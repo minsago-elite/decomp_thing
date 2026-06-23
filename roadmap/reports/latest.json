@@ -1,0 +1,62 @@
+{
+  "generated_at": "2026-06-23T04:52:48Z",
+  "current_level": "L0",
+  "current_status": "active",
+  "next_failing_gate": "Web UI uploads ELF",
+  "totals": {
+    "levels": 6,
+    "gates": 30,
+    "passing_gates": 0,
+    "failing_or_blocked_gates": 0
+  },
+  "levels": [
+    {
+      "id": "L0",
+      "name": "Skeleton",
+      "status": "active",
+      "passing_gates": 0,
+      "total_gates": 4,
+      "blocking_gate": "Web UI uploads ELF"
+    },
+    {
+      "id": "L1",
+      "name": "Recompilable Output",
+      "status": "pending",
+      "passing_gates": 0,
+      "total_gates": 5,
+      "blocking_gate": "Ghidra analysis runs"
+    },
+    {
+      "id": "L2",
+      "name": "Simple Behavioral Match",
+      "status": "pending",
+      "passing_gates": 0,
+      "total_gates": 5,
+      "blocking_gate": "Hello-world binary passes"
+    },
+    {
+      "id": "L3",
+      "name": "Trace-Guided Repair",
+      "status": "pending",
+      "passing_gates": 0,
+      "total_gates": 5,
+      "blocking_gate": "Failed validation cases produce structured diffs"
+    },
+    {
+      "id": "L4",
+      "name": "Automatic Exploration",
+      "status": "pending",
+      "passing_gates": 0,
+      "total_gates": 5,
+      "blocking_gate": "angr creates candidate argv/stdin cases"
+    },
+    {
+      "id": "L5",
+      "name": "High-Confidence Reconstruction",
+      "status": "pending",
+      "passing_gates": 0,
+      "total_gates": 6,
+      "blocking_gate": "benchmark suite passes across stripped, optimized, PIE, non-PIE, stdin, argv, file, and libc-heavy examples"
+    }
+  ]
+}

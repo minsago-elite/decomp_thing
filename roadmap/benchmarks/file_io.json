@@ -1,0 +1,11 @@
+{
+  "id": "file_io",
+  "description": "Programs that read and write declared file fixtures.",
+  "cases": [
+    {
+      "id": "copy_file",
+      "fixture": "benchmarks/fixtures/copy_file",
+      "expected_gate": "l5_all_generated_cases"
+    }
+  ]
+}

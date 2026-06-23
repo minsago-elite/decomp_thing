@@ -1,0 +1,16 @@
+{
+  "id": "stdin_programs",
+  "description": "Programs whose behavior is driven by stdin.",
+  "cases": [
+    {
+      "id": "stdin_echo",
+      "fixture": "benchmarks/fixtures/stdin_echo",
+      "expected_gate": "l2_stdin_processing"
+    },
+    {
+      "id": "stdin_branching",
+      "fixture": "benchmarks/fixtures/stdin_branching",
+      "expected_gate": "l4_coverage_increases"
+    }
+  ]
+}

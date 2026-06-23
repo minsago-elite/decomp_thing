@@ -1,0 +1,16 @@
+{
+  "id": "stripped_optimized",
+  "description": "Broad maturity benchmark covering stripped, optimized, PIE, non-PIE, and libc-heavy binaries.",
+  "cases": [
+    {
+      "id": "stripped_o2",
+      "fixture": "benchmarks/fixtures/stripped_o2",
+      "expected_gate": "l5_benchmark_suite"
+    },
+    {
+      "id": "pie_libc",
+      "fixture": "benchmarks/fixtures/pie_libc",
+      "expected_gate": "l5_benchmark_suite"
+    }
+  ]
+}

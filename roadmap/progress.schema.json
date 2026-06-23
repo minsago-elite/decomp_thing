@@ -1,0 +1,76 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://decomp-engine.local/schemas/progress.schema.json",
+  "title": "decomp_engine roadmap progress",
+  "type": "object",
+  "required": ["current_level", "current_status", "last_updated", "levels"],
+  "additionalProperties": false,
+  "properties": {
+    "current_level": {
+      "type": "string",
+      "pattern": "^L[0-5]$"
+    },
+    "current_status": {
+      "type": "string",
+      "enum": ["pending", "active", "complete", "blocked"]
+    },
+    "last_updated": {
+      "type": "string",
+      "format": "date-time"
+    },
+    "levels": {
+      "type": "array",
+      "minItems": 1,
+      "items": {
+        "type": "object",
+        "required": ["id", "name", "status", "gates"],
+        "additionalProperties": false,
+        "properties": {
+          "id": {
+            "type": "string",
+            "pattern": "^L[0-5]$"
+          },
+          "name": {
+            "type": "string",
+            "minLength": 1
+          },
+          "status": {
+            "type": "string",
+            "enum": ["pending", "active", "complete", "blocked"]
+          },
+          "gates": {
+            "type": "array",
+            "minItems": 1,
+            "items": {
+              "type": "object",
+              "required": ["id", "description", "status", "source", "evidence"],
+              "additionalProperties": false,
+              "properties": {
+                "id": {
+                  "type": "string",
+                  "pattern": "^l[0-5]_[a-z0-9_]+$"
+                },
+                "description": {
+                  "type": "string",
+                  "minLength": 1
+                },
+                "status": {
+                  "type": "string",
+                  "enum": ["pending", "passing", "failing", "blocked", "manual_review"]
+                },
+                "source": {
+                  "type": "string",
+                  "enum": ["test", "benchmark", "manual", "report"]
+                },
+                "evidence": {
+                  "type": "string",
+                  "minLength": 1
+                }
+              }
+            }
+          }
+        }
+      }
+    }
+  }
+}

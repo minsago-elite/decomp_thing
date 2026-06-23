@@ -1,0 +1,259 @@
+{
+  "current_level": "L0",
+  "current_status": "active",
+  "last_updated": "2026-06-23T04:52:48Z",
+  "levels": [
+    {
+      "id": "L0",
+      "name": "Skeleton",
+      "status": "active",
+      "gates": [
+        {
+          "id": "l0_web_uploads_elf",
+          "description": "Web UI uploads ELF",
+          "status": "pending",
+          "source": "test",
+          "evidence": "roadmap/reports/latest.json"
+        },
+        {
+          "id": "l0_backend_stores_job",
+          "description": "Backend stores job",
+          "status": "pending",
+          "source": "test",
+          "evidence": "roadmap/reports/latest.json"
+        },
+        {
+          "id": "l0_metadata_extraction",
+          "description": "Basic metadata extraction works",
+          "status": "pending",
+          "source": "test",
+          "evidence": "roadmap/reports/latest.json"
+        },
+        {
+          "id": "l0_job_state_visible",
+          "description": "Job state is visible",
+          "status": "pending",
+          "source": "test",
+          "evidence": "roadmap/reports/latest.json"
+        }
+      ]
+    },
+    {
+      "id": "L1",
+      "name": "Recompilable Output",
+      "status": "pending",
+      "gates": [
+        {
+          "id": "l1_ghidra_analysis",
+          "description": "Ghidra analysis runs",
+          "status": "pending",
+          "source": "test",
+          "evidence": "roadmap/reports/latest.json"
+        },
+        {
+          "id": "l1_initial_c_project",
+          "description": "Initial C project is generated",
+          "status": "pending",
+          "source": "test",
+          "evidence": "roadmap/reports/latest.json"
+        },
+        {
+          "id": "l1_make_simple",
+          "description": "make completes for simple binaries",
+          "status": "pending",
+          "source": "benchmark",
+          "evidence": "roadmap/benchmarks/simple_cli.json"
+        },
+        {
+          "id": "l1_build_logs",
+          "description": "Build logs are captured",
+          "status": "pending",
+          "source": "test",
+          "evidence": "roadmap/reports/latest.json"
+        },
+        {
+          "id": "l1_artifact_layout",
+          "description": "Generated artifact layout is stable",
+          "status": "pending",
+          "source": "test",
+          "evidence": "roadmap/reports/latest.json"
+        }
+      ]
+    },
+    {
+      "id": "L2",
+      "name": "Simple Behavioral Match",
+      "status": "pending",
+      "gates": [
+        {
+          "id": "l2_hello_world",
+          "description": "Hello-world binary passes",
+          "status": "pending",
+          "source": "benchmark",
+          "evidence": "roadmap/benchmarks/simple_cli.json"
+        },
+        {
+          "id": "l2_argv_processing",
+          "description": "argv-processing binary passes",
+          "status": "pending",
+          "source": "benchmark",
+          "evidence": "roadmap/benchmarks/simple_cli.json"
+        },
+        {
+          "id": "l2_stdin_processing",
+          "description": "stdin-processing binary passes",
+          "status": "pending",
+          "source": "benchmark",
+          "evidence": "roadmap/benchmarks/stdin_programs.json"
+        },
+        {
+          "id": "l2_process_io_compare",
+          "description": "exit code/stdout/stderr are compared byte-for-byte",
+          "status": "pending",
+          "source": "test",
+          "evidence": "roadmap/reports/latest.json"
+        },
+        {
+          "id": "l2_sandbox_required",
+          "description": "sandboxed execution is mandatory",
+          "status": "pending",
+          "source": "test",
+          "evidence": "roadmap/reports/latest.json"
+        }
+      ]
+    },
+    {
+      "id": "L3",
+      "name": "Trace-Guided Repair",
+      "status": "pending",
+      "gates": [
+        {
+          "id": "l3_structured_diffs",
+          "description": "Failed validation cases produce structured diffs",
+          "status": "pending",
+          "source": "test",
+          "evidence": "roadmap/reports/latest.json"
+        },
+        {
+          "id": "l3_compile_repair",
+          "description": "OpenRouter repair loop can patch compile errors",
+          "status": "pending",
+          "source": "test",
+          "evidence": "roadmap/reports/latest.json"
+        },
+        {
+          "id": "l3_behavior_repair",
+          "description": "OpenRouter repair loop can patch behavior mismatches",
+          "status": "pending",
+          "source": "benchmark",
+          "evidence": "roadmap/benchmarks/simple_cli.json"
+        },
+        {
+          "id": "l3_regression_tests",
+          "description": "Regression tests are retained",
+          "status": "pending",
+          "source": "test",
+          "evidence": "roadmap/reports/latest.json"
+        },
+        {
+          "id": "l3_iteration_history",
+          "description": "iteration history is visible in UI",
+          "status": "pending",
+          "source": "test",
+          "evidence": "roadmap/reports/latest.json"
+        }
+      ]
+    },
+    {
+      "id": "L4",
+      "name": "Automatic Exploration",
+      "status": "pending",
+      "gates": [
+        {
+          "id": "l4_angr_cases",
+          "description": "angr creates candidate argv/stdin cases",
+          "status": "pending",
+          "source": "test",
+          "evidence": "roadmap/reports/latest.json"
+        },
+        {
+          "id": "l4_static_hints",
+          "description": "string/static-hint input generation works",
+          "status": "pending",
+          "source": "test",
+          "evidence": "roadmap/reports/latest.json"
+        },
+        {
+          "id": "l4_mutation_expansion",
+          "description": "mutation-based expansion works",
+          "status": "pending",
+          "source": "test",
+          "evidence": "roadmap/reports/latest.json"
+        },
+        {
+          "id": "l4_coverage_increases",
+          "description": "generated tests increase path/output coverage",
+          "status": "pending",
+          "source": "benchmark",
+          "evidence": "roadmap/benchmarks/stdin_programs.json"
+        },
+        {
+          "id": "l4_confidence_score",
+          "description": "confidence score reflects validation breadth",
+          "status": "pending",
+          "source": "test",
+          "evidence": "roadmap/reports/latest.json"
+        }
+      ]
+    },
+    {
+      "id": "L5",
+      "name": "High-Confidence Reconstruction",
+      "status": "pending",
+      "gates": [
+        {
+          "id": "l5_benchmark_suite",
+          "description": "benchmark suite passes across stripped, optimized, PIE, non-PIE, stdin, argv, file, and libc-heavy examples",
+          "status": "pending",
+          "source": "benchmark",
+          "evidence": "roadmap/benchmarks/stripped_optimized.json"
+        },
+        {
+          "id": "l5_reproducible_recompile",
+          "description": "generated project recompiles reproducibly",
+          "status": "pending",
+          "source": "benchmark",
+          "evidence": "roadmap/benchmarks/simple_cli.json"
+        },
+        {
+          "id": "l5_all_generated_cases",
+          "description": "behavior matches on all benchmark-generated cases",
+          "status": "pending",
+          "source": "benchmark",
+          "evidence": "roadmap/benchmarks/file_io.json"
+        },
+        {
+          "id": "l5_unresolved_reported",
+          "description": "unresolved functions/globals are explicitly reported",
+          "status": "pending",
+          "source": "test",
+          "evidence": "roadmap/reports/latest.json"
+        },
+        {
+          "id": "l5_confidence_limits",
+          "description": "confidence score and limitations are shown honestly",
+          "status": "pending",
+          "source": "test",
+          "evidence": "roadmap/reports/latest.json"
+        },
+        {
+          "id": "l5_no_universal_claim",
+          "description": "no claim of universal equivalence unless formally proven for that specific binary",
+          "status": "pending",
+          "source": "manual",
+          "evidence": "roadmap/milestones/L5_high_confidence.md"
+        }
+      ]
+    }
+  ]
+}

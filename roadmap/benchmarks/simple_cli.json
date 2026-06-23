@@ -1,0 +1,16 @@
+{
+  "id": "simple_cli",
+  "description": "Simple CLI programs covering hello-world and argv behavior.",
+  "cases": [
+    {
+      "id": "hello_world",
+      "fixture": "benchmarks/fixtures/hello_world",
+      "expected_gate": "l2_hello_world"
+    },
+    {
+      "id": "argv_echo",
+      "fixture": "benchmarks/fixtures/argv_echo",
+      "expected_gate": "l2_argv_processing"
+    }
+  ]
+}
