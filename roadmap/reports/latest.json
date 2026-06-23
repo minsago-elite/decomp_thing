@@ -1,12 +1,12 @@
 {
-  "generated_at": "2026-06-23T04:52:48Z",
+  "generated_at": "2026-06-23T04:55:39Z",
   "current_level": "L0",
   "current_status": "active",
-  "next_failing_gate": "Web UI uploads ELF",
+  "next_failing_gate": "Backend stores job",
   "totals": {
     "levels": 6,
     "gates": 30,
-    "passing_gates": 0,
+    "passing_gates": 1,
     "failing_or_blocked_gates": 0
   },
   "levels": [
@@ -14,9 +14,9 @@
       "id": "L0",
       "name": "Skeleton",
       "status": "active",
-      "passing_gates": 0,
+      "passing_gates": 1,
       "total_gates": 4,
-      "blocking_gate": "Web UI uploads ELF"
+      "blocking_gate": "Backend stores job"
     },
     {
       "id": "L1",

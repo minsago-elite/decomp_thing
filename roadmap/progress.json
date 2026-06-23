@@ -1,7 +1,7 @@
 {
   "current_level": "L0",
   "current_status": "active",
-  "last_updated": "2026-06-23T04:52:48Z",
+  "last_updated": "2026-06-23T04:55:39Z",
   "levels": [
     {
       "id": "L0",
@@ -11,9 +11,9 @@
         {
           "id": "l0_web_uploads_elf",
           "description": "Web UI uploads ELF",
-          "status": "pending",
+          "status": "passing",
           "source": "test",
-          "evidence": "roadmap/reports/latest.json"
+          "evidence": "tests/test_web_upload.py"
         },
         {
           "id": "l0_backend_stores_job",
