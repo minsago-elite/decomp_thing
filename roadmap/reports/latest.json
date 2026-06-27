@@ -1,12 +1,12 @@
 {
-  "generated_at": "2026-06-23T04:55:39Z",
+  "generated_at": "2026-06-23T04:57:08Z",
   "current_level": "L0",
   "current_status": "active",
-  "next_failing_gate": "Backend stores job",
+  "next_failing_gate": "Basic metadata extraction works",
   "totals": {
     "levels": 6,
     "gates": 30,
-    "passing_gates": 1,
+    "passing_gates": 2,
     "failing_or_blocked_gates": 0
   },
   "levels": [
@@ -14,9 +14,9 @@
       "id": "L0",
       "name": "Skeleton",
       "status": "active",
-      "passing_gates": 1,
+      "passing_gates": 2,
       "total_gates": 4,
-      "blocking_gate": "Backend stores job"
+      "blocking_gate": "Basic metadata extraction works"
     },
     {
       "id": "L1",

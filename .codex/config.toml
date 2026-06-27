@@ -1,0 +1,4 @@
+[goals]
+max_turns = 500
+check_model = "gpt-5.4-mini"
+timeout_minutes = 480

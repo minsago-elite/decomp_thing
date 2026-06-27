@@ -10,7 +10,7 @@ Progress is intentionally evidence-backed. Human-readable milestone docs live un
 - Current maturity level: `L0`
 - Current milestone: Skeleton
 - Current status: `active`
-- Next failing gate: Backend stores job
+- Next failing gate: Basic metadata extraction works
 - Latest generated report: `roadmap/reports/latest.json`
 <!-- roadmap:summary:end -->
 
@@ -30,7 +30,7 @@ L0 through L5 describe increasing practical confidence. L5 is the strongest prac
 <!-- roadmap:progress:start -->
 | Level | Name | Status | Passing Gates | Blocking Gate |
 |---|---|---:|---:|---|
-| L0 | Skeleton | active | 1/4 | Backend stores job |
+| L0 | Skeleton | active | 2/4 | Basic metadata extraction works |
 | L1 | Recompilable Output | pending | 0/5 | Ghidra analysis runs |
 | L2 | Simple Behavioral Match | pending | 0/5 | Hello-world binary passes |
 | L3 | Trace-Guided Repair | pending | 0/5 | Failed validation cases produce structured diffs |
