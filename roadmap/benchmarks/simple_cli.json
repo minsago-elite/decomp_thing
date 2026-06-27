@@ -18,6 +18,11 @@
     "evidence": "src/test/kotlin/decompengine/l2/BehaviorValidationTest.kt",
     "comparison": "sandboxed original-vs-rebuilt process I/O is compared byte-for-byte"
   },
+  "l3_behavior_repair": {
+    "status": "passing",
+    "evidence": "src/test/kotlin/decompengine/l3/TraceGuidedRepairTest.kt::OpenRouter repair loop can patch behavior mismatches",
+    "repair": "structured behavior diff prompts a source patch, rebuilds, and retains the regression input"
+  },
   "cases": [
     {
       "id": "hello_world",

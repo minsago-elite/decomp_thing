@@ -1,12 +1,12 @@
 {
-  "generated_at": "2026-06-27T05:11:34Z",
-  "current_level": "L2",
+  "generated_at": "2026-06-27T05:22:39Z",
+  "current_level": "L3",
   "current_status": "complete",
   "next_failing_gate": "none",
   "totals": {
     "levels": 6,
     "gates": 31,
-    "passing_gates": 15,
+    "passing_gates": 20,
     "failing_or_blocked_gates": 0
   },
   "levels": [
@@ -37,10 +37,10 @@
     {
       "id": "L3",
       "name": "Trace-Guided Repair",
-      "status": "pending",
-      "passing_gates": 0,
+      "status": "complete",
+      "passing_gates": 5,
       "total_gates": 5,
-      "blocking_gate": "Failed validation cases produce structured diffs"
+      "blocking_gate": "none"
     },
     {
       "id": "L4",

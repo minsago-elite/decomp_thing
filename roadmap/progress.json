@@ -1,7 +1,7 @@
 {
-  "current_level": "L2",
+  "current_level": "L3",
   "current_status": "complete",
-  "last_updated": "2026-06-27T05:11:34Z",
+  "last_updated": "2026-06-27T05:22:39Z",
   "levels": [
     {
       "id": "L0",
@@ -132,42 +132,42 @@
     {
       "id": "L3",
       "name": "Trace-Guided Repair",
-      "status": "pending",
+      "status": "complete",
       "gates": [
         {
           "id": "l3_structured_diffs",
           "description": "Failed validation cases produce structured diffs",
-          "status": "pending",
+          "status": "passing",
           "source": "test",
-          "evidence": "roadmap/reports/latest.json"
+          "evidence": "src/test/kotlin/decompengine/l3/TraceGuidedRepairTest.kt"
         },
         {
           "id": "l3_compile_repair",
           "description": "OpenRouter repair loop can patch compile errors",
-          "status": "pending",
+          "status": "passing",
           "source": "test",
-          "evidence": "roadmap/reports/latest.json"
+          "evidence": "src/test/kotlin/decompengine/l3/TraceGuidedRepairTest.kt"
         },
         {
           "id": "l3_behavior_repair",
           "description": "OpenRouter repair loop can patch behavior mismatches",
-          "status": "pending",
+          "status": "passing",
           "source": "benchmark",
           "evidence": "roadmap/benchmarks/simple_cli.json"
         },
         {
           "id": "l3_regression_tests",
           "description": "Regression tests are retained",
-          "status": "pending",
+          "status": "passing",
           "source": "test",
-          "evidence": "roadmap/reports/latest.json"
+          "evidence": "src/test/kotlin/decompengine/l3/TraceGuidedRepairTest.kt"
         },
         {
           "id": "l3_iteration_history",
           "description": "iteration history is visible in UI",
-          "status": "pending",
+          "status": "passing",
           "source": "test",
-          "evidence": "roadmap/reports/latest.json"
+          "evidence": "tests/test_web_upload.py"
         }
       ]
     },
