@@ -5,6 +5,9 @@ import decompengine.l2.BehaviorCaseResult
 import decompengine.l2.BehaviorComparator
 import decompengine.l2.ProcessInput
 import decompengine.l2.ProcessOutput
+import com.sun.net.httpserver.HttpServer
+import java.net.InetSocketAddress
+import java.net.URI
 import kotlin.io.path.createDirectories
 import kotlin.io.path.createTempDirectory
 import kotlin.io.path.exists
@@ -70,6 +73,54 @@ class TraceGuidedRepairTest {
         assertTrue(history.all().single().summary.contains("brace"))
         assertTrue(projectDir.resolve("reports/repair_history.json").readText().contains("hello_default"))
         assertTrue(client.lastRequest!!.prompt.contains("stderr:"))
+    }
+
+    @Test
+    fun `OpenRouter HTTP client parses patch responses`() {
+        val server = HttpServer.create(InetSocketAddress("127.0.0.1", 0), 0)
+        val requests = mutableListOf<String>()
+        server.createContext("/api/v1/chat/completions") { exchange ->
+            requests += exchange.requestBody.bufferedReader().readText()
+            assertEquals("Bearer test-key", exchange.requestHeaders.getFirst("Authorization"))
+            val response = """
+                {
+                  "choices": [
+                    {
+                      "message": {
+                        "content": "{\"summary\":\"fix compile error\",\"patches\":[{\"relativePath\":\"src/reconstructed.c\",\"replacement\":\"int decomp_engine_main(void) {\\n    return 0;\\n}\\n\"}]}"
+                      }
+                    }
+                  ]
+                }
+            """.trimIndent()
+            exchange.sendResponseHeaders(200, response.toByteArray().size.toLong())
+            exchange.responseBody.use { it.write(response.toByteArray()) }
+        }
+        server.start()
+        try {
+            val client = HttpOpenRouterRepairClient(
+                apiKey = "test-key",
+                model = "openrouter/test",
+                endpoint = URI.create("http://127.0.0.1:${server.address.port}/api/v1/chat/completions"),
+            )
+
+            val response = client.requestRepair(
+                RepairRequest(
+                    failureKind = "compile",
+                    prompt = "compiler stderr",
+                    projectFiles = mapOf("src/reconstructed.c" to "broken"),
+                    regressionInputs = listOf(ProcessInput(id = "default")),
+                ),
+            )
+
+            assertEquals("fix compile error", response.summary)
+            assertEquals("src/reconstructed.c", response.patches.single().relativePath)
+            assertTrue(response.patches.single().replacement.contains("return 0;"))
+            assertTrue(requests.single().contains("openrouter/test"))
+            assertTrue(requests.single().contains("compiler stderr"))
+        } finally {
+            server.stop(0)
+        }
     }
 
     @Test
