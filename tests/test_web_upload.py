@@ -118,6 +118,52 @@ def test_job_state_page_shows_status_and_metadata(tmp_path: Path) -> None:
     assert b"x86-64" in page
 
 
+def test_job_state_page_shows_repair_iteration_history(tmp_path: Path) -> None:
+    server = UploadServer(("127.0.0.1", 0), tmp_path)
+    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    try:
+        body, content_type = multipart_body("fixture.elf", ELF_FIXTURE)
+        status, _, payload = request(
+            server,
+            "POST",
+            "/jobs",
+            body,
+            {"Content-Type": content_type, "Accept": "application/json"},
+        )
+        assert status == 201
+        job = json.loads(payload)
+        reports_dir = tmp_path / job["id"] / "reports"
+        reports_dir.mkdir()
+        (reports_dir / "repair_history.json").write_text(
+            json.dumps(
+                {
+                    "iterations": [
+                        {
+                            "index": 1,
+                            "failureKind": "behavior",
+                            "summary": "match observed stdout",
+                            "retainedRegressionIds": ["hello_default"],
+                        }
+                    ]
+                }
+            ),
+            encoding="utf-8",
+        )
+
+        status, _, page = request(server, "GET", f"/jobs/{job['id']}")
+    finally:
+        server.shutdown()
+        server.server_close()
+
+    assert status == 200
+    assert b"Repair History" in page
+    assert b"Iteration 1" in page
+    assert b"behavior" in page
+    assert b"match observed stdout" in page
+    assert b"hello_default" in page
+
+
 def test_upload_rejects_non_elf(tmp_path: Path) -> None:
     server = UploadServer(("127.0.0.1", 0), tmp_path)
     thread = threading.Thread(target=server.serve_forever, daemon=True)

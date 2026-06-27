@@ -69,6 +69,7 @@ def render_job(job: Job) -> str:
         f"      <dt>{html.escape(key.replace('_', ' ').title())}</dt><dd>{html.escape(str(value))}</dd>"
         for key, value in job.metadata.items()
     )
+    repair_history = render_repair_history(job)
     return f"""<!doctype html>
 <html lang="en">
 <head>
@@ -86,10 +87,51 @@ def render_job(job: Job) -> str:
       <dt>Created</dt><dd>{html.escape(job.created_at)}</dd>
       {metadata_items}
     </dl>
+    {repair_history}
   </main>
 </body>
 </html>
 """
+
+
+def render_repair_history(job: Job) -> str:
+    history_path = job.binary_path.parent / "reports" / "repair_history.json"
+    if not history_path.exists():
+        return ""
+
+    try:
+        payload = json.loads(history_path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return "<section><h2>Repair History</h2><p>Repair history could not be loaded.</p></section>"
+
+    iterations = payload.get("iterations", [])
+    if not isinstance(iterations, list) or not iterations:
+        return ""
+
+    items = []
+    for iteration in iterations:
+        if not isinstance(iteration, dict):
+            continue
+        index = html.escape(str(iteration.get("index", "?")))
+        failure_kind = html.escape(str(iteration.get("failureKind", "unknown")))
+        summary = html.escape(str(iteration.get("summary", "")))
+        regression_ids = iteration.get("retainedRegressionIds", [])
+        if isinstance(regression_ids, list):
+            regressions = ", ".join(html.escape(str(item)) for item in regression_ids)
+        else:
+            regressions = ""
+        items.append(
+            "<li>"
+            f"<strong>Iteration {index}</strong> "
+            f"<span>{failure_kind}</span> "
+            f"<p>{summary}</p> "
+            f"<p>Regressions: {regressions}</p>"
+            "</li>"
+        )
+
+    if not items:
+        return ""
+    return "<section><h2>Repair History</h2><ol>" + "".join(items) + "</ol></section>"
 
 
 class UploadHandler(BaseHTTPRequestHandler):
