@@ -2,7 +2,7 @@
 
 This roadmap tracks progress toward a recompilable, behaviorally equivalent C reconstruction tool for Linux x86-64 ELF binaries.
 
-Progress is intentionally evidence-backed. Human-readable milestone docs live under `roadmap/milestones/`, while machine-readable state lives in `roadmap/progress.json`. Run `python -m decomp_engine.roadmap update` to regenerate summaries and `python -m decomp_engine.roadmap check` in CI to reject stale or unsupported progress claims.
+Progress is intentionally evidence-backed. Human-readable milestone docs live under `roadmap/milestones/`, while machine-readable state lives in `roadmap/progress.json`. Run `./gradlew roadmapUpdate` to regenerate summaries and `./gradlew roadmapCheck` in CI to reject stale or unsupported progress claims.
 
 ## Current Status
 
@@ -60,8 +60,8 @@ The latest generated summary is written to `roadmap/reports/latest.json`.
 After implementing a feature or adding benchmark evidence:
 
 ```bash
-python -m decomp_engine.roadmap update
-python -m decomp_engine.roadmap check
+./gradlew roadmapUpdate
+./gradlew roadmapCheck
 ```
 
 The update command rewrites `roadmap/progress.json`, `roadmap/reports/latest.json`, and the generated sections in this file. The check command fails if the roadmap is stale, malformed, or claims a completed level while any required gate is not passing.

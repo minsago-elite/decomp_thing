@@ -3,7 +3,7 @@
   "description": "Simple CLI programs covering hello-world and argv behavior.",
   "l1_make_simple": {
     "status": "passing",
-    "evidence": "src/test/kotlin/decompengine/l1/L1PipelineTest.kt::make completes and build log is captured",
+    "evidence": "src/test/kotlin/decompengine/project/ReconstructionPipelineTest.kt::make completes and build log is captured",
     "artifact_layout": [
       "Makefile",
       "include/decomp_engine.h",
@@ -15,12 +15,12 @@
   },
   "l2_results": {
     "status": "passing",
-    "evidence": "src/test/kotlin/decompengine/l2/BehaviorValidationTest.kt",
+    "evidence": "src/test/kotlin/decompengine/validation/BehaviorValidationTest.kt",
     "comparison": "sandboxed original-vs-rebuilt process I/O is compared byte-for-byte"
   },
   "l3_behavior_repair": {
     "status": "passing",
-    "evidence": "src/test/kotlin/decompengine/l3/TraceGuidedRepairTest.kt::OpenRouter repair loop can patch behavior mismatches",
+    "evidence": "src/test/kotlin/decompengine/repair/TraceGuidedRepairTest.kt::OpenRouter repair loop can patch behavior mismatches",
     "repair": "structured behavior diff prompts a source patch, rebuilds, and retains the regression input"
   },
   "cases": [
@@ -29,14 +29,14 @@
       "fixture": "benchmarks/fixtures/hello_world",
       "expected_gate": "l2_hello_world",
       "status": "passing",
-      "evidence": "src/test/kotlin/decompengine/l2/BehaviorValidationTest.kt::hello-world binary passes byte-for-byte comparison"
+      "evidence": "src/test/kotlin/decompengine/validation/BehaviorValidationTest.kt::hello-world binary passes byte-for-byte comparison"
     },
     {
       "id": "argv_echo",
       "fixture": "benchmarks/fixtures/argv_echo",
       "expected_gate": "l2_argv_processing",
       "status": "passing",
-      "evidence": "src/test/kotlin/decompengine/l2/BehaviorValidationTest.kt::argv-processing binary passes byte-for-byte comparison"
+      "evidence": "src/test/kotlin/decompengine/validation/BehaviorValidationTest.kt::argv-processing binary passes byte-for-byte comparison"
     }
   ]
 }

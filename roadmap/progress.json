@@ -13,28 +13,28 @@
           "description": "Web UI uploads ELF",
           "status": "passing",
           "source": "test",
-          "evidence": "tests/test_web_upload.py"
+          "evidence": "src/test/kotlin/decompengine/web/UploadServerTest.kt"
         },
         {
           "id": "l0_backend_stores_job",
           "description": "Backend stores job",
           "status": "passing",
           "source": "test",
-          "evidence": "tests/test_jobs.py"
+          "evidence": "src/test/kotlin/decompengine/jobs/JobStoreTest.kt"
         },
         {
           "id": "l0_metadata_extraction",
           "description": "Basic metadata extraction works",
           "status": "passing",
           "source": "test",
-          "evidence": "tests/test_jobs.py"
+          "evidence": "src/test/kotlin/decompengine/jobs/JobStoreTest.kt"
         },
         {
           "id": "l0_job_state_visible",
           "description": "Job state is visible",
           "status": "passing",
           "source": "test",
-          "evidence": "tests/test_web_upload.py"
+          "evidence": "src/test/kotlin/decompengine/web/UploadServerTest.kt"
         }
       ]
     },
@@ -48,14 +48,14 @@
           "description": "Ghidra analysis runs",
           "status": "passing",
           "source": "test",
-          "evidence": "src/test/kotlin/decompengine/l1/L1PipelineTest.kt"
+          "evidence": "src/test/kotlin/decompengine/project/ReconstructionPipelineTest.kt"
         },
         {
           "id": "l1_initial_c_project",
           "description": "Initial C project is generated",
           "status": "passing",
           "source": "test",
-          "evidence": "src/test/kotlin/decompengine/l1/L1PipelineTest.kt"
+          "evidence": "src/test/kotlin/decompengine/project/ReconstructionPipelineTest.kt"
         },
         {
           "id": "l1_make_simple",
@@ -69,21 +69,21 @@
           "description": "Build logs are captured",
           "status": "passing",
           "source": "test",
-          "evidence": "src/test/kotlin/decompengine/l1/L1PipelineTest.kt"
+          "evidence": "src/test/kotlin/decompengine/project/ReconstructionPipelineTest.kt"
         },
         {
           "id": "l1_artifact_layout",
           "description": "Generated artifact layout is stable",
           "status": "passing",
           "source": "test",
-          "evidence": "src/test/kotlin/decompengine/l1/L1PipelineTest.kt"
+          "evidence": "src/test/kotlin/decompengine/project/ReconstructionPipelineTest.kt"
         },
         {
           "id": "l1_kotlin_jvm_backend",
           "description": "L1.1 Kotlin JVM backend calls Ghidra through an in-process JVM boundary",
           "status": "passing",
           "source": "test",
-          "evidence": "src/test/kotlin/decompengine/l1/L1PipelineTest.kt"
+          "evidence": "src/test/kotlin/decompengine/project/ReconstructionPipelineTest.kt"
         }
       ]
     },
@@ -118,14 +118,14 @@
           "description": "exit code/stdout/stderr are compared byte-for-byte",
           "status": "passing",
           "source": "test",
-          "evidence": "src/test/kotlin/decompengine/l2/BehaviorValidationTest.kt"
+          "evidence": "src/test/kotlin/decompengine/validation/BehaviorValidationTest.kt"
         },
         {
           "id": "l2_sandbox_required",
           "description": "sandboxed execution is mandatory",
           "status": "passing",
           "source": "test",
-          "evidence": "src/test/kotlin/decompengine/l2/BehaviorValidationTest.kt"
+          "evidence": "src/test/kotlin/decompengine/validation/BehaviorValidationTest.kt"
         }
       ]
     },
@@ -139,14 +139,14 @@
           "description": "Failed validation cases produce structured diffs",
           "status": "passing",
           "source": "test",
-          "evidence": "src/test/kotlin/decompengine/l3/TraceGuidedRepairTest.kt"
+          "evidence": "src/test/kotlin/decompengine/repair/TraceGuidedRepairTest.kt"
         },
         {
           "id": "l3_compile_repair",
           "description": "OpenRouter repair loop can patch compile errors",
           "status": "passing",
           "source": "test",
-          "evidence": "src/test/kotlin/decompengine/l3/TraceGuidedRepairTest.kt"
+          "evidence": "src/test/kotlin/decompengine/repair/TraceGuidedRepairTest.kt"
         },
         {
           "id": "l3_behavior_repair",
@@ -160,14 +160,14 @@
           "description": "Regression tests are retained",
           "status": "passing",
           "source": "test",
-          "evidence": "src/test/kotlin/decompengine/l3/TraceGuidedRepairTest.kt"
+          "evidence": "src/test/kotlin/decompengine/repair/TraceGuidedRepairTest.kt"
         },
         {
           "id": "l3_iteration_history",
           "description": "iteration history is visible in UI",
           "status": "passing",
           "source": "test",
-          "evidence": "tests/test_web_upload.py"
+          "evidence": "src/test/kotlin/decompengine/web/UploadServerTest.kt"
         }
       ]
     },
@@ -181,21 +181,21 @@
           "description": "angr creates candidate argv/stdin cases",
           "status": "passing",
           "source": "test",
-          "evidence": "src/test/kotlin/decompengine/l4/AutomaticExplorationTest.kt"
+          "evidence": "src/test/kotlin/decompengine/exploration/AutomaticExplorationTest.kt"
         },
         {
           "id": "l4_static_hints",
           "description": "string/static-hint input generation works",
           "status": "passing",
           "source": "test",
-          "evidence": "src/test/kotlin/decompengine/l4/AutomaticExplorationTest.kt"
+          "evidence": "src/test/kotlin/decompengine/exploration/AutomaticExplorationTest.kt"
         },
         {
           "id": "l4_mutation_expansion",
           "description": "mutation-based expansion works",
           "status": "passing",
           "source": "test",
-          "evidence": "src/test/kotlin/decompengine/l4/AutomaticExplorationTest.kt"
+          "evidence": "src/test/kotlin/decompengine/exploration/AutomaticExplorationTest.kt"
         },
         {
           "id": "l4_coverage_increases",
@@ -209,7 +209,7 @@
           "description": "confidence score reflects validation breadth",
           "status": "passing",
           "source": "test",
-          "evidence": "src/test/kotlin/decompengine/l4/AutomaticExplorationTest.kt"
+          "evidence": "src/test/kotlin/decompengine/exploration/AutomaticExplorationTest.kt"
         }
       ]
     },

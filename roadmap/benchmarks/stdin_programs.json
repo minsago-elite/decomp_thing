@@ -3,12 +3,12 @@
   "description": "Programs whose behavior is driven by stdin.",
   "l2_results": {
     "status": "passing",
-    "evidence": "src/test/kotlin/decompengine/l2/BehaviorValidationTest.kt::stdin-processing binary passes byte-for-byte comparison",
+    "evidence": "src/test/kotlin/decompengine/validation/BehaviorValidationTest.kt::stdin-processing binary passes byte-for-byte comparison",
     "comparison": "sandboxed original-vs-rebuilt stdin-driven process I/O is compared byte-for-byte"
   },
   "l4_results": {
     "status": "passing",
-    "evidence": "src/test/kotlin/decompengine/l4/AutomaticExplorationTest.kt",
+    "evidence": "src/test/kotlin/decompengine/exploration/AutomaticExplorationTest.kt",
     "generated_inputs": ["angr argv/stdin candidates", "static string hints", "mutations"],
     "coverage": "generated tests increase distinct sandboxed output signatures",
     "confidence": "score increases with input source breadth and output-signature breadth"
@@ -19,14 +19,14 @@
       "fixture": "benchmarks/fixtures/stdin_echo",
       "expected_gate": "l2_stdin_processing",
       "status": "passing",
-      "evidence": "src/test/kotlin/decompengine/l2/BehaviorValidationTest.kt::stdin-processing binary passes byte-for-byte comparison"
+      "evidence": "src/test/kotlin/decompengine/validation/BehaviorValidationTest.kt::stdin-processing binary passes byte-for-byte comparison"
     },
     {
       "id": "stdin_branching",
       "fixture": "benchmarks/fixtures/stdin_branching",
       "expected_gate": "l4_coverage_increases",
       "status": "passing",
-      "evidence": "src/test/kotlin/decompengine/l4/AutomaticExplorationTest.kt::generated tests increase path and output coverage"
+      "evidence": "src/test/kotlin/decompengine/exploration/AutomaticExplorationTest.kt::generated tests increase path and output coverage"
     }
   ]
 }

@@ -13,15 +13,13 @@ scripts/ci.sh
 That command runs:
 
 - `./gradlew --no-daemon test`
-- `python -m pytest`
-- `python -m decomp_engine.roadmap check`
+- `./gradlew --no-daemon roadmapCheck`
 
 ## Required CI Tools
 
 Install these system tools before running the test suite:
 
 - JDK 21
-- Python 3.12 or newer
 - `gcc` and `make`
 - `bubblewrap`
 - `binutils` for `strings`
@@ -51,16 +49,13 @@ jobs:
         with:
           distribution: temurin
           java-version: "21"
-      - uses: actions/setup-python@v5
-        with:
-          python-version: "3.12"
       - run: |
           sudo apt-get update
           sudo apt-get install -y --no-install-recommends \
             bubblewrap \
             binutils \
             build-essential
-      - run: ./gradlew --no-daemon test
+      - run: ./gradlew --no-daemon test roadmapCheck
 ```
 
 ## CI Artifacts

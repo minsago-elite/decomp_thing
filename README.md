@@ -10,6 +10,6 @@ Run the full local CI suite:
 scripts/ci.sh
 ```
 
-This executes Kotlin/JVM tests, Python tests, and roadmap consistency checks.
+This executes Kotlin/JVM tests and roadmap consistency checks.
 
 See [docs/ci.md](docs/ci.md) for CI/CD requirements, GitHub Actions usage, and downstream validation guidance.
