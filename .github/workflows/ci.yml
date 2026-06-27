@@ -1,0 +1,57 @@
+name: CI
+
+on:
+  push:
+    branches: ["master", "main"]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    name: Test on Ubuntu
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v5
+
+      - name: Set up JDK 21
+        uses: actions/setup-java@v5
+        with:
+          distribution: temurin
+          java-version: "21"
+
+      - name: Set up Python 3.12
+        uses: actions/setup-python@v6
+        with:
+          python-version: "3.12"
+
+      - name: Install system test dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            bubblewrap \
+            binutils \
+            build-essential
+
+      - name: Install Python test dependencies
+        run: python -m pip install --upgrade pip pytest
+
+      - name: Cache Gradle
+        uses: gradle/actions/setup-gradle@v5
+
+      - name: Run project CI
+        run: scripts/ci.sh
+
+      - name: Upload JVM test reports
+        if: always()
+        uses: actions/upload-artifact@v6
+        with:
+          name: gradle-test-reports
+          path: |
+            build/reports/tests/test
+            build/test-results/test
