@@ -13,8 +13,8 @@ class RoadmapManagerTest {
     fun `progress has required evidence and current level`() {
         val progress = Json.parseToJsonElement(Path("roadmap/progress.json").readText()).jsonObject
 
-        assertEquals("L4", progress["current_level"].toString().trim('"'))
-        assertEquals("complete", progress["current_status"].toString().trim('"'))
+        assertEquals("L5", progress["current_level"].toString().trim('"'))
+        assertEquals("active", progress["current_status"].toString().trim('"'))
         assertTrue(progress["levels"]!!.toString().contains("\"evidence\""))
     }
 

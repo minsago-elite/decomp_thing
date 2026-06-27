@@ -1,266 +1,266 @@
 {
-  "current_level": "L4",
-  "current_status": "complete",
-  "last_updated": "2026-06-27T05:41:13Z",
-  "levels": [
-    {
-      "id": "L0",
-      "name": "Skeleton",
-      "status": "complete",
-      "gates": [
+    "current_level": "L5",
+    "current_status": "active",
+    "last_updated": "2026-06-27T06:44:16.785238639Z",
+    "levels": [
         {
-          "id": "l0_web_uploads_elf",
-          "description": "Web UI uploads ELF",
-          "status": "passing",
-          "source": "test",
-          "evidence": "src/test/kotlin/decompengine/web/UploadServerTest.kt"
+            "id": "L0",
+            "name": "Skeleton",
+            "status": "complete",
+            "gates": [
+                {
+                    "id": "l0_web_uploads_elf",
+                    "description": "Web UI uploads ELF",
+                    "status": "passing",
+                    "source": "test",
+                    "evidence": "src/test/kotlin/decompengine/web/UploadServerTest.kt"
+                },
+                {
+                    "id": "l0_backend_stores_job",
+                    "description": "Backend stores job",
+                    "status": "passing",
+                    "source": "test",
+                    "evidence": "src/test/kotlin/decompengine/jobs/JobStoreTest.kt"
+                },
+                {
+                    "id": "l0_metadata_extraction",
+                    "description": "Basic metadata extraction works",
+                    "status": "passing",
+                    "source": "test",
+                    "evidence": "src/test/kotlin/decompengine/jobs/JobStoreTest.kt"
+                },
+                {
+                    "id": "l0_job_state_visible",
+                    "description": "Job state is visible",
+                    "status": "passing",
+                    "source": "test",
+                    "evidence": "src/test/kotlin/decompengine/web/UploadServerTest.kt"
+                }
+            ]
         },
         {
-          "id": "l0_backend_stores_job",
-          "description": "Backend stores job",
-          "status": "passing",
-          "source": "test",
-          "evidence": "src/test/kotlin/decompengine/jobs/JobStoreTest.kt"
+            "id": "L1",
+            "name": "Recompilable Output",
+            "status": "complete",
+            "gates": [
+                {
+                    "id": "l1_ghidra_analysis",
+                    "description": "Ghidra analysis runs",
+                    "status": "passing",
+                    "source": "test",
+                    "evidence": "src/test/kotlin/decompengine/project/ReconstructionPipelineTest.kt"
+                },
+                {
+                    "id": "l1_initial_c_project",
+                    "description": "Initial C project is generated",
+                    "status": "passing",
+                    "source": "test",
+                    "evidence": "src/test/kotlin/decompengine/project/ReconstructionPipelineTest.kt"
+                },
+                {
+                    "id": "l1_make_simple",
+                    "description": "make completes for simple binaries",
+                    "status": "passing",
+                    "source": "benchmark",
+                    "evidence": "roadmap/benchmarks/simple_cli.json"
+                },
+                {
+                    "id": "l1_build_logs",
+                    "description": "Build logs are captured",
+                    "status": "passing",
+                    "source": "test",
+                    "evidence": "src/test/kotlin/decompengine/project/ReconstructionPipelineTest.kt"
+                },
+                {
+                    "id": "l1_artifact_layout",
+                    "description": "Generated artifact layout is stable",
+                    "status": "passing",
+                    "source": "test",
+                    "evidence": "src/test/kotlin/decompengine/project/ReconstructionPipelineTest.kt"
+                },
+                {
+                    "id": "l1_kotlin_jvm_backend",
+                    "description": "L1.1 Kotlin JVM backend calls Ghidra through an in-process JVM boundary",
+                    "status": "passing",
+                    "source": "test",
+                    "evidence": "src/test/kotlin/decompengine/project/ReconstructionPipelineTest.kt"
+                }
+            ]
         },
         {
-          "id": "l0_metadata_extraction",
-          "description": "Basic metadata extraction works",
-          "status": "passing",
-          "source": "test",
-          "evidence": "src/test/kotlin/decompengine/jobs/JobStoreTest.kt"
+            "id": "L2",
+            "name": "Simple Behavioral Match",
+            "status": "complete",
+            "gates": [
+                {
+                    "id": "l2_hello_world",
+                    "description": "Hello-world binary passes",
+                    "status": "passing",
+                    "source": "benchmark",
+                    "evidence": "roadmap/benchmarks/simple_cli.json"
+                },
+                {
+                    "id": "l2_argv_processing",
+                    "description": "argv-processing binary passes",
+                    "status": "passing",
+                    "source": "benchmark",
+                    "evidence": "roadmap/benchmarks/simple_cli.json"
+                },
+                {
+                    "id": "l2_stdin_processing",
+                    "description": "stdin-processing binary passes",
+                    "status": "passing",
+                    "source": "benchmark",
+                    "evidence": "roadmap/benchmarks/stdin_programs.json"
+                },
+                {
+                    "id": "l2_process_io_compare",
+                    "description": "exit code/stdout/stderr are compared byte-for-byte",
+                    "status": "passing",
+                    "source": "test",
+                    "evidence": "src/test/kotlin/decompengine/validation/BehaviorValidationTest.kt"
+                },
+                {
+                    "id": "l2_sandbox_required",
+                    "description": "sandboxed execution is mandatory",
+                    "status": "passing",
+                    "source": "test",
+                    "evidence": "src/test/kotlin/decompengine/validation/BehaviorValidationTest.kt"
+                }
+            ]
         },
         {
-          "id": "l0_job_state_visible",
-          "description": "Job state is visible",
-          "status": "passing",
-          "source": "test",
-          "evidence": "src/test/kotlin/decompengine/web/UploadServerTest.kt"
+            "id": "L3",
+            "name": "Trace-Guided Repair",
+            "status": "complete",
+            "gates": [
+                {
+                    "id": "l3_structured_diffs",
+                    "description": "Failed validation cases produce structured diffs",
+                    "status": "passing",
+                    "source": "test",
+                    "evidence": "src/test/kotlin/decompengine/repair/TraceGuidedRepairTest.kt"
+                },
+                {
+                    "id": "l3_compile_repair",
+                    "description": "OpenRouter repair loop can patch compile errors",
+                    "status": "passing",
+                    "source": "test",
+                    "evidence": "src/test/kotlin/decompengine/repair/TraceGuidedRepairTest.kt"
+                },
+                {
+                    "id": "l3_behavior_repair",
+                    "description": "OpenRouter repair loop can patch behavior mismatches",
+                    "status": "passing",
+                    "source": "benchmark",
+                    "evidence": "roadmap/benchmarks/simple_cli.json"
+                },
+                {
+                    "id": "l3_regression_tests",
+                    "description": "Regression tests are retained",
+                    "status": "passing",
+                    "source": "test",
+                    "evidence": "src/test/kotlin/decompengine/repair/TraceGuidedRepairTest.kt"
+                },
+                {
+                    "id": "l3_iteration_history",
+                    "description": "iteration history is visible in UI",
+                    "status": "passing",
+                    "source": "test",
+                    "evidence": "src/test/kotlin/decompengine/web/UploadServerTest.kt"
+                }
+            ]
+        },
+        {
+            "id": "L4",
+            "name": "Automatic Exploration",
+            "status": "complete",
+            "gates": [
+                {
+                    "id": "l4_angr_cases",
+                    "description": "angr creates candidate argv/stdin cases",
+                    "status": "passing",
+                    "source": "test",
+                    "evidence": "src/test/kotlin/decompengine/exploration/AutomaticExplorationTest.kt"
+                },
+                {
+                    "id": "l4_static_hints",
+                    "description": "string/static-hint input generation works",
+                    "status": "passing",
+                    "source": "test",
+                    "evidence": "src/test/kotlin/decompengine/exploration/AutomaticExplorationTest.kt"
+                },
+                {
+                    "id": "l4_mutation_expansion",
+                    "description": "mutation-based expansion works",
+                    "status": "passing",
+                    "source": "test",
+                    "evidence": "src/test/kotlin/decompengine/exploration/AutomaticExplorationTest.kt"
+                },
+                {
+                    "id": "l4_coverage_increases",
+                    "description": "generated tests increase path/output coverage",
+                    "status": "passing",
+                    "source": "benchmark",
+                    "evidence": "roadmap/benchmarks/stdin_programs.json"
+                },
+                {
+                    "id": "l4_confidence_score",
+                    "description": "confidence score reflects validation breadth",
+                    "status": "passing",
+                    "source": "test",
+                    "evidence": "src/test/kotlin/decompengine/exploration/AutomaticExplorationTest.kt"
+                }
+            ]
+        },
+        {
+            "id": "L5",
+            "name": "High-Confidence Reconstruction",
+            "status": "active",
+            "gates": [
+                {
+                    "id": "l5_benchmark_suite",
+                    "description": "benchmark suite passes across stripped, optimized, PIE, non-PIE, stdin, argv, file, and libc-heavy examples",
+                    "status": "pending",
+                    "source": "benchmark",
+                    "evidence": "roadmap/benchmarks/stripped_optimized.json"
+                },
+                {
+                    "id": "l5_reproducible_recompile",
+                    "description": "generated project recompiles reproducibly",
+                    "status": "pending",
+                    "source": "benchmark",
+                    "evidence": "roadmap/benchmarks/simple_cli.json"
+                },
+                {
+                    "id": "l5_all_generated_cases",
+                    "description": "behavior matches on all benchmark-generated cases",
+                    "status": "pending",
+                    "source": "benchmark",
+                    "evidence": "roadmap/benchmarks/file_io.json"
+                },
+                {
+                    "id": "l5_unresolved_reported",
+                    "description": "unresolved functions/globals are explicitly reported",
+                    "status": "passing",
+                    "source": "test",
+                    "evidence": "src/test/kotlin/decompengine/project/ReconstructionPipelineTest.kt"
+                },
+                {
+                    "id": "l5_confidence_limits",
+                    "description": "confidence score and limitations are shown honestly",
+                    "status": "pending",
+                    "source": "test",
+                    "evidence": "roadmap/reports/latest.json"
+                },
+                {
+                    "id": "l5_no_universal_claim",
+                    "description": "no claim of universal equivalence unless formally proven for that specific binary",
+                    "status": "pending",
+                    "source": "manual",
+                    "evidence": "roadmap/milestones/L5_high_confidence.md"
+                }
+            ]
         }
-      ]
-    },
-    {
-      "id": "L1",
-      "name": "Recompilable Output",
-      "status": "complete",
-      "gates": [
-        {
-          "id": "l1_ghidra_analysis",
-          "description": "Ghidra analysis runs",
-          "status": "passing",
-          "source": "test",
-          "evidence": "src/test/kotlin/decompengine/project/ReconstructionPipelineTest.kt"
-        },
-        {
-          "id": "l1_initial_c_project",
-          "description": "Initial C project is generated",
-          "status": "passing",
-          "source": "test",
-          "evidence": "src/test/kotlin/decompengine/project/ReconstructionPipelineTest.kt"
-        },
-        {
-          "id": "l1_make_simple",
-          "description": "make completes for simple binaries",
-          "status": "passing",
-          "source": "benchmark",
-          "evidence": "roadmap/benchmarks/simple_cli.json"
-        },
-        {
-          "id": "l1_build_logs",
-          "description": "Build logs are captured",
-          "status": "passing",
-          "source": "test",
-          "evidence": "src/test/kotlin/decompengine/project/ReconstructionPipelineTest.kt"
-        },
-        {
-          "id": "l1_artifact_layout",
-          "description": "Generated artifact layout is stable",
-          "status": "passing",
-          "source": "test",
-          "evidence": "src/test/kotlin/decompengine/project/ReconstructionPipelineTest.kt"
-        },
-        {
-          "id": "l1_kotlin_jvm_backend",
-          "description": "L1.1 Kotlin JVM backend calls Ghidra through an in-process JVM boundary",
-          "status": "passing",
-          "source": "test",
-          "evidence": "src/test/kotlin/decompengine/project/ReconstructionPipelineTest.kt"
-        }
-      ]
-    },
-    {
-      "id": "L2",
-      "name": "Simple Behavioral Match",
-      "status": "complete",
-      "gates": [
-        {
-          "id": "l2_hello_world",
-          "description": "Hello-world binary passes",
-          "status": "passing",
-          "source": "benchmark",
-          "evidence": "roadmap/benchmarks/simple_cli.json"
-        },
-        {
-          "id": "l2_argv_processing",
-          "description": "argv-processing binary passes",
-          "status": "passing",
-          "source": "benchmark",
-          "evidence": "roadmap/benchmarks/simple_cli.json"
-        },
-        {
-          "id": "l2_stdin_processing",
-          "description": "stdin-processing binary passes",
-          "status": "passing",
-          "source": "benchmark",
-          "evidence": "roadmap/benchmarks/stdin_programs.json"
-        },
-        {
-          "id": "l2_process_io_compare",
-          "description": "exit code/stdout/stderr are compared byte-for-byte",
-          "status": "passing",
-          "source": "test",
-          "evidence": "src/test/kotlin/decompengine/validation/BehaviorValidationTest.kt"
-        },
-        {
-          "id": "l2_sandbox_required",
-          "description": "sandboxed execution is mandatory",
-          "status": "passing",
-          "source": "test",
-          "evidence": "src/test/kotlin/decompengine/validation/BehaviorValidationTest.kt"
-        }
-      ]
-    },
-    {
-      "id": "L3",
-      "name": "Trace-Guided Repair",
-      "status": "complete",
-      "gates": [
-        {
-          "id": "l3_structured_diffs",
-          "description": "Failed validation cases produce structured diffs",
-          "status": "passing",
-          "source": "test",
-          "evidence": "src/test/kotlin/decompengine/repair/TraceGuidedRepairTest.kt"
-        },
-        {
-          "id": "l3_compile_repair",
-          "description": "OpenRouter repair loop can patch compile errors",
-          "status": "passing",
-          "source": "test",
-          "evidence": "src/test/kotlin/decompengine/repair/TraceGuidedRepairTest.kt"
-        },
-        {
-          "id": "l3_behavior_repair",
-          "description": "OpenRouter repair loop can patch behavior mismatches",
-          "status": "passing",
-          "source": "benchmark",
-          "evidence": "roadmap/benchmarks/simple_cli.json"
-        },
-        {
-          "id": "l3_regression_tests",
-          "description": "Regression tests are retained",
-          "status": "passing",
-          "source": "test",
-          "evidence": "src/test/kotlin/decompengine/repair/TraceGuidedRepairTest.kt"
-        },
-        {
-          "id": "l3_iteration_history",
-          "description": "iteration history is visible in UI",
-          "status": "passing",
-          "source": "test",
-          "evidence": "src/test/kotlin/decompengine/web/UploadServerTest.kt"
-        }
-      ]
-    },
-    {
-      "id": "L4",
-      "name": "Automatic Exploration",
-      "status": "complete",
-      "gates": [
-        {
-          "id": "l4_angr_cases",
-          "description": "angr creates candidate argv/stdin cases",
-          "status": "passing",
-          "source": "test",
-          "evidence": "src/test/kotlin/decompengine/exploration/AutomaticExplorationTest.kt"
-        },
-        {
-          "id": "l4_static_hints",
-          "description": "string/static-hint input generation works",
-          "status": "passing",
-          "source": "test",
-          "evidence": "src/test/kotlin/decompengine/exploration/AutomaticExplorationTest.kt"
-        },
-        {
-          "id": "l4_mutation_expansion",
-          "description": "mutation-based expansion works",
-          "status": "passing",
-          "source": "test",
-          "evidence": "src/test/kotlin/decompengine/exploration/AutomaticExplorationTest.kt"
-        },
-        {
-          "id": "l4_coverage_increases",
-          "description": "generated tests increase path/output coverage",
-          "status": "passing",
-          "source": "benchmark",
-          "evidence": "roadmap/benchmarks/stdin_programs.json"
-        },
-        {
-          "id": "l4_confidence_score",
-          "description": "confidence score reflects validation breadth",
-          "status": "passing",
-          "source": "test",
-          "evidence": "src/test/kotlin/decompengine/exploration/AutomaticExplorationTest.kt"
-        }
-      ]
-    },
-    {
-      "id": "L5",
-      "name": "High-Confidence Reconstruction",
-      "status": "pending",
-      "gates": [
-        {
-          "id": "l5_benchmark_suite",
-          "description": "benchmark suite passes across stripped, optimized, PIE, non-PIE, stdin, argv, file, and libc-heavy examples",
-          "status": "pending",
-          "source": "benchmark",
-          "evidence": "roadmap/benchmarks/stripped_optimized.json"
-        },
-        {
-          "id": "l5_reproducible_recompile",
-          "description": "generated project recompiles reproducibly",
-          "status": "pending",
-          "source": "benchmark",
-          "evidence": "roadmap/benchmarks/simple_cli.json"
-        },
-        {
-          "id": "l5_all_generated_cases",
-          "description": "behavior matches on all benchmark-generated cases",
-          "status": "pending",
-          "source": "benchmark",
-          "evidence": "roadmap/benchmarks/file_io.json"
-        },
-        {
-          "id": "l5_unresolved_reported",
-          "description": "unresolved functions/globals are explicitly reported",
-          "status": "pending",
-          "source": "test",
-          "evidence": "roadmap/reports/latest.json"
-        },
-        {
-          "id": "l5_confidence_limits",
-          "description": "confidence score and limitations are shown honestly",
-          "status": "pending",
-          "source": "test",
-          "evidence": "roadmap/reports/latest.json"
-        },
-        {
-          "id": "l5_no_universal_claim",
-          "description": "no claim of universal equivalence unless formally proven for that specific binary",
-          "status": "pending",
-          "source": "manual",
-          "evidence": "roadmap/milestones/L5_high_confidence.md"
-        }
-      ]
-    }
-  ]
+    ]
 }

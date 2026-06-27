@@ -1,62 +1,62 @@
 {
-  "generated_at": "2026-06-27T05:41:13Z",
-  "current_level": "L4",
-  "current_status": "complete",
-  "next_failing_gate": "none",
-  "totals": {
-    "levels": 6,
-    "gates": 31,
-    "passing_gates": 25,
-    "failing_or_blocked_gates": 0
-  },
-  "levels": [
-    {
-      "id": "L0",
-      "name": "Skeleton",
-      "status": "complete",
-      "passing_gates": 4,
-      "total_gates": 4,
-      "blocking_gate": "none"
+    "generated_at": "2026-06-27T06:44:16.809717696Z",
+    "current_level": "L5",
+    "current_status": "active",
+    "next_failing_gate": "benchmark suite passes across stripped, optimized, PIE, non-PIE, stdin, argv, file, and libc-heavy examples",
+    "totals": {
+        "levels": 6,
+        "gates": 31,
+        "passing_gates": 26,
+        "failing_or_blocked_gates": 0
     },
-    {
-      "id": "L1",
-      "name": "Recompilable Output",
-      "status": "complete",
-      "passing_gates": 6,
-      "total_gates": 6,
-      "blocking_gate": "none"
-    },
-    {
-      "id": "L2",
-      "name": "Simple Behavioral Match",
-      "status": "complete",
-      "passing_gates": 5,
-      "total_gates": 5,
-      "blocking_gate": "none"
-    },
-    {
-      "id": "L3",
-      "name": "Trace-Guided Repair",
-      "status": "complete",
-      "passing_gates": 5,
-      "total_gates": 5,
-      "blocking_gate": "none"
-    },
-    {
-      "id": "L4",
-      "name": "Automatic Exploration",
-      "status": "complete",
-      "passing_gates": 5,
-      "total_gates": 5,
-      "blocking_gate": "none"
-    },
-    {
-      "id": "L5",
-      "name": "High-Confidence Reconstruction",
-      "status": "pending",
-      "passing_gates": 0,
-      "total_gates": 6,
-      "blocking_gate": "benchmark suite passes across stripped, optimized, PIE, non-PIE, stdin, argv, file, and libc-heavy examples"
-    }
-  ]
+    "levels": [
+        {
+            "id": "L0",
+            "name": "Skeleton",
+            "status": "complete",
+            "passing_gates": 4,
+            "total_gates": 4,
+            "blocking_gate": "none"
+        },
+        {
+            "id": "L1",
+            "name": "Recompilable Output",
+            "status": "complete",
+            "passing_gates": 6,
+            "total_gates": 6,
+            "blocking_gate": "none"
+        },
+        {
+            "id": "L2",
+            "name": "Simple Behavioral Match",
+            "status": "complete",
+            "passing_gates": 5,
+            "total_gates": 5,
+            "blocking_gate": "none"
+        },
+        {
+            "id": "L3",
+            "name": "Trace-Guided Repair",
+            "status": "complete",
+            "passing_gates": 5,
+            "total_gates": 5,
+            "blocking_gate": "none"
+        },
+        {
+            "id": "L4",
+            "name": "Automatic Exploration",
+            "status": "complete",
+            "passing_gates": 5,
+            "total_gates": 5,
+            "blocking_gate": "none"
+        },
+        {
+            "id": "L5",
+            "name": "High-Confidence Reconstruction",
+            "status": "active",
+            "passing_gates": 1,
+            "total_gates": 6,
+            "blocking_gate": "benchmark suite passes across stripped, optimized, PIE, non-PIE, stdin, argv, file, and libc-heavy examples"
+        }
+    ]
 }

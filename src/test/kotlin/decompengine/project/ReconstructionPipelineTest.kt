@@ -68,6 +68,7 @@ class ReconstructionPipelineTest {
                 "Makefile",
                 "include/decomp_engine.h",
                 "reports/analysis.json",
+                "reports/unresolved.json",
                 "src/main.c",
                 "src/reconstructed.c",
             ),
@@ -100,6 +101,21 @@ class ReconstructionPipelineTest {
         assertTrue(report.projectDir.resolve("Makefile").exists())
         assertTrue(report.projectDir.resolve("reports/build.log").exists())
         assertTrue(report.projectDir.resolve("build/reconstructed").isExecutable())
+    }
+
+    @Test
+    fun `unresolved symbol report is emitted`() {
+        val tempDir = createTempDirectory("reconstruction-unresolved-")
+        val binary = tempDir.resolve("hello").also { it.writeBytes(elfFixture()) }
+        val analysis = testAnalyzer().analyze(binary, tempDir.resolve("analysis"))
+        val projectDir = RecompilableProjectGenerator.generate(analysis, tempDir.resolve("project"))
+
+        val report = projectDir.resolve("reports/unresolved.json").readText()
+        assertTrue(report.contains("\"unresolvedFunctionCount\""))
+        assertTrue(report.contains("\"unresolvedObjectCount\""))
+        assertTrue(report.contains("\"functions\""))
+        assertTrue(report.contains("\"objects\""))
+        assertTrue(report.contains("does not imply behavioral equivalence"))
     }
 
     private fun testAnalyzer(): GhidraJvmAnalyzer =

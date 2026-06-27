@@ -2,6 +2,8 @@ package decompengine.analysis
 
 import decompengine.binary.ElfMetadata
 import decompengine.binary.ElfMetadataReader
+import decompengine.binary.ElfSymbolInventoryReader
+import decompengine.binary.SymbolInventory
 
 import java.io.ByteArrayOutputStream
 import java.io.PrintStream
@@ -21,6 +23,7 @@ data class GhidraAnalysis(
     val binaryPath: Path,
     val reportsDir: Path,
     val metadata: ElfMetadata,
+    val symbolInventory: SymbolInventory,
     val mainClass: String,
     val args: List<String>,
     val returnCode: Int,
@@ -51,10 +54,13 @@ class GhidraJvmAnalyzer(private val config: GhidraJvmConfig) {
         reportsDir.resolve("ghidra_stdout.log").writeText(stdout.toString(Charsets.UTF_8))
         reportsDir.resolve("ghidra_stderr.log").writeText(stderr.toString(Charsets.UTF_8))
 
+        val binaryBytes = binaryPath.readBytes()
+        val metadata = ElfMetadataReader.read(binaryBytes)
         val analysis = GhidraAnalysis(
             binaryPath = binaryPath,
             reportsDir = reportsDir,
-            metadata = ElfMetadataReader.read(binaryPath.readBytes()),
+            metadata = metadata,
+            symbolInventory = ElfSymbolInventoryReader.read(binaryBytes, metadata),
             mainClass = config.mainClass,
             args = args,
             returnCode = returnCode,
