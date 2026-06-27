@@ -20,10 +20,10 @@ class SandboxRunnerTest {
 
         val output = SandboxRunner().run(binary, ProcessInput(id = "default"))
 
-        assertTrue(output.sandboxCommand.contains("/usr/bin/bwrap"))
+        assertTrue(output.sandboxCommand.contains("/usr/bin/bwrap"), "command was: ${output.sandboxCommand}")
         assertTrue(output.sandboxCommand.contains("--ro-bind"))
         assertTrue(output.sandboxCommand.contains("--die-with-parent"))
-        assertEquals(0, output.exitCode)
+        assertEquals(0, output.exitCode, "exit=${output.exitCode} stderr=${output.stderr.decodeToString()}")
         assertEquals("hello, world\n", output.stdout.decodeToString())
     }
 
