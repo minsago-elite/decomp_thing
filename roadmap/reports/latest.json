@@ -1,12 +1,12 @@
 {
-  "generated_at": "2026-06-27T05:22:39Z",
-  "current_level": "L3",
+  "generated_at": "2026-06-27T05:41:13Z",
+  "current_level": "L4",
   "current_status": "complete",
   "next_failing_gate": "none",
   "totals": {
     "levels": 6,
     "gates": 31,
-    "passing_gates": 20,
+    "passing_gates": 25,
     "failing_or_blocked_gates": 0
   },
   "levels": [
@@ -45,10 +45,10 @@
     {
       "id": "L4",
       "name": "Automatic Exploration",
-      "status": "pending",
-      "passing_gates": 0,
+      "status": "complete",
+      "passing_gates": 5,
       "total_gates": 5,
-      "blocking_gate": "angr creates candidate argv/stdin cases"
+      "blocking_gate": "none"
     },
     {
       "id": "L5",

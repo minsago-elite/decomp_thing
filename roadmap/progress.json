@@ -1,7 +1,7 @@
 {
-  "current_level": "L3",
+  "current_level": "L4",
   "current_status": "complete",
-  "last_updated": "2026-06-27T05:22:39Z",
+  "last_updated": "2026-06-27T05:41:13Z",
   "levels": [
     {
       "id": "L0",
@@ -174,42 +174,42 @@
     {
       "id": "L4",
       "name": "Automatic Exploration",
-      "status": "pending",
+      "status": "complete",
       "gates": [
         {
           "id": "l4_angr_cases",
           "description": "angr creates candidate argv/stdin cases",
-          "status": "pending",
+          "status": "passing",
           "source": "test",
-          "evidence": "roadmap/reports/latest.json"
+          "evidence": "src/test/kotlin/decompengine/l4/AutomaticExplorationTest.kt"
         },
         {
           "id": "l4_static_hints",
           "description": "string/static-hint input generation works",
-          "status": "pending",
+          "status": "passing",
           "source": "test",
-          "evidence": "roadmap/reports/latest.json"
+          "evidence": "src/test/kotlin/decompengine/l4/AutomaticExplorationTest.kt"
         },
         {
           "id": "l4_mutation_expansion",
           "description": "mutation-based expansion works",
-          "status": "pending",
+          "status": "passing",
           "source": "test",
-          "evidence": "roadmap/reports/latest.json"
+          "evidence": "src/test/kotlin/decompengine/l4/AutomaticExplorationTest.kt"
         },
         {
           "id": "l4_coverage_increases",
           "description": "generated tests increase path/output coverage",
-          "status": "pending",
+          "status": "passing",
           "source": "benchmark",
           "evidence": "roadmap/benchmarks/stdin_programs.json"
         },
         {
           "id": "l4_confidence_score",
           "description": "confidence score reflects validation breadth",
-          "status": "pending",
+          "status": "passing",
           "source": "test",
-          "evidence": "roadmap/reports/latest.json"
+          "evidence": "src/test/kotlin/decompengine/l4/AutomaticExplorationTest.kt"
         }
       ]
     },
