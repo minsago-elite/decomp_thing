@@ -1,13 +1,13 @@
 package decompengine.integration
 
-import decompengine.l1.ElfMetadataReader
-import decompengine.l2.BehaviorComparator
-import decompengine.l2.ProcessInput
-import decompengine.l4.AutomaticExplorer
-import decompengine.l4.CandidateInput
-import decompengine.l4.CandidateSource
-import decompengine.l4.StaticHintGenerator
-import decompengine.l4.AngrExplorer
+import decompengine.binary.ElfMetadataReader
+import decompengine.validation.BehaviorComparator
+import decompengine.validation.ProcessInput
+import decompengine.exploration.AutomaticExplorer
+import decompengine.exploration.CandidateInput
+import decompengine.exploration.CandidateSource
+import decompengine.exploration.StaticHintGenerator
+import decompengine.exploration.AngrExplorer
 import kotlin.io.path.Path
 import kotlin.io.path.createDirectories
 import kotlin.io.path.createTempDirectory
@@ -77,7 +77,7 @@ class RealBinaryIntegrationTest {
 
     @Test
     fun `real stdin branching binary gains output coverage from generated inputs`() {
-        val tempDir = createTempDirectory("real-l4-")
+        val tempDir = createTempDirectory("real-exploration-")
         val binary = compileFixture(tempDir, "stdin_branching")
         val seed = listOf(CandidateInput("empty", CandidateSource.SEED))
 

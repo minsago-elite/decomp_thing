@@ -1,4 +1,4 @@
-package decompengine.l2
+package decompengine.validation
 
 import kotlin.io.path.createDirectories
 import kotlin.io.path.createTempDirectory
@@ -15,7 +15,7 @@ import kotlin.test.assertTrue
 class BehaviorValidationTest {
     @Test
     fun `hello-world binary passes byte-for-byte comparison`() {
-        val tempDir = createTempDirectory("l2-hello-")
+        val tempDir = createTempDirectory("validation-hello-")
         val original = compileC(tempDir, "hello-original", helloWorldSource())
         val rebuilt = compileC(tempDir, "hello-rebuilt", helloWorldSource())
 
@@ -34,7 +34,7 @@ class BehaviorValidationTest {
 
     @Test
     fun `argv-processing binary passes byte-for-byte comparison`() {
-        val tempDir = createTempDirectory("l2-argv-")
+        val tempDir = createTempDirectory("validation-argv-")
         val original = compileC(tempDir, "argv-original", argvEchoSource())
         val rebuilt = compileC(tempDir, "argv-rebuilt", argvEchoSource())
 
@@ -55,7 +55,7 @@ class BehaviorValidationTest {
 
     @Test
     fun `stdin-processing binary passes byte-for-byte comparison`() {
-        val tempDir = createTempDirectory("l2-stdin-")
+        val tempDir = createTempDirectory("validation-stdin-")
         val original = compileC(tempDir, "stdin-original", stdinEchoSource())
         val rebuilt = compileC(tempDir, "stdin-rebuilt", stdinEchoSource())
 
@@ -76,7 +76,7 @@ class BehaviorValidationTest {
 
     @Test
     fun `exit code stdout and stderr are compared byte-for-byte`() {
-        val tempDir = createTempDirectory("l2-mismatch-")
+        val tempDir = createTempDirectory("validation-mismatch-")
         val original = compileC(tempDir, "original", "int main(void) { return 0; }\n")
         val rebuilt = compileC(tempDir, "rebuilt", "int main(void) { return 1; }\n")
 
@@ -98,7 +98,7 @@ class BehaviorValidationTest {
 
     @Test
     fun `sandboxed execution is mandatory and visible in reports`() {
-        val tempDir = createTempDirectory("l2-sandbox-")
+        val tempDir = createTempDirectory("validation-sandbox-")
         val original = compileC(tempDir, "original", helloWorldSource())
         val rebuilt = compileC(tempDir, "rebuilt", helloWorldSource())
 

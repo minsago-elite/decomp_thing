@@ -1,9 +1,11 @@
-package decompengine.l1
+package decompengine.analysis
+
+import decompengine.binary.ElfMetadata
+import decompengine.binary.ElfMetadataReader
 
 import java.io.ByteArrayOutputStream
 import java.io.PrintStream
 import java.net.URLClassLoader
-import java.nio.file.Files
 import java.nio.file.Path
 import kotlin.io.path.createDirectories
 import kotlin.io.path.pathString

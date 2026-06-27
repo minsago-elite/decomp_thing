@@ -1,4 +1,4 @@
-package decompengine.l1
+package decompengine.binary
 
 import java.nio.ByteBuffer
 import java.nio.ByteOrder

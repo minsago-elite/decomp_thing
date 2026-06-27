@@ -1,8 +1,8 @@
-package decompengine.l3
+package decompengine.repair
 
-import decompengine.l2.BehaviorCaseResult
-import decompengine.l2.BehaviorComparator
-import decompengine.l2.ProcessInput
+import decompengine.validation.BehaviorCaseResult
+import decompengine.validation.BehaviorComparator
+import decompengine.validation.ProcessInput
 import java.net.URI
 import java.net.http.HttpClient
 import java.net.http.HttpRequest
@@ -259,10 +259,10 @@ class TraceGuidedRepairLoop(
         reportsDir: Path,
     ): RepairIteration {
         val comparison = try {
-            BehaviorComparator().compare("l3_behavior_repair", originalBinary, rebuiltBinary, inputs, reportsDir)
+            BehaviorComparator().compare("behavior_repair", originalBinary, rebuiltBinary, inputs, reportsDir)
         } catch (_: RuntimeException) {
-            val report = BehaviorComparatorNoThrow().compare("l3_behavior_repair", originalBinary, rebuiltBinary, inputs, reportsDir)
-            val diff = StructuredDiffBuilder.from("l3_behavior_repair", report.cases)
+            val report = BehaviorComparatorNoThrow().compare("behavior_repair", originalBinary, rebuiltBinary, inputs, reportsDir)
+            val diff = StructuredDiffBuilder.from("behavior_repair", report.cases)
             val request = RepairRequest(
                 failureKind = "behavior",
                 prompt = diff.toPrompt(),
@@ -315,10 +315,10 @@ private class BehaviorComparatorNoThrow {
     }.getOrElse {
         val reportPath = reportsDir.resolve("$id.behavior.json")
         val results = cases.map { input ->
-            val runner = decompengine.l2.SandboxRunner()
+            val runner = decompengine.validation.SandboxRunner()
             BehaviorCaseResult(input, runner.run(originalBinary, input), runner.run(rebuiltBinary, input))
         }
-        decompengine.l2.BehaviorComparisonReport(id, originalBinary, rebuiltBinary, results, reportPath).also {
+        decompengine.validation.BehaviorComparisonReport(id, originalBinary, rebuiltBinary, results, reportPath).also {
             reportPath.writeText("""{"id":"$id","matches":${it.matches}}""" + "\n")
         }
     }

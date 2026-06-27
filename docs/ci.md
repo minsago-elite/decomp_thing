@@ -70,7 +70,7 @@ Useful artifacts to retain:
 - `build/reports/tests/test`
 - `build/test-results/test`
 - generated behavior reports under project `reports/`
-- generated exploration reports such as `l4_exploration.json`
+- generated exploration reports such as `exploration.json`
 - repair history reports such as `repair_history.json`
 
 ## Determinism Notes

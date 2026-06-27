@@ -1,6 +1,6 @@
-package decompengine.l4
+package decompengine.exploration
 
-import decompengine.l2.ProcessInput
+import decompengine.validation.ProcessInput
 import kotlin.io.path.createDirectories
 import kotlin.io.path.createTempDirectory
 import kotlin.io.path.exists
@@ -22,7 +22,7 @@ class AutomaticExplorationTest {
 
     @Test
     fun `string static-hint input generation works`() {
-        val tempDir = createTempDirectory("l4-static-")
+        val tempDir = createTempDirectory("exploration-static-")
         val binary = compileBranchingProgram(tempDir)
 
         val candidates = StaticHintGenerator().generate(binary)
@@ -44,7 +44,7 @@ class AutomaticExplorationTest {
 
     @Test
     fun `generated tests increase path and output coverage`() {
-        val tempDir = createTempDirectory("l4-coverage-")
+        val tempDir = createTempDirectory("exploration-coverage-")
         val binary = compileBranchingProgram(tempDir)
         val baseline = listOf(CandidateInput("empty", CandidateSource.SEED))
         val expanded = baseline + listOf(
@@ -83,7 +83,7 @@ class AutomaticExplorationTest {
 
     @Test
     fun `automatic exploration writes generated input and confidence report`() {
-        val tempDir = createTempDirectory("l4-report-")
+        val tempDir = createTempDirectory("exploration-report-")
         val binary = compileBranchingProgram(tempDir)
         val seed = listOf(CandidateInput("empty", CandidateSource.SEED))
 

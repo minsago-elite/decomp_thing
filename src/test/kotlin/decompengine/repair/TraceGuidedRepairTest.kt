@@ -1,10 +1,10 @@
-package decompengine.l3
+package decompengine.repair
 
-import decompengine.l1.MakeProjectBuilder
-import decompengine.l2.BehaviorCaseResult
-import decompengine.l2.BehaviorComparator
-import decompengine.l2.ProcessInput
-import decompengine.l2.ProcessOutput
+import decompengine.project.MakeProjectBuilder
+import decompengine.validation.BehaviorCaseResult
+import decompengine.validation.BehaviorComparator
+import decompengine.validation.ProcessInput
+import decompengine.validation.ProcessOutput
 import com.sun.net.httpserver.HttpServer
 import java.net.InetSocketAddress
 import java.net.URI
@@ -49,7 +49,7 @@ class TraceGuidedRepairTest {
 
     @Test
     fun `OpenRouter repair loop can patch compile errors`() {
-        val tempDir = createTempDirectory("l3-compile-")
+        val tempDir = createTempDirectory("repair-compile-")
         val projectDir = createProject(tempDir.resolve("project"), reconstructedSource = "int decomp_engine_main(void) {\n")
         val history = RepairHistory(projectDir.resolve("reports/repair_history.json"))
         val client = FakeRepairClient(
@@ -125,7 +125,7 @@ class TraceGuidedRepairTest {
 
     @Test
     fun `OpenRouter repair loop can patch behavior mismatches`() {
-        val tempDir = createTempDirectory("l3-behavior-")
+        val tempDir = createTempDirectory("repair-behavior-")
         val original = compileC(tempDir, "original", helloProgramSource("hello, world"))
         val projectDir = createProject(tempDir.resolve("project"), reconstructedSource = helloMainSource("wrong"))
         val initialBuild = MakeProjectBuilder.build(projectDir)
@@ -162,7 +162,7 @@ class TraceGuidedRepairTest {
 
     @Test
     fun `regression tests are retained across repair attempts`() {
-        val tempDir = createTempDirectory("l3-regression-")
+        val tempDir = createTempDirectory("repair-regression-")
         val projectDir = createProject(tempDir.resolve("project"), reconstructedSource = "int decomp_engine_main(void) {\n")
         val history = RepairHistory(projectDir.resolve("reports/repair_history.json"))
         val inputs = listOf(

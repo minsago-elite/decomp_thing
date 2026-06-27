@@ -1,5 +1,7 @@
-package decompengine.l1
+package decompengine.project
 
+import decompengine.analysis.GhidraAnalysis
+import decompengine.analysis.GhidraJvmAnalyzer
 import java.nio.file.Path
 import kotlin.io.path.createDirectories
 import kotlin.io.path.exists
@@ -124,7 +126,7 @@ object MakeProjectBuilder {
     }
 }
 
-class L1Pipeline(private val analyzer: GhidraJvmAnalyzer) {
+class ReconstructionPipeline(private val analyzer: GhidraJvmAnalyzer) {
     fun generate(binaryPath: Path, workDir: Path): BuildReport {
         val analysis = analyzer.analyze(binaryPath, workDir.resolve("analysis"))
         val projectDir = RecompilableProjectGenerator.generate(analysis, workDir.resolve("project"))

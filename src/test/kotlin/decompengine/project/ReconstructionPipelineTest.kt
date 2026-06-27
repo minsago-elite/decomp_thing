@@ -1,5 +1,8 @@
-package decompengine.l1
+package decompengine.project
 
+import decompengine.analysis.GhidraJvmAnalyzer
+import decompengine.analysis.GhidraJvmConfig
+import decompengine.binary.ElfMetadataReader
 import kotlin.io.path.ExperimentalPathApi
 import kotlin.io.path.Path
 import kotlin.io.path.createTempDirectory
@@ -14,7 +17,7 @@ import kotlin.test.Test
 import kotlin.test.assertEquals
 import kotlin.test.assertTrue
 
-class L1PipelineTest {
+class ReconstructionPipelineTest {
     @Test
     fun `ELF metadata extraction works in Kotlin backend`() {
         val metadata = ElfMetadataReader.read(elfFixture())
@@ -31,7 +34,7 @@ class L1PipelineTest {
 
     @Test
     fun `Ghidra analysis runs through JVM main call and captures report`() {
-        val tempDir = createTempDirectory("l1-ghidra-")
+        val tempDir = createTempDirectory("reconstruction-ghidra-")
         val binary = tempDir.resolve("hello").also { it.writeBytes(elfFixture()) }
         val analyzer = testAnalyzer()
 
@@ -47,7 +50,7 @@ class L1PipelineTest {
     @OptIn(ExperimentalPathApi::class)
     @Test
     fun `initial C project layout is stable`() {
-        val tempDir = createTempDirectory("l1-layout-")
+        val tempDir = createTempDirectory("reconstruction-layout-")
         val binary = tempDir.resolve("hello").also { it.writeBytes(elfFixture()) }
         val analysis = testAnalyzer().analyze(binary, tempDir.resolve("analysis"))
 
@@ -74,7 +77,7 @@ class L1PipelineTest {
 
     @Test
     fun `make completes and build log is captured`() {
-        val tempDir = createTempDirectory("l1-build-")
+        val tempDir = createTempDirectory("reconstruction-build-")
         val binary = tempDir.resolve("hello").also { it.writeBytes(elfFixture()) }
         val analysis = testAnalyzer().analyze(binary, tempDir.resolve("analysis"))
         val projectDir = RecompilableProjectGenerator.generate(analysis, tempDir.resolve("project"))
@@ -87,13 +90,13 @@ class L1PipelineTest {
     }
 
     @Test
-    fun `L1 pipeline generates buildable project`() {
-        val tempDir = createTempDirectory("l1-pipeline-")
+    fun `reconstruction pipeline generates buildable project`() {
+        val tempDir = createTempDirectory("reconstruction-pipeline-")
         val binary = tempDir.resolve("hello").also { it.writeBytes(elfFixture()) }
 
-        val report = L1Pipeline(testAnalyzer()).generate(binary, tempDir.resolve("l1"))
+        val report = ReconstructionPipeline(testAnalyzer()).generate(binary, tempDir.resolve("reconstruction"))
 
-        assertEquals(tempDir.resolve("l1/project"), report.projectDir)
+        assertEquals(tempDir.resolve("reconstruction/project"), report.projectDir)
         assertTrue(report.projectDir.resolve("Makefile").exists())
         assertTrue(report.projectDir.resolve("reports/build.log").exists())
         assertTrue(report.projectDir.resolve("build/reconstructed").isExecutable())
@@ -106,7 +109,7 @@ class L1PipelineTest {
                     .split(System.getProperty("path.separator"))
                     .filter { it.isNotBlank() }
                     .map { Path(it) },
-                mainClass = "decompengine.l1.FakeAnalyzeHeadless",
+                mainClass = "decompengine.analysis.FakeAnalyzeHeadless",
             ),
         )
 

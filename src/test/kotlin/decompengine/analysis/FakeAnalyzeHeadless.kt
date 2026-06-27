@@ -1,4 +1,4 @@
-package decompengine.l1
+package decompengine.analysis
 
 import java.nio.file.Path
 import kotlin.io.path.createDirectories

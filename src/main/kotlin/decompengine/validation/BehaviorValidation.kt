@@ -1,4 +1,4 @@
-package decompengine.l2
+package decompengine.validation
 
 import java.nio.file.Path
 import java.time.Duration

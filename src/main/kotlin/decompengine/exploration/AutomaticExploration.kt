@@ -1,7 +1,7 @@
-package decompengine.l4
+package decompengine.exploration
 
-import decompengine.l2.ProcessInput
-import decompengine.l2.SandboxRunner
+import decompengine.validation.ProcessInput
+import decompengine.validation.SandboxRunner
 import java.nio.file.Path
 import kotlin.io.path.createDirectories
 import kotlin.io.path.pathString
@@ -199,7 +199,7 @@ class AutomaticExplorer(
         val expanded = (generated + mutations.expand(generated)).distinctBy { it.args to it.stdin.decodeToString() }
         val coverageReport = coverage.measure(binaryPath, seedInputs, expanded)
         val confidence = ConfidenceScorer.score(expanded, coverageReport, sandboxed = true)
-        val reportPath = reportsDir.createDirectories().resolve("l4_exploration.json")
+        val reportPath = reportsDir.createDirectories().resolve("exploration.json")
         val report = ExplorationReport(expanded, coverageReport, confidence, reportPath)
         reportPath.writeText(report.toJson())
         return report
