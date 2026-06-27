@@ -2,10 +2,19 @@ from __future__ import annotations
 
 import http.client
 import json
+import struct
 import threading
 from pathlib import Path
 
 from decomp_engine.web import UploadServer
+
+
+ELF_FIXTURE = (
+    b"\x7fELF"
+    + bytes([2, 1, 1, 3, 0])
+    + (b"\x00" * 7)
+    + struct.pack("<HHIQQQIHHHHHH", 2, 62, 1, 0x401000, 64, 0, 0, 64, 56, 2, 64, 5, 4)
+)
 
 
 def multipart_body(filename: str, content: bytes) -> tuple[bytes, str]:
@@ -57,7 +66,7 @@ def test_web_ui_uploads_elf_and_returns_job(tmp_path: Path) -> None:
     thread = threading.Thread(target=server.serve_forever, daemon=True)
     thread.start()
     try:
-        body, content_type = multipart_body("fixture.elf", b"\x7fELF" + b"\x02\x01\x01" + (b"\x00" * 32))
+        body, content_type = multipart_body("fixture.elf", ELF_FIXTURE)
         status, _, payload = request(
             server,
             "POST",
@@ -73,8 +82,40 @@ def test_web_ui_uploads_elf_and_returns_job(tmp_path: Path) -> None:
     job = json.loads(payload)
     assert job["filename"] == "fixture.elf"
     assert job["status"] == "uploaded"
+    assert job["metadata"]["format"] == "ELF64"
+    assert job["metadata"]["machine"] == "x86-64"
     assert (tmp_path / job["id"] / "input.elf").read_bytes().startswith(b"\x7fELF")
     assert (tmp_path / job["id"] / "job.json").exists()
+
+
+def test_job_state_page_shows_status_and_metadata(tmp_path: Path) -> None:
+    server = UploadServer(("127.0.0.1", 0), tmp_path)
+    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    try:
+        body, content_type = multipart_body("fixture.elf", ELF_FIXTURE)
+        status, _, payload = request(
+            server,
+            "POST",
+            "/jobs",
+            body,
+            {"Content-Type": content_type, "Accept": "application/json"},
+        )
+        assert status == 201
+        job = json.loads(payload)
+
+        status, _, page = request(server, "GET", f"/jobs/{job['id']}")
+    finally:
+        server.shutdown()
+        server.server_close()
+
+    assert status == 200
+    assert b"uploaded" in page
+    assert b"fixture.elf" in page
+    assert b"Format" in page
+    assert b"ELF64" in page
+    assert b"Machine" in page
+    assert b"x86-64" in page
 
 
 def test_upload_rejects_non_elf(tmp_path: Path) -> None:

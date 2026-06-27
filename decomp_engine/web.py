@@ -65,6 +65,10 @@ def render_index() -> str:
 
 
 def render_job(job: Job) -> str:
+    metadata_items = "\n".join(
+        f"      <dt>{html.escape(key.replace('_', ' ').title())}</dt><dd>{html.escape(str(value))}</dd>"
+        for key, value in job.metadata.items()
+    )
     return f"""<!doctype html>
 <html lang="en">
 <head>
@@ -80,6 +84,7 @@ def render_job(job: Job) -> str:
       <dt>Filename</dt><dd>{html.escape(job.filename)}</dd>
       <dt>Size</dt><dd>{job.size_bytes} bytes</dd>
       <dt>Created</dt><dd>{html.escape(job.created_at)}</dd>
+      {metadata_items}
     </dl>
   </main>
 </body>

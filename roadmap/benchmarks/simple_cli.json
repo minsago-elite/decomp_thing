@@ -1,6 +1,18 @@
 {
   "id": "simple_cli",
   "description": "Simple CLI programs covering hello-world and argv behavior.",
+  "l1_make_simple": {
+    "status": "passing",
+    "evidence": "src/test/kotlin/decompengine/l1/L1PipelineTest.kt::make completes and build log is captured",
+    "artifact_layout": [
+      "Makefile",
+      "include/decomp_engine.h",
+      "src/main.c",
+      "src/reconstructed.c",
+      "reports/analysis.json",
+      "reports/build.log"
+    ]
+  },
   "cases": [
     {
       "id": "hello_world",

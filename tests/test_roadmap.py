@@ -11,7 +11,8 @@ REPO_ROOT = Path(__file__).resolve().parents[1]
 
 def test_progress_json_has_required_evidence() -> None:
     progress = json.loads((REPO_ROOT / "roadmap" / "progress.json").read_text())
-    assert progress["current_level"] == "L0"
+    assert progress["current_level"] == "L1"
+    assert progress["current_status"] == "complete"
     assert progress["levels"]
     for level in progress["levels"]:
         assert level["gates"]

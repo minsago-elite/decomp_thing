@@ -1,12 +1,12 @@
 {
-  "current_level": "L0",
-  "current_status": "active",
-  "last_updated": "2026-06-23T04:57:08Z",
+  "current_level": "L1",
+  "current_status": "complete",
+  "last_updated": "2026-06-27T05:04:25Z",
   "levels": [
     {
       "id": "L0",
       "name": "Skeleton",
-      "status": "active",
+      "status": "complete",
       "gates": [
         {
           "id": "l0_web_uploads_elf",
@@ -25,58 +25,65 @@
         {
           "id": "l0_metadata_extraction",
           "description": "Basic metadata extraction works",
-          "status": "pending",
+          "status": "passing",
           "source": "test",
-          "evidence": "roadmap/reports/latest.json"
+          "evidence": "tests/test_jobs.py"
         },
         {
           "id": "l0_job_state_visible",
           "description": "Job state is visible",
-          "status": "pending",
+          "status": "passing",
           "source": "test",
-          "evidence": "roadmap/reports/latest.json"
+          "evidence": "tests/test_web_upload.py"
         }
       ]
     },
     {
       "id": "L1",
       "name": "Recompilable Output",
-      "status": "pending",
+      "status": "complete",
       "gates": [
         {
           "id": "l1_ghidra_analysis",
           "description": "Ghidra analysis runs",
-          "status": "pending",
+          "status": "passing",
           "source": "test",
-          "evidence": "roadmap/reports/latest.json"
+          "evidence": "src/test/kotlin/decompengine/l1/L1PipelineTest.kt"
         },
         {
           "id": "l1_initial_c_project",
           "description": "Initial C project is generated",
-          "status": "pending",
+          "status": "passing",
           "source": "test",
-          "evidence": "roadmap/reports/latest.json"
+          "evidence": "src/test/kotlin/decompengine/l1/L1PipelineTest.kt"
         },
         {
           "id": "l1_make_simple",
           "description": "make completes for simple binaries",
-          "status": "pending",
+          "status": "passing",
           "source": "benchmark",
           "evidence": "roadmap/benchmarks/simple_cli.json"
         },
         {
           "id": "l1_build_logs",
           "description": "Build logs are captured",
-          "status": "pending",
+          "status": "passing",
           "source": "test",
-          "evidence": "roadmap/reports/latest.json"
+          "evidence": "src/test/kotlin/decompengine/l1/L1PipelineTest.kt"
         },
         {
           "id": "l1_artifact_layout",
           "description": "Generated artifact layout is stable",
-          "status": "pending",
+          "status": "passing",
           "source": "test",
-          "evidence": "roadmap/reports/latest.json"
+          "evidence": "src/test/kotlin/decompengine/l1/L1PipelineTest.kt"
+        },
+        {
+          "id": "l1_kotlin_jvm_backend",
+          "description": "L1.1 Kotlin JVM backend calls Ghidra through an in-process JVM boundary",
+          "status": "passing",
+          "source": "test",
+          "evidence": "src/test/kotlin/decompengine/l1/L1PipelineTest.kt"
         }
       ]
     },

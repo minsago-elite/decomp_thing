@@ -1,0 +1,151 @@
+package decompengine.l1
+
+import kotlin.io.path.ExperimentalPathApi
+import kotlin.io.path.Path
+import kotlin.io.path.createTempDirectory
+import kotlin.io.path.exists
+import kotlin.io.path.isExecutable
+import kotlin.io.path.listDirectoryEntries
+import kotlin.io.path.pathString
+import kotlin.io.path.readText
+import kotlin.io.path.relativeTo
+import kotlin.io.path.writeBytes
+import kotlin.test.Test
+import kotlin.test.assertEquals
+import kotlin.test.assertTrue
+
+class L1PipelineTest {
+    @Test
+    fun `ELF metadata extraction works in Kotlin backend`() {
+        val metadata = ElfMetadataReader.read(elfFixture())
+
+        assertEquals("ELF64", metadata.format)
+        assertEquals("little", metadata.endianness)
+        assertEquals("Linux", metadata.osAbi)
+        assertEquals("executable", metadata.objectType)
+        assertEquals("x86-64", metadata.machine)
+        assertEquals(0x401000UL, metadata.entryPoint)
+        assertEquals(2.toUShort(), metadata.programHeaderCount)
+        assertEquals(5.toUShort(), metadata.sectionHeaderCount)
+    }
+
+    @Test
+    fun `Ghidra analysis runs through JVM main call and captures report`() {
+        val tempDir = createTempDirectory("l1-ghidra-")
+        val binary = tempDir.resolve("hello").also { it.writeBytes(elfFixture()) }
+        val analyzer = testAnalyzer()
+
+        val analysis = analyzer.analyze(binary, tempDir.resolve("analysis"))
+
+        assertEquals(0, analysis.returnCode)
+        assertEquals("x86-64", analysis.metadata.machine)
+        assertTrue(tempDir.resolve("analysis/ghidra_project/analysis.marker").exists())
+        assertTrue(analysis.reportPath.readText().contains("\"tool\": \"ghidra-jvm\""))
+        assertTrue(analysis.reportsDir.resolve("ghidra_stdout.log").readText().startsWith("fake ghidra analyzed"))
+    }
+
+    @OptIn(ExperimentalPathApi::class)
+    @Test
+    fun `initial C project layout is stable`() {
+        val tempDir = createTempDirectory("l1-layout-")
+        val binary = tempDir.resolve("hello").also { it.writeBytes(elfFixture()) }
+        val analysis = testAnalyzer().analyze(binary, tempDir.resolve("analysis"))
+
+        val projectDir = RecompilableProjectGenerator.generate(analysis, tempDir.resolve("project"))
+        val files = projectDir.listDirectoryEntries()
+            .flatMap { root ->
+                if (root.toFile().isDirectory) root.toFile().walkTopDown().filter { it.isFile }.map { it.toPath() }.toList()
+                else listOf(root)
+            }
+            .map { it.relativeTo(projectDir).pathString }
+            .sorted()
+
+        assertEquals(
+            listOf(
+                "Makefile",
+                "include/decomp_engine.h",
+                "reports/analysis.json",
+                "src/main.c",
+                "src/reconstructed.c",
+            ),
+            files,
+        )
+    }
+
+    @Test
+    fun `make completes and build log is captured`() {
+        val tempDir = createTempDirectory("l1-build-")
+        val binary = tempDir.resolve("hello").also { it.writeBytes(elfFixture()) }
+        val analysis = testAnalyzer().analyze(binary, tempDir.resolve("analysis"))
+        val projectDir = RecompilableProjectGenerator.generate(analysis, tempDir.resolve("project"))
+
+        val report = MakeProjectBuilder.build(projectDir)
+
+        assertEquals(0, report.returnCode)
+        assertTrue(projectDir.resolve("build/reconstructed").exists())
+        assertTrue(report.logPath.readText().contains("exit_code=0"))
+    }
+
+    @Test
+    fun `L1 pipeline generates buildable project`() {
+        val tempDir = createTempDirectory("l1-pipeline-")
+        val binary = tempDir.resolve("hello").also { it.writeBytes(elfFixture()) }
+
+        val report = L1Pipeline(testAnalyzer()).generate(binary, tempDir.resolve("l1"))
+
+        assertEquals(tempDir.resolve("l1/project"), report.projectDir)
+        assertTrue(report.projectDir.resolve("Makefile").exists())
+        assertTrue(report.projectDir.resolve("reports/build.log").exists())
+        assertTrue(report.projectDir.resolve("build/reconstructed").isExecutable())
+    }
+
+    private fun testAnalyzer(): GhidraJvmAnalyzer =
+        GhidraJvmAnalyzer(
+            GhidraJvmConfig(
+                classpath = System.getProperty("java.class.path")
+                    .split(System.getProperty("path.separator"))
+                    .filter { it.isNotBlank() }
+                    .map { Path(it) },
+                mainClass = "decompengine.l1.FakeAnalyzeHeadless",
+            ),
+        )
+
+    private fun elfFixture(): ByteArray {
+        val bytes = ByteArray(64)
+        bytes[0] = 0x7f
+        bytes[1] = 'E'.code.toByte()
+        bytes[2] = 'L'.code.toByte()
+        bytes[3] = 'F'.code.toByte()
+        bytes[4] = 2
+        bytes[5] = 1
+        bytes[6] = 1
+        bytes[7] = 3
+        putShort(bytes, 16, 2)
+        putShort(bytes, 18, 62)
+        putInt(bytes, 20, 1)
+        putLong(bytes, 24, 0x401000)
+        putLong(bytes, 32, 64)
+        putLong(bytes, 40, 0)
+        putInt(bytes, 48, 0)
+        putShort(bytes, 52, 64)
+        putShort(bytes, 54, 56)
+        putShort(bytes, 56, 2)
+        putShort(bytes, 58, 64)
+        putShort(bytes, 60, 5)
+        putShort(bytes, 62, 4)
+        return bytes
+    }
+
+    private fun putShort(bytes: ByteArray, offset: Int, value: Int) {
+        bytes[offset] = value.toByte()
+        bytes[offset + 1] = (value ushr 8).toByte()
+    }
+
+    private fun putInt(bytes: ByteArray, offset: Int, value: Int) {
+        repeat(4) { index -> bytes[offset + index] = (value ushr (index * 8)).toByte() }
+    }
+
+    private fun putLong(bytes: ByteArray, offset: Int, value: Long) {
+        repeat(8) { index -> bytes[offset + index] = (value ushr (index * 8)).toByte() }
+    }
+}

@@ -7,10 +7,10 @@ Progress is intentionally evidence-backed. Human-readable milestone docs live un
 ## Current Status
 
 <!-- roadmap:summary:start -->
-- Current maturity level: `L0`
-- Current milestone: Skeleton
-- Current status: `active`
-- Next failing gate: Basic metadata extraction works
+- Current maturity level: `L1`
+- Current milestone: Recompilable Output
+- Current status: `complete`
+- Next failing gate: none
 - Latest generated report: `roadmap/reports/latest.json`
 <!-- roadmap:summary:end -->
 
@@ -30,8 +30,8 @@ L0 through L5 describe increasing practical confidence. L5 is the strongest prac
 <!-- roadmap:progress:start -->
 | Level | Name | Status | Passing Gates | Blocking Gate |
 |---|---|---:|---:|---|
-| L0 | Skeleton | active | 2/4 | Basic metadata extraction works |
-| L1 | Recompilable Output | pending | 0/5 | Ghidra analysis runs |
+| L0 | Skeleton | complete | 4/4 | none |
+| L1 | Recompilable Output | complete | 6/6 | none |
 | L2 | Simple Behavioral Match | pending | 0/5 | Hello-world binary passes |
 | L3 | Trace-Guided Repair | pending | 0/5 | Failed validation cases produce structured diffs |
 | L4 | Automatic Exploration | pending | 0/5 | angr creates candidate argv/stdin cases |
@@ -52,9 +52,8 @@ The latest generated summary is written to `roadmap/reports/latest.json`.
 ## Known Blockers
 
 - No reconstruction engine exists yet.
-- No web UI exists yet.
 - Benchmarks are defined but not executable yet.
-- Gate status is seeded as `pending` until implementation tests provide evidence.
+- L2 behavior matching has not started yet.
 
 ## Updating Progress
 
