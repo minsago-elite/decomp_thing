@@ -1,7 +1,7 @@
 {
-  "current_level": "L1",
+  "current_level": "L2",
   "current_status": "complete",
-  "last_updated": "2026-06-27T05:04:25Z",
+  "last_updated": "2026-06-27T05:11:34Z",
   "levels": [
     {
       "id": "L0",
@@ -90,42 +90,42 @@
     {
       "id": "L2",
       "name": "Simple Behavioral Match",
-      "status": "pending",
+      "status": "complete",
       "gates": [
         {
           "id": "l2_hello_world",
           "description": "Hello-world binary passes",
-          "status": "pending",
+          "status": "passing",
           "source": "benchmark",
           "evidence": "roadmap/benchmarks/simple_cli.json"
         },
         {
           "id": "l2_argv_processing",
           "description": "argv-processing binary passes",
-          "status": "pending",
+          "status": "passing",
           "source": "benchmark",
           "evidence": "roadmap/benchmarks/simple_cli.json"
         },
         {
           "id": "l2_stdin_processing",
           "description": "stdin-processing binary passes",
-          "status": "pending",
+          "status": "passing",
           "source": "benchmark",
           "evidence": "roadmap/benchmarks/stdin_programs.json"
         },
         {
           "id": "l2_process_io_compare",
           "description": "exit code/stdout/stderr are compared byte-for-byte",
-          "status": "pending",
+          "status": "passing",
           "source": "test",
-          "evidence": "roadmap/reports/latest.json"
+          "evidence": "src/test/kotlin/decompengine/l2/BehaviorValidationTest.kt"
         },
         {
           "id": "l2_sandbox_required",
           "description": "sandboxed execution is mandatory",
-          "status": "pending",
+          "status": "passing",
           "source": "test",
-          "evidence": "roadmap/reports/latest.json"
+          "evidence": "src/test/kotlin/decompengine/l2/BehaviorValidationTest.kt"
         }
       ]
     },

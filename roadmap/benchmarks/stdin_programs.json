@@ -1,11 +1,18 @@
 {
   "id": "stdin_programs",
   "description": "Programs whose behavior is driven by stdin.",
+  "l2_results": {
+    "status": "passing",
+    "evidence": "src/test/kotlin/decompengine/l2/BehaviorValidationTest.kt::stdin-processing binary passes byte-for-byte comparison",
+    "comparison": "sandboxed original-vs-rebuilt stdin-driven process I/O is compared byte-for-byte"
+  },
   "cases": [
     {
       "id": "stdin_echo",
       "fixture": "benchmarks/fixtures/stdin_echo",
-      "expected_gate": "l2_stdin_processing"
+      "expected_gate": "l2_stdin_processing",
+      "status": "passing",
+      "evidence": "src/test/kotlin/decompengine/l2/BehaviorValidationTest.kt::stdin-processing binary passes byte-for-byte comparison"
     },
     {
       "id": "stdin_branching",

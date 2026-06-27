@@ -1,12 +1,12 @@
 {
-  "generated_at": "2026-06-27T05:04:25Z",
-  "current_level": "L1",
+  "generated_at": "2026-06-27T05:11:34Z",
+  "current_level": "L2",
   "current_status": "complete",
   "next_failing_gate": "none",
   "totals": {
     "levels": 6,
     "gates": 31,
-    "passing_gates": 10,
+    "passing_gates": 15,
     "failing_or_blocked_gates": 0
   },
   "levels": [
@@ -29,10 +29,10 @@
     {
       "id": "L2",
       "name": "Simple Behavioral Match",
-      "status": "pending",
-      "passing_gates": 0,
+      "status": "complete",
+      "passing_gates": 5,
       "total_gates": 5,
-      "blocking_gate": "Hello-world binary passes"
+      "blocking_gate": "none"
     },
     {
       "id": "L3",

@@ -7,8 +7,8 @@ Progress is intentionally evidence-backed. Human-readable milestone docs live un
 ## Current Status
 
 <!-- roadmap:summary:start -->
-- Current maturity level: `L1`
-- Current milestone: Recompilable Output
+- Current maturity level: `L2`
+- Current milestone: Simple Behavioral Match
 - Current status: `complete`
 - Next failing gate: none
 - Latest generated report: `roadmap/reports/latest.json`
@@ -32,7 +32,7 @@ L0 through L5 describe increasing practical confidence. L5 is the strongest prac
 |---|---|---:|---:|---|
 | L0 | Skeleton | complete | 4/4 | none |
 | L1 | Recompilable Output | complete | 6/6 | none |
-| L2 | Simple Behavioral Match | pending | 0/5 | Hello-world binary passes |
+| L2 | Simple Behavioral Match | complete | 5/5 | none |
 | L3 | Trace-Guided Repair | pending | 0/5 | Failed validation cases produce structured diffs |
 | L4 | Automatic Exploration | pending | 0/5 | angr creates candidate argv/stdin cases |
 | L5 | High-Confidence Reconstruction | pending | 0/6 | benchmark suite passes across stripped, optimized, PIE, non-PIE, stdin, argv, file, and libc-heavy examples |
@@ -52,8 +52,8 @@ The latest generated summary is written to `roadmap/reports/latest.json`.
 ## Known Blockers
 
 - No reconstruction engine exists yet.
-- Benchmarks are defined but not executable yet.
-- L2 behavior matching has not started yet.
+- Broad benchmark execution beyond L2 fixtures has not started yet.
+- L3 trace-guided repair has not started yet.
 
 ## Updating Progress
 

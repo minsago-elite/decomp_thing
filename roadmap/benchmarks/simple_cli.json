@@ -13,16 +13,25 @@
       "reports/build.log"
     ]
   },
+  "l2_results": {
+    "status": "passing",
+    "evidence": "src/test/kotlin/decompengine/l2/BehaviorValidationTest.kt",
+    "comparison": "sandboxed original-vs-rebuilt process I/O is compared byte-for-byte"
+  },
   "cases": [
     {
       "id": "hello_world",
       "fixture": "benchmarks/fixtures/hello_world",
-      "expected_gate": "l2_hello_world"
+      "expected_gate": "l2_hello_world",
+      "status": "passing",
+      "evidence": "src/test/kotlin/decompengine/l2/BehaviorValidationTest.kt::hello-world binary passes byte-for-byte comparison"
     },
     {
       "id": "argv_echo",
       "fixture": "benchmarks/fixtures/argv_echo",
-      "expected_gate": "l2_argv_processing"
+      "expected_gate": "l2_argv_processing",
+      "status": "passing",
+      "evidence": "src/test/kotlin/decompengine/l2/BehaviorValidationTest.kt::argv-processing binary passes byte-for-byte comparison"
     }
   ]
 }
