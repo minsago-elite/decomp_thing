@@ -1,12 +1,12 @@
 {
-    "generated_at": "2026-06-27T06:44:16.809717696Z",
+    "generated_at": "2026-06-27T07:20:50.404818766Z",
     "current_level": "L5",
     "current_status": "active",
     "next_failing_gate": "benchmark suite passes across stripped, optimized, PIE, non-PIE, stdin, argv, file, and libc-heavy examples",
     "totals": {
         "levels": 6,
         "gates": 31,
-        "passing_gates": 26,
+        "passing_gates": 28,
         "failing_or_blocked_gates": 0
     },
     "levels": [
@@ -54,7 +54,7 @@
             "id": "L5",
             "name": "High-Confidence Reconstruction",
             "status": "active",
-            "passing_gates": 1,
+            "passing_gates": 3,
             "total_gates": 6,
             "blocking_gate": "benchmark suite passes across stripped, optimized, PIE, non-PIE, stdin, argv, file, and libc-heavy examples"
         }

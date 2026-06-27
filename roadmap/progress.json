@@ -1,7 +1,7 @@
 {
     "current_level": "L5",
     "current_status": "active",
-    "last_updated": "2026-06-27T06:44:16.785238639Z",
+    "last_updated": "2026-06-27T07:20:50.380459238Z",
     "levels": [
         {
             "id": "L0",
@@ -249,14 +249,14 @@
                 {
                     "id": "l5_confidence_limits",
                     "description": "confidence score and limitations are shown honestly",
-                    "status": "pending",
+                    "status": "passing",
                     "source": "test",
-                    "evidence": "roadmap/reports/latest.json"
+                    "evidence": "src/test/kotlin/decompengine/exploration/AutomaticExplorationTest.kt"
                 },
                 {
                     "id": "l5_no_universal_claim",
                     "description": "no claim of universal equivalence unless formally proven for that specific binary",
-                    "status": "pending",
+                    "status": "passing",
                     "source": "manual",
                     "evidence": "roadmap/milestones/L5_high_confidence.md"
                 }

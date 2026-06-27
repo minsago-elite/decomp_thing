@@ -97,6 +97,9 @@ class AutomaticExplorationTest {
         assertTrue(json.contains("\"source\": \"STATIC_HINT\""))
         assertTrue(json.contains("\"source\": \"MUTATION\""))
         assertTrue(json.contains("\"coverageIncreased\": true"))
+        assertTrue(json.contains("\"sandboxed\": true"))
+        assertTrue(json.contains("\"confidence\""))
+        assertTrue(json.contains("\"outputSignatureCount\""))
     }
 
     private class FakeAngrExplorer : AngrExplorer {

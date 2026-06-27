@@ -10,6 +10,7 @@ import kotlin.io.path.writeText
 import kotlin.test.Test
 import kotlin.test.assertEquals
 import kotlin.test.assertFailsWith
+import kotlin.test.assertFalse
 import kotlin.test.assertTrue
 
 class BehaviorValidationTest {
@@ -101,8 +102,9 @@ class BehaviorValidationTest {
         val tempDir = createTempDirectory("validation-sandbox-")
         val original = compileC(tempDir, "original", helloWorldSource())
         val rebuilt = compileC(tempDir, "rebuilt", helloWorldSource())
+        val sandbox = SandboxRunner()
 
-        val report = BehaviorComparator().compare(
+        val report = BehaviorComparator(sandbox).compare(
             id = "sandbox_required",
             originalBinary = original,
             rebuiltBinary = rebuilt,
@@ -112,8 +114,18 @@ class BehaviorValidationTest {
 
         val command = report.cases.single().original.sandboxCommand
         assertTrue(command.contains("/usr/bin/bwrap"))
-        assertTrue(command.contains("--unshare-net"))
-        assertTrue(report.reportPath.readText().contains("\"sandbox\": \"bubblewrap\""))
+        assertTrue(command.contains("--ro-bind"))
+        assertTrue(command.contains("--die-with-parent"))
+        if (sandbox.networkIsolationSupported()) {
+            assertTrue(command.contains("--unshare-net"))
+        } else {
+            assertFalse(command.contains("--unshare-net"))
+        }
+        val json = report.reportPath.readText()
+        assertTrue(json.contains("\"sandbox\": \"bubblewrap\""))
+        assertTrue(json.contains("\"networkIsolated\""))
+        assertEquals(sandbox.networkIsolationSupported(), report.networkIsolated)
+        assertEquals(sandbox.networkIsolationSupported(), report.cases.single().original.networkIsolated)
     }
 
     private fun compileC(tempDir: java.nio.file.Path, name: String, source: String): java.nio.file.Path {

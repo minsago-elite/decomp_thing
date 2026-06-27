@@ -35,7 +35,7 @@ L0 through L5 describe increasing practical confidence. L5 is the strongest prac
 | L2 | Simple Behavioral Match | complete | 5/5 | none |
 | L3 | Trace-Guided Repair | complete | 5/5 | none |
 | L4 | Automatic Exploration | complete | 5/5 | none |
-| L5 | High-Confidence Reconstruction | active | 1/6 | benchmark suite passes across stripped, optimized, PIE, non-PIE, stdin, argv, file, and libc-heavy examples |
+| L5 | High-Confidence Reconstruction | active | 3/6 | benchmark suite passes across stripped, optimized, PIE, non-PIE, stdin, argv, file, and libc-heavy examples |
 <!-- roadmap:progress:end -->
 
 ## Benchmark Summary

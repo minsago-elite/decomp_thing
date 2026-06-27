@@ -2,7 +2,9 @@ package decompengine.validation
 
 import java.nio.file.Path
 import java.time.Duration
+import java.util.concurrent.ConcurrentHashMap
 import kotlin.io.path.createDirectories
+import kotlin.io.path.exists
 import kotlin.io.path.pathString
 import kotlin.io.path.writeText
 
@@ -27,19 +29,22 @@ data class ProcessOutput(
     val stdout: ByteArray,
     val stderr: ByteArray,
     val sandboxCommand: List<String>,
+    val networkIsolated: Boolean = true,
 ) {
     override fun equals(other: Any?): Boolean =
         other is ProcessOutput &&
             exitCode == other.exitCode &&
             stdout.contentEquals(other.stdout) &&
             stderr.contentEquals(other.stderr) &&
-            sandboxCommand == other.sandboxCommand
+            sandboxCommand == other.sandboxCommand &&
+            networkIsolated == other.networkIsolated
 
     override fun hashCode(): Int {
         var result = exitCode
         result = 31 * result + stdout.contentHashCode()
         result = 31 * result + stderr.contentHashCode()
         result = 31 * result + sandboxCommand.hashCode()
+        result = 31 * result + networkIsolated.hashCode()
         return result
     }
 }
@@ -63,22 +68,77 @@ data class BehaviorComparisonReport(
     val reportPath: Path,
 ) {
     val matches: Boolean = cases.all { it.matches }
+    val networkIsolated: Boolean = cases.all { it.original.networkIsolated && it.rebuilt.networkIsolated }
 }
 
 class BehaviorMismatchException(message: String) : RuntimeException(message)
+
+class SandboxUnavailableException(message: String) : RuntimeException(message)
+
+object BwrapCapability {
+    private val cache = ConcurrentHashMap<String, Boolean>()
+
+    fun networkIsolationSupported(bwrapPath: Path, timeoutPath: Path): Boolean =
+        cache.computeIfAbsent("${bwrapPath.pathString}|${timeoutPath.pathString}") {
+            probe(bwrapPath, timeoutPath)
+        }
+
+    fun resetCache() {
+        cache.clear()
+    }
+
+    private fun probe(bwrapPath: Path, timeoutPath: Path): Boolean {
+        if (!bwrapPath.exists() || !timeoutPath.exists()) return false
+        val command = listOf(
+            timeoutPath.pathString,
+            "3s",
+            bwrapPath.pathString,
+            "--unshare-net",
+            "--die-with-parent",
+            "--ro-bind",
+            "/usr",
+            "/usr",
+            "--ro-bind",
+            "/lib",
+            "/lib",
+            "--dir",
+            "/tmp",
+            "/usr/bin/true",
+        )
+        return try {
+            val process = ProcessBuilder(command)
+                .redirectErrorStream(true)
+                .start()
+            process.inputStream.readBytes()
+            process.waitFor() == 0
+        } catch (_: Exception) {
+            false
+        }
+    }
+}
 
 class SandboxRunner(
     private val timeout: Duration = Duration.ofSeconds(5),
     private val bwrapPath: Path = Path.of("/usr/bin/bwrap"),
     private val timeoutPath: Path = Path.of("/usr/bin/timeout"),
+    private val networkIsolation: Boolean = BwrapCapability.networkIsolationSupported(bwrapPath, timeoutPath),
 ) {
+    fun networkIsolationSupported(): Boolean = networkIsolation
+
     fun run(executable: Path, input: ProcessInput): ProcessOutput {
+        if (!bwrapPath.exists()) {
+            throw SandboxUnavailableException("bubblewrap not found at ${bwrapPath.pathString}; sandboxed execution is mandatory")
+        }
         val executableDir = executable.toAbsolutePath().parent
         val command = mutableListOf(
             timeoutPath.pathString,
             "${timeout.toSeconds()}s",
             bwrapPath.pathString,
-            "--unshare-net",
+        )
+        if (networkIsolation) {
+            command += "--unshare-net"
+        }
+        command += listOf(
             "--die-with-parent",
             "--ro-bind",
             "/usr",
@@ -107,7 +167,13 @@ class SandboxRunner(
         val stdout = process.inputStream.readBytes()
         val stderr = process.errorStream.readBytes()
         val exitCode = process.waitFor()
-        return ProcessOutput(exitCode = exitCode, stdout = stdout, stderr = stderr, sandboxCommand = command)
+        return ProcessOutput(
+            exitCode = exitCode,
+            stdout = stdout,
+            stderr = stderr,
+            sandboxCommand = command,
+            networkIsolated = networkIsolation,
+        )
     }
 }
 
@@ -146,6 +212,7 @@ private fun BehaviorComparisonReport.toJson(): String = """
 {
   "id": "${id.escapeJson()}",
   "sandbox": "bubblewrap",
+  "networkIsolated": $networkIsolated,
   "originalBinary": "${originalBinary.pathString.escapeJson()}",
   "rebuiltBinary": "${rebuiltBinary.pathString.escapeJson()}",
   "matches": $matches,
@@ -174,6 +241,7 @@ private fun ProcessOutput.toJson(): String = """
   "exitCode": $exitCode,
   "stdoutHex": "${stdout.toHex()}",
   "stderrHex": "${stderr.toHex()}",
+  "networkIsolated": $networkIsolated,
   "sandboxCommand": [${sandboxCommand.joinToString(", ") { "\"${it.escapeJson()}\"" }}]
 }
 """.trimIndent()
