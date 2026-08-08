@@ -1,9 +1,9 @@
 # L1: Reconstruct
 
-Goal: turn the supported vulnerable ELF fixture into meaningful editable C.
+Goal: compile `c-vul/src/01_out_of_bounds_write.c` and reconstruct its ELF into meaningful editable C.
 
 Done when:
 
 - the generated C represents the fixture's required behavior instead of returning a placeholder value.
 - the generated project compiles into an executable.
-- normal inputs produce the required exit code, stdout, stderr, and file effects.
+- the reconstructed executable prints `[03] Alexandria Stone` and exits successfully.

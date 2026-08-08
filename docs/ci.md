@@ -13,7 +13,8 @@ scripts/ci.sh
 That command runs:
 
 - `./gradlew --no-daemon test`
-- `./gradlew --no-daemon roadmapCheck`
+
+`ROADMAP.md` is maintained directly during MVP development and is not generated or checked by CI.
 
 ## Required CI Tools
 
@@ -45,6 +46,8 @@ jobs:
     runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@v4
+        with:
+          submodules: recursive
       - uses: actions/setup-java@v4
         with:
           distribution: temurin
@@ -55,7 +58,7 @@ jobs:
             bubblewrap \
             binutils \
             build-essential
-      - run: ./gradlew --no-daemon test roadmapCheck
+      - run: ./gradlew --no-daemon test
 ```
 
 ## CI Artifacts

@@ -2,23 +2,20 @@
 
 The MVP proves one complete path: reconstruct one supported vulnerable ELF into editable C, patch one evidenced vulnerability, rebuild it, and verify that the exploit is blocked without breaking required behavior.
 
-Progress is evidence-backed in `roadmap/progress.json`. Run `./gradlew roadmapUpdate` after changing progress and `./gradlew roadmapCheck` in CI.
+This file is maintained directly during MVP development. Update the checklist and current phase when verified work lands.
 
 ## Current Status
 
-<!-- roadmap:summary:start -->
-- Current maturity level: `L1`
-- Current milestone: Reconstruct
-- Current status: `active`
-- Next failing gate: one supported vulnerable ELF is reconstructed into meaningful editable C
-- Latest generated report: `roadmap/reports/latest.json`
-<!-- roadmap:summary:end -->
+- Current phase: **L1 Reconstruct**
+- Status: **in progress**
+- Next target: reconstruct the pinned `01_out_of_bounds_write.c` binary into meaningful editable C.
 
 ## MVP Scope
 
 - Linux x86-64 ELF.
-- One fixture: stack buffer overflow.
-- One normal-input corpus and one exploit reproducer.
+- One fixture: `benchmarks/fixtures/c-vul/src/01_out_of_bounds_write.c` from the pinned `c-vul` submodule.
+- One expected behavior: print `[03] Alexandria Stone` and exit successfully.
+- One exploit reproducer: run the original fixture with AddressSanitizer and observe a stack buffer overflow.
 - Generated C source, patched C source, rebuilt binary, and validation report.
 - Human approval before applying a generated security patch.
 
@@ -30,19 +27,31 @@ Progress is evidence-backed in `roadmap/progress.json`. Run `./gradlew roadmapUp
 
 L3 through L5 are intentionally omitted from the MVP. Automated repair loops, automatic input exploration, and broad confidence benchmarking remain post-MVP work.
 
-## Progress
+## Checklist
 
-<!-- roadmap:progress:start -->
-| Level | Name | Status | Passing Gates | Blocking Gate |
-|---|---|---:|---:|---|
-| L1 | Reconstruct | active | 0/3 | one supported vulnerable ELF is reconstructed into meaningful editable C |
-| L2 | Patch | pending | 0/3 | the vulnerability has a reproducible finding and maps to reconstructed source |
-| L6 | Verify and Deliver | pending | 0/3 | the original exploit reproduces and the patched binary blocks it |
-<!-- roadmap:progress:end -->
+### L1 Reconstruct
+
+- [ ] Build `binary_01` from the pinned c-vul source.
+- [ ] Reconstruct meaningful editable C from the ELF.
+- [ ] Compile the reconstructed C.
+- [ ] Produce `[03] Alexandria Stone` with exit code 0.
+
+### L2 Patch
+
+- [x] Reproduce the original CWE-787 stack buffer overflow with AddressSanitizer.
+- [ ] Map the finding to reconstructed C.
+- [ ] Apply and record a human-approved minimal patch.
+- [ ] Compile the patched C with sanitizer and hardening flags.
+
+### L6 Verify and Deliver
+
+- [ ] Verify the patched binary has no sanitizer error for the reproducer.
+- [ ] Verify the patched binary preserves `[03] Alexandria Stone` and exit code 0.
+- [ ] Package sources, binaries, diff, build logs, validation results, and residual risks.
 
 ## Definition of Done
 
-The MVP is done only when `roadmap/benchmarks/vulnerability_remediation.json` passes end to end. A buildable `return 0` skeleton, an analyzer warning without a reproducer, or a patch that breaks valid behavior does not count.
+The MVP is done only when `roadmap/benchmarks/vulnerability_remediation.json` passes end to end for `01_out_of_bounds_write.c`. A buildable `return 0` skeleton, an analyzer warning without the sanitizer reproducer, or a patch that changes the expected badge output does not count.
 
 ## Post-MVP
 

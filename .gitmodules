@@ -1,0 +1,3 @@
+[submodule "benchmarks/fixtures/c-vul"]
+	path = benchmarks/fixtures/c-vul
+	url = https://github.com/minsago-elite/c-vul.git

@@ -22,19 +22,3 @@ dependencies {
     implementation("org.jetbrains.kotlinx:kotlinx-serialization-json:1.9.0")
     testImplementation(kotlin("test"))
 }
-
-tasks.register<JavaExec>("roadmapCheck") {
-    group = "verification"
-    description = "Validate roadmap state."
-    classpath = sourceSets.main.get().runtimeClasspath
-    mainClass.set("decompengine.MainKt")
-    args("roadmap", "check")
-}
-
-tasks.register<JavaExec>("roadmapUpdate") {
-    group = "documentation"
-    description = "Regenerate roadmap summary and report files."
-    classpath = sourceSets.main.get().runtimeClasspath
-    mainClass.set("decompengine.MainKt")
-    args("roadmap", "update")
-}
