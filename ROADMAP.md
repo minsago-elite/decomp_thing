@@ -1,23 +1,23 @@
 # MVP Roadmap
 
-The MVP proves one complete path: reconstruct one supported vulnerable ELF into editable C, patch one evidenced vulnerability, rebuild it, and verify that the exploit is blocked without breaking required behavior.
+The MVP proves one complete path for small, symbol-bearing Linux binaries: decompile an input ELF into editable C, patch one evidenced memory-safety vulnerability, rebuild it, and verify the failing execution is fixed without breaking observed behavior.
 
 This file is maintained directly during MVP development. Update the checklist and current phase when verified work lands.
 
 ## Current Status
 
-- Current phase: **L1 Reconstruct**
+- Current phase: **L1-L2 CLI vertical slice**
 - Status: **in progress**
-- Next target: reconstruct the pinned `01_out_of_bounds_write.c` binary into meaningful editable C.
+- Next target: complete the CLI against the pinned fixture while deriving reconstruction from the input binary, never from fixture source.
 
 ## MVP Scope
 
 - Linux x86-64 ELF.
-- One fixture: `benchmarks/fixtures/c-vul/src/01_out_of_bounds_write.c` from the pinned `c-vul` submodule.
-- One expected behavior: print `[03] Alexandria Stone` and exit successfully.
-- One exploit reproducer: run the original fixture with AddressSanitizer and observe a stack buffer overflow.
+- Small, dynamically linked, symbol-bearing Linux x86-64 ELF programs with no external files, arguments, or interactive input.
+- The pinned `01_out_of_bounds_write.c` binary is the acceptance fixture, not a hard-coded reconstruction template.
+- One automatically observed default execution plus a memory-safety finding confirmed on rebuilt code with sanitizers.
 - Generated C source, patched C source, rebuilt binary, and validation report.
-- Human approval before applying a generated security patch.
+- Human approval before applying a generated security patch; `--yes` permits CI automation.
 - A CLI-first workflow that streams progress and tool output while the job is running.
 - A reproducible Docker environment with no host dependencies beyond Docker and Git.
 - A provider-neutral OpenAI-compatible LLM client configured through `.env`.
@@ -87,19 +87,23 @@ Every successful run produces this stable minimum layout:
 
 ```text
 <directory>/
-|-- decompiled/
-|   `-- reconstructed.c
-|-- patched/
+|-- decompile/
+|   `-- decompiled.c
+|-- patched_c/
+|   `-- patched.c
+|-- patched_binary/
 |   `-- patched_binary
+|-- summary/
+|   `-- SUMMARY.md
 |-- logs/
-`-- SUMMARY.md
 ```
 
-- `decompiled/reconstructed.c` contains the editable C reconstructed from the input ELF before the security patch.
-- `patched/patched_binary` is the final executable that passed security and behavior validation.
+- `decompile/decompiled.c` contains the editable C reconstructed from the input ELF before the security patch.
+- `patched_c/patched.c` contains the approved patched source.
+- `patched_binary/patched_binary` is the final executable that passed security and behavior validation.
 - `logs/` contains the timestamped output streamed from analysis, compilation, sanitizers, and validation.
-- `SUMMARY.md` records the input and artifact hashes, executed phases, CWE-787 evidence, approved source change, build and hardening settings, validation results, output paths, and residual risks.
-- A failed run must retain available logs and `SUMMARY.md` with the failure phase, but must not present an unverified binary as `patched/patched_binary`.
+- `summary/SUMMARY.md` records the input and artifact hashes, executed phases, CWE-787 evidence, approved source change, build and hardening settings, validation results, output paths, and residual risks.
+- A failed run must retain available logs and `summary/SUMMARY.md` with the failure phase, but must not present an unverified binary as `patched_binary/patched_binary`.
 
 ## Steps
 
@@ -126,11 +130,12 @@ L3 through L5 are intentionally omitted from the MVP. Automated repair loops, au
 
 ### L1 Reconstruct
 
-- [ ] Provide the `llm_bin_patch patch` CLI entry point.
-- [ ] Stream phase changes and child-process output in real time while retaining logs.
-- [ ] Build `binary_01` from the pinned c-vul source.
-- [ ] Reconstruct meaningful editable C from the ELF.
-- [ ] Compile the reconstructed C.
+- [x] Provide the `llm_bin_patch patch` CLI entry point.
+- [x] Stream phase changes and child-process output in real time while retaining logs.
+- [ ] Build `binary_01` from the pinned c-vul source only as an acceptance input.
+- [ ] Extract Ghidra decompiler output from the ELF without reading or copying fixture source.
+- [ ] Ask the configured LLM to turn decompiler output into one standalone, meaningful C file.
+- [x] Compile the reconstructed C.
 - [ ] Produce `[03] Alexandria Stone` with exit code 0.
 
 ### L2 Patch
@@ -138,21 +143,22 @@ L3 through L5 are intentionally omitted from the MVP. Automated repair loops, au
 - [x] Reproduce the original CWE-787 stack buffer overflow with AddressSanitizer.
 - [ ] Map the finding to reconstructed C.
 - [ ] Apply and record a human-approved minimal patch.
-- [ ] Show the proposed diff and request approval through the CLI before applying it.
-- [ ] Compile the patched C with sanitizer and hardening flags.
+- [x] Show the proposed diff and request approval through the CLI before applying it.
+- [x] Compile the patched C with sanitizer and hardening flags.
 
 ### L6 Verify and Deliver
 
-- [ ] Verify the patched binary has no sanitizer error for the reproducer.
-- [ ] Verify the patched binary preserves `[03] Alexandria Stone` and exit code 0.
-- [ ] Write the original reconstructed C to `decompiled/reconstructed.c`.
-- [ ] Publish the validated executable as `patched/patched_binary`.
-- [ ] Write the full process summary and residual risks to `SUMMARY.md`.
-- [ ] Retain timestamped analysis, build, sanitizer, and validation output under `logs/`.
+- [x] Verify the patched binary has no sanitizer error for the reproducer.
+- [x] Verify the patched binary preserves `[03] Alexandria Stone` and exit code 0.
+- [x] Write the original reconstructed C to `decompile/decompiled.c`.
+- [x] Write the approved patched C to `patched_c/patched.c`.
+- [x] Publish the validated executable as `patched_binary/patched_binary`.
+- [ ] Write the full process summary and residual risks to `summary/SUMMARY.md`.
+- [x] Retain timestamped analysis, build, sanitizer, and validation output under `logs/`.
 
 ## Definition of Done
 
-The MVP is done only when a clean checkout can build the Docker image, load `BASE_URL`, `API_KEY`, and `MODEL` from `.env`, and run `llm_bin_patch patch` through Docker Compose without host-installed Java, Ghidra, or C tooling. The command must run `roadmap/benchmarks/vulnerability_remediation.json` end to end for `01_out_of_bounds_write.c`, emit observable progress before completion, pass every validation check, and produce `decompiled/reconstructed.c`, `patched/patched_binary`, and `SUMMARY.md`. A provider-specific OpenRouter dependency, leaked credential, buildable `return 0` skeleton, buffered output shown only at completion, analyzer warning without the sanitizer reproducer, unverified patched binary, or patch that changes the expected badge output does not count.
+The MVP is done only when a clean checkout can build the Docker image, load `BASE_URL`, `API_KEY`, and `MODEL` from `.env`, and run `llm_bin_patch patch` through Docker Compose without host-installed Java, Ghidra, or C tooling. The command must process the acceptance binary without consulting its source file, emit observable progress before completion, pass every validation check, and produce `decompile/decompiled.c`, `patched_c/patched.c`, `patched_binary/patched_binary`, and `summary/SUMMARY.md`. A fixture-source copy, provider-specific dependency, leaked credential, buildable `return 0` skeleton, buffered output shown only at completion, unverified patched binary, or patch that changes observed normal output does not count.
 
 ## Post-MVP
 

@@ -1,5 +1,9 @@
 package decompengine
 
+import decompengine.mvp.MvpPatchException
+import decompengine.mvp.MvpPatchOptions
+import decompengine.mvp.MvpPatchWorkflow
+import decompengine.repair.HttpOpenAiCompatibleRepairClient
 import decompengine.web.UploadServer
 import java.net.URI
 import java.nio.file.Files
@@ -8,6 +12,7 @@ import java.nio.file.Path
 fun main(args: Array<String>) {
     when (args.firstOrNull()) {
         "doctor" -> runDoctor(args.drop(1))
+        "patch" -> runPatch(args.drop(1))
         "web" -> runWeb(args.drop(1))
         null, "help", "--help", "-h" -> printHelp()
         else -> {
@@ -16,6 +21,40 @@ fun main(args: Array<String>) {
             kotlin.system.exitProcess(2)
         }
     }
+}
+
+private fun runPatch(args: List<String>) {
+    var input: Path? = null
+    var output: Path? = null
+    var assumeYes = false
+    var index = 0
+    while (index < args.size) {
+        when (args[index]) {
+            "--output" -> {
+                if (index + 1 >= args.size) patchUsageError("--output requires a directory")
+                output = Path.of(args[index + 1]); index += 2
+            }
+            "--yes" -> { assumeYes = true; index++ }
+            else -> {
+                if (args[index].startsWith("-") || input != null) patchUsageError("unexpected argument: ${args[index]}")
+                input = Path.of(args[index]); index++
+            }
+        }
+    }
+    if (input == null || output == null) patchUsageError("patch requires an input ELF and output directory")
+    try {
+        MvpPatchWorkflow(HttpOpenAiCompatibleRepairClient.fromEnvironment()).run(MvpPatchOptions(input, output, assumeYes))
+    } catch (failure: IllegalArgumentException) {
+        System.err.println("configuration error: ${failure.message}"); kotlin.system.exitProcess(2)
+    } catch (failure: MvpPatchException) {
+        System.err.println("patch failed: ${failure.message}"); kotlin.system.exitProcess(1)
+    }
+}
+
+private fun patchUsageError(message: String): Nothing {
+    System.err.println(message)
+    System.err.println("usage: llm_bin_patch patch <input-elf> --output <directory> [--yes]")
+    kotlin.system.exitProcess(2)
 }
 
 private fun runDoctor(args: List<String>) {
@@ -120,6 +159,7 @@ private fun printHelp() {
         """
         Usage:
           llm_bin_patch doctor [--tools-only]
+          llm_bin_patch patch <input-elf> --output <directory> [--yes]
           llm_bin_patch web [--host 127.0.0.1] [--port 8000] [--data-dir .decomp_engine/jobs]
         """.trimIndent(),
     )
