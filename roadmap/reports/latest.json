@@ -1,11 +1,11 @@
 {
-    "generated_at": "2026-06-27T07:20:50.404818766Z",
+    "generated_at": "2026-08-08T01:32:48.867346877Z",
     "current_level": "L5",
     "current_status": "active",
     "next_failing_gate": "benchmark suite passes across stripped, optimized, PIE, non-PIE, stdin, argv, file, and libc-heavy examples",
     "totals": {
-        "levels": 6,
-        "gates": 31,
+        "levels": 7,
+        "gates": 38,
         "passing_gates": 28,
         "failing_or_blocked_gates": 0
     },
@@ -57,6 +57,14 @@
             "passing_gates": 3,
             "total_gates": 6,
             "blocking_gate": "benchmark suite passes across stripped, optimized, PIE, non-PIE, stdin, argv, file, and libc-heavy examples"
+        },
+        {
+            "id": "L6",
+            "name": "Vulnerability Remediation",
+            "status": "pending",
+            "passing_gates": 0,
+            "total_gates": 7,
+            "blocking_gate": "vulnerability findings include reproducible evidence, affected behavior, and CWE classification"
         }
     ]
 }

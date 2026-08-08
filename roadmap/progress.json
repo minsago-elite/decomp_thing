@@ -1,7 +1,7 @@
 {
     "current_level": "L5",
     "current_status": "active",
-    "last_updated": "2026-06-27T07:20:50.380459238Z",
+    "last_updated": "2026-08-08T01:32:48.824761597Z",
     "levels": [
         {
             "id": "L0",
@@ -259,6 +259,62 @@
                     "status": "passing",
                     "source": "manual",
                     "evidence": "roadmap/milestones/L5_high_confidence.md"
+                }
+            ]
+        },
+        {
+            "id": "L6",
+            "name": "Vulnerability Remediation",
+            "status": "pending",
+            "gates": [
+                {
+                    "id": "l6_evidenced_findings",
+                    "description": "vulnerability findings include reproducible evidence, affected behavior, and CWE classification",
+                    "status": "pending",
+                    "source": "benchmark",
+                    "evidence": "roadmap/benchmarks/vulnerability_remediation.json"
+                },
+                {
+                    "id": "l6_source_mapping",
+                    "description": "each accepted finding maps to reconstructed source and records mapping uncertainty",
+                    "status": "pending",
+                    "source": "report",
+                    "evidence": "roadmap/milestones/L6_vulnerability_remediation.md"
+                },
+                {
+                    "id": "l6_patch_traceability",
+                    "description": "security patches modify reconstructed source with finding-to-diff traceability and approval state",
+                    "status": "pending",
+                    "source": "test",
+                    "evidence": "src/test/kotlin/decompengine/security/VulnerabilityRemediationTest.kt"
+                },
+                {
+                    "id": "l6_recompiled_artifact",
+                    "description": "patched reconstructed source recompiles into a hardened replacement binary",
+                    "status": "pending",
+                    "source": "benchmark",
+                    "evidence": "roadmap/benchmarks/vulnerability_remediation.json"
+                },
+                {
+                    "id": "l6_exploit_regressions",
+                    "description": "reproducers for accepted vulnerabilities no longer trigger on the patched binary",
+                    "status": "pending",
+                    "source": "benchmark",
+                    "evidence": "roadmap/benchmarks/vulnerability_remediation.json"
+                },
+                {
+                    "id": "l6_behavior_regressions",
+                    "description": "patched binaries retain required behavior across the L5 validation corpus",
+                    "status": "pending",
+                    "source": "benchmark",
+                    "evidence": "roadmap/benchmarks/vulnerability_remediation.json"
+                },
+                {
+                    "id": "l6_residual_risk_report",
+                    "description": "reports distinguish fixed, mitigated, rejected, and unresolved findings without claiming universal security",
+                    "status": "pending",
+                    "source": "report",
+                    "evidence": "roadmap/milestones/L6_vulnerability_remediation.md"
                 }
             ]
         }

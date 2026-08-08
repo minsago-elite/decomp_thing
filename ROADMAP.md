@@ -1,6 +1,6 @@
 # Self-Documenting Roadmap
 
-This roadmap tracks progress toward a recompilable, behaviorally equivalent C reconstruction tool for Linux x86-64 ELF binaries.
+This roadmap tracks progress toward a recompilable, behaviorally equivalent C reconstruction tool for Linux x86-64 ELF binaries that can remediate evidenced vulnerabilities and produce a validated replacement binary.
 
 Progress is intentionally evidence-backed. Human-readable milestone docs live under `roadmap/milestones/`, while machine-readable state lives in `roadmap/progress.json`. Run `./gradlew roadmapUpdate` to regenerate summaries and `./gradlew roadmapCheck` in CI to reject stale or unsupported progress claims.
 
@@ -16,7 +16,7 @@ Progress is intentionally evidence-backed. Human-readable milestone docs live un
 
 ## Maturity Model
 
-L0 through L5 describe increasing practical confidence. L5 is the strongest practical target for this project, not a universal proof that every possible input behaves identically for every possible environment.
+L0 through L6 describe increasing practical confidence. L6 is the strongest practical target for this project, not a universal proof that every possible input behaves identically or that every vulnerability has been removed.
 
 - L0: Skeleton - accept a binary and create a visible job.
 - L1: Recompilable Output - generate a buildable C project.
@@ -24,6 +24,7 @@ L0 through L5 describe increasing practical confidence. L5 is the strongest prac
 - L3: Trace-Guided Repair - use runtime diffs and OpenRouter patches to improve output.
 - L4: Automatic Exploration - generate validation inputs automatically.
 - L5: High-Confidence Reconstruction - pass a broad benchmark suite with honest confidence reporting.
+- L6: Vulnerability Remediation - find evidenced vulnerabilities, patch reconstructed source, rebuild it, and validate security and behavioral regressions.
 
 ## Progress
 
@@ -36,6 +37,7 @@ L0 through L5 describe increasing practical confidence. L5 is the strongest prac
 | L3 | Trace-Guided Repair | complete | 5/5 | none |
 | L4 | Automatic Exploration | complete | 5/5 | none |
 | L5 | High-Confidence Reconstruction | active | 3/6 | benchmark suite passes across stripped, optimized, PIE, non-PIE, stdin, argv, file, and libc-heavy examples |
+| L6 | Vulnerability Remediation | pending | 0/7 | vulnerability findings include reproducible evidence, affected behavior, and CWE classification |
 <!-- roadmap:progress:end -->
 
 ## Benchmark Summary
@@ -46,6 +48,7 @@ Benchmark definitions live under `roadmap/benchmarks/`.
 - `stdin_programs.json`: stdin-driven programs.
 - `file_io.json`: programs that read and write files.
 - `stripped_optimized.json`: stripped, optimized, PIE, non-PIE, and libc-heavy cases.
+- `vulnerability_remediation.json`: end-to-end vulnerability evidence, source patching, recompilation, and security and behavior regressions.
 
 The latest generated summary is written to `roadmap/reports/latest.json`.
 
@@ -54,6 +57,7 @@ The latest generated summary is written to `roadmap/reports/latest.json`.
 - No reconstruction engine exists yet.
 - High-confidence reconstruction has not started yet.
 - Broad benchmark execution beyond simple L2-L4 fixtures has not started yet.
+- Vulnerability detection, finding-to-source mapping, security patch generation, and exploit regression validation have not started yet.
 
 ## Updating Progress
 

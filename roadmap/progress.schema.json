@@ -8,7 +8,7 @@
   "properties": {
     "current_level": {
       "type": "string",
-      "pattern": "^L[0-5]$"
+      "pattern": "^L[0-6]$"
     },
     "current_status": {
       "type": "string",
@@ -28,7 +28,7 @@
         "properties": {
           "id": {
             "type": "string",
-            "pattern": "^L[0-5]$"
+            "pattern": "^L[0-6]$"
           },
           "name": {
             "type": "string",
@@ -48,7 +48,7 @@
               "properties": {
                 "id": {
                   "type": "string",
-                  "pattern": "^l[0-5]_[a-z0-9_]+$"
+                  "pattern": "^l[0-6]_[a-z0-9_]+$"
                 },
                 "description": {
                   "type": "string",
