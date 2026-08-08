@@ -1,8 +1,8 @@
 {
-    "generated_at": "2026-08-08T01:32:48.867346877Z",
-    "current_level": "L5",
+    "generated_at": "2026-08-08T01:37:20.389155978Z",
+    "current_level": "L6",
     "current_status": "active",
-    "next_failing_gate": "benchmark suite passes across stripped, optimized, PIE, non-PIE, stdin, argv, file, and libc-heavy examples",
+    "next_failing_gate": "vulnerability findings include reproducible evidence, affected behavior, and CWE classification",
     "totals": {
         "levels": 7,
         "gates": 38,
@@ -37,7 +37,7 @@
         {
             "id": "L3",
             "name": "Trace-Guided Repair",
-            "status": "complete",
+            "status": "deferred",
             "passing_gates": 5,
             "total_gates": 5,
             "blocking_gate": "none"
@@ -45,7 +45,7 @@
         {
             "id": "L4",
             "name": "Automatic Exploration",
-            "status": "complete",
+            "status": "deferred",
             "passing_gates": 5,
             "total_gates": 5,
             "blocking_gate": "none"
@@ -53,7 +53,7 @@
         {
             "id": "L5",
             "name": "High-Confidence Reconstruction",
-            "status": "active",
+            "status": "deferred",
             "passing_gates": 3,
             "total_gates": 6,
             "blocking_gate": "benchmark suite passes across stripped, optimized, PIE, non-PIE, stdin, argv, file, and libc-heavy examples"
@@ -61,7 +61,7 @@
         {
             "id": "L6",
             "name": "Vulnerability Remediation",
-            "status": "pending",
+            "status": "active",
             "passing_gates": 0,
             "total_gates": 7,
             "blocking_gate": "vulnerability findings include reproducible evidence, affected behavior, and CWE classification"

@@ -12,7 +12,7 @@
     },
     "current_status": {
       "type": "string",
-      "enum": ["pending", "active", "complete", "blocked"]
+      "enum": ["pending", "active", "complete", "blocked", "deferred"]
     },
     "last_updated": {
       "type": "string",
@@ -36,7 +36,7 @@
           },
           "status": {
             "type": "string",
-            "enum": ["pending", "active", "complete", "blocked"]
+            "enum": ["pending", "active", "complete", "blocked", "deferred"]
           },
           "gates": {
             "type": "array",

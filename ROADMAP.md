@@ -4,13 +4,15 @@ This roadmap tracks progress toward a recompilable, behaviorally equivalent C re
 
 Progress is intentionally evidence-backed. Human-readable milestone docs live under `roadmap/milestones/`, while machine-readable state lives in `roadmap/progress.json`. Run `./gradlew roadmapUpdate` to regenerate summaries and `./gradlew roadmapCheck` in CI to reject stale or unsupported progress claims.
 
+For the MVP, implementation proceeds from L2 directly to a constrained L6 workflow. L3 through L5 remain documented but are deferred until the end-to-end reconstruction, patching, recompilation, and validation path works on the MVP fixtures.
+
 ## Current Status
 
 <!-- roadmap:summary:start -->
-- Current maturity level: `L5`
-- Current milestone: High-Confidence Reconstruction
+- Current maturity level: `L6`
+- Current milestone: Vulnerability Remediation
 - Current status: `active`
-- Next failing gate: benchmark suite passes across stripped, optimized, PIE, non-PIE, stdin, argv, file, and libc-heavy examples
+- Next failing gate: vulnerability findings include reproducible evidence, affected behavior, and CWE classification
 - Latest generated report: `roadmap/reports/latest.json`
 <!-- roadmap:summary:end -->
 
@@ -26,6 +28,8 @@ L0 through L6 describe increasing practical confidence. L6 is the strongest prac
 - L5: High-Confidence Reconstruction - pass a broad benchmark suite with honest confidence reporting.
 - L6: Vulnerability Remediation - find evidenced vulnerabilities, patch reconstructed source, rebuild it, and validate security and behavioral regressions.
 
+MVP execution order: `L1 -> L2 -> L6`. Deferred levels retain their existing evidence and will be reactivated after the MVP path is demonstrated end to end.
+
 ## Progress
 
 <!-- roadmap:progress:start -->
@@ -34,10 +38,10 @@ L0 through L6 describe increasing practical confidence. L6 is the strongest prac
 | L0 | Skeleton | complete | 4/4 | none |
 | L1 | Recompilable Output | complete | 6/6 | none |
 | L2 | Simple Behavioral Match | complete | 5/5 | none |
-| L3 | Trace-Guided Repair | complete | 5/5 | none |
-| L4 | Automatic Exploration | complete | 5/5 | none |
-| L5 | High-Confidence Reconstruction | active | 3/6 | benchmark suite passes across stripped, optimized, PIE, non-PIE, stdin, argv, file, and libc-heavy examples |
-| L6 | Vulnerability Remediation | pending | 0/7 | vulnerability findings include reproducible evidence, affected behavior, and CWE classification |
+| L3 | Trace-Guided Repair | deferred | 5/5 | none |
+| L4 | Automatic Exploration | deferred | 5/5 | none |
+| L5 | High-Confidence Reconstruction | deferred | 3/6 | benchmark suite passes across stripped, optimized, PIE, non-PIE, stdin, argv, file, and libc-heavy examples |
+| L6 | Vulnerability Remediation | active | 0/7 | vulnerability findings include reproducible evidence, affected behavior, and CWE classification |
 <!-- roadmap:progress:end -->
 
 ## Benchmark Summary
@@ -58,6 +62,7 @@ The latest generated summary is written to `roadmap/reports/latest.json`.
 - High-confidence reconstruction has not started yet.
 - Broad benchmark execution beyond simple L2-L4 fixtures has not started yet.
 - Vulnerability detection, finding-to-source mapping, security patch generation, and exploit regression validation have not started yet.
+- L3 trace-guided repair, L4 automatic exploration, and L5 broad confidence work are deferred for the MVP.
 
 ## Updating Progress
 
