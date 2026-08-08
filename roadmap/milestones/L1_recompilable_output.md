@@ -1,13 +1,9 @@
-# L1: Recompilable Output
+# L1: Reconstruct
 
-Goal: produce a buildable C project from an analyzed ELF.
+Goal: turn the supported vulnerable ELF fixture into meaningful editable C.
 
-Required gates:
+Done when:
 
-- Ghidra analysis runs.
-- Initial C project is generated.
-- `make` completes for simple binaries.
-- Build logs are captured.
-- Generated artifact layout is stable.
-
-Acceptance evidence should include a generated project fixture with `Makefile`, `src/`, `include/`, `reports/`, and a successful build report.
+- the generated C represents the fixture's required behavior instead of returning a placeholder value.
+- the generated project compiles into an executable.
+- normal inputs produce the required exit code, stdout, stderr, and file effects.

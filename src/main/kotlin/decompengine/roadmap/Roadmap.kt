@@ -56,7 +56,7 @@ class RoadmapManager(private val repoRoot: Path = Path.of("").toAbsolutePath().n
 
     private fun validate(progress: JsonObject) {
         requireKeys(progress, setOf("current_level", "current_status", "last_updated", "levels"), "progress")
-        val statuses = setOf("pending", "active", "complete", "blocked", "deferred")
+        val statuses = setOf("pending", "active", "complete", "blocked")
         val gateStatuses = setOf("pending", "passing", "failing", "blocked", "manual_review")
         val gateSources = setOf("test", "benchmark", "manual", "report")
         if (progress.string("current_status") !in statuses) {

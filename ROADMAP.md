@@ -1,76 +1,51 @@
-# Self-Documenting Roadmap
+# MVP Roadmap
 
-This roadmap tracks progress toward a recompilable, behaviorally equivalent C reconstruction tool for Linux x86-64 ELF binaries that can remediate evidenced vulnerabilities and produce a validated replacement binary.
+The MVP proves one complete path: reconstruct one supported vulnerable ELF into editable C, patch one evidenced vulnerability, rebuild it, and verify that the exploit is blocked without breaking required behavior.
 
-Progress is intentionally evidence-backed. Human-readable milestone docs live under `roadmap/milestones/`, while machine-readable state lives in `roadmap/progress.json`. Run `./gradlew roadmapUpdate` to regenerate summaries and `./gradlew roadmapCheck` in CI to reject stale or unsupported progress claims.
-
-For the MVP, implementation proceeds from L2 directly to a constrained L6 workflow. L3 through L5 remain documented but are deferred until the end-to-end reconstruction, patching, recompilation, and validation path works on the MVP fixtures.
+Progress is evidence-backed in `roadmap/progress.json`. Run `./gradlew roadmapUpdate` after changing progress and `./gradlew roadmapCheck` in CI.
 
 ## Current Status
 
 <!-- roadmap:summary:start -->
-- Current maturity level: `L6`
-- Current milestone: Vulnerability Remediation
+- Current maturity level: `L1`
+- Current milestone: Reconstruct
 - Current status: `active`
-- Next failing gate: vulnerability findings include reproducible evidence, affected behavior, and CWE classification
+- Next failing gate: one supported vulnerable ELF is reconstructed into meaningful editable C
 - Latest generated report: `roadmap/reports/latest.json`
 <!-- roadmap:summary:end -->
 
-## Maturity Model
+## MVP Scope
 
-L0 through L6 describe increasing practical confidence. L6 is the strongest practical target for this project, not a universal proof that every possible input behaves identically or that every vulnerability has been removed.
+- Linux x86-64 ELF.
+- One fixture: stack buffer overflow.
+- One normal-input corpus and one exploit reproducer.
+- Generated C source, patched C source, rebuilt binary, and validation report.
+- Human approval before applying a generated security patch.
 
-- L0: Skeleton - accept a binary and create a visible job.
-- L1: Recompilable Output - generate a buildable C project.
-- L2: Simple Behavioral Match - match process I/O for simple binaries.
-- L3: Trace-Guided Repair - use runtime diffs and OpenRouter patches to improve output.
-- L4: Automatic Exploration - generate validation inputs automatically.
-- L5: High-Confidence Reconstruction - pass a broad benchmark suite with honest confidence reporting.
-- L6: Vulnerability Remediation - find evidenced vulnerabilities, patch reconstructed source, rebuild it, and validate security and behavioral regressions.
+## Steps
 
-MVP execution order: `L1 -> L2 -> L6`. Deferred levels retain their existing evidence and will be reactivated after the MVP path is demonstrated end to end.
+1. **L1 Reconstruct:** produce meaningful editable C, compile it, and match required normal behavior.
+2. **L2 Patch:** document the vulnerability, map it to the C source, apply an approved patch, and rebuild.
+3. **L6 Verify and Deliver:** prove the exploit is blocked, normal behavior remains, and package the artifacts.
+
+L3 through L5 are intentionally omitted from the MVP. Automated repair loops, automatic input exploration, and broad confidence benchmarking remain post-MVP work.
 
 ## Progress
 
 <!-- roadmap:progress:start -->
 | Level | Name | Status | Passing Gates | Blocking Gate |
 |---|---|---:|---:|---|
-| L0 | Skeleton | complete | 4/4 | none |
-| L1 | Recompilable Output | complete | 6/6 | none |
-| L2 | Simple Behavioral Match | complete | 5/5 | none |
-| L3 | Trace-Guided Repair | deferred | 5/5 | none |
-| L4 | Automatic Exploration | deferred | 5/5 | none |
-| L5 | High-Confidence Reconstruction | deferred | 3/6 | benchmark suite passes across stripped, optimized, PIE, non-PIE, stdin, argv, file, and libc-heavy examples |
-| L6 | Vulnerability Remediation | active | 0/7 | vulnerability findings include reproducible evidence, affected behavior, and CWE classification |
+| L1 | Reconstruct | active | 0/3 | one supported vulnerable ELF is reconstructed into meaningful editable C |
+| L2 | Patch | pending | 0/3 | the vulnerability has a reproducible finding and maps to reconstructed source |
+| L6 | Verify and Deliver | pending | 0/3 | the original exploit reproduces and the patched binary blocks it |
 <!-- roadmap:progress:end -->
 
-## Benchmark Summary
+## Definition of Done
 
-Benchmark definitions live under `roadmap/benchmarks/`.
+The MVP is done only when `roadmap/benchmarks/vulnerability_remediation.json` passes end to end. A buildable `return 0` skeleton, an analyzer warning without a reproducer, or a patch that breaks valid behavior does not count.
 
-- `simple_cli.json`: hello-world and argv-style programs.
-- `stdin_programs.json`: stdin-driven programs.
-- `file_io.json`: programs that read and write files.
-- `stripped_optimized.json`: stripped, optimized, PIE, non-PIE, and libc-heavy cases.
-- `vulnerability_remediation.json`: end-to-end vulnerability evidence, source patching, recompilation, and security and behavior regressions.
+## Post-MVP
 
-The latest generated summary is written to `roadmap/reports/latest.json`.
-
-## Known Blockers
-
-- No reconstruction engine exists yet.
-- High-confidence reconstruction has not started yet.
-- Broad benchmark execution beyond simple L2-L4 fixtures has not started yet.
-- Vulnerability detection, finding-to-source mapping, security patch generation, and exploit regression validation have not started yet.
-- L3 trace-guided repair, L4 automatic exploration, and L5 broad confidence work are deferred for the MVP.
-
-## Updating Progress
-
-After implementing a feature or adding benchmark evidence:
-
-```bash
-./gradlew roadmapUpdate
-./gradlew roadmapCheck
-```
-
-The update command rewrites `roadmap/progress.json`, `roadmap/reports/latest.json`, and the generated sections in this file. The check command fails if the roadmap is stale, malformed, or claims a completed level while any required gate is not passing.
+- L3: automate compile and behavior repair loops.
+- L4: generate validation inputs automatically.
+- L5: expand to stripped, optimized, PIE, file-I/O, and libc-heavy binaries.

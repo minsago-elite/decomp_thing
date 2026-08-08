@@ -1,13 +1,9 @@
-# L2: Simple Behavioral Match
+# L2: Patch
 
-Goal: match original process behavior for simple programs.
+Goal: apply one reviewable source patch for the supported vulnerability.
 
-Required gates:
+Done when:
 
-- Hello-world binary passes.
-- argv-processing binary passes.
-- stdin-processing binary passes.
-- exit code/stdout/stderr are compared byte-for-byte.
-- sandboxed execution is mandatory.
-
-Acceptance evidence should include sandboxed original-vs-rebuilt runs and byte-for-byte process I/O comparison reports.
+- a CWE-classified finding has a reproducer and maps to reconstructed source.
+- a human-approved minimal patch is recorded as a source diff.
+- the patched source recompiles with the MVP hardening flags.

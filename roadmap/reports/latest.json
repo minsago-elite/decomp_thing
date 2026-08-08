@@ -1,70 +1,38 @@
 {
-    "generated_at": "2026-08-08T01:37:20.389155978Z",
-    "current_level": "L6",
+    "generated_at": "2026-08-08T01:43:49.480208758Z",
+    "current_level": "L1",
     "current_status": "active",
-    "next_failing_gate": "vulnerability findings include reproducible evidence, affected behavior, and CWE classification",
+    "next_failing_gate": "one supported vulnerable ELF is reconstructed into meaningful editable C",
     "totals": {
-        "levels": 7,
-        "gates": 38,
-        "passing_gates": 28,
+        "levels": 3,
+        "gates": 9,
+        "passing_gates": 0,
         "failing_or_blocked_gates": 0
     },
     "levels": [
         {
-            "id": "L0",
-            "name": "Skeleton",
-            "status": "complete",
-            "passing_gates": 4,
-            "total_gates": 4,
-            "blocking_gate": "none"
-        },
-        {
             "id": "L1",
-            "name": "Recompilable Output",
-            "status": "complete",
-            "passing_gates": 6,
-            "total_gates": 6,
-            "blocking_gate": "none"
+            "name": "Reconstruct",
+            "status": "active",
+            "passing_gates": 0,
+            "total_gates": 3,
+            "blocking_gate": "one supported vulnerable ELF is reconstructed into meaningful editable C"
         },
         {
             "id": "L2",
-            "name": "Simple Behavioral Match",
-            "status": "complete",
-            "passing_gates": 5,
-            "total_gates": 5,
-            "blocking_gate": "none"
-        },
-        {
-            "id": "L3",
-            "name": "Trace-Guided Repair",
-            "status": "deferred",
-            "passing_gates": 5,
-            "total_gates": 5,
-            "blocking_gate": "none"
-        },
-        {
-            "id": "L4",
-            "name": "Automatic Exploration",
-            "status": "deferred",
-            "passing_gates": 5,
-            "total_gates": 5,
-            "blocking_gate": "none"
-        },
-        {
-            "id": "L5",
-            "name": "High-Confidence Reconstruction",
-            "status": "deferred",
-            "passing_gates": 3,
-            "total_gates": 6,
-            "blocking_gate": "benchmark suite passes across stripped, optimized, PIE, non-PIE, stdin, argv, file, and libc-heavy examples"
+            "name": "Patch",
+            "status": "pending",
+            "passing_gates": 0,
+            "total_gates": 3,
+            "blocking_gate": "the vulnerability has a reproducible finding and maps to reconstructed source"
         },
         {
             "id": "L6",
-            "name": "Vulnerability Remediation",
-            "status": "active",
+            "name": "Verify and Deliver",
+            "status": "pending",
             "passing_gates": 0,
-            "total_gates": 7,
-            "blocking_gate": "vulnerability findings include reproducible evidence, affected behavior, and CWE classification"
+            "total_gates": 3,
+            "blocking_gate": "the original exploit reproduces and the patched binary blocks it"
         }
     ]
 }

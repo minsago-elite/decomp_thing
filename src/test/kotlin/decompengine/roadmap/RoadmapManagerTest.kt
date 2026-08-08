@@ -14,22 +14,19 @@ class RoadmapManagerTest {
     fun `progress has required evidence and current level`() {
         val progress = Json.parseToJsonElement(Path("roadmap/progress.json").readText()).jsonObject
 
-        assertEquals("L6", progress["current_level"].toString().trim('"'))
+        assertEquals("L1", progress["current_level"].toString().trim('"'))
         assertEquals("active", progress["current_status"].toString().trim('"'))
         assertTrue(progress["levels"]!!.toString().contains("\"evidence\""))
     }
 
     @Test
-    fun `MVP defers intermediate levels and activates vulnerability remediation`() {
+    fun `MVP contains only reconstruct patch and delivery steps`() {
         val progress = Json.parseToJsonElement(Path("roadmap/progress.json").readText()).jsonObject
         val levels = progress["levels"]!!.jsonArray.map { it.jsonObject }
-        val l6 = levels.single { it["id"].toString().trim('"') == "L6" }
 
-        assertTrue(levels.filter { it["id"].toString().trim('"') in setOf("L3", "L4", "L5") }
-            .all { it["status"].toString().trim('"') == "deferred" })
-        assertEquals("active", l6["status"].toString().trim('"'))
-        assertTrue(l6["gates"]!!.toString().contains("l6_exploit_regressions"))
-        assertTrue(l6["gates"]!!.toString().contains("l6_behavior_regressions"))
+        assertEquals(listOf("L1", "L2", "L6"), levels.map { it["id"].toString().trim('"') })
+        assertEquals(listOf("active", "pending", "pending"), levels.map { it["status"].toString().trim('"') })
+        assertTrue(levels.last()["gates"]!!.toString().contains("l6_exploit_blocked"))
     }
 
     @Test
