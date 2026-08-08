@@ -18,6 +18,23 @@ This file is maintained directly during MVP development. Update the checklist an
 - One exploit reproducer: run the original fixture with AddressSanitizer and observe a stack buffer overflow.
 - Generated C source, patched C source, rebuilt binary, and validation report.
 - Human approval before applying a generated security patch.
+- A CLI-first workflow that streams progress and tool output while the job is running.
+
+## CLI Contract
+
+The MVP is operated through one command:
+
+```bash
+llm_bin_patch patch <input-elf> --output <directory>
+```
+
+- Print each phase as it starts: inspect, reconstruct, compile, reproduce, patch, and verify.
+- Stream Ghidra, compiler, sanitizer, and validation output immediately instead of buffering it until completion.
+- Send normal progress to stdout and warnings or errors to stderr, flushing after every event.
+- Mirror the streamed output into timestamped log files under the output directory.
+- Prompt for human approval before applying the proposed source patch.
+- Finish with a concise summary containing the result, output paths, and any residual risk.
+- Return exit code 0 only when reconstruction, patching, recompilation, exploit blocking, and behavior validation all pass.
 
 ## Steps
 
@@ -31,6 +48,8 @@ L3 through L5 are intentionally omitted from the MVP. Automated repair loops, au
 
 ### L1 Reconstruct
 
+- [ ] Provide the `llm_bin_patch patch` CLI entry point.
+- [ ] Stream phase changes and child-process output in real time while retaining logs.
 - [ ] Build `binary_01` from the pinned c-vul source.
 - [ ] Reconstruct meaningful editable C from the ELF.
 - [ ] Compile the reconstructed C.
@@ -41,6 +60,7 @@ L3 through L5 are intentionally omitted from the MVP. Automated repair loops, au
 - [x] Reproduce the original CWE-787 stack buffer overflow with AddressSanitizer.
 - [ ] Map the finding to reconstructed C.
 - [ ] Apply and record a human-approved minimal patch.
+- [ ] Show the proposed diff and request approval through the CLI before applying it.
 - [ ] Compile the patched C with sanitizer and hardening flags.
 
 ### L6 Verify and Deliver
@@ -51,7 +71,7 @@ L3 through L5 are intentionally omitted from the MVP. Automated repair loops, au
 
 ## Definition of Done
 
-The MVP is done only when `roadmap/benchmarks/vulnerability_remediation.json` passes end to end for `01_out_of_bounds_write.c`. A buildable `return 0` skeleton, an analyzer warning without the sanitizer reproducer, or a patch that changes the expected badge output does not count.
+The MVP is done only when `llm_bin_patch patch` runs `roadmap/benchmarks/vulnerability_remediation.json` end to end for `01_out_of_bounds_write.c`, emits observable progress before the command finishes, and passes every validation check. A buildable `return 0` skeleton, buffered output shown only at completion, an analyzer warning without the sanitizer reproducer, or a patch that changes the expected badge output does not count.
 
 ## Post-MVP
 
