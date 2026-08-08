@@ -19,6 +19,49 @@ This file is maintained directly during MVP development. Update the checklist an
 - Generated C source, patched C source, rebuilt binary, and validation report.
 - Human approval before applying a generated security patch.
 - A CLI-first workflow that streams progress and tool output while the job is running.
+- A reproducible Docker environment with no host dependencies beyond Docker and Git.
+- A provider-neutral OpenAI-compatible LLM client configured through `.env`.
+
+## Docker Environment
+
+The MVP ships with a pinned `Dockerfile` and `compose.yaml` that install and configure:
+
+- JDK 21 and the Gradle wrapper runtime.
+- Headless Ghidra and its JVM classpath.
+- GCC, Make, binutils, AddressSanitizer, and UndefinedBehaviorSanitizer.
+- bubblewrap for network-disabled execution of analyzed binaries.
+- the built `llm_bin_patch` CLI and the initialized c-vul fixture.
+
+The image runs as a non-root user. Input is mounted read-only at `/input`, output is mounted read-write at `/output`, and API credentials are supplied only at container runtime. Tool versions and the Ghidra download checksum are pinned so a clean image build is reproducible.
+
+Example execution:
+
+```bash
+docker compose run --rm llm-bin-patch \
+  patch /input/binary_01 --output /output
+```
+
+The CLI provides a `doctor` command that checks Java, Ghidra, GCC, sanitizers, binutils, bubblewrap, writable output, and LLM connectivity before a patch run.
+
+## LLM Configuration
+
+`compose.yaml` loads these values from an untracked `.env` file:
+
+```dotenv
+BASE_URL=https://api.example.com/v1
+API_KEY=replace-me
+MODEL=openai-compatible-model-name
+```
+
+- Commit `.env.example` with placeholders and ignore `.env` in Git.
+- Treat `BASE_URL` as the API root and call the standard `POST {BASE_URL}/chat/completions` endpoint.
+- Send `API_KEY` as a bearer token and `MODEL` as the request model without provider-specific translation.
+- Depend only on the OpenAI-compatible chat-completions request and response fields used by the MVP.
+- Replace OpenRouter-specific class names, errors, prompts, and documentation with provider-neutral names.
+- Validate required configuration at startup and report actionable errors for invalid URLs, authentication failures, timeouts, rate limits, malformed responses, and unavailable models.
+- Apply explicit connection and request timeouts with bounded retries for transient failures.
+- Never write `API_KEY`, authorization headers, or full credential-bearing requests to stdout, stderr, logs, `SUMMARY.md`, image layers, or build history.
+- Test against a deterministic local OpenAI-compatible fake server; keep real-provider smoke tests opt-in.
 
 ## CLI Contract
 
@@ -66,6 +109,18 @@ L3 through L5 are intentionally omitted from the MVP. Automated repair loops, au
 
 ## Checklist
 
+### Environment and API
+
+- [ ] Add a pinned Dockerfile containing JDK 21, headless Ghidra, GCC, Make, binutils, sanitizers, and bubblewrap.
+- [ ] Add `compose.yaml` with read-only input, writable output, `.env` loading, and a non-root runtime user.
+- [ ] Add `.env.example` containing `BASE_URL`, `API_KEY`, and `MODEL`, and add `.env` to `.gitignore`.
+- [ ] Rename the OpenRouter client to a provider-neutral OpenAI-compatible client.
+- [ ] Remove the hard-coded OpenRouter endpoint and use `BASE_URL`, `API_KEY`, and `MODEL`.
+- [ ] Add configuration validation, credential redaction, timeouts, bounded retries, and clear API error reporting.
+- [ ] Add `llm_bin_patch doctor` and verify all required tools inside the container.
+- [ ] Add deterministic OpenAI-compatible API contract tests without requiring an external service.
+- [ ] Build the image from a clean checkout and run the pinned c-vul fixture end to end through Docker Compose.
+
 ### L1 Reconstruct
 
 - [ ] Provide the `llm_bin_patch patch` CLI entry point.
@@ -94,7 +149,7 @@ L3 through L5 are intentionally omitted from the MVP. Automated repair loops, au
 
 ## Definition of Done
 
-The MVP is done only when `llm_bin_patch patch` runs `roadmap/benchmarks/vulnerability_remediation.json` end to end for `01_out_of_bounds_write.c`, emits observable progress before the command finishes, passes every validation check, and produces `decompiled/reconstructed.c`, `patched/patched_binary`, and `SUMMARY.md`. A buildable `return 0` skeleton, buffered output shown only at completion, an analyzer warning without the sanitizer reproducer, an unverified patched binary, or a patch that changes the expected badge output does not count.
+The MVP is done only when a clean checkout can build the Docker image, load `BASE_URL`, `API_KEY`, and `MODEL` from `.env`, and run `llm_bin_patch patch` through Docker Compose without host-installed Java, Ghidra, or C tooling. The command must run `roadmap/benchmarks/vulnerability_remediation.json` end to end for `01_out_of_bounds_write.c`, emit observable progress before completion, pass every validation check, and produce `decompiled/reconstructed.c`, `patched/patched_binary`, and `SUMMARY.md`. A provider-specific OpenRouter dependency, leaked credential, buildable `return 0` skeleton, buffered output shown only at completion, analyzer warning without the sanitizer reproducer, unverified patched binary, or patch that changes the expected badge output does not count.
 
 ## Post-MVP
 
