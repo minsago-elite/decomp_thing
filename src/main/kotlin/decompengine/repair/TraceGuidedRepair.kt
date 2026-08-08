@@ -81,9 +81,11 @@ class HttpOpenAiCompatibleRepairClient(
     private val apiKey: String,
     private val model: String,
     baseUrl: URI,
+    reasoningEffort: String? = null,
     private val httpClient: HttpClient = HttpClient.newHttpClient(),
 ) : RepairClient {
     private val endpoint = URI.create(baseUrl.toString().trimEnd('/') + "/chat/completions")
+    private val reasoningEffort = reasoningEffort?.trim()?.takeIf { it.isNotEmpty() }
 
     init {
         require(apiKey.isNotBlank()) { "API_KEY must not be blank" }
@@ -91,13 +93,17 @@ class HttpOpenAiCompatibleRepairClient(
         require(baseUrl.scheme in setOf("http", "https") && !baseUrl.host.isNullOrBlank()) {
             "BASE_URL must be an absolute HTTP(S) URL"
         }
+        require(this.reasoningEffort == null || this.reasoningEffort in SUPPORTED_REASONING_EFFORTS) {
+            "REASONING_EFFORT must be one of ${SUPPORTED_REASONING_EFFORTS.joinToString(", ")}"
+        }
     }
 
     override fun requestRepair(request: RepairRequest): RepairResponse {
+        val reasoningLine = reasoningEffort?.let { "  \"reasoning_effort\": \"${it.escapeJson()}\",\n" }.orEmpty()
         val body = """
             {
               "model": "${model.escapeJson()}",
-              "messages": [
+            $reasoningLine  "messages": [
                 {
                   "role": "system",
                   "content": "Return source patches as JSON with summary and patches. Each patch has relativePath and replacement."
@@ -188,7 +194,10 @@ class HttpOpenAiCompatibleRepairClient(
                 apiKey = environment["API_KEY"].orEmpty(),
                 model = environment["MODEL"].orEmpty(),
                 baseUrl = URI.create(environment["BASE_URL"].orEmpty()),
+                reasoningEffort = environment["REASONING_EFFORT"],
             )
+
+        private val SUPPORTED_REASONING_EFFORTS = setOf("none", "minimal", "low", "medium", "high", "xhigh")
     }
 }
 

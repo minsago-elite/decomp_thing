@@ -10,7 +10,7 @@ Create the local API configuration:
 cp .env.example .env
 ```
 
-Set `BASE_URL`, `API_KEY`, and `MODEL` in `.env`, then build and verify the environment:
+Set `BASE_URL`, `API_KEY`, `MODEL`, and optional `REASONING_EFFORT` in `.env`, then build and verify the environment. Supported reasoning values are `none`, `minimal`, `low`, `medium`, `high`, and `xhigh`; leave it blank to omit the API field.
 
 ```bash
 mkdir -p input output

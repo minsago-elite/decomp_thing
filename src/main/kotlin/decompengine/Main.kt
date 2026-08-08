@@ -59,6 +59,14 @@ private fun runDoctor(args: List<String>) {
         reportDoctorCheck("BASE_URL", validBaseUrl, failures)
         reportDoctorCheck("API_KEY", !System.getenv("API_KEY").isNullOrBlank(), failures)
         reportDoctorCheck("MODEL", !System.getenv("MODEL").isNullOrBlank(), failures)
+        val reasoningEffort = System.getenv("REASONING_EFFORT")?.trim().orEmpty()
+        if (reasoningEffort.isNotEmpty()) {
+            reportDoctorCheck(
+                "REASONING_EFFORT",
+                reasoningEffort in setOf("none", "minimal", "low", "medium", "high", "xhigh"),
+                failures,
+            )
+        }
     }
 
     if (failures.isNotEmpty()) {

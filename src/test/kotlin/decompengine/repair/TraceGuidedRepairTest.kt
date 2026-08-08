@@ -15,6 +15,7 @@ import kotlin.io.path.readText
 import kotlin.io.path.writeText
 import kotlin.test.Test
 import kotlin.test.assertEquals
+import kotlin.test.assertFailsWith
 import kotlin.test.assertNotNull
 import kotlin.test.assertTrue
 
@@ -102,6 +103,7 @@ class TraceGuidedRepairTest {
                     "API_KEY" to "test-key",
                     "MODEL" to "compatible/test",
                     "BASE_URL" to "http://127.0.0.1:${server.address.port}/api/v1",
+                    "REASONING_EFFORT" to "high",
                 ),
             )
 
@@ -118,10 +120,27 @@ class TraceGuidedRepairTest {
             assertEquals("src/reconstructed.c", response.patches.single().relativePath)
             assertTrue(response.patches.single().replacement.contains("return 0;"))
             assertTrue(requests.single().contains("compatible/test"))
+            assertTrue(requests.single().contains("\"reasoning_effort\": \"high\""))
             assertTrue(requests.single().contains("compiler stderr"))
         } finally {
             server.stop(0)
         }
+    }
+
+    @Test
+    fun `OpenAI-compatible client rejects unsupported reasoning effort`() {
+        val error = assertFailsWith<IllegalArgumentException> {
+            HttpOpenAiCompatibleRepairClient.fromEnvironment(
+                mapOf(
+                    "API_KEY" to "test-key",
+                    "MODEL" to "compatible/test",
+                    "BASE_URL" to "https://api.example.com/v1",
+                    "REASONING_EFFORT" to "maximum",
+                ),
+            )
+        }
+
+        assertTrue(error.message.orEmpty().contains("REASONING_EFFORT"))
     }
 
     @Test

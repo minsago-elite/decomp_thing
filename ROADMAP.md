@@ -51,11 +51,13 @@ The CLI provides a `doctor` command that checks Java, Ghidra, GCC, sanitizers, b
 BASE_URL=https://api.example.com/v1
 API_KEY=replace-me
 MODEL=openai-compatible-model-name
+REASONING_EFFORT=medium
 ```
 
 - Commit `.env.example` with placeholders and ignore `.env` in Git.
 - Treat `BASE_URL` as the API root and call the standard `POST {BASE_URL}/chat/completions` endpoint.
 - Send `API_KEY` as a bearer token and `MODEL` as the request model without provider-specific translation.
+- Send optional `REASONING_EFFORT` as `reasoning_effort`; omit the field when the value is blank for providers that do not support it.
 - Depend only on the OpenAI-compatible chat-completions request and response fields used by the MVP.
 - Replace OpenRouter-specific class names, errors, prompts, and documentation with provider-neutral names.
 - Validate required configuration at startup and report actionable errors for invalid URLs, authentication failures, timeouts, rate limits, malformed responses, and unavailable models.
@@ -113,7 +115,7 @@ L3 through L5 are intentionally omitted from the MVP. Automated repair loops, au
 
 - [x] Add a pinned Dockerfile containing JDK 21, headless Ghidra, GCC, Make, binutils, sanitizers, and bubblewrap.
 - [x] Add `compose.yaml` with read-only input, writable output, `.env` loading, and a non-root runtime user.
-- [x] Add `.env.example` containing `BASE_URL`, `API_KEY`, and `MODEL`, and add `.env` to `.gitignore`.
+- [x] Add `.env.example` containing `BASE_URL`, `API_KEY`, `MODEL`, and optional `REASONING_EFFORT`, and add `.env` to `.gitignore`.
 - [x] Rename the OpenRouter client to a provider-neutral OpenAI-compatible client.
 - [x] Remove the hard-coded OpenRouter endpoint and use `BASE_URL`, `API_KEY`, and `MODEL`.
 - [ ] Add configuration validation, credential redaction, timeouts, bounded retries, and clear API error reporting.
