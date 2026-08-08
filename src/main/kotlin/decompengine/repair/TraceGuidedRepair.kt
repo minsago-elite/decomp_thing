@@ -73,16 +73,26 @@ data class RepairResponse(
     val patches: List<SourcePatch>,
 )
 
-interface OpenRouterRepairClient {
+interface RepairClient {
     fun requestRepair(request: RepairRequest): RepairResponse
 }
 
-class HttpOpenRouterRepairClient(
+class HttpOpenAiCompatibleRepairClient(
     private val apiKey: String,
     private val model: String,
-    private val endpoint: URI = URI.create("https://openrouter.ai/api/v1/chat/completions"),
+    baseUrl: URI,
     private val httpClient: HttpClient = HttpClient.newHttpClient(),
-) : OpenRouterRepairClient {
+) : RepairClient {
+    private val endpoint = URI.create(baseUrl.toString().trimEnd('/') + "/chat/completions")
+
+    init {
+        require(apiKey.isNotBlank()) { "API_KEY must not be blank" }
+        require(model.isNotBlank()) { "MODEL must not be blank" }
+        require(baseUrl.scheme in setOf("http", "https") && !baseUrl.host.isNullOrBlank()) {
+            "BASE_URL must be an absolute HTTP(S) URL"
+        }
+    }
+
     override fun requestRepair(request: RepairRequest): RepairResponse {
         val body = """
             {
@@ -106,7 +116,7 @@ class HttpOpenRouterRepairClient(
             .build()
         val response = httpClient.send(httpRequest, HttpResponse.BodyHandlers.ofString())
         if (response.statusCode() !in 200..299) {
-            error("OpenRouter repair request failed with HTTP ${response.statusCode()}: ${response.body()}")
+            error("OpenAI-compatible repair request failed with HTTP ${response.statusCode()}: ${response.body()}")
         }
         return parseRepairResponse(extractMessageContent(response.body()))
     }
@@ -127,7 +137,7 @@ class HttpOpenRouterRepairClient(
     private fun extractMessageContent(body: String): String {
         val marker = "\"content\""
         val markerIndex = body.indexOf(marker)
-        if (markerIndex < 0) error("OpenRouter response did not include message content")
+        if (markerIndex < 0) error("OpenAI-compatible response did not include message content")
         val colon = body.indexOf(':', markerIndex)
         val firstQuote = body.indexOf('"', colon + 1)
         val result = StringBuilder()
@@ -155,21 +165,30 @@ class HttpOpenRouterRepairClient(
                 result.append(char)
             }
         }
-        error("OpenRouter response content string was unterminated")
+        error("OpenAI-compatible response content string was unterminated")
     }
 
     private fun parseRepairResponse(content: String): RepairResponse {
         val summary = content.substringAfter("\"summary\"", "").substringAfter(':', "").substringAfter('"', "")
             .substringBefore('"')
-            .ifBlank { "OpenRouter repair response" }
+            .ifBlank { "OpenAI-compatible repair response" }
         val patches = Regex(
             "\\{\\s*\"relativePath\"\\s*:\\s*\"((?:\\\\.|[^\"])*)\"\\s*,\\s*\"replacement\"\\s*:\\s*\"((?:\\\\.|[^\"])*)\"\\s*}",
             RegexOption.DOT_MATCHES_ALL,
         ).findAll(content).map {
             SourcePatch(it.groupValues[1].unescapeJson(), it.groupValues[2].unescapeJson())
         }.toList()
-        if (patches.isEmpty()) error("OpenRouter response did not include source patches")
+        if (patches.isEmpty()) error("OpenAI-compatible response did not include source patches")
         return RepairResponse(summary = summary, patches = patches)
+    }
+
+    companion object {
+        fun fromEnvironment(environment: Map<String, String> = System.getenv()): HttpOpenAiCompatibleRepairClient =
+            HttpOpenAiCompatibleRepairClient(
+                apiKey = environment["API_KEY"].orEmpty(),
+                model = environment["MODEL"].orEmpty(),
+                baseUrl = URI.create(environment["BASE_URL"].orEmpty()),
+            )
     }
 }
 
@@ -238,7 +257,7 @@ class RepairHistory(private val path: Path) {
 }
 
 class TraceGuidedRepairLoop(
-    private val client: OpenRouterRepairClient,
+    private val client: RepairClient,
     private val history: RepairHistory,
 ) {
     fun repairCompileError(projectDir: Path, failure: CompileFailure, regressionInputs: List<ProcessInput>): RepairIteration {

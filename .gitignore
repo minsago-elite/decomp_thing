@@ -1,6 +1,9 @@
 .gradle/
 .kotlin/
+.env
 .pytest_cache/
 build/
+input/
+output/
 __pycache__/
 *.py[cod]

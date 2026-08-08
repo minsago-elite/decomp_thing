@@ -7,7 +7,6 @@ import decompengine.validation.ProcessInput
 import decompengine.validation.ProcessOutput
 import com.sun.net.httpserver.HttpServer
 import java.net.InetSocketAddress
-import java.net.URI
 import kotlin.io.path.createDirectories
 import kotlin.io.path.createTempDirectory
 import kotlin.io.path.exists
@@ -48,7 +47,7 @@ class TraceGuidedRepairTest {
     }
 
     @Test
-    fun `OpenRouter repair loop can patch compile errors`() {
+    fun `repair loop can patch compile errors`() {
         val tempDir = createTempDirectory("repair-compile-")
         val projectDir = createProject(tempDir.resolve("project"), reconstructedSource = "int decomp_engine_main(void) {\n")
         val history = RepairHistory(projectDir.resolve("reports/repair_history.json"))
@@ -76,7 +75,7 @@ class TraceGuidedRepairTest {
     }
 
     @Test
-    fun `OpenRouter HTTP client parses patch responses`() {
+    fun `OpenAI-compatible HTTP client uses configured base URL and parses patch responses`() {
         val server = HttpServer.create(InetSocketAddress("127.0.0.1", 0), 0)
         val requests = mutableListOf<String>()
         server.createContext("/api/v1/chat/completions") { exchange ->
@@ -98,10 +97,12 @@ class TraceGuidedRepairTest {
         }
         server.start()
         try {
-            val client = HttpOpenRouterRepairClient(
-                apiKey = "test-key",
-                model = "openrouter/test",
-                endpoint = URI.create("http://127.0.0.1:${server.address.port}/api/v1/chat/completions"),
+            val client = HttpOpenAiCompatibleRepairClient.fromEnvironment(
+                mapOf(
+                    "API_KEY" to "test-key",
+                    "MODEL" to "compatible/test",
+                    "BASE_URL" to "http://127.0.0.1:${server.address.port}/api/v1",
+                ),
             )
 
             val response = client.requestRepair(
@@ -116,7 +117,7 @@ class TraceGuidedRepairTest {
             assertEquals("fix compile error", response.summary)
             assertEquals("src/reconstructed.c", response.patches.single().relativePath)
             assertTrue(response.patches.single().replacement.contains("return 0;"))
-            assertTrue(requests.single().contains("openrouter/test"))
+            assertTrue(requests.single().contains("compatible/test"))
             assertTrue(requests.single().contains("compiler stderr"))
         } finally {
             server.stop(0)
@@ -124,7 +125,7 @@ class TraceGuidedRepairTest {
     }
 
     @Test
-    fun `OpenRouter repair loop can patch behavior mismatches`() {
+    fun `repair loop can patch behavior mismatches`() {
         val tempDir = createTempDirectory("repair-behavior-")
         val original = compileC(tempDir, "original", helloProgramSource("hello, world"))
         val projectDir = createProject(tempDir.resolve("project"), reconstructedSource = helloMainSource("wrong"))
@@ -179,7 +180,7 @@ class TraceGuidedRepairTest {
         assertTrue(historyJson.contains("two_args"))
     }
 
-    private class FakeRepairClient(private val response: RepairResponse) : OpenRouterRepairClient {
+    private class FakeRepairClient(private val response: RepairResponse) : RepairClient {
         var lastRequest: RepairRequest? = null
 
         override fun requestRepair(request: RepairRequest): RepairResponse {

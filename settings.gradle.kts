@@ -12,4 +12,4 @@ dependencyResolutionManagement {
     }
 }
 
-rootProject.name = "decomp-engine"
+rootProject.name = "llm-bin-patch"

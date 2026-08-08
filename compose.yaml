@@ -1,0 +1,15 @@
+services:
+  llm-bin-patch:
+    build:
+      context: .
+      args:
+        APP_UID: ${LOCAL_UID:-1000}
+        APP_GID: ${LOCAL_GID:-1000}
+    env_file:
+      - .env
+    init: true
+    stdin_open: true
+    tty: true
+    volumes:
+      - ${INPUT_DIR:-./input}:/input:ro
+      - ${OUTPUT_DIR:-./output}:/output

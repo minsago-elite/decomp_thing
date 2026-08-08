@@ -111,14 +111,15 @@ L3 through L5 are intentionally omitted from the MVP. Automated repair loops, au
 
 ### Environment and API
 
-- [ ] Add a pinned Dockerfile containing JDK 21, headless Ghidra, GCC, Make, binutils, sanitizers, and bubblewrap.
-- [ ] Add `compose.yaml` with read-only input, writable output, `.env` loading, and a non-root runtime user.
-- [ ] Add `.env.example` containing `BASE_URL`, `API_KEY`, and `MODEL`, and add `.env` to `.gitignore`.
-- [ ] Rename the OpenRouter client to a provider-neutral OpenAI-compatible client.
-- [ ] Remove the hard-coded OpenRouter endpoint and use `BASE_URL`, `API_KEY`, and `MODEL`.
+- [x] Add a pinned Dockerfile containing JDK 21, headless Ghidra, GCC, Make, binutils, sanitizers, and bubblewrap.
+- [x] Add `compose.yaml` with read-only input, writable output, `.env` loading, and a non-root runtime user.
+- [x] Add `.env.example` containing `BASE_URL`, `API_KEY`, and `MODEL`, and add `.env` to `.gitignore`.
+- [x] Rename the OpenRouter client to a provider-neutral OpenAI-compatible client.
+- [x] Remove the hard-coded OpenRouter endpoint and use `BASE_URL`, `API_KEY`, and `MODEL`.
 - [ ] Add configuration validation, credential redaction, timeouts, bounded retries, and clear API error reporting.
 - [ ] Add `llm_bin_patch doctor` and verify all required tools inside the container.
-- [ ] Add deterministic OpenAI-compatible API contract tests without requiring an external service.
+- [ ] Move binary execution to a separate no-network runner container without API credentials; do not grant the application container `SYS_ADMIN` or privileged mode.
+- [x] Add deterministic OpenAI-compatible API contract tests without requiring an external service.
 - [ ] Build the image from a clean checkout and run the pinned c-vul fixture end to end through Docker Compose.
 
 ### L1 Reconstruct

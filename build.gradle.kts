@@ -12,6 +12,7 @@ kotlin {
 
 application {
     mainClass.set("decompengine.MainKt")
+    applicationName = "llm_bin_patch"
 }
 
 tasks.test {
