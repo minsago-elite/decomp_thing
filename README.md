@@ -22,6 +22,17 @@ The container includes JDK 21, headless Ghidra, GCC, Make, binutils, sanitizers,
 
 The current Compose service does not add `SYS_ADMIN` or run as privileged. Standard Docker therefore prevents nested bubblewrap mount namespaces. Use this environment only with the pinned, trusted MVP fixture until binary execution is moved to a separate no-network runner container.
 
+## Browser GUI
+
+Start the local workbench and open `http://127.0.0.1:8000`:
+
+```bash
+./gradlew installDist
+build/install/llm_bin_patch/bin/llm_bin_patch web
+```
+
+The GUI provides persistent ELF uploads, recent-job navigation, metadata inspection, background automatic exploration, live status refresh, coverage and confidence evidence, repair history, and report downloads. Uploaded binaries are only executed after selecting **Start automatic exploration**, using the same mandatory sandbox as the CLI. Job data defaults to `.decomp_engine/jobs`; change it with `--data-dir`.
+
 ## Development
 
 Initialize the pinned vulnerability fixture after cloning:

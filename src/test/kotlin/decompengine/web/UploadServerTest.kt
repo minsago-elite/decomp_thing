@@ -4,7 +4,8 @@ import decompengine.jobs.elfFixture
 import kotlinx.serialization.json.Json
 import kotlinx.serialization.json.jsonObject
 import java.net.HttpURLConnection
-import java.net.URL
+import java.net.URI
+import java.util.concurrent.Executor
 import kotlin.io.path.createDirectories
 import kotlin.io.path.createTempDirectory
 import kotlin.io.path.exists
@@ -23,6 +24,22 @@ class UploadServerTest {
             assertEquals(200, response.status)
             assertTrue(response.body.decodeToString().contains("multipart/form-data"))
             assertTrue(response.body.decodeToString().contains("name=\"binary\""))
+            assertTrue(response.body.decodeToString().contains("Binary reconstruction workbench"))
+            assertTrue(response.body.decodeToString().contains("/assets/app.css"))
+        }
+    }
+
+    @Test
+    fun `dashboard lists uploaded jobs`() {
+        withServer { server, _ ->
+            upload(server, "dashboard.elf", elfFixture(), acceptJson = true)
+
+            val page = request(server, "GET", "/")
+
+            assertEquals(200, page.status)
+            assertTrue(page.body.decodeToString().contains("Recent jobs"))
+            assertTrue(page.body.decodeToString().contains("dashboard.elf"))
+            assertTrue(page.body.decodeToString().contains("Uploaded"))
         }
     }
 
@@ -98,9 +115,70 @@ class UploadServerTest {
         }
     }
 
-    private fun withServer(block: (UploadServer, java.nio.file.Path) -> Unit) {
+    @Test
+    fun `GUI launches analysis renders evidence and downloads artifacts`() {
+        val analyzer = JobAnalyzer { job, reportsDir ->
+            assertEquals("analyzing", job.status)
+            reportsDir.resolve("exploration.json").writeText(
+                """
+                {
+                  "candidateCount": 2,
+                  "coverageIncreased": true,
+                  "baselineOutputSignatures": 1,
+                  "expandedOutputSignatures": 2,
+                  "newOutputSignatures": ["2:4152475f5345435245540a:"],
+                  "angr": {"argvStates":2,"stdinStates":2,"argvSteps":10,"stdinSteps":12},
+                  "confidence": {
+                    "score": 0.625,
+                    "inputCount": 2,
+                    "sourceCount": 2,
+                    "outputSignatureCount": 2,
+                    "newOutputSignatureCount": 1,
+                    "sandboxed": true,
+                    "networkIsolated": true
+                  },
+                  "candidates": [
+                    {"id":"seed_default","source":"SEED","args":[],"stdinHex":""},
+                    {"id":"angr_secret","source":"ANGR","args":["secret"],"stdinHex":""}
+                  ],
+                  "observations": [
+                    {"candidateId":"seed_default","signature":"0:44454641554c540a:","exitCode":0,"stdoutHex":"44454641554c540a","stderrHex":"","networkIsolated":true},
+                    {"candidateId":"angr_secret","signature":"2:4152475f5345435245540a:","exitCode":2,"stdoutHex":"4152475f5345435245540a","stderrHex":"","networkIsolated":true}
+                  ]
+                }
+                """.trimIndent(),
+            )
+        }
+        withServer(analyzer) { server, _ ->
+            val upload = upload(server, "branching.elf", elfFixture(), acceptJson = true)
+            val job = Json.parseToJsonElement(upload.body.decodeToString()).jsonObject
+            val jobId = job["id"].toString().trim('"')
+
+            val launch = request(server, "POST", "/jobs/$jobId/explore", followRedirects = false)
+            val page = request(server, "GET", "/jobs/$jobId")
+            val api = request(server, "GET", "/api/jobs/$jobId")
+            val artifact = request(server, "GET", "/jobs/$jobId/artifacts/reports/exploration.json")
+
+            assertEquals(303, launch.status)
+            assertEquals("complete", Json.parseToJsonElement(api.body.decodeToString()).jsonObject["status"].toString().trim('"'))
+            val html = page.body.decodeToString()
+            assertTrue(html.contains("Exploration report"))
+            assertTrue(html.contains("63%"))
+            assertTrue(html.contains("angr_secret"))
+            assertTrue(html.contains("ARG_SECRET↵"))
+            assertTrue(html.contains("Artifacts"))
+            assertEquals(200, artifact.status)
+            assertTrue(artifact.body.decodeToString().contains("\"candidateCount\": 2"))
+        }
+    }
+
+    private fun withServer(
+        analyzer: JobAnalyzer = JobAnalyzer { _, _ -> },
+        block: (UploadServer, java.nio.file.Path) -> Unit,
+    ) {
         val dataDir = createTempDirectory("web-jobs-")
-        val server = UploadServer("127.0.0.1", 0, dataDir)
+        val directExecutor = Executor { command -> command.run() }
+        val server = UploadServer("127.0.0.1", 0, dataDir, analyzer, directExecutor)
         server.start()
         try {
             block(server, dataDir)
@@ -136,9 +214,11 @@ class UploadServerTest {
         path: String,
         body: ByteArray = ByteArray(0),
         headers: Map<String, String> = emptyMap(),
+        followRedirects: Boolean = true,
     ): Response {
-        val connection = URL("http://127.0.0.1:${server.serverPort}$path").openConnection() as HttpURLConnection
+        val connection = URI("http://127.0.0.1:${server.serverPort}$path").toURL().openConnection() as HttpURLConnection
         connection.requestMethod = method
+        connection.instanceFollowRedirects = followRedirects
         headers.forEach { (key, value) -> connection.setRequestProperty(key, value) }
         if (body.isNotEmpty()) {
             connection.doOutput = true

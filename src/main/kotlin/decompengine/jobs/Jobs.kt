@@ -13,6 +13,7 @@ import kotlinx.serialization.json.jsonObject
 import kotlinx.serialization.json.jsonPrimitive
 import kotlinx.serialization.json.put
 import java.nio.file.Path
+import java.nio.file.Files
 import java.time.Instant
 import java.util.UUID
 import kotlin.io.path.createDirectories
@@ -20,6 +21,7 @@ import kotlin.io.path.exists
 import kotlin.io.path.name
 import kotlin.io.path.readBytes
 import kotlin.io.path.readText
+import kotlin.io.path.isRegularFile
 import kotlin.io.path.writeBytes
 import kotlin.io.path.writeText
 
@@ -31,6 +33,8 @@ data class Job(
     val filename: String,
     val status: String,
     val createdAt: String,
+    val updatedAt: String = createdAt,
+    val statusMessage: String? = null,
     val sizeBytes: Int,
     val binaryPath: Path,
     val metadata: ElfMetadata,
@@ -40,13 +44,18 @@ data class Job(
         put("filename", filename)
         put("status", status)
         put("created_at", createdAt)
+        put("updated_at", updatedAt)
+        statusMessage?.let { put("status_message", it) }
         put("size_bytes", sizeBytes)
         put("binary_path", binaryPath.toString())
         put("metadata", metadata.toJson())
     }
 }
 
-class JobStore(private val root: Path) {
+class JobStore(root: Path) {
+    private val root = root.toAbsolutePath().normalize()
+
+    @Synchronized
     fun createFromUpload(filename: String, content: ByteArray): Job {
         val metadata = try {
             ElfMetadataReader.read(content)
@@ -59,6 +68,9 @@ class JobStore(private val root: Path) {
         val jobDir = root.resolve(jobId).createDirectories()
         val binaryPath = jobDir.resolve("input.elf")
         binaryPath.writeBytes(content)
+        check(binaryPath.toFile().setExecutable(true, true) || Files.isExecutable(binaryPath)) {
+            "could not mark uploaded ELF executable"
+        }
         val job = Job(
             id = jobId,
             filename = Path.of(filename).name.ifBlank { "input.elf" },
@@ -68,15 +80,13 @@ class JobStore(private val root: Path) {
             binaryPath = binaryPath,
             metadata = metadata,
         )
-        jobDir.resolve("job.json").writeText(Json { prettyPrint = true }.encodeToString(JsonElement.serializer(), job.toJson()) + "\n")
+        persist(job)
         return job
     }
 
+    @Synchronized
     fun get(jobId: String): Job {
-        if (jobId.isBlank() || listOf("/", "\\", "..").any { jobId.contains(it) }) {
-            throw JobStoreException("invalid job id: $jobId")
-        }
-        val metadataPath = root.resolve(jobId).resolve("job.json")
+        val metadataPath = jobDirectory(jobId).resolve("job.json")
         if (!metadataPath.exists()) {
             throw JobStoreException("job not found: $jobId")
         }
@@ -86,10 +96,74 @@ class JobStore(private val root: Path) {
             filename = payload.string("filename"),
             status = payload.string("status"),
             createdAt = payload.string("created_at"),
+            updatedAt = payload.optionalString("updated_at") ?: payload.string("created_at"),
+            statusMessage = payload.optionalString("status_message"),
             sizeBytes = payload.int("size_bytes"),
             binaryPath = Path.of(payload.string("binary_path")),
             metadata = payload.jsonObject("metadata").toElfMetadata(),
         )
+    }
+
+    @Synchronized
+    fun list(): List<Job> {
+        if (!root.exists()) return emptyList()
+        return Files.list(root).use { paths ->
+            paths.iterator().asSequence()
+                .filter { Files.isDirectory(it) && it.resolve("job.json").isRegularFile() }
+                .toList()
+                .mapNotNull { directory -> runCatching { get(directory.fileName.toString()) }.getOrNull() }
+                .sortedByDescending { it.createdAt }
+        }
+    }
+
+    @Synchronized
+    fun updateStatus(jobId: String, status: String, message: String? = null): Job {
+        require(status in VALID_STATUSES) { "invalid job status: $status" }
+        val updated = get(jobId).copy(
+            status = status,
+            updatedAt = Instant.now().toString(),
+            statusMessage = message?.replace(Regex("[\\r\\n]+"), " ")?.take(500),
+        )
+        persist(updated)
+        return updated
+    }
+
+    fun reportsDirectory(jobId: String): Path = jobDirectory(jobId).resolve("reports").createDirectories()
+
+    fun resolveArtifact(jobId: String, relativePath: String): Path {
+        require(relativePath.isNotBlank()) { "artifact path must not be blank" }
+        require(relativePath.replace('\\', '/').startsWith("reports/")) { "only report artifacts may be downloaded" }
+        val jobDir = jobDirectory(jobId).toAbsolutePath().normalize()
+        val artifact = jobDir.resolve(relativePath).normalize()
+        if (!artifact.startsWith(jobDir) || !artifact.isRegularFile()) {
+            throw JobStoreException("artifact not found: $relativePath")
+        }
+        return artifact
+    }
+
+    @Synchronized
+    fun recoverInterruptedJobs() {
+        list().filter { it.status in setOf("queued", "analyzing") }.forEach { job ->
+            updateStatus(job.id, "failed", "Analysis was interrupted before the server restarted")
+        }
+    }
+
+    private fun jobDirectory(jobId: String): Path {
+        if (jobId.isBlank() || !jobId.matches(Regex("[a-f0-9]{32}"))) {
+            throw JobStoreException("invalid job id: $jobId")
+        }
+        return root.resolve(jobId)
+    }
+
+    private fun persist(job: Job) {
+        val jobDir = jobDirectory(job.id).createDirectories()
+        jobDir.resolve("job.json").writeText(
+            Json { prettyPrint = true }.encodeToString(JsonElement.serializer(), job.toJson()) + "\n",
+        )
+    }
+
+    private companion object {
+        val VALID_STATUSES = setOf("uploaded", "queued", "analyzing", "complete", "failed")
     }
 }
 
@@ -122,6 +196,7 @@ private fun JsonObject.toElfMetadata(): ElfMetadata = ElfMetadata(
 )
 
 private fun JsonObject.string(name: String): String = getValue(name).jsonPrimitive.content
+private fun JsonObject.optionalString(name: String): String? = get(name)?.jsonPrimitive?.content
 private fun JsonObject.int(name: String): Int = getValue(name).jsonPrimitive.int
 private fun JsonObject.long(name: String): Long = getValue(name).jsonPrimitive.content.toLong()
 private fun JsonObject.jsonObject(name: String): JsonObject = getValue(name).jsonObject

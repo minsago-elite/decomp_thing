@@ -6,6 +6,7 @@ import kotlin.io.path.createTempDirectory
 import kotlin.io.path.exists
 import kotlin.io.path.readBytes
 import kotlin.io.path.readText
+import kotlin.io.path.writeText
 import kotlin.test.Test
 import kotlin.test.assertEquals
 import kotlin.test.assertFailsWith
@@ -42,6 +43,47 @@ class JobStoreTest {
         assertFailsWith<InvalidUploadException> {
             store.createFromUpload("not-elf.bin", "not an elf".toByteArray())
         }
+    }
+
+    @Test
+    fun `backend lists jobs and persists analysis status`() {
+        val store = JobStore(createTempDirectory("jobs-status-"))
+        val first = store.createFromUpload("first.elf", elfFixture())
+        val second = store.createFromUpload("second.elf", elfFixture())
+
+        val updated = store.updateStatus(first.id, "analyzing", "Exploring candidate inputs")
+
+        assertEquals("analyzing", updated.status)
+        assertEquals("Exploring candidate inputs", updated.statusMessage)
+        assertEquals("analyzing", store.get(first.id).status)
+        assertEquals(setOf(second.id, first.id), store.list().map { it.id }.toSet())
+    }
+
+    @Test
+    fun `backend resolves only job-local artifact files`() {
+        val root = createTempDirectory("jobs-artifacts-")
+        val store = JobStore(root)
+        val job = store.createFromUpload("fixture.elf", elfFixture())
+        val report = store.reportsDirectory(job.id).resolve("exploration.json")
+        report.writeText("{}")
+
+        assertEquals(report, store.resolveArtifact(job.id, "reports/exploration.json"))
+        assertFailsWith<IllegalArgumentException> { store.resolveArtifact(job.id, "../job.json") }
+        assertFailsWith<IllegalArgumentException> { store.resolveArtifact(job.id, "job.json") }
+        assertFailsWith<JobStoreException> { store.resolveArtifact(job.id, "reports/missing.json") }
+    }
+
+    @Test
+    fun `backend marks interrupted analysis jobs failed on recovery`() {
+        val store = JobStore(createTempDirectory("jobs-recovery-"))
+        val job = store.createFromUpload("fixture.elf", elfFixture())
+        store.updateStatus(job.id, "analyzing", "running")
+
+        store.recoverInterruptedJobs()
+
+        val recovered = store.get(job.id)
+        assertEquals("failed", recovered.status)
+        assertTrue(recovered.statusMessage.orEmpty().contains("interrupted"))
     }
 }
 
