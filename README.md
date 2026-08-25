@@ -33,6 +33,8 @@ build/install/llm_bin_patch/bin/llm_bin_patch web
 
 The GUI provides persistent ELF uploads, recent-job navigation, metadata inspection, background automatic exploration, live status refresh, coverage and confidence evidence, repair history, and report downloads. Uploaded binaries are only executed after selecting **Start automatic exploration**, using the same mandatory sandbox as the CLI. Job data defaults to `.decomp_engine/jobs`; change it with `--data-dir`.
 
+For a non-Docker angr installation, set `ANGR_PYTHON` to the Python executable that can import angr before starting the GUI.
+
 ## Development
 
 Initialize the pinned vulnerability fixture after cloning:

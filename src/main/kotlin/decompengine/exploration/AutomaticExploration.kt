@@ -59,7 +59,8 @@ interface AngrExplorer {
 }
 
 class PythonAngrExplorer(
-    private val python: Path = Path.of("/usr/bin/python3"),
+    private val python: Path = System.getenv("ANGR_PYTHON")?.takeIf(String::isNotBlank)?.let(Path::of)
+        ?: Path.of("/usr/bin/python3"),
     private val timeout: Path = Path.of("/usr/bin/timeout"),
     private val timeoutSeconds: Int = 45,
     private val maxSteps: Int = 300,

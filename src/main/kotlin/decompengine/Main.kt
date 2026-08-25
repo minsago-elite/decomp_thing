@@ -199,8 +199,9 @@ private fun runDoctor(args: List<String>) {
     }
     val bwrapInstalled = Files.isExecutable(Path.of("/usr/bin/bwrap"))
     reportDoctorCheck("bwrap executable", bwrapInstalled, failures)
+    val angrPython = System.getenv("ANGR_PYTHON")?.takeIf(String::isNotBlank) ?: "python3"
     val angrAvailable = runCatching {
-        ProcessBuilder("python3", "-c", "import angr").start().waitFor() == 0
+        ProcessBuilder(angrPython, "-c", "import angr").start().waitFor() == 0
     }.getOrDefault(false)
     reportDoctorCheck("angr", angrAvailable, failures)
 
