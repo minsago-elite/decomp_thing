@@ -4,6 +4,12 @@ import decompengine.binary.ElfMetadata
 import decompengine.binary.ElfMetadataReader
 import decompengine.binary.ElfSymbolInventoryReader
 import decompengine.binary.SymbolInventory
+import decompengine.project.ProgramModelJson
+import decompengine.project.RecoveredFunction
+import decompengine.project.RecoveredProgramModel
+import decompengine.project.RecoveryStatus
+import decompengine.project.sha256
+import decompengine.project.stableFunctionId
 
 import java.io.ByteArrayOutputStream
 import java.io.PrintStream
@@ -12,11 +18,14 @@ import java.nio.file.Path
 import kotlin.io.path.createDirectories
 import kotlin.io.path.pathString
 import kotlin.io.path.readBytes
+import kotlin.io.path.exists
+import kotlin.io.path.readText
 import kotlin.io.path.writeText
 
 data class GhidraJvmConfig(
     val classpath: List<Path>,
     val mainClass: String = "ghidra.app.util.headless.AnalyzeHeadless",
+    val scriptDirectory: Path? = null,
 )
 
 data class GhidraAnalysis(
@@ -24,6 +33,7 @@ data class GhidraAnalysis(
     val reportsDir: Path,
     val metadata: ElfMetadata,
     val symbolInventory: SymbolInventory,
+    val programModel: RecoveredProgramModel,
     val mainClass: String,
     val args: List<String>,
     val returnCode: Int,
@@ -37,13 +47,19 @@ class GhidraJvmAnalyzer(private val config: GhidraJvmConfig) {
     fun analyze(binaryPath: Path, outputDir: Path): GhidraAnalysis {
         val reportsDir = outputDir.resolve("reports").createDirectories()
         val ghidraProjectDir = outputDir.resolve("ghidra_project").createDirectories()
-        val args = listOf(
+        val programModelPath = reportsDir.resolve("program_model.json")
+        val args = buildList {
+            addAll(listOf(
             ghidraProjectDir.pathString,
             "decomp_engine_l1",
             "-import",
             binaryPath.pathString,
             "-overwrite",
-        )
+            ))
+            config.scriptDirectory?.let { scripts ->
+                addAll(listOf("-scriptPath", scripts.pathString, "-postScript", "ExportProgramModel.java", programModelPath.pathString))
+            }
+        }
 
         val stdout = ByteArrayOutputStream()
         val stderr = ByteArrayOutputStream()
@@ -56,11 +72,28 @@ class GhidraJvmAnalyzer(private val config: GhidraJvmConfig) {
 
         val binaryBytes = binaryPath.readBytes()
         val metadata = ElfMetadataReader.read(binaryBytes)
+        val programModel = if (programModelPath.exists()) {
+            ProgramModelJson.read(programModelPath.readText())
+        } else {
+            RecoveredProgramModel(
+                inputSha256 = sha256(binaryBytes),
+                functions = listOf(
+                    RecoveredFunction(
+                        id = stableFunctionId(metadata.entryPoint),
+                        name = "decomp_engine_main",
+                        address = metadata.entryPoint,
+                        prototype = "int decomp_engine_main(void)",
+                        status = RecoveryStatus.SYNTHETIC,
+                    ),
+                ),
+            ).also { programModelPath.writeText(it.toJson()) }
+        }
         val analysis = GhidraAnalysis(
             binaryPath = binaryPath,
             reportsDir = reportsDir,
             metadata = metadata,
             symbolInventory = ElfSymbolInventoryReader.read(binaryBytes, metadata),
+            programModel = programModel,
             mainClass = config.mainClass,
             args = args,
             returnCode = returnCode,
@@ -128,6 +161,7 @@ private fun GhidraAnalysis.toJson(): String = """
   },
   "stdoutLog": "${reportsDir.resolve("ghidra_stdout.log").pathString.escapeJson()}",
   "stderrLog": "${reportsDir.resolve("ghidra_stderr.log").pathString.escapeJson()}"
+  ,"programModel": "${reportsDir.resolve("program_model.json").pathString.escapeJson()}"
 }
 """.trimIndent() + "\n"
 
