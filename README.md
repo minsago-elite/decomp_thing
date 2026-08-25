@@ -18,7 +18,7 @@ docker compose build
 docker compose run --rm llm-bin-patch doctor
 ```
 
-The container includes JDK 21, headless Ghidra, GCC, Make, binutils, sanitizers, and bubblewrap. Input files are mounted read-only from `./input`; generated artifacts are written to `./output`.
+The container includes JDK 21, headless Ghidra, GCC, Make, binutils, sanitizers, bubblewrap, Python, and a pinned angr installation. Input files are mounted read-only from `./input`; generated artifacts are written to `./output`.
 
 The current Compose service does not add `SYS_ADMIN` or run as privileged. Standard Docker therefore prevents nested bubblewrap mount namespaces. Use this environment only with the pinned, trusted MVP fixture until binary execution is moved to a separate no-network runner container.
 
@@ -37,5 +37,17 @@ scripts/ci.sh
 ```
 
 This executes the Kotlin/JVM test suite. Project planning and progress are tracked in [GitHub milestones](https://github.com/minsago-elite/decomp_thing/milestones) and [issues](https://github.com/minsago-elite/decomp_thing/issues). `ROADMAP.md` is deprecated and retained only as a migration pointer.
+
+Trace-guided repair iterates over compile and behavior failures while retaining every regression input in `repair_history.json`:
+
+```bash
+llm_bin_patch repair ./original ./generated-project --max-iterations 5
+```
+
+Automatic exploration combines bounded symbolic argv/stdin execution, static string hints, and mutations. It writes generated cases, observed output signatures, exploration diagnostics, and an evidence-bounded confidence score to `exploration.json`:
+
+```bash
+llm_bin_patch explore ./binary --reports ./reports
+```
 
 See [docs/ci.md](docs/ci.md) for CI/CD requirements, GitHub Actions usage, and downstream validation guidance.

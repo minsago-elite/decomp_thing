@@ -1,5 +1,8 @@
 package decompengine
 
+import decompengine.exploration.AutomaticExplorer
+import decompengine.exploration.CandidateInput
+import decompengine.exploration.CandidateSource
 import decompengine.mvp.MvpPatchException
 import decompengine.mvp.MvpPatchOptions
 import decompengine.mvp.MvpPatchWorkflow
@@ -11,12 +14,14 @@ import decompengine.web.UploadServer
 import java.net.URI
 import java.nio.file.Files
 import java.nio.file.Path
+import java.util.Locale
 
 fun main(args: Array<String>) {
     when (args.firstOrNull()) {
         "doctor" -> runDoctor(args.drop(1))
         "patch" -> runPatch(args.drop(1))
         "repair" -> runRepair(args.drop(1))
+        "explore" -> runExplore(args.drop(1))
         "web" -> runWeb(args.drop(1))
         null, "help", "--help", "-h" -> printHelp()
         else -> {
@@ -25,6 +30,56 @@ fun main(args: Array<String>) {
             kotlin.system.exitProcess(2)
         }
     }
+}
+
+private fun runExplore(args: List<String>) {
+    var binary: Path? = null
+    var reports: Path? = null
+    val seedArgs = mutableListOf<String>()
+    val seedStdin = mutableListOf<String>()
+    var index = 0
+    while (index < args.size) {
+        when (args[index]) {
+            "--reports" -> {
+                if (index + 1 >= args.size) exploreUsageError("--reports requires a directory")
+                reports = Path.of(args[index + 1]); index += 2
+            }
+            "--arg" -> {
+                if (index + 1 >= args.size) exploreUsageError("--arg requires a value")
+                seedArgs += args[index + 1]; index += 2
+            }
+            "--stdin" -> {
+                if (index + 1 >= args.size) exploreUsageError("--stdin requires a value")
+                seedStdin += args[index + 1]; index += 2
+            }
+            else -> {
+                if (args[index].startsWith("-") || binary != null) exploreUsageError("unexpected argument: ${args[index]}")
+                binary = Path.of(args[index]); index++
+            }
+        }
+    }
+    if (binary == null || reports == null) exploreUsageError("explore requires a binary and reports directory")
+    val seeds = buildList {
+        add(CandidateInput("seed_default", CandidateSource.SEED))
+        seedArgs.forEachIndexed { seedIndex, value ->
+            add(CandidateInput("seed_arg_$seedIndex", CandidateSource.SEED, args = listOf(value)))
+        }
+        seedStdin.forEachIndexed { seedIndex, value ->
+            add(CandidateInput("seed_stdin_$seedIndex", CandidateSource.SEED, stdin = value.toByteArray()))
+        }
+    }
+    val report = AutomaticExplorer().explore(binary, seeds, reports)
+    println(
+        "exploration generated ${report.candidates.size} input(s), discovered " +
+            "${report.coverage.newSignatures.size} new output signature(s), confidence=${"%.4f".format(Locale.ROOT, report.confidence.score)}",
+    )
+    println("report: ${report.reportPath}")
+}
+
+private fun exploreUsageError(message: String): Nothing {
+    System.err.println(message)
+    System.err.println("usage: llm_bin_patch explore <binary> --reports <directory> [--arg <value>] [--stdin <value>]")
+    kotlin.system.exitProcess(2)
 }
 
 private fun runRepair(args: List<String>) {
@@ -118,7 +173,7 @@ private fun runDoctor(args: List<String>) {
     }
 
     val failures = mutableListOf<String>()
-    listOf("java", "gcc", "make", "readelf", "strings").forEach { command ->
+    listOf("java", "gcc", "make", "readelf", "strings", "python3").forEach { command ->
         val available = runCatching {
             ProcessBuilder("sh", "-c", "command -v \"${'$'}1\" >/dev/null 2>&1", "sh", command)
                 .start()
@@ -128,6 +183,10 @@ private fun runDoctor(args: List<String>) {
     }
     val bwrapInstalled = Files.isExecutable(Path.of("/usr/bin/bwrap"))
     reportDoctorCheck("bwrap executable", bwrapInstalled, failures)
+    val angrAvailable = runCatching {
+        ProcessBuilder("python3", "-c", "import angr").start().waitFor() == 0
+    }.getOrDefault(false)
+    reportDoctorCheck("angr", angrAvailable, failures)
 
     val ghidraHome = System.getenv("GHIDRA_HOME")?.let(Path::of)
     reportDoctorCheck(
@@ -214,6 +273,7 @@ private fun printHelp() {
           llm_bin_patch doctor [--tools-only]
           llm_bin_patch patch <input-elf> --output <directory> [--yes]
           llm_bin_patch repair <original-binary> <project-dir> [--reports <directory>] [--max-iterations <count>]
+          llm_bin_patch explore <binary> --reports <directory> [--arg <value>] [--stdin <value>]
           llm_bin_patch web [--host 127.0.0.1] [--port 8000] [--data-dir .decomp_engine/jobs]
         """.trimIndent(),
     )

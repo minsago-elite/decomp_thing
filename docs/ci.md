@@ -25,10 +25,10 @@ Install these system tools before running the test suite:
 - `bubblewrap`
 - `binutils` for `strings`
 
-Optional integrations:
+Optional local integrations:
 
-- `angr` enables the real Python angr candidate generator. Tests use a fake provider for deterministic CI.
-- `OPENROUTER_API_KEY` enables real OpenRouter repair calls. Tests use a local OpenRouter-shaped HTTP endpoint.
+- Set `ANGR_PYTHON` to an angr-enabled Python executable to run the real symbolic argv/stdin integration test. The Docker image pins angr for production exploration; ordinary JVM tests use a deterministic process-adapter fixture.
+- `BASE_URL`, `API_KEY`, and `MODEL` enable real OpenAI-compatible repair calls. Tests use a deterministic local compatible HTTP endpoint.
 - Ghidra can be supplied through the Kotlin JVM adapter. Tests use a fake JVM entrypoint for deterministic CI.
 
 ## GitHub Actions Consumer Example
@@ -73,4 +73,4 @@ Useful artifacts to retain:
 
 ## Determinism Notes
 
-The default CI path does not require external services. Real integrations are behind explicit adapter boundaries, while tests exercise deterministic fakes for Ghidra, angr, and OpenRouter. This keeps CI stable while preserving the production integration shape.
+The default CI path does not require external services. Real integrations are behind explicit adapter boundaries, while tests exercise deterministic fakes for Ghidra, angr, and the OpenAI-compatible API. This keeps CI stable while preserving the production integration shape.

@@ -2,6 +2,8 @@
 
 FROM eclipse-temurin:21-jdk-jammy@sha256:55fb9bf738f5d9b4a6c01b39337e3070d3e27370dd3c478fd1d5d3cd2233c6d8 AS toolchain
 
+ARG ANGR_VERSION=9.2.213
+
 RUN apt-get update \
     && apt-get install -y --no-install-recommends \
         binutils \
@@ -9,7 +11,10 @@ RUN apt-get update \
         build-essential \
         ca-certificates \
         curl \
+        python3 \
+        python3-pip \
         unzip \
+    && python3 -m pip install --no-cache-dir "angr==${ANGR_VERSION}" \
     && rm -rf /var/lib/apt/lists/*
 
 FROM toolchain AS build

@@ -13,6 +13,47 @@ import kotlin.test.assertTrue
 
 class AutomaticExplorationTest {
     @Test
+    fun `python angr adapter returns argv stdin and exploration diagnostics`() {
+        val tempDir = createTempDirectory("exploration-angr-adapter-")
+        val fakePython = tempDir.resolve("fake-python").apply {
+            writeText(
+                """#!/bin/sh
+                printf '%s\n' '{"stats":{"argvStates":2,"stdinStates":3,"argvSteps":10,"stdinSteps":11},"candidates":[{"id":"arg","mode":"argv","argv":"secret","stdinHex":""},{"id":"stdin","mode":"stdin","argv":"","stdinHex":"6f70656e0a"}]}'
+                """.trimIndent(),
+            )
+            toFile().setExecutable(true)
+        }
+        val explorer = PythonAngrExplorer(python = fakePython, timeoutSeconds = 2)
+
+        val candidates = explorer.generate(java.nio.file.Path.of("/tmp/fake-binary"))
+
+        assertTrue(candidates.any { it.args == listOf("secret") })
+        assertTrue(candidates.any { it.stdin.decodeToString() == "open\n" })
+        assertEquals(AngrDiagnostics(2, 3, 10, 11), explorer.diagnostics)
+    }
+
+    @Test
+    fun `real angr symbolically discovers branching argv and stdin when configured`() {
+        val python = System.getenv("ANGR_PYTHON")?.takeIf(String::isNotBlank) ?: return
+        val tempDir = createTempDirectory("exploration-angr-real-")
+        val binary = compileBranchingProgram(tempDir)
+        val explorer = PythonAngrExplorer(
+            python = java.nio.file.Path.of(python),
+            timeoutSeconds = 60,
+            maxSteps = 400,
+            maxStates = 96,
+            stdinBytes = 8,
+        )
+
+        val candidates = explorer.generate(binary)
+
+        assertTrue(candidates.any { it.args == listOf("secret") }, candidates.toString())
+        assertTrue(candidates.any { it.stdin.decodeToString().startsWith("open\n") }, candidates.toString())
+        assertTrue(explorer.diagnostics!!.argvStates > 1)
+        assertTrue(explorer.diagnostics!!.stdinStates > 1)
+    }
+
+    @Test
     fun `angr explorer creates candidate argv and stdin cases through adapter boundary`() {
         val candidates = FakeAngrExplorer().generate(java.nio.file.Path.of("/tmp/fake"))
 
@@ -40,6 +81,7 @@ class AutomaticExplorationTest {
         assertTrue(expanded.any { it.source == CandidateSource.MUTATION && it.args == listOf("SECRET") })
         assertTrue(expanded.any { it.stdin.decodeToString() == "open\n" })
         assertTrue(expanded.any { it.args == listOf("SecretSecret") })
+        assertTrue(expanded.any { it.args.singleOrNull()?.length == 64 })
     }
 
     @Test
@@ -57,6 +99,8 @@ class AutomaticExplorationTest {
         assertTrue(report.increased)
         assertEquals(1, report.baselineSignatures.size)
         assertTrue(report.expandedSignatures.size >= 3)
+        assertTrue(report.newSignatures.size >= 2)
+        assertEquals(expanded.size, report.observations.size)
     }
 
     @Test
@@ -79,6 +123,7 @@ class AutomaticExplorationTest {
         assertTrue(high.score > low.score)
         assertEquals(4, high.sourceCount)
         assertEquals(3, high.outputSignatureCount)
+        assertEquals(3, high.newOutputSignatureCount)
     }
 
     @Test
@@ -100,9 +145,14 @@ class AutomaticExplorationTest {
         assertTrue(json.contains("\"sandboxed\": true"))
         assertTrue(json.contains("\"confidence\""))
         assertTrue(json.contains("\"outputSignatureCount\""))
+        assertTrue(json.contains("\"newOutputSignatures\""))
+        assertTrue(json.contains("\"observations\""))
+        assertTrue(json.contains("\"argvStates\": 2"))
     }
 
     private class FakeAngrExplorer : AngrExplorer {
+        override val diagnostics = AngrDiagnostics(argvStates = 2, stdinStates = 2, argvSteps = 10, stdinSteps = 12)
+
         override fun generate(binaryPath: java.nio.file.Path): List<CandidateInput> =
             listOf(
                 CandidateInput("angr_secret_arg", CandidateSource.ANGR, args = listOf("secret")),
