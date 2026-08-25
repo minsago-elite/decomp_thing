@@ -87,6 +87,7 @@ private fun runRepair(args: List<String>) {
     var project: Path? = null
     var reports: Path? = null
     var maxIterations = 5
+    var exploreInputs = false
     var index = 0
     while (index < args.size) {
         when (args[index]) {
@@ -100,6 +101,7 @@ private fun runRepair(args: List<String>) {
                     ?: repairUsageError("--max-iterations must be a number")
                 index += 2
             }
+            "--explore" -> { exploreInputs = true; index++ }
             else -> {
                 if (args[index].startsWith("-")) repairUsageError("unexpected argument: ${args[index]}")
                 if (original == null) original = Path.of(args[index])
@@ -112,10 +114,24 @@ private fun runRepair(args: List<String>) {
     if (original == null || project == null) repairUsageError("repair requires an original binary and project directory")
     val reportsDir = reports ?: project.resolve("reports")
     val history = RepairHistory(reportsDir.resolve("repair_history.json"))
+    val regressionInputs = if (exploreInputs) {
+        val exploration = AutomaticExplorer().explore(
+            original,
+            listOf(CandidateInput("seed_default", CandidateSource.SEED)),
+            reportsDir,
+        )
+        println(
+            "exploration retained ${exploration.candidates.size} regression input(s) across " +
+                "${exploration.coverage.expandedSignatures.size} observed output signature(s)",
+        )
+        exploration.candidates.map(CandidateInput::toProcessInput)
+    } else {
+        listOf(ProcessInput("default"))
+    }
     val result = TraceGuidedRepairLoop(HttpOpenAiCompatibleRepairClient.fromEnvironment(), history).repairUntilValid(
         projectDir = project,
         originalBinary = original,
-        inputs = listOf(ProcessInput("default")),
+        inputs = regressionInputs,
         reportsDir = reportsDir,
         maxIterations = maxIterations,
     )
@@ -127,7 +143,7 @@ private fun runRepair(args: List<String>) {
 
 private fun repairUsageError(message: String): Nothing {
     System.err.println(message)
-    System.err.println("usage: llm_bin_patch repair <original-binary> <project-dir> [--reports <directory>] [--max-iterations <count>]")
+    System.err.println("usage: llm_bin_patch repair <original-binary> <project-dir> [--reports <directory>] [--max-iterations <count>] [--explore]")
     kotlin.system.exitProcess(2)
 }
 
@@ -272,7 +288,7 @@ private fun printHelp() {
         Usage:
           llm_bin_patch doctor [--tools-only]
           llm_bin_patch patch <input-elf> --output <directory> [--yes]
-          llm_bin_patch repair <original-binary> <project-dir> [--reports <directory>] [--max-iterations <count>]
+          llm_bin_patch repair <original-binary> <project-dir> [--reports <directory>] [--max-iterations <count>] [--explore]
           llm_bin_patch explore <binary> --reports <directory> [--arg <value>] [--stdin <value>]
           llm_bin_patch web [--host 127.0.0.1] [--port 8000] [--data-dir .decomp_engine/jobs]
         """.trimIndent(),

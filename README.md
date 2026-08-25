@@ -41,8 +41,10 @@ This executes the Kotlin/JVM test suite. Project planning and progress are track
 Trace-guided repair iterates over compile and behavior failures while retaining every regression input in `repair_history.json`:
 
 ```bash
-llm_bin_patch repair ./original ./generated-project --max-iterations 5
+llm_bin_patch repair ./original ./generated-project --max-iterations 5 --explore
 ```
+
+With `--explore`, all automatically generated L4 inputs become persisted L3 regression cases and are re-run after every repair attempt.
 
 Automatic exploration combines bounded symbolic argv/stdin execution, static string hints, and mutations. It writes generated cases, observed output signatures, exploration diagnostics, and an evidence-bounded confidence score to `exploration.json`:
 
