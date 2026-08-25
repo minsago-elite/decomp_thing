@@ -14,7 +14,7 @@ That command runs:
 
 - `./gradlew --no-daemon test`
 
-`ROADMAP.md` is maintained directly during MVP development and is not generated or checked by CI.
+Project planning is maintained in [GitHub milestones](https://github.com/minsago-elite/decomp_thing/milestones) and [issues](https://github.com/minsago-elite/decomp_thing/issues). `ROADMAP.md` is deprecated and is not generated or checked by CI.
 
 ## Required CI Tools
 

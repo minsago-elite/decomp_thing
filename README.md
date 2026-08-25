@@ -36,6 +36,6 @@ Run the full local CI suite:
 scripts/ci.sh
 ```
 
-This executes the Kotlin/JVM test suite. During MVP development, edit `ROADMAP.md` directly; roadmap generation and consistency tooling are disabled.
+This executes the Kotlin/JVM test suite. Project planning and progress are tracked in [GitHub milestones](https://github.com/minsago-elite/decomp_thing/milestones) and [issues](https://github.com/minsago-elite/decomp_thing/issues). `ROADMAP.md` is deprecated and retained only as a migration pointer.
 
 See [docs/ci.md](docs/ci.md) for CI/CD requirements, GitHub Actions usage, and downstream validation guidance.
