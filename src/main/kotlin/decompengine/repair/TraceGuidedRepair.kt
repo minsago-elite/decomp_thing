@@ -2,12 +2,22 @@ package decompengine.repair
 
 import decompengine.validation.BehaviorCaseResult
 import decompengine.validation.BehaviorComparator
+import decompengine.validation.BehaviorComparisonReport
 import decompengine.validation.ProcessInput
+import kotlinx.serialization.json.Json
+import kotlinx.serialization.json.JsonArray
+import kotlinx.serialization.json.JsonObject
+import kotlinx.serialization.json.contentOrNull
+import kotlinx.serialization.json.intOrNull
+import kotlinx.serialization.json.jsonArray
+import kotlinx.serialization.json.jsonObject
+import kotlinx.serialization.json.jsonPrimitive
 import java.net.URI
 import java.net.http.HttpClient
 import java.net.http.HttpRequest
 import java.net.http.HttpResponse
 import java.nio.file.Path
+import java.util.concurrent.CompletableFuture
 import kotlin.io.path.createDirectories
 import kotlin.io.path.exists
 import kotlin.io.path.name
@@ -243,26 +253,73 @@ data class RepairIteration(
     val summary: String,
     val patches: List<SourcePatch>,
     val retainedRegressionIds: List<String>,
+    val before: RepairEvidence? = null,
+    val after: RepairEvidence? = null,
+    val succeeded: Boolean = false,
 )
+
+data class RepairEvidence(
+    val kind: String,
+    val summary: String,
+    val artifactPath: String? = null,
+)
+
+data class RepairRunResult(
+    val iterations: List<RepairIteration>,
+    val validation: BehaviorComparisonReport,
+)
+
+class RepairExhaustedException(message: String) : RuntimeException(message)
 
 class RepairHistory(private val path: Path) {
     private val iterations = mutableListOf<RepairIteration>()
+    private val regressionInputs = mutableListOf<ProcessInput>()
+
+    init {
+        if (path.exists()) load(path.readText())
+    }
+
+    fun retain(inputs: List<ProcessInput>) {
+        inputs.forEach { candidate ->
+            val existing = regressionInputs.indexOfFirst { it.id == candidate.id }
+            require(existing < 0 || regressionInputs[existing] == candidate) {
+                "regression input id ${candidate.id} refers to different input data"
+            }
+            if (existing < 0) regressionInputs += candidate
+        }
+        persist()
+    }
 
     fun append(iteration: RepairIteration) {
         iterations += iteration
-        path.parent.createDirectories()
-        path.writeText(toJson())
+        persist()
     }
 
     fun all(): List<RepairIteration> = iterations.toList()
+    fun retainedInputs(): List<ProcessInput> = regressionInputs.toList()
 
     fun toJson(): String = """
         {
+          "regressionInputs": [
+        ${regressionInputs.joinToString(",\n") { it.toJson().prependIndent("    ") }}
+          ],
           "iterations": [
         ${iterations.joinToString(",\n") { it.toJson().prependIndent("    ") }}
           ]
         }
     """.trimIndent() + "\n"
+
+    private fun persist() {
+        path.parent.createDirectories()
+        path.writeText(toJson())
+    }
+
+    private fun load(payload: String) {
+        val root = runCatching { Json.parseToJsonElement(payload).jsonObject }
+            .getOrElse { error("invalid repair history at ${path.pathString}: ${it.message}") }
+        root["regressionInputs"]?.jsonArray?.map(::parseProcessInput)?.let(regressionInputs::addAll)
+        root["iterations"]?.jsonArray?.map(::parseIteration)?.let(iterations::addAll)
+    }
 }
 
 class TraceGuidedRepairLoop(
@@ -270,11 +327,12 @@ class TraceGuidedRepairLoop(
     private val history: RepairHistory,
 ) {
     fun repairCompileError(projectDir: Path, failure: CompileFailure, regressionInputs: List<ProcessInput>): RepairIteration {
+        history.retain(regressionInputs)
         val request = RepairRequest(
             failureKind = "compile",
             prompt = failure.toPrompt(),
             projectFiles = projectSources(projectDir),
-            regressionInputs = regressionInputs,
+            regressionInputs = history.retainedInputs(),
         )
         return applyRepair(projectDir, request)
     }
@@ -286,30 +344,81 @@ class TraceGuidedRepairLoop(
         inputs: List<ProcessInput>,
         reportsDir: Path,
     ): RepairIteration {
-        val comparison = try {
-            BehaviorComparator().compare("behavior_repair", originalBinary, rebuiltBinary, inputs, reportsDir)
-        } catch (_: RuntimeException) {
-            val report = BehaviorComparatorNoThrow().compare("behavior_repair", originalBinary, rebuiltBinary, inputs, reportsDir)
-            val diff = StructuredDiffBuilder.from("behavior_repair", report.cases)
-            val request = RepairRequest(
-                failureKind = "behavior",
-                prompt = diff.toPrompt(),
-                projectFiles = projectSources(projectDir),
-                regressionInputs = inputs,
-            )
-            return applyRepair(projectDir, request)
-        }
-        error("behavior already matched for ${comparison.id}; no repair needed")
+        history.retain(inputs)
+        val comparison = BehaviorComparator().evaluate(
+            "behavior_repair",
+            originalBinary,
+            rebuiltBinary,
+            history.retainedInputs(),
+            reportsDir,
+        )
+        if (comparison.matches) error("behavior already matched for ${comparison.id}; no repair needed")
+        val diff = StructuredDiffBuilder.from("behavior_repair", comparison.cases)
+        val diffPath = reportsDir.resolve("behavior_repair.diff.json")
+        diffPath.writeText(diff.toJson())
+        val request = RepairRequest(
+            failureKind = "behavior",
+            prompt = diff.toPrompt(),
+            projectFiles = projectSources(projectDir),
+            regressionInputs = history.retainedInputs(),
+        )
+        return applyRepair(
+            projectDir,
+            request,
+            before = RepairEvidence("behavior", "${diff.cases.count { !it.matches }} mismatched case(s)", diffPath.pathString),
+        )
     }
 
-    private fun applyRepair(projectDir: Path, request: RepairRequest): RepairIteration {
-        val response = client.requestRepair(request)
-        response.patches.forEach { patch ->
-            val target = projectDir.resolve(patch.relativePath).normalize()
-            require(target.startsWith(projectDir.normalize())) { "patch escapes project dir: ${patch.relativePath}" }
-            target.parent.createDirectories()
-            target.writeText(patch.replacement)
+    fun repairUntilValid(
+        projectDir: Path,
+        originalBinary: Path,
+        inputs: List<ProcessInput>,
+        reportsDir: Path = projectDir.resolve("reports"),
+        maxIterations: Int = 5,
+    ): RepairRunResult {
+        require(maxIterations > 0) { "maxIterations must be positive" }
+        history.retain(inputs)
+        reportsDir.createDirectories()
+        val startedAt = history.all().size
+        var assessment = assess(projectDir, originalBinary, reportsDir, "initial")
+        if (assessment is RepairAssessment.Valid) {
+            return RepairRunResult(emptyList(), assessment.report)
         }
+
+        repeat(maxIterations) { offset ->
+            val request = assessment.toRequest(projectSources(projectDir), history.retainedInputs())
+            val response = client.requestRepair(request)
+            applyPatches(projectDir, response.patches)
+            val after = assess(projectDir, originalBinary, reportsDir, "iteration_${startedAt + offset + 1}")
+            val iteration = RepairIteration(
+                index = history.all().size + 1,
+                failureKind = request.failureKind,
+                prompt = request.prompt,
+                summary = response.summary,
+                patches = response.patches,
+                retainedRegressionIds = history.retainedInputs().map { it.id },
+                before = assessment.evidence,
+                after = after.evidence,
+                succeeded = after is RepairAssessment.Valid,
+            )
+            history.append(iteration)
+            if (after is RepairAssessment.Valid) {
+                return RepairRunResult(history.all().drop(startedAt), after.report)
+            }
+            assessment = after
+        }
+        throw RepairExhaustedException(
+            "repair did not converge after $maxIterations iteration(s); see ${reportsDir.resolve("repair_history.json")}",
+        )
+    }
+
+    private fun applyRepair(
+        projectDir: Path,
+        request: RepairRequest,
+        before: RepairEvidence? = null,
+    ): RepairIteration {
+        val response = client.requestRepair(request)
+        applyPatches(projectDir, response.patches)
         val iteration = RepairIteration(
             index = history.all().size + 1,
             failureKind = request.failureKind,
@@ -317,9 +426,66 @@ class TraceGuidedRepairLoop(
             summary = response.summary,
             patches = response.patches,
             retainedRegressionIds = request.regressionInputs.map { it.id },
+            before = before,
         )
         history.append(iteration)
         return iteration
+    }
+
+    private fun applyPatches(projectDir: Path, patches: List<SourcePatch>) {
+        require(patches.isNotEmpty()) { "repair response contained no patches" }
+        val allowed = projectSources(projectDir).keys
+        require(patches.map { it.relativePath }.distinct().size == patches.size) { "repair response patches a file more than once" }
+        val base = projectDir.toAbsolutePath().normalize()
+        val targets = patches.map { patch ->
+            require(patch.relativePath in allowed) { "patch targets an unknown project file: ${patch.relativePath}" }
+            val target = base.resolve(patch.relativePath).normalize()
+            require(target.startsWith(base)) {
+                "patch escapes project dir: ${patch.relativePath}"
+            }
+            patch to target
+        }
+        targets.forEach { (patch, target) ->
+            target.parent.createDirectories()
+            target.writeText(patch.replacement)
+        }
+    }
+
+    private fun assess(
+        projectDir: Path,
+        originalBinary: Path,
+        reportsDir: Path,
+        label: String,
+    ): RepairAssessment {
+        val compile = compile(projectDir, reportsDir.resolve("$label.compile.log"))
+        if (compile != null) return RepairAssessment.CompileError(compile, reportsDir.resolve("$label.compile.log"))
+        val rebuilt = projectDir.resolve("build/reconstructed")
+        val report = BehaviorComparator().evaluate(
+            "${label}_behavior",
+            originalBinary,
+            rebuilt,
+            history.retainedInputs(),
+            reportsDir,
+        )
+        if (report.matches) return RepairAssessment.Valid(report)
+        val diff = StructuredDiffBuilder.from(report.id, report.cases)
+        val path = reportsDir.resolve("${report.id}.diff.json")
+        path.writeText(diff.toJson())
+        return RepairAssessment.BehaviorError(diff, path)
+    }
+
+    private fun compile(projectDir: Path, logPath: Path): CompileFailure? {
+        val command = listOf("make")
+        val process = ProcessBuilder(command).directory(projectDir.toFile()).start()
+        val stdoutFuture = CompletableFuture.supplyAsync { process.inputStream.bufferedReader().readText() }
+        val stderrFuture = CompletableFuture.supplyAsync { process.errorStream.bufferedReader().readText() }
+        val exitCode = process.waitFor()
+        val stdout = stdoutFuture.join()
+        val stderr = stderrFuture.join()
+        logPath.writeText(
+            "${'$'} make\nexit_code=$exitCode\n\n[stdout]\n$stdout\n[stderr]\n$stderr",
+        )
+        return if (exitCode == 0) null else CompileFailure(command, exitCode, stdout, stderr)
     }
 
     private fun projectSources(projectDir: Path): Map<String, String> =
@@ -331,25 +497,51 @@ class TraceGuidedRepairLoop(
             .toMap()
 }
 
-private class BehaviorComparatorNoThrow {
-    fun compare(
-        id: String,
-        originalBinary: Path,
-        rebuiltBinary: Path,
-        cases: List<ProcessInput>,
-        reportsDir: Path,
-    ) = runCatching {
-        BehaviorComparator().compare(id, originalBinary, rebuiltBinary, cases, reportsDir)
-    }.getOrElse {
-        val reportPath = reportsDir.resolve("$id.behavior.json")
-        val results = cases.map { input ->
-            val runner = decompengine.validation.SandboxRunner()
-            BehaviorCaseResult(input, runner.run(originalBinary, input), runner.run(rebuiltBinary, input))
-        }
-        decompengine.validation.BehaviorComparisonReport(id, originalBinary, rebuiltBinary, results, reportPath).also {
-            reportPath.writeText("""{"id":"$id","matches":${it.matches}}""" + "\n")
-        }
+private sealed interface RepairAssessment {
+    val evidence: RepairEvidence
+
+    data class CompileError(val failure: CompileFailure, val logPath: Path) : RepairAssessment {
+        override val evidence = RepairEvidence(
+            kind = "compile",
+            summary = "compiler exited with code ${failure.exitCode}",
+            artifactPath = logPath.pathString,
+        )
     }
+
+    data class BehaviorError(val diff: StructuredBehaviorDiff, val diffPath: Path) : RepairAssessment {
+        override val evidence = RepairEvidence(
+            kind = "behavior",
+            summary = "${diff.cases.count { !it.matches }} of ${diff.cases.size} regression case(s) mismatched",
+            artifactPath = diffPath.pathString,
+        )
+    }
+
+    data class Valid(val report: BehaviorComparisonReport) : RepairAssessment {
+        override val evidence = RepairEvidence(
+            kind = "valid",
+            summary = "all ${report.cases.size} regression case(s) compiled and matched",
+            artifactPath = report.reportPath.pathString,
+        )
+    }
+}
+
+private fun RepairAssessment.toRequest(
+    projectFiles: Map<String, String>,
+    regressionInputs: List<ProcessInput>,
+): RepairRequest = when (this) {
+    is RepairAssessment.CompileError -> RepairRequest(
+        failureKind = "compile",
+        prompt = failure.toPrompt(),
+        projectFiles = projectFiles,
+        regressionInputs = regressionInputs,
+    )
+    is RepairAssessment.BehaviorError -> RepairRequest(
+        failureKind = "behavior",
+        prompt = diff.toPrompt(),
+        projectFiles = projectFiles,
+        regressionInputs = regressionInputs,
+    )
+    is RepairAssessment.Valid -> error("valid projects do not need a repair request")
 }
 
 fun StructuredBehaviorDiff.toPrompt(): String = """
@@ -361,15 +553,61 @@ fun StructuredBehaviorDiff.toPrompt(): String = """
     }}
 """.trimIndent()
 
+fun StructuredBehaviorDiff.toJson(): String = """
+{
+  "id": "${id.escapeJson()}",
+  "matches": $matches,
+  "cases": [
+${cases.joinToString(",\n") { it.toJson().prependIndent("    ") }}
+  ]
+}
+""".trimIndent() + "\n"
+
+private fun CaseDiff.toJson(): String = """
+{
+  "id": "${id.escapeJson()}",
+  "args": [${args.joinToString(", ") { "\"${it.escapeJson()}\"" }}],
+  "stdinHex": "$stdinHex",
+  "matches": $matches,
+  "exitCode": {
+    "expected": $exitCodeExpected,
+    "actual": $exitCodeActual,
+    "matches": $exitCodeMatches
+  },
+  "stdout": ${stdout.toJson()},
+  "stderr": ${stderr.toJson()}
+}
+""".trimIndent()
+
+private fun StreamDiff.toJson(): String = """
+{
+  "expectedHex": "$expectedHex",
+  "actualHex": "$actualHex",
+  "firstDifferenceOffset": ${firstDifferenceOffset ?: "null"}
+}
+""".trimIndent()
+
 private fun RepairIteration.toJson(): String = """
 {
   "index": $index,
   "failureKind": "${failureKind.escapeJson()}",
+  "prompt": "${prompt.escapeJson()}",
   "summary": "${summary.escapeJson()}",
+  "succeeded": $succeeded,
   "retainedRegressionIds": [${retainedRegressionIds.joinToString(", ") { "\"${it.escapeJson()}\"" }}],
+  "before": ${before?.toJson() ?: "null"},
+  "after": ${after?.toJson() ?: "null"},
   "patches": [
 ${patches.joinToString(",\n") { it.toJson().prependIndent("    ") }}
   ]
+}
+""".trimIndent()
+
+private fun RepairEvidence.toJson(): String = """
+{
+  "kind": "${kind.escapeJson()}",
+  "summary": "${summary.escapeJson()}",
+  "artifactPath": ${artifactPath?.let { "\"${it.escapeJson()}\"" } ?: "null"}
 }
 """.trimIndent()
 
@@ -379,6 +617,59 @@ private fun SourcePatch.toJson(): String = """
   "replacement": "${replacement.escapeJson()}"
 }
 """.trimIndent()
+
+private fun ProcessInput.toJson(): String = """
+{
+  "id": "${id.escapeJson()}",
+  "args": [${args.joinToString(", ") { "\"${it.escapeJson()}\"" }}],
+  "stdinHex": "${stdin.toHex()}"
+}
+""".trimIndent()
+
+private fun parseProcessInput(element: kotlinx.serialization.json.JsonElement): ProcessInput {
+    val value = element.jsonObject
+    return ProcessInput(
+        id = value.requiredString("id"),
+        args = value["args"]?.jsonArray?.map { it.jsonPrimitive.content } ?: emptyList(),
+        stdin = value.requiredString("stdinHex").hexToBytes(),
+    )
+}
+
+private fun parseIteration(element: kotlinx.serialization.json.JsonElement): RepairIteration {
+    val value = element.jsonObject
+    return RepairIteration(
+        index = value["index"]?.jsonPrimitive?.intOrNull ?: error("repair history iteration is missing index"),
+        failureKind = value.requiredString("failureKind"),
+        prompt = value["prompt"]?.jsonPrimitive?.contentOrNull.orEmpty(),
+        summary = value.requiredString("summary"),
+        patches = value["patches"]?.jsonArray?.map { patch ->
+            val item = patch.jsonObject
+            SourcePatch(item.requiredString("relativePath"), item.requiredString("replacement"))
+        } ?: emptyList(),
+        retainedRegressionIds = value["retainedRegressionIds"]?.jsonArray?.map { it.jsonPrimitive.content } ?: emptyList(),
+        before = value["before"]?.let(::parseEvidence),
+        after = value["after"]?.let(::parseEvidence),
+        succeeded = value["succeeded"]?.jsonPrimitive?.contentOrNull?.toBooleanStrictOrNull() ?: false,
+    )
+}
+
+private fun parseEvidence(element: kotlinx.serialization.json.JsonElement): RepairEvidence? {
+    if (element.toString() == "null") return null
+    val value = element.jsonObject
+    return RepairEvidence(
+        kind = value.requiredString("kind"),
+        summary = value.requiredString("summary"),
+        artifactPath = value["artifactPath"]?.jsonPrimitive?.contentOrNull,
+    )
+}
+
+private fun JsonObject.requiredString(name: String): String =
+    get(name)?.jsonPrimitive?.contentOrNull ?: error("repair history is missing $name")
+
+private fun String.hexToBytes(): ByteArray {
+    require(length % 2 == 0) { "hex input must contain pairs of characters" }
+    return ByteArray(length / 2) { index -> substring(index * 2, index * 2 + 2).toInt(16).toByte() }
+}
 
 private fun ByteArray.toHex(): String = joinToString("") { "%02x".format(it) }
 

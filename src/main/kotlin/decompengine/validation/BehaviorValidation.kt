@@ -185,6 +185,21 @@ class BehaviorComparator(private val sandbox: SandboxRunner = SandboxRunner()) {
         cases: List<ProcessInput>,
         reportsDir: Path,
     ): BehaviorComparisonReport {
+        val report = evaluate(id, originalBinary, rebuiltBinary, cases, reportsDir)
+        if (!report.matches) {
+            throw BehaviorMismatchException("behavior comparison failed for $id; see ${report.reportPath.pathString}")
+        }
+        return report
+    }
+
+    fun evaluate(
+        id: String,
+        originalBinary: Path,
+        rebuiltBinary: Path,
+        cases: List<ProcessInput>,
+        reportsDir: Path,
+    ): BehaviorComparisonReport {
+        require(cases.isNotEmpty()) { "at least one behavior case is required" }
         reportsDir.createDirectories()
         val results = cases.map { input ->
             BehaviorCaseResult(
@@ -201,9 +216,6 @@ class BehaviorComparator(private val sandbox: SandboxRunner = SandboxRunner()) {
             reportPath = reportsDir.resolve("$id.behavior.json"),
         )
         report.reportPath.writeText(report.toJson())
-        if (!report.matches) {
-            throw BehaviorMismatchException("behavior comparison failed for $id; see ${report.reportPath.pathString}")
-        }
         return report
     }
 }

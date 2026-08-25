@@ -4,6 +4,9 @@ import decompengine.mvp.MvpPatchException
 import decompengine.mvp.MvpPatchOptions
 import decompengine.mvp.MvpPatchWorkflow
 import decompengine.repair.HttpOpenAiCompatibleRepairClient
+import decompengine.repair.RepairHistory
+import decompengine.repair.TraceGuidedRepairLoop
+import decompengine.validation.ProcessInput
 import decompengine.web.UploadServer
 import java.net.URI
 import java.nio.file.Files
@@ -13,6 +16,7 @@ fun main(args: Array<String>) {
     when (args.firstOrNull()) {
         "doctor" -> runDoctor(args.drop(1))
         "patch" -> runPatch(args.drop(1))
+        "repair" -> runRepair(args.drop(1))
         "web" -> runWeb(args.drop(1))
         null, "help", "--help", "-h" -> printHelp()
         else -> {
@@ -21,6 +25,55 @@ fun main(args: Array<String>) {
             kotlin.system.exitProcess(2)
         }
     }
+}
+
+private fun runRepair(args: List<String>) {
+    var original: Path? = null
+    var project: Path? = null
+    var reports: Path? = null
+    var maxIterations = 5
+    var index = 0
+    while (index < args.size) {
+        when (args[index]) {
+            "--reports" -> {
+                if (index + 1 >= args.size) repairUsageError("--reports requires a directory")
+                reports = Path.of(args[index + 1]); index += 2
+            }
+            "--max-iterations" -> {
+                if (index + 1 >= args.size) repairUsageError("--max-iterations requires a number")
+                maxIterations = args[index + 1].toIntOrNull()
+                    ?: repairUsageError("--max-iterations must be a number")
+                index += 2
+            }
+            else -> {
+                if (args[index].startsWith("-")) repairUsageError("unexpected argument: ${args[index]}")
+                if (original == null) original = Path.of(args[index])
+                else if (project == null) project = Path.of(args[index])
+                else repairUsageError("unexpected argument: ${args[index]}")
+                index++
+            }
+        }
+    }
+    if (original == null || project == null) repairUsageError("repair requires an original binary and project directory")
+    val reportsDir = reports ?: project.resolve("reports")
+    val history = RepairHistory(reportsDir.resolve("repair_history.json"))
+    val result = TraceGuidedRepairLoop(HttpOpenAiCompatibleRepairClient.fromEnvironment(), history).repairUntilValid(
+        projectDir = project,
+        originalBinary = original,
+        inputs = listOf(ProcessInput("default")),
+        reportsDir = reportsDir,
+        maxIterations = maxIterations,
+    )
+    result.iterations.forEach { iteration ->
+        println("repair iteration ${iteration.index}: ${iteration.failureKind} - ${iteration.summary}")
+    }
+    println("repair passed ${result.validation.cases.size} retained regression case(s); report: ${result.validation.reportPath}")
+}
+
+private fun repairUsageError(message: String): Nothing {
+    System.err.println(message)
+    System.err.println("usage: llm_bin_patch repair <original-binary> <project-dir> [--reports <directory>] [--max-iterations <count>]")
+    kotlin.system.exitProcess(2)
 }
 
 private fun runPatch(args: List<String>) {
@@ -160,6 +213,7 @@ private fun printHelp() {
         Usage:
           llm_bin_patch doctor [--tools-only]
           llm_bin_patch patch <input-elf> --output <directory> [--yes]
+          llm_bin_patch repair <original-binary> <project-dir> [--reports <directory>] [--max-iterations <count>]
           llm_bin_patch web [--host 127.0.0.1] [--port 8000] [--data-dir .decomp_engine/jobs]
         """.trimIndent(),
     )

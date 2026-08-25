@@ -199,12 +199,78 @@ class TraceGuidedRepairTest {
         assertTrue(historyJson.contains("two_args"))
     }
 
+    @Test
+    fun `repair loop iterates from compile failure through behavior mismatch and persists regressions`() {
+        val tempDir = createTempDirectory("repair-converge-")
+        val original = compileC(tempDir, "original", helloProgramSource("hello, world"))
+        val projectDir = createProject(tempDir.resolve("project"), reconstructedSource = "int decomp_engine_main(void) {\n")
+        val historyPath = projectDir.resolve("reports/repair_history.json")
+        val inputs = listOf(
+            ProcessInput(id = "default"),
+            ProcessInput(id = "argument", args = listOf("kept")),
+        )
+        val client = QueueRepairClient(
+            RepairResponse("make it compile", listOf(SourcePatch("src/reconstructed.c", helloMainSource("wrong")))),
+            RepairResponse("match observed output", listOf(SourcePatch("src/reconstructed.c", goodHelloSource()))),
+        )
+
+        val result = TraceGuidedRepairLoop(client, RepairHistory(historyPath)).repairUntilValid(
+            projectDir = projectDir,
+            originalBinary = original,
+            inputs = inputs,
+            maxIterations = 3,
+        )
+
+        assertTrue(result.validation.matches)
+        assertEquals(listOf("compile", "behavior"), result.iterations.map { it.failureKind })
+        assertEquals(false, result.iterations.first().succeeded)
+        assertEquals(true, result.iterations.last().succeeded)
+        assertEquals("compile", result.iterations.first().before?.kind)
+        assertEquals("behavior", result.iterations.first().after?.kind)
+        assertEquals("valid", result.iterations.last().after?.kind)
+        assertEquals(inputs.map { it.id }, client.requests.last().regressionInputs.map { it.id })
+        assertTrue(projectDir.resolve("reports/iteration_1_behavior.diff.json").exists())
+
+        val reloaded = RepairHistory(historyPath)
+        assertEquals(inputs, reloaded.retainedInputs())
+        assertEquals(2, reloaded.all().size)
+        assertTrue(historyPath.readText().contains("\"before\""))
+        assertTrue(historyPath.readText().contains("\"after\""))
+    }
+
+    @Test
+    fun `reloaded repair history retains earlier regressions in later requests`() {
+        val tempDir = createTempDirectory("repair-reload-")
+        val projectDir = createProject(tempDir.resolve("project"), reconstructedSource = "int decomp_engine_main(void) {\n")
+        val historyPath = projectDir.resolve("reports/repair_history.json")
+        RepairHistory(historyPath).retain(listOf(ProcessInput("earlier", stdin = "old\n".toByteArray())))
+        val client = QueueRepairClient(RepairResponse("fix", listOf(SourcePatch("src/reconstructed.c", goodHelloSource()))))
+
+        TraceGuidedRepairLoop(client, RepairHistory(historyPath)).repairCompileError(
+            projectDir,
+            collectCompileFailure(projectDir),
+            listOf(ProcessInput("new", args = listOf("value"))),
+        )
+
+        assertEquals(listOf("earlier", "new"), client.requests.single().regressionInputs.map { it.id })
+    }
+
     private class FakeRepairClient(private val response: RepairResponse) : RepairClient {
         var lastRequest: RepairRequest? = null
 
         override fun requestRepair(request: RepairRequest): RepairResponse {
             lastRequest = request
             return response
+        }
+    }
+
+    private class QueueRepairClient(vararg responses: RepairResponse) : RepairClient {
+        private val responses = ArrayDeque(responses.toList())
+        val requests = mutableListOf<RepairRequest>()
+
+        override fun requestRepair(request: RepairRequest): RepairResponse {
+            requests += request
+            return responses.removeFirstOrNull() ?: error("unexpected repair request")
         }
     }
 

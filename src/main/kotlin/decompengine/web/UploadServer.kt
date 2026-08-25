@@ -10,6 +10,7 @@ import decompengine.jobs.toJson
 import kotlinx.serialization.json.Json
 import kotlinx.serialization.json.JsonArray
 import kotlinx.serialization.json.JsonElement
+import kotlinx.serialization.json.JsonObject
 import kotlinx.serialization.json.jsonObject
 import java.net.InetSocketAddress
 import java.net.URLDecoder
@@ -151,12 +152,24 @@ fun renderRepairHistory(job: Job): String {
         val index = iteration["index"]?.toString()?.escapeHtml() ?: "?"
         val failureKind = iteration["failureKind"]?.toString()?.trim('"')?.escapeHtml() ?: "unknown"
         val summary = iteration["summary"]?.toString()?.trim('"')?.escapeHtml() ?: ""
+        val status = if (iteration["succeeded"]?.toString() == "true") "passed" else "needs another iteration"
         val regressions = (iteration["retainedRegressionIds"] as? JsonArray)
             ?.joinToString(", ") { it.toString().trim('"').escapeHtml() }
             ?: ""
-        "<li><strong>Iteration $index</strong> <span>$failureKind</span> <p>$summary</p> <p>Regressions: $regressions</p></li>"
+        val before = renderEvidence("Before", iteration["before"] as? JsonObject)
+        val after = renderEvidence("After", iteration["after"] as? JsonObject)
+        "<li><strong>Iteration $index</strong> <span>$failureKind — $status</span> <p>$summary</p>$before$after<p>Regressions: $regressions</p></li>"
     }
     return "<section><h2>Repair History</h2><ol>$items</ol></section>"
+}
+
+private fun renderEvidence(label: String, evidence: JsonObject?): String {
+    if (evidence == null) return ""
+    val kind = evidence["kind"]?.toString()?.trim('"')?.escapeHtml().orEmpty()
+    val summary = evidence["summary"]?.toString()?.trim('"')?.escapeHtml().orEmpty()
+    val artifact = evidence["artifactPath"]?.toString()?.trim('"')?.escapeHtml().orEmpty()
+    val artifactText = if (artifact.isBlank() || artifact == "null") "" else " <code>$artifact</code>"
+    return "<p><strong>$label:</strong> $kind — $summary$artifactText</p>"
 }
 
 private fun HttpExchange.sendHtml(status: Int, body: String) = sendBytes(status, body, "text/html; charset=utf-8")

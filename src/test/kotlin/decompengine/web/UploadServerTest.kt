@@ -58,6 +58,9 @@ class UploadServerTest {
                       "index": 1,
                       "failureKind": "behavior",
                       "summary": "match observed stdout",
+                      "succeeded": true,
+                      "before": {"kind":"behavior","summary":"one mismatch","artifactPath":"before.diff.json"},
+                      "after": {"kind":"valid","summary":"all cases match","artifactPath":"after.behavior.json"},
                       "retainedRegressionIds": ["hello_default"]
                     }
                   ]
@@ -77,6 +80,11 @@ class UploadServerTest {
             assertTrue(body.contains("Iteration 1"))
             assertTrue(body.contains("match observed stdout"))
             assertTrue(body.contains("hello_default"))
+            assertTrue(body.contains("behavior — passed"))
+            assertTrue(body.contains("Before:"))
+            assertTrue(body.contains("one mismatch"))
+            assertTrue(body.contains("After:"))
+            assertTrue(body.contains("all cases match"))
         }
     }
 
