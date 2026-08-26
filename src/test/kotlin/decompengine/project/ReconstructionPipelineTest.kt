@@ -66,11 +66,15 @@ class ReconstructionPipelineTest {
         assertEquals(
             listOf(
                 "Makefile",
-                "include/decomp_engine.h",
+                "include/decomp_types.h",
+                "include/modules/decomp.h",
                 "reports/analysis.json",
+                "reports/module_plan.json",
+                "reports/program_model.json",
                 "reports/unresolved.json",
+                "source_tree_manifest.json",
                 "src/main.c",
-                "src/reconstructed.c",
+                "src/modules/decomp.c",
             ),
             files,
         )

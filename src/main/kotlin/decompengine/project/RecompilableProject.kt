@@ -65,59 +65,13 @@ private fun String.escapeJson(): String =
     }
 
 object RecompilableProjectGenerator {
-    fun generate(analysis: GhidraAnalysis, projectDir: Path): Path {
-        val srcDir = projectDir.resolve("src").createDirectories()
-        val includeDir = projectDir.resolve("include").createDirectories()
+    fun generate(
+        analysis: GhidraAnalysis,
+        projectDir: Path,
+        reconstructor: ModuleReconstructor = EvidenceModuleReconstructor(),
+    ): Path {
         val reportsDir = projectDir.resolve("reports").createDirectories()
-        projectDir.resolve("Makefile").writeText(
-            """
-            CC ?= gcc
-            CFLAGS ?= -std=c11 -Wall -Wextra -Werror -Iinclude
-            TARGET ?= build/reconstructed
-            SOURCES := src/main.c src/reconstructed.c
-
-            all: ${'$'}(TARGET)
-
-            ${'$'}(TARGET): ${'$'}(SOURCES) include/decomp_engine.h
-            	@mkdir -p ${'$'}(dir ${'$'}@)
-            	${'$'}(CC) ${'$'}(CFLAGS) ${'$'}(SOURCES) -o ${'$'}@
-
-            clean:
-            	rm -rf build
-
-            .PHONY: all clean
-            """.trimIndent() + "\n",
-        )
-        includeDir.resolve("decomp_engine.h").writeText(
-            """
-            #ifndef DECOMP_ENGINE_H
-            #define DECOMP_ENGINE_H
-
-            int decomp_engine_main(void);
-
-            #endif
-            """.trimIndent() + "\n",
-        )
-        srcDir.resolve("main.c").writeText(
-            """
-            #include "decomp_engine.h"
-
-            int main(int argc, char **argv) {
-                (void)argc;
-                (void)argv;
-                return decomp_engine_main();
-            }
-            """.trimIndent() + "\n",
-        )
-        srcDir.resolve("reconstructed.c").writeText(
-            """
-            #include "decomp_engine.h"
-
-            int decomp_engine_main(void) {
-                return 0;
-            }
-            """.trimIndent() + "\n",
-        )
+        val manifest = SourceTreeGenerator.generate(analysis.programModel, projectDir, reconstructor = reconstructor)
         reportsDir.resolve("analysis.json").writeText(
             """
             {
@@ -128,12 +82,8 @@ object RecompilableProjectGenerator {
                 "entryPoint": ${analysis.metadata.entryPoint}
               },
               "generatedFiles": [
-                "Makefile",
-                "include/decomp_engine.h",
-                "src/main.c",
-                "src/reconstructed.c",
-                "reports/analysis.json",
-                "reports/unresolved.json"
+                ${manifest.files.map { it.path }.plus("reports/analysis.json").plus("reports/unresolved.json")
+                    .distinct().sorted().joinToString(",\n                ") { "\"$it\"" }}
               ]
             }
             """.trimIndent() + "\n",
