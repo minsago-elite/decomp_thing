@@ -5,8 +5,6 @@ services:
       args:
         APP_UID: ${LOCAL_UID:-1000}
         APP_GID: ${LOCAL_GID:-1000}
-    env_file:
-      - .env
     init: true
     stdin_open: true
     tty: true
@@ -14,6 +12,10 @@ services:
       - binary-runner
     environment:
       BINARY_RUNNER_DIR: /runner
+      BASE_URL: ${BASE_URL:-}
+      API_KEY: ${API_KEY:-}
+      MODEL: ${MODEL:-}
+      REASONING_EFFORT: ${REASONING_EFFORT:-}
     volumes:
       - ${INPUT_DIR:-./input}:/input:ro
       - ${OUTPUT_DIR:-./output}:/output
@@ -40,6 +42,36 @@ services:
       - ${INPUT_DIR:-./input}:/input:ro
       - ${OUTPUT_DIR:-./output}:/output:ro
       - runner-control:/runner
+  fixture-builder:
+    profiles:
+      - acceptance
+    build:
+      context: .
+      args:
+        APP_UID: ${LOCAL_UID:-1000}
+        APP_GID: ${LOCAL_GID:-1000}
+    entrypoint:
+      - clang
+    command:
+      - -O0
+      - -Wall
+      - -Wextra
+      - -std=c11
+      - -fno-stack-protector
+      - -U_FORTIFY_SOURCE
+      - -D_FORTIFY_SOURCE=0
+      - /fixture/01_out_of_bounds_write.c
+      - -o
+      - /input/binary_01
+    network_mode: none
+    read_only: true
+    cap_drop:
+      - ALL
+    security_opt:
+      - no-new-privileges:true
+    volumes:
+      - ${CVUL_SOURCE_DIR:-./benchmarks/fixtures/c-vul/src}:/fixture:ro
+      - ${INPUT_DIR:-./input}:/input
 
 volumes:
   runner-control:

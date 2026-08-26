@@ -4,6 +4,7 @@
 .kotlin
 .env
 build
+benchmarks/fixtures/c-vul
 input
 output
 **/__pycache__

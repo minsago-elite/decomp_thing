@@ -10,6 +10,7 @@ RUN apt-get update \
         bubblewrap \
         build-essential \
         ca-certificates \
+        clang \
         curl \
         python3 \
         python3-pip \
@@ -32,7 +33,6 @@ ARG APP_UID=1000
 ARG APP_GID=1000
 
 ENV GHIDRA_HOME=/opt/ghidra
-ENV CVUL_HOME=/opt/fixtures/c-vul
 ENV PATH="/opt/llm_bin_patch/bin:${PATH}"
 
 RUN curl --fail --location --retry 3 \
@@ -48,7 +48,6 @@ RUN curl --fail --location --retry 3 \
     && chown llm-bin-patch:llm-bin-patch /output
 
 COPY --from=build /workspace/build/install/llm_bin_patch /opt/llm_bin_patch
-COPY --from=build /workspace/benchmarks/fixtures/c-vul /opt/fixtures/c-vul
 
 USER llm-bin-patch
 WORKDIR /work
