@@ -9,6 +9,13 @@ jobs:
     runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+          cache-dependency-path: requirements/oracle-generation.txt
+      - name: Install pinned oracle-generation dependencies
+        run: python3 -m pip install -r requirements/oracle-generation.txt
       - run: |
           sudo apt-get update
           sudo apt-get install -y --no-install-recommends binutils build-essential gnupg

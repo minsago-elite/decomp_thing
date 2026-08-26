@@ -677,6 +677,61 @@ class GccFunctionRecoveryTest(unittest.TestCase):
             with self.assertRaisesRegex(ScoringError, "not enough memory"):
                 report_json_bytes(score_fixture())
 
+    def test_model_strings_use_payload_bound_without_weakening_identifier_bounds(self) -> None:
+        def bounded_long_string(data: dict[str, Any]) -> None:
+            data["functions"][0]["strings"] = ["x" * 5000]
+
+        with self.staged_json(RICH_MODEL, bounded_long_string) as rich:
+            boundaries = score_fixture(rich_model=rich)["twins"]["rich"][
+                "boundaries"
+            ]
+            self.assertEqual(5, boundaries["referenceCount"])
+
+        for field in ("calls", "referencedGlobals"):
+            with self.subTest(field=field):
+                def oversized_identifier(
+                    data: dict[str, Any],
+                    field: str = field,
+                ) -> None:
+                    data["functions"][0][field] = ["x" * 4097]
+
+                with self.staged_json(RICH_MODEL, oversized_identifier) as rich:
+                    with self.assertRaisesRegex(
+                        ScoringError,
+                        "at most 4096 characters",
+                    ):
+                        score_fixture(rich_model=rich)
+
+        def oversized_string(data: dict[str, Any]) -> None:
+            data["functions"][0]["strings"] = [
+                "x" * (function_scorer.MAX_TEXT_CHARACTERS + 1)
+            ]
+
+        with self.staged_json(RICH_MODEL, oversized_string) as rich:
+            with self.assertRaisesRegex(
+                ScoringError,
+                f"at most {function_scorer.MAX_TEXT_CHARACTERS} characters",
+            ):
+                score_fixture(rich_model=rich)
+
+    def test_json_string_projection_matches_canonical_encoder_edges(self) -> None:
+        samples = (
+            "",
+            "plain/ascii",
+            'quote"slash\\',
+            "\x00\b\f\n\r\t\x1f",
+            "é\u2028",
+            "💩",
+            "\ud800",
+        )
+        for value in samples:
+            with self.subTest(value=ascii(value)):
+                expected = len(json.dumps(value, ensure_ascii=True).encode("ascii"))
+                self.assertEqual(
+                    expected,
+                    function_scorer._json_string_encoded_size(value),
+                )
+
     def test_unchecked_core_api_cannot_emit_production_status(self) -> None:
         oracle = load_function_oracle(ORACLE)
         production_claim = replace(

@@ -1,0 +1,566 @@
+{
+  "schemaVersion": 1,
+  "richArtifactSha256": "8009c7cfc4f66017aa932d86a6d4ec7f374e6ab7a01b3ef5ab3d2fcc78c2378b",
+  "exclusions": [
+    {
+      "rva": "0x3980",
+      "reason": "Reviewed emitted cold partition; it is compiler-generated split code, not a distinct source function."
+    },
+    {
+      "rva": "0x39af",
+      "reason": "Reviewed emitted cold partition; it is compiler-generated split code, not a distinct source function."
+    },
+    {
+      "rva": "0x4084",
+      "reason": "Reviewed emitted cold partition; it is compiler-generated split code, not a distinct source function."
+    },
+    {
+      "rva": "0x408e",
+      "reason": "Reviewed emitted cold partition; it is compiler-generated split code, not a distinct source function."
+    },
+    {
+      "rva": "0x40ba",
+      "reason": "Reviewed emitted cold partition; it is compiler-generated split code, not a distinct source function."
+    },
+    {
+      "rva": "0x40bf",
+      "reason": "Reviewed emitted cold partition; it is compiler-generated split code, not a distinct source function."
+    },
+    {
+      "rva": "0x40c4",
+      "reason": "Reviewed emitted cold partition; it is compiler-generated split code, not a distinct source function."
+    },
+    {
+      "rva": "0x40c9",
+      "reason": "Reviewed emitted cold partition; it is compiler-generated split code, not a distinct source function."
+    },
+    {
+      "rva": "0x40ce",
+      "reason": "Reviewed emitted cold partition; it is compiler-generated split code, not a distinct source function."
+    },
+    {
+      "rva": "0x40d4",
+      "reason": "Reviewed emitted cold partition; it is compiler-generated split code, not a distinct source function."
+    },
+    {
+      "rva": "0x40d9",
+      "reason": "Reviewed emitted cold partition; it is compiler-generated split code, not a distinct source function."
+    },
+    {
+      "rva": "0x40de",
+      "reason": "Reviewed emitted cold partition; it is compiler-generated split code, not a distinct source function."
+    },
+    {
+      "rva": "0x4106",
+      "reason": "Reviewed emitted cold partition; it is compiler-generated split code, not a distinct source function."
+    },
+    {
+      "rva": "0x41b4",
+      "reason": "Reviewed emitted cold partition; it is compiler-generated split code, not a distinct source function."
+    },
+    {
+      "rva": "0x41e5",
+      "reason": "Reviewed emitted cold partition; it is compiler-generated split code, not a distinct source function."
+    },
+    {
+      "rva": "0x41ea",
+      "reason": "Reviewed emitted cold partition; it is compiler-generated split code, not a distinct source function."
+    },
+    {
+      "rva": "0x4274",
+      "reason": "Reviewed emitted cold partition; it is compiler-generated split code, not a distinct source function."
+    },
+    {
+      "rva": "0x4284",
+      "reason": "Reviewed emitted cold partition; it is compiler-generated split code, not a distinct source function."
+    },
+    {
+      "rva": "0x4294",
+      "reason": "Reviewed emitted cold partition; it is compiler-generated split code, not a distinct source function."
+    },
+    {
+      "rva": "0x42b8",
+      "reason": "Reviewed emitted cold partition; it is compiler-generated split code, not a distinct source function."
+    },
+    {
+      "rva": "0x42dc",
+      "reason": "Reviewed emitted cold partition; it is compiler-generated split code, not a distinct source function."
+    },
+    {
+      "rva": "0x42e8",
+      "reason": "Reviewed emitted cold partition; it is compiler-generated split code, not a distinct source function."
+    },
+    {
+      "rva": "0x42f4",
+      "reason": "Reviewed emitted cold partition; it is compiler-generated split code, not a distinct source function."
+    },
+    {
+      "rva": "0x4315",
+      "reason": "Reviewed emitted cold partition; it is compiler-generated split code, not a distinct source function."
+    },
+    {
+      "rva": "0x4325",
+      "reason": "Reviewed emitted cold partition; it is compiler-generated split code, not a distinct source function."
+    },
+    {
+      "rva": "0x4335",
+      "reason": "Reviewed emitted cold partition; it is compiler-generated split code, not a distinct source function."
+    },
+    {
+      "rva": "0x4345",
+      "reason": "Reviewed emitted cold partition; it is compiler-generated split code, not a distinct source function."
+    },
+    {
+      "rva": "0x4355",
+      "reason": "Reviewed emitted cold partition; it is compiler-generated split code, not a distinct source function."
+    },
+    {
+      "rva": "0x4365",
+      "reason": "Reviewed emitted cold partition; it is compiler-generated split code, not a distinct source function."
+    },
+    {
+      "rva": "0x4375",
+      "reason": "Reviewed emitted cold partition; it is compiler-generated split code, not a distinct source function."
+    },
+    {
+      "rva": "0x4385",
+      "reason": "Reviewed emitted cold partition; it is compiler-generated split code, not a distinct source function."
+    },
+    {
+      "rva": "0x4395",
+      "reason": "Reviewed emitted cold partition; it is compiler-generated split code, not a distinct source function."
+    },
+    {
+      "rva": "0x43a5",
+      "reason": "Reviewed emitted cold partition; it is compiler-generated split code, not a distinct source function."
+    },
+    {
+      "rva": "0x43b5",
+      "reason": "Reviewed emitted cold partition; it is compiler-generated split code, not a distinct source function."
+    },
+    {
+      "rva": "0x43c5",
+      "reason": "Reviewed emitted cold partition; it is compiler-generated split code, not a distinct source function."
+    },
+    {
+      "rva": "0x43d5",
+      "reason": "Reviewed emitted cold partition; it is compiler-generated split code, not a distinct source function."
+    },
+    {
+      "rva": "0x43e5",
+      "reason": "Reviewed emitted cold partition; it is compiler-generated split code, not a distinct source function."
+    },
+    {
+      "rva": "0x43f5",
+      "reason": "Reviewed emitted cold partition; it is compiler-generated split code, not a distinct source function."
+    },
+    {
+      "rva": "0x4405",
+      "reason": "Reviewed emitted cold partition; it is compiler-generated split code, not a distinct source function."
+    },
+    {
+      "rva": "0x4415",
+      "reason": "Reviewed emitted cold partition; it is compiler-generated split code, not a distinct source function."
+    },
+    {
+      "rva": "0x4425",
+      "reason": "Reviewed emitted cold partition; it is compiler-generated split code, not a distinct source function."
+    },
+    {
+      "rva": "0x4435",
+      "reason": "Reviewed emitted cold partition; it is compiler-generated split code, not a distinct source function."
+    },
+    {
+      "rva": "0x4441",
+      "reason": "Reviewed emitted cold partition; it is compiler-generated split code, not a distinct source function."
+    },
+    {
+      "rva": "0x444d",
+      "reason": "Reviewed emitted cold partition; it is compiler-generated split code, not a distinct source function."
+    },
+    {
+      "rva": "0x44b2",
+      "reason": "Reviewed emitted cold partition; it is compiler-generated split code, not a distinct source function."
+    },
+    {
+      "rva": "0x44e4",
+      "reason": "Reviewed emitted cold partition; it is compiler-generated split code, not a distinct source function."
+    },
+    {
+      "rva": "0x44f4",
+      "reason": "Reviewed emitted cold partition; it is compiler-generated split code, not a distinct source function."
+    },
+    {
+      "rva": "0x4510",
+      "reason": "Reviewed emitted cold partition; it is compiler-generated split code, not a distinct source function."
+    },
+    {
+      "rva": "0x451c",
+      "reason": "Reviewed emitted cold partition; it is compiler-generated split code, not a distinct source function."
+    },
+    {
+      "rva": "0x4528",
+      "reason": "Reviewed emitted cold partition; it is compiler-generated split code, not a distinct source function."
+    },
+    {
+      "rva": "0x4538",
+      "reason": "Reviewed emitted cold partition; it is compiler-generated split code, not a distinct source function."
+    },
+    {
+      "rva": "0x460d",
+      "reason": "Reviewed emitted cold partition; it is compiler-generated split code, not a distinct source function."
+    },
+    {
+      "rva": "0x468a",
+      "reason": "Reviewed emitted cold partition; it is compiler-generated split code, not a distinct source function."
+    },
+    {
+      "rva": "0x469a",
+      "reason": "Reviewed emitted cold partition; it is compiler-generated split code, not a distinct source function."
+    },
+    {
+      "rva": "0x46aa",
+      "reason": "Reviewed emitted cold partition; it is compiler-generated split code, not a distinct source function."
+    },
+    {
+      "rva": "0x46af",
+      "reason": "Reviewed emitted cold partition; it is compiler-generated split code, not a distinct source function."
+    },
+    {
+      "rva": "0x46b4",
+      "reason": "Reviewed emitted cold partition; it is compiler-generated split code, not a distinct source function."
+    },
+    {
+      "rva": "0x46be",
+      "reason": "Reviewed emitted cold partition; it is compiler-generated split code, not a distinct source function."
+    },
+    {
+      "rva": "0x46c8",
+      "reason": "Reviewed emitted cold partition; it is compiler-generated split code, not a distinct source function."
+    },
+    {
+      "rva": "0x46cd",
+      "reason": "Reviewed emitted cold partition; it is compiler-generated split code, not a distinct source function."
+    },
+    {
+      "rva": "0x46d2",
+      "reason": "Reviewed emitted cold partition; it is compiler-generated split code, not a distinct source function."
+    },
+    {
+      "rva": "0x46d7",
+      "reason": "Reviewed emitted cold partition; it is compiler-generated split code, not a distinct source function."
+    },
+    {
+      "rva": "0x46dc",
+      "reason": "Reviewed emitted cold partition; it is compiler-generated split code, not a distinct source function."
+    },
+    {
+      "rva": "0x46e1",
+      "reason": "Reviewed emitted cold partition; it is compiler-generated split code, not a distinct source function."
+    },
+    {
+      "rva": "0x46e6",
+      "reason": "Reviewed emitted cold partition; it is compiler-generated split code, not a distinct source function."
+    },
+    {
+      "rva": "0x46ec",
+      "reason": "Reviewed emitted cold partition; it is compiler-generated split code, not a distinct source function."
+    },
+    {
+      "rva": "0x46f2",
+      "reason": "Reviewed emitted cold partition; it is compiler-generated split code, not a distinct source function."
+    },
+    {
+      "rva": "0x46f7",
+      "reason": "Reviewed emitted cold partition; it is compiler-generated split code, not a distinct source function."
+    },
+    {
+      "rva": "0x46fc",
+      "reason": "Reviewed emitted cold partition; it is compiler-generated split code, not a distinct source function."
+    },
+    {
+      "rva": "0x4701",
+      "reason": "Reviewed emitted cold partition; it is compiler-generated split code, not a distinct source function."
+    },
+    {
+      "rva": "0x4706",
+      "reason": "Reviewed emitted cold partition; it is compiler-generated split code, not a distinct source function."
+    },
+    {
+      "rva": "0x470c",
+      "reason": "Reviewed emitted cold partition; it is compiler-generated split code, not a distinct source function."
+    },
+    {
+      "rva": "0x4711",
+      "reason": "Reviewed emitted cold partition; it is compiler-generated split code, not a distinct source function."
+    },
+    {
+      "rva": "0x4716",
+      "reason": "Reviewed emitted cold partition; it is compiler-generated split code, not a distinct source function."
+    },
+    {
+      "rva": "0x471b",
+      "reason": "Reviewed emitted cold partition; it is compiler-generated split code, not a distinct source function."
+    },
+    {
+      "rva": "0x4720",
+      "reason": "Reviewed emitted cold partition; it is compiler-generated split code, not a distinct source function."
+    },
+    {
+      "rva": "0x4725",
+      "reason": "Reviewed emitted cold partition; it is compiler-generated split code, not a distinct source function."
+    },
+    {
+      "rva": "0x472a",
+      "reason": "Reviewed emitted cold partition; it is compiler-generated split code, not a distinct source function."
+    },
+    {
+      "rva": "0x472f",
+      "reason": "Reviewed emitted cold partition; it is compiler-generated split code, not a distinct source function."
+    },
+    {
+      "rva": "0x4734",
+      "reason": "Reviewed emitted cold partition; it is compiler-generated split code, not a distinct source function."
+    },
+    {
+      "rva": "0x4830",
+      "reason": "Reviewed compiler-generated static-initialization wrapper; it is not a distinct source function."
+    },
+    {
+      "rva": "0x4a50",
+      "reason": "Reviewed compiler-generated static-initialization wrapper; it is not a distinct source function."
+    },
+    {
+      "rva": "0x16ab9",
+      "reason": "Reviewed compiler-generated static-initialization wrapper; it is not a distinct source function."
+    },
+    {
+      "rva": "0x35206",
+      "reason": "Reviewed compiler-generated static-initialization wrapper; it is not a distinct source function."
+    },
+    {
+      "rva": "0x3bff0",
+      "reason": "Reviewed compiler-generated static-initialization wrapper; it is not a distinct source function."
+    },
+    {
+      "rva": "0x8532c",
+      "reason": "Reviewed compiler-generated static-initialization wrapper; it is not a distinct source function."
+    },
+    {
+      "rva": "0x8a636",
+      "reason": "Reviewed compiler-generated static-initialization wrapper; it is not a distinct source function."
+    },
+    {
+      "rva": "0x999fd",
+      "reason": "Reviewed compiler-generated static-initialization wrapper; it is not a distinct source function."
+    },
+    {
+      "rva": "0x99c1d",
+      "reason": "Reviewed compiler-generated static-initialization wrapper; it is not a distinct source function."
+    },
+    {
+      "rva": "0xa6976",
+      "reason": "Reviewed compiler-generated lambda conversion wrapper; it is not a distinct source function."
+    },
+    {
+      "rva": "0xb93ba",
+      "reason": "Reviewed compiler-generated static-initialization wrapper; it is not a distinct source function."
+    },
+    {
+      "rva": "0xf3220",
+      "reason": "Reviewed emitted optimization clone or partition; it is not a distinct source function."
+    },
+    {
+      "rva": "0xf3320",
+      "reason": "Reviewed emitted optimization clone or partition; it is not a distinct source function."
+    },
+    {
+      "rva": "0xf3790",
+      "reason": "Reviewed compiler-generated transactional clone; it is not a distinct source function."
+    },
+    {
+      "rva": "0xf37a0",
+      "reason": "Reviewed compiler-generated transactional clone; it is not a distinct source function."
+    },
+    {
+      "rva": "0xf37b0",
+      "reason": "Reviewed compiler-generated transactional clone; it is not a distinct source function."
+    },
+    {
+      "rva": "0xf37c0",
+      "reason": "Reviewed compiler-generated transactional clone; it is not a distinct source function."
+    },
+    {
+      "rva": "0xf5690",
+      "reason": "Reviewed compiler-generated transactional clone; it is not a distinct source function."
+    },
+    {
+      "rva": "0xf56f0",
+      "reason": "Reviewed compiler-generated transactional clone; it is not a distinct source function."
+    },
+    {
+      "rva": "0xf5760",
+      "reason": "Reviewed compiler-generated transactional clone; it is not a distinct source function."
+    },
+    {
+      "rva": "0xf5780",
+      "reason": "Reviewed compiler-generated transactional clone; it is not a distinct source function."
+    },
+    {
+      "rva": "0xf57a0",
+      "reason": "Reviewed compiler-generated transactional clone; it is not a distinct source function."
+    },
+    {
+      "rva": "0xf57c0",
+      "reason": "Reviewed compiler-generated transactional clone; it is not a distinct source function."
+    },
+    {
+      "rva": "0xf5820",
+      "reason": "Reviewed compiler-generated transactional clone; it is not a distinct source function."
+    },
+    {
+      "rva": "0xf5890",
+      "reason": "Reviewed compiler-generated transactional clone; it is not a distinct source function."
+    },
+    {
+      "rva": "0xf58b0",
+      "reason": "Reviewed compiler-generated transactional clone; it is not a distinct source function."
+    },
+    {
+      "rva": "0xf58d0",
+      "reason": "Reviewed compiler-generated transactional clone; it is not a distinct source function."
+    },
+    {
+      "rva": "0xf5930",
+      "reason": "Reviewed compiler-generated transactional clone; it is not a distinct source function."
+    },
+    {
+      "rva": "0xf59a0",
+      "reason": "Reviewed compiler-generated transactional clone; it is not a distinct source function."
+    },
+    {
+      "rva": "0xf59c0",
+      "reason": "Reviewed compiler-generated transactional clone; it is not a distinct source function."
+    },
+    {
+      "rva": "0xf59e0",
+      "reason": "Reviewed compiler-generated transactional clone; it is not a distinct source function."
+    },
+    {
+      "rva": "0xf5a40",
+      "reason": "Reviewed compiler-generated transactional clone; it is not a distinct source function."
+    },
+    {
+      "rva": "0xf5ab0",
+      "reason": "Reviewed compiler-generated transactional clone; it is not a distinct source function."
+    },
+    {
+      "rva": "0xf5ad0",
+      "reason": "Reviewed compiler-generated transactional clone; it is not a distinct source function."
+    },
+    {
+      "rva": "0xf5af0",
+      "reason": "Reviewed compiler-generated transactional clone; it is not a distinct source function."
+    },
+    {
+      "rva": "0xf5b50",
+      "reason": "Reviewed compiler-generated transactional clone; it is not a distinct source function."
+    },
+    {
+      "rva": "0xf5bc0",
+      "reason": "Reviewed compiler-generated transactional clone; it is not a distinct source function."
+    },
+    {
+      "rva": "0xf5be0",
+      "reason": "Reviewed compiler-generated transactional clone; it is not a distinct source function."
+    },
+    {
+      "rva": "0xf5c00",
+      "reason": "Reviewed compiler-generated transactional clone; it is not a distinct source function."
+    },
+    {
+      "rva": "0xf5c60",
+      "reason": "Reviewed compiler-generated transactional clone; it is not a distinct source function."
+    },
+    {
+      "rva": "0xf5cd0",
+      "reason": "Reviewed compiler-generated transactional clone; it is not a distinct source function."
+    },
+    {
+      "rva": "0xf5cf0",
+      "reason": "Reviewed compiler-generated transactional clone; it is not a distinct source function."
+    },
+    {
+      "rva": "0xf5d10",
+      "reason": "Reviewed compiler-generated transactional clone; it is not a distinct source function."
+    },
+    {
+      "rva": "0xf5d30",
+      "reason": "Reviewed compiler-generated transactional clone; it is not a distinct source function."
+    },
+    {
+      "rva": "0xf5d90",
+      "reason": "Reviewed compiler-generated transactional clone; it is not a distinct source function."
+    },
+    {
+      "rva": "0xf5e00",
+      "reason": "Reviewed compiler-generated transactional clone; it is not a distinct source function."
+    },
+    {
+      "rva": "0xf5e20",
+      "reason": "Reviewed compiler-generated transactional clone; it is not a distinct source function."
+    },
+    {
+      "rva": "0xf5e40",
+      "reason": "Reviewed compiler-generated transactional clone; it is not a distinct source function."
+    },
+    {
+      "rva": "0xf5ea0",
+      "reason": "Reviewed compiler-generated transactional clone; it is not a distinct source function."
+    },
+    {
+      "rva": "0xf5f10",
+      "reason": "Reviewed compiler-generated transactional clone; it is not a distinct source function."
+    },
+    {
+      "rva": "0xf5f30",
+      "reason": "Reviewed compiler-generated transactional clone; it is not a distinct source function."
+    },
+    {
+      "rva": "0xf5f50",
+      "reason": "Reviewed compiler-generated transactional clone; it is not a distinct source function."
+    },
+    {
+      "rva": "0xf5fb0",
+      "reason": "Reviewed compiler-generated transactional clone; it is not a distinct source function."
+    },
+    {
+      "rva": "0xf6020",
+      "reason": "Reviewed compiler-generated transactional clone; it is not a distinct source function."
+    },
+    {
+      "rva": "0xf6040",
+      "reason": "Reviewed compiler-generated transactional clone; it is not a distinct source function."
+    },
+    {
+      "rva": "0xf9840",
+      "reason": "Reviewed emitted optimization clone or partition; it is not a distinct source function."
+    },
+    {
+      "rva": "0xfb220",
+      "reason": "Reviewed emitted optimization clone or partition; it is not a distinct source function."
+    },
+    {
+      "rva": "0xfb330",
+      "reason": "Reviewed emitted optimization clone or partition; it is not a distinct source function."
+    },
+    {
+      "rva": "0xff480",
+      "reason": "Reviewed emitted optimization clone or partition; it is not a distinct source function."
+    },
+    {
+      "rva": "0x106070",
+      "reason": "Reviewed emitted optimization clone or partition; it is not a distinct source function."
+    }
+  ]
+}

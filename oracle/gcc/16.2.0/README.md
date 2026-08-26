@@ -76,8 +76,12 @@ python3 -m unittest discover -s tests/oracle -v
 ## Scope of this checkpoint
 
 This lock anchors the adjacent production build record, retained DWARF-rich
-driver and stripped twin, and generated oracle manifest. The
+driver and stripped twin, generated oracle manifest, and checked-in normalized
+function-recovery oracle. The generic generator lives in
+`oracle/function_recovery_oracle.py`; this directory supplies only the verified
+artifact binding and reviewed exact-RVA exclusion profile. Regeneration is
+documented in `docs/gcc-function-recovery-scoring.md` and is byte-compared in
+the oracle test suite. The
 [strict build and ELF verification procedure](../../../docs/gcc-oracle-artifact-verification.md)
-documents clean reproduction and the CI gate. Later benchmark checkpoints add
-structural and behavior oracles without turning GCC into an engine-specific
-code path.
+documents clean reproduction and the CI gate. GCC remains one substantial C
+benchmark, not an engine-specific code path.

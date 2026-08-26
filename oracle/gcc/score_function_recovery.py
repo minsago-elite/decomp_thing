@@ -60,6 +60,33 @@ from oracle.function_recovery import (
 )
 
 
+class _VerifiedArtifactManifestSnapshot:
+    """Own a verified private snapshot until its consumer has finished."""
+
+    def __init__(
+        self,
+        *,
+        manifest_payload: bytes | bytearray,
+        manifest: dict[str, Any],
+        artifact_paths: Mapping[str, Path],
+        artifact_source_paths: Mapping[str, Path],
+        dependency_source_paths: tuple[Path, ...],
+        temporary_directory: tempfile.TemporaryDirectory[str],
+    ) -> None:
+        self.manifest_payload = manifest_payload
+        self.manifest = manifest
+        self.artifact_paths = dict(artifact_paths)
+        self.artifact_source_paths = dict(artifact_source_paths)
+        self.dependency_source_paths = dependency_source_paths
+        self._temporary_directory = temporary_directory
+
+    def __enter__(self) -> _VerifiedArtifactManifestSnapshot:
+        return self
+
+    def __exit__(self, *unused: object) -> None:
+        self._temporary_directory.cleanup()
+
+
 def _stage_bounded_regular_snapshot(
     source: Path,
     destination: Path,
@@ -175,28 +202,29 @@ def _stage_payload(
             os.close(descriptor)
 
 
-def _verify_artifact_manifest_binding(
-    oracle: FunctionOracle,
-    artifact_manifest_path: Path | None,
-) -> _ScoringContext:
-    if oracle.scope == "fixture":
-        if artifact_manifest_path is not None:
-            raise ScoringError(
-                "fixture scoring may not claim an artifact-manifest binding"
-            )
-        return _fixture_context()
-    if artifact_manifest_path is None:
-        raise ScoringError(
-            "production scoring requires the bound --artifact-manifest"
+def _verified_artifact_manifest_snapshot(
+    artifact_manifest_path: Path,
+    *,
+    expected_sha256: str | None = None,
+    artifact_overrides: Mapping[str, Path] | None = None,
+) -> _VerifiedArtifactManifestSnapshot:
+    """Verify one bounded manifest and coherent private dependency snapshot."""
+
+    requested_overrides = {} if artifact_overrides is None else dict(artifact_overrides)
+    if not set(requested_overrides) <= {"full", "stripped"}:
+        raise ScoringError("artifact overrides may contain only full and stripped")
+    try:
+        manifest_payload = _read_regular_snapshot(
+            artifact_manifest_path,
+            "artifact manifest",
+            MAX_MANIFEST_BYTES,
         )
-    assert oracle.artifact_manifest_sha256 is not None
-    manifest_payload = _read_regular_snapshot(
-        artifact_manifest_path,
-        "artifact manifest",
-        MAX_MANIFEST_BYTES,
-    )
-    actual_manifest_sha256 = hashlib.sha256(manifest_payload).hexdigest()
-    if actual_manifest_sha256 != oracle.artifact_manifest_sha256:
+        actual_manifest_sha256 = hashlib.sha256(manifest_payload).hexdigest()
+    except MemoryError as error:
+        raise ScoringError(
+            "not enough memory to retain the bounded artifact-manifest snapshot"
+        ) from error
+    if expected_sha256 is not None and actual_manifest_sha256 != expected_sha256:
         raise ScoringError(
             "artifact manifest SHA-256 does not match the production function oracle"
         )
@@ -324,7 +352,7 @@ def _verify_artifact_manifest_binding(
             "build record.outputs",
             {"full", "stripped"},
         )
-        artifact_sources: list[tuple[Path, str, int]] = []
+        artifact_sources: list[tuple[str, Path, Path, str, int]] = []
         for manifest_name in ("full", "stripped"):
             record_path = f"artifact manifest.artifacts.{manifest_name}"
             artifact_record = _object(
@@ -357,18 +385,26 @@ def _verify_artifact_manifest_binding(
                 relative_path,
                 f"{manifest_name} artifact",
             )
+            artifact_source = requested_overrides.get(manifest_name, artifact_path)
             artifact_sources.append(
-                (artifact_path, f"{manifest_name} artifact", recorded_bytes)
+                (
+                    manifest_name,
+                    artifact_source,
+                    artifact_path,
+                    f"{manifest_name} artifact",
+                    recorded_bytes,
+                )
             )
 
         # The legacy GCC derivation helpers are intentionally reused for their
         # schema/signature/ELF checks, but they read by pathname.  Give them a
         # private tree of stable bounded snapshots rather than the mutable
         # original paths checked above.
-        with tempfile.TemporaryDirectory(
+        temporary_directory = tempfile.TemporaryDirectory(
             prefix="gcc-function-score-manifest-"
-        ) as staging_directory:
-            staging_root = Path(staging_directory)
+        )
+        try:
+            staging_root = Path(temporary_directory.name)
             staged_source = staging_root / source_path.relative_to(directory)
             staged_build = staging_root / build_path.relative_to(directory)
             _stage_payload(staged_source, source_payload, "source lock")
@@ -384,15 +420,25 @@ def _verify_artifact_manifest_binding(
                     expected_bytes=expected_evidence_bytes,
                 )
 
-            for artifact_path, label, recorded_bytes in artifact_sources:
+            staged_artifacts: dict[str, Path] = {}
+            artifact_source_paths: dict[str, Path] = {}
+            for (
+                manifest_name,
+                artifact_source,
+                artifact_path,
+                label,
+                recorded_bytes,
+            ) in artifact_sources:
                 staged_artifact = staging_root / artifact_path.relative_to(directory)
                 _stage_bounded_regular_snapshot(
-                    artifact_path,
+                    artifact_source,
                     staged_artifact,
                     label,
                     MAX_ARTIFACT_BYTES,
                     expected_bytes=recorded_bytes,
                 )
+                staged_artifacts[manifest_name] = staged_artifact
+                artifact_source_paths[manifest_name] = artifact_source
 
             expected = _assemble_manifest(
                 staging_root,
@@ -401,7 +447,10 @@ def _verify_artifact_manifest_binding(
                 staged_build,
                 build_record["path"],
             )
-        _compare_exact(manifest, expected, "artifact manifest")
+            _compare_exact(manifest, expected, "artifact manifest")
+        except BaseException:
+            temporary_directory.cleanup()
+            raise
     except ScoringError:
         raise
     except MemoryError as error:
@@ -418,33 +467,74 @@ def _verify_artifact_manifest_binding(
     ) as error:
         raise ScoringError(f"artifact manifest verification failed: {error}") from error
 
-    manifest_hashes = {
-        "rich": manifest["artifacts"]["full"]["sha256"],
-        "stripped": manifest["artifacts"]["stripped"]["sha256"],
-    }
-    if oracle.identifier != manifest["oracle"]["id"]:
+    return _VerifiedArtifactManifestSnapshot(
+        manifest_payload=manifest_payload,
+        manifest=manifest,
+        artifact_paths={
+            "rich": staged_artifacts["full"],
+            "stripped": staged_artifacts["stripped"],
+        },
+        artifact_source_paths={
+            "rich": artifact_source_paths["full"],
+            "stripped": artifact_source_paths["stripped"],
+        },
+        dependency_source_paths=(
+            source_path,
+            build_path,
+            *(item[0] for item in evidence_sources),
+            *(path for path in artifact_source_paths.values()),
+        ),
+        temporary_directory=temporary_directory,
+    )
+
+
+def _verify_artifact_manifest_binding(
+    oracle: FunctionOracle,
+    artifact_manifest_path: Path | None,
+) -> _ScoringContext:
+    if oracle.scope == "fixture":
+        if artifact_manifest_path is not None:
+            raise ScoringError(
+                "fixture scoring may not claim an artifact-manifest binding"
+            )
+        return _fixture_context()
+    if artifact_manifest_path is None:
         raise ScoringError(
-            "function-oracle id does not match the artifact manifest oracle id"
+            "production scoring requires the bound --artifact-manifest"
         )
-    for twin in _TWIN_NAMES:
-        if oracle.artifacts[twin].input_sha256 != manifest_hashes[twin]:
+    assert oracle.artifact_manifest_sha256 is not None
+    with _verified_artifact_manifest_snapshot(
+        artifact_manifest_path,
+        expected_sha256=oracle.artifact_manifest_sha256,
+    ) as snapshot:
+        manifest = snapshot.manifest
+        manifest_hashes = {
+            "rich": manifest["artifacts"]["full"]["sha256"],
+            "stripped": manifest["artifacts"]["stripped"]["sha256"],
+        }
+        if oracle.identifier != manifest["oracle"]["id"]:
             raise ScoringError(
-                f"{twin} function-oracle artifact hash does not match artifact manifest"
+                "function-oracle id does not match the artifact manifest oracle id"
             )
-        observed_metadata = _artifact_metadata_from_manifest(manifest, twin)
-        recorded_metadata = oracle.artifacts[twin]
-        if recorded_metadata.elf_type != observed_metadata.elf_type:
-            raise ScoringError(
-                f"{twin} function-oracle ELF type does not match artifact manifest"
-            )
-        if recorded_metadata.elf_image_base != observed_metadata.elf_image_base:
-            raise ScoringError(
-                f"{twin} function-oracle ELF image base does not match artifact manifest"
-            )
-        if recorded_metadata.executable_ranges != observed_metadata.executable_ranges:
-            raise ScoringError(
-                f"{twin} function-oracle executable ranges do not match artifact manifest"
-            )
+        for twin in _TWIN_NAMES:
+            if oracle.artifacts[twin].input_sha256 != manifest_hashes[twin]:
+                raise ScoringError(
+                    f"{twin} function-oracle artifact hash does not match artifact manifest"
+                )
+            observed_metadata = _artifact_metadata_from_manifest(manifest, twin)
+            recorded_metadata = oracle.artifacts[twin]
+            if recorded_metadata.elf_type != observed_metadata.elf_type:
+                raise ScoringError(
+                    f"{twin} function-oracle ELF type does not match artifact manifest"
+                )
+            if recorded_metadata.elf_image_base != observed_metadata.elf_image_base:
+                raise ScoringError(
+                    f"{twin} function-oracle ELF image base does not match artifact manifest"
+                )
+            if recorded_metadata.executable_ranges != observed_metadata.executable_ranges:
+                raise ScoringError(
+                    f"{twin} function-oracle executable ranges do not match artifact manifest"
+                )
     return _artifact_verified_unattested_model_context()
 
 

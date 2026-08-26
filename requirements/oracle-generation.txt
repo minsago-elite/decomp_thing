@@ -1,0 +1,3 @@
+# Generation-only dependencies. Scoring checked-in oracle JSON uses stdlib only.
+pyelftools==0.33
+fastjsonschema==2.22.2

@@ -771,11 +771,21 @@ def load_function_oracle(path: Path) -> FunctionOracle:
     )
 
 
-def _string_array(value: Any, path: str) -> None:
+def _string_array(
+    value: Any,
+    path: str,
+    *,
+    maximum_characters: int = MAX_IDENTIFIER_CHARACTERS,
+) -> None:
     for index, item in enumerate(
         _array(value, path, maximum=MAX_MODEL_REFERENCES_PER_FUNCTION)
     ):
-        _string(item, f"{path}[{index}]", allow_empty=True, maximum=4096)
+        _string(
+            item,
+            f"{path}[{index}]",
+            allow_empty=True,
+            maximum=maximum_characters,
+        )
 
 
 def load_program_model(
@@ -886,7 +896,11 @@ def load_program_model(
             raise ScoringError(f"{item_path}.status has an invalid value")
         _string_array(item["calls"], f"{item_path}.calls")
         _string_array(item["referencedGlobals"], f"{item_path}.referencedGlobals")
-        _string_array(item["strings"], f"{item_path}.strings")
+        _string_array(
+            item["strings"],
+            f"{item_path}.strings",
+            maximum_characters=MAX_TEXT_CHARACTERS,
+        )
         if item["decompiledC"] is not None:
             _string(
                 item["decompiledC"],
@@ -1288,10 +1302,19 @@ def _assignment_edge_detail(
     }
 
 
-def _bounded_json_string_estimate(value: str) -> int:
-    # ``ensure_ascii=True`` can render one non-BMP code point as two six-byte
-    # surrogate escapes.  The bound intentionally includes quotes.
-    return 2 + 12 * len(value)
+def _json_string_encoded_size(value: str) -> int:
+    """Count exact ``ensure_ascii=True`` JSON-string bytes without allocating."""
+
+    size = 2  # surrounding quotes
+    for character in value:
+        codepoint = ord(character)
+        if character in {'"', "\\"} or character in "\b\f\n\r\t":
+            size += 2
+        elif codepoint < 0x20 or codepoint > 0x7E:
+            size += 12 if codepoint > 0xFFFF else 6
+        else:
+            size += 1
+    return size
 
 
 def _preflight_report_projection(
@@ -1302,25 +1325,25 @@ def _preflight_report_projection(
 
     estimated = 64 * 1024
     for function in oracle.functions:
-        estimated += 512 + _bounded_json_string_estimate(function.identifier)
+        estimated += 512 + _json_string_encoded_size(function.identifier)
         appearances = 2 if function.exclusion is None else 1
         if function.exclusion is not None:
-            estimated += _bounded_json_string_estimate(function.exclusion.reason)
+            estimated += _json_string_encoded_size(function.exclusion.reason)
             if function.exclusion.kind == "compiler-generated":
                 # An exact excluded recovery can repeat the id and reason once
                 # in each twin's ignored-recovery detail.
                 estimated += 2 * (
                     128
-                    + _bounded_json_string_estimate(function.identifier)
-                    + _bounded_json_string_estimate(function.exclusion.reason)
+                    + _json_string_encoded_size(function.identifier)
+                    + _json_string_encoded_size(function.exclusion.reason)
                 )
         for alias in function.aliases:
-            alias_bytes = 256 + _bounded_json_string_estimate(alias.name)
+            alias_bytes = 256 + _json_string_encoded_size(alias.name)
             for fact in alias.evidence:
                 alias_bytes += (
                     128
-                    + _bounded_json_string_estimate(fact.kind)
-                    + _bounded_json_string_estimate(fact.locator)
+                    + _json_string_encoded_size(fact.kind)
+                    + _json_string_encoded_size(fact.locator)
                 )
             estimated += appearances * alias_bytes
         if estimated > MAX_REPORT_BYTES:
@@ -1332,8 +1355,8 @@ def _preflight_report_projection(
         for recovered_function in recovered_twins[twin].functions:
             estimated += (
                 512
-                + _bounded_json_string_estimate(recovered_function.identifier)
-                + _bounded_json_string_estimate(recovered_function.name)
+                + _json_string_encoded_size(recovered_function.identifier)
+                + _json_string_encoded_size(recovered_function.name)
             )
             if estimated > MAX_REPORT_BYTES:
                 raise ScoringError(
@@ -1352,8 +1375,8 @@ def _charge_ambiguity_projection(
     for oracle_function, recovered_function in alternative_edges:
         report_projection[0] += (
             512
-            + _bounded_json_string_estimate(oracle_function.identifier)
-            + _bounded_json_string_estimate(recovered_function.identifier)
+            + _json_string_encoded_size(oracle_function.identifier)
+            + _json_string_encoded_size(recovered_function.identifier)
         )
         if report_projection[0] > MAX_REPORT_BYTES:
             raise ScoringError(
