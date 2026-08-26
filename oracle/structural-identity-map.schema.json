@@ -1,0 +1,101 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://github.com/minsago-elite/decomp_thing/oracle/structural-identity-map.schema.json",
+  "title": "Independently verified structural entity identity map",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schemaVersion", "scope", "map", "mappings", "attestation"],
+  "properties": {
+    "schemaVersion": {"const": 1},
+    "scope": {"enum": ["fixture", "production"]},
+    "map": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["id", "oracleId", "oracleSha256", "recoveredModelId"],
+      "properties": {
+        "id": {"$ref": "#/$defs/identifier"},
+        "oracleId": {"$ref": "#/$defs/identifier"},
+        "oracleSha256": {"$ref": "#/$defs/sha256"},
+        "recoveredModelId": {"$ref": "#/$defs/identifier"}
+      }
+    },
+    "mappings": {
+      "type": "array",
+      "maxItems": 100000,
+      "items": {"$ref": "#/$defs/mapping"}
+    },
+    "attestation": {"$ref": "#/$defs/attestation"}
+  },
+  "allOf": [
+    {
+      "if": {"required": ["scope"], "properties": {"scope": {"const": "fixture"}}},
+      "then": {"properties": {"attestation": {"properties": {"kind": {"const": "fixture-digest"}}}}}
+    },
+    {
+      "if": {"required": ["scope"], "properties": {"scope": {"const": "production"}}},
+      "then": {"properties": {"attestation": {"properties": {"kind": {"const": "adapter-replay"}}}}}
+    }
+  ],
+  "$defs": {
+    "identifier": {"type": "string", "minLength": 1, "maxLength": 4096, "pattern": "^[A-Za-z0-9][A-Za-z0-9._:/@+\\-]*$"},
+    "sha256": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
+    "mappingEvidence": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["kind", "oracleLocator", "recoveredLocator", "verifier"],
+      "properties": {
+        "kind": {"type": "string", "minLength": 1, "maxLength": 128},
+        "oracleLocator": {"type": "string", "minLength": 1, "maxLength": 16384},
+        "recoveredLocator": {"type": "string", "minLength": 1, "maxLength": 16384},
+        "verifier": {"type": "string", "minLength": 1, "maxLength": 16384}
+      }
+    },
+    "mapping": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["kind", "oracleId", "recoveredId", "evidence"],
+      "properties": {
+        "kind": {"enum": ["global", "type"]},
+        "oracleId": {"$ref": "#/$defs/identifier"},
+        "recoveredId": {"$ref": "#/$defs/identifier"},
+        "evidence": {
+          "type": "array",
+          "minItems": 1,
+          "maxItems": 32,
+          "items": {"$ref": "#/$defs/mappingEvidence"}
+        }
+      }
+    },
+    "attestation": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["kind", "payloadSha256", "evidenceSha256", "verifier"],
+      "properties": {
+        "kind": {"enum": ["fixture-digest", "adapter-replay"]},
+        "payloadSha256": {"$ref": "#/$defs/sha256"},
+        "evidenceSha256": {
+          "oneOf": [{"$ref": "#/$defs/sha256"}, {"type": "null"}]
+        },
+        "verifier": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["id", "version"],
+          "properties": {
+            "id": {"$ref": "#/$defs/identifier"},
+            "version": {"$ref": "#/$defs/identifier"}
+          }
+        }
+      },
+      "allOf": [
+        {
+          "if": {"properties": {"kind": {"const": "fixture-digest"}}},
+          "then": {"properties": {"evidenceSha256": {"type": "null"}}}
+        },
+        {
+          "if": {"properties": {"kind": {"const": "adapter-replay"}}},
+          "then": {"properties": {"evidenceSha256": {"$ref": "#/$defs/sha256"}}}
+        }
+      ]
+    }
+  }
+}

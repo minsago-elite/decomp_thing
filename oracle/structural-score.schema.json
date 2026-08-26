@@ -1,0 +1,609 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://github.com/minsago-elite/decomp_thing/oracle/structural-score.schema.json",
+  "title": "Deterministic structural recovery score report",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schemaVersion",
+    "oracle",
+    "model",
+    "targetAbi",
+    "normalizationProfile",
+    "boundaryMapping",
+    "identityMapping",
+    "policy",
+    "dimensions",
+    "aggregate",
+    "entities"
+  ],
+  "properties": {
+    "schemaVersion": {"const": 1},
+    "oracle": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["id", "scope", "sha256", "artifactManifestSha256", "boundaryOracleId"],
+      "properties": {
+        "id": {"$ref": "#/$defs/identifier"},
+        "scope": {"enum": ["fixture", "production"]},
+        "sha256": {"$ref": "#/$defs/sha256"},
+        "artifactManifestSha256": {
+          "oneOf": [{"$ref": "#/$defs/sha256"}, {"type": "null"}]
+        },
+        "boundaryOracleId": {"$ref": "#/$defs/identifier"}
+      }
+    },
+    "model": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["id", "scope", "sha256", "payloadSha256", "verification", "provenance"],
+      "properties": {
+        "id": {"$ref": "#/$defs/identifier"},
+        "scope": {"enum": ["fixture", "production"]},
+        "sha256": {"$ref": "#/$defs/sha256"},
+        "payloadSha256": {"$ref": "#/$defs/sha256"},
+        "verification": {"$ref": "#/$defs/verification"},
+        "provenance": {"$ref": "#/$defs/provenance"}
+      }
+    },
+    "targetAbi": {"$ref": "#/$defs/digestBinding"},
+    "normalizationProfile": {"$ref": "#/$defs/normalizationProfile"},
+    "boundaryMapping": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["scoreSha256", "twin", "projectionAdapter", "selectedFunctionCount"],
+      "properties": {
+        "scoreSha256": {"$ref": "#/$defs/sha256"},
+        "twin": {"enum": ["rich", "stripped"]},
+        "projectionAdapter": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["id", "version", "objectFormat"],
+          "properties": {
+            "id": {"const": "function-recovery-score-elf"},
+            "version": {"const": "1"},
+            "objectFormat": {"const": "ELF"}
+          }
+        },
+        "selectedFunctionCount": {"type": "integer", "minimum": 0}
+      }
+    },
+    "identityMapping": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["id", "sha256", "mappingCount", "verification", "productionVerified"],
+      "properties": {
+        "id": {"$ref": "#/$defs/identifier"},
+        "sha256": {"$ref": "#/$defs/sha256"},
+        "mappingCount": {"type": "integer", "minimum": 0},
+        "verification": {"enum": ["fixture-payload-digest-only", "adapter-replay-verified"]},
+        "productionVerified": {"type": "boolean"}
+      }
+    },
+    "policy": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["identitySelection", "abiEquivalence", "sourceNormalization", "outcomeLattice", "limits"],
+      "properties": {
+        "identitySelection": {
+          "const": "function and internal-call endpoint identities come only from the selected function-boundary report; global and type identities come only from the separately reviewed identity map; facts align by canonical dimension and slot"
+        },
+        "abiEquivalence": {
+          "const": "exact requires identical source and ABI projections; ABI-equivalent requires different source projections and identical non-null projections validated by the selected target descriptor"
+        },
+        "sourceNormalization": {
+          "const": "language-neutral tagged source projections interpreted only under the exact normalization-profile ID, version, and configuration digest; adapter-local declarations and display names are forbidden"
+        },
+        "outcomeLattice": {
+          "const": [
+            "exact",
+            "abi-equivalent",
+            "recovered-unknown",
+            "oracle-unobservable",
+            "contradicted",
+            "fabricated"
+          ]
+        },
+        "limits": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "maxJsonInputBytes",
+            "maxReportBytes",
+            "maxTotalInputBytes",
+            "maxEntities",
+            "maxFacts",
+            "maxFactsPerEntity",
+            "maxEvidencePerFact",
+            "maxMappings",
+            "maxTextCharacters",
+            "maxJsonNumberCharacters",
+            "maxTotalEntities",
+            "maxTotalFacts",
+            "maxTotalEvidence",
+            "maxReportEntries",
+            "maxProjectedReportBytes"
+          ],
+          "properties": {
+            "maxJsonInputBytes": {"const": 67108864},
+            "maxReportBytes": {"const": 134217728},
+            "maxTotalInputBytes": {"const": 201326592},
+            "maxEntities": {"const": 50000},
+            "maxFacts": {"const": 500000},
+            "maxFactsPerEntity": {"const": 20000},
+            "maxEvidencePerFact": {"const": 32},
+            "maxMappings": {"const": 100000},
+            "maxTextCharacters": {"const": 16384},
+            "maxJsonNumberCharacters": {"const": 128},
+            "maxTotalEntities": {"const": 50000},
+            "maxTotalFacts": {"const": 600000},
+            "maxTotalEvidence": {"const": 2000000},
+            "maxReportEntries": {"const": 600000},
+            "maxProjectedReportBytes": {"const": 100663296}
+          }
+        }
+      }
+    },
+    "dimensions": {
+      "type": "array",
+      "minItems": 20,
+      "maxItems": 20,
+      "items": {"$ref": "#/$defs/dimensionMetric"},
+      "allOf": [
+        {"contains": {"properties": {"dimension": {"const": "function.prototype"}}}},
+        {"contains": {"properties": {"dimension": {"const": "function.calling-convention"}}}},
+        {"contains": {"properties": {"dimension": {"const": "function.variadic"}}}},
+        {"contains": {"properties": {"dimension": {"const": "function.parameter-abi-class"}}}},
+        {"contains": {"properties": {"dimension": {"const": "function.return-abi-class"}}}},
+        {"contains": {"properties": {"dimension": {"const": "call.internal"}}}},
+        {"contains": {"properties": {"dimension": {"const": "call.external"}}}},
+        {"contains": {"properties": {"dimension": {"const": "call.indirect"}}}},
+        {"contains": {"properties": {"dimension": {"const": "global.reference"}}}},
+        {"contains": {"properties": {"dimension": {"const": "global.storage"}}}},
+        {"contains": {"properties": {"dimension": {"const": "global.linkage"}}}},
+        {"contains": {"properties": {"dimension": {"const": "global.type"}}}},
+        {"contains": {"properties": {"dimension": {"const": "type.aggregate.kind"}}}},
+        {"contains": {"properties": {"dimension": {"const": "type.aggregate.size-bits"}}}},
+        {"contains": {"properties": {"dimension": {"const": "type.aggregate.alignment-bits"}}}},
+        {"contains": {"properties": {"dimension": {"const": "type.aggregate.member-offset-bits"}}}},
+        {"contains": {"properties": {"dimension": {"const": "type.aggregate.member-type"}}}},
+        {"contains": {"properties": {"dimension": {"const": "type.enum.underlying-abi-class"}}}},
+        {"contains": {"properties": {"dimension": {"const": "type.enum.enumerator-value"}}}},
+        {"contains": {"properties": {"dimension": {"const": "type.typedef.target"}}}}
+      ]
+    },
+    "aggregate": {"$ref": "#/$defs/metric"},
+    "entities": {
+      "type": "array",
+      "minItems": 1,
+      "maxItems": 50000,
+      "items": {"$ref": "#/$defs/entityResult"}
+    }
+  },
+  "oneOf": [
+    {
+      "properties": {
+        "oracle": {"properties": {"scope": {"const": "fixture"}, "artifactManifestSha256": {"type": "null"}}},
+        "model": {"properties": {"scope": {"const": "fixture"}, "verification": {"$ref": "#/$defs/fixtureVerification"}}},
+        "identityMapping": {"properties": {"verification": {"const": "fixture-payload-digest-only"}, "productionVerified": {"const": false}}}
+      }
+    },
+    {
+      "properties": {
+        "oracle": {"properties": {"scope": {"const": "production"}, "artifactManifestSha256": {"$ref": "#/$defs/sha256"}}},
+        "model": {"properties": {"scope": {"const": "production"}, "verification": {"$ref": "#/$defs/productionVerification"}}},
+        "identityMapping": {"properties": {"verification": {"const": "adapter-replay-verified"}, "productionVerified": {"const": true}}}
+      }
+    }
+  ],
+  "$defs": {
+    "identifier": {"type": "string", "minLength": 1, "maxLength": 4096, "pattern": "^[A-Za-z0-9][A-Za-z0-9._:/@+\\-]*$"},
+    "sha256": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
+    "address": {"type": "string", "pattern": "^0x(?:0|[1-9a-f][0-9a-f]{0,15})$"},
+    "normalizedSourceString": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 4112,
+      "pattern": "^(?:(?:prototype|convention|type-token|type-entity|function|external|signature|global|external-storage|register):[A-Za-z0-9_][A-Za-z0-9._:/@+\\-]*|(?:static-rva|tls-offset):0x(?:0|[1-9a-f][0-9a-f]{0,15})|internal|external|weak|common|unique|none|record|overlay|variant|sequence)$"
+    },
+    "dimension": {
+      "enum": [
+        "function.prototype",
+        "function.calling-convention",
+        "function.variadic",
+        "function.parameter-abi-class",
+        "function.return-abi-class",
+        "call.internal",
+        "call.external",
+        "call.indirect",
+        "global.reference",
+        "global.storage",
+        "global.linkage",
+        "global.type",
+        "type.aggregate.kind",
+        "type.aggregate.size-bits",
+        "type.aggregate.alignment-bits",
+        "type.aggregate.member-offset-bits",
+        "type.aggregate.member-type",
+        "type.enum.underlying-abi-class",
+        "type.enum.enumerator-value",
+        "type.typedef.target"
+      ]
+    },
+    "tool": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["id", "version", "executableSha256", "configurationSha256"],
+      "properties": {
+        "id": {"$ref": "#/$defs/identifier"},
+        "version": {"$ref": "#/$defs/identifier"},
+        "executableSha256": {"$ref": "#/$defs/sha256"},
+        "configurationSha256": {"$ref": "#/$defs/sha256"}
+      }
+    },
+    "digestBinding": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["id", "sha256"],
+      "properties": {
+        "id": {"$ref": "#/$defs/identifier"},
+        "sha256": {"$ref": "#/$defs/sha256"}
+      }
+    },
+    "normalizationProfile": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["id", "version", "configurationSha256"],
+      "properties": {
+        "id": {"const": "structural-source-normalization"},
+        "version": {"const": "1"},
+        "configurationSha256": {"const": "4385f86a45a39e55a8f9f072e5563720f4775edbb53d8d4c290f9f232982ae80"}
+      }
+    },
+    "provenance": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["inputBinary", "exporter", "loader", "targetAbi", "normalizationProfile", "boundaryScore", "identityMap"],
+      "properties": {
+        "inputBinary": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["sha256", "sizeBytes"],
+          "properties": {
+            "sha256": {"$ref": "#/$defs/sha256"},
+            "sizeBytes": {"type": "integer", "minimum": 1}
+          }
+        },
+        "exporter": {"$ref": "#/$defs/tool"},
+        "loader": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["id", "version", "executableSha256", "configurationSha256", "imageBase"],
+          "properties": {
+            "id": {"$ref": "#/$defs/identifier"},
+            "version": {"$ref": "#/$defs/identifier"},
+            "executableSha256": {"$ref": "#/$defs/sha256"},
+            "configurationSha256": {"$ref": "#/$defs/sha256"},
+            "imageBase": {"$ref": "#/$defs/address"}
+          }
+        },
+        "targetAbi": {"$ref": "#/$defs/digestBinding"},
+        "normalizationProfile": {"$ref": "#/$defs/normalizationProfile"},
+        "boundaryScore": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["sha256", "twin", "projectionAdapter"],
+          "properties": {
+            "sha256": {"$ref": "#/$defs/sha256"},
+            "twin": {"enum": ["rich", "stripped"]},
+            "projectionAdapter": {"$ref": "#/$defs/adapterBinding"}
+          }
+        },
+        "identityMap": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["sha256"],
+          "properties": {"sha256": {"$ref": "#/$defs/sha256"}}
+        }
+      }
+    },
+    "adapterBinding": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["id", "version"],
+      "properties": {
+        "id": {"const": "function-recovery-score-elf"},
+        "version": {"const": "1"}
+      }
+    },
+    "verification": {
+      "oneOf": [
+        {"$ref": "#/$defs/fixtureVerification"},
+        {"$ref": "#/$defs/productionVerification"}
+      ]
+    },
+    "fixtureVerification": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "status",
+        "payloadDigestVerified",
+        "identityMapPayloadDigestVerified",
+        "adapterReplayVerified",
+        "productionVerified"
+      ],
+      "properties": {
+        "status": {"const": "fixture-digest-only"},
+        "payloadDigestVerified": {"const": true},
+        "identityMapPayloadDigestVerified": {"const": true},
+        "adapterReplayVerified": {"const": false},
+        "productionVerified": {"const": false}
+      }
+    },
+    "productionVerification": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "status",
+        "payloadDigestVerified",
+        "identityMapPayloadDigestVerified",
+        "adapterReplayVerified",
+        "productionVerified"
+      ],
+      "properties": {
+        "status": {"const": "adapter-replay-verified"},
+        "payloadDigestVerified": {"const": true},
+        "identityMapPayloadDigestVerified": {"const": true},
+        "adapterReplayVerified": {"const": true},
+        "productionVerified": {"const": true}
+      }
+    },
+    "evidence": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["kind", "locator"],
+      "properties": {
+        "kind": {"type": "string", "minLength": 1, "maxLength": 128},
+        "locator": {"type": "string", "minLength": 1, "maxLength": 16384}
+      }
+    },
+    "abi": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["callingConvention", "classes", "sizeBits", "alignmentBits", "variadic"],
+      "properties": {
+        "callingConvention": {
+          "oneOf": [
+            {"type": "string", "minLength": 1, "maxLength": 128},
+            {"type": "null"}
+          ]
+        },
+        "classes": {
+          "type": "array",
+          "maxItems": 256,
+          "items": {"type": "string", "minLength": 1, "maxLength": 128}
+        },
+        "sizeBits": {"oneOf": [{"type": "integer", "minimum": 1}, {"type": "null"}]},
+        "alignmentBits": {"oneOf": [{"type": "integer", "minimum": 1}, {"type": "null"}]},
+        "variadic": {"oneOf": [{"type": "boolean"}, {"type": "null"}]}
+      }
+    },
+    "value": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["source", "abi"],
+      "properties": {
+        "source": {
+          "oneOf": [
+            {"$ref": "#/$defs/normalizedSourceString"},
+            {"type": "integer"},
+            {"type": "boolean"}
+          ]
+        },
+        "abi": {"oneOf": [{"$ref": "#/$defs/abi"}, {"type": "null"}]}
+      }
+    },
+    "outcomes": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "exact",
+        "abi-equivalent",
+        "recovered-unknown",
+        "oracle-unobservable",
+        "contradicted",
+        "fabricated"
+      ],
+      "properties": {
+        "exact": {"type": "integer", "minimum": 0},
+        "abi-equivalent": {"type": "integer", "minimum": 0},
+        "recovered-unknown": {"type": "integer", "minimum": 0},
+        "oracle-unobservable": {"type": "integer", "minimum": 0},
+        "contradicted": {"type": "integer", "minimum": 0},
+        "fabricated": {"type": "integer", "minimum": 0}
+      }
+    },
+    "ratio": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["numerator", "denominator", "value"],
+      "properties": {
+        "numerator": {"type": "integer", "minimum": 0},
+        "denominator": {"type": "integer", "minimum": 0},
+        "value": {
+          "oneOf": [
+            {"type": "number", "minimum": 0, "maximum": 1},
+            {"type": "null"}
+          ]
+        }
+      }
+    },
+    "metric": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "oracleDenominator",
+        "recoveredDenominator",
+        "observableOracleCount",
+        "unobservableOracleCount",
+        "outcomes",
+        "credit",
+        "claimPrecision"
+      ],
+      "properties": {
+        "oracleDenominator": {"type": "integer", "minimum": 0},
+        "recoveredDenominator": {"type": "integer", "minimum": 0},
+        "observableOracleCount": {"type": "integer", "minimum": 0},
+        "unobservableOracleCount": {"type": "integer", "minimum": 0},
+        "outcomes": {"$ref": "#/$defs/outcomes"},
+        "credit": {"$ref": "#/$defs/ratio"},
+        "claimPrecision": {"$ref": "#/$defs/ratio"}
+      }
+    },
+    "dimensionMetric": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "dimension",
+        "oracleDenominator",
+        "recoveredDenominator",
+        "observableOracleCount",
+        "unobservableOracleCount",
+        "outcomes",
+        "credit",
+        "claimPrecision"
+      ],
+      "properties": {
+        "dimension": {"$ref": "#/$defs/dimension"},
+        "oracleDenominator": {"type": "integer", "minimum": 0},
+        "recoveredDenominator": {"type": "integer", "minimum": 0},
+        "observableOracleCount": {"type": "integer", "minimum": 0},
+        "unobservableOracleCount": {"type": "integer", "minimum": 0},
+        "outcomes": {"$ref": "#/$defs/outcomes"},
+        "credit": {"$ref": "#/$defs/ratio"},
+        "claimPrecision": {"$ref": "#/$defs/ratio"}
+      }
+    },
+    "factResult": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "dimension",
+        "slot",
+        "oracleFactId",
+        "recoveredFactId",
+        "outcome",
+        "oracleValue",
+        "recoveredValue",
+        "normalizedRecoveredValue",
+        "referenceMappingVerified",
+        "oracleEvidence",
+        "recoveredEvidence"
+      ],
+      "properties": {
+        "dimension": {"$ref": "#/$defs/dimension"},
+        "slot": {"$ref": "#/$defs/identifier"},
+        "oracleFactId": {
+          "oneOf": [{"$ref": "#/$defs/identifier"}, {"type": "null"}]
+        },
+        "recoveredFactId": {
+          "oneOf": [{"$ref": "#/$defs/identifier"}, {"type": "null"}]
+        },
+        "outcome": {
+          "enum": [
+            "exact",
+            "abi-equivalent",
+            "recovered-unknown",
+            "oracle-unobservable",
+            "contradicted",
+            "fabricated"
+          ]
+        },
+        "oracleValue": {"oneOf": [{"$ref": "#/$defs/value"}, {"type": "null"}]},
+        "recoveredValue": {"oneOf": [{"$ref": "#/$defs/value"}, {"type": "null"}]},
+        "normalizedRecoveredValue": {
+          "oneOf": [{"$ref": "#/$defs/value"}, {"type": "null"}]
+        },
+        "referenceMappingVerified": {
+          "oneOf": [{"type": "boolean"}, {"type": "null"}]
+        },
+        "oracleEvidence": {
+          "type": "array",
+          "maxItems": 32,
+          "items": {"$ref": "#/$defs/evidence"}
+        },
+        "recoveredEvidence": {
+          "type": "array",
+          "maxItems": 32,
+          "items": {"$ref": "#/$defs/evidence"}
+        }
+      },
+      "allOf": [
+        {
+          "if": {"required": ["outcome"], "properties": {"outcome": {"enum": ["exact", "abi-equivalent", "contradicted"]}}},
+          "then": {"properties": {
+            "oracleFactId": {"$ref": "#/$defs/identifier"},
+            "recoveredFactId": {"$ref": "#/$defs/identifier"},
+            "oracleValue": {"$ref": "#/$defs/value"},
+            "recoveredValue": {"$ref": "#/$defs/value"},
+            "normalizedRecoveredValue": {"$ref": "#/$defs/value"}
+          }}
+        },
+        {
+          "if": {"required": ["outcome"], "properties": {"outcome": {"const": "recovered-unknown"}}},
+          "then": {"properties": {
+            "oracleFactId": {"$ref": "#/$defs/identifier"},
+            "oracleValue": {"$ref": "#/$defs/value"},
+            "recoveredValue": {"type": "null"},
+            "normalizedRecoveredValue": {"type": "null"},
+            "referenceMappingVerified": {"type": "null"}
+          }}
+        },
+        {
+          "if": {"required": ["outcome"], "properties": {"outcome": {"const": "oracle-unobservable"}}},
+          "then": {"properties": {
+            "oracleFactId": {"$ref": "#/$defs/identifier"},
+            "oracleValue": {"type": "null"},
+            "normalizedRecoveredValue": {"type": "null"},
+            "referenceMappingVerified": {"type": "null"}
+          }}
+        },
+        {
+          "if": {"required": ["outcome"], "properties": {"outcome": {"const": "fabricated"}}},
+          "then": {"properties": {
+            "oracleFactId": {"type": "null"},
+            "oracleValue": {"type": "null"},
+            "recoveredFactId": {"$ref": "#/$defs/identifier"},
+            "normalizedRecoveredValue": {"type": "null"},
+            "referenceMappingVerified": {"type": "null"}
+          }}
+        }
+      ]
+    },
+    "entityResult": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["kind", "oracleId", "recoveredId", "metric", "facts"],
+      "properties": {
+        "kind": {"enum": ["function", "global", "type"]},
+        "oracleId": {
+          "oneOf": [{"$ref": "#/$defs/identifier"}, {"type": "null"}]
+        },
+        "recoveredId": {
+          "oneOf": [{"$ref": "#/$defs/identifier"}, {"type": "null"}]
+        },
+        "metric": {"$ref": "#/$defs/metric"},
+        "facts": {
+          "type": "array",
+          "minItems": 1,
+          "maxItems": 20000,
+          "items": {"$ref": "#/$defs/factResult"}
+        }
+      },
+      "anyOf": [
+        {"properties": {"oracleId": {"$ref": "#/$defs/identifier"}}},
+        {"properties": {"recoveredId": {"$ref": "#/$defs/identifier"}}}
+      ]
+    }
+  }
+}

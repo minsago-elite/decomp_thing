@@ -1,0 +1,371 @@
+{
+  "schemaVersion": 1,
+  "scope": "fixture",
+  "oracle": {
+    "id": "neutral-structural-fixture-v1",
+    "producer": {
+      "id": "fixture-debug-normalizer",
+      "version": "1",
+      "executableSha256": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "configurationSha256": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+    },
+    "artifactManifestSha256": null,
+    "boundaryOracle": {
+      "id": "fixture-function-recovery-v1",
+      "artifactManifestSha256": null
+    }
+  },
+  "artifact": {
+    "id": "neutral-rich-artifact",
+    "inputSha256": "1111111111111111111111111111111111111111111111111111111111111111",
+    "sizeBytes": 4096,
+    "imageBase": "0x400000"
+  },
+  "targetAbi": {
+    "id": "sysv-amd64-elf-v1",
+    "sha256": "d251d5e6a0edc17655c355fb8fd757d557f064a6e67095ad53c8ca1e7569a343"
+  },
+  "normalizationProfile": {
+    "id": "structural-source-normalization",
+    "version": "1",
+    "configurationSha256": "4385f86a45a39e55a8f9f072e5563720f4775edbb53d8d4c290f9f232982ae80"
+  },
+  "entities": [
+    {
+      "kind": "function",
+      "id": "die-cu0-10-alpha",
+      "facts": [
+        {
+          "id": "truth-interface-prototype",
+          "slot": "prototype",
+          "dimension": "function.prototype",
+          "observability": "observable",
+          "value": {"source": "prototype:signed-i32-from-signed-i32", "abi": null},
+          "evidence": [{"kind": "debug-info", "locator": "unit:0;entry:0x10;attribute:type"}]
+        },
+        {
+          "id": "truth-interface-convention",
+          "slot": "calling-convention",
+          "dimension": "function.calling-convention",
+          "observability": "observable",
+          "value": {
+            "source": "convention:sysv",
+            "abi": {
+              "callingConvention": "sysv-amd64",
+              "classes": [],
+              "sizeBits": null,
+              "alignmentBits": null,
+              "variadic": null
+            }
+          },
+          "evidence": [{"kind": "target-rule", "locator": "default-convention:unit:0;entry:0x10"}]
+        },
+        {
+          "id": "truth-interface-variadic",
+          "slot": "variadic",
+          "dimension": "function.variadic",
+          "observability": "observable",
+          "value": {
+            "source": false,
+            "abi": {
+              "callingConvention": null,
+              "classes": [],
+              "sizeBits": null,
+              "alignmentBits": null,
+              "variadic": false
+            }
+          },
+          "evidence": [{"kind": "debug-info", "locator": "unit:0;entry:0x10;children"}]
+        },
+        {
+          "id": "truth-interface-parameter-0",
+          "slot": "parameter:0",
+          "dimension": "function.parameter-abi-class",
+          "observability": "observable",
+          "value": {
+            "source": "type-token:signed-i32",
+            "abi": {
+              "callingConvention": null,
+              "classes": ["INTEGER"],
+              "sizeBits": 32,
+              "alignmentBits": 32,
+              "variadic": null
+            }
+          },
+          "evidence": [{"kind": "debug-info", "locator": "unit:0;entry:0x11"}]
+        },
+        {
+          "id": "truth-interface-return",
+          "slot": "return",
+          "dimension": "function.return-abi-class",
+          "observability": "observable",
+          "value": {
+            "source": "type-token:signed-i32",
+            "abi": {
+              "callingConvention": null,
+              "classes": ["INTEGER"],
+              "sizeBits": 32,
+              "alignmentBits": 32,
+              "variadic": null
+            }
+          },
+          "evidence": [{"kind": "debug-info", "locator": "unit:0;entry:0x10;return"}]
+        },
+        {
+          "id": "truth-call-internal",
+          "slot": "call:0x110:internal",
+          "dimension": "call.internal",
+          "observability": "observable",
+          "value": {"source": "function:die-cu0-20-beta", "abi": null},
+          "evidence": [{"kind": "instruction", "locator": "rva:0x110"}]
+        },
+        {
+          "id": "truth-call-external",
+          "slot": "call:0x118:external",
+          "dimension": "call.external",
+          "observability": "observable",
+          "value": {"source": "external:runtime.write", "abi": null},
+          "evidence": [{"kind": "relocation", "locator": "rva:0x118"}]
+        },
+        {
+          "id": "truth-call-indirect",
+          "slot": "call:0x120:indirect",
+          "dimension": "call.indirect",
+          "observability": "observable",
+          "value": {"source": "signature:integer-to-integer", "abi": null},
+          "evidence": [{"kind": "instruction", "locator": "rva:0x120"}]
+        },
+        {
+          "id": "truth-global-reference",
+          "slot": "global-ref:0x128",
+          "dimension": "global.reference",
+          "observability": "observable",
+          "value": {"source": "global:global.counter", "abi": null},
+          "evidence": [{"kind": "relocation", "locator": "rva:0x128"}]
+        }
+      ]
+    },
+    {
+      "kind": "function",
+      "id": "die-cu0-20-beta",
+      "facts": [
+        {
+          "id": "truth-unobservable-prototype",
+          "slot": "prototype",
+          "dimension": "function.prototype",
+          "observability": "oracle-unobservable",
+          "value": null,
+          "evidence": [{"kind": "oracle-limit", "locator": "entry:0x20;declaration-not-emitted"}]
+        }
+      ]
+    },
+    {
+      "kind": "function",
+      "id": "die-cu0-30-gamma",
+      "facts": [
+        {
+          "id": "truth-gamma-prototype",
+          "slot": "prototype",
+          "dimension": "function.prototype",
+          "observability": "observable",
+          "value": {"source": "prototype:void-from-void", "abi": null},
+          "evidence": [{"kind": "debug-info", "locator": "unit:0;entry:0x30;attribute:type"}]
+        }
+      ]
+    },
+    {
+      "kind": "function",
+      "id": "die-cu0-40-delta",
+      "facts": [
+        {
+          "id": "truth-missing-prototype",
+          "slot": "prototype",
+          "dimension": "function.prototype",
+          "observability": "observable",
+          "value": {"source": "prototype:void-from-void", "abi": null},
+          "evidence": [{"kind": "debug-info", "locator": "unit:0;entry:0x40;attribute:type"}]
+        }
+      ]
+    },
+    {
+      "kind": "function",
+      "id": "die-cu0-50-epsilon",
+      "facts": [
+        {
+          "id": "truth-epsilon-prototype",
+          "slot": "prototype",
+          "dimension": "function.prototype",
+          "observability": "observable",
+          "value": {"source": "prototype:void-from-void", "abi": null},
+          "evidence": [{"kind": "debug-info", "locator": "unit:0;entry:0x50;attribute:type"}]
+        }
+      ]
+    },
+    {
+      "kind": "global",
+      "id": "global.counter",
+      "facts": [
+        {
+          "id": "truth-global-storage",
+          "slot": "storage",
+          "dimension": "global.storage",
+          "observability": "observable",
+          "value": {"source": "static-rva:0x900", "abi": null},
+          "evidence": [{"kind": "symbol-table", "locator": "object:rva:0x900"}]
+        },
+        {
+          "id": "truth-global-linkage",
+          "slot": "linkage",
+          "dimension": "global.linkage",
+          "observability": "observable",
+          "value": {"source": "internal", "abi": null},
+          "evidence": [{"kind": "symbol-table", "locator": "binding:local;rva:0x900"}]
+        },
+        {
+          "id": "truth-global-type",
+          "slot": "type",
+          "dimension": "global.type",
+          "observability": "observable",
+          "value": {
+            "source": "type-entity:type.s32",
+            "abi": {
+              "callingConvention": null,
+              "classes": ["INTEGER"],
+              "sizeBits": 32,
+              "alignmentBits": 32,
+              "variadic": null
+            }
+          },
+          "evidence": [{"kind": "debug-info", "locator": "unit:0;entry:0x80;type"}]
+        }
+      ]
+    },
+    {
+      "kind": "type",
+      "id": "type.s32",
+      "facts": [
+        {
+          "id": "truth-s32-typedef",
+          "slot": "typedef-target",
+          "dimension": "type.typedef.target",
+          "observability": "observable",
+          "value": {
+            "source": "type-token:signed-i32",
+            "abi": {
+              "callingConvention": null,
+              "classes": ["INTEGER"],
+              "sizeBits": 32,
+              "alignmentBits": 32,
+              "variadic": null
+            }
+          },
+          "evidence": [{"kind": "debug-info", "locator": "unit:0;entry:0x81"}]
+        }
+      ]
+    },
+    {
+      "kind": "type",
+      "id": "type.packet",
+      "facts": [
+        {
+          "id": "truth-packet-kind",
+          "slot": "aggregate-kind",
+          "dimension": "type.aggregate.kind",
+          "observability": "observable",
+          "value": {"source": "record", "abi": null},
+          "evidence": [{"kind": "debug-info", "locator": "unit:0;entry:0xa0;tag"}]
+        },
+        {
+          "id": "truth-packet-size",
+          "slot": "aggregate-size",
+          "dimension": "type.aggregate.size-bits",
+          "observability": "observable",
+          "value": {
+            "source": 128,
+            "abi": {
+              "callingConvention": null,
+              "classes": [],
+              "sizeBits": 128,
+              "alignmentBits": null,
+              "variadic": null
+            }
+          },
+          "evidence": [{"kind": "debug-info", "locator": "unit:0;entry:0xa0;byte-size"}]
+        },
+        {
+          "id": "truth-packet-alignment",
+          "slot": "aggregate-alignment",
+          "dimension": "type.aggregate.alignment-bits",
+          "observability": "observable",
+          "value": {
+            "source": 64,
+            "abi": {
+              "callingConvention": null,
+              "classes": [],
+              "sizeBits": null,
+              "alignmentBits": 64,
+              "variadic": null
+            }
+          },
+          "evidence": [{"kind": "target-rule", "locator": "unit:0;entry:0xa0;alignment"}]
+        },
+        {
+          "id": "truth-packet-member-offset",
+          "slot": "member:0:offset",
+          "dimension": "type.aggregate.member-offset-bits",
+          "observability": "observable",
+          "value": {"source": 0, "abi": null},
+          "evidence": [{"kind": "debug-info", "locator": "unit:0;entry:0xa1;location"}]
+        },
+        {
+          "id": "truth-packet-member-type",
+          "slot": "member:0:type",
+          "dimension": "type.aggregate.member-type",
+          "observability": "observable",
+          "value": {
+            "source": "type-entity:type.s32",
+            "abi": {
+              "callingConvention": null,
+              "classes": ["INTEGER"],
+              "sizeBits": 32,
+              "alignmentBits": 32,
+              "variadic": null
+            }
+          },
+          "evidence": [{"kind": "debug-info", "locator": "unit:0;entry:0xa1;type"}]
+        }
+      ]
+    },
+    {
+      "kind": "type",
+      "id": "type.mode",
+      "facts": [
+        {
+          "id": "truth-mode-underlying",
+          "slot": "enum-underlying",
+          "dimension": "type.enum.underlying-abi-class",
+          "observability": "observable",
+          "value": {
+            "source": "type-token:unsigned-i32",
+            "abi": {
+              "callingConvention": null,
+              "classes": ["INTEGER"],
+              "sizeBits": 32,
+              "alignmentBits": 32,
+              "variadic": null
+            }
+          },
+          "evidence": [{"kind": "debug-info", "locator": "unit:0;entry:0xb0;underlying"}]
+        },
+        {
+          "id": "truth-mode-enumerator-ready",
+          "slot": "enumerator:READY",
+          "dimension": "type.enum.enumerator-value",
+          "observability": "observable",
+          "value": {"source": 7, "abi": null},
+          "evidence": [{"kind": "debug-info", "locator": "unit:0;entry:0xb1;constant"}]
+        }
+      ]
+    }
+  ]
+}

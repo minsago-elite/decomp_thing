@@ -1,0 +1,73 @@
+{
+  "schemaVersion": 1,
+  "scope": "fixture",
+  "map": {
+    "id": "neutral-structural-fixture-map-v1",
+    "oracleId": "neutral-structural-fixture-v1",
+    "oracleSha256": "9a479186e5d0595a0820e399e2d789f2a108497f0089f4b64e8247e3fbfa129d",
+    "recoveredModelId": "neutral-recovered-structure-v1"
+  },
+  "mappings": [
+    {
+      "kind": "global",
+      "oracleId": "global.counter",
+      "recoveredId": "recovered.global.900",
+      "evidence": [
+        {
+          "kind": "storage-rva",
+          "oracleLocator": "rva:0x900",
+          "recoveredLocator": "rva:0x900",
+          "verifier": "fixture exact-RVA review"
+        }
+      ]
+    },
+    {
+      "kind": "type",
+      "oracleId": "type.mode",
+      "recoveredId": "recovered.type.mode",
+      "evidence": [
+        {
+          "kind": "reviewed-layout-pair",
+          "oracleLocator": "unit:0;entry:0xb0",
+          "recoveredLocator": "type-index:12",
+          "verifier": "fixture independent type-map review"
+        }
+      ]
+    },
+    {
+      "kind": "type",
+      "oracleId": "type.packet",
+      "recoveredId": "recovered.type.packet",
+      "evidence": [
+        {
+          "kind": "reviewed-layout-pair",
+          "oracleLocator": "unit:0;entry:0xa0",
+          "recoveredLocator": "type-index:11",
+          "verifier": "fixture independent type-map review"
+        }
+      ]
+    },
+    {
+      "kind": "type",
+      "oracleId": "type.s32",
+      "recoveredId": "recovered.type.i32",
+      "evidence": [
+        {
+          "kind": "reviewed-layout-pair",
+          "oracleLocator": "unit:0;entry:0x81",
+          "recoveredLocator": "type-index:10",
+          "verifier": "fixture independent type-map review"
+        }
+      ]
+    }
+  ],
+  "attestation": {
+    "kind": "fixture-digest",
+    "payloadSha256": "beb56464209ccbbc091269b7f482ad569f9779a74403bbb4d459973fd538d5bb",
+    "evidenceSha256": null,
+    "verifier": {
+      "id": "fixture-review-receipt",
+      "version": "1"
+    }
+  }
+}

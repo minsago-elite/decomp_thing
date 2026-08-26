@@ -1,0 +1,240 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://github.com/minsago-elite/decomp_thing/oracle/structural-oracle.schema.json",
+  "title": "Program-neutral structural recovery oracle",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schemaVersion", "scope", "oracle", "artifact", "targetAbi", "normalizationProfile", "entities"],
+  "properties": {
+    "schemaVersion": {"const": 1},
+    "scope": {"enum": ["fixture", "production"]},
+    "oracle": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["id", "producer", "artifactManifestSha256", "boundaryOracle"],
+      "properties": {
+        "id": {"$ref": "#/$defs/identifier"},
+        "producer": {"$ref": "#/$defs/tool"},
+        "artifactManifestSha256": {
+          "oneOf": [{"$ref": "#/$defs/sha256"}, {"type": "null"}]
+        },
+        "boundaryOracle": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["id", "artifactManifestSha256"],
+          "properties": {
+            "id": {"$ref": "#/$defs/identifier"},
+            "artifactManifestSha256": {
+              "oneOf": [{"$ref": "#/$defs/sha256"}, {"type": "null"}]
+            }
+          }
+        }
+      }
+    },
+    "artifact": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["id", "inputSha256", "sizeBytes", "imageBase"],
+      "properties": {
+        "id": {"$ref": "#/$defs/identifier"},
+        "inputSha256": {"$ref": "#/$defs/sha256"},
+        "sizeBytes": {"type": "integer", "minimum": 1},
+        "imageBase": {"$ref": "#/$defs/address"}
+      }
+    },
+    "targetAbi": {"$ref": "#/$defs/targetBinding"},
+    "normalizationProfile": {"$ref": "#/$defs/normalizationProfile"},
+    "entities": {
+      "type": "array",
+      "minItems": 1,
+      "maxItems": 50000,
+      "items": {"$ref": "#/$defs/oracleEntity"}
+    }
+  },
+  "allOf": [
+    {
+      "if": {"properties": {"scope": {"const": "fixture"}}},
+      "then": {
+        "properties": {
+          "oracle": {
+            "properties": {
+              "artifactManifestSha256": {"type": "null"},
+              "boundaryOracle": {
+                "properties": {"artifactManifestSha256": {"type": "null"}}
+              }
+            }
+          }
+        }
+      }
+    },
+    {
+      "if": {"properties": {"scope": {"const": "production"}}},
+      "then": {
+        "properties": {
+          "oracle": {
+            "properties": {
+              "artifactManifestSha256": {"$ref": "#/$defs/sha256"},
+              "boundaryOracle": {
+                "properties": {"artifactManifestSha256": {"$ref": "#/$defs/sha256"}}
+              }
+            }
+          }
+        }
+      }
+    }
+  ],
+  "$defs": {
+    "identifier": {"type": "string", "minLength": 1, "maxLength": 4096, "pattern": "^[A-Za-z0-9][A-Za-z0-9._:/@+\\-]*$"},
+    "sha256": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
+    "address": {"type": "string", "pattern": "^0x(?:0|[1-9a-f][0-9a-f]{0,15})$"},
+    "normalizedSourceString": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 4112,
+      "pattern": "^(?:(?:prototype|convention|type-token|type-entity|function|external|signature|global|external-storage|register):[A-Za-z0-9_][A-Za-z0-9._:/@+\\-]*|(?:static-rva|tls-offset):0x(?:0|[1-9a-f][0-9a-f]{0,15})|internal|external|weak|common|unique|none|record|overlay|variant|sequence)$"
+    },
+    "dimension": {
+      "enum": [
+        "function.prototype",
+        "function.calling-convention",
+        "function.variadic",
+        "function.parameter-abi-class",
+        "function.return-abi-class",
+        "call.internal",
+        "call.external",
+        "call.indirect",
+        "global.reference",
+        "global.storage",
+        "global.linkage",
+        "global.type",
+        "type.aggregate.kind",
+        "type.aggregate.size-bits",
+        "type.aggregate.alignment-bits",
+        "type.aggregate.member-offset-bits",
+        "type.aggregate.member-type",
+        "type.enum.underlying-abi-class",
+        "type.enum.enumerator-value",
+        "type.typedef.target"
+      ]
+    },
+    "tool": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["id", "version", "executableSha256", "configurationSha256"],
+      "properties": {
+        "id": {"$ref": "#/$defs/identifier"},
+        "version": {"$ref": "#/$defs/identifier"},
+        "executableSha256": {"$ref": "#/$defs/sha256"},
+        "configurationSha256": {"$ref": "#/$defs/sha256"}
+      }
+    },
+    "normalizationProfile": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["id", "version", "configurationSha256"],
+      "properties": {
+        "id": {"const": "structural-source-normalization"},
+        "version": {"const": "1"},
+        "configurationSha256": {"const": "4385f86a45a39e55a8f9f072e5563720f4775edbb53d8d4c290f9f232982ae80"}
+      }
+    },
+    "targetBinding": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["id", "sha256"],
+      "properties": {
+        "id": {"$ref": "#/$defs/identifier"},
+        "sha256": {"$ref": "#/$defs/sha256"}
+      }
+    },
+    "evidence": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["kind", "locator"],
+      "properties": {
+        "kind": {"type": "string", "minLength": 1, "maxLength": 128},
+        "locator": {"type": "string", "minLength": 1, "maxLength": 16384}
+      }
+    },
+    "abi": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["callingConvention", "classes", "sizeBits", "alignmentBits", "variadic"],
+      "properties": {
+        "callingConvention": {
+          "oneOf": [
+            {"type": "string", "minLength": 1, "maxLength": 128},
+            {"type": "null"}
+          ]
+        },
+        "classes": {
+          "type": "array",
+          "maxItems": 256,
+          "items": {"type": "string", "minLength": 1, "maxLength": 128}
+        },
+        "sizeBits": {"oneOf": [{"type": "integer", "minimum": 1}, {"type": "null"}]},
+        "alignmentBits": {"oneOf": [{"type": "integer", "minimum": 1}, {"type": "null"}]},
+        "variadic": {"oneOf": [{"type": "boolean"}, {"type": "null"}]}
+      }
+    },
+    "value": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["source", "abi"],
+      "properties": {
+        "source": {
+          "oneOf": [
+            {"$ref": "#/$defs/normalizedSourceString"},
+            {"type": "integer"},
+            {"type": "boolean"}
+          ]
+        },
+        "abi": {"oneOf": [{"$ref": "#/$defs/abi"}, {"type": "null"}]}
+      }
+    },
+    "oracleFact": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["id", "slot", "dimension", "observability", "value", "evidence"],
+      "properties": {
+        "id": {"$ref": "#/$defs/identifier"},
+        "slot": {"$ref": "#/$defs/identifier"},
+        "dimension": {"$ref": "#/$defs/dimension"},
+        "observability": {"enum": ["observable", "oracle-unobservable"]},
+        "value": {"oneOf": [{"$ref": "#/$defs/value"}, {"type": "null"}]},
+        "evidence": {
+          "type": "array",
+          "minItems": 1,
+          "maxItems": 32,
+          "uniqueItems": true,
+          "items": {"$ref": "#/$defs/evidence"}
+        }
+      },
+      "allOf": [
+        {
+          "if": {"properties": {"observability": {"const": "observable"}}},
+          "then": {"properties": {"value": {"$ref": "#/$defs/value"}}}
+        },
+        {
+          "if": {"properties": {"observability": {"const": "oracle-unobservable"}}},
+          "then": {"properties": {"value": {"type": "null"}}}
+        }
+      ]
+    },
+    "oracleEntity": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["kind", "id", "facts"],
+      "properties": {
+        "kind": {"enum": ["function", "global", "type"]},
+        "id": {"$ref": "#/$defs/identifier"},
+        "facts": {
+          "type": "array",
+          "minItems": 1,
+          "maxItems": 20000,
+          "items": {"$ref": "#/$defs/oracleFact"}
+        }
+      }
+    }
+  }
+}

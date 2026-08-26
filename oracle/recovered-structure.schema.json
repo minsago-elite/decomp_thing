@@ -1,0 +1,276 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://github.com/minsago-elite/decomp_thing/oracle/recovered-structure.schema.json",
+  "title": "Authenticated recovered structural facts",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schemaVersion", "scope", "model", "provenance", "entities", "attestation"],
+  "properties": {
+    "schemaVersion": {"const": 1},
+    "scope": {"enum": ["fixture", "production"]},
+    "model": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["id"],
+      "properties": {"id": {"$ref": "#/$defs/identifier"}}
+    },
+    "provenance": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["inputBinary", "exporter", "loader", "targetAbi", "normalizationProfile", "boundaryScore", "identityMap"],
+      "properties": {
+        "inputBinary": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["sha256", "sizeBytes"],
+          "properties": {
+            "sha256": {"$ref": "#/$defs/sha256"},
+            "sizeBytes": {"type": "integer", "minimum": 1}
+          }
+        },
+        "exporter": {"$ref": "#/$defs/tool"},
+        "loader": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["id", "version", "executableSha256", "configurationSha256", "imageBase"],
+          "properties": {
+            "id": {"$ref": "#/$defs/identifier"},
+            "version": {"$ref": "#/$defs/identifier"},
+            "executableSha256": {"$ref": "#/$defs/sha256"},
+            "configurationSha256": {"$ref": "#/$defs/sha256"},
+            "imageBase": {"$ref": "#/$defs/address"}
+          }
+        },
+        "targetAbi": {"$ref": "#/$defs/digestBinding"},
+        "normalizationProfile": {"$ref": "#/$defs/normalizationProfile"},
+        "boundaryScore": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["sha256", "twin", "projectionAdapter"],
+          "properties": {
+            "sha256": {"$ref": "#/$defs/sha256"},
+            "twin": {"enum": ["rich", "stripped"]},
+            "projectionAdapter": {"$ref": "#/$defs/adapterBinding"}
+          }
+        },
+        "identityMap": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["sha256"],
+          "properties": {"sha256": {"$ref": "#/$defs/sha256"}}
+        }
+      }
+    },
+    "entities": {
+      "type": "array",
+      "minItems": 1,
+      "maxItems": 50000,
+      "items": {"$ref": "#/$defs/recoveredEntity"}
+    },
+    "attestation": {"$ref": "#/$defs/attestation"}
+  },
+  "allOf": [
+    {
+      "if": {"required": ["scope"], "properties": {"scope": {"const": "fixture"}}},
+      "then": {"properties": {"attestation": {"properties": {"kind": {"const": "fixture-digest"}}}}}
+    },
+    {
+      "if": {"required": ["scope"], "properties": {"scope": {"const": "production"}}},
+      "then": {"properties": {"attestation": {"properties": {"kind": {"const": "adapter-replay"}}}}}
+    }
+  ],
+  "$defs": {
+    "identifier": {"type": "string", "minLength": 1, "maxLength": 4096, "pattern": "^[A-Za-z0-9][A-Za-z0-9._:/@+\\-]*$"},
+    "sha256": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
+    "address": {"type": "string", "pattern": "^0x(?:0|[1-9a-f][0-9a-f]{0,15})$"},
+    "normalizedSourceString": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 4112,
+      "pattern": "^(?:(?:prototype|convention|type-token|type-entity|function|external|signature|global|external-storage|register):[A-Za-z0-9_][A-Za-z0-9._:/@+\\-]*|(?:static-rva|tls-offset):0x(?:0|[1-9a-f][0-9a-f]{0,15})|internal|external|weak|common|unique|none|record|overlay|variant|sequence)$"
+    },
+    "dimension": {
+      "enum": [
+        "function.prototype",
+        "function.calling-convention",
+        "function.variadic",
+        "function.parameter-abi-class",
+        "function.return-abi-class",
+        "call.internal",
+        "call.external",
+        "call.indirect",
+        "global.reference",
+        "global.storage",
+        "global.linkage",
+        "global.type",
+        "type.aggregate.kind",
+        "type.aggregate.size-bits",
+        "type.aggregate.alignment-bits",
+        "type.aggregate.member-offset-bits",
+        "type.aggregate.member-type",
+        "type.enum.underlying-abi-class",
+        "type.enum.enumerator-value",
+        "type.typedef.target"
+      ]
+    },
+    "tool": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["id", "version", "executableSha256", "configurationSha256"],
+      "properties": {
+        "id": {"$ref": "#/$defs/identifier"},
+        "version": {"$ref": "#/$defs/identifier"},
+        "executableSha256": {"$ref": "#/$defs/sha256"},
+        "configurationSha256": {"$ref": "#/$defs/sha256"}
+      }
+    },
+    "normalizationProfile": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["id", "version", "configurationSha256"],
+      "properties": {
+        "id": {"const": "structural-source-normalization"},
+        "version": {"const": "1"},
+        "configurationSha256": {"const": "4385f86a45a39e55a8f9f072e5563720f4775edbb53d8d4c290f9f232982ae80"}
+      }
+    },
+    "digestBinding": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["id", "sha256"],
+      "properties": {
+        "id": {"$ref": "#/$defs/identifier"},
+        "sha256": {"$ref": "#/$defs/sha256"}
+      }
+    },
+    "adapterBinding": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["id", "version"],
+      "properties": {
+        "id": {"$ref": "#/$defs/identifier"},
+        "version": {"$ref": "#/$defs/identifier"}
+      }
+    },
+    "evidence": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["kind", "locator"],
+      "properties": {
+        "kind": {"type": "string", "minLength": 1, "maxLength": 128},
+        "locator": {"type": "string", "minLength": 1, "maxLength": 16384}
+      }
+    },
+    "abi": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["callingConvention", "classes", "sizeBits", "alignmentBits", "variadic"],
+      "properties": {
+        "callingConvention": {
+          "oneOf": [
+            {"type": "string", "minLength": 1, "maxLength": 128},
+            {"type": "null"}
+          ]
+        },
+        "classes": {
+          "type": "array",
+          "maxItems": 256,
+          "items": {"type": "string", "minLength": 1, "maxLength": 128}
+        },
+        "sizeBits": {"oneOf": [{"type": "integer", "minimum": 1}, {"type": "null"}]},
+        "alignmentBits": {"oneOf": [{"type": "integer", "minimum": 1}, {"type": "null"}]},
+        "variadic": {"oneOf": [{"type": "boolean"}, {"type": "null"}]}
+      }
+    },
+    "value": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["source", "abi"],
+      "properties": {
+        "source": {
+          "oneOf": [
+            {"$ref": "#/$defs/normalizedSourceString"},
+            {"type": "integer"},
+            {"type": "boolean"}
+          ]
+        },
+        "abi": {"oneOf": [{"$ref": "#/$defs/abi"}, {"type": "null"}]}
+      }
+    },
+    "recoveredFact": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["id", "slot", "dimension", "state", "value", "evidence"],
+      "properties": {
+        "id": {"$ref": "#/$defs/identifier"},
+        "slot": {"$ref": "#/$defs/identifier"},
+        "dimension": {"$ref": "#/$defs/dimension"},
+        "state": {"enum": ["recovered", "recovered-unknown"]},
+        "value": {"oneOf": [{"$ref": "#/$defs/value"}, {"type": "null"}]},
+        "evidence": {
+          "type": "array",
+          "minItems": 1,
+          "maxItems": 32,
+          "uniqueItems": true,
+          "items": {"$ref": "#/$defs/evidence"}
+        }
+      },
+      "allOf": [
+        {
+          "if": {"properties": {"state": {"const": "recovered"}}},
+          "then": {"properties": {"value": {"$ref": "#/$defs/value"}}}
+        },
+        {
+          "if": {"properties": {"state": {"const": "recovered-unknown"}}},
+          "then": {"properties": {"value": {"type": "null"}}}
+        }
+      ]
+    },
+    "recoveredEntity": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["kind", "id", "facts"],
+      "properties": {
+        "kind": {"enum": ["function", "global", "type"]},
+        "id": {"$ref": "#/$defs/identifier"},
+        "facts": {
+          "type": "array",
+          "minItems": 1,
+          "maxItems": 20000,
+          "items": {"$ref": "#/$defs/recoveredFact"}
+        }
+      }
+    },
+    "attestation": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["kind", "payloadSha256", "evidenceSha256", "verifier"],
+      "properties": {
+        "kind": {"enum": ["fixture-digest", "adapter-replay"]},
+        "payloadSha256": {"$ref": "#/$defs/sha256"},
+        "evidenceSha256": {
+          "oneOf": [{"$ref": "#/$defs/sha256"}, {"type": "null"}]
+        },
+        "verifier": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["id", "version"],
+          "properties": {
+            "id": {"$ref": "#/$defs/identifier"},
+            "version": {"$ref": "#/$defs/identifier"}
+          }
+        }
+      },
+      "allOf": [
+        {
+          "if": {"properties": {"kind": {"const": "fixture-digest"}}},
+          "then": {"properties": {"evidenceSha256": {"type": "null"}}}
+        },
+        {
+          "if": {"properties": {"kind": {"const": "adapter-replay"}}},
+          "then": {"properties": {"evidenceSha256": {"$ref": "#/$defs/sha256"}}}
+        }
+      ]
+    }
+  }
+}

@@ -1,0 +1,406 @@
+{
+  "schemaVersion": 1,
+  "scope": "fixture",
+  "model": {
+    "id": "neutral-recovered-structure-v1"
+  },
+  "provenance": {
+    "inputBinary": {
+      "sha256": "1111111111111111111111111111111111111111111111111111111111111111",
+      "sizeBytes": 4096
+    },
+    "exporter": {
+      "id": "fixture-structure-exporter",
+      "version": "1",
+      "executableSha256": "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+      "configurationSha256": "dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd"
+    },
+    "loader": {
+      "id": "fixture-binary-loader",
+      "version": "1",
+      "executableSha256": "eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee",
+      "configurationSha256": "ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff",
+      "imageBase": "0x400000"
+    },
+    "targetAbi": {
+      "id": "sysv-amd64-elf-v1",
+      "sha256": "d251d5e6a0edc17655c355fb8fd757d557f064a6e67095ad53c8ca1e7569a343"
+    },
+    "normalizationProfile": {
+      "id": "structural-source-normalization",
+      "version": "1",
+      "configurationSha256": "4385f86a45a39e55a8f9f072e5563720f4775edbb53d8d4c290f9f232982ae80"
+    },
+    "boundaryScore": {
+      "sha256": "b05d85d9f21e704c2581b84ded3ea5442eb4695ed75e74d25778e417a5a8d593",
+      "twin": "rich",
+      "projectionAdapter": {
+        "id": "function-recovery-score-elf",
+        "version": "1"
+      }
+    },
+    "identityMap": {
+      "sha256": "836f2f29dc233c29a9da8356c7f4f8d51d0d7c80ce8c338963568f2b7ec93ae9"
+    }
+  },
+  "entities": [
+    {
+      "kind": "function",
+      "id": "fn_0000000000400010",
+      "facts": [
+        {
+          "id": "claim-interface-prototype",
+          "slot": "prototype",
+          "dimension": "function.prototype",
+          "state": "recovered",
+          "value": {"source": "prototype:signed-i32-from-signed-i32", "abi": null},
+          "evidence": [{"kind": "export", "locator": "function:fn_0000000000400010;prototype"}]
+        },
+        {
+          "id": "claim-interface-convention",
+          "slot": "calling-convention",
+          "dimension": "function.calling-convention",
+          "state": "recovered",
+          "value": {
+            "source": "convention:__cdecl",
+            "abi": {
+              "callingConvention": "sysv-amd64",
+              "classes": [],
+              "sizeBits": null,
+              "alignmentBits": null,
+              "variadic": null
+            }
+          },
+          "evidence": [{"kind": "export", "locator": "function:fn_0000000000400010;calling-convention"}]
+        },
+        {
+          "id": "claim-interface-variadic",
+          "slot": "variadic",
+          "dimension": "function.variadic",
+          "state": "recovered",
+          "value": {
+            "source": false,
+            "abi": {
+              "callingConvention": null,
+              "classes": [],
+              "sizeBits": null,
+              "alignmentBits": null,
+              "variadic": false
+            }
+          },
+          "evidence": [{"kind": "export", "locator": "function:fn_0000000000400010;variadic"}]
+        },
+        {
+          "id": "claim-interface-parameter-0",
+          "slot": "parameter:0",
+          "dimension": "function.parameter-abi-class",
+          "state": "recovered",
+          "value": {
+            "source": "type-token:int32",
+            "abi": {
+              "callingConvention": null,
+              "classes": ["INTEGER"],
+              "sizeBits": 32,
+              "alignmentBits": 32,
+              "variadic": null
+            }
+          },
+          "evidence": [{"kind": "export", "locator": "function:fn_0000000000400010;parameter:0"}]
+        },
+        {
+          "id": "claim-interface-return",
+          "slot": "return",
+          "dimension": "function.return-abi-class",
+          "state": "recovered",
+          "value": {
+            "source": "type-token:signed-i32",
+            "abi": {
+              "callingConvention": null,
+              "classes": ["INTEGER"],
+              "sizeBits": 32,
+              "alignmentBits": 32,
+              "variadic": null
+            }
+          },
+          "evidence": [{"kind": "export", "locator": "function:fn_0000000000400010;return"}]
+        },
+        {
+          "id": "claim-call-internal",
+          "slot": "call:0x110:internal",
+          "dimension": "call.internal",
+          "state": "recovered",
+          "value": {"source": "function:fn_0000000000400022", "abi": null},
+          "evidence": [{"kind": "instruction", "locator": "rva:0x110;decoded-call"}]
+        },
+        {
+          "id": "claim-call-external",
+          "slot": "call:0x118:external",
+          "dimension": "call.external",
+          "state": "recovered",
+          "value": {"source": "external:runtime.write", "abi": null},
+          "evidence": [{"kind": "relocation", "locator": "rva:0x118;resolved-import"}]
+        },
+        {
+          "id": "claim-call-indirect",
+          "slot": "call:0x120:indirect",
+          "dimension": "call.indirect",
+          "state": "recovered",
+          "value": {"source": "signature:void-to-integer", "abi": null},
+          "evidence": [{"kind": "instruction", "locator": "rva:0x120;decoded-indirect"}]
+        },
+        {
+          "id": "claim-global-reference",
+          "slot": "global-ref:0x128",
+          "dimension": "global.reference",
+          "state": "recovered",
+          "value": {"source": "global:recovered.global.900", "abi": null},
+          "evidence": [{"kind": "relocation", "locator": "rva:0x128;resolved-storage"}]
+        }
+      ]
+    },
+    {
+      "kind": "function",
+      "id": "fn_0000000000400022",
+      "facts": [
+        {
+          "id": "claim-unobservable-prototype",
+          "slot": "prototype",
+          "dimension": "function.prototype",
+          "state": "recovered",
+          "value": {"source": "prototype:u64-from-void", "abi": null},
+          "evidence": [{"kind": "export", "locator": "function:fn_0000000000400022;prototype"}]
+        }
+      ]
+    },
+    {
+      "kind": "function",
+      "id": "fn_0000000000400040",
+      "facts": [
+        {
+          "id": "claim-unknown-prototype",
+          "slot": "prototype",
+          "dimension": "function.prototype",
+          "state": "recovered-unknown",
+          "value": null,
+          "evidence": [{"kind": "export", "locator": "function:fn_0000000000400040;prototype-unavailable"}]
+        }
+      ]
+    },
+    {
+      "kind": "function",
+      "id": "fn_0000000000400050",
+      "facts": [
+        {
+          "id": "claim-epsilon-prototype",
+          "slot": "prototype",
+          "dimension": "function.prototype",
+          "state": "recovered",
+          "value": {"source": "prototype:void-from-void", "abi": null},
+          "evidence": [{"kind": "export", "locator": "function:fn_0000000000400050;prototype"}]
+        }
+      ]
+    },
+    {
+      "kind": "function",
+      "id": "fn_0000000000400080",
+      "facts": [
+        {
+          "id": "claim-extra-function-prototype",
+          "slot": "prototype",
+          "dimension": "function.prototype",
+          "state": "recovered",
+          "value": {"source": "prototype:u64-from-void", "abi": null},
+          "evidence": [{"kind": "export", "locator": "function:fn_0000000000400080;prototype"}]
+        }
+      ]
+    },
+    {
+      "kind": "global",
+      "id": "recovered.global.900",
+      "facts": [
+        {
+          "id": "claim-global-storage",
+          "slot": "storage",
+          "dimension": "global.storage",
+          "state": "recovered",
+          "value": {"source": "static-rva:0x900", "abi": null},
+          "evidence": [{"kind": "export", "locator": "global:recovered.global.900;storage"}]
+        },
+        {
+          "id": "claim-global-linkage",
+          "slot": "linkage",
+          "dimension": "global.linkage",
+          "state": "recovered",
+          "value": {"source": "external", "abi": null},
+          "evidence": [{"kind": "export", "locator": "global:recovered.global.900;linkage"}]
+        },
+        {
+          "id": "claim-global-type",
+          "slot": "type",
+          "dimension": "global.type",
+          "state": "recovered",
+          "value": {
+            "source": "type-entity:recovered.type.i32",
+            "abi": {
+              "callingConvention": null,
+              "classes": ["INTEGER"],
+              "sizeBits": 32,
+              "alignmentBits": 32,
+              "variadic": null
+            }
+          },
+          "evidence": [{"kind": "export", "locator": "global:recovered.global.900;type"}]
+        }
+      ]
+    },
+    {
+      "kind": "global",
+      "id": "recovered.global.extra",
+      "facts": [
+        {
+          "id": "claim-fabricated-storage",
+          "slot": "storage",
+          "dimension": "global.storage",
+          "state": "recovered",
+          "value": {"source": "static-rva:0x980", "abi": null},
+          "evidence": [{"kind": "export", "locator": "global:recovered.global.extra;storage"}]
+        }
+      ]
+    },
+    {
+      "kind": "type",
+      "id": "recovered.type.i32",
+      "facts": [
+        {
+          "id": "claim-s32-typedef",
+          "slot": "typedef-target",
+          "dimension": "type.typedef.target",
+          "state": "recovered",
+          "value": {
+            "source": "type-token:int32",
+            "abi": {
+              "callingConvention": null,
+              "classes": ["INTEGER"],
+              "sizeBits": 32,
+              "alignmentBits": 32,
+              "variadic": null
+            }
+          },
+          "evidence": [{"kind": "export", "locator": "type-index:10;target"}]
+        }
+      ]
+    },
+    {
+      "kind": "type",
+      "id": "recovered.type.packet",
+      "facts": [
+        {
+          "id": "claim-packet-kind",
+          "slot": "aggregate-kind",
+          "dimension": "type.aggregate.kind",
+          "state": "recovered",
+          "value": {"source": "record", "abi": null},
+          "evidence": [{"kind": "export", "locator": "type-index:11;kind"}]
+        },
+        {
+          "id": "claim-packet-size",
+          "slot": "aggregate-size",
+          "dimension": "type.aggregate.size-bits",
+          "state": "recovered",
+          "value": {
+            "source": 128,
+            "abi": {
+              "callingConvention": null,
+              "classes": [],
+              "sizeBits": 128,
+              "alignmentBits": null,
+              "variadic": null
+            }
+          },
+          "evidence": [{"kind": "export", "locator": "type-index:11;size"}]
+        },
+        {
+          "id": "claim-packet-alignment-unknown",
+          "slot": "aggregate-alignment",
+          "dimension": "type.aggregate.alignment-bits",
+          "state": "recovered-unknown",
+          "value": null,
+          "evidence": [{"kind": "export", "locator": "type-index:11;alignment-unavailable"}]
+        },
+        {
+          "id": "claim-packet-member-offset",
+          "slot": "member:0:offset",
+          "dimension": "type.aggregate.member-offset-bits",
+          "state": "recovered",
+          "value": {"source": 0, "abi": null},
+          "evidence": [{"kind": "export", "locator": "type-index:11;member:0;offset"}]
+        },
+        {
+          "id": "claim-packet-member-type",
+          "slot": "member:0:type",
+          "dimension": "type.aggregate.member-type",
+          "state": "recovered",
+          "value": {
+            "source": "type-entity:recovered.type.i32",
+            "abi": {
+              "callingConvention": null,
+              "classes": ["INTEGER"],
+              "sizeBits": 32,
+              "alignmentBits": 32,
+              "variadic": null
+            }
+          },
+          "evidence": [{"kind": "export", "locator": "type-index:11;member:0;type"}]
+        },
+        {
+          "id": "claim-packet-extra-member-offset",
+          "slot": "member:1:offset",
+          "dimension": "type.aggregate.member-offset-bits",
+          "state": "recovered",
+          "value": {"source": 64, "abi": null},
+          "evidence": [{"kind": "export", "locator": "type-index:11;member:1;offset"}]
+        }
+      ]
+    },
+    {
+      "kind": "type",
+      "id": "recovered.type.mode",
+      "facts": [
+        {
+          "id": "claim-mode-underlying",
+          "slot": "enum-underlying",
+          "dimension": "type.enum.underlying-abi-class",
+          "state": "recovered",
+          "value": {
+            "source": "type-token:uint32",
+            "abi": {
+              "callingConvention": null,
+              "classes": ["INTEGER"],
+              "sizeBits": 32,
+              "alignmentBits": 32,
+              "variadic": null
+            }
+          },
+          "evidence": [{"kind": "export", "locator": "type-index:12;underlying"}]
+        },
+        {
+          "id": "claim-mode-enumerator-ready",
+          "slot": "enumerator:READY",
+          "dimension": "type.enum.enumerator-value",
+          "state": "recovered",
+          "value": {"source": 7, "abi": null},
+          "evidence": [{"kind": "export", "locator": "type-index:12;enumerator:READY"}]
+        }
+      ]
+    }
+  ],
+  "attestation": {
+    "kind": "fixture-digest",
+    "payloadSha256": "ec4c53ce604f551e2a7505716c5ea80e529d0b63148ea93826b6f9647dcc57b5",
+    "evidenceSha256": null,
+    "verifier": {
+      "id": "fixture-export-receipt",
+      "version": "1"
+    }
+  }
+}
