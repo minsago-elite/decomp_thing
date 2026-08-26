@@ -58,9 +58,9 @@ export MODEL=...
 llm_bin_patch reconstruct ./input/program --output ./output/program-source
 ```
 
-Functions are assigned to deterministic modules before any LLM request. Each request may replace only its planned C file and is bounded by `--max-context-chars`. Without complete API configuration, the command emits recovered C where available and explicit buildable stubs otherwise; pass `--evidence-only` to request that behavior intentionally.
+Functions are assigned to deterministic modules before any LLM request. Each request may replace only its planned C file and is bounded by `--max-context-chars`. A module is accepted only when every owned function has attributable provenance and a non-placeholder definition using portable types. Failed, partial, oversized, and evidence-only results remain buildable when possible but are explicitly marked unresolved; pass `--evidence-only` to request the placeholder tree intentionally.
 
-The output includes `source-tree/` for normal editing, `source-tree.zip` for archival, and `reconstruction.json` for automation. The tree contains shared types, module headers and implementations, a parallel incremental Makefile, the whole-program recovery model, module ownership plan, unresolved entities, per-module prompt and source hashes, confidence limitations, tool versions, and build logs. `ARCHIVE_MANIFEST.sha256` verifies the archive payload.
+The output includes `source-tree/` for normal editing, `source-tree.zip` for archival, and `reconstruction.json` for automation. The tree contains shared types, module headers and implementations, a parallel incremental Makefile, the whole-program recovery model, module ownership plan, unresolved entities, per-module prompt budget, prompt hash, acceptance decision, source hash, confidence limitations, tool versions, and build logs. Checkpoints are reused only when their recorded source hash still matches, so an interrupted run preserves accepted module bytes. `ARCHIVE_MANIFEST.sha256` verifies the archive payload.
 
 ## Development
 
