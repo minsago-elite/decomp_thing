@@ -13,6 +13,7 @@ import decompengine.project.RecoveredType
 import decompengine.project.RecoveryStatus
 import decompengine.project.SourceTreeGenerator
 import decompengine.project.sha256
+import decompengine.binary.ElfMetadataReader
 import decompengine.validation.BehaviorComparator
 import decompengine.validation.ProcessInput
 import kotlinx.serialization.json.Json
@@ -48,6 +49,16 @@ class ArchivalProjectScaleIntegrationTest {
             val id = fixture["id"]!!.jsonPrimitive.content
             val source = corpus.resolve(fixture["source"]!!.jsonPrimitive.content)
             assertEquals(fixture["sourceSha256"]!!.jsonPrimitive.content, sha256(source.readBytes()))
+            fixture["binaries"]!!.jsonArray.map { it.jsonObject }.forEach { binaryEntry ->
+                val binary = corpus.resolve(binaryEntry["path"]!!.jsonPrimitive.content)
+                assertEquals(binaryEntry["sha256"]!!.jsonPrimitive.content, sha256(binary.readBytes()))
+                val metadata = ElfMetadataReader.read(binary.readBytes())
+                assertEquals("ELF64", metadata.format)
+                assertEquals("x86-64", metadata.machine)
+                val symbols = command(listOf("nm", binary.toString())).second
+                if (binaryEntry["symbols"]!!.jsonPrimitive.content == "present") assertTrue(symbols.contains(" main"))
+                else assertFalse(symbols.contains(" main"))
+            }
             val nonPie = compile(source, temp.resolve("$id-nonpie"), listOf("-O0", "-no-pie"))
             val pie = compile(source, temp.resolve("$id-pie"), listOf("-O2", "-fPIE", "-pie"))
             assertTrue(nonPie.isExecutable() && pie.isExecutable())

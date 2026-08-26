@@ -48,10 +48,12 @@ root = pathlib.Path(sys.argv[1])
 for name in ("symbols", "stripped-a"):
     model = json.loads((root / name / "analysis/reports/program_model.json").read_text())
     assert model["schemaVersion"] == 1
-    assert len(model["functions"]) >= 49
+    assert len(model["functions"]) >= 50
     assert all(item["id"].startswith("fn_") and item["address"].startswith("0x") for item in model["functions"])
     assert sum(len(item["referencedGlobals"]) for item in model["functions"]) > 0
     assert sum(len(item["strings"]) for item in model["functions"]) > 0
+    if name == "symbols":
+        assert len(model["types"]) > 0
     assert (root / name / "source-tree/build/reconstructed").is_file()
     assert (root / name / "source-tree.zip").is_file()
 PY

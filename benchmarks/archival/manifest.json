@@ -8,6 +8,10 @@
       "source": "small_cli.c",
       "sourceSha256": "9bbb580a0b6fb3c1e4403f799f1552dcdf70b49be327b42e4b092b919617dd60",
       "compilerVariants": ["gcc -O0 -no-pie", "gcc -O2 -fPIE -pie -s"],
+      "binaries": [
+        {"path":"binaries/linux-x86_64/small_cli-symbols","sha256":"58a031b2cf03f2a37944d1557eb1e2520da380ad2a97baa00063a0ab2673a779","symbols":"present","optimization":"O0","pie":false},
+        {"path":"binaries/linux-x86_64/small_cli-stripped","sha256":"0cda4b44a8017ba8f5a4b3218833059f9ba53d66eaeb3e1e237b5a39755e4d4a","symbols":"stripped","optimization":"O0","pie":false}
+      ],
       "inputSurfaces": ["argv"],
       "expectedFunctionCountMinimum": 1,
       "expectedModuleCountMinimum": 1
@@ -15,10 +19,14 @@
     {
       "id": "large_project",
       "source": "large_project.c",
-      "sourceSha256": "3981f47bff7580c68ab3c3ad2d8db0b7611ee5a6a25c86afa9ca8f1477d6882b",
+      "sourceSha256": "8e18804bf830ec6f29b283fa1dbc0aa0dcc04648816ca94937b114fa8f34e6e4",
       "compilerVariants": ["gcc -O0 -no-pie", "gcc -O2 -fPIE -pie", "strip --strip-all"],
+      "binaries": [
+        {"path":"binaries/linux-x86_64/large_project-symbols","sha256":"be1be0a42b28032e98507ecea58982204b60bfe8c82cc7eaec618daa05e1c3c4","symbols":"present","optimization":"O2","pie":true},
+        {"path":"binaries/linux-x86_64/large_project-stripped","sha256":"0c6da08bcb7ca936d20e76e816bf5bab2e94393cf5f2c7bf0a40d752c8b82bd1","symbols":"stripped","optimization":"O2","pie":true}
+      ],
       "inputSurfaces": ["argv", "stdin", "file", "libc", "shared-global-state"],
-      "expectedFunctionCountMinimum": 49,
+      "expectedFunctionCountMinimum": 50,
       "expectedModuleCountMinimum": 5
     }
   ]

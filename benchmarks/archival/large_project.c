@@ -3,6 +3,16 @@
 #include <string.h>
 
 int archive_bias = 7;
+typedef struct archive_state {
+    int adjustment;
+    unsigned runs;
+} archive_state;
+archive_state shared_archive_state = { 2, 0 };
+
+int store_state_bias(archive_state *state) {
+    state->runs++;
+    return state->adjustment;
+}
 
 #define STAGE(group, n) int group##_##n(void) { return n; }
 STAGE(parse, 0)  STAGE(parse, 1)  STAGE(parse, 2)  STAGE(parse, 3)
@@ -30,6 +40,6 @@ int main(int argc, char **argv) {
         strcpy(value, "default");
     }
     value[strcspn(value, "\r\n")] = '\0';
-    printf("%s:%d\n", value, archive_bias + parse_3() + render_4() + store_5() + util_6());
+    printf("%s:%d\n", value, archive_bias + store_state_bias(&shared_archive_state) + parse_3() + render_4() + store_5() + util_6());
     return argc > 3 ? 3 : 0;
 }

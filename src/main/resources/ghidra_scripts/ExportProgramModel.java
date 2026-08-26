@@ -87,7 +87,13 @@ public class ExportProgramModel extends GhidraScript {
         String key = type.getPathName();
         String id = String.format("type_%08x", key.hashCode());
         int length = Math.max(type.getLength(), 1);
-        String declaration = "/* Ghidra type " + key.replace("*/", "* /") + " */ typedef unsigned char recovered_" + id + "[" + length + "];";
+        String cName = type.getName().replaceAll("[^A-Za-z0-9_]", "_");
+        if (cName.isEmpty() || Character.isDigit(cName.charAt(0))) cName = "recovered_" + id;
+        String prefix = "/* Ghidra type " + key.replace("*/", "* /") + " */ ";
+        String declaration;
+        if (type instanceof Composite) declaration = prefix + "typedef struct " + cName + " { unsigned char _data[" + length + "]; } " + cName + ";";
+        else if (type instanceof Enum) declaration = prefix + "typedef int " + cName + ";";
+        else declaration = prefix + "typedef unsigned char " + cName + "[" + length + "];";
         types.putIfAbsent(id, new TypeEvidence(id, declaration, sourceAddress));
     }
 

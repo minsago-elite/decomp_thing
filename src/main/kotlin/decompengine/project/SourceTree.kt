@@ -437,13 +437,15 @@ private fun globalDeclaration(global: RecoveredGlobal, external: Boolean): Strin
     val declaration = if (array == null) "$type $name" else "${array.groupValues[1]} $name[${array.groupValues[2]}]"
     if (external) return "extern $declaration;"
     val rawInitializer = global.initializer?.trim()?.split(Regex("\\s+"), limit = 2)?.first()
+    val aggregate = array != null || !portableReturnType(type.removeSuffix(" *").trim())
     val initializer = when {
         '*' in type -> "0"
+        aggregate -> rawInitializer?.takeIf { (it.startsWith('"') && it.endsWith('"')) || (it.startsWith('{') && it.endsWith('}')) } ?: "{0}"
         rawInitializer?.matches(Regex("[0-9a-fA-F]+h")) == true -> "0x${rawInitializer.dropLast(1)}"
         else -> rawInitializer?.takeIf {
         it.matches(Regex("[-+]?(0x[0-9a-fA-F]+|0|[1-9][0-9]*)([uUlLfF]|[uU][lL])?")) ||
             (it.startsWith('"') && it.endsWith('"')) || (it.startsWith('{') && it.endsWith('}'))
-        } ?: "0"
+        } ?: if (aggregate) "{0}" else "0"
     }
     return "$declaration = $initializer;"
 }
