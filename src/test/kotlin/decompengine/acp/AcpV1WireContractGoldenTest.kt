@@ -73,8 +73,50 @@ class AcpV1WireContractGoldenTest {
     fun `sdk serializers match every versioned v1 golden message`() {
         assertExchange("initialize", AcpMethod.AgentMethods.V1.Initialize)
         assertExchange("session-new", AcpMethod.AgentMethods.V1.SessionNew)
-        assertExchange("session-prompt", AcpMethod.AgentMethods.V1.SessionPrompt)
-        assertNotification("session-update.notification", AcpMethod.ClientMethods.V1.SessionUpdate)
+        assertRequest("session-prompt.request", AcpMethod.AgentMethods.V1.SessionPrompt)
+        assertResponse(
+            "session-prompt-end-turn.response",
+            "session-prompt.request",
+            AcpMethod.AgentMethods.V1.SessionPrompt,
+        )
+        assertResponse(
+            "session-prompt-max-tokens.response",
+            "session-prompt.request",
+            AcpMethod.AgentMethods.V1.SessionPrompt,
+        )
+        assertResponse(
+            "session-prompt-max-turn-requests.response",
+            "session-prompt.request",
+            AcpMethod.AgentMethods.V1.SessionPrompt,
+        )
+        assertResponse(
+            "session-prompt-refusal.response",
+            "session-prompt.request",
+            AcpMethod.AgentMethods.V1.SessionPrompt,
+        )
+        assertResponse(
+            "session-prompt-cancelled.response",
+            "session-prompt.request",
+            AcpMethod.AgentMethods.V1.SessionPrompt,
+        )
+        assertNotification(
+            "session-update-agent-message.notification",
+            AcpMethod.ClientMethods.V1.SessionUpdate,
+        )
+        assertNotification(
+            "session-update-user-message.notification",
+            AcpMethod.ClientMethods.V1.SessionUpdate,
+        )
+        assertNotification(
+            "session-update-agent-thought.notification",
+            AcpMethod.ClientMethods.V1.SessionUpdate,
+        )
+        assertNotification("session-update-plan.notification", AcpMethod.ClientMethods.V1.SessionUpdate)
+        assertNotification("session-update-tool-call.notification", AcpMethod.ClientMethods.V1.SessionUpdate)
+        assertNotification(
+            "session-update-tool-call-update.notification",
+            AcpMethod.ClientMethods.V1.SessionUpdate,
+        )
         assertExchange("fs-read", AcpMethod.ClientMethods.V1.FsReadTextFile)
         assertExchange("fs-write", AcpMethod.ClientMethods.V1.FsWriteTextFile)
         assertExchange("terminal-create", AcpMethod.ClientMethods.V1.TerminalCreate)
@@ -98,8 +140,15 @@ class AcpV1WireContractGoldenTest {
     ) {
         val requestName = "$name.request"
         val responseName = "$name.response"
+        assertRequest(requestName, method)
+        assertResponse(responseName, requestName, method)
+    }
+
+    private fun <TRequest : AcpRequest, TResponse : AcpResponse> assertRequest(
+        requestName: String,
+        method: AcpMethod.AcpRequestResponseMethod<TRequest, TResponse>,
+    ) {
         val request = message(requestName)
-        val response = message(responseName)
 
         val decodedRequest = assertIs<JsonRpcRequest>(
             decodeJsonRpcMessage(request.toString()),
@@ -116,6 +165,15 @@ class AcpV1WireContractGoldenTest {
             assertNotNull(decodedRequest.params, "$requestName must carry params"),
         )
         assertEnvelopeRoundTrip(requestName, request)
+    }
+
+    private fun <TRequest : AcpRequest, TResponse : AcpResponse> assertResponse(
+        responseName: String,
+        requestName: String,
+        method: AcpMethod.AcpRequestResponseMethod<TRequest, TResponse>,
+    ) {
+        val request = message(requestName)
+        val response = message(responseName)
 
         val decodedResponse = assertIs<JsonRpcResponse>(
             decodeJsonRpcMessage(response.toString()),
@@ -199,8 +257,17 @@ class AcpV1WireContractGoldenTest {
             "session-new.request",
             "session-new.response",
             "session-prompt.request",
-            "session-prompt.response",
-            "session-update.notification",
+            "session-prompt-end-turn.response",
+            "session-prompt-max-tokens.response",
+            "session-prompt-max-turn-requests.response",
+            "session-prompt-refusal.response",
+            "session-prompt-cancelled.response",
+            "session-update-agent-message.notification",
+            "session-update-user-message.notification",
+            "session-update-agent-thought.notification",
+            "session-update-plan.notification",
+            "session-update-tool-call.notification",
+            "session-update-tool-call-update.notification",
             "fs-read.request",
             "fs-read.response",
             "fs-write.request",

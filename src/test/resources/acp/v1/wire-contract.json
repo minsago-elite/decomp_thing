@@ -83,14 +83,42 @@
         ]
       }
     },
-    "session-prompt.response": {
+    "session-prompt-end-turn.response": {
       "jsonrpc": "2.0",
       "id": 3,
       "result": {
         "stopReason": "end_turn"
       }
     },
-    "session-update.notification": {
+    "session-prompt-max-tokens.response": {
+      "jsonrpc": "2.0",
+      "id": 3,
+      "result": {
+        "stopReason": "max_tokens"
+      }
+    },
+    "session-prompt-max-turn-requests.response": {
+      "jsonrpc": "2.0",
+      "id": 3,
+      "result": {
+        "stopReason": "max_turn_requests"
+      }
+    },
+    "session-prompt-refusal.response": {
+      "jsonrpc": "2.0",
+      "id": 3,
+      "result": {
+        "stopReason": "refusal"
+      }
+    },
+    "session-prompt-cancelled.response": {
+      "jsonrpc": "2.0",
+      "id": 3,
+      "result": {
+        "stopReason": "cancelled"
+      }
+    },
+    "session-update-agent-message.notification": {
       "jsonrpc": "2.0",
       "method": "session/update",
       "params": {
@@ -102,6 +130,85 @@
             "text": "Synthetic progress update."
           },
           "messageId": "message-1"
+        }
+      }
+    },
+    "session-update-user-message.notification": {
+      "jsonrpc": "2.0",
+      "method": "session/update",
+      "params": {
+        "sessionId": "session-1",
+        "update": {
+          "sessionUpdate": "user_message_chunk",
+          "content": {
+            "type": "text",
+            "text": "Synthetic user follow-up."
+          },
+          "messageId": "message-2"
+        }
+      }
+    },
+    "session-update-agent-thought.notification": {
+      "jsonrpc": "2.0",
+      "method": "session/update",
+      "params": {
+        "sessionId": "session-1",
+        "update": {
+          "sessionUpdate": "agent_thought_chunk",
+          "content": {
+            "type": "text",
+            "text": "Synthetic private progress."
+          },
+          "messageId": "message-3"
+        }
+      }
+    },
+    "session-update-plan.notification": {
+      "jsonrpc": "2.0",
+      "method": "session/update",
+      "params": {
+        "sessionId": "session-1",
+        "update": {
+          "sessionUpdate": "plan",
+          "entries": [
+            {
+              "content": "Inspect synthetic input",
+              "priority": "high",
+              "status": "in_progress"
+            }
+          ]
+        }
+      }
+    },
+    "session-update-tool-call.notification": {
+      "jsonrpc": "2.0",
+      "method": "session/update",
+      "params": {
+        "sessionId": "session-1",
+        "update": {
+          "sessionUpdate": "tool_call",
+          "toolCallId": "tool-2",
+          "title": "Inspect synthetic input",
+          "kind": "read",
+          "status": "in_progress",
+          "content": [],
+          "locations": []
+        }
+      }
+    },
+    "session-update-tool-call-update.notification": {
+      "jsonrpc": "2.0",
+      "method": "session/update",
+      "params": {
+        "sessionId": "session-1",
+        "update": {
+          "sessionUpdate": "tool_call_update",
+          "toolCallId": "tool-2",
+          "title": "Inspect synthetic input",
+          "kind": "read",
+          "status": "completed",
+          "content": [],
+          "locations": []
         }
       }
     },
