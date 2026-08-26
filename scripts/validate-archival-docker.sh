@@ -40,8 +40,8 @@ run_reconstruction large-stripped stripped-b
 # host-side determinism checks and cleanup.
 docker run --rm \
   --volume "$validation_root/output:/output" \
-  --entrypoint chmod \
-  "$image" -R a+rwX /output
+  --entrypoint sh \
+  "$image" -c 'find /output -mindepth 1 -exec chmod a+rwX {} +'
 
 cmp "$validation_root/output/symbols-a/analysis/reports/program_model.json" \
     "$validation_root/output/symbols-b/analysis/reports/program_model.json"
