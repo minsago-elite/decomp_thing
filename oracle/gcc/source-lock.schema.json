@@ -1,0 +1,286 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://github.com/minsago-elite/decomp_thing/oracle/gcc/source-lock.schema.json",
+  "title": "GCC oracle source provenance lock",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schemaVersion",
+    "oracle",
+    "source",
+    "revision",
+    "signing",
+    "redistribution"
+  ],
+  "properties": {
+    "schemaVersion": {
+      "const": 1
+    },
+    "oracle": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["id", "project", "version", "purpose"],
+      "properties": {
+        "id": {
+          "type": "string",
+          "minLength": 1
+        },
+        "project": {
+          "type": "string",
+          "minLength": 1
+        },
+        "version": {
+          "type": "string",
+          "pattern": "^[0-9]+\\.[0-9]+\\.[0-9]+$"
+        },
+        "purpose": {
+          "type": "string",
+          "minLength": 1
+        }
+      }
+    },
+    "source": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "archiveRoot",
+        "releaseAnnouncementUrl",
+        "releasePageUrl",
+        "archive",
+        "detachedSignature"
+      ],
+      "properties": {
+        "archiveRoot": {
+          "$ref": "#/$defs/relativePath"
+        },
+        "releaseAnnouncementUrl": {
+          "$ref": "#/$defs/httpsUrl"
+        },
+        "releasePageUrl": {
+          "$ref": "#/$defs/httpsUrl"
+        },
+        "archive": {
+          "$ref": "#/$defs/artifact"
+        },
+        "detachedSignature": {
+          "$ref": "#/$defs/artifact"
+        }
+      }
+    },
+    "revision": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "repositoryUrl",
+        "tag",
+        "tagObject",
+        "commit",
+        "tagEvidence",
+        "archiveMarkers"
+      ],
+      "properties": {
+        "repositoryUrl": {
+          "$ref": "#/$defs/httpsUrl"
+        },
+        "tag": {
+          "type": "string",
+          "minLength": 1
+        },
+        "tagObject": {
+          "$ref": "#/$defs/gitObject"
+        },
+        "commit": {
+          "$ref": "#/$defs/gitObject"
+        },
+        "tagEvidence": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "payloadFile",
+            "payloadBytes",
+            "payloadSha256",
+            "signatureFile",
+            "signatureBytes",
+            "signatureSha256"
+          ],
+          "properties": {
+            "payloadFile": {
+              "$ref": "#/$defs/relativePath"
+            },
+            "payloadBytes": {
+              "type": "integer",
+              "minimum": 1
+            },
+            "payloadSha256": {
+              "$ref": "#/$defs/sha256"
+            },
+            "signatureFile": {
+              "$ref": "#/$defs/relativePath"
+            },
+            "signatureBytes": {
+              "type": "integer",
+              "minimum": 1
+            },
+            "signatureSha256": {
+              "$ref": "#/$defs/sha256"
+            }
+          }
+        },
+        "archiveMarkers": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["revision", "version", "developmentPhase"],
+          "properties": {
+            "revision": {
+              "$ref": "#/$defs/textRecord"
+            },
+            "version": {
+              "$ref": "#/$defs/textRecord"
+            },
+            "developmentPhase": {
+              "$ref": "#/$defs/textRecord"
+            }
+          }
+        }
+      }
+    },
+    "signing": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "authorityUrl",
+        "keyRetrievalUrl",
+        "keyFile",
+        "keySha256",
+        "primaryFingerprint",
+        "signingFingerprint"
+      ],
+      "properties": {
+        "authorityUrl": {
+          "$ref": "#/$defs/httpsUrl"
+        },
+        "keyRetrievalUrl": {
+          "$ref": "#/$defs/httpsUrl"
+        },
+        "keyFile": {
+          "$ref": "#/$defs/relativePath"
+        },
+        "keySha256": {
+          "$ref": "#/$defs/sha256"
+        },
+        "primaryFingerprint": {
+          "$ref": "#/$defs/fingerprint"
+        },
+        "signingFingerprint": {
+          "$ref": "#/$defs/fingerprint"
+        }
+      }
+    },
+    "redistribution": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["summary", "licenseFiles"],
+      "properties": {
+        "summary": {
+          "type": "string",
+          "minLength": 1
+        },
+        "licenseFiles": {
+          "type": "array",
+          "minItems": 4,
+          "maxItems": 4,
+          "uniqueItems": true,
+          "items": {
+            "$ref": "#/$defs/descriptionRecord"
+          }
+        }
+      }
+    }
+  },
+  "$defs": {
+    "sha256": {
+      "type": "string",
+      "pattern": "^[0-9a-f]{64}$"
+    },
+    "gitObject": {
+      "type": "string",
+      "pattern": "^[0-9a-f]{40}$"
+    },
+    "fingerprint": {
+      "type": "string",
+      "pattern": "^[0-9A-F]{40}$"
+    },
+    "httpsUrl": {
+      "type": "string",
+      "format": "uri",
+      "pattern": "^https://"
+    },
+    "relativePath": {
+      "type": "string",
+      "minLength": 1,
+      "pattern": "^(?!/)(?!.*(?:^|/)\\.\\.(?:/|$))(?!.*\\\\).+$"
+    },
+    "artifact": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["fileName", "url", "bytes", "sha256"],
+      "properties": {
+        "fileName": {
+          "type": "string",
+          "pattern": "^[^/\\\\]+$"
+        },
+        "url": {
+          "$ref": "#/$defs/httpsUrl"
+        },
+        "bytes": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "sha256": {
+          "$ref": "#/$defs/sha256"
+        }
+      }
+    },
+    "textRecord": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["path", "bytes", "sha256", "text"],
+      "properties": {
+        "path": {
+          "$ref": "#/$defs/relativePath"
+        },
+        "bytes": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "sha256": {
+          "$ref": "#/$defs/sha256"
+        },
+        "text": {
+          "type": "string"
+        }
+      }
+    },
+    "descriptionRecord": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["path", "bytes", "sha256", "description"],
+      "properties": {
+        "path": {
+          "$ref": "#/$defs/relativePath"
+        },
+        "bytes": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "sha256": {
+          "$ref": "#/$defs/sha256"
+        },
+        "description": {
+          "type": "string",
+          "minLength": 1
+        }
+      }
+    }
+  }
+}

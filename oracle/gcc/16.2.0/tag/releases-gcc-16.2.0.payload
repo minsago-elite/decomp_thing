@@ -1,0 +1,6 @@
+object 78d4ac73dd391005b895a6148cd9831e28e1208b
+type commit
+tag releases/gcc-16.2.0
+tagger Richard Biener <rguenther@suse.de> 1786088838 +0000
+
+GCC 16.2.0 release

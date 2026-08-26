@@ -1,0 +1,97 @@
+{
+  "schemaVersion": 1,
+  "oracle": {
+    "id": "gcc-driver-16.2.0",
+    "project": "GNU Compiler Collection",
+    "version": "16.2.0",
+    "purpose": "Authoritative source input for the source-aligned GCC driver oracle pair"
+  },
+  "source": {
+    "archiveRoot": "gcc-16.2.0",
+    "releaseAnnouncementUrl": "https://gcc.gnu.org/pipermail/gcc/2026-August/248711.html",
+    "releasePageUrl": "https://gcc.gnu.org/gcc-16/",
+    "archive": {
+      "fileName": "gcc-16.2.0.tar.xz",
+      "url": "https://ftp.gnu.org/gnu/gcc/gcc-16.2.0/gcc-16.2.0.tar.xz",
+      "bytes": 107200820,
+      "sha256": "e6738e29597f733270731aa90600f37ffdc045079dfc27ec7e8192cc81085c3e"
+    },
+    "detachedSignature": {
+      "fileName": "gcc-16.2.0.tar.xz.sig",
+      "url": "https://ftp.gnu.org/gnu/gcc/gcc-16.2.0/gcc-16.2.0.tar.xz.sig",
+      "bytes": 310,
+      "sha256": "43d73202dcede15d31001c6ba0d28723014ef57e4dc815631772daadbe23bcd2"
+    }
+  },
+  "revision": {
+    "repositoryUrl": "https://gcc.gnu.org/git/gcc.git",
+    "tag": "releases/gcc-16.2.0",
+    "tagObject": "1831ac03fd08e3400c16b29f21762e6b326a618d",
+    "commit": "78d4ac73dd391005b895a6148cd9831e28e1208b",
+    "tagEvidence": {
+      "payloadFile": "tag/releases-gcc-16.2.0.payload",
+      "payloadBytes": 163,
+      "payloadSha256": "bfc082efedb5324641d89cbdc3fbce067a2524e4faf69ae6e17fe5eb40b9281a",
+      "signatureFile": "tag/releases-gcc-16.2.0.sig",
+      "signatureBytes": 512,
+      "signatureSha256": "be83e6c296074195bab948872c6249fd2f007c328908530a515b5cde81990eb7"
+    },
+    "archiveMarkers": {
+      "revision": {
+        "path": "LAST_UPDATED",
+        "bytes": 89,
+        "sha256": "d81180ed681d7fdbbc6ec89fad1d54520858dffa85557b29d6c972f024aab779",
+        "text": "Obtained from git: releases/gcc-16.2.0 revision 78d4ac73dd391005b895a6148cd9831e28e1208b\n"
+      },
+      "version": {
+        "path": "gcc/BASE-VER",
+        "bytes": 7,
+        "sha256": "e9f8839c742db21d285464b01dfb2e572f802c366729873cdc4a296c8c3a01ea",
+        "text": "16.2.0\n"
+      },
+      "developmentPhase": {
+        "path": "gcc/DEV-PHASE",
+        "bytes": 0,
+        "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+        "text": ""
+      }
+    }
+  },
+  "signing": {
+    "authorityUrl": "https://gcc.gnu.org/mirrors.html",
+    "keyRetrievalUrl": "https://keyserver.ubuntu.com/pks/lookup?op=get&search=0x7F74F97C103468EE5D750B583AB00996FC26A641",
+    "keyFile": "keys/richard-guenther-gcc-release.asc",
+    "keySha256": "2408f24e68b0f5530bfb02fdc2906524f6e143ed2f1d5af6e5a38d505f8f602b",
+    "primaryFingerprint": "13975A70E63C361C73AE69EF6EEB81F8981C74C7",
+    "signingFingerprint": "7F74F97C103468EE5D750B583AB00996FC26A641"
+  },
+  "redistribution": {
+    "summary": "GCC is redistributed under file-specific GNU licenses. Preserve applicable notices and provide corresponding source as required. The GCC Runtime Library Exception 3.1 applies only to files whose notices invoke it.",
+    "licenseFiles": [
+      {
+        "path": "COPYING",
+        "bytes": 18002,
+        "sha256": "231f7edcc7352d7734a96eef0b8030f77982678c516876fcb81e25b32d68564c",
+        "description": "GNU General Public License version 2 text retained for source files whose notices select it"
+      },
+      {
+        "path": "COPYING3",
+        "bytes": 35147,
+        "sha256": "8ceb4b9ee5adedde47b31e975c1d90c73ad27b6b165a1dcd80c7c545eb65b903",
+        "description": "GNU General Public License version 3 text"
+      },
+      {
+        "path": "COPYING3.LIB",
+        "bytes": 7639,
+        "sha256": "a853c2ffec17057872340eee242ae4d96cbf2b520ae27d903e1b2fef1a5f9d1c",
+        "description": "GNU Lesser General Public License version 3 text"
+      },
+      {
+        "path": "COPYING.RUNTIME",
+        "bytes": 3324,
+        "sha256": "9d6b43ce4d8de0c878bf16b54d8e7a10d9bd42b75178153e3af6a815bdc90f74",
+        "description": "GCC Runtime Library Exception version 3.1 text"
+      }
+    ]
+  }
+}
