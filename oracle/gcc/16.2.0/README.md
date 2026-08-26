@@ -71,7 +71,8 @@ python3 -m unittest discover -s tests/oracle -v
 
 ## Scope of this checkpoint
 
-This lock establishes the source input only. Issue #38 still requires the
-pinned build environment and configuration, an unstripped DWARF-rich GCC
-driver, its stripped twin, executable-section equivalence checks, Build IDs,
-complete artifact/section hashes, a clean rebuild, and CI integration.
+This lock establishes the source input only. The
+[strict build-record and ELF twin verifier](../../../docs/gcc-oracle-artifact-verification.md)
+is now implemented, but no production build record or GCC artifact pair is
+checked in yet. Issue #38 still requires the pinned build, retained binaries,
+generated manifest, a clean rebuild, and CI integration.

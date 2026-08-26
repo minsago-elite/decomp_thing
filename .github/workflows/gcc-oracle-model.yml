@@ -1,0 +1,18 @@
+name: GCC oracle model
+
+on:
+  push:
+  pull_request:
+
+jobs:
+  provenance-and-elf-verifier:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends binutils build-essential gnupg
+      - name: Verify source provenance metadata
+        run: python3 scripts/verify-gcc-oracle-source.py --metadata-only
+      - name: Test oracle schemas and ELF twin verifier
+        run: python3 -m unittest discover -s tests/oracle -v
