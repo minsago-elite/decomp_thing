@@ -1,8 +1,15 @@
 package decompengine.validation
 
+import java.io.ByteArrayOutputStream
+import java.io.InputStream
 import java.nio.file.Path
 import java.time.Duration
+import java.util.concurrent.ExecutionException
+import java.util.concurrent.Executors
+import java.util.concurrent.Future
+import java.util.concurrent.TimeUnit
 import java.util.concurrent.ConcurrentHashMap
+import java.util.concurrent.atomic.AtomicLong
 import kotlin.io.path.createDirectories
 import kotlin.io.path.exists
 import kotlin.io.path.pathString
@@ -75,6 +82,23 @@ class BehaviorMismatchException(message: String) : RuntimeException(message)
 
 class SandboxUnavailableException(message: String) : RuntimeException(message)
 
+class BehaviorOutputLimitException(message: String) : RuntimeException(message)
+
+class BehaviorExecutionTimeoutException(message: String) : RuntimeException(message)
+
+data class SandboxOutputLimits(
+    val maximumStdoutBytes: Long = 8L * 1024 * 1024,
+    val maximumStderrBytes: Long = 8L * 1024 * 1024,
+    val maximumAggregateBytes: Long = 16L * 1024 * 1024,
+) {
+    init {
+        require(maximumStdoutBytes in 1 until Int.MAX_VALUE.toLong())
+        require(maximumStderrBytes in 1 until Int.MAX_VALUE.toLong())
+        require(maximumAggregateBytes >= maxOf(maximumStdoutBytes, maximumStderrBytes) &&
+            maximumAggregateBytes < Int.MAX_VALUE.toLong())
+    }
+}
+
 object BwrapCapability {
     private val cache = ConcurrentHashMap<String, Boolean>()
 
@@ -117,11 +141,19 @@ object BwrapCapability {
     }
 }
 
+/**
+ * Lightweight compatibility runner for local validation and tests.
+ *
+ * This is deliberately not a production repair-validation authority: it has no verified cgroup
+ * pids/memory/filesystem quota. Production repair strategies must supply their own contained
+ * [decompengine.repair.RepairValidationStrategy] implementation.
+ */
 class SandboxRunner(
     private val timeout: Duration = Duration.ofSeconds(5),
     private val bwrapPath: Path = Path.of("/usr/bin/bwrap"),
     private val timeoutPath: Path = Path.of("/usr/bin/timeout"),
     private val networkIsolation: Boolean = BwrapCapability.networkIsolationSupported(bwrapPath, timeoutPath),
+    private val outputLimits: SandboxOutputLimits = SandboxOutputLimits(),
 ) {
     fun networkIsolationSupported(): Boolean = networkIsolation
 
@@ -129,16 +161,18 @@ class SandboxRunner(
         if (!bwrapPath.exists()) {
             throw SandboxUnavailableException("bubblewrap not found at ${bwrapPath.pathString}; sandboxed execution is mandatory")
         }
-        val executableDir = executable.toAbsolutePath().parent
+        val absoluteExecutable = executable.toAbsolutePath().normalize()
         val command = mutableListOf(
             timeoutPath.pathString,
-            "${timeout.toSeconds()}s",
+            "${maxOf(1L, timeout.toSeconds())}s",
             bwrapPath.pathString,
         )
         if (networkIsolation) {
             command += "--unshare-net"
         }
         command += listOf(
+            "--unshare-pid",
+            "--new-session",
             "--die-with-parent",
             "--ro-bind",
             "/usr",
@@ -151,33 +185,149 @@ class SandboxRunner(
             "/lib64",
             "--dir",
             "/tmp",
+            "--dir",
+            "/program",
             "--ro-bind",
-            executableDir.pathString,
-            executableDir.pathString,
+            absoluteExecutable.pathString,
+            "/program/executable",
             "--chdir",
-            executableDir.pathString,
-            executable.toAbsolutePath().pathString,
+            "/tmp",
+            "/program/executable",
         )
         command += input.args
 
-        val process = ProcessBuilder(command)
-            .redirectErrorStream(false)
-            .start()
-        process.outputStream.use { it.write(input.stdin) }
-        val stdout = process.inputStream.readBytes()
-        val stderr = process.errorStream.readBytes()
-        val exitCode = process.waitFor()
-        return ProcessOutput(
-            exitCode = exitCode,
-            stdout = stdout,
-            stderr = stderr,
-            sandboxCommand = command,
-            networkIsolated = networkIsolation,
-        )
+        val builder = ProcessBuilder(command).redirectErrorStream(false)
+        builder.environment().clear()
+        builder.environment()["PATH"] = "/usr/bin"
+        val process = builder.start()
+        val executor = Executors.newFixedThreadPool(3) { runnable ->
+            Thread(runnable, "behavior-process-io").apply { isDaemon = true }
+        }
+        val aggregate = AtomicLong()
+        val stdoutFuture = executor.submit<ByteArray> {
+            readBounded(process.inputStream, "stdout", outputLimits.maximumStdoutBytes, aggregate)
+        }
+        val stderrFuture = executor.submit<ByteArray> {
+            readBounded(process.errorStream, "stderr", outputLimits.maximumStderrBytes, aggregate)
+        }
+        val stdinFuture = executor.submit<Unit> { process.outputStream.use { it.write(input.stdin) } }
+        var primaryFailure: Throwable? = null
+        try {
+            val deadline = runCatching { Math.addExact(System.nanoTime(), timeout.toNanos()) }
+                .getOrDefault(Long.MAX_VALUE)
+            while (process.isAlive || !stdoutFuture.isDone || !stderrFuture.isDone || !stdinFuture.isDone) {
+                completedFailure(stdoutFuture)?.let { throw it }
+                completedFailure(stderrFuture)?.let { throw it }
+                completedFailure(stdinFuture)?.let { throw it }
+                if (System.nanoTime() >= deadline) {
+                    throw BehaviorExecutionTimeoutException(
+                        "sandboxed behavior execution exceeded ${timeout.toMillis()} ms",
+                    )
+                }
+                Thread.sleep(5)
+            }
+            val exitCode = process.exitValue()
+            val stdout = awaitIo(stdoutFuture)
+            val stderr = awaitIo(stderrFuture)
+            awaitIo(stdinFuture)
+            return ProcessOutput(
+                exitCode = exitCode,
+                stdout = stdout,
+                stderr = stderr,
+                sandboxCommand = command,
+                networkIsolated = networkIsolation,
+            )
+        } catch (failure: Throwable) {
+            if (failure is InterruptedException) Thread.currentThread().interrupt()
+            primaryFailure = failure
+            throw failure
+        } finally {
+            var cleanupFailure: Throwable? = null
+            fun cleanup(action: () -> Unit) {
+                try {
+                    action()
+                } catch (failure: Throwable) {
+                    val existing = cleanupFailure
+                    if (existing == null) cleanupFailure = failure else existing.addSuppressed(failure)
+                }
+            }
+            if (primaryFailure != null || process.isAlive) {
+                cleanup { terminateProcessTree(process) }
+            }
+            cleanup { process.outputStream.close() }
+            cleanup { process.inputStream.close() }
+            cleanup { process.errorStream.close() }
+            listOf(stdinFuture, stdoutFuture, stderrFuture).forEach { it.cancel(true) }
+            executor.shutdownNow()
+            cleanupFailure?.let { failure ->
+                val primary = primaryFailure
+                if (primary != null) primary.addSuppressed(failure) else throw failure
+            }
+        }
+    }
+
+    private fun readBounded(
+        input: InputStream,
+        label: String,
+        maximumBytes: Long,
+        aggregate: AtomicLong,
+    ): ByteArray {
+        input.use { stream ->
+            val output = ByteArrayOutputStream(minOf(maximumBytes.toInt(), 8192))
+            val buffer = ByteArray(8192)
+            var streamBytes = 0L
+            while (true) {
+                val count = stream.read(buffer)
+                if (count < 0) return output.toByteArray()
+                streamBytes = Math.addExact(streamBytes, count.toLong())
+                val aggregateBytes = aggregate.addAndGet(count.toLong())
+                if (streamBytes > maximumBytes) {
+                    throw BehaviorOutputLimitException(
+                        "sandboxed behavior $label exceeds $maximumBytes bytes",
+                    )
+                }
+                if (aggregateBytes > outputLimits.maximumAggregateBytes) {
+                    throw BehaviorOutputLimitException(
+                        "sandboxed behavior output exceeds ${outputLimits.maximumAggregateBytes} aggregate bytes",
+                    )
+                }
+                output.write(buffer, 0, count)
+            }
+        }
+    }
+
+    private fun completedFailure(future: Future<*>): Throwable? {
+        if (!future.isDone) return null
+        return try {
+            future.get()
+            null
+        } catch (failure: ExecutionException) {
+            failure.cause ?: failure
+        }
+    }
+
+    private fun <T> awaitIo(future: Future<T>): T = try {
+        future.get()
+    } catch (failure: ExecutionException) {
+        throw failure.cause ?: failure
+    }
+
+    private fun terminateProcessTree(process: Process) {
+        val descendants = process.toHandle().descendants().toList().asReversed()
+        descendants.forEach { it.destroy() }
+        process.destroy()
+        if (!process.waitFor(250, TimeUnit.MILLISECONDS)) {
+            descendants.forEach { if (it.isAlive) it.destroyForcibly() }
+            process.destroyForcibly()
+            require(process.waitFor(2, TimeUnit.SECONDS)) { "sandboxed behavior process did not terminate" }
+        }
     }
 }
 
-class BehaviorComparator(private val sandbox: SandboxRunner = SandboxRunner()) {
+class BehaviorComparator(
+    private val sandbox: SandboxRunner = SandboxRunner(),
+    private val maximumAggregateOutputBytes: Long = Long.MAX_VALUE,
+) {
     fun compare(
         id: String,
         originalBinary: Path,
@@ -201,11 +351,25 @@ class BehaviorComparator(private val sandbox: SandboxRunner = SandboxRunner()) {
     ): BehaviorComparisonReport {
         require(cases.isNotEmpty()) { "at least one behavior case is required" }
         reportsDir.createDirectories()
+        var aggregateOutputBytes = 0L
+        fun runBounded(binary: Path, input: ProcessInput): ProcessOutput {
+            val output = sandbox.run(binary, input)
+            aggregateOutputBytes = Math.addExact(
+                aggregateOutputBytes,
+                Math.addExact(output.stdout.size.toLong(), output.stderr.size.toLong()),
+            )
+            if (aggregateOutputBytes > maximumAggregateOutputBytes) {
+                throw BehaviorOutputLimitException(
+                    "behavior comparison output exceeds $maximumAggregateOutputBytes aggregate bytes",
+                )
+            }
+            return output
+        }
         val results = cases.map { input ->
             BehaviorCaseResult(
                 input = input,
-                original = sandbox.run(originalBinary, input),
-                rebuilt = sandbox.run(rebuiltBinary, input),
+                original = runBounded(originalBinary, input),
+                rebuilt = runBounded(rebuiltBinary, input),
             )
         }
         val report = BehaviorComparisonReport(

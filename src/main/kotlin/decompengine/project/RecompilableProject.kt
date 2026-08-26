@@ -198,6 +198,15 @@ object RecompilableProjectGenerator {
     }
 }
 
+/** Stable owner ID emitted by generated-C builds and consumed by generated-C repair indexing. */
+internal fun generatedCUnplannedModuleId(path: String): String =
+    if (path == "src/main.c") {
+        "entrypoint"
+    } else {
+        "generated_path_" +
+            path.toByteArray(Charsets.UTF_8).joinToString("") { byte -> "%02x".format(byte.toInt() and 0xff) }
+    }
+
 object MakeProjectBuilder {
     private data class BuildOwner(
         val id: String,
@@ -307,7 +316,7 @@ object MakeProjectBuilder {
         }
         require(sources.isNotEmpty()) { "generated project has no C sources" }
         val ownerIds = sources.associateWith { source ->
-            planned[source] ?: if (source == "src/main.c") "entrypoint" else "unowned_${source.removePrefix("src/").removeSuffix(".c")}"
+            planned[source] ?: generatedCUnplannedModuleId(source)
         }
         require(planned.keys.all { it in sources }) {
             "module plan references missing sources: ${(planned.keys - sources.toSet()).sorted().joinToString(",")}"

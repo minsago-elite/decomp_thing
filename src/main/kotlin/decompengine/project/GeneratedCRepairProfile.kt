@@ -14,6 +14,7 @@ import decompengine.repair.RepairValidationStrategy
 import decompengine.repair.RepairValidationAssurance
 import decompengine.repair.readStableRegularFile
 import decompengine.repair.openRepairRootDirectory
+import decompengine.repair.repairDescriptorPath
 import decompengine.validation.BehaviorComparisonReport
 import decompengine.validation.ProcessInput
 import decompengine.validation.SandboxUnavailableException
@@ -102,14 +103,10 @@ object GeneratedCRepairIndexProfile : RepairIndexProfile {
         }
         val explicitlyOwnedPaths = modules.flatMapTo(hashSetOf()) { it.ownedPaths }
         val shared = listOf(MAKEFILE, TYPES_HEADER).filter { it in sourcePaths }.sorted()
-        val entryFallbackModules = mapOf(
-            "src/main.c" to "entrypoint",
-            "src/reconstructed.c" to "reconstructed",
-        ).filterKeys { it in sourcePaths && it !in explicitlyOwnedPaths }
         val sharedSet = shared.toHashSet()
         val fallbackModules = TreeMap<String, String>()
         sourcePaths.filter { it !in explicitlyOwnedPaths && it !in sharedSet }.forEach { path ->
-            fallbackModules[path] = entryFallbackModules[path] ?: generatedCPathModuleId(path)
+            fallbackModules[path] = generatedCUnplannedModuleId(path)
         }
         return RepairIndexLayout(
             sourcePaths = sourcePaths,
@@ -120,7 +117,11 @@ object GeneratedCRepairIndexProfile : RepairIndexProfile {
             sharedInvalidationPaths = shared.filter { it in editable },
             pathDependencies = deriveIncludes(projectRoot, sourcePaths.toSet(), budget),
             fallbackModuleIdsByPath = fallbackModules,
-            behaviorRootModuleIds = entryFallbackModules.values.distinct().sorted(),
+            behaviorRootModuleIds = fallbackModules
+                .filterKeys { it.endsWith(".c") }
+                .values
+                .distinct()
+                .sorted(),
             behaviorRootEntityIds = evidence.functions.filter {
                 it.name in setOf("_start", "decomp_engine_main", "entry", "main")
             }.map { it.id }.sorted(),
@@ -547,7 +548,7 @@ object GeneratedCRepairIndexProfile : RepairIndexProfile {
         }
         fun names(directory: LinuxDescriptor, relativeDirectory: String): List<String> {
             val discovered = ArrayList<String>()
-            Files.newDirectoryStream(LinuxFilesystemSyscalls.descriptorPath(directory)).use { stream ->
+            Files.newDirectoryStream(repairDescriptorPath(directory)).use { stream ->
                 stream.forEach { path ->
                     val name = path.fileName.toString()
                     require(name.isNotBlank() && '/' !in name && name !in setOf(".", "..")) {
@@ -697,9 +698,6 @@ object GeneratedCRepairIndexProfile : RepairIndexProfile {
         require(value.split('/').none { it in setOf("", ".", "..") }) { "invalid generated C profile path" }
         return value
     }
-
-    private fun generatedCPathModuleId(path: String): String = "generated_path_" +
-        path.toByteArray(Charsets.UTF_8).joinToString("") { byte -> "%02x".format(byte.toInt() and 0xff) }
 
     private const val INDEX_EVIDENCE_SCHEMA_VERSION = 1
     private const val BUILD_CONTRACT_SCHEMA_VERSION = 2

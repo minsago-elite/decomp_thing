@@ -1,6 +1,7 @@
 package decompengine.mvp
 
 import decompengine.repair.RepairClient
+import decompengine.repair.RepairClientInvocation
 import decompengine.repair.RepairRequest
 import decompengine.repair.RepairResponse
 import decompengine.repair.SourcePatch
@@ -175,7 +176,7 @@ class MvpPatchWorkflowTest {
         private val responses = ArrayDeque(responses.toList())
         val requests = mutableListOf<RepairRequest>()
 
-        override fun requestRepair(request: RepairRequest): RepairResponse {
+        override fun requestRepair(request: RepairRequest, invocation: RepairClientInvocation): RepairResponse {
             requests += request
             return responses.removeFirst()
         }

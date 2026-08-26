@@ -15,8 +15,8 @@ import decompengine.project.EvidenceModuleReconstructor
 import decompengine.project.GhidraHeadlessProgramModelAnalyzer
 import decompengine.repair.HttpOpenAiCompatibleRepairClient
 import decompengine.repair.RepairClientAgentHarness
-import decompengine.repair.RepairHistory
-import decompengine.repair.TraceGuidedRepairLoop
+import decompengine.repair.RepairRuntimeConfiguration
+import decompengine.repair.SecureRepairRuntime
 import decompengine.validation.ProcessInput
 import decompengine.web.UploadServer
 import java.net.URI
@@ -172,7 +172,6 @@ private fun runRepair(args: List<String>) {
     }
     if (original == null || project == null) repairUsageError("repair requires an original binary and project directory")
     val reportsDir = reports ?: project.resolve("reports")
-    val history = RepairHistory(reportsDir.resolve("repair_history.json"))
     val regressionInputs = if (exploreInputs) {
         val exploration = AutomaticExplorer().explore(
             original,
@@ -187,16 +186,14 @@ private fun runRepair(args: List<String>) {
     } else {
         listOf(ProcessInput("default"))
     }
-    val result = TraceGuidedRepairLoop(
-        RepairClientAgentHarness(HttpOpenAiCompatibleRepairClient.fromEnvironment()),
-        history,
-    ).repairUntilValid(
-        projectDir = project,
-        originalBinary = original,
-        inputs = regressionInputs,
-        reportsDir = reportsDir,
-        maxIterations = maxIterations,
-    )
+    val result = SecureRepairRuntime.open(
+        RepairRuntimeConfiguration(
+            profileId = "generated-c-make-v1",
+            historyPath = reportsDir.resolve("repair_history.json"),
+        ),
+    ).use { runtime ->
+        runtime.repairUntilValid(project, original, regressionInputs, reportsDir, maxIterations)
+    }
     result.iterations.forEach { iteration ->
         println("repair iteration ${iteration.index}: ${iteration.failureKind} - ${iteration.summary}")
     }

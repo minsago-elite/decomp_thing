@@ -2837,7 +2837,7 @@ internal class ModuleRevisionGraph private constructor(
             }
             try {
                 requireLexicalRootBinding(portableProjectRoot, rootDescriptor.identity)
-                val projectRoot = LinuxFilesystemSyscalls.descriptorPath(rootDescriptor)
+                val projectRoot = repairDescriptorPath(rootDescriptor)
                 val stateDir = projectRoot.resolve("reports/repair-revisions")
                 require(!Files.isSymbolicLink(projectRoot.resolve("reports"))) {
                     "repair reports directory must not be a symbolic link"
