@@ -172,13 +172,49 @@ class UploadServerTest {
         }
     }
 
+    @Test
+    fun `GUI launches reconstruction browses escaped source and downloads archive`() {
+        val reconstructor = JobReconstructor { job, reportsDir ->
+            assertEquals("analyzing", job.status)
+            val tree = reportsDir.resolve("source-tree")
+            tree.resolve("src/modules").createDirectories()
+            tree.resolve("reports").createDirectories()
+            tree.resolve("src/modules/core.c").writeText("int core(void) { /* <script>alert(1)</script> */ return 0; }\n")
+            tree.resolve("Makefile").writeText("all:\n\t@true\n")
+            tree.resolve("source_tree_manifest.json").writeText("{\"files\":[]}")
+            tree.resolve("reports/confidence.json").writeText("{\"projectScore\":0.75}")
+            reportsDir.resolve("source-tree.zip").writeText("archive")
+        }
+        withServer(reconstructor = reconstructor) { server, _ ->
+            val upload = upload(server, "archive.elf", elfFixture(), acceptJson = true)
+            val jobId = Json.parseToJsonElement(upload.body.decodeToString()).jsonObject["id"].toString().trim('"')
+
+            val launch = request(server, "POST", "/jobs/$jobId/reconstruct", followRedirects = false)
+            val page = request(server, "GET", "/jobs/$jobId")
+            val source = request(server, "GET", "/jobs/$jobId/source/src/modules/core.c")
+            val archive = request(server, "GET", "/jobs/$jobId/artifacts/reports/source-tree.zip")
+            val traversal = request(server, "GET", "/jobs/$jobId/source/%2e%2e%2Foutside.c")
+
+            assertEquals(303, launch.status)
+            assertTrue(page.body.decodeToString().contains("Archival source tree"))
+            assertTrue(page.body.decodeToString().contains("src/modules/core.c"))
+            assertTrue(page.body.decodeToString().contains("75%"))
+            assertEquals(200, source.status)
+            assertTrue(source.body.decodeToString().contains("&lt;script&gt;"))
+            assertTrue(!source.body.decodeToString().contains("<script>alert"))
+            assertEquals("archive", archive.body.decodeToString())
+            assertEquals(400, traversal.status)
+        }
+    }
+
     private fun withServer(
         analyzer: JobAnalyzer = JobAnalyzer { _, _ -> },
+        reconstructor: JobReconstructor = JobReconstructor { _, _ -> },
         block: (UploadServer, java.nio.file.Path) -> Unit,
     ) {
         val dataDir = createTempDirectory("web-jobs-")
         val directExecutor = Executor { command -> command.run() }
-        val server = UploadServer("127.0.0.1", 0, dataDir, analyzer, directExecutor)
+        val server = UploadServer("127.0.0.1", 0, dataDir, analyzer, reconstructor, directExecutor)
         server.start()
         try {
             block(server, dataDir)

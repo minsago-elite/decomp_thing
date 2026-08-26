@@ -10,6 +10,12 @@ import decompengine.jobs.Job
 import decompengine.jobs.JobStore
 import decompengine.jobs.JobStoreException
 import decompengine.jobs.toJson
+import decompengine.project.ArchivalReconstructionService
+import decompengine.project.BoundedLlmModuleReconstructor
+import decompengine.project.EvidenceModuleReconstructor
+import decompengine.project.GhidraHeadlessProgramModelAnalyzer
+import decompengine.project.ModuleReconstructor
+import decompengine.repair.HttpOpenAiCompatibleRepairClient
 import kotlinx.serialization.json.Json
 import kotlinx.serialization.json.JsonElement
 import java.io.ByteArrayOutputStream
@@ -28,6 +34,10 @@ fun interface JobAnalyzer {
     fun analyze(job: Job, reportsDir: Path)
 }
 
+fun interface JobReconstructor {
+    fun reconstruct(job: Job, reportsDir: Path)
+}
+
 class AutomaticJobAnalyzer : JobAnalyzer {
     override fun analyze(job: Job, reportsDir: Path) {
         AutomaticExplorer().explore(
@@ -38,11 +48,28 @@ class AutomaticJobAnalyzer : JobAnalyzer {
     }
 }
 
+class SourceTreeJobReconstructor(
+    private val environment: Map<String, String> = System.getenv(),
+) : JobReconstructor {
+    override fun reconstruct(job: Job, reportsDir: Path) {
+        val moduleReconstructor: ModuleReconstructor = if (listOf("BASE_URL", "API_KEY", "MODEL").all { !environment[it].isNullOrBlank() }) {
+            BoundedLlmModuleReconstructor(HttpOpenAiCompatibleRepairClient.fromEnvironment(environment))
+        } else {
+            EvidenceModuleReconstructor()
+        }
+        ArchivalReconstructionService(
+            GhidraHeadlessProgramModelAnalyzer.fromEnvironment(environment),
+            moduleReconstructor,
+        ).reconstruct(job.binaryPath, reportsDir)
+    }
+}
+
 class UploadServer(
     host: String,
     port: Int,
     dataDir: Path,
     private val analyzer: JobAnalyzer = AutomaticJobAnalyzer(),
+    private val reconstructor: JobReconstructor = SourceTreeJobReconstructor(),
     executor: Executor? = null,
 ) {
     private val server = HttpServer.create(InetSocketAddress(host, port), 0)
@@ -83,6 +110,10 @@ class UploadServer(
                     exchange.sendHtml(200, renderJob(store.get(decode(segments[1]))))
                 exchange.requestMethod == "POST" && segments.size == 3 && segments[0] == "jobs" && segments[2] == "explore" ->
                     handleExplore(exchange, decode(segments[1]))
+                exchange.requestMethod == "POST" && segments.size == 3 && segments[0] == "jobs" && segments[2] == "reconstruct" ->
+                    handleReconstruct(exchange, decode(segments[1]))
+                exchange.requestMethod == "GET" && segments.size >= 4 && segments[0] == "jobs" && segments[2] == "source" ->
+                    handleSource(exchange, decode(segments[1]), segments.drop(3).joinToString("/").let(::decode))
                 exchange.requestMethod == "GET" && segments.size >= 4 && segments[0] == "jobs" && segments[2] == "artifacts" ->
                     handleArtifact(exchange, decode(segments[1]), segments.drop(3).joinToString("/").let(::decode))
                 exchange.requestMethod == "GET" && segments.size == 3 && segments[0] == "api" && segments[1] == "jobs" ->
@@ -117,17 +148,45 @@ class UploadServer(
 
     private fun handleExplore(exchange: HttpExchange, jobId: String) {
         val job = store.get(jobId)
+        schedule(
+            exchange,
+            job,
+            queuedMessage = "Waiting for an exploration worker",
+            activeMessage = "Generating and executing candidate inputs",
+            completeMessage = "Exploration completed successfully",
+        ) { analyzer.analyze(it, store.reportsDirectory(it.id)) }
+    }
+
+    private fun handleReconstruct(exchange: HttpExchange, jobId: String) {
+        val job = store.get(jobId)
+        schedule(
+            exchange,
+            job,
+            queuedMessage = "Waiting for a source-tree worker",
+            activeMessage = "Recovering program structure and generating source modules",
+            completeMessage = "Archival source tree generated successfully",
+        ) { reconstructor.reconstruct(it, store.reportsDirectory(it.id)) }
+    }
+
+    private fun schedule(
+        exchange: HttpExchange,
+        job: Job,
+        queuedMessage: String,
+        activeMessage: String,
+        completeMessage: String,
+        operation: (Job) -> Unit,
+    ) {
         if (!runningJobs.add(job.id)) {
-            exchange.sendHtml(409, renderErrorPage(409, "Analysis already running", "This job already has an active exploration run."))
+            exchange.sendHtml(409, renderErrorPage(409, "Analysis already running", "This job already has an active background operation."))
             return
         }
-        store.updateStatus(job.id, "queued", "Waiting for an analysis worker")
+        store.updateStatus(job.id, "queued", queuedMessage)
         try {
             analysisExecutor.execute {
                 try {
-                    val active = store.updateStatus(job.id, "analyzing", "Generating and executing candidate inputs")
-                    analyzer.analyze(active, store.reportsDirectory(job.id))
-                    store.updateStatus(job.id, "complete", "Exploration completed successfully")
+                    val active = store.updateStatus(job.id, "analyzing", activeMessage)
+                    operation(active)
+                    store.updateStatus(job.id, "complete", completeMessage)
                 } catch (failure: Exception) {
                     store.updateStatus(job.id, "failed", failure.message ?: failure.javaClass.simpleName)
                 } finally {
@@ -140,6 +199,20 @@ class UploadServer(
             throw failure
         }
         exchange.redirect("/jobs/${job.id}")
+    }
+
+    private fun handleSource(exchange: HttpExchange, jobId: String, relativePath: String) {
+        require(relativePath.isNotBlank()) { "source path must not be blank" }
+        val normalized = relativePath.replace('\\', '/')
+        require(!normalized.startsWith('/') && normalized.split('/').none { it.isBlank() || it == ".." || it == "." }) {
+            "source path must remain inside the generated tree"
+        }
+        require(normalized == "Makefile" || normalized.endsWith(".c") || normalized.endsWith(".h") ||
+            normalized.endsWith(".json") || normalized.endsWith(".md") || normalized.endsWith(".log")) {
+            "only generated text files may be viewed"
+        }
+        val source = store.resolveArtifact(jobId, "reports/source-tree/$normalized")
+        exchange.sendHtml(200, renderSourceFile(store.get(jobId), normalized, java.nio.file.Files.readString(source)))
     }
 
     private fun handleArtifact(exchange: HttpExchange, jobId: String, relativePath: String) {
@@ -228,6 +301,7 @@ private fun HttpExchange.sendBytes(
 
 private fun contentType(path: Path): String = when (path.fileName.toString().substringAfterLast('.', "")) {
     "json" -> "application/json; charset=utf-8"
+    "zip" -> "application/zip"
     "log", "txt", "c", "h", "md" -> "text/plain; charset=utf-8"
     else -> "application/octet-stream"
 }

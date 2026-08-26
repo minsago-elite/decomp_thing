@@ -73,6 +73,7 @@ class ReconstructionPipelineTest {
                 "reports/module_plan.json",
                 "reports/modules/decomp.json",
                 "reports/program_model.json",
+                "reports/toolchain.json",
                 "reports/unresolved.json",
                 "source_tree_manifest.json",
                 "src/main.c",

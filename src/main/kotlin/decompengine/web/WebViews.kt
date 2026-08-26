@@ -78,7 +78,10 @@ fun renderJob(job: Job): String {
         "<button class=\"button primary\" disabled>Analysis in progress <span class=\"spinner\"></span></button>"
     } else {
         val label = if (job.status == "complete") "Run exploration again" else "Start automatic exploration"
-        "<form action=\"/jobs/${job.id}/explore\" method=\"post\"><button class=\"button primary\" type=\"submit\">$label <span>↗</span></button></form>"
+        """
+        <form action="/jobs/${job.id}/reconstruct" method="post"><button class="button primary" type="submit">Generate source tree <span>↗</span></button></form>
+        <form action="/jobs/${job.id}/explore" method="post"><button class="button secondary" type="submit">$label</button></form>
+        """.trimIndent()
     }
     val script = if (active) """
         const initialStatus = ${jsString(job.status)};
@@ -132,6 +135,7 @@ fun renderJob(job: Job): String {
               </section>
             </div>
             ${renderExploration(job)}
+            ${renderSourceTree(job)}
             ${renderRepairHistory(job)}
             ${renderArtifacts(job, artifacts)}
           </main>
@@ -139,6 +143,17 @@ fun renderJob(job: Job): String {
         script = script,
     )
 }
+
+fun renderSourceFile(job: Job, relativePath: String, source: String): String = page(
+    title = relativePath,
+    body = """
+      <main class="shell source-shell">
+        <a class="back-link" href="/jobs/${job.id}">← ${job.filename.escapeHtml()}</a>
+        <section class="source-heading"><div><p class="kicker">Generated source</p><h1>${relativePath.escapeHtml()}</h1></div><a class="button secondary" href="${artifactHref(job, "reports/source-tree/$relativePath")}">Download</a></section>
+        <pre class="source-view"><code>${source.escapeHtml()}</code></pre>
+      </main>
+    """.trimIndent(),
+)
 
 fun renderErrorPage(status: Int, title: String, message: String): String = page(
     title = title,
@@ -264,6 +279,35 @@ private fun renderArtifacts(job: Job, artifacts: List<Path>): String {
     """.trimIndent()
 }
 
+private fun renderSourceTree(job: Job): String {
+    val root = job.binaryPath.parent.resolve("reports/source-tree")
+    val manifest = root.resolve("source_tree_manifest.json")
+    if (!manifest.exists()) return ""
+    val files = Files.walk(root).use { paths ->
+        paths.filter { it.isRegularFile() }.map { root.relativize(it).toString().replace('\\', '/') }
+            .filter { it == "Makefile" || it.endsWith(".c") || it.endsWith(".h") || it.endsWith(".json") || it.endsWith(".md") || it.endsWith(".log") }
+            .sorted().toList()
+    }
+    val rows = files.joinToString("") { relative ->
+        val depth = relative.count { it == '/' }
+        val kind = relative.substringAfterLast('.', "file").uppercase().take(4)
+        "<li style=\"--depth:$depth\"><a href=\"/jobs/${job.id}/source/${encodePath(relative)}\"><span>$kind</span><code>${relative.escapeHtml()}</code><i>→</i></a></li>"
+    }
+    val confidencePath = root.resolve("reports/confidence.json")
+    val confidence = runCatching {
+        Json.parseToJsonElement(confidencePath.readText()).jsonObject["projectScore"]?.jsonPrimitive?.doubleOrNull
+    }.getOrNull()
+    val bundle = job.binaryPath.parent.resolve("reports/source-tree.zip")
+    return """
+      <section class="panel source-tree-panel">
+        <div class="section-heading compact"><span class="step">04</span><div><p class="kicker">Reconstructed project</p><h2>Archival source tree</h2></div>${confidence?.let { "<span class=\"count\">${(it * 100).roundToInt()}%</span>" }.orEmpty()}</div>
+        <p class="tree-note">${files.size} readable project files. Confidence is evidence-bounded and does not claim universal equivalence.</p>
+        <ul class="source-tree">$rows</ul>
+        ${if (bundle.exists()) "<a class=\"button primary archive-download\" href=\"${artifactHref(job, "reports/source-tree.zip")}\">Download verified source archive ↓</a>" else ""}
+      </section>
+    """.trimIndent()
+}
+
 private fun listArtifacts(jobDir: Path): List<Path> {
     if (!jobDir.exists()) return emptyList()
     return Files.walk(jobDir).use { paths ->
@@ -285,6 +329,10 @@ private fun artifactHref(job: Job, relative: String): String =
     "/jobs/${job.id}/artifacts/" + relative.split('/', '\\').joinToString("/") {
         URLEncoder.encode(it, StandardCharsets.UTF_8).replace("+", "%20")
     }
+
+private fun encodePath(relative: String): String = relative.split('/').joinToString("/") {
+    URLEncoder.encode(it, StandardCharsets.UTF_8).replace("+", "%20")
+}
 
 private fun page(title: String, body: String, script: String = ""): String = """<!doctype html>
 <html lang="en">
@@ -360,7 +408,7 @@ h1 em { color: var(--acid); font-style: normal; }
 .lede { max-width: 650px; color: var(--muted); font-size: 18px; line-height: 1.65; }
 .dashboard-grid, .job-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 18px; }
 .panel { border: 1px solid var(--line); border-radius: 14px; background: linear-gradient(145deg, rgba(24,30,27,.96), rgba(15,19,17,.96)); box-shadow: 0 24px 80px rgba(0,0,0,.18); }
-.upload-panel, .queue-panel, .overview-panel, .workflow-panel, .evidence-panel, .history-panel, .artifacts-panel { padding: 28px; }
+.upload-panel, .queue-panel, .overview-panel, .workflow-panel, .evidence-panel, .history-panel, .artifacts-panel, .source-tree-panel { padding: 28px; }
 .section-heading { display: flex; align-items: flex-start; gap: 14px; margin-bottom: 28px; }
 .section-heading.compact { align-items: center; }
 .section-heading h2 { margin: 2px 0 0; font-size: 23px; letter-spacing: -.035em; }
@@ -377,6 +425,8 @@ h1 em { color: var(--acid); font-style: normal; }
 .button { min-height: 48px; padding: 0 19px; border: 0; border-radius: 7px; display: inline-flex; align-items: center; justify-content: center; gap: 14px; font: 750 14px inherit; text-decoration: none; cursor: pointer; transition: .18s ease; }
 .button.primary { color: #11160d; background: var(--acid); }
 .button.primary:hover { background: #ddff82; transform: translateY(-1px); }
+.button.secondary { color: var(--ink); background: #252d29; border: 1px solid #3a463f; }
+.button.secondary:hover { border-color: var(--cyan); }
 .button:disabled { opacity: .6; cursor: wait; transform: none; }
 .button span { margin-left: auto; }
 .guardrails { display: flex; flex-wrap: wrap; gap: 7px; margin-top: 18px; }
@@ -410,9 +460,10 @@ h1 em { color: var(--acid); font-style: normal; }
 .table-wrap { overflow-x: auto; border: 1px solid var(--line); border-radius: 8px; }table { width: 100%; border-collapse: collapse; font-size: 12px; }th { color: var(--muted); background: #101411; font: 700 9px ui-monospace, monospace; letter-spacing: .07em; text-transform: uppercase; text-align: left; }th, td { padding: 12px; border-bottom: 1px solid var(--line); white-space: nowrap; }tbody tr:last-child td { border: 0; }code { font: 11px ui-monospace, SFMono-Regular, Menlo, monospace; color: #c9d0ca; }.source-tag.angr { color: var(--cyan); }.source-tag.mutation { color: var(--warning); }.source-tag.static_hint { color: #ba9cff; }.source-tag.seed { color: var(--acid); }.table-note { color: var(--muted); font-size: 11px; margin: 12px 0 0; }
 .history-list { display: grid; gap: 10px; }.history-item { display: grid; grid-template-columns: 40px 1fr; gap: 15px; padding: 17px; border: 1px solid var(--line); border-radius: 8px; }.history-index { display: grid; place-items: center; width: 32px; height: 32px; border-radius: 50%; background: #252d28; color: var(--acid); font: 700 11px ui-monospace, monospace; }.history-title { display: flex; align-items: center; justify-content: space-between; }.history-item p { color: var(--muted); font-size: 12px; }.evidence-line { display: grid; gap: 5px; padding: 9px 11px; border-left: 2px solid var(--cyan); background: rgba(114,215,208,.04); }.evidence-line b { color: var(--ink); }.regressions { margin-bottom: 0; }
 .artifact-list { display: grid; grid-template-columns: 1fr 1fr; gap: 9px; }.artifact-row { display: flex; align-items: center; gap: 12px; padding: 13px; border: 1px solid var(--line); border-radius: 8px; text-decoration: none; transition: .15s; }.artifact-row:hover { border-color: #526157; background: #202722; }.artifact-row > span:last-child { margin-left: auto; color: var(--acid); }.artifact-icon { display: grid; place-items: center; width: 38px; height: 38px; border-radius: 5px; background: #252d28; color: var(--cyan); font: 700 9px ui-monospace, monospace; }.artifact-row strong, .artifact-row small { display: block; }.artifact-row small { margin-top: 4px; color: var(--muted); font-size: 10px; }
+.source-tree-panel { margin-top: 18px; }.tree-note { color: var(--muted); font-size: 13px; }.source-tree { list-style: none; padding: 0; margin: 18px 0; border: 1px solid var(--line); border-radius: 8px; overflow: hidden; }.source-tree li + li { border-top: 1px solid var(--line); }.source-tree a { display: grid; grid-template-columns: 42px 1fr 20px; gap: 11px; align-items: center; min-height: 43px; padding: 7px 12px 7px calc(12px + var(--depth) * 18px); text-decoration: none; background: rgba(8,11,9,.25); }.source-tree a:hover { background: #202722; }.source-tree span { color: var(--cyan); font: 700 9px ui-monospace, monospace; }.source-tree i { color: var(--acid); font-style: normal; }.archive-download { width: max-content; }.source-shell { padding-block: 44px 80px; }.source-heading { display: flex; align-items: flex-end; justify-content: space-between; gap: 20px; padding: 42px 0 24px; }.source-heading h1 { margin: 8px 0 0; font: 700 clamp(1.8rem,4vw,3.5rem)/1.05 ui-monospace, monospace; letter-spacing: -.05em; }.source-view { overflow: auto; min-height: 420px; padding: 24px; border: 1px solid var(--line); border-radius: 10px; background: #080b09; line-height: 1.55; tab-size: 4; }.source-view code { font-size: 12px; color: #dbe2dc; }
 .spinner { width: 12px; height: 12px; border: 2px solid rgba(0,0,0,.25); border-top-color: #111; border-radius: 50%; animation: spin .8s linear infinite; }@keyframes spin { to { transform: rotate(360deg); } }
 .error-shell { display: grid; place-items: start; align-content: center; min-height: calc(100vh - 150px); max-width: 760px; }.error-shell h1 { font-size: 58px; margin: 5px 0 20px; }.error-shell > p:not(.error-code) { color: var(--muted); font-size: 17px; }.error-code { color: var(--danger); font: 700 12px ui-monospace, monospace; }.error-shell .button { margin-top: 20px; }
 footer { display: flex; justify-content: space-between; padding-block: 32px; margin-top: 60px; border-top: 1px solid var(--line); color: var(--muted); font: 700 10px ui-monospace, monospace; letter-spacing: .08em; text-transform: uppercase; }
 @media (max-width: 820px) { .dashboard-grid, .job-grid { grid-template-columns: 1fr; }.hero { padding-top: 58px; }.job-header { align-items: flex-start; flex-direction: column; }.job-actions { align-items: flex-start; flex-direction: column; }.metric-grid { grid-template-columns: 1fr 1fr; }.artifact-list { grid-template-columns: 1fr; }.build-label { display: none; } }
-@media (max-width: 520px) { .shell { width: min(100% - 24px, 1180px); }.upload-panel, .queue-panel, .overview-panel, .workflow-panel, .evidence-panel, .history-panel, .artifacts-panel { padding: 19px; }.metric-grid, .metadata-grid { grid-template-columns: 1fr; }.datum:nth-child(odd) { padding-right: 0; }h1 { font-size: 3rem; }.job-row .status-pill { display: none; } }
+@media (max-width: 520px) { .shell { width: min(100% - 24px, 1180px); }.upload-panel, .queue-panel, .overview-panel, .workflow-panel, .evidence-panel, .history-panel, .artifacts-panel, .source-tree-panel { padding: 19px; }.metric-grid, .metadata-grid { grid-template-columns: 1fr; }.datum:nth-child(odd) { padding-right: 0; }h1 { font-size: 3rem; }.job-row .status-pill { display: none; }.source-heading { align-items: flex-start; flex-direction: column; } }
 """.trimIndent()

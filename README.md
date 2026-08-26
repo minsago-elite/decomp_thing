@@ -31,9 +31,25 @@ Start the local workbench and open `http://127.0.0.1:8000`:
 build/install/llm_bin_patch/bin/llm_bin_patch web
 ```
 
-The GUI provides persistent ELF uploads, recent-job navigation, metadata inspection, background automatic exploration, live status refresh, coverage and confidence evidence, repair history, and report downloads. Uploaded binaries are only executed after selecting **Start automatic exploration**, using the same mandatory sandbox as the CLI. Job data defaults to `.decomp_engine/jobs`; change it with `--data-dir`.
+The GUI provides persistent ELF uploads, recent-job navigation, metadata inspection, background automatic exploration, archival source-tree reconstruction, live status refresh, source browsing, coverage and confidence evidence, repair history, and verified archive downloads. Uploaded binaries are only executed after selecting **Start automatic exploration**, using the same mandatory sandbox as the CLI. Job data defaults to `.decomp_engine/jobs`; change it with `--data-dir`.
 
 For a non-Docker angr installation, set `ANGR_PYTHON` to the Python executable that can import angr before starting the GUI.
+
+## Archival source-tree reconstruction
+
+Generate a buildable multi-file project and deterministic ZIP bundle with Ghidra evidence and optional bounded LLM reconstruction:
+
+```bash
+export GHIDRA_HOME=/path/to/ghidra
+export BASE_URL=https://api.example.com/v1
+export API_KEY=...
+export MODEL=...
+llm_bin_patch reconstruct ./input/program --output ./output/program-source
+```
+
+Functions are assigned to deterministic modules before any LLM request. Each request may replace only its planned C file and is bounded by `--max-context-chars`. Without complete API configuration, the command emits recovered C where available and explicit buildable stubs otherwise; pass `--evidence-only` to request that behavior intentionally.
+
+The output includes `source-tree/` for normal editing, `source-tree.zip` for archival, and `reconstruction.json` for automation. The tree contains shared types, module headers and implementations, a parallel incremental Makefile, the whole-program recovery model, module ownership plan, unresolved entities, per-module prompt and source hashes, confidence limitations, tool versions, and build logs. `ARCHIVE_MANIFEST.sha256` verifies the archive payload.
 
 ## Development
 

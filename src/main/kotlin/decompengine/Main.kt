@@ -6,6 +6,10 @@ import decompengine.exploration.CandidateSource
 import decompengine.mvp.MvpPatchException
 import decompengine.mvp.MvpPatchOptions
 import decompengine.mvp.MvpPatchWorkflow
+import decompengine.project.ArchivalReconstructionService
+import decompengine.project.BoundedLlmModuleReconstructor
+import decompengine.project.EvidenceModuleReconstructor
+import decompengine.project.GhidraHeadlessProgramModelAnalyzer
 import decompengine.repair.HttpOpenAiCompatibleRepairClient
 import decompengine.repair.RepairHistory
 import decompengine.repair.TraceGuidedRepairLoop
@@ -22,6 +26,7 @@ fun main(args: Array<String>) {
         "patch" -> runPatch(args.drop(1))
         "repair" -> runRepair(args.drop(1))
         "explore" -> runExplore(args.drop(1))
+        "reconstruct" -> runReconstruct(args.drop(1))
         "web" -> runWeb(args.drop(1))
         null, "help", "--help", "-h" -> printHelp()
         else -> {
@@ -30,6 +35,52 @@ fun main(args: Array<String>) {
             kotlin.system.exitProcess(2)
         }
     }
+}
+
+private fun runReconstruct(args: List<String>) {
+    var binary: Path? = null
+    var output: Path? = null
+    var evidenceOnly = false
+    var maximumContext = 120_000
+    var index = 0
+    while (index < args.size) {
+        when (args[index]) {
+            "--output" -> {
+                if (index + 1 >= args.size) reconstructUsageError("--output requires a directory")
+                output = Path.of(args[index + 1]); index += 2
+            }
+            "--evidence-only" -> { evidenceOnly = true; index++ }
+            "--max-context-chars" -> {
+                if (index + 1 >= args.size) reconstructUsageError("--max-context-chars requires a number")
+                maximumContext = args[index + 1].toIntOrNull()
+                    ?: reconstructUsageError("--max-context-chars must be a number")
+                index += 2
+            }
+            else -> {
+                if (args[index].startsWith("-") || binary != null) reconstructUsageError("unexpected argument: ${args[index]}")
+                binary = Path.of(args[index]); index++
+            }
+        }
+    }
+    if (binary == null || output == null) reconstructUsageError("reconstruct requires an input binary and output directory")
+    val hasApi = listOf("BASE_URL", "API_KEY", "MODEL").all { !System.getenv(it).isNullOrBlank() }
+    val reconstructor = if (!evidenceOnly && hasApi) {
+        BoundedLlmModuleReconstructor(HttpOpenAiCompatibleRepairClient.fromEnvironment(), maximumContext)
+    } else {
+        if (!evidenceOnly) println("LLM configuration is incomplete; generating an evidence-backed source tree with explicit stubs")
+        EvidenceModuleReconstructor()
+    }
+    val result = ArchivalReconstructionService(GhidraHeadlessProgramModelAnalyzer.fromEnvironment(), reconstructor)
+        .reconstruct(binary, output)
+    println("source tree: ${result.projectDir}")
+    println("archive: ${result.bundle.archivePath}")
+    println("archive sha256: ${result.bundle.archiveSha256}")
+}
+
+private fun reconstructUsageError(message: String): Nothing {
+    System.err.println(message)
+    System.err.println("usage: llm_bin_patch reconstruct <binary> --output <directory> [--evidence-only] [--max-context-chars <count>]")
+    kotlin.system.exitProcess(2)
 }
 
 private fun runExplore(args: List<String>) {
@@ -291,6 +342,7 @@ private fun printHelp() {
           llm_bin_patch patch <input-elf> --output <directory> [--yes]
           llm_bin_patch repair <original-binary> <project-dir> [--reports <directory>] [--max-iterations <count>] [--explore]
           llm_bin_patch explore <binary> --reports <directory> [--arg <value>] [--stdin <value>]
+          llm_bin_patch reconstruct <binary> --output <directory> [--evidence-only] [--max-context-chars <count>]
           llm_bin_patch web [--host 127.0.0.1] [--port 8000] [--data-dir .decomp_engine/jobs]
         """.trimIndent(),
     )

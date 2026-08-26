@@ -201,6 +201,9 @@ object SourceTreeGenerator {
         val confidence = renderConfidence(model, plan)
         projectDir.resolve("reports/confidence.json").writeText(confidence)
         generated += evidence("reports/confidence.json", confidence, "evidence", model.functions.map { it.id } + model.globals.map { it.id })
+        val toolchain = renderToolchain()
+        projectDir.resolve("reports/toolchain.json").writeText(toolchain)
+        generated += evidence("reports/toolchain.json", toolchain, "environment", emptyList())
         val manifest = SourceTreeManifest(
             inputSha256 = model.inputSha256,
             files = generated,
@@ -323,6 +326,25 @@ object SourceTreeGenerator {
             append(unresolved.sorted().joinToString(",") { "\"$it\"" })
             append("]\n}\n")
         }
+    }
+
+    private fun renderToolchain(): String {
+        fun version(command: String): String = runCatching {
+            ProcessBuilder(command, "--version").redirectErrorStream(true).start().let { process ->
+                val line = process.inputStream.bufferedReader().readLine().orEmpty()
+                process.waitFor()
+                line
+            }
+        }.getOrDefault("unavailable").replace("\\", "\\\\").replace("\"", "\\\"")
+        return """
+            {
+              "decompEngineVersion": "0.1.0",
+              "javaVersion": "${System.getProperty("java.version")}",
+              "gcc": "${version("gcc")}",
+              "make": "${version("make")}",
+              "note": "LLM model and prompt hashes are recorded per generated module when applicable."
+            }
+        """.trimIndent() + "\n"
     }
 }
 
