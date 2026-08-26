@@ -1,8 +1,11 @@
 package decompengine.project
 
+import decompengine.analysis.GhidraAnalysisException
 import java.nio.file.Files
 import java.nio.file.Path
+import java.time.Duration
 import java.util.concurrent.CompletableFuture
+import java.util.concurrent.TimeUnit
 import kotlin.io.path.createDirectories
 import kotlin.io.path.isExecutable
 import kotlin.io.path.pathString
@@ -14,7 +17,24 @@ fun interface ProgramModelAnalyzer {
     fun analyze(binaryPath: Path, workDir: Path): RecoveredProgramModel
 }
 
-class GhidraHeadlessProgramModelAnalyzer(private val ghidraHome: Path) : ProgramModelAnalyzer {
+data class GhidraProgramModelExportLimits(
+    val wallClockTimeout: Duration = Duration.ofMinutes(10),
+    val terminationGrace: Duration = Duration.ofSeconds(5),
+) {
+    init {
+        require(!wallClockTimeout.isZero && !wallClockTimeout.isNegative && wallClockTimeout <= Duration.ofMinutes(10)) {
+            "Ghidra export timeout must be positive and at most 10 minutes"
+        }
+        require(!terminationGrace.isNegative && terminationGrace <= Duration.ofSeconds(30)) {
+            "Ghidra termination grace must be between zero and 30 seconds"
+        }
+    }
+}
+
+class GhidraHeadlessProgramModelAnalyzer(
+    private val ghidraHome: Path,
+    private val limits: GhidraProgramModelExportLimits = GhidraProgramModelExportLimits(),
+) : ProgramModelAnalyzer {
     override fun analyze(binaryPath: Path, workDir: Path): RecoveredProgramModel {
         val executable = ghidraHome.resolve("support/analyzeHeadless")
         require(executable.isExecutable()) { "GHIDRA_HOME does not contain executable support/analyzeHeadless" }
@@ -34,12 +54,27 @@ class GhidraHeadlessProgramModelAnalyzer(private val ghidraHome: Path) : Program
             "-scriptPath", scripts.pathString,
             "-postScript", "ExportProgramModel.java", output.pathString,
         )
-        val process = ProcessBuilder(command).start()
+        val process = ProcessBuilder(command)
+            .directory(workDir.toFile())
+            .start()
         val stdout = CompletableFuture.supplyAsync { process.inputStream.bufferedReader().readText() }
         val stderr = CompletableFuture.supplyAsync { process.errorStream.bufferedReader().readText() }
-        val exitCode = process.waitFor()
+        val completed = process.waitFor(limits.wallClockTimeout.toMillis(), TimeUnit.MILLISECONDS)
+        if (!completed) {
+            process.destroy()
+            if (!process.waitFor(limits.terminationGrace.toMillis(), TimeUnit.MILLISECONDS)) {
+                process.destroyForcibly().waitFor()
+            }
+        }
+        val exitCode = if (completed) process.exitValue() else -1
         reports.resolve("ghidra_stdout.log").writeText(stdout.join())
         reports.resolve("ghidra_stderr.log").writeText(stderr.join())
+        if (!completed) {
+            throw GhidraAnalysisException(
+                "Ghidra program recovery exceeded ${limits.wallClockTimeout.toSeconds()} seconds; " +
+                    "rerun with the same output directory to resume durable function checkpoints",
+            )
+        }
         require(exitCode == 0 && Files.isRegularFile(output)) {
             "Ghidra program recovery failed with exit code $exitCode; see ${reports.resolve("ghidra_stderr.log")}"
         }
