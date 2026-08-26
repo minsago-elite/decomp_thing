@@ -8,6 +8,7 @@ import decompengine.doctor.DoctorOptions
 import decompengine.mvp.MvpPatchException
 import decompengine.mvp.MvpPatchOptions
 import decompengine.mvp.MvpPatchWorkflow
+import decompengine.mvp.BinaryRunnerService
 import decompengine.project.ArchivalReconstructionService
 import decompengine.project.BoundedLlmModuleReconstructor
 import decompengine.project.EvidenceModuleReconstructor
@@ -26,6 +27,7 @@ fun main(args: Array<String>) {
     when (args.firstOrNull()) {
         "doctor" -> runDoctor(args.drop(1))
         "patch" -> runPatch(args.drop(1))
+        "runner" -> runRunner(args.drop(1))
         "repair" -> runRepair(args.drop(1))
         "explore" -> runExplore(args.drop(1))
         "reconstruct" -> runReconstruct(args.drop(1))
@@ -234,6 +236,33 @@ private fun patchUsageError(message: String): Nothing {
     kotlin.system.exitProcess(2)
 }
 
+private fun runRunner(args: List<String>) {
+    var control = Path.of("/runner")
+    var roots = listOf(Path.of("/input"), Path.of("/output"))
+    var index = 0
+    while (index < args.size) {
+        when (args[index]) {
+            "--control-dir" -> {
+                if (index + 1 >= args.size) runnerUsageError("--control-dir requires a directory")
+                control = Path.of(args[index + 1]); index += 2
+            }
+            "--root" -> {
+                if (index + 1 >= args.size) runnerUsageError("--root requires a directory")
+                roots = roots + Path.of(args[index + 1]); index += 2
+            }
+            else -> runnerUsageError("unexpected argument: ${args[index]}")
+        }
+    }
+    val isolated = System.getenv("RUNNER_NETWORK_ISOLATED") == "true"
+    BinaryRunnerService(control, roots.distinct(), isolated).runForever()
+}
+
+private fun runnerUsageError(message: String): Nothing {
+    System.err.println(message)
+    System.err.println("usage: llm_bin_patch runner [--control-dir <directory>] [--root <directory>]...")
+    kotlin.system.exitProcess(2)
+}
+
 private fun runDoctor(args: List<String>) {
     var toolsOnly = false
     var output = Path.of(System.getenv("OUTPUT_DIR") ?: if (Files.isDirectory(Path.of("/output"))) "/output" else "output")
@@ -301,6 +330,7 @@ private fun printHelp() {
         Usage:
           llm_bin_patch doctor [--tools-only] [--output <directory>]
           llm_bin_patch patch <input-elf> --output <directory> [--yes]
+          llm_bin_patch runner [--control-dir <directory>] [--root <directory>]...
           llm_bin_patch repair <original-binary> <project-dir> [--reports <directory>] [--max-iterations <count>] [--explore]
           llm_bin_patch explore <binary> --reports <directory> [--arg <value>] [--stdin <value>]
           llm_bin_patch reconstruct <binary> --output <directory> [--evidence-only] [--max-context-chars <count>]

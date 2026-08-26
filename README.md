@@ -20,7 +20,7 @@ docker compose run --rm llm-bin-patch doctor --output /output
 
 The container includes JDK 21, headless Ghidra, GCC, Make, binutils, sanitizers, bubblewrap, Python, and a pinned angr installation. Input files are mounted read-only from `./input`; generated artifacts are written to `/output`. `doctor` exercises the compiler and sanitizer runtime, verifies the output mount is writable, and performs an authenticated `GET /models` preflight without printing the API key. Use `doctor --tools-only` when API connectivity is intentionally unavailable.
 
-The current Compose service does not add `SYS_ADMIN` or run as privileged. Standard Docker therefore prevents nested bubblewrap mount namespaces. Use this environment only with the pinned, trusted MVP fixture until binary execution is moved to a separate no-network runner container.
+Compose runs analyzed binaries in the separate `binary-runner` service. That service receives no `.env`, has `network_mode: none`, a read-only root filesystem, no Linux capabilities, read-only input/output mounts, and only a narrow writable request volume. The application service does not add `SYS_ADMIN` or run as privileged. Outside Compose, binary execution requires a working bubblewrap user/network namespace and starts with a cleared, allowlisted environment.
 
 ## Browser GUI
 

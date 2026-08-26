@@ -26,6 +26,7 @@ class MvpPatchWorkflow(
     private val environment: Map<String, String> = System.getenv(),
     private val approve: (String) -> Boolean = ::promptForApproval,
     private val decompiler: BinaryDecompiler = GhidraDecompiler(environment),
+    private val binaryExecution: BinaryExecutionBoundary = BinaryExecutionBoundaryFactory.fromEnvironment(environment),
 ) {
     fun run(options: MvpPatchOptions) {
         val input = options.inputElf.toAbsolutePath().normalize()
@@ -43,9 +44,7 @@ class MvpPatchWorkflow(
         val finalBinary = patchedBinaryDir.resolve("patched_binary")
         finalBinary.deleteIfExists()
         val logger = StreamingLogger(logs.resolve("patch-${Instant.now().toEpochMilli()}.log"))
-        val evidence = MvpRunEvidence(environment).apply {
-            isolation = "direct host-process execution; credential and network isolation are not established in this workflow"
-        }
+        val evidence = MvpRunEvidence(environment)
         var phase = "inspect"
         try {
             logger.use {
@@ -53,12 +52,8 @@ class MvpPatchWorkflow(
                 it.phase(phase)
                 requireElf64(input)
                 it.command(listOf("readelf", "-h", "-s", input.pathString), work, "ELF metadata")
-                val original = it.command(
-                    listOf("timeout", "5s", "stdbuf", "-o0", input.pathString),
-                    input.parent,
-                    "observe original",
-                    requireSuccess = false,
-                )
+                val original = it.binary(binaryExecution, input, input.parent, "observe original")
+                evidence.isolation = original.isolation.requireSecure().toString()
                 if (original.stdout.isBlank()) throw MvpPatchException("original produced no observable stdout")
                 evidence.check("original behavior observation", original.exitCode == 0, "exit=${original.exitCode}, stdoutBytes=${original.stdout.toByteArray().size}")
                 evidence.passPhase(phase, "ELF metadata inspected and default behavior retained")
@@ -91,9 +86,9 @@ class MvpPatchWorkflow(
                 phase = "reproduce"
                 evidence.startPhase(phase)
                 it.phase(phase)
-                val finding = it.command(
-                    listOf("timeout", "5s", vulnerable.pathString), work, "sanitizer reproducer",
-                    environment = mapOf("ASAN_OPTIONS" to "detect_leaks=0:halt_on_error=1"), requireSuccess = false,
+                val finding = it.binary(
+                    binaryExecution, vulnerable, work, "sanitizer reproducer",
+                    environment = mapOf("ASAN_OPTIONS" to "detect_leaks=0:halt_on_error=1"),
                 )
                 if (finding.exitCode == 0 || !finding.combined.contains("Sanitizer")) {
                     throw MvpPatchException("reconstructed program did not reproduce a sanitizer finding")
@@ -177,8 +172,8 @@ class MvpPatchWorkflow(
         logger.command(command, target.parent, "compile ${target.fileName}")
     }
 
-    private fun verify(logger: StreamingLogger, binary: Path, expected: CommandResult, label: String) {
-        val result = logger.command(listOf("timeout", "5s", binary.pathString), binary.parent, label, false)
+    private fun verify(logger: StreamingLogger, binary: Path, expected: BinaryExecutionResult, label: String) {
+        val result = logger.binary(binaryExecution, binary, binary.parent, label)
         if (result.exitCode != 0 || result.stdout != expected.stdout || result.combined.contains("Sanitizer")) {
             throw MvpPatchException("$label did not preserve observed behavior")
         }
@@ -254,6 +249,24 @@ class StreamingLogger(path: Path) : AutoCloseable {
         val code = process.waitFor(); info("$label exit_code=$code")
         if (requireSuccess && code !in accepted) throw MvpPatchException("$label failed with exit code $code")
         return CommandResult(code, stdout.toString(), stderr.toString())
+    }
+
+    fun binary(
+        boundary: BinaryExecutionBoundary,
+        executable: Path,
+        directory: Path,
+        label: String,
+        environment: Map<String, String> = emptyMap(),
+    ): BinaryExecutionResult {
+        info("$ $label: isolated-exec ${executable.toAbsolutePath().normalize()}")
+        val result = boundary.execute(executable, directory, environment)
+        synchronized(this) {
+            result.stdout.lineSequence().filter(String::isNotEmpty).forEach { line -> println(line); writer.appendLine(line) }
+            result.stderr.lineSequence().filter(String::isNotEmpty).forEach { line -> System.err.println(line); writer.appendLine("[stderr] $line") }
+            writer.flush()
+        }
+        info("$label exit_code=${result.exitCode} isolation=${result.isolation}")
+        return result
     }
 
     private fun stream(input: java.io.InputStream, capture: StringBuilder, error: Boolean): Thread =

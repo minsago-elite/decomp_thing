@@ -10,6 +10,36 @@ services:
     init: true
     stdin_open: true
     tty: true
+    depends_on:
+      - binary-runner
+    environment:
+      BINARY_RUNNER_DIR: /runner
     volumes:
       - ${INPUT_DIR:-./input}:/input:ro
       - ${OUTPUT_DIR:-./output}:/output
+      - runner-control:/runner
+  binary-runner:
+    build:
+      context: .
+      args:
+        APP_UID: ${LOCAL_UID:-1000}
+        APP_GID: ${LOCAL_GID:-1000}
+    entrypoint: ["llm_bin_patch", "runner", "--control-dir", "/runner"]
+    init: true
+    network_mode: none
+    read_only: true
+    cap_drop:
+      - ALL
+    security_opt:
+      - no-new-privileges:true
+    environment:
+      RUNNER_NETWORK_ISOLATED: "true"
+    tmpfs:
+      - /tmp:size=64m,noexec,nosuid,nodev
+    volumes:
+      - ${INPUT_DIR:-./input}:/input:ro
+      - ${OUTPUT_DIR:-./output}:/output:ro
+      - runner-control:/runner
+
+volumes:
+  runner-control:

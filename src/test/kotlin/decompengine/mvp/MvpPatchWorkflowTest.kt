@@ -35,6 +35,7 @@ class MvpPatchWorkflowTest {
             environment = mapOf("API_KEY" to "top-secret-value"),
             approve = { true },
             decompiler = BinaryDecompiler { _, _, _, raw -> raw.writeText("int main(void) { /* ghidra */ }\n") },
+            binaryExecution = testExecutionBoundary(),
         ).run(MvpPatchOptions(input, output))
 
         assertEquals(2, client.requests.size)
@@ -80,6 +81,7 @@ class MvpPatchWorkflowTest {
                 client = client,
                 approve = { false },
                 decompiler = BinaryDecompiler { _, _, _, raw -> raw.writeText("decompiled c") },
+                binaryExecution = testExecutionBoundary(),
             ).run(MvpPatchOptions(input, output))
         }
 
@@ -103,6 +105,7 @@ class MvpPatchWorkflowTest {
             MvpPatchWorkflow(
                 client = QueueRepairClient(),
                 decompiler = BinaryDecompiler { _, _, _, _ -> error("must not run") },
+                binaryExecution = testExecutionBoundary(),
             ).run(MvpPatchOptions(input, output, assumeYes = true))
         }
 
@@ -124,6 +127,7 @@ class MvpPatchWorkflowTest {
             client = client,
             approve = { error("--yes must bypass the interactive prompt") },
             decompiler = BinaryDecompiler { _, _, _, raw -> raw.writeText("decompiled c") },
+            binaryExecution = testExecutionBoundary(),
         ).run(MvpPatchOptions(input, output, assumeYes = true))
 
         assertTrue(output.resolve("summary/SUMMARY.md").readText().contains("approved by --yes automation"))
@@ -147,6 +151,19 @@ class MvpPatchWorkflowTest {
             requests += request
             return responses.removeFirst()
         }
+    }
+
+    private fun testExecutionBoundary() = BinaryExecutionBoundary { executable, directory, environment ->
+        val process = ProcessBuilder(executable.toAbsolutePath().toString())
+            .directory(directory.toFile())
+            .apply { environment().putAll(environment) }
+            .start()
+        BinaryExecutionResult(
+            process.waitFor(),
+            process.inputStream.bufferedReader().readText(),
+            process.errorStream.bufferedReader().readText(),
+            BinaryIsolation("deterministic test boundary", networkIsolated = true, credentialsIsolated = true),
+        )
     }
 
     private fun compileC(tempDir: Path, name: String, source: String): Path {
