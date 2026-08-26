@@ -1,0 +1,74 @@
+{
+  "schemaVersion": 1,
+  "inputSha256": "2222222222222222222222222222222222222222222222222222222222222222",
+  "functions": [
+    {
+      "id": "fn_0000000000500010",
+      "name": "alpha",
+      "address": "0x500010",
+      "prototype": "undefined alpha(void)",
+      "status": "partial",
+      "calls": [],
+      "referencedGlobals": [],
+      "strings": [],
+      "decompiledC": null
+    },
+    {
+      "id": "fn_0000000000500020",
+      "name": "FUN_500020",
+      "address": "0x500020",
+      "prototype": "undefined FUN_500020(void)",
+      "status": "recovered",
+      "calls": [],
+      "referencedGlobals": [],
+      "strings": [],
+      "decompiledC": null
+    },
+    {
+      "id": "fn_000000000050002d",
+      "name": "gamma",
+      "address": "0x50002d",
+      "prototype": "undefined gamma(void)",
+      "status": "partial",
+      "calls": [],
+      "referencedGlobals": [],
+      "strings": [],
+      "decompiledC": null
+    },
+    {
+      "id": "fn_0000000000500050",
+      "name": "FUN_500050",
+      "address": "0x500050",
+      "prototype": "undefined FUN_500050(void)",
+      "status": "recovered",
+      "calls": [],
+      "referencedGlobals": [],
+      "strings": [],
+      "decompiledC": null
+    },
+    {
+      "id": "fn_0000000000500060",
+      "name": "FUN_500060",
+      "address": "0x500060",
+      "prototype": "undefined FUN_500060(void)",
+      "status": "recovered",
+      "calls": [],
+      "referencedGlobals": [],
+      "strings": [],
+      "decompiledC": null
+    },
+    {
+      "id": "fn_0000000000500090",
+      "name": "false_positive",
+      "address": "0x500090",
+      "prototype": "void false_positive(void)",
+      "status": "synthetic",
+      "calls": [],
+      "referencedGlobals": [],
+      "strings": [],
+      "decompiledC": null
+    }
+  ],
+  "globals": [],
+  "types": []
+}

@@ -1,0 +1,459 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://github.com/minsago-elite/decomp_thing/oracle/function-recovery-score.schema.json",
+  "title": "Function-boundary and name-recovery score report",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schemaVersion", "oracle", "policy", "twins"],
+  "properties": {
+    "schemaVersion": {"const": 1},
+    "oracle": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "id", "scope", "source", "artifactManifestSha256",
+        "verification", "functionRecordCount", "scoredFunctionCount",
+        "exclusions", "excludedFunctions"
+      ],
+      "oneOf": [
+        {
+          "type": "object",
+          "properties": {
+            "scope": {"const": "fixture"},
+            "artifactManifestSha256": {"type": "null"},
+            "verification": {"$ref": "#/$defs/fixtureVerification"}
+          }
+        },
+        {
+          "type": "object",
+          "properties": {
+            "scope": {"const": "production"},
+            "artifactManifestSha256": {"$ref": "#/$defs/sha256"},
+            "verification": {
+              "$ref": "#/$defs/artifactVerifiedModelUnattestedVerification"
+            }
+          }
+        }
+      ],
+      "properties": {
+        "id": {"$ref": "#/$defs/identifier"},
+        "scope": {"enum": ["fixture", "production"]},
+        "source": {"const": "dwarf-and-symbols"},
+        "artifactManifestSha256": {
+          "oneOf": [{"$ref": "#/$defs/sha256"}, {"type": "null"}]
+        },
+        "verification": {"$ref": "#/$defs/verification"},
+        "functionRecordCount": {"type": "integer", "minimum": 1},
+        "scoredFunctionCount": {"type": "integer", "minimum": 1},
+        "exclusions": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["compiler-generated", "inlined"],
+          "properties": {
+            "compiler-generated": {"type": "integer", "minimum": 0},
+            "inlined": {"type": "integer", "minimum": 0}
+          }
+        },
+        "excludedFunctions": {
+          "type": "array", "maxItems": 20000,
+          "items": {"$ref": "#/$defs/excludedFunction"}
+        }
+      }
+    },
+    "policy": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "addressNormalization", "nearMissBytes", "nearMissMatching",
+        "nameComparison", "exclusionHandling", "limits"
+      ],
+      "properties": {
+        "addressNormalization": {"type": "string", "minLength": 1, "maxLength": 4096},
+        "nearMissBytes": {"type": "integer", "minimum": 1, "maximum": 4096},
+        "nearMissMatching": {"type": "string", "minLength": 1, "maxLength": 4096},
+        "nameComparison": {"type": "string", "minLength": 1, "maxLength": 4096},
+        "exclusionHandling": {"type": "string", "minLength": 1, "maxLength": 4096},
+        "limits": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "maxJsonInputBytes", "maxManifestBytes",
+            "maxSupportingInputBytes", "maxArtifactBytes", "maxReportBytes",
+            "maxFunctionRecords", "maxAliasesPerFunction",
+            "maxEvidencePerAlias", "maxModelReferencesPerFunction",
+            "maxModelGlobalsOrTypes", "maxTextCharacters",
+            "maxMatchingCells", "maxAmbiguityEdges"
+          ],
+          "properties": {
+            "maxJsonInputBytes": {"type": "integer", "minimum": 1},
+            "maxManifestBytes": {"type": "integer", "minimum": 1},
+            "maxSupportingInputBytes": {"type": "integer", "minimum": 1},
+            "maxArtifactBytes": {"type": "integer", "minimum": 1},
+            "maxReportBytes": {"type": "integer", "minimum": 1},
+            "maxFunctionRecords": {"type": "integer", "minimum": 1},
+            "maxAliasesPerFunction": {"type": "integer", "minimum": 1},
+            "maxEvidencePerAlias": {"type": "integer", "minimum": 1},
+            "maxModelReferencesPerFunction": {
+              "type": "integer", "minimum": 1
+            },
+            "maxModelGlobalsOrTypes": {"type": "integer", "minimum": 1},
+            "maxTextCharacters": {"type": "integer", "minimum": 1},
+            "maxMatchingCells": {"type": "integer", "minimum": 1},
+            "maxAmbiguityEdges": {"type": "integer", "minimum": 1}
+          }
+        }
+      }
+    },
+    "twins": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["rich", "stripped"],
+      "properties": {
+        "rich": {"$ref": "#/$defs/twin"},
+        "stripped": {"$ref": "#/$defs/twin"}
+      }
+    }
+  },
+  "$defs": {
+    "verification": {
+      "oneOf": [
+        {"$ref": "#/$defs/fixtureVerification"},
+        {"$ref": "#/$defs/artifactVerifiedModelUnattestedVerification"}
+      ]
+    },
+    "fixtureVerification": {
+      "type": "object", "additionalProperties": false,
+      "required": [
+        "status", "artifactManifestVerified",
+        "programModelProvenance", "productionVerified"
+      ],
+      "properties": {
+        "status": {"const": "fixture-non-production"},
+        "artifactManifestVerified": {"const": false},
+        "programModelProvenance": {"const": "fixture-inputs"},
+        "productionVerified": {"const": false}
+      }
+    },
+    "artifactVerifiedModelUnattestedVerification": {
+      "type": "object", "additionalProperties": false,
+      "required": [
+        "status", "artifactManifestVerified",
+        "programModelProvenance", "productionVerified"
+      ],
+      "properties": {
+        "status": {"const": "artifact-verified-model-unattested"},
+        "artifactManifestVerified": {"const": true},
+        "programModelProvenance": {"const": "unattested-schema-v1"},
+        "productionVerified": {"const": false}
+      }
+    },
+    "sha256": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
+    "address": {
+      "type": "string",
+      "pattern": "^0x(?:0|[1-9a-f][0-9a-f]{0,15})$"
+    },
+    "identifier": {"type": "string", "minLength": 1, "maxLength": 4096},
+    "name": {"type": "string", "minLength": 1, "maxLength": 4096},
+    "reason": {"type": "string", "minLength": 1, "maxLength": 16384},
+    "addressRange": {
+      "type": "object", "additionalProperties": false,
+      "required": ["start", "endExclusive"],
+      "properties": {
+        "start": {"$ref": "#/$defs/address"},
+        "endExclusive": {"$ref": "#/$defs/address"}
+      }
+    },
+    "evidence": {
+      "type": "object", "additionalProperties": false,
+      "required": ["kind", "locator"],
+      "properties": {
+        "kind": {"enum": ["dwarf-subprogram", "elf-symbol"]},
+        "locator": {"type": "string", "minLength": 1, "maxLength": 16384}
+      }
+    },
+    "availabilityMap": {
+      "type": "object", "additionalProperties": false,
+      "required": ["rich", "stripped"],
+      "properties": {
+        "rich": {"enum": ["surviving", "removed", "not-observable"]},
+        "stripped": {"enum": ["surviving", "removed", "not-observable"]}
+      }
+    },
+    "oracleAliasAllTwins": {
+      "type": "object", "additionalProperties": false,
+      "required": ["name", "availability", "evidence"],
+      "properties": {
+        "name": {"$ref": "#/$defs/name"},
+        "availability": {"$ref": "#/$defs/availabilityMap"},
+        "evidence": {
+          "type": "array", "minItems": 1, "maxItems": 256,
+          "uniqueItems": true, "items": {"$ref": "#/$defs/evidence"}
+        }
+      }
+    },
+    "oracleAlias": {
+      "type": "object", "additionalProperties": false,
+      "required": ["name", "availability", "evidence"],
+      "properties": {
+        "name": {"$ref": "#/$defs/name"},
+        "availability": {"enum": ["surviving", "removed", "not-observable"]},
+        "evidence": {
+          "type": "array", "minItems": 1, "maxItems": 256,
+          "uniqueItems": true, "items": {"$ref": "#/$defs/evidence"}
+        }
+      }
+    },
+    "excludedFunction": {
+      "type": "object", "additionalProperties": false,
+      "required": ["oracleId", "rva", "aliases", "kind", "reason"],
+      "properties": {
+        "oracleId": {"$ref": "#/$defs/identifier"},
+        "rva": {"oneOf": [{"$ref": "#/$defs/address"}, {"type": "null"}]},
+        "aliases": {
+          "type": "array", "minItems": 1, "maxItems": 256,
+          "uniqueItems": true, "items": {"$ref": "#/$defs/oracleAliasAllTwins"}
+        },
+        "kind": {"enum": ["compiler-generated", "inlined"]},
+        "reason": {"$ref": "#/$defs/reason"}
+      }
+    },
+    "ratio": {
+      "type": "object", "additionalProperties": false,
+      "required": ["numerator", "denominator", "value"],
+      "properties": {
+        "numerator": {"type": "integer", "minimum": 0},
+        "denominator": {"type": "integer", "minimum": 0},
+        "value": {
+          "oneOf": [
+            {"type": "number", "minimum": 0, "maximum": 1},
+            {"type": "null"}
+          ]
+        }
+      }
+    },
+    "nameMetric": {
+      "type": "object", "additionalProperties": false,
+      "required": ["referenceCount", "exact", "incorrect", "missingBoundary", "accuracy"],
+      "properties": {
+        "referenceCount": {"type": "integer", "minimum": 0},
+        "exact": {"type": "integer", "minimum": 0},
+        "incorrect": {"type": "integer", "minimum": 0},
+        "missingBoundary": {"type": "integer", "minimum": 0},
+        "accuracy": {"$ref": "#/$defs/ratio"}
+      }
+    },
+    "recoveredDetail": {
+      "type": "object", "additionalProperties": false,
+      "required": ["recoveredId", "recoveredRva", "recoveredName", "recoveredStatus"],
+      "properties": {
+        "recoveredId": {"$ref": "#/$defs/identifier"},
+        "recoveredRva": {"$ref": "#/$defs/address"},
+        "recoveredName": {"$ref": "#/$defs/name"},
+        "recoveredStatus": {"enum": ["recovered", "partial", "failed", "synthetic"]}
+      }
+    },
+    "falseNegative": {
+      "type": "object", "additionalProperties": false,
+      "required": ["oracleId", "oracleRva", "oracleAliases"],
+      "properties": {
+        "oracleId": {"$ref": "#/$defs/identifier"},
+        "oracleRva": {"$ref": "#/$defs/address"},
+        "oracleAliases": {
+          "type": "array", "minItems": 1, "maxItems": 256,
+          "items": {"$ref": "#/$defs/oracleAlias"}
+        }
+      }
+    },
+    "match": {
+      "type": "object", "additionalProperties": false,
+      "required": [
+        "oracleId", "oracleRva", "oracleAliases", "recoveredId",
+        "recoveredRva", "recoveredName", "recoveredStatus", "deltaBytes",
+        "matchKind", "nameResult", "matchedAlias",
+        "matchedAliasAvailability", "nameCategoryResults"
+      ],
+      "properties": {
+        "oracleId": {"$ref": "#/$defs/identifier"},
+        "oracleRva": {"$ref": "#/$defs/address"},
+        "oracleAliases": {
+          "type": "array", "minItems": 1, "maxItems": 256,
+          "items": {"$ref": "#/$defs/oracleAlias"}
+        },
+        "recoveredId": {"$ref": "#/$defs/identifier"},
+        "recoveredRva": {"$ref": "#/$defs/address"},
+        "recoveredName": {"$ref": "#/$defs/name"},
+        "recoveredStatus": {"enum": ["recovered", "partial", "failed", "synthetic"]},
+        "deltaBytes": {"type": "integer"},
+        "matchKind": {"enum": ["exact", "near"]},
+        "nameResult": {"enum": ["exact", "incorrect", "not-scored"]},
+        "matchedAlias": {
+          "oneOf": [{"$ref": "#/$defs/name"}, {"type": "null"}]
+        },
+        "matchedAliasAvailability": {
+          "oneOf": [
+            {"enum": ["surviving", "removed", "not-observable"]},
+            {"type": "null"}
+          ]
+        },
+        "nameCategoryResults": {
+          "type": "object", "additionalProperties": false,
+          "required": ["surviving", "removed"],
+          "properties": {
+            "surviving": {"enum": ["exact", "incorrect", "not-applicable"]},
+            "removed": {"enum": ["exact", "incorrect", "not-applicable"]}
+          }
+        }
+      }
+    },
+    "ignored": {
+      "type": "object", "additionalProperties": false,
+      "required": [
+        "recoveredId", "recoveredRva", "recoveredName", "recoveredStatus",
+        "oracleId", "exclusionKind", "exclusionReason"
+      ],
+      "properties": {
+        "recoveredId": {"$ref": "#/$defs/identifier"},
+        "recoveredRva": {"$ref": "#/$defs/address"},
+        "recoveredName": {"$ref": "#/$defs/name"},
+        "recoveredStatus": {"enum": ["recovered", "partial", "failed", "synthetic"]},
+        "oracleId": {"$ref": "#/$defs/identifier"},
+        "exclusionKind": {"const": "compiler-generated"},
+        "exclusionReason": {"$ref": "#/$defs/reason"}
+      }
+    },
+    "assignmentEdge": {
+      "type": "object", "additionalProperties": false,
+      "required": [
+        "oracleId", "oracleRva", "recoveredId", "recoveredRva",
+        "deltaBytes", "distanceBytes"
+      ],
+      "properties": {
+        "oracleId": {"$ref": "#/$defs/identifier"},
+        "oracleRva": {"$ref": "#/$defs/address"},
+        "recoveredId": {"$ref": "#/$defs/identifier"},
+        "recoveredRva": {"$ref": "#/$defs/address"},
+        "deltaBytes": {"type": "integer"},
+        "distanceBytes": {"type": "integer", "minimum": 0}
+      }
+    },
+    "nearAssignment": {
+      "type": "object", "additionalProperties": false,
+      "required": [
+        "objective", "stableTieBreak", "nameIndependent",
+        "hasAlternativeOptimalMatching", "optimalCandidateEdgeCount",
+        "alternativeOptimalEdges"
+      ],
+      "properties": {
+        "objective": {
+          "type": "object", "additionalProperties": false,
+          "required": ["maximumCardinality", "minimumTotalDistanceBytes"],
+          "properties": {
+            "maximumCardinality": {"type": "integer", "minimum": 0},
+            "minimumTotalDistanceBytes": {"type": "integer", "minimum": 0}
+          }
+        },
+        "stableTieBreak": {"type": "string", "minLength": 1, "maxLength": 4096},
+        "nameIndependent": {"const": true},
+        "hasAlternativeOptimalMatching": {"type": "boolean"},
+        "optimalCandidateEdgeCount": {"type": "integer", "minimum": 0},
+        "alternativeOptimalEdges": {
+          "type": "array", "maxItems": 100000,
+          "items": {"$ref": "#/$defs/assignmentEdge"}
+        }
+      }
+    },
+    "twin": {
+      "type": "object", "additionalProperties": false,
+      "required": [
+        "artifact", "boundaries", "nameRecovery", "nearMatchAssignment",
+        "exactMatches", "nearMisses", "falsePositives", "falseNegatives",
+        "ignoredExcludedRecoveries"
+      ],
+      "properties": {
+        "artifact": {
+          "type": "object", "additionalProperties": false,
+          "required": [
+            "inputSha256", "elfType", "elfImageBase", "modelImageBase",
+            "modelImageBaseEvidence", "modelImageBaseValidation",
+            "executableRvaRanges"
+          ],
+          "properties": {
+            "inputSha256": {"$ref": "#/$defs/sha256"},
+            "elfType": {"enum": ["ET_EXEC", "ET_DYN"]},
+            "elfImageBase": {"$ref": "#/$defs/address"},
+            "modelImageBase": {"$ref": "#/$defs/address"},
+            "modelImageBaseEvidence": {"const": "explicit-scorer-input"},
+            "modelImageBaseValidation": {
+              "enum": [
+                "fixture-explicit-input",
+                "matches-manifest-elf-image-base"
+              ]
+            },
+            "executableRvaRanges": {
+              "type": "array", "minItems": 1, "maxItems": 256,
+              "items": {"$ref": "#/$defs/addressRange"}
+            }
+          }
+        },
+        "boundaries": {
+          "type": "object", "additionalProperties": false,
+          "required": [
+            "referenceCount", "rawRecoveredCount", "scoredRecoveredCount",
+            "ignoredExcludedCount", "exactMatches", "nearMisses",
+            "truePositives", "falsePositives", "falseNegatives", "precision",
+            "recall", "f1", "exactAddressRate", "nearMissRate",
+            "nearMissDistanceBytes"
+          ],
+          "properties": {
+            "referenceCount": {"type": "integer", "minimum": 1},
+            "rawRecoveredCount": {"type": "integer", "minimum": 0},
+            "scoredRecoveredCount": {"type": "integer", "minimum": 0},
+            "ignoredExcludedCount": {"type": "integer", "minimum": 0},
+            "exactMatches": {"type": "integer", "minimum": 0},
+            "nearMisses": {"type": "integer", "minimum": 0},
+            "truePositives": {"type": "integer", "minimum": 0},
+            "falsePositives": {"type": "integer", "minimum": 0},
+            "falseNegatives": {"type": "integer", "minimum": 0},
+            "precision": {"$ref": "#/$defs/ratio"},
+            "recall": {"$ref": "#/$defs/ratio"},
+            "f1": {"$ref": "#/$defs/ratio"},
+            "exactAddressRate": {"$ref": "#/$defs/ratio"},
+            "nearMissRate": {"$ref": "#/$defs/ratio"},
+            "nearMissDistanceBytes": {"type": "integer", "minimum": 0}
+          }
+        },
+        "nameRecovery": {
+          "type": "object", "additionalProperties": false,
+          "required": ["overall", "surviving", "removed", "notObservableCount"],
+          "properties": {
+            "overall": {"$ref": "#/$defs/nameMetric"},
+            "surviving": {"$ref": "#/$defs/nameMetric"},
+            "removed": {"$ref": "#/$defs/nameMetric"},
+            "notObservableCount": {"type": "integer", "minimum": 0}
+          }
+        },
+        "nearMatchAssignment": {"$ref": "#/$defs/nearAssignment"},
+        "exactMatches": {
+          "type": "array", "maxItems": 20000,
+          "items": {"$ref": "#/$defs/match"}
+        },
+        "nearMisses": {
+          "type": "array", "maxItems": 20000,
+          "items": {"$ref": "#/$defs/match"}
+        },
+        "falsePositives": {
+          "type": "array", "maxItems": 20000,
+          "items": {"$ref": "#/$defs/recoveredDetail"}
+        },
+        "falseNegatives": {
+          "type": "array", "maxItems": 20000,
+          "items": {"$ref": "#/$defs/falseNegative"}
+        },
+        "ignoredExcludedRecoveries": {
+          "type": "array", "maxItems": 20000,
+          "items": {"$ref": "#/$defs/ignored"}
+        }
+      }
+    }
+  }
+}
