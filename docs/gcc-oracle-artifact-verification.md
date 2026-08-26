@@ -7,9 +7,16 @@ source release is already pinned by
 verifiable build-record and ELF-manifest boundary that follows that source
 lock.
 
-No GCC oracle binaries or production build record are checked in yet. The
-local binaries built by the unit tests are deliberately small fixtures, not
-the GCC oracle and not evidence that issue #38 is complete.
+GCC is the first large C benchmark profile, not a target-specific assumption
+of the reconstruction engine. The artifact and scoring contracts measure
+ordinary ELF/C recovery properties and are intended to admit additional
+program profiles. GCC-specific source provenance, commands, and expected
+behavior stay below `oracle/gcc/`; production reconstruction remains
+program-agnostic.
+
+The production build record, rich/stripped pair, and derived manifest are
+checked in under `oracle/gcc/16.2.0/`. Local binaries built by the unit tests
+remain deliberately small fixtures and are never substituted for that pair.
 
 ## Versioned formats
 
@@ -68,12 +75,58 @@ its complete output. The caller supplies the image digest because a process
 inside a container cannot securely infer the digest used by the outer
 runtime.
 
+Build the recorded toolchain image from the pinned Dockerfile frontend,
+official GCC image, and Debian snapshot with a fixed source date:
+
+```bash
+docker buildx build \
+  --no-cache \
+  --platform linux/amd64 \
+  --build-arg SOURCE_DATE_EPOCH=1786060800 \
+  --load \
+  --tag decomp-gcc-oracle-toolchain:16.2.0 \
+  --file oracle/gcc/16.2.0/build-toolchain.Dockerfile \
+  oracle/gcc/16.2.0
+
+docker image inspect --format '{{.Id}}' decomp-gcc-oracle-toolchain:16.2.0
+```
+
+The inspected ID must be
+`sha256:510c510f300d811df22c7769633575a94939073b529a73125bf96cfb96dc7248`.
+The Dockerfile itself has SHA-256
+`8b0af79ba3426f49ba599eb0c7eea433c62ac5bb6ab5e7797f7d09d978f43543`.
+An image-ID mismatch fails closed even if a mutable tag has the expected name.
+Two independent no-cache builds must produce that same image ID. The
+discarded download stage verifies exact Debian package hashes; the final
+layer copies only the required headers, libraries, and notices and normalizes
+all changed timestamps to `SOURCE_DATE_EPOCH`.
+
 ## Produce and verify the pair
 
 The build must start from the already verified GCC 16.2.0 source archive and
 run the argument vectors from the build record. Stage the linked `gcc` driver
 as the full artifact before altering it. Derive the second artifact only by
 running the recorded stripping command against that staged full artifact.
+
+The rebuild driver performs that complete sequence without shell-evaluating
+the recorded commands. It requires a nonexistent workspace, verifies the
+signed archive and live image/tool identities first, clears the build
+environment to the recorded allowlist, disables container networking, and
+compares the regenerated manifest byte-for-byte with the checked-in one:
+
+```bash
+python3 scripts/fetch-gcc-oracle-source.py /tmp/gcc-oracle-cache
+python3 scripts/rebuild-gcc-oracle.py \
+  --source-cache /tmp/gcc-oracle-cache \
+  --workspace /tmp/gcc-oracle-clean-build
+```
+
+Set `DOCKER=/path/to/docker` or pass `--docker /path/to/docker` when the CLI is
+not named `docker`. The workspace is deliberately retained on failure for
+inspection; choose a new path for every independent rebuild. The rebuild
+runner requires Python 3.12 or newer so archive extraction always uses the
+explicit PEP 706 `data` filter in addition to its own canonical-path and link
+preflight.
 
 Keep `source-lock.json`, `build-record.json`, the artifacts directory, and the
 eventual manifest under the same version directory. Then create the manifest:
@@ -163,24 +216,33 @@ and deterministic CLI output. Run the complete oracle test group with:
 python3 -m unittest discover -s tests/oracle -v
 ```
 
-## Work still required for the real GCC pair
+## Recorded production result
 
-The model and verifier intentionally do not choose unreviewed production
-values. Issue #38 still needs:
+Independent clean extractions and out-of-tree builds reproduced both files
+byte-for-byte. The checked-in facts, all recomputed by the manifest verifier,
+are:
 
-1. Select and lock the immutable build image, bootstrap compiler/binutils, GCC
-   configuration, and exact build/install/staging commands in a real
-   `oracle/gcc/16.2.0/build-record.json`.
-2. Perform a clean out-of-tree build from the verified upstream archive at
-   commit `78d4ac73dd391005b895a6148cd9831e28e1208b` and preserve the unmodified
-   DWARF-rich driver.
-3. Derive the stripped artifact only from that driver, run both verifier
-   commands, and review the generated manifest.
-4. Choose a repository/release storage mechanism suitable for the artifact
-   sizes and redistribution obligations.
-5. Add the retained pair to CI (or fetch it by immutable hash) and execute the
-   live build-record and artifact-manifest gates there.
+| Artifact | Bytes | SHA-256 |
+| --- | ---: | --- |
+| DWARF-rich driver | 20,713,760 | `8009c7cfc4f66017aa932d86a6d4ec7f374e6ab7a01b3ef5ab3d2fcc78c2378b` |
+| stripped twin | 2,349,296 | `3c0cfef73a02b06b40456e89d9d9e33727144c2f473b8b7256b361a7699d48a4` |
+
+Both files carry GNU Build ID
+`df5e4869383c150bbb3aab0ebac4eacb1dcd07d0`. Their 1,096,393 file-backed
+executable bytes have SHA-256
+`0c2639a4c2e662205c79515424f1d4b28fb2d6602324ce10c0b575ca3d312499`.
+The rich file has DWARF and a static symbol table; the stripped twin has
+neither. The checked-in workflow fetches and fully verifies the exact signed
+source release, rebuilds and authenticates the toolchain image, and verifies
+the formal schemas, production manifest, complete artifact hashes, and every
+recorded ELF relationship on pushes and pull requests.
+
+The executable pair is derived from GPL-licensed GCC sources. Exact source
+bytes, signatures, signer identity, license texts, and the complete rebuild
+recipe are identified by the adjacent lock and build record. Distributors of
+the binaries must preserve the applicable notices and satisfy the source-code
+provision obligations described there.
 
 An installed distribution GCC—even one reporting version 16.2.0—is not a
 substitute: downstream patches, PGO/LTO, stripping, and unavailable matching
-build inputs prevent it from serving as the source-aligned oracle.
+build inputs prevent it from serving as this source-aligned benchmark oracle.

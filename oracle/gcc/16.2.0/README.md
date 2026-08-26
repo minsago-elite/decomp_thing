@@ -8,6 +8,10 @@ The lock records enough independent evidence to reject an altered download, a
 different Git revision, an unexpected signer, or missing redistribution
 notices.
 
+This is a benchmark profile for one substantial C program. It does not make
+GCC a special case in the reconstruction engine, and future program profiles
+can supply the same kinds of artifact, structural, and behavior evidence.
+
 ## Locked provenance
 
 - Release: GCC 16.2.0, announced by the GCC project on 2026-08-07.
@@ -71,8 +75,9 @@ python3 -m unittest discover -s tests/oracle -v
 
 ## Scope of this checkpoint
 
-This lock establishes the source input only. The
-[strict build-record and ELF twin verifier](../../../docs/gcc-oracle-artifact-verification.md)
-is now implemented, but no production build record or GCC artifact pair is
-checked in yet. Issue #38 still requires the pinned build, retained binaries,
-generated manifest, a clean rebuild, and CI integration.
+This lock anchors the adjacent production build record, retained DWARF-rich
+driver and stripped twin, and generated oracle manifest. The
+[strict build and ELF verification procedure](../../../docs/gcc-oracle-artifact-verification.md)
+documents clean reproduction and the CI gate. Later benchmark checkpoints add
+structural and behavior oracles without turning GCC into an engine-specific
+code path.

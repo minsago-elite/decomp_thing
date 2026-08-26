@@ -185,7 +185,16 @@ class GccOracleArtifactTest(unittest.TestCase):
     ) -> Iterator[tuple[Path, Path, Path, Path, Path]]:
         with tempfile.TemporaryDirectory(prefix="gcc-oracle-pair-test-") as temporary:
             directory = Path(temporary)
-            shutil.copytree(SOURCE_LOCK.parent, directory, dirs_exist_ok=True)
+            shutil.copytree(
+                SOURCE_LOCK.parent,
+                directory,
+                dirs_exist_ok=True,
+                ignore=shutil.ignore_patterns(
+                    "artifacts",
+                    "build-record.json",
+                    "oracle-manifest.json",
+                ),
+            )
             artifacts = directory / "artifacts"
             artifacts.mkdir()
             full = artifacts / "gcc-driver.full"

@@ -14,5 +14,39 @@ jobs:
           sudo apt-get install -y --no-install-recommends binutils build-essential gnupg
       - name: Verify source provenance metadata
         run: python3 scripts/verify-gcc-oracle-source.py --metadata-only
+      - name: Fetch and fully verify the pinned source release
+        run: python3 scripts/fetch-gcc-oracle-source.py "$RUNNER_TEMP/gcc-oracle-source"
+      - name: Reproduce and verify the recorded toolchain image
+        run: |
+          echo '8b0af79ba3426f49ba599eb0c7eea433c62ac5bb6ab5e7797f7d09d978f43543  oracle/gcc/16.2.0/build-toolchain.Dockerfile' \
+            | sha256sum --check --strict
+          docker buildx build \
+            --no-cache \
+            --platform linux/amd64 \
+            --build-arg SOURCE_DATE_EPOCH=1786060800 \
+            --load \
+            --tag decomp-gcc-oracle-toolchain:16.2.0 \
+            --file oracle/gcc/16.2.0/build-toolchain.Dockerfile \
+            oracle/gcc/16.2.0
+          expected=sha256:510c510f300d811df22c7769633575a94939073b529a73125bf96cfb96dc7248
+          observed="$(docker image inspect --format '{{.Id}}' decomp-gcc-oracle-toolchain:16.2.0)"
+          test "$observed" = "$expected"
+          docker run --rm \
+            --platform linux/amd64 \
+            --network none \
+            --read-only \
+            --cap-drop ALL \
+            --security-opt no-new-privileges \
+            --tmpfs /tmp:rw,nosuid,nodev,noexec \
+            --mount "type=bind,src=$GITHUB_WORKSPACE,dst=/oracle,readonly" \
+            --workdir /oracle \
+            --entrypoint /usr/bin/python3 \
+            "$expected" \
+            scripts/verify-gcc-oracle-build-record.py \
+            --source-lock oracle/gcc/16.2.0/source-lock.json \
+            --build-record oracle/gcc/16.2.0/build-record.json \
+            --container-digest "$expected"
       - name: Test oracle schemas and ELF twin verifier
         run: python3 -m unittest discover -s tests/oracle -v
+      - name: Verify checked-in production oracle pair
+        run: python3 scripts/verify-gcc-oracle-artifacts.py oracle/gcc/16.2.0/oracle-manifest.json
