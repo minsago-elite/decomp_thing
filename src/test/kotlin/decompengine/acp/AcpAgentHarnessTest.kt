@@ -114,7 +114,7 @@ class AcpAgentHarnessTest {
                 }
             }
         }
-        assertEquals(47, acpTestMethods.size, acpTestMethods.joinToString { it.name })
+        assertEquals(52, acpTestMethods.size, acpTestMethods.joinToString { it.name })
         assertTrue(
             acpTestMethods.all { it.returnType == Void.TYPE },
             acpTestMethods.filter { it.returnType != Void.TYPE }.joinToString {
@@ -159,6 +159,38 @@ class AcpAgentHarnessTest {
         assertFalse(diagnostics.stderrTruncated)
         assertFalse(diagnostics.forcedTermination)
         assertProcessStopped(diagnostics.pid)
+    }
+
+    @Test
+    fun `fragmented stdout writes are assembled into complete protocol frames`() {
+        val fixture = fixture(genericContract = true)
+        val harness = harness("fragmented-stdout")
+
+        val result = harness.execute(fixture.request)
+
+        assertEquals(AgentStopReason.COMPLETED, result.stopReason)
+        assertEquals("updated artifact\n", fixture.source.readText())
+        assertEquals(FORBIDDEN_CANARY_CONTENT, fixture.forbiddenCanary.readText())
+        assertCleanTermination(harness)
+    }
+
+    @Test
+    fun `stable v1 stop reasons map to the program neutral execution contract`() {
+        mapOf(
+            "stop-max-tokens" to AgentStopReason.LIMIT_EXHAUSTED,
+            "stop-max-turn-requests" to AgentStopReason.LIMIT_EXHAUSTED,
+            "stop-refusal" to AgentStopReason.REFUSED,
+        ).forEach { (mode, expected) ->
+            val fixture = fixture(genericContract = true)
+            val harness = harness(mode)
+
+            val result = harness.execute(fixture.request)
+
+            assertEquals(expected, result.stopReason, mode)
+            assertEquals("original artifact\n", fixture.source.readText(), mode)
+            assertEquals(FORBIDDEN_CANARY_CONTENT, fixture.forbiddenCanary.readText(), mode)
+            assertCleanTermination(harness, mode)
+        }
     }
 
     @Test
@@ -367,6 +399,76 @@ class AcpAgentHarnessTest {
     }
 
     @Test
+    fun `fake agent exercises terminal create kill wait output and release lifecycle`() {
+        val parent = createTempDirectory("acp-terminal-kill-wire-").toAbsolutePath().normalize()
+        val staging = AcpWorkflowStagingRoot.createReadOnly("project", parent)
+        val artifact = staging.path.resolve("contract/artifact.txt")
+        artifact.parent.createDirectories()
+        artifact.writeText("original artifact\n")
+        val forbiddenCanary = staging.path.resolve("forbidden-canary.txt")
+        forbiddenCanary.writeText(FORBIDDEN_CANARY_CONTENT)
+        val request = AgentExecutionRequest(
+            objective = "exercise the protocol fixture",
+            workspaceRoots = listOf(staging.workspaceRoot),
+            contextInputs = listOf(
+                decompengine.agent.AgentContextInput("contract", "protocol evidence"),
+            ),
+            accessPolicy = AgentAccessPolicy(
+                listOf(
+                    AgentPathRule(
+                        AgentWorkspacePath("project", "contract/artifact.txt"),
+                        setOf(AgentOperation.READ_FILE),
+                    ),
+                ),
+                setOf(
+                    AgentOperation.READ_FILE,
+                    AgentOperation.EXECUTE_COMMAND,
+                    AgentOperation.REQUEST_PERMISSION,
+                ),
+            ),
+        )
+        val terminalPolicy = AcpTerminalExecutionPolicy(
+            listOf(AcpSandboxRootGrant(staging, AcpSandboxRootMode.READ_ONLY)),
+            listOf(
+                AcpTerminalCommandRule(
+                    AcpSandboxReadOnlyMount(SLEEP),
+                    listOf("30"),
+                    staging.path,
+                ),
+            ),
+            AcpTerminalLimits(
+                maximumConcurrentTerminals = 1,
+                maximumTerminalCreates = 1,
+                maximumDuration = Duration.ofSeconds(3),
+                resourceLimits = AcpSandboxResourceLimits(maximumCpuSeconds = 3),
+            ),
+        )
+        val harness = harness(
+            "terminal-kill-lifecycle",
+            timeouts = timeouts(request = 5_000),
+            terminalPolicy = terminalPolicy,
+        )
+
+        val result = harness.execute(request)
+
+        assertEquals(AgentStopReason.NO_CHANGES, result.stopReason)
+        val reasons = harness.latestTerminalAudit().map { it.reason }.toSet()
+        assertTrue(AcpTerminalAuditReason.CREATED in reasons)
+        assertTrue(AcpTerminalAuditReason.TOOL_BOUND in reasons)
+        assertTrue(AcpTerminalAuditReason.KILLED in reasons)
+        assertTrue(AcpTerminalAuditReason.EXIT_OBSERVED in reasons)
+        assertTrue(AcpTerminalAuditReason.OUTPUT_OBSERVED in reasons)
+        assertTrue(AcpTerminalAuditReason.RELEASED in reasons)
+        assertTrue(harness.latestTerminalAudit().all { it.networkIsolated })
+        assertEquals(AcpPermissionAuditOutcome.DENIED, harness.latestPermissionAudit().single().outcome)
+        assertEquals(AcpPermissionAuditReason.DEFAULT_DENY, harness.latestPermissionAudit().single().reason)
+        assertEquals(1, result.usage?.toolCalls)
+        assertEquals("original artifact\n", artifact.readText())
+        assertEquals(FORBIDDEN_CANARY_CONTENT, forbiddenCanary.readText())
+        assertCleanTermination(harness)
+    }
+
+    @Test
     fun `unsupported versions and missing configured capabilities fail actionably`() {
         val fixture = fixture()
         val versionFailure = assertFailsWith<AgentExecutionException> {
@@ -407,6 +509,52 @@ class AcpAgentHarnessTest {
             assertTrue(failure.message.orEmpty().contains("response id"), mode)
             assertProcessStopped(assertNotNull(harness.latestDiagnostics()).pid)
         }
+    }
+
+    @Test
+    fun `pipelined callback ids unknown peer methods and denied writes follow JSON-RPC`() {
+        val pipelinedFixture = fixture(genericContract = true)
+        val pipelinedHarness = harness("pipelined-callbacks")
+
+        val pipelined = pipelinedHarness.execute(pipelinedFixture.request)
+
+        assertEquals(AgentStopReason.NO_CHANGES, pipelined.stopReason)
+        assertEquals(listOf(0L, 1L), pipelinedHarness.latestFilesystemAudit().map { it.sequence })
+        assertEquals(
+            setOf("contract/artifact.txt"),
+            pipelinedHarness.latestFilesystemAudit().map { assertNotNull(it.policyPath).relativePath }.toSet(),
+        )
+        assertEquals("original artifact\n", pipelinedFixture.source.readText())
+        assertEquals(FORBIDDEN_CANARY_CONTENT, pipelinedFixture.forbiddenCanary.readText())
+        assertCleanTermination(pipelinedHarness, "pipelined callbacks")
+
+        val unknownFixture = fixture(genericContract = true)
+        val unknownHarness = harness("unknown-methods")
+
+        val unknown = unknownHarness.execute(unknownFixture.request)
+
+        assertEquals(AgentStopReason.NO_CHANGES, unknown.stopReason)
+        assertTrue(unknownHarness.latestFilesystemAudit().isEmpty())
+        assertEquals("original artifact\n", unknownFixture.source.readText())
+        assertEquals(FORBIDDEN_CANARY_CONTENT, unknownFixture.forbiddenCanary.readText())
+        assertCleanTermination(unknownHarness, "unknown methods")
+
+        val deniedFixture = fixture(genericContract = true)
+        val canaryBefore = Files.readAllBytes(deniedFixture.forbiddenCanary)
+        val deniedHarness = harness("forbidden-write")
+
+        val denied = deniedHarness.execute(deniedFixture.request)
+
+        assertEquals(AgentStopReason.NO_CHANGES, denied.stopReason)
+        assertTrue(canaryBefore.contentEquals(Files.readAllBytes(deniedFixture.forbiddenCanary)))
+        val denial = deniedHarness.latestFilesystemAudit().single()
+        assertEquals("fs/write_text_file", denial.method)
+        assertEquals("forbidden-canary.txt", assertNotNull(denial.policyPath).relativePath)
+        assertEquals(AcpFilesystemAuditOutcome.DENIED, denial.outcome)
+        assertEquals(AcpFilesystemAuditReason.POLICY_DENIED, denial.reason)
+        assertFalse(denial.toString().contains(deniedFixture.workspace.toString()))
+        assertFalse(denial.toString().contains("attempted overwrite payload"))
+        assertCleanTermination(deniedHarness, "denied write")
     }
 
     @Test
@@ -474,6 +622,19 @@ class AcpAgentHarnessTest {
         assertEquals(AgentFailureKind.PROCESS_CRASH, initializeCrash.failure.kind)
         assertEquals("17", initializeCrash.failure.details["exitCode"])
         assertProcessStopped(assertNotNull(initializeCrashHarness.latestDiagnostics()).pid)
+    }
+
+    @Test
+    fun `literal physical newline inside a JSON string fails closed and cleans containment`() {
+        val fixture = fixture(genericContract = true, wallMillis = 2_000)
+        val harness = harness(
+            "physical-newline-in-string",
+            timeouts = timeouts(request = 1_000, shutdown = 600),
+        )
+
+        val failure = assertBoundedCleanProtocolFailure(fixture, harness, maximumWallMillis = 5_000)
+
+        assertTrue(failure.message.orEmpty().contains("malformed JSON-RPC"), failure.message)
     }
 
     @Test
@@ -963,6 +1124,7 @@ class AcpAgentHarnessTest {
     private data class Fixture(
         val workspace: Path,
         val source: Path,
+        val forbiddenCanary: Path,
         val request: AgentExecutionRequest,
     )
 
@@ -971,14 +1133,18 @@ class AcpAgentHarnessTest {
         includeReadyPath: Boolean = false,
         wallMillis: Long = 5_000,
         maximumOutputBytes: Long = 128 * 1024,
+        genericContract: Boolean = false,
     ): Fixture {
         val workspace = createTempDirectory("acp-harness-").toAbsolutePath().normalize()
-        val source = workspace.resolve("src/module.c")
+        val sourceRelativePath = if (genericContract) "contract/artifact.txt" else "src/module.c"
+        val source = workspace.resolve(sourceRelativePath)
         source.parent.createDirectories()
-        source.writeText("old source\n")
+        source.writeText(if (genericContract) "original artifact\n" else "old source\n")
+        val forbiddenCanary = workspace.resolve("forbidden-canary.txt")
+        forbiddenCanary.writeText(FORBIDDEN_CANARY_CONTENT)
         val rules = mutableListOf(
             AgentPathRule(
-                AgentWorkspacePath("project", "src/module.c"),
+                AgentWorkspacePath("project", sourceRelativePath),
                 setOf(AgentOperation.READ_FILE, AgentOperation.WRITE_FILE),
             ),
         )
@@ -991,10 +1157,17 @@ class AcpAgentHarnessTest {
         return Fixture(
             workspace,
             source,
+            forbiddenCanary,
             AgentExecutionRequest(
-                objective = "edit the fixture",
+                objective = if (genericContract) "exercise the protocol fixture" else "edit the fixture",
                 workspaceRoots = listOf(AgentWorkspaceRoot("project", workspace)),
-                contextInputs = listOf(decompengine.agent.AgentContextInput("compiler", "compiler evidence")),
+                contextInputs = listOf(
+                    if (genericContract) {
+                        decompengine.agent.AgentContextInput("contract", "protocol evidence")
+                    } else {
+                        decompengine.agent.AgentContextInput("compiler", "compiler evidence")
+                    },
+                ),
                 accessPolicy = AgentAccessPolicy(rules),
                 limits = AgentExecutionLimits(
                     wallClockTimeout = Duration.ofMillis(wallMillis),
@@ -1190,6 +1363,42 @@ class AcpAgentHarnessTest {
         .digest(Files.readAllBytes(path))
         .joinToString("") { "%02x".format(it) }
 
+    private fun assertBoundedCleanProtocolFailure(
+        fixture: Fixture,
+        harness: AcpAgentHarness,
+        maximumWallMillis: Long,
+    ): AgentExecutionException {
+        val executor = Executors.newSingleThreadExecutor()
+        val startedAt = System.nanoTime()
+        val execution = executor.submit<AgentExecutionException> {
+            assertFailsWith { harness.execute(fixture.request) }
+        }
+        val failure = try {
+            execution.get(maximumWallMillis, TimeUnit.MILLISECONDS)
+        } catch (wrapped: ExecutionException) {
+            throw wrapped.cause ?: wrapped
+        } finally {
+            execution.cancel(true)
+            executor.shutdownNow()
+        }
+        val elapsedMillis = TimeUnit.NANOSECONDS.toMillis(System.nanoTime() - startedAt)
+        assertTrue(
+            elapsedMillis <= maximumWallMillis + 250,
+            "protocol failure exceeded its bounded wall time: $elapsedMillis ms",
+        )
+        assertEquals(AgentFailureKind.PROTOCOL, failure.failure.kind)
+        assertEquals(FORBIDDEN_CANARY_CONTENT, fixture.forbiddenCanary.readText())
+        assertCleanTermination(harness, "protocol failure")
+        return failure
+    }
+
+    private fun assertCleanTermination(harness: AcpAgentHarness, context: String = "execution") {
+        val diagnostics = assertNotNull(harness.latestDiagnostics(), context)
+        assertTrue(diagnostics.remainingProcessIds.isEmpty(), context)
+        assertTrue(diagnostics.sandboxCleanupVerified, context)
+        assertProcessStopped(diagnostics.pid)
+    }
+
     private fun assertProcessStopped(pid: Long) {
         assertFalse(ProcessHandle.of(pid).map(ProcessHandle::isAlive).orElse(false), "process $pid is still alive")
     }
@@ -1209,6 +1418,7 @@ class AcpAgentHarnessTest {
         val SLEEP: Path = Path.of("/usr/bin/sleep")
         val PYTHON_STDLIB: Path = Path.of("/usr/lib/python3.14")
         val AGENT_SCRIPT_DESTINATION: Path = Path.of("/decomp-acp-test/fake_acp_v1_agent.py")
+        const val FORBIDDEN_CANARY_CONTENT: String = "forbidden canary must remain unchanged\n"
         val GATE_HELPER: Path by lazy {
             val output = createTempDirectory("acp-static-gate-helper-")
                 .resolve("gate-helper")

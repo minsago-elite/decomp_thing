@@ -8,10 +8,33 @@ import time
 MODE = sys.argv[1]
 SENTINEL = sys.argv[2] if len(sys.argv) > 2 else ""
 READY = sys.argv[3] if len(sys.argv) > 3 else ""
+GENERIC_CONTRACT_MODES = {
+    "fragmented-stdout",
+    "pipelined-callbacks",
+    "unknown-methods",
+    "forbidden-write",
+    "physical-newline-in-string",
+    "terminal-kill-lifecycle",
+    "stop-max-tokens",
+    "stop-max-turn-requests",
+    "stop-refusal",
+}
 
 
 def send(message):
-    sys.stdout.write(json.dumps(message, separators=(",", ":")) + "\n")
+    encoded = json.dumps(message, separators=(",", ":")) + "\n"
+    if MODE == "fragmented-stdout":
+        # Split every frame across fixed, flushed writes, including the line delimiter.  The
+        # receiver must assemble a stream rather than assuming one write equals one frame.
+        first = 1
+        second = max(first + 1, len(encoded) - 1)
+        for fragment in (encoded[:first], encoded[first:second], encoded[second:]):
+            if fragment:
+                sys.stdout.write(fragment)
+                sys.stdout.flush()
+                time.sleep(0.003)
+        return
+    sys.stdout.write(encoded)
     sys.stdout.flush()
 
 
@@ -94,6 +117,7 @@ if expected_fs != "unchecked":
         raise SystemExit(96)
 if MODE in (
     "terminal-lifecycle",
+    "terminal-kill-lifecycle",
     "terminal-cancelled-orphan",
     "terminal-cross-session-hang",
     "terminal-missing-session-hang",
@@ -182,7 +206,9 @@ prompt = read_message()
 if prompt is None or prompt.get("method") != "session/prompt":
     raise SystemExit(94)
 prompt_text = prompt.get("params", {}).get("prompt", [{}])[0].get("text", "")
-if "edit the fixture" not in prompt_text or "compiler evidence" not in prompt_text:
+expected_objective = "exercise the protocol fixture" if MODE in GENERIC_CONTRACT_MODES else "edit the fixture"
+expected_context = "protocol evidence" if MODE in GENERIC_CONTRACT_MODES else "compiler evidence"
+if expected_objective not in prompt_text or expected_context not in prompt_text:
     respond(prompt, error={"code": -32602, "message": "prompt lost objective or context"})
     raise SystemExit(95)
 
@@ -252,6 +278,72 @@ if MODE == "fs-read-write":
     write_response = read_message()
     if write_response is None or write_response.get("id") != 101 or "error" in write_response:
         raise SystemExit(99)
+if MODE == "pipelined-callbacks":
+    source = join_path(cwd, "contract/artifact.txt")
+    for request_id in (130, 131):
+        send({
+            "jsonrpc": "2.0",
+            "id": request_id,
+            "method": "fs/read_text_file",
+            "params": {
+                "sessionId": "fixture-session",
+                "path": source,
+                "line": 1,
+                "limit": 1,
+            },
+        })
+    responses = [read_message(), read_message()]
+    responses_by_id = {
+        response.get("id"): response
+        for response in responses
+        if isinstance(response, dict)
+    }
+    if set(responses_by_id) != {130, 131}:
+        raise SystemExit(121)
+    if any(
+        response.get("result", {}).get("content") != "original artifact\n"
+        for response in responses_by_id.values()
+    ):
+        raise SystemExit(122)
+    respond(prompt, {"stopReason": "end_turn"})
+    raise SystemExit(0)
+if MODE == "unknown-methods":
+    send({
+        "jsonrpc": "2.0",
+        "id": 132,
+        "method": "contract/unknown_request",
+        "params": {"opaque": "generic-value"},
+    })
+    send({
+        "jsonrpc": "2.0",
+        "method": "contract/unknown_notification",
+        "params": {"opaque": "generic-value"},
+    })
+    unknown_response = read_message()
+    if unknown_response is None or unknown_response.get("id") != 132:
+        raise SystemExit(123)
+    if unknown_response.get("error", {}).get("code") != -32601:
+        raise SystemExit(124)
+    respond(prompt, {"stopReason": "end_turn"})
+    raise SystemExit(0)
+if MODE == "forbidden-write":
+    send({
+        "jsonrpc": "2.0",
+        "id": 133,
+        "method": "fs/write_text_file",
+        "params": {
+            "sessionId": "fixture-session",
+            "path": join_path(cwd, "forbidden-canary.txt"),
+            "content": "attempted overwrite payload\n",
+        },
+    })
+    denied_response = read_message()
+    if denied_response is None or denied_response.get("id") != 133:
+        raise SystemExit(131)
+    if denied_response.get("error", {}).get("code") != -32602:
+        raise SystemExit(132)
+    respond(prompt, {"stopReason": "end_turn"})
+    raise SystemExit(0)
 if MODE == "permission-default-deny":
     send({
         "jsonrpc": "2.0",
@@ -359,6 +451,90 @@ if MODE == "terminal-lifecycle":
         raise SystemExit(112)
     respond(prompt, {"stopReason": "end_turn"})
     raise SystemExit(0)
+if MODE == "terminal-kill-lifecycle":
+    send({
+        "jsonrpc": "2.0",
+        "id": 117,
+        "method": "terminal/create",
+        "params": {
+            "sessionId": "fixture-session",
+            "command": "/usr/bin/sleep",
+            "args": ["30"],
+            "cwd": cwd,
+            "env": [],
+            "outputByteLimit": 4096,
+        },
+    })
+    create_response = read_message()
+    terminal_id = (create_response or {}).get("result", {}).get("terminalId")
+    if create_response is None or create_response.get("id") != 117 or not terminal_id:
+        raise SystemExit(125)
+    send({
+        "jsonrpc": "2.0",
+        "id": 118,
+        "method": "session/request_permission",
+        "params": {
+            "sessionId": "fixture-session",
+            "toolCall": {
+                "sessionUpdate": "tool_call_update",
+                "toolCallId": "terminal-kill-tool",
+                "title": "Exercise terminal kill lifecycle",
+                "kind": "execute",
+                "status": "in_progress",
+                "content": [{"type": "terminal", "terminalId": terminal_id}],
+            },
+            "options": [
+                {"optionId": "allow", "name": "Allow once", "kind": "allow_once"},
+                {"optionId": "reject", "name": "Reject once", "kind": "reject_once"},
+            ],
+        },
+    })
+    permission_response = read_message()
+    permission_outcome = (permission_response or {}).get("result", {}).get("outcome", {})
+    if permission_response is None or permission_response.get("id") != 118:
+        raise SystemExit(126)
+    if permission_outcome.get("outcome") != "selected" or permission_outcome.get("optionId") != "reject":
+        raise SystemExit(127)
+    send({
+        "jsonrpc": "2.0",
+        "id": 119,
+        "method": "terminal/kill",
+        "params": {"sessionId": "fixture-session", "terminalId": terminal_id},
+    })
+    kill_response = read_message()
+    if kill_response is None or kill_response.get("id") != 119 or "error" in kill_response:
+        raise SystemExit(128)
+    send({
+        "jsonrpc": "2.0",
+        "id": 120,
+        "method": "terminal/wait_for_exit",
+        "params": {"sessionId": "fixture-session", "terminalId": terminal_id},
+    })
+    wait_response = read_message()
+    if wait_response is None or wait_response.get("id") != 120:
+        raise SystemExit(129)
+    if wait_response.get("result", {}).get("signal") not in ("SIGTERM", "SIGKILL"):
+        raise SystemExit(130)
+    send({
+        "jsonrpc": "2.0",
+        "id": 121,
+        "method": "terminal/output",
+        "params": {"sessionId": "fixture-session", "terminalId": terminal_id},
+    })
+    output_response = read_message()
+    if output_response is None or output_response.get("id") != 121 or "error" in output_response:
+        raise SystemExit(133)
+    send({
+        "jsonrpc": "2.0",
+        "id": 122,
+        "method": "terminal/release",
+        "params": {"sessionId": "fixture-session", "terminalId": terminal_id},
+    })
+    release_response = read_message()
+    if release_response is None or release_response.get("id") != 122 or "error" in release_response:
+        raise SystemExit(134)
+    respond(prompt, {"stopReason": "end_turn"})
+    raise SystemExit(0)
 if MODE == "terminal-cancelled-orphan":
     send({
         "jsonrpc": "2.0",
@@ -428,6 +604,14 @@ if MODE == "terminal-near-wall":
 if READY and MODE != "cancel-after-response":
     write_workspace_file(READY, "ready\n", 801)
 
+if MODE == "physical-newline-in-string":
+    # This is an actual LF byte inside the JSON string, not the valid two-byte JSON escape `\\n`.
+    prefix = '{"jsonrpc":"2.0","id":' + json.dumps(prompt["id"]) + ',"result":{"stopReason":"end'
+    sys.stdout.write(prefix + "\nturn" + '"}}\n')
+    sys.stdout.flush()
+    time.sleep(30)
+    raise SystemExit(0)
+
 if MODE == "malformed-prompt":
     sys.stdout.write("[]\n")
     sys.stdout.flush()
@@ -489,6 +673,15 @@ if MODE in ("wait-for-cancel", "ignore-cancel"):
             respond(prompt, {"stopReason": "cancelled"})
             raise SystemExit(0)
 
+stop_reasons = {
+    "stop-max-tokens": "max_tokens",
+    "stop-max-turn-requests": "max_turn_requests",
+    "stop-refusal": "refusal",
+}
+if MODE in stop_reasons:
+    respond(prompt, {"stopReason": stop_reasons[MODE]})
+    raise SystemExit(0)
+
 if MODE == "invalid-update":
     update({
         "sessionUpdate": "tool_call",
@@ -529,9 +722,13 @@ update({
     "status": "in_progress",
 })
 
-source = join_path(cwd, "src/module.c")
+source = join_path(
+    cwd,
+    "contract/artifact.txt" if MODE == "fragmented-stdout" else "src/module.c",
+)
 if MODE != "fs-read-write":
-    write_workspace_file(source, "new source\n", 803)
+    content = "updated artifact\n" if MODE == "fragmented-stdout" else "new source\n"
+    write_workspace_file(source, content, 803)
 
 update({
     "sessionUpdate": "tool_call_update",
