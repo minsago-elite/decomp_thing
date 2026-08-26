@@ -65,6 +65,12 @@ Run the full local CI suite:
 scripts/ci.sh
 ```
 
+Run the opt-in real-Ghidra adapter test after setting `GHIDRA_HOME`:
+
+```bash
+RUN_REAL_GHIDRA=true ./gradlew test --tests 'decompengine.mvp.GhidraDecompilerTest'
+```
+
 This executes the Kotlin/JVM test suite. Project planning and progress are tracked in [GitHub milestones](https://github.com/minsago-elite/decomp_thing/milestones) and [issues](https://github.com/minsago-elite/decomp_thing/issues). `ROADMAP.md` is deprecated and retained only as a migration pointer.
 
 Trace-guided repair iterates over compile and behavior failures while retaining every regression input in `repair_history.json`:
