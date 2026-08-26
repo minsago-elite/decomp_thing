@@ -1,0 +1,427 @@
+{
+  "cases": [
+    {
+      "artifacts": [
+        {
+          "base64": "TU9DSy1PQkpFQ1QAdjEK",
+          "bytes": 15,
+          "mode": "0o644",
+          "path": "assembly.o",
+          "present": true,
+          "sha256": "e5e021333c0fd167a18f93780b1a03bc65f0aef311d0232b24e6a2d06153e9a5"
+        }
+      ],
+      "exitCode": 0,
+      "id": "assembly-file",
+      "status": "passed",
+      "stderr": {
+        "base64": "",
+        "bytes": 0,
+        "normalizations": [],
+        "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+      },
+      "stdout": {
+        "base64": "",
+        "bytes": 0,
+        "normalizations": [],
+        "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+      }
+    },
+    {
+      "artifacts": [
+        {
+          "base64": "TU9DSy1PQkpFQ1QAdjEK",
+          "bytes": 15,
+          "mode": "0o644",
+          "path": "file.o",
+          "present": true,
+          "sha256": "e5e021333c0fd167a18f93780b1a03bc65f0aef311d0232b24e6a2d06153e9a5"
+        }
+      ],
+      "exitCode": 0,
+      "id": "compile-file",
+      "status": "passed",
+      "stderr": {
+        "base64": "",
+        "bytes": 0,
+        "normalizations": [],
+        "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+      },
+      "stdout": {
+        "base64": "",
+        "bytes": 0,
+        "normalizations": [],
+        "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+      }
+    },
+    {
+      "artifacts": [
+        {
+          "base64": "TU9DSy1PQkpFQ1QAdjEK",
+          "bytes": 15,
+          "mode": "0o644",
+          "path": "stdin.o",
+          "present": true,
+          "sha256": "e5e021333c0fd167a18f93780b1a03bc65f0aef311d0232b24e6a2d06153e9a5"
+        }
+      ],
+      "exitCode": 0,
+      "id": "compile-stdin",
+      "status": "passed",
+      "stderr": {
+        "base64": "",
+        "bytes": 0,
+        "normalizations": [],
+        "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+      },
+      "stdout": {
+        "base64": "",
+        "bytes": 0,
+        "normalizations": [],
+        "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+      }
+    },
+    {
+      "artifacts": [
+        {
+          "base64": null,
+          "bytes": null,
+          "mode": null,
+          "path": "missing.o",
+          "present": false,
+          "sha256": null
+        }
+      ],
+      "exitCode": 1,
+      "id": "diagnostic-invalid-input",
+      "status": "passed",
+      "stderr": {
+        "base64": "bW9jayBjYzE6IG1pc3NpbmcgaW5wdXQgbWlzc2luZy5jCg==",
+        "bytes": 34,
+        "normalizations": [],
+        "sha256": "fc6d35d325e7984d3b9bd91720f37631f04cac325ba8460aedd13376ec5125a8"
+      },
+      "stdout": {
+        "base64": "",
+        "bytes": 0,
+        "normalizations": [],
+        "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+      }
+    },
+    {
+      "artifacts": [],
+      "exitCode": 1,
+      "id": "diagnostic-invalid-option",
+      "status": "passed",
+      "stderr": {
+        "base64": "b3JhY2xlOiBlcnJvcjogdW5yZWNvZ25pemVkIGNvbW1hbmQtbGluZSBvcHRpb24gJy0tZGVmaW5pdGVseS1ub3QtYS1zdXBwb3J0ZWQtY29ycHVzLW9wdGlvbicKb3JhY2xlOiBmYXRhbCBlcnJvcjogbm8gaW5wdXQgZmlsZXMKY29tcGlsYXRpb24gdGVybWluYXRlZC4K",
+        "bytes": 153,
+        "normalizations": [],
+        "sha256": "525b39acc7388841c74e1411725f7d2207b6a1f5214f691b938492cf09e1416c"
+      },
+      "stdout": {
+        "base64": "",
+        "bytes": 0,
+        "normalizations": [],
+        "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+      }
+    },
+    {
+      "artifacts": [],
+      "exitCode": 0,
+      "id": "environment-search-path",
+      "status": "passed",
+      "stderr": {
+        "base64": "b2JzZXJ2ZWQtY29tcGlsZXItcGF0aD0vd29ya3NwYWNlL2Vudi10b29scy9jYzEK",
+        "bytes": 48,
+        "normalizations": [],
+        "sha256": "70330cf554b95c6419d4365bc45ea0d26cf8c83d89d8a1846c2f749a3068294a"
+      },
+      "stdout": {
+        "base64": "TU9DSy1QUkVQUk9DRVNTRUQK",
+        "bytes": 18,
+        "normalizations": [],
+        "sha256": "b8a1f8e4208ed2055f683bd08a081ad8b794b7f88145b0a35d0693f18b04d178"
+      }
+    },
+    {
+      "artifacts": [],
+      "exitCode": 0,
+      "id": "help-driver",
+      "status": "passed",
+      "stderr": {
+        "base64": "",
+        "bytes": 0,
+        "normalizations": [],
+        "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+      },
+      "stdout": {
+        "base64": "VXNhZ2U6IG9yYWNsZSBbb3B0aW9uc10gZmlsZS4uLgpPcHRpb25zOgogIC1wYXNzLWV4aXQtY29kZXMgICAgICAgICBFeGl0IHdpdGggaGlnaGVzdCBlcnJvciBjb2RlIGZyb20gYSBwaGFzZS4KICAtLWhlbHAgICAgICAgICAgICAgICAgICAgRGlzcGxheSB0aGlzIGluZm9ybWF0aW9uLgogIC0tdGFyZ2V0LWhlbHAgICAgICAgICAgICBEaXNwbGF5IHRhcmdldCBzcGVjaWZpYyBjb21tYW5kIGxpbmUgb3B0aW9ucyAoaW5jbHVkaW5nIGFzc2VtYmxlciBhbmQgbGlua2VyIG9wdGlvbnMpLgogIC0taGVscD17Y29tbW9ufG9wdGltaXplcnN8cGFyYW1zfHRhcmdldHx3YXJuaW5nc3xbXl17am9pbmVkfHNlcGFyYXRlfHVuZG9jdW1lbnRlZH19WywuLi5dLgogICAgICAgICAgICAgICAgICAgICAgICAgICBEaXNwbGF5IHNwZWNpZmljIHR5cGVzIG9mIGNvbW1hbmQgbGluZSBvcHRpb25zLgogIChVc2UgJy12IC0taGVscCcgdG8gZGlzcGxheSBjb21tYW5kIGxpbmUgb3B0aW9ucyBvZiBzdWItcHJvY2Vzc2VzKS4KICAtLXZlcnNpb24gICAgICAgICAgICAgICAgRGlzcGxheSBjb21waWxlciB2ZXJzaW9uIGluZm9ybWF0aW9uLgogIC1kdW1wc3BlY3MgICAgICAgICAgICAgICBEaXNwbGF5IGFsbCBvZiB0aGUgYnVpbHQgaW4gc3BlYyBzdHJpbmdzLgogIC1kdW1wdmVyc2lvbiAgICAgICAgICAgICBEaXNwbGF5IHRoZSB2ZXJzaW9uIG9mIHRoZSBjb21waWxlci4KICAtZHVtcG1hY2hpbmUgICAgICAgICAgICAgRGlzcGxheSB0aGUgY29tcGlsZXIncyB0YXJnZXQgcHJvY2Vzc29yLgogIC1mb2ZmbG9hZD08dGFyZ2V0cz4gICAgICBTcGVjaWZ5IG9mZmxvYWRpbmcgdGFyZ2V0cy4KICAtcHJpbnQtc2VhcmNoLWRpcnMgICAgICAgRGlzcGxheSB0aGUgZGlyZWN0b3JpZXMgaW4gdGhlIGNvbXBpbGVyJ3Mgc2VhcmNoIHBhdGguCiAgLXByaW50LWxpYmdjYy1maWxlLW5hbWUgIERpc3BsYXkgdGhlIG5hbWUgb2YgdGhlIGNvbXBpbGVyJ3MgY29tcGFuaW9uIGxpYnJhcnkuCiAgLXByaW50LWZpbGUtbmFtZT08bGliPiAgIERpc3BsYXkgdGhlIGZ1bGwgcGF0aCB0byBsaWJyYXJ5IDxsaWI+LgogIC1wcmludC1wcm9nLW5hbWU9PHByb2c+ICBEaXNwbGF5IHRoZSBmdWxsIHBhdGggdG8gY29tcGlsZXIgY29tcG9uZW50IDxwcm9nPi4KICAtcHJpbnQtbXVsdGlhcmNoICAgICAgICAgRGlzcGxheSB0aGUgdGFyZ2V0J3Mgbm9ybWFsaXplZCBHTlUgdHJpcGxldCwgdXNlZCBhcwogICAgICAgICAgICAgICAgICAgICAgICAgICBhIGNvbXBvbmVudCBpbiB0aGUgbGlicmFyeSBwYXRoLgogIC1wcmludC1tdWx0aS1kaXJlY3RvcnkgICBEaXNwbGF5IHRoZSByb290IGRpcmVjdG9yeSBmb3IgdmVyc2lvbnMgb2YgbGliZ2NjLgogIC1wcmludC1tdWx0aS1saWIgICAgICAgICBEaXNwbGF5IHRoZSBtYXBwaW5nIGJldHdlZW4gY29tbWFuZCBsaW5lIG9wdGlvbnMgYW5kCiAgICAgICAgICAgICAgICAgICAgICAgICAgIG11bHRpcGxlIGxpYnJhcnkgc2VhcmNoIGRpcmVjdG9yaWVzLgogIC1wcmludC1tdWx0aS1vcy1kaXJlY3RvcnkgRGlzcGxheSB0aGUgcmVsYXRpdmUgcGF0aCB0byBPUyBsaWJyYXJpZXMuCiAgLXByaW50LXN5c3Jvb3QgICAgICAgICAgIERpc3BsYXkgdGhlIHRhcmdldCBsaWJyYXJpZXMgZGlyZWN0b3J5LgogIC1wcmludC1zeXNyb290LWhlYWRlcnMtc3VmZml4IERpc3BsYXkgdGhlIHN5c3Jvb3Qgc3VmZml4IHVzZWQgdG8gZmluZCBoZWFkZXJzLgogIC1XYSw8b3B0aW9ucz4gICAgICAgICAgICBQYXNzIGNvbW1hLXNlcGFyYXRlZCA8b3B0aW9ucz4gb24gdG8gdGhlIGFzc2VtYmxlci4KICAtV3AsPG9wdGlvbnM+ICAgICAgICAgICAgUGFzcyBjb21tYS1zZXBhcmF0ZWQgPG9wdGlvbnM+IG9uIHRvIHRoZSBwcmVwcm9jZXNzb3IuCiAgLVdsLDxvcHRpb25zPiAgICAgICAgICAgIFBhc3MgY29tbWEtc2VwYXJhdGVkIDxvcHRpb25zPiBvbiB0byB0aGUgbGlua2VyLgogIC1YYXNzZW1ibGVyIDxhcmc+ICAgICAgICBQYXNzIDxhcmc+IG9uIHRvIHRoZSBhc3NlbWJsZXIuCiAgLVhwcmVwcm9jZXNzb3IgPGFyZz4gICAgIFBhc3MgPGFyZz4gb24gdG8gdGhlIHByZXByb2Nlc3Nvci4KICAtWGxpbmtlciA8YXJnPiAgICAgICAgICAgUGFzcyA8YXJnPiBvbiB0byB0aGUgbGlua2VyLgogIC1zYXZlLXRlbXBzICAgICAgICAgICAgICBEbyBub3QgZGVsZXRlIGludGVybWVkaWF0ZSBmaWxlcy4KICAtc2F2ZS10ZW1wcz08YXJnPiAgICAgICAgRG8gbm90IGRlbGV0ZSBpbnRlcm1lZGlhdGUgZmlsZXMuCiAgLW5vLWNhbm9uaWNhbC1wcmVmaXhlcyAgIERvIG5vdCBjYW5vbmljYWxpemUgcGF0aHMgd2hlbiBidWlsZGluZyByZWxhdGl2ZQogICAgICAgICAgICAgICAgICAgICAgICAgICBwcmVmaXhlcyB0byBvdGhlciBnY2MgY29tcG9uZW50cy4KICAtcGlwZSAgICAgICAgICAgICAgICAgICAgVXNlIHBpcGVzIHJhdGhlciB0aGFuIGludGVybWVkaWF0ZSBmaWxlcy4KICAtdGltZSAgICAgICAgICAgICAgICAgICAgVGltZSB0aGUgZXhlY3V0aW9uIG9mIGVhY2ggc3VicHJvY2Vzcy4KICAtc3BlY3M9PGZpbGU+ICAgICAgICAgICAgT3ZlcnJpZGUgYnVpbHQtaW4gc3BlY3Mgd2l0aCB0aGUgY29udGVudHMgb2YgPGZpbGU+LgogIC1zdGQ9PHN0YW5kYXJkPiAgICAgICAgICBBc3N1bWUgdGhhdCB0aGUgaW5wdXQgc291cmNlcyBhcmUgZm9yIDxzdGFuZGFyZD4uCiAgLS1zeXNyb290PTxkaXJlY3Rvcnk+ICAgIFVzZSA8ZGlyZWN0b3J5PiBhcyB0aGUgcm9vdCBkaXJlY3RvcnkgZm9yIGhlYWRlcnMKICAgICAgICAgICAgICAgICAgICAgICAgICAgYW5kIGxpYnJhcmllcy4KICAtQiA8ZGlyZWN0b3J5PiAgICAgICAgICAgQWRkIDxkaXJlY3Rvcnk+IHRvIHRoZSBjb21waWxlcidzIHNlYXJjaCBwYXRocy4KICAtdiAgICAgICAgICAgICAgICAgICAgICAgRGlzcGxheSB0aGUgcHJvZ3JhbXMgaW52b2tlZCBieSB0aGUgY29tcGlsZXIuCiAgLSMjIyAgICAgICAgICAgICAgICAgICAgIExpa2UgLXYgYnV0IG9wdGlvbnMgcXVvdGVkIGFuZCBjb21tYW5kcyBub3QgZXhlY3V0ZWQuCiAgLUUgICAgICAgICAgICAgICAgICAgICAgIFByZXByb2Nlc3Mgb25seTsgZG8gbm90IGNvbXBpbGUsIGFzc2VtYmxlIG9yIGxpbmsuCiAgLVMgICAgICAgICAgICAgICAgICAgICAgIENvbXBpbGUgb25seTsgZG8gbm90IGFzc2VtYmxlIG9yIGxpbmsuCiAgLWMgICAgICAgICAgICAgICAgICAgICAgIENvbXBpbGUgYW5kIGFzc2VtYmxlLCBidXQgZG8gbm90IGxpbmsuCiAgLW8gPGZpbGU+ICAgICAgICAgICAgICAgIFBsYWNlIHRoZSBvdXRwdXQgaW50byA8ZmlsZT4uCiAgLXBpZSAgICAgICAgICAgICAgICAgICAgIENyZWF0ZSBhIGR5bmFtaWNhbGx5IGxpbmtlZCBwb3NpdGlvbiBpbmRlcGVuZGVudAogICAgICAgICAgICAgICAgICAgICAgICAgICBleGVjdXRhYmxlLgogIC1zaGFyZWQgICAgICAgICAgICAgICAgICBDcmVhdGUgYSBzaGFyZWQgbGlicmFyeS4KICAteCA8bGFuZ3VhZ2U+ICAgICAgICAgICAgU3BlY2lmeSB0aGUgbGFuZ3VhZ2Ugb2YgdGhlIGZvbGxvd2luZyBpbnB1dCBmaWxlcy4KICAgICAgICAgICAgICAgICAgICAgICAgICAgUGVybWlzc2libGUgbGFuZ3VhZ2VzIGluY2x1ZGU6IGMgYysrIGFzc2VtYmxlciBub25lCiAgICAgICAgICAgICAgICAgICAgICAgICAgICdub25lJyBtZWFucyByZXZlcnQgdG8gdGhlIGRlZmF1bHQgYmVoYXZpb3Igb2YKICAgICAgICAgICAgICAgICAgICAgICAgICAgZ3Vlc3NpbmcgdGhlIGxhbmd1YWdlIGJhc2VkIG9uIHRoZSBmaWxlJ3MgZXh0ZW5zaW9uLgoKT3B0aW9ucyBzdGFydGluZyB3aXRoIC1nLCAtZiwgLW0sIC1PLCAtVywgb3IgLS1wYXJhbSBhcmUgYXV0b21hdGljYWxseQogcGFzc2VkIG9uIHRvIHRoZSB2YXJpb3VzIHN1Yi1wcm9jZXNzZXMgaW52b2tlZCBieSBvcmFjbGUuICBJbiBvcmRlciB0byBwYXNzCiBvdGhlciBvcHRpb25zIG9uIHRvIHRoZXNlIHByb2Nlc3NlcyB0aGUgLVc8bGV0dGVyPiBvcHRpb25zIG11c3QgYmUgdXNlZC4KCkZvciBidWcgcmVwb3J0aW5nIGluc3RydWN0aW9ucywgcGxlYXNlIHNlZToKPGh0dHBzOi8vZ2NjLmdudS5vcmcvYnVncy8+Lgo=",
+        "bytes": 4082,
+        "normalizations": [],
+        "sha256": "7a0250d66493c38ea6051e3492bf59779f6b43d516856299f73be753fc30a1b2"
+      }
+    },
+    {
+      "artifacts": [
+        {
+          "base64": "TU9DSy1FWEVDVVRBQkxFAHYxCg==",
+          "bytes": 19,
+          "mode": "0o700",
+          "path": "linked.bin",
+          "present": true,
+          "sha256": "611d8ceedfe67437b495a97682eaf5818f93b4c93eedbcddf72737c24b4f303a"
+        }
+      ],
+      "exitCode": 0,
+      "id": "linking",
+      "status": "passed",
+      "stderr": {
+        "base64": "",
+        "bytes": 0,
+        "normalizations": [],
+        "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+      },
+      "stdout": {
+        "base64": "",
+        "bytes": 0,
+        "normalizations": [],
+        "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+      }
+    },
+    {
+      "artifacts": [],
+      "exitCode": 0,
+      "id": "metadata-dumpmachine",
+      "status": "passed",
+      "stderr": {
+        "base64": "",
+        "bytes": 0,
+        "normalizations": [],
+        "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+      },
+      "stdout": {
+        "base64": "eDg2XzY0LXBjLWxpbnV4LWdudQo=",
+        "bytes": 20,
+        "normalizations": [],
+        "sha256": "1c7da408e283702561a445e700b61c0f55a082230a3cfe323208841221274a6a"
+      }
+    },
+    {
+      "artifacts": [],
+      "exitCode": 0,
+      "id": "metadata-dumpversion",
+      "status": "passed",
+      "stderr": {
+        "base64": "",
+        "bytes": 0,
+        "normalizations": [],
+        "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+      },
+      "stdout": {
+        "base64": "MTYuMi4wCg==",
+        "bytes": 7,
+        "normalizations": [],
+        "sha256": "e9f8839c742db21d285464b01dfb2e572f802c366729873cdc4a296c8c3a01ea"
+      }
+    },
+    {
+      "artifacts": [],
+      "exitCode": 0,
+      "id": "metadata-version",
+      "status": "passed",
+      "stderr": {
+        "base64": "",
+        "bytes": 0,
+        "normalizations": [],
+        "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+      },
+      "stdout": {
+        "base64": "b3JhY2xlIChHQ0MpIDE2LjIuMApDb3B5cmlnaHQgKEMpIDIwMjYgRnJlZSBTb2Z0d2FyZSBGb3VuZGF0aW9uLCBJbmMuClRoaXMgaXMgZnJlZSBzb2Z0d2FyZTsgc2VlIHRoZSBzb3VyY2UgZm9yIGNvcHlpbmcgY29uZGl0aW9ucy4gIFRoZXJlIGlzIE5PCndhcnJhbnR5OyBub3QgZXZlbiBmb3IgTUVSQ0hBTlRBQklMSVRZIG9yIEZJVE5FU1MgRk9SIEEgUEFSVElDVUxBUiBQVVJQT1NFLgoK",
+        "bytes": 222,
+        "normalizations": [],
+        "sha256": "dfdb19fc0bd5dcd763e010d1956430a417224539109108f61b231d1a296371ab"
+      }
+    },
+    {
+      "artifacts": [],
+      "exitCode": 0,
+      "id": "preprocess-file",
+      "status": "passed",
+      "stderr": {
+        "base64": "",
+        "bytes": 0,
+        "normalizations": [],
+        "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+      },
+      "stdout": {
+        "base64": "TU9DSy1QUkVQUk9DRVNTRUQK",
+        "bytes": 18,
+        "normalizations": [],
+        "sha256": "b8a1f8e4208ed2055f683bd08a081ad8b794b7f88145b0a35d0693f18b04d178"
+      }
+    },
+    {
+      "artifacts": [],
+      "exitCode": 0,
+      "id": "preprocess-stdin",
+      "status": "passed",
+      "stderr": {
+        "base64": "",
+        "bytes": 0,
+        "normalizations": [],
+        "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+      },
+      "stdout": {
+        "base64": "TU9DSy1QUkVQUk9DRVNTRUQK",
+        "bytes": 18,
+        "normalizations": [],
+        "sha256": "b8a1f8e4208ed2055f683bd08a081ad8b794b7f88145b0a35d0693f18b04d178"
+      }
+    },
+    {
+      "artifacts": [
+        {
+          "base64": "TU9DSy1PQkpFQ1QAdjEK",
+          "bytes": 15,
+          "mode": "0o644",
+          "path": "response.o",
+          "present": true,
+          "sha256": "e5e021333c0fd167a18f93780b1a03bc65f0aef311d0232b24e6a2d06153e9a5"
+        }
+      ],
+      "exitCode": 0,
+      "id": "response-file",
+      "status": "passed",
+      "stderr": {
+        "base64": "",
+        "bytes": 0,
+        "normalizations": [],
+        "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+      },
+      "stdout": {
+        "base64": "",
+        "bytes": 0,
+        "normalizations": [],
+        "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+      }
+    }
+  ],
+  "corpus": {
+    "id": "gcc-16-2-0-driver-behavior",
+    "sha256": "bcc1a14ca8c54f94106c943f0bc5698cb9af3151b7bf20a49ae3c8828baaad0e"
+  },
+  "executable": {
+    "bytes": 2349296,
+    "sha256": "3c0cfef73a02b06b40456e89d9d9e33727144c2f473b8b7256b361a7699d48a4"
+  },
+  "limits": {
+    "artifactBytes": 2097152,
+    "cpuSeconds": 5,
+    "fileBytes": 2097152,
+    "memoryBytes": 536870912,
+    "openFiles": 64,
+    "processes": 64,
+    "stderrBytes": 262144,
+    "stdoutBytes": 262144,
+    "timeoutMilliseconds": 5000,
+    "workspaceBytes": 16777216,
+    "workspaceEntries": 512
+  },
+  "sandbox": {
+    "backend": "oci-container-v1",
+    "collectorArgv": [
+      "/usr/bin/python3",
+      "-I",
+      "-S",
+      "-B",
+      "-c",
+      "import os, stat\nsource = \"/workspace\"\ntarget = \"/case-results\"\nmaximum_bytes = int(os.environ[\"WORKSPACE_BYTES\"])\nmaximum_entries = int(os.environ[\"WORKSPACE_ENTRIES\"])\nrecords = []\nstack = [(\"\", source)]\nlogical = allocated = 0\nwhile stack:\n    relative_root, source_root = stack.pop()\n    for entry in sorted(os.scandir(source_root), key=lambda item: item.name):\n        relative = entry.name if not relative_root else relative_root + \"/\" + entry.name\n        metadata = entry.stat(follow_symlinks=False)\n        records.append((relative, metadata))\n        if len(records) > maximum_entries:\n            raise RuntimeError(\"workspace entry bound exceeded\")\n        logical += metadata.st_size\n        allocated += metadata.st_blocks * 512\n        if logical > maximum_bytes or allocated > maximum_bytes:\n            raise RuntimeError(\"workspace byte bound exceeded\")\n        if metadata.st_mode & 0o7000:\n            raise RuntimeError(\"workspace special mode bits are forbidden\")\n        if stat.S_ISDIR(metadata.st_mode):\n            stack.append((relative, entry.path))\n        elif not stat.S_ISREG(metadata.st_mode) or metadata.st_nlink != 1:\n            raise RuntimeError(\"workspace contains a non-regular entry\")\n        elif not metadata.st_mode & 0o400:\n            raise RuntimeError(\"workspace file is not owner-readable\")\nfor relative, metadata in sorted(records, key=lambda item: (item[0].count(\"/\"), item[0])):\n    destination = os.path.join(target, *relative.split(\"/\"))\n    source_path = os.path.join(source, *relative.split(\"/\"))\n    if stat.S_ISDIR(metadata.st_mode):\n        os.mkdir(destination, 0o700)\n        continue\n    source_fd = os.open(source_path, os.O_RDONLY | os.O_NOFOLLOW)\n    destination_fd = os.open(destination, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, 0o600)\n    remaining = metadata.st_size\n    try:\n        while remaining:\n            chunk = os.read(source_fd, min(remaining, 1048576))\n            if not chunk:\n                raise RuntimeError(\"workspace file changed during collection\")\n            view = memoryview(chunk)\n            while view:\n                written = os.write(destination_fd, view)\n                view = view[written:]\n            remaining -= len(chunk)\n        if os.read(source_fd, 1):\n            raise RuntimeError(\"workspace file grew during collection\")\n        os.fchmod(destination_fd, metadata.st_mode & 0o777)\n    finally:\n        os.close(source_fd)\n        os.close(destination_fd)\n"
+    ],
+    "controlClient": {
+      "bytes": 42677472,
+      "sha256": "e45381109c685311cf84c5e33a1aca7da81d6b55c0f9aed74091fc08c3a94f13",
+      "version": "Docker version 29.7.2, build a7dcaa6\n"
+    },
+    "engineProfile": {
+      "apiVersion": "1.55",
+      "architecture": "amd64",
+      "cgroupDriver": "systemd",
+      "cgroupVersion": 2,
+      "componentsSha256": "53eac8fe100341b65c87b5840bbf271f1d471f6b74553ba8d410156ebaaab011",
+      "containerRuntime": "runc",
+      "containerRuntimeCommit": "v1.4.3-0-gbb14dab",
+      "containerRuntimeFeaturesSha256": "c41c71ffb7a88612341e64b88f053f6b3f18832a9563efab0a5be8d4e664cd2c",
+      "containerRuntimePath": "runc",
+      "containerRuntimeVersion": "1.4.3",
+      "kernelVersion": "7.1.8-gentoo-dist-hardened",
+      "operatingSystem": "linux",
+      "product": "Docker Engine - Community",
+      "securityOptions": [
+        "name=cgroupns",
+        "name=rootless",
+        "name=seccomp,profile=builtin"
+      ],
+      "serverCommit": "6a43e3d",
+      "serverVersion": "29.7.2",
+      "storageDriver": "overlay2",
+      "volumePlugin": "local"
+    },
+    "environmentLauncher": "/usr/bin/env",
+    "imageDigest": "sha256:510c510f300d811df22c7769633575a94939073b529a73125bf96cfb96dc7248",
+    "imageEnvironment": [
+      "PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin",
+      "GPG_KEYS=B215C1633BCA0477615F1B35A5B3A004745C015A \tB3C42148A44E6983B3E4CC0793FA9B1AB75C61B8 \t90AA470469D3965A87A5DCB494D03953902C9419 \t80F98B2E0DAB6C8281BDF541A7C8C3B2F71EDF1C \t7F74F97C103468EE5D750B583AB00996FC26A641 \t33C235A34C46AA3FFB293709A328C3A2C3C45C06 \tD3A93CAD751C2AF4F8C7AD516C35B99309B5FA62",
+      "GCC_MIRRORS=https://ftpmirror.gnu.org/gcc \t\thttps://mirrors.kernel.org/gnu/gcc \t\thttps://bigsearcher.com/mirrors/gcc/releases \t\thttp://www.netgull.com/gcc/releases \t\thttps://ftpmirror.gnu.org/gcc \t\thttps://sourceware.org/pub/gcc/releases \t\tftp://ftp.gnu.org/gnu/gcc",
+      "GCC_VERSION=16.2.0"
+    ],
+    "isolation": "network-none-readonly-root-cap-drop-all-no-new-privileges-pid-ipc-private-cgroup-bounds",
+    "keeperArgv": [
+      "/usr/bin/sleep",
+      "infinity"
+    ],
+    "oomScoreAdjustment": 500,
+    "platform": "linux/amd64",
+    "preExecArgv": [
+      "/usr/bin/python3",
+      "-I",
+      "-S",
+      "-B",
+      "-c",
+      "import errno, os, resource, sys\narguments = sys.argv[1:]\nif len(arguments) < 14 or arguments[0] != \"behavior-preexec-v1\" or arguments[12] != \"--\":\n    raise RuntimeError(\"invalid pre-exec contract\")\nrole = arguments[1]\nnonce = arguments[2]\nif role not in {\"keeper\", \"setup\", \"target\", \"collector\"}:\n    raise RuntimeError(\"invalid pre-exec role\")\nif len(nonce) != 32 or any(character not in \"0123456789abcdef\" for character in nonce):\n    raise RuntimeError(\"invalid pre-exec nonce\")\nmemory_max, pids_max, cpu_quota, cpu_period, file_size, open_files, processes, cpu_seconds, oom_score_adjustment = map(int, arguments[3:12])\ncommand = arguments[13:]\nif not command or not command[0].startswith(\"/\"):\n    raise RuntimeError(\"invalid pre-exec command\")\nif open(\"/proc/self/cgroup\", encoding=\"ascii\").read() != \"0::/\\n\":\n    raise RuntimeError(\"process is not at a private cgroup namespace root\")\nmounts = [line.split() for line in open(\"/proc/self/mountinfo\", encoding=\"ascii\") if \" /sys/fs/cgroup \" in line]\nif len(mounts) != 1:\n    raise RuntimeError(\"ambiguous cgroup mount\")\nmount = mounts[0]\nseparator = mount.index(\"-\")\nif mount[3] != \"/\" or mount[separator + 1] != \"cgroup2\" or \"ro\" not in set(mount[5].split(\",\")):\n    raise RuntimeError(\"cgroup2 namespace root is not read-only\")\ncgroup = \"/sys/fs/cgroup\"\ndef control(name):\n    with open(cgroup + \"/\" + name, encoding=\"ascii\") as stream:\n        return stream.read().strip()\nexpected = {\n    \"memory.max\": str(memory_max),\n    \"memory.swap.max\": \"0\",\n    \"memory.high\": \"max\",\n    \"memory.low\": \"0\",\n    \"memory.min\": \"0\",\n    \"memory.oom.group\": \"0\",\n    \"pids.max\": str(pids_max),\n    \"cpu.max\": str(cpu_quota) + \" \" + str(cpu_period),\n    \"cpu.weight\": \"100\",\n    \"cgroup.subtree_control\": \"\",\n    \"cgroup.type\": \"domain\",\n    \"cgroup.procs\": \"1\",\n}\nfor name, value in expected.items():\n    if control(name) != value:\n        raise RuntimeError(\"cgroup control mismatch: \" + name)\nburst = cgroup + \"/cpu.max.burst\"\nif os.path.exists(burst) and control(\"cpu.max.burst\") != \"0\":\n    raise RuntimeError(\"cgroup CPU burst is not zero\")\noptional_defaults = {\n    \"cpu.idle\": \"0\",\n    \"cpu.weight.nice\": \"0\",\n    \"cpu.uclamp.min\": \"0.00\",\n    \"cpu.uclamp.max\": \"max\",\n    \"memory.swap.high\": \"max\",\n    \"memory.zswap.max\": \"max\",\n    \"memory.zswap.writeback\": \"1\",\n    \"io.max\": \"\",\n    \"io.weight\": \"default 100\",\n}\nfor name, value in optional_defaults.items():\n    if os.path.exists(cgroup + \"/\" + name) and control(name) != value:\n        raise RuntimeError(\"cgroup default control mismatch: \" + name)\nfor configured, effective in ((\"cpuset.cpus\", \"cpuset.cpus.effective\"), (\"cpuset.mems\", \"cpuset.mems.effective\")):\n    configured_exists = os.path.exists(cgroup + \"/\" + configured)\n    effective_exists = os.path.exists(cgroup + \"/\" + effective)\n    if configured_exists != effective_exists:\n        raise RuntimeError(\"incomplete cgroup cpuset controls\")\n    if configured_exists and (control(configured) != \"\" or control(effective) == \"\"):\n        raise RuntimeError(\"cgroup cpuset is explicitly constrained or ineffective: \" + configured)\nif not {\"cpu\", \"memory\", \"pids\"}.issubset(set(control(\"cgroup.controllers\").split())):\n    raise RuntimeError(\"required cgroup controllers are unavailable\")\nif any(entry.is_dir(follow_symlinks=False) for entry in os.scandir(cgroup)):\n    raise RuntimeError(\"cgroup namespace root contains delegated children\")\nif os.access(cgroup, os.W_OK):\n    raise RuntimeError(\"cgroup namespace root is writable\")\nfor name in (*expected, \"cgroup.threads\"):\n    path = cgroup + \"/\" + name\n    if os.access(path, os.W_OK):\n        raise RuntimeError(\"cgroup control is writable: \" + name)\n    try:\n        descriptor = os.open(path, os.O_WRONLY | os.O_CLOEXEC)\n    except OSError as error:\n        if error.errno not in {errno.EACCES, errno.EPERM, errno.EROFS}:\n            raise\n    else:\n        os.close(descriptor)\n        raise RuntimeError(\"cgroup control opened writable: \" + name)\nif open(\"/proc/self/oom_score_adj\", encoding=\"ascii\").read().strip() != str(oom_score_adjustment):\n    raise RuntimeError(\"process OOM score adjustment mismatch\")\nrlimits = {\n    resource.RLIMIT_CORE: (0, 0),\n    resource.RLIMIT_FSIZE: (file_size, file_size),\n    resource.RLIMIT_NOFILE: (open_files, open_files),\n    resource.RLIMIT_NPROC: (processes, processes),\n    resource.RLIMIT_CPU: (cpu_seconds, cpu_seconds),\n}\nfor identifier, value in rlimits.items():\n    if resource.getrlimit(identifier) != value:\n        raise RuntimeError(\"process rlimit mismatch\")\nmarker = b\"\\x00behavior-preexec-v1:\" + role.encode(\"ascii\") + b\":\" + nonce.encode(\"ascii\") + b\"\\n\"\nif os.write(1, marker) != len(marker):\n    raise RuntimeError(\"incomplete pre-exec control frame\")\nos.execv(command[0], command)\n"
+    ],
+    "resourcePolicyVersion": 1,
+    "setupArgv": [
+      "/usr/bin/python3",
+      "-I",
+      "-S",
+      "-B",
+      "-c",
+      "import os, stat\nsource = \"/case-inputs\"\ntarget = \"/workspace\"\nmaximum_bytes = int(os.environ[\"WORKSPACE_BYTES\"])\nmaximum_entries = int(os.environ[\"WORKSPACE_ENTRIES\"])\ntarget_uid = int(os.environ[\"TARGET_UID\"])\ntarget_gid = int(os.environ[\"TARGET_GID\"])\nmount_records = [line.split() for line in open(\"/proc/self/mountinfo\") if \" /workspace \" in line]\nif len(mount_records) != 1:\n    raise RuntimeError(\"workspace mount identity is ambiguous\")\nmount_record = mount_records[0]\nseparator = mount_record.index(\"-\")\nmount_options = set(mount_record[5].split(\",\"))\nsuper_options = set(mount_record[separator + 3].split(\",\"))\nif mount_record[separator + 1] != \"tmpfs\" or not {\"rw\", \"nosuid\", \"nodev\"}.issubset(mount_options) or \"rw\" not in super_options:\n    raise RuntimeError(\"workspace is not the required tmpfs mount\")\nfilesystem = os.statvfs(target)\ncapacity = filesystem.f_blocks * filesystem.f_frsize\nif capacity < maximum_bytes or capacity >= maximum_bytes + filesystem.f_frsize or filesystem.f_files != maximum_entries:\n    raise RuntimeError(\"workspace tmpfs quotas do not match the profile\")\nmetadata = os.stat(target, follow_symlinks=False)\nif metadata.st_uid != target_uid or metadata.st_gid != target_gid or metadata.st_mode & 0o7777 != 0o700:\n    raise RuntimeError(\"workspace tmpfs ownership does not match the profile\")\nstack = [(source, target)]\nwhile stack:\n    source_root, target_root = stack.pop()\n    for entry in sorted(os.scandir(source_root), key=lambda item: item.name):\n        source_path = entry.path\n        target_path = os.path.join(target_root, entry.name)\n        metadata = entry.stat(follow_symlinks=False)\n        if stat.S_ISDIR(metadata.st_mode):\n            os.mkdir(target_path, 0o700)\n            stack.append((source_path, target_path))\n        elif stat.S_ISREG(metadata.st_mode) and metadata.st_nlink == 1:\n            mode = 0o500 if metadata.st_mode & 0o111 else 0o400\n            source_fd = os.open(source_path, os.O_RDONLY | os.O_NOFOLLOW)\n            target_fd = os.open(target_path, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, mode)\n            try:\n                while True:\n                    chunk = os.read(source_fd, 1048576)\n                    if not chunk:\n                        break\n                    view = memoryview(chunk)\n                    while view:\n                        written = os.write(target_fd, view)\n                        view = view[written:]\n                os.fchmod(target_fd, mode)\n            finally:\n                os.close(source_fd)\n                os.close(target_fd)\n        else:\n            raise RuntimeError(\"case input tree contains a non-regular entry\")\n"
+    ],
+    "targetUser": "65534:65534"
+  },
+  "schemaVersion": 1,
+  "summary": {
+    "cases": 14,
+    "categories": [
+      "artifacts",
+      "assembly",
+      "diagnostics",
+      "environment-search-paths",
+      "exit-status",
+      "file-compile",
+      "help",
+      "invalid-inputs",
+      "linking",
+      "metadata",
+      "preprocessing",
+      "response-files",
+      "stderr",
+      "stdin",
+      "stdout",
+      "target-query"
+    ],
+    "passed": 14
+  }
+}

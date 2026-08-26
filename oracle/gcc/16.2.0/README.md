@@ -77,7 +77,9 @@ python3 -m unittest discover -s tests/oracle -v
 
 This lock anchors the adjacent production build record, retained DWARF-rich
 driver and stripped twin, generated oracle manifest, and checked-in normalized
-function-recovery oracle. The generic generator lives in
+function-recovery oracle. It also anchors the checked, hermetic
+`behavior-corpus.json` and deterministic `behavior-corpus-evidence.json`.
+The generic function generator lives in
 `oracle/function_recovery_oracle.py`; this directory supplies only the verified
 artifact binding and reviewed exact-RVA exclusion profile. Regeneration is
 documented in `docs/gcc-function-recovery-scoring.md` and is byte-compared in
@@ -85,3 +87,105 @@ the oracle test suite. The
 [strict build and ELF verification procedure](../../../docs/gcc-oracle-artifact-verification.md)
 documents clean reproduction and the CI gate. GCC remains one substantial C
 benchmark, not an engine-specific code path.
+
+## Driver behavior benchmark
+
+The adjacent behavior corpus is a thin GCC 16.2.0 profile of the
+[program-agnostic executable behavior contract](../../../docs/executable-behavior-corpus.md).
+It does not add GCC semantics to the runner. The profile cross-binds the exact
+stripped artifact (`3c0cfef73a02b06b40456e89d9d9e33727144c2f473b8b7256b361a7699d48a4`)
+and the exact build runtime image
+(`sha256:510c510f300d811df22c7769633575a94939073b529a73125bf96cfb96dc7248`)
+to the already verified oracle manifest and build record.
+
+The profile additionally authenticates the Docker 29.7.2 static client used
+to control that image: 42,677,472 bytes, SHA-256
+`e45381109c685311cf84c5e33a1aca7da81d6b55c0f9aed74091fc08c3a94f13`,
+and version output `Docker version 29.7.2, build a7dcaa6`. The upstream
+`docker-29.7.2.tgz` at
+`https://download.docker.com/linux/static/stable/x86_64/` has SHA-256
+`803d433f226db4776e1768fd319fc6c6e4935a456acf84fcc0080818b854bc8f`.
+The checked generic engine profile exactly binds Docker Engine 29.7.2 and its
+commit/API and component digest, Linux amd64 kernel
+`7.1.8-gentoo-dist-hardened`, rootless mode, cgroup v2/systemd, overlay2, the
+built-in seccomp profile, the local tmpfs-volume driver, and runc 1.4.3 by
+commit and feature hash. A different client, server, kernel, runtime, or
+weaker security mode fails closed before a benchmark case starts. These are
+executor provenance values for this benchmark profile, not GCC behavior in
+the generic runner.
+
+Fourteen sorted cases cover version and target queries, help, invalid-option
+and missing-input diagnostics, file and stdin preprocessing, file and stdin
+compilation, assembly, linking, response files, and `COMPILER_PATH` program
+search. Every case records its complete environment overlay, stdin and staged
+files, exit status, byte-exact stdout/stderr, and all expected produced or
+absent artifacts. The checked profile applies zero normalizations.
+
+Each case runs the opaque driver as a non-root PID 1 with no target-visible
+read/write host bind. A quota-backed tmpfs volume is retained by a checked
+keeper, populated from read-only inputs by the profile's authenticated setup
+command, and copied out by its authenticated bounded collector only after the
+target container is gone. Before each keeper, setup, target, or collector role,
+the image-bound pre-exec wrapper proves the live private cgroup-v2 limits and
+all configured rlimits, then emits a fresh role-and-nonce-bound control frame
+that the runner requires and removes. The nonce is absent after the role is
+executed. The pre-exec/setup/keeper/collector argv are reviewed trusted
+control-plane data in this thin profile; only the driver is treated as hostile.
+These are upper bounds at the container-visible cgroup root: an authenticated
+host ancestor may impose a stricter bound.
+
+Only the GCC driver executable is part of the oracle pair; its matching
+installed `cc1`, assembler, and linker tree is not. Compile-stage cases
+therefore stage small, hashed deterministic companion programs as corpus
+inputs. These cases measure the driver's observable option/response expansion,
+program search, phase ordering, stdin/file handling, exit propagation, and
+artifact orchestration. They deliberately do not claim to measure frontend
+language semantics, optimization, assembler encoding, or system linking;
+those require separate program-agnostic semantic/oracle dimensions.
+
+After reproducing the locked image, regenerate candidate expectations and
+compare them with the reviewed corpus:
+
+```bash
+export DOCKER=/absolute/path/to/docker-29.7.2/docker/docker
+export DOCKER_HOST=unix:///absolute/path/to/blessed-rootless-docker.sock
+python3 scripts/check-gcc-behavior-executor.py
+python3 scripts/generate-gcc-behavior-corpus.py --output /tmp/behavior-corpus.json
+cmp /tmp/behavior-corpus.json oracle/gcc/16.2.0/behavior-corpus.json
+```
+
+Run verification and compare the deterministic evidence:
+
+```bash
+python3 scripts/run-gcc-behavior-corpus.py \
+  --json-output /tmp/behavior-corpus-evidence.json
+cmp /tmp/behavior-corpus-evidence.json \
+  oracle/gcc/16.2.0/behavior-corpus-evidence.json
+```
+
+The checked benchmark pair can also be cross-validated offline, without a
+claim of live reproduction:
+
+```bash
+python3 scripts/check-behavior-corpus-evidence.py \
+  --corpus oracle/gcc/16.2.0/behavior-corpus.json \
+  --evidence oracle/gcc/16.2.0/behavior-corpus-evidence.json
+```
+
+The oracle workflow builds and authenticates the exact image before Python
+test discovery, downloads and hashes the locked control client, and exports its
+absolute path to a rootless test daemon. Generic adversarial cases derive and
+assert that live daemon's exact profile. The checked GCC evidence is
+regenerated and byte-compared only when the daemon, including kernel version,
+matches this profile. Hosted Ubuntu emits an explicit skip notice rather than
+claiming reproduction on a different kernel; its offline corpus/evidence,
+schema, adapter, and provenance checks still run. A pinned VM/kernel job is
+deferred infrastructure. `tests/oracle/test_gcc_behavior_corpus.py` checks
+every acceptance category and proves that artifact or runtime substitution is
+rejected.
+
+That skip is deliberately narrow: only a well-formed executor that retains all
+mandatory isolation capabilities but differs from an authenticated exact
+profile field returns status 78. A client/image/runtime lookup failure, daemon
+or control-plane failure, malformed response, missing security capability, or
+other verifier error fails the workflow.

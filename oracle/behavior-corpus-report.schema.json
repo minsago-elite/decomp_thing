@@ -1,0 +1,86 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://github.com/minsago-elite/decomp_thing/oracle/behavior-corpus-report.schema.json",
+  "title": "Deterministic behavior-corpus evidence",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schemaVersion", "corpus", "executable", "sandbox", "limits", "summary", "cases"],
+  "properties": {
+    "schemaVersion": {"const": 1},
+    "corpus": {"type": "object", "additionalProperties": false, "required": ["id", "sha256"], "properties": {"id": {"$ref": "#/$defs/id"}, "sha256": {"$ref": "#/$defs/sha256"}}},
+    "executable": {"type": "object", "additionalProperties": false, "required": ["bytes", "sha256"], "properties": {"bytes": {"type": "integer", "minimum": 1, "maximum": 67108864}, "sha256": {"$ref": "#/$defs/sha256"}}},
+    "sandbox": {"$ref": "#/$defs/sandbox"},
+    "limits": {"$ref": "#/$defs/limits"},
+    "summary": {"type": "object", "additionalProperties": false, "required": ["cases", "passed", "categories"], "properties": {"cases": {"type": "integer", "minimum": 1, "maximum": 256}, "passed": {"type": "integer", "minimum": 1, "maximum": 256}, "categories": {"type": "array", "minItems": 1, "maxItems": 256, "uniqueItems": true, "items": {"$ref": "#/$defs/id"}}}},
+    "cases": {"type": "array", "minItems": 1, "maxItems": 256, "items": {"$ref": "#/$defs/case"}}
+  },
+  "$defs": {
+    "id": {"type": "string", "pattern": "^[a-z][a-z0-9]*(?:-[a-z0-9]+)*$", "maxLength": 128},
+    "sha256": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
+    "helperArgv": {"type": "array", "minItems": 1, "maxItems": 4096, "items": {"type": "string", "maxLength": 8192}},
+    "limits": {
+      "type": "object", "additionalProperties": false,
+      "required": ["timeoutMilliseconds", "stdoutBytes", "stderrBytes", "artifactBytes", "memoryBytes", "fileBytes", "openFiles", "processes", "cpuSeconds", "workspaceBytes", "workspaceEntries"],
+      "properties": {
+        "timeoutMilliseconds": {"type": "integer", "minimum": 1, "maximum": 30000},
+        "stdoutBytes": {"type": "integer", "minimum": 0, "maximum": 16777216},
+        "stderrBytes": {"type": "integer", "minimum": 0, "maximum": 16777216},
+        "artifactBytes": {"type": "integer", "minimum": 0, "maximum": 16777216},
+        "memoryBytes": {"type": "integer", "minimum": 67108864, "maximum": 8589934592},
+        "fileBytes": {"type": "integer", "minimum": 1, "maximum": 16777216},
+        "openFiles": {"type": "integer", "minimum": 16, "maximum": 4096},
+        "processes": {"type": "integer", "minimum": 1, "maximum": 4096},
+        "cpuSeconds": {"type": "integer", "minimum": 1, "maximum": 30},
+        "workspaceBytes": {"type": "integer", "minimum": 1, "maximum": 67108864},
+        "workspaceEntries": {"type": "integer", "minimum": 1, "maximum": 4096}
+      }
+    },
+    "sandbox": {
+      "type": "object", "additionalProperties": false,
+      "required": ["backend", "resourcePolicyVersion", "oomScoreAdjustment", "imageDigest", "platform", "isolation", "imageEnvironment", "preExecArgv", "environmentLauncher", "keeperArgv", "setupArgv", "collectorArgv", "targetUser", "controlClient", "engineProfile"],
+      "properties": {
+        "backend": {"const": "oci-container-v1"},
+        "resourcePolicyVersion": {"const": 1},
+        "oomScoreAdjustment": {"const": 500},
+        "imageDigest": {"type": "string", "pattern": "^sha256:[0-9a-f]{64}$"},
+        "platform": {"type": "string", "pattern": "^[a-z0-9]+/[a-z0-9_]+$", "maxLength": 64},
+        "isolation": {"const": "network-none-readonly-root-cap-drop-all-no-new-privileges-pid-ipc-private-cgroup-bounds"},
+        "imageEnvironment": {"type": "array", "maxItems": 256, "uniqueItems": true, "items": {"type": "string", "minLength": 1, "maxLength": 16384}},
+        "preExecArgv": {"$ref": "#/$defs/helperArgv"},
+        "environmentLauncher": {"type": "string", "pattern": "^/(?:[^/]+/)*[^/]+$", "maxLength": 4096},
+        "keeperArgv": {"$ref": "#/$defs/helperArgv"},
+        "setupArgv": {"$ref": "#/$defs/helperArgv"},
+        "collectorArgv": {"$ref": "#/$defs/helperArgv"},
+        "targetUser": {"type": "string", "pattern": "^[1-9][0-9]*:[1-9][0-9]*$", "maxLength": 32},
+        "controlClient": {"type": "object", "additionalProperties": false, "required": ["bytes", "sha256", "version"], "properties": {"bytes": {"type": "integer", "minimum": 1, "maximum": 67108864}, "sha256": {"$ref": "#/$defs/sha256"}, "version": {"type": "string", "minLength": 1, "maxLength": 512}}},
+        "engineProfile": {
+          "type": "object", "additionalProperties": false,
+          "required": ["product", "serverVersion", "serverCommit", "apiVersion", "operatingSystem", "architecture", "kernelVersion", "componentsSha256", "cgroupVersion", "cgroupDriver", "storageDriver", "securityOptions", "containerRuntime", "containerRuntimePath", "containerRuntimeVersion", "containerRuntimeCommit", "containerRuntimeFeaturesSha256", "volumePlugin"],
+          "properties": {
+            "product": {"type": "string", "minLength": 1, "maxLength": 256},
+            "serverVersion": {"type": "string", "minLength": 1, "maxLength": 256},
+            "serverCommit": {"type": "string", "minLength": 1, "maxLength": 256},
+            "apiVersion": {"type": "string", "pattern": "^[0-9]+\\.[0-9]+$", "maxLength": 16},
+            "operatingSystem": {"const": "linux"},
+            "architecture": {"type": "string", "minLength": 1, "maxLength": 64},
+            "kernelVersion": {"type": "string", "minLength": 1, "maxLength": 256},
+            "componentsSha256": {"$ref": "#/$defs/sha256"},
+            "cgroupVersion": {"const": 2},
+            "cgroupDriver": {"type": "string", "minLength": 1, "maxLength": 256},
+            "storageDriver": {"type": "string", "minLength": 1, "maxLength": 256},
+            "securityOptions": {"type": "array", "minItems": 1, "maxItems": 32, "uniqueItems": true, "items": {"type": "string", "minLength": 1, "maxLength": 256}},
+            "containerRuntime": {"type": "string", "minLength": 1, "maxLength": 128},
+            "containerRuntimePath": {"type": "string", "minLength": 1, "maxLength": 256},
+            "containerRuntimeVersion": {"type": "string", "minLength": 1, "maxLength": 256},
+            "containerRuntimeCommit": {"type": "string", "minLength": 1, "maxLength": 256},
+            "containerRuntimeFeaturesSha256": {"$ref": "#/$defs/sha256"},
+            "volumePlugin": {"const": "local"}
+          }
+        }
+      }
+    },
+    "observation": {"type": "object", "additionalProperties": false, "required": ["bytes", "sha256", "base64", "normalizations"], "properties": {"bytes": {"type": "integer", "minimum": 0, "maximum": 16777216}, "sha256": {"$ref": "#/$defs/sha256"}, "base64": {"type": "string", "maxLength": 22369632}, "normalizations": {"type": "array", "maxItems": 64, "uniqueItems": true, "items": {"$ref": "#/$defs/id"}}}},
+    "artifact": {"type": "object", "additionalProperties": false, "required": ["path", "present", "bytes", "sha256", "base64", "mode"], "properties": {"path": {"type": "string", "minLength": 1, "maxLength": 4096}, "present": {"type": "boolean"}, "bytes": {"type": ["integer", "null"], "minimum": 0, "maximum": 16777216}, "sha256": {"oneOf": [{"$ref": "#/$defs/sha256"}, {"type": "null"}]}, "base64": {"type": ["string", "null"], "maxLength": 22369632}, "mode": {"oneOf": [{"type": "string", "pattern": "^0o[4-7][0-7]{2}$"}, {"type": "null"}]}}},
+    "case": {"type": "object", "additionalProperties": false, "required": ["id", "status", "exitCode", "stdout", "stderr", "artifacts"], "properties": {"id": {"$ref": "#/$defs/id"}, "status": {"const": "passed"}, "exitCode": {"type": "integer", "minimum": 0, "maximum": 255}, "stdout": {"$ref": "#/$defs/observation"}, "stderr": {"$ref": "#/$defs/observation"}, "artifacts": {"type": "array", "maxItems": 256, "items": {"$ref": "#/$defs/artifact"}}}}
+  }
+}
