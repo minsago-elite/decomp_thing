@@ -16,12 +16,23 @@ jobs:
           distribution: temurin
           java-version: "21"
           cache: gradle
-      - run: |
+      - name: Install sandbox host prerequisites
+        run: |
           sudo apt-get update
-          sudo apt-get install -y --no-install-recommends bubblewrap binutils build-essential
+          sudo apt-get install -y --no-install-recommends \
+            bubblewrap \
+            binutils \
+            build-essential \
+            dbus-user-session \
+            python3 \
+            systemd \
+            util-linux
           sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0
           bwrap --ro-bind /usr /usr --ro-bind /lib /lib --ro-bind /lib64 /lib64 /usr/bin/true
-      - run: scripts/ci.sh
+      - name: Prepare required live ACP sandbox host
+        run: scripts/ci-prepare-acp-sandbox.sh
+      - name: Run JVM and Kotlin checks
+        run: scripts/ci.sh
       - uses: actions/upload-artifact@v4
         if: always()
         with:

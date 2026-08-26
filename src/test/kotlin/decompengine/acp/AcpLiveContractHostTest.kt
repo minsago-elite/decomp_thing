@@ -1,0 +1,59 @@
+package decompengine.acp
+
+import java.nio.file.Files
+import kotlin.test.Test
+import kotlin.test.assertEquals
+import kotlin.test.assertFailsWith
+import kotlin.test.assertTrue
+import org.opentest4j.TestAbortedException
+
+class AcpLiveContractHostTest {
+    @Test
+    fun `discovers the effective system Python runtime without distro paths`() {
+        val runtime = requirePythonRuntime()
+
+        assertTrue(Files.isExecutable(runtime.executable))
+        assertTrue(Files.isDirectory(runtime.stdlib))
+        assertTrue(Files.isRegularFile(runtime.jsonExtension))
+        assertTrue(runtime.jsonExtension.startsWith(runtime.stdlib))
+        assertTrue(runtime.nativeRuntimeMounts.isNotEmpty())
+        assertTrue(runtime.nativeRuntimeMounts.any { it.source == runtime.jsonExtension })
+        assertEquals(
+            runtime.nativeRuntimeMounts.size,
+            runtime.nativeRuntimeMounts.map { it.destination }.distinct().size,
+        )
+    }
+
+    @Test
+    fun `required live contract capabilities fail instead of skipping`() {
+        val failure = assertFailsWith<AssertionError> {
+            AcpLiveContractHost.requireCapability(false, { "fixture host is unavailable" }, required = true)
+        }
+
+        assertTrue(failure.message.orEmpty().contains("DECOMP_REQUIRE_LIVE_ACP_CONTRACT=1"))
+        assertFailsWith<TestAbortedException> {
+            AcpLiveContractHost.requireCapability(false, { "fixture host is unavailable" }, required = false)
+        }
+    }
+
+    @Test
+    fun `stdlib mounts are exact and traversal is rejected`() {
+        val runtime = requirePythonRuntime()
+
+        val mounts = runtime.stdlibMounts(listOf("json", "json"))
+
+        assertEquals(1, mounts.size)
+        assertEquals(runtime.stdlib.resolve("json"), mounts.single().source)
+        assertEquals(mounts.single().source, mounts.single().destination)
+        assertFailsWith<IllegalArgumentException> { runtime.stdlibMounts(listOf("../outside")) }
+    }
+
+    private fun requirePythonRuntime(): AcpPythonRuntimeLayout {
+        val result = runCatching { AcpLiveContractHost.discoverPythonRuntime() }
+        AcpLiveContractHost.requireCapability(
+            result.isSuccess,
+            message = { "system Python runtime discovery failed: ${result.exceptionOrNull()?.message}" },
+        )
+        return result.getOrThrow()
+    }
+}
