@@ -14,6 +14,7 @@ import decompengine.project.BoundedLlmModuleReconstructor
 import decompengine.project.EvidenceModuleReconstructor
 import decompengine.project.GhidraHeadlessProgramModelAnalyzer
 import decompengine.repair.HttpOpenAiCompatibleRepairClient
+import decompengine.repair.RepairClientAgentHarness
 import decompengine.repair.RepairHistory
 import decompengine.repair.TraceGuidedRepairLoop
 import decompengine.validation.ProcessInput
@@ -69,7 +70,10 @@ private fun runReconstruct(args: List<String>) {
     if (binary == null || output == null) reconstructUsageError("reconstruct requires an input binary and output directory")
     val hasApi = listOf("BASE_URL", "API_KEY", "MODEL").all { !System.getenv(it).isNullOrBlank() }
     val reconstructor = if (!evidenceOnly && hasApi) {
-        BoundedLlmModuleReconstructor(HttpOpenAiCompatibleRepairClient.fromEnvironment(), maximumContext)
+        BoundedLlmModuleReconstructor(
+            RepairClientAgentHarness(HttpOpenAiCompatibleRepairClient.fromEnvironment()),
+            maximumContext,
+        )
     } else {
         if (!evidenceOnly) println("LLM configuration is incomplete; generating an evidence-backed source tree with explicit stubs")
         EvidenceModuleReconstructor()
@@ -183,7 +187,10 @@ private fun runRepair(args: List<String>) {
     } else {
         listOf(ProcessInput("default"))
     }
-    val result = TraceGuidedRepairLoop(HttpOpenAiCompatibleRepairClient.fromEnvironment(), history).repairUntilValid(
+    val result = TraceGuidedRepairLoop(
+        RepairClientAgentHarness(HttpOpenAiCompatibleRepairClient.fromEnvironment()),
+        history,
+    ).repairUntilValid(
         projectDir = project,
         originalBinary = original,
         inputs = regressionInputs,

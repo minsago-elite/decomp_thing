@@ -16,6 +16,7 @@ import decompengine.project.EvidenceModuleReconstructor
 import decompengine.project.GhidraHeadlessProgramModelAnalyzer
 import decompengine.project.ModuleReconstructor
 import decompengine.repair.HttpOpenAiCompatibleRepairClient
+import decompengine.repair.RepairClientAgentHarness
 import kotlinx.serialization.json.Json
 import kotlinx.serialization.json.JsonElement
 import java.io.ByteArrayOutputStream
@@ -53,7 +54,9 @@ class SourceTreeJobReconstructor(
 ) : JobReconstructor {
     override fun reconstruct(job: Job, reportsDir: Path) {
         val moduleReconstructor: ModuleReconstructor = if (listOf("BASE_URL", "API_KEY", "MODEL").all { !environment[it].isNullOrBlank() }) {
-            BoundedLlmModuleReconstructor(HttpOpenAiCompatibleRepairClient.fromEnvironment(environment))
+            BoundedLlmModuleReconstructor(
+                RepairClientAgentHarness(HttpOpenAiCompatibleRepairClient.fromEnvironment(environment)),
+            )
         } else {
             EvidenceModuleReconstructor()
         }

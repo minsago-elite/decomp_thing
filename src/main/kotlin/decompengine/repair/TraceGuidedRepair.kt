@@ -1,5 +1,19 @@
 package decompengine.repair
 
+import decompengine.agent.AgentAccessPolicy
+import decompengine.agent.AgentCancellation
+import decompengine.agent.AgentContextInput
+import decompengine.agent.AgentExecutionEvent
+import decompengine.agent.AgentExecutionLimits
+import decompengine.agent.AgentExecutionRequest
+import decompengine.agent.AgentExecutionResult
+import decompengine.agent.AgentFileChangeKind
+import decompengine.agent.AgentHarness
+import decompengine.agent.AgentOperation
+import decompengine.agent.AgentPathRule
+import decompengine.agent.AgentStopReason
+import decompengine.agent.AgentWorkspacePath
+import decompengine.agent.AgentWorkspaceRoot
 import decompengine.validation.BehaviorCaseResult
 import decompengine.validation.BehaviorComparator
 import decompengine.validation.BehaviorComparisonReport
@@ -20,7 +34,6 @@ import java.net.http.HttpRequest
 import java.net.http.HttpResponse
 import java.nio.file.Path
 import java.nio.file.Files
-import java.nio.file.StandardCopyOption
 import java.util.concurrent.CompletableFuture
 import kotlin.io.path.createDirectories
 import kotlin.io.path.exists
@@ -308,16 +321,26 @@ class RepairHistory(private val path: Path) {
     }
 }
 
+private data class RepairTask(
+    val failureKind: String,
+    val prompt: String,
+    val projectPaths: Set<String>,
+    val regressionInputs: List<ProcessInput>,
+)
+
 class TraceGuidedRepairLoop(
-    private val client: RepairClient,
+    private val harness: AgentHarness,
     private val history: RepairHistory,
+    private val limits: AgentExecutionLimits = AgentExecutionLimits(),
+    private val cancellation: AgentCancellation = AgentCancellation.NONE,
+    private val onAgentEvent: (AgentExecutionEvent) -> Unit = {},
 ) {
     fun repairCompileError(projectDir: Path, failure: CompileFailure, regressionInputs: List<ProcessInput>): RepairIteration {
         history.retain(regressionInputs)
-        val request = RepairRequest(
+        val request = RepairTask(
             failureKind = "compile",
             prompt = failure.toPrompt(),
-            projectFiles = projectSources(projectDir, failure.stdout + "\n" + failure.stderr),
+            projectPaths = projectSources(projectDir, failure.stdout + "\n" + failure.stderr),
             regressionInputs = history.retainedInputs(),
         )
         return applyRepair(projectDir, request)
@@ -342,10 +365,10 @@ class TraceGuidedRepairLoop(
         val diff = StructuredDiffBuilder.from("behavior_repair", comparison.cases)
         val diffPath = reportsDir.resolve("behavior_repair.diff.json")
         diffPath.writeText(diff.toJson())
-        val request = RepairRequest(
+        val request = RepairTask(
             failureKind = "behavior",
             prompt = diff.toPrompt(),
-            projectFiles = projectSources(projectDir),
+            projectPaths = projectSources(projectDir),
             regressionInputs = history.retainedInputs(),
         )
         return applyRepair(
@@ -372,9 +395,9 @@ class TraceGuidedRepairLoop(
         }
 
         repeat(maxIterations) { offset ->
-            val request = assessment.toRequest(projectSources(projectDir, assessment.contextHint()), history.retainedInputs())
-            val response = client.requestRepair(request)
-            val applied = applyPatches(projectDir, response.patches)
+            val request = assessment.toTask(projectSources(projectDir, assessment.contextHint()), history.retainedInputs())
+            val execution = executeRepair(projectDir, request)
+            val applied = execution.applied
             val after = assess(projectDir, originalBinary, reportsDir, "iteration_${startedAt + offset + 1}")
             val rolledBack = assessment !is RepairAssessment.CompileError && after is RepairAssessment.CompileError
             if (rolledBack) rollbackPatches(projectDir, applied)
@@ -382,8 +405,8 @@ class TraceGuidedRepairLoop(
                 index = history.all().size + 1,
                 failureKind = request.failureKind,
                 prompt = request.prompt,
-                summary = response.summary,
-                patches = response.patches,
+                summary = execution.result.summary ?: "agent changed ${applied.size} source file(s)",
+                patches = execution.patches,
                 retainedRegressionIds = history.retainedInputs().map { it.id },
                 before = assessment.evidence,
                 after = after.evidence,
@@ -403,17 +426,17 @@ class TraceGuidedRepairLoop(
 
     private fun applyRepair(
         projectDir: Path,
-        request: RepairRequest,
+        request: RepairTask,
         before: RepairEvidence? = null,
     ): RepairIteration {
-        val response = client.requestRepair(request)
-        val applied = applyPatches(projectDir, response.patches)
+        val execution = executeRepair(projectDir, request)
+        val applied = execution.applied
         val iteration = RepairIteration(
             index = history.all().size + 1,
             failureKind = request.failureKind,
             prompt = request.prompt,
-            summary = response.summary,
-            patches = response.patches,
+            summary = execution.result.summary ?: "agent changed ${applied.size} source file(s)",
+            patches = execution.patches,
             retainedRegressionIds = request.regressionInputs.map { it.id },
             before = before,
         )
@@ -422,45 +445,97 @@ class TraceGuidedRepairLoop(
         return iteration
     }
 
-    private data class AppliedPatch(val path: String, val beforeSha256: String, val afterSha256: String, val beforeContent: ByteArray)
+    private data class AppliedPatch(
+        val path: String,
+        val beforeSha256: String,
+        val afterSha256: String,
+        val beforeContent: ByteArray,
+    )
 
-    private fun applyPatches(projectDir: Path, patches: List<SourcePatch>): List<AppliedPatch> {
-        require(patches.isNotEmpty()) { "repair response contained no patches" }
-        val manifestOwned = SourceTreeManifestReader.editablePaths(projectDir)
-        val allowed = if (manifestOwned.isNotEmpty()) manifestOwned else projectSources(projectDir).keys
-        require(patches.map { it.relativePath }.distinct().size == patches.size) { "repair response patches a file more than once" }
+    private data class ExecutedRepair(
+        val result: AgentExecutionResult,
+        val applied: List<AppliedPatch>,
+        val patches: List<SourcePatch>,
+    )
+
+    private fun executeRepair(projectDir: Path, repair: RepairTask): ExecutedRepair {
         val base = projectDir.toAbsolutePath().normalize()
-        val targets = patches.map { patch ->
-            require(patch.relativePath in allowed) { "patch targets an unknown project file: ${patch.relativePath}" }
-            val target = base.resolve(patch.relativePath).normalize()
-            require(target.startsWith(base)) {
-                "patch escapes project dir: ${patch.relativePath}"
-            }
-            patch to target
+        val root = AgentWorkspaceRoot("project", base)
+        val allowed = repair.projectPaths.sorted()
+        val before = allowed.associateWith { relative -> base.resolve(relative).readBytes() }
+        val rules = allowed.map { relative ->
+            AgentPathRule(
+                AgentWorkspacePath(root.id, relative),
+                setOf(AgentOperation.READ_FILE, AgentOperation.WRITE_FILE),
+            )
         }
-        val originals = targets.associate { (_, target) -> target to target.readBytes() }
-        val staged = targets.map { (patch, target) ->
-            target.parent.createDirectories()
-            val temporary = Files.createTempFile(target.parent, ".${target.fileName}.", ".repair")
-            temporary.writeText(patch.replacement)
-            Triple(patch, target, temporary)
+        val regressionContext = repair.regressionInputs.joinToString("\n") { input ->
+            "${input.id}: args=${input.args} stdinHex=${input.stdin.toHex()}"
+        }.ifEmpty { "<none>" }
+        val request = AgentExecutionRequest(
+            objective = """
+                Repair the ${repair.failureKind} failure in the authorized project workspace.
+                Edit only the allowed project files in place and preserve all retained regression behavior.
+
+                ${repair.prompt}
+            """.trimIndent(),
+            workspaceRoots = listOf(root),
+            contextInputs = listOf(
+                AgentContextInput(RepairClientAgentHarness.FAILURE_KIND_CONTEXT_ID, repair.failureKind),
+                AgentContextInput("retained-regression-inputs", regressionContext),
+            ),
+            accessPolicy = AgentAccessPolicy(rules),
+            limits = limits,
+            cancellation = cancellation,
+        )
+        val restore = {
+            before.forEach { (relative, content) -> runCatching { base.resolve(relative).writeBytes(content) } }
         }
-        try {
-            staged.forEach { (_, target, temporary) ->
-                runCatching {
-                    Files.move(temporary, target, StandardCopyOption.ATOMIC_MOVE, StandardCopyOption.REPLACE_EXISTING)
-                }.getOrElse {
-                    Files.move(temporary, target, StandardCopyOption.REPLACE_EXISTING)
-                }
-            }
+        val result = try {
+            harness.execute(request, onAgentEvent)
         } catch (failure: Exception) {
-            originals.forEach { (target, bytes) -> runCatching { target.writeBytes(bytes) } }
-            staged.forEach { (_, _, temporary) -> runCatching { Files.deleteIfExists(temporary) } }
+            restore()
             throw failure
         }
-        return targets.map { (patch, target) ->
-            val before = originals.getValue(target)
-            AppliedPatch(patch.relativePath, sha256(before), sha256(patch.replacement.toByteArray()), before)
+        try {
+            require(result.stopReason == AgentStopReason.COMPLETED) {
+                "repair agent stopped with ${result.stopReason.name.lowercase()}: ${result.summary.orEmpty()}"
+            }
+            require(result.changes.isNotEmpty()) { "repair agent completed without changing a source file" }
+            val declared = result.changes.associateBy { change ->
+                require(change.path.rootId == root.id && change.path.relativePath in before) {
+                    "repair agent reported an unauthorized file change: ${change.path.rootId}:${change.path.relativePath}"
+                }
+                change.path.relativePath
+            }
+            val actualChanged = allowed.filterTo(mutableSetOf()) { relative ->
+                val target = base.resolve(relative)
+                !target.exists() || !target.readBytes().contentEquals(before.getValue(relative))
+            }
+            require(actualChanged == declared.keys) {
+                "repair agent change report does not match workspace changes: actual=$actualChanged reported=${declared.keys}"
+            }
+            val applied = declared.entries.sortedBy { it.key }.map { (relative, change) ->
+                require(change.kind == AgentFileChangeKind.MODIFIED) {
+                    "repair may only modify existing project files: $relative"
+                }
+                val target = base.resolve(relative)
+                require(target.exists()) { "repair agent deleted an allowed project file: $relative" }
+                val beforeContent = before.getValue(relative)
+                val afterContent = target.readBytes()
+                require(change.beforeSha256 == sha256(beforeContent) && change.afterSha256 == sha256(afterContent)) {
+                    "repair agent digests do not match workspace file: $relative"
+                }
+                require(change.sizeBytes == null || change.sizeBytes == afterContent.size.toLong()) {
+                    "repair agent size does not match workspace file: $relative"
+                }
+                AppliedPatch(relative, sha256(beforeContent), sha256(afterContent), beforeContent)
+            }
+            val patches = applied.map { patch -> SourcePatch(patch.path, base.resolve(patch.path).readText()) }
+            return ExecutedRepair(result, applied, patches)
+        } catch (failure: Exception) {
+            restore()
+            throw failure
         }
     }
 
@@ -510,7 +585,7 @@ class TraceGuidedRepairLoop(
         return if (exitCode == 0) null else CompileFailure(command, exitCode, stdout, stderr)
     }
 
-    private fun projectSources(projectDir: Path, diagnosticHint: String? = null): Map<String, String> {
+    private fun projectSources(projectDir: Path, diagnosticHint: String? = null): Set<String> {
         val owned = SourceTreeManifestReader.editablePaths(projectDir).ifEmpty {
             Files.walk(projectDir).use { paths ->
                 paths.filter { it.isRegularFile() }
@@ -524,7 +599,7 @@ class TraceGuidedRepairLoop(
             candidate in hinted || candidate == "Makefile" || candidate == "include/decomp_types.h" ||
                 hinted.any { Path.of(it).fileName.toString().substringBefore('.') == Path.of(candidate).fileName.toString().substringBefore('.') }
         }.toSet()
-        return selected.sorted().associateWith { projectDir.resolve(it).readText() }
+        return selected.sorted().toSet()
     }
 
     private fun recordRevisions(
@@ -579,20 +654,20 @@ private fun RepairAssessment.contextHint(): String? = when (this) {
     is RepairAssessment.BehaviorError, is RepairAssessment.Valid -> null
 }
 
-private fun RepairAssessment.toRequest(
-    projectFiles: Map<String, String>,
+private fun RepairAssessment.toTask(
+    projectPaths: Set<String>,
     regressionInputs: List<ProcessInput>,
-): RepairRequest = when (this) {
-    is RepairAssessment.CompileError -> RepairRequest(
+): RepairTask = when (this) {
+    is RepairAssessment.CompileError -> RepairTask(
         failureKind = "compile",
         prompt = failure.toPrompt(),
-        projectFiles = projectFiles,
+        projectPaths = projectPaths,
         regressionInputs = regressionInputs,
     )
-    is RepairAssessment.BehaviorError -> RepairRequest(
+    is RepairAssessment.BehaviorError -> RepairTask(
         failureKind = "behavior",
         prompt = diff.toPrompt(),
-        projectFiles = projectFiles,
+        projectPaths = projectPaths,
         regressionInputs = regressionInputs,
     )
     is RepairAssessment.Valid -> error("valid projects do not need a repair request")

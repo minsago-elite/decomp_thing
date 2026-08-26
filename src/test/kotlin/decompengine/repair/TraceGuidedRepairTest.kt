@@ -1,9 +1,21 @@
 package decompengine.repair
 
+import decompengine.agent.AgentExecutionException
+import decompengine.agent.AgentExecutionEvent
+import decompengine.agent.AgentExecutionRequest
+import decompengine.agent.AgentExecutionResult
+import decompengine.agent.AgentFailureKind
+import decompengine.agent.AgentFileChange
+import decompengine.agent.AgentFileChangeKind
+import decompengine.agent.AgentHarness
+import decompengine.agent.AgentOperation
+import decompengine.agent.AgentStopReason
+import decompengine.agent.AgentWorkspacePath
 import decompengine.project.MakeProjectBuilder
 import decompengine.project.RecoveredFunction
 import decompengine.project.RecoveredProgramModel
 import decompengine.project.SourceTreeGenerator
+import decompengine.project.sha256
 import decompengine.validation.BehaviorCaseResult
 import decompengine.validation.BehaviorComparator
 import decompengine.validation.ProcessInput
@@ -14,6 +26,7 @@ import kotlin.io.path.createDirectories
 import kotlin.io.path.createTempDirectory
 import kotlin.io.path.exists
 import kotlin.io.path.pathString
+import kotlin.io.path.readBytes
 import kotlin.io.path.readText
 import kotlin.io.path.writeText
 import kotlin.test.Test
@@ -55,15 +68,37 @@ class TraceGuidedRepairTest {
         val tempDir = createTempDirectory("repair-compile-")
         val projectDir = createProject(tempDir.resolve("project"), reconstructedSource = "int decomp_engine_main(void) {\n")
         val history = RepairHistory(projectDir.resolve("reports/repair_history.json"))
-        val client = FakeRepairClient(
-            RepairResponse(
-                summary = "close missing brace",
-                patches = listOf(SourcePatch("src/reconstructed.c", goodHelloSource())),
-            ),
-        )
+        var captured: AgentExecutionRequest? = null
+        val harness = object : AgentHarness {
+            override fun execute(
+                request: AgentExecutionRequest,
+                onEvent: (AgentExecutionEvent) -> Unit,
+            ): AgentExecutionResult {
+                captured = request
+                val path = AgentWorkspacePath("project", "src/reconstructed.c")
+                assertTrue(request.accessPolicy.allows(path, AgentOperation.WRITE_FILE))
+                val target = path.resolve(request.workspaceRoots)
+                val before = target.readBytes()
+                val replacement = goodHelloSource()
+                target.writeText(replacement)
+                return AgentExecutionResult(
+                    AgentStopReason.COMPLETED,
+                    "close missing brace",
+                    listOf(
+                        AgentFileChange(
+                            path,
+                            AgentFileChangeKind.MODIFIED,
+                            sha256(before),
+                            sha256(replacement.toByteArray()),
+                            replacement.toByteArray().size.toLong(),
+                        ),
+                    ),
+                )
+            }
+        }
         val failure = collectCompileFailure(projectDir)
 
-        val iteration = TraceGuidedRepairLoop(client, history).repairCompileError(
+        val iteration = TraceGuidedRepairLoop(harness, history).repairCompileError(
             projectDir = projectDir,
             failure = failure,
             regressionInputs = listOf(ProcessInput(id = "hello_default")),
@@ -75,7 +110,10 @@ class TraceGuidedRepairTest {
         assertTrue(build.projectDir.resolve("build/reconstructed").exists())
         assertTrue(history.all().single().summary.contains("brace"))
         assertTrue(projectDir.resolve("reports/repair_history.json").readText().contains("hello_default"))
-        assertTrue(client.lastRequest!!.prompt.contains("stderr:"))
+        val request = assertNotNull(captured)
+        assertTrue(request.objective.contains("stderr:"))
+        assertTrue(request.workspaceRoots.single().path.isAbsolute)
+        assertTrue(request.contextInputs.single { it.id == "retained-regression-inputs" }.content.contains("hello_default"))
     }
 
     @Test
@@ -161,7 +199,7 @@ class TraceGuidedRepairTest {
         )
         val inputs = listOf(ProcessInput(id = "hello_default"))
 
-        val iteration = TraceGuidedRepairLoop(client, history).repairBehaviorMismatch(
+        val iteration = TraceGuidedRepairLoop(RepairClientAgentHarness(client), history).repairBehaviorMismatch(
             projectDir = projectDir,
             originalBinary = original,
             rebuiltBinary = initialBuild.projectDir.resolve("build/reconstructed"),
@@ -193,7 +231,10 @@ class TraceGuidedRepairTest {
             ProcessInput(id = "two_args", args = listOf("alpha", "beta")),
         )
 
-        TraceGuidedRepairLoop(FakeRepairClient(RepairResponse("fix", listOf(SourcePatch("src/reconstructed.c", goodHelloSource())))), history)
+        TraceGuidedRepairLoop(
+            RepairClientAgentHarness(FakeRepairClient(RepairResponse("fix", listOf(SourcePatch("src/reconstructed.c", goodHelloSource()))))),
+            history,
+        )
             .repairCompileError(projectDir, collectCompileFailure(projectDir), inputs)
 
         assertEquals(listOf("no_args", "two_args"), history.all().single().retainedRegressionIds)
@@ -217,7 +258,7 @@ class TraceGuidedRepairTest {
             RepairResponse("match observed output", listOf(SourcePatch("src/reconstructed.c", goodHelloSource()))),
         )
 
-        val result = TraceGuidedRepairLoop(client, RepairHistory(historyPath)).repairUntilValid(
+        val result = TraceGuidedRepairLoop(RepairClientAgentHarness(client), RepairHistory(historyPath)).repairUntilValid(
             projectDir = projectDir,
             originalBinary = original,
             inputs = inputs,
@@ -231,7 +272,7 @@ class TraceGuidedRepairTest {
         assertEquals("compile", result.iterations.first().before?.kind)
         assertEquals("behavior", result.iterations.first().after?.kind)
         assertEquals("valid", result.iterations.last().after?.kind)
-        assertEquals(inputs.map { it.id }, client.requests.last().regressionInputs.map { it.id })
+        assertTrue(inputs.all { client.requests.last().prompt.contains(it.id) })
         assertTrue(projectDir.resolve("reports/iteration_1_behavior.diff.json").exists())
 
         val reloaded = RepairHistory(historyPath)
@@ -249,13 +290,13 @@ class TraceGuidedRepairTest {
         RepairHistory(historyPath).retain(listOf(ProcessInput("earlier", stdin = "old\n".toByteArray())))
         val client = QueueRepairClient(RepairResponse("fix", listOf(SourcePatch("src/reconstructed.c", goodHelloSource()))))
 
-        TraceGuidedRepairLoop(client, RepairHistory(historyPath)).repairCompileError(
+        TraceGuidedRepairLoop(RepairClientAgentHarness(client), RepairHistory(historyPath)).repairCompileError(
             projectDir,
             collectCompileFailure(projectDir),
             listOf(ProcessInput("new", args = listOf("value"))),
         )
 
-        assertEquals(listOf("earlier", "new"), client.requests.single().regressionInputs.map { it.id })
+        assertTrue(listOf("earlier", "new").all { client.requests.single().prompt.contains(it) })
     }
 
     @Test
@@ -268,7 +309,10 @@ class TraceGuidedRepairTest {
         parsePath.writeText("#include \"modules/parse.h\"\nint parse_input(void) {\n")
         val client = FakeRepairClient(RepairResponse("repair parse module", listOf(SourcePatch("src/modules/parse.c", validParse))))
 
-        TraceGuidedRepairLoop(client, RepairHistory(projectDir.resolve("reports/repair_history.json"))).repairCompileError(
+        TraceGuidedRepairLoop(
+            RepairClientAgentHarness(client),
+            RepairHistory(projectDir.resolve("reports/repair_history.json")),
+        ).repairCompileError(
             projectDir,
             collectCompileFailure(projectDir),
             listOf(ProcessInput("default")),
@@ -296,14 +340,18 @@ class TraceGuidedRepairTest {
             ),
         )
 
-        assertFailsWith<IllegalArgumentException> {
-            TraceGuidedRepairLoop(client, RepairHistory(projectDir.resolve("reports/repair_history.json"))).repairCompileError(
+        val failure = assertFailsWith<AgentExecutionException> {
+            TraceGuidedRepairLoop(
+                RepairClientAgentHarness(client),
+                RepairHistory(projectDir.resolve("reports/repair_history.json")),
+            ).repairCompileError(
                 projectDir,
                 CompileFailure(listOf("make"), 2, "", "src/modules/parse.c: error"),
                 emptyList(),
             )
         }
 
+        assertEquals(AgentFailureKind.WORKSPACE_VIOLATION, failure.failure.kind)
         assertEquals(before, parsePath.readText())
         assertTrue(!projectDir.resolve("src/rogue.c").exists())
     }
@@ -318,7 +366,10 @@ class TraceGuidedRepairTest {
         val client = QueueRepairClient(RepairResponse("bad repair", listOf(SourcePatch("src/reconstructed.c", "int broken(\n"))))
 
         assertFailsWith<RepairExhaustedException> {
-            TraceGuidedRepairLoop(client, RepairHistory(projectDir.resolve("reports/repair_history.json"))).repairUntilValid(
+            TraceGuidedRepairLoop(
+                RepairClientAgentHarness(client),
+                RepairHistory(projectDir.resolve("reports/repair_history.json")),
+            ).repairUntilValid(
                 projectDir,
                 original,
                 listOf(ProcessInput("default")),

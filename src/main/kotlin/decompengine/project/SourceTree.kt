@@ -1,11 +1,23 @@
 package decompengine.project
 
-import decompengine.repair.RepairClient
-import decompengine.repair.RepairRequest
+import decompengine.agent.AgentAccessPolicy
+import decompengine.agent.AgentContextInput
+import decompengine.agent.AgentExecutionRequest
+import decompengine.agent.AgentFileChangeKind
+import decompengine.agent.AgentHarness
+import decompengine.agent.AgentOperation
+import decompengine.agent.AgentPathRule
+import decompengine.agent.AgentStopReason
+import decompengine.agent.AgentWorkspacePath
+import decompengine.agent.AgentWorkspaceRoot
+import decompengine.agent.execute
 import java.nio.file.Path
 import kotlin.io.path.createDirectories
+import kotlin.io.path.deleteIfExists
 import kotlin.io.path.exists
+import kotlin.io.path.readBytes
 import kotlin.io.path.readText
+import kotlin.io.path.writeBytes
 import kotlin.io.path.writeText
 
 data class ModuleReconstructionRequest(
@@ -15,6 +27,7 @@ data class ModuleReconstructionRequest(
     val moduleHeader: String,
     val privateHeader: String,
     val dependencyHeaders: Map<String, String>,
+    val workspaceRoot: Path,
     val observedBehavior: String? = null,
 )
 
@@ -62,7 +75,7 @@ class EvidenceModuleReconstructor(private val includeRecoveredC: Boolean = false
 class RecoveredCModuleReconstructor : ModuleReconstructor by EvidenceModuleReconstructor(includeRecoveredC = true)
 
 class BoundedLlmModuleReconstructor(
-    private val client: RepairClient,
+    private val harness: AgentHarness,
     private val maximumContextCharacters: Int = 120_000,
 ) : ModuleReconstructor {
     init { require(maximumContextCharacters >= 4_096) }
@@ -75,15 +88,10 @@ class BoundedLlmModuleReconstructor(
                 "calls: ${function.calls.sorted()}\nglobals: ${function.referencedGlobals.sorted()}\n" +
                 "strings: ${function.strings.sorted()}\ndecompilation:\n${function.decompiledC ?: "<unavailable>"}"
         }
-        val prompt = """
+        val objective = """
             Reconstruct exactly one C implementation unit at $target.
             Preserve recovered behavior and suspicious operations. Do not invent file paths or edit headers.
-            Return one complete replacement for $target. Keep provenance comments containing every function ID.
-
-            $evidence
-
-            Observed behavior evidence:
-            ${request.observedBehavior ?: "<not yet available; report this limitation>"}
+            Edit $target in the authorized workspace and keep provenance comments containing every function ID.
         """.trimIndent()
         val files = linkedMapOf(
             "include/decomp_types.h" to request.sharedHeader,
@@ -91,15 +99,64 @@ class BoundedLlmModuleReconstructor(
             "src/modules/${request.module.id}_internal.h" to request.privateHeader,
         )
             .apply { putAll(request.dependencyHeaders) }
-        val contextSize = prompt.length + files.entries.sumOf { it.key.length + it.value.length }
+        val observed = request.observedBehavior ?: "<not yet available; report this limitation>"
+        val contextSize = objective.length + evidence.length + observed.length + files.entries.sumOf { it.key.length + it.value.length }
         require(contextSize <= maximumContextCharacters) {
             "module ${request.module.id} exceeds context budget: $contextSize > $maximumContextCharacters characters"
         }
-        val response = client.requestRepair(RepairRequest("module-reconstruction", prompt, files, emptyList()))
-        require(response.patches.size == 1 && response.patches.single().relativePath == target) {
-            "module reconstruction must replace only $target"
+        val workspaceRoot = request.workspaceRoot.toAbsolutePath().normalize()
+        val root = AgentWorkspaceRoot("project", workspaceRoot)
+        val readRules = files.keys.map { path ->
+            AgentPathRule(AgentWorkspacePath(root.id, path), setOf(AgentOperation.READ_FILE))
         }
-        return ReconstructedModule(response.patches.single().replacement, "llm:${client.modelIdentifier() ?: "unspecified"}", sha256(prompt.toByteArray()))
+        val targetPath = AgentWorkspacePath(root.id, target)
+        val sourcePath = targetPath.resolve(listOf(root))
+        val before = sourcePath.takeIf { it.exists() }?.readBytes()
+        try {
+            val execution = harness.execute(
+                AgentExecutionRequest(
+                    objective = objective,
+                    workspaceRoots = listOf(root),
+                    contextInputs = listOf(
+                        AgentContextInput("recovered-module-evidence", evidence),
+                        AgentContextInput("observed-behavior", observed),
+                    ),
+                    accessPolicy = AgentAccessPolicy(
+                        readRules + AgentPathRule(
+                            targetPath,
+                            setOf(AgentOperation.READ_FILE, AgentOperation.WRITE_FILE, AgentOperation.CREATE_FILE),
+                        ),
+                    ),
+                ),
+            )
+            require(execution.stopReason == AgentStopReason.COMPLETED) {
+                "module reconstruction stopped with ${execution.stopReason.name.lowercase()}: ${execution.summary.orEmpty()}"
+            }
+            require(execution.changes.size == 1 && execution.changes.single().path == targetPath) {
+                "module reconstruction must change only $target"
+            }
+            val change = execution.changes.single()
+            require(change.kind != AgentFileChangeKind.DELETED) { "module reconstruction deleted $target" }
+            require(sourcePath.exists()) { "module reconstruction reported $target without creating it" }
+            val source = sourcePath.readText()
+            val sourceBytes = source.toByteArray()
+            val expectedKind = if (before == null) AgentFileChangeKind.CREATED else AgentFileChangeKind.MODIFIED
+            require(change.kind == expectedKind && change.beforeSha256 == before?.let(::sha256)) {
+                "module reconstruction before-state does not match $target"
+            }
+            require(change.afterSha256 == sha256(sourceBytes) && (change.sizeBytes == null || change.sizeBytes == sourceBytes.size.toLong())) {
+                "module reconstruction result does not match $target"
+            }
+            val promptEvidence = listOf(objective, evidence, observed).joinToString("\n\n")
+            return ReconstructedModule(
+                source,
+                "agent:${harness.implementationIdentifier() ?: "unspecified"}",
+                sha256(promptEvidence.toByteArray()),
+            )
+        } catch (failure: Exception) {
+            if (before == null) sourcePath.deleteIfExists() else sourcePath.writeBytes(before)
+            throw failure
+        }
     }
 }
 
@@ -182,7 +239,16 @@ object SourceTreeGenerator {
             val cached = readCheckpoint(checkpointPath)?.takeIf { it.fingerprint == fingerprint && sourcePath.exists() }
             val result = cached?.let { ReconstructedModule(sourcePath.readText(), it.generator, it.promptSha256) }
                 ?: reconstructor.reconstruct(
-                    ModuleReconstructionRequest(module, model, typesHeader, headers.getValue(module.id), privateHeaders.getValue(module.id), dependencyHeaders, observedBehavior),
+                    ModuleReconstructionRequest(
+                        module,
+                        model,
+                        typesHeader,
+                        headers.getValue(module.id),
+                        privateHeaders.getValue(module.id),
+                        dependencyHeaders,
+                        projectDir,
+                        observedBehavior,
+                    ),
                 ).also { reconstructed ->
                     sourcePath.writeText(reconstructed.source.trimEnd() + "\n")
                     checkpointPath.writeText(ModuleCheckpoint(fingerprint, reconstructed.generator, reconstructed.promptSha256).toJson())

@@ -1,9 +1,14 @@
 package decompengine.project
 
-import decompengine.repair.RepairClient
-import decompengine.repair.RepairRequest
-import decompengine.repair.RepairResponse
-import decompengine.repair.SourcePatch
+import decompengine.agent.AgentExecutionEvent
+import decompengine.agent.AgentExecutionRequest
+import decompengine.agent.AgentExecutionResult
+import decompengine.agent.AgentFileChange
+import decompengine.agent.AgentFileChangeKind
+import decompengine.agent.AgentHarness
+import decompengine.agent.AgentOperation
+import decompengine.agent.AgentStopReason
+import decompengine.agent.AgentWorkspacePath
 import kotlin.io.path.createTempDirectory
 import kotlin.io.path.exists
 import kotlin.io.path.readText
@@ -39,11 +44,23 @@ class SourceTreeTest {
     @Test
     fun `LLM reconstruction is restricted to the planned module path`() {
         val project = createTempDirectory("source-tree-llm-")
-        val client = object : RepairClient {
-            override fun requestRepair(request: RepairRequest): RepairResponse {
-                assertTrue(request.prompt.contains("src/modules/parse.c"))
-                assertTrue(request.prompt.contains("case default: stdout=ok"))
-                return RepairResponse("module", listOf(SourcePatch("src/modules/parse.c", "#include \"modules/parse.h\"\nint parse_input(void) { return 0; }\n")))
+        val harness = object : AgentHarness {
+            override fun execute(
+                request: AgentExecutionRequest,
+                onEvent: (AgentExecutionEvent) -> Unit,
+            ): AgentExecutionResult {
+                assertTrue(request.objective.contains("src/modules/parse.c"))
+                assertTrue(request.contextInputs.single { it.id == "observed-behavior" }.content.contains("case default: stdout=ok"))
+                val path = AgentWorkspacePath("project", "src/modules/parse.c")
+                assertTrue(request.accessPolicy.allows(path, AgentOperation.CREATE_FILE))
+                val source = "#include \"modules/parse.h\"\nint parse_input(void) { return 0; }\n"
+                val target = path.resolve(request.workspaceRoots)
+                target.writeText(source)
+                return AgentExecutionResult(
+                    AgentStopReason.COMPLETED,
+                    "module reconstructed in workspace",
+                    listOf(AgentFileChange(path, AgentFileChangeKind.CREATED, null, sha256(source.toByteArray()), source.length.toLong())),
+                )
             }
         }
         val oneModule = model().copy(functions = model().functions.take(1), globals = emptyList())
@@ -51,29 +68,42 @@ class SourceTreeTest {
         SourceTreeGenerator.generate(
             oneModule,
             project,
-            reconstructor = BoundedLlmModuleReconstructor(client),
+            reconstructor = BoundedLlmModuleReconstructor(harness),
             observedBehavior = "case default: stdout=ok",
         )
 
         assertTrue(project.resolve("src/modules/parse.c").readText().contains("parse_input"))
-        assertTrue(project.resolve("source_tree_manifest.json").readText().contains("\"generator\": \"llm:unspecified\""))
+        assertTrue(project.resolve("source_tree_manifest.json").readText().contains("\"generator\": \"agent:unspecified\""))
     }
 
     @Test
     fun `LLM reconstruction enforces context budget before making a request`() {
         var called = false
-        val client = object : RepairClient {
-            override fun requestRepair(request: RepairRequest): RepairResponse {
+        val harness = object : AgentHarness {
+            override fun execute(
+                request: AgentExecutionRequest,
+                onEvent: (AgentExecutionEvent) -> Unit,
+            ): AgentExecutionResult {
                 called = true
                 error("unexpected")
             }
         }
-        val reconstructor = BoundedLlmModuleReconstructor(client, 4_096)
+        val reconstructor = BoundedLlmModuleReconstructor(harness, 4_096)
         val huge = model().copy(functions = listOf(model().functions.first().copy(decompiledC = "x".repeat(10_000))))
         val module = DeterministicModulePlanner().plan(huge).modules.single()
 
         assertFailsWith<IllegalArgumentException> {
-            reconstructor.reconstruct(ModuleReconstructionRequest(module, huge, "header", "module", "private", emptyMap()))
+            reconstructor.reconstruct(
+                ModuleReconstructionRequest(
+                    module,
+                    huge,
+                    "header",
+                    "module",
+                    "private",
+                    emptyMap(),
+                    createTempDirectory("source-tree-context-budget-"),
+                ),
+            )
         }
         assertTrue(!called)
     }
