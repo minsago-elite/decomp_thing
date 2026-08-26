@@ -7,7 +7,6 @@ import java.io.BufferedWriter
 import java.nio.file.Files
 import java.nio.file.Path
 import java.nio.file.StandardCopyOption
-import java.security.MessageDigest
 import java.time.Instant
 import java.util.Comparator
 import kotlin.io.path.createDirectories
@@ -38,14 +37,19 @@ class MvpPatchWorkflow(
         val patchedSourceDir = output.resolve("patched_c").createDirectories()
         val patchedBinaryDir = output.resolve("patched_binary").createDirectories()
         val summaryDir = output.resolve("summary").createDirectories()
+        val evidenceDir = output.resolve("evidence").createDirectories()
         val work = output.resolve(".work").createDirectories()
+        val raw = work.resolve("ghidra_decompiled.c")
         val finalBinary = patchedBinaryDir.resolve("patched_binary")
         finalBinary.deleteIfExists()
         val logger = StreamingLogger(logs.resolve("patch-${Instant.now().toEpochMilli()}.log"))
+        val evidence = MvpRunEvidence(environment).apply {
+            isolation = "direct host-process execution; credential and network isolation are not established in this workflow"
+        }
         var phase = "inspect"
-        var patchSummary = "not generated"
         try {
             logger.use {
+                evidence.startPhase(phase)
                 it.phase(phase)
                 requireElf64(input)
                 it.command(listOf("readelf", "-h", "-s", input.pathString), work, "ELF metadata")
@@ -56,10 +60,12 @@ class MvpPatchWorkflow(
                     requireSuccess = false,
                 )
                 if (original.stdout.isBlank()) throw MvpPatchException("original produced no observable stdout")
+                evidence.check("original behavior observation", original.exitCode == 0, "exit=${original.exitCode}, stdoutBytes=${original.stdout.toByteArray().size}")
+                evidence.passPhase(phase, "ELF metadata inspected and default behavior retained")
 
                 phase = "reconstruct"
+                evidence.startPhase(phase)
                 it.phase(phase)
-                val raw = work.resolve("ghidra_decompiled.c")
                 decompiler.decompile(it, input, work, raw)
                 if (!raw.exists() || raw.readText().isBlank()) throw MvpPatchException("Ghidra produced no decompiler output")
                 val reconstructed = decompiled.resolve("decompiled.c")
@@ -72,13 +78,18 @@ class MvpPatchWorkflow(
                     ),
                 )
                 reconstructed.writeText(singleReplacement(reconstruction.patches.map { it.relativePath to it.replacement }, "decompiled.c"))
+                evidence.passPhase(phase, "Ghidra export converted to standalone decompile/decompiled.c")
 
                 phase = "compile"
+                evidence.startPhase(phase)
                 it.phase(phase)
                 val vulnerable = work.resolve("reconstructed_asan")
                 compile(it, reconstructed, vulnerable, sanitizer = true, warningsAsErrors = false)
+                evidence.check("reconstructed sanitizer build", true, "compiled with AddressSanitizer and UBSan")
+                evidence.passPhase(phase, "reconstructed source compiled with sanitizers")
 
                 phase = "reproduce"
+                evidence.startPhase(phase)
                 it.phase(phase)
                 val finding = it.command(
                     listOf("timeout", "5s", vulnerable.pathString), work, "sanitizer reproducer",
@@ -87,8 +98,16 @@ class MvpPatchWorkflow(
                 if (finding.exitCode == 0 || !finding.combined.contains("Sanitizer")) {
                     throw MvpPatchException("reconstructed program did not reproduce a sanitizer finding")
                 }
+                val findingPath = evidenceDir.resolve("cwe-787-sanitizer.txt")
+                findingPath.writeText(evidence.redact(finding.combined))
+                evidence.findingPath = findingPath
+                evidence.findingSourceLocation = findSourceLocation(finding.combined)
+                    ?: throw MvpPatchException("sanitizer finding did not map to decompile/decompiled.c")
+                evidence.check("CWE-787 reproduction", true, "out-of-bounds write retained at ${evidence.findingSourceLocation}; exit=${finding.exitCode}")
+                evidence.passPhase(phase, "CWE-787 sanitizer failure reproduced and mapped to reconstructed C")
 
                 phase = "patch"
+                evidence.startPhase(phase)
                 it.phase(phase)
                 val proposal = client.requestRepair(
                     RepairRequest(
@@ -98,28 +117,53 @@ class MvpPatchWorkflow(
                         regressionInputs = listOf(ProcessInput("default")),
                     ),
                 )
-                patchSummary = proposal.summary
+                evidence.patchExplanation = proposal.summary
                 val proposedSource = patchedSourceDir.resolve("patched.c")
                 proposedSource.writeText(singleReplacement(proposal.patches.map { it.relativePath to it.replacement }, "patched.c"))
-                it.command(listOf("diff", "-u", reconstructed.pathString, proposedSource.pathString), work, "proposed patch", false, accepted = setOf(0, 1))
-                if (!options.assumeYes && !approve(patchSummary)) throw MvpPatchException("patch was not approved")
+                val diff = it.command(listOf("diff", "-u", reconstructed.pathString, proposedSource.pathString), work, "proposed patch", false, accepted = setOf(0, 1))
+                if (diff.exitCode == 0 || diff.stdout.isBlank()) throw MvpPatchException("proposed patch did not change reconstructed C")
+                val diffPath = evidenceDir.resolve("approved.patch")
+                diffPath.writeText(evidence.redact(diff.stdout))
+                evidence.patchDiff = diff.stdout
+                evidence.patchDiffPath = diffPath
+                val approved = options.assumeYes || approve(evidence.patchExplanation)
+                evidence.approvalDecision = when {
+                    !approved -> "rejected interactively"
+                    options.assumeYes -> "approved by --yes automation"
+                    else -> "approved interactively"
+                }
+                evidence.check("source patch approval", approved, evidence.approvalDecision)
+                if (!approved) throw MvpPatchException("patch was not approved")
+                evidence.passPhase(phase, "non-empty source diff approved and retained at evidence/approved.patch")
 
                 phase = "verify"
+                evidence.startPhase(phase)
                 it.phase(phase)
                 val patchedAsan = work.resolve("patched_asan")
                 compile(it, proposedSource, patchedAsan, sanitizer = true, warningsAsErrors = true)
-                verify(it, patchedAsan, original, "sanitizer verification")
+                evidence.check("patched sanitizer build", true, "compiled with -Werror, AddressSanitizer, and UBSan")
+                verify(it, patchedAsan, original, "sanitizer security validation")
+                evidence.check("sanitizer security validation", true, "CWE-787 reproducer no longer reports a sanitizer failure")
                 val release = work.resolve("patched_release")
                 compile(it, proposedSource, release, sanitizer = false, warningsAsErrors = true)
+                evidence.check("hardened release build", true, "compiled with FORTIFY_SOURCE=2, stack protector, PIE, RELRO, and immediate binding")
+                verifyHardening(it, release)
+                evidence.check("binary hardening inspection", true, "ELF is PIE with GNU_RELRO and immediate binding")
                 verify(it, release, original, "release verification")
+                evidence.check("behavior validation", true, "exit code and stdout match the observed original default execution")
                 Files.copy(release, finalBinary, StandardCopyOption.REPLACE_EXISTING)
                 finalBinary.toFile().setExecutable(true, true)
-                writeSummary(summaryDir, input, reconstructed, proposedSource, finalBinary, patchSummary, "PASS", null)
+                evidence.passPhase(phase, "all sanitizer, hardening, security, and behavior checks passed")
+                writeMvpSummary(summaryDir.resolve("SUMMARY.md"), output, input, raw, reconstructed, proposedSource, finalBinary, "PASS", null, evidence)
                 it.info("completed: $finalBinary")
             }
         } catch (failure: Exception) {
             finalBinary.deleteIfExists()
-            writeSummary(summaryDir, input, decompiled.resolve("decompiled.c"), patchedSourceDir.resolve("patched.c"), finalBinary, patchSummary, "FAIL", "$phase: ${failure.message}")
+            evidence.failPhase(phase, failure.message ?: failure.javaClass.simpleName)
+            writeMvpSummary(
+                summaryDir.resolve("SUMMARY.md"), output, input, raw, decompiled.resolve("decompiled.c"),
+                patchedSourceDir.resolve("patched.c"), finalBinary, "FAIL", "$phase: ${failure.message}", evidence,
+            )
             throw if (failure is MvpPatchException) failure else MvpPatchException(failure.message ?: failure.javaClass.simpleName)
         }
     }
@@ -137,6 +181,16 @@ class MvpPatchWorkflow(
         val result = logger.command(listOf("timeout", "5s", binary.pathString), binary.parent, label, false)
         if (result.exitCode != 0 || result.stdout != expected.stdout || result.combined.contains("Sanitizer")) {
             throw MvpPatchException("$label did not preserve observed behavior")
+        }
+    }
+
+    private fun verifyHardening(logger: StreamingLogger, binary: Path) {
+        val headers = logger.command(listOf("readelf", "-W", "-h", "-l", "-d", binary.pathString), binary.parent, "hardening inspection")
+        val output = headers.combined
+        if (!Regex("Type:\\s+DYN").containsMatchIn(output) || !output.contains("GNU_RELRO") ||
+            !(output.contains("BIND_NOW") || Regex("FLAGS.*NOW").containsMatchIn(output))
+        ) {
+            throw MvpPatchException("release binary is missing required PIE, RELRO, or immediate-binding hardening")
         }
     }
 }
@@ -247,49 +301,13 @@ private fun patchPrompt(stdout: String, sanitizer: String) = """
     In the JSON summary, explain the vulnerability root cause, the exact code change, and why the change preserves observed behavior.
 """.trimIndent()
 
+private fun findSourceLocation(sanitizer: String): String? =
+    Regex("(?:[A-Za-z]:)?[^\\s:]*decompiled\\.c:\\d+(?::\\d+)?")
+        .find(sanitizer)
+        ?.value
+        ?.substringAfterLast('/')
+
 private fun promptForApproval(summary: String): Boolean {
     println("Patch summary: $summary"); print("Apply this patch? [y/N] "); System.out.flush()
     return readlnOrNull()?.trim()?.lowercase() in setOf("y", "yes")
-}
-
-private fun writeSummary(summaryDir: Path, input: Path, source: Path, patchedSource: Path, binary: Path, patch: String, result: String, failure: String?) {
-    summaryDir.createDirectories()
-    summaryDir.resolve("SUMMARY.md").writeText("""
-        # MVP Patch Summary
-
-        - Result: $result
-        - Input SHA-256: `${input.takeIf { it.exists() }?.sha256() ?: "unavailable"}`
-        - Decompiled C: `${if (source.exists()) "decompile/decompiled.c" else "unavailable"}`
-        - Patched C: `${if (patchedSource.exists()) "patched_c/patched.c" else "unavailable"}`
-        - Patched binary: `${if (binary.exists()) "patched_binary/patched_binary" else "not published"}`
-        - Failure: ${failure ?: "none"}
-
-        ## Vulnerability Found
-
-        The reconstructed program triggered a memory-safety failure during sanitizer verification before patching. The MVP treats that failure as the evidence used to request and validate the source-level fix.
-
-        ## Patch Explanation
-
-        ${patch.toSummaryParagraph()}
-
-        ## Patched Artifacts
-
-        - Source: `${if (patchedSource.exists()) "patched_c/patched.c" else "unavailable"}`
-        - Binary: `${if (binary.exists()) "patched_binary/patched_binary" else "not published"}`
-
-        ## Residual Risk
-
-        This MVP supports small symbol-bearing x86-64 ELF programs and validates only the observed default execution. Input execution is not network-isolated when nested bubblewrap is unavailable.
-    """.trimIndent() + "\n")
-}
-
-private fun Path.sha256() = MessageDigest.getInstance("SHA-256").digest(readBytes()).joinToString("") { "%02x".format(it) }
-
-private fun String.toSummaryParagraph(): String {
-    val normalized = trim().replace(Regex("\\s+"), " ")
-    return if (normalized.isBlank() || normalized == "not generated") {
-        "No source patch was generated before the workflow stopped."
-    } else {
-        normalized
-    }
 }

@@ -27,11 +27,12 @@ class MvpPatchWorkflowTest {
         output.resolve("stale/nested/old.txt").writeText("old output")
         val client = QueueRepairClient(
             RepairResponse("reconstruct vulnerable source", listOf(SourcePatch("decompiled.c", vulnerableSource()))),
-            RepairResponse("bound copy to the local buffer", listOf(SourcePatch("patched.c", patchedSource()))),
+            RepairResponse("bound copy to the local buffer without exposing top-secret-value", listOf(SourcePatch("patched.c", patchedSource()))),
         )
 
         MvpPatchWorkflow(
             client = client,
+            environment = mapOf("API_KEY" to "top-secret-value"),
             approve = { true },
             decompiler = BinaryDecompiler { _, _, _, raw -> raw.writeText("int main(void) { /* ghidra */ }\n") },
         ).run(MvpPatchOptions(input, output))
@@ -44,9 +45,20 @@ class MvpPatchWorkflowTest {
         assertTrue(output.resolve("patched_binary/patched_binary").exists())
         val summary = output.resolve("summary/SUMMARY.md").readText()
         assertTrue(summary.contains("Result: PASS"))
-        assertTrue(summary.contains("## Vulnerability Found"))
-        assertTrue(summary.contains("## Patch Explanation"))
+        assertTrue(summary.contains("## CWE-787 Evidence and Source Mapping"))
+        assertTrue(summary.contains("decompiled.c:"))
+        assertTrue(summary.contains("## Approved Source Change"))
         assertTrue(summary.contains("bound copy to the local buffer"))
+        assertFalse(summary.contains("top-secret-value"))
+        assertTrue(summary.contains("[REDACTED]"))
+        assertTrue(summary.contains("approved interactively"))
+        assertTrue(summary.contains("| verify | PASS |"))
+        assertTrue(summary.contains("binary hardening inspection | PASS"))
+        assertTrue(summary.contains("behavior validation | PASS"))
+        assertTrue(summary.contains("evidence/approved.patch"))
+        assertTrue(output.resolve("evidence/approved.patch").exists())
+        assertTrue(output.resolve("evidence/cwe-787-sanitizer.txt").exists())
+        assertTrue(Regex("`[0-9a-f]{64}`").containsMatchIn(summary))
 
         val patched = ProcessBuilder(output.resolve("patched_binary/patched_binary").pathString).start()
         assertEquals(0, patched.waitFor())
@@ -73,7 +85,11 @@ class MvpPatchWorkflowTest {
 
         assertTrue(failure.message.orEmpty().contains("not approved"))
         assertFalse(output.resolve("patched_binary/patched_binary").exists())
-        assertTrue(output.resolve("summary/SUMMARY.md").readText().contains("Result: FAIL"))
+        val summary = output.resolve("summary/SUMMARY.md").readText()
+        assertTrue(summary.contains("Result: FAIL"))
+        assertTrue(summary.contains("Failure phase and reason: patch: patch was not approved"))
+        assertTrue(summary.contains("rejected interactively"))
+        assertTrue(summary.contains("Verified final binary: `not published`"))
     }
 
     @Test
@@ -92,6 +108,25 @@ class MvpPatchWorkflowTest {
 
         assertTrue(failure.message.orEmpty().contains("64-bit ELF"))
         assertFalse(output.resolve("patched_binary/patched_binary").exists())
+    }
+
+    @Test
+    fun `yes automation records approval without prompting`() {
+        val tempDir = createTempDirectory("mvp-yes-")
+        val input = compileC(tempDir, "original", originalSource())
+        val output = tempDir.resolve("output")
+        val client = QueueRepairClient(
+            RepairResponse("reconstruct vulnerable source", listOf(SourcePatch("decompiled.c", vulnerableSource()))),
+            RepairResponse("bound copy", listOf(SourcePatch("patched.c", patchedSource()))),
+        )
+
+        MvpPatchWorkflow(
+            client = client,
+            approve = { error("--yes must bypass the interactive prompt") },
+            decompiler = BinaryDecompiler { _, _, _, raw -> raw.writeText("decompiled c") },
+        ).run(MvpPatchOptions(input, output, assumeYes = true))
+
+        assertTrue(output.resolve("summary/SUMMARY.md").readText().contains("approved by --yes automation"))
     }
 
     @Test
