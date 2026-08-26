@@ -3,9 +3,11 @@
 .gradle
 .kotlin
 .env
+.codex
 build
 benchmarks/fixtures/c-vul
 input
 output
+nohup.out
 **/__pycache__
 **/*.pyc
