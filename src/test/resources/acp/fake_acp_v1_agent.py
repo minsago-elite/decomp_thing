@@ -190,6 +190,18 @@ if MODE in ("fs-cap-read-only", "fs-cap-write-only", "fs-cap-none"):
     respond(prompt, {"stopReason": "end_turn"})
     raise SystemExit(0)
 
+if MODE == "protocol-frame-flood":
+    # Each tiny notification is valid JSON-RPC, but the host must reject the aggregate frame
+    # count before the SDK's internally unbounded transport queues can amplify it in memory.
+    for ordinal in range(64):
+        send({
+            "jsonrpc": "2.0",
+            "method": "contract/unknown_notification",
+            "params": {"ordinal": ordinal},
+        })
+    time.sleep(30)
+    raise SystemExit(0)
+
 if MODE == "fs-denied-outside":
     outside = cwd.rstrip("/").rsplit("/", 1)[0] + "/outside.txt"
     send({

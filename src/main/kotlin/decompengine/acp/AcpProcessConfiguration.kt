@@ -10,6 +10,10 @@ const val ACP_KOTLIN_SDK_VERSION: String = "0.30.1"
 /** ACP v2 is a draft and is deliberately not included in this client's supported-version set. */
 const val ACP_STABLE_PROTOCOL_VERSION: Int = 1
 
+/** Keeps the SDK's internally unbounded message channels behind a finite adapter boundary. */
+internal const val DEFAULT_MAXIMUM_ACP_PROTOCOL_FRAMES: Int = 1_024
+internal const val MAXIMUM_ACP_PROTOCOL_FRAMES: Int = 4_096
+
 enum class AcpRequiredAgentCapability(val diagnosticName: String) {
     LOAD_SESSION("loadSession"),
     PROMPT_IMAGE("promptCapabilities.image"),
@@ -67,6 +71,7 @@ class AcpProcessConfiguration(
     requiredAgentCapabilities: Collection<AcpRequiredAgentCapability> = emptySet(),
     val timeouts: AcpLifecycleTimeouts = AcpLifecycleTimeouts(),
     val maximumFrameBytes: Int = 1024 * 1024,
+    val maximumProtocolFrames: Int = DEFAULT_MAXIMUM_ACP_PROTOCOL_FRAMES,
     val maximumStderrBytes: Int = 256 * 1024,
     val implementationId: String = "acp-v1",
     val filesystemLimits: AcpFilesystemLimits = AcpFilesystemLimits(),
@@ -94,6 +99,9 @@ class AcpProcessConfiguration(
             "ACP environment variable names must use portable [A-Za-z_][A-Za-z0-9_]* syntax"
         }
         require(maximumFrameBytes > 0) { "maximum ACP frame size must be positive" }
+        require(maximumProtocolFrames in 1..MAXIMUM_ACP_PROTOCOL_FRAMES) {
+            "maximum ACP protocol frames must be between 1 and $MAXIMUM_ACP_PROTOCOL_FRAMES"
+        }
         require(maximumStderrBytes > 0) { "maximum ACP stderr capture must be positive" }
         require(implementationId.isNotBlank()) { "ACP implementation id must not be blank" }
         require(sandboxBoundary == null || !inheritParentEnvironment) {

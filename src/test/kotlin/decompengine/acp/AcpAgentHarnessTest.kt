@@ -114,7 +114,7 @@ class AcpAgentHarnessTest {
                 }
             }
         }
-        assertEquals(46, acpTestMethods.size, acpTestMethods.joinToString { it.name })
+        assertEquals(47, acpTestMethods.size, acpTestMethods.joinToString { it.name })
         assertTrue(
             acpTestMethods.all { it.returnType == Void.TYPE },
             acpTestMethods.filter { it.returnType != Void.TYPE }.joinToString {
@@ -758,6 +758,50 @@ class AcpAgentHarnessTest {
     }
 
     @Test
+    fun `protocol frame flood is bounded before SDK dispatch and leaves no process or workspace residue`() {
+        assertFailsWith<IllegalArgumentException> {
+            AcpProcessConfiguration(Path.of("/usr/bin/true"), maximumProtocolFrames = 0)
+        }
+        assertFailsWith<IllegalArgumentException> {
+            AcpProcessConfiguration(
+                Path.of("/usr/bin/true"),
+                maximumProtocolFrames = MAXIMUM_ACP_PROTOCOL_FRAMES + 1,
+            )
+        }
+
+        val fixture = fixture(
+            wallMillis = 2_000,
+            maximumOutputBytes = Long.MAX_VALUE,
+        )
+        val harness = harness(
+            "protocol-frame-flood",
+            timeouts = timeouts(request = 1_000, shutdown = 600),
+            maximumProtocolFrames = 8,
+        )
+        val executor = Executors.newSingleThreadExecutor()
+        try {
+            val execution = executor.submit<AgentExecutionException> {
+                assertFailsWith { harness.execute(fixture.request) }
+            }
+            val failure = try {
+                execution.get(5, TimeUnit.SECONDS)
+            } catch (wrapped: ExecutionException) {
+                throw wrapped.cause ?: wrapped
+            }
+
+            assertEquals(AgentFailureKind.RESOURCE_EXHAUSTED, failure.failure.kind)
+            assertTrue(failure.message.orEmpty().contains("8-frame protocol limit"), failure.message)
+            assertEquals("old source\n", fixture.source.readText())
+            val diagnostics = assertNotNull(harness.latestDiagnostics())
+            assertTrue(diagnostics.remainingProcessIds.isEmpty())
+            assertTrue(diagnostics.sandboxCleanupVerified)
+            assertProcessStopped(diagnostics.pid)
+        } finally {
+            executor.shutdownNow()
+        }
+    }
+
+    @Test
     fun `workspace snapshots stream large files and observe prelaunch cancellation and wall time`() {
         val largeFixture = fixture()
         largeFixture.source.writeText("x".repeat(2 * 1024 * 1024))
@@ -1013,6 +1057,7 @@ class AcpAgentHarnessTest {
         requiredCapabilities: Set<AcpRequiredAgentCapability> = emptySet(),
         timeouts: AcpLifecycleTimeouts = timeouts(),
         maximumFrameBytes: Int = 64 * 1024,
+        maximumProtocolFrames: Int = DEFAULT_MAXIMUM_ACP_PROTOCOL_FRAMES,
         terminalPolicy: AcpTerminalExecutionPolicy? = null,
     ): AcpAgentHarness {
         requireLiveSandboxHost()
@@ -1026,6 +1071,7 @@ class AcpAgentHarnessTest {
                 requiredAgentCapabilities = requiredCapabilities,
                 timeouts = timeouts,
                 maximumFrameBytes = maximumFrameBytes,
+                maximumProtocolFrames = maximumProtocolFrames,
                 maximumStderrBytes = 64 * 1024,
                 implementationId = "scripted-acp-v1",
                 sandboxBoundary = liveSandboxConfiguration(

@@ -1,0 +1,282 @@
+{
+  "fixtureFormat": "decomp-engine-acp-wire-contract",
+  "fixtureFormatVersion": 1,
+  "protocolVersion": 1,
+  "sdkArtifactVersion": "0.30.1",
+  "sdkReportedVersion": "0.30.1-dev-67",
+  "messages": {
+    "initialize.request": {
+      "jsonrpc": "2.0",
+      "id": 1,
+      "method": "initialize",
+      "params": {
+        "protocolVersion": 1,
+        "clientCapabilities": {
+          "fs": {
+            "readTextFile": true,
+            "writeTextFile": true
+          },
+          "terminal": true
+        },
+        "clientInfo": {
+          "name": "decomp_engine",
+          "version": "0.1.0"
+        }
+      }
+    },
+    "initialize.response": {
+      "jsonrpc": "2.0",
+      "id": 1,
+      "result": {
+        "protocolVersion": 1,
+        "agentCapabilities": {
+          "loadSession": false,
+          "promptCapabilities": {
+            "audio": false,
+            "image": false,
+            "embeddedContext": false
+          },
+          "mcpCapabilities": {
+            "http": false,
+            "sse": false
+          },
+          "sessionCapabilities": {},
+          "auth": {}
+        },
+        "authMethods": [],
+        "agentInfo": {
+          "name": "contract-fixture-agent",
+          "version": "1.0"
+        }
+      }
+    },
+    "session-new.request": {
+      "jsonrpc": "2.0",
+      "id": 2,
+      "method": "session/new",
+      "params": {
+        "cwd": "/workspace",
+        "mcpServers": [],
+        "additionalDirectories": [
+          "/workspace/context"
+        ]
+      }
+    },
+    "session-new.response": {
+      "jsonrpc": "2.0",
+      "id": 2,
+      "result": {
+        "sessionId": "session-1"
+      }
+    },
+    "session-prompt.request": {
+      "jsonrpc": "2.0",
+      "id": 3,
+      "method": "session/prompt",
+      "params": {
+        "sessionId": "session-1",
+        "prompt": [
+          {
+            "type": "text",
+            "text": "Inspect the requested workspace change."
+          }
+        ]
+      }
+    },
+    "session-prompt.response": {
+      "jsonrpc": "2.0",
+      "id": 3,
+      "result": {
+        "stopReason": "end_turn"
+      }
+    },
+    "session-update.notification": {
+      "jsonrpc": "2.0",
+      "method": "session/update",
+      "params": {
+        "sessionId": "session-1",
+        "update": {
+          "sessionUpdate": "agent_message_chunk",
+          "content": {
+            "type": "text",
+            "text": "Synthetic progress update."
+          },
+          "messageId": "message-1"
+        }
+      }
+    },
+    "fs-read.request": {
+      "jsonrpc": "2.0",
+      "id": 4,
+      "method": "fs/read_text_file",
+      "params": {
+        "sessionId": "session-1",
+        "path": "/workspace/input.txt",
+        "line": 2,
+        "limit": 4
+      }
+    },
+    "fs-read.response": {
+      "jsonrpc": "2.0",
+      "id": 4,
+      "result": {
+        "content": "alpha\nbeta\n"
+      }
+    },
+    "fs-write.request": {
+      "jsonrpc": "2.0",
+      "id": 5,
+      "method": "fs/write_text_file",
+      "params": {
+        "sessionId": "session-1",
+        "path": "/workspace/output.txt",
+        "content": "updated\n"
+      }
+    },
+    "fs-write.response": {
+      "jsonrpc": "2.0",
+      "id": 5,
+      "result": {}
+    },
+    "terminal-create.request": {
+      "jsonrpc": "2.0",
+      "id": 6,
+      "method": "terminal/create",
+      "params": {
+        "sessionId": "session-1",
+        "command": "/tool/program",
+        "args": [
+          "--check"
+        ],
+        "cwd": "/workspace",
+        "env": [
+          {
+            "name": "MODE",
+            "value": "verify"
+          }
+        ],
+        "outputByteLimit": 4096
+      }
+    },
+    "terminal-create.response": {
+      "jsonrpc": "2.0",
+      "id": 6,
+      "result": {
+        "terminalId": "terminal-1"
+      }
+    },
+    "terminal-output.request": {
+      "jsonrpc": "2.0",
+      "id": 8,
+      "method": "terminal/output",
+      "params": {
+        "sessionId": "session-1",
+        "terminalId": "terminal-1"
+      }
+    },
+    "terminal-output.response": {
+      "jsonrpc": "2.0",
+      "id": 8,
+      "result": {
+        "output": "check complete\n",
+        "truncated": false,
+        "exitStatus": {
+          "exitCode": 0
+        }
+      }
+    },
+    "terminal-wait-for-exit.request": {
+      "jsonrpc": "2.0",
+      "id": 9,
+      "method": "terminal/wait_for_exit",
+      "params": {
+        "sessionId": "session-1",
+        "terminalId": "terminal-1"
+      }
+    },
+    "terminal-wait-for-exit.response": {
+      "jsonrpc": "2.0",
+      "id": 9,
+      "result": {
+        "exitCode": 0
+      }
+    },
+    "terminal-kill.request": {
+      "jsonrpc": "2.0",
+      "id": 10,
+      "method": "terminal/kill",
+      "params": {
+        "sessionId": "session-1",
+        "terminalId": "terminal-1"
+      }
+    },
+    "terminal-kill.response": {
+      "jsonrpc": "2.0",
+      "id": 10,
+      "result": {}
+    },
+    "terminal-release.request": {
+      "jsonrpc": "2.0",
+      "id": 11,
+      "method": "terminal/release",
+      "params": {
+        "sessionId": "session-1",
+        "terminalId": "terminal-1"
+      }
+    },
+    "terminal-release.response": {
+      "jsonrpc": "2.0",
+      "id": 11,
+      "result": {}
+    },
+    "permission.request": {
+      "jsonrpc": "2.0",
+      "id": 7,
+      "method": "session/request_permission",
+      "params": {
+        "sessionId": "session-1",
+        "toolCall": {
+          "toolCallId": "tool-1",
+          "title": "Run bounded check",
+          "kind": "execute",
+          "status": "in_progress",
+          "content": [
+            {
+              "type": "terminal",
+              "terminalId": "terminal-1"
+            }
+          ]
+        },
+        "options": [
+          {
+            "optionId": "allow",
+            "name": "Allow once",
+            "kind": "allow_once"
+          },
+          {
+            "optionId": "reject",
+            "name": "Reject once",
+            "kind": "reject_once"
+          }
+        ]
+      }
+    },
+    "permission.response": {
+      "jsonrpc": "2.0",
+      "id": 7,
+      "result": {
+        "outcome": {
+          "outcome": "selected",
+          "optionId": "reject"
+        }
+      }
+    },
+    "session-cancel.notification": {
+      "jsonrpc": "2.0",
+      "method": "session/cancel",
+      "params": {
+        "sessionId": "session-1"
+      }
+    }
+  }
+}

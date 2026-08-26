@@ -540,6 +540,7 @@ class AcpAgentHarness(
             ioDispatcher = Dispatchers.IO,
             input = running.stdoutFrames(
                 configuration.maximumFrameBytes.coerceAtMost(request.limits.maxOutputBytes.coerceAtMost(Int.MAX_VALUE.toLong()).toInt()),
+                configuration.maximumProtocolFrames,
             ),
             output = running::writeFrame,
             name = "decomp-engine-acp-v1",
@@ -1234,11 +1235,12 @@ private class RunningAcpProcess(
         }
     }
 
-    fun stdoutFrames(maximumFrameBytes: Int): Flow<String> = flow {
+    fun stdoutFrames(maximumFrameBytes: Int, maximumProtocolFrames: Int): Flow<String> = flow {
         check(stdoutOwnership.compareAndSet(StdoutOwnership.UNCLAIMED, StdoutOwnership.FRAME_CONSUMER)) {
             "ACP stdout already has an active consumer"
         }
         val frame = ByteArrayOutputStream()
+        var observedProtocolFrames = 0
         try {
             while (true) {
                 val next = try {
@@ -1267,6 +1269,19 @@ private class RunningAcpProcess(
                     continue
                 }
                 if (next == '\n'.code) {
+                    if (frame.size() == 0) {
+                        val terminal = AcpMalformedFrameFailure("ACP stdout contained an empty JSON-RPC frame")
+                        fail(terminal)
+                        throw terminal
+                    }
+                    observedProtocolFrames += 1
+                    if (observedProtocolFrames > maximumProtocolFrames) {
+                        val terminal = AcpOutputLimitFailure(
+                            "ACP stdout exceeded the $maximumProtocolFrames-frame protocol limit",
+                        )
+                        fail(terminal)
+                        throw terminal
+                    }
                     val line = try {
                         decodeUtf8(frame.toByteArray())
                     } catch (terminal: AcpMalformedFrameFailure) {
