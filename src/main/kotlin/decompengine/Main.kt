@@ -3,6 +3,8 @@ package decompengine
 import decompengine.exploration.AutomaticExplorer
 import decompengine.exploration.CandidateInput
 import decompengine.exploration.CandidateSource
+import decompengine.doctor.Doctor
+import decompengine.doctor.DoctorOptions
 import decompengine.mvp.MvpPatchException
 import decompengine.mvp.MvpPatchOptions
 import decompengine.mvp.MvpPatchWorkflow
@@ -233,78 +235,37 @@ private fun patchUsageError(message: String): Nothing {
 }
 
 private fun runDoctor(args: List<String>) {
-    val toolsOnly = args.singleOrNull() == "--tools-only"
-    if (args.isNotEmpty() && !toolsOnly) {
-        System.err.println("usage: llm_bin_patch doctor [--tools-only]")
-        kotlin.system.exitProcess(2)
-    }
-
-    val failures = mutableListOf<String>()
-    listOf("java", "gcc", "make", "readelf", "strings", "python3").forEach { command ->
-        val available = runCatching {
-            ProcessBuilder("sh", "-c", "command -v \"${'$'}1\" >/dev/null 2>&1", "sh", command)
-                .start()
-                .waitFor() == 0
-        }.getOrDefault(false)
-        reportDoctorCheck(command, available, failures)
-    }
-    val bwrapInstalled = Files.isExecutable(Path.of("/usr/bin/bwrap"))
-    reportDoctorCheck("bwrap executable", bwrapInstalled, failures)
-    val angrPython = System.getenv("ANGR_PYTHON")?.takeIf(String::isNotBlank) ?: "python3"
-    val angrAvailable = runCatching {
-        ProcessBuilder(angrPython, "-c", "import angr").start().waitFor() == 0
-    }.getOrDefault(false)
-    reportDoctorCheck("angr", angrAvailable, failures)
-
-    val ghidraHome = System.getenv("GHIDRA_HOME")?.let(Path::of)
-    reportDoctorCheck(
-        "ghidra",
-        ghidraHome != null && Files.isExecutable(ghidraHome.resolve("support/analyzeHeadless")),
-        failures,
-    )
-    val cVulHome = System.getenv("CVUL_HOME")?.let(Path::of) ?: Path.of("benchmarks/fixtures/c-vul")
-    reportDoctorCheck(
-        "c-vul fixture",
-        Files.isRegularFile(cVulHome.resolve("src/01_out_of_bounds_write.c")),
-        failures,
-    )
-
-    if (!toolsOnly) {
-        val baseUrl = System.getenv("BASE_URL").orEmpty()
-        val validBaseUrl = runCatching {
-            val uri = URI.create(baseUrl)
-            uri.scheme in setOf("http", "https") && !uri.host.isNullOrBlank()
-        }.getOrDefault(false)
-        reportDoctorCheck("BASE_URL", validBaseUrl, failures)
-        reportDoctorCheck("API_KEY", !System.getenv("API_KEY").isNullOrBlank(), failures)
-        reportDoctorCheck("MODEL", !System.getenv("MODEL").isNullOrBlank(), failures)
-        val reasoningEffort = System.getenv("REASONING_EFFORT")?.trim().orEmpty()
-        if (reasoningEffort.isNotEmpty()) {
-            reportDoctorCheck(
-                "REASONING_EFFORT",
-                reasoningEffort in setOf("none", "minimal", "low", "medium", "high", "xhigh"),
-                failures,
-            )
+    var toolsOnly = false
+    var output = Path.of(System.getenv("OUTPUT_DIR") ?: if (Files.isDirectory(Path.of("/output"))) "/output" else "output")
+    var index = 0
+    while (index < args.size) {
+        when (args[index]) {
+            "--tools-only" -> { toolsOnly = true; index++ }
+            "--output" -> {
+                if (index + 1 >= args.size) doctorUsageError("--output requires a directory")
+                output = Path.of(args[index + 1]); index += 2
+            }
+            else -> doctorUsageError("unexpected argument: ${args[index]}")
         }
     }
-
-    if (failures.isNotEmpty()) {
-        System.err.println("Environment check failed: ${failures.joinToString(", ")}")
+    val report = Doctor().inspect(DoctorOptions(output, toolsOnly))
+    report.checks.forEach { check ->
+        val stream = if (check.passed) System.out else System.err
+        stream.println("[${if (check.passed) "ok" else "failed"}] ${check.name}: ${check.detail}")
+        stream.flush()
+    }
+    if (!report.passed) {
+        System.err.println("Environment check failed (${report.checks.count { !it.passed }} check(s)); resolve each [failed] item above.")
         kotlin.system.exitProcess(1)
     }
-    println("Environment check passed")
+    println("Environment check passed (${report.checks.size} checks)")
     System.out.flush()
 }
 
-private fun reportDoctorCheck(name: String, passed: Boolean, failures: MutableList<String>) {
-    if (passed) {
-        println("[ok] $name")
-        System.out.flush()
-    } else {
-        System.err.println("[missing] $name")
-        System.err.flush()
-        failures += name
-    }
+private fun doctorUsageError(message: String): Nothing {
+    System.err.println(message)
+    System.err.println("usage: llm_bin_patch doctor [--tools-only] [--output <directory>]")
+    kotlin.system.exitProcess(2)
 }
 
 private fun runWeb(args: List<String>) {
@@ -338,7 +299,7 @@ private fun printHelp() {
     println(
         """
         Usage:
-          llm_bin_patch doctor [--tools-only]
+          llm_bin_patch doctor [--tools-only] [--output <directory>]
           llm_bin_patch patch <input-elf> --output <directory> [--yes]
           llm_bin_patch repair <original-binary> <project-dir> [--reports <directory>] [--max-iterations <count>] [--explore]
           llm_bin_patch explore <binary> --reports <directory> [--arg <value>] [--stdin <value>]

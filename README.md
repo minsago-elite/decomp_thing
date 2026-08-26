@@ -15,10 +15,10 @@ Set `BASE_URL`, `API_KEY`, `MODEL`, and optional `REASONING_EFFORT` in `.env`, t
 ```bash
 mkdir -p input output
 docker compose build
-docker compose run --rm llm-bin-patch doctor
+docker compose run --rm llm-bin-patch doctor --output /output
 ```
 
-The container includes JDK 21, headless Ghidra, GCC, Make, binutils, sanitizers, bubblewrap, Python, and a pinned angr installation. Input files are mounted read-only from `./input`; generated artifacts are written to `./output`.
+The container includes JDK 21, headless Ghidra, GCC, Make, binutils, sanitizers, bubblewrap, Python, and a pinned angr installation. Input files are mounted read-only from `./input`; generated artifacts are written to `/output`. `doctor` exercises the compiler and sanitizer runtime, verifies the output mount is writable, and performs an authenticated `GET /models` preflight without printing the API key. Use `doctor --tools-only` when API connectivity is intentionally unavailable.
 
 The current Compose service does not add `SYS_ADMIN` or run as privileged. Standard Docker therefore prevents nested bubblewrap mount namespaces. Use this environment only with the pinned, trusted MVP fixture until binary execution is moved to a separate no-network runner container.
 
