@@ -28,6 +28,7 @@ object ArchivalPackager {
 
     fun create(projectDir: Path, archivePath: Path): ArchivalBundle {
         require(projectDir.resolve("source_tree_manifest.json").isRegularFile()) { "project is missing source_tree_manifest.json" }
+        ArchivalProjectAuditor.audit(projectDir)
         val readme = projectDir.resolve("ARCHIVE_README.md")
         readme.writeText(
             """

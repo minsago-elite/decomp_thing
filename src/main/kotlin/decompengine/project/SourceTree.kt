@@ -32,7 +32,9 @@ class EvidenceModuleReconstructor : ModuleReconstructor {
         val functions = request.module.functionIds.map { id -> request.model.functions.single { it.id == id } }
         val globals = request.module.globalIds.map { id -> request.model.globals.single { it.id == id } }
         val source = buildString {
-            append("#include <stddef.h>\n#include \"modules/${request.module.id}.h\"\n\n")
+            append("#include <stddef.h>\n#include \"modules/${request.module.id}.h\"\n")
+            request.dependencyHeaders.keys.sorted().forEach { header -> append("#include \"").append(header.removePrefix("include/")).append("\"\n") }
+            append('\n')
             globals.forEach { global ->
                 append("/* recovered global @ 0x${global.address.toString(16)} */\n")
                 append(global.type).append(' ').append(safeCName(global.name))

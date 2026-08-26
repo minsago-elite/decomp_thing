@@ -1,0 +1,25 @@
+{
+  "schemaVersion": 1,
+  "provenance": "repository-authored synthetic fixtures",
+  "redistribution": "CC0-1.0",
+  "fixtures": [
+    {
+      "id": "small_cli",
+      "source": "small_cli.c",
+      "sourceSha256": "9bbb580a0b6fb3c1e4403f799f1552dcdf70b49be327b42e4b092b919617dd60",
+      "compilerVariants": ["gcc -O0 -no-pie", "gcc -O2 -fPIE -pie -s"],
+      "inputSurfaces": ["argv"],
+      "expectedFunctionCountMinimum": 1,
+      "expectedModuleCountMinimum": 1
+    },
+    {
+      "id": "large_project",
+      "source": "large_project.c",
+      "sourceSha256": "3981f47bff7580c68ab3c3ad2d8db0b7611ee5a6a25c86afa9ca8f1477d6882b",
+      "compilerVariants": ["gcc -O0 -no-pie", "gcc -O2 -fPIE -pie", "strip --strip-all"],
+      "inputSurfaces": ["argv", "stdin", "file", "libc", "shared-global-state"],
+      "expectedFunctionCountMinimum": 49,
+      "expectedModuleCountMinimum": 5
+    }
+  ]
+}
