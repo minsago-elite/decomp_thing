@@ -41,11 +41,13 @@ RUN curl --fail --location --retry 3 \
     && echo "${GHIDRA_SHA256}  /tmp/ghidra.zip" | sha256sum --check --strict \
     && unzip -q /tmp/ghidra.zip -d /opt \
     && mv "/opt/ghidra_${GHIDRA_VERSION}_PUBLIC" "${GHIDRA_HOME}" \
-    && rm /tmp/ghidra.zip \
-    && groupadd --gid "${APP_GID}" llm-bin-patch \
+    && rm /tmp/ghidra.zip
+
+RUN groupadd --gid "${APP_GID}" llm-bin-patch \
     && useradd --uid "${APP_UID}" --gid "${APP_GID}" --create-home --shell /bin/bash llm-bin-patch \
-    && mkdir -p /input /output \
-    && chown llm-bin-patch:llm-bin-patch /output
+    && mkdir -p /input /output /runner \
+    && chown llm-bin-patch:llm-bin-patch /output /runner \
+    && chmod 0700 /runner
 
 COPY --from=build /workspace/build/install/llm_bin_patch /opt/llm_bin_patch
 
