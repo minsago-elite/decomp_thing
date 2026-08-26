@@ -86,6 +86,15 @@ class AcpFilesystemBrokerTest {
             @Suppress("UNCHECKED_CAST")
             (records as MutableList<AcpFilesystemAuditRecord>).clear()
         }
+
+        val boundedAudit = AcpFilesystemAuditRecorder(maximumRecords = 1)
+        AcpFilesystemBroker.open(request, AcpFilesystemLimits(), boundedAudit).use { broker ->
+            runBlocking { broker.readTextFile("bounded-session", source.toString(), null, null) }
+            assertFailsWith<AcpProtocolFailure> {
+                runBlocking { broker.readTextFile("bounded-session", source.toString(), null, null) }
+            }
+        }
+        assertEquals(1, boundedAudit.snapshot().size, "filesystem audit evidence must remain bounded")
     }
 
     @Test

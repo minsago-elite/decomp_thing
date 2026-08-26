@@ -7,11 +7,15 @@ the official Kotlin SDK from Maven Central:
 com.agentclientprotocol:acp:0.30.1
 ```
 
+All lifecycle, filesystem, terminal, containment, and evidence contracts in this module are target-program neutral.
+They authorize explicit workflow paths and exact commands; no compiler, language, build system, or benchmark identity
+is embedded in the ACP architecture.
+
 The dependency is exact rather than a range. The SDK's stable `LATEST_PROTOCOL_VERSION` is `1`; the harness also
 sends `protocolVersion = 1` with `supportedProtocolVersions = {1}` and uses only the v1 `Client` types. ACP v2 types
 are draft, require an explicit SDK opt-in, and are not imported or negotiated here. The no-op SLF4J binding is pinned
 alongside the SDK to keep SDK logging silent in CLI and test hosts; subprocess stderr remains separately captured.
-JNA is independently pinned to `5.19.1` for the small Linux filesystem syscall boundary described below.
+JNA is independently pinned to `5.19.1` for the small Linux descriptor and transaction syscall boundary.
 
 The 0.30.1 SDK marks three optional v1 schema extensions used at the contract boundary as `UnstableApi`: additional
 session directories, prompt token usage, and message identifiers. Opt-in is deliberately scoped to the adapter code
@@ -21,9 +25,112 @@ below must review these fields explicitly; removal or wire-shape changes require
 
 ## Process and wire boundary
 
-The configured executable must be an absolute, normalized executable path. Its argument list is passed directly to
-`ProcessBuilder`; no shell command string is constructed. The child starts in the request's first absolute workspace
-root. Environment inheritance is an explicit configuration switch, and exact overrides can be supplied.
+The public `AcpAgentHarness` has no uncontained production mode. Before it starts an ACP agent it verifies an explicit
+Linux boundary made from digest-pinned, canonical, root-owned `bubblewrap`, `prlimit`, `systemd-run`, `systemctl`, and
+`bash` executables plus a digest/manifest-pinned static gate helper. Absence, replacement, an unsupported platform, a missing user systemd bus, or inability to create and
+inspect the required cgroup-v2 scope is a configuration failure. The production artifact exposes no uncontained
+harness constructor, injected boundary/launcher factory, test mode, or fake terminal-boundary entry point. The public
+harness always creates the final production boundary itself; tests exercise that same boundary.
+
+The configured agent/terminal executable and ordered argument vector are explicit and are never parsed as shell
+syntax. One separately pinned Bash invocation, already inside the transient scope, runs only the constant boundary
+script `exec 4<"$1"; shift; exec "$@"`: the private environment-bootstrap path and exact bubblewrap argv are quoted positional
+arguments, and no agent-, workflow-, or terminal-supplied byte enters shell syntax. The supervisor starts this fixed
+launcher inside the verified scope; the launcher immediately replaces itself with bubblewrap, so only ordinary stdio
+crosses the systemd boundary. Mutable
+user-installed agent executables and runtime closures require a provisioning-time recursive manifest. At launch they
+are copied through identity-bound descriptors into a private closure whose pinned outer container remains exact mode
+`0700` for descriptor-relative cleanup; only the mounted `root` subtree is recursively made non-writable, rehashed,
+pinned by an open descriptor, and mounted from that private snapshot path. Recursively root-owned,
+non-group/world-writable closures may be mounted directly from their immutable path while an open descriptor anchors
+identity revalidation. Cross-process `/proc/<pid>/fd` mount paths are not used because user-namespace access to them is
+not portable. Links, special entries, mount transitions, excessive depth/count/bytes,
+and closures containing bubblewrap, systemd scope tools, or user-namespace launchers are rejected.
+Every security executable path is canonical and every ancestor from `/` to the executable is root-owned,
+non-group/world-writable, and not writable by the current effective user. POSIX/NFS/rich ACLs and executable capability
+xattrs are rejected as authority-bearing metadata. Permitted stable LSM labels and ordinary xattrs are included in the
+pinned metadata digest rather than mistaken for write authority. This makes later path execution safe against a
+same-UID rename or restored-path ABA within the process boundary, rather than relying on a digest check around a
+mutable pathname.
+
+Every outer agent uses `bwrap --unshare-all --unshare-user --new-session --die-with-parent --clearenv
+--disable-userns --assert-userns-disabled`, all capabilities dropped, and private `/proc`, `/dev`, and `/tmp`. It sees
+no host root, home, ambient secrets, or host network namespace. `--not-a-security-boundary` is never used. Session
+`cwd` and
+additional-directory paths are private empty anchors: they exist so an agent can form callback paths, but direct
+syscalls reveal no host workspace data. The agent itself starts in private `/tmp`. Environment inheritance is
+prohibited; only explicit names and typed `PUBLIC` or `SECRET` values are installed.
+
+Each process is placed in a random collision-checked transient systemd user scope whose manager metadata and actual
+cgroup-v2 leaf files prove finite `pids.max`, `memory.max`, `memory.swap.max = 0`, `memory.oom.group = 1`, and `cpu.max`,
+plus manager `OOMPolicy=kill`, `KillMode=control-group`, a finite runtime maximum, and no delegation. `RLIMIT_NPROC` is
+only a loose host-UID backstop, never the process authority; its finite headroom is based on current same-UID Linux
+tasks (threads), not merely process leaders. The outer, clean-environment `prlimit` invocation fixes
+exact NOFILE, FSIZE, CORE, AS, and CPU limits before systemd creates the scope; the host verifies the helper's effective
+soft and hard limits from `/proc` before authorization.
+
+Launch has one post-mount authorization gate. Each launch creates an unnamed environment inode, forces and verifies
+mode `0600`, materializes one unpredictable private bootstrap name, and lets the constant Bash launcher open that name
+once as fd 4 before replacing itself with bubblewrap. Bubblewrap uses `--clearenv` and
+`--ro-bind-fd 4 /decomp-acp-internal/environment`, completes namespaces and mounts, then starts the genuinely static
+gate helper (verified ELF with neither `PT_INTERP` nor `DT_NEEDED`) at the reserved internal path. The helper begins
+with no caller environment: it accepts only bubblewrap's unavoidable single `PWD` binding when its value exactly
+matches `getcwd()` (the direct protocol probe may supply no binding), and rejects every other bootstrap variable.
+That bootstrap value is never inherited by the target. The helper normalizes signals, closes surplus descriptors,
+opens the exact native target as fd 3 and the environment bind as fd 4, and blocks in a raw one-byte read on ACP stdin.
+It accepts only `G`; EOF, a wrong byte, or malformed environment records exits without executing the target. After
+`G` it parses bounded, sorted, unique NUL
+`NAME=VALUE` records and calls `execveat(fd3, "", ..., AT_EMPTY_PATH)`, so it performs no PATH lookup or post-check
+target pathname resolution. Direct script targets are rejected; a workflow must authorize a native interpreter and
+pass the script as an explicit read-only argv/data mount.
+
+While the helper is blocked, the host proves its exact executable, fixed argv, process topology/start times and cgroup,
+the exact single `PWD=getcwd()` bootstrap environment, namespace/capability state, `read(fd0, ..., 1)`,
+target/environment descriptor identities,
+and exact limits. It strictly bounds and parses mountinfo and stats every sandbox-visible runtime, staging, helper,
+target, and environment bind below `/proc/<helper>/root`; device, inode, type, mode, mountpoint, and read-only/write mode
+must match the pinned host authority (bind mount IDs may legitimately differ). The host then descriptor-relatively
+unlinks the environment and single-file helper/target snapshots, proves link count zero, rehashes them through retained
+descriptors, repeats all binding and waiter attestations, performs the final cancellation check, reserves bounded
+launch-evidence capacity, and invokes the broker's internal write-ahead authorization/audit callback. Only then does it
+record the authorized launch and attempt exactly one `G` byte. No cancellation, policy, or audit decision follows that
+commit: an IOException
+cannot distinguish a delivered byte from a peer close, so process outcome is authoritative. Independent or nested
+launches use independent helpers and never share a global lock.
+
+Every potentially multi-entry or multi-byte pre-authorization step uses the caller's shared cancellation/wall-deadline
+checkpoint: initial boundary preparation and tool probes, policy-only runtime validation, recursive manifesting and
+snapshot copy/hardening, the same-UID task scan used only to size the `RLIMIT_NPROC` backstop, systemd attachment
+polling, environment validation/sorting/encoding, multi-mount command construction, staging-quota identity checks,
+helper/process/mount attestation, bounded `/proc` reads, exact rlimit verification, and canonical policy/evidence
+construction. Environment, argv, runtime-mount, staging-root, empty-anchor, command-rule, launch-evidence, audit, and
+canonical-metadata collections also have explicit aggregate count and byte ceilings before materialization. A checkpoint failure
+enters the same proven cleanup path; cleanup itself is intentionally non-cancellable and retains resources if absence
+cannot be proved.
+If cancellation wins immediately after `systemd-run` starts but before it publishes `ControlGroup`, cleanup first
+terminates the still-unreleased process and accepts success only when the exact unit is `not-found` and a bounded,
+exhaustive cgroup-v2 hierarchy walk proves that no directory bearing that random unit name remains. A discovered path
+is never used for signaling unless it came from the exact unit metadata; an oversized or deep hierarchy fails closed.
+
+Private cleanup is descriptor/name-bound and bounded across the whole tree by aggregate entry, logical-byte, and depth
+budgets; excess retains the pinned tree and surfaces a cleanup-proof failure instead of recursing or allocating without
+limit. Cleanup succeeds only after the scope/cgroup, environment, runtime snapshots, and control directory are proven
+gone. Cleanup-proof failures are fatal and sticky across repeated release/close calls, retain the unresolved
+terminal/scope record, and are never converted to an ordinary policy denial. After a harness observes an unresolved
+cleanup proof, later executions on that harness fail with the same fatal cleanup state instead of silently starting
+another session. Scope signaling and an independently retained pidfd for the exact launched supervisor process are both
+attempted, so a scope-control failure cannot skip direct owned-process termination. Ordered pre-release cleanup signals
+an attested bubblewrap process only through a `pidfd_open` handle
+after start-time, cgroup-membership, and executable identity are rechecked around the open; `pidfd_send_signal` therefore
+cannot target an unrelated process that reused the numeric PID. A kernel/libc without these pidfd primitives fails
+boundary preparation closed.
+
+The host trust boundary is the Unix account. A separate hostile process already running as the same UID can use
+`ptrace`, `/proc/<pid>/fd`, or owner-only `chmod` powers to mutate otherwise private snapshots between the last
+attestation and the one-byte commit, and Linux provides no general revocation of those same-UID powers. Production must
+run the engine under a dedicated, uncompromised service UID. The implementation detects deterministic swaps and byte
+mutation at every exposed pre-commit hook and never claims protection from an already-compromised peer process under
+that UID.
 
 The child gets dedicated pipes:
 
@@ -32,7 +139,8 @@ The child gets dedicated pipes:
 - every inbound response ID must match and consume one pending outbound request ID, so unknown and duplicate responses
   are rejected before SDK dispatch;
 - stderr is continuously drained into a separate bounded capture, available through `latestDiagnostics()`; and
-- total stdout, individual frame, and retained stderr sizes are bounded.
+- one saturating aggregate produced-byte counter covers stdout plus stderr and kills the cgroup on overflow, while
+  individual frame and retained-stderr sizes remain independently bounded.
 
 One process serves one execution. The client runs `initialize`, validates the selected version and configured agent
 capabilities, creates a session with an absolute `cwd`, sends one text prompt, streams `session/update` events, and
@@ -41,12 +149,10 @@ requires exactly one final prompt stop reason. Additional workspace roots requir
 
 Startup, individual request, prompt idle, total wall-clock, cancellation grace, transport-drain, and shutdown waits
 all have finite deadlines. Cancellation sends `session/cancel` once a session exists. Cleanup closes the protocol and
-stdin, then escalates from graceful exit to process-tree termination and forced termination within the configured
-shutdown window. Exit status, bounded stderr, forced-termination state, and any surviving PIDs are retained separately
-from protocol stdout. Diagnostics distinguish any tree-termination escalation from an accepted termination request for
-the root agent process. A naturally observed nonzero exit remains a process crash even when a valid final prompt
-response arrived first. Once host termination escalation begins, a subsequent nonzero exit is treated as cleanup
-because the portable process API cannot distinguish a signal-caused exit from a concurrent natural exit at that point.
+stdin, then escalates from graceful to forced cgroup termination. Exit status, bounded stderr, aggregate produced-output
+count/limit/overflow state, containment provider,
+network isolation, cleanup-proof state, and any surviving PIDs are retained separately from protocol stdout. Successful
+sandbox evidence is published only after a verified gated launch returns; a failed launch never claims containment.
 
 Initial and final workspace digests are computed with a fixed-size streaming buffer. Traversal, hashing, and diffing
 check the execution wall deadline, and initial snapshotting also observes cancellation before any process is launched.
@@ -60,16 +166,10 @@ are isolated from lifecycle polling, but post-response message-completion and fi
 to preserve event ordering. The harness cannot safely preempt arbitrary blocking callback code, so lifecycle deadlines
 are not a bound on a callback that violates this requirement.
 
-The portable lifecycle tracks the launched process and repeatedly discovers and terminates its ordinary descendants.
-It is not OS containment: a deliberately daemonizing child can double-fork or create a new session before discovery
-and become unreachable through Java `ProcessHandle`. Process-group/cgroup or Windows Job Object containment, shutdown
-recovery, and stress proof remain explicit work in issues #61 and #71. Until that lands, diagnostics and tests prove
-cleanup only for the launched process and descendants that remain discoverable; they do not prove categorical cleanup
-of adversarial daemon escapes.
-
-Terminal capabilities are not advertised by this lifecycle layer. Permission requests are denied by default using an
-offered reject choice, or cancelled when no reject choice exists. The terminal/permission issue adds its broker without
-changing this process lifecycle.
+Double forks and `setsid` remain inside the verified cgroup and cannot escape teardown. There is deliberately no
+portable fallback: production ACP execution currently requires supported Linux descriptor primitives, user namespaces,
+bubblewrap, and a working user systemd manager with authority to create the verified scopes. Remote ACP agents require
+a future separately brokered transport; permission answers cannot widen network authority.
 
 ## Filesystem broker
 
@@ -134,10 +234,66 @@ directions independently. Each attempted callback produces an immutable `AcpFile
 policy path when available, outcome, and stable reason. Absolute host paths and file content are never copied into the
 audit records.
 
-This boundary governs only calls routed through the ACP filesystem callbacks. The exchange validation and rollback
-defend callback-local interleavings, but they do not turn the configured agent executable into an OS sandbox or stop it
-from racing the broker with arbitrary direct host syscalls (including further changes during rollback). Preventing that
-adversarial actor, and terminal/syscall containment generally, remains the separate #61 process-sandbox boundary.
+The filesystem broker still authorizes each callback independently. The outer process boundary closes the former
+direct-syscall gap: workspace paths are private empty anchors rather than host binds, so the agent cannot open or race
+the host files outside the broker.
+
+## Terminal broker and staging authority
+
+`ClientCapabilities.terminal` is false unless a verified boundary and an explicit immutable
+`AcpTerminalExecutionPolicy` both exist and the request's `AgentAccessPolicy` grants `EXECUTE_COMMAND`. Advertisement
+is not authorization. Every `terminal/create` must exactly match one rule's command, ordered argv, absolute normalized
+cwd, and complete environment map. Shell expansion, PATH lookup, partial argument matches, extra variables, and
+alternate cwd values are rejected. Environment names use portable syntax, credential-like names are forbidden, and a
+terminal policy may not contain the raw bytes of any non-empty outer value explicitly marked `SECRET`. This raw-byte
+check covers command/argv, environment names and values, cwd, executable/runtime mount paths and manifests, and staging
+identifiers/paths. `PUBLIC` values are not treated as secrets based on naming heuristics.
+
+This is deliberately not a general information-flow proof. The broker cannot infer arbitrary encodings, hashes, or
+other transforms of a secret, nor can it recognize secret-derived data that a trusted workflow already placed in a
+staging root. Policy construction, transformation logic, and staged input provenance therefore remain trusted workflow
+responsibilities. The sandbox prevents ambient host/API-secret inheritance and the raw-byte check blocks literal
+secret authority, but neither mechanism claims semantic taint tracking.
+
+Command executables and runtime mounts use the authenticated closure rules above. The only writable mounts are
+explicit workflow staging roots, and authority is honestly the whole mounted root. A production writable root must be
+a fresh mode-0700 directory created by `AcpWorkflowStagingRoot.createQuotaBacked` on an otherwise empty dedicated tmpfs.
+Its exact mount identity, finite `size`, finite `nr_inodes`, ownership, mode, byte capacity, and inode capacity are
+pinned and reverified at use time. A factory-created ordinary root may be granted read-only, but there is no
+main-artifact factory or policy mode that upgrades an ordinary directory to writable terminal authority. This
+aggregate quota combines with
+cgroup pids/memory/CPU, per-file size, open-file, output-retention, produced-output, wall-time, concurrent-terminal, and
+total-create limits. It therefore bounds many-small-file, directory, sparse-file, and background-writer attacks without
+claiming that `RLIMIT_FSIZE` is an aggregate disk quota. The workflow owns eventual staging-root deletion.
+
+Terminal IDs carry a session-derived tag and random nonce. Callbacks reject cross-session, unknown, released, and
+unbound IDs. A created terminal must appear in `ToolCallContent.Terminal` for exactly one tool-call ID; rebinding,
+orphaning, or normal prompt completion with an unreleased terminal is a protocol failure. Output retains a bounded tail
+and separately counts all produced bytes. Wait, idempotent kill, and release follow ACP v1 semantics; release invalidates
+the ID. Timeout, overflow, cancellation, release, prompt failure, and teardown terminate and prove cleanup of the full
+cgroup.
+
+`latestTerminalAudit()` retains only sequence, session, method, hashes of request/terminal/tool IDs, decision reason,
+network-isolation state, retained bytes, saturated total-produced bytes, and truncation. It never retains command text,
+argv, cwd/host paths, environment values, or output. `latestSandboxEvidence()` binds every security tool's canonical
+path hash/content digest/mode/metadata digest, effective outer and terminal resource limits, runtime-closure limits, the exact manifested
+agent executable and runtime mounts, actual per-launch cgroup controller values, namespace settings, every staging
+identity/mode/quota proof, aggregate outer stdout/stderr production, and canonicalized terminal command authority. A length-delimited canonical SHA-256 binds the
+complete metadata record. Evidence is absent for every launch that fails before the write-ahead authorization callback;
+after the one-byte commit attempt, delivery is inherently outcome-ambiguous and the launch is treated and evidenced as
+authorized rather than misreported as a denial.
+
+## Permission requests
+
+Permission answers are advisory and never mutate filesystem, terminal, network, or sandbox policy. The default
+noninteractive decider chooses an actually offered reject-once/reject-always option, otherwise cancels. Narrow allow
+rules exactly match tool title, tool kind, option label, and allow kind. An interactive `AcpPermissionDecider` may
+suspend for a trusted user, but its selected option ID is checked against the offered set. Invalid or duplicate offers,
+decider failure, cancellation, and unavailable choices fail closed. Workflow policy must separately grant
+`REQUEST_PERMISSION` before an allow can be returned. `ALLOW_ALWAYS` remains an advisory UI answer and cannot create
+authority outside the immutable workflow policy. Permission evidence hashes tool/option IDs and always records
+`authorityExpanded = false`. The callback's embedded `ToolCallUpdate` is validated, translated, and charged to the
+tool-call limit exactly once before terminal content can bind any terminal authority.
 
 ## Upgrade policy
 

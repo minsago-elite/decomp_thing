@@ -8,17 +8,19 @@ import com.sun.jna.Platform
 import com.sun.jna.Pointer
 import java.io.ByteArrayOutputStream
 import java.io.IOException
+import java.io.OutputStream
 import java.nio.file.FileSystems
 import java.nio.file.Files
 import java.nio.file.Path
 import java.nio.file.attribute.BasicFileAttributes
 
 /**
- * The small Linux syscall surface used by [AcpFilesystemBroker].
+ * The small Linux descriptor/syscall surface used by the ACP filesystem and process boundaries.
  *
  * Java NIO does not expose descriptor-relative no-replace/exchange renames, nor a way to reopen an
- * already-authorized O_PATH descriptor for reading. Keeping this boundary small makes unsupported
- * hosts fail closed instead of silently falling back to path-based I/O.
+ * already-authorized O_PATH descriptor for reading, or race-free pidfd signaling. Keeping this
+ * boundary small makes unsupported hosts fail closed instead of silently falling back to pathname
+ * I/O or numeric-PID signaling.
  */
 internal object LinuxFilesystemSyscalls {
     private val libc: LibC by lazy { Native.load(Platform.C_LIBRARY_NAME, LibC::class.java) }
@@ -53,6 +55,53 @@ internal object LinuxFilesystemSyscalls {
         }
     }
 
+    /** Requires race-free process signaling for ordered sandbox cleanup; there is no kill(2) fallback. */
+    fun requirePidfdSupported() {
+        try {
+            openProcessHandle(ProcessHandle.current().pid()).use { handle ->
+                require(handle.pid == ProcessHandle.current().pid())
+                if (!signalProcess(handle, 0)) {
+                    throw IOException("Linux pidfd process cleanup probe lost its live process")
+                }
+            }
+        } catch (failure: UnsatisfiedLinkError) {
+            throw IOException("Linux pidfd process cleanup is unavailable", failure)
+        }
+    }
+
+    fun openProcessHandle(pid: Long): LinuxProcessDescriptor {
+        require(pid in 1..Int.MAX_VALUE.toLong()) { "process id is invalid" }
+        val fd = retryOnInterrupted("open sandbox process handle") {
+            libc.pidfd_open(pid.toInt(), 0).toLong()
+        }.toInt()
+        if (fd < 0) throw syscallFailure("open sandbox process handle")
+        return LinuxProcessDescriptor(fd, pid)
+    }
+
+    /** Gracefully signals the exact process pinned by [handle]. */
+    fun terminateProcess(handle: LinuxProcessDescriptor): Boolean = signalProcess(handle, SIGTERM)
+
+    /** Forcibly signals the exact process pinned by [handle]. */
+    fun killProcess(handle: LinuxProcessDescriptor): Boolean = signalProcess(handle, SIGKILL)
+
+    /** Signals the pinned process, never a later process reusing its numeric PID. */
+    private fun signalProcess(handle: LinuxProcessDescriptor, signal: Int): Boolean =
+        handle.signalWhileOpen { descriptor ->
+            var result: Boolean? = null
+            while (result == null) {
+                if (libc.pidfd_send_signal(descriptor, signal, null, 0) == 0) {
+                    result = true
+                    continue
+                }
+                when (val error = Native.getLastError()) {
+                    EINTR -> continue
+                    ESRCH -> result = false
+                    else -> throw LinuxSyscallException("kill pinned sandbox boundary process", error)
+                }
+            }
+            result
+        }
+
     fun openRoot(path: Path): LinuxDescriptor = openDescriptor(
         AT_FDCWD,
         path.toString(),
@@ -79,6 +128,18 @@ internal object LinuxFilesystemSyscalls {
         )
     } catch (failure: LinuxSyscallException) {
         if (failure.errno == ENOENT) null else throw failure
+    }
+
+    /** Follows only the kernel-owned `/proc/<pid>/exe` magic link for process attestation. */
+    fun openProcessExecutable(pid: Long): LinuxDescriptor {
+        require(pid in 1..Int.MAX_VALUE.toLong()) { "process id is invalid" }
+        return openDescriptor(
+            AT_FDCWD,
+            "/proc/$pid/exe",
+            O_PATH or O_CLOEXEC,
+            0,
+            "inspect sandbox process executable",
+        )
     }
 
     fun openPathAtOrNull(parentFd: Int, name: String): LinuxDescriptor? = try {
@@ -120,6 +181,20 @@ internal object LinuxFilesystemSyscalls {
         OWNER_READ_WRITE,
         "create secure unnamed temporary file",
     )
+
+    /** Creates one named regular file below an already-pinned private directory. */
+    fun createRegularFile(parentFd: Int, name: String, mode: Int): LinuxDescriptor {
+        require(name.isNotEmpty() && name != "." && name != ".." && '/' !in name && '\u0000' !in name) {
+            "descriptor-relative file name is invalid"
+        }
+        return openDescriptor(
+            parentFd,
+            name,
+            O_WRONLY or O_CREAT or O_EXCL or O_NOFOLLOW or O_CLOEXEC,
+            mode,
+            "create secure private regular file",
+        )
+    }
 
     fun linkTemporaryAt(temporary: LinuxDescriptor, parentFd: Int, name: String) {
         call("materialize secure temporary file") {
@@ -169,6 +244,91 @@ internal object LinuxFilesystemSyscalls {
         return output.toByteArray()
     }
 
+    /** Reads at most [maximumBytes] from the start of an already-pinned regular file. */
+    fun readPrefix(authorized: LinuxDescriptor, maximumBytes: Int): ByteArray {
+        require(maximumBytes >= 0) { "prefix byte limit must not be negative" }
+        if (maximumBytes == 0) return ByteArray(0)
+        openReadableFrom(authorized).use { readable ->
+            val buffer = Memory(maximumBytes.toLong())
+            val count = retryOnInterrupted("read authenticated filesystem prefix") {
+                libc.read(readable.fd, buffer, NativeLong(maximumBytes.toLong())).toLong()
+            }
+            if (count < 0L) throw syscallFailure("read authenticated filesystem prefix")
+            return buffer.getByteArray(0, count.toInt())
+        }
+    }
+
+    /** Copies bytes from the already-pinned regular-file descriptor into a private snapshot. */
+    fun copyReadableTo(
+        authorized: LinuxDescriptor,
+        output: OutputStream,
+        maximumBytes: Long,
+        cancellationCheck: () -> Unit = {},
+    ): Long {
+        require(maximumBytes >= 0) { "copy byte budget must not be negative" }
+        openReadableFrom(authorized).use { readable ->
+            val buffer = Memory(BUFFER_BYTES.toLong())
+            var total = 0L
+            while (true) {
+                cancellationCheck()
+                val count = retryOnInterrupted("copy authenticated runtime file") {
+                    libc.read(readable.fd, buffer, NativeLong(BUFFER_BYTES.toLong())).toLong()
+                }
+                if (count == 0L) return total
+                if (count < 0L) throw syscallFailure("copy authenticated runtime file")
+                total = Math.addExact(total, count)
+                if (total > maximumBytes) throw LinuxResourceLimitException()
+                output.write(buffer.getByteArray(0, count.toInt()))
+                cancellationCheck()
+            }
+        }
+    }
+
+    /** Copies between two already-open file descriptions without resolving a destination path. */
+    fun copyReadableTo(
+        authorized: LinuxDescriptor,
+        destination: LinuxDescriptor,
+        maximumBytes: Long,
+        cancellationCheck: () -> Unit = {},
+    ): Long {
+        require(maximumBytes >= 0) { "copy byte budget must not be negative" }
+        openReadableFrom(authorized).use { readable ->
+            val buffer = Memory(BUFFER_BYTES.toLong())
+            var total = 0L
+            while (true) {
+                cancellationCheck()
+                val count = retryOnInterrupted("copy authenticated runtime file") {
+                    libc.read(readable.fd, buffer, NativeLong(BUFFER_BYTES.toLong())).toLong()
+                }
+                if (count == 0L) {
+                    cancellationCheck()
+                    call("synchronize private runtime file") { libc.fsync(destination.fd) }
+                    cancellationCheck()
+                    return total
+                }
+                if (count < 0L) throw syscallFailure("copy authenticated runtime file")
+                total = Math.addExact(total, count)
+                if (total > maximumBytes) throw LinuxResourceLimitException()
+                var offset = 0L
+                while (offset < count) {
+                    val written = retryOnInterrupted("write private runtime file") {
+                        libc.write(
+                            destination.fd,
+                            buffer.share(offset),
+                            NativeLong(count - offset),
+                        ).toLong()
+                    }
+                    if (written <= 0L) throw syscallFailure("write private runtime file")
+                    offset += written
+                    cancellationCheck()
+                }
+            }
+        }
+    }
+
+    /** `/proc/self/fd` is used only while this process still owns [descriptor]. */
+    fun descriptorPath(descriptor: LinuxDescriptor): Path = descriptorPath(descriptor.fd)
+
     fun write(descriptor: LinuxDescriptor, content: ByteArray, cancellationCheck: () -> Unit) {
         val buffer = Memory(maxOf(1, minOf(content.size, BUFFER_BYTES)).toLong())
         var offset = 0
@@ -189,7 +349,53 @@ internal object LinuxFilesystemSyscalls {
         call("set secure temporary file mode") { libc.fchmod(descriptor.fd, mode) }
     }
 
-    fun extendedAttributeNames(descriptor: LinuxDescriptor): List<String> {
+    /**
+     * Changes the mode of the regular file or directory already pinned by an O_PATH [authorized]
+     * descriptor. Linux rejects `fchmod(O_PATH)` with EBADF, so reopen the kernel-owned
+     * `/proc/self/fd` magic link and authenticate that new file description before mutating it.
+     * The mutable workspace pathname is never resolved again.
+     */
+    fun chmodPinned(authorized: LinuxDescriptor, mode: Int) {
+        val before = identity(authorized.fd)
+        if (
+            before.key != authorized.identity.key ||
+            before.mountId != authorized.identity.mountId ||
+            before.isSymbolicLink ||
+            (!before.isRegularFile && !before.isDirectory)
+        ) {
+            throw IOException("pinned filesystem entry identity changed before setting its mode")
+        }
+        val flags = O_RDONLY or O_CLOEXEC or if (before.isDirectory) O_DIRECTORY else O_NONBLOCK
+        val reopened = openDescriptor(
+            AT_FDCWD,
+            descriptorPath(authorized.fd).toString(),
+            flags,
+            0,
+            "reopen pinned filesystem entry for mode update",
+        )
+        reopened.use {
+            val reopenedBefore = identity(reopened.fd)
+            if (!samePinnedObject(before, reopenedBefore)) {
+                throw IOException("pinned filesystem entry identity changed while reopening for mode update")
+            }
+            call("set pinned filesystem entry mode") { libc.fchmod(reopened.fd, mode) }
+            val reopenedAfter = identity(reopened.fd)
+            val authorizedAfter = identity(authorized.fd)
+            if (
+                !samePinnedObject(before, reopenedAfter) ||
+                !samePinnedObject(reopenedAfter, authorizedAfter) ||
+                reopenedAfter.mode.permissions != mode.permissions
+            ) {
+                throw IOException("pinned filesystem entry identity changed while setting its mode")
+            }
+        }
+    }
+
+    fun extendedAttributeNames(
+        descriptor: LinuxDescriptor,
+        cancellationCheck: () -> Unit = {},
+    ): List<String> {
+        cancellationCheck()
         val path = descriptorPath(descriptor.fd).toString()
         val required = retryOnInterrupted("inspect filesystem metadata") {
             libc.listxattr(path, null, NativeLong(0)).toLong()
@@ -199,15 +405,54 @@ internal object LinuxFilesystemSyscalls {
         if (required > MAXIMUM_XATTR_NAME_BYTES) {
             throw IOException("filesystem metadata list exceeds the broker limit")
         }
+        cancellationCheck()
         val names = Memory(required)
         val actual = retryOnInterrupted("inspect filesystem metadata") {
             libc.listxattr(path, names, NativeLong(required)).toLong()
         }
         if (actual < 0L) throw syscallFailure("inspect filesystem metadata")
-        return names.getByteArray(0, actual.toInt())
+        cancellationCheck()
+        val result = names.getByteArray(0, actual.toInt())
             .split(0)
             .filter { it.isNotEmpty() }
-            .map { bytes -> bytes.toByteArray().toString(Charsets.UTF_8) }
+            .map { bytes ->
+                cancellationCheck()
+                bytes.toByteArray().toString(Charsets.UTF_8)
+            }
+        if (result.size > MAXIMUM_XATTR_NAMES) {
+            throw IOException("filesystem metadata contains too many extended attributes")
+        }
+        return result
+    }
+
+    fun extendedAttributeValue(
+        descriptor: LinuxDescriptor,
+        name: String,
+        maximumBytes: Int = MAXIMUM_XATTR_VALUE_BYTES,
+        cancellationCheck: () -> Unit = {},
+    ): ByteArray {
+        cancellationCheck()
+        require(name.isNotEmpty() && '\u0000' !in name) { "extended attribute name is invalid" }
+        require(maximumBytes > 0) { "extended attribute value limit must be positive" }
+        val path = descriptorPath(descriptor.fd).toString()
+        val required = retryOnInterrupted("inspect filesystem metadata value") {
+            libc.getxattr(path, name, null, NativeLong(0)).toLong()
+        }
+        if (required < 0L) throw syscallFailure("inspect filesystem metadata value")
+        if (required > maximumBytes.toLong()) {
+            throw IOException("filesystem metadata value exceeds the broker limit")
+        }
+        if (required == 0L) return ByteArray(0)
+        cancellationCheck()
+        val value = Memory(required)
+        val actual = retryOnInterrupted("inspect filesystem metadata value") {
+            libc.getxattr(path, name, value, NativeLong(required)).toLong()
+        }
+        if (actual < 0L || actual != required) {
+            throw IOException("filesystem metadata value changed while it was inspected")
+        }
+        cancellationCheck()
+        return value.getByteArray(0, actual.toInt())
     }
 
     fun renameNoReplace(parentFd: Int, from: String, to: String) {
@@ -224,6 +469,45 @@ internal object LinuxFilesystemSyscalls {
 
     fun unlink(parentFd: Int, name: String) {
         unlink(parentFd, name, missingIsSuccess = false)
+    }
+
+    fun removeDirectory(parentFd: Int, name: String) {
+        while (true) {
+            val result = libc.unlinkat(parentFd, name, AT_REMOVEDIR)
+            if (result == 0) return
+            val error = Native.getLastError()
+            if (error != EINTR) throw LinuxSyscallException("remove secure private directory", error)
+        }
+    }
+
+    /** Creates one exact private child without resolving the parent pathname again. */
+    fun createDirectory(parentFd: Int, name: String, mode: Int) {
+        require(name.isNotEmpty() && name != "." && name != ".." && '/' !in name && '\u0000' !in name) {
+            "descriptor-relative directory name is invalid"
+        }
+        call("create secure private directory") { libc.mkdirat(parentFd, name, mode) }
+    }
+
+    /** Lists names through this JVM's already-open directory descriptor, never a host pathname. */
+    fun directoryEntryNames(
+        directory: LinuxDescriptor,
+        maximumEntries: Int = MAXIMUM_PRIVATE_DIRECTORY_ENTRIES,
+        cancellationCheck: () -> Unit = {},
+    ): List<String> {
+        require(maximumEntries > 0) { "directory entry limit must be positive" }
+        return Files.newDirectoryStream(descriptorPath(directory.fd)).use { entries ->
+            val names = ArrayList<String>(minOf(maximumEntries, 1024))
+            for (entry in entries) {
+                cancellationCheck()
+                if (names.size >= maximumEntries) throw LinuxResourceLimitException()
+                val name = entry.fileName.toString()
+                if (name.isEmpty() || name == "." || name == ".." || '/' in name || '\u0000' in name) {
+                    throw IOException("private directory contains an invalid entry name")
+                }
+                names += name
+            }
+            names
+        }
     }
 
     private fun unlink(parentFd: Int, name: String, missingIsSuccess: Boolean) {
@@ -299,6 +583,16 @@ internal object LinuxFilesystemSyscalls {
     private fun syscallFailure(operation: String): LinuxSyscallException =
         LinuxSyscallException(operation, Native.getLastError())
 
+    private fun samePinnedObject(first: LinuxFileIdentity, second: LinuxFileIdentity): Boolean =
+        first.key == second.key &&
+            first.mountId == second.mountId &&
+            first.uid == second.uid &&
+            first.gid == second.gid &&
+            first.linkCount == second.linkCount &&
+            first.isRegularFile == second.isRegularFile &&
+            first.isDirectory == second.isDirectory &&
+            first.isSymbolicLink == second.isSymbolicLink
+
     private fun close(fd: Int) {
         while (libc.close(fd) != 0 && Native.getLastError() == EINTR) {
             // POSIX leaves close-after-EINTR semantics implementation-specific. Linux closes the descriptor.
@@ -307,6 +601,14 @@ internal object LinuxFilesystemSyscalls {
     }
 
     private fun descriptorPath(fd: Int): Path = PROCESS_FD_DIRECTORY.resolve(fd.toString())
+
+    /** A cross-process magic-link to the exact open file description retained by this JVM. */
+    fun stableDescriptorPath(fd: Int): Path = Path.of(
+        "/proc",
+        ProcessHandle.current().pid().toString(),
+        "fd",
+        fd.toString(),
+    )
 
     private fun descriptorMountId(fd: Int): Long {
         val prefix = "mnt_id:\t"
@@ -327,12 +629,18 @@ internal object LinuxFilesystemSyscalls {
         fun linkat(oldDirectoryFd: Int, oldPath: String, newDirectoryFd: Int, newPath: String, flags: Int): Int
         fun renameat2(oldDirectoryFd: Int, oldPath: String, newDirectoryFd: Int, newPath: String, flags: Int): Int
         fun unlinkat(directoryFd: Int, path: String, flags: Int): Int
+        fun mkdirat(directoryFd: Int, path: String, mode: Int): Int
+        fun pidfd_open(pid: Int, flags: Int): Int
+        fun pidfd_send_signal(pidfd: Int, signal: Int, info: Pointer?, flags: Int): Int
         fun listxattr(path: String, list: Pointer?, size: NativeLong): NativeLong
+        fun getxattr(path: String, name: String, value: Pointer?, size: NativeLong): NativeLong
     }
 
     private const val AT_FDCWD = -100
     private const val O_RDONLY = 0
     private const val O_WRONLY = 1
+    private const val O_CREAT = 0x40
+    private const val O_EXCL = 0x80
     private const val O_NONBLOCK = 0x800
     private const val O_DIRECTORY = 0x10000
     private const val O_NOFOLLOW = 0x20000
@@ -341,15 +649,22 @@ internal object LinuxFilesystemSyscalls {
     private const val O_TMPFILE = 0x410000
     private const val OWNER_READ_WRITE = 0x180 // 0600
     private const val AT_EMPTY_PATH = 0x1000
+    private const val AT_REMOVEDIR = 0x200
     private const val RENAME_NOREPLACE = 1
     private const val RENAME_EXCHANGE = 2
     private const val EINTR = 4
+    internal const val ESRCH = 3
+    private const val SIGTERM = 15
+    private const val SIGKILL = 9
     internal const val ENOENT = 2
     internal const val EEXIST = 17
     internal const val ENOTDIR = 20
     internal const val ELOOP = 40
     private const val BUFFER_BYTES = 16 * 1024
     private const val MAXIMUM_XATTR_NAME_BYTES = 1024L * 1024L
+    private const val MAXIMUM_XATTR_NAMES = 1024
+    private const val MAXIMUM_XATTR_VALUE_BYTES = 1024 * 1024
+    private const val MAXIMUM_PRIVATE_DIRECTORY_ENTRIES = 100_000
     private val PROCESS_FD_DIRECTORY = Path.of("/proc/self/fd")
     private val PROCESS_FD_INFO_DIRECTORY = Path.of("/proc/self/fdinfo")
     private val NULL_DEVICE = Path.of("/dev/null")
@@ -387,6 +702,31 @@ internal class LinuxDescriptor(
             NativeClose.close(fd)
         } catch (_: Throwable) {
             // close is terminal ownership release and must never turn a completed transaction into failure.
+        }
+    }
+}
+
+internal class LinuxProcessDescriptor internal constructor(
+    private val fd: Int,
+    val pid: Long,
+) : AutoCloseable {
+    private var ownsDescriptor = true
+
+    /** Holds the ownership lock across the syscall so close cannot expose a reused fd number. */
+    @Synchronized
+    fun signalWhileOpen(signal: (Int) -> Boolean): Boolean {
+        if (!ownsDescriptor) return false
+        return signal(fd)
+    }
+
+    @Synchronized
+    override fun close() {
+        if (!ownsDescriptor) return
+        ownsDescriptor = false
+        try {
+            NativeClose.close(fd)
+        } catch (_: Throwable) {
+            // Linux closes a descriptor even when close reports EINTR; retrying risks another fd.
         }
     }
 }

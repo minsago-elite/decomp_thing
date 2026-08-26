@@ -1,7 +1,6 @@
 import json
-import os
-import signal
-import subprocess
+import posix as os
+import _signal as signal
 import sys
 import time
 
@@ -40,10 +39,35 @@ def update(value):
     })
 
 
+def write_workspace_file(path, content, request_id):
+    """Exercise the client filesystem broker; the outer agent has no host workspace bind."""
+    send({
+        "jsonrpc": "2.0",
+        "id": request_id,
+        "method": "fs/write_text_file",
+        "params": {
+            "sessionId": "fixture-session",
+            "path": path,
+            "content": content,
+        },
+    })
+    response = read_message()
+    if response is None or response.get("id") != request_id or "error" in response:
+        raise SystemExit(120)
+
+
+def join_path(root, relative):
+    return root.rstrip("/") + "/" + relative.lstrip("/")
+
+
 sys.stderr.write("fixture-stderr:" + SENTINEL + "\n")
 if MODE == "stderr-overflow":
     sys.stderr.write("x" * 70000)
 sys.stderr.flush()
+if MODE == "stderr-flood":
+    chunk = b"x" * 8192
+    while True:
+        os.write(2, chunk)
 
 if MODE == "no-initialize":
     time.sleep(30)
@@ -68,6 +92,17 @@ if expected_fs != "unchecked":
             "message": "unexpected client filesystem capabilities",
         })
         raise SystemExit(96)
+if MODE in (
+    "terminal-lifecycle",
+    "terminal-cancelled-orphan",
+    "terminal-cross-session-hang",
+    "terminal-missing-session-hang",
+    "terminal-near-wall",
+):
+    actual_terminal = initialize.get("params", {}).get("clientCapabilities", {}).get("terminal")
+    if actual_terminal is not True:
+        respond(initialize, error={"code": -32602, "message": "terminal capability was not enabled"})
+        raise SystemExit(104)
 
 if MODE == "malformed-initialize":
     sys.stdout.write("{not-json\n")
@@ -115,7 +150,7 @@ session_new = read_message()
 if session_new is None or session_new.get("method") != "session/new":
     raise SystemExit(92)
 cwd = session_new.get("params", {}).get("cwd", "")
-if not os.path.isabs(cwd):
+if not cwd.startswith("/"):
     respond(session_new, error={"code": -32602, "message": "cwd must be absolute"})
     raise SystemExit(93)
 if MODE == "auth-required":
@@ -126,6 +161,22 @@ if MODE == "no-session-response":
     time.sleep(30)
     raise SystemExit(0)
 respond(session_new, {"sessionId": "fixture-session"})
+if MODE == "terminal-cross-session-hang":
+    # Deliberately pipeline the forged callback directly behind session/new. The host must bind
+    # from the raw response before its transport can enqueue or dispatch this adjacent frame.
+    send({
+        "jsonrpc": "2.0",
+        "id": 115,
+        "method": "terminal/create",
+        "params": {
+            "sessionId": "other-session",
+            "command": "/usr/bin/echo",
+            "args": ["wire-terminal"],
+            "cwd": cwd,
+            "env": [],
+            "outputByteLimit": 4096,
+        },
+    })
 
 prompt = read_message()
 if prompt is None or prompt.get("method") != "session/prompt":
@@ -140,7 +191,7 @@ if MODE in ("fs-cap-read-only", "fs-cap-write-only", "fs-cap-none"):
     raise SystemExit(0)
 
 if MODE == "fs-denied-outside":
-    outside = os.path.abspath(os.path.join(cwd, "..", "outside.txt"))
+    outside = cwd.rstrip("/").rsplit("/", 1)[0] + "/outside.txt"
     send({
         "jsonrpc": "2.0",
         "id": 102,
@@ -159,7 +210,7 @@ if MODE == "fs-denied-outside":
     raise SystemExit(0)
 
 if MODE == "fs-read-write":
-    source = os.path.join(cwd, "src", "module.c")
+    source = join_path(cwd, "src/module.c")
     send({
         "jsonrpc": "2.0",
         "id": 100,
@@ -189,9 +240,181 @@ if MODE == "fs-read-write":
     write_response = read_message()
     if write_response is None or write_response.get("id") != 101 or "error" in write_response:
         raise SystemExit(99)
+if MODE == "permission-default-deny":
+    send({
+        "jsonrpc": "2.0",
+        "id": 103,
+        "method": "session/request_permission",
+        "params": {
+            "sessionId": "fixture-session",
+            "toolCall": {
+                "sessionUpdate": "tool_call_update",
+                "toolCallId": "permission-tool",
+                "title": "Run exact fixture command",
+                "kind": "execute",
+                "status": "pending",
+            },
+            "options": [
+                {"optionId": "allow", "name": "Allow once", "kind": "allow_once"},
+                {"optionId": "reject", "name": "Reject once", "kind": "reject_once"},
+            ],
+        },
+    })
+    permission_response = read_message()
+    outcome = (permission_response or {}).get("result", {}).get("outcome", {})
+    if permission_response is None or permission_response.get("id") != 103:
+        raise SystemExit(102)
+    if outcome.get("outcome") != "selected" or outcome.get("optionId") != "reject":
+        raise SystemExit(103)
+if MODE == "terminal-lifecycle":
+    terminal_argument = "wire-terminal"
+    send({
+        "jsonrpc": "2.0",
+        "id": 104,
+        "method": "terminal/create",
+        "params": {
+            "sessionId": "fixture-session",
+            "command": "/usr/bin/echo",
+            "args": [terminal_argument],
+            "cwd": cwd,
+            "env": [],
+            "outputByteLimit": 4096,
+        },
+    })
+    create_response = read_message()
+    terminal_id = (create_response or {}).get("result", {}).get("terminalId")
+    if create_response is None or create_response.get("id") != 104 or not terminal_id:
+        raise SystemExit(105)
+    # A permission callback carries a real ToolCallUpdate. Binding the terminal here exercises
+    # the callback-only path: the client must validate/count the tool call before the terminal
+    # side effect, exactly as it does for session/update notifications.
+    send({
+        "jsonrpc": "2.0",
+        "id": 105,
+        "method": "session/request_permission",
+        "params": {
+            "sessionId": "fixture-session",
+            "toolCall": {
+                "sessionUpdate": "tool_call_update",
+                "toolCallId": "terminal-tool",
+                "title": "Run exact fixture command",
+                "kind": "execute",
+                "status": "in_progress",
+                "content": [{"type": "terminal", "terminalId": terminal_id}],
+            },
+            "options": [
+                {"optionId": "allow", "name": "Allow once", "kind": "allow_once"},
+                {"optionId": "reject", "name": "Reject once", "kind": "reject_once"},
+            ],
+        },
+    })
+    permission_response = read_message()
+    permission_outcome = (permission_response or {}).get("result", {}).get("outcome", {})
+    if permission_response is None or permission_response.get("id") != 105:
+        raise SystemExit(106)
+    if permission_outcome.get("outcome") != "selected" or permission_outcome.get("optionId") != "reject":
+        raise SystemExit(107)
+    send({
+        "jsonrpc": "2.0",
+        "id": 106,
+        "method": "terminal/wait_for_exit",
+        "params": {"sessionId": "fixture-session", "terminalId": terminal_id},
+    })
+    wait_response = read_message()
+    if wait_response is None or wait_response.get("id") != 106:
+        raise SystemExit(108)
+    if wait_response.get("result", {}).get("exitCode") != 0:
+        raise SystemExit(109)
+    send({
+        "jsonrpc": "2.0",
+        "id": 107,
+        "method": "terminal/output",
+        "params": {"sessionId": "fixture-session", "terminalId": terminal_id},
+    })
+    output_response = read_message()
+    if output_response is None or output_response.get("id") != 107:
+        raise SystemExit(110)
+    if output_response.get("result", {}).get("output") != "wire-terminal\n":
+        raise SystemExit(111)
+    send({
+        "jsonrpc": "2.0",
+        "id": 108,
+        "method": "terminal/release",
+        "params": {"sessionId": "fixture-session", "terminalId": terminal_id},
+    })
+    release_response = read_message()
+    if release_response is None or release_response.get("id") != 108 or "error" in release_response:
+        raise SystemExit(112)
+    respond(prompt, {"stopReason": "end_turn"})
+    raise SystemExit(0)
+if MODE == "terminal-cancelled-orphan":
+    send({
+        "jsonrpc": "2.0",
+        "id": 109,
+        "method": "terminal/create",
+        "params": {
+            "sessionId": "fixture-session",
+            "command": "/usr/bin/echo",
+            "args": ["wire-terminal"],
+            "cwd": cwd,
+            "env": [],
+            "outputByteLimit": 4096,
+        },
+    })
+    create_response = read_message()
+    if create_response is None or create_response.get("id") != 109:
+        raise SystemExit(113)
+    if not (create_response.get("result", {}).get("terminalId")):
+        raise SystemExit(114)
+    # This is an agent-selected protocol stop reason, not host cancellation. The deliberately
+    # orphaned terminal must therefore be validated and rejected by finishSession.
+    respond(prompt, {"stopReason": "cancelled"})
+    raise SystemExit(0)
+if MODE == "terminal-cross-session-hang":
+    # A fatal cross-session callback must end the host exchange even if the peer never sends a
+    # prompt response and ignores the callback error. The callback was pipelined above.
+    time.sleep(30)
+    raise SystemExit(0)
+if MODE == "terminal-missing-session-hang":
+    send({
+        "jsonrpc": "2.0",
+        "id": 116,
+        "method": "terminal/create",
+        "params": {
+            "command": "/usr/bin/echo",
+            "args": ["wire-terminal"],
+            "cwd": cwd,
+            "env": [],
+            "outputByteLimit": 4096,
+        },
+    })
+    # Missing correlation must also be fatal instead of becoming an SDK callback error that the
+    # peer can ignore while leaving session/prompt pending.
+    time.sleep(30)
+    raise SystemExit(0)
+if MODE == "terminal-near-wall":
+    write_workspace_file(join_path(cwd, "src/module.c"), "near-wall terminal requested\n", 110)
+    time.sleep(0.65)
+    send({
+        "jsonrpc": "2.0",
+        "id": 111,
+        "method": "terminal/create",
+        "params": {
+            "sessionId": "fixture-session",
+            "command": "/usr/bin/sleep",
+            "args": ["30"],
+            "cwd": cwd,
+            "env": [],
+            "outputByteLimit": 4096,
+        },
+    })
+    create_response = read_message()
+    if create_response is None:
+        raise SystemExit(0)
+    time.sleep(30)
+    raise SystemExit(0)
 if READY and MODE != "cancel-after-response":
-    with open(READY, "w", encoding="utf-8") as ready:
-        ready.write("ready\n")
+    write_workspace_file(READY, "ready\n", 801)
 
 if MODE == "malformed-prompt":
     sys.stdout.write("[]\n")
@@ -265,14 +488,13 @@ if MODE == "invalid-update":
     raise SystemExit(0)
 
 if MODE == "success-child-hang":
-    child = subprocess.Popen([
-        sys.executable,
-        "-c",
-        "import signal,time; signal.signal(signal.SIGTERM, signal.SIG_IGN); time.sleep(30)",
-    ])
+    child_pid = os.fork()
+    if child_pid == 0:
+        signal.signal(signal.SIGTERM, signal.SIG_IGN)
+        time.sleep(30)
+        os._exit(0)
     if READY:
-        with open(READY, "w", encoding="utf-8") as ready:
-            ready.write(str(child.pid) + "\n")
+        write_workspace_file(READY, str(child_pid) + "\n", 802)
 
 update({
     "sessionUpdate": "agent_message_chunk",
@@ -295,10 +517,9 @@ update({
     "status": "in_progress",
 })
 
-source = os.path.join(cwd, "src", "module.c")
+source = join_path(cwd, "src/module.c")
 if MODE != "fs-read-write":
-    with open(source, "w", encoding="utf-8") as output:
-        output.write("new source\n")
+    write_workspace_file(source, "new source\n", 803)
 
 update({
     "sessionUpdate": "tool_call_update",
@@ -324,11 +545,24 @@ if MODE == "response-then-delayed-crash":
     time.sleep(0.04)
     raise SystemExit(32)
 
+if MODE == "response-then-stderr-burst":
+    # Wait until the host has accepted the clean response and entered protocol shutdown, then
+    # write just over the fixture's aggregate limit and exit. This fits in a pipe, so the host
+    # must prove natural EOF rather than relying on writer backpressure before counting it.
+    sys.stdin.read()
+    os.write(2, b"z" * ((16 * 1024) + 1))
+    raise SystemExit(0)
+
+if MODE == "response-then-stdout-burst":
+    # The protocol flow is no longer allowed to parse frames after the clean response, but the
+    # raw stdout descriptor still belongs to the aggregate produced-output accountant.
+    sys.stdin.read()
+    os.write(1, b"q" * (128 * 1024))
+    raise SystemExit(0)
+
 if MODE == "cancel-after-response":
     # Host stdin closes only after it accepted the final response and entered shutdown.
     sys.stdin.read()
-    with open(READY, "w", encoding="utf-8") as ready:
-        ready.write("cancel final snapshot\n")
     raise SystemExit(0)
 
 if MODE in ("success-hang", "success-child-hang"):

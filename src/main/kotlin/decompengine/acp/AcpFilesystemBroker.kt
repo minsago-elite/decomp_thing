@@ -73,9 +73,16 @@ data class AcpFilesystemAuditRecord(
     val reason: AcpFilesystemAuditReason,
 )
 
-internal class AcpFilesystemAuditRecorder {
+internal class AcpFilesystemAuditRecorder(
+    private val maximumRecords: Int = MAXIMUM_FILESYSTEM_AUDIT_RECORDS,
+) {
     private var nextSequence = 0L
     private val records = mutableListOf<AcpFilesystemAuditRecord>()
+    private var overflowFailure: AcpProtocolFailure? = null
+
+    init {
+        require(maximumRecords > 0) { "maximum filesystem audit records must be positive" }
+    }
 
     fun record(
         sessionId: String,
@@ -84,24 +91,32 @@ internal class AcpFilesystemAuditRecorder {
         policyPath: AgentWorkspacePath?,
         outcome: AcpFilesystemAuditOutcome,
         reason: AcpFilesystemAuditReason,
-    ) {
-        val requestedPathSha256 = requestedPath.sha256()
-        synchronized(records) {
-            records += AcpFilesystemAuditRecord(
-                sequence = nextSequence++,
-                sessionId = sessionId,
-                method = method,
-                requestedPathSha256 = requestedPathSha256,
-                policyPath = policyPath,
-                outcome = outcome,
-                reason = reason,
+    ) = synchronized(records) {
+        overflowFailure?.let { throw it }
+        if (records.size >= maximumRecords) {
+            val failure = AcpProtocolFailure(
+                "ACP filesystem audit exceeded the $maximumRecords-record evidence limit",
             )
+            overflowFailure = failure
+            throw failure
         }
+        val requestedPathSha256 = requestedPath.sha256()
+        records += AcpFilesystemAuditRecord(
+            sequence = nextSequence++,
+            sessionId = sessionId,
+            method = method,
+            requestedPathSha256 = requestedPathSha256,
+            policyPath = policyPath,
+            outcome = outcome,
+            reason = reason,
+        )
     }
 
     fun snapshot(): List<AcpFilesystemAuditRecord> = synchronized(records) {
         Collections.unmodifiableList(ArrayList(records))
     }
+
+    fun failure(): AcpProtocolFailure? = synchronized(records) { overflowFailure }
 }
 
 /** Test-only interleaving points are placed directly around the security-relevant native primitive. */
@@ -1043,3 +1058,5 @@ private fun encodeUtf8(content: String, maximumBytes: Int): ByteArray {
 private fun String.sha256(): String = MessageDigest.getInstance("SHA-256")
     .digest(toByteArray(StandardCharsets.UTF_8))
     .joinToString("") { byte -> "%02x".format(byte) }
+
+private const val MAXIMUM_FILESYSTEM_AUDIT_RECORDS = 4096

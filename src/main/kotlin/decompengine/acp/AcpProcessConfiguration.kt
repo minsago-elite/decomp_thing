@@ -20,6 +20,21 @@ enum class AcpRequiredAgentCapability(val diagnosticName: String) {
     ADDITIONAL_DIRECTORIES("sessionCapabilities.additionalDirectories"),
 }
 
+enum class AcpEnvironmentProvenance {
+    PUBLIC,
+    SECRET,
+}
+
+/** Explicit provenance is mandatory; no variable name is treated as a reliable secret oracle. */
+data class AcpEnvironmentValue(
+    val value: String,
+    val provenance: AcpEnvironmentProvenance,
+) {
+    init {
+        require('\u0000' !in value) { "ACP environment values must not contain NUL" }
+    }
+}
+
 data class AcpLifecycleTimeouts(
     val startup: Duration = Duration.ofSeconds(20),
     val request: Duration = Duration.ofMinutes(20),
@@ -40,23 +55,33 @@ data class AcpLifecycleTimeouts(
  * Subprocess settings for one ACP execution.
  *
  * [executable] is required to be an absolute normalized path. [arguments] are passed directly to
- * [ProcessBuilder], never through a shell. When [inheritParentEnvironment] is false, the child sees
- * only [environment].
+ * the verified process boundary, never through a shell. Public harness execution requires
+ * [sandboxBoundary] and never inherits the parent environment. Each explicit environment value
+ * carries trusted provenance so raw secret bytes can be excluded from terminal authority.
  */
 class AcpProcessConfiguration(
     val executable: Path,
     arguments: Collection<String> = emptyList(),
-    environment: Map<String, String> = emptyMap(),
-    val inheritParentEnvironment: Boolean = true,
+    environment: Map<String, AcpEnvironmentValue> = emptyMap(),
+    val inheritParentEnvironment: Boolean = false,
     requiredAgentCapabilities: Collection<AcpRequiredAgentCapability> = emptySet(),
     val timeouts: AcpLifecycleTimeouts = AcpLifecycleTimeouts(),
     val maximumFrameBytes: Int = 1024 * 1024,
     val maximumStderrBytes: Int = 256 * 1024,
     val implementationId: String = "acp-v1",
     val filesystemLimits: AcpFilesystemLimits = AcpFilesystemLimits(),
+    val sandboxBoundary: AcpLinuxSandboxConfiguration? = null,
+    val terminalPolicy: AcpTerminalExecutionPolicy? = null,
+    val permissionDecider: AcpPermissionDecider = AcpNonInteractivePermissionDecider.DEFAULT_DENY,
+    /** Required when [executable] is not recursively root-owned and immutable. */
+    val expectedExecutableManifestSha256: String? = null,
 ) {
-    val arguments: List<String> = Collections.unmodifiableList(ArrayList(arguments))
-    val environment: Map<String, String> = Collections.unmodifiableMap(LinkedHashMap(environment))
+    val arguments: List<String> = Collections.unmodifiableList(
+        ArrayList(requireBoundedProcessArguments(arguments)),
+    )
+    val environment: Map<String, AcpEnvironmentValue> = Collections.unmodifiableMap(
+        LinkedHashMap(requireBoundedProcessEnvironment(environment)),
+    )
     val requiredAgentCapabilities: Set<AcpRequiredAgentCapability> =
         Collections.unmodifiableSet(LinkedHashSet(requiredAgentCapabilities))
 
@@ -65,16 +90,28 @@ class AcpProcessConfiguration(
         require(executable == executable.normalize()) { "ACP executable must be normalized: $executable" }
         require(executable.toString().isNotBlank()) { "ACP executable must not be blank" }
         require(this.arguments.none { '\u0000' in it }) { "ACP argv must not contain NUL" }
-        require(this.environment.keys.all { it.isNotBlank() && '=' !in it && '\u0000' !in it }) {
-            "ACP environment variable names must be non-empty and must not contain '=' or NUL"
+        require(this.environment.keys.all { it.matches(Regex("[A-Za-z_][A-Za-z0-9_]*")) }) {
+            "ACP environment variable names must use portable [A-Za-z_][A-Za-z0-9_]* syntax"
         }
-        require(this.environment.values.none { '\u0000' in it }) { "ACP environment values must not contain NUL" }
         require(maximumFrameBytes > 0) { "maximum ACP frame size must be positive" }
         require(maximumStderrBytes > 0) { "maximum ACP stderr capture must be positive" }
         require(implementationId.isNotBlank()) { "ACP implementation id must not be blank" }
+        require(sandboxBoundary == null || !inheritParentEnvironment) {
+            "sandboxed ACP execution must start from a cleared, explicitly configured environment"
+        }
+        require(terminalPolicy == null || sandboxBoundary != null) {
+            "ACP terminal policy requires the production Linux sandbox boundary"
+        }
+        expectedExecutableManifestSha256?.let { digest ->
+            require(digest.matches(Regex("[0-9a-f]{64}"))) {
+                "expected ACP executable manifest digest must be a lowercase SHA-256 value"
+            }
+        }
     }
 
     internal fun command(): List<String> = listOf(executable.toString()) + arguments
+
+    internal fun environmentValues(): Map<String, String> = environment.mapValues { (_, binding) -> binding.value }
 }
 
 data class AcpProcessDiagnostics(
@@ -82,13 +119,53 @@ data class AcpProcessDiagnostics(
     val exitCode: Int?,
     val stderr: String,
     val stderrTruncated: Boolean,
+    /** Saturating count of bytes consumed from the agent's stdout and stderr pipes. */
+    val producedOutputBytes: Long,
+    val producedOutputLimitBytes: Long,
+    val outputLimitExceeded: Boolean,
     val forcedTermination: Boolean,
     val rootTerminationRequested: Boolean,
     val remainingProcessIds: List<Long>,
+    val containment: String,
+    val networkIsolated: Boolean,
+    val sandboxCleanupVerified: Boolean,
 )
 
 private fun requirePositiveMillis(name: String, duration: Duration) {
     require(!duration.isZero && !duration.isNegative && duration.toMillis() > 0) {
         "$name timeout must be at least one millisecond"
     }
+}
+
+private fun requireBoundedProcessArguments(arguments: Collection<String>): Collection<String> {
+    require(arguments.size < MAXIMUM_SANDBOX_ARGUMENTS) {
+        "ACP argv exceeds the authenticated argument-count limit"
+    }
+    var encodedBytes = 0L
+    arguments.forEach { argument ->
+        encodedBytes = Math.addExact(encodedBytes, utf8Length(argument) + 1L)
+        require(encodedBytes <= MAXIMUM_SANDBOX_ARGUMENT_BYTES) {
+            "ACP argv exceeds the authenticated byte limit"
+        }
+    }
+    return arguments
+}
+
+private fun requireBoundedProcessEnvironment(
+    environment: Map<String, AcpEnvironmentValue>,
+): Map<String, AcpEnvironmentValue> {
+    require(environment.size <= MAXIMUM_SANDBOX_ENVIRONMENT_BINDINGS) {
+        "ACP environment exceeds the authenticated binding-count limit"
+    }
+    var encodedBytes = 0L
+    environment.forEach { (name, binding) ->
+        encodedBytes = Math.addExact(
+            encodedBytes,
+            utf8Length(name) + utf8Length(binding.value) + 2L,
+        )
+        require(encodedBytes <= MAXIMUM_SANDBOX_ENVIRONMENT_BYTES) {
+            "ACP environment exceeds the authenticated byte limit"
+        }
+    }
+    return environment
 }

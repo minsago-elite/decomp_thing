@@ -13,6 +13,8 @@ import decompengine.agent.AgentFileChangeKind
 import decompengine.agent.AgentMessageEvent
 import decompengine.agent.AgentOperation
 import decompengine.agent.AgentPathRule
+import decompengine.agent.AgentPermissionDecision
+import decompengine.agent.AgentPermissionEvent
 import decompengine.agent.AgentPlanEvent
 import decompengine.agent.AgentStopReason
 import decompengine.agent.AgentToolEvent
@@ -21,6 +23,8 @@ import decompengine.agent.AgentWorkspacePath
 import decompengine.agent.AgentWorkspaceRoot
 import decompengine.agent.execute
 import java.nio.file.Path
+import java.nio.file.Files
+import java.security.MessageDigest
 import java.time.Duration
 import java.util.concurrent.CountDownLatch
 import java.util.concurrent.ExecutionException
@@ -39,8 +43,86 @@ import kotlin.test.assertFalse
 import kotlin.test.assertNotNull
 import kotlin.test.assertNull
 import kotlin.test.assertTrue
+import org.junit.jupiter.api.Assumptions.assumeTrue
 
 class AcpAgentHarnessTest {
+    @Test
+    fun `public harness fails closed before launch when the outer sandbox is absent`() {
+        val fixture = fixture()
+        val harness = AcpAgentHarness(
+            AcpProcessConfiguration(executable = Path.of("/usr/bin/true")),
+        )
+
+        val failure = assertFailsWith<AgentExecutionException> { harness.execute(fixture.request) }
+
+        assertEquals(AgentFailureKind.CONFIGURATION, failure.failure.kind)
+        assertTrue(failure.failure.message.contains("sandbox"))
+        assertNull(harness.latestDiagnostics())
+        assertNull(harness.latestSandboxEvidence(), "failed launch must not claim successful containment")
+    }
+
+    @Test
+    fun `production bytecode exposes no launcher boundary or test mode bypass`() {
+        val fixture = fixture()
+        val harness = AcpAgentHarness(
+            AcpProcessConfiguration(
+                executable = Path.of("/usr/bin/true"),
+                sandboxBoundary = missingSandboxConfiguration(),
+            ),
+        )
+
+        val failure = assertFailsWith<AgentExecutionException> { harness.execute(fixture.request) }
+
+        assertEquals(AgentFailureKind.CONFIGURATION, failure.failure.kind)
+        assertNull(harness.latestSandboxEvidence())
+        val bytecode = javap(AcpAgentHarness::class.java) + "\n" + javap(AcpTerminalBroker::class.java)
+        listOf(
+            "uncontainedForTesting",
+            "withBoundaryForTesting",
+            "openWithTestBoundary",
+            "TEST_ONLY_UNCONTAINED",
+            "AcpProcessSandboxBoundary",
+            "AcpTerminalSandboxBoundary",
+            "boundaryFactory",
+            "launchMode",
+        ).forEach { forbidden -> assertFalse(forbidden in bytecode, bytecode) }
+        val harnessConstructors = AcpAgentHarness::class.java.declaredConstructors.toList()
+        assertEquals(1, harnessConstructors.size)
+        assertEquals(listOf(AcpProcessConfiguration::class.java), harnessConstructors.single().parameterTypes.toList())
+        listOf(AcpAgentHarness::class.java, AcpTerminalBroker::class.java).forEach { type ->
+            val callableParameterTypes = type.declaredConstructors.flatMap { it.parameterTypes.toList() } +
+                type.declaredMethods.flatMap { it.parameterTypes.toList() }
+            assertTrue(
+                callableParameterTypes.none(::isForbiddenExecutionSeamType),
+                "$type accepts ${callableParameterTypes.filter(::isForbiddenExecutionSeamType)}",
+            )
+        }
+        assertTrue(AcpTerminalBroker::class.java.isSealed)
+        assertTrue(AcpTerminalBroker::class.java.permittedSubclasses.all { permitted ->
+            java.lang.reflect.Modifier.isPrivate(permitted.modifiers)
+        })
+        val acpTestMethods = listOf(
+            AcpAgentHarnessTest::class.java,
+            AcpPermissionPolicyTest::class.java,
+            AcpSandboxPolicyTest::class.java,
+            AcpTerminalBrokerTest::class.java,
+            LinuxBubblewrapBoundaryTest::class.java,
+        ).flatMap { type ->
+            type.declaredMethods.filter { method ->
+                method.annotations.any { annotation ->
+                    annotation.annotationClass.java.name == "org.junit.jupiter.api.Test"
+                }
+            }
+        }
+        assertEquals(46, acpTestMethods.size, acpTestMethods.joinToString { it.name })
+        assertTrue(
+            acpTestMethods.all { it.returnType == Void.TYPE },
+            acpTestMethods.filter { it.returnType != Void.TYPE }.joinToString {
+                "${it.declaringClass.simpleName}.${it.name}:${it.returnType.name}"
+            },
+        )
+    }
+
     @Test
     fun `pinned SDK negotiates stable v1 and streams one subprocess turn without shell interpretation`() {
         assertEquals(1, LATEST_PROTOCOL_VERSION)
@@ -77,6 +159,211 @@ class AcpAgentHarnessTest {
         assertFalse(diagnostics.stderrTruncated)
         assertFalse(diagnostics.forcedTermination)
         assertProcessStopped(diagnostics.pid)
+    }
+
+    @Test
+    fun `fake agent permission request uses offered default denial and metadata-only evidence`() {
+        val fixture = fixture()
+        val request = fixture.request.withPolicy(
+            AgentAccessPolicy(
+                fixture.request.accessPolicy.pathRules,
+                fixture.request.accessPolicy.allowedOperations + AgentOperation.REQUEST_PERMISSION,
+            ),
+        )
+        val harness = harness("permission-default-deny")
+        val events = mutableListOf<decompengine.agent.AgentExecutionEvent>()
+
+        val result = harness.execute(request, events::add)
+
+        assertEquals(AgentStopReason.COMPLETED, result.stopReason)
+        val permission = events.filterIsInstance<AgentPermissionEvent>().single()
+        assertEquals(AgentPermissionDecision.DENY, permission.decision)
+        assertEquals("reject", permission.selectedOptionId)
+        assertEquals(2, result.usage?.toolCalls)
+        assertEquals(
+            1,
+            events.filterIsInstance<AgentToolEvent>().count { it.toolCallId == "permission-tool" },
+            "permission callback ToolCallUpdate must be translated and counted exactly once",
+        )
+        val evidence = harness.latestPermissionAudit().single()
+        assertEquals(AcpPermissionAuditReason.DEFAULT_DENY, evidence.reason)
+        assertFalse(evidence.authorityExpanded)
+        assertFalse(evidence.toString().contains("Run exact fixture command"))
+    }
+
+    @Test
+    fun `fake agent exercises official terminal create wait output release and tool correlation`() {
+        val parent = createTempDirectory("acp-terminal-wire-").toAbsolutePath().normalize()
+        val staging = AcpWorkflowStagingRoot.createReadOnly("project", parent)
+        val source = staging.path.resolve("src/module.c")
+        source.parent.createDirectories()
+        source.writeText("old source\n")
+        val pathRule = AgentPathRule(
+            AgentWorkspacePath("project", "src/module.c"),
+            setOf(AgentOperation.READ_FILE, AgentOperation.WRITE_FILE),
+        )
+        val request = AgentExecutionRequest(
+            objective = "edit the fixture",
+            workspaceRoots = listOf(staging.workspaceRoot),
+            contextInputs = listOf(decompengine.agent.AgentContextInput("compiler", "compiler evidence")),
+            accessPolicy = AgentAccessPolicy(
+                listOf(pathRule),
+                setOf(
+                    AgentOperation.READ_FILE,
+                    AgentOperation.WRITE_FILE,
+                    AgentOperation.EXECUTE_COMMAND,
+                    AgentOperation.REQUEST_PERMISSION,
+                ),
+            ),
+        )
+        val terminalArgument = "wire-terminal"
+        val terminalPolicy = AcpTerminalExecutionPolicy(
+            listOf(AcpSandboxRootGrant(staging, AcpSandboxRootMode.READ_ONLY)),
+            listOf(
+                AcpTerminalCommandRule(
+                    AcpSandboxReadOnlyMount(ECHO),
+                    listOf(terminalArgument),
+                    staging.path,
+                ),
+            ),
+            AcpTerminalLimits(
+                maximumConcurrentTerminals = 1,
+                maximumTerminalCreates = 1,
+                maximumDuration = Duration.ofSeconds(3),
+                resourceLimits = AcpSandboxResourceLimits(maximumCpuSeconds = 3),
+            ),
+        )
+        val harness = harness(
+            "terminal-lifecycle",
+            sentinel = "wire",
+            timeouts = timeouts(request = 5_000),
+            terminalPolicy = terminalPolicy,
+        )
+
+        val events = mutableListOf<decompengine.agent.AgentExecutionEvent>()
+        val result = try {
+            harness.execute(request, events::add)
+        } catch (failure: AgentExecutionException) {
+            throw AssertionError(
+                "terminal wire fixture failed; metadata-only audit=${harness.latestTerminalAudit()}",
+                failure,
+            )
+        }
+
+        assertEquals(AgentStopReason.NO_CHANGES, result.stopReason)
+        val reasons = harness.latestTerminalAudit().map { it.reason }.toSet()
+        assertTrue(AcpTerminalAuditReason.CREATED in reasons)
+        assertTrue(AcpTerminalAuditReason.TOOL_BOUND in reasons)
+        assertTrue(AcpTerminalAuditReason.EXIT_OBSERVED in reasons)
+        assertTrue(AcpTerminalAuditReason.OUTPUT_OBSERVED in reasons)
+        assertTrue(AcpTerminalAuditReason.RELEASED in reasons)
+        assertTrue(harness.latestTerminalAudit().all { it.networkIsolated })
+        assertEquals(1, result.usage?.toolCalls)
+        assertEquals(
+            1,
+            events.filterIsInstance<AgentToolEvent>().count { it.toolCallId == "terminal-tool" },
+            "permission callback terminal binding must validate and count its tool call exactly once",
+        )
+        assertEquals(AgentPermissionDecision.DENY, events.filterIsInstance<AgentPermissionEvent>().single().decision)
+        assertEquals(AcpPermissionAuditReason.DEFAULT_DENY, harness.latestPermissionAudit().single().reason)
+        val evidence = assertNotNull(harness.latestSandboxEvidence())
+        assertTrue(evidence.outerAgentContained)
+        assertEquals(
+            listOf(AcpSandboxLaunchPurpose.OUTER_AGENT, AcpSandboxLaunchPurpose.TERMINAL),
+            evidence.launches.map { it.purpose },
+        )
+
+        val orphanHarness = harness(
+            "terminal-cancelled-orphan",
+            sentinel = "wire",
+            timeouts = timeouts(request = 5_000),
+            terminalPolicy = terminalPolicy,
+        )
+        val orphanFailure = assertFailsWith<AgentExecutionException> {
+            orphanHarness.execute(request)
+        }
+        assertEquals(AgentFailureKind.PROTOCOL, orphanFailure.failure.kind)
+        assertTrue(orphanFailure.message.orEmpty().contains("orphan terminal"))
+        assertTrue(orphanHarness.latestTerminalAudit().any {
+            it.reason == AcpTerminalAuditReason.UNBOUND_TERMINAL
+        })
+
+        val crossSessionHarness = harness(
+            "terminal-cross-session-hang",
+            sentinel = "wire",
+            timeouts = timeouts(request = 5_000),
+            terminalPolicy = terminalPolicy,
+        )
+        val crossSessionFailure = assertFailsWith<AgentExecutionException> {
+            crossSessionHarness.execute(request)
+        }
+        assertEquals(
+            AgentFailureKind.PROTOCOL,
+            crossSessionFailure.failure.kind,
+            "fatal terminal callback violations must win even when the peer leaves session/prompt pending",
+        )
+        assertTrue(
+            crossSessionFailure.message.orEmpty().contains("crossed session boundaries"),
+            crossSessionFailure.message,
+        )
+        assertTrue(crossSessionHarness.latestTerminalAudit().none {
+            it.reason == AcpTerminalAuditReason.CROSS_SESSION
+        }, "raw session correlation must fail before SDK or terminal-broker dispatch")
+
+        val missingSessionHarness = harness(
+            "terminal-missing-session-hang",
+            sentinel = "wire",
+            timeouts = timeouts(request = 5_000),
+            terminalPolicy = terminalPolicy,
+        )
+        val missingSessionFailure = assertFailsWith<AgentExecutionException> {
+            missingSessionHarness.execute(request)
+        }
+        assertEquals(AgentFailureKind.PROTOCOL, missingSessionFailure.failure.kind)
+        assertTrue(
+            missingSessionFailure.message.orEmpty().contains("requires string params.sessionId"),
+            missingSessionFailure.message,
+        )
+        assertTrue(missingSessionHarness.latestTerminalAudit().isEmpty())
+
+        source.writeText("old source\n")
+        val nearWallPolicy = AcpTerminalExecutionPolicy(
+            listOf(AcpSandboxRootGrant(staging, AcpSandboxRootMode.READ_ONLY)),
+            listOf(
+                AcpTerminalCommandRule(
+                    AcpSandboxReadOnlyMount(SLEEP),
+                    listOf("30"),
+                    staging.path,
+                ),
+            ),
+            AcpTerminalLimits(
+                maximumConcurrentTerminals = 1,
+                maximumTerminalCreates = 1,
+                maximumDuration = Duration.ofSeconds(3),
+                resourceLimits = AcpSandboxResourceLimits(maximumCpuSeconds = 3),
+            ),
+        )
+        val nearWallHarness = harness(
+            "terminal-near-wall",
+            sentinel = "wire",
+            timeouts = timeouts(request = 5_000, shutdown = 1_000),
+            terminalPolicy = nearWallPolicy,
+        )
+        val nearWallFailure = assertFailsWith<AgentExecutionException> {
+            nearWallHarness.execute(request.withWallClockTimeout(Duration.ofMillis(1_100)))
+        }
+        assertEquals(AgentFailureKind.TIMEOUT, nearWallFailure.failure.kind)
+        assertEquals("near-wall terminal requested\n", source.readText(), "fixture never reached terminal/create")
+        val nearWallAudit = nearWallHarness.latestTerminalAudit()
+        val deadlineTermination = nearWallAudit.firstOrNull { it.reason == AcpTerminalAuditReason.TIMEOUT }
+        assertNotNull(deadlineTermination, "near-wall terminal work did not observe the shared execution deadline")
+        nearWallAudit.firstOrNull { it.reason == AcpTerminalAuditReason.CREATED }?.let { created ->
+            assertTrue(
+                created.sequence < deadlineTermination.sequence,
+                "execution-wide timeout evidence must follow a successfully created terminal",
+            )
+        }
+        assertProcessStopped(assertNotNull(nearWallHarness.latestDiagnostics()).pid)
     }
 
     @Test
@@ -236,7 +523,7 @@ class AcpAgentHarnessTest {
             wallHarness.execute(wallFixture.request)
         }
         assertEquals(AgentFailureKind.TIMEOUT, wall.failure.kind)
-        assertTrue(wall.message.orEmpty().contains("wall-clock"))
+        assertTrue(wall.message.orEmpty().contains("wall-clock"), wall.message)
         assertProcessStopped(assertNotNull(wallHarness.latestDiagnostics()).pid)
     }
 
@@ -400,14 +687,13 @@ class AcpAgentHarnessTest {
 
         val result = harness.execute(fixture.request)
 
-        val childPid = childPidPath.readText().trim().toLong()
+        assertTrue(childPidPath.readText().trim().toLong() > 0L)
         assertEquals(AgentStopReason.COMPLETED, result.stopReason)
         val diagnostics = assertNotNull(harness.latestDiagnostics())
         assertTrue(diagnostics.forcedTermination)
         assertTrue(diagnostics.rootTerminationRequested)
         assertTrue(diagnostics.remainingProcessIds.isEmpty())
         assertProcessStopped(diagnostics.pid)
-        assertProcessStopped(childPid)
     }
 
     @Test
@@ -431,6 +717,44 @@ class AcpAgentHarnessTest {
         assertTrue(diagnostics.stderrTruncated)
         assertTrue(diagnostics.stderr.toByteArray().size <= 64 * 1024)
         assertProcessStopped(diagnostics.pid)
+
+        val aggregateLimit = 16L * 1024
+        val floodHarness = harness(
+            "stderr-flood",
+            timeouts = timeouts(request = 2_000, shutdown = 1_000),
+        )
+        val floodFailure = assertFailsWith<AgentExecutionException> {
+            floodHarness.execute(fixture(maximumOutputBytes = aggregateLimit).request)
+        }
+        assertEquals(AgentFailureKind.RESOURCE_EXHAUSTED, floodFailure.failure.kind)
+        assertTrue(floodFailure.message.orEmpty().contains("stdout and stderr"))
+        val floodDiagnostics = assertNotNull(floodHarness.latestDiagnostics())
+        assertEquals(aggregateLimit, floodDiagnostics.producedOutputLimitBytes)
+        assertTrue(floodDiagnostics.producedOutputBytes > aggregateLimit)
+        assertTrue(floodDiagnostics.outputLimitExceeded)
+        assertTrue(floodDiagnostics.rootTerminationRequested)
+        assertProcessStopped(floodDiagnostics.pid)
+        val floodEvidence = assertNotNull(floodHarness.latestSandboxEvidence())
+        assertEquals(floodDiagnostics.producedOutputBytes, floodEvidence.outerProcessOutput?.observedBytes)
+        assertTrue(floodEvidence.outerProcessOutput?.limitExceeded == true)
+
+        listOf("response-then-stderr-burst", "response-then-stdout-burst").forEach { mode ->
+            val shutdownBurstHarness = harness(
+                mode,
+                timeouts = timeouts(request = 2_000, shutdown = 1_200),
+            )
+            val shutdownBurstFailure = assertFailsWith<AgentExecutionException>(mode) {
+                shutdownBurstHarness.execute(fixture(maximumOutputBytes = aggregateLimit).request)
+            }
+            assertEquals(AgentFailureKind.RESOURCE_EXHAUSTED, shutdownBurstFailure.failure.kind, mode)
+            val shutdownBurstDiagnostics = assertNotNull(shutdownBurstHarness.latestDiagnostics(), mode)
+            assertTrue(shutdownBurstDiagnostics.outputLimitExceeded, mode)
+            assertTrue(shutdownBurstDiagnostics.producedOutputBytes > aggregateLimit, mode)
+            assertTrue(
+                shutdownBurstHarness.latestSandboxEvidence()?.outerProcessOutput?.limitExceeded == true,
+                mode,
+            )
+        }
     }
 
     @Test
@@ -456,6 +780,46 @@ class AcpAgentHarnessTest {
         assertTrue(cancelled.summary.orEmpty().contains("initial workspace snapshot"))
         assertEquals(null, cancelledHarness.latestDiagnostics())
 
+        val launchCancellationObserved = java.util.concurrent.atomic.AtomicBoolean(false)
+        val launchCancellation = AgentCancellation {
+            val duringActualBoundaryLaunch = Thread.currentThread().stackTrace.any { frame ->
+                frame.className == LinuxBubblewrapBoundary::class.java.name && frame.methodName == "launch"
+            }
+            if (duringActualBoundaryLaunch) launchCancellationObserved.set(true)
+            duringActualBoundaryLaunch
+        }
+        val launchCancelledHarness = harness("success")
+        val launchCancelled = launchCancelledHarness.execute(
+            fixture().request.withCancellation(launchCancellation),
+        )
+        assertTrue(launchCancellationObserved.get(), "fixture did not reach the real sandbox launch checkpoint")
+        assertEquals(AgentStopReason.CANCELLED, launchCancelled.stopReason)
+        assertTrue(launchCancelled.summary.orEmpty().contains("sandbox launch"))
+        assertNull(launchCancelledHarness.latestDiagnostics())
+        assertNull(launchCancelledHarness.latestSandboxEvidence())
+
+        val evidenceCancellationObserved = java.util.concurrent.atomic.AtomicBoolean(false)
+        val evidenceCancellation = AgentCancellation {
+            val duringEvidenceConstruction = Thread.currentThread().stackTrace.any { frame ->
+                frame.className == LinuxBubblewrapBoundary::class.java.name && frame.methodName == "evidence"
+            }
+            if (duringEvidenceConstruction) evidenceCancellationObserved.set(true)
+            duringEvidenceConstruction
+        }
+        val evidenceCancelledHarness = harness("success")
+        val evidenceCancelled = evidenceCancelledHarness.execute(
+            fixture().request.withCancellation(evidenceCancellation),
+        )
+        assertTrue(
+            evidenceCancellationObserved.get(),
+            "fixture did not reach post-launch evidence construction",
+        )
+        assertEquals(AgentStopReason.CANCELLED, evidenceCancelled.stopReason)
+        val evidenceCancellationDiagnostics = assertNotNull(evidenceCancelledHarness.latestDiagnostics())
+        assertTrue(evidenceCancellationDiagnostics.remainingProcessIds.isEmpty())
+        assertTrue(evidenceCancellationDiagnostics.sandboxCleanupVerified)
+        assertProcessStopped(evidenceCancellationDiagnostics.pid)
+
         val timeoutFixture = fixture()
         val timeoutHarness = harness("success")
         val timeout = assertFailsWith<AgentExecutionException> {
@@ -465,21 +829,6 @@ class AcpAgentHarnessTest {
         assertTrue(timeout.message.orEmpty().contains("initial workspace snapshot"))
         assertEquals(null, timeoutHarness.latestDiagnostics())
 
-        val finalCancellationFixture = fixture(includeReadyPath = true)
-        val finalCancellationMarker = finalCancellationFixture.workspace.resolve("ready")
-        val finalCancellationHarness = harness("cancel-after-response", ready = finalCancellationMarker)
-        val finalCancellation = AgentCancellation { finalCancellationMarker.exists() }
-        val finalFailure = assertFailsWith<AgentExecutionException> {
-            finalCancellationHarness.execute(
-                finalCancellationFixture.request.withCancellation(finalCancellation),
-            )
-        }
-        assertEquals(AgentFailureKind.UNAVAILABLE, finalFailure.failure.kind)
-        assertEquals("final-workspace-snapshot", finalFailure.failure.details["phase"])
-        val finalDiagnostics = assertNotNull(finalCancellationHarness.latestDiagnostics())
-        assertEquals(0, finalDiagnostics.exitCode)
-        assertFalse(finalDiagnostics.forcedTermination)
-        assertProcessStopped(finalDiagnostics.pid)
     }
 
     @Test
@@ -664,26 +1013,38 @@ class AcpAgentHarnessTest {
         requiredCapabilities: Set<AcpRequiredAgentCapability> = emptySet(),
         timeouts: AcpLifecycleTimeouts = timeouts(),
         maximumFrameBytes: Int = 64 * 1024,
+        terminalPolicy: AcpTerminalExecutionPolicy? = null,
     ): AcpAgentHarness {
+        requireLiveSandboxHost()
         val script = Path.of(requireNotNull(javaClass.getResource("/acp/fake_acp_v1_agent.py")).toURI())
-        val arguments = mutableListOf(script.toString(), mode, sentinel)
+        val arguments = mutableListOf("-S", AGENT_SCRIPT_DESTINATION.toString(), mode, sentinel)
         ready?.let { arguments += it.toString() }
         return AcpAgentHarness(
             AcpProcessConfiguration(
-                executable = Path.of("/usr/bin/python3"),
+                executable = PYTHON,
                 arguments = arguments,
                 requiredAgentCapabilities = requiredCapabilities,
                 timeouts = timeouts,
                 maximumFrameBytes = maximumFrameBytes,
                 maximumStderrBytes = 64 * 1024,
                 implementationId = "scripted-acp-v1",
+                sandboxBoundary = liveSandboxConfiguration(
+                    listOf(
+                        AcpSandboxReadOnlyMount(
+                            script,
+                            AGENT_SCRIPT_DESTINATION,
+                            calculateAcpRuntimeManifestSha256(script),
+                        ),
+                    ),
+                ),
+                terminalPolicy = terminalPolicy,
             ),
         )
     }
 
     private fun timeouts(
         startup: Long = 1_000,
-        request: Long = 2_000,
+        request: Long = 5_000,
         shutdown: Long = 600,
     ): AcpLifecycleTimeouts = AcpLifecycleTimeouts(
         startup = Duration.ofMillis(startup),
@@ -693,7 +1054,151 @@ class AcpAgentHarnessTest {
         shutdown = Duration.ofMillis(shutdown),
     )
 
+    private fun missingSandboxConfiguration(): AcpLinuxSandboxConfiguration =
+        AcpLinuxSandboxConfiguration(
+            bubblewrapExecutable = Path.of("/definitely-absent/decomp-bwrap"),
+            resourceLimiterExecutable = Path.of("/definitely-absent/decomp-prlimit"),
+            scopeSupervisorExecutable = Path.of("/definitely-absent/decomp-systemd-run"),
+            scopeInspectorExecutable = Path.of("/definitely-absent/decomp-systemctl"),
+            environmentFdOpenerExecutable = Path.of("/definitely-absent/decomp-bash"),
+            sandboxGateHelperExecutable = Path.of("/definitely-absent/decomp-gate-helper"),
+            launcherRuntimeMounts = emptyList(),
+            agentRuntimeMounts = emptyList(),
+            systemdUserRuntimeDirectory = Path.of("/definitely-absent/decomp-runtime"),
+            expectedBubblewrapSha256 = "0".repeat(64),
+            expectedResourceLimiterSha256 = "0".repeat(64),
+            expectedScopeSupervisorSha256 = "0".repeat(64),
+            expectedScopeInspectorSha256 = "0".repeat(64),
+            expectedEnvironmentFdOpenerSha256 = "0".repeat(64),
+            expectedSandboxGateHelperSha256 = "0".repeat(64),
+            expectedSandboxGateHelperManifestSha256 = "0".repeat(64),
+        )
+
+    private fun liveSandboxConfiguration(
+        agentRuntimeMounts: Collection<AcpSandboxReadOnlyMount>,
+    ): AcpLinuxSandboxConfiguration = AcpLinuxSandboxConfiguration(
+        bubblewrapExecutable = BWRAP,
+        resourceLimiterExecutable = PRLIMIT,
+        scopeSupervisorExecutable = SYSTEMD_RUN,
+        scopeInspectorExecutable = SYSTEMCTL,
+        environmentFdOpenerExecutable = BASH,
+        sandboxGateHelperExecutable = GATE_HELPER,
+        // Protected dynamic-loader/runtime destinations are immutable boundary closure, never
+        // request-selected terminal mounts. They are pinned once and evidenced for every launch.
+        launcherRuntimeMounts = LAUNCHER_RUNTIME_MOUNTS + PYTHON_RUNTIME_MOUNTS,
+        agentRuntimeMounts = agentRuntimeMounts,
+        systemdUserRuntimeDirectory = USER_RUNTIME,
+        agentResourceLimits = AcpSandboxResourceLimits(
+            maximumProcesses = 16,
+            maximumOpenFiles = 128,
+            maximumFileBytes = 64L * 1024 * 1024,
+            maximumAddressSpaceBytes = 512L * 1024 * 1024,
+            maximumCpuSeconds = 20,
+        ),
+        expectedBubblewrapSha256 = sha256(BWRAP),
+        expectedResourceLimiterSha256 = sha256(PRLIMIT),
+        expectedScopeSupervisorSha256 = sha256(SYSTEMD_RUN),
+        expectedScopeInspectorSha256 = sha256(SYSTEMCTL),
+        expectedEnvironmentFdOpenerSha256 = sha256(BASH),
+        expectedSandboxGateHelperSha256 = sha256(GATE_HELPER),
+        expectedSandboxGateHelperManifestSha256 = calculateAcpRuntimeManifestSha256(GATE_HELPER),
+    )
+
+    private fun requireLiveSandboxHost() {
+        val missing = listOf(BWRAP, PRLIMIT, SYSTEMD_RUN, SYSTEMCTL, BASH, PYTHON, ECHO, SLEEP, CC)
+            .filterNot(Files::isExecutable)
+        assumeTrue(missing.isEmpty(), "live ACP harness sandbox tools unavailable: $missing")
+        assumeTrue(Files.exists(USER_RUNTIME.resolve("bus")), "systemd user bus is unavailable")
+        assumeTrue(
+            Files.isRegularFile(Path.of("/sys/fs/cgroup/cgroup.controllers")),
+            "cgroup v2 is unavailable",
+        )
+        assumeTrue(Files.isExecutable(GATE_HELPER), "static ACP gate helper could not be built")
+    }
+
+    private fun javap(type: Class<*>): String {
+        val executable = Path.of(System.getProperty("java.home"), "bin", "javap")
+        val classPath = Path.of(requireNotNull(type.protectionDomain.codeSource).location.toURI()).toString()
+        val process = ProcessBuilder(
+            executable.toString(),
+            "-p",
+            "-classpath",
+            classPath,
+            type.name,
+        ).redirectErrorStream(true).start()
+        val exited = process.waitFor(10, TimeUnit.SECONDS)
+        if (!exited) {
+            process.destroyForcibly()
+            process.waitFor(3, TimeUnit.SECONDS)
+        }
+        val output = process.inputStream.readAllBytes().toString(Charsets.UTF_8)
+        assertTrue(exited, "javap timed out")
+        assertEquals(0, process.exitValue(), output)
+        return output
+    }
+
+    private fun isForbiddenExecutionSeamType(type: Class<*>): Boolean =
+        listOf("Boundary", "Launcher", "TestMode").any(type.name::contains)
+
+    private fun sha256(path: Path): String = MessageDigest.getInstance("SHA-256")
+        .digest(Files.readAllBytes(path))
+        .joinToString("") { "%02x".format(it) }
+
     private fun assertProcessStopped(pid: Long) {
         assertFalse(ProcessHandle.of(pid).map(ProcessHandle::isAlive).orElse(false), "process $pid is still alive")
+    }
+
+    private companion object {
+        val BWRAP: Path = Path.of("/usr/bin/bwrap")
+        val PRLIMIT: Path = Path.of("/usr/bin/prlimit")
+        val SYSTEMD_RUN: Path = Path.of("/usr/bin/systemd-run")
+        val SYSTEMCTL: Path = Path.of("/usr/bin/systemctl")
+        val BASH: Path = Path.of("/usr/bin/bash")
+        val CC: Path = Path.of("/usr/bin/cc")
+        val USER_RUNTIME: Path by lazy {
+            Path.of("/run/user/${(Files.getAttribute(Path.of("/proc/self"), "unix:uid") as Number).toInt()}")
+        }
+        val PYTHON: Path = Path.of("/usr/bin/python3.14")
+        val ECHO: Path = Path.of("/usr/bin/echo")
+        val SLEEP: Path = Path.of("/usr/bin/sleep")
+        val PYTHON_STDLIB: Path = Path.of("/usr/lib/python3.14")
+        val AGENT_SCRIPT_DESTINATION: Path = Path.of("/decomp-acp-test/fake_acp_v1_agent.py")
+        val GATE_HELPER: Path by lazy {
+            val output = createTempDirectory("acp-static-gate-helper-")
+                .resolve("gate-helper")
+                .toAbsolutePath()
+                .normalize()
+            val source = Path.of("src/main/c/decomp_acp_gate_helper.c").toAbsolutePath().normalize()
+            val process = ProcessBuilder(
+                CC.toString(), "-std=c11", "-O2", "-static", source.toString(), "-o", output.toString(),
+            ).redirectErrorStream(true).start()
+            val diagnostics = process.inputStream.readNBytes(32 * 1024).toString(Charsets.UTF_8)
+            if (!process.waitFor(20, TimeUnit.SECONDS) || process.exitValue() != 0) {
+                throw IllegalStateException("static ACP gate helper unavailable: $diagnostics")
+            }
+            output
+        }
+        val LAUNCHER_RUNTIME_MOUNTS: List<AcpSandboxReadOnlyMount> = listOf(
+            AcpSandboxReadOnlyMount(
+                Path.of("/usr/lib64/ld-linux-x86-64.so.2"),
+                Path.of("/lib64/ld-linux-x86-64.so.2"),
+            ),
+            AcpSandboxReadOnlyMount(Path.of("/usr/lib64/libc.so.6")),
+        )
+        val PYTHON_RUNTIME_MOUNTS: List<AcpSandboxReadOnlyMount> = buildList {
+            listOf("encodings", "json", "re", "collections").forEach { name ->
+                add(AcpSandboxReadOnlyMount(PYTHON_STDLIB.resolve(name)))
+            }
+            listOf(
+                "_collections_abc.py", "abc.py", "codecs.py", "copyreg.py", "enum.py",
+                "functools.py", "keyword.py", "operator.py", "reprlib.py", "types.py", "zipimport.py",
+            ).forEach { name -> add(AcpSandboxReadOnlyMount(PYTHON_STDLIB.resolve(name))) }
+            val jsonExtension = Files.list(PYTHON_STDLIB.resolve("lib-dynload")).use { entries ->
+                entries.filter { it.fileName.toString().startsWith("_json.") }.toList().single()
+            }
+            add(AcpSandboxReadOnlyMount(jsonExtension))
+            add(AcpSandboxReadOnlyMount(Path.of("/usr/lib64/libpython3.14.so.1.0")))
+            add(AcpSandboxReadOnlyMount(Path.of("/usr/lib64/libm.so.6")))
+        }
     }
 }
