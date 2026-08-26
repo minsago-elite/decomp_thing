@@ -19,6 +19,8 @@ jobs:
       - run: |
           sudo apt-get update
           sudo apt-get install -y --no-install-recommends bubblewrap binutils build-essential
+          sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0
+          bwrap --ro-bind /usr /usr --ro-bind /lib /lib --ro-bind /lib64 /lib64 /usr/bin/true
       - run: scripts/ci.sh
       - uses: actions/upload-artifact@v4
         if: always()
