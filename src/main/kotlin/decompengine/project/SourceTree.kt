@@ -11,7 +11,16 @@ import decompengine.agent.AgentStopReason
 import decompengine.agent.AgentWorkspacePath
 import decompengine.agent.AgentWorkspaceRoot
 import decompengine.agent.execute
+import kotlinx.serialization.json.Json
+import kotlinx.serialization.json.boolean
+import kotlinx.serialization.json.intOrNull
+import kotlinx.serialization.json.jsonArray
+import kotlinx.serialization.json.jsonObject
+import kotlinx.serialization.json.jsonPrimitive
+import java.nio.file.AtomicMoveNotSupportedException
+import java.nio.file.Files
 import java.nio.file.Path
+import java.nio.file.StandardCopyOption
 import kotlin.io.path.createDirectories
 import kotlin.io.path.deleteIfExists
 import kotlin.io.path.exists
@@ -35,14 +44,29 @@ data class ReconstructedModule(
     val source: String,
     val generator: String,
     val promptSha256: String,
+    val promptCharacters: Int? = null,
+    val promptBudgetCharacters: Int? = null,
+    val issues: List<ModuleReconstructionIssue> = emptyList(),
+    val retryable: Boolean = true,
+)
+
+data class ModuleReconstructionIssue(
+    val code: String,
+    val message: String,
+    val entityIds: List<String>,
 )
 
 fun interface ModuleReconstructor {
     fun reconstruct(request: ModuleReconstructionRequest): ReconstructedModule
+
+    /** Stable identity used only to resume a deliberate unresolved result from the same strategy. */
+    fun cacheIdentity(): String = "custom"
 }
 
 /** Emits buildable evidence stubs by default; raw recovered C remains in the program model for later refinement. */
 class EvidenceModuleReconstructor(private val includeRecoveredC: Boolean = false) : ModuleReconstructor {
+    override fun cacheIdentity(): String = if (includeRecoveredC) "recovered-c:v1" else "evidence-only:v1"
+
     override fun reconstruct(request: ModuleReconstructionRequest): ReconstructedModule {
         val functions = request.module.functionIds.map { id -> request.model.functions.single { it.id == id } }
         val globals = request.module.globalIds.map { id -> request.model.globals.single { it.id == id } }
@@ -51,7 +75,7 @@ class EvidenceModuleReconstructor(private val includeRecoveredC: Boolean = false
             request.dependencyHeaders.keys.sorted().forEach { header -> append("#include \"").append(header.removePrefix("include/")).append("\"\n") }
             append('\n')
             globals.forEach { global ->
-                append("/* recovered global @ 0x${global.address.toString(16)} */\n")
+                append("/* ${global.id}; recovered global @ 0x${global.address.toString(16)} */\n")
                 append(globalDeclaration(global, external = false)).append("\n\n")
             }
             functions.forEach { function ->
@@ -61,7 +85,30 @@ class EvidenceModuleReconstructor(private val includeRecoveredC: Boolean = false
                 else append(stub(function)).append("\n\n")
             }
         }
-        return ReconstructedModule(source, "evidence", sha256(source.toByteArray()))
+        val unresolved = if (includeRecoveredC) {
+            functions.filter { it.decompiledC.isNullOrBlank() }.map { function ->
+                ModuleReconstructionIssue(
+                    "recovered-c-unavailable",
+                    "normalized recovered C is unavailable for ${function.id}",
+                    listOf(function.id),
+                )
+            }
+        } else {
+            listOf(
+                ModuleReconstructionIssue(
+                    "evidence-only-placeholder",
+                    "evidence-only mode emits placeholders and does not accept implementations",
+                    request.module.functionIds + request.module.globalIds,
+                ),
+            ).filter { it.entityIds.isNotEmpty() }
+        }
+        return ReconstructedModule(
+            source = source,
+            generator = if (includeRecoveredC) "recovered-c" else "evidence-only",
+            promptSha256 = sha256(source.toByteArray()),
+            issues = unresolved,
+            retryable = false,
+        )
     }
 
     private fun stub(function: RecoveredFunction): String {
@@ -80,18 +127,36 @@ class BoundedLlmModuleReconstructor(
 ) : ModuleReconstructor {
     init { require(maximumContextCharacters >= 4_096) }
 
+    override fun cacheIdentity(): String =
+        "agent:${harness.implementationIdentifier() ?: "unspecified"}:context-$maximumContextCharacters:v1"
+
     override fun reconstruct(request: ModuleReconstructionRequest): ReconstructedModule {
         val target = request.module.sourcePath
         val localFunctions = request.module.functionIds.map { id -> request.model.functions.single { it.id == id } }
-        val evidence = localFunctions.joinToString("\n\n") { function ->
+        val localGlobals = request.module.globalIds.map { id -> request.model.globals.single { it.id == id } }
+        val functionEvidence = localFunctions.joinToString("\n\n") { function ->
             "${function.id} @ 0x${function.address.toString(16)}\nprototype: ${function.prototype}\n" +
                 "calls: ${function.calls.sorted()}\nglobals: ${function.referencedGlobals.sorted()}\n" +
                 "strings: ${function.strings.sorted()}\ndecompilation:\n${function.decompiledC ?: "<unavailable>"}"
         }
+        val globalEvidence = localGlobals.joinToString("\n") { global ->
+            "${global.id} @ 0x${global.address.toString(16)}: ${global.type} ${global.name}; " +
+                "initializer=${global.initializer ?: "<unavailable>"}; status=${global.status.name.lowercase()}"
+        }
+        val evidence = buildString {
+            append("module: ").append(request.module.id).append('\n')
+            append("ownership evidence: ").append(request.module.boundaryEvidence.sorted()).append("\n\n")
+            append("functions:\n").append(functionEvidence.ifBlank { "<none>" })
+            append("\n\nglobals:\n").append(globalEvidence.ifBlank { "<none>" })
+        }
+        val provenanceIds = (request.module.functionIds + request.module.globalIds).sorted()
         val objective = """
             Reconstruct exactly one C implementation unit at $target.
             Preserve recovered behavior and suspicious operations. Do not invent file paths or edit headers.
-            Edit $target in the authorized workspace and keep provenance comments containing every function ID.
+            Edit $target in the authorized workspace and keep provenance comments containing every owned entity ID:
+            ${provenanceIds.joinToString(", ")}
+            Do not use generic return-value placeholders or undefined decompiler types. If evidence is insufficient,
+            stop without claiming completion so the module is recorded as explicitly unresolved.
         """.trimIndent()
         val files = linkedMapOf(
             "include/decomp_types.h" to request.sharedHeader,
@@ -100,9 +165,20 @@ class BoundedLlmModuleReconstructor(
         )
             .apply { putAll(request.dependencyHeaders) }
         val observed = request.observedBehavior ?: "<not yet available; report this limitation>"
-        val contextSize = objective.length + evidence.length + observed.length + files.entries.sumOf { it.key.length + it.value.length }
-        require(contextSize <= maximumContextCharacters) {
-            "module ${request.module.id} exceeds context budget: $contextSize > $maximumContextCharacters characters"
+        val promptEvidence = buildString {
+            append(objective).append("\n\n").append(evidence).append("\n\n").append(observed)
+            files.toSortedMap().forEach { (path, content) ->
+                append("\n\n--- ").append(path).append(" ---\n").append(content)
+            }
+        }
+        val contextSize = promptEvidence.length
+        if (contextSize > maximumContextCharacters) {
+            throw ModuleContextBudgetExceededException(
+                request.module.id,
+                contextSize,
+                maximumContextCharacters,
+                sha256(promptEvidence.toByteArray()),
+            )
         }
         val workspaceRoot = request.workspaceRoot.toAbsolutePath().normalize()
         val root = AgentWorkspaceRoot("project", workspaceRoot)
@@ -129,6 +205,13 @@ class BoundedLlmModuleReconstructor(
                     ),
                 ),
             )
+            if (execution.stopReason in setOf(AgentStopReason.CANCELLED, AgentStopReason.LIMIT_EXHAUSTED)) {
+                throw ModuleReconstructionInterruptedException(
+                    request.module.id,
+                    execution.stopReason,
+                    execution.summary,
+                )
+            }
             require(execution.stopReason == AgentStopReason.COMPLETED) {
                 "module reconstruction stopped with ${execution.stopReason.name.lowercase()}: ${execution.summary.orEmpty()}"
             }
@@ -147,11 +230,12 @@ class BoundedLlmModuleReconstructor(
             require(change.afterSha256 == sha256(sourceBytes) && (change.sizeBytes == null || change.sizeBytes == sourceBytes.size.toLong())) {
                 "module reconstruction result does not match $target"
             }
-            val promptEvidence = listOf(objective, evidence, observed).joinToString("\n\n")
             return ReconstructedModule(
                 source,
                 "agent:${harness.implementationIdentifier() ?: "unspecified"}",
                 sha256(promptEvidence.toByteArray()),
+                promptCharacters = contextSize,
+                promptBudgetCharacters = maximumContextCharacters,
             )
         } catch (failure: Exception) {
             if (before == null) sourcePath.deleteIfExists() else sourcePath.writeBytes(before)
@@ -160,38 +244,60 @@ class BoundedLlmModuleReconstructor(
     }
 }
 
+class ModuleContextBudgetExceededException(
+    val moduleId: String,
+    val promptCharacters: Int,
+    val promptBudgetCharacters: Int,
+    val promptSha256: String,
+) : IllegalArgumentException(
+    "module $moduleId exceeds context budget: $promptCharacters > $promptBudgetCharacters characters",
+)
+
+class ModuleReconstructionInterruptedException(
+    val moduleId: String,
+    val stopReason: AgentStopReason,
+    val agentSummary: String?,
+) : IllegalStateException(
+    "module $moduleId reconstruction was interrupted with ${stopReason.name.lowercase()}: ${agentSummary.orEmpty()}",
+)
+
 data class GeneratedFileEvidence(
     val path: String,
     val sha256: String,
     val generator: String,
     val promptSha256: String? = null,
     val entityIds: List<String> = emptyList(),
+    val acceptedImplementation: Boolean? = null,
 )
 
 data class SourceTreeManifest(
-    val schemaVersion: Int = 1,
+    val schemaVersion: Int = 2,
     val inputSha256: String,
     val files: List<GeneratedFileEvidence>,
     val unresolvedEntityIds: List<String>,
+    val unresolvedImplementationIds: List<String> = emptyList(),
 ) {
     val editablePaths: Set<String> get() = files.map { it.path }.filter { it == "Makefile" || it.endsWith(".c") || it.endsWith(".h") }.toSet()
 
     fun toJson(): String = buildString {
         append("{\n  \"schemaVersion\": ").append(schemaVersion)
-        append(",\n  \"inputSha256\": \"").append(inputSha256).append("\",")
+        append(",\n  \"inputSha256\": \"").append(inputSha256.jsonEscape()).append("\",")
         append("\n  \"files\": [")
         append(files.sortedBy { it.path }.joinToString(",") { file ->
             """
             {
-              "path": "${file.path}",
-              "sha256": "${file.sha256}",
-              "generator": "${file.generator}",
-              "promptSha256": ${file.promptSha256?.let { "\"$it\"" } ?: "null"},
-              "entityIds": [${file.entityIds.sorted().joinToString(", ") { "\"$it\"" }}]
+              "path": "${file.path.jsonEscape()}",
+              "sha256": "${file.sha256.jsonEscape()}",
+              "generator": "${file.generator.jsonEscape()}",
+              "promptSha256": ${file.promptSha256?.let { "\"${it.jsonEscape()}\"" } ?: "null"},
+              "acceptedImplementation": ${file.acceptedImplementation ?: "null"},
+              "entityIds": [${file.entityIds.sorted().joinToString(", ") { "\"${it.jsonEscape()}\"" }}]
             }""".trimIndent().prependIndent("    ")
         })
         append("\n  ],\n  \"unresolvedEntityIds\": [")
-        append(unresolvedEntityIds.sorted().joinToString(", ") { "\"$it\"" })
+        append(unresolvedEntityIds.sorted().joinToString(", ") { "\"${it.jsonEscape()}\"" })
+        append("],\n  \"unresolvedImplementationIds\": [")
+        append(unresolvedImplementationIds.sorted().joinToString(", ") { "\"${it.jsonEscape()}\"" })
         append("]\n}\n")
     }
 }
@@ -229,35 +335,90 @@ object SourceTreeGenerator {
             val module = plan.modules.single { it.id == id }
             generated += evidence("src/modules/${id}_internal.h", content, "planner", module.functionIds)
         }
+        val unresolvedImplementations = sortedSetOf<String>()
 
         generationOrder(plan, model).forEachIndexed { index, module ->
             val dependencies = dependencyModules(module, model, plan)
             val dependencyHeaders = dependencies.associate { dependency -> plan.modules.single { it.id == dependency }.headerPath to headers.getValue(dependency) }
-            val fingerprint = moduleFingerprint(module, model, typesHeader, headers.getValue(module.id), privateHeaders.getValue(module.id), dependencyHeaders)
+            val fingerprint = moduleFingerprint(
+                module,
+                model,
+                typesHeader,
+                headers.getValue(module.id),
+                privateHeaders.getValue(module.id),
+                dependencyHeaders,
+                observedBehavior,
+            )
             val sourcePath = modulesSourceDir.resolve("${module.id}.c")
             val checkpointPath = moduleReportsDir.resolve("${module.id}.json")
-            val cached = readCheckpoint(checkpointPath)?.takeIf { it.fingerprint == fingerprint && sourcePath.exists() }
-            val result = cached?.let { ReconstructedModule(sourcePath.readText(), it.generator, it.promptSha256) }
-                ?: reconstructor.reconstruct(
-                    ModuleReconstructionRequest(
+            val attemptPath = moduleReportsDir.resolve("${module.id}.attempt.json")
+            val request = ModuleReconstructionRequest(
+                module,
+                model,
+                typesHeader,
+                headers.getValue(module.id),
+                privateHeaders.getValue(module.id),
+                dependencyHeaders,
+                projectDir,
+                observedBehavior,
+            )
+            val cacheIdentity = reconstructor.cacheIdentity()
+            val recordedCheckpoint = readCheckpoint(checkpointPath)
+            val cached = recordedCheckpoint?.takeIf { checkpoint ->
+                checkpoint.fingerprint == fingerprint &&
+                    sourcePath.exists() &&
+                    sha256(sourcePath.readBytes()) == checkpoint.sourceSha256 &&
+                    (checkpoint.accepted || (!checkpoint.retryable && checkpoint.reconstructorIdentity == cacheIdentity))
+            }
+            val checkpoint = cached ?: run {
+                val attempted = try {
+                    reconstructor.reconstruct(request)
+                } catch (interrupted: ModuleReconstructionInterruptedException) {
+                    writeInterruptionReport(
+                        attemptPath,
                         module,
-                        model,
-                        typesHeader,
-                        headers.getValue(module.id),
-                        privateHeaders.getValue(module.id),
-                        dependencyHeaders,
-                        projectDir,
-                        observedBehavior,
-                    ),
-                ).also { reconstructed ->
-                    sourcePath.writeText(reconstructed.source.trimEnd() + "\n")
-                    checkpointPath.writeText(ModuleCheckpoint(fingerprint, reconstructed.generator, reconstructed.promptSha256).toJson())
+                        fingerprint,
+                        cacheIdentity,
+                        sourcePath,
+                        recordedCheckpoint,
+                        interrupted,
+                    )
+                    throw interrupted
+                } catch (failure: Exception) {
+                    unresolvedFallback(request, cacheIdentity, failure)
                 }
-            val normalizedSource = result.source.trimEnd() + "\n"
-            if (!sourcePath.exists() || sourcePath.readText() != normalizedSource) sourcePath.writeText(normalizedSource)
-            generated += evidence(module.sourcePath, normalizedSource, result.generator, module.functionIds + module.globalIds, result.promptSha256)
-            val checkpoint = checkpointPath.readText()
-            generated += evidence("reports/modules/${module.id}.json", checkpoint, "planner", module.functionIds + module.globalIds)
+                val normalizedSource = attempted.source.trimEnd() + "\n"
+                val issues = assessReconstruction(module, model, attempted, normalizedSource)
+                val accepted = issues.isEmpty()
+                writeAtomically(sourcePath, normalizedSource)
+                ModuleCheckpoint(
+                    fingerprint = fingerprint,
+                    sourceSha256 = sha256(normalizedSource.toByteArray()),
+                    generator = attempted.generator,
+                    reconstructorIdentity = cacheIdentity,
+                    promptSha256 = attempted.promptSha256,
+                    promptCharacters = attempted.promptCharacters,
+                    promptBudgetCharacters = attempted.promptBudgetCharacters,
+                    accepted = accepted,
+                    retryable = attempted.retryable,
+                    issues = issues,
+                    entityIds = module.functionIds + module.globalIds,
+                ).also { writeAtomically(checkpointPath, it.toJson()) }
+            }
+            attemptPath.deleteIfExists()
+            val normalizedSource = sourcePath.readText()
+            val moduleEntityIds = module.functionIds + module.globalIds
+            if (!checkpoint.accepted) unresolvedImplementations += moduleEntityIds
+            generated += evidence(
+                module.sourcePath,
+                normalizedSource,
+                checkpoint.generator,
+                moduleEntityIds,
+                checkpoint.promptSha256,
+                checkpoint.accepted,
+            )
+            val checkpointText = checkpointPath.readText()
+            generated += evidence("reports/modules/${module.id}.json", checkpointText, "planner", moduleEntityIds)
             onModuleProgress(index + 1, plan.modules.size, module.id)
         }
 
@@ -298,15 +459,16 @@ object SourceTreeGenerator {
         val toolchain = renderToolchain()
         projectDir.resolve("reports/toolchain.json").writeText(toolchain)
         generated += evidence("reports/toolchain.json", toolchain, "environment", emptyList())
-        val unresolvedMarkdown = renderUnresolvedMarkdown(model)
+        val unresolvedMarkdown = renderUnresolvedMarkdown(model, plan, unresolvedImplementations)
         projectDir.resolve("UNRESOLVED.md").writeText(unresolvedMarkdown)
-        generated += evidence("UNRESOLVED.md", unresolvedMarkdown, "evidence", emptyList())
+        generated += evidence("UNRESOLVED.md", unresolvedMarkdown, "evidence", unresolvedImplementations.toList())
         val manifest = SourceTreeManifest(
             inputSha256 = model.inputSha256,
             files = generated,
             unresolvedEntityIds = model.functions.filter { it.status != RecoveryStatus.RECOVERED }.map { it.id } +
                 model.globals.filter { it.status != RecoveryStatus.RECOVERED }.map { it.id } +
                 model.types.filter { it.status != RecoveryStatus.RECOVERED }.map { it.id },
+            unresolvedImplementationIds = unresolvedImplementations.toList(),
         )
         projectDir.resolve("source_tree_manifest.json").writeText(manifest.toJson())
         return manifest
@@ -384,18 +546,422 @@ object SourceTreeGenerator {
         ".PHONY: all clean",
     ).joinToString("\n", postfix = "\n")
 
-    private fun evidence(path: String, content: String, generator: String, ids: List<String>, prompt: String? = null) =
-        GeneratedFileEvidence(path, sha256(content.toByteArray()), generator, prompt, ids.sorted())
+    private fun evidence(
+        path: String,
+        content: String,
+        generator: String,
+        ids: List<String>,
+        prompt: String? = null,
+        acceptedImplementation: Boolean? = null,
+    ) = GeneratedFileEvidence(
+        path,
+        sha256(content.toByteArray()),
+        generator,
+        prompt,
+        ids.sorted(),
+        acceptedImplementation,
+    )
 
-    private data class ModuleCheckpoint(val fingerprint: String, val generator: String, val promptSha256: String) {
-        fun toJson() = "{\"fingerprint\":\"$fingerprint\",\"generator\":\"$generator\",\"promptSha256\":\"$promptSha256\"}\n"
+    private data class ModuleCheckpoint(
+        val fingerprint: String,
+        val sourceSha256: String,
+        val generator: String,
+        val reconstructorIdentity: String,
+        val promptSha256: String,
+        val promptCharacters: Int?,
+        val promptBudgetCharacters: Int?,
+        val accepted: Boolean,
+        val retryable: Boolean,
+        val issues: List<ModuleReconstructionIssue>,
+        val entityIds: List<String>,
+    ) {
+        fun toJson(): String = buildString {
+            append("{\n  \"schemaVersion\": 2,")
+            append("\n  \"fingerprint\": \"").append(fingerprint).append("\",")
+            append("\n  \"sourceSha256\": \"").append(sourceSha256).append("\",")
+            append("\n  \"generator\": \"").append(generator.jsonEscape()).append("\",")
+            append("\n  \"reconstructorIdentity\": \"").append(reconstructorIdentity.jsonEscape()).append("\",")
+            append("\n  \"promptSha256\": \"").append(promptSha256).append("\",")
+            append("\n  \"promptCharacters\": ").append(promptCharacters ?: "null").append(',')
+            append("\n  \"promptBudgetCharacters\": ").append(promptBudgetCharacters ?: "null").append(',')
+            append("\n  \"accepted\": ").append(accepted).append(',')
+            append("\n  \"retryable\": ").append(retryable).append(',')
+            append("\n  \"entityStatuses\": [")
+            append(entityIds.sorted().joinToString(",") { id ->
+                "\n    {\"id\":\"${id.jsonEscape()}\",\"status\":\"${if (accepted) "accepted" else "unresolved"}\"}"
+            })
+            append("\n  ],\n  \"issues\": [")
+            append(issues.joinToString(",") { issue ->
+                """
+                {
+                  "code": "${issue.code.jsonEscape()}",
+                  "message": "${issue.message.jsonEscape()}",
+                  "entityIds": [${issue.entityIds.sorted().joinToString(",") { "\"${it.jsonEscape()}\"" }}]
+                }""".trimIndent().prependIndent("    ")
+            })
+            append("\n  ]\n}\n")
+        }
     }
 
     private fun readCheckpoint(path: Path): ModuleCheckpoint? {
         if (!path.exists()) return null
-        val text = path.readText()
-        fun field(name: String) = Regex("\\\"$name\\\":\\\"([^\\\"]*)\\\"").find(text)?.groupValues?.get(1)
-        return ModuleCheckpoint(field("fingerprint") ?: return null, field("generator") ?: return null, field("promptSha256") ?: return null)
+        return runCatching {
+            val root = Json.parseToJsonElement(path.readText()).jsonObject
+            if (root["schemaVersion"]?.jsonPrimitive?.intOrNull != 2) return null
+            ModuleCheckpoint(
+                fingerprint = root.getValue("fingerprint").jsonPrimitive.content,
+                sourceSha256 = root.getValue("sourceSha256").jsonPrimitive.content,
+                generator = root.getValue("generator").jsonPrimitive.content,
+                reconstructorIdentity = root.getValue("reconstructorIdentity").jsonPrimitive.content,
+                promptSha256 = root.getValue("promptSha256").jsonPrimitive.content,
+                promptCharacters = root["promptCharacters"]?.jsonPrimitive?.intOrNull,
+                promptBudgetCharacters = root["promptBudgetCharacters"]?.jsonPrimitive?.intOrNull,
+                accepted = root.getValue("accepted").jsonPrimitive.boolean,
+                retryable = root.getValue("retryable").jsonPrimitive.boolean,
+                issues = root.getValue("issues").jsonArray.map { element ->
+                    val issue = element.jsonObject
+                    ModuleReconstructionIssue(
+                        issue.getValue("code").jsonPrimitive.content,
+                        issue.getValue("message").jsonPrimitive.content,
+                        issue.getValue("entityIds").jsonArray.map { it.jsonPrimitive.content },
+                    )
+                },
+                entityIds = root.getValue("entityStatuses").jsonArray.map {
+                    it.jsonObject.getValue("id").jsonPrimitive.content
+                },
+            )
+        }.getOrNull()
+    }
+
+    private fun writeInterruptionReport(
+        path: Path,
+        module: PlannedModule,
+        fingerprint: String,
+        reconstructorIdentity: String,
+        sourcePath: Path,
+        previousCheckpoint: ModuleCheckpoint?,
+        interruption: ModuleReconstructionInterruptedException,
+    ) {
+        val currentSourceSha256 = sourcePath.takeIf { it.exists() }?.readBytes()?.let(::sha256)
+        val report = buildString {
+            append("{\n  \"schemaVersion\": 1,")
+            append("\n  \"moduleId\": \"").append(module.id.jsonEscape()).append("\",")
+            append("\n  \"fingerprint\": \"").append(fingerprint).append("\",")
+            append("\n  \"reconstructorIdentity\": \"").append(reconstructorIdentity.jsonEscape()).append("\",")
+            append("\n  \"status\": \"interrupted\",")
+            append("\n  \"stopReason\": \"").append(interruption.stopReason.name.lowercase()).append("\",")
+            append("\n  \"summary\": ")
+            append(interruption.agentSummary?.let { "\"${it.take(2_000).jsonEscape()}\"" } ?: "null").append(',')
+            append("\n  \"currentSourceSha256\": ")
+            append(currentSourceSha256?.let { "\"$it\"" } ?: "null").append(',')
+            append("\n  \"previousAcceptedSourceSha256\": ")
+            append(previousCheckpoint?.takeIf { it.accepted }?.sourceSha256?.let { "\"$it\"" } ?: "null").append(',')
+            append("\n  \"entityIds\": [")
+            append((module.functionIds + module.globalIds).sorted().joinToString(",") { "\"${it.jsonEscape()}\"" })
+            append("]\n}\n")
+        }
+        writeAtomically(path, report)
+    }
+
+    private fun unresolvedFallback(
+        request: ModuleReconstructionRequest,
+        reconstructorIdentity: String,
+        failure: Exception,
+    ): ReconstructedModule {
+        val fallback = EvidenceModuleReconstructor().reconstruct(request)
+        val entityIds = request.module.functionIds + request.module.globalIds
+        val code = if (failure is ModuleContextBudgetExceededException) "context-budget-exceeded" else "reconstruction-failed"
+        val message = buildString {
+            append(failure::class.simpleName ?: "Exception")
+            failure.message?.takeIf(String::isNotBlank)?.let { append(": ").append(it.take(2_000)) }
+        }
+        return fallback.copy(
+            generator = "unresolved:$reconstructorIdentity",
+            promptSha256 = (failure as? ModuleContextBudgetExceededException)?.promptSha256 ?: fallback.promptSha256,
+            promptCharacters = (failure as? ModuleContextBudgetExceededException)?.promptCharacters,
+            promptBudgetCharacters = (failure as? ModuleContextBudgetExceededException)?.promptBudgetCharacters,
+            issues = fallback.issues + ModuleReconstructionIssue(code, message, entityIds),
+            retryable = true,
+        )
+    }
+
+    private fun assessReconstruction(
+        module: PlannedModule,
+        model: RecoveredProgramModel,
+        reconstructed: ReconstructedModule,
+        source: String,
+    ): List<ModuleReconstructionIssue> {
+        val entityIds = module.functionIds + module.globalIds
+        val issues = reconstructed.issues.toMutableList()
+        if (source.isBlank() && entityIds.isNotEmpty()) {
+            issues += ModuleReconstructionIssue("empty-source", "module source is empty", entityIds)
+        }
+        if (reconstructed.generator.startsWith("agent:")) {
+            val promptCharacters = reconstructed.promptCharacters
+            val promptBudget = reconstructed.promptBudgetCharacters
+            when {
+                promptCharacters == null || promptBudget == null -> issues += ModuleReconstructionIssue(
+                    "prompt-budget-unattributed",
+                    "agent result does not record prompt size and configured budget",
+                    entityIds,
+                )
+                promptCharacters > promptBudget -> issues += ModuleReconstructionIssue(
+                    "context-budget-exceeded",
+                    "agent prompt used $promptCharacters characters with a $promptBudget character budget",
+                    entityIds,
+                )
+            }
+        }
+        val codeOnly = codeWithoutCommentsOrLiterals(source)
+        val undefinedType = Regex("\\b(?:undefined(?:1|2|4|8)?|byte|longlong)\\b")
+        if (reconstructed.generator != "evidence-only" && undefinedType.containsMatchIn(codeOnly)) {
+            issues += ModuleReconstructionIssue(
+                "undefined-decompiler-type",
+                "candidate source retains an undefined decompiler type",
+                entityIds,
+            )
+        }
+        module.functionIds.forEach { id ->
+            val function = model.functions.single { it.id == id }
+            if (!source.contains(id)) {
+                issues += ModuleReconstructionIssue(
+                    "missing-function-provenance",
+                    "candidate source does not attribute ${function.id}",
+                    listOf(function.id),
+                )
+            }
+            val body = findFunctionBody(source, safeCName(function.name))
+            if (body == null) {
+                issues += ModuleReconstructionIssue(
+                    "missing-function-definition",
+                    "candidate source does not define ${safeCName(function.name)} for ${function.id}",
+                    listOf(function.id),
+                )
+            } else if (
+                reconstructed.generator != "recovered-c" &&
+                genericReturnBody(body) &&
+                !recoveredEvidenceIsTrivial(function)
+            ) {
+                issues += ModuleReconstructionIssue(
+                    "generic-return-placeholder",
+                    "candidate implementation for ${function.id} is indistinguishable from the evidence-only return stub",
+                    listOf(function.id),
+                )
+            }
+        }
+        module.globalIds.forEach { id ->
+            val global = model.globals.single { it.id == id }
+            if (!source.contains(id)) {
+                issues += ModuleReconstructionIssue(
+                    "missing-global-provenance",
+                    "candidate source does not attribute $id",
+                    listOf(id),
+                )
+            }
+            if (!hasGlobalDefinition(codeOnly, safeCName(global.name))) {
+                issues += ModuleReconstructionIssue(
+                    "missing-global-definition",
+                    "candidate source does not define ${safeCName(global.name)} for $id",
+                    listOf(id),
+                )
+            }
+        }
+        return issues.distinctBy { Triple(it.code, it.message, it.entityIds.sorted()) }
+    }
+
+    private fun findFunctionBody(source: String, functionName: String): String? {
+        val candidates = Regex("\\b${Regex.escape(functionName)}\\s*\\(").findAll(source)
+        candidates.forEach { candidate ->
+            val parameterStart = source.indexOf('(', candidate.range.first)
+            val parameterEnd = matchingDelimiter(source, parameterStart, '(', ')') ?: return@forEach
+            var bodyStart = parameterEnd + 1
+            while (bodyStart < source.length && source[bodyStart].isWhitespace()) bodyStart++
+            if (bodyStart >= source.length || source[bodyStart] != '{') return@forEach
+            val bodyEnd = matchingDelimiter(source, bodyStart, '{', '}') ?: return@forEach
+            return source.substring(bodyStart + 1, bodyEnd)
+        }
+        return null
+    }
+
+    private fun matchingDelimiter(source: String, start: Int, open: Char, close: Char): Int? {
+        var depth = 0
+        var index = start
+        var quoted: Char? = null
+        var escaped = false
+        var lineComment = false
+        var blockComment = false
+        while (index < source.length) {
+            val character = source[index]
+            val next = source.getOrNull(index + 1)
+            when {
+                lineComment -> if (character == '\n') lineComment = false
+                blockComment -> if (character == '*' && next == '/') {
+                    blockComment = false
+                    index++
+                }
+                quoted != null -> when {
+                    escaped -> escaped = false
+                    character == '\\' -> escaped = true
+                    character == quoted -> quoted = null
+                }
+                character == '/' && next == '/' -> {
+                    lineComment = true
+                    index++
+                }
+                character == '/' && next == '*' -> {
+                    blockComment = true
+                    index++
+                }
+                character == '"' || character == '\'' -> quoted = character
+                character == open -> depth++
+                character == close -> {
+                    depth--
+                    if (depth == 0) return index
+                }
+            }
+            index++
+        }
+        return null
+    }
+
+    private fun genericReturnBody(body: String): Boolean {
+        val withoutComments = body
+            .replace(Regex("/\\*.*?\\*/", setOf(RegexOption.DOT_MATCHES_ALL)), "")
+            .replace(Regex("//[^\\r\\n]*"), "")
+            .replace(Regex("\\s+"), "")
+        return withoutComments == "return0;" || withoutComments == "return;"
+    }
+
+    private fun recoveredEvidenceIsTrivial(function: RecoveredFunction): Boolean =
+        function.decompiledC?.let { recovered ->
+            findFunctionBody(recovered, function.name)?.let(::genericReturnBody)
+                ?: Regex("\\{\\s*return(?:\\s+0)?\\s*;\\s*}", RegexOption.DOT_MATCHES_ALL).containsMatchIn(recovered)
+        } == true
+
+    /**
+     * Preserve code layout while hiding tokens that occur only in comments and literals. This keeps
+     * acceptance checks from treating diagnostics such as "copied 1 byte" as C type declarations.
+     */
+    private fun codeWithoutCommentsOrLiterals(source: String): String = buildString(source.length) {
+        var index = 0
+        var lineComment = false
+        var blockComment = false
+        var quoted: Char? = null
+        var escaped = false
+        while (index < source.length) {
+            val character = source[index]
+            val next = source.getOrNull(index + 1)
+            when {
+                lineComment -> {
+                    append(if (character == '\n') '\n' else ' ')
+                    if (character == '\n') lineComment = false
+                }
+                blockComment -> {
+                    append(if (character == '\n') '\n' else ' ')
+                    if (character == '*' && next == '/') {
+                        append(' ')
+                        index++
+                        blockComment = false
+                    }
+                }
+                quoted != null -> {
+                    append(if (character == '\n') '\n' else ' ')
+                    when {
+                        escaped -> escaped = false
+                        character == '\\' -> escaped = true
+                        character == quoted -> quoted = null
+                    }
+                }
+                character == '/' && next == '/' -> {
+                    append("  ")
+                    index++
+                    lineComment = true
+                }
+                character == '/' && next == '*' -> {
+                    append("  ")
+                    index++
+                    blockComment = true
+                }
+                character == '"' || character == '\'' -> {
+                    append(' ')
+                    quoted = character
+                }
+                else -> append(character)
+            }
+            index++
+        }
+    }
+
+    /**
+     * Recognize a top-level C declarator for [name]. References in function bodies, parameters,
+     * array bounds, and other globals' initializers do not qualify as definitions.
+     */
+    private fun hasGlobalDefinition(code: String, name: String): Boolean {
+        val occurrences = Regex("\\b${Regex.escape(name)}\\b").findAll(code).iterator()
+        if (!occurrences.hasNext()) return false
+        var occurrence = occurrences.next()
+        var braceDepth = 0
+        var parenthesisDepth = 0
+        var bracketDepth = 0
+        var statementStart = 0
+        for (index in code.indices) {
+            if (index == occurrence.range.first) {
+                if (braceDepth == 0 && bracketDepth == 0) {
+                    val prefix = code.substring(statementStart, occurrence.range.first)
+                    val functionPointerDeclarator = parenthesisDepth == 1 && prefix.trimEnd().endsWith("(*")
+                    val declarationPrefix = parenthesisDepth == 0 || functionPointerDeclarator
+                    val hasType = Regex("[A-Za-z_]\\w*").containsMatchIn(prefix)
+                    val isExternal = Regex("\\bextern\\b").containsMatchIn(prefix)
+                    val suffix = code.substring(occurrence.range.last + 1).trimStart()
+                    val declaratorSuffix = when {
+                        functionPointerDeclarator -> suffix.startsWith(')')
+                        suffix.startsWith('(') -> false
+                        suffix.isEmpty() -> true
+                        else -> suffix.first() in setOf(';', '=', ',', '[')
+                    }
+                    if (declarationPrefix && hasType && !isExternal && '=' !in prefix && declaratorSuffix) {
+                        return true
+                    }
+                }
+                if (!occurrences.hasNext()) break
+                occurrence = occurrences.next()
+            }
+            when (code[index]) {
+                '{' -> braceDepth++
+                '}' -> {
+                    if (braceDepth > 0) braceDepth--
+                    if (braceDepth == 0) statementStart = index + 1
+                }
+                '(' -> parenthesisDepth++
+                ')' -> if (parenthesisDepth > 0) parenthesisDepth--
+                '[' -> bracketDepth++
+                ']' -> if (bracketDepth > 0) bracketDepth--
+                ';' -> if (braceDepth == 0 && parenthesisDepth == 0 && bracketDepth == 0) {
+                    statementStart = index + 1
+                }
+            }
+        }
+        return false
+    }
+
+    private fun writeAtomically(path: Path, content: String) {
+        path.parent?.createDirectories()
+        val temporary = Files.createTempFile(path.parent ?: path.toAbsolutePath().parent, ".${path.fileName}.", ".tmp")
+        try {
+            temporary.writeText(content)
+            try {
+                Files.move(
+                    temporary,
+                    path,
+                    StandardCopyOption.ATOMIC_MOVE,
+                    StandardCopyOption.REPLACE_EXISTING,
+                )
+            } catch (_: AtomicMoveNotSupportedException) {
+                Files.move(temporary, path, StandardCopyOption.REPLACE_EXISTING)
+            }
+        } finally {
+            temporary.deleteIfExists()
+        }
     }
 
     private fun moduleFingerprint(
@@ -405,6 +971,7 @@ object SourceTreeGenerator {
         moduleHeader: String,
         privateHeader: String,
         dependencyHeaders: Map<String, String>,
+        observedBehavior: String?,
     ): String {
         val functions = module.functionIds.sorted().joinToString("\n") { id ->
             val item = model.functions.single { it.id == id }
@@ -413,7 +980,12 @@ object SourceTreeGenerator {
         }
         val globals = module.globalIds.sorted().joinToString("\n") { id -> model.globals.single { it.id == id }.toString() }
         val dependencies = dependencyHeaders.toSortedMap().entries.joinToString("\n") { it.key + "\n" + it.value }
-        return sha256((functions + "\n" + globals + "\n" + sharedHeader + moduleHeader + privateHeader + dependencies).toByteArray())
+        return sha256(
+            (
+                functions + "\n" + globals + "\n" + sharedHeader + moduleHeader + privateHeader +
+                    dependencies + "\n" + observedBehavior.orEmpty()
+                ).toByteArray(),
+        )
     }
 
     private fun generationOrder(plan: ModulePlan, model: RecoveredProgramModel): List<PlannedModule> {
@@ -484,7 +1056,11 @@ object SourceTreeGenerator {
         """.trimIndent() + "\n"
     }
 
-    private fun renderUnresolvedMarkdown(model: RecoveredProgramModel): String {
+    private fun renderUnresolvedMarkdown(
+        model: RecoveredProgramModel,
+        plan: ModulePlan,
+        unresolvedImplementationIds: Set<String>,
+    ): String {
         val rows = buildList {
             model.functions.filter { it.status != RecoveryStatus.RECOVERED }.forEach { add("function" to Triple(it.id, it.status, "0x${it.address.toString(16)}")) }
             model.globals.filter { it.status != RecoveryStatus.RECOVERED }.forEach { add("global" to Triple(it.id, it.status, "0x${it.address.toString(16)}")) }
@@ -498,6 +1074,20 @@ object SourceTreeGenerator {
                 append("| Kind | Stable ID | Status | Provenance |\n|---|---|---|---|\n")
                 rows.sortedBy { it.second.first }.forEach { (kind, details) ->
                     append("| $kind | `${details.first}` | ${details.second.name.lowercase()} | ${details.third} |\n")
+                }
+            }
+            append("\n## Implementation generation\n\n")
+            if (unresolvedImplementationIds.isEmpty()) {
+                append("Every planner-owned implementation passed the acceptance checks.\n")
+            } else {
+                val owner = plan.modules.flatMap { module ->
+                    (module.functionIds + module.globalIds).map { id -> id to module.id }
+                }.toMap()
+                append("These planner-owned entities are not accepted implementations. See the attributable module report for the exact evidence.\n\n")
+                append("| Stable ID | Owning module | Evidence |\n|---|---|---|\n")
+                unresolvedImplementationIds.sorted().forEach { id ->
+                    val moduleId = owner.getValue(id)
+                    append("| `$id` | `$moduleId` | `reports/modules/$moduleId.json` |\n")
                 }
             }
         }
@@ -553,6 +1143,19 @@ internal fun safeCName(name: String): String {
         sanitized.first().isDigit() -> "fn_$sanitized"
         collision -> "recovered_$sanitized"
         else -> sanitized
+    }
+}
+
+private fun String.jsonEscape(): String = buildString {
+    for (character in this@jsonEscape) {
+        when (character) {
+            '\\' -> append("\\\\")
+            '"' -> append("\\\"")
+            '\n' -> append("\\n")
+            '\r' -> append("\\r")
+            '\t' -> append("\\t")
+            else -> if (character.code < 0x20) append("\\u%04x".format(character.code)) else append(character)
+        }
     }
 }
 
