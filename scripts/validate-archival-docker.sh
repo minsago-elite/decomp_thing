@@ -35,6 +35,14 @@ run_reconstruction large-symbols symbols-b
 run_reconstruction large-stripped stripped-a
 run_reconstruction large-stripped stripped-b
 
+# The image uses a fixed non-root UID, while hosted runners may use another UID.
+# Normalize only this disposable mount from inside the owning container before
+# host-side determinism checks and cleanup.
+docker run --rm \
+  --volume "$validation_root/output:/output" \
+  --entrypoint chmod \
+  "$image" -R a+rwX /output
+
 cmp "$validation_root/output/symbols-a/analysis/reports/program_model.json" \
     "$validation_root/output/symbols-b/analysis/reports/program_model.json"
 cmp "$validation_root/output/symbols-a/source-tree.zip" \
