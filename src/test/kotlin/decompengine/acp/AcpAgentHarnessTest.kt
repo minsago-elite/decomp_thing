@@ -37,6 +37,7 @@ import kotlin.test.assertEquals
 import kotlin.test.assertFailsWith
 import kotlin.test.assertFalse
 import kotlin.test.assertNotNull
+import kotlin.test.assertNull
 import kotlin.test.assertTrue
 
 class AcpAgentHarnessTest {
@@ -494,6 +495,78 @@ class AcpAgentHarnessTest {
         assertProcessStopped(assertNotNull(harness.latestDiagnostics()).pid)
     }
 
+    @Test
+    fun `official ACP filesystem callbacks enforce policy and retain metadata-only audit`() {
+        val fixture = fixture()
+        val harness = harness("fs-read-write")
+
+        val result = harness.execute(fixture.request)
+
+        assertEquals(AgentStopReason.COMPLETED, result.stopReason)
+        assertEquals("new source through broker\n", fixture.source.readText())
+        assertEquals(AgentFileChangeKind.MODIFIED, result.changes.single().kind)
+        val audit = harness.latestFilesystemAudit()
+        assertEquals(listOf(0L, 1L), audit.map { it.sequence })
+        assertEquals(List(2) { "fixture-session" }, audit.map { it.sessionId })
+        assertEquals(listOf("fs/read_text_file", "fs/write_text_file"), audit.map { it.method })
+        assertEquals(List(2) { "src/module.c" }, audit.map { assertNotNull(it.policyPath).relativePath })
+        assertTrue(audit.all { it.outcome == AcpFilesystemAuditOutcome.ALLOWED })
+        assertFalse(audit.toString().contains(fixture.workspace.toString()))
+        assertFalse(audit.toString().contains("new source through broker"))
+        assertProcessStopped(assertNotNull(harness.latestDiagnostics()).pid)
+    }
+
+    @Test
+    fun `filesystem capability advertisement is frozen to each workflow allowlist`() {
+        val readFixture = fixture()
+        val readRequest = readFixture.request.withPolicy(
+            AgentAccessPolicy(
+                listOf(
+                    AgentPathRule(
+                        AgentWorkspacePath("project", "src/module.c"),
+                        setOf(AgentOperation.READ_FILE),
+                    ),
+                ),
+            ),
+        )
+        assertEquals(AgentStopReason.NO_CHANGES, harness("fs-cap-read-only").execute(readRequest).stopReason)
+
+        val writeFixture = fixture()
+        val writeRequest = writeFixture.request.withPolicy(
+            AgentAccessPolicy(
+                listOf(
+                    AgentPathRule(
+                        AgentWorkspacePath("project", "src/module.c"),
+                        setOf(AgentOperation.WRITE_FILE),
+                    ),
+                ),
+            ),
+        )
+        assertEquals(AgentStopReason.NO_CHANGES, harness("fs-cap-write-only").execute(writeRequest).stopReason)
+
+        val disabledFixture = fixture()
+        val disabledRequest = disabledFixture.request.withPolicy(AgentAccessPolicy(emptyList()))
+        assertEquals(AgentStopReason.NO_CHANGES, harness("fs-cap-none").execute(disabledRequest).stopReason)
+    }
+
+    @Test
+    fun `filesystem containment denial crosses the official JSON-RPC boundary without path disclosure`() {
+        val fixture = fixture()
+        val harness = harness("fs-denied-outside")
+
+        val result = harness.execute(fixture.request)
+
+        assertEquals(AgentStopReason.NO_CHANGES, result.stopReason)
+        assertEquals("old source\n", fixture.source.readText())
+        val decision = harness.latestFilesystemAudit().single()
+        assertEquals("fixture-session", decision.sessionId)
+        assertEquals("fs/read_text_file", decision.method)
+        assertEquals(AcpFilesystemAuditOutcome.DENIED, decision.outcome)
+        assertEquals(AcpFilesystemAuditReason.OUTSIDE_WORKSPACE, decision.reason)
+        assertNull(decision.policyPath)
+        assertFalse(decision.toString().contains(fixture.workspace.parent.toString()))
+    }
+
     private data class Fixture(
         val workspace: Path,
         val source: Path,
@@ -571,6 +644,16 @@ class AcpAgentHarnessTest {
                 maxInputTokens = limits.maxInputTokens,
                 maxOutputTokens = limits.maxOutputTokens,
             ),
+            cancellation,
+        )
+
+    private fun AgentExecutionRequest.withPolicy(policy: AgentAccessPolicy): AgentExecutionRequest =
+        AgentExecutionRequest(
+            objective,
+            workspaceRoots,
+            contextInputs,
+            policy,
+            limits,
             cancellation,
         )
 

@@ -53,6 +53,22 @@ initialize = read_message()
 if initialize is None or initialize.get("method") != "initialize":
     raise SystemExit(91)
 
+expected_fs = {
+    "fs-read-write": {"readTextFile": True, "writeTextFile": True},
+    "fs-denied-outside": {"readTextFile": True, "writeTextFile": True},
+    "fs-cap-read-only": {"readTextFile": True, "writeTextFile": False},
+    "fs-cap-write-only": {"readTextFile": False, "writeTextFile": True},
+    "fs-cap-none": None,
+}.get(MODE, "unchecked")
+if expected_fs != "unchecked":
+    actual_fs = initialize.get("params", {}).get("clientCapabilities", {}).get("fs")
+    if actual_fs != expected_fs:
+        respond(initialize, error={
+            "code": -32602,
+            "message": "unexpected client filesystem capabilities",
+        })
+        raise SystemExit(96)
+
 if MODE == "malformed-initialize":
     sys.stdout.write("{not-json\n")
     sys.stdout.flush()
@@ -118,6 +134,61 @@ prompt_text = prompt.get("params", {}).get("prompt", [{}])[0].get("text", "")
 if "edit the fixture" not in prompt_text or "compiler evidence" not in prompt_text:
     respond(prompt, error={"code": -32602, "message": "prompt lost objective or context"})
     raise SystemExit(95)
+
+if MODE in ("fs-cap-read-only", "fs-cap-write-only", "fs-cap-none"):
+    respond(prompt, {"stopReason": "end_turn"})
+    raise SystemExit(0)
+
+if MODE == "fs-denied-outside":
+    outside = os.path.abspath(os.path.join(cwd, "..", "outside.txt"))
+    send({
+        "jsonrpc": "2.0",
+        "id": 102,
+        "method": "fs/read_text_file",
+        "params": {
+            "sessionId": "fixture-session",
+            "path": outside,
+        },
+    })
+    denied_response = read_message()
+    if denied_response is None or denied_response.get("id") != 102:
+        raise SystemExit(100)
+    if denied_response.get("error", {}).get("code") != -32602:
+        raise SystemExit(101)
+    respond(prompt, {"stopReason": "end_turn"})
+    raise SystemExit(0)
+
+if MODE == "fs-read-write":
+    source = os.path.join(cwd, "src", "module.c")
+    send({
+        "jsonrpc": "2.0",
+        "id": 100,
+        "method": "fs/read_text_file",
+        "params": {
+            "sessionId": "fixture-session",
+            "path": source,
+            "line": 1,
+            "limit": 1,
+        },
+    })
+    read_response = read_message()
+    if read_response is None or read_response.get("id") != 100:
+        raise SystemExit(97)
+    if read_response.get("result", {}).get("content") != "old source\n":
+        raise SystemExit(98)
+    send({
+        "jsonrpc": "2.0",
+        "id": 101,
+        "method": "fs/write_text_file",
+        "params": {
+            "sessionId": "fixture-session",
+            "path": source,
+            "content": "new source through broker\n",
+        },
+    })
+    write_response = read_message()
+    if write_response is None or write_response.get("id") != 101 or "error" in write_response:
+        raise SystemExit(99)
 if READY and MODE != "cancel-after-response":
     with open(READY, "w", encoding="utf-8") as ready:
         ready.write("ready\n")
@@ -225,8 +296,9 @@ update({
 })
 
 source = os.path.join(cwd, "src", "module.c")
-with open(source, "w", encoding="utf-8") as output:
-    output.write("new source\n")
+if MODE != "fs-read-write":
+    with open(source, "w", encoding="utf-8") as output:
+        output.write("new source\n")
 
 update({
     "sessionUpdate": "tool_call_update",

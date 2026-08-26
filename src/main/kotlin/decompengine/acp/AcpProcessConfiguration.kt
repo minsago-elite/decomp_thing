@@ -53,6 +53,7 @@ class AcpProcessConfiguration(
     val maximumFrameBytes: Int = 1024 * 1024,
     val maximumStderrBytes: Int = 256 * 1024,
     val implementationId: String = "acp-v1",
+    val filesystemLimits: AcpFilesystemLimits = AcpFilesystemLimits(),
 ) {
     val arguments: List<String> = Collections.unmodifiableList(ArrayList(arguments))
     val environment: Map<String, String> = Collections.unmodifiableMap(LinkedHashMap(environment))

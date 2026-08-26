@@ -21,6 +21,7 @@ tasks.test {
 
 dependencies {
     implementation("com.agentclientprotocol:acp:0.30.1")
+    implementation("net.java.dev.jna:jna:5.19.1")
     runtimeOnly("org.slf4j:slf4j-nop:2.0.16")
     implementation("org.jetbrains.kotlinx:kotlinx-serialization-json:1.9.0")
     testImplementation(kotlin("test"))

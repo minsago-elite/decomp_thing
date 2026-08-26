@@ -18,9 +18,11 @@ import com.agentclientprotocol.model.PlanEntryStatus
 import com.agentclientprotocol.model.PromptResponse
 import com.agentclientprotocol.model.RequestPermissionOutcome
 import com.agentclientprotocol.model.RequestPermissionResponse
+import com.agentclientprotocol.model.ReadTextFileResponse
 import com.agentclientprotocol.model.SessionUpdate
 import com.agentclientprotocol.model.StopReason
 import com.agentclientprotocol.model.ToolCallStatus
+import com.agentclientprotocol.model.WriteTextFileResponse
 import com.agentclientprotocol.protocol.AcpExpectedError
 import com.agentclientprotocol.protocol.JsonRpcException
 import com.agentclientprotocol.protocol.Protocol
@@ -101,10 +103,14 @@ class AcpAgentHarness(
     private val configuration: AcpProcessConfiguration,
 ) : AgentHarness {
     private val diagnostics = AtomicReference<AcpProcessDiagnostics?>()
+    private val filesystemAudit = AtomicReference<List<AcpFilesystemAuditRecord>>(emptyList())
 
     override fun implementationIdentifier(): String = configuration.implementationId
 
     fun latestDiagnostics(): AcpProcessDiagnostics? = diagnostics.get()
+
+    /** Metadata-only filesystem decisions from the latest execution on this harness. */
+    fun latestFilesystemAudit(): List<AcpFilesystemAuditRecord> = filesystemAudit.get()
 
     @OptIn(UnstableApi::class)
     override fun execute(
@@ -112,6 +118,7 @@ class AcpAgentHarness(
         onEvent: (AgentExecutionEvent) -> Unit,
     ): AgentExecutionResult {
         diagnostics.set(null)
+        filesystemAudit.set(emptyList())
         validateRequest(request)
         if (request.cancellation.isCancellationRequested()) {
             return AgentExecutionResult(AgentStopReason.CANCELLED, "cancelled before the ACP process started")
@@ -138,6 +145,8 @@ class AcpAgentHarness(
         val running = startProcess(request, translator.activity)
         val protocolReference = AtomicReference<Protocol?>()
         val protocolScopeReference = AtomicReference<CoroutineScope?>()
+        val filesystemReference = AtomicReference<AcpFilesystemBroker?>()
+        val filesystemAuditRecorder = AcpFilesystemAuditRecorder()
         var outcome: PromptOutcome? = null
         var primaryFailure: Throwable? = null
 
@@ -150,6 +159,8 @@ class AcpAgentHarness(
                     wallDeadline = wallDeadline,
                     protocolReference = protocolReference,
                     protocolScopeReference = protocolScopeReference,
+                    filesystemAuditRecorder = filesystemAuditRecorder,
+                    filesystemReference = filesystemReference,
                 )
             }
         } catch (failure: Throwable) {
@@ -168,8 +179,13 @@ class AcpAgentHarness(
             }
         }
 
-        val processDiagnostics = runBlocking {
-            running.shutdown(protocolReference.get(), protocolScopeReference.get(), configuration.timeouts.shutdown)
+        val processDiagnostics = try {
+            runBlocking {
+                running.shutdown(protocolReference.get(), protocolScopeReference.get(), configuration.timeouts.shutdown)
+            }
+        } finally {
+            filesystemReference.getAndSet(null)?.close()
+            filesystemAudit.set(filesystemAuditRecorder.snapshot())
         }
         diagnostics.set(processDiagnostics)
         running.failure.get()?.let { terminal ->
@@ -293,6 +309,8 @@ class AcpAgentHarness(
         wallDeadline: MonotonicDeadline,
         protocolReference: AtomicReference<Protocol?>,
         protocolScopeReference: AtomicReference<CoroutineScope?>,
+        filesystemAuditRecorder: AcpFilesystemAuditRecorder,
+        filesystemReference: AtomicReference<AcpFilesystemBroker?>,
     ): PromptOutcome {
         val protocolScope = CoroutineScope(SupervisorJob() + Dispatchers.Default)
         protocolScopeReference.set(protocolScope)
@@ -312,6 +330,12 @@ class AcpAgentHarness(
         transport.onClose { running.fail(AcpEofFailure("ACP stdout closed")) }
         val client = Client(protocol)
         protocol.start()
+        val filesystem = AcpFilesystemBroker.open(
+            request,
+            configuration.filesystemLimits,
+            filesystemAuditRecorder,
+        )
+        filesystemReference.set(filesystem)
 
         val agentInfo = awaitPhase(
             phase = "initialize",
@@ -324,7 +348,7 @@ class AcpAgentHarness(
             client.initialize(
                 ClientInfo(
                     protocolVersion = ACP_STABLE_PROTOCOL_VERSION,
-                    capabilities = ClientCapabilities(),
+                    capabilities = ClientCapabilities(fs = filesystem.capability),
                     implementation = Implementation("decomp_engine", "0.1.0"),
                     supportedProtocolVersions = setOf(ACP_STABLE_PROTOCOL_VERSION),
                 ),
@@ -355,7 +379,12 @@ class AcpAgentHarness(
                 ),
             ) { sessionId, _ ->
                 translator.recordSession(sessionId.value)
-                DenyingClientOperations(request.cancellation, translator)
+                PolicyClientOperations(
+                    request.cancellation,
+                    translator,
+                    filesystem,
+                    sessionId.value,
+                )
             }
         }
         translator.recordSession(session.sessionId.value)
@@ -1121,10 +1150,25 @@ private class AcpEventTranslator(
     }
 }
 
-private class DenyingClientOperations(
+private class PolicyClientOperations(
     private val cancellation: AgentCancellation,
     private val translator: AcpEventTranslator,
+    private val filesystem: AcpFilesystemBroker,
+    private val sessionId: String,
 ) : ClientSessionOperations {
+    override suspend fun fsReadTextFile(
+        path: String,
+        line: UInt?,
+        limit: UInt?,
+        _meta: JsonElement?,
+    ): ReadTextFileResponse = filesystem.readTextFile(sessionId, path, line, limit)
+
+    override suspend fun fsWriteTextFile(
+        path: String,
+        content: String,
+        _meta: JsonElement?,
+    ): WriteTextFileResponse = filesystem.writeTextFile(sessionId, path, content)
+
     override suspend fun requestPermissions(
         toolCall: SessionUpdate.ToolCallUpdate,
         permissions: List<PermissionOption>,
