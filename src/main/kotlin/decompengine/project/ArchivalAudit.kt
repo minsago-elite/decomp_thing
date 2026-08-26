@@ -11,7 +11,6 @@ import kotlin.io.path.exists
 import kotlin.io.path.isRegularFile
 import kotlin.io.path.readText
 import kotlin.io.path.readBytes
-import kotlin.io.path.writeText
 
 data class ArchivalAudit(
     val entityCount: Int,
@@ -100,7 +99,7 @@ object ArchivalProjectAuditor {
             moduleRevisionSha256 = moduleRevisions,
             unresolvedBehaviorReportIds = unresolvedBehavior,
         )
-        projectDir.resolve("reports/archival_audit.json").writeText(audit.toJson())
+        writeProjectEvidenceAtomically(projectDir.resolve("reports/archival_audit.json"), audit.toJson())
         return audit
     }
 }

@@ -4,10 +4,12 @@ import kotlinx.serialization.json.Json
 import kotlinx.serialization.json.jsonArray
 import kotlinx.serialization.json.jsonObject
 import kotlinx.serialization.json.jsonPrimitive
+import java.nio.file.Files
 import kotlin.io.path.createTempDirectory
 import kotlin.io.path.exists
 import kotlin.io.path.listDirectoryEntries
 import kotlin.io.path.readText
+import kotlin.io.path.writeText
 import kotlin.test.Test
 import kotlin.test.assertEquals
 import kotlin.test.assertFailsWith
@@ -26,8 +28,19 @@ class StrictProjectBuildTest {
         assertTrue(report.command.single { it.startsWith("CFLAGS=") }.contains("-Werror"))
         assertTrue(project.resolve("BUILDING.md").readText().contains(report.command.joinToString(" ").substringBefore("CFLAGS=")))
         assertTrue(project.resolve("BUILDING.md").readText().contains("does not require analysis caches"))
-        assertTrue(project.resolve("reports/build_contract.json").readText().contains("\"warningsAsErrors\": true"))
-        assertTrue(project.resolve("reports/build_contract.json").readText().contains("\"apiCredentialsRequired\": false"))
+        val contract = Json.parseToJsonElement(project.resolve("reports/build_contract.json").readText()).jsonObject
+        assertEquals(2, contract.getValue("schemaVersion").jsonPrimitive.content.toInt())
+        assertEquals("true", contract.getValue("warningsAsErrors").jsonPrimitive.content)
+        assertEquals("true", contract.getValue("reproduciblePathMapping").jsonPrimitive.content)
+        assertEquals("false", contract.getValue("apiCredentialsRequired").jsonPrimitive.content)
+        assertEquals("true", contract.getValue("sourceStableDuringBuild").jsonPrimitive.content)
+        assertTrue(contract.getValue("sourceRevisionSha256").jsonPrimitive.content.matches(Regex("[a-f0-9]{64}")))
+        assertTrue(contract.getValue("sourceInputs").jsonArray.any {
+            it.jsonObject.getValue("path").jsonPrimitive.content == "Makefile"
+        })
+        val artifact = contract.getValue("artifact").jsonObject
+        assertEquals("build/reconstructed", artifact.getValue("path").jsonPrimitive.content)
+        assertTrue(artifact.getValue("sha256").jsonPrimitive.content.matches(Regex("[a-f0-9]{64}")))
         assertTrue(report.logPath.readText().contains("--output-sync=target"))
         assertTrue(report.diagnosticsDir.listDirectoryEntries("*.log").isNotEmpty())
         assertTrue(report.diagnosticsDir.listDirectoryEntries("*.log").all { it.readText().contains("owner=") })
@@ -35,7 +48,7 @@ class StrictProjectBuildTest {
         val bundle = ArchivalPackager.create(project, project.parent.resolve("strict-build.zip"))
         assertTrue(bundle.payloadFiles.any { it.startsWith("reports/build/modules/") })
         assertTrue(project.resolve("ARCHIVE_README.md").readText().contains("command in `BUILDING.md`"))
-        val extracted = project.parent.resolve("extracted")
+        val extracted = project.resolveSibling("${project.fileName}-extracted")
         ArchivalBundleVerifier.extractAndVerify(bundle.archivePath, extracted)
         assertTrue(extracted.resolve("BUILDING.md").exists())
         assertEquals(0, MakeProjectBuilder.build(extracted).returnCode)
@@ -113,8 +126,35 @@ class StrictProjectBuildTest {
         }
     }
 
+    @Test
+    fun `build rejects symbolic output paths before writing host files`() {
+        val temp = createTempDirectory("strict-build-symlink-")
+        val project = temp.resolve("project")
+        SourceTreeGenerator.generate(buildableModel(), project)
+        val sentinel = temp.resolve("outside-sentinel").also { it.writeText("keep") }
+        Files.createSymbolicLink(project.resolve("BUILDING.md"), sentinel)
+
+        val failure = assertFailsWith<IllegalArgumentException> { MakeProjectBuilder.build(project) }
+
+        assertTrue(failure.message.orEmpty().contains("symbolic link"))
+        assertEquals("keep", sentinel.readText())
+    }
+
+    @Test
+    fun `build atomically replaces hard-linked evidence without changing host files`() {
+        val temp = createTempDirectory("strict-build-hardlink-")
+        val project = temp.resolve("project")
+        SourceTreeGenerator.generate(buildableModel(), project)
+        val sentinel = temp.resolve("outside-sentinel").also { it.writeText("keep") }
+        Files.createLink(project.resolve("reports/build_contract.json"), sentinel)
+
+        assertEquals(0, MakeProjectBuilder.build(project).returnCode)
+        assertEquals("keep", sentinel.readText())
+        assertTrue(project.resolve("reports/build_contract.json").readText().contains("\"returnCode\": 0"))
+    }
+
     private fun buildableModel() = RecoveredProgramModel(
-        inputSha256 = "strict-build-fixture",
+        inputSha256 = sha256("strict-build-fixture".toByteArray()),
         functions = listOf(
             RecoveredFunction(
                 id = "fn_0000000000001000",

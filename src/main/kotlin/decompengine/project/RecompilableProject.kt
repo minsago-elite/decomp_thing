@@ -7,8 +7,11 @@ import kotlinx.serialization.json.Json
 import kotlinx.serialization.json.jsonArray
 import kotlinx.serialization.json.jsonObject
 import kotlinx.serialization.json.jsonPrimitive
+import java.io.BufferedInputStream
 import java.nio.file.Files
+import java.nio.file.LinkOption
 import java.nio.file.Path
+import java.security.MessageDigest
 import kotlin.io.path.createDirectories
 import kotlin.io.path.exists
 import kotlin.io.path.isRegularFile
@@ -58,6 +61,65 @@ data class ProjectBuildConfiguration(
         "CC=$compilerExecutable",
         "CFLAGS=${cFlags.joinToString(" ")}",
     )
+}
+
+internal data class BuildSourceInput(
+    val path: String,
+    val bytes: Long,
+    val sha256: String,
+)
+
+internal data class BuildSourceRevision(
+    val sha256: String,
+    val inputs: List<BuildSourceInput>,
+)
+
+internal data class BuildArtifactIdentity(
+    val path: String,
+    val bytes: Long,
+    val sha256: String,
+)
+
+internal fun captureBuildSourceRevision(projectDir: Path): BuildSourceRevision {
+    val inputs = Files.walk(projectDir).use { paths ->
+        paths.filter { path ->
+            if (!Files.isRegularFile(path, LinkOption.NOFOLLOW_LINKS) || Files.isSymbolicLink(path)) return@filter false
+            val relative = path.relativeTo(projectDir).pathString.replace('\\', '/')
+            relative == "Makefile" || relative.startsWith("src/") || relative.startsWith("include/")
+        }.map { path ->
+            val relative = path.relativeTo(projectDir).pathString.replace('\\', '/')
+            require(relative.isNotBlank() && !relative.startsWith('/') && relative.split('/').none { it in setOf("", ".", "..") }) {
+                "build source path is not normalized: $relative"
+            }
+            val size = Files.size(path)
+            BuildSourceInput(relative, size, sha256File(path, size))
+        }.toList().sortedBy { it.path }
+    }
+    require(inputs.isNotEmpty() && inputs.any { it.path == "Makefile" }) {
+        "build source revision must contain Makefile and at least one input"
+    }
+    require(inputs.map { it.path }.distinct().size == inputs.size) { "build source inputs must be unique" }
+    val canonical = inputs.joinToString("") { input ->
+        "${input.path.length}:${input.path}:${input.bytes}:${input.sha256}\n"
+    }
+    return BuildSourceRevision(sha256(canonical.toByteArray(Charsets.UTF_8)), inputs)
+}
+
+private fun sha256File(path: Path, expectedBytes: Long): String {
+    val digest = MessageDigest.getInstance("SHA-256")
+    var observedBytes = 0L
+    BufferedInputStream(Files.newInputStream(path)).use { input ->
+        val buffer = ByteArray(DEFAULT_BUFFER_SIZE)
+        while (true) {
+            val count = input.read(buffer)
+            if (count < 0) break
+            observedBytes = Math.addExact(observedBytes, count.toLong())
+            require(observedBytes <= expectedBytes) { "file grew while its build identity was captured: $path" }
+            digest.update(buffer, 0, count)
+        }
+    }
+    require(observedBytes == expectedBytes) { "file changed while its build identity was captured: $path" }
+    return digest.digest().joinToString("") { "%02x".format(it) }
 }
 
 private fun renderUnresolvedReport(analysis: GhidraAnalysis): String {
@@ -148,21 +210,38 @@ object MakeProjectBuilder {
         projectDir: Path,
         configuration: ProjectBuildConfiguration = ProjectBuildConfiguration(),
     ): BuildReport {
-        if (!projectDir.resolve("Makefile").exists()) {
+        require(!Files.isSymbolicLink(projectDir)) { "generated project root must not be a symbolic link" }
+        val projectRoot = projectDir.toRealPath()
+        require(projectRoot.toString().none { it == '=' || it.code < 0x20 || it.code == 0x7f }) {
+            "generated project path cannot be encoded safely in GCC reproducible-prefix mappings: $projectRoot"
+        }
+        validateBuildProjectTree(projectRoot)
+        if (!projectRoot.resolve("Makefile").exists()) {
             throw BuildException("generated project is missing Makefile")
         }
-        val reportsDir = projectDir.resolve("reports").createDirectories()
+        resetBuildDirectory(projectRoot.resolve("build"))
+        val reportsDir = projectRoot.resolve("reports").createDirectories()
         val diagnosticsDir = reportsDir.resolve("build/modules").createDirectories()
-        val owners = discoverOwners(projectDir)
+        val owners = discoverOwners(projectRoot)
         val command = configuration.command()
-        writeBuildInstructions(projectDir, configuration)
+        writeBuildInstructions(projectRoot, configuration)
+        val sourceRevisionBeforeBuild = captureBuildSourceRevision(projectRoot)
         val processBuilder = ProcessBuilder(command)
-            .directory(projectDir.toFile())
+            .directory(projectRoot.toFile())
             .redirectErrorStream(true)
         sanitizeBuildEnvironment(processBuilder.environment())
+        processBuilder.environment()["PWD"] = projectRoot.toString()
         val process = processBuilder.start()
         val output = process.inputStream.bufferedReader().readText()
         val returnCode = process.waitFor()
+        val sourceRevisionAfterBuild = captureBuildSourceRevision(projectRoot)
+        val sourceStableDuringBuild = sourceRevisionBeforeBuild == sourceRevisionAfterBuild
+        val artifact = projectRoot.resolve("build/reconstructed").takeIf {
+            returnCode == 0 && Files.isRegularFile(it, LinkOption.NOFOLLOW_LINKS) && !Files.isSymbolicLink(it)
+        }?.let { path ->
+            val size = Files.size(path)
+            BuildArtifactIdentity("build/reconstructed", size, sha256File(path, size))
+        }
         val grouped = groupDiagnostics(output, owners)
         val failedOwners = determineFailedOwners(returnCode, grouped)
         Files.list(diagnosticsDir).use { paths ->
@@ -170,10 +249,26 @@ object MakeProjectBuilder {
         }
         writeOwnerDiagnostics(diagnosticsDir, owners, grouped, failedOwners)
         val logPath = reportsDir.resolve("build.log")
-        logPath.writeText(renderBuildLog(command, returnCode, owners, grouped))
-        reportsDir.resolve("build_contract.json").writeText(
-            renderBuildContract(configuration, command, owners, failedOwners, returnCode),
+        writeProjectEvidenceAtomically(logPath, renderBuildLog(command, returnCode, owners, grouped))
+        writeProjectEvidenceAtomically(
+            reportsDir.resolve("build_contract.json"),
+            renderBuildContract(
+                configuration,
+                command,
+                owners,
+                failedOwners,
+                returnCode,
+                sourceRevisionBeforeBuild,
+                sourceStableDuringBuild,
+                artifact,
+            ),
         )
+        if (!sourceStableDuringBuild) {
+            throw BuildException("build source inputs changed while the build command was running; see ${logPath.pathString}")
+        }
+        if (returnCode == 0 && artifact == null) {
+            throw BuildException("build command succeeded without producing build/reconstructed; see ${logPath.pathString}")
+        }
         if (returnCode != 0) {
             throw BuildException(
                 "generated project failed to build; owners=${failedOwners.joinToString(",")}; " +
@@ -181,7 +276,7 @@ object MakeProjectBuilder {
             )
         }
         return BuildReport(
-            projectDir = projectDir,
+            projectDir = projectRoot,
             returnCode = returnCode,
             logPath = logPath,
             diagnosticsDir = diagnosticsDir,
@@ -231,6 +326,27 @@ object MakeProjectBuilder {
         }
     }
 
+    private fun validateBuildProjectTree(projectDir: Path) {
+        Files.walk(projectDir).use { paths ->
+            paths.forEach { path ->
+                require(!Files.isSymbolicLink(path)) { "generated build project contains a symbolic link: $path" }
+                require(
+                    Files.isDirectory(path, LinkOption.NOFOLLOW_LINKS) ||
+                        Files.isRegularFile(path, LinkOption.NOFOLLOW_LINKS),
+                ) {
+                    "generated build project contains a non-regular filesystem entry: $path"
+                }
+            }
+        }
+    }
+
+    private fun resetBuildDirectory(buildDir: Path) {
+        if (!Files.exists(buildDir, LinkOption.NOFOLLOW_LINKS)) return
+        Files.walk(buildDir).use { paths ->
+            paths.sorted(Comparator.reverseOrder()).forEach(Files::delete)
+        }
+    }
+
     private fun groupDiagnostics(output: String, owners: List<BuildOwner>): Map<String, List<String>> {
         val grouped = linkedMapOf<String, MutableList<String>>()
         owners.forEach { grouped[it.id] = mutableListOf() }
@@ -241,7 +357,7 @@ object MakeProjectBuilder {
             val sourceOwner = owners.firstOrNull { line.contains(it.sourcePath) }
             val objectOwner = owners.firstOrNull { line.contains("${it.objectPath}:") }
             currentOwner = when {
-                line.contains("-o build/reconstructed") -> "link"
+                line.startsWith("[link] ") || line.contains("-o build/reconstructed") -> "link"
                 sourceOwner != null -> sourceOwner.id
                 objectOwner != null -> objectOwner.id
                 else -> currentOwner
@@ -271,7 +387,8 @@ object MakeProjectBuilder {
                 lines.isEmpty() -> "not-run-or-up-to-date"
                 else -> "compiled"
             }
-            diagnosticsDir.resolve(owner.diagnosticFile).writeText(
+            writeProjectEvidenceAtomically(
+                diagnosticsDir.resolve(owner.diagnosticFile),
                 buildString {
                     append("owner=").append(owner.id).append('\n')
                     append("source=").append(owner.sourcePath).append('\n')
@@ -284,7 +401,8 @@ object MakeProjectBuilder {
         listOf("link", "project").forEach { owner ->
             val lines = grouped[owner].orEmpty()
             if (lines.isNotEmpty() || owner in failedOwners) {
-                diagnosticsDir.resolve("_$owner.log").writeText(
+                writeProjectEvidenceAtomically(
+                    diagnosticsDir.resolve("_$owner.log"),
                     "owner=$owner\nstatus=${if (owner in failedOwners) "failed" else "completed"}\n\n" +
                         "[build-output]\n${lines.joinToString("\n", postfix = "\n")}",
                 )
@@ -315,16 +433,30 @@ object MakeProjectBuilder {
         owners: List<BuildOwner>,
         failedOwners: List<String>,
         returnCode: Int,
+        sourceRevision: BuildSourceRevision,
+        sourceStableDuringBuild: Boolean,
+        artifact: BuildArtifactIdentity?,
     ): String = buildString {
-        append("{\n  \"schemaVersion\": 1,")
+        append("{\n  \"schemaVersion\": 2,")
         append("\n  \"command\": [")
         append(command.joinToString(",") { "\"${it.escapeJson()}\"" })
         append("],\n  \"parallelism\": ").append(configuration.parallelism).append(',')
         append("\n  \"warningsAsErrors\": true,")
+        append("\n  \"reproduciblePathMapping\": true,")
         append("\n  \"declaredDependencies\": [\"GNU Make\",\"GCC\",\"POSIX shell\",\"POSIX find\",\"POSIX mkdir\",\"POSIX rm\"],")
         append("\n  \"apiCredentialsRequired\": false,")
         append("\n  \"analysisCachesRequired\": false,")
         append("\n  \"returnCode\": ").append(returnCode).append(',')
+        append("\n  \"sourceStableDuringBuild\": ").append(sourceStableDuringBuild).append(',')
+        append("\n  \"sourceRevisionSha256\": \"").append(sourceRevision.sha256).append("\",")
+        append("\n  \"sourceInputs\": [")
+        append(sourceRevision.inputs.joinToString(",") { input ->
+            "{\"path\":\"${input.path.escapeJson()}\",\"bytes\":${input.bytes},\"sha256\":\"${input.sha256}\"}"
+        })
+        append("],\n  \"artifact\": ")
+        append(artifact?.let { identity ->
+            "{\"path\":\"${identity.path}\",\"bytes\":${identity.bytes},\"sha256\":\"${identity.sha256}\"}"
+        } ?: "null").append(',')
         append("\n  \"failedOwners\": [")
         append(failedOwners.joinToString(",") { "\"${it.escapeJson()}\"" })
         append("],\n  \"modules\": [")
@@ -336,7 +468,8 @@ object MakeProjectBuilder {
 
     private fun writeBuildInstructions(projectDir: Path, configuration: ProjectBuildConfiguration) {
         val command = configuration.command().joinToString(" ", transform = ::shellDisplay)
-        projectDir.resolve("BUILDING.md").writeText(
+        writeProjectEvidenceAtomically(
+            projectDir.resolve("BUILDING.md"),
             """
             # Build the reconstructed project
 
@@ -346,7 +479,7 @@ object MakeProjectBuilder {
             $command
             ```
 
-            The build requires GNU Make, GCC, a POSIX shell, and the POSIX `find`, `mkdir`, and `rm` utilities. `-Werror` is mandatory. It does not require analysis caches, network access, or API credentials. Per-module compiler diagnostics are written under `reports/build/modules/`; `reports/build_contract.json` maps every source to its owning module.
+            The build requires GNU Make, GCC, a POSIX shell, and the POSIX `find`, `mkdir`, and `rm` utilities. `-Werror` is mandatory. The generated Makefile maps file, macro, and debug paths to a project-relative root so identical accepted source revisions do not retain workstation paths. The build does not require analysis caches, network access, or API credentials. Per-module compiler diagnostics are written under `reports/build/modules/`; `reports/build_contract.json` maps every source to its owning module.
             """.trimIndent() + "\n",
         )
     }
