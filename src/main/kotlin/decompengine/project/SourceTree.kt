@@ -232,6 +232,9 @@ object SourceTreeGenerator {
         val toolchain = renderToolchain()
         projectDir.resolve("reports/toolchain.json").writeText(toolchain)
         generated += evidence("reports/toolchain.json", toolchain, "environment", emptyList())
+        val unresolvedMarkdown = renderUnresolvedMarkdown(model)
+        projectDir.resolve("UNRESOLVED.md").writeText(unresolvedMarkdown)
+        generated += evidence("UNRESOLVED.md", unresolvedMarkdown, "evidence", emptyList())
         val manifest = SourceTreeManifest(
             inputSha256 = model.inputSha256,
             files = generated,
@@ -413,6 +416,25 @@ object SourceTreeGenerator {
               "note": "LLM model and prompt hashes are recorded per generated module when applicable."
             }
         """.trimIndent() + "\n"
+    }
+
+    private fun renderUnresolvedMarkdown(model: RecoveredProgramModel): String {
+        val rows = buildList {
+            model.functions.filter { it.status != RecoveryStatus.RECOVERED }.forEach { add("function" to Triple(it.id, it.status, "0x${it.address.toString(16)}")) }
+            model.globals.filter { it.status != RecoveryStatus.RECOVERED }.forEach { add("global" to Triple(it.id, it.status, "0x${it.address.toString(16)}")) }
+            model.types.filter { it.status != RecoveryStatus.RECOVERED }.forEach { add("type" to Triple(it.id, it.status, it.sourceAddress?.let { address -> "0x${address.toString(16)}" } ?: "no address")) }
+        }
+        return buildString {
+            append("# Unresolved reconstruction evidence\n\n")
+            append("This list is evidence-bounded. The generated project does not claim universal behavioral equivalence.\n\n")
+            if (rows.isEmpty()) append("No structurally unresolved entities were identified. Untested behavior remains unresolved.\n")
+            else {
+                append("| Kind | Stable ID | Status | Provenance |\n|---|---|---|---|\n")
+                rows.sortedBy { it.second.first }.forEach { (kind, details) ->
+                    append("| $kind | `${details.first}` | ${details.second.name.lowercase()} | ${details.third} |\n")
+                }
+            }
+        }
     }
 }
 

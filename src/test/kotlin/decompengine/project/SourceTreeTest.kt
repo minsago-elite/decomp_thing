@@ -17,7 +17,8 @@ class SourceTreeTest {
     @Test
     fun `generator emits buildable multi-module tree and provenance manifest`() {
         val project = createTempDirectory("source-tree-")
-        val manifest = SourceTreeGenerator.generate(model(), project)
+        val progress = mutableListOf<String>()
+        val manifest = SourceTreeGenerator.generate(model(), project, onModuleProgress = { _, _, module -> progress += module })
 
         assertTrue(project.resolve("src/modules/parse.c").exists())
         assertTrue(project.resolve("src/modules/render.c").exists())
@@ -27,10 +28,12 @@ class SourceTreeTest {
         assertEquals(0, MakeProjectBuilder.build(project).returnCode)
         assertEquals(manifest.editablePaths, SourceTreeManifestReader.editablePaths(project))
         assertTrue(project.resolve("source_tree_manifest.json").readText().contains("input-sha"))
+        assertEquals(listOf("render", "parse"), progress)
         val confidence = project.resolve("reports/confidence.json").readText()
         assertTrue(confidence.contains("\"id\":\"parse\""))
         assertTrue(confidence.contains("\"projectScore\""))
         assertTrue(confidence.contains("behavioral equivalence is not implied"))
+        assertTrue(project.resolve("UNRESOLVED.md").readText().contains("does not claim universal behavioral equivalence"))
     }
 
     @Test

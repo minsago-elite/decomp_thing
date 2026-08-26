@@ -66,6 +66,7 @@ class ReconstructionPipelineTest {
         assertEquals(
             listOf(
                 "Makefile",
+                "UNRESOLVED.md",
                 "include/decomp_types.h",
                 "include/modules/decomp.h",
                 "reports/analysis.json",

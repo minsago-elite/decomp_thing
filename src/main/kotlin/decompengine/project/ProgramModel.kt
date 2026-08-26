@@ -189,9 +189,16 @@ class DeterministicModulePlanner(private val maximumFunctionsPerModule: Int = 24
         require(overrides.keys.all { id -> functions.any { it.id == id } || model.globals.any { it.id == id } }) {
             "module override references an unknown entity"
         }
+        val anonymousComponents = anonymousComponents(functions)
+        val inference = functions.associate { function ->
+            function.id to when (val override = overrides[function.id]) {
+                null -> inferModule(function, functions, anonymousComponents)
+                else -> safeIdentifier(override) to "user override"
+            }
+        }
         val grouped = linkedMapOf<String, MutableList<RecoveredFunction>>()
         functions.forEach { function ->
-            val base = overrides[function.id]?.let(::safeIdentifier) ?: inferredModule(function)
+            val base = inference.getValue(function.id).first
             val groupsWithBase = grouped.keys.count { it == base || it.startsWith("${base}_") }
             val target = grouped.entries.lastOrNull { (name, members) ->
                 (name == base || name.startsWith("${base}_")) && members.size < maximumFunctionsPerModule
@@ -216,7 +223,7 @@ class DeterministicModulePlanner(private val maximumFunctionsPerModule: Int = 24
                 functionIds = members.map { it.id },
                 globalIds = globalsByModule[id].orEmpty().map { it.id },
                 boundaryEvidence = buildList {
-                    add(if (members.any { overrides.containsKey(it.id) }) "user override" else "stable symbol/address grouping")
+                    addAll(members.map { inference.getValue(it.id).second }.distinct().sorted())
                     if (referencedModules.isNotEmpty()) add("calls modules: ${referencedModules.joinToString(", ")}")
                 },
             )
@@ -228,10 +235,60 @@ class DeterministicModulePlanner(private val maximumFunctionsPerModule: Int = 24
         return ModulePlan(modules = modules, dependencyCycles = dependencyCycles(graph))
     }
 
-    private fun inferredModule(function: RecoveredFunction): String {
+    private fun namedModule(function: RecoveredFunction): String? {
         val meaningfulName = function.name.takeUnless { it.startsWith("FUN_") || it.startsWith("sub_") || it.startsWith("fn_") }
         val prefix = meaningfulName?.substringBefore('_')?.takeIf { it.length >= 3 }
-        return safeIdentifier(prefix ?: "core")
+        return prefix?.let(::safeIdentifier)
+    }
+
+    private fun inferModule(
+        function: RecoveredFunction,
+        functions: List<RecoveredFunction>,
+        anonymousComponents: Map<String, Pair<String, String>>,
+    ): Pair<String, String> {
+        namedModule(function)?.let { return it to "symbol prefix '${function.name.substringBefore('_')}'" }
+        data class Candidate(val module: String, val weight: Int, val reason: String)
+        val candidates = mutableListOf<Candidate>()
+        functions.forEach { other ->
+            val module = namedModule(other) ?: return@forEach
+            if (other.id in function.calls || function.id in other.calls) candidates += Candidate(module, 4, "call-graph affinity to $module")
+            val sharedGlobals = function.referencedGlobals.intersect(other.referencedGlobals)
+            if (sharedGlobals.isNotEmpty()) candidates += Candidate(module, 2, "shared globals with $module: ${sharedGlobals.sorted().joinToString(",")}")
+            val sharedStrings = function.strings.intersect(other.strings)
+            if (sharedStrings.isNotEmpty()) candidates += Candidate(module, 1, "shared strings with $module")
+        }
+        if (candidates.isNotEmpty()) {
+            val scores = candidates.groupBy { it.module }.mapValues { (_, items) -> items.sumOf { it.weight } }
+            val selected = scores.entries.sortedWith(compareByDescending<Map.Entry<String, Int>> { it.value }.thenBy { it.key }).first().key
+            val reasons = candidates.filter { it.module == selected }.map { it.reason }.distinct().sorted().joinToString("; ")
+            return selected to reasons
+        }
+        return anonymousComponents.getValue(function.id)
+    }
+
+    private fun anonymousComponents(functions: List<RecoveredFunction>): Map<String, Pair<String, String>> {
+        val anonymous = functions.filter { namedModule(it) == null }
+        val byId = anonymous.associateBy { it.id }
+        val adjacency = anonymous.associate { function ->
+            function.id to (function.calls.filter(byId::containsKey) + anonymous.filter { function.id in it.calls }.map { it.id }).toSet()
+        }
+        val result = mutableMapOf<String, Pair<String, String>>()
+        val visited = mutableSetOf<String>()
+        anonymous.forEach { start ->
+            if (!visited.add(start.id)) return@forEach
+            val queue = ArrayDeque(listOf(start.id))
+            val members = mutableListOf<String>()
+            while (queue.isNotEmpty()) {
+                val id = queue.removeFirst()
+                members += id
+                adjacency[id].orEmpty().sorted().forEach { if (visited.add(it)) queue.addLast(it) }
+            }
+            val root = members.map(byId::getValue).minBy { it.address }
+            val module = if (members.size == 1) "core" else "component_${root.address.toString(16)}"
+            val evidence = if (members.size == 1) "stable address fallback" else "anonymous call-graph component rooted at 0x${root.address.toString(16)}"
+            members.forEach { result[it] = module to evidence }
+        }
+        return result
     }
 
     private fun dependencyCycles(graph: Map<String, Set<String>>): List<List<String>> {

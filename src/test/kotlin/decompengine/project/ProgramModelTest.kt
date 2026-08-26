@@ -30,7 +30,8 @@ class ProgramModelTest {
         assertEquals(model.functions.map { it.id }.sorted(), plan.modules.flatMap { it.functionIds }.sorted())
         assertEquals(model.globals.map { it.id }.sorted(), plan.modules.flatMap { it.globalIds }.sorted())
         assertEquals("user_interface", plan.modules.single { "fn_0000000000401020" in it.functionIds }.id)
-        assertTrue(plan.toJson().contains("stable symbol/address grouping"))
+        assertTrue(plan.toJson().contains("symbol prefix"))
+        assertTrue(plan.toJson().contains("user override"))
     }
 
     @Test
@@ -69,6 +70,24 @@ class ProgramModelTest {
         assertEquals(named.toJson(), ProgramModelJson.read(named.toJson()).toJson())
         assertEquals(stripped.toJson(), ProgramModelJson.read(stripped.toJson()).toJson())
         assertTrue(stripped.functions.all { it.id == stableFunctionId(it.address) })
+    }
+
+    @Test
+    fun `anonymous functions use call graph shared data and string affinity`() {
+        val parse = RecoveredFunction("fn_10", "parse_input", 0x10UL, "int parse_input(void)", strings = setOf("token"))
+        val render = RecoveredFunction("fn_20", "render_page", 0x20UL, "int render_page(void)", referencedGlobals = setOf("global_ui"))
+        val byCall = RecoveredFunction("fn_30", "FUN_30", 0x30UL, "int FUN_30(void)", calls = setOf("fn_10"))
+        val byData = RecoveredFunction("fn_40", "FUN_40", 0x40UL, "int FUN_40(void)", referencedGlobals = setOf("global_ui"))
+        val byString = RecoveredFunction("fn_50", "FUN_50", 0x50UL, "int FUN_50(void)", strings = setOf("token"))
+        val model = RecoveredProgramModel(inputSha256 = "affinity", functions = listOf(parse, render, byCall, byData, byString))
+
+        val plan = DeterministicModulePlanner().plan(model)
+
+        assertTrue("fn_30" in plan.modules.single { it.id == "parse" }.functionIds)
+        assertTrue("fn_40" in plan.modules.single { it.id == "render" }.functionIds)
+        assertTrue("fn_50" in plan.modules.single { it.id == "parse" }.functionIds)
+        assertTrue(plan.modules.single { it.id == "parse" }.boundaryEvidence.any { "call-graph affinity" in it })
+        assertTrue(plan.modules.single { it.id == "render" }.boundaryEvidence.any { "shared globals" in it })
     }
 
     private fun fixtureModel() = RecoveredProgramModel(

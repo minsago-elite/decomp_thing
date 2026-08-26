@@ -30,10 +30,15 @@ run_reconstruction() {
     "$image" reconstruct "/input/$binary" --output "/output/$output" --evidence-only
 }
 
-run_reconstruction large-symbols symbols
+run_reconstruction large-symbols symbols-a
+run_reconstruction large-symbols symbols-b
 run_reconstruction large-stripped stripped-a
 run_reconstruction large-stripped stripped-b
 
+cmp "$validation_root/output/symbols-a/analysis/reports/program_model.json" \
+    "$validation_root/output/symbols-b/analysis/reports/program_model.json"
+cmp "$validation_root/output/symbols-a/source-tree.zip" \
+    "$validation_root/output/symbols-b/source-tree.zip"
 cmp "$validation_root/output/stripped-a/analysis/reports/program_model.json" \
     "$validation_root/output/stripped-b/analysis/reports/program_model.json"
 cmp "$validation_root/output/stripped-a/source-tree.zip" \
@@ -45,14 +50,14 @@ import pathlib
 import sys
 
 root = pathlib.Path(sys.argv[1])
-for name in ("symbols", "stripped-a"):
+for name in ("symbols-a", "stripped-a"):
     model = json.loads((root / name / "analysis/reports/program_model.json").read_text())
     assert model["schemaVersion"] == 1
     assert len(model["functions"]) >= 50
     assert all(item["id"].startswith("fn_") and item["address"].startswith("0x") for item in model["functions"])
     assert sum(len(item["referencedGlobals"]) for item in model["functions"]) > 0
     assert sum(len(item["strings"]) for item in model["functions"]) > 0
-    if name == "symbols":
+    if name == "symbols-a":
         assert len(model["types"]) > 0
     assert (root / name / "source-tree/build/reconstructed").is_file()
     assert (root / name / "source-tree.zip").is_file()
