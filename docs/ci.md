@@ -14,6 +14,14 @@ That command runs:
 
 - `./gradlew --no-daemon test`
 
+The repository workflow also runs the pinned Ghidra image against symbol-bearing and stripped large fixtures:
+
+```bash
+scripts/validate-archival-docker.sh
+```
+
+That heavier gate compiles both binaries, runs complete evidence-only source-tree reconstruction, requires non-empty global/string recovery, compares repeated stripped models and archives byte-for-byte, verifies every archive payload hash, and rebuilds the freshly extracted project.
+
 Project planning is maintained in [GitHub milestones](https://github.com/minsago-elite/decomp_thing/milestones) and [issues](https://github.com/minsago-elite/decomp_thing/issues). `ROADMAP.md` is deprecated and is not generated or checked by CI.
 
 ## Required CI Tools
@@ -29,7 +37,7 @@ Optional local integrations:
 
 - Set `ANGR_PYTHON` to an angr-enabled Python executable to run the real symbolic argv/stdin integration test. The Docker image pins angr for production exploration; ordinary JVM tests use a deterministic process-adapter fixture.
 - `BASE_URL`, `API_KEY`, and `MODEL` enable real OpenAI-compatible repair calls. Tests use a deterministic local compatible HTTP endpoint.
-- Ghidra can be supplied through the Kotlin JVM adapter. Tests use a fake JVM entrypoint for deterministic CI.
+- Ghidra can be supplied through the Kotlin JVM adapter. Fast tests use a fake JVM entrypoint; the archival Docker CI job uses the pinned real Ghidra release and bundled exporter.
 
 ## GitHub Actions Consumer Example
 
@@ -70,7 +78,8 @@ Useful artifacts to retain:
 - generated behavior reports under project `reports/`
 - generated exploration reports such as `exploration.json`
 - repair history reports such as `repair_history.json`
+- archival `source-tree.zip`, `ARCHIVE_MANIFEST.sha256`, and `reports/archival_audit.json`
 
 ## Determinism Notes
 
-The default CI path does not require external services. Real integrations are behind explicit adapter boundaries, while tests exercise deterministic fakes for Ghidra, angr, and the OpenAI-compatible API. This keeps CI stable while preserving the production integration shape.
+The default CI path does not require external services. Tests exercise deterministic fakes for angr and the OpenAI-compatible API. Ghidra is additionally exercised in the pinned Docker gate so exporter API compatibility and stripped-binary determinism are verified against the production integration.

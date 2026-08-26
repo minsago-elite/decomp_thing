@@ -28,8 +28,8 @@ fun interface ModuleReconstructor {
     fun reconstruct(request: ModuleReconstructionRequest): ReconstructedModule
 }
 
-/** Uses recovered C when available and explicit stubs otherwise; useful without API access and as an LLM baseline. */
-class EvidenceModuleReconstructor : ModuleReconstructor {
+/** Emits buildable evidence stubs by default; raw recovered C remains in the program model for later refinement. */
+class EvidenceModuleReconstructor(private val includeRecoveredC: Boolean = false) : ModuleReconstructor {
     override fun reconstruct(request: ModuleReconstructionRequest): ReconstructedModule {
         val functions = request.module.functionIds.map { id -> request.model.functions.single { it.id == id } }
         val globals = request.module.globalIds.map { id -> request.model.globals.single { it.id == id } }
@@ -43,7 +43,7 @@ class EvidenceModuleReconstructor : ModuleReconstructor {
             }
             functions.forEach { function ->
                 append("/* ${function.id} @ 0x${function.address.toString(16)}; status=${function.status.name.lowercase()} */\n")
-                val recovered = function.decompiledC?.trim()?.takeIf(String::isNotEmpty)
+                val recovered = function.decompiledC?.trim()?.takeIf(String::isNotEmpty)?.takeIf { includeRecoveredC }
                 if (recovered != null) append(recovered).append("\n\n")
                 else append(stub(function)).append("\n\n")
             }
@@ -57,6 +57,9 @@ class EvidenceModuleReconstructor : ModuleReconstructor {
         return "$prototype {\n$body\n}"
     }
 }
+
+/** Uses already-normalized recovered C, primarily for trusted fixtures and post-normalization pipelines. */
+class RecoveredCModuleReconstructor : ModuleReconstructor by EvidenceModuleReconstructor(includeRecoveredC = true)
 
 class BoundedLlmModuleReconstructor(
     private val client: RepairClient,
@@ -194,7 +197,13 @@ object SourceTreeGenerator {
 
         val hasRecoveredMain = model.functions.any { safeCName(it.name) == "main" }
         if (!hasRecoveredMain) {
-            val entry = model.functions.firstOrNull { safeCName(it.name) == "decomp_engine_main" } ?: model.functions.minByOrNull { it.address }
+            val entry = model.functions.firstOrNull { safeCName(it.name) == "decomp_engine_main" }
+                ?: model.functions.firstOrNull { safeCName(it.name) in setOf("entry", "recovered__start") }
+                ?: model.functions.minByOrNull { it.address }
+            val entryBody = entry?.let {
+                if (normalizedPrototype(it).startsWith("void ")) "${safeCName(it.name)}();\n    return 0;"
+                else "return ${safeCName(it.name)}();"
+            } ?: "return 0;"
             val mainSource = """
                 #include "decomp_types.h"
                 ${entry?.let { "extern ${normalizedPrototype(it)};" } ?: ""}
@@ -202,7 +211,7 @@ object SourceTreeGenerator {
                 int main(int argc, char **argv) {
                     (void)argc;
                     (void)argv;
-                    return ${entry?.let { "${safeCName(it.name)}()" } ?: "0"};
+                    $entryBody
                 }
             """.trimIndent() + "\n"
             projectDir.resolve("src/main.c").writeText(mainSource)
@@ -409,9 +418,17 @@ object SourceTreeGenerator {
 
 internal fun normalizedPrototype(function: RecoveredFunction): String {
     val raw = normalizeGhidraTypes(function.prototype.trim().removeSuffix(";"))
-    if (Regex("\\b${Regex.escape(function.name)}\\s*\\(").containsMatchIn(raw)) return raw.replaceFirst(function.name, safeCName(function.name))
-    return "int ${safeCName(function.name)}(void)"
+    val name = safeCName(function.name)
+    if (name == "main") return "int main(int argc, char **argv)"
+    val rawReturn = raw.substringBefore(function.name).trim()
+    val decompiledReturn = function.decompiledC?.trimStart()?.substringBefore(function.name)?.trim()?.substringAfterLast('\n')?.trim()
+    val returnType = decompiledReturn?.takeIf(::portableReturnType) ?: rawReturn.takeIf(::portableReturnType) ?: "int"
+    return "$returnType $name(void)"
 }
+
+private fun portableReturnType(value: String): Boolean = value.matches(
+    Regex("(void|char|short|int|long|float|double|size_t|u?int(8|16|32|64)_t)(\\s+long|\\s*\\*)*"),
+)
 
 private fun globalDeclaration(global: RecoveredGlobal, external: Boolean): String {
     val type = normalizeGhidraTypes(global.type.trim())
@@ -419,10 +436,15 @@ private fun globalDeclaration(global: RecoveredGlobal, external: Boolean): Strin
     val array = Regex("^(.+)\\[(\\d+)]$").matchEntire(type)
     val declaration = if (array == null) "$type $name" else "${array.groupValues[1]} $name[${array.groupValues[2]}]"
     if (external) return "extern $declaration;"
-    val initializer = global.initializer?.trim()?.takeIf {
-        it.matches(Regex("[-+]?((0x)?[0-9a-fA-F]+|[0-9]+([uUlLfF]|[uU][lL])*)")) ||
+    val rawInitializer = global.initializer?.trim()?.split(Regex("\\s+"), limit = 2)?.first()
+    val initializer = when {
+        '*' in type -> "0"
+        rawInitializer?.matches(Regex("[0-9a-fA-F]+h")) == true -> "0x${rawInitializer.dropLast(1)}"
+        else -> rawInitializer?.takeIf {
+        it.matches(Regex("[-+]?(0x[0-9a-fA-F]+|0|[1-9][0-9]*)([uUlLfF]|[uU][lL])?")) ||
             (it.startsWith('"') && it.endsWith('"')) || (it.startsWith('{') && it.endsWith('}'))
-    } ?: "0"
+        } ?: "0"
+    }
     return "$declaration = $initializer;"
 }
 
@@ -432,10 +454,16 @@ private fun normalizeGhidraTypes(value: String): String = value
     .replace(Regex("\\bundefined2\\b"), "uint16_t")
     .replace(Regex("\\bundefined1\\b|\\bundefined\\b|\\bbyte\\b"), "uint8_t")
     .replace(Regex("\\blonglong\\b"), "long long")
+    .replace(Regex("\\bpointer\\b"), "void *")
 
 internal fun safeCName(name: String): String {
     val sanitized = name.replace(Regex("[^A-Za-z0-9_]+"), "_").ifBlank { "recovered" }
-    return if (sanitized.first().isDigit()) "fn_$sanitized" else sanitized
+    val collision = sanitized in setOf("_init", "_fini", "_start", "stdin", "stdout", "stderr") || sanitized.startsWith("__")
+    return when {
+        sanitized.first().isDigit() -> "fn_$sanitized"
+        collision -> "recovered_$sanitized"
+        else -> sanitized
+    }
 }
 
 object SourceTreeManifestReader {

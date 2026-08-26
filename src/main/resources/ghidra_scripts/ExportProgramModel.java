@@ -135,7 +135,10 @@ public class ExportProgramModel extends GhidraScript {
                         Address target = reference.getToAddress();
                         if (!target.isMemoryAddress()) continue;
                         Data data = currentProgram.getListing().getDataContaining(target);
-                        if (data != null && data.hasStringValue() && data.getValue() != null) strings.add(data.getValue().toString());
+                        if (data != null && data.hasStringValue() && data.getValue() != null) {
+                            strings.add(data.getValue().toString());
+                            continue;
+                        }
                         if (reference.getReferenceType().isData() && currentProgram.getFunctionManager().getFunctionContaining(target) == null) {
                             GlobalEvidence global = globalAt(target);
                             globals.putIfAbsent(global.address.getOffset(), global);

@@ -6,6 +6,7 @@ import decompengine.project.ArchivalProjectAuditor
 import decompengine.project.DeterministicModulePlanner
 import decompengine.project.MakeProjectBuilder
 import decompengine.project.RecoveredFunction
+import decompengine.project.RecoveredCModuleReconstructor
 import decompengine.project.RecoveredGlobal
 import decompengine.project.RecoveredProgramModel
 import decompengine.project.RecoveredType
@@ -76,7 +77,7 @@ class ArchivalProjectScaleIntegrationTest {
             ),
         )
         val project = temp.resolve("project")
-        SourceTreeGenerator.generate(model, project)
+        SourceTreeGenerator.generate(model, project, reconstructor = RecoveredCModuleReconstructor())
         val rebuilt = MakeProjectBuilder.build(project).projectDir.resolve("build/reconstructed")
 
         val report = BehaviorComparator().compare(
@@ -102,7 +103,11 @@ class ArchivalProjectScaleIntegrationTest {
         val original = compile(originalSource, temp.resolve("original"), listOf("-O2", "-fPIE", "-pie"))
         check(command(listOf("strip", "--strip-all", original.toString())).first == 0)
         val project = temp.resolve("project")
-        SourceTreeGenerator.generate(model.copy(inputSha256 = sha256(original.readBytes())), project)
+        SourceTreeGenerator.generate(
+            model.copy(inputSha256 = sha256(original.readBytes())),
+            project,
+            reconstructor = RecoveredCModuleReconstructor(),
+        )
         val rebuilt = MakeProjectBuilder.build(project).projectDir.resolve("build/reconstructed")
         original.parent.resolve("sample.txt").writeText("from-file\n")
         rebuilt.parent.resolve("sample.txt").writeText("from-file\n")
