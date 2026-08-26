@@ -138,7 +138,7 @@ object SourceTreeGenerator {
         val includeDir = projectDir.resolve("include").createDirectories()
         val modulesIncludeDir = includeDir.resolve("modules").createDirectories()
         val modulesSourceDir = projectDir.resolve("src/modules").createDirectories()
-        projectDir.resolve("reports").createDirectories()
+        val moduleReportsDir = projectDir.resolve("reports/modules").createDirectories()
 
         val typesHeader = renderTypesHeader(model)
         includeDir.resolve("decomp_types.h").writeText(typesHeader)
@@ -154,17 +154,23 @@ object SourceTreeGenerator {
 
         plan.modules.forEach { module ->
             val dependencies = dependencyModules(module, model, plan)
-            val result = reconstructor.reconstruct(
-                ModuleReconstructionRequest(
-                    module,
-                    model,
-                    typesHeader,
-                    headers.getValue(module.id),
-                    dependencies.associate { dependency -> plan.modules.single { it.id == dependency }.headerPath to headers.getValue(dependency) },
-                ),
-            )
-            modulesSourceDir.resolve("${module.id}.c").writeText(result.source.trimEnd() + "\n")
-            generated += evidence(module.sourcePath, result.source.trimEnd() + "\n", result.generator, module.functionIds + module.globalIds, result.promptSha256)
+            val dependencyHeaders = dependencies.associate { dependency -> plan.modules.single { it.id == dependency }.headerPath to headers.getValue(dependency) }
+            val fingerprint = moduleFingerprint(module, model, typesHeader, headers.getValue(module.id), dependencyHeaders)
+            val sourcePath = modulesSourceDir.resolve("${module.id}.c")
+            val checkpointPath = moduleReportsDir.resolve("${module.id}.json")
+            val cached = readCheckpoint(checkpointPath)?.takeIf { it.fingerprint == fingerprint && sourcePath.exists() }
+            val result = cached?.let { ReconstructedModule(sourcePath.readText(), it.generator, it.promptSha256) }
+                ?: reconstructor.reconstruct(
+                    ModuleReconstructionRequest(module, model, typesHeader, headers.getValue(module.id), dependencyHeaders),
+                ).also { reconstructed ->
+                    sourcePath.writeText(reconstructed.source.trimEnd() + "\n")
+                    checkpointPath.writeText(ModuleCheckpoint(fingerprint, reconstructed.generator, reconstructed.promptSha256).toJson())
+                }
+            val normalizedSource = result.source.trimEnd() + "\n"
+            if (!sourcePath.exists() || sourcePath.readText() != normalizedSource) sourcePath.writeText(normalizedSource)
+            generated += evidence(module.sourcePath, normalizedSource, result.generator, module.functionIds + module.globalIds, result.promptSha256)
+            val checkpoint = checkpointPath.readText()
+            generated += evidence("reports/modules/${module.id}.json", checkpoint, "planner", module.functionIds + module.globalIds)
         }
 
         val hasRecoveredMain = model.functions.any { safeCName(it.name) == "main" }
@@ -192,6 +198,9 @@ object SourceTreeGenerator {
         projectDir.resolve("reports/module_plan.json").writeText(plan.toJson())
         generated += evidence("reports/program_model.json", model.toJson(), "analysis", model.functions.map { it.id } + model.globals.map { it.id })
         generated += evidence("reports/module_plan.json", plan.toJson(), "planner", model.functions.map { it.id } + model.globals.map { it.id })
+        val confidence = renderConfidence(model, plan)
+        projectDir.resolve("reports/confidence.json").writeText(confidence)
+        generated += evidence("reports/confidence.json", confidence, "evidence", model.functions.map { it.id } + model.globals.map { it.id })
         val manifest = SourceTreeManifest(
             inputSha256 = model.inputSha256,
             files = generated,
@@ -257,6 +266,64 @@ object SourceTreeGenerator {
 
     private fun evidence(path: String, content: String, generator: String, ids: List<String>, prompt: String? = null) =
         GeneratedFileEvidence(path, sha256(content.toByteArray()), generator, prompt, ids.sorted())
+
+    private data class ModuleCheckpoint(val fingerprint: String, val generator: String, val promptSha256: String) {
+        fun toJson() = "{\"fingerprint\":\"$fingerprint\",\"generator\":\"$generator\",\"promptSha256\":\"$promptSha256\"}\n"
+    }
+
+    private fun readCheckpoint(path: Path): ModuleCheckpoint? {
+        if (!path.exists()) return null
+        val text = path.readText()
+        fun field(name: String) = Regex("\\\"$name\\\":\\\"([^\\\"]*)\\\"").find(text)?.groupValues?.get(1)
+        return ModuleCheckpoint(field("fingerprint") ?: return null, field("generator") ?: return null, field("promptSha256") ?: return null)
+    }
+
+    private fun moduleFingerprint(
+        module: PlannedModule,
+        model: RecoveredProgramModel,
+        sharedHeader: String,
+        moduleHeader: String,
+        dependencyHeaders: Map<String, String>,
+    ): String {
+        val functions = module.functionIds.sorted().joinToString("\n") { id ->
+            val item = model.functions.single { it.id == id }
+            listOf(item.id, item.name, item.address.toString(), item.prototype, item.status.name, item.decompiledC.orEmpty(),
+                item.calls.sorted().joinToString(","), item.referencedGlobals.sorted().joinToString(","), item.strings.sorted().joinToString(",")).joinToString("|")
+        }
+        val globals = module.globalIds.sorted().joinToString("\n") { id -> model.globals.single { it.id == id }.toString() }
+        val dependencies = dependencyHeaders.toSortedMap().entries.joinToString("\n") { it.key + "\n" + it.value }
+        return sha256((functions + "\n" + globals + "\n" + sharedHeader + moduleHeader + dependencies).toByteArray())
+    }
+
+    private fun renderConfidence(model: RecoveredProgramModel, plan: ModulePlan): String {
+        fun score(status: RecoveryStatus) = when (status) {
+            RecoveryStatus.RECOVERED -> 1.0
+            RecoveryStatus.PARTIAL -> 0.6
+            RecoveryStatus.SYNTHETIC -> 0.25
+            RecoveryStatus.FAILED -> 0.0
+        }
+        val moduleScores = plan.modules.map { module ->
+            val statuses = module.functionIds.map { id -> model.functions.single { it.id == id }.status } +
+                module.globalIds.map { id -> model.globals.single { it.id == id }.status }
+            module.id to if (statuses.isEmpty()) 0.0 else statuses.map(::score).average()
+        }
+        val allStatuses = model.functions.map { it.status } + model.globals.map { it.status } + model.types.map { it.status }
+        val projectScore = if (allStatuses.isEmpty()) 0.0 else allStatuses.map(::score).average()
+        return buildString {
+            append("{\n  \"basis\": \"recovery evidence only; behavioral equivalence is not implied\",")
+            append("\n  \"projectScore\": ").append("%.4f".format(java.util.Locale.ROOT, projectScore)).append(',')
+            append("\n  \"modules\": [")
+            append(moduleScores.sortedBy { it.first }.joinToString(",") { (id, value) ->
+                "\n    {\"id\":\"$id\",\"score\":${"%.4f".format(java.util.Locale.ROOT, value)}}"
+            })
+            append("\n  ],\n  \"unresolvedEntityIds\": [")
+            val unresolved = model.functions.filter { it.status != RecoveryStatus.RECOVERED }.map { it.id } +
+                model.globals.filter { it.status != RecoveryStatus.RECOVERED }.map { it.id } +
+                model.types.filter { it.status != RecoveryStatus.RECOVERED }.map { it.id }
+            append(unresolved.sorted().joinToString(",") { "\"$it\"" })
+            append("]\n}\n")
+        }
+    }
 }
 
 internal fun normalizedPrototype(function: RecoveredFunction): String {

@@ -4,6 +4,8 @@ import decompengine.validation.BehaviorCaseResult
 import decompengine.validation.BehaviorComparator
 import decompengine.validation.BehaviorComparisonReport
 import decompengine.validation.ProcessInput
+import decompengine.project.SourceTreeManifestReader
+import decompengine.project.sha256
 import kotlinx.serialization.json.Json
 import kotlinx.serialization.json.JsonArray
 import kotlinx.serialization.json.JsonObject
@@ -17,13 +19,19 @@ import java.net.http.HttpClient
 import java.net.http.HttpRequest
 import java.net.http.HttpResponse
 import java.nio.file.Path
+import java.nio.file.Files
+import java.nio.file.StandardCopyOption
 import java.util.concurrent.CompletableFuture
 import kotlin.io.path.createDirectories
 import kotlin.io.path.exists
 import kotlin.io.path.name
 import kotlin.io.path.pathString
 import kotlin.io.path.readText
+import kotlin.io.path.readBytes
+import kotlin.io.path.isRegularFile
+import kotlin.io.path.relativeTo
 import kotlin.io.path.writeText
+import kotlin.io.path.writeBytes
 
 data class StreamDiff(
     val expectedHex: String,
@@ -331,7 +339,7 @@ class TraceGuidedRepairLoop(
         val request = RepairRequest(
             failureKind = "compile",
             prompt = failure.toPrompt(),
-            projectFiles = projectSources(projectDir),
+            projectFiles = projectSources(projectDir, failure.stdout + "\n" + failure.stderr),
             regressionInputs = history.retainedInputs(),
         )
         return applyRepair(projectDir, request)
@@ -386,9 +394,9 @@ class TraceGuidedRepairLoop(
         }
 
         repeat(maxIterations) { offset ->
-            val request = assessment.toRequest(projectSources(projectDir), history.retainedInputs())
+            val request = assessment.toRequest(projectSources(projectDir, assessment.contextHint()), history.retainedInputs())
             val response = client.requestRepair(request)
-            applyPatches(projectDir, response.patches)
+            val applied = applyPatches(projectDir, response.patches)
             val after = assess(projectDir, originalBinary, reportsDir, "iteration_${startedAt + offset + 1}")
             val iteration = RepairIteration(
                 index = history.all().size + 1,
@@ -402,6 +410,7 @@ class TraceGuidedRepairLoop(
                 succeeded = after is RepairAssessment.Valid,
             )
             history.append(iteration)
+            recordRevisions(projectDir, iteration.index, applied, after.evidence, after is RepairAssessment.Valid)
             if (after is RepairAssessment.Valid) {
                 return RepairRunResult(history.all().drop(startedAt), after.report)
             }
@@ -418,7 +427,7 @@ class TraceGuidedRepairLoop(
         before: RepairEvidence? = null,
     ): RepairIteration {
         val response = client.requestRepair(request)
-        applyPatches(projectDir, response.patches)
+        val applied = applyPatches(projectDir, response.patches)
         val iteration = RepairIteration(
             index = history.all().size + 1,
             failureKind = request.failureKind,
@@ -429,12 +438,16 @@ class TraceGuidedRepairLoop(
             before = before,
         )
         history.append(iteration)
+        recordRevisions(projectDir, iteration.index, applied, before, accepted = true)
         return iteration
     }
 
-    private fun applyPatches(projectDir: Path, patches: List<SourcePatch>) {
+    private data class AppliedPatch(val path: String, val beforeSha256: String, val afterSha256: String)
+
+    private fun applyPatches(projectDir: Path, patches: List<SourcePatch>): List<AppliedPatch> {
         require(patches.isNotEmpty()) { "repair response contained no patches" }
-        val allowed = projectSources(projectDir).keys
+        val manifestOwned = SourceTreeManifestReader.editablePaths(projectDir)
+        val allowed = if (manifestOwned.isNotEmpty()) manifestOwned else projectSources(projectDir).keys
         require(patches.map { it.relativePath }.distinct().size == patches.size) { "repair response patches a file more than once" }
         val base = projectDir.toAbsolutePath().normalize()
         val targets = patches.map { patch ->
@@ -445,10 +458,27 @@ class TraceGuidedRepairLoop(
             }
             patch to target
         }
-        targets.forEach { (patch, target) ->
+        val originals = targets.associate { (_, target) -> target to target.readBytes() }
+        val staged = targets.map { (patch, target) ->
             target.parent.createDirectories()
-            target.writeText(patch.replacement)
+            val temporary = Files.createTempFile(target.parent, ".${target.fileName}.", ".repair")
+            temporary.writeText(patch.replacement)
+            Triple(patch, target, temporary)
         }
+        try {
+            staged.forEach { (_, target, temporary) ->
+                runCatching {
+                    Files.move(temporary, target, StandardCopyOption.ATOMIC_MOVE, StandardCopyOption.REPLACE_EXISTING)
+                }.getOrElse {
+                    Files.move(temporary, target, StandardCopyOption.REPLACE_EXISTING)
+                }
+            }
+        } catch (failure: Exception) {
+            originals.forEach { (target, bytes) -> runCatching { target.writeBytes(bytes) } }
+            staged.forEach { (_, _, temporary) -> runCatching { Files.deleteIfExists(temporary) } }
+            throw failure
+        }
+        return targets.map { (patch, target) -> AppliedPatch(patch.relativePath, sha256(originals.getValue(target)), sha256(patch.replacement.toByteArray())) }
     }
 
     private fun assess(
@@ -488,13 +518,40 @@ class TraceGuidedRepairLoop(
         return if (exitCode == 0) null else CompileFailure(command, exitCode, stdout, stderr)
     }
 
-    private fun projectSources(projectDir: Path): Map<String, String> =
-        listOf("Makefile", "src/main.c", "src/reconstructed.c", "include/decomp_engine.h")
-            .mapNotNull { relative ->
-                val path = projectDir.resolve(relative)
-                if (path.exists()) relative to path.readText() else null
+    private fun projectSources(projectDir: Path, diagnosticHint: String? = null): Map<String, String> {
+        val owned = SourceTreeManifestReader.editablePaths(projectDir).ifEmpty {
+            Files.walk(projectDir).use { paths ->
+                paths.filter { it.isRegularFile() }
+                    .map { it.relativeTo(projectDir).pathString.replace('\\', '/') }
+                    .filter { it == "Makefile" || it.endsWith(".c") || it.endsWith(".h") }
+                    .toList().toSet()
             }
-            .toMap()
+        }
+        val hinted = diagnosticHint?.let { hint -> owned.filter { it in hint || Path.of(it).fileName.toString() in hint }.toSet() }.orEmpty()
+        val selected = if (hinted.isEmpty()) owned else owned.filter { candidate ->
+            candidate in hinted || candidate == "Makefile" || candidate == "include/decomp_types.h" ||
+                hinted.any { Path.of(it).fileName.toString().substringBefore('.') == Path.of(candidate).fileName.toString().substringBefore('.') }
+        }.toSet()
+        return selected.sorted().associateWith { projectDir.resolve(it).readText() }
+    }
+
+    private fun recordRevisions(
+        projectDir: Path,
+        iteration: Int,
+        patches: List<AppliedPatch>,
+        evidence: RepairEvidence?,
+        accepted: Boolean,
+    ) {
+        val path = projectDir.resolve("reports/source_revisions.jsonl")
+        path.parent.createDirectories()
+        val lines = patches.joinToString("") { patch ->
+            "{\"iteration\":$iteration,\"path\":\"${patch.path.escapeJson()}\",\"beforeSha256\":\"${patch.beforeSha256}\"," +
+                "\"afterSha256\":\"${patch.afterSha256}\",\"accepted\":$accepted," +
+                "\"evidenceKind\":${evidence?.kind?.let { "\"${it.escapeJson()}\"" } ?: "null"}," +
+                "\"evidenceArtifact\":${evidence?.artifactPath?.let { "\"${it.escapeJson()}\"" } ?: "null"}}\n"
+        }
+        Files.writeString(path, lines, java.nio.file.StandardOpenOption.CREATE, java.nio.file.StandardOpenOption.APPEND)
+    }
 }
 
 private sealed interface RepairAssessment {
@@ -523,6 +580,11 @@ private sealed interface RepairAssessment {
             artifactPath = report.reportPath.pathString,
         )
     }
+}
+
+private fun RepairAssessment.contextHint(): String? = when (this) {
+    is RepairAssessment.CompileError -> failure.stdout + "\n" + failure.stderr
+    is RepairAssessment.BehaviorError, is RepairAssessment.Valid -> null
 }
 
 private fun RepairAssessment.toRequest(

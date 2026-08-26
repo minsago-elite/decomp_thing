@@ -1,6 +1,9 @@
 package decompengine.repair
 
 import decompengine.project.MakeProjectBuilder
+import decompengine.project.RecoveredFunction
+import decompengine.project.RecoveredProgramModel
+import decompengine.project.SourceTreeGenerator
 import decompengine.validation.BehaviorCaseResult
 import decompengine.validation.BehaviorComparator
 import decompengine.validation.ProcessInput
@@ -255,6 +258,56 @@ class TraceGuidedRepairTest {
         assertEquals(listOf("earlier", "new"), client.requests.single().regressionInputs.map { it.id })
     }
 
+    @Test
+    fun `repair discovers manifest-owned modules and sends compile-relevant context`() {
+        val tempDir = createTempDirectory("repair-tree-")
+        val projectDir = tempDir.resolve("project")
+        SourceTreeGenerator.generate(multiModuleModel(), projectDir)
+        val parsePath = projectDir.resolve("src/modules/parse.c")
+        val validParse = parsePath.readText()
+        parsePath.writeText("#include \"modules/parse.h\"\nint parse_input(void) {\n")
+        val client = FakeRepairClient(RepairResponse("repair parse module", listOf(SourcePatch("src/modules/parse.c", validParse))))
+
+        TraceGuidedRepairLoop(client, RepairHistory(projectDir.resolve("reports/repair_history.json"))).repairCompileError(
+            projectDir,
+            collectCompileFailure(projectDir),
+            listOf(ProcessInput("default")),
+        )
+
+        assertEquals(0, MakeProjectBuilder.build(projectDir).returnCode)
+        assertTrue("src/modules/parse.c" in client.lastRequest!!.projectFiles)
+        assertTrue("include/modules/parse.h" in client.lastRequest!!.projectFiles)
+        assertTrue("src/modules/render.c" !in client.lastRequest!!.projectFiles)
+        assertTrue(projectDir.resolve("reports/source_revisions.jsonl").readText().contains("src/modules/parse.c"))
+    }
+
+    @Test
+    fun `manifest restriction rejects an invalid multi-file response before any write`() {
+        val tempDir = createTempDirectory("repair-tree-atomic-")
+        val projectDir = tempDir.resolve("project")
+        SourceTreeGenerator.generate(multiModuleModel(), projectDir)
+        val parsePath = projectDir.resolve("src/modules/parse.c")
+        parsePath.writeText("broken\n")
+        val before = parsePath.readText()
+        val client = FakeRepairClient(
+            RepairResponse(
+                "unsafe response",
+                listOf(SourcePatch("src/modules/parse.c", "replacement\n"), SourcePatch("src/rogue.c", "rogue\n")),
+            ),
+        )
+
+        assertFailsWith<IllegalArgumentException> {
+            TraceGuidedRepairLoop(client, RepairHistory(projectDir.resolve("reports/repair_history.json"))).repairCompileError(
+                projectDir,
+                CompileFailure(listOf("make"), 2, "", "src/modules/parse.c: error"),
+                emptyList(),
+            )
+        }
+
+        assertEquals(before, parsePath.readText())
+        assertTrue(!projectDir.resolve("src/rogue.c").exists())
+    }
+
     private class FakeRepairClient(private val response: RepairResponse) : RepairClient {
         var lastRequest: RepairRequest? = null
 
@@ -314,6 +367,14 @@ class TraceGuidedRepairTest {
         projectDir.resolve("src/reconstructed.c").writeText(reconstructedSource)
         return projectDir
     }
+
+    private fun multiModuleModel() = RecoveredProgramModel(
+        inputSha256 = "repair-fixture",
+        functions = listOf(
+            RecoveredFunction("fn_1000", "parse_input", 0x1000UL, "int parse_input(void)"),
+            RecoveredFunction("fn_2000", "render_page", 0x2000UL, "int render_page(void)"),
+        ),
+    )
 
     private fun collectCompileFailure(projectDir: java.nio.file.Path): CompileFailure {
         val process = ProcessBuilder("make")

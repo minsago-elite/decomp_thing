@@ -25,6 +25,10 @@ class SourceTreeTest {
         assertEquals(0, MakeProjectBuilder.build(project).returnCode)
         assertEquals(manifest.editablePaths, SourceTreeManifestReader.editablePaths(project))
         assertTrue(project.resolve("source_tree_manifest.json").readText().contains("input-sha"))
+        val confidence = project.resolve("reports/confidence.json").readText()
+        assertTrue(confidence.contains("\"id\":\"parse\""))
+        assertTrue(confidence.contains("\"projectScore\""))
+        assertTrue(confidence.contains("behavioral equivalence is not implied"))
     }
 
     @Test
@@ -61,6 +65,20 @@ class SourceTreeTest {
             reconstructor.reconstruct(ModuleReconstructionRequest(module, huge, "header", "module", emptyMap()))
         }
         assertTrue(!called)
+    }
+
+    @Test
+    fun `unchanged modules resume from checkpoints without regeneration`() {
+        val project = createTempDirectory("source-tree-resume-")
+        SourceTreeGenerator.generate(model(), project)
+        val before = project.resolve("src/modules/parse.c").readText()
+        val refusing = ModuleReconstructor { error("unchanged module was regenerated") }
+
+        SourceTreeGenerator.generate(model(), project, reconstructor = refusing)
+
+        assertEquals(before, project.resolve("src/modules/parse.c").readText())
+        assertTrue(project.resolve("reports/modules/parse.json").exists())
+        assertTrue(project.resolve("reports/modules/render.json").exists())
     }
 
     private fun model() = RecoveredProgramModel(
