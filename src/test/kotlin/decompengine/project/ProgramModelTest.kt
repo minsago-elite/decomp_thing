@@ -90,6 +90,84 @@ class ProgramModelTest {
         assertTrue(plan.modules.single { it.id == "render" }.boundaryEvidence.any { "shared globals" in it })
     }
 
+    @Test
+    fun `indexed affinity retains per-function weights and deterministic tie breaks`() {
+        val parseFirst = RecoveredFunction(
+            "fn_10",
+            "parse_first",
+            0x10UL,
+            "int parse_first(void)",
+            referencedGlobals = setOf("shared", "parse_only"),
+            strings = setOf("marker"),
+        )
+        val parseSecond = RecoveredFunction(
+            "fn_20",
+            "parse_second",
+            0x20UL,
+            "int parse_second(void)",
+            referencedGlobals = setOf("shared"),
+            strings = setOf("marker"),
+        )
+        val render = RecoveredFunction(
+            "fn_30",
+            "render_page",
+            0x30UL,
+            "int render_page(void)",
+            calls = setOf("fn_40"),
+        )
+        val anonymous = RecoveredFunction(
+            "fn_40",
+            "FUN_40",
+            0x40UL,
+            "int FUN_40(void)",
+            calls = setOf("fn_30"),
+            referencedGlobals = setOf("parse_only", "shared"),
+            strings = setOf("marker"),
+        )
+        val model = RecoveredProgramModel(
+            inputSha256 = "weighted-affinity",
+            functions = listOf(anonymous, render, parseSecond, parseFirst),
+        )
+
+        val forward = DeterministicModulePlanner().plan(model)
+        val reversed = DeterministicModulePlanner().plan(model.copy(functions = model.functions.reversed()))
+
+        assertEquals(forward, reversed)
+        val parseModule = forward.modules.single { "fn_40" in it.functionIds }
+        assertEquals("parse", parseModule.id)
+        assertTrue(
+            parseModule.boundaryEvidence.any {
+                "shared globals with parse: parse_only,shared" in it &&
+                    "shared globals with parse: shared" in it &&
+                    "shared strings with parse" in it
+            },
+        )
+    }
+
+    @Test
+    fun `global-only overrides create owned modules instead of dropping globals`() {
+        val global = RecoveredGlobal("global_10", "counter", 0x10UL, "int")
+        val model = RecoveredProgramModel(inputSha256 = "global-override", functions = emptyList(), globals = listOf(global))
+
+        val plan = DeterministicModulePlanner().plan(model, mapOf(global.id to "Runtime State"))
+
+        assertEquals(listOf(global.id), plan.modules.flatMap { it.globalIds })
+        assertEquals("runtime_state", plan.modules.single { global.id in it.globalIds }.id)
+    }
+
+    @Test
+    fun `dependency diagnostics collapse overlapping cycles into one sparse component`() {
+        val functions = listOf(
+            RecoveredFunction("fn_1", "alpha_one", 1UL, "void alpha_one(void)", calls = setOf("fn_2", "fn_3")),
+            RecoveredFunction("fn_2", "bravo_two", 2UL, "void bravo_two(void)", calls = setOf("fn_1", "fn_3")),
+            RecoveredFunction("fn_3", "charlie_three", 3UL, "void charlie_three(void)", calls = setOf("fn_1")),
+        )
+
+        val plan = DeterministicModulePlanner().plan(RecoveredProgramModel(inputSha256 = "scc", functions = functions))
+
+        assertEquals(listOf(listOf("alpha", "bravo", "charlie")), plan.dependencyCycles)
+    }
+
     private fun fixtureModel() = RecoveredProgramModel(
         inputSha256 = "abc123",
         functions = listOf(
