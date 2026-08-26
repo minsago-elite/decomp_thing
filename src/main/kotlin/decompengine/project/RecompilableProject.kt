@@ -3,19 +3,62 @@ package decompengine.project
 import decompengine.analysis.GhidraAnalysis
 import decompengine.analysis.GhidraJvmAnalyzer
 import decompengine.binary.UnresolvedSymbol
+import kotlinx.serialization.json.Json
+import kotlinx.serialization.json.jsonArray
+import kotlinx.serialization.json.jsonObject
+import kotlinx.serialization.json.jsonPrimitive
+import java.nio.file.Files
 import java.nio.file.Path
 import kotlin.io.path.createDirectories
 import kotlin.io.path.exists
+import kotlin.io.path.isRegularFile
 import kotlin.io.path.pathString
+import kotlin.io.path.readText
+import kotlin.io.path.relativeTo
 import kotlin.io.path.writeText
 
 data class BuildReport(
     val projectDir: Path,
     val returnCode: Int,
     val logPath: Path,
+    val diagnosticsDir: Path = logPath.parent.resolve("build/modules"),
+    val failedOwners: List<String> = emptyList(),
+    val command: List<String> = emptyList(),
 )
 
 class BuildException(message: String) : RuntimeException(message)
+
+data class ProjectBuildConfiguration(
+    val makeExecutable: String = "make",
+    val compilerExecutable: String = "gcc",
+    val parallelism: Int = 4,
+    val cFlags: List<String> = listOf("-std=c11", "-g", "-Wall", "-Wextra", "-Werror", "-Iinclude"),
+) {
+    init {
+        require(makeExecutable.isNotBlank() && '\n' !in makeExecutable && '\r' !in makeExecutable) {
+            "make executable must be a non-blank single-line value"
+        }
+        require(compilerExecutable.matches(Regex("[A-Za-z0-9_./+-]+"))) {
+            "compiler executable contains characters that are unsafe in a Make variable"
+        }
+        require(parallelism in 1..256) { "parallelism must be between 1 and 256" }
+        require(cFlags.isNotEmpty() && cFlags.all { it.matches(Regex("[A-Za-z0-9_./=:+,-]+")) }) {
+            "C flags contain characters that are unsafe in a Make variable"
+        }
+        require(cFlags.any { it == "-Werror" }) { "warnings-as-errors (-Werror) is required" }
+        require(cFlags.none { it == "-w" || it.startsWith("-Wno-error") }) {
+            "C flags cannot disable warnings-as-errors"
+        }
+    }
+
+    fun command(): List<String> = listOf(
+        makeExecutable,
+        "--jobs=$parallelism",
+        "--output-sync=target",
+        "CC=$compilerExecutable",
+        "CFLAGS=${cFlags.joinToString(" ")}",
+    )
+}
 
 private fun renderUnresolvedReport(analysis: GhidraAnalysis): String {
     val inventory = analysis.symbolInventory
@@ -94,35 +137,238 @@ object RecompilableProjectGenerator {
 }
 
 object MakeProjectBuilder {
-    fun build(projectDir: Path): BuildReport {
+    private data class BuildOwner(
+        val id: String,
+        val sourcePath: String,
+        val objectPath: String,
+        val diagnosticFile: String,
+    )
+
+    fun build(
+        projectDir: Path,
+        configuration: ProjectBuildConfiguration = ProjectBuildConfiguration(),
+    ): BuildReport {
         if (!projectDir.resolve("Makefile").exists()) {
             throw BuildException("generated project is missing Makefile")
         }
         val reportsDir = projectDir.resolve("reports").createDirectories()
-        val process = ProcessBuilder("make")
+        val diagnosticsDir = reportsDir.resolve("build/modules").createDirectories()
+        val owners = discoverOwners(projectDir)
+        val command = configuration.command()
+        writeBuildInstructions(projectDir, configuration)
+        val processBuilder = ProcessBuilder(command)
             .directory(projectDir.toFile())
-            .redirectErrorStream(false)
-            .start()
-        val stdout = process.inputStream.bufferedReader().readText()
-        val stderr = process.errorStream.bufferedReader().readText()
+            .redirectErrorStream(true)
+        sanitizeBuildEnvironment(processBuilder.environment())
+        val process = processBuilder.start()
+        val output = process.inputStream.bufferedReader().readText()
         val returnCode = process.waitFor()
+        val grouped = groupDiagnostics(output, owners)
+        val failedOwners = determineFailedOwners(returnCode, grouped)
+        Files.list(diagnosticsDir).use { paths ->
+            paths.filter { it.isRegularFile() && it.fileName.toString().endsWith(".log") }.forEach(Files::delete)
+        }
+        writeOwnerDiagnostics(diagnosticsDir, owners, grouped, failedOwners)
         val logPath = reportsDir.resolve("build.log")
-        logPath.writeText(
-            """
-            ${'$'} make
-            exit_code=$returnCode
-
-            [stdout]
-            $stdout
-            [stderr]
-            $stderr
-            """.trimIndent() + "\n",
+        logPath.writeText(renderBuildLog(command, returnCode, owners, grouped))
+        reportsDir.resolve("build_contract.json").writeText(
+            renderBuildContract(configuration, command, owners, failedOwners, returnCode),
         )
         if (returnCode != 0) {
-            throw BuildException("generated project failed to build; see ${logPath.pathString}")
+            throw BuildException(
+                "generated project failed to build; owners=${failedOwners.joinToString(",")}; " +
+                    "see ${logPath.pathString} and ${diagnosticsDir.pathString}",
+            )
         }
-        return BuildReport(projectDir = projectDir, returnCode = returnCode, logPath = logPath)
+        return BuildReport(
+            projectDir = projectDir,
+            returnCode = returnCode,
+            logPath = logPath,
+            diagnosticsDir = diagnosticsDir,
+            failedOwners = failedOwners,
+            command = command,
+        )
     }
+
+    private fun discoverOwners(projectDir: Path): List<BuildOwner> {
+        val planPath = projectDir.resolve("reports/module_plan.json")
+        val planned = if (planPath.isRegularFile()) {
+            val root = Json.parseToJsonElement(planPath.readText()).jsonObject
+            root["modules"]?.jsonArray.orEmpty().associate { element ->
+                val module = element.jsonObject
+                module.getValue("sourcePath").jsonPrimitive.content.replace('\\', '/') to
+                    module.getValue("id").jsonPrimitive.content
+            }
+        } else {
+            emptyMap()
+        }
+        val sourcesRoot = projectDir.resolve("src")
+        require(Files.isDirectory(sourcesRoot)) { "generated project is missing src directory" }
+        val sources = Files.walk(sourcesRoot).use { paths ->
+            paths.filter { it.isRegularFile() && it.fileName.toString().endsWith(".c") }
+                .map { it.relativeTo(projectDir).pathString.replace('\\', '/') }
+                .toList()
+                .sorted()
+        }
+        require(sources.isNotEmpty()) { "generated project has no C sources" }
+        val ownerIds = sources.associateWith { source ->
+            planned[source] ?: if (source == "src/main.c") "entrypoint" else "unowned_${source.removePrefix("src/").removeSuffix(".c")}"
+        }
+        require(planned.keys.all { it in sources }) {
+            "module plan references missing sources: ${(planned.keys - sources.toSet()).sorted().joinToString(",")}"
+        }
+        val diagnosticNames = ownerIds.values.associateWith { safeIdentifier(it) }
+        val collisions = diagnosticNames.entries.groupBy { it.value }.filterValues { it.size > 1 }
+        require(collisions.isEmpty()) { "module IDs collide as diagnostic file names: ${collisions.keys.sorted().joinToString(",")}" }
+        return sources.map { source ->
+            val id = ownerIds.getValue(source)
+            BuildOwner(
+                id = id,
+                sourcePath = source,
+                objectPath = "build/${source.removePrefix("src/").removeSuffix(".c")}.o",
+                diagnosticFile = "${diagnosticNames.getValue(id)}.log",
+            )
+        }
+    }
+
+    private fun groupDiagnostics(output: String, owners: List<BuildOwner>): Map<String, List<String>> {
+        val grouped = linkedMapOf<String, MutableList<String>>()
+        owners.forEach { grouped[it.id] = mutableListOf() }
+        grouped["link"] = mutableListOf()
+        grouped["project"] = mutableListOf()
+        var currentOwner = "project"
+        output.lineSequence().forEach { line ->
+            val sourceOwner = owners.firstOrNull { line.contains(it.sourcePath) }
+            val objectOwner = owners.firstOrNull { line.contains("${it.objectPath}:") }
+            currentOwner = when {
+                line.contains("-o build/reconstructed") -> "link"
+                sourceOwner != null -> sourceOwner.id
+                objectOwner != null -> objectOwner.id
+                else -> currentOwner
+            }
+            grouped.getValue(currentOwner) += line
+        }
+        return grouped.mapValues { (_, lines) -> lines.toList() }
+    }
+
+    private fun determineFailedOwners(returnCode: Int, grouped: Map<String, List<String>>): List<String> {
+        if (returnCode == 0) return emptyList()
+        val failure = Regex("fatal error:|error:|undefined reference|No rule to make target|\\*\\*\\*", RegexOption.IGNORE_CASE)
+        val explicit = grouped.filterValues { lines -> lines.any { failure.containsMatchIn(it) } }.keys
+        return (explicit.ifEmpty { setOf("project") }).sorted()
+    }
+
+    private fun writeOwnerDiagnostics(
+        diagnosticsDir: Path,
+        owners: List<BuildOwner>,
+        grouped: Map<String, List<String>>,
+        failedOwners: List<String>,
+    ) {
+        owners.sortedBy { it.id }.forEach { owner ->
+            val lines = grouped[owner.id].orEmpty()
+            val status = when {
+                owner.id in failedOwners -> "failed"
+                lines.isEmpty() -> "not-run-or-up-to-date"
+                else -> "compiled"
+            }
+            diagnosticsDir.resolve(owner.diagnosticFile).writeText(
+                buildString {
+                    append("owner=").append(owner.id).append('\n')
+                    append("source=").append(owner.sourcePath).append('\n')
+                    append("status=").append(status).append("\n\n")
+                    append("[compiler-output]\n")
+                    if (lines.isEmpty()) append("<none>\n") else append(lines.joinToString("\n", postfix = "\n"))
+                },
+            )
+        }
+        listOf("link", "project").forEach { owner ->
+            val lines = grouped[owner].orEmpty()
+            if (lines.isNotEmpty() || owner in failedOwners) {
+                diagnosticsDir.resolve("_$owner.log").writeText(
+                    "owner=$owner\nstatus=${if (owner in failedOwners) "failed" else "completed"}\n\n" +
+                        "[build-output]\n${lines.joinToString("\n", postfix = "\n")}",
+                )
+            }
+        }
+    }
+
+    private fun renderBuildLog(
+        command: List<String>,
+        returnCode: Int,
+        owners: List<BuildOwner>,
+        grouped: Map<String, List<String>>,
+    ): String = buildString {
+        append("$ ").append(command.joinToString(" ", transform = ::shellDisplay)).append('\n')
+        append("exit_code=").append(returnCode).append("\n")
+        (owners.map { it.id }.distinct().sorted() + listOf("link", "project")).forEach { owner ->
+            val lines = grouped[owner].orEmpty()
+            if (lines.isNotEmpty()) {
+                append("\n[owner:").append(owner).append("]\n")
+                append(lines.joinToString("\n", postfix = "\n"))
+            }
+        }
+    }
+
+    private fun renderBuildContract(
+        configuration: ProjectBuildConfiguration,
+        command: List<String>,
+        owners: List<BuildOwner>,
+        failedOwners: List<String>,
+        returnCode: Int,
+    ): String = buildString {
+        append("{\n  \"schemaVersion\": 1,")
+        append("\n  \"command\": [")
+        append(command.joinToString(",") { "\"${it.escapeJson()}\"" })
+        append("],\n  \"parallelism\": ").append(configuration.parallelism).append(',')
+        append("\n  \"warningsAsErrors\": true,")
+        append("\n  \"declaredDependencies\": [\"GNU Make\",\"GCC\",\"POSIX shell\",\"POSIX find\",\"POSIX mkdir\",\"POSIX rm\"],")
+        append("\n  \"apiCredentialsRequired\": false,")
+        append("\n  \"analysisCachesRequired\": false,")
+        append("\n  \"returnCode\": ").append(returnCode).append(',')
+        append("\n  \"failedOwners\": [")
+        append(failedOwners.joinToString(",") { "\"${it.escapeJson()}\"" })
+        append("],\n  \"modules\": [")
+        append(owners.sortedBy { it.id }.joinToString(",") { owner ->
+            "{\"id\":\"${owner.id.escapeJson()}\",\"source\":\"${owner.sourcePath.escapeJson()}\",\"diagnostics\":\"reports/build/modules/${owner.diagnosticFile.escapeJson()}\"}"
+        })
+        append("]\n}\n")
+    }
+
+    private fun writeBuildInstructions(projectDir: Path, configuration: ProjectBuildConfiguration) {
+        val command = configuration.command().joinToString(" ", transform = ::shellDisplay)
+        projectDir.resolve("BUILDING.md").writeText(
+            """
+            # Build the reconstructed project
+
+            From this directory, run the following single parallel build command:
+
+            ```sh
+            $command
+            ```
+
+            The build requires GNU Make, GCC, a POSIX shell, and the POSIX `find`, `mkdir`, and `rm` utilities. `-Werror` is mandatory. It does not require analysis caches, network access, or API credentials. Per-module compiler diagnostics are written under `reports/build/modules/`; `reports/build_contract.json` maps every source to its owning module.
+            """.trimIndent() + "\n",
+        )
+    }
+
+    private fun sanitizeBuildEnvironment(environment: MutableMap<String, String>) {
+        val sensitive = Regex("(^|_)(API(_|$)|TOKEN($|_)|SECRET($|_)|PASSWORD($|_)|BASE_URL$|MODEL$|CACHE($|_))", RegexOption.IGNORE_CASE)
+        environment.keys.filter { sensitive.containsMatchIn(it) }.toList().forEach(environment::remove)
+        environment.remove("MAKEFLAGS")
+        environment.remove("MFLAGS")
+        listOf(
+            "CPATH", "C_INCLUDE_PATH", "CPLUS_INCLUDE_PATH", "LIBRARY_PATH", "COMPILER_PATH",
+            "GCC_EXEC_PREFIX", "LD_PRELOAD", "CPPFLAGS", "LDFLAGS",
+        ).forEach(environment::remove)
+        environment["LC_ALL"] = "C"
+        environment["LANG"] = "C"
+        environment["TZ"] = "UTC"
+        environment["SOURCE_DATE_EPOCH"] = "0"
+    }
+
+    private fun shellDisplay(argument: String): String =
+        if (argument.matches(Regex("[A-Za-z0-9_./:=+-]+"))) argument
+        else "'${argument.replace("'", "'\\''")}'"
 }
 
 class ReconstructionPipeline(private val analyzer: GhidraJvmAnalyzer) {

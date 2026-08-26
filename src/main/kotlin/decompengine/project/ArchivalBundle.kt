@@ -36,7 +36,7 @@ object ArchivalPackager {
 
             This project was reconstructed from a binary using evidence-backed analysis and may not be universally equivalent to the original.
 
-            Build with `make`. The recovered program model, module plan, confidence, unresolved entities, build logs, and per-module provenance are under `reports/`.
+            Build with the exact parallel warnings-as-errors command in `BUILDING.md`. The recovered program model, module plan, confidence, unresolved entities, build logs, and per-module provenance are under `reports/`.
             Verify payload hashes with `ARCHIVE_MANIFEST.sha256` before use.
             """.trimIndent() + "\n",
         )
