@@ -7,6 +7,7 @@ import decompengine.repair.SourcePatch
 import kotlin.io.path.createTempDirectory
 import kotlin.io.path.exists
 import kotlin.io.path.readText
+import kotlin.io.path.writeText
 import kotlin.test.Test
 import kotlin.test.assertEquals
 import kotlin.test.assertFailsWith
@@ -20,7 +21,8 @@ class SourceTreeTest {
 
         assertTrue(project.resolve("src/modules/parse.c").exists())
         assertTrue(project.resolve("src/modules/render.c").exists())
-        assertTrue(project.resolve("include/modules/parse.h").readText().contains("fn_0000000000401000"))
+        assertTrue(project.resolve("src/modules/parse_internal.h").readText().contains("fn_0000000000401000"))
+        assertTrue(project.resolve("include/modules/render.h").readText().contains("fn_0000000000401020"))
         assertTrue(project.resolve("include/decomp_types.h").readText().contains("struct recovered_state"))
         assertEquals(0, MakeProjectBuilder.build(project).returnCode)
         assertEquals(manifest.editablePaths, SourceTreeManifestReader.editablePaths(project))
@@ -37,15 +39,21 @@ class SourceTreeTest {
         val client = object : RepairClient {
             override fun requestRepair(request: RepairRequest): RepairResponse {
                 assertTrue(request.prompt.contains("src/modules/parse.c"))
+                assertTrue(request.prompt.contains("case default: stdout=ok"))
                 return RepairResponse("module", listOf(SourcePatch("src/modules/parse.c", "#include \"modules/parse.h\"\nint parse_input(void) { return 0; }\n")))
             }
         }
         val oneModule = model().copy(functions = model().functions.take(1), globals = emptyList())
 
-        SourceTreeGenerator.generate(oneModule, project, reconstructor = BoundedLlmModuleReconstructor(client))
+        SourceTreeGenerator.generate(
+            oneModule,
+            project,
+            reconstructor = BoundedLlmModuleReconstructor(client),
+            observedBehavior = "case default: stdout=ok",
+        )
 
         assertTrue(project.resolve("src/modules/parse.c").readText().contains("parse_input"))
-        assertTrue(project.resolve("source_tree_manifest.json").readText().contains("\"generator\": \"llm\""))
+        assertTrue(project.resolve("source_tree_manifest.json").readText().contains("\"generator\": \"llm:unspecified\""))
     }
 
     @Test
@@ -62,7 +70,7 @@ class SourceTreeTest {
         val module = DeterministicModulePlanner().plan(huge).modules.single()
 
         assertFailsWith<IllegalArgumentException> {
-            reconstructor.reconstruct(ModuleReconstructionRequest(module, huge, "header", "module", emptyMap()))
+            reconstructor.reconstruct(ModuleReconstructionRequest(module, huge, "header", "module", "private", emptyMap()))
         }
         assertTrue(!called)
     }
@@ -79,6 +87,18 @@ class SourceTreeTest {
         assertEquals(before, project.resolve("src/modules/parse.c").readText())
         assertTrue(project.resolve("reports/modules/parse.json").exists())
         assertTrue(project.resolve("reports/modules/render.json").exists())
+    }
+
+    @Test
+    fun `build rejects unowned implementation files`() {
+        val project = createTempDirectory("source-tree-unowned-")
+        SourceTreeGenerator.generate(model(), project)
+        project.resolve("src/rogue.c").writeText("int rogue(void) { return 1; }\n")
+
+        val failure = assertFailsWith<BuildException> { MakeProjectBuilder.build(project) }
+
+        assertTrue(failure.message.orEmpty().contains("failed to build"))
+        assertTrue(project.resolve("reports/build.log").readText().contains("unowned C files"))
     }
 
     private fun model() = RecoveredProgramModel(

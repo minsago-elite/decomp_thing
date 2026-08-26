@@ -93,6 +93,7 @@ data class RepairResponse(
 
 interface RepairClient {
     fun requestRepair(request: RepairRequest): RepairResponse
+    fun modelIdentifier(): String? = null
 }
 
 class HttpOpenAiCompatibleRepairClient(
@@ -102,6 +103,7 @@ class HttpOpenAiCompatibleRepairClient(
     reasoningEffort: String? = null,
     private val httpClient: HttpClient = HttpClient.newHttpClient(),
 ) : RepairClient {
+    override fun modelIdentifier(): String = model
     private val endpoint = URI.create(baseUrl.toString().trimEnd('/') + "/chat/completions")
     private val reasoningEffort = reasoningEffort?.trim()?.takeIf { it.isNotEmpty() }
 
@@ -398,6 +400,8 @@ class TraceGuidedRepairLoop(
             val response = client.requestRepair(request)
             val applied = applyPatches(projectDir, response.patches)
             val after = assess(projectDir, originalBinary, reportsDir, "iteration_${startedAt + offset + 1}")
+            val rolledBack = assessment !is RepairAssessment.CompileError && after is RepairAssessment.CompileError
+            if (rolledBack) rollbackPatches(projectDir, applied)
             val iteration = RepairIteration(
                 index = history.all().size + 1,
                 failureKind = request.failureKind,
@@ -414,7 +418,7 @@ class TraceGuidedRepairLoop(
             if (after is RepairAssessment.Valid) {
                 return RepairRunResult(history.all().drop(startedAt), after.report)
             }
-            assessment = after
+            assessment = if (rolledBack) assessment else after
         }
         throw RepairExhaustedException(
             "repair did not converge after $maxIterations iteration(s); see ${reportsDir.resolve("repair_history.json")}",
@@ -438,11 +442,11 @@ class TraceGuidedRepairLoop(
             before = before,
         )
         history.append(iteration)
-        recordRevisions(projectDir, iteration.index, applied, before, accepted = true)
+        recordRevisions(projectDir, iteration.index, applied, before, accepted = false)
         return iteration
     }
 
-    private data class AppliedPatch(val path: String, val beforeSha256: String, val afterSha256: String)
+    private data class AppliedPatch(val path: String, val beforeSha256: String, val afterSha256: String, val beforeContent: ByteArray)
 
     private fun applyPatches(projectDir: Path, patches: List<SourcePatch>): List<AppliedPatch> {
         require(patches.isNotEmpty()) { "repair response contained no patches" }
@@ -478,7 +482,19 @@ class TraceGuidedRepairLoop(
             staged.forEach { (_, _, temporary) -> runCatching { Files.deleteIfExists(temporary) } }
             throw failure
         }
-        return targets.map { (patch, target) -> AppliedPatch(patch.relativePath, sha256(originals.getValue(target)), sha256(patch.replacement.toByteArray())) }
+        return targets.map { (patch, target) ->
+            val before = originals.getValue(target)
+            AppliedPatch(patch.relativePath, sha256(before), sha256(patch.replacement.toByteArray()), before)
+        }
+    }
+
+    private fun rollbackPatches(projectDir: Path, patches: List<AppliedPatch>) {
+        val base = projectDir.toAbsolutePath().normalize()
+        patches.forEach { patch ->
+            val target = base.resolve(patch.path).normalize()
+            require(target.startsWith(base)) { "rollback path escapes project: ${patch.path}" }
+            target.writeBytes(patch.beforeContent)
+        }
     }
 
     private fun assess(

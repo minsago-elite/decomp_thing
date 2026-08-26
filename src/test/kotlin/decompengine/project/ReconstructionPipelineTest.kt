@@ -78,6 +78,7 @@ class ReconstructionPipelineTest {
                 "source_tree_manifest.json",
                 "src/main.c",
                 "src/modules/decomp.c",
+                "src/modules/decomp_internal.h",
             ),
             files,
         )

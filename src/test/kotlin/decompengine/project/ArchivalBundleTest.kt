@@ -8,6 +8,7 @@ import kotlin.io.path.createTempDirectory
 import kotlin.io.path.exists
 import kotlin.io.path.readBytes
 import kotlin.io.path.readText
+import kotlin.io.path.writeText
 import kotlin.test.Test
 import kotlin.test.assertEquals
 import kotlin.test.assertFailsWith
@@ -49,6 +50,23 @@ class ArchivalBundleTest {
             ArchivalBundleVerifier.extractAndVerify(archive, temp.resolve("out"))
         }
         assertTrue(!temp.resolve("escape").exists())
+    }
+
+    @Test
+    fun `audit keeps mismatched behavior unresolved per source revision`() {
+        val temp = createTempDirectory("archive-audit-")
+        val project = temp.resolve("project")
+        SourceTreeGenerator.generate(model(4), project)
+        project.resolve("reports/mismatch.behavior.json").writeText(
+            "{\"id\":\"mismatch\",\"sandbox\":\"bubblewrap\",\"networkIsolated\":false,\"matches\":false}",
+        )
+
+        val audit = ArchivalProjectAuditor.audit(project)
+
+        assertEquals(false, audit.behaviorMatched)
+        assertEquals(listOf("mismatch"), audit.unresolvedBehaviorReportIds)
+        assertTrue(audit.moduleRevisionSha256.isNotEmpty())
+        assertTrue(project.resolve("reports/archival_audit.json").readText().contains("sourceRevisionSha256"))
     }
 
     private fun model(size: Int) = RecoveredProgramModel(

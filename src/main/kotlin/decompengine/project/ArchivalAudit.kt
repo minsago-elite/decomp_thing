@@ -2,6 +2,7 @@ package decompengine.project
 
 import kotlinx.serialization.json.Json
 import kotlinx.serialization.json.booleanOrNull
+import kotlinx.serialization.json.jsonArray
 import kotlinx.serialization.json.jsonObject
 import kotlinx.serialization.json.jsonPrimitive
 import java.nio.file.Files
@@ -9,6 +10,7 @@ import java.nio.file.Path
 import kotlin.io.path.exists
 import kotlin.io.path.isRegularFile
 import kotlin.io.path.readText
+import kotlin.io.path.readBytes
 import kotlin.io.path.writeText
 
 data class ArchivalAudit(
@@ -20,6 +22,8 @@ data class ArchivalAudit(
     val behaviorMatched: Boolean?,
     val sandboxReported: Boolean,
     val networkIsolation: Set<Boolean>,
+    val moduleRevisionSha256: Map<String, String>,
+    val unresolvedBehaviorReportIds: List<String>,
 ) {
     val provenanceComplete: Boolean get() = missingModelProvenance.isEmpty() && missingSourceProvenance.isEmpty()
     val universalEquivalenceClaim: Boolean = false
@@ -35,6 +39,8 @@ data class ArchivalAudit(
           "behaviorMatched": ${behaviorMatched ?: "null"},
           "sandboxReported": $sandboxReported,
           "networkIsolationObserved": [${networkIsolation.sorted().joinToString(",")}],
+          "moduleBehaviorEvidence": [${moduleRevisionSha256.toSortedMap().entries.joinToString(",") { (id, hash) -> "{\"moduleId\":\"$id\",\"sourceRevisionSha256\":\"$hash\",\"scope\":\"project-observed behavior\"}" }}],
+          "unresolvedBehaviorReportIds": [${unresolvedBehaviorReportIds.sorted().joinToString(",") { "\"$it\"" }}],
           "universalEquivalenceClaim": false,
           "limitation": "Confidence is bounded by recovered structure and observed behavior; untested behavior remains unresolved."
         }
@@ -47,6 +53,7 @@ object ArchivalProjectAuditor {
         require(modelPath.isRegularFile()) { "project is missing reports/program_model.json" }
         val model = ProgramModelJson.read(modelPath.readText())
         val planText = projectDir.resolve("reports/module_plan.json").readText()
+        val planJson = Json.parseToJsonElement(planText).jsonObject
         val manifestText = projectDir.resolve("source_tree_manifest.json").readText()
         val entities = model.functions.map { it.id } + model.globals.map { it.id } + model.types.map { it.id }
         val ownedEntities = model.functions.map { it.id } + model.globals.map { it.id }
@@ -69,6 +76,16 @@ object ArchivalProjectAuditor {
         }
         val matches = behavior.mapNotNull { it["matches"]?.jsonPrimitive?.booleanOrNull }
         val networks = behavior.mapNotNull { it["networkIsolated"]?.jsonPrimitive?.booleanOrNull }.toSet()
+        val moduleRevisions = planJson["modules"]?.let { modules ->
+            modules.jsonArray.associate { element ->
+                val module = element.jsonObject
+                val id = module.getValue("id").jsonPrimitive.content
+                val source = module.getValue("sourcePath").jsonPrimitive.content
+                id to sha256(projectDir.resolve(source).readBytes())
+            }
+        }.orEmpty()
+        val unresolvedBehavior = behavior.filter { it["matches"]?.jsonPrimitive?.booleanOrNull == false }
+            .mapNotNull { it["id"]?.jsonPrimitive?.content }
         val audit = ArchivalAudit(
             entityCount = entities.size,
             missingModelProvenance = missingModel,
@@ -80,6 +97,8 @@ object ArchivalProjectAuditor {
             behaviorMatched = matches.takeIf { it.isNotEmpty() }?.all { it },
             sandboxReported = behavior.isNotEmpty() && behavior.all { it["sandbox"]?.jsonPrimitive?.content == "bubblewrap" },
             networkIsolation = networks,
+            moduleRevisionSha256 = moduleRevisions,
+            unresolvedBehaviorReportIds = unresolvedBehavior,
         )
         projectDir.resolve("reports/archival_audit.json").writeText(audit.toJson())
         return audit

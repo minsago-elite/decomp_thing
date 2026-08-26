@@ -40,6 +40,37 @@ class ProgramModelTest {
         }
     }
 
+    @Test
+    fun `planner diagnoses cross-module dependency cycles`() {
+        val first = RecoveredFunction("fn_1", "parse_one", 1UL, "int parse_one(void)", calls = setOf("fn_2"))
+        val second = RecoveredFunction("fn_2", "render_two", 2UL, "int render_two(void)", calls = setOf("fn_1"))
+
+        val plan = DeterministicModulePlanner().plan(RecoveredProgramModel(inputSha256 = "cycle", functions = listOf(first, second)))
+
+        assertEquals(listOf(listOf("parse", "render")), plan.dependencyCycles)
+        assertTrue(plan.toJson().contains("dependencyCycles"))
+    }
+
+    @Test
+    fun `program model parser rejects schema drift and missing entity arrays`() {
+        assertFailsWith<IllegalArgumentException> {
+            ProgramModelJson.read("{\"schemaVersion\":2,\"inputSha256\":\"x\",\"functions\":[],\"globals\":[],\"types\":[]}")
+        }
+        assertFailsWith<NoSuchElementException> {
+            ProgramModelJson.read("{\"schemaVersion\":1,\"inputSha256\":\"x\",\"functions\":[]}")
+        }
+    }
+
+    @Test
+    fun `symbol-bearing and stripped naming remain deterministic`() {
+        val named = fixtureModel()
+        val stripped = named.copy(functions = named.functions.map { it.copy(name = "FUN_${it.address.toString(16)}") })
+
+        assertEquals(named.toJson(), ProgramModelJson.read(named.toJson()).toJson())
+        assertEquals(stripped.toJson(), ProgramModelJson.read(stripped.toJson()).toJson())
+        assertTrue(stripped.functions.all { it.id == stableFunctionId(it.address) })
+    }
+
     private fun fixtureModel() = RecoveredProgramModel(
         inputSha256 = "abc123",
         functions = listOf(

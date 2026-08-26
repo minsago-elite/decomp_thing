@@ -135,6 +135,7 @@ fun renderJob(job: Job): String {
               </section>
             </div>
             ${renderExploration(job)}
+            ${renderReconstructionProgress(job)}
             ${renderSourceTree(job)}
             ${renderRepairHistory(job)}
             ${renderArtifacts(job, artifacts)}
@@ -144,16 +145,34 @@ fun renderJob(job: Job): String {
     )
 }
 
-fun renderSourceFile(job: Job, relativePath: String, source: String): String = page(
-    title = relativePath,
-    body = """
+fun renderSourceFile(job: Job, relativePath: String, source: String): String {
+    val tree = job.binaryPath.parent.resolve("reports/source-tree")
+    val manifest = runCatching { Json.parseToJsonElement(tree.resolve("source_tree_manifest.json").readText()).jsonObject }.getOrNull()
+    val fileEvidence = manifest?.get("files")?.jsonArray?.mapNotNull { it as? JsonObject }
+        ?.firstOrNull { it.text("path") == relativePath }
+    val generator = fileEvidence?.text("generator").orEmpty()
+    val entities = fileEvidence?.get("entityIds")?.jsonArray?.joinToString(", ") { it.jsonPrimitive.content }.orEmpty()
+    val moduleId = relativePath.substringAfterLast('/').substringBeforeLast('.')
+    val moduleConfidence = runCatching {
+        Json.parseToJsonElement(tree.resolve("reports/confidence.json").readText()).jsonObject["modules"]?.jsonArray
+            ?.mapNotNull { it as? JsonObject }?.firstOrNull { it.text("id") == moduleId }
+            ?.get("score")?.jsonPrimitive?.doubleOrNull
+    }.getOrNull()
+    val provenance = if (fileEvidence == null) "" else """
+        <div class="source-provenance"><span><b>Generator</b>${generator.escapeHtml()}</span><span><b>Entities</b>${entities.escapeHtml().ifBlank { "none" }}</span>${moduleConfidence?.let { "<span><b>Module confidence</b>${(it * 100).roundToInt()}%</span>" }.orEmpty()}</div>
+    """.trimIndent()
+    return page(
+        title = relativePath,
+        body = """
       <main class="shell source-shell">
         <a class="back-link" href="/jobs/${job.id}">← ${job.filename.escapeHtml()}</a>
         <section class="source-heading"><div><p class="kicker">Generated source</p><h1>${relativePath.escapeHtml()}</h1></div><a class="button secondary" href="${artifactHref(job, "reports/source-tree/$relativePath")}">Download</a></section>
+        $provenance
         <pre class="source-view"><code>${source.escapeHtml()}</code></pre>
       </main>
-    """.trimIndent(),
-)
+        """.trimIndent(),
+    )
+}
 
 fun renderErrorPage(status: Int, title: String, message: String): String = page(
     title = title,
@@ -304,6 +323,22 @@ private fun renderSourceTree(job: Job): String {
         <p class="tree-note">${files.size} readable project files. Confidence is evidence-bounded and does not claim universal equivalence.</p>
         <ul class="source-tree">$rows</ul>
         ${if (bundle.exists()) "<a class=\"button primary archive-download\" href=\"${artifactHref(job, "reports/source-tree.zip")}\">Download verified source archive ↓</a>" else ""}
+      </section>
+    """.trimIndent()
+}
+
+private fun renderReconstructionProgress(job: Job): String {
+    val path = job.binaryPath.parent.resolve("reports/reconstruction_progress.json")
+    if (!path.exists()) return ""
+    val progress = runCatching { Json.parseToJsonElement(path.readText()).jsonObject }.getOrNull() ?: return ""
+    val phase = progress.text("phase")
+    val completed = progress.number("completed")
+    val total = progress.number("total")
+    val module = progress.text("module")
+    return """
+      <section class="panel reconstruction-progress">
+        <div><p class="kicker">Source reconstruction · ${phase.escapeHtml()}</p><h2>$completed / $total modules</h2></div>
+        ${if (module.isBlank()) "" else "<code>${module.escapeHtml()}</code>"}
       </section>
     """.trimIndent()
 }
@@ -461,6 +496,7 @@ h1 em { color: var(--acid); font-style: normal; }
 .history-list { display: grid; gap: 10px; }.history-item { display: grid; grid-template-columns: 40px 1fr; gap: 15px; padding: 17px; border: 1px solid var(--line); border-radius: 8px; }.history-index { display: grid; place-items: center; width: 32px; height: 32px; border-radius: 50%; background: #252d28; color: var(--acid); font: 700 11px ui-monospace, monospace; }.history-title { display: flex; align-items: center; justify-content: space-between; }.history-item p { color: var(--muted); font-size: 12px; }.evidence-line { display: grid; gap: 5px; padding: 9px 11px; border-left: 2px solid var(--cyan); background: rgba(114,215,208,.04); }.evidence-line b { color: var(--ink); }.regressions { margin-bottom: 0; }
 .artifact-list { display: grid; grid-template-columns: 1fr 1fr; gap: 9px; }.artifact-row { display: flex; align-items: center; gap: 12px; padding: 13px; border: 1px solid var(--line); border-radius: 8px; text-decoration: none; transition: .15s; }.artifact-row:hover { border-color: #526157; background: #202722; }.artifact-row > span:last-child { margin-left: auto; color: var(--acid); }.artifact-icon { display: grid; place-items: center; width: 38px; height: 38px; border-radius: 5px; background: #252d28; color: var(--cyan); font: 700 9px ui-monospace, monospace; }.artifact-row strong, .artifact-row small { display: block; }.artifact-row small { margin-top: 4px; color: var(--muted); font-size: 10px; }
 .source-tree-panel { margin-top: 18px; }.tree-note { color: var(--muted); font-size: 13px; }.source-tree { list-style: none; padding: 0; margin: 18px 0; border: 1px solid var(--line); border-radius: 8px; overflow: hidden; }.source-tree li + li { border-top: 1px solid var(--line); }.source-tree a { display: grid; grid-template-columns: 42px 1fr 20px; gap: 11px; align-items: center; min-height: 43px; padding: 7px 12px 7px calc(12px + var(--depth) * 18px); text-decoration: none; background: rgba(8,11,9,.25); }.source-tree a:hover { background: #202722; }.source-tree span { color: var(--cyan); font: 700 9px ui-monospace, monospace; }.source-tree i { color: var(--acid); font-style: normal; }.archive-download { width: max-content; }.source-shell { padding-block: 44px 80px; }.source-heading { display: flex; align-items: flex-end; justify-content: space-between; gap: 20px; padding: 42px 0 24px; }.source-heading h1 { margin: 8px 0 0; font: 700 clamp(1.8rem,4vw,3.5rem)/1.05 ui-monospace, monospace; letter-spacing: -.05em; }.source-view { overflow: auto; min-height: 420px; padding: 24px; border: 1px solid var(--line); border-radius: 10px; background: #080b09; line-height: 1.55; tab-size: 4; }.source-view code { font-size: 12px; color: #dbe2dc; }
+.reconstruction-progress { margin-top: 18px; padding: 20px 28px; display: flex; align-items: center; justify-content: space-between; }.reconstruction-progress h2 { margin: 5px 0 0; }.source-provenance { display: grid; grid-template-columns: repeat(3,1fr); gap: 10px; margin-bottom: 16px; }.source-provenance span { padding: 12px; border: 1px solid var(--line); border-radius: 7px; color: var(--muted); font: 11px ui-monospace,monospace; }.source-provenance b { display: block; margin-bottom: 6px; color: var(--cyan); text-transform: uppercase; font-size: 9px; }
 .spinner { width: 12px; height: 12px; border: 2px solid rgba(0,0,0,.25); border-top-color: #111; border-radius: 50%; animation: spin .8s linear infinite; }@keyframes spin { to { transform: rotate(360deg); } }
 .error-shell { display: grid; place-items: start; align-content: center; min-height: calc(100vh - 150px); max-width: 760px; }.error-shell h1 { font-size: 58px; margin: 5px 0 20px; }.error-shell > p:not(.error-code) { color: var(--muted); font-size: 17px; }.error-code { color: var(--danger); font: 700 12px ui-monospace, monospace; }.error-shell .button { margin-top: 20px; }
 footer { display: flex; justify-content: space-between; padding-block: 32px; margin-top: 60px; border-top: 1px solid var(--line); color: var(--muted); font: 700 10px ui-monospace, monospace; letter-spacing: .08em; text-transform: uppercase; }

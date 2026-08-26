@@ -181,8 +181,9 @@ class UploadServerTest {
             tree.resolve("reports").createDirectories()
             tree.resolve("src/modules/core.c").writeText("int core(void) { /* <script>alert(1)</script> */ return 0; }\n")
             tree.resolve("Makefile").writeText("all:\n\t@true\n")
-            tree.resolve("source_tree_manifest.json").writeText("{\"files\":[]}")
-            tree.resolve("reports/confidence.json").writeText("{\"projectScore\":0.75}")
+            tree.resolve("source_tree_manifest.json").writeText("{\"files\":[{\"path\":\"src/modules/core.c\",\"generator\":\"llm\",\"entityIds\":[\"fn_1000\"]}]}")
+            tree.resolve("reports/confidence.json").writeText("{\"projectScore\":0.75,\"modules\":[{\"id\":\"core\",\"score\":0.8}]}")
+            reportsDir.resolve("reconstruction_progress.json").writeText("{\"phase\":\"modules\",\"completed\":2,\"total\":4,\"module\":\"core\"}")
             reportsDir.resolve("source-tree.zip").writeText("archive")
         }
         withServer(reconstructor = reconstructor) { server, _ ->
@@ -199,9 +200,12 @@ class UploadServerTest {
             assertTrue(page.body.decodeToString().contains("Archival source tree"))
             assertTrue(page.body.decodeToString().contains("src/modules/core.c"))
             assertTrue(page.body.decodeToString().contains("75%"))
+            assertTrue(page.body.decodeToString().contains("2 / 4 modules"))
             assertEquals(200, source.status)
             assertTrue(source.body.decodeToString().contains("&lt;script&gt;"))
             assertTrue(!source.body.decodeToString().contains("<script>alert"))
+            assertTrue(source.body.decodeToString().contains("fn_1000"))
+            assertTrue(source.body.decodeToString().contains("80%"))
             assertEquals("archive", archive.body.decodeToString())
             assertEquals(400, traversal.status)
         }

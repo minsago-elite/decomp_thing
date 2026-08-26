@@ -69,9 +69,17 @@ class ArchivalReconstructionService(
         outputDir.createDirectories()
         val model = analyzer.analyze(binaryPath, outputDir.resolve("analysis"))
         val project = outputDir.resolve("source-tree")
-        SourceTreeGenerator.generate(model, project, reconstructor = reconstructor)
+        val progressPath = outputDir.resolve("reconstruction_progress.json")
+        progressPath.writeText("{\"phase\":\"planning\",\"completed\":0,\"total\":0}\n")
+        var moduleTotal = 0
+        val observedBehavior = outputDir.resolve("exploration.json").takeIf { Files.isRegularFile(it) }?.readText()
+        SourceTreeGenerator.generate(model, project, reconstructor = reconstructor, observedBehavior = observedBehavior) { completed, total, module ->
+            moduleTotal = total
+            progressPath.writeText("{\"phase\":\"modules\",\"completed\":$completed,\"total\":$total,\"module\":\"$module\"}\n")
+        }
         val build = MakeProjectBuilder.build(project)
         val bundle = ArchivalPackager.create(project, outputDir.resolve("source-tree.zip"))
+        progressPath.writeText("{\"phase\":\"complete\",\"completed\":$moduleTotal,\"total\":$moduleTotal}\n")
         outputDir.resolve("reconstruction.json").writeText(
             """
             {

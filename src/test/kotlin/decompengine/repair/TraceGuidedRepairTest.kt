@@ -308,6 +308,29 @@ class TraceGuidedRepairTest {
         assertTrue(!projectDir.resolve("src/rogue.c").exists())
     }
 
+    @Test
+    fun `compile-breaking behavior repair rolls back to the last buildable tree`() {
+        val tempDir = createTempDirectory("repair-rollback-")
+        val original = compileC(tempDir, "original", helloProgramSource("hello, world"))
+        val projectDir = createProject(tempDir.resolve("project"), reconstructedSource = helloMainSource("wrong"))
+        MakeProjectBuilder.build(projectDir)
+        val before = projectDir.resolve("src/reconstructed.c").readText()
+        val client = QueueRepairClient(RepairResponse("bad repair", listOf(SourcePatch("src/reconstructed.c", "int broken(\n"))))
+
+        assertFailsWith<RepairExhaustedException> {
+            TraceGuidedRepairLoop(client, RepairHistory(projectDir.resolve("reports/repair_history.json"))).repairUntilValid(
+                projectDir,
+                original,
+                listOf(ProcessInput("default")),
+                maxIterations = 1,
+            )
+        }
+
+        assertEquals(before, projectDir.resolve("src/reconstructed.c").readText())
+        assertEquals(0, MakeProjectBuilder.build(projectDir).returnCode)
+        assertTrue(projectDir.resolve("reports/source_revisions.jsonl").readText().contains("\"accepted\":false"))
+    }
+
     private class FakeRepairClient(private val response: RepairResponse) : RepairClient {
         var lastRequest: RepairRequest? = null
 

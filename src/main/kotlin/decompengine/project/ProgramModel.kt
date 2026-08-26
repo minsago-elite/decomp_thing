@@ -99,8 +99,10 @@ data class RecoveredProgramModel(
 object ProgramModelJson {
     fun read(text: String): RecoveredProgramModel {
         val root = Json.parseToJsonElement(text).jsonObject
+        val schemaVersion = root.int("schemaVersion", 1)
+        require(schemaVersion == 1) { "unsupported program model schemaVersion: $schemaVersion" }
         return RecoveredProgramModel(
-            schemaVersion = root.int("schemaVersion", 1),
+            schemaVersion = schemaVersion,
             inputSha256 = root.string("inputSha256"),
             functions = root.array("functions").map { element ->
                 val item = element.jsonObject
@@ -141,7 +143,7 @@ object ProgramModelJson {
 
     private fun JsonObject.string(name: String): String = getValue(name).jsonPrimitive.content
     private fun JsonObject.int(name: String, default: Int): Int = get(name)?.jsonPrimitive?.content?.toInt() ?: default
-    private fun JsonObject.array(name: String) = get(name)?.jsonArray.orEmpty()
+    private fun JsonObject.array(name: String) = getValue(name).jsonArray
     private fun JsonObject.stringSet(name: String) = array(name).map { it.jsonPrimitive.content }.toSet()
 }
 
@@ -154,7 +156,11 @@ data class PlannedModule(
     val boundaryEvidence: List<String>,
 )
 
-data class ModulePlan(val schemaVersion: Int = 1, val modules: List<PlannedModule>) {
+data class ModulePlan(
+    val schemaVersion: Int = 1,
+    val modules: List<PlannedModule>,
+    val dependencyCycles: List<List<String>> = emptyList(),
+) {
     fun toJson(): String = buildString {
         append("{\n  \"schemaVersion\": ").append(schemaVersion).append(",\n  \"modules\": [")
         append(modules.sortedBy { it.id }.joinToString(",") { module ->
@@ -168,7 +174,9 @@ data class ModulePlan(val schemaVersion: Int = 1, val modules: List<PlannedModul
               "boundaryEvidence": [${module.boundaryEvidence.joinToString(", ") { "\"${it.json()}\"" }}]
             }""".trimIndent().prependIndent("    ")
         })
-        append("\n  ]\n}\n")
+        append("\n  ],\n  \"dependencyCycles\": [")
+        append(dependencyCycles.joinToString(",") { cycle -> "[${cycle.joinToString(",") { "\"${it.json()}\"" }}]" })
+        append("]\n}\n")
     }
 }
 
@@ -199,7 +207,7 @@ class DeterministicModulePlanner(private val maximumFunctionsPerModule: Int = 24
                     ?: functions.firstOrNull { global.id in it.referencedGlobals }?.let { functionOwner[it.id] }
                     ?: grouped.keys.first()
             }
-        return ModulePlan(modules = grouped.map { (id, members) ->
+        val modules = grouped.map { (id, members) ->
             val referencedModules = members.flatMap { it.calls }.mapNotNull(functionOwner::get).filter { it != id }.distinct().sorted()
             PlannedModule(
                 id = id,
@@ -212,13 +220,35 @@ class DeterministicModulePlanner(private val maximumFunctionsPerModule: Int = 24
                     if (referencedModules.isNotEmpty()) add("calls modules: ${referencedModules.joinToString(", ")}")
                 },
             )
-        }.sortedBy { it.id })
+        }.sortedBy { it.id }
+        val owner = modules.flatMap { module -> module.functionIds.map { it to module.id } }.toMap()
+        val graph = modules.associate { module -> module.id to module.functionIds.flatMap { id ->
+            model.functions.single { it.id == id }.calls.mapNotNull(owner::get)
+        }.filter { it != module.id }.toSet() }
+        return ModulePlan(modules = modules, dependencyCycles = dependencyCycles(graph))
     }
 
     private fun inferredModule(function: RecoveredFunction): String {
         val meaningfulName = function.name.takeUnless { it.startsWith("FUN_") || it.startsWith("sub_") || it.startsWith("fn_") }
         val prefix = meaningfulName?.substringBefore('_')?.takeIf { it.length >= 3 }
         return safeIdentifier(prefix ?: "core")
+    }
+
+    private fun dependencyCycles(graph: Map<String, Set<String>>): List<List<String>> {
+        val cycles = linkedSetOf<List<String>>()
+        fun visit(node: String, path: List<String>) {
+            val existing = path.indexOf(node)
+            if (existing >= 0) {
+                val cycle = path.drop(existing)
+                val canonical = cycle.indices.map { offset -> cycle.drop(offset) + cycle.take(offset) }.minBy { it.joinToString("\u0000") }
+                cycles += canonical
+                return
+            }
+            if (path.size >= graph.size) return
+            graph[node].orEmpty().sorted().forEach { visit(it, path + node) }
+        }
+        graph.keys.sorted().forEach { visit(it, emptyList()) }
+        return cycles.sortedBy { it.joinToString("\u0000") }
     }
 }
 
