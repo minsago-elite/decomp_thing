@@ -40,6 +40,7 @@ class MvpPatchWorkflowTest {
 
         assertEquals(2, client.requests.size)
         assertTrue(client.requests.first().projectFiles.keys.single().endsWith("ghidra_decompiled.c"))
+        assertTrue(client.requests.first().projectFiles.values.single().contains("ghidra"))
         assertTrue(output.resolve("decompile/decompiled.c").readText().contains("badge[i]"))
         assertFalse(output.resolve("stale/nested/old.txt").exists())
         assertTrue(output.resolve("patched_c/patched.c").readText().contains("return 0;"))
@@ -59,6 +60,10 @@ class MvpPatchWorkflowTest {
         assertTrue(summary.contains("evidence/approved.patch"))
         assertTrue(output.resolve("evidence/approved.patch").exists())
         assertTrue(output.resolve("evidence/cwe-787-sanitizer.txt").exists())
+        assertTrue(output.resolve("evidence/reconstruction-request.md").readText().contains("Binary-derived context"))
+        assertTrue(output.resolve("evidence/reconstruction-response.md").readText().contains("badge[i]"))
+        assertTrue(output.resolve("evidence/patch-request.md").readText().contains("Sanitizer evidence"))
+        assertTrue(output.resolve("evidence/patch-response.md").readText().contains("[REDACTED]"))
         assertTrue(Regex("`[0-9a-f]{64}`").containsMatchIn(summary))
 
         val patched = ProcessBuilder(output.resolve("patched_binary/patched_binary").pathString).start()
@@ -131,6 +136,29 @@ class MvpPatchWorkflowTest {
         ).run(MvpPatchOptions(input, output, assumeYes = true))
 
         assertTrue(output.resolve("summary/SUMMARY.md").readText().contains("approved by --yes automation"))
+    }
+
+    @Test
+    fun `rejects placeholder reconstruction before compilation`() {
+        val tempDir = createTempDirectory("mvp-placeholder-")
+        val input = compileC(tempDir, "original", originalSource())
+        val output = tempDir.resolve("output")
+        val client = QueueRepairClient(
+            RepairResponse("placeholder", listOf(SourcePatch("decompiled.c", "int main(void) { return 0; }\n"))),
+        )
+
+        val failure = assertFailsWith<MvpPatchException> {
+            MvpPatchWorkflow(
+                client = client,
+                decompiler = BinaryDecompiler { _, _, _, raw -> raw.writeText("binary-derived ghidra context") },
+                binaryExecution = testExecutionBoundary(),
+            ).run(MvpPatchOptions(input, output, assumeYes = true))
+        }
+
+        assertTrue(failure.message.orEmpty().contains("placeholder"))
+        assertFalse(output.resolve("patched_binary/patched_binary").exists())
+        assertTrue(output.resolve("evidence/reconstruction-request.md").exists())
+        assertTrue(output.resolve("evidence/reconstruction-response.md").exists())
     }
 
     @Test

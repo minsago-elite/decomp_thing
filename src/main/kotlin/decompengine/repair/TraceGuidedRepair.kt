@@ -160,52 +160,28 @@ class HttpOpenAiCompatibleRepairClient(
         ${projectFiles.entries.joinToString("\n\n") { "### ${it.key}\n${it.value}" }}
     """.trimIndent()
 
-    private fun extractMessageContent(body: String): String {
-        val marker = "\"content\""
-        val markerIndex = body.indexOf(marker)
-        if (markerIndex < 0) error("OpenAI-compatible response did not include message content")
-        val colon = body.indexOf(':', markerIndex)
-        val firstQuote = body.indexOf('"', colon + 1)
-        val result = StringBuilder()
-        var index = firstQuote + 1
-        var escaped = false
-        while (index < body.length) {
-            val char = body[index++]
-            if (escaped) {
-                result.append(
-                    when (char) {
-                        'n' -> '\n'
-                        'r' -> '\r'
-                        't' -> '\t'
-                        '"' -> '"'
-                        '\\' -> '\\'
-                        else -> char
-                    },
-                )
-                escaped = false
-            } else if (char == '\\') {
-                escaped = true
-            } else if (char == '"') {
-                return result.toString()
-            } else {
-                result.append(char)
-            }
-        }
-        error("OpenAI-compatible response content string was unterminated")
-    }
+    private fun extractMessageContent(body: String): String = runCatching {
+        Json.parseToJsonElement(body).jsonObject
+            .getValue("choices").jsonArray.first().jsonObject
+            .getValue("message").jsonObject
+            .getValue("content").jsonPrimitive.content
+    }.getOrElse { throw IllegalStateException("OpenAI-compatible response did not include valid message content", it) }
 
     private fun parseRepairResponse(content: String): RepairResponse {
-        val summary = content.substringAfter("\"summary\"", "").substringAfter(':', "").substringAfter('"', "")
-            .substringBefore('"')
-            .ifBlank { "OpenAI-compatible repair response" }
-        val patches = Regex(
-            "\\{\\s*\"relativePath\"\\s*:\\s*\"((?:\\\\.|[^\"])*)\"\\s*,\\s*\"replacement\"\\s*:\\s*\"((?:\\\\.|[^\"])*)\"\\s*}",
-            RegexOption.DOT_MATCHES_ALL,
-        ).findAll(content).map {
-            SourcePatch(it.groupValues[1].unescapeJson(), it.groupValues[2].unescapeJson())
-        }.toList()
+        val normalized = content.trim().removeSurrounding("```json", "```").trim()
+        val response = runCatching { Json.parseToJsonElement(normalized).jsonObject }
+            .getOrElse { throw IllegalStateException("OpenAI-compatible message content was not valid patch JSON", it) }
+        val summary = response["summary"]?.jsonPrimitive?.contentOrNull?.ifBlank { null }
+            ?: "OpenAI-compatible repair response"
+        val patches = response["patches"]?.jsonArray?.map { item ->
+            val patch = item.jsonObject
+            SourcePatch(
+                relativePath = patch.getValue("relativePath").jsonPrimitive.content,
+                replacement = patch.getValue("replacement").jsonPrimitive.content,
+            )
+        }.orEmpty()
         if (patches.isEmpty()) error("OpenAI-compatible response did not include source patches")
-        return RepairResponse(summary = summary, patches = patches)
+        return RepairResponse(summary, patches)
     }
 
     companion object {

@@ -90,7 +90,7 @@ class TraceGuidedRepairTest {
                   "choices": [
                     {
                       "message": {
-                        "content": "{\"summary\":\"fix compile error\",\"patches\":[{\"relativePath\":\"src/reconstructed.c\",\"replacement\":\"int decomp_engine_main(void) {\\n    return 0;\\n}\\n\"}]}"
+                        "content": "{\"summary\":\"fix \\\"quoted\\\" compile error\",\"patches\":[{\"relativePath\":\"src/reconstructed.c\",\"replacement\":\"int decomp_engine_main(void) {\\n    return 0;\\n}\\n\"}]}"
                       }
                     }
                   ]
@@ -119,7 +119,7 @@ class TraceGuidedRepairTest {
                 ),
             )
 
-            assertEquals("fix compile error", response.summary)
+            assertEquals("fix \"quoted\" compile error", response.summary)
             assertEquals("src/reconstructed.c", response.patches.single().relativePath)
             assertTrue(response.patches.single().replacement.contains("return 0;"))
             assertTrue(requests.single().contains("compatible/test"))

@@ -84,6 +84,10 @@ internal fun writeMvpSummary(
         "Patched C" to patchedSource,
         "Patched binary" to binary,
         "Sanitizer finding" to evidence.findingPath,
+        "Reconstruction request" to output.resolve("evidence/reconstruction-request.md"),
+        "Reconstruction response" to output.resolve("evidence/reconstruction-response.md"),
+        "Patch request" to output.resolve("evidence/patch-request.md"),
+        "Patch response" to output.resolve("evidence/patch-response.md"),
     )
     val phaseRows = evidence.phases.values.joinToString("\n") {
         "| ${it.name.escapeTable()} | ${it.status} | ${evidence.redact(it.detail).escapeTable()} |"

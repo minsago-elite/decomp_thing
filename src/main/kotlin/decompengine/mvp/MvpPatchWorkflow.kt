@@ -40,7 +40,7 @@ class MvpPatchWorkflow(
         val summaryDir = output.resolve("summary").createDirectories()
         val evidenceDir = output.resolve("evidence").createDirectories()
         val work = output.resolve(".work").createDirectories()
-        val raw = work.resolve("ghidra_decompiled.c")
+                val raw = work.resolve("ghidra_decompiled.c")
         val finalBinary = patchedBinaryDir.resolve("patched_binary")
         finalBinary.deleteIfExists()
         val logger = StreamingLogger(logs.resolve("patch-${Instant.now().toEpochMilli()}.log"))
@@ -64,15 +64,19 @@ class MvpPatchWorkflow(
                 decompiler.decompile(it, input, work, raw)
                 if (!raw.exists() || raw.readText().isBlank()) throw MvpPatchException("Ghidra produced no decompiler output")
                 val reconstructed = decompiled.resolve("decompiled.c")
-                val reconstruction = client.requestRepair(
-                    RepairRequest(
-                        failureKind = "binary-reconstruction",
-                        prompt = reconstructionPrompt(original.stdout),
-                        projectFiles = mapOf("ghidra_decompiled.c" to raw.readText()),
-                        regressionInputs = listOf(ProcessInput("default")),
-                    ),
+                val reconstructionRequest = RepairRequest(
+                    failureKind = "binary-reconstruction",
+                    prompt = reconstructionPrompt(original.stdout),
+                    projectFiles = mapOf("ghidra_decompiled.c" to raw.readText()),
+                    regressionInputs = listOf(ProcessInput("default")),
                 )
-                reconstructed.writeText(singleReplacement(reconstruction.patches.map { it.relativePath to it.replacement }, "decompiled.c"))
+                retainRequest(evidenceDir.resolve("reconstruction-request.md"), reconstructionRequest, evidence)
+                val reconstruction = client.requestRepair(reconstructionRequest)
+                retainResponse(evidenceDir.resolve("reconstruction-response.md"), reconstruction, evidence)
+                val reconstructedSource = singleReplacement(reconstruction.patches.map { it.relativePath to it.replacement }, "decompiled.c")
+                validateMeaningfulReconstruction(reconstructedSource)
+                reconstructed.writeText(reconstructedSource)
+                evidence.check("meaningful standalone reconstruction", true, "source has main, control/data behavior, and no generic placeholder shape")
                 evidence.passPhase(phase, "Ghidra export converted to standalone decompile/decompiled.c")
 
                 phase = "compile"
@@ -104,14 +108,15 @@ class MvpPatchWorkflow(
                 phase = "patch"
                 evidence.startPhase(phase)
                 it.phase(phase)
-                val proposal = client.requestRepair(
-                    RepairRequest(
-                        failureKind = "memory-safety",
-                        prompt = patchPrompt(original.stdout, finding.combined),
-                        projectFiles = mapOf("decompile/decompiled.c" to reconstructed.readText()),
-                        regressionInputs = listOf(ProcessInput("default")),
-                    ),
+                val patchRequest = RepairRequest(
+                    failureKind = "memory-safety",
+                    prompt = patchPrompt(original.stdout, finding.combined),
+                    projectFiles = mapOf("decompile/decompiled.c" to reconstructed.readText()),
+                    regressionInputs = listOf(ProcessInput("default")),
                 )
+                retainRequest(evidenceDir.resolve("patch-request.md"), patchRequest, evidence)
+                val proposal = client.requestRepair(patchRequest)
+                retainResponse(evidenceDir.resolve("patch-response.md"), proposal, evidence)
                 evidence.patchExplanation = proposal.summary
                 val proposedSource = patchedSourceDir.resolve("patched.c")
                 proposedSource.writeText(singleReplacement(proposal.patches.map { it.relativePath to it.replacement }, "patched.c"))
@@ -313,6 +318,33 @@ private fun patchPrompt(stdout: String, sanitizer: String) = """
     Return exactly one full-file replacement whose relativePath is patched.c. It must compile as C11 with -Wall -Wextra -Werror.
     In the JSON summary, explain the vulnerability root cause, the exact code change, and why the change preserves observed behavior.
 """.trimIndent()
+
+private fun validateMeaningfulReconstruction(source: String) {
+    val meaningfulLines = source.lineSequence().map(String::trim).filter { it.isNotEmpty() && !it.startsWith("//") }.count()
+    val hasMain = Regex("\\bmain\\s*\\(").containsMatchIn(source)
+    val hasRecoveredBehavior = Regex("\\b(for|while|if|switch|memcpy|memmove|strcpy|puts|printf)\\b|\\[[^]]+]\\s*=").containsMatchIn(source)
+    if (source.length < 120 || meaningfulLines < 6 || !hasMain || !hasRecoveredBehavior) {
+        throw MvpPatchException("LLM reconstruction is a placeholder or lacks meaningful recovered control/data behavior")
+    }
+}
+
+private fun retainRequest(path: Path, request: RepairRequest, evidence: MvpRunEvidence) {
+    val files = request.projectFiles.toSortedMap().entries.joinToString("\n\n") { (name, content) ->
+        "## $name\n\n```c\n${evidence.redact(content).trimEnd()}\n```"
+    }
+    path.writeText(
+        "# Retained LLM Request\n\n- Failure kind: ${evidence.redact(request.failureKind)}\n" +
+            "- Regression inputs: ${request.regressionInputs.joinToString { evidence.redact(it.id) }}\n\n" +
+            "## Objective\n\n${evidence.redact(request.prompt)}\n\n## Binary-derived context\n\n$files\n",
+    )
+}
+
+private fun retainResponse(path: Path, response: decompengine.repair.RepairResponse, evidence: MvpRunEvidence) {
+    val patches = response.patches.joinToString("\n\n") { patch ->
+        "## ${evidence.redact(patch.relativePath)}\n\n```c\n${evidence.redact(patch.replacement).trimEnd()}\n```"
+    }
+    path.writeText("# Retained LLM Response\n\n## Summary\n\n${evidence.redact(response.summary)}\n\n$patches\n")
+}
 
 private fun findSourceLocation(sanitizer: String): String? =
     Regex("(?:[A-Za-z]:)?[^\\s:]*decompiled\\.c:\\d+(?::\\d+)?")
