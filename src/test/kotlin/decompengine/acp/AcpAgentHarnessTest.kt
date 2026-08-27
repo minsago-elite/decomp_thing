@@ -44,7 +44,6 @@ import kotlin.test.assertFalse
 import kotlin.test.assertNotNull
 import kotlin.test.assertNull
 import kotlin.test.assertTrue
-import org.junit.jupiter.api.Assumptions.assumeTrue
 import org.junit.jupiter.api.Timeout
 
 @Timeout(value = 60, unit = TimeUnit.SECONDS)
@@ -1406,7 +1405,7 @@ class AcpAgentHarnessTest {
         sandboxGateHelperExecutable = GATE_HELPER,
         // Protected dynamic-loader/runtime destinations are immutable boundary closure, never
         // request-selected terminal mounts. They are pinned once and evidenced for every launch.
-        launcherRuntimeMounts = LAUNCHER_RUNTIME_MOUNTS + PYTHON_RUNTIME_MOUNTS,
+        launcherRuntimeMounts = PYTHON_RUNTIME_MOUNTS,
         agentRuntimeMounts = agentRuntimeMounts,
         systemdUserRuntimeDirectory = USER_RUNTIME,
         agentResourceLimits = AcpSandboxResourceLimits(
@@ -1426,15 +1425,31 @@ class AcpAgentHarnessTest {
     )
 
     private fun requireLiveSandboxHost() {
+        AcpLiveContractHost.requireCapability(
+            PYTHON_RUNTIME.isSuccess,
+            message = {
+                "system Python runtime discovery failed: " +
+                    (PYTHON_RUNTIME.exceptionOrNull()?.message ?: "unknown failure")
+            },
+        )
         val missing = listOf(BWRAP, PRLIMIT, SYSTEMD_RUN, SYSTEMCTL, BASH, PYTHON, ECHO, SLEEP, CC)
             .filterNot(Files::isExecutable)
-        assumeTrue(missing.isEmpty(), "live ACP harness sandbox tools unavailable: $missing")
-        assumeTrue(Files.exists(USER_RUNTIME.resolve("bus")), "systemd user bus is unavailable")
-        assumeTrue(
-            Files.isRegularFile(Path.of("/sys/fs/cgroup/cgroup.controllers")),
-            "cgroup v2 is unavailable",
+        AcpLiveContractHost.requireCapability(
+            missing.isEmpty(),
+            message = { "live ACP harness sandbox tools are unavailable: $missing" },
         )
-        assumeTrue(Files.isExecutable(GATE_HELPER), "static ACP gate helper could not be built")
+        AcpLiveContractHost.requireCapability(
+            Files.exists(USER_RUNTIME.resolve("bus")),
+            message = { "systemd user bus is unavailable" },
+        )
+        AcpLiveContractHost.requireCapability(
+            Files.isRegularFile(Path.of("/sys/fs/cgroup/cgroup.controllers")),
+            message = { "cgroup v2 is unavailable" },
+        )
+        AcpLiveContractHost.requireCapability(
+            Files.isExecutable(GATE_HELPER),
+            message = { "static ACP gate helper could not be built" },
+        )
     }
 
     private fun javap(type: Class<*>): String {
@@ -1598,10 +1613,12 @@ class AcpAgentHarnessTest {
         val USER_RUNTIME: Path by lazy {
             Path.of("/run/user/${(Files.getAttribute(Path.of("/proc/self"), "unix:uid") as Number).toInt()}")
         }
-        val PYTHON: Path = Path.of("/usr/bin/python3.14")
+        val PYTHON_RUNTIME: Result<AcpPythonRuntimeLayout> by lazy {
+            runCatching { AcpLiveContractHost.discoverPythonRuntime() }
+        }
+        val PYTHON: Path get() = PYTHON_RUNTIME.getOrThrow().executable
         val ECHO: Path = Path.of("/usr/bin/echo")
         val SLEEP: Path = Path.of("/usr/bin/sleep")
-        val PYTHON_STDLIB: Path = Path.of("/usr/lib/python3.14")
         val AGENT_SCRIPT_DESTINATION: Path = Path.of("/decomp-acp-test/fake_acp_v1_agent.py")
         const val FORBIDDEN_CANARY_CONTENT: String = "forbidden canary must remain unchanged\n"
         val PARENT_SECRET_CANARY: String by lazy {
@@ -1624,27 +1641,15 @@ class AcpAgentHarnessTest {
             }
             output
         }
-        val LAUNCHER_RUNTIME_MOUNTS: List<AcpSandboxReadOnlyMount> = listOf(
-            AcpSandboxReadOnlyMount(
-                Path.of("/usr/lib64/ld-linux-x86-64.so.2"),
-                Path.of("/lib64/ld-linux-x86-64.so.2"),
-            ),
-            AcpSandboxReadOnlyMount(Path.of("/usr/lib64/libc.so.6")),
-        )
-        val PYTHON_RUNTIME_MOUNTS: List<AcpSandboxReadOnlyMount> = buildList {
-            listOf("encodings", "json", "re", "collections").forEach { name ->
-                add(AcpSandboxReadOnlyMount(PYTHON_STDLIB.resolve(name)))
-            }
-            listOf(
-                "_collections_abc.py", "abc.py", "codecs.py", "copyreg.py", "enum.py",
-                "functools.py", "keyword.py", "operator.py", "reprlib.py", "types.py", "zipimport.py",
-            ).forEach { name -> add(AcpSandboxReadOnlyMount(PYTHON_STDLIB.resolve(name))) }
-            val jsonExtension = Files.list(PYTHON_STDLIB.resolve("lib-dynload")).use { entries ->
-                entries.filter { it.fileName.toString().startsWith("_json.") }.toList().single()
-            }
-            add(AcpSandboxReadOnlyMount(jsonExtension))
-            add(AcpSandboxReadOnlyMount(Path.of("/usr/lib64/libpython3.14.so.1.0")))
-            add(AcpSandboxReadOnlyMount(Path.of("/usr/lib64/libm.so.6")))
+        val PYTHON_RUNTIME_MOUNTS: List<AcpSandboxReadOnlyMount> by lazy {
+            val runtime = PYTHON_RUNTIME.getOrThrow()
+            runtime.nativeRuntimeMounts + runtime.stdlibMounts(
+                listOf(
+                    "encodings", "json", "re", "collections",
+                    "_collections_abc.py", "abc.py", "codecs.py", "copyreg.py", "enum.py",
+                    "functools.py", "keyword.py", "operator.py", "reprlib.py", "types.py", "zipimport.py",
+                ),
+            )
         }
     }
 }
