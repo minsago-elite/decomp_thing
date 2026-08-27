@@ -527,8 +527,8 @@ class AcpAgentHarnessTest {
     }
 
     @Test
-    fun `unknown and duplicate JSON-RPC response ids are rejected before SDK dispatch`() {
-        listOf("unknown-response-id", "duplicate-response-id").forEach { mode ->
+    fun `unknown duplicate and late JSON-RPC response ids are rejected before SDK dispatch`() {
+        listOf("unknown-response-id", "duplicate-response-id", "late-response-id").forEach { mode ->
             val fixture = fixture(genericContract = true)
             val harness = harness(mode)
             val failure = executeExpectingCleanFailure(harness, fixture.request, mode, fixture)
@@ -1025,6 +1025,18 @@ class AcpAgentHarnessTest {
             AcpProcessConfiguration(
                 Path.of("/usr/bin/true"),
                 maximumProtocolFrames = MAXIMUM_ACP_PROTOCOL_FRAMES + 1,
+            )
+        }
+        assertFailsWith<IllegalArgumentException> {
+            AcpProcessConfiguration(
+                Path.of("/usr/bin/true"),
+                maximumFrameBytes = MAXIMUM_ACP_FRAME_BYTES + 1,
+            )
+        }
+        assertFailsWith<IllegalArgumentException> {
+            AcpProcessConfiguration(
+                Path.of("/usr/bin/true"),
+                maximumStderrBytes = MAXIMUM_ACP_STDERR_BYTES + 1,
             )
         }
 

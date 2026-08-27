@@ -16,6 +16,7 @@ GENERIC_CONTRACT_MODES = {
     "fragmented-stdout",
     "invalid-update",
     "invalid-utf8-prompt",
+    "late-response-id",
     "malformed-prompt",
     "missing-jsonrpc-prompt",
     "negative-usage",
@@ -242,6 +243,13 @@ expected_context = "protocol evidence" if MODE in GENERIC_CONTRACT_MODES else "c
 if expected_objective not in prompt_text or expected_context not in prompt_text:
     respond(prompt, error={"code": -32602, "message": "prompt lost objective or context"})
     raise SystemExit(95)
+
+if MODE == "late-response-id":
+    # Re-send the already-consumed initialize response only after the later prompt is in flight.
+    # This is deterministically late rather than merely adjacent to the original response.
+    respond(initialize, initialize_result)
+    time.sleep(30)
+    raise SystemExit(0)
 
 if MODE in ("fs-cap-read-only", "fs-cap-write-only", "fs-cap-none"):
     respond(prompt, {"stopReason": "end_turn"})

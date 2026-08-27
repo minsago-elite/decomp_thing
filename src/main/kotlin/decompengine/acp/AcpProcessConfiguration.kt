@@ -13,6 +13,8 @@ const val ACP_STABLE_PROTOCOL_VERSION: Int = 1
 /** Keeps the SDK's internally unbounded message channels behind a finite adapter boundary. */
 internal const val DEFAULT_MAXIMUM_ACP_PROTOCOL_FRAMES: Int = 1_024
 internal const val MAXIMUM_ACP_PROTOCOL_FRAMES: Int = 4_096
+internal const val MAXIMUM_ACP_FRAME_BYTES: Int = 8 * 1024 * 1024
+internal const val MAXIMUM_ACP_STDERR_BYTES: Int = 4 * 1024 * 1024
 
 enum class AcpRequiredAgentCapability(val diagnosticName: String) {
     LOAD_SESSION("loadSession"),
@@ -98,11 +100,15 @@ class AcpProcessConfiguration(
         require(this.environment.keys.all { it.matches(Regex("[A-Za-z_][A-Za-z0-9_]*")) }) {
             "ACP environment variable names must use portable [A-Za-z_][A-Za-z0-9_]* syntax"
         }
-        require(maximumFrameBytes > 0) { "maximum ACP frame size must be positive" }
+        require(maximumFrameBytes in 1..MAXIMUM_ACP_FRAME_BYTES) {
+            "maximum ACP frame size must be between 1 and $MAXIMUM_ACP_FRAME_BYTES bytes"
+        }
         require(maximumProtocolFrames in 1..MAXIMUM_ACP_PROTOCOL_FRAMES) {
             "maximum ACP protocol frames must be between 1 and $MAXIMUM_ACP_PROTOCOL_FRAMES"
         }
-        require(maximumStderrBytes > 0) { "maximum ACP stderr capture must be positive" }
+        require(maximumStderrBytes in 1..MAXIMUM_ACP_STDERR_BYTES) {
+            "maximum ACP stderr capture must be between 1 and $MAXIMUM_ACP_STDERR_BYTES bytes"
+        }
         require(implementationId.isNotBlank()) { "ACP implementation id must not be blank" }
         require(sandboxBoundary == null || !inheritParentEnvironment) {
             "sandboxed ACP execution must start from a cleared, explicitly configured environment"
