@@ -9,6 +9,8 @@ import decompengine.mvp.MvpPatchException
 import decompengine.mvp.MvpPatchOptions
 import decompengine.mvp.MvpPatchWorkflow
 import decompengine.mvp.BinaryRunnerService
+import decompengine.acp.AcpHarnessFactory
+import decompengine.acp.AcpHarnessKind
 import decompengine.project.ArchivalReconstructionService
 import decompengine.project.BoundedLlmModuleReconstructor
 import decompengine.project.EvidenceModuleReconstructor
@@ -47,6 +49,7 @@ private fun runReconstruct(args: List<String>) {
     var output: Path? = null
     var evidenceOnly = false
     var maximumContext = 120_000
+    var harnessOverride: String? = null
     var index = 0
     while (index < args.size) {
         when (args[index]) {
@@ -61,6 +64,10 @@ private fun runReconstruct(args: List<String>) {
                     ?: reconstructUsageError("--max-context-chars must be a number")
                 index += 2
             }
+            "--harness" -> {
+                if (index + 1 >= args.size) reconstructUsageError("--harness requires direct or acp")
+                harnessOverride = args[index + 1]; index += 2
+            }
             else -> {
                 if (args[index].startsWith("-") || binary != null) reconstructUsageError("unexpected argument: ${args[index]}")
                 binary = Path.of(args[index]); index++
@@ -68,6 +75,17 @@ private fun runReconstruct(args: List<String>) {
         }
     }
     if (binary == null || output == null) reconstructUsageError("reconstruct requires an input binary and output directory")
+    val harnessEnv = harnessOverride?.let { mapOf("ACP_HARNESS" to it) } ?: emptyMap()
+    val harnessSelection = try {
+        AcpHarnessFactory.fromEnvironment(System.getenv() + harnessEnv)
+    } catch (e: IllegalArgumentException) {
+        reconstructUsageError(e.message ?: "invalid harness configuration")
+    }
+    if (harnessSelection.kind == AcpHarnessKind.ACP) {
+        println("harness: acp (${harnessSelection.configuration?.executable})")
+    } else {
+        println("harness: direct")
+    }
     val hasApi = listOf("BASE_URL", "API_KEY", "MODEL").all { !System.getenv(it).isNullOrBlank() }
     val reconstructor = if (!evidenceOnly && hasApi) {
         BoundedLlmModuleReconstructor(
@@ -87,7 +105,7 @@ private fun runReconstruct(args: List<String>) {
 
 private fun reconstructUsageError(message: String): Nothing {
     System.err.println(message)
-    System.err.println("usage: llm_bin_patch reconstruct <binary> --output <directory> [--evidence-only] [--max-context-chars <count>]")
+    System.err.println("usage: llm_bin_patch reconstruct <binary> --output <directory> [--evidence-only] [--max-context-chars <count>] [--harness direct|acp]")
     kotlin.system.exitProcess(2)
 }
 
@@ -147,6 +165,7 @@ private fun runRepair(args: List<String>) {
     var reports: Path? = null
     var maxIterations = 5
     var exploreInputs = false
+    var harnessOverride: String? = null
     var index = 0
     while (index < args.size) {
         when (args[index]) {
@@ -161,6 +180,10 @@ private fun runRepair(args: List<String>) {
                 index += 2
             }
             "--explore" -> { exploreInputs = true; index++ }
+            "--harness" -> {
+                if (index + 1 >= args.size) repairUsageError("--harness requires direct or acp")
+                harnessOverride = args[index + 1]; index += 2
+            }
             else -> {
                 if (args[index].startsWith("-")) repairUsageError("unexpected argument: ${args[index]}")
                 if (original == null) original = Path.of(args[index])
@@ -169,6 +192,17 @@ private fun runRepair(args: List<String>) {
                 index++
             }
         }
+    }
+    val harnessEnv = harnessOverride?.let { mapOf("ACP_HARNESS" to it) } ?: emptyMap()
+    val harnessSelection = try {
+        AcpHarnessFactory.fromEnvironment(System.getenv() + harnessEnv)
+    } catch (e: IllegalArgumentException) {
+        repairUsageError(e.message ?: "invalid harness configuration")
+    }
+    if (harnessSelection.kind == AcpHarnessKind.ACP) {
+        println("harness: acp (${harnessSelection.configuration?.executable})")
+    } else {
+        println("harness: direct")
     }
     if (original == null || project == null) repairUsageError("repair requires an original binary and project directory")
     val reportsDir = reports ?: project.resolve("reports")
@@ -202,7 +236,7 @@ private fun runRepair(args: List<String>) {
 
 private fun repairUsageError(message: String): Nothing {
     System.err.println(message)
-    System.err.println("usage: llm_bin_patch repair <original-binary> <project-dir> [--reports <directory>] [--max-iterations <count>] [--explore]")
+    System.err.println("usage: llm_bin_patch repair <original-binary> <project-dir> [--reports <directory>] [--max-iterations <count>] [--explore] [--harness direct|acp]")
     kotlin.system.exitProcess(2)
 }
 
@@ -335,10 +369,15 @@ private fun printHelp() {
           llm_bin_patch doctor [--tools-only] [--output <directory>]
           llm_bin_patch patch <input-elf> --output <directory> [--yes]
           llm_bin_patch runner [--control-dir <directory>] [--root <directory>]...
-          llm_bin_patch repair <original-binary> <project-dir> [--reports <directory>] [--max-iterations <count>] [--explore]
+          llm_bin_patch repair <original-binary> <project-dir> [--reports <directory>] [--max-iterations <count>] [--explore] [--harness direct|acp]
           llm_bin_patch explore <binary> --reports <directory> [--arg <value>] [--stdin <value>]
-          llm_bin_patch reconstruct <binary> --output <directory> [--evidence-only] [--max-context-chars <count>]
+          llm_bin_patch reconstruct <binary> --output <directory> [--evidence-only] [--max-context-chars <count>] [--harness direct|acp]
           llm_bin_patch web [--host 127.0.0.1] [--port 8000] [--data-dir .decomp_engine/jobs]
+
+        Harness selection:
+          --harness direct  use the built-in OpenAI-compatible client (default)
+          --harness acp     use an external ACP agent via ACP_HARNESS=acp, ACP_AGENT_EXECUTABLE, ACP_AGENT_ARGS, ACP_PERMISSION_MODE, ACP_TIMEOUT_SECONDS
+          Doctor verifies the ACP executable resolves, starts, negotiates ACP v1, and shuts down cleanly.
         """.trimIndent(),
     )
 }
