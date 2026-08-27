@@ -79,7 +79,8 @@ export XDG_RUNTIME_DIR="$runtime_directory"
 export DBUS_SESSION_BUS_ADDRESS="unix:path=$bus_path"
 
 manager_version="$(timeout --kill-after=5s 10s systemctl --user show --property=Version --value)"
-if [[ ! "$manager_version" =~ ^[0-9]+([.][0-9]+)*$ ]]; then
+if ((${#manager_version} == 0 || ${#manager_version} > 128)) ||
+  [[ ! "$manager_version" =~ ^[0-9][0-9A-Za-z.+~:_-]*$ ]]; then
   echo "systemd user manager returned an invalid version: $manager_version" >&2
   exit 1
 fi

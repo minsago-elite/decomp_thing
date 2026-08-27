@@ -38,6 +38,21 @@ class LinuxBubblewrapBoundaryTest {
         assertFalse("--share-net" in arguments)
         assertFalse("--not-a-security-boundary" in arguments)
         assertFalse("--block-fd" in arguments)
+        listOf(
+            "261.1",
+            "261.1\n",
+            "255.4-1ubuntu8.16\n",
+            "252.30-1~deb12u2\r\n",
+        ).forEach { assertTrue(isValidSystemdManagerVersionOutput(it), it) }
+        listOf(
+            "",
+            "systemd 261.1\n",
+            " 261.1\n",
+            "261.1 packaged\n",
+            "261.1\nignored",
+            "261.1\n\n",
+            "1".repeat(129),
+        ).forEach { assertFalse(isValidSystemdManagerVersionOutput(it), it) }
         var committed = false
         commitSandboxAuthorization(object : OutputStream() {
             override fun write(value: Int) {

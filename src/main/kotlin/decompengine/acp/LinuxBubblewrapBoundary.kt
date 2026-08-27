@@ -4358,9 +4358,19 @@ private fun probeSystemd(
         listOf("show", "--property=Version", "--value"),
         cancellationCheck = cancellationCheck,
     )
-    if (!manager.output.trim().matches(Regex("[0-9]+(?:\\.[0-9]+)*"))) {
+    if (!isValidSystemdManagerVersionOutput(manager.output)) {
         throw IOException("systemd user manager is unavailable")
     }
+}
+
+internal fun isValidSystemdManagerVersionOutput(output: String): Boolean {
+    val version = when {
+        output.endsWith("\r\n") -> output.dropLast(2)
+        output.endsWith('\n') -> output.dropLast(1)
+        else -> output
+    }
+    return version.length in 1..MAXIMUM_SYSTEMD_MANAGER_VERSION_BYTES &&
+        version.matches(Regex("[0-9][0-9A-Za-z.+~:_-]*"))
 }
 
 /** Proves that the fixed launcher opens only the supplied environment descriptor path as fd 4. */
@@ -5142,6 +5152,7 @@ private const val SCOPE_POLL_MILLIS = 20L
 private const val TRUSTED_PROCESS_POLL_MILLIS = 20L
 private const val MAXIMUM_PROBE_BYTES = 32 * 1024
 private const val MAXIMUM_GATE_HELPER_BYTES = 4 * 1024 * 1024
+private const val MAXIMUM_SYSTEMD_MANAGER_VERSION_BYTES = 128
 internal const val MAXIMUM_SANDBOX_ARGUMENTS = 1024
 internal const val MAXIMUM_SANDBOX_ARGUMENT_BYTES = 1024L * 1024L
 private const val MAXIMUM_PROC_CMDLINE_BYTES = 1024 * 1024
