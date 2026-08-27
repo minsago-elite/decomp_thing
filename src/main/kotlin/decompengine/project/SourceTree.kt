@@ -611,7 +611,8 @@ object SourceTreeGenerator {
     }
 
     private fun renderMakefile(sources: List<String>, profile: ReconstructionProfile): String {
-        val cflags = profile.adapterConfiguration["compiler-flags"]?.joinToString(" ") ?: "-std=c11 -g -Wall -Wextra -Iinclude"
+        val rawFlags = profile.adapterConfiguration["compiler-flags"]?.toList() ?: listOf("-std=c11", "-g", "-Wall", "-Wextra", "-Iinclude")
+        val cflags = rawFlags.filter { it != "-Werror" }.joinToString(" ")
         val cc = profile.adapterConfiguration["compiler-driver"]?.firstOrNull() ?: "gcc"
         return listOf(
             "CC ?= $cc",
