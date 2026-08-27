@@ -736,62 +736,15 @@ class RepairHistory(
         Collections.unmodifiableList(ArrayList(regressionInputs.map(ProcessInput::detachedCopy)))
 
     @Synchronized
-    fun toJson(): String {
-        requireBoundedProjection()
-        return """
-            {
-              "regressionInputs": [
-            ${regressionInputs.joinToString(",\n") { it.toJson().prependIndent("    ") }}
-              ],
-              "iterations": [
-            ${iterations.joinToString(",\n") { it.toJson().prependIndent("    ") }}
-              ]
-            }
-        """.trimIndent() + "\n"
-    }
+    fun toJson(): String = renderRepairHistoryProjection(iterations, regressionInputs, maximumBytes)
 
     private fun persist() {
         path.parent.createDirectories()
-        requireBoundedProjection()
         val payload = toJson()
         require(payload.toByteArray().size.toLong() <= maximumBytes) {
             "repair history exceeds its $maximumBytes-byte limit"
         }
         writeRepairEvidenceAtomically(path, payload)
-    }
-
-    private fun requireBoundedProjection() {
-        var projected = 256L
-        fun addText(value: String?) {
-            if (value == null) return
-            projected = Math.addExact(
-                projected,
-                Math.multiplyExact(value.toByteArray(Charsets.UTF_8).size.toLong(), 6L),
-            )
-        }
-        regressionInputs.forEach { input ->
-            projected = Math.addExact(projected, Math.multiplyExact(input.stdin.size.toLong(), 2L) + 128L)
-            addText(input.id)
-            input.args.forEach(::addText)
-        }
-        iterations.forEach { iteration ->
-            projected = Math.addExact(projected, 1024L)
-            addText(iteration.failureKind)
-            addText(iteration.prompt)
-            addText(iteration.summary)
-            iteration.retainedRegressionIds.forEach(::addText)
-            listOfNotNull(iteration.before, iteration.after).forEach { evidence ->
-                addText(evidence.kind)
-                addText(evidence.summary)
-                addText(evidence.artifactPath)
-            }
-            iteration.patches.forEach { patch ->
-                addText(patch.relativePath)
-                projected = Math.addExact(projected, Math.multiplyExact(patch.replacementBytes.size.toLong(), 2L) + 128L)
-            }
-            require(projected <= maximumBytes) { "repair history exceeds its $maximumBytes-byte limit" }
-        }
-        require(projected <= maximumBytes) { "repair history exceeds its $maximumBytes-byte limit" }
     }
 
     private fun load(payload: String) {
@@ -802,6 +755,74 @@ class RepairHistory(
         root["iterations"]?.jsonArray?.map(::parseIteration)?.map(RepairIteration::deepFrozenCopy)
             ?.let(iterations::addAll)
     }
+}
+
+internal fun renderRepairHistoryProjection(
+    authoritative: List<RepairIteration>,
+    authoritativeRegressionInputs: List<ProcessInput>,
+    maximumBytes: Long,
+): String {
+    require(maximumBytes in 1..MAXIMUM_REPAIR_PROJECTION_BYTES) { "repair history byte limit is invalid" }
+    val iterations = authoritative.map(RepairIteration::deepFrozenCopy)
+    val regressionInputs = authoritativeRegressionInputs.map(ProcessInput::detachedCopy)
+    require(iterations.map { it.index } == iterations.map { it.index }.distinct().sorted()) {
+        "authoritative repair iterations must have unique ordered indexes"
+    }
+    require(regressionInputs.map { it.id } == regressionInputs.map { it.id }.distinct().sorted()) {
+        "authoritative retained regression inputs must have unique sorted IDs"
+    }
+    var projected = 256L
+    fun addText(value: String?) {
+        if (value == null) return
+        projected = Math.addExact(
+            projected,
+            Math.multiplyExact(value.toByteArray(Charsets.UTF_8).size.toLong(), 6L),
+        )
+    }
+    regressionInputs.forEach { input ->
+        projected = Math.addExact(projected, Math.multiplyExact(input.stdin.size.toLong(), 2L) + 128L)
+        addText(input.id)
+        input.args.forEach(::addText)
+    }
+    iterations.forEach { iteration ->
+        projected = Math.addExact(projected, 1024L)
+        addText(iteration.failureKind)
+        addText(iteration.prompt)
+        addText(iteration.summary)
+        iteration.retainedRegressionIds.forEach(::addText)
+        listOfNotNull(iteration.before, iteration.after).forEach { evidence ->
+            addText(evidence.kind)
+            addText(evidence.summary)
+            addText(evidence.artifactPath)
+        }
+        iteration.patches.forEach { patch ->
+            addText(patch.relativePath)
+            projected = Math.addExact(
+                projected,
+                Math.multiplyExact(patch.replacementBytes.size.toLong(), 2L) + 128L,
+            )
+        }
+        if (projected > maximumBytes) {
+            throw RepairBudgetExceededException("repair history exceeds its $maximumBytes-byte limit")
+        }
+    }
+    if (projected > maximumBytes) {
+        throw RepairBudgetExceededException("repair history exceeds its $maximumBytes-byte limit")
+    }
+    val payload = """
+        {
+          "regressionInputs": [
+        ${regressionInputs.joinToString(",\n") { it.toJson().prependIndent("    ") }}
+          ],
+          "iterations": [
+        ${iterations.joinToString(",\n") { it.toJson().prependIndent("    ") }}
+          ]
+        }
+    """.trimIndent() + "\n"
+    if (payload.toByteArray(Charsets.UTF_8).size.toLong() > maximumBytes) {
+        throw RepairBudgetExceededException("repair history exceeds its $maximumBytes-byte limit")
+    }
+    return payload
 }
 
 private data class RepairTask(
@@ -1143,13 +1164,13 @@ class TraceGuidedRepairLoop private constructor(
             }
             try {
                 graph.synchronizeRepairHistory()
+                projectionHistory.adoptCanonicalProjection(
+                    graph.derivedRepairIterations(),
+                    graph.retainedRegressionCorpus().inputs,
+                )
             } catch (_: Exception) {
                 // A committed graph head remains an unambiguous success if this projection fails.
             }
-            projectionHistory.adoptCanonicalProjection(
-                graph.derivedRepairIterations(),
-                graph.retainedRegressionCorpus().inputs,
-            )
         }
         fun iteration(index: Int): RepairIteration = graph.derivedRepairIterations().single { it.index == index }
         override fun close() {
@@ -1188,7 +1209,7 @@ class TraceGuidedRepairLoop private constructor(
         val baseContent = try {
             graph.requireContextBinding(repair.context)
             graph.preflightStagingContext(repair.context)
-        } catch (failure: Exception) {
+        } catch (failure: Throwable) {
             runCatching(graph::close).onFailure(failure::addSuppressed)
             throw failure
         }
@@ -1205,7 +1226,7 @@ class TraceGuidedRepairLoop private constructor(
                     regressionCorpusSha256 = repair.regressionCorpusSha256,
                 ),
             )
-        } catch (failure: Exception) {
+        } catch (failure: Throwable) {
             runCatching(graph::close).onFailure(failure::addSuppressed)
             throw failure
         }
@@ -1245,8 +1266,12 @@ class TraceGuidedRepairLoop private constructor(
                 },
                 onEvent = onAgentEvent,
             )
-        } catch (failure: Exception) {
-            abortPendingGraph(graph, attempt, failure, "agent-error")
+        } catch (failure: Throwable) {
+            if (failure is Exception) {
+                abortPendingGraph(graph, attempt, failure, "agent-error")
+            } else {
+                runCatching(graph::close).onFailure(failure::addSuppressed)
+            }
             throw failure
         }
         val result = stagedExecution.result
@@ -1295,8 +1320,12 @@ class TraceGuidedRepairLoop private constructor(
             graph.installCandidate(attempt, replacements)
             val patches = applied.map { patch -> RepairPatch(patch.path, patch.afterContent) }
             return ExecutedRepair(result, applied, patches, graph, attempt, history)
-        } catch (failure: Exception) {
-            abortPendingGraph(graph, attempt, failure, "candidate-error")
+        } catch (failure: Throwable) {
+            if (failure is Exception) {
+                abortPendingGraph(graph, attempt, failure, "candidate-error")
+            } else {
+                runCatching(graph::close).onFailure(failure::addSuppressed)
+            }
             throw failure
         }
     }

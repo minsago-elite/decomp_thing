@@ -906,6 +906,44 @@ class TraceGuidedRepairTest {
     }
 
     @Test
+    fun `agent termination closes the pending graph and releases its root lock`() {
+        val tempDir = createTempDirectory("repair-agent-termination-")
+        val projectDir = createProject(tempDir.resolve("project"), reconstructedSource = "int decomp_engine_main(void) {\n")
+        val target = projectDir.resolve("src/reconstructed.c")
+        val before = target.readBytes()
+        val budget = RepairResourceBudget(maximumGraphLockWaitMillis = 100)
+        val harness = object : CapturedRepairAgentHarness {
+            override fun execute(
+                request: AgentExecutionRequest,
+                onEvent: (AgentExecutionEvent) -> Unit,
+            ): AgentExecutionResult = error("strict captured test must not use a host workspace")
+
+            override fun executeCaptured(
+                request: AgentExecutionRequest,
+                initialFiles: Map<String, ByteArray>,
+                output: BoundedRepairOutput,
+                onEvent: (AgentExecutionEvent) -> Unit,
+            ): AgentExecutionResult = throw SimulatedAgentTermination()
+        }
+        val loop = generatedCRepairLoop(
+            harness,
+            RepairHistory(projectDir.resolve("reports/repair_history.json")),
+            resourceBudget = budget,
+        )
+
+        assertFailsWith<SimulatedAgentTermination> {
+            loop.repairCompileError(projectDir, collectCompileFailure(projectDir), emptyList())
+        }
+        loop.close()
+        assertContentEquals(before, target.readBytes())
+
+        ModuleRevisionGraph.open(projectDir, GeneratedCRepairIndexProfile, budget).use { recovered ->
+            assertEquals(null, recovered.snapshot.pendingAttemptId)
+            assertTrue(recovered.snapshot.nodes.last().recoveredAfterCrash)
+        }
+    }
+
+    @Test
     fun `staging rejects oversized agent output before allocation beyond its budget`() {
         val tempDir = createTempDirectory("repair-staging-oversize-")
         val projectDir = createProject(tempDir.resolve("project"), reconstructedSource = "int decomp_engine_main(void) {\n")
@@ -1437,6 +1475,7 @@ class TraceGuidedRepairTest {
     }
 
     private class SimulatedEvidenceCrash : Error("simulated crash after graph-head persistence")
+    private class SimulatedAgentTermination : Error("simulated agent process termination")
 
     private class QueueRepairClient(vararg responses: RepairResponse) : RepairClient {
         private val responses = ArrayDeque(responses.toList())

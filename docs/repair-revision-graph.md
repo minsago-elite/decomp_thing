@@ -102,7 +102,10 @@ device/inode/mount identity and descriptor metadata, and re-resolves the complet
 read. Unsupported hosts fail closed instead of falling back to a path-based read.
 
 Graph open pins the authenticated project-root directory descriptor before JVM coordination and
-retains it until after the graph lock and channel are released. Pre-index recovery, profile/index
+retains it until after the root-inode lock and repair-state descriptors are released. The
+cross-process `flock` is held on an authenticated duplicate of that project-root directory itself,
+not on a replaceable file below `reports/`; replacing or renaming the state subtree therefore cannot
+create a second graph-aware lock domain. Pre-index recovery, profile/index
 reads, source publication, lock/state/blob access, cleanup, and compatibility projections all resolve
 from that descriptor's inode. Renaming the root or retargeting an ancestor therefore cannot redirect
 an open graph into a replacement tree; a replacement root has a distinct coordinator and lock.
@@ -131,13 +134,18 @@ budget. A separately canonical `recovery-binding.json`, written before the first
 immutably binds profile/configuration, budget, exact source/editable paths, and index digest. A
 content-sensitive profile must authorize that persisted layout without reading possibly dirty live
 source; only after restoration may normal profile resolution rebuild and verify the live index.
+The binding becomes immutable authority only once `graph.json` exists. If first initialization fails
+before that graph publication, the next root-locked attempt size-checks and atomically replaces the
+unparsed binding residue. It also bounded-lists, authenticates by content digest, and removes every
+graphless blob final/temporary/quarantine name before reserving the new root snapshot; a failed
+profile or budget cannot strand unrelated initialization blobs that consume all future capacity.
 Pending preimage/context and candidate patch cardinality and aggregate-byte limits are checked before
 any recovery blob or retained preimage body is read. `beginAttempt` derives preimage sizes and hashes
 from the already verified head, applies the aggregate limit, and only then allocates captured file bodies.
 The same pending-preimage aggregate validator is used before `beginAttempt`
 persists, during every live-state persistence validation, and during startup recovery validation.
 The complete selected readable staging context is captured and checked against both context and
-staging byte limits before `beginAttempt`, so a valid staging<context configuration cannot create a
+staging byte limits before `beginAttempt`, so a valid staging/context configuration cannot create a
 durable pending record that startup would reject. Startup also preflights the complete accepted
 source set and refuses unknown replacements. Cleanup
 removes only exact transaction-derived temporaries whose content matches that journal; arbitrary
@@ -149,11 +157,25 @@ same-credential process that mutates those reserved names outside the lock at th
 boundary violates this authority contract; deployments with such adversaries must protect the
 project directories with a stronger filesystem boundary.
 
-The project graph lock serializes every repair-owned context selection, publication, build, behavior
-assessment, acceptance, and rollback. Each individual exchange is atomic and the journal makes a
+The project-root inode lock serializes every repair-owned context selection, publication, build,
+behavior assessment, acceptance, and rollback. JVM admission and the root-inode lock consume one
+monotonic persisted wait deadline rather than independent timeout windows. Each individual exchange
+is atomic and the journal makes a
 multi-file attempt crash-consistent. A general filesystem does not provide an atomic multi-file tree
 swap: a non-cooperating external reader can observe a mixed revision between per-file renames. Such
 readers must acquire the same graph lock if they require transaction-level visibility.
+
+Canonical state, blobs, and compatibility projections use a separate descriptor-relative atomic
+writer: it fsyncs an unnamed inode, links and fsyncs one exact recovery name, exchanges or installs
+that name, validates both identities, and fsyncs the parent directory as the commit boundary.
+Ordinary pre-commit exceptions roll the exchange back durably; ordinary failures after that boundary
+cannot turn the committed write into an ambiguous API failure. A non-`Exception` throwable is treated
+as process termination: cleanup is skipped, the live graph is poisoned, and callers must close and
+reopen it so journal recovery selects the durable state. Before the directory fsync, a real storage
+crash may replay either the complete old mapping or the complete new mapping; recovery supports both
+outcomes. Unit fault injection proves namespace/restart handling in a live kernel, while power-loss
+ordering still relies on Linux `renameat2` plus file-and-directory `fsync` semantics and is not a
+substitute for faulted-block-device testing.
 
 The full retained regression corpus (IDs, argv, and stdin bytes) and its canonical digest live in
 the graph, not merely in `repair_history.json`. Corpus additions acquire the same cross-process graph
@@ -217,6 +239,8 @@ every changed file.
 | One candidate patch | 32 files / 2 MiB |
 | Candidate behavior output/time | 8 MiB stdout / 8 MiB stderr / 16 MiB aggregate / 5 s |
 | Generated-C discovery | 1,000,000 entries / 100,000 directories / depth 128 |
+| Repair state traversal | 1,000,000 directory entries |
+| Graph lock admission | 10 s |
 | Revision nodes | 10,000 |
 | Serialized revision graph | 256 MiB |
 | Content-addressed revision blobs | 4 GiB |
@@ -232,6 +256,17 @@ profile-configuration, and final-index canonical bytes are fed incrementally int
 than accumulated in unbounded strings. Generated-C evidence checks top-level module/entity/type/cycle
 counts and aggregate nested-array/reference counts before collection transforms. Diagnostic path
 recovery additionally caps a line at 16,384 characters and the number of line-prefix probes at 4,096.
+JVM-local and cross-process graph-lock acquisition share the persisted admission deadline, and blob
+cleanup charges the state-directory entry limit before sorting or deleting any entry. Root and
+candidate blob batches reserve their prospective distinct directory entries with one bounded listing
+before publication, and loaded graph references are rejected if they exceed the same limit; this
+prevents a live graph from creating state that its own next open cannot traverse without making
+initialization quadratic in the number of source blobs. Before every pending journal transition, the
+graph renders and validates the deterministic crash-recovered rejection it would need on restart,
+including graph bytes, node/blob limits, and exact history/compatibility projection limits. Retained
+corpus changes and final accept/reject states pass the same commit-readiness preflight before durable
+state or source rollback, so no successful call can create a journal that its persisted budget cannot
+clear.
 
 The mechanism is program-agnostic. A large compiler recovery is a useful benchmark, but benchmark-
 specific fixtures, compiler names, flags, commands, paths, or expected behavior do not belong in the

@@ -1,5 +1,6 @@
 package decompengine.repair
 
+import decompengine.acp.LinuxFilesystemSyscalls
 import decompengine.project.RecoveredFunction
 import decompengine.project.RecoveredProgramModel
 import decompengine.project.SourceTreeGenerator
@@ -1480,24 +1481,24 @@ class ModuleRevisionGraphTest {
     fun `history projection fails from aggregate accounting before decoding retained blobs`() {
         val project = generatedProject()
         val budget = RepairResourceBudget(maximumProjectionBytes = 512)
-        val target = project.resolve("src/modules/alpha.c")
-        val candidate = target.readBytes() + "\n/* bounded projection */\n".repeat(32).toByteArray()
         val graph = ModuleRevisionGraph.open(project, GeneratedCRepairIndexProfile, budget)
         val corpus = graph.retainedRegressionCorpus()
-        val attempt = graph.beginAttempt(
-            listOf("src/modules/alpha.c"),
-            RevisionRepairMetadata(1, "compile", "bounded", null, emptyList(), null, corpus.sha256),
-        )
-        graph.installCandidate(attempt, mapOf("src/modules/alpha.c" to candidate))
-        graph.reject(attempt, RepairEvidence("compile", "rejected candidate"))
-        val digest = graph.snapshot.nodes.last().changes.single().afterBlobSha256
+        val unrelated = graph.snapshot.nodes.first().changes.single { it.path == "src/modules/delta.c" }
+        val digest = unrelated.afterBlobSha256
         val blob = project.resolve("reports/repair-revisions/blobs/$digest")
+        val originalBlob = blob.readBytes()
         blob.writeText("corrupt only after graph open")
 
-        val failure = assertFailsWith<RepairBudgetExceededException> { graph.derivedRepairIterations() }
+        val failure = assertFailsWith<RepairBudgetExceededException> {
+            graph.beginAttempt(
+                listOf("src/modules/alpha.c"),
+                RevisionRepairMetadata(1, "compile", "bounded", null, emptyList(), null, corpus.sha256),
+            )
+        }
 
         assertTrue(failure.message.orEmpty().contains("projection"))
-        blob.writeBytes(candidate)
+        assertEquals(null, graph.snapshot.pendingAttemptId)
+        blob.writeBytes(originalBlob)
         graph.close()
         ModuleRevisionGraph.open(project, GeneratedCRepairIndexProfile, budget).use { }
     }
@@ -1971,6 +1972,358 @@ class ModuleRevisionGraphTest {
     }
 
     @Test
+    fun `durable graph publication crash points recover an exact pending attempt`() {
+        val stages: List<(ModuleRevisionFaultPoint) -> Boolean> = listOf(
+            { point ->
+                point is ModuleRevisionFaultPoint.AfterStatePublicationExchange &&
+                    point.scope == "revision-state" && point.name == "graph.json"
+            },
+            { point ->
+                point is ModuleRevisionFaultPoint.AfterStatePublicationDirectorySync &&
+                    point.scope == "revision-state" && point.name == "graph.json"
+            },
+        )
+        stages.forEachIndexed { stageIndex, matches ->
+            val project = generatedProject()
+            val target = project.resolve("src/modules/alpha.c")
+            val accepted = target.readBytes()
+            var armed = false
+            val graph = ModuleRevisionGraph.openForTesting(
+                project,
+                GeneratedCRepairIndexProfile,
+                faultInjector = ModuleRevisionFaultInjector { point ->
+                    if (armed && matches(point)) throw SimulatedRepairCrash()
+                },
+            )
+            armed = true
+
+            assertFailsWith<SimulatedRepairCrash>("state publication stage $stageIndex") {
+                graph.beginAttempt(listOf("src/modules/alpha.c"))
+            }
+            assertFailsWith<IllegalStateException> {
+                graph.snapshot
+            }
+            graph.close()
+            assertContentEquals(accepted, target.readBytes())
+
+            ModuleRevisionGraph.open(project, GeneratedCRepairIndexProfile).use { recovered ->
+                assertEquals(null, recovered.snapshot.pendingAttemptId)
+                assertTrue(recovered.snapshot.nodes.last().recoveredAfterCrash)
+                assertContentEquals(accepted, target.readBytes())
+            }
+            assertFalse(
+                project.resolve("reports/repair-revisions/.graph.json.repair-atomic.tmp").exists(),
+                "state publication stage $stageIndex left its exact recovery name",
+            )
+        }
+    }
+
+    @Test
+    fun `non-exception termination preserves crash residue and poisons the live graph`() {
+        val project = generatedProject()
+        var armed = false
+        val graph = ModuleRevisionGraph.openForTesting(
+            project,
+            GeneratedCRepairIndexProfile,
+            faultInjector = ModuleRevisionFaultInjector { point ->
+                if (armed && point is ModuleRevisionFaultPoint.AfterStatePublicationExchange &&
+                    point.scope == "revision-state" && point.name == "graph.json"
+                ) {
+                    throw SimulatedRepairTermination()
+                }
+            },
+        )
+        armed = true
+
+        assertFailsWith<SimulatedRepairTermination> {
+            graph.beginAttempt(listOf("src/modules/alpha.c"))
+        }
+        assertTrue(project.resolve("reports/repair-revisions/.graph.json.repair-atomic.tmp").exists())
+        assertFailsWith<IllegalStateException> { graph.snapshot }
+        graph.close()
+
+        ModuleRevisionGraph.open(project, GeneratedCRepairIndexProfile).use { recovered ->
+            assertEquals(null, recovered.snapshot.pendingAttemptId)
+            assertTrue(recovered.snapshot.nodes.last().recoveredAfterCrash)
+        }
+    }
+
+    @Test
+    fun `ordinary state publication faults agree with the durable commit boundary`() {
+        run {
+            val project = generatedProject()
+            val graphPath = project.resolve("reports/repair-revisions/graph.json")
+            var armed = false
+            var injected = false
+            val graph = ModuleRevisionGraph.openForTesting(
+                project,
+                GeneratedCRepairIndexProfile,
+                faultInjector = ModuleRevisionFaultInjector { point ->
+                    if (armed && !injected &&
+                        point is ModuleRevisionFaultPoint.AfterStatePublicationExchange &&
+                        point.scope == "revision-state" && point.name == "graph.json"
+                    ) {
+                        injected = true
+                        throw IllegalStateException("ordinary precommit publication fault")
+                    }
+                },
+            )
+            val before = graphPath.readBytes()
+            armed = true
+
+            assertFailsWith<IllegalStateException> {
+                graph.beginAttempt(listOf("src/modules/alpha.c"))
+            }
+            assertEquals(null, graph.snapshot.pendingAttemptId)
+            assertContentEquals(before, graphPath.readBytes())
+            assertFalse(project.resolve("reports/repair-revisions/.graph.json.repair-atomic.tmp").exists())
+            graph.close()
+            ModuleRevisionGraph.open(project, GeneratedCRepairIndexProfile).use { reopened ->
+                assertEquals(null, reopened.snapshot.pendingAttemptId)
+            }
+        }
+
+        run {
+            val project = generatedProject()
+            var armed = false
+            var injected = false
+            val graph = ModuleRevisionGraph.openForTesting(
+                project,
+                GeneratedCRepairIndexProfile,
+                faultInjector = ModuleRevisionFaultInjector { point ->
+                    if (armed && !injected &&
+                        point is ModuleRevisionFaultPoint.AfterStatePublicationDirectorySync &&
+                        point.scope == "revision-state" && point.name == "graph.json"
+                    ) {
+                        injected = true
+                        throw IllegalStateException("ordinary postcommit publication fault")
+                    }
+                },
+            )
+            armed = true
+
+            val attempt = graph.beginAttempt(listOf("src/modules/alpha.c"))
+            assertEquals(attempt.id, graph.snapshot.pendingAttemptId)
+            assertTrue(project.resolve("reports/repair-revisions/graph.json").readText().contains(attempt.id))
+            graph.reject(attempt, RepairEvidence("test", "postcommit fault was a committed success"))
+            graph.close()
+            ModuleRevisionGraph.open(project, GeneratedCRepairIndexProfile).use { reopened ->
+                assertEquals(ModuleRevisionStatus.REJECTED, reopened.snapshot.nodes.last().status)
+            }
+        }
+    }
+
+    @Test
+    fun `projection capacity is reserved before pending and completed state commits`() {
+        run {
+            val project = generatedProject()
+            val budget = RepairResourceBudget(maximumProjectionBytes = 512)
+            ModuleRevisionGraph.open(project, GeneratedCRepairIndexProfile, budget).use { graph ->
+                val corpus = graph.retainedRegressionCorpus()
+                assertFailsWith<RepairBudgetExceededException> {
+                    graph.beginAttempt(
+                        listOf("src/modules/alpha.c"),
+                        RevisionRepairMetadata(
+                            1,
+                            "compile",
+                            "bounded failure",
+                            null,
+                            emptyList(),
+                            null,
+                            corpus.sha256,
+                        ),
+                    )
+                }
+                assertEquals(null, graph.snapshot.pendingAttemptId)
+            }
+            ModuleRevisionGraph.open(project, GeneratedCRepairIndexProfile, budget).use { reopened ->
+                assertEquals(null, reopened.snapshot.pendingAttemptId)
+            }
+        }
+
+        run {
+            val project = generatedProject()
+            val target = project.resolve("src/modules/alpha.c")
+            val accepted = target.readBytes()
+            val budget = RepairResourceBudget(maximumProjectionBytes = 16L * 1024)
+            ModuleRevisionGraph.open(project, GeneratedCRepairIndexProfile, budget).use { graph ->
+                val corpus = graph.retainedRegressionCorpus()
+                val attempt = graph.beginAttempt(
+                    listOf("src/modules/alpha.c"),
+                    RevisionRepairMetadata(
+                        1,
+                        "compile",
+                        "repair one module",
+                        "bounded summary",
+                        emptyList(),
+                        null,
+                        corpus.sha256,
+                    ),
+                )
+                graph.installCandidate(
+                    attempt,
+                    mapOf("src/modules/alpha.c" to accepted + "\n/* candidate */\n".toByteArray()),
+                )
+
+                assertFailsWith<RepairBudgetExceededException> {
+                    graph.accept(attempt, RepairEvidence("valid", "x".repeat(5_000)))
+                }
+                assertEquals(attempt.id, graph.snapshot.pendingAttemptId)
+                graph.reject(attempt, RepairEvidence("projection-budget", "oversized acceptance evidence rejected"))
+                assertEquals(ModuleRevisionStatus.REJECTED, graph.snapshot.nodes.last().status)
+                assertContentEquals(accepted, target.readBytes())
+            }
+            ModuleRevisionGraph.open(project, GeneratedCRepairIndexProfile, budget).use { reopened ->
+                assertEquals(ModuleRevisionStatus.REJECTED, reopened.snapshot.nodes.last().status)
+                assertEquals(null, reopened.snapshot.pendingAttemptId)
+            }
+        }
+    }
+
+    @Test
+    fun `pending candidate reserves graph bytes for deterministic recovery`() {
+        val project = genericProject("repair-recovery-graph-budget-", mapOf("code/unit.src" to "unit\n"))
+        val modules = (0 until 256).map { index ->
+            val id = "module_${index.toString().padStart(3, '0')}"
+            RepairModuleEvidence(
+                id = id,
+                ownedPaths = if (index == 0) listOf("code/unit.src") else emptyList(),
+                dependencyModuleIds = if (index == 0) {
+                    emptyList()
+                } else {
+                    listOf("module_${(index - 1).toString().padStart(3, '0')}")
+                },
+            )
+        }
+        val profile = DeclarativeRepairIndexProfile(
+            "recovery-graph-budget-v1",
+            RepairIndexLayout(
+                sourcePaths = listOf("code/unit.src"),
+                editablePaths = listOf("code/unit.src"),
+                modules = modules,
+            ),
+        )
+        val budget = RepairResourceBudget(maximumGraphBytes = 6L * 1024)
+        val target = project.resolve("code/unit.src")
+        val before = target.readBytes()
+
+        ModuleRevisionGraph.open(project, profile, budget).use { graph ->
+            val attempt = graph.beginAttempt(listOf("code/unit.src"))
+            val failure = assertFailsWith<RepairBudgetExceededException> {
+                graph.installCandidate(attempt, mapOf("code/unit.src" to "changed\n".toByteArray()))
+            }
+            assertTrue(failure.message.orEmpty().contains("graph"))
+            assertEquals(attempt.id, graph.snapshot.pendingAttemptId)
+            assertContentEquals(before, target.readBytes())
+        }
+
+        ModuleRevisionGraph.open(project, profile, budget).use { recovered ->
+            assertEquals(null, recovered.snapshot.pendingAttemptId)
+            assertTrue(recovered.snapshot.nodes.last().recoveredAfterCrash)
+            assertContentEquals(before, target.readBytes())
+        }
+    }
+
+    @Test
+    fun `startup removes a bounded crashed blob atomic before graph recovery`() {
+        val project = generatedProject()
+        val target = project.resolve("src/modules/alpha.c")
+        val accepted = target.readBytes()
+        var armed = false
+        val graph = ModuleRevisionGraph.openForTesting(
+            project,
+            GeneratedCRepairIndexProfile,
+            faultInjector = ModuleRevisionFaultInjector { point ->
+                if (armed && point is ModuleRevisionFaultPoint.AfterStateTemporaryDirectorySync &&
+                    point.scope == "revision-blob"
+                ) {
+                    throw SimulatedRepairCrash()
+                }
+            },
+        )
+        val attempt = graph.beginAttempt(listOf("src/modules/alpha.c"))
+        armed = true
+
+        assertFailsWith<SimulatedRepairCrash> {
+            graph.installCandidate(
+                attempt,
+                mapOf("src/modules/alpha.c" to accepted + "\n/* interrupted blob */\n".toByteArray()),
+            )
+        }
+        graph.close()
+        assertContentEquals(accepted, target.readBytes())
+        val blobs = project.resolve("reports/repair-revisions/blobs")
+        assertTrue(Files.list(blobs).use { entries ->
+            entries.anyMatch { it.fileName.toString().matches(Regex("\\.[0-9a-f]{64}\\.repair-atomic\\.tmp")) }
+        })
+
+        ModuleRevisionGraph.open(project, GeneratedCRepairIndexProfile).use { recovered ->
+            assertEquals(null, recovered.snapshot.pendingAttemptId)
+            assertTrue(recovered.snapshot.nodes.last().recoveredAfterCrash)
+            assertContentEquals(accepted, target.readBytes())
+        }
+        assertFalse(Files.list(blobs).use { entries ->
+            entries.anyMatch { it.fileName.toString().endsWith(".repair-atomic.tmp") }
+        })
+    }
+
+    @Test
+    fun `invalid state targets do not leak descriptors across rejected writes`() {
+        val project = createTempDirectory("repair-invalid-state-fd-").resolve("project")
+        project.resolve("reports/repair-revisions/blobs").createDirectories()
+        val graphPath = project.resolve("reports/repair-revisions/graph.json")
+        graphPath.writeText("invalid")
+        Files.createLink(project.resolve("reports/repair-revisions/graph.alias"), graphPath)
+
+        LinuxFilesystemSyscalls.openRoot(project).use { root ->
+            RepairStateStore.open(root).use { store ->
+                val before = Files.list(Path.of("/proc/self/fd")).use { it.count() }
+                repeat(128) {
+                    assertFailsWith<IllegalArgumentException> { store.writeGraph("state".toByteArray()) }
+                }
+                val after = Files.list(Path.of("/proc/self/fd")).use { it.count() }
+                assertEquals(before, after)
+            }
+        }
+    }
+
+    @Test
+    fun `open graph keeps all repair state bound when the reports name is replaced`() {
+        val project = generatedProject()
+        val reports = project.resolve("reports")
+        val heldReports = project.resolve("reports-held")
+        val graph = ModuleRevisionGraph.open(project, GeneratedCRepairIndexProfile)
+        val heldGraph = reports.resolve("repair-revisions/graph.json")
+        val before = heldGraph.readBytes()
+
+        Files.move(reports, heldReports)
+        reports.resolve("repair-revisions/blobs").createDirectories()
+        val replacementGraph = reports.resolve("repair-revisions/graph.json")
+        val canary = "replacement state must remain untouched\n".toByteArray()
+        replacementGraph.writeBytes(canary)
+
+        try {
+            val attempt = graph.beginAttempt(listOf("src/modules/alpha.c"))
+            graph.reject(attempt, RepairEvidence("test", "descriptor-pinned state stayed bound"))
+            assertContentEquals(canary, replacementGraph.readBytes())
+            assertFalse(reports.resolve("source_revisions.jsonl").exists())
+            assertFalse(before.contentEquals(heldReports.resolve("repair-revisions/graph.json").readBytes()))
+        } finally {
+            graph.close()
+        }
+
+        Files.delete(replacementGraph)
+        Files.delete(reports.resolve("repair-revisions/blobs"))
+        Files.delete(reports.resolve("repair-revisions"))
+        Files.delete(reports)
+        Files.move(heldReports, reports)
+        ModuleRevisionGraph.open(project, GeneratedCRepairIndexProfile).use { reopened ->
+            assertEquals(null, reopened.snapshot.pendingAttemptId)
+            assertEquals(ModuleRevisionStatus.REJECTED, reopened.snapshot.nodes.last().status)
+        }
+    }
+
+    @Test
     fun `ancestor retarget cannot redirect an open graph or share replacement locks`() {
         val original = generatedProject()
         val replacement = generatedProject()
@@ -2113,7 +2466,9 @@ class ModuleRevisionGraphTest {
         waiter.start()
         assertTrue(started.await(5, TimeUnit.SECONDS))
         val deadline = System.nanoTime() + TimeUnit.SECONDS.toNanos(5)
-        while (waiter.state != Thread.State.WAITING && System.nanoTime() < deadline) Thread.onSpinWait()
+        while (waiter.state !in setOf(Thread.State.WAITING, Thread.State.TIMED_WAITING) &&
+            System.nanoTime() < deadline
+        ) Thread.onSpinWait()
         waiter.interrupt()
         waiter.join(5_000)
         assertFalse(waiter.isAlive)
@@ -2121,6 +2476,136 @@ class ModuleRevisionGraphTest {
         assertTrue(interruptRestored.get())
         first.close()
         ModuleRevisionGraph.open(project, GeneratedCRepairIndexProfile).use { }
+    }
+
+    @Test
+    fun `same JVM and operating system graph lock waits are budgeted`() {
+        val project = generatedProject()
+        val budget = RepairResourceBudget(maximumGraphLockWaitMillis = 100)
+        val first = ModuleRevisionGraph.open(project, GeneratedCRepairIndexProfile, budget)
+        val executor = Executors.newSingleThreadExecutor()
+        try {
+            val failure = executor.submit<Throwable?> {
+                runCatching {
+                    ModuleRevisionGraph.open(project, GeneratedCRepairIndexProfile, budget).close()
+                }.exceptionOrNull()
+            }.get(5, TimeUnit.SECONDS)
+            assertTrue(failure is RepairGraphLockTimeoutException, failure.toString())
+        } finally {
+            first.close()
+            executor.shutdownNow()
+        }
+        ModuleRevisionGraph.open(project, GeneratedCRepairIndexProfile, budget).use { }
+    }
+
+    @Test
+    fun `blob cleanup charges directory entries before materializing or deleting them`() {
+        val project = generatedProject()
+        val budget = RepairResourceBudget(maximumStateDirectoryEntries = 128)
+        ModuleRevisionGraph.open(project, GeneratedCRepairIndexProfile, budget).use { }
+        val blobs = project.resolve("reports/repair-revisions/blobs")
+        repeat(129) { index ->
+            blobs.resolve("unowned-${index.toString().padStart(3, '0')}").writeText("preserve")
+        }
+
+        assertFailsWith<decompengine.acp.LinuxResourceLimitException> {
+            ModuleRevisionGraph.open(project, GeneratedCRepairIndexProfile, budget).close()
+        }
+        assertEquals(129L, Files.list(blobs).use { entries ->
+            entries.filter { it.fileName.toString().startsWith("unowned-") }.count()
+        })
+    }
+
+    @Test
+    fun `blob publication cannot create a graph that exceeds its own reopen traversal budget`() {
+        val project = genericProject(
+            "repair-blob-publication-budget-",
+            mapOf("code/first.src" to "first\n", "code/second.src" to "second\n"),
+        )
+        val layout = RepairIndexLayout(
+            sourcePaths = listOf("code/first.src", "code/second.src"),
+            editablePaths = listOf("code/first.src", "code/second.src"),
+            modules = listOf(
+                RepairModuleEvidence("first", listOf("code/first.src")),
+                RepairModuleEvidence("second", listOf("code/second.src")),
+            ),
+        )
+        val profile = DeclarativeRepairIndexProfile("blob-publication-budget-v1", layout)
+        val budget = RepairResourceBudget(maximumStateDirectoryEntries = 2)
+        val blobs = project.resolve("reports/repair-revisions/blobs")
+
+        assertFailsWith<RepairBudgetExceededException> {
+            ModuleRevisionGraph.open(
+                project,
+                profile,
+                RepairResourceBudget(maximumStateDirectoryEntries = 1),
+            ).close()
+        }
+        assertTrue(project.resolve("reports/repair-revisions/recovery-binding.json").exists())
+        assertFalse(project.resolve("reports/repair-revisions/graph.json").exists())
+        assertEquals(0L, Files.list(blobs).use { it.count() })
+
+        ModuleRevisionGraph.open(project, profile, budget).use { graph ->
+            val attempt = graph.beginAttempt(layout.editablePaths)
+            assertFailsWith<RepairBudgetExceededException> {
+                graph.installCandidate(
+                    attempt,
+                    mapOf(
+                        "code/first.src" to "changed first\n".toByteArray(),
+                        "code/second.src" to "changed second\n".toByteArray(),
+                    ),
+                )
+            }
+            assertEquals(2L, Files.list(blobs).use { it.count() })
+        }
+
+        ModuleRevisionGraph.open(project, profile, budget).use { reopened ->
+            assertEquals(null, reopened.snapshot.pendingAttemptId)
+            assertTrue(reopened.snapshot.nodes.last().recoveredAfterCrash)
+        }
+        assertEquals(2L, Files.list(blobs).use { it.count() })
+    }
+
+    @Test
+    fun `graphless initialization retry removes bounded orphan blobs before rebinding`() {
+        val project = genericProject(
+            "repair-orphan-initialization-",
+            mapOf("code/first.src" to "first\n", "code/second.src" to "second\n"),
+        )
+        val layout = RepairIndexLayout(
+            sourcePaths = listOf("code/first.src", "code/second.src"),
+            editablePaths = listOf("code/first.src", "code/second.src"),
+            modules = listOf(
+                RepairModuleEvidence("first", listOf("code/first.src")),
+                RepairModuleEvidence("second", listOf("code/second.src")),
+            ),
+        )
+        val profile = DeclarativeRepairIndexProfile("orphan-initialization-v1", layout)
+        val failedBudget = RepairResourceBudget(
+            maximumStateDirectoryEntries = 2,
+            maximumProjectionBytes = 1,
+        )
+        val blobs = project.resolve("reports/repair-revisions/blobs")
+
+        assertFailsWith<RepairBudgetExceededException> {
+            ModuleRevisionGraph.open(project, profile, failedBudget).close()
+        }
+        assertFalse(project.resolve("reports/repair-revisions/graph.json").exists())
+        assertEquals(2L, Files.list(blobs).use { it.count() })
+        project.resolve("code/first.src").writeText("changed first\n")
+        project.resolve("code/second.src").writeText("changed second\n")
+
+        val validBudget = RepairResourceBudget(maximumStateDirectoryEntries = 2)
+        ModuleRevisionGraph.open(project, profile, validBudget).use { reopened ->
+            assertEquals(null, reopened.snapshot.pendingAttemptId)
+        }
+        assertEquals(2L, Files.list(blobs).use { it.count() })
+        assertTrue(Files.list(blobs).use { entries ->
+            entries.map { it.fileName.toString() }.allMatch { digest ->
+                digest == sha256("changed first\n".toByteArray()) ||
+                    digest == sha256("changed second\n".toByteArray())
+            }
+        })
     }
 
     @Test
@@ -2145,6 +2630,43 @@ class ModuleRevisionGraphTest {
             first.close()
             assertEquals("ACQUIRED", acquired.get(10, TimeUnit.SECONDS))
             assertTrue(process.waitFor(10, TimeUnit.SECONDS), "separate-JVM graph probe did not exit")
+            assertEquals(0, process.exitValue())
+        } finally {
+            runCatching(first::close)
+            outputReader.shutdownNow()
+            if (process.isAlive) process.destroyForcibly()
+        }
+    }
+
+    @Test
+    fun `separate JVM cannot bypass the root lock by replacing reports`() {
+        val project = generatedProject()
+        val reports = project.resolve("reports")
+        val heldReports = project.resolve("reports-held")
+        val first = ModuleRevisionGraph.open(project, GeneratedCRepairIndexProfile)
+        Files.move(reports, heldReports)
+        reports.createDirectories()
+        Files.copy(heldReports.resolve("program_model.json"), reports.resolve("program_model.json"))
+        Files.copy(heldReports.resolve("module_plan.json"), reports.resolve("module_plan.json"))
+
+        val java = Path.of(System.getProperty("java.home"), "bin", "java")
+        val process = ProcessBuilder(
+            java.toString(),
+            "-cp",
+            System.getProperty("java.class.path"),
+            ModuleRevisionGraphLockProbe::class.java.name,
+            project.toString(),
+        ).redirectErrorStream(true).start()
+        val reader = process.inputStream.bufferedReader()
+        val outputReader = Executors.newSingleThreadExecutor()
+        try {
+            assertEquals("READY", outputReader.submit<String?> { reader.readLine() }.get(10, TimeUnit.SECONDS))
+            val acquired = outputReader.submit<String?> { reader.readLine() }
+            assertFailsWith<TimeoutException> { acquired.get(500, TimeUnit.MILLISECONDS) }
+
+            first.close()
+            assertEquals("ACQUIRED", acquired.get(10, TimeUnit.SECONDS))
+            assertTrue(process.waitFor(10, TimeUnit.SECONDS), "replacement-reports graph probe did not exit")
             assertEquals(0, process.exitValue())
         } finally {
             runCatching(first::close)
@@ -2302,6 +2824,7 @@ class ModuleRevisionGraphTest {
     }
 
     private class SimulatedRepairCrash : Error("simulated repair process crash")
+    private class SimulatedRepairTermination : Throwable("simulated non-exception process termination")
 
     private fun createScaleProject(project: Path, moduleCount: Int, functionsPerModule: Int) {
         project.resolve("src/modules").createDirectories()

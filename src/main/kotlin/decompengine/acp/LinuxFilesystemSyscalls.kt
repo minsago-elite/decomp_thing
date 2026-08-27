@@ -154,24 +154,44 @@ internal object LinuxFilesystemSyscalls {
         if (failure.errno == ENOENT) null else throw failure
     }
 
-    /** Opens the regular file pinned by [authorized] rather than resolving its workspace pathname again. */
-    fun openReadableFrom(authorized: LinuxDescriptor): LinuxDescriptor {
-        val reopened = openDescriptor(
-            AT_FDCWD,
-            descriptorPath(authorized.fd).toString(),
-            O_RDONLY or O_NONBLOCK or O_CLOEXEC,
-            0,
-            "open authorized filesystem entry for reading",
-        )
-        if (
-            reopened.identity.key != authorized.identity.key ||
-            reopened.identity.mountId != authorized.identity.mountId
-        ) {
-            reopened.close()
-            throw IOException("authorized descriptor identity changed while reopening")
+    /** Opens one existing regular file below an already-pinned directory without following links. */
+    fun openRegularFileAtOrNull(parentFd: Int, name: String): LinuxDescriptor? {
+        requireDescriptorRelativeName(name)
+        val opened = try {
+            openDescriptor(
+                parentFd,
+                name,
+                O_PATH or O_NOFOLLOW or O_CLOEXEC,
+                0,
+                "open descriptor-relative regular file",
+            )
+        } catch (failure: LinuxSyscallException) {
+            if (failure.errno == ENOENT) return null
+            throw failure
         }
-        return reopened
+        return authenticateNamedRegularFile(parentFd, name, opened, "descriptor-relative regular file")
     }
+
+    /** Opens the regular file pinned by [authorized] rather than resolving its workspace pathname again. */
+    fun openReadableFrom(authorized: LinuxDescriptor): LinuxDescriptor = reopenRegularFile(
+        authorized,
+        O_RDONLY or O_NONBLOCK or O_CLOEXEC,
+        "open authorized filesystem entry for reading",
+    )
+
+    /** Reopens an authenticated regular file for writes without resolving its mutable name again. */
+    fun reopenWritable(authorized: LinuxDescriptor): LinuxDescriptor = reopenRegularFile(
+        authorized,
+        O_WRONLY or O_NONBLOCK or O_CLOEXEC,
+        "open authorized filesystem entry for writing",
+    )
+
+    /** Reopens an authenticated regular file for read/write locking or state access. */
+    fun reopenReadWrite(authorized: LinuxDescriptor): LinuxDescriptor = reopenRegularFile(
+        authorized,
+        O_RDWR or O_NONBLOCK or O_CLOEXEC,
+        "open authorized filesystem entry for reading and writing",
+    )
 
     /** Creates an unnamed inode, so every failure before [linkTemporaryAt] is residue-free. */
     fun createTemporaryAt(parentFd: Int): LinuxDescriptor = openDescriptor(
@@ -184,16 +204,15 @@ internal object LinuxFilesystemSyscalls {
 
     /** Creates one named regular file below an already-pinned private directory. */
     fun createRegularFile(parentFd: Int, name: String, mode: Int): LinuxDescriptor {
-        require(name.isNotEmpty() && name != "." && name != ".." && '/' !in name && '\u0000' !in name) {
-            "descriptor-relative file name is invalid"
-        }
-        return openDescriptor(
+        requireDescriptorRelativeName(name)
+        val opened = openDescriptor(
             parentFd,
             name,
-            O_WRONLY or O_CREAT or O_EXCL or O_NOFOLLOW or O_CLOEXEC,
+            O_WRONLY or O_CREAT or O_EXCL or O_NONBLOCK or O_NOFOLLOW or O_CLOEXEC,
             mode,
             "create secure private regular file",
         )
+        return authenticateNamedRegularFile(parentFd, name, opened, "created private regular file")
     }
 
     fun linkTemporaryAt(temporary: LinuxDescriptor, parentFd: Int, name: String) {
@@ -328,6 +347,71 @@ internal object LinuxFilesystemSyscalls {
 
     /** `/proc/self/fd` is used only while this process still owns [descriptor]. */
     fun descriptorPath(descriptor: LinuxDescriptor): Path = descriptorPath(descriptor.fd)
+
+    /** Flushes an authenticated regular file or directory through its already-open descriptor. */
+    fun synchronize(descriptor: LinuxDescriptor) {
+        descriptor.whileOpen { fd ->
+            val before = identity(fd)
+            requireSynchronizableIdentity(descriptor.identity, before)
+            call("synchronize authenticated filesystem entry") { libc.fsync(fd) }
+            val after = identity(fd)
+            if (!sameDescriptorObject(before, after)) {
+                throw IOException("filesystem entry identity changed while it was synchronized")
+            }
+        }
+    }
+
+    /**
+     * Attempts one nonblocking, open-file-description-scoped exclusive lock acquisition.
+     *
+     * Callers own retry timing and deadlines. This primitive never waits in the kernel for another
+     * lock holder, and retries only an interrupted syscall.
+     */
+    fun tryExclusiveLock(descriptor: LinuxDescriptor): Boolean = descriptor.whileOpen { fd ->
+        val before = identity(fd)
+        requireLockableIdentity(descriptor.identity, before)
+        var acquired: Boolean? = null
+        while (acquired == null) {
+            if (libc.flock(fd, LOCK_EX or LOCK_NB) == 0) {
+                acquired = true
+                continue
+            }
+            when (val error = Native.getLastError()) {
+                EINTR -> continue
+                EWOULDBLOCK -> acquired = false
+                else -> throw LinuxSyscallException("acquire nonblocking exclusive filesystem lock", error)
+            }
+        }
+        try {
+            val after = identity(fd)
+            if (!sameDescriptorObject(before, after)) {
+                throw IOException("filesystem entry identity changed while acquiring its lock")
+            }
+            acquired
+        } catch (failure: Throwable) {
+            if (acquired == true) {
+                try {
+                    unlockDescriptor(fd)
+                } catch (unlockFailure: Throwable) {
+                    failure.addSuppressed(unlockFailure)
+                }
+            }
+            throw failure
+        }
+    }
+
+    /** Releases an exclusive lock held by this descriptor's open file description. */
+    fun unlock(descriptor: LinuxDescriptor) {
+        descriptor.whileOpen { fd ->
+            val before = identity(fd)
+            requireLockableIdentity(descriptor.identity, before)
+            unlockDescriptor(fd)
+            val after = identity(fd)
+            if (!sameDescriptorObject(before, after)) {
+                throw IOException("filesystem entry identity changed while releasing its lock")
+            }
+        }
+    }
 
     fun write(descriptor: LinuxDescriptor, content: ByteArray, cancellationCheck: () -> Unit) {
         val buffer = Memory(maxOf(1, minOf(content.size, BUFFER_BYTES)).toLong())
@@ -556,6 +640,105 @@ internal object LinuxFilesystemSyscalls {
         }
     }
 
+    /** Reopens only the kernel-pinned object, never the mutable name that originally selected it. */
+    private fun reopenRegularFile(
+        authorized: LinuxDescriptor,
+        flags: Int,
+        operation: String,
+    ): LinuxDescriptor = authorized.whileOpen { authorizedFd ->
+        val authorizedBefore = identity(authorizedFd)
+        requireRegularIdentity(authorized.identity, authorizedBefore, operation)
+        val reopened = openDescriptor(
+            AT_FDCWD,
+            descriptorPath(authorizedFd).toString(),
+            flags,
+            0,
+            operation,
+        )
+        try {
+            val reopenedIdentity = identity(reopened.fd)
+            val authorizedAfter = identity(authorizedFd)
+            requireRegularIdentity(authorizedBefore, reopenedIdentity, operation)
+            if (!sameDescriptorObject(reopenedIdentity, authorizedAfter)) {
+                throw IOException("authorized regular-file identity changed while it was reopened")
+            }
+            reopened
+        } catch (failure: Throwable) {
+            reopened.close()
+            throw failure
+        }
+    }
+
+    /** Authenticates that a named open still denotes the regular file returned to the caller. */
+    private fun authenticateNamedRegularFile(
+        parentFd: Int,
+        name: String,
+        opened: LinuxDescriptor,
+        description: String,
+    ): LinuxDescriptor = try {
+        val openedBefore = identity(opened.fd)
+        requireRegularIdentity(opened.identity, openedBefore, "authenticate $description")
+        val named = openPathAtOrNull(parentFd, name)
+            ?: throw IOException("$description disappeared while it was authenticated")
+        named.use {
+            val namedIdentity = identity(named.fd)
+            val openedAfter = identity(opened.fd)
+            requireRegularIdentity(openedBefore, namedIdentity, "authenticate $description")
+            if (!sameDescriptorObject(namedIdentity, openedAfter)) {
+                throw IOException("$description identity changed while it was authenticated")
+            }
+        }
+        opened
+    } catch (failure: Throwable) {
+        opened.close()
+        throw failure
+    }
+
+    private fun requireDescriptorRelativeName(name: String) {
+        require(name.isNotEmpty() && name != "." && name != ".." && '/' !in name && '\u0000' !in name) {
+            "descriptor-relative regular-file name is invalid"
+        }
+    }
+
+    private fun requireRegularIdentity(
+        expected: LinuxFileIdentity,
+        actual: LinuxFileIdentity,
+        operation: String,
+    ) {
+        if (
+            !sameDescriptorObject(expected, actual) ||
+            !actual.isRegularFile ||
+            actual.isDirectory ||
+            actual.isSymbolicLink
+        ) {
+            throw IOException("$operation requires an authenticated regular file")
+        }
+    }
+
+    private fun requireSynchronizableIdentity(expected: LinuxFileIdentity, actual: LinuxFileIdentity) {
+        if (
+            !sameDescriptorObject(expected, actual) ||
+            actual.isSymbolicLink ||
+            (!actual.isRegularFile && !actual.isDirectory)
+        ) {
+            throw IOException("synchronization requires an authenticated regular file or directory")
+        }
+    }
+
+    private fun requireLockableIdentity(expected: LinuxFileIdentity, actual: LinuxFileIdentity) {
+        if (
+            !sameDescriptorObject(expected, actual) ||
+            actual.isSymbolicLink ||
+            (!actual.isRegularFile && !actual.isDirectory)
+        ) {
+            throw IOException("filesystem locking requires an authenticated regular file or directory")
+        }
+    }
+
+    private fun unlockDescriptor(fd: Int) {
+        call("release exclusive filesystem lock") { libc.flock(fd, LOCK_UN) }
+    }
+
     private fun renameAt2(oldParentFd: Int, oldName: String, newParentFd: Int, newName: String, flags: Int) {
         call("install secure temporary file") {
             libc.renameat2(oldParentFd, oldName, newParentFd, newName, flags)
@@ -593,6 +776,13 @@ internal object LinuxFilesystemSyscalls {
             first.isDirectory == second.isDirectory &&
             first.isSymbolicLink == second.isSymbolicLink
 
+    private fun sameDescriptorObject(first: LinuxFileIdentity, second: LinuxFileIdentity): Boolean =
+        first.key == second.key &&
+            first.mountId == second.mountId &&
+            first.isRegularFile == second.isRegularFile &&
+            first.isDirectory == second.isDirectory &&
+            first.isSymbolicLink == second.isSymbolicLink
+
     private fun close(fd: Int) {
         while (libc.close(fd) != 0 && Native.getLastError() == EINTR) {
             // POSIX leaves close-after-EINTR semantics implementation-specific. Linux closes the descriptor.
@@ -625,6 +815,7 @@ internal object LinuxFilesystemSyscalls {
         fun read(fd: Int, buffer: Pointer, count: NativeLong): NativeLong
         fun write(fd: Int, buffer: Pointer, count: NativeLong): NativeLong
         fun fsync(fd: Int): Int
+        fun flock(fd: Int, operation: Int): Int
         fun fchmod(fd: Int, mode: Int): Int
         fun linkat(oldDirectoryFd: Int, oldPath: String, newDirectoryFd: Int, newPath: String, flags: Int): Int
         fun renameat2(oldDirectoryFd: Int, oldPath: String, newDirectoryFd: Int, newPath: String, flags: Int): Int
@@ -639,6 +830,7 @@ internal object LinuxFilesystemSyscalls {
     private const val AT_FDCWD = -100
     private const val O_RDONLY = 0
     private const val O_WRONLY = 1
+    private const val O_RDWR = 2
     private const val O_CREAT = 0x40
     private const val O_EXCL = 0x80
     private const val O_NONBLOCK = 0x800
@@ -653,6 +845,10 @@ internal object LinuxFilesystemSyscalls {
     private const val RENAME_NOREPLACE = 1
     private const val RENAME_EXCHANGE = 2
     private const val EINTR = 4
+    private const val EWOULDBLOCK = 11
+    private const val LOCK_EX = 2
+    private const val LOCK_NB = 4
+    private const val LOCK_UN = 8
     internal const val ESRCH = 3
     private const val SIGTERM = 15
     private const val SIGKILL = 9
@@ -694,6 +890,14 @@ internal class LinuxDescriptor(
 ) : AutoCloseable {
     private var ownsDescriptor = true
 
+    /** Holds descriptor ownership across a syscall so close cannot expose a reused fd number. */
+    @Synchronized
+    internal fun <T> whileOpen(action: (Int) -> T): T {
+        check(ownsDescriptor) { "Linux filesystem descriptor is closed" }
+        return action(fd)
+    }
+
+    @Synchronized
     override fun close() {
         if (!ownsDescriptor) return
         ownsDescriptor = false

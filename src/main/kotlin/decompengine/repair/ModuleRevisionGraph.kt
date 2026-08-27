@@ -23,7 +23,6 @@ import java.io.OutputStream
 import java.io.OutputStreamWriter
 import java.nio.ByteBuffer
 import java.nio.channels.FileChannel
-import java.nio.channels.FileLock
 import java.nio.file.Files
 import java.nio.file.FileSystems
 import java.nio.file.LinkOption
@@ -38,6 +37,7 @@ import java.util.Collections
 import java.util.TreeMap
 import java.util.TreeSet
 import java.util.concurrent.Semaphore
+import java.util.concurrent.TimeUnit
 import kotlin.io.path.createDirectories
 import kotlin.io.path.exists
 import kotlin.io.path.isRegularFile
@@ -47,6 +47,8 @@ import kotlin.io.path.readText
 import kotlin.math.min
 
 internal const val MAXIMUM_REPAIR_PROJECTION_BYTES: Long = 64L * 1024 * 1024
+private val REPAIR_BLOB_DIGEST = Regex("[0-9a-f]{64}")
+private val BLOB_ATOMIC_TEMPORARY = Regex("\\.([0-9a-f]{64})\\.repair-atomic\\.tmp")
 
 /**
  * Hard limits for one repair index, context window, patch attempt, and durable revision graph.
@@ -84,6 +86,8 @@ data class RepairResourceBudget(
     val maximumDiscoveryEntries: Int = 1_000_000,
     val maximumDiscoveryDirectories: Int = 100_000,
     val maximumDiscoveryDepth: Int = 128,
+    val maximumStateDirectoryEntries: Int = 1_000_000,
+    val maximumGraphLockWaitMillis: Long = 10_000,
     val maximumRevisionNodes: Int = 10_000,
     val maximumGraphBytes: Long = 256L * 1024 * 1024,
     val maximumStoredBlobBytes: Long = 4L * 1024 * 1024 * 1024,
@@ -118,6 +122,8 @@ data class RepairResourceBudget(
         require(maximumDiscoveryEntries in 1..2_000_000)
         require(maximumDiscoveryDirectories in 1..maximumDiscoveryEntries)
         require(maximumDiscoveryDepth in 1..1024)
+        require(maximumStateDirectoryEntries in 1..2_000_000)
+        require(maximumGraphLockWaitMillis in 1..60_000)
         require(maximumRevisionNodes in 2..1_000_000)
         require(maximumGraphBytes in 1 until Int.MAX_VALUE.toLong())
         require(maximumStoredBlobBytes >= maximumSourceBytes)
@@ -125,6 +131,8 @@ data class RepairResourceBudget(
 }
 
 class RepairBudgetExceededException(message: String) : IllegalArgumentException(message)
+
+class RepairGraphLockTimeoutException(message: String) : IllegalStateException(message)
 
 /** Optional source-bound diagnostic ownership supplied by a profile. */
 class RepairFailureOwnership(
@@ -1268,6 +1276,9 @@ internal sealed interface ModuleRevisionFaultPoint {
     data object AfterHeadPersist : ModuleRevisionFaultPoint
     data object BeforeSourceManifestSync : ModuleRevisionFaultPoint
     data object BeforeCompatibilityLogSync : ModuleRevisionFaultPoint
+    data class AfterStateTemporaryDirectorySync(val scope: String, val name: String) : ModuleRevisionFaultPoint
+    data class AfterStatePublicationExchange(val scope: String, val name: String) : ModuleRevisionFaultPoint
+    data class AfterStatePublicationDirectorySync(val scope: String, val name: String) : ModuleRevisionFaultPoint
 }
 
 internal fun interface ModuleRevisionFaultInjector {
@@ -1399,7 +1410,11 @@ private object RepairRootCoordinator {
 
     private val registry = mutableMapOf<RepairRootIdentity, Entry>()
 
-    fun acquire(rootDescriptor: LinuxDescriptor): RepairRootCoordination {
+    fun acquire(
+        rootDescriptor: LinuxDescriptor,
+        deadlineNanos: Long,
+        maximumWaitMillis: Long,
+    ): RepairRootCoordination {
         require(rootDescriptor.identity.isDirectory && !rootDescriptor.identity.isSymbolicLink) {
             "repair project root is not a descriptor-authenticated directory"
         }
@@ -1416,7 +1431,10 @@ private object RepairRootCoordinator {
                 }
             }
             try {
-                entry.permit.acquire()
+                val remaining = deadlineNanos - System.nanoTime()
+                if (remaining <= 0 || !entry.permit.tryAcquire(remaining, TimeUnit.NANOSECONDS)) {
+                    throw repairGraphLockTimeout(maximumWaitMillis)
+                }
             } catch (interrupted: InterruptedException) {
                 Thread.currentThread().interrupt()
                 throw IllegalStateException("repair revision graph lock acquisition was interrupted", interrupted)
@@ -1503,6 +1521,52 @@ private object RepairRootCoordinator {
     }
 }
 
+private fun acquireRepairProjectRootLock(
+    projectRoot: LinuxDescriptor,
+    deadlineNanos: Long,
+    maximumWaitMillis: Long,
+): LinuxDescriptor {
+    val lock = LinuxFilesystemSyscalls.openDirectoryAt(projectRoot.fd, ".")
+    var acquired = false
+    try {
+        val currentRoot = LinuxFilesystemSyscalls.identity(projectRoot.fd)
+        require(
+            currentRoot.key == projectRoot.identity.key && currentRoot.mountId == projectRoot.identity.mountId &&
+                currentRoot.isDirectory && !currentRoot.isSymbolicLink &&
+                lock.identity.key == currentRoot.key && lock.identity.mountId == currentRoot.mountId &&
+                lock.identity.isDirectory && !lock.identity.isSymbolicLink,
+        ) {
+            "repair project root lock does not identify the pinned project root"
+        }
+        while (true) {
+            val remaining = deadlineNanos - System.nanoTime()
+            if (remaining <= 0) throw repairGraphLockTimeout(maximumWaitMillis)
+            if (LinuxFilesystemSyscalls.tryExclusiveLock(lock)) {
+                acquired = true
+                return lock
+            }
+            val afterAttempt = deadlineNanos - System.nanoTime()
+            if (afterAttempt <= 0) throw repairGraphLockTimeout(maximumWaitMillis)
+            try {
+                TimeUnit.NANOSECONDS.sleep(minOf(REPAIR_LOCK_POLL_NANOS, afterAttempt))
+            } catch (interrupted: InterruptedException) {
+                Thread.currentThread().interrupt()
+                throw IllegalStateException("repair revision graph lock acquisition was interrupted", interrupted)
+            }
+        }
+    } catch (failure: Throwable) {
+        if (acquired) runCatching { LinuxFilesystemSyscalls.unlock(lock) }
+        lock.close()
+        throw failure
+    }
+}
+
+private fun repairGraphLockTimeout(maximumWaitMillis: Long) = RepairGraphLockTimeoutException(
+    "repair revision graph lock was not available within $maximumWaitMillis ms",
+)
+
+private val REPAIR_LOCK_POLL_NANOS = TimeUnit.MILLISECONDS.toNanos(20)
+
 /**
  * Crash-consistent source transaction journal and deterministic module revision DAG.
  *
@@ -1516,14 +1580,12 @@ internal class ModuleRevisionGraph private constructor(
     portableProjectRootCandidate: Path?,
     rootDescriptorCandidate: LinuxDescriptor?,
     indexCandidate: ModuleRepairIndex?,
-    graphPathCandidate: Path?,
-    blobsDirCandidate: Path?,
-    lockChannelCandidate: FileChannel?,
-    lockCandidate: FileLock?,
+    stateStoreCandidate: RepairStateStore?,
+    lockDescriptorCandidate: LinuxDescriptor?,
     rootCoordinationCandidate: RepairRootCoordination?,
     faultInjectorCandidate: ModuleRevisionFaultInjector?,
 ) : AutoCloseable {
-    private enum class Lifecycle { OPEN, CLOSING, CLOSED }
+    private enum class Lifecycle { OPEN, POISONED, CLOSING, CLOSED }
 
     private var lifecycle: Lifecycle
     private var operationDepth: Int
@@ -1533,10 +1595,8 @@ internal class ModuleRevisionGraph private constructor(
     private val projectRoot: Path
     private val portableProjectRoot: Path
     private val index: ModuleRepairIndex
-    private val graphPath: Path
-    private val blobsDir: Path
-    private val lockChannel: FileChannel
-    private val lock: FileLock
+    private val stateStore: RepairStateStore
+    private val lockDescriptor: LinuxDescriptor
     private val rootCoordination: RepairRootCoordination
     private val faultInjector: ModuleRevisionFaultInjector?
     private var state: RevisionGraphState
@@ -1554,10 +1614,8 @@ internal class ModuleRevisionGraph private constructor(
         projectRoot = requireNotNull(projectRootCandidate)
         portableProjectRoot = requireNotNull(portableProjectRootCandidate)
         index = requireNotNull(indexCandidate)
-        graphPath = requireNotNull(graphPathCandidate)
-        blobsDir = requireNotNull(blobsDirCandidate)
-        lockChannel = requireNotNull(lockChannelCandidate)
-        lock = requireNotNull(lockCandidate)
+        stateStore = requireNotNull(stateStoreCandidate)
+        lockDescriptor = requireNotNull(lockDescriptorCandidate)
         rootCoordination = requireNotNull(rootCoordinationCandidate)
         faultInjector = faultInjectorCandidate
         state = loadOrInitialize().deepFrozenCopy()
@@ -1614,7 +1672,8 @@ internal class ModuleRevisionGraph private constructor(
         validateRegressionCorpus(canonical, state.budget)
         val digest = regressionCorpusSha256(canonical)
         if (canonical != state.retainedRegressionInputs || digest != state.regressionCorpusSha256) {
-            persist(state.copy(retainedRegressionInputs = canonical, regressionCorpusSha256 = digest))
+            val retainedState = state.copy(retainedRegressionInputs = canonical, regressionCorpusSha256 = digest)
+            persist(requireCommitReadyState(retainedState))
         }
         RetainedRegressionCorpus(canonical, digest)
     }
@@ -1796,7 +1855,9 @@ internal class ModuleRevisionGraph private constructor(
             emptyList(),
             portableMetadata,
         )
-        persist(state.copy(nextOrdinal = ordinal + 1, pending = pending))
+        val pendingState = state.copy(nextOrdinal = ordinal + 1, pending = pending)
+        requireRecoverablePendingState(pendingState)
+        persist(pendingState)
         return ModuleRevisionAttempt(attemptId)
     }
 
@@ -1805,13 +1866,13 @@ internal class ModuleRevisionGraph private constructor(
         val pending = requirePending(attempt)
         val metadata = requireNotNull(pending.repairMetadata) { "repair attempt has no iteration metadata" }
         require(metadata.summary == null) { "repair attempt summary is already recorded" }
-        persist(
-            state.copy(
-                pending = pending.copy(
-                    repairMetadata = metadata.copy(summary = portableEvidenceText(summary)),
-                ),
+        val annotatedState = state.copy(
+            pending = pending.copy(
+                repairMetadata = metadata.copy(summary = portableEvidenceText(summary)),
             ),
         )
+        requireRecoverablePendingState(annotatedState)
+        persist(annotatedState)
     }
 
     @Synchronized
@@ -1845,11 +1906,13 @@ internal class ModuleRevisionGraph private constructor(
         }
         requireCurrentHead()
         val preimages = pending.preimages.associateBy { it.path }
+        val replacementDigests = normalized.mapValues { (_, replacement) -> sha256(replacement) }
+        val blobReservation = reserveBlobPublications(replacementDigests.values)
         val changes = normalized.entries.sortedBy { it.key }.mapNotNull { (path, replacement) ->
             val before = preimages.getValue(path)
-            val afterSha = sha256(replacement)
+            val afterSha = replacementDigests.getValue(path)
             if (afterSha == before.beforeSha256 && replacement.contentEquals(readBlob(before.beforeBlobSha256!!))) return@mapNotNull null
-            val blob = storeBlob(replacement)
+            val blob = storeBlob(replacement, blobReservation)
             RevisionFileDelta(
                 path,
                 before.beforeSha256,
@@ -1875,7 +1938,14 @@ internal class ModuleRevisionGraph private constructor(
                 "repair revision blobs require $projectedBlobBytes bytes; limit=${state.budget.maximumStoredBlobBytes}",
             )
         }
-        persist(state.copy(pending = candidatePending))
+        val candidateState = state.copy(pending = candidatePending)
+        try {
+            requireRecoverablePendingState(candidateState)
+        } catch (failure: Exception) {
+            deleteUnreferencedCandidateBlobs(changes)
+            throw failure
+        }
+        persist(candidateState)
         try {
             installFiles(
                 changes.associate { it.path to readBlob(it.afterBlobSha256) },
@@ -1924,7 +1994,8 @@ internal class ModuleRevisionGraph private constructor(
         // excluded by the graph lock and non-cooperating changes observed here fail closed.
         requireAcceptingIndex()
         val node = finalizeNode(pending, ModuleRevisionStatus.ACCEPTED, evidence, recovered = false)
-        persist(state.copy(headId = node.id, nodes = state.nodes + node, pending = null))
+        val acceptedState = state.copy(headId = node.id, nodes = state.nodes + node, pending = null)
+        persist(requireCommitReadyState(acceptedState))
         try {
             faultInjector?.hit(ModuleRevisionFaultPoint.AfterHeadPersist)
         } catch (crash: Error) {
@@ -1957,6 +2028,9 @@ internal class ModuleRevisionGraph private constructor(
     @Synchronized
     fun reject(attempt: ModuleRevisionAttempt, evidence: RepairEvidence? = null): ModuleRevisionNode = graphOperation {
         val pending = requirePending(attempt)
+        val node = finalizeNode(pending, ModuleRevisionStatus.REJECTED, evidence, recovered = false)
+        val rejectedState = state.copy(nodes = state.nodes + node, pending = null)
+        val preparedRejection = requireCommitReadyState(rejectedState)
         if (pending.candidateSourceRevisionSha256 == null) {
             require(revisionSha256(index.sourceSnapshot()) == pending.parentSourceRevisionSha256) {
                 "source tree changed while a pre-candidate repair attempt was pending"
@@ -1964,8 +2038,7 @@ internal class ModuleRevisionGraph private constructor(
         } else {
             restorePreimages(pending)
         }
-        val node = finalizeNode(pending, ModuleRevisionStatus.REJECTED, evidence, recovered = false)
-        persist(state.copy(nodes = state.nodes + node, pending = null))
+        persist(preparedRejection)
         try {
             synchronizeCompatibilityLog()
         } catch (_: Exception) {
@@ -1976,8 +2049,15 @@ internal class ModuleRevisionGraph private constructor(
 
     @Synchronized
     fun derivedRepairIterations(): List<RepairIteration> = graphOperation {
-        requireBoundedIterationProjection()
-        immutableList(state.nodes.mapNotNull { node ->
+        derivedRepairIterations(state.nodes, state.budget)
+    }
+
+    private fun derivedRepairIterations(
+        nodes: List<ModuleRevisionNode>,
+        budget: RepairResourceBudget,
+    ): List<RepairIteration> {
+        requireBoundedIterationProjection(nodes, budget)
+        return immutableList(nodes.mapNotNull { node ->
             val metadata = node.repairMetadata ?: return@mapNotNull null
             val patches = node.changes.map { change ->
                 RepairPatch(change.path, readBlob(change.afterBlobSha256))
@@ -2008,37 +2088,50 @@ internal class ModuleRevisionGraph private constructor(
 
     @Synchronized
     fun synchronizeCompatibilityLog() = graphOperation {
-        val path = projectRoot.resolve("reports/source_revisions.jsonl")
-        val nodes = state.nodes.filter { it.status != ModuleRevisionStatus.ROOT && it.changes.isNotEmpty() }
+        stateStore.writeReport(
+            "source_revisions.jsonl",
+            renderCompatibilityProjection(state.nodes, state.budget.maximumProjectionBytes),
+        )
+    }
+
+    private fun renderCompatibilityProjection(
+        candidates: List<ModuleRevisionNode>,
+        maximumBytes: Long,
+    ): ByteArray {
+        val nodes = candidates.filter { it.status != ModuleRevisionStatus.ROOT && it.changes.isNotEmpty() }
         var projectedBytes = 0L
         nodes.forEach { node ->
             projectedBytes = Math.addExact(
                 projectedBytes,
                 compatibilityRevisionRecord(node).toByteArray(Charsets.UTF_8).size.toLong(),
             )
-            if (projectedBytes > state.budget.maximumProjectionBytes) {
+            if (projectedBytes > maximumBytes) {
                 throw RepairBudgetExceededException(
-                    "source revision compatibility projection exceeds ${state.budget.maximumProjectionBytes} bytes",
+                    "source revision compatibility projection exceeds $maximumBytes bytes",
                 )
             }
         }
         val payload = buildString(projectedBytes.toInt()) {
             nodes.forEach { append(compatibilityRevisionRecord(it)) }
         }.toByteArray(Charsets.UTF_8)
-        if (payload.size.toLong() > state.budget.maximumProjectionBytes) {
+        if (payload.size.toLong() > maximumBytes) {
             throw RepairBudgetExceededException(
-                "source revision compatibility projection exceeds ${state.budget.maximumProjectionBytes} bytes",
+                "source revision compatibility projection exceeds $maximumBytes bytes",
             )
         }
-        atomicWrite(path, payload)
+        return payload
     }
 
     @Synchronized
     internal fun synchronizeRepairHistory() = graphOperation {
-        RepairHistory(
-            projectRoot.resolve("reports/repair_history.json"),
-            state.budget.maximumProjectionBytes,
-        ).reconcile(derivedRepairIterations(), retainedRegressionCorpus().inputs)
+        stateStore.writeReport(
+            "repair_history.json",
+            renderRepairHistoryProjection(
+                derivedRepairIterations(),
+                retainedRegressionCorpus().inputs,
+                state.budget.maximumProjectionBytes,
+            ).toByteArray(Charsets.UTF_8),
+        )
     }
 
     private fun compatibilityRevisionRecord(node: ModuleRevisionNode): String = buildString {
@@ -2059,7 +2152,10 @@ internal class ModuleRevisionGraph private constructor(
         append("]}\n")
     }
 
-    private fun requireBoundedIterationProjection() {
+    private fun requireBoundedIterationProjection(
+        nodes: List<ModuleRevisionNode>,
+        budget: RepairResourceBudget,
+    ) {
         var projectedBytes = 128L
         fun addText(value: String?) {
             if (value == null) return
@@ -2068,7 +2164,7 @@ internal class ModuleRevisionGraph private constructor(
                 Math.multiplyExact(value.toByteArray(Charsets.UTF_8).size.toLong(), 6L),
             )
         }
-        state.nodes.forEach { node ->
+        nodes.forEach { node ->
             val metadata = node.repairMetadata ?: return@forEach
             projectedBytes = Math.addExact(projectedBytes, 1024L)
             addText(metadata.failureKind)
@@ -2086,13 +2182,27 @@ internal class ModuleRevisionGraph private constructor(
                 addText(change.path)
                 projectedBytes = Math.addExact(projectedBytes, Math.multiplyExact(change.afterBytes, 2L))
             }
-            if (projectedBytes > state.budget.maximumProjectionBytes) {
+            if (projectedBytes > budget.maximumProjectionBytes) {
                 throw RepairBudgetExceededException(
-                    "repair history projection exceeds ${state.budget.maximumProjectionBytes} bytes",
+                    "repair history projection exceeds ${budget.maximumProjectionBytes} bytes",
                 )
             }
         }
     }
+
+    private fun requireProjectableState(candidate: RevisionGraphState) {
+        renderRepairHistoryProjection(
+            derivedRepairIterations(candidate.nodes, candidate.budget),
+            candidate.retainedRegressionInputs,
+            candidate.budget.maximumProjectionBytes,
+        )
+        renderCompatibilityProjection(candidate.nodes, candidate.budget.maximumProjectionBytes)
+    }
+
+    private fun requireCommitReadyState(candidate: RevisionGraphState): PreparedRevisionGraphState =
+        prepareStateForPersistence(candidate).also { prepared ->
+            requireProjectableState(prepared.state)
+        }
 
     @Synchronized
     override fun close() {
@@ -2103,8 +2213,9 @@ internal class ModuleRevisionGraph private constructor(
         check(operationDepth == 0) { "revision graph still has an active operation" }
         lifecycle = Lifecycle.CLOSING
         try {
-            runCatching { lock.release() }
-            lockChannel.close()
+            runCatching { LinuxFilesystemSyscalls.unlock(lockDescriptor) }
+            lockDescriptor.close()
+            stateStore.close()
         } finally {
             try {
                 rootDescriptor.close()
@@ -2118,21 +2229,18 @@ internal class ModuleRevisionGraph private constructor(
     }
 
     private fun loadOrInitialize(): RevisionGraphState {
-        if (Files.exists(graphPath, LinkOption.NOFOLLOW_LINKS)) {
-            val payload = readStableRegularFile(
-                graphPath.parent,
-                graphPath.fileName.toString(),
-                index.budget.maximumGraphBytes,
-            ).bytes
+        if (stateStore.graphExists()) {
+            val payload = stateStore.readGraph(index.budget.maximumGraphBytes)
             return parseCanonicalGraph(payload, "reports/repair-revisions/graph.json")
         }
         val snapshot = index.sourceSnapshot()
+        val blobReservation = reserveBlobPublications(snapshot.map { it.sha256 })
         val rootChanges = snapshot.map { source ->
             val observed = readStableRegularFile(projectRoot, source.path, index.budget.maximumSourceFileBytes)
             require(observed.sha256 == source.sha256 && observed.bytes.size.toLong() == source.bytes) {
                 "repair root source changed while its content blob was captured: ${source.path}"
             }
-            val blob = storeBlob(observed.bytes)
+            val blob = storeBlob(observed.bytes, blobReservation)
             RevisionFileDelta(source.path, null, null, source.sha256, null, blob, source.bytes)
         }
         val verifiedSnapshot = index.sourceSnapshot()
@@ -2151,7 +2259,7 @@ internal class ModuleRevisionGraph private constructor(
             emptyList(),
             emptyList(),
             "initial-source",
-            "source_tree_manifest.json".takeIf { projectRoot.resolve(it).exists() },
+            "source_tree_manifest.json".takeIf { stateStore.rootFileExists(it) },
             false,
             "initial accepted source tree",
         )
@@ -2169,11 +2277,12 @@ internal class ModuleRevisionGraph private constructor(
             null,
             referencedBlobBytes(listOf(node), null),
         )
+        requireProjectableState(initial)
         val payload = renderGraph(initial).toByteArray(Charsets.UTF_8)
         if (payload.size.toLong() > index.budget.maximumGraphBytes) {
             throw RepairBudgetExceededException("initial repair graph exceeds ${index.budget.maximumGraphBytes} bytes")
         }
-        atomicWrite(graphPath, payload)
+        stateStore.writeGraph(payload)
         return initial
     }
 
@@ -2193,6 +2302,13 @@ internal class ModuleRevisionGraph private constructor(
         require(state.nodes.isNotEmpty() && state.nodes.first().status == ModuleRevisionStatus.ROOT)
         require(state.nodes.map { it.id }.distinct().size == state.nodes.size) { "revision graph node IDs are not unique" }
         require(state.nodes.size <= state.budget.maximumRevisionNodes) { "revision graph exceeds its node budget" }
+        val referencedBlobCount = referencedBlobDigests(state.nodes, state.pending).size
+        if (referencedBlobCount > state.budget.maximumStateDirectoryEntries) {
+            throw RepairBudgetExceededException(
+                "repair graph references $referencedBlobCount blobs; " +
+                    "state directory entry limit=${state.budget.maximumStateDirectoryEntries}",
+            )
+        }
         val ids = hashSetOf<String>()
         var previousOrdinal = -1
         var previousRepairIteration = 0
@@ -2384,6 +2500,14 @@ internal class ModuleRevisionGraph private constructor(
 
     private fun recoverPendingAttempt() {
         val pending = state.pending ?: return
+        val node = finalizeNode(
+            pending,
+            ModuleRevisionStatus.REJECTED,
+            RepairEvidence("crash-recovery", "restored pending repair preimages after restart"),
+            recovered = true,
+        )
+        val recoveredState = state.copy(nodes = state.nodes + node, pending = null)
+        val preparedRecovery = requireCommitReadyState(recoveredState)
         if (pending.candidateSourceRevisionSha256 == null) {
             require(revisionSha256(index.sourceSnapshot()) == pending.parentSourceRevisionSha256) {
                 "source tree changed while a pre-candidate repair attempt was pending"
@@ -2391,13 +2515,7 @@ internal class ModuleRevisionGraph private constructor(
         } else {
             restorePreimages(pending)
         }
-        val node = finalizeNode(
-            pending,
-            ModuleRevisionStatus.REJECTED,
-            RepairEvidence("crash-recovery", "restored pending repair preimages after restart"),
-            recovered = true,
-        )
-        persist(state.copy(nodes = state.nodes + node, pending = null))
+        persist(preparedRecovery)
     }
 
     private fun finalizeNode(
@@ -2423,6 +2541,17 @@ internal class ModuleRevisionGraph private constructor(
             evidenceSummary = evidence?.summary?.let(::portableEvidenceText),
             repairMetadata = pending.repairMetadata,
         )
+    }
+
+    private fun requireRecoverablePendingState(candidate: RevisionGraphState) {
+        val pending = requireNotNull(candidate.pending) { "recoverability check requires a pending repair" }
+        val recoveredNode = finalizeNode(
+            pending,
+            ModuleRevisionStatus.REJECTED,
+            RepairEvidence("crash-recovery", "restored pending repair preimages after restart"),
+            recovered = true,
+        )
+        requireCommitReadyState(candidate.copy(nodes = candidate.nodes + recoveredNode, pending = null))
     }
 
     private fun restorePreimages(pending: PendingAttempt) {
@@ -2488,32 +2617,54 @@ internal class ModuleRevisionGraph private constructor(
         return target
     }
 
-    private fun storeBlob(bytes: ByteArray): String {
+    private data class BlobPublicationReservation(val digests: Set<String>)
+
+    private fun storeBlob(
+        bytes: ByteArray,
+        publicationReservation: BlobPublicationReservation? = null,
+    ): String {
         // Detach from caller-owned buffers before hashing or writing. A concurrent mutation cannot
         // make the durable filename authenticate bytes other than the bytes referenced by state.
         val frozenBytes = bytes.copyOf()
         val digest = sha256(frozenBytes)
-        val target = blobsDir.resolve(digest)
-        if (Files.exists(target, LinkOption.NOFOLLOW_LINKS)) {
-            require(Files.isRegularFile(target, LinkOption.NOFOLLOW_LINKS) && !Files.isSymbolicLink(target)) {
-                "repair blob is not a regular file: $digest"
-            }
-            require(readStableRegularFile(blobsDir, digest, index.budget.maximumSourceFileBytes).bytes.contentEquals(frozenBytes)) {
+        if (stateStore.blobExists(digest)) {
+            require(stateStore.readBlob(digest, index.budget.maximumSourceFileBytes).bytes.contentEquals(frozenBytes)) {
                 "repair blob digest collision or corruption: $digest"
             }
             return digest
         }
-        atomicWrite(target, frozenBytes)
-        val authenticated = readStableRegularFile(blobsDir, digest, index.budget.maximumSourceFileBytes)
+        require(digest in publicationReservation?.digests.orEmpty()) {
+            "repair blob is missing without a budgeted publication reservation: $digest"
+        }
+        stateStore.writeBlob(digest, frozenBytes)
+        val authenticated = stateStore.readBlob(digest, index.budget.maximumSourceFileBytes)
         require(authenticated.sha256 == digest && authenticated.bytes.contentEquals(frozenBytes)) {
             "repair blob write did not persist authenticated content: $digest"
         }
         return digest
     }
 
+    private fun reserveBlobPublications(requiredDigests: Collection<String>): BlobPublicationReservation {
+        val required = requiredDigests.toSet()
+        require(required.all(REPAIR_BLOB_DIGEST::matches)) { "repair blob publication digest is invalid" }
+        val maximumEntries = index.budget.maximumStateDirectoryEntries
+        val names = stateStore.blobNames(maximumEntries)
+        val stagedDigests = names.mapNotNull { name ->
+            BLOB_ATOMIC_TEMPORARY.matchEntire(name)?.groupValues?.get(1)
+        }.toSet()
+        val additionalEntries = required.count { digest -> digest !in names && digest !in stagedDigests }
+        val projectedEntries = Math.addExact(names.size, additionalEntries)
+        if (projectedEntries > maximumEntries) {
+            throw RepairBudgetExceededException(
+                "repair blob publication requires $projectedEntries directory entries; limit=$maximumEntries",
+            )
+        }
+        return BlobPublicationReservation(required)
+    }
+
     private fun readBlob(digest: String): ByteArray {
         require(digest.matches(Regex("[0-9a-f]{64}"))) { "invalid repair blob digest" }
-        val observed = readStableRegularFile(blobsDir, digest, index.budget.maximumSourceFileBytes)
+        val observed = stateStore.readBlob(digest, index.budget.maximumSourceFileBytes)
         require(observed.sha256 == digest) { "repair blob is corrupt: $digest" }
         return observed.bytes
     }
@@ -2529,11 +2680,13 @@ internal class ModuleRevisionGraph private constructor(
             val existing = sizes.putIfAbsent(digest, bytes)
             require(existing == null || existing == bytes) { "repair blob has inconsistent sizes: $digest" }
         }
-        nodes.flatMap { it.changes }.forEach { delta ->
-            delta.beforeBlobSha256?.let { before ->
-                record(before, delta.beforeBytes ?: error("repair delta is missing before-byte count"))
+        nodes.forEach { node ->
+            node.changes.forEach { delta ->
+                delta.beforeBlobSha256?.let { before ->
+                    record(before, delta.beforeBytes ?: error("repair delta is missing before-byte count"))
+                }
+                record(delta.afterBlobSha256, delta.afterBytes)
             }
-            record(delta.afterBlobSha256, delta.afterBytes)
         }
         pending?.preimages.orEmpty().forEach {
             record(it.beforeBlobSha256, it.beforeBytes ?: error("repair preimage is missing byte count"))
@@ -2546,7 +2699,7 @@ internal class ModuleRevisionGraph private constructor(
         }
         return sizes.entries.fold(0L) { total, (digest, bytes) ->
             if (verifyContents) {
-                val observed = readStableRegularFile(blobsDir, digest, index.budget.maximumSourceFileBytes)
+                val observed = stateStore.readBlob(digest, index.budget.maximumSourceFileBytes)
                 require(observed.sha256 == digest) { "repair blob digest does not match graph: $digest" }
                 require(observed.bytes.size.toLong() == bytes) { "repair blob size does not match graph: $digest" }
             }
@@ -2558,8 +2711,8 @@ internal class ModuleRevisionGraph private constructor(
         val referenced = referencedBlobDigests()
         changes.map { it.afterBlobSha256 }.filterNot { it in referenced }.distinct().forEachIndexed { cleanupIndex, digest ->
             cleanupRepairOwnedEntry(
-                graphPath.parent,
-                "blobs",
+                stateStore.blobsPath,
+                "",
                 digest,
                 setOf(digest),
                 null,
@@ -2575,20 +2728,20 @@ internal class ModuleRevisionGraph private constructor(
 
     private fun cleanupUnreferencedBlobs() {
         val referenced = referencedBlobDigests()
-        Files.list(blobsDir).use { entries ->
-            entries.toList().sortedBy { it.fileName.toString() }.forEachIndexed { indexInCleanup, path ->
-                val name = path.fileName.toString()
+        val names = stateStore.blobNames(state.budget.maximumStateDirectoryEntries)
+        names.mapNotNull { name -> BLOB_ATOMIC_TEMPORARY.matchEntire(name)?.groupValues?.get(1) }
+            .forEach(stateStore::cleanupBlobTemporary)
+        names.asSequence()
+            .filterNot(BLOB_ATOMIC_TEMPORARY::matches)
+            .forEachIndexed { indexInCleanup, name ->
                 val baseName = name.removeSuffix(".cleanup")
                 if (baseName !in referenced) {
-                    require(!Files.isDirectory(path, LinkOption.NOFOLLOW_LINKS)) {
-                        "repair blob directory contains an unexpected directory: $name"
-                    }
                     require(baseName.matches(Regex("[0-9a-f]{64}"))) {
                         "repair blob directory contains an unowned entry: $name"
                     }
                     cleanupRepairOwnedEntry(
-                        graphPath.parent,
-                        "blobs",
+                        stateStore.blobsPath,
+                        "",
                         baseName,
                         setOf(baseName),
                         null,
@@ -2599,25 +2752,13 @@ internal class ModuleRevisionGraph private constructor(
                         faultInjector,
                         required = false,
                     )
-                }
             }
-        }
-        forceDirectory(blobsDir)
+    }
+        stateStore.synchronizeBlobs()
     }
 
     private fun cleanupGraphTemporaries() {
-        cleanupAtomicSiblingTemporaries(graphPath)
-    }
-
-    private fun cleanupAtomicSiblingTemporaries(target: Path) {
-        val temporary = atomicRepairTemporary(target)
-        if (Files.exists(temporary, LinkOption.NOFOLLOW_LINKS)) {
-            require(!Files.isDirectory(temporary, LinkOption.NOFOLLOW_LINKS)) {
-                "repair graph state contains an unexpected journal-owned temporary directory"
-            }
-            Files.delete(temporary)
-        }
-        forceDirectory(target.parent)
+        stateStore.cleanupGraphTemporary()
     }
 
     private fun cleanupSourceTemporaries(pending: PendingAttempt?) {
@@ -2648,9 +2789,11 @@ internal class ModuleRevisionGraph private constructor(
         nodes: List<ModuleRevisionNode>,
         pending: PendingAttempt?,
     ): Set<String> = buildSet {
-        nodes.flatMap { it.changes }.forEach { delta ->
-            delta.beforeBlobSha256?.let(::add)
-            add(delta.afterBlobSha256)
+        nodes.forEach { node ->
+            node.changes.forEach { delta ->
+                delta.beforeBlobSha256?.let(::add)
+                add(delta.afterBlobSha256)
+            }
         }
         pending?.preimages.orEmpty().forEach { delta ->
             delta.beforeBlobSha256?.let(::add)
@@ -2704,7 +2847,12 @@ internal class ModuleRevisionGraph private constructor(
         return variants.fold(value) { normalized, root -> normalized.replace(root, replacement) }
     }
 
-    private fun persist(candidate: RevisionGraphState) {
+    private data class PreparedRevisionGraphState(
+        val state: RevisionGraphState,
+        val payload: ByteArray,
+    )
+
+    private fun prepareStateForPersistence(candidate: RevisionGraphState): PreparedRevisionGraphState {
         val frozenCandidate = candidate.deepFrozenCopy()
         val blobBytes = referencedBlobBytes(frozenCandidate.nodes, frozenCandidate.pending)
         require(blobBytes <= frozenCandidate.budget.maximumStoredBlobBytes) { "revision graph exceeds stored blob budget" }
@@ -2720,14 +2868,19 @@ internal class ModuleRevisionGraph private constructor(
         if (payload.size.toLong() > frozenCandidate.budget.maximumGraphBytes) {
             throw RepairBudgetExceededException("repair revision graph exceeds ${frozenCandidate.budget.maximumGraphBytes} bytes")
         }
-        atomicWrite(graphPath, payload)
-        state = normalized
+        return PreparedRevisionGraphState(normalized, payload)
+    }
+
+    private fun persist(candidate: RevisionGraphState) = persist(prepareStateForPersistence(candidate))
+
+    private fun persist(prepared: PreparedRevisionGraphState) {
+        stateStore.writeGraph(prepared.payload)
+        state = prepared.state
     }
 
     private fun synchronizeSourceManifest() {
-        val manifestPath = projectRoot.resolve("source_tree_manifest.json")
-        cleanupAtomicSiblingTemporaries(manifestPath)
-        if (!Files.exists(manifestPath, LinkOption.NOFOLLOW_LINKS)) return
+        stateStore.cleanupRootTemporary("source_tree_manifest.json")
+        if (!stateStore.rootFileExists("source_tree_manifest.json")) return
         val manifestBytes = readStableRegularFile(
             projectRoot,
             "source_tree_manifest.json",
@@ -2770,7 +2923,10 @@ internal class ModuleRevisionGraph private constructor(
         if (changed) {
             val updatedRoot = LinkedHashMap(root)
             updatedRoot["files"] = kotlinx.serialization.json.JsonArray(updatedFiles)
-            atomicWrite(manifestPath, (JsonObject(updatedRoot).toString() + "\n").toByteArray(Charsets.UTF_8))
+            stateStore.writeRoot(
+                "source_tree_manifest.json",
+                (JsonObject(updatedRoot).toString() + "\n").toByteArray(Charsets.UTF_8),
+            )
         }
     }
 
@@ -2787,6 +2943,12 @@ internal class ModuleRevisionGraph private constructor(
         rootCoordination.enterOperation()
         try {
             return action()
+        } catch (failure: Throwable) {
+            // Non-Exception throwables model a lost process at an arbitrary durability boundary.
+            // If a caller catches one in-process, disk may be either side of the last commit while
+            // this object's cached state is not. Poison the graph until close/reopen recovery.
+            if (failure !is Exception) lifecycle = Lifecycle.POISONED
+            throw failure
         } finally {
             try {
                 rootCoordination.exitOperation()
@@ -2829,47 +2991,43 @@ internal class ModuleRevisionGraph private constructor(
                 "repair project root is not a regular non-symbolic-link directory"
             }
             val rootDescriptor = LinuxFilesystemSyscalls.openRoot(portableProjectRoot)
+            val maximumWaitNanos = TimeUnit.MILLISECONDS.toNanos(budget.maximumGraphLockWaitMillis)
+            val lockDeadlineNanos = System.nanoTime() + maximumWaitNanos
             val rootCoordination = try {
-                RepairRootCoordinator.acquire(rootDescriptor)
+                RepairRootCoordinator.acquire(
+                    rootDescriptor,
+                    lockDeadlineNanos,
+                    budget.maximumGraphLockWaitMillis,
+                )
             } catch (failure: Throwable) {
                 rootDescriptor.close()
                 throw failure
             }
+            var lock: LinuxDescriptor? = null
             try {
                 requireLexicalRootBinding(portableProjectRoot, rootDescriptor.identity)
+                lock = acquireRepairProjectRootLock(
+                    rootDescriptor,
+                    lockDeadlineNanos,
+                    budget.maximumGraphLockWaitMillis,
+                )
                 val projectRoot = repairDescriptorPath(rootDescriptor)
-                val stateDir = projectRoot.resolve("reports/repair-revisions")
-                require(!Files.isSymbolicLink(projectRoot.resolve("reports"))) {
-                    "repair reports directory must not be a symbolic link"
-                }
-                stateDir.createDirectories()
-                require(Files.isDirectory(stateDir, LinkOption.NOFOLLOW_LINKS) && !Files.isSymbolicLink(stateDir)) {
-                    "repair revision state is not a regular directory"
-                }
-                val blobs = stateDir.resolve("blobs").createDirectories()
-                require(Files.isDirectory(blobs, LinkOption.NOFOLLOW_LINKS) && !Files.isSymbolicLink(blobs)) {
-                    "repair blob state is not a regular directory"
-                }
-                val lockPath = stateDir.resolve("graph.lock")
-                require(!Files.isSymbolicLink(lockPath)) { "repair graph lock must not be a symbolic link" }
-                val channel = FileChannel.open(lockPath, StandardOpenOption.CREATE, StandardOpenOption.WRITE)
-                val lock = try {
-                    channel.lock()
-                } catch (failure: Exception) {
-                    channel.close()
-                    throw IllegalStateException("could not acquire repair revision graph lock", failure)
-                }
+                val stateStore = RepairStateStore.open(rootDescriptor, faultInjector)
                 return try {
-                    val graphPath = stateDir.resolve("graph.json")
-                    val bindingPath = stateDir.resolve("recovery-binding.json")
-                    cleanupAtomicTemporaryBeforeOpen(graphPath)
-                    cleanupAtomicTemporaryBeforeOpen(bindingPath)
-                    restorePendingPreimagesBeforeIndex(projectRoot, graphPath, bindingPath, blobs, profile, budget)
+                    stateStore.cleanupGraphTemporary()
+                    stateStore.cleanupBindingTemporary()
+                    if (!stateStore.graphExists()) {
+                        stateStore.cleanupUnboundBlobs(
+                            budget.maximumStateDirectoryEntries,
+                            budget.maximumSourceFileBytes,
+                        )
+                    }
+                    restorePendingPreimagesBeforeIndex(projectRoot, stateStore, profile, budget)
                     val currentIndex = SecureRepairRuntime.loadIndex(graphAuthority, projectRoot, profile, budget)
                     require(currentIndex.belongsTo(projectRoot) && currentIndex.budget == budget) {
                         "repair dependency index belongs to a different project or resource budget"
                     }
-                    requireRecoveryBinding(bindingPath, currentIndex)
+                    requireRecoveryBinding(stateStore, currentIndex)
                     try {
                         SecureRepairRuntime.authorizeGraphConstruction(graphAuthority)
                         ModuleRevisionGraph(
@@ -2878,10 +3036,8 @@ internal class ModuleRevisionGraph private constructor(
                             portableProjectRoot,
                             rootDescriptor,
                             currentIndex,
-                            graphPath,
-                            blobs,
-                            channel,
-                            lock,
+                            stateStore,
+                            requireNotNull(lock),
                             rootCoordination,
                             faultInjector,
                         )
@@ -2889,15 +3045,21 @@ internal class ModuleRevisionGraph private constructor(
                         SecureRepairRuntime.clearConstructionAuthorization()
                     }
                 } catch (failure: Throwable) {
-                    runCatching { lock.release() }
-                    channel.close()
+                    stateStore.close()
                     throw failure
                 }
             } catch (failure: Throwable) {
                 try {
-                    rootDescriptor.close()
+                    lock?.let { held ->
+                        runCatching { LinuxFilesystemSyscalls.unlock(held) }
+                        held.close()
+                    }
                 } finally {
-                    rootCoordination.close()
+                    try {
+                        rootDescriptor.close()
+                    } finally {
+                        rootCoordination.close()
+                    }
                 }
                 throw failure
             }
@@ -2923,20 +3085,25 @@ private fun requireLexicalRootBinding(path: Path, expected: LinuxFileIdentity) {
     }
 }
 
-private fun requireRecoveryBinding(path: Path, index: ModuleRepairIndex) {
+private fun requireRecoveryBinding(store: RepairStateStore, index: ModuleRepairIndex) {
     val expected = recoveryBinding(index)
-    if (Files.exists(path, LinkOption.NOFOLLOW_LINKS)) {
-        require(Files.isRegularFile(path, LinkOption.NOFOLLOW_LINKS) && !Files.isSymbolicLink(path)) {
-            "repair recovery authorization is not a regular file"
-        }
-        val observed = parseCanonicalRecoveryBinding(
-            readStableRegularFile(path.parent, path.fileName.toString(), index.budget.maximumGraphBytes).bytes,
+    val expectedBytes = renderRecoveryBinding(expected).toByteArray(Charsets.UTF_8)
+    if (expectedBytes.size.toLong() > index.budget.maximumGraphBytes) {
+        throw RepairBudgetExceededException(
+            "repair recovery authorization exceeds ${index.budget.maximumGraphBytes} bytes",
         )
-        require(observed == expected) {
-            "repair recovery authorization differs from the current profile/index layout"
-        }
-    } else {
-        atomicWrite(path, renderRecoveryBinding(expected).toByteArray(Charsets.UTF_8))
+    }
+    if (!store.graphExists()) {
+        // A first-open failure may have durably published a large, malformed, or differently bound
+        // file before any graph or pending journal existed. Under the held root lock that file is
+        // replaceable initialization residue and is never parsed as revision authority.
+        store.writeBinding(expectedBytes)
+        return
+    }
+    require(store.bindingExists()) { "repair graph is missing its recovery authorization" }
+    val observed = parseCanonicalRecoveryBinding(store.readBinding(index.budget.maximumGraphBytes))
+    require(observed == expected) {
+        "repair recovery authorization differs from the current profile/index layout"
     }
 }
 
@@ -2976,16 +3143,6 @@ private fun parseCanonicalRecoveryBinding(payload: ByteArray): RepairRecoveryBin
     require(binding.editablePaths == binding.editablePaths.map(::normalizedRelative).distinct().sorted())
     require(binding.editablePaths.all { it in binding.sourcePaths })
     return binding
-}
-
-private fun cleanupAtomicTemporaryBeforeOpen(target: Path) {
-    val temporary = atomicRepairTemporary(target)
-    if (!Files.exists(temporary, LinkOption.NOFOLLOW_LINKS)) return
-    require(Files.isRegularFile(temporary, LinkOption.NOFOLLOW_LINKS) && !Files.isSymbolicLink(temporary)) {
-        "repair graph temporary is not a regular file"
-    }
-    Files.delete(temporary)
-    forceDirectory(target.parent)
 }
 
 /**
@@ -3231,33 +3388,24 @@ private fun validateGraphBeforeRecovery(
  */
 private fun restorePendingPreimagesBeforeIndex(
     projectRoot: Path,
-    graphPath: Path,
-    bindingPath: Path,
-    blobsDir: Path,
+    store: RepairStateStore,
     profile: RepairIndexProfile,
     requestedBudget: RepairResourceBudget,
 ) {
-    if (!Files.exists(graphPath, LinkOption.NOFOLLOW_LINKS)) return
-    require(Files.isRegularFile(graphPath, LinkOption.NOFOLLOW_LINKS) && !Files.isSymbolicLink(graphPath)) {
-        "revision graph is not a regular file: $graphPath"
-    }
-    val graphBytes = readStableRegularFile(graphPath.parent, graphPath.fileName.toString(), requestedBudget.maximumGraphBytes).bytes
+    if (!store.graphExists()) return
+    val graphBytes = store.readGraph(requestedBudget.maximumGraphBytes)
     val loaded = parseCanonicalGraph(graphBytes, "reports/repair-revisions/graph.json")
-    require(Files.isRegularFile(bindingPath, LinkOption.NOFOLLOW_LINKS) && !Files.isSymbolicLink(bindingPath)) {
+    require(store.bindingExists()) {
         "revision graph is missing its immutable recovery authorization"
     }
     val binding = parseCanonicalRecoveryBinding(
-        readStableRegularFile(
-            bindingPath.parent,
-            bindingPath.fileName.toString(),
-            requestedBudget.maximumGraphBytes,
-        ).bytes,
+        store.readBinding(requestedBudget.maximumGraphBytes),
     )
     val acceptedSources = validateGraphBeforeRecovery(
         loaded,
         profile,
         binding,
-        blobsDir,
+        store.blobsPath,
         requestedBudget,
     )
     val pending = loaded.pending ?: return
@@ -3274,7 +3422,7 @@ private fun restorePendingPreimagesBeforeIndex(
                 observed.bytes.size.toLong() == candidate.afterBytes -> {
                 val beforeDigest = requireNotNull(candidate.beforeBlobSha256)
                 val preimage = readStableRegularFile(
-                    blobsDir,
+                    store.blobsPath,
                     beforeDigest,
                     requestedBudget.maximumSourceFileBytes,
                 )
@@ -3362,9 +3510,6 @@ private fun publishRepairFiles(
                 faultInjector,
             )
         }
-        staged.map { replacement ->
-            if (replacement.parentRelative.isEmpty()) projectRoot else projectRoot.resolve(replacement.parentRelative)
-        }.distinct().forEach(::forceDirectory)
     } catch (failure: Throwable) {
         primaryFailure = failure
         throw failure
@@ -3452,6 +3597,7 @@ private fun stageRepairReplacement(
         temporary = LinuxFilesystemSyscalls.createTemporaryAt(parent.fd)
         LinuxFilesystemSyscalls.write(temporary, replacement) { }
         LinuxFilesystemSyscalls.chmod(temporary, target.identity.mode.permissions)
+        LinuxFilesystemSyscalls.synchronize(temporary)
         val preparedBeforeLink = LinuxFilesystemSyscalls.identity(temporary.fd)
         require(
             preparedBeforeLink.key == temporary.identity.key &&
@@ -3462,6 +3608,7 @@ private fun stageRepairReplacement(
         ) { "repair replacement cannot preserve source mode/ownership metadata: $relative" }
         LinuxFilesystemSyscalls.linkTemporaryAt(temporary, parent.fd, temporaryName)
         linked = true
+        LinuxFilesystemSyscalls.synchronize(parent)
         val materialized = requireNotNull(LinuxFilesystemSyscalls.openPathAtOrNull(parent.fd, temporaryName)) {
             "repair replacement disappeared after materialization: $relative"
         }
@@ -3601,6 +3748,9 @@ private fun exchangeRepairFile(
             }
             parent.requireNamedRepairIdentity(parts.last(), authorizedTemporary.identity)
             parent.requireNamedRepairIdentity(temporaryName, authorizedTarget.identity)
+            // Persist both the installed candidate name and the displaced accepted inode before
+            // the latter is quarantined or unlinked.
+            LinuxFilesystemSyscalls.synchronize(parent)
         } catch (failure: Exception) {
             if (exchanged) {
                 runCatching {
@@ -3742,11 +3892,13 @@ private fun cleanupRepairOwnedEntryAt(
                     }
                 }
                 LinuxFilesystemSyscalls.renameNoReplace(parentFd, quarantine, name)
+                synchronizeRepairDirectory(parentFd)
             }
         }
         try {
             LinuxFilesystemSyscalls.renameNoReplace(parentFd, name, quarantine)
             quarantined = true
+            synchronizeRepairDirectory(parentFd)
         } catch (failure: decompengine.acp.LinuxSyscallException) {
             if (failure.errno == LinuxFilesystemSyscalls.ENOENT && !required) return
             throw failure
@@ -3772,10 +3924,13 @@ private fun cleanupRepairOwnedEntryAt(
         requireOwned()
         LinuxFilesystemSyscalls.unlink(parentFd, quarantine)
         quarantined = false
-        // There is deliberately no fallible work after the irreversible unlink.
+        synchronizeRepairDirectory(parentFd)
     } catch (failure: Throwable) {
         if (quarantined) {
-            runCatching { LinuxFilesystemSyscalls.renameNoReplace(parentFd, quarantine, name) }
+            runCatching {
+                LinuxFilesystemSyscalls.renameNoReplace(parentFd, quarantine, name)
+                synchronizeRepairDirectory(parentFd)
+            }
                 .onFailure(failure::addSuppressed)
         }
         throw failure
@@ -3841,10 +3996,15 @@ private fun rollbackRepairExchange(
                 }
             }
         }
+        synchronizeRepairDirectory(parentFd)
     } finally {
         installed.close()
         displaced.close()
     }
+}
+
+private fun synchronizeRepairDirectory(parentFd: Int) {
+    LinuxFilesystemSyscalls.openDirectoryAt(parentFd, ".").use(LinuxFilesystemSyscalls::synchronize)
 }
 
 private fun renderGraph(state: RevisionGraphState): String = buildString {
@@ -3885,6 +4045,8 @@ private fun RepairResourceBudget.toJson(): String =
         "\"maximumDiscoveryEntries\":$maximumDiscoveryEntries," +
         "\"maximumDiscoveryDirectories\":$maximumDiscoveryDirectories," +
         "\"maximumDiscoveryDepth\":$maximumDiscoveryDepth," +
+        "\"maximumStateDirectoryEntries\":$maximumStateDirectoryEntries," +
+        "\"maximumGraphLockWaitMillis\":$maximumGraphLockWaitMillis," +
         "\"maximumRevisionNodes\":$maximumRevisionNodes," +
         "\"maximumGraphBytes\":$maximumGraphBytes," +
         "\"maximumStoredBlobBytes\":$maximumStoredBlobBytes}"
@@ -3987,6 +4149,8 @@ private fun parseGraph(payload: String): RevisionGraphState {
             maximumDiscoveryEntries = value.requiredInt("maximumDiscoveryEntries"),
             maximumDiscoveryDirectories = value.requiredInt("maximumDiscoveryDirectories"),
             maximumDiscoveryDepth = value.requiredInt("maximumDiscoveryDepth"),
+            maximumStateDirectoryEntries = value.requiredInt("maximumStateDirectoryEntries"),
+            maximumGraphLockWaitMillis = value.requiredLong("maximumGraphLockWaitMillis"),
             maximumRevisionNodes = value.requiredInt("maximumRevisionNodes"),
             maximumGraphBytes = value.requiredLong("maximumGraphBytes"),
             maximumStoredBlobBytes = value.requiredLong("maximumStoredBlobBytes"),
