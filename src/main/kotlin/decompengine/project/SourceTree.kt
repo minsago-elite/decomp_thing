@@ -374,27 +374,35 @@ object SourceTreeGenerator {
         onModuleProgress: (completed: Int, total: Int, moduleId: String) -> Unit = { _, _, _ -> },
     ): SourceTreeManifest {
         val plan = planner.plan(model, overrides)
-        val includeDir = projectDir.resolve("include").createDirectories()
-        val modulesIncludeDir = includeDir.resolve("modules").createDirectories()
-        val modulesSourceDir = projectDir.resolve("src/modules").createDirectories()
-        val moduleReportsDir = projectDir.resolve("reports/modules").createDirectories()
-
         val typesHeader = renderTypesHeader(model)
-        includeDir.resolve("decomp_types.h").writeText(typesHeader)
+        val typesHeaderPath = profile.layout.declaration("shared-interface").materialize()
+        val typesHeaderFile = projectDir.resolve(typesHeaderPath)
+        typesHeaderFile.parent.createDirectories()
+        typesHeaderFile.writeText(typesHeader)
         val headers = plan.modules.associate { module -> module.id to renderModuleHeader(module, model, plan) }
         val privateHeaders = plan.modules.associate { module -> module.id to renderPrivateHeader(module, model, plan) }
-        headers.forEach { (id, content) -> modulesIncludeDir.resolve("$id.h").writeText(content) }
-        privateHeaders.forEach { (id, content) -> modulesSourceDir.resolve("${id}_internal.h").writeText(content) }
+        headers.forEach { (id, content) ->
+            val path = profile.layout.declaration("module-interface").materialize(mapOf("module" to id))
+            val file = projectDir.resolve(path)
+            file.parent.createDirectories()
+            file.writeText(content)
+        }
+        privateHeaders.forEach { (id, content) ->
+            val path = profile.layout.declaration("module-private-interface").materialize(mapOf("module" to id))
+            val file = projectDir.resolve(path)
+            file.parent.createDirectories()
+            file.writeText(content)
+        }
 
         val generated = mutableListOf<GeneratedFileEvidence>()
-        generated += evidence(profile, "include/decomp_types.h", typesHeader, "planner", model.types.map { it.id })
+        generated += evidence(profile, typesHeaderPath, typesHeader, "planner", model.types.map { it.id })
         headers.forEach { (id, content) ->
             val module = plan.modules.single { it.id == id }
             generated += evidence(profile, module.headerPath, content, "planner", module.functionIds + module.globalIds)
         }
         privateHeaders.forEach { (id, content) ->
-            val module = plan.modules.single { it.id == id }
-            generated += evidence(profile, "src/modules/${id}_internal.h", content, "planner", module.functionIds)
+            val path = profile.layout.declaration("module-private-interface").materialize(mapOf("module" to id))
+            generated += evidence(profile, path, content, "planner", plan.modules.single { it.id == id }.functionIds)
         }
         val unresolvedImplementations = sortedSetOf<String>()
 
@@ -411,9 +419,9 @@ object SourceTreeGenerator {
                 observedBehavior,
                 profile.sha256,
             )
-            val sourcePath = modulesSourceDir.resolve("${module.id}.c")
-            val checkpointPath = moduleReportsDir.resolve("${module.id}.json")
-            val attemptPath = moduleReportsDir.resolve("${module.id}.attempt.json")
+            val sourcePath = projectDir.resolve(module.sourcePath)
+            val checkpointPath = projectDir.resolve(profile.layout.declaration("module-evidence").materialize(mapOf("module" to module.id)))
+            val attemptPath = projectDir.resolve("reports/modules/${module.id}.attempt.json")
             val request = ModuleReconstructionRequest(
                 module,
                 model,
@@ -481,7 +489,8 @@ object SourceTreeGenerator {
                 checkpoint.accepted,
             )
             val checkpointText = checkpointPath.readText()
-            generated += evidence(profile, "reports/modules/${module.id}.json", checkpointText, "planner", moduleEntityIds)
+            val checkpointEvidencePath = profile.layout.declaration("module-evidence").materialize(mapOf("module" to module.id))
+            generated += evidence(profile, checkpointEvidencePath, checkpointText, "planner", moduleEntityIds)
             onModuleProgress(index + 1, plan.modules.size, module.id)
         }
 
@@ -504,27 +513,45 @@ object SourceTreeGenerator {
                     $entryBody
                 }
             """.trimIndent() + "\n"
-            projectDir.resolve("src/main.c").writeText(mainSource)
-            generated += evidence(profile, "src/main.c", mainSource, "planner", listOfNotNull(entry?.id))
+            val entrypointPath = profile.layout.declaration("entrypoint-implementation").materialize()
+            val entrypointFile = projectDir.resolve(entrypointPath)
+            entrypointFile.parent.createDirectories()
+            entrypointFile.writeText(mainSource)
+            generated += evidence(profile, entrypointPath, mainSource, "planner", listOfNotNull(entry?.id))
         }
-        val sourcePaths = generated.map { it.path }.filter { it.endsWith(".c") }.sorted()
-        val makefile = renderMakefile(sourcePaths)
-        projectDir.resolve("Makefile").writeText(makefile)
-        generated += evidence(profile, "Makefile", makefile, "planner", emptyList())
+        val sourcePaths = generated.filter { entry ->
+            try {
+                val declaration = profile.layout.declarationForPath(entry.path)
+                ProjectFileRole.MODULE_IMPLEMENTATION in declaration.roles || ProjectFileRole.ENTRYPOINT_IMPLEMENTATION in declaration.roles
+            } catch (_: IllegalArgumentException) {
+                entry.path.endsWith(".c")
+            }
+        }.map { it.path }.sorted()
+        val makefile = renderMakefile(sourcePaths, profile)
+        val makefilePath = profile.layout.declaration("build-definition").materialize()
+        val makefileFile = projectDir.resolve(makefilePath)
+        makefileFile.parent.createDirectories()
+        makefileFile.writeText(makefile)
+        generated += evidence(profile, makefilePath, makefile, "planner", emptyList())
 
-        projectDir.resolve("reports/program_model.json").writeText(model.toJson())
-        projectDir.resolve("reports/module_plan.json").writeText(plan.toJson())
-        generated += evidence(profile, "reports/program_model.json", model.toJson(), "analysis", model.functions.map { it.id } + model.globals.map { it.id })
-        generated += evidence(profile, "reports/module_plan.json", plan.toJson(), "planner", model.functions.map { it.id } + model.globals.map { it.id })
+        val programModelPath = profile.layout.declaration("program-model-evidence").materialize()
+        val modulePlanPath = profile.layout.declaration("module-plan-evidence").materialize()
+        val confidencePath = profile.layout.declaration("confidence-evidence").materialize()
+        val toolchainPath = profile.layout.declaration("toolchain-evidence").materialize()
+        val unresolvedPath = profile.layout.declaration("unresolved-evidence").materialize()
+        projectDir.resolve(programModelPath).also { it.parent.createDirectories() }.writeText(model.toJson())
+        projectDir.resolve(modulePlanPath).also { it.parent.createDirectories() }.writeText(plan.toJson())
+        generated += evidence(profile, programModelPath, model.toJson(), "analysis", model.functions.map { it.id } + model.globals.map { it.id })
+        generated += evidence(profile, modulePlanPath, plan.toJson(), "planner", model.functions.map { it.id } + model.globals.map { it.id })
         val confidence = renderConfidence(model, plan)
-        projectDir.resolve("reports/confidence.json").writeText(confidence)
-        generated += evidence(profile, "reports/confidence.json", confidence, "evidence", model.functions.map { it.id } + model.globals.map { it.id })
+        projectDir.resolve(confidencePath).also { it.parent.createDirectories() }.writeText(confidence)
+        generated += evidence(profile, confidencePath, confidence, "evidence", model.functions.map { it.id } + model.globals.map { it.id })
         val toolchain = renderToolchain()
-        projectDir.resolve("reports/toolchain.json").writeText(toolchain)
-        generated += evidence(profile, "reports/toolchain.json", toolchain, "environment", emptyList())
+        projectDir.resolve(toolchainPath).also { it.parent.createDirectories() }.writeText(toolchain)
+        generated += evidence(profile, toolchainPath, toolchain, "environment", emptyList())
         val unresolvedMarkdown = renderUnresolvedMarkdown(model, plan, unresolvedImplementations)
-        projectDir.resolve("UNRESOLVED.md").writeText(unresolvedMarkdown)
-        generated += evidence(profile, "UNRESOLVED.md", unresolvedMarkdown, "evidence", unresolvedImplementations.toList())
+        projectDir.resolve(unresolvedPath).also { it.parent.createDirectories() }.writeText(unresolvedMarkdown)
+        generated += evidence(profile, unresolvedPath, unresolvedMarkdown, "evidence", unresolvedImplementations.toList())
         val manifest = SourceTreeManifest(
             profileId = profile.id,
             profileSha256 = profile.sha256,
@@ -583,9 +610,12 @@ object SourceTreeGenerator {
             .mapNotNull(owner::get).filter { it != module.id }.distinct().sorted()
     }
 
-    private fun renderMakefile(sources: List<String>): String = listOf(
-        "CC ?= gcc",
-        "CFLAGS ?= -std=c11 -g -Wall -Wextra -Iinclude",
+    private fun renderMakefile(sources: List<String>, profile: ReconstructionProfile): String {
+        val cflags = profile.adapterConfiguration["compiler-flags"]?.joinToString(" ") ?: "-std=c11 -g -Wall -Wextra -Iinclude"
+        val cc = profile.adapterConfiguration["compiler-driver"]?.firstOrNull() ?: "gcc"
+        return listOf(
+            "CC ?= $cc",
+            "CFLAGS ?= $cflags",
         "REPRODUCIBLE_CFLAGS := \"-ffile-prefix-map=${'$'}${'$'}PWD=.\" \"-fdebug-prefix-map=${'$'}${'$'}PWD=.\" \"-fmacro-prefix-map=${'$'}${'$'}PWD=.\"",
         "TARGET ?= build/reconstructed",
         "SOURCES := ${sources.joinToString(" ")}",
@@ -613,6 +643,7 @@ object SourceTreeGenerator {
         "-include ${'$'}(OBJECTS:.o=.d)",
         ".PHONY: all clean",
     ).joinToString("\n", postfix = "\n")
+    }
 
     private fun evidence(
         profile: ReconstructionProfile,

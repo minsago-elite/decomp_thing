@@ -53,7 +53,10 @@ private data class AffinityIndexes(
 )
 
 /** Deterministic ownership planning; LLM output is deliberately not allowed to choose paths. */
-class DeterministicModulePlanner(private val maximumFunctionsPerModule: Int = 24) {
+class DeterministicModulePlanner(
+    private val maximumFunctionsPerModule: Int = 24,
+    private val layout: ProjectLayoutProfile = GeneratedCMakeReconstructionProfile.descriptor.layout,
+) {
     init {
         require(maximumFunctionsPerModule > 0)
     }
@@ -129,8 +132,8 @@ class DeterministicModulePlanner(private val maximumFunctionsPerModule: Int = 24
             dependenciesByModule[id] = referencedModules
             PlannedModule(
                 id = id,
-                sourcePath = "src/modules/$id.c",
-                headerPath = "include/modules/$id.h",
+                sourcePath = layout.declaration("module-implementation").materialize(mapOf("module" to id)),
+                headerPath = layout.declaration("module-interface").materialize(mapOf("module" to id)),
                 functionIds = members.map { it.id },
                 globalIds = globalsByModule[id].orEmpty().map { it.id },
                 boundaryEvidence = buildList {
