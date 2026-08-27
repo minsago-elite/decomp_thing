@@ -65,6 +65,7 @@ object ArchivalPackager {
         projectDir: Path,
         archivePath: Path,
         limits: ArchivalBundleLimits = ArchivalBundleLimits(),
+        profile: ReconstructionProfile = GeneratedCMakeReconstructionProfile.descriptor,
     ): ArchivalBundle {
         require(!Files.isSymbolicLink(projectDir)) { "archive project root must not be a symbolic link" }
         require(projectDir.resolve("source_tree_manifest.json").isRegularFile(LinkOption.NOFOLLOW_LINKS)) {
@@ -103,7 +104,7 @@ object ArchivalPackager {
             """.trimIndent() + "\n",
         )
         val payload = collectPayload(projectDir, archiveDestination, limits)
-        validateSourceManifest(projectDir, payload.associateBy { it.relativePath })
+        validateSourceManifest(projectDir, payload.associateBy { it.relativePath }, profile)
         val payloadBytes = payload.fold(0L) { total, item -> Math.addExact(total, item.size) }
         val hashManifestBytes = payload.fold(0L) { total, item ->
             Math.addExact(total, 67L + item.relativePath.toByteArray(Charsets.UTF_8).size)
@@ -208,6 +209,7 @@ object ArchivalBundleVerifier {
         archivePath: Path,
         targetDir: Path,
         limits: ArchivalBundleLimits = ArchivalBundleLimits(),
+        profile: ReconstructionProfile = GeneratedCMakeReconstructionProfile.descriptor,
     ): List<Path> {
         require(Files.isRegularFile(archivePath, LinkOption.NOFOLLOW_LINKS) && !Files.isSymbolicLink(archivePath)) {
             "archive must be a regular non-symbolic-link file"
@@ -297,7 +299,7 @@ object ArchivalBundleVerifier {
                 val path = staging.resolve(relative)
                 ArchivePayload(relative, path, Files.size(path), hash, 0)
             }.associateBy { it.relativePath }
-            validateSourceManifest(staging, payload)
+            validateSourceManifest(staging, payload, profile)
             if (existingTargetIdentity != null) {
                 finalizeIntoExistingTarget(staging, targetBase, existingTargetIdentity, extractedRelative.toSet())
             } else {
@@ -413,21 +415,18 @@ private fun validateSuccessfulBuild(projectDir: Path, requireArtifact: Boolean =
     }
 }
 
-private fun validateSourceManifest(projectDir: Path, payload: Map<String, ArchivePayload>) {
+private fun validateSourceManifest(
+    projectDir: Path,
+    payload: Map<String, ArchivePayload>,
+    expectedProfile: ReconstructionProfile,
+) {
     requiredArchivePaths.forEach { relative ->
         require(relative in payload) {
             "archive payload is missing required evidence: $relative"
         }
     }
-    val root = Json.parseToJsonElement(projectDir.resolve("source_tree_manifest.json").readText()).jsonObject
-    require(root["schemaVersion"]?.jsonPrimitive?.intOrNull == 2) {
-        "source tree manifest must use the accepted-implementation schema version 2"
-    }
-    require(root["unresolvedImplementationIds"]?.jsonArray != null) {
-        "source tree manifest is missing unresolved implementation evidence"
-    }
-    val oracleSha256 = root["inputSha256"]?.jsonPrimitive?.contentOrNull
-        ?: error("source tree manifest is missing its oracle identity")
+    val manifest = SourceTreeManifestReader.read(projectDir, expectedProfile)
+    val oracleSha256 = manifest.inputSha256
     require(oracleSha256.matches(Regex("[a-f0-9]{64}"))) {
         "source tree manifest has an invalid oracle SHA-256"
     }
@@ -437,22 +436,14 @@ private fun validateSourceManifest(projectDir: Path, payload: Map<String, Archiv
     require(modelOracleSha256 == oracleSha256) {
         "program model and source tree manifest identify different oracle binaries"
     }
-    val seen = mutableSetOf<String>()
-    root["files"]?.jsonArray?.forEach { element ->
-        val item = element.jsonObject
-        val relative = item["path"]?.jsonPrimitive?.content ?: error("source tree manifest entry is missing path")
-        val expected = item["sha256"]?.jsonPrimitive?.content ?: error("source tree manifest entry is missing sha256")
-        validateRelativePath(relative)
-        require(seen.add(relative)) { "source tree manifest contains a duplicate path: $relative" }
-        require(expected.matches(Regex("[a-f0-9]{64}"))) { "source tree manifest has an invalid hash: $relative" }
-        val archived = payload[relative] ?: error("source tree manifest path is missing from archive: $relative")
-        require(archived.sha256 == expected) { "source tree manifest hash mismatch: $relative" }
-        if (relative.startsWith("src/modules/") && relative.endsWith(".c")) {
-            require(item["acceptedImplementation"]?.jsonPrimitive?.booleanOrNull != null) {
-                "source tree manifest does not classify module implementation: $relative"
-            }
+    manifest.files.forEach { file ->
+        validateRelativePath(file.path)
+        val archived = payload[file.path] ?: error("source tree manifest path is missing from archive: ${file.path}")
+        require(archived.sha256 == file.sha256) { "source tree manifest hash mismatch: ${file.path}" }
+        require(ProjectFileRole.MODULE_IMPLEMENTATION !in file.roles || file.acceptedImplementation != null) {
+            "source tree manifest does not classify module implementation: ${file.path}"
         }
-    } ?: error("source tree manifest is missing files")
+    }
 }
 
 private fun inspectPayload(relative: String, path: Path, limits: ArchivalBundleLimits): ArchivePayload {

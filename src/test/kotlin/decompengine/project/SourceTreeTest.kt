@@ -33,6 +33,13 @@ class SourceTreeTest {
         assertTrue(project.resolve("include/decomp_types.h").readText().contains("struct recovered_state"))
         assertEquals(0, MakeProjectBuilder.build(project).returnCode)
         assertEquals(manifest.editablePaths, SourceTreeManifestReader.editablePaths(project))
+        assertEquals(3, manifest.schemaVersion)
+        assertEquals(GeneratedCMakeReconstructionProfile.PROFILE_ID, manifest.profileId)
+        assertEquals(GeneratedCMakeReconstructionProfile.descriptor.sha256, manifest.profileSha256)
+        val moduleSource = manifest.files.single { it.path == "src/modules/parse.c" }
+        assertEquals(ProjectContentKind.UTF8_TEXT, moduleSource.contentKind)
+        assertTrue(ProjectFileRole.MODULE_IMPLEMENTATION in moduleSource.roles)
+        assertTrue(ProjectFileRole.EDITABLE in moduleSource.roles)
         assertTrue(project.resolve("source_tree_manifest.json").readText().contains("input-sha"))
         assertEquals(listOf("render", "parse"), progress)
         val confidence = project.resolve("reports/confidence.json").readText()
@@ -40,6 +47,53 @@ class SourceTreeTest {
         assertTrue(confidence.contains("\"projectScore\""))
         assertTrue(confidence.contains("behavioral equivalence is not implied"))
         assertTrue(project.resolve("UNRESOLVED.md").readText().contains("does not claim universal behavioral equivalence"))
+    }
+
+    @Test
+    fun `manifest parser rejects schema role path and profile-policy drift`() {
+        val project = createTempDirectory("source-tree-manifest-strict-")
+        SourceTreeGenerator.generate(model(), project)
+        val text = project.resolve("source_tree_manifest.json").readText()
+        val expected = GeneratedCMakeReconstructionProfile.descriptor
+
+        val parsed = SourceTreeManifestReader.parse(text, expected)
+        assertEquals(parsed.editablePaths, SourceTreeManifestReader.editablePaths(project))
+        assertFailsWith<IllegalArgumentException> {
+            SourceTreeManifestReader.parse(text.replaceFirst("{\n", "{\n  \"unexpected\": true,\n"), expected)
+        }
+        assertFailsWith<IllegalArgumentException> {
+            SourceTreeManifestReader.parse(
+                text.replaceFirst("\"schemaVersion\": 3,", "\"schemaVersion\": 3, \"\\u0073chemaVersion\": 3,"),
+                expected,
+            )
+        }
+        assertFailsWith<IllegalArgumentException> {
+            SourceTreeManifestReader.parse(text.replaceFirst("\"schemaVersion\": 3", "\"schemaVersion\": \"3\""), expected)
+        }
+        assertFailsWith<IllegalArgumentException> {
+            SourceTreeManifestReader.parse(
+                text.replaceFirst("\"acceptedImplementation\": false", "\"acceptedImplementation\": \"false\""),
+                expected,
+            )
+        }
+        assertFailsWith<IllegalArgumentException> {
+            SourceTreeManifestReader.parse(text.replaceFirst("\"archive-payload\"", "\"unknown-role\""), expected)
+        }
+        assertFailsWith<IllegalArgumentException> {
+            SourceTreeManifestReader.parse(text.replaceFirst("\"path\": \"Makefile\"", "\"path\": \"../Makefile\""), expected)
+        }
+        assertFailsWith<IllegalArgumentException> {
+            SourceTreeManifestReader.parse(
+                text.replaceFirst(expected.sha256, "0".repeat(64)),
+                expected,
+            )
+        }
+        project.resolve("source_tree_manifest.json").writeText(
+            text.replaceFirst("\"editable\"", "\"evidence\""),
+        )
+        assertFailsWith<IllegalArgumentException> {
+            SourceTreeManifestReader.editablePaths(project)
+        }
     }
 
     @Test

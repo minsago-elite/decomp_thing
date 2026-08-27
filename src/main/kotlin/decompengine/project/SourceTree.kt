@@ -12,7 +12,10 @@ import decompengine.agent.AgentWorkspacePath
 import decompengine.agent.AgentWorkspaceRoot
 import decompengine.agent.execute
 import kotlinx.serialization.json.Json
+import kotlinx.serialization.json.JsonNull
 import kotlinx.serialization.json.boolean
+import kotlinx.serialization.json.booleanOrNull
+import kotlinx.serialization.json.contentOrNull
 import kotlinx.serialization.json.intOrNull
 import kotlinx.serialization.json.jsonArray
 import kotlinx.serialization.json.jsonObject
@@ -21,6 +24,8 @@ import java.nio.file.AtomicMoveNotSupportedException
 import java.nio.file.Files
 import java.nio.file.Path
 import java.nio.file.StandardCopyOption
+import java.util.Collections
+import java.util.EnumSet
 import kotlin.io.path.createDirectories
 import kotlin.io.path.deleteIfExists
 import kotlin.io.path.exists
@@ -261,29 +266,82 @@ class ModuleReconstructionInterruptedException(
     "module $moduleId reconstruction was interrupted with ${stopReason.name.lowercase()}: ${agentSummary.orEmpty()}",
 )
 
-data class GeneratedFileEvidence(
+class GeneratedFileEvidence(
     val path: String,
     val sha256: String,
     val generator: String,
     val promptSha256: String? = null,
-    val entityIds: List<String> = emptyList(),
+    entityIds: List<String> = emptyList(),
     val acceptedImplementation: Boolean? = null,
-)
-
-data class SourceTreeManifest(
-    val schemaVersion: Int = 2,
-    val inputSha256: String,
-    val files: List<GeneratedFileEvidence>,
-    val unresolvedEntityIds: List<String>,
-    val unresolvedImplementationIds: List<String> = emptyList(),
+    roles: Set<ProjectFileRole>,
+    val contentKind: ProjectContentKind,
 ) {
-    val editablePaths: Set<String> get() = files.map { it.path }.filter { it == "Makefile" || it.endsWith(".c") || it.endsWith(".h") }.toSet()
+    val entityIds: List<String> = Collections.unmodifiableList(entityIds.toList().sorted())
+    val roles: Set<ProjectFileRole> = Collections.unmodifiableSet(
+        if (roles.isEmpty()) EnumSet.noneOf(ProjectFileRole::class.java) else EnumSet.copyOf(roles),
+    )
+
+    init {
+        requireNormalizedProjectPath(path, "source tree manifest path")
+        require(sha256.matches(Regex("[0-9a-f]{64}"))) { "source tree manifest file hash is invalid: $path" }
+        require(generator.isNotBlank() && generator.length <= 4_096 && '\n' !in generator && '\r' !in generator) {
+            "source tree manifest generator is invalid: $path"
+        }
+        require(promptSha256 == null || promptSha256.matches(Regex("[0-9a-f]{64}"))) {
+            "source tree manifest prompt hash is invalid: $path"
+        }
+        require(this.roles.isNotEmpty()) { "source tree manifest file roles are empty: $path" }
+        require(ProjectFileRole.EDITABLE !in this.roles || contentKind == ProjectContentKind.UTF8_TEXT) {
+            "editable source tree manifest files must be UTF-8 text: $path"
+        }
+        require(ProjectFileRole.MODULE_IMPLEMENTATION !in this.roles || acceptedImplementation != null) {
+            "module implementation acceptance is not classified: $path"
+        }
+        require(this.entityIds.distinct().size == this.entityIds.size) {
+            "source tree manifest entity IDs must be unique: $path"
+        }
+    }
+}
+
+class SourceTreeManifest(
+    val schemaVersion: Int = 3,
+    val profileId: String,
+    val profileSha256: String,
+    val inputSha256: String,
+    files: List<GeneratedFileEvidence>,
+    unresolvedEntityIds: List<String>,
+    unresolvedImplementationIds: List<String> = emptyList(),
+) {
+    val files: List<GeneratedFileEvidence> = Collections.unmodifiableList(files.toList().sortedBy(GeneratedFileEvidence::path))
+    val unresolvedEntityIds: List<String> = Collections.unmodifiableList(unresolvedEntityIds.toList().distinct().sorted())
+    val unresolvedImplementationIds: List<String> =
+        Collections.unmodifiableList(unresolvedImplementationIds.toList().distinct().sorted())
+    val editablePaths: Set<String> = Collections.unmodifiableSet(
+        this.files.filter { ProjectFileRole.EDITABLE in it.roles }.mapTo(sortedSetOf(), GeneratedFileEvidence::path),
+    )
+
+    init {
+        require(schemaVersion == 3) { "unsupported source tree manifest schemaVersion: $schemaVersion" }
+        require(profileId.matches(Regex("[A-Za-z0-9_][A-Za-z0-9_.-]{0,127}"))) {
+            "source tree manifest profile ID is invalid"
+        }
+        require(profileSha256.matches(Regex("[0-9a-f]{64}"))) { "source tree manifest profile digest is invalid" }
+        require(inputSha256.isNotBlank() && inputSha256.length <= 4_096 && '\n' !in inputSha256 && '\r' !in inputSha256) {
+            "source tree manifest input identity is invalid"
+        }
+        require(this.files.isNotEmpty()) { "source tree manifest files must not be empty" }
+        require(this.files.map(GeneratedFileEvidence::path).distinct().size == this.files.size) {
+            "source tree manifest file paths must be unique"
+        }
+    }
 
     fun toJson(): String = buildString {
         append("{\n  \"schemaVersion\": ").append(schemaVersion)
-        append(",\n  \"inputSha256\": \"").append(inputSha256.jsonEscape()).append("\",")
+        append(",\n  \"profileId\": \"").append(profileId.jsonEscape()).append("\",")
+        append("\n  \"profileSha256\": \"").append(profileSha256).append("\",")
+        append("\n  \"inputSha256\": \"").append(inputSha256.jsonEscape()).append("\",")
         append("\n  \"files\": [")
-        append(files.sortedBy { it.path }.joinToString(",") { file ->
+        append(files.joinToString(",") { file ->
             """
             {
               "path": "${file.path.jsonEscape()}",
@@ -291,13 +349,15 @@ data class SourceTreeManifest(
               "generator": "${file.generator.jsonEscape()}",
               "promptSha256": ${file.promptSha256?.let { "\"${it.jsonEscape()}\"" } ?: "null"},
               "acceptedImplementation": ${file.acceptedImplementation ?: "null"},
-              "entityIds": [${file.entityIds.sorted().joinToString(", ") { "\"${it.jsonEscape()}\"" }}]
+              "contentKind": "${file.contentKind.wireName}",
+              "roles": [${file.roles.map(ProjectFileRole::wireName).sorted().joinToString(", ") { "\"${it.jsonEscape()}\"" }}],
+              "entityIds": [${file.entityIds.joinToString(", ") { "\"${it.jsonEscape()}\"" }}]
             }""".trimIndent().prependIndent("    ")
         })
         append("\n  ],\n  \"unresolvedEntityIds\": [")
-        append(unresolvedEntityIds.sorted().joinToString(", ") { "\"${it.jsonEscape()}\"" })
+        append(unresolvedEntityIds.joinToString(", ") { "\"${it.jsonEscape()}\"" })
         append("],\n  \"unresolvedImplementationIds\": [")
-        append(unresolvedImplementationIds.sorted().joinToString(", ") { "\"${it.jsonEscape()}\"" })
+        append(unresolvedImplementationIds.joinToString(", ") { "\"${it.jsonEscape()}\"" })
         append("]\n}\n")
     }
 }
@@ -310,6 +370,7 @@ object SourceTreeGenerator {
         reconstructor: ModuleReconstructor = EvidenceModuleReconstructor(),
         overrides: Map<String, String> = emptyMap(),
         observedBehavior: String? = null,
+        profile: ReconstructionProfile = GeneratedCMakeReconstructionProfile.descriptor,
         onModuleProgress: (completed: Int, total: Int, moduleId: String) -> Unit = { _, _, _ -> },
     ): SourceTreeManifest {
         val plan = planner.plan(model, overrides)
@@ -326,14 +387,14 @@ object SourceTreeGenerator {
         privateHeaders.forEach { (id, content) -> modulesSourceDir.resolve("${id}_internal.h").writeText(content) }
 
         val generated = mutableListOf<GeneratedFileEvidence>()
-        generated += evidence("include/decomp_types.h", typesHeader, "planner", model.types.map { it.id })
+        generated += evidence(profile, "include/decomp_types.h", typesHeader, "planner", model.types.map { it.id })
         headers.forEach { (id, content) ->
             val module = plan.modules.single { it.id == id }
-            generated += evidence(module.headerPath, content, "planner", module.functionIds + module.globalIds)
+            generated += evidence(profile, module.headerPath, content, "planner", module.functionIds + module.globalIds)
         }
         privateHeaders.forEach { (id, content) ->
             val module = plan.modules.single { it.id == id }
-            generated += evidence("src/modules/${id}_internal.h", content, "planner", module.functionIds)
+            generated += evidence(profile, "src/modules/${id}_internal.h", content, "planner", module.functionIds)
         }
         val unresolvedImplementations = sortedSetOf<String>()
 
@@ -348,6 +409,7 @@ object SourceTreeGenerator {
                 privateHeaders.getValue(module.id),
                 dependencyHeaders,
                 observedBehavior,
+                profile.sha256,
             )
             val sourcePath = modulesSourceDir.resolve("${module.id}.c")
             val checkpointPath = moduleReportsDir.resolve("${module.id}.json")
@@ -410,6 +472,7 @@ object SourceTreeGenerator {
             val moduleEntityIds = module.functionIds + module.globalIds
             if (!checkpoint.accepted) unresolvedImplementations += moduleEntityIds
             generated += evidence(
+                profile,
                 module.sourcePath,
                 normalizedSource,
                 checkpoint.generator,
@@ -418,7 +481,7 @@ object SourceTreeGenerator {
                 checkpoint.accepted,
             )
             val checkpointText = checkpointPath.readText()
-            generated += evidence("reports/modules/${module.id}.json", checkpointText, "planner", moduleEntityIds)
+            generated += evidence(profile, "reports/modules/${module.id}.json", checkpointText, "planner", moduleEntityIds)
             onModuleProgress(index + 1, plan.modules.size, module.id)
         }
 
@@ -442,27 +505,29 @@ object SourceTreeGenerator {
                 }
             """.trimIndent() + "\n"
             projectDir.resolve("src/main.c").writeText(mainSource)
-            generated += evidence("src/main.c", mainSource, "planner", listOfNotNull(entry?.id))
+            generated += evidence(profile, "src/main.c", mainSource, "planner", listOfNotNull(entry?.id))
         }
         val sourcePaths = generated.map { it.path }.filter { it.endsWith(".c") }.sorted()
         val makefile = renderMakefile(sourcePaths)
         projectDir.resolve("Makefile").writeText(makefile)
-        generated += evidence("Makefile", makefile, "planner", emptyList())
+        generated += evidence(profile, "Makefile", makefile, "planner", emptyList())
 
         projectDir.resolve("reports/program_model.json").writeText(model.toJson())
         projectDir.resolve("reports/module_plan.json").writeText(plan.toJson())
-        generated += evidence("reports/program_model.json", model.toJson(), "analysis", model.functions.map { it.id } + model.globals.map { it.id })
-        generated += evidence("reports/module_plan.json", plan.toJson(), "planner", model.functions.map { it.id } + model.globals.map { it.id })
+        generated += evidence(profile, "reports/program_model.json", model.toJson(), "analysis", model.functions.map { it.id } + model.globals.map { it.id })
+        generated += evidence(profile, "reports/module_plan.json", plan.toJson(), "planner", model.functions.map { it.id } + model.globals.map { it.id })
         val confidence = renderConfidence(model, plan)
         projectDir.resolve("reports/confidence.json").writeText(confidence)
-        generated += evidence("reports/confidence.json", confidence, "evidence", model.functions.map { it.id } + model.globals.map { it.id })
+        generated += evidence(profile, "reports/confidence.json", confidence, "evidence", model.functions.map { it.id } + model.globals.map { it.id })
         val toolchain = renderToolchain()
         projectDir.resolve("reports/toolchain.json").writeText(toolchain)
-        generated += evidence("reports/toolchain.json", toolchain, "environment", emptyList())
+        generated += evidence(profile, "reports/toolchain.json", toolchain, "environment", emptyList())
         val unresolvedMarkdown = renderUnresolvedMarkdown(model, plan, unresolvedImplementations)
         projectDir.resolve("UNRESOLVED.md").writeText(unresolvedMarkdown)
-        generated += evidence("UNRESOLVED.md", unresolvedMarkdown, "evidence", unresolvedImplementations.toList())
+        generated += evidence(profile, "UNRESOLVED.md", unresolvedMarkdown, "evidence", unresolvedImplementations.toList())
         val manifest = SourceTreeManifest(
+            profileId = profile.id,
+            profileSha256 = profile.sha256,
             inputSha256 = model.inputSha256,
             files = generated,
             unresolvedEntityIds = model.functions.filter { it.status != RecoveryStatus.RECOVERED }.map { it.id } +
@@ -550,20 +615,26 @@ object SourceTreeGenerator {
     ).joinToString("\n", postfix = "\n")
 
     private fun evidence(
+        profile: ReconstructionProfile,
         path: String,
         content: String,
         generator: String,
         ids: List<String>,
         prompt: String? = null,
         acceptedImplementation: Boolean? = null,
-    ) = GeneratedFileEvidence(
-        path,
-        sha256(content.toByteArray()),
-        generator,
-        prompt,
-        ids.sorted(),
-        acceptedImplementation,
-    )
+    ): GeneratedFileEvidence {
+        val declaration = profile.layout.declarationForPath(path)
+        return GeneratedFileEvidence(
+            path,
+            sha256(content.toByteArray()),
+            generator,
+            prompt,
+            ids.sorted(),
+            acceptedImplementation,
+            declaration.roles,
+            declaration.contentKind,
+        )
+    }
 
     private data class ModuleCheckpoint(
         val fingerprint: String,
@@ -975,6 +1046,7 @@ object SourceTreeGenerator {
         privateHeader: String,
         dependencyHeaders: Map<String, String>,
         observedBehavior: String?,
+        profileSha256: String,
     ): String {
         val functions = module.functionIds.sorted().joinToString("\n") { id ->
             val item = model.functions.single { it.id == id }
@@ -986,7 +1058,7 @@ object SourceTreeGenerator {
         return sha256(
             (
                 functions + "\n" + globals + "\n" + sharedHeader + moduleHeader + privateHeader +
-                    dependencies + "\n" + observedBehavior.orEmpty()
+                    dependencies + "\n" + observedBehavior.orEmpty() + "\n" + profileSha256
                 ).toByteArray(),
         )
     }
@@ -1163,11 +1235,276 @@ private fun String.jsonEscape(): String = buildString {
 }
 
 object SourceTreeManifestReader {
-    private val pathPattern = Regex("\\\"path\\\"\\s*:\\s*\\\"([^\\\"]+)\\\"")
-    fun editablePaths(projectDir: Path): Set<String> {
+    private val rootKeys = setOf(
+        "schemaVersion",
+        "profileId",
+        "profileSha256",
+        "inputSha256",
+        "files",
+        "unresolvedEntityIds",
+        "unresolvedImplementationIds",
+    )
+    private val fileKeys = setOf(
+        "path",
+        "sha256",
+        "generator",
+        "promptSha256",
+        "acceptedImplementation",
+        "contentKind",
+        "roles",
+        "entityIds",
+    )
+
+    fun read(projectDir: Path, expectedProfile: ReconstructionProfile): SourceTreeManifest {
+        val path = projectDir.resolve("source_tree_manifest.json")
+        require(path.exists()) { "project is missing source_tree_manifest.json" }
+        return parse(path.readText(), expectedProfile)
+    }
+
+    fun parse(text: String, expectedProfile: ReconstructionProfile): SourceTreeManifest {
+        UniqueJsonObjectKeyValidator(text).validate()
+        val root = Json.parseToJsonElement(text).jsonObject
+        require(root.keys == rootKeys) { "source tree manifest fields do not match schema version 3" }
+        val schemaPrimitive = root.getValue("schemaVersion").jsonPrimitive
+        require(!schemaPrimitive.isString) { "source tree manifest schemaVersion must be an integer" }
+        val schemaVersion = schemaPrimitive.intOrNull
+            ?: throw IllegalArgumentException("source tree manifest schemaVersion must be an integer")
+        require(schemaVersion == 3) { "unsupported source tree manifest schemaVersion: $schemaVersion" }
+        val profileId = requiredManifestString(root, "profileId")
+        val profileSha256 = requiredManifestString(root, "profileSha256")
+        val files = root.getValue("files").jsonArray.map { element ->
+            val item = element.jsonObject
+            require(item.keys == fileKeys) { "source tree manifest file fields do not match schema version 3" }
+            val roles = item.getValue("roles").jsonArray.map { role ->
+                require(role.jsonPrimitive.isString) { "source tree manifest file roles must be strings" }
+                ProjectFileRole.fromWireName(role.jsonPrimitive.content)
+            }
+            require(roles.map(ProjectFileRole::wireName) == roles.map(ProjectFileRole::wireName).distinct().sorted()) {
+                "source tree manifest file roles must be unique and sorted"
+            }
+            val entityIds = item.getValue("entityIds").jsonArray.map {
+                require(it.jsonPrimitive.isString) { "source tree manifest entity IDs must be strings" }
+                it.jsonPrimitive.content
+            }
+            require(entityIds == entityIds.distinct().sorted()) {
+                "source tree manifest entity IDs must be unique and sorted"
+            }
+            val accepted = item.getValue("acceptedImplementation").let { value ->
+                if (value is JsonNull) {
+                    null
+                } else {
+                    require(!value.jsonPrimitive.isString) {
+                        "source tree manifest acceptance value must be Boolean or null"
+                    }
+                    value.jsonPrimitive.booleanOrNull
+                        ?: throw IllegalArgumentException("source tree manifest acceptance value must be Boolean or null")
+                }
+            }
+            GeneratedFileEvidence(
+                path = requiredManifestString(item, "path"),
+                sha256 = requiredManifestString(item, "sha256"),
+                generator = requiredManifestString(item, "generator"),
+                promptSha256 = item.getValue("promptSha256").let { value ->
+                    if (value is JsonNull) null else {
+                        require(value.jsonPrimitive.isString) {
+                            "source tree manifest prompt hash must be a string or null"
+                        }
+                        value.jsonPrimitive.contentOrNull
+                    }
+                },
+                entityIds = entityIds,
+                acceptedImplementation = accepted,
+                roles = roles.toSet(),
+                contentKind = ProjectContentKind.fromWireName(requiredManifestString(item, "contentKind")),
+            )
+        }
+        require(files.map(GeneratedFileEvidence::path) == files.map(GeneratedFileEvidence::path).distinct().sorted()) {
+            "source tree manifest files must be unique and sorted"
+        }
+        fun sortedIds(name: String): List<String> = root.getValue(name).jsonArray.map {
+            require(it.jsonPrimitive.isString) { "source tree manifest $name values must be strings" }
+            it.jsonPrimitive.content
+        }.also { ids ->
+            require(ids == ids.distinct().sorted()) { "source tree manifest $name must be unique and sorted" }
+        }
+        val manifest = SourceTreeManifest(
+            schemaVersion = schemaVersion,
+            profileId = profileId,
+            profileSha256 = profileSha256,
+            inputSha256 = requiredManifestString(root, "inputSha256"),
+            files = files,
+            unresolvedEntityIds = sortedIds("unresolvedEntityIds"),
+            unresolvedImplementationIds = sortedIds("unresolvedImplementationIds"),
+        )
+        require(manifest.profileId == expectedProfile.id && manifest.profileSha256 == expectedProfile.sha256) {
+            "source tree manifest reconstruction profile does not match the expected profile"
+        }
+        manifest.files.forEach { file ->
+            val declaration = expectedProfile.layout.declarationForPath(file.path)
+            require(file.roles == declaration.roles && file.contentKind == declaration.contentKind) {
+                "source tree manifest file policy does not match the reconstruction profile: ${file.path}"
+            }
+        }
+        return manifest
+    }
+
+    fun editablePaths(
+        projectDir: Path,
+        expectedProfile: ReconstructionProfile = GeneratedCMakeReconstructionProfile.descriptor,
+    ): Set<String> {
         val path = projectDir.resolve("source_tree_manifest.json")
         if (!path.exists()) return emptySet()
-        return pathPattern.findAll(path.readText()).map { it.groupValues[1] }
-            .filter { it == "Makefile" || it.endsWith(".c") || it.endsWith(".h") }.toSet()
+        return read(projectDir, expectedProfile).editablePaths
+    }
+
+    private fun requiredManifestString(objectValue: kotlinx.serialization.json.JsonObject, name: String): String {
+        val primitive = objectValue.getValue(name).jsonPrimitive
+        require(primitive.isString) { "source tree manifest $name must be a string" }
+        return primitive.content
     }
 }
+
+/** Reject duplicate object members before kotlinx.serialization can collapse them. */
+private class UniqueJsonObjectKeyValidator(private val source: String) {
+    private var cursor = 0
+
+    fun validate() {
+        parseValue(0)
+        skipWhitespace()
+        require(cursor == source.length) { "source tree manifest has trailing JSON content" }
+    }
+
+    private fun parseValue(depth: Int) {
+        require(depth <= MAXIMUM_MANIFEST_JSON_DEPTH) { "source tree manifest JSON nesting is too deep" }
+        skipWhitespace()
+        require(cursor < source.length) { "source tree manifest contains incomplete JSON" }
+        when (source[cursor]) {
+            '{' -> parseObject(depth + 1)
+            '[' -> parseArray(depth + 1)
+            '"' -> parseString()
+            't' -> consumeLiteral("true")
+            'f' -> consumeLiteral("false")
+            'n' -> consumeLiteral("null")
+            '-', in '0'..'9' -> parseNumber()
+            else -> throw IllegalArgumentException("source tree manifest contains invalid JSON")
+        }
+    }
+
+    private fun parseObject(depth: Int) {
+        cursor++
+        skipWhitespace()
+        if (consumeIf('}')) return
+        val keys = mutableSetOf<String>()
+        while (true) {
+            skipWhitespace()
+            require(cursor < source.length && source[cursor] == '"') {
+                "source tree manifest JSON object key must be a string"
+            }
+            val key = parseString()
+            require(keys.add(key)) { "source tree manifest JSON object contains duplicate key: $key" }
+            skipWhitespace()
+            require(consumeIf(':')) { "source tree manifest JSON object is missing a colon" }
+            parseValue(depth)
+            skipWhitespace()
+            if (consumeIf('}')) return
+            require(consumeIf(',')) { "source tree manifest JSON object is missing a comma" }
+        }
+    }
+
+    private fun parseArray(depth: Int) {
+        cursor++
+        skipWhitespace()
+        if (consumeIf(']')) return
+        while (true) {
+            parseValue(depth)
+            skipWhitespace()
+            if (consumeIf(']')) return
+            require(consumeIf(',')) { "source tree manifest JSON array is missing a comma" }
+        }
+    }
+
+    private fun parseString(): String {
+        require(consumeIf('"')) { "source tree manifest JSON string is invalid" }
+        val decoded = StringBuilder()
+        while (cursor < source.length) {
+            val character = source[cursor++]
+            when {
+                character == '"' -> return decoded.toString()
+                character == '\\' -> {
+                    require(cursor < source.length) { "source tree manifest JSON escape is incomplete" }
+                    when (val escaped = source[cursor++]) {
+                        '"', '\\', '/' -> decoded.append(escaped)
+                        'b' -> decoded.append('\b')
+                        'f' -> decoded.append('\u000c')
+                        'n' -> decoded.append('\n')
+                        'r' -> decoded.append('\r')
+                        't' -> decoded.append('\t')
+                        'u' -> {
+                            require(cursor + 4 <= source.length) {
+                                "source tree manifest JSON Unicode escape is incomplete"
+                            }
+                            val digits = source.substring(cursor, cursor + 4)
+                            require(digits.all { it.isDigit() || it.lowercaseChar() in 'a'..'f' }) {
+                                "source tree manifest JSON Unicode escape is invalid"
+                            }
+                            decoded.append(digits.toInt(16).toChar())
+                            cursor += 4
+                        }
+                        else -> throw IllegalArgumentException("source tree manifest JSON escape is invalid")
+                    }
+                }
+                character.code < 0x20 -> throw IllegalArgumentException(
+                    "source tree manifest JSON string contains a control character",
+                )
+                else -> decoded.append(character)
+            }
+        }
+        throw IllegalArgumentException("source tree manifest JSON string is unterminated")
+    }
+
+    private fun parseNumber() {
+        consumeIf('-')
+        require(cursor < source.length) { "source tree manifest JSON number is incomplete" }
+        if (consumeIf('0')) {
+            require(cursor >= source.length || source[cursor] !in '0'..'9') {
+                "source tree manifest JSON number has a leading zero"
+            }
+        } else {
+            require(source[cursor] in '1'..'9') { "source tree manifest JSON number is invalid" }
+            while (cursor < source.length && source[cursor] in '0'..'9') cursor++
+        }
+        if (consumeIf('.')) {
+            require(cursor < source.length && source[cursor] in '0'..'9') {
+                "source tree manifest JSON fraction is incomplete"
+            }
+            while (cursor < source.length && source[cursor] in '0'..'9') cursor++
+        }
+        if (cursor < source.length && source[cursor].lowercaseChar() == 'e') {
+            cursor++
+            if (cursor < source.length && source[cursor] in setOf('+', '-')) cursor++
+            require(cursor < source.length && source[cursor] in '0'..'9') {
+                "source tree manifest JSON exponent is incomplete"
+            }
+            while (cursor < source.length && source[cursor] in '0'..'9') cursor++
+        }
+    }
+
+    private fun consumeLiteral(value: String) {
+        require(source.regionMatches(cursor, value, 0, value.length)) {
+            "source tree manifest contains an invalid JSON literal"
+        }
+        cursor += value.length
+    }
+
+    private fun consumeIf(character: Char): Boolean {
+        if (cursor >= source.length || source[cursor] != character) return false
+        cursor++
+        return true
+    }
+
+    private fun skipWhitespace() {
+        while (cursor < source.length && source[cursor] in setOf(' ', '\t', '\n', '\r')) cursor++
+    }
+}
+
+private const val MAXIMUM_MANIFEST_JSON_DEPTH = 64
