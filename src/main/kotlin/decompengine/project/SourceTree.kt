@@ -524,7 +524,7 @@ object SourceTreeGenerator {
                 val declaration = profile.layout.declarationForPath(entry.path)
                 ProjectFileRole.MODULE_IMPLEMENTATION in declaration.roles || ProjectFileRole.ENTRYPOINT_IMPLEMENTATION in declaration.roles
             } catch (_: IllegalArgumentException) {
-                entry.path.endsWith(".c")
+                false
             }
         }.map { it.path }.sorted()
         val makefile = renderMakefile(sourcePaths, profile)
