@@ -69,9 +69,46 @@ services:
       - ALL
     security_opt:
       - no-new-privileges:true
+    tmpfs:
+      - /tmp:size=64m,noexec,nosuid,nodev,mode=1777
     volumes:
       - ${CVUL_SOURCE_DIR:-./benchmarks/fixtures/c-vul/src}:/fixture:ro
       - ${INPUT_DIR:-./input}:/input
 
+  mvp-fake-provider:
+    profiles:
+      - acceptance
+    build:
+      context: .
+      args:
+        APP_UID: ${LOCAL_UID:-1000}
+        APP_GID: ${LOCAL_GID:-1000}
+    entrypoint:
+      - python3
+      - -u
+      - /provider/fake_openai_provider.py
+    init: true
+    read_only: true
+    cap_drop:
+      - ALL
+    security_opt:
+      - no-new-privileges:true
+    environment:
+      PYTHONDONTWRITEBYTECODE: "1"
+    healthcheck:
+      test: ["CMD", "python3", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8080/health', timeout=1).read()"]
+      interval: 1s
+      timeout: 2s
+      retries: 30
+      start_period: 1s
+    tmpfs:
+      - /tmp:size=8m,noexec,nosuid,nodev,mode=1777
+    volumes:
+      - ./benchmarks/fixtures/mvp-c-vul/fake_openai_provider.py:/provider/fake_openai_provider.py:ro
+
 volumes:
   runner-control:
+
+networks:
+  default:
+    internal: ${MVP_FAKE_PROVIDER:-false}

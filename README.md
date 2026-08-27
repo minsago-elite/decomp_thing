@@ -22,7 +22,14 @@ The container includes JDK 21, headless Ghidra, GCC, Make, binutils, sanitizers,
 
 Compose runs analyzed binaries in the separate `binary-runner` service. That service receives no `.env`, has `network_mode: none`, a read-only root filesystem, no Linux capabilities, read-only input/output mounts, and only a narrow writable request volume. The application service does not add `SYS_ADMIN` or run as privileged. Outside Compose, binary execution requires a working bubblewrap user/network namespace and starts with a cleared, allowlisted environment.
 
-Run the complete pinned c-vul acceptance flow from a clean checkout with a real OpenAI-compatible model configuration:
+Run the complete pinned c-vul acceptance flow deterministically and without credentials from a clean checkout:
+
+```bash
+git submodule update --init --recursive
+scripts/validate-mvp-docker.sh benchmarks/fixtures/mvp-c-vul/fake-provider.env
+```
+
+The checked fake provider is an explicit MVP fixture, not reusable reconstruction logic or evidence of model quality. It is non-root, read-only, reachable only on an internal Compose network, accepts a bounded request body, and returns exactly the two fixture responses needed to exercise reconstruction and repair. The normal application and isolated binary-runner services still receive no fixture source. The same validation script also supports a real OpenAI-compatible model configuration:
 
 ```bash
 git submodule update --init --recursive
@@ -31,7 +38,7 @@ cp .env.example .env
 scripts/validate-mvp-docker.sh .env
 ```
 
-The script uses the no-network `fixture-builder` profile to compile only `01_out_of_bounds_write.c` with pinned Clang flags into an isolated `binary_01` input directory. Fixture source is mounted read-only only in that builder and is absent from both runtime services. The script then runs `llm_bin_patch patch` through Compose and checks original CWE-787 evidence, isolated execution guarantees, exact `[03] Alexandria Stone` behavior, hashes, logs, secret redaction, and stable output layout. Successful runs contain `decompile/decompiled.c`, `patched_c/patched.c`, `patched_binary/patched_binary`, `evidence/`, `logs/`, and `summary/SUMMARY.md`; failed runs keep available evidence but never publish the final binary.
+The script uses the no-network, read-only `fixture-builder` profile with a bounded temporary filesystem to compile only `01_out_of_bounds_write.c` with pinned Clang flags into an isolated `binary_01` input directory. Fixture source is mounted read-only only in that builder and is absent from both runtime services. The script then runs `llm_bin_patch patch` through Compose and checks original CWE-787 evidence, isolated execution guarantees, exact `[03] Alexandria Stone` behavior, hashes, logs, secret redaction, and stable output layout. Successful runs contain `decompile/decompiled.c`, `patched_c/patched.c`, `patched_binary/patched_binary`, `evidence/`, `logs/`, and `summary/SUMMARY.md`; failed runs keep available evidence but never publish the final binary.
 
 ## Browser GUI
 

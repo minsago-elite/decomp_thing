@@ -18,10 +18,27 @@ set +a
 : "${API_KEY:?API_KEY is required in $config_file}"
 : "${MODEL:?MODEL is required in $config_file}"
 
-if [[ "$API_KEY" == "replace-me" || "$BASE_URL" == *example.com* || "$MODEL" == *model-name* ]]; then
-  echo "replace the placeholder API configuration in $config_file" >&2
-  exit 2
-fi
+fake_provider=${MVP_FAKE_PROVIDER:-false}
+case "$fake_provider" in
+  false)
+    if [[ "$API_KEY" == "replace-me" || "$BASE_URL" == *example.com* || "$MODEL" == *model-name* ]]; then
+      echo "replace the placeholder API configuration in $config_file" >&2
+      exit 2
+    fi
+    ;;
+  true)
+    if [[ "$BASE_URL" != "http://mvp-fake-provider:8080/v1" ||
+          "$API_KEY" != "mvp-fixture-not-a-secret-v1" ||
+          "$MODEL" != "mvp-c-vul-fixture-v1" || -n "${REASONING_EFFORT:-}" ]]; then
+      echo "the MVP fake-provider mode requires the checked credential-free fixture configuration" >&2
+      exit 2
+    fi
+    ;;
+  *)
+    echo "MVP_FAKE_PROVIDER must be true or false" >&2
+    exit 2
+    ;;
+esac
 if ! command -v docker >/dev/null 2>&1 || ! docker compose version >/dev/null 2>&1; then
   echo "Docker with the Compose plugin is required" >&2
   exit 2
@@ -42,7 +59,15 @@ fi
 
 validation_root=$(mktemp -d /tmp/decomp-mvp-ci.XXXXXX)
 project_name="decomp-mvp-${RANDOM}-$$"
+binds_ready=false
 cleanup() {
+  # Rootless Docker maps the non-root application user to a subordinate host UID. Empty the
+  # private output bind through that same user before the host removes the temporary directory.
+  if [[ "$binds_ready" == "true" && "${INPUT_DIR:-}" == "$validation_root/input" &&
+        "${OUTPUT_DIR:-}" == "$validation_root/output" ]]; then
+    docker compose -p "$project_name" --env-file "$config_file" run --rm --no-deps \
+      --entrypoint find llm-bin-patch /output -depth -mindepth 1 -delete >/dev/null 2>&1 || true
+  fi
   docker compose -p "$project_name" --env-file "$config_file" down --volumes --remove-orphans >/dev/null 2>&1 || true
   case "$validation_root" in
     /tmp/decomp-mvp-ci.*) rm -rf -- "$validation_root" ;;
@@ -52,6 +77,13 @@ cleanup() {
 trap cleanup EXIT
 
 mkdir -p "$validation_root/input" "$validation_root/output"
+if [[ "$(stat -c '%a' "$validation_root")" != "700" ]]; then
+  echo "the MVP validation root must be private" >&2
+  exit 1
+fi
+# The private 0700 parent prevents host access while these bind roots remain writable by the
+# subordinate UID used for a non-root container under rootless Docker.
+chmod 0777 "$validation_root/input" "$validation_root/output"
 fixture_source_sha=$(sha256sum benchmarks/fixtures/c-vul/src/01_out_of_bounds_write.c | awk '{print $1}')
 
 export INPUT_DIR="$validation_root/input"
@@ -62,8 +94,13 @@ export LOCAL_GID
 CVUL_SOURCE_DIR=$(realpath benchmarks/fixtures/c-vul/src)
 LOCAL_UID=$(id -u)
 LOCAL_GID=$(id -g)
+binds_ready=true
 
-docker compose -p "$project_name" --env-file "$config_file" build
+build_profile=()
+if [[ "$fake_provider" == "true" ]]; then
+  build_profile=(--profile acceptance)
+fi
+docker compose -p "$project_name" --env-file "$config_file" "${build_profile[@]}" build
 compiler_version=$(docker compose -p "$project_name" --env-file "$config_file" --profile acceptance run --rm --no-deps --entrypoint clang fixture-builder --version | head -n 1)
 docker compose -p "$project_name" --env-file "$config_file" --profile acceptance run --rm --no-deps fixture-builder
 input_sha=$(sha256sum "$validation_root/input/binary_01" | awk '{print $1}')
@@ -88,15 +125,30 @@ for service in llm-bin-patch binary-runner; do
     'test ! -e /opt/fixtures/c-vul && test ! -e /workspace/benchmarks/fixtures/c-vul'
 done
 
+if [[ "$fake_provider" == "true" ]]; then
+  docker compose -p "$project_name" --env-file "$config_file" --profile acceptance \
+    up --detach --wait --wait-timeout 30 mvp-fake-provider
+fi
 docker compose -p "$project_name" --env-file "$config_file" up --detach binary-runner
 docker compose -p "$project_name" --env-file "$config_file" run --rm --no-deps \
   llm-bin-patch patch /input/binary_01 --output /output/mvp --yes
+
+if [[ "$fake_provider" == "true" ]]; then
+  fake_provider_logs=$(docker compose -p "$project_name" --env-file "$config_file" logs --no-color mvp-fake-provider)
+  if [[ "$(grep -Fc 'accepted mvp request 1: binary-reconstruction' <<<"$fake_provider_logs")" -ne 1 ||
+        "$(grep -Fc 'accepted mvp request 2: memory-safety' <<<"$fake_provider_logs")" -ne 1 ]]; then
+    echo "the deterministic MVP provider did not observe exactly the expected two requests" >&2
+    exit 1
+  fi
+fi
 
 summary="$validation_root/output/mvp/summary/SUMMARY.md"
 test -f "$summary"
 test -f "$validation_root/output/mvp/decompile/decompiled.c"
 test -f "$validation_root/output/mvp/patched_c/patched.c"
-test -x "$validation_root/output/mvp/patched_binary/patched_binary"
+test -f "$validation_root/output/mvp/patched_binary/patched_binary"
+docker compose -p "$project_name" --env-file "$config_file" run --rm --no-deps \
+  --entrypoint sh binary-runner -c 'test -x /output/mvp/patched_binary/patched_binary'
 test -s "$validation_root/output/mvp/evidence/cwe-787-sanitizer.txt"
 test -s "$validation_root/output/mvp/evidence/approved.patch"
 test -s "$validation_root/output/mvp/evidence/reconstruction-request.md"
@@ -107,14 +159,42 @@ grep -q -- '- Result: PASS' "$summary"
 grep -q 'CWE-787 Evidence and Source Mapping' "$summary"
 grep -q 'networkIsolated=true; credentialsIsolated=true' "$summary"
 grep -q "$input_sha" "$summary"
-if grep -R --fixed-strings --quiet "$API_KEY" "$validation_root/output/mvp"; then
-  echo "API key leaked into MVP artifacts" >&2
-  exit 1
-fi
-if grep -R --fixed-strings --quiet "$fixture_source_sha" "$validation_root/output/mvp"; then
-  echo "fixture source hash unexpectedly appeared in reconstruction artifacts" >&2
-  exit 1
-fi
+
+set +e
+docker compose -p "$project_name" --env-file "$config_file" run --rm --no-deps \
+  --entrypoint sh llm-bin-patch -c \
+  'grep -r --devices=skip --fixed-strings --quiet -- "$API_KEY" /output/mvp'
+api_scan_status=$?
+set -e
+case "$api_scan_status" in
+  0)
+    echo "API key leaked into MVP artifacts" >&2
+    exit 1
+    ;;
+  1) ;;
+  *)
+    echo "API key artifact scan failed with exit code $api_scan_status" >&2
+    exit 1
+    ;;
+esac
+
+set +e
+docker compose -p "$project_name" --env-file "$config_file" run --rm --no-deps \
+  -e MVP_FORBIDDEN_VALUE="$fixture_source_sha" --entrypoint sh llm-bin-patch -c \
+  'grep -r --devices=skip --fixed-strings --quiet -- "$MVP_FORBIDDEN_VALUE" /output/mvp'
+source_scan_status=$?
+set -e
+case "$source_scan_status" in
+  0)
+    echo "fixture source hash unexpectedly appeared in reconstruction artifacts" >&2
+    exit 1
+    ;;
+  1) ;;
+  *)
+    echo "fixture source hash artifact scan failed with exit code $source_scan_status" >&2
+    exit 1
+    ;;
+esac
 
 normal_output=$(docker compose -p "$project_name" --env-file "$config_file" run --rm --no-deps \
   --entrypoint /output/mvp/patched_binary/patched_binary binary-runner)
