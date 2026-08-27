@@ -17,6 +17,10 @@ application {
 
 tasks.test {
     useJUnitPlatform()
+    environment(
+        "DECOMP_ACP_PARENT_SECRET_CANARY",
+        "decomp-acp-parent-secret-canary-must-not-cross-the-sandbox",
+    )
 }
 
 dependencies {

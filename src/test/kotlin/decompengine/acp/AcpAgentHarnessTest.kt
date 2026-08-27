@@ -5,6 +5,7 @@ import decompengine.agent.AgentAccessPolicy
 import decompengine.agent.AgentCancellation
 import decompengine.agent.AgentCancellationSource
 import decompengine.agent.AgentExecutionException
+import decompengine.agent.AgentExecutionEvent
 import decompengine.agent.AgentExecutionLimits
 import decompengine.agent.AgentExecutionRequest
 import decompengine.agent.AgentFailureKind
@@ -44,7 +45,9 @@ import kotlin.test.assertNotNull
 import kotlin.test.assertNull
 import kotlin.test.assertTrue
 import org.junit.jupiter.api.Assumptions.assumeTrue
+import org.junit.jupiter.api.Timeout
 
+@Timeout(value = 60, unit = TimeUnit.SECONDS)
 class AcpAgentHarnessTest {
     @Test
     fun `public harness fails closed before launch when the outer sandbox is absent`() {
@@ -227,17 +230,19 @@ class AcpAgentHarnessTest {
     fun `fake agent exercises official terminal create wait output release and tool correlation`() {
         val parent = createTempDirectory("acp-terminal-wire-").toAbsolutePath().normalize()
         val staging = AcpWorkflowStagingRoot.createReadOnly("project", parent)
-        val source = staging.path.resolve("src/module.c")
+        val source = staging.path.resolve("contract/artifact.txt")
         source.parent.createDirectories()
-        source.writeText("old source\n")
+        source.writeText("original artifact\n")
+        val forbiddenCanary = staging.path.resolve("forbidden-canary.txt")
+        forbiddenCanary.writeText(FORBIDDEN_CANARY_CONTENT)
         val pathRule = AgentPathRule(
-            AgentWorkspacePath("project", "src/module.c"),
+            AgentWorkspacePath("project", "contract/artifact.txt"),
             setOf(AgentOperation.READ_FILE, AgentOperation.WRITE_FILE),
         )
         val request = AgentExecutionRequest(
-            objective = "edit the fixture",
+            objective = "exercise the protocol fixture",
             workspaceRoots = listOf(staging.workspaceRoot),
-            contextInputs = listOf(decompengine.agent.AgentContextInput("compiler", "compiler evidence")),
+            contextInputs = listOf(decompengine.agent.AgentContextInput("contract", "protocol evidence")),
             accessPolicy = AgentAccessPolicy(
                 listOf(pathRule),
                 setOf(
@@ -311,9 +316,12 @@ class AcpAgentHarnessTest {
             timeouts = timeouts(request = 5_000),
             terminalPolicy = terminalPolicy,
         )
-        val orphanFailure = assertFailsWith<AgentExecutionException> {
-            orphanHarness.execute(request)
-        }
+        val orphanFailure = executeExpectingCleanFailure(
+            orphanHarness,
+            request,
+            "orphan terminal",
+            forbiddenCanary = forbiddenCanary,
+        )
         assertEquals(AgentFailureKind.PROTOCOL, orphanFailure.failure.kind)
         assertTrue(orphanFailure.message.orEmpty().contains("orphan terminal"))
         assertTrue(orphanHarness.latestTerminalAudit().any {
@@ -326,9 +334,12 @@ class AcpAgentHarnessTest {
             timeouts = timeouts(request = 5_000),
             terminalPolicy = terminalPolicy,
         )
-        val crossSessionFailure = assertFailsWith<AgentExecutionException> {
-            crossSessionHarness.execute(request)
-        }
+        val crossSessionFailure = executeExpectingCleanFailure(
+            crossSessionHarness,
+            request,
+            "cross-session terminal",
+            forbiddenCanary = forbiddenCanary,
+        )
         assertEquals(
             AgentFailureKind.PROTOCOL,
             crossSessionFailure.failure.kind,
@@ -348,9 +359,12 @@ class AcpAgentHarnessTest {
             timeouts = timeouts(request = 5_000),
             terminalPolicy = terminalPolicy,
         )
-        val missingSessionFailure = assertFailsWith<AgentExecutionException> {
-            missingSessionHarness.execute(request)
-        }
+        val missingSessionFailure = executeExpectingCleanFailure(
+            missingSessionHarness,
+            request,
+            "missing-session terminal",
+            forbiddenCanary = forbiddenCanary,
+        )
         assertEquals(AgentFailureKind.PROTOCOL, missingSessionFailure.failure.kind)
         assertTrue(
             missingSessionFailure.message.orEmpty().contains("requires string params.sessionId"),
@@ -358,7 +372,7 @@ class AcpAgentHarnessTest {
         )
         assertTrue(missingSessionHarness.latestTerminalAudit().isEmpty())
 
-        source.writeText("old source\n")
+        source.writeText("original artifact\n")
         val nearWallPolicy = AcpTerminalExecutionPolicy(
             listOf(AcpSandboxRootGrant(staging, AcpSandboxRootMode.READ_ONLY)),
             listOf(
@@ -381,9 +395,12 @@ class AcpAgentHarnessTest {
             timeouts = timeouts(request = 5_000, shutdown = 1_000),
             terminalPolicy = nearWallPolicy,
         )
-        val nearWallFailure = assertFailsWith<AgentExecutionException> {
-            nearWallHarness.execute(request.withWallClockTimeout(Duration.ofMillis(1_100)))
-        }
+        val nearWallFailure = executeExpectingCleanFailure(
+            nearWallHarness,
+            request.withWallClockTimeout(Duration.ofMillis(1_100)),
+            "near-wall terminal",
+            forbiddenCanary = forbiddenCanary,
+        )
         assertEquals(AgentFailureKind.TIMEOUT, nearWallFailure.failure.kind)
         assertEquals("near-wall terminal requested\n", source.readText(), "fixture never reached terminal/create")
         val nearWallAudit = nearWallHarness.latestTerminalAudit()
@@ -395,7 +412,6 @@ class AcpAgentHarnessTest {
                 "execution-wide timeout evidence must follow a successfully created terminal",
             )
         }
-        assertProcessStopped(assertNotNull(nearWallHarness.latestDiagnostics()).pid)
     }
 
     @Test
@@ -470,10 +486,14 @@ class AcpAgentHarnessTest {
 
     @Test
     fun `unsupported versions and missing configured capabilities fail actionably`() {
-        val fixture = fixture()
-        val versionFailure = assertFailsWith<AgentExecutionException> {
-            harness("unsupported-version").execute(fixture.request)
-        }
+        val versionFixture = fixture(genericContract = true)
+        val versionHarness = harness("unsupported-version")
+        val versionFailure = executeExpectingCleanFailure(
+            versionHarness,
+            versionFixture.request,
+            "unsupported version",
+            versionFixture,
+        )
         assertEquals(
             AgentFailureKind.PROTOCOL,
             versionFailure.failure.kind,
@@ -482,32 +502,40 @@ class AcpAgentHarnessTest {
         assertTrue(versionFailure.message.orEmpty().contains("stable v1"))
         assertEquals("2", versionFailure.failure.details["offeredVersion"])
 
-        val capabilityFailure = assertFailsWith<AgentExecutionException> {
-            harness(
-                "success",
-                requiredCapabilities = setOf(AcpRequiredAgentCapability.LOAD_SESSION),
-            ).execute(fixture.request)
-        }
+        val capabilityFixture = fixture(genericContract = true)
+        val capabilityHarness = harness(
+            "success",
+            requiredCapabilities = setOf(AcpRequiredAgentCapability.LOAD_SESSION),
+        )
+        val capabilityFailure = executeExpectingCleanFailure(
+            capabilityHarness,
+            capabilityFixture.request,
+            "missing required capability",
+            capabilityFixture,
+        )
         assertEquals(AgentFailureKind.CONFIGURATION, capabilityFailure.failure.kind)
         assertEquals("loadSession", capabilityFailure.failure.details["missingCapabilities"])
 
-        val missingVersion = assertFailsWith<AgentExecutionException> {
-            harness("missing-protocol-version").execute(fixture().request)
-        }
+        val missingVersionFixture = fixture(genericContract = true)
+        val missingVersionHarness = harness("missing-protocol-version")
+        val missingVersion = executeExpectingCleanFailure(
+            missingVersionHarness,
+            missingVersionFixture.request,
+            "missing protocol version",
+            missingVersionFixture,
+        )
         assertEquals(AgentFailureKind.PROTOCOL, missingVersion.failure.kind)
     }
 
     @Test
     fun `unknown and duplicate JSON-RPC response ids are rejected before SDK dispatch`() {
         listOf("unknown-response-id", "duplicate-response-id").forEach { mode ->
+            val fixture = fixture(genericContract = true)
             val harness = harness(mode)
-            val failure = assertFailsWith<AgentExecutionException>(mode) {
-                harness.execute(fixture().request)
-            }
+            val failure = executeExpectingCleanFailure(harness, fixture.request, mode, fixture)
 
             assertEquals(AgentFailureKind.PROTOCOL, failure.failure.kind, mode)
             assertTrue(failure.message.orEmpty().contains("response id"), mode)
-            assertProcessStopped(assertNotNull(harness.latestDiagnostics()).pid)
         }
     }
 
@@ -559,14 +587,24 @@ class AcpAgentHarnessTest {
 
     @Test
     fun `malformed stdout clean EOF and nonzero crashes are distinct failures`() {
-        val malformedInitialize = assertFailsWith<AgentExecutionException> {
-            harness("malformed-initialize").execute(fixture().request)
-        }
+        val malformedInitializeFixture = fixture(genericContract = true)
+        val malformedInitializeHarness = harness("malformed-initialize")
+        val malformedInitialize = executeExpectingCleanFailure(
+            malformedInitializeHarness,
+            malformedInitializeFixture.request,
+            "malformed initialize",
+            malformedInitializeFixture,
+        )
         assertEquals(AgentFailureKind.PROTOCOL, malformedInitialize.failure.kind)
 
-        val malformed = assertFailsWith<AgentExecutionException> {
-            harness("malformed-prompt").execute(fixture().request)
-        }
+        val malformedFixture = fixture(genericContract = true)
+        val malformedHarness = harness("malformed-prompt")
+        val malformed = executeExpectingCleanFailure(
+            malformedHarness,
+            malformedFixture.request,
+            "malformed prompt",
+            malformedFixture,
+        )
         assertEquals(AgentFailureKind.PROTOCOL, malformed.failure.kind)
         assertTrue(malformed.message.orEmpty().contains("malformed JSON-RPC"))
 
@@ -577,51 +615,72 @@ class AcpAgentHarnessTest {
             "numeric-jsonrpc-prompt",
             "result-and-error-prompt",
         ).forEach { mode ->
-            val strictFailure = assertFailsWith<AgentExecutionException>(mode) {
-                harness(mode).execute(fixture().request)
-            }
+            val strictFixture = fixture(genericContract = true)
+            val strictHarness = harness(mode)
+            val strictFailure = executeExpectingCleanFailure(
+                strictHarness,
+                strictFixture.request,
+                mode,
+                strictFixture,
+            )
             assertEquals(AgentFailureKind.PROTOCOL, strictFailure.failure.kind, mode)
             assertTrue(strictFailure.message.orEmpty().contains("malformed JSON-RPC"), mode)
         }
 
-        val invalidUtf8 = assertFailsWith<AgentExecutionException> {
-            harness("invalid-utf8-prompt").execute(fixture().request)
-        }
+        val invalidUtf8Fixture = fixture(genericContract = true)
+        val invalidUtf8Harness = harness("invalid-utf8-prompt")
+        val invalidUtf8 = executeExpectingCleanFailure(
+            invalidUtf8Harness,
+            invalidUtf8Fixture.request,
+            "invalid UTF-8",
+            invalidUtf8Fixture,
+        )
         assertEquals(AgentFailureKind.PROTOCOL, invalidUtf8.failure.kind)
         assertTrue(invalidUtf8.message.orEmpty().contains("invalid UTF-8"))
 
-        val invalidUpdate = assertFailsWith<AgentExecutionException> {
-            harness("invalid-update").execute(fixture().request)
-        }
+        val invalidUpdateFixture = fixture(genericContract = true)
+        val invalidUpdateHarness = harness("invalid-update")
+        val invalidUpdate = executeExpectingCleanFailure(
+            invalidUpdateHarness,
+            invalidUpdateFixture.request,
+            "invalid update",
+            invalidUpdateFixture,
+        )
         assertEquals(AgentFailureKind.PROTOCOL, invalidUpdate.failure.kind)
         assertTrue(invalidUpdate.message.orEmpty().contains("empty tool call id"))
 
-        val negativeUsage = assertFailsWith<AgentExecutionException> {
-            harness("negative-usage").execute(fixture().request)
-        }
+        val negativeUsageFixture = fixture(genericContract = true)
+        val negativeUsageHarness = harness("negative-usage")
+        val negativeUsage = executeExpectingCleanFailure(
+            negativeUsageHarness,
+            negativeUsageFixture.request,
+            "negative usage",
+            negativeUsageFixture,
+        )
         assertEquals(AgentFailureKind.PROTOCOL, negativeUsage.failure.kind)
         assertTrue(negativeUsage.message.orEmpty().contains("invalid prompt usage"))
 
-        val eof = assertFailsWith<AgentExecutionException> {
-            harness("eof-prompt").execute(fixture().request)
-        }
+        val eofFixture = fixture(genericContract = true)
+        val eofHarness = harness("eof-prompt")
+        val eof = executeExpectingCleanFailure(eofHarness, eofFixture.request, "clean EOF", eofFixture)
         assertEquals(AgentFailureKind.TRANSPORT, eof.failure.kind)
 
+        val crashFixture = fixture(genericContract = true)
         val crashHarness = harness("crash-prompt")
-        val crash = assertFailsWith<AgentExecutionException> {
-            crashHarness.execute(fixture().request)
-        }
+        val crash = executeExpectingCleanFailure(crashHarness, crashFixture.request, "prompt crash", crashFixture)
         assertEquals(AgentFailureKind.PROCESS_CRASH, crash.failure.kind)
         assertEquals("23", crash.failure.details["exitCode"])
-        assertProcessStopped(assertNotNull(crashHarness.latestDiagnostics()).pid)
 
+        val initializeCrashFixture = fixture(genericContract = true)
         val initializeCrashHarness = harness("crash-after-initialize")
-        val initializeCrash = assertFailsWith<AgentExecutionException> {
-            initializeCrashHarness.execute(fixture().request)
-        }
+        val initializeCrash = executeExpectingCleanFailure(
+            initializeCrashHarness,
+            initializeCrashFixture.request,
+            "initialize crash",
+            initializeCrashFixture,
+        )
         assertEquals(AgentFailureKind.PROCESS_CRASH, initializeCrash.failure.kind)
         assertEquals("17", initializeCrash.failure.details["exitCode"])
-        assertProcessStopped(assertNotNull(initializeCrashHarness.latestDiagnostics()).pid)
     }
 
     @Test
@@ -639,68 +698,70 @@ class AcpAgentHarnessTest {
 
     @Test
     fun `startup request and idle waits are independently bounded`() {
+        val startupFixture = fixture(genericContract = true)
         val startupHarness = harness(
             "no-initialize",
             timeouts = timeouts(startup = 180, request = 1_000),
         )
-        val startup = assertFailsWith<AgentExecutionException> {
-            startupHarness.execute(fixture().request)
-        }
+        val startup = executeExpectingCleanFailure(
+            startupHarness,
+            startupFixture.request,
+            "initialize timeout",
+            startupFixture,
+        )
         assertEquals(AgentFailureKind.TIMEOUT, startup.failure.kind)
         assertTrue(startup.message.orEmpty().contains("initialize"))
-        assertProcessStopped(assertNotNull(startupHarness.latestDiagnostics()).pid)
 
+        val requestFixture = fixture(genericContract = true)
         val requestHarness = harness(
             "no-session-response",
             timeouts = timeouts(startup = 1_000, request = 180),
         )
-        val request = assertFailsWith<AgentExecutionException> {
-            requestHarness.execute(fixture().request)
-        }
+        val request = executeExpectingCleanFailure(
+            requestHarness,
+            requestFixture.request,
+            "session request timeout",
+            requestFixture,
+        )
         assertEquals(AgentFailureKind.TIMEOUT, request.failure.kind)
         assertTrue(request.message.orEmpty().contains("session/new"))
-        assertProcessStopped(assertNotNull(requestHarness.latestDiagnostics()).pid)
 
-        val idleFixture = fixture(idleMillis = 150)
+        val idleFixture = fixture(idleMillis = 150, genericContract = true)
         val idleHarness = harness(
             "wait-for-cancel",
             timeouts = timeouts(startup = 1_000, request = 2_000),
         )
-        val idle = assertFailsWith<AgentExecutionException> {
-            idleHarness.execute(idleFixture.request)
-        }
+        val idle = executeExpectingCleanFailure(idleHarness, idleFixture.request, "idle timeout", idleFixture)
         assertEquals(AgentFailureKind.TIMEOUT, idle.failure.kind)
         assertTrue(idle.message.orEmpty().contains("idle"))
         val idleDiagnostics = assertNotNull(idleHarness.latestDiagnostics())
         assertFalse(idleDiagnostics.forcedTermination)
-        assertProcessStopped(idleDiagnostics.pid)
 
-        val wallFixture = fixture(idleMillis = 2_000, wallMillis = 180)
+        val wallFixture = fixture(idleMillis = 2_000, wallMillis = 180, genericContract = true)
         val wallHarness = harness(
             "wait-for-cancel",
             timeouts = timeouts(startup = 1_000, request = 2_000),
         )
-        val wall = assertFailsWith<AgentExecutionException> {
-            wallHarness.execute(wallFixture.request)
-        }
+        val wall = executeExpectingCleanFailure(wallHarness, wallFixture.request, "wall timeout", wallFixture)
         assertEquals(AgentFailureKind.TIMEOUT, wall.failure.kind)
         assertTrue(wall.message.orEmpty().contains("wall-clock"), wall.message)
-        assertProcessStopped(assertNotNull(wallHarness.latestDiagnostics()).pid)
     }
 
     @Test
     fun `a blocking event callback cannot prevent the wall deadline and process cleanup`() {
-        val fixture = fixture(idleMillis = 2_000, wallMillis = 250)
+        val fixture = fixture(idleMillis = 2_000, wallMillis = 250, genericContract = true)
         val harness = harness(
             "update-then-hang",
             timeouts = timeouts(startup = 1_000, request = 2_000, shutdown = 600),
         )
+        val events = mutableListOf<AgentExecutionEvent>()
         val callbackEntered = CountDownLatch(1)
         val releaseCallback = CountDownLatch(1)
         val executor = Executors.newSingleThreadExecutor()
         try {
             val execution = executor.submit<decompengine.agent.AgentExecutionResult> {
-                harness.execute(fixture.request) {
+                harness.execute(fixture.request) { event ->
+                    events += event
                     callbackEntered.countDown()
                     releaseCallback.await()
                 }
@@ -715,7 +776,13 @@ class AcpAgentHarnessTest {
             }
             assertEquals(AgentFailureKind.TIMEOUT, failure.failure.kind)
             assertTrue(failure.message.orEmpty().contains("wall-clock"))
-            assertProcessStopped(assertNotNull(harness.latestDiagnostics()).pid)
+            assertCleanTermination(
+                harness = harness,
+                context = "blocked callback timeout",
+                fixture = fixture,
+                failure = failure,
+                events = events,
+            )
         } finally {
             releaseCallback.countDown()
             executor.shutdownNow()
@@ -724,7 +791,7 @@ class AcpAgentHarnessTest {
 
     @Test
     fun `caller cancellation sends session cancel and returns a cancelled result`() {
-        val fixture = fixture(includeReadyPath = true)
+        val fixture = fixture(includeReadyPath = true, genericContract = true)
         val cancellation = AgentCancellationSource()
         val request = fixture.request.withCancellation(cancellation)
         val ready = fixture.workspace.resolve("ready")
@@ -734,8 +801,11 @@ class AcpAgentHarnessTest {
             timeouts = timeouts(startup = 1_000, request = 3_000),
         )
         val executor = Executors.newSingleThreadExecutor()
+        val events = mutableListOf<AgentExecutionEvent>()
         try {
-            val execution = executor.submit<decompengine.agent.AgentExecutionResult> { harness.execute(request) }
+            val execution = executor.submit<decompengine.agent.AgentExecutionResult> {
+                harness.execute(request, events::add)
+            }
             val deadline = System.nanoTime() + TimeUnit.SECONDS.toNanos(3)
             while (!ready.exists() && !execution.isDone && System.nanoTime() < deadline) Thread.sleep(10)
             assertTrue(ready.exists(), "fixture never reached session/prompt")
@@ -747,11 +817,16 @@ class AcpAgentHarnessTest {
                 throw failure.cause ?: failure
             }
             assertEquals(AgentStopReason.CANCELLED, result.stopReason)
-            assertEquals("old source\n", fixture.source.readText())
+            assertEquals("original artifact\n", fixture.source.readText())
             assertEquals(AgentFileChangeKind.CREATED, result.changes.single().kind)
             val diagnostics = assertNotNull(harness.latestDiagnostics())
             assertFalse(diagnostics.forcedTermination)
-            assertProcessStopped(diagnostics.pid)
+            assertCleanTermination(
+                harness = harness,
+                context = "cooperative cancellation",
+                fixture = fixture,
+                events = events,
+            )
         } finally {
             executor.shutdownNow()
         }
@@ -817,14 +892,13 @@ class AcpAgentHarnessTest {
             "response-then-crash" to "31",
             "response-then-delayed-crash" to "32",
         ).forEach { (mode, expectedExit) ->
+            val fixture = fixture(genericContract = true)
             val harness = harness(
                 mode,
                 timeouts = timeouts(startup = 1_000, request = 2_000, shutdown = 1_000),
             )
 
-            val failure = assertFailsWith<AgentExecutionException>(mode) {
-                harness.execute(fixture().request)
-            }
+            val failure = executeExpectingCleanFailure(harness, fixture.request, mode, fixture)
 
             assertEquals(AgentFailureKind.PROCESS_CRASH, failure.failure.kind, mode)
             assertEquals(expectedExit, failure.failure.details["exitCode"], mode)
@@ -832,7 +906,6 @@ class AcpAgentHarnessTest {
             assertFalse(diagnostics.forcedTermination, mode)
             assertFalse(diagnostics.rootTerminationRequested, mode)
             assertEquals(expectedExit.toInt(), diagnostics.exitCode, mode)
-            assertProcessStopped(diagnostics.pid)
         }
     }
 
@@ -859,34 +932,54 @@ class AcpAgentHarnessTest {
 
     @Test
     fun `stdout frame total and retained stderr sizes are bounded independently`() {
-        val frameFailure = assertFailsWith<AgentExecutionException> {
-            harness("oversized-frame-prompt", maximumFrameBytes = 1_024).execute(fixture().request)
-        }
+        val frameFixture = fixture(genericContract = true)
+        val frameHarness = harness("oversized-frame-prompt", maximumFrameBytes = 1_024)
+        val frameFailure = executeExpectingCleanFailure(
+            frameHarness,
+            frameFixture.request,
+            "individual frame limit",
+            frameFixture,
+        )
         assertEquals(AgentFailureKind.RESOURCE_EXHAUSTED, frameFailure.failure.kind)
         assertTrue(frameFailure.message.orEmpty().contains("frame limit"))
 
-        val totalFailure = assertFailsWith<AgentExecutionException> {
-            harness("oversized-frame-prompt", maximumFrameBytes = 128 * 1024)
-                .execute(fixture(maximumOutputBytes = 1_024).request)
-        }
+        val totalFixture = fixture(maximumOutputBytes = 1_024, genericContract = true)
+        val totalHarness = harness("oversized-frame-prompt", maximumFrameBytes = 128 * 1024)
+        val totalFailure = executeExpectingCleanFailure(
+            totalHarness,
+            totalFixture.request,
+            "aggregate stdout limit",
+            totalFixture,
+        )
         assertEquals(AgentFailureKind.RESOURCE_EXHAUSTED, totalFailure.failure.kind)
         assertTrue(totalFailure.message.orEmpty().contains("execution limit"))
 
+        val stderrFixture = fixture(genericContract = true)
         val stderrHarness = harness("stderr-overflow")
-        stderrHarness.execute(fixture().request)
+        val stderrEvents = mutableListOf<AgentExecutionEvent>()
+        stderrHarness.execute(stderrFixture.request, stderrEvents::add)
         val diagnostics = assertNotNull(stderrHarness.latestDiagnostics())
         assertTrue(diagnostics.stderrTruncated)
         assertTrue(diagnostics.stderr.toByteArray().size <= 64 * 1024)
-        assertProcessStopped(diagnostics.pid)
+        assertCleanTermination(
+            harness = stderrHarness,
+            context = "retained stderr limit",
+            fixture = stderrFixture,
+            events = stderrEvents,
+        )
 
         val aggregateLimit = 16L * 1024
+        val floodFixture = fixture(maximumOutputBytes = aggregateLimit, genericContract = true)
         val floodHarness = harness(
             "stderr-flood",
             timeouts = timeouts(request = 2_000, shutdown = 1_000),
         )
-        val floodFailure = assertFailsWith<AgentExecutionException> {
-            floodHarness.execute(fixture(maximumOutputBytes = aggregateLimit).request)
-        }
+        val floodFailure = executeExpectingCleanFailure(
+            floodHarness,
+            floodFixture.request,
+            "stderr flood",
+            floodFixture,
+        )
         assertEquals(AgentFailureKind.RESOURCE_EXHAUSTED, floodFailure.failure.kind)
         assertTrue(floodFailure.message.orEmpty().contains("stdout and stderr"))
         val floodDiagnostics = assertNotNull(floodHarness.latestDiagnostics())
@@ -894,19 +987,25 @@ class AcpAgentHarnessTest {
         assertTrue(floodDiagnostics.producedOutputBytes > aggregateLimit)
         assertTrue(floodDiagnostics.outputLimitExceeded)
         assertTrue(floodDiagnostics.rootTerminationRequested)
-        assertProcessStopped(floodDiagnostics.pid)
         val floodEvidence = assertNotNull(floodHarness.latestSandboxEvidence())
         assertEquals(floodDiagnostics.producedOutputBytes, floodEvidence.outerProcessOutput?.observedBytes)
         assertTrue(floodEvidence.outerProcessOutput?.limitExceeded == true)
 
         listOf("response-then-stderr-burst", "response-then-stdout-burst").forEach { mode ->
+            val shutdownBurstFixture = fixture(
+                maximumOutputBytes = aggregateLimit,
+                genericContract = true,
+            )
             val shutdownBurstHarness = harness(
                 mode,
                 timeouts = timeouts(request = 2_000, shutdown = 1_200),
             )
-            val shutdownBurstFailure = assertFailsWith<AgentExecutionException>(mode) {
-                shutdownBurstHarness.execute(fixture(maximumOutputBytes = aggregateLimit).request)
-            }
+            val shutdownBurstFailure = executeExpectingCleanFailure(
+                shutdownBurstHarness,
+                shutdownBurstFixture.request,
+                mode,
+                shutdownBurstFixture,
+            )
             assertEquals(AgentFailureKind.RESOURCE_EXHAUSTED, shutdownBurstFailure.failure.kind, mode)
             val shutdownBurstDiagnostics = assertNotNull(shutdownBurstHarness.latestDiagnostics(), mode)
             assertTrue(shutdownBurstDiagnostics.outputLimitExceeded, mode)
@@ -933,6 +1032,7 @@ class AcpAgentHarnessTest {
         val fixture = fixture(
             wallMillis = 2_000,
             maximumOutputBytes = Long.MAX_VALUE,
+            genericContract = true,
         )
         val harness = harness(
             "protocol-frame-flood",
@@ -940,9 +1040,10 @@ class AcpAgentHarnessTest {
             maximumProtocolFrames = 8,
         )
         val executor = Executors.newSingleThreadExecutor()
+        val events = mutableListOf<AgentExecutionEvent>()
         try {
             val execution = executor.submit<AgentExecutionException> {
-                assertFailsWith { harness.execute(fixture.request) }
+                assertFailsWith { harness.execute(fixture.request, events::add) }
             }
             val failure = try {
                 execution.get(5, TimeUnit.SECONDS)
@@ -952,11 +1053,14 @@ class AcpAgentHarnessTest {
 
             assertEquals(AgentFailureKind.RESOURCE_EXHAUSTED, failure.failure.kind)
             assertTrue(failure.message.orEmpty().contains("8-frame protocol limit"), failure.message)
-            assertEquals("old source\n", fixture.source.readText())
-            val diagnostics = assertNotNull(harness.latestDiagnostics())
-            assertTrue(diagnostics.remainingProcessIds.isEmpty())
-            assertTrue(diagnostics.sandboxCleanupVerified)
-            assertProcessStopped(diagnostics.pid)
+            assertEquals("original artifact\n", fixture.source.readText())
+            assertCleanTermination(
+                harness = harness,
+                context = "protocol frame flood",
+                fixture = fixture,
+                failure = failure,
+                events = events,
+            )
         } finally {
             executor.shutdownNow()
         }
@@ -1038,15 +1142,13 @@ class AcpAgentHarnessTest {
 
     @Test
     fun `authentication-required JSON-RPC error is typed and does not leak the process`() {
+        val fixture = fixture(genericContract = true)
         val harness = harness("auth-required")
-        val failure = assertFailsWith<AgentExecutionException> {
-            harness.execute(fixture().request)
-        }
+        val failure = executeExpectingCleanFailure(harness, fixture.request, "authentication required", fixture)
 
         assertEquals(AgentFailureKind.AUTHENTICATION, failure.failure.kind)
         assertEquals("-32000", failure.failure.details["rpcCode"])
         assertTrue(failure.message.orEmpty().contains("configure the external agent"))
-        assertProcessStopped(assertNotNull(harness.latestDiagnostics()).pid)
     }
 
     @Test
@@ -1369,9 +1471,10 @@ class AcpAgentHarnessTest {
         maximumWallMillis: Long,
     ): AgentExecutionException {
         val executor = Executors.newSingleThreadExecutor()
+        val events = mutableListOf<AgentExecutionEvent>()
         val startedAt = System.nanoTime()
         val execution = executor.submit<AgentExecutionException> {
-            assertFailsWith { harness.execute(fixture.request) }
+            assertFailsWith { harness.execute(fixture.request, events::add) }
         }
         val failure = try {
             execution.get(maximumWallMillis, TimeUnit.MILLISECONDS)
@@ -1387,16 +1490,98 @@ class AcpAgentHarnessTest {
             "protocol failure exceeded its bounded wall time: $elapsedMillis ms",
         )
         assertEquals(AgentFailureKind.PROTOCOL, failure.failure.kind)
-        assertEquals(FORBIDDEN_CANARY_CONTENT, fixture.forbiddenCanary.readText())
-        assertCleanTermination(harness, "protocol failure")
+        assertCleanTermination(
+            harness = harness,
+            context = "protocol failure",
+            fixture = fixture,
+            failure = failure,
+            events = events,
+        )
         return failure
     }
 
-    private fun assertCleanTermination(harness: AcpAgentHarness, context: String = "execution") {
+    private fun executeExpectingCleanFailure(
+        harness: AcpAgentHarness,
+        request: AgentExecutionRequest,
+        context: String,
+        fixture: Fixture? = null,
+        forbiddenCanary: Path? = fixture?.forbiddenCanary,
+    ): AgentExecutionException {
+        val events = mutableListOf<AgentExecutionEvent>()
+        val failure = assertFailsWith<AgentExecutionException>(context) {
+            harness.execute(request, events::add)
+        }
+        assertCleanTermination(
+            harness = harness,
+            context = context,
+            fixture = fixture,
+            forbiddenCanary = forbiddenCanary,
+            failure = failure,
+            events = events,
+        )
+        return failure
+    }
+
+    private fun assertCleanTermination(
+        harness: AcpAgentHarness,
+        context: String = "execution",
+        fixture: Fixture? = null,
+        forbiddenCanary: Path? = fixture?.forbiddenCanary,
+        failure: AgentExecutionException? = null,
+        events: Collection<AgentExecutionEvent> = emptyList(),
+    ) {
         val diagnostics = assertNotNull(harness.latestDiagnostics(), context)
         assertTrue(diagnostics.remainingProcessIds.isEmpty(), context)
         assertTrue(diagnostics.sandboxCleanupVerified, context)
         assertProcessStopped(diagnostics.pid)
+        forbiddenCanary?.let { canary ->
+            assertEquals(FORBIDDEN_CANARY_CONTENT, canary.readText(), context)
+        }
+
+        val evidence = assertNotNull(harness.latestSandboxEvidence(), "$context sandbox evidence")
+        val secretSurfaces = linkedMapOf<String, Any?>(
+            "failure message" to failure?.failure?.message,
+            "failure details" to failure?.failure?.details,
+            "diagnostics" to diagnostics,
+            "events" to events,
+            "filesystem audit" to harness.latestFilesystemAudit(),
+            "permission audit" to harness.latestPermissionAudit(),
+            "terminal audit" to harness.latestTerminalAudit(),
+            "sandbox evidence" to listOf(
+                evidence.provider,
+                evidence.providerVersion,
+                evidence.providerExecutableSha256,
+                evidence.providerExecutableMode,
+                evidence.resourceLimiterSha256,
+                evidence.scopeSupervisorSha256,
+                evidence.scopeInspectorSha256,
+                evidence.environmentFdOpenerSha256,
+                evidence.securityExecutables,
+                evidence.outerAgentLimits,
+                evidence.runtimeClosureLimits,
+                evidence.cgroupV2PidsLimited,
+                evidence.cgroupV2MemoryLimited,
+                evidence.cgroupV2CpuLimited,
+                evidence.networkIsolated,
+                evidence.outerAgentContained,
+                evidence.nestedUserNamespacesDisabled,
+                evidence.newSession,
+                evidence.dieWithParent,
+                evidence.policySha256,
+                evidence.terminalLimits,
+                evidence.launches,
+                evidence.authorities,
+                evidence.terminalAudit,
+                evidence.outerProcessOutput,
+                evidence.evidenceSha256,
+            ),
+        )
+        secretSurfaces.forEach { (label, surface) ->
+            assertFalse(
+                surface.toString().contains(PARENT_SECRET_CANARY),
+                "$context retained parent-secret bytes in $label",
+            )
+        }
     }
 
     private fun assertProcessStopped(pid: Long) {
@@ -1419,6 +1604,11 @@ class AcpAgentHarnessTest {
         val PYTHON_STDLIB: Path = Path.of("/usr/lib/python3.14")
         val AGENT_SCRIPT_DESTINATION: Path = Path.of("/decomp-acp-test/fake_acp_v1_agent.py")
         const val FORBIDDEN_CANARY_CONTENT: String = "forbidden canary must remain unchanged\n"
+        val PARENT_SECRET_CANARY: String by lazy {
+            requireNotNull(System.getenv("DECOMP_ACP_PARENT_SECRET_CANARY")) {
+                "Gradle must inject the ACP parent-secret canary into the test process"
+            }
+        }
         val GATE_HELPER: Path by lazy {
             val output = createTempDirectory("acp-static-gate-helper-")
                 .resolve("gate-helper")

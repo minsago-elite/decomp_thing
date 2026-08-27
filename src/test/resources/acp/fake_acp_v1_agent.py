@@ -8,17 +8,48 @@ import time
 MODE = sys.argv[1]
 SENTINEL = sys.argv[2] if len(sys.argv) > 2 else ""
 READY = sys.argv[3] if len(sys.argv) > 3 else ""
+PARENT_SECRET_ENVIRONMENT_NAME = "DECOMP_ACP_PARENT_SECRET_CANARY"
 GENERIC_CONTRACT_MODES = {
+    "contaminated-prompt",
+    "crash-prompt",
+    "eof-prompt",
     "fragmented-stdout",
+    "invalid-update",
+    "invalid-utf8-prompt",
+    "malformed-prompt",
+    "missing-jsonrpc-prompt",
+    "negative-usage",
+    "numeric-jsonrpc-prompt",
+    "oversized-frame-prompt",
     "pipelined-callbacks",
+    "protocol-frame-flood",
+    "response-then-crash",
+    "response-then-delayed-crash",
+    "response-then-stderr-burst",
+    "response-then-stdout-burst",
+    "result-and-error-prompt",
+    "stderr-overflow",
     "unknown-methods",
     "forbidden-write",
     "physical-newline-in-string",
+    "terminal-lifecycle",
     "terminal-kill-lifecycle",
+    "terminal-cancelled-orphan",
+    "terminal-cross-session-hang",
+    "terminal-missing-session-hang",
+    "terminal-near-wall",
     "stop-max-tokens",
     "stop-max-turn-requests",
     "stop-refusal",
+    "update-then-hang",
+    "wait-for-cancel",
+    "wrong-jsonrpc-prompt",
 }
+
+if PARENT_SECRET_ENVIRONMENT_NAME in os.environ:
+    sys.stderr.write("fatal: ambient parent-secret canary reached the ACP sandbox\n")
+    sys.stderr.flush()
+    raise SystemExit(90)
 
 
 def send(message):
@@ -581,7 +612,7 @@ if MODE == "terminal-missing-session-hang":
     time.sleep(30)
     raise SystemExit(0)
 if MODE == "terminal-near-wall":
-    write_workspace_file(join_path(cwd, "src/module.c"), "near-wall terminal requested\n", 110)
+    write_workspace_file(join_path(cwd, "contract/artifact.txt"), "near-wall terminal requested\n", 110)
     time.sleep(0.65)
     send({
         "jsonrpc": "2.0",
@@ -724,10 +755,10 @@ update({
 
 source = join_path(
     cwd,
-    "contract/artifact.txt" if MODE == "fragmented-stdout" else "src/module.c",
+    "contract/artifact.txt" if MODE in GENERIC_CONTRACT_MODES else "src/module.c",
 )
 if MODE != "fs-read-write":
-    content = "updated artifact\n" if MODE == "fragmented-stdout" else "new source\n"
+    content = "updated artifact\n" if MODE in GENERIC_CONTRACT_MODES else "new source\n"
     write_workspace_file(source, content, 803)
 
 update({
