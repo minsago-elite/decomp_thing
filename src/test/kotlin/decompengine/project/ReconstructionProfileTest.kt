@@ -142,6 +142,46 @@ class ReconstructionProfileTest {
         }
     }
 
+    @Test
+    fun `planner and source tree honour a non-C layout`() {
+        val rustLayout = ProjectLayoutProfile(
+            ProjectLayoutProfile.CURRENT_SCHEMA_VERSION,
+            listOf(
+                ProjectFileDeclaration("shared-interface", "src/lib.rs", setOf(ProjectFileRole.PUBLIC_INTERFACE, ProjectFileRole.VIEWABLE), ProjectContentKind.UTF8_TEXT),
+                ProjectFileDeclaration("module-interface", "src/modules/{module}.rs", setOf(ProjectFileRole.PUBLIC_INTERFACE, ProjectFileRole.VIEWABLE), ProjectContentKind.UTF8_TEXT),
+                ProjectFileDeclaration("module-private-interface", "src/modules/{module}_internal.rs", setOf(ProjectFileRole.PRIVATE_INTERFACE, ProjectFileRole.VIEWABLE), ProjectContentKind.UTF8_TEXT),
+                ProjectFileDeclaration("module-implementation", "src/modules/{module}.rs.impl", setOf(ProjectFileRole.MODULE_IMPLEMENTATION, ProjectFileRole.VIEWABLE, ProjectFileRole.EDITABLE), ProjectContentKind.UTF8_TEXT),
+                ProjectFileDeclaration("entrypoint-implementation", "src/main.rs", setOf(ProjectFileRole.ENTRYPOINT_IMPLEMENTATION, ProjectFileRole.VIEWABLE), ProjectContentKind.UTF8_TEXT),
+                ProjectFileDeclaration("build-definition", "Cargo.toml", setOf(ProjectFileRole.BUILD_DEFINITION, ProjectFileRole.VIEWABLE), ProjectContentKind.UTF8_TEXT),
+                ProjectFileDeclaration("program-model-evidence", "reports/program_model.json", setOf(ProjectFileRole.EVIDENCE), ProjectContentKind.UTF8_TEXT),
+                ProjectFileDeclaration("module-plan-evidence", "reports/module_plan.json", setOf(ProjectFileRole.EVIDENCE), ProjectContentKind.UTF8_TEXT),
+                ProjectFileDeclaration("module-evidence", "reports/modules/{module}.json", setOf(ProjectFileRole.EVIDENCE), ProjectContentKind.UTF8_TEXT),
+                ProjectFileDeclaration("confidence-evidence", "reports/confidence.json", setOf(ProjectFileRole.EVIDENCE), ProjectContentKind.UTF8_TEXT),
+                ProjectFileDeclaration("toolchain-evidence", "reports/toolchain.json", setOf(ProjectFileRole.EVIDENCE), ProjectContentKind.UTF8_TEXT),
+                ProjectFileDeclaration("unresolved-evidence", "UNRESOLVED.md", setOf(ProjectFileRole.EVIDENCE), ProjectContentKind.UTF8_TEXT),
+            ),
+        )
+        val budgets = budgets()
+        val profile = ReconstructionProfile(ReconstructionProfile.CURRENT_SCHEMA_VERSION, "rust-test-v1", rustLayout, budgets)
+        val planner = DeterministicModulePlanner(maximumFunctionsPerModule = 8, layout = rustLayout)
+        val model = RecoveredProgramModel(
+            inputSha256 = "a".repeat(64),
+            functions = listOf(
+                RecoveredFunction(id = "fn_a", name = "fn_a", address = 0x1000u, prototype = "void fn_a()", decompiledC = "void fn_a() {}", calls = emptySet(), referencedGlobals = emptySet(), strings = emptySet(), status = RecoveryStatus.RECOVERED),
+                RecoveredFunction(id = "fn_b", name = "fn_b", address = 0x1010u, prototype = "void fn_b()", decompiledC = "void fn_b() {}", calls = setOf("fn_a"), referencedGlobals = emptySet(), strings = emptySet(), status = RecoveryStatus.RECOVERED),
+            ),
+            globals = emptyList(),
+            types = emptyList(),
+        )
+        val plan = planner.plan(model)
+        assertTrue(plan.modules.isNotEmpty())
+        plan.modules.forEach { module ->
+            assertTrue(module.sourcePath.endsWith(".rs.impl"))
+            assertTrue(module.headerPath.endsWith(".rs"))
+        }
+        assertEquals(profile.sha256, profile.sha256)
+    }
+
     private fun budgets() = ReconstructionBudgets(
         exportWallClockMillis = 1_000,
         exportMaximumResidentBytes = 1_024,
