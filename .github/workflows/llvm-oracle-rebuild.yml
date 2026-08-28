@@ -53,7 +53,8 @@ jobs:
                 --tool buildSystem /usr/bin/cmake \
                 --tool compiler /usr/lib/llvm-22/bin/clang \
                 --tool linker /usr/lib/llvm-22/bin/lld \
-                --tool stripper /usr/lib/llvm-22/bin/llvm-strip \
+                --tool stripper /usr/lib/llvm-22/bin/llvm-objcopy \
+                --version-command linker "[\"/usr/lib/llvm-22/bin/lld\", \"-flavor\", \"gnu\", \"--version\"]" \
                 > /output/tool-records.json
               tar --extract --xz --file /source-cache/llvm-project-22.1.6.src.tar.xz --directory /oracle
               cmake -G Ninja \
@@ -89,7 +90,7 @@ jobs:
                 /oracle/build/bin/clang-22 /oracle/install/bin/clang-22
               install -m 0755 \
                 /oracle/install/bin/clang-22 /output/clang-driver.full
-              /usr/lib/llvm-22/bin/llvm-strip --strip-all \
+              /usr/lib/llvm-22/bin/llvm-objcopy --strip-all \
                 -o /output/clang-driver.stripped /output/clang-driver.full
             '
           sudo chown -R "$USER:$USER" "$RUNNER_TEMP/oracle-output"
