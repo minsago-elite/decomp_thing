@@ -621,7 +621,9 @@ if MODE == "terminal-missing-session-hang":
     raise SystemExit(0)
 if MODE == "terminal-near-wall":
     write_workspace_file(join_path(cwd, "contract/artifact.txt"), "near-wall terminal requested\n", 110)
-    time.sleep(0.65)
+    # Request the long-lived terminal promptly. The host-side test gives process startup a
+    # deterministic margin and proves that the shorter shared execution deadline, rather than
+    # this fixture's scheduling delay or the terminal's own deadline, terminates it.
     send({
         "jsonrpc": "2.0",
         "id": 111,

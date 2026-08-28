@@ -392,7 +392,7 @@ class AcpAgentHarnessTest {
             AcpTerminalLimits(
                 maximumConcurrentTerminals = 1,
                 maximumTerminalCreates = 1,
-                maximumDuration = Duration.ofSeconds(3),
+                maximumDuration = Duration.ofSeconds(10),
                 resourceLimits = AcpSandboxResourceLimits(maximumCpuSeconds = 3),
             ),
         )
@@ -404,7 +404,7 @@ class AcpAgentHarnessTest {
         )
         val nearWallFailure = executeExpectingCleanFailure(
             nearWallHarness,
-            request.withWallClockTimeout(Duration.ofMillis(1_100)),
+            request.withWallClockTimeout(Duration.ofSeconds(3)),
             "near-wall terminal",
             forbiddenCanary = forbiddenCanary,
         )
