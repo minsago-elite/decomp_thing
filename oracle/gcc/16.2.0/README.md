@@ -98,13 +98,18 @@ and the exact build runtime image
 (`sha256:510c510f300d811df22c7769633575a94939073b529a73125bf96cfb96dc7248`)
 to the already verified oracle manifest and build record.
 
-The profile additionally authenticates the Docker 29.7.2 static client used
-to control that image: 42,677,472 bytes, SHA-256
+The profile additionally authenticates the Docker 29.7.2 static distribution
+used to run the dedicated daemon and control that image. Its client is
+42,677,472 bytes with SHA-256
 `e45381109c685311cf84c5e33a1aca7da81d6b55c0f9aed74091fc08c3a94f13`,
 and version output `Docker version 29.7.2, build a7dcaa6`. The upstream
 `docker-29.7.2.tgz` at
 `https://download.docker.com/linux/static/stable/x86_64/` has SHA-256
 `803d433f226db4776e1768fd319fc6c6e4935a456acf84fcc0080818b854bc8f`.
+CI also requires the archive's daemon version output
+`Docker version 29.7.2, build 6a43e3d` and places the authenticated static
+distribution first on the daemon launcher's `PATH`; runner-preinstalled
+engine components cannot be selected accidentally.
 The hosted rootless daemon is launched by Docker's matching
 `docker-rootless-extras-29.7.2.tgz`, exactly 12,000,464 bytes with SHA-256
 `15a5cb81f2c5cf15ea21427f2e8241eac0deb2221175f993b5e76926e705ec6a`.

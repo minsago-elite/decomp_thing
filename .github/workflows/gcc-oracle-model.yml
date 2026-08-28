@@ -78,6 +78,8 @@ jobs:
           test "$(stat --format='%s' "$RUNNER_TEMP/docker-client/docker/docker")" = 42677472
           test "$("$RUNNER_TEMP/docker-client/docker/docker" --version)" = \
             'Docker version 29.7.2, build a7dcaa6'
+          test "$("$RUNNER_TEMP/docker-client/docker/dockerd" --version)" = \
+            'Docker version 29.7.2, build 6a43e3d'
           curl --fail --silent --show-error --location \
             https://download.docker.com/linux/static/stable/x86_64/docker-rootless-extras-29.7.2.tgz \
             --output "$RUNNER_TEMP/docker-client/docker-rootless-extras-29.7.2.tgz"
@@ -120,7 +122,7 @@ jobs:
             "$RUNNER_TEMP/rootless-data" \
             "$RUNNER_TEMP/rootless-exec" \
             "$RUNNER_TEMP/rootless-state"
-          export PATH="/usr/bin:$RUNNER_TEMP/docker-client/docker:$PATH"
+          export PATH="$RUNNER_TEMP/docker-client/docker:/usr/bin:$PATH"
           export XDG_RUNTIME_DIR="$runtime_directory"
           export DOCKERD_ROOTLESS_ROOTLESSKIT_STATE_DIR="$RUNNER_TEMP/rootless-state"
           export DOCKERD_ROOTLESS_ROOTLESSKIT_NET=slirp4netns
@@ -156,9 +158,11 @@ jobs:
             sed -n '1,240p' "$RUNNER_TEMP/rootless-dockerd.log"
             exit 1
           fi
-          test "$(DOCKER_HOST="unix://$socket" \
+          server_version="$(DOCKER_HOST="unix://$socket" \
             "$RUNNER_TEMP/docker-client/docker/docker" version \
-              --format '{{.Server.Version}}')" = 29.7.2
+              --format '{{.Server.Version}}')"
+          echo "rootless Docker server version: $server_version"
+          test "$server_version" = 29.7.2
           DOCKER_HOST="unix://$socket" \
             "$RUNNER_TEMP/docker-client/docker/docker" image load \
               --input "$RUNNER_TEMP/gcc-oracle-image.tar"
