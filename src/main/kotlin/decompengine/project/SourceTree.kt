@@ -120,7 +120,7 @@ class EvidenceModuleReconstructor(private val includeRecoveredC: Boolean = false
     private fun stub(function: RecoveredFunction): String {
         val prototype = normalizedPrototype(function)
         val body = if (prototype.trimStart().startsWith("void ")) "    return;" else "    return 0;"
-        return "$prototype {\n$body\n}"
+        return markNamedParametersUsed("$prototype {\n$body\n}")
     }
 
     /** Keep strict warning builds honest without changing recovered behavior. */

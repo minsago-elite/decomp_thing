@@ -114,6 +114,34 @@ class StrictProjectBuildTest {
     }
 
     @Test
+    fun `evidence stubs use named parameters and pass the effective strict command`() {
+        val project = createTempDirectory("strict-evidence-parameters-")
+        SourceTreeGenerator.generate(
+            RecoveredProgramModel(
+                inputSha256 = "strict-evidence-parameters",
+                functions = listOf(
+                    RecoveredFunction(
+                        id = "fn_main",
+                        name = "main",
+                        address = 0x1000UL,
+                        prototype = "int main(int argc, char **argv)",
+                    ),
+                ),
+            ),
+            project,
+            reconstructor = EvidenceModuleReconstructor(),
+        )
+
+        val report = MakeProjectBuilder.build(project)
+
+        assertEquals(0, report.returnCode)
+        assertTrue(report.command.single { it.startsWith("CFLAGS=") }.contains("-Werror"))
+        val source = project.resolve("src/modules/main.c").readText()
+        assertTrue(source.contains("(void)argc;"), source)
+        assertTrue(source.contains("(void)argv;"), source)
+    }
+
+    @Test
     fun `link failure is attributed to the module whose object references the missing symbol`() {
         val project = createTempDirectory("strict-link-failure-")
         val model = RecoveredProgramModel(
