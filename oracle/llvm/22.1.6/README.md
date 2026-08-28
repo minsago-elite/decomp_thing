@@ -44,6 +44,12 @@ python3 scripts/verify-llvm-oracle-source.py --metadata-only
 python3 scripts/fetch-llvm-oracle-source.py /tmp/llvm-oracle-source
 python3 scripts/verify-llvm-oracle-artifacts.py \
   oracle/llvm/22.1.6/oracle-manifest.json
+python3 scripts/create-llvm-oracle-manifest.py \
+  --source-lock oracle/llvm/22.1.6/source-lock.json \
+  --build-record oracle/llvm/22.1.6/build-record.json \
+  --output /tmp/llvm-oracle-manifest.json
+cmp /tmp/llvm-oracle-manifest.json \
+  oracle/llvm/22.1.6/oracle-manifest.json
 python3 scripts/generate-llvm-function-recovery-oracle.py \
   --manifest oracle/llvm/22.1.6/oracle-manifest.json \
   --exclusions oracle/llvm/22.1.6/function-recovery-exclusions.json \
@@ -60,6 +66,10 @@ With the exact Docker executor profile available as `DOCKER` and
 
 ```sh
 python3 scripts/check-llvm-behavior-executor.py
+python3 scripts/generate-llvm-behavior-corpus.py \
+  --output /tmp/llvm-behavior-corpus.json
+cmp /tmp/llvm-behavior-corpus.json \
+  oracle/llvm/22.1.6/behavior-corpus.json
 python3 scripts/run-llvm-behavior-corpus.py \
   --json-output /tmp/llvm-behavior-evidence.json
 cmp /tmp/llvm-behavior-evidence.json \
@@ -74,3 +84,16 @@ the upstream archive, disables network access for compilation, executes every
 command recorded in `build-record.json`, and uploads the full/stripped pair,
 tool records, and image digest for review. A rebuilt pair is not accepted
 until manifest generation and every verification command above pass.
+
+Dispatch it from a clean `master`, wait for completion, and download the
+short-lived review bundle with:
+
+```sh
+gh workflow run llvm-oracle-rebuild.yml --ref master
+run_id="$(gh run list --workflow llvm-oracle-rebuild.yml --branch master \
+  --limit 1 --json databaseId --jq '.[0].databaseId')"
+gh run watch "$run_id" --exit-status
+gh run download "$run_id" --name llvm-oracle-rebuild \
+  --dir /tmp/llvm-oracle-rebuild
+sha256sum /tmp/llvm-oracle-rebuild/clang-driver.*
+```
