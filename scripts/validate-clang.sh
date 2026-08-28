@@ -27,7 +27,7 @@ trap cleanup EXIT
 
 "$clang_executable" --version
 
-strict_flags=(-std=c11 -O1 -g -Wall -Wextra -Werror)
+strict_flags=(-std=c11 -O1 -g -Wall -Wextra -Wformat -Wformat-security -Werror)
 sanitizer_flags=(-std=c11 -O1 -g -fno-omit-frame-pointer -fsanitize=address,undefined)
 
 if [[ ! -f benchmarks/fixtures/c-vul/src/01_out_of_bounds_write.c ]]; then
@@ -42,11 +42,17 @@ done
 
 for source in benchmarks/fixtures/c-vul/src/*.c; do
   case "$source" in
-    */08_uninitialized_memory.c) continue ;;
+    */05_format_string.c|*/08_uninitialized_memory.c) continue ;;
   esac
   output="$validation_root/vul-$(basename "${source%.c}")"
   "$clang_executable" "${strict_flags[@]}" "$source" -o "$output"
 done
+
+if ! "$clang_executable" "${strict_flags[@]}" \
+  benchmarks/fixtures/c-vul/src/05_format_string.c \
+  -o "$validation_root/format-string" 2>"$validation_root/format-string.log"; then
+  grep -F "format string is not a string literal" "$validation_root/format-string.log" >/dev/null
+fi
 
 if "$clang_executable" "${strict_flags[@]}" \
   benchmarks/fixtures/c-vul/src/08_uninitialized_memory.c \
