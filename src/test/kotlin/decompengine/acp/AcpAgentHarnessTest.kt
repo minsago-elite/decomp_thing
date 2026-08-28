@@ -135,7 +135,15 @@ class AcpAgentHarnessTest {
         val harness = harness("success", sentinel = sentinel)
         val events = mutableListOf<decompengine.agent.AgentExecutionEvent>()
 
-        val result = harness.execute(fixture.request, events::add)
+        val result = try {
+            harness.execute(fixture.request, events::add)
+        } catch (failure: Exception) {
+            throw AssertionError(
+                "canonical live ACP fixture failed; diagnostics=${harness.latestDiagnostics()}; " +
+                    "sandbox=${harness.latestSandboxEvidence()}",
+                failure,
+            )
+        }
 
         assertEquals(AgentStopReason.COMPLETED, result.stopReason)
         assertEquals("fixture-session", result.session?.sessionId)
