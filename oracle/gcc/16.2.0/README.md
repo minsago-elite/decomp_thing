@@ -115,6 +115,11 @@ at `/usr/bin/rootlesskit` so the distribution AppArmor user-namespace profile
 applies. The launcher is explicitly bound to Ubuntu's
 `slirp4netns=1.2.1-1build2` with the builtin port driver and host loopback
 disabled; CI verifies both the signed package version and live tool version.
+Because every keeper, setup, target, and collector container is independently
+required to use `network=none`, the dedicated daemon has no default bridge,
+iptables/ip6tables management, forwarding, or masquerading. This is Docker's
+documented no-network bootstrap configuration and avoids granting the daemon
+unused firewall authority.
 The checked generic engine profile exactly binds Docker Engine 29.7.2 and its
 commit/API and component digest, Linux amd64 kernel
 `7.1.8-gentoo-dist-hardened`, rootless mode, cgroup v2/systemd, overlay2, the

@@ -133,6 +133,11 @@ jobs:
             --pidfile="$RUNNER_TEMP/rootless-dockerd.pid" \
             --host="unix://$socket" \
             --storage-driver=overlay2 \
+            --bridge=none \
+            --iptables=false \
+            --ip6tables=false \
+            --ip-forward=false \
+            --ip-masq=false \
             >"$RUNNER_TEMP/rootless-dockerd.log" 2>&1 &
           echo "$!" > "$RUNNER_TEMP/rootless-wrapper.pid"
           ready=false
