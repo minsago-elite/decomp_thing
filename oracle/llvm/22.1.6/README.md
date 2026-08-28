@@ -20,13 +20,18 @@ The build uses `-Oz -g2`, an X86-only target set, and full-DWARF zlib
 compression. It intentionally disables LLVM tests, examples, bindings, RTTI,
 assertions, and optional libraries that are not part of the driver benchmark.
 The artifact still contains every linked monolithic Clang/LLVM function.
+The hosted rebuild produced a 529,730,248-byte rich ELF and an
+84,561,368-byte stripped ELF with GNU Build ID
+`b10a1c569ff0ec7ce1f60c77fef8f4715558f30c`; each file remains below the
+512 MiB per-artifact safety limit.
 
 The function-recovery document is narrower: it scores emitted functions from
 the 76 `clang/lib/Driver` and `clang/tools/driver/driver.cpp` compilation units,
 plus driver-namespace and process-entry symbols. Inline-only DIEs are not
 score records because they have no emitted start. This yields a practical,
 driver-focused benchmark without raising the generic 20,000-function safety
-limit for the monolithic binary's 269,944 emitted RVAs.
+limit for the monolithic binary's 269,944 emitted RVAs. The checked profile
+contains 4,303 emitted functions and no exclusions.
 
 Behavior cases run the stripped driver as an opaque mounted executable in the
 same independently authenticated, rootless generic sandbox used by the GCC

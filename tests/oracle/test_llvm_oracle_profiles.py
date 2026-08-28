@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import hashlib
+import json
 from pathlib import Path
 import tempfile
 import unittest
@@ -7,7 +9,12 @@ import unittest
 
 REPOSITORY_ROOT = Path(__file__).resolve().parents[2]
 
-from oracle.behavior_corpus import validate_corpus  # noqa: E402
+from oracle.behavior_corpus import (  # noqa: E402
+    load_corpus,
+    load_report,
+    validate_corpus,
+    validate_corpus_report_pair,
+)
 from oracle.llvm.generate_behavior_corpus import build_draft, sandbox_profile  # noqa: E402
 from oracle.llvm.generate_function_recovery_oracle import (  # noqa: E402
     _driver_compilation_unit,
@@ -16,6 +23,8 @@ from oracle.llvm.generate_function_recovery_oracle import (  # noqa: E402
 
 
 class LlvmOracleProfilesTest(unittest.TestCase):
+    PROFILE = REPOSITORY_ROOT / "oracle/llvm/22.1.6"
+
     def test_function_scope_is_explicit_and_program_owned(self) -> None:
         self.assertTrue(_driver_symbol("main"))
         self.assertTrue(_driver_symbol("_ZN5clang6driver6DriverC1Ev"))
@@ -77,6 +86,70 @@ class LlvmOracleProfilesTest(unittest.TestCase):
             self.assertNotIn("clang-driver-22", content, relative)
             self.assertNotIn("clang-22-1-6", content, relative)
             self.assertNotIn("22.1.6", content, relative)
+
+    def test_checked_behavior_evidence_covers_real_driver_outputs(self) -> None:
+        corpus, corpus_payload = load_corpus(self.PROFILE / "behavior-corpus.json")
+        report, _ = load_report(self.PROFILE / "behavior-corpus-evidence.json")
+        self.assertIs(
+            report,
+            validate_corpus_report_pair(
+                corpus,
+                report,
+                corpus_payload=corpus_payload,
+            ),
+        )
+        self.assertEqual(11, report["summary"]["cases"])
+        self.assertEqual(11, report["summary"]["passed"])
+        self.assertEqual(
+            {
+                "bytes": 84561368,
+                "sha256": "65e57857bfaf9f98a552f2fd371938e11175158bc4c11c849bd6ecbfef30c006",
+            },
+            report["executable"],
+        )
+        cases = {case["id"]: case for case in report["cases"]}
+        self.assertEqual(1, cases["diagnostic-invalid-option"]["exitCode"])
+        self.assertEqual(1, cases["diagnostic-syntax"]["exitCode"])
+        linked = cases["link-program"]["artifacts"]
+        self.assertEqual(1, len(linked))
+        self.assertEqual("program", linked[0]["path"])
+        self.assertTrue(linked[0]["present"])
+        self.assertEqual("0o755", linked[0]["mode"])
+        self.assertGreater(linked[0]["bytes"], 0)
+
+    def test_checked_function_oracle_is_manifest_bound_and_driver_scoped(self) -> None:
+        manifest_payload = (self.PROFILE / "oracle-manifest.json").read_bytes()
+        document = json.loads(
+            (self.PROFILE / "function-recovery-oracle.json").read_text(encoding="utf-8")
+        )
+        self.assertEqual("clang-driver-22.1.6", document["oracle"]["id"])
+        self.assertEqual(
+            hashlib.sha256(manifest_payload).hexdigest(),
+            document["oracle"]["artifactManifestSha256"],
+        )
+        self.assertEqual(
+            "c36ea7da092273ee53d6955557cd8eb7dcd38da92e1f577249968330a275981a",
+            document["artifacts"]["rich"]["inputSha256"],
+        )
+        self.assertEqual(
+            "65e57857bfaf9f98a552f2fd371938e11175158bc4c11c849bd6ecbfef30c006",
+            document["artifacts"]["stripped"]["inputSha256"],
+        )
+        self.assertEqual(4303, len(document["functions"]))
+        self.assertTrue(all(function["exclusion"] is None for function in document["functions"]))
+        names = {
+            alias["name"]
+            for function in document["functions"]
+            for alias in function["aliases"]
+        }
+        self.assertIn("main", names)
+        self.assertIn("clang_main", names)
+        self.assertIn(
+            "_ZN5clang6driver6Driver16BuildCompilationEN4llvm8ArrayRefIPKcEE",
+            names,
+        )
+        rvas = [int(function["rva"], 16) for function in document["functions"]]
+        self.assertEqual(sorted(set(rvas)), rvas)
 
 
 if __name__ == "__main__":
