@@ -87,6 +87,33 @@ class StrictProjectBuildTest {
     }
 
     @Test
+    fun `recovered named parameters are explicit no-op uses under the effective strict command`() {
+        val project = createTempDirectory("strict-recovered-parameters-")
+        val model = RecoveredProgramModel(
+            inputSha256 = "strict-recovered-parameters",
+            functions = listOf(
+                RecoveredFunction(
+                    id = "fn_main",
+                    name = "main",
+                    address = 0x1000UL,
+                    prototype = "int main(int argc, char **argv)",
+                    decompiledC = "int main(int argc, char **argv) { return 0; }",
+                ),
+            ),
+        )
+        SourceTreeGenerator.generate(model, project, reconstructor = RecoveredCModuleReconstructor())
+
+        val report = MakeProjectBuilder.build(project)
+
+        assertEquals(0, report.returnCode)
+        assertTrue(report.command.single { it.startsWith("CFLAGS=") }.contains("-Werror"))
+        assertTrue(project.resolve("Makefile").readText().contains("-Werror"))
+        val source = project.resolve("src/modules/main.c").readText()
+        assertTrue(source.contains("(void)argc;"), source)
+        assertTrue(source.contains("(void)argv;"), source)
+    }
+
+    @Test
     fun `link failure is attributed to the module whose object references the missing symbol`() {
         val project = createTempDirectory("strict-link-failure-")
         val model = RecoveredProgramModel(

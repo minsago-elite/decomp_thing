@@ -70,7 +70,7 @@ fun interface ModuleReconstructor {
 
 /** Emits buildable evidence stubs by default; raw recovered C remains in the program model for later refinement. */
 class EvidenceModuleReconstructor(private val includeRecoveredC: Boolean = false) : ModuleReconstructor {
-    override fun cacheIdentity(): String = if (includeRecoveredC) "recovered-c:v1" else "evidence-only:v1"
+    override fun cacheIdentity(): String = if (includeRecoveredC) "recovered-c:v2" else "evidence-only:v1"
 
     override fun reconstruct(request: ModuleReconstructionRequest): ReconstructedModule {
         val functions = request.module.functionIds.map { id -> request.model.functions.single { it.id == id } }
@@ -86,6 +86,7 @@ class EvidenceModuleReconstructor(private val includeRecoveredC: Boolean = false
             functions.forEach { function ->
                 append("/* ${function.id} @ 0x${function.address.toString(16)}; status=${function.status.name.lowercase()} */\n")
                 val recovered = function.decompiledC?.trim()?.takeIf(String::isNotEmpty)?.takeIf { includeRecoveredC }
+                    ?.let(::markNamedParametersUsed)
                 if (recovered != null) append(recovered).append("\n\n")
                 else append(stub(function)).append("\n\n")
             }
@@ -120,6 +121,40 @@ class EvidenceModuleReconstructor(private val includeRecoveredC: Boolean = false
         val prototype = normalizedPrototype(function)
         val body = if (prototype.trimStart().startsWith("void ")) "    return;" else "    return 0;"
         return "$prototype {\n$body\n}"
+    }
+
+    /** Keep strict warning builds honest without changing recovered behavior. */
+    private fun markNamedParametersUsed(source: String): String {
+        val bodyStart = source.indexOf('{')
+        if (bodyStart < 0) return source
+        val signature = source.substring(0, bodyStart)
+        val parametersStart = signature.indexOf('(')
+        val parametersEnd = signature.lastIndexOf(')')
+        if (parametersStart < 0 || parametersEnd <= parametersStart) return source
+        val cKeywords = setOf(
+            "auto", "char", "const", "double", "enum", "extern", "float", "inline", "int", "long",
+            "register", "restrict", "short", "signed", "static", "struct", "typedef", "union", "unsigned",
+            "void", "volatile", "_Atomic", "_Bool", "_Complex",
+        )
+        val names = signature.substring(parametersStart + 1, parametersEnd)
+            .split(',')
+            .mapNotNull { parameter ->
+                Regex("([A-Za-z_][A-Za-z0-9_]*)\\s*(?:\\[[^]]*])?\\s*$")
+                    .find(parameter.trim())?.groupValues?.get(1)
+            }
+            .filterNot(cKeywords::contains)
+            .distinct()
+        if (names.isEmpty()) return source
+        val body = source.substring(bodyStart + 1)
+        val missingUses = names.filterNot { name ->
+            Regex("\\(\\s*void\\s*\\)\\s*${Regex.escape(name)}\\s*;").containsMatchIn(body)
+        }
+        if (missingUses.isEmpty()) return source
+        return buildString(source.length + missingUses.sumOf { it.length + 14 }) {
+            append(source, 0, bodyStart + 1)
+            missingUses.forEach { name -> append("\n    (void)").append(name).append(';') }
+            append(source, bodyStart + 1, source.length)
+        }
     }
 }
 
@@ -611,8 +646,8 @@ object SourceTreeGenerator {
     }
 
     private fun renderMakefile(sources: List<String>, profile: ReconstructionProfile): String {
-        val rawFlags = profile.adapterConfiguration["compiler-flags"]?.toList() ?: listOf("-std=c11", "-g", "-Wall", "-Wextra", "-Iinclude")
-        val cflags = rawFlags.filter { it != "-Werror" }.joinToString(" ")
+        val cflags = profile.adapterConfiguration["compiler-flags"]?.joinToString(" ")
+            ?: "-std=c11 -g -Wall -Wextra -Werror -Iinclude"
         val cc = profile.adapterConfiguration["compiler-driver"]?.firstOrNull() ?: "gcc"
         return listOf(
             "CC ?= $cc",
