@@ -112,7 +112,9 @@ CI separately hashes its launcher and RootlessKit binary, requires RootlessKit
 3.0.2, and requires the live daemon to report Docker 29.7.2 before loading an
 oracle image. On Ubuntu 24.04, the authenticated RootlessKit binary is placed
 at `/usr/bin/rootlesskit` so the distribution AppArmor user-namespace profile
-applies.
+applies. The launcher is explicitly bound to Ubuntu's
+`slirp4netns=1.2.1-1build2` with the builtin port driver and host loopback
+disabled; CI verifies both the signed package version and live tool version.
 The checked generic engine profile exactly binds Docker Engine 29.7.2 and its
 commit/API and component digest, Linux amd64 kernel
 `7.1.8-gentoo-dist-hardened`, rootless mode, cgroup v2/systemd, overlay2, the

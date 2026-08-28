@@ -19,7 +19,8 @@ jobs:
       - run: |
           sudo apt-get update
           sudo apt-get install -y --no-install-recommends \
-            apparmor binutils build-essential dbus-user-session gnupg uidmap
+            apparmor binutils build-essential dbus-user-session gnupg \
+            slirp4netns=1.2.1-1build2 uidmap
       - name: Verify source provenance metadata
         run: python3 scripts/verify-gcc-oracle-source.py --metadata-only
       - name: Fetch and fully verify the pinned source release
@@ -102,6 +103,11 @@ jobs:
           sudo install -m 0755 "$rootless/rootlesskit" /usr/bin/rootlesskit
           test "$(sha256sum /usr/bin/rootlesskit | cut -d' ' -f1)" = \
             98f07e783dd6b3cd236c7865d1dce7937e645ec74a0fe2971725449af074f466
+          test "$(command -v slirp4netns)" = /usr/bin/slirp4netns
+          test "$(dpkg-query --show --showformat='${Version}' slirp4netns)" = \
+            1.2.1-1build2
+          test "$(slirp4netns --version | head -n 1)" = \
+            'slirp4netns version 1.2.1'
       - name: Start the pinned rootless generic behavior executor
         run: |
           docker image save decomp-gcc-oracle-toolchain:16.2.0 \
@@ -117,6 +123,9 @@ jobs:
           export PATH="/usr/bin:$RUNNER_TEMP/docker-client/docker:$PATH"
           export XDG_RUNTIME_DIR="$runtime_directory"
           export DOCKERD_ROOTLESS_ROOTLESSKIT_STATE_DIR="$RUNNER_TEMP/rootless-state"
+          export DOCKERD_ROOTLESS_ROOTLESSKIT_NET=slirp4netns
+          export DOCKERD_ROOTLESS_ROOTLESSKIT_PORT_DRIVER=builtin
+          export DOCKERD_ROOTLESS_ROOTLESSKIT_DISABLE_HOST_LOOPBACK=true
           socket="$runtime_directory/decomp-behavior-docker.sock"
           "$RUNNER_TEMP/docker-client/docker-rootless-extras/dockerd-rootless.sh" \
             --data-root="$RUNNER_TEMP/rootless-data" \
