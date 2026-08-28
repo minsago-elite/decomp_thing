@@ -35,6 +35,20 @@ That heavier gate compiles both binaries, runs complete evidence-only source-tre
 
 Project planning is maintained in [GitHub milestones](https://github.com/minsago-elite/decomp_thing/milestones) and [issues](https://github.com/minsago-elite/decomp_thing/issues). `ROADMAP.md` is deprecated and is not generated or checked by CI.
 
+## Source-aligned compiler oracles
+
+The independent `GCC oracle model` and `LLVM oracle model` workflows verify
+authenticated upstream releases, immutable toolchain/build records,
+DWARF-rich and stripped ELF equivalence, deterministic function-recovery
+ground truth, and checked behavior evidence. The LLVM lane checks out Git LFS
+objects and fails if either Clang artifact is missing or still a pointer.
+
+The expensive source rebuild is intentionally manual. Run the `LLVM oracle
+clean rebuild` workflow when the source lock, toolchain, flags, or artifact
+pair changes; ordinary pushes and pull requests verify the already-reviewed
+bytes. Exact LLVM commands and benchmark boundaries are documented in
+`oracle/llvm/22.1.6/README.md`.
+
 ## Required CI Tools
 
 Install these system tools before running the test suite:
