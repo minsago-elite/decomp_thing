@@ -12,7 +12,7 @@ cleanup() {
       --volume "$validation_root/output:/output" \
       --entrypoint sh \
       decomp-thing-archival-ci \
-      -c 'find /output -mindepth 1 -exec chmod a+rX {} +' >/dev/null 2>&1 || true
+      -c 'find /output -mindepth 1 -exec chmod a+rwX {} +' >/dev/null 2>&1 || true
     while IFS= read -r evidence; do
       echo "==> ${evidence#"$validation_root/"}" >&2
       sed -n '1,240p' "$evidence" >&2
