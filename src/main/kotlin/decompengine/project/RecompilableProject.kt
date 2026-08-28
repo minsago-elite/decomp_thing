@@ -452,7 +452,9 @@ object MakeProjectBuilder {
         append("],\n  \"parallelism\": ").append(configuration.parallelism).append(',')
         append("\n  \"warningsAsErrors\": true,")
         append("\n  \"reproduciblePathMapping\": true,")
-        append("\n  \"declaredDependencies\": [\"GNU Make\",\"GCC\",\"POSIX shell\",\"POSIX find\",\"POSIX mkdir\",\"POSIX rm\"],")
+        append("\n  \"declaredDependencies\": [\"GNU Make\",\"C compiler (")
+            .append(configuration.compilerExecutable.escapeJson())
+            .append(")\",\"POSIX shell\",\"POSIX find\",\"POSIX mkdir\",\"POSIX rm\"],")
         append("\n  \"apiCredentialsRequired\": false,")
         append("\n  \"analysisCachesRequired\": false,")
         append("\n  \"returnCode\": ").append(returnCode).append(',')
@@ -488,7 +490,7 @@ object MakeProjectBuilder {
             $command
             ```
 
-            The build requires GNU Make, GCC, a POSIX shell, and the POSIX `find`, `mkdir`, and `rm` utilities. `-Werror` is mandatory. The generated Makefile maps file, macro, and debug paths to a project-relative root so identical accepted source revisions do not retain workstation paths. The build does not require analysis caches, network access, or API credentials. Per-module compiler diagnostics are written under `reports/build/modules/`; `reports/build_contract.json` maps every source to its owning module.
+            The build requires GNU Make, the configured C compiler `${configuration.compilerExecutable}`, a POSIX shell, and the POSIX `find`, `mkdir`, and `rm` utilities. `-Werror` is mandatory. The generated Makefile maps file, macro, and debug paths to a project-relative root so identical accepted source revisions do not retain workstation paths. The build does not require analysis caches, network access, or API credentials. Per-module compiler diagnostics are written under `reports/build/modules/`; `reports/build_contract.json` maps every source to its owning module.
             """.trimIndent() + "\n",
         )
     }

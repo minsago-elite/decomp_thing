@@ -14,6 +14,17 @@ That command runs:
 
 - `./gradlew --no-daemon test`
 
+Run the independent generated-C compatibility lane with LLVM/Clang:
+
+```bash
+DECOMP_TEST_CLANG=/absolute/path/to/clang scripts/validate-clang.sh
+```
+
+That gate compiles the single-file, archival, and vulnerability fixtures with
+strict Clang warnings, proves the intentional uninitialized-use diagnostic,
+requires AddressSanitizer and UndefinedBehaviorSanitizer findings, and builds a
+generated multi-module project through an explicit `CC=clang` selection.
+
 The repository workflow also runs the pinned Ghidra image against symbol-bearing and stripped large fixtures:
 
 ```bash
@@ -30,6 +41,7 @@ Install these system tools before running the test suite:
 
 - JDK 21
 - `gcc` and `make`
+- LLVM/Clang 18 for `scripts/validate-clang.sh`
 - `bubblewrap`
 - `binutils` for `strings`
 
