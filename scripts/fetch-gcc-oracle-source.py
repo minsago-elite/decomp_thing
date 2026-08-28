@@ -9,9 +9,11 @@ from pathlib import Path
 import ssl
 import sys
 import tempfile
+import time
 import urllib.error
 import urllib.request
 from urllib.parse import urlsplit
+from collections.abc import Callable
 
 
 REPOSITORY_ROOT = Path(__file__).resolve().parents[1]
@@ -26,57 +28,116 @@ from oracle.gcc.verify_source_lock import (  # noqa: E402
 
 
 DEFAULT_LOCK = REPOSITORY_ROOT / "oracle/gcc/16.2.0/source-lock.json"
+FETCH_ATTEMPTS_PER_ENDPOINT = 2
+FETCH_TIMEOUT_SECONDS = 20
+FETCH_TOTAL_SECONDS = 120
+FETCH_RETRY_DELAY_SECONDS = 1
 
 
-def fetch_artifact(destination: Path, specification: dict[str, object], label: str) -> Path:
+def official_candidate_urls(canonical_url: str) -> list[str]:
+    parsed = urlsplit(canonical_url)
+    path_parts = parsed.path.strip("/").split("/")
+    if (
+        parsed.scheme != "https"
+        or parsed.netloc != "ftp.gnu.org"
+        or len(path_parts) != 4
+        or path_parts[:2] != ["gnu", "gcc"]
+        or not path_parts[2].startswith("gcc-")
+    ):
+        raise VerificationError(f"unsupported canonical GNU GCC URL: {canonical_url}")
+    release = path_parts[2]
+    file_name = path_parts[3]
+    return [
+        canonical_url,
+        f"https://gcc.gnu.org/pub/gcc/releases/{release}/{file_name}",
+        f"https://ftpmirror.gnu.org/gcc/{release}/{file_name}",
+    ]
+
+
+def fetch_artifact(
+    destination: Path,
+    specification: dict[str, object],
+    label: str,
+    *,
+    opener: Callable[..., object] = urllib.request.urlopen,
+    sleeper: Callable[[float], None] = time.sleep,
+    monotonic: Callable[[], float] = time.monotonic,
+) -> Path:
     target = destination / str(specification["fileName"])
     if target.exists():
         verify_locked_file(target, specification, label)
         print(f"reused verified {label}: {target}")
         return target
 
-    request = urllib.request.Request(
-        str(specification["url"]),
-        headers={"User-Agent": "decomp-thing-gcc-oracle-fetch/1"},
-    )
+    urls = official_candidate_urls(str(specification["url"]))
     context = ssl.create_default_context()
-    try:
-        with tempfile.TemporaryDirectory(
-            prefix=".gcc-oracle-download-", dir=destination
-        ) as temporary:
-            staged = Path(temporary) / str(specification["fileName"])
-            print(f"fetching {label}: {specification['url']}")
-            with urllib.request.urlopen(request, context=context, timeout=60) as response:
-                final_url = response.geturl()
-                if urlsplit(final_url).scheme != "https":
-                    raise VerificationError(f"{label} redirected to a non-HTTPS URL: {final_url}")
-                content_encoding = response.headers.get("Content-Encoding")
-                if content_encoding not in {None, "identity"}:
-                    raise VerificationError(
-                        f"{label} used unexpected Content-Encoding {content_encoding!r}"
-                    )
-                content_length = response.headers.get("Content-Length")
-                if content_length is not None and int(content_length) != specification["bytes"]:
-                    raise VerificationError(
-                        f"{label} HTTP Content-Length mismatch: expected "
-                        f"{specification['bytes']}, got {content_length}"
-                    )
-                with staged.open("xb") as output:
-                    while chunk := response.read(1024 * 1024):
-                        output.write(chunk)
-                    output.flush()
-                    os.fsync(output.fileno())
-            verify_locked_file(staged, specification, label)
+    deadline = monotonic() + FETCH_TOTAL_SECONDS
+    failures: list[str] = []
+    for url in urls:
+        for attempt in range(1, FETCH_ATTEMPTS_PER_ENDPOINT + 1):
+            remaining = deadline - monotonic()
+            if remaining <= 0:
+                failures.append("total fetch deadline exhausted")
+                break
+            request = urllib.request.Request(
+                url,
+                headers={"User-Agent": "decomp-thing-gcc-oracle-fetch/2"},
+            )
             try:
-                os.link(staged, target)
-            except FileExistsError:
-                verify_locked_file(target, specification, label)
-            print(f"fetched and verified {label}: {target}")
-    except VerificationError:
-        raise
-    except (OSError, ValueError, urllib.error.URLError) as error:
-        raise VerificationError(f"could not fetch {label}: {error}") from error
-    return target
+                with tempfile.TemporaryDirectory(
+                    prefix=".gcc-oracle-download-", dir=destination
+                ) as temporary:
+                    staged = Path(temporary) / str(specification["fileName"])
+                    print(f"fetching {label} (attempt {attempt}): {url}")
+                    with opener(
+                        request,
+                        context=context,
+                        timeout=min(FETCH_TIMEOUT_SECONDS, max(1, int(remaining))),
+                    ) as response:
+                        final_url = response.geturl()
+                        if urlsplit(final_url).scheme != "https":
+                            raise VerificationError(
+                                f"{label} redirected to a non-HTTPS URL: {final_url}"
+                            )
+                        content_encoding = response.headers.get("Content-Encoding")
+                        if content_encoding not in {None, "identity"}:
+                            raise VerificationError(
+                                f"{label} used unexpected Content-Encoding {content_encoding!r}"
+                            )
+                        content_length = response.headers.get("Content-Length")
+                        if content_length is not None and int(content_length) != specification["bytes"]:
+                            raise VerificationError(
+                                f"{label} HTTP Content-Length mismatch: expected "
+                                f"{specification['bytes']}, got {content_length}"
+                            )
+                        expected_bytes = int(specification["bytes"])
+                        observed_bytes = 0
+                        with staged.open("xb") as output:
+                            while chunk := response.read(1024 * 1024):
+                                observed_bytes += len(chunk)
+                                if observed_bytes > expected_bytes:
+                                    raise VerificationError(
+                                        f"{label} exceeded its locked byte length {expected_bytes}"
+                                    )
+                                output.write(chunk)
+                            output.flush()
+                            os.fsync(output.fileno())
+                    verify_locked_file(staged, specification, label)
+                    try:
+                        os.link(staged, target)
+                    except FileExistsError:
+                        verify_locked_file(target, specification, label)
+                    print(f"fetched and verified {label}: {target}")
+                    return target
+            except (VerificationError, OSError, ValueError, urllib.error.URLError) as error:
+                failures.append(f"{url} attempt {attempt}: {error}")
+                if attempt < FETCH_ATTEMPTS_PER_ENDPOINT and monotonic() < deadline:
+                    sleeper(FETCH_RETRY_DELAY_SECONDS)
+        if monotonic() >= deadline:
+            break
+    raise VerificationError(
+        f"could not fetch {label} from any official endpoint: {'; '.join(failures)}"
+    )
 
 
 def main() -> int:
