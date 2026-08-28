@@ -91,7 +91,7 @@ jobs:
               install -m 0755 \
                 /oracle/install/bin/clang-22 /output/clang-driver.full
               /usr/lib/llvm-22/bin/llvm-objcopy --strip-all \
-                -o /output/clang-driver.stripped /output/clang-driver.full
+                /output/clang-driver.full /output/clang-driver.stripped
             '
           sudo chown -R "$USER:$USER" "$RUNNER_TEMP/oracle-output"
           cp "$RUNNER_TEMP/image-digest.txt" "$RUNNER_TEMP/oracle-output/"
