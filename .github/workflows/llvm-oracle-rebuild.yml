@@ -78,7 +78,10 @@ jobs:
                 "-DCMAKE_C_FLAGS_RELWITHDEBINFO=-Oz -g2 -DNDEBUG -ffile-prefix-map=/oracle=/usr/src/llvm-oracle" \
                 "-DCMAKE_CXX_FLAGS_RELWITHDEBINFO=-Oz -g2 -DNDEBUG -ffile-prefix-map=/oracle=/usr/src/llvm-oracle"
               cmake --build /oracle/build --target clang -- -j4
-              install -m 0755 /oracle/build/bin/clang-22 /output/clang-driver.full
+              install -D -m 0755 \
+                /oracle/build/bin/clang-22 /oracle/install/bin/clang-22
+              install -m 0755 \
+                /oracle/install/bin/clang-22 /output/clang-driver.full
               /usr/lib/llvm-22/bin/llvm-strip --strip-all \
                 -o /output/clang-driver.stripped /output/clang-driver.full
               python3 /repository/scripts/capture-oracle-tools.py \
