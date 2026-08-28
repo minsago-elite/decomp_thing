@@ -27,6 +27,12 @@ internal object AcpLiveContractHost {
         Path.of("/usr/bin/python3"),
         Path.of("/usr/bin/python3.14"),
     )
+    private val defaultRuntimeAliasRoots = listOf(
+        Path.of("/lib"),
+        Path.of("/lib32"),
+        Path.of("/lib64"),
+        Path.of("/libx32"),
+    )
 
     /**
      * Resolves the effective interpreter, stdlib, extension and native loader closure without
@@ -150,15 +156,27 @@ internal object AcpLiveContractHost {
         check(loaderSource in executableMappings) {
             "Python ELF interpreter was not present in its executable mappings: $loaderSource"
         }
-        val mounts = buildList {
-            add(AcpSandboxReadOnlyMount(loaderSource, loaderDestination))
-            executableMappings.asSequence()
-                .filter { it != executable && it != loaderSource }
-                .sortedBy(Path::toString)
-                .forEach { add(AcpSandboxReadOnlyMount(it)) }
+        val mountsByDestination = linkedMapOf<Path, AcpSandboxReadOnlyMount>()
+        fun addMount(source: Path, destination: Path = source) {
+            val mount = AcpSandboxReadOnlyMount(source, destination)
+            val existing = mountsByDestination.putIfAbsent(destination, mount)
+            check(existing == null || existing.source == source) {
+                "Python native runtime produced conflicting mount destination: $destination"
+            }
         }
-        check(mounts.map { it.destination }.distinct().size == mounts.size) {
-            "Python native runtime produced conflicting mount destinations"
+
+        addMount(loaderSource, loaderDestination)
+        executableMappings.asSequence()
+            .filter { it != executable }
+            .sortedBy(Path::toString)
+            .forEach { source ->
+                runtimeAliasDestinations(source).forEach { destination ->
+                    addMount(source, destination)
+                }
+            }
+        val mounts = mountsByDestination.values.sortedBy { it.destination.toString() }
+        check(mounts.any { it.source == jsonExtension }) {
+            "Python _json extension was omitted from its runtime mounts"
         }
         return AcpPythonRuntimeLayout(
             executable = executable,
@@ -166,6 +184,35 @@ internal object AcpLiveContractHost {
             jsonExtension = jsonExtension,
             nativeRuntimeMounts = mounts,
         )
+    }
+
+    /**
+     * Expands only verified FHS compatibility symlinks for an already authenticated runtime file.
+     * The kernel reports canonical `/usr/lib*` paths in `/proc/self/maps`, while an ELF loader may
+     * still search `/lib*`. A fresh bubblewrap root has no host symlinks, so both destinations must
+     * name the same pinned source file explicitly.
+     */
+    internal fun runtimeAliasDestinations(
+        source: Path,
+        aliasRoots: List<Path> = defaultRuntimeAliasRoots,
+    ): List<Path> {
+        requireAbsoluteNormalized("Python native runtime source", source)
+        val canonicalSource = source.toRealPath()
+        check(source == canonicalSource) { "Python native runtime source is not canonical: $source" }
+        val destinations = linkedSetOf(source)
+        aliasRoots.distinct().sortedBy(Path::toString).forEach { aliasRoot ->
+            requireAbsoluteNormalized("runtime alias root", aliasRoot)
+            if (!Files.isSymbolicLink(aliasRoot)) return@forEach
+            val canonicalRoot = aliasRoot.toRealPath()
+            if (!Files.isDirectory(canonicalRoot) || !source.startsWith(canonicalRoot)) return@forEach
+            val destination = aliasRoot.resolve(canonicalRoot.relativize(source)).normalize()
+            check(destination.startsWith(aliasRoot)) { "runtime alias escaped its root: $destination" }
+            check(Files.isSameFile(source, destination)) {
+                "runtime alias does not identify its canonical source: $destination"
+            }
+            destinations.add(destination)
+        }
+        return destinations.sortedBy(Path::toString)
     }
 
     private fun java.io.InputStream.readBounded(): ByteArray {

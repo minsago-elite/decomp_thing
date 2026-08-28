@@ -1,6 +1,11 @@
 package decompengine.acp
 
 import java.nio.file.Files
+import java.nio.file.Path
+import kotlin.io.path.createDirectories
+import kotlin.io.path.createSymbolicLinkPointingTo
+import kotlin.io.path.createTempDirectory
+import kotlin.io.path.writeText
 import kotlin.test.Test
 import kotlin.test.assertEquals
 import kotlin.test.assertFailsWith
@@ -46,6 +51,25 @@ class AcpLiveContractHostTest {
         assertEquals(runtime.stdlib.resolve("json"), mounts.single().source)
         assertEquals(mounts.single().source, mounts.single().destination)
         assertFailsWith<IllegalArgumentException> { runtime.stdlibMounts(listOf("../outside")) }
+    }
+
+    @Test
+    fun `native runtime closure preserves verified loader alias destinations`() {
+        val root = createTempDirectory("acp-runtime-alias-")
+        val canonicalRoot = root.resolve("usr/lib64").createDirectories()
+        val runtimeFile = canonicalRoot.resolve("libfixture.so").apply { writeText("fixture") }
+        val aliasRoot = root.resolve("lib64").createSymbolicLinkPointingTo(Path.of("usr/lib64"))
+
+        val destinations = AcpLiveContractHost.runtimeAliasDestinations(
+            runtimeFile,
+            aliasRoots = listOf(aliasRoot),
+        )
+
+        assertEquals(
+            listOf(aliasRoot.resolve("libfixture.so"), runtimeFile).sortedBy(Path::toString),
+            destinations,
+        )
+        assertTrue(destinations.all { Files.isSameFile(runtimeFile, it) })
     }
 
     private fun requirePythonRuntime(): AcpPythonRuntimeLayout {
