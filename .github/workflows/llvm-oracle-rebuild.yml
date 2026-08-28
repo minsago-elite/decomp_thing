@@ -11,7 +11,7 @@ jobs:
     runs-on: ubuntu-24.04
     timeout-minutes: 120
     steps:
-      - uses: actions/checkout@v5
+      - uses: actions/checkout@v7
         with:
           lfs: false
       - name: Build the pinned LLVM toolchain image
@@ -97,7 +97,7 @@ jobs:
           cp "$RUNNER_TEMP/image-digest.txt" "$RUNNER_TEMP/oracle-output/"
           sha256sum "$RUNNER_TEMP/oracle-output"/clang-driver.*
           stat --format='%n %s' "$RUNNER_TEMP/oracle-output"/clang-driver.*
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v7
         with:
           name: llvm-oracle-rebuild
           path: ${{ runner.temp }}/oracle-output

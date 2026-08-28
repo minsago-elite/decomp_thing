@@ -8,10 +8,10 @@ jobs:
   kotlin:
     runs-on: ubuntu-24.04
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
         with:
           submodules: recursive
-      - uses: actions/setup-java@v4
+      - uses: actions/setup-java@v6
         with:
           distribution: temurin
           java-version: "21"
@@ -33,7 +33,7 @@ jobs:
         run: scripts/ci-prepare-acp-sandbox.sh
       - name: Run JVM and Kotlin checks
         run: scripts/ci.sh
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v7
         if: always()
         with:
           name: kotlin-test-reports
@@ -44,7 +44,7 @@ jobs:
   archival-ghidra:
     runs-on: ubuntu-24.04
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
         with:
           submodules: recursive
       - uses: docker/setup-buildx-action@v3
@@ -53,10 +53,10 @@ jobs:
   clang:
     runs-on: ubuntu-24.04
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
         with:
           submodules: recursive
-      - uses: actions/setup-java@v4
+      - uses: actions/setup-java@v6
         with:
           distribution: temurin
           java-version: "21"
@@ -71,7 +71,7 @@ jobs:
         env:
           DECOMP_TEST_CLANG: /usr/bin/clang-18
         run: scripts/validate-clang.sh
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v7
         if: always()
         with:
           name: clang-test-reports
