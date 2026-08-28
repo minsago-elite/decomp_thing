@@ -348,18 +348,29 @@ internal object AcpLiveContractHost {
 
     private val PYTHON_RUNTIME_PROBE = """
         import _json
+        import _signal
+        import json
         import os
+        import posix
+        import re
         import sysconfig
+        import time
 
         executable_mappings = set()
         with open("/proc/self/maps", "rb", buffering=0) as mappings:
             for raw_line in mappings:
                 fields = raw_line.rstrip(b"\n").split(None, 5)
-                if len(fields) != 6 or b"x" not in fields[1] or not fields[5].startswith(b"/"):
+                if len(fields) != 6 or not fields[5].startswith(b"/"):
                     continue
                 if fields[5].endswith(b" (deleted)"):
                     raise RuntimeError("deleted executable mapping")
-                executable_mappings.add(os.path.realpath(os.fsdecode(fields[5])))
+                candidate = os.path.realpath(os.fsdecode(fields[5]))
+                try:
+                    with open(candidate, "rb", buffering=0) as mapped_file:
+                        if mapped_file.read(4) == b"\x7fELF":
+                            executable_mappings.add(candidate)
+                except OSError:
+                    raise RuntimeError("mapped runtime file became unreadable")
 
         records = [
             b"$PROBE_MAGIC",
