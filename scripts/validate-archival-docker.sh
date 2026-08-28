@@ -5,6 +5,23 @@ cd "$(dirname "$0")/.."
 
 validation_root=$(mktemp -d /tmp/decomp-archival-ci.XXXXXX)
 cleanup() {
+  local status=$?
+  if ((status != 0)) && [[ -d "$validation_root/output" ]]; then
+    echo "Archival validation failed; retained build evidence follows" >&2
+    docker run --rm \
+      --volume "$validation_root/output:/output" \
+      --entrypoint sh \
+      decomp-thing-archival-ci \
+      -c 'find /output -mindepth 1 -exec chmod a+rX {} +' >/dev/null 2>&1 || true
+    while IFS= read -r evidence; do
+      echo "==> ${evidence#"$validation_root/"}" >&2
+      sed -n '1,240p' "$evidence" >&2
+    done < <(
+      find "$validation_root/output" -type f \
+        \( -path '*/reports/build.log' -o -path '*/reports/build/modules/*.log' -o -path '*/src/main.c' \) \
+        -print | sort
+    )
+  fi
   case "$validation_root" in
     /tmp/decomp-archival-ci.*) rm -rf -- "$validation_root" ;;
     *) echo "refusing to remove unexpected validation path: $validation_root" >&2 ;;
