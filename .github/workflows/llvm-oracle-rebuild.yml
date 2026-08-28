@@ -1,0 +1,98 @@
+name: LLVM oracle clean rebuild
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  rebuild:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 90
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          lfs: false
+      - name: Build the pinned LLVM toolchain image
+        run: |
+          docker buildx build \
+            --no-cache \
+            --platform linux/amd64 \
+            --build-arg SOURCE_DATE_EPOCH=1779182222 \
+            --load \
+            --tag decomp-llvm-oracle-toolchain:22.1.6 \
+            --file oracle/llvm/22.1.6/build-toolchain.Dockerfile \
+            oracle/llvm/22.1.6
+          docker image inspect --format '{{.Id}}' decomp-llvm-oracle-toolchain:22.1.6 \
+            | tee "$RUNNER_TEMP/image-digest.txt"
+      - name: Fetch and authenticate LLVM 22.1.6
+        run: python3 scripts/fetch-llvm-oracle-source.py "$RUNNER_TEMP/source-cache"
+      - name: Build the monolithic Clang oracle pair
+        run: |
+          install -d "$RUNNER_TEMP/oracle-work" "$RUNNER_TEMP/oracle-output"
+          docker run --rm \
+            --platform linux/amd64 \
+            --network none \
+            --cap-drop ALL \
+            --security-opt no-new-privileges \
+            --mount "type=bind,src=$GITHUB_WORKSPACE,dst=/repository,readonly" \
+            --mount "type=bind,src=$RUNNER_TEMP/source-cache,dst=/source-cache,readonly" \
+            --mount "type=bind,src=$RUNNER_TEMP/oracle-work,dst=/oracle" \
+            --mount "type=bind,src=$RUNNER_TEMP/oracle-output,dst=/output" \
+            --env LC_ALL=C \
+            --env TZ=UTC \
+            --env SOURCE_DATE_EPOCH=1779182222 \
+            decomp-llvm-oracle-toolchain:22.1.6 \
+            bash -euxo pipefail -c '
+              tar --extract --xz --file /source-cache/llvm-project-22.1.6.src.tar.xz --directory /oracle
+              cmake -G Ninja \
+                -S /oracle/llvm-project-22.1.6.src/llvm \
+                -B /oracle/build \
+                -DCMAKE_BUILD_TYPE=RelWithDebInfo \
+                -DLLVM_ENABLE_PROJECTS=clang \
+                -DLLVM_TARGETS_TO_BUILD=X86 \
+                -DLLVM_INCLUDE_TESTS=OFF \
+                -DCLANG_INCLUDE_TESTS=OFF \
+                -DLLVM_INCLUDE_BENCHMARKS=OFF \
+                -DLLVM_INCLUDE_EXAMPLES=OFF \
+                -DLLVM_BUILD_EXAMPLES=OFF \
+                -DLLVM_ENABLE_BINDINGS=OFF \
+                -DLLVM_ENABLE_TERMINFO=OFF \
+                -DLLVM_ENABLE_LIBXML2=OFF \
+                -DLLVM_ENABLE_ZSTD=OFF \
+                -DLLVM_ENABLE_CURL=OFF \
+                -DLLVM_ENABLE_HTTPLIB=OFF \
+                -DLLVM_ENABLE_LIBEDIT=OFF \
+                -DLLVM_ENABLE_ASSERTIONS=OFF \
+                -DLLVM_ENABLE_RTTI=OFF \
+                -DCMAKE_C_COMPILER=/usr/lib/llvm-22/bin/clang \
+                -DCMAKE_CXX_COMPILER=/usr/lib/llvm-22/bin/clang++ \
+                -DCMAKE_AR=/usr/lib/llvm-22/bin/llvm-ar \
+                -DCMAKE_RANLIB=/usr/lib/llvm-22/bin/llvm-ranlib \
+                "-DCMAKE_EXE_LINKER_FLAGS=-fuse-ld=lld -Wl,--build-id=sha1 -Wl,--compress-debug-sections=zstd" \
+                "-DCMAKE_SHARED_LINKER_FLAGS=-fuse-ld=lld -Wl,--build-id=sha1 -Wl,--compress-debug-sections=zstd" \
+                "-DCMAKE_C_FLAGS_RELWITHDEBINFO=-Oz -g2 -DNDEBUG -ffile-prefix-map=/oracle=/usr/src/llvm-oracle" \
+                "-DCMAKE_CXX_FLAGS_RELWITHDEBINFO=-Oz -g2 -DNDEBUG -ffile-prefix-map=/oracle=/usr/src/llvm-oracle"
+              cmake --build /oracle/build --target clang -- -j4
+              install -m 0755 /oracle/build/bin/clang-22 /output/clang-driver.full
+              /usr/lib/llvm-22/bin/llvm-strip --strip-all \
+                -o /output/clang-driver.stripped /output/clang-driver.full
+              python3 /repository/scripts/capture-oracle-tools.py \
+                --tool buildGenerator /usr/bin/ninja \
+                --tool buildSystem /usr/bin/cmake \
+                --tool compiler /usr/lib/llvm-22/bin/clang \
+                --tool linker /usr/lib/llvm-22/bin/ld.lld \
+                --tool stripper /usr/lib/llvm-22/bin/llvm-strip \
+                > /output/tool-records.json
+            '
+          sudo chown -R "$USER:$USER" "$RUNNER_TEMP/oracle-output"
+          cp "$RUNNER_TEMP/image-digest.txt" "$RUNNER_TEMP/oracle-output/"
+          sha256sum "$RUNNER_TEMP/oracle-output"/clang-driver.*
+          stat --format='%n %s' "$RUNNER_TEMP/oracle-output"/clang-driver.*
+      - uses: actions/upload-artifact@v4
+        with:
+          name: llvm-oracle-rebuild
+          path: ${{ runner.temp }}/oracle-output
+          compression-level: 0
+          retention-days: 1
