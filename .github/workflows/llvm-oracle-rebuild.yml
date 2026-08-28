@@ -13,7 +13,7 @@ jobs:
     steps:
       - uses: actions/checkout@v7
         with:
-          lfs: false
+          lfs: true
       - name: Build the pinned LLVM toolchain image
         run: |
           docker buildx build \
@@ -97,6 +97,14 @@ jobs:
           cp "$RUNNER_TEMP/image-digest.txt" "$RUNNER_TEMP/oracle-output/"
           sha256sum "$RUNNER_TEMP/oracle-output"/clang-driver.*
           stat --format='%n %s' "$RUNNER_TEMP/oracle-output"/clang-driver.*
+      - name: Prove the clean rebuild matches the checked oracle pair
+        run: |
+          cmp "$RUNNER_TEMP/oracle-output/clang-driver.full" \
+            oracle/llvm/22.1.6/artifacts/clang-driver.full
+          cmp "$RUNNER_TEMP/oracle-output/clang-driver.stripped" \
+            oracle/llvm/22.1.6/artifacts/clang-driver.stripped
+          python3 scripts/verify-llvm-oracle-artifacts.py \
+            oracle/llvm/22.1.6/oracle-manifest.json
       - uses: actions/upload-artifact@v7
         with:
           name: llvm-oracle-rebuild

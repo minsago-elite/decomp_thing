@@ -1,0 +1,78 @@
+name: LLVM oracle model
+
+on:
+  push:
+  pull_request:
+
+jobs:
+  provenance-artifacts-and-ground-truth:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          lfs: true
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+          cache-dependency-path: requirements/oracle-generation.txt
+      - name: Install pinned oracle dependencies
+        run: python3 -m pip install -r requirements/oracle-generation.txt
+      - name: Verify authenticated LLVM source
+        run: |
+          python3 scripts/verify-llvm-oracle-source.py --metadata-only
+          python3 scripts/fetch-llvm-oracle-source.py "$RUNNER_TEMP/llvm-source"
+      - name: Reproduce and verify the recorded LLVM toolchain image
+        run: |
+          docker buildx build \
+            --no-cache \
+            --platform linux/amd64 \
+            --build-arg SOURCE_DATE_EPOCH=1779182222 \
+            --load \
+            --tag decomp-llvm-oracle-toolchain:22.1.6 \
+            --file oracle/llvm/22.1.6/build-toolchain.Dockerfile \
+            oracle/llvm/22.1.6
+          observed="$(docker image inspect --format '{{.Id}}' \
+            decomp-llvm-oracle-toolchain:22.1.6)"
+          docker run --rm \
+            --platform linux/amd64 \
+            --network none \
+            --read-only \
+            --cap-drop ALL \
+            --security-opt no-new-privileges \
+            --tmpfs /tmp:rw,nosuid,nodev,noexec \
+            --mount "type=bind,src=$GITHUB_WORKSPACE,dst=/repository,readonly" \
+            --workdir /repository \
+            --entrypoint /usr/bin/python3 \
+            "$observed" \
+            scripts/verify-llvm-oracle-build-record.py \
+              --source-lock oracle/llvm/22.1.6/source-lock.json \
+              --build-record oracle/llvm/22.1.6/build-record.json \
+              --container-digest "$observed"
+      - name: Verify checked Clang ELF twins
+        run: |
+          python3 scripts/verify-llvm-oracle-artifacts.py \
+            oracle/llvm/22.1.6/oracle-manifest.json
+      - name: Regenerate deterministic Clang function oracle
+        run: |
+          python3 scripts/generate-llvm-function-recovery-oracle.py \
+            --manifest oracle/llvm/22.1.6/oracle-manifest.json \
+            --exclusions oracle/llvm/22.1.6/function-recovery-exclusions.json \
+            --output "$RUNNER_TEMP/function-recovery-oracle.json"
+          cmp "$RUNNER_TEMP/function-recovery-oracle.json" \
+            oracle/llvm/22.1.6/function-recovery-oracle.json
+      - name: Verify checked Clang behavior evidence offline
+        run: |
+          python3 scripts/check-behavior-corpus-evidence.py \
+            --corpus oracle/llvm/22.1.6/behavior-corpus.json \
+            --evidence oracle/llvm/22.1.6/behavior-corpus-evidence.json
+      - name: Run LLVM and shared oracle regression tests
+        run: |
+          python3 -m unittest \
+            tests.oracle.test_capture_oracle_tools \
+            tests.oracle.test_llvm_source_lock \
+            tests.oracle.test_llvm_oracle_profiles \
+            tests.oracle.test_gcc_oracle_artifacts \
+            tests.oracle.test_function_recovery_oracle_generation \
+            tests.oracle.test_behavior_corpus -v
