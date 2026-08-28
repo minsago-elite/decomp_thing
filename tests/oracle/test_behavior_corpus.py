@@ -99,6 +99,27 @@ while stack:
             os.fchmod(target_fd, mode)
         finally: os.close(source_fd); os.close(target_fd)
 '''
+
+
+def discover_fixture_runtime(
+    *,
+    fallback_runtime: Path = Path("/tmp/decomp-docker/bin/docker"),
+    fallback_socket: Path = Path("/tmp/decomp-docker/runtime/docker.sock"),
+) -> tuple[Path | None, dict[str, str]]:
+    """Select only an explicitly configured or complete fallback executor."""
+
+    configured_runtime = os.environ.get("DOCKER")
+    configured_host = os.environ.get("DOCKER_HOST")
+    if configured_runtime:
+        runtime_environment = (
+            {"DOCKER_HOST": configured_host} if configured_host else {}
+        )
+        return Path(configured_runtime), runtime_environment
+    if fallback_runtime.is_file() and fallback_socket.exists():
+        return fallback_runtime, {"DOCKER_HOST": f"unix://{fallback_socket}"}
+    return None, {}
+
+
 FIXTURE_COLLECTOR_PROGRAM = r'''import os, stat
 maximum_bytes = int(os.environ["WORKSPACE_BYTES"]); maximum_entries = int(os.environ["WORKSPACE_ENTRIES"])
 records = []; stack = [("", "/workspace")]; logical = allocated = 0
@@ -292,22 +313,12 @@ int main(int argc, char **argv) {
             check=True,
         )
         cls.executable_payload = cls.executable.read_bytes()
-        configured_runtime = os.environ.get("DOCKER")
         fallback_runtime = Path("/tmp/decomp-docker/bin/docker")
-        discovered_runtime = (
-            configured_runtime
-            or shutil.which("docker")
-            or (os.fspath(fallback_runtime) if fallback_runtime.is_file() else None)
-        )
-        cls.runtime = Path(discovered_runtime) if discovered_runtime else None
-        configured_host = os.environ.get("DOCKER_HOST")
         fallback_socket = Path("/tmp/decomp-docker/runtime/docker.sock")
-        if configured_host:
-            cls.runtime_environment = {"DOCKER_HOST": configured_host}
-        elif fallback_socket.exists():
-            cls.runtime_environment = {"DOCKER_HOST": f"unix://{fallback_socket}"}
-        else:
-            cls.runtime_environment = {}
+        cls.runtime, cls.runtime_environment = discover_fixture_runtime(
+            fallback_runtime=fallback_runtime,
+            fallback_socket=fallback_socket,
+        )
         if cls.runtime is not None:
             try:
                 image_records = json.loads(
@@ -476,6 +487,22 @@ int main(int argc, char **argv) {
             container_runtime=self.runtime,
             container_runtime_environment=self.runtime_environment,
         )
+
+    def test_unconfigured_docker_on_path_does_not_enable_integration(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            missing_runtime = Path(temporary) / "missing-runtime"
+            missing_socket = Path(temporary) / "missing.sock"
+            with mock.patch.dict(
+                os.environ,
+                {"PATH": "/docker-on-path", "DOCKER_HOST": "unix:///unrelated.sock"},
+                clear=True,
+            ):
+                runtime, environment = discover_fixture_runtime(
+                    fallback_runtime=missing_runtime,
+                    fallback_socket=missing_socket,
+                )
+        self.assertIsNone(runtime)
+        self.assertEqual({}, environment)
 
     def corpus(self, mode: str = "binary") -> dict[str, object]:
         stdin_payload = b"\x00stdin\xff"
