@@ -38,6 +38,11 @@ jobs:
             oracle/gcc/16.2.0
           expected=sha256:510c510f300d811df22c7769633575a94939073b529a73125bf96cfb96dc7248
           observed="$(docker image inspect --format '{{.Id}}' decomp-gcc-oracle-toolchain:16.2.0)"
+          echo "recorded origin image: $expected"
+          echo "reproduced image: $observed"
+          docker image inspect \
+            --format 'rootfs={{json .RootFS.Layers}} config={{json .Config}} created={{json .Created}}' \
+            decomp-gcc-oracle-toolchain:16.2.0
           test "$observed" = "$expected"
           docker run --rm \
             --platform linux/amd64 \
