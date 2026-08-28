@@ -744,10 +744,12 @@ class AcpAgentHarnessTest {
         val idleDiagnostics = assertNotNull(idleHarness.latestDiagnostics())
         assertFalse(idleDiagnostics.forcedTermination)
 
-        val wallFixture = fixture(idleMillis = 2_000, wallMillis = 180, genericContract = true)
+        // The wall budget includes the authenticated workspace snapshot and outer sandbox launch.
+        // Leave enough headroom for a contended hosted runner while keeping idle out of contention.
+        val wallFixture = fixture(idleMillis = 20_000, wallMillis = 5_000, genericContract = true)
         val wallHarness = harness(
             "wait-for-cancel",
-            timeouts = timeouts(startup = 1_000, request = 2_000),
+            timeouts = timeouts(startup = 2_000, request = 10_000),
         )
         val wall = executeExpectingCleanFailure(wallHarness, wallFixture.request, "wall timeout", wallFixture)
         assertEquals(AgentFailureKind.TIMEOUT, wall.failure.kind)
@@ -756,10 +758,12 @@ class AcpAgentHarnessTest {
 
     @Test
     fun `a blocking event callback cannot prevent the wall deadline and process cleanup`() {
-        val fixture = fixture(idleMillis = 2_000, wallMillis = 250, genericContract = true)
+        // The callback must be reached before the wall clock expires; prelaunch containment can
+        // legitimately take seconds under hosted contention and is part of the same wall budget.
+        val fixture = fixture(idleMillis = 20_000, wallMillis = 5_000, genericContract = true)
         val harness = harness(
             "update-then-hang",
-            timeouts = timeouts(startup = 1_000, request = 2_000, shutdown = 600),
+            timeouts = timeouts(startup = 2_000, request = 10_000, shutdown = 600),
         )
         val events = mutableListOf<AgentExecutionEvent>()
         val callbackEntered = CountDownLatch(1)
@@ -773,10 +777,10 @@ class AcpAgentHarnessTest {
                     releaseCallback.await()
                 }
             }
-            assertTrue(callbackEntered.await(2, TimeUnit.SECONDS), "fixture never delivered an event")
+            assertTrue(callbackEntered.await(10, TimeUnit.SECONDS), "fixture never delivered an event")
 
             val failure = try {
-                execution.get(2, TimeUnit.SECONDS)
+                execution.get(10, TimeUnit.SECONDS)
                 error("execution unexpectedly succeeded")
             } catch (wrapped: ExecutionException) {
                 wrapped.cause as? AgentExecutionException ?: throw wrapped
