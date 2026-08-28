@@ -21,7 +21,7 @@ import os
 from pathlib import Path
 import stat
 import tempfile
-from typing import Any, BinaryIO, Iterable, Mapping, Sequence
+from typing import Any, BinaryIO, Callable, Iterable, Mapping, Sequence
 
 
 MAX_GENERATION_ARTIFACT_BYTES = 512 * 1024 * 1024
@@ -507,7 +507,33 @@ def _freeze_aliases(
     }
 
 
-def inspect_elf_functions(path: Path, *, twin: str) -> ElfArtifactFacts:
+def _compilation_unit_path(compilation_unit: Any, twin: str) -> str:
+    top = compilation_unit.get_top_DIE()
+    parts: list[str] = []
+    for attribute_name in ("DW_AT_comp_dir", "DW_AT_name"):
+        attribute = top.attributes.get(attribute_name)
+        if attribute is not None:
+            parts.append(
+                _decode_dwarf_string(
+                    attribute.value,
+                    f"{twin} compilation unit {hex(top.offset)} {attribute_name}",
+                )
+            )
+    if not parts:
+        raise OracleGenerationError(
+            f"{twin} compilation unit {hex(top.offset)} has no path identity"
+        )
+    return "/".join(part.rstrip("/") for part in parts)
+
+
+def inspect_elf_functions(
+    path: Path,
+    *,
+    twin: str,
+    symbol_name_selector: Callable[[str], bool] | None = None,
+    compilation_unit_selector: Callable[[str], bool] | None = None,
+    include_inline_only: bool = True,
+) -> ElfArtifactFacts:
     """Extract deterministic function facts from one ELF artifact."""
 
     if twin not in _TWIN_NAMES:
@@ -622,6 +648,10 @@ def inspect_elf_functions(path: Path, *, twin: str) -> ElfArtifactFacts:
                     continue
                 if symbol["st_shndx"] == "SHN_UNDEF" or not symbol.name:
                     continue
+                if symbol_name_selector is not None and not symbol_name_selector(
+                    symbol.name
+                ):
+                    continue
                 address = int(symbol["st_value"])
                 if not _in_executable_range(address, image_base, executable_ranges):
                     continue
@@ -671,6 +701,10 @@ def inspect_elf_functions(path: Path, *, twin: str) -> ElfArtifactFacts:
             scanned_dies = 0
             scanned_subprograms = 0
             for compilation_unit in dwarf_info.iter_CUs():
+                if compilation_unit_selector is not None and not compilation_unit_selector(
+                    _compilation_unit_path(compilation_unit, twin)
+                ):
+                    continue
                 for die in compilation_unit.iter_DIEs():
                     scanned_dies += 1
                     if scanned_dies > MAX_SCANNED_DIES:
@@ -716,7 +750,7 @@ def inspect_elf_functions(path: Path, *, twin: str) -> ElfArtifactFacts:
                             rva = address - image_base
                             for name, evidence in names.items():
                                 add_evidence(rva, name, evidence)
-                    elif inline_value in {1, 3}:
+                    elif include_inline_only and inline_value in {1, 3}:
                         if len(aliases) + len(inline_only) >= MAX_GENERATED_FUNCTIONS:
                             raise OracleGenerationError(
                                 f"{twin} ELF exceeds the "
@@ -857,6 +891,9 @@ def generate_function_oracle(
     expected_rich_sha256: str | None = None,
     expected_stripped_sha256: str | None = None,
     near_miss_bytes: int = 16,
+    symbol_name_selector: Callable[[str], bool] | None = None,
+    compilation_unit_selector: Callable[[str], bool] | None = None,
+    include_inline_only: bool = True,
 ) -> dict[str, Any]:
     """Generate a closed function oracle from an arbitrary compatible ELF pair."""
 
@@ -889,8 +926,20 @@ def generate_function_oracle(
                 f"explicit exclusion reason at {hex(rva)} is invalid"
             )
 
-    rich = inspect_elf_functions(rich_path, twin="rich")
-    stripped = inspect_elf_functions(stripped_path, twin="stripped")
+    rich = inspect_elf_functions(
+        rich_path,
+        twin="rich",
+        symbol_name_selector=symbol_name_selector,
+        compilation_unit_selector=compilation_unit_selector,
+        include_inline_only=include_inline_only,
+    )
+    stripped = inspect_elf_functions(
+        stripped_path,
+        twin="stripped",
+        symbol_name_selector=symbol_name_selector,
+        compilation_unit_selector=compilation_unit_selector,
+        include_inline_only=include_inline_only,
+    )
     if expected_rich_sha256 is not None and rich.input_sha256 != expected_rich_sha256:
         raise OracleGenerationError("rich artifact hash does not match its profile")
     if expected_stripped_sha256 is not None and stripped.input_sha256 != expected_stripped_sha256:

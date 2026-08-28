@@ -10,7 +10,7 @@ from __future__ import annotations
 import hashlib
 from pathlib import Path
 import tempfile
-from typing import Any
+from typing import Any, Callable
 
 from oracle.function_recovery import (
     ScoringError,
@@ -90,6 +90,9 @@ def generate_gcc_profile_oracle(
     rich_artifact_path: Path | None = None,
     stripped_artifact_path: Path | None = None,
     near_miss_bytes: int = 16,
+    symbol_name_selector: Callable[[str], bool] | None = None,
+    compilation_unit_selector: Callable[[str], bool] | None = None,
+    include_inline_only: bool = True,
 ) -> dict[str, Any]:
     """Authenticate a benchmark profile and publish its normalized oracle."""
 
@@ -136,6 +139,9 @@ def generate_gcc_profile_oracle(
             expected_rich_sha256=artifacts["full"]["sha256"],
             expected_stripped_sha256=artifacts["stripped"]["sha256"],
             near_miss_bytes=near_miss_bytes,
+            symbol_name_selector=symbol_name_selector,
+            compilation_unit_selector=compilation_unit_selector,
+            include_inline_only=include_inline_only,
         )
         for twin in ("rich", "stripped"):
             expected = _artifact_metadata_from_manifest(manifest, twin)

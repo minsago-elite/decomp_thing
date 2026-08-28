@@ -436,6 +436,24 @@ class FunctionRecoveryOracleGenerationTest(unittest.TestCase):
                 ):
                     generator.inspect_elf_functions(path, twin="rich")
 
+            with patch.object(
+                generator,
+                "_require_pyelftools",
+                return_value=(
+                    lambda stream: fake_elf,
+                    SymbolTable,
+                    object,
+                    object,
+                    lambda form: None,
+                ),
+            ), patch.object(generator, "MAX_GENERATED_FUNCTIONS", 1):
+                selected = generator.inspect_elf_functions(
+                    path,
+                    twin="rich",
+                    symbol_name_selector=lambda name: name == "first",
+                )
+            self.assertEqual([0x10], list(selected.aliases_by_rva))
+
             class InlineDie:
                 tag = "DW_TAG_subprogram"
 
@@ -448,20 +466,29 @@ class FunctionRecoveryOracleGenerationTest(unittest.TestCase):
                     }
 
             class CompilationUnit:
-                def __init__(self) -> None:
-                    self.dies = [InlineDie(1, self), InlineDie(2, self)]
+                def __init__(self, path: str, offsets: list[int]) -> None:
+                    self.path = path
+                    self.dies = [InlineDie(offset, self) for offset in offsets]
+
+                def get_top_DIE(self) -> object:
+                    return SimpleNamespace(
+                        offset=0,
+                        attributes={
+                            "DW_AT_name": SimpleNamespace(value=self.path),
+                        },
+                    )
 
                 def iter_DIEs(self) -> object:
                     return iter(self.dies)
 
             class DwarfInfo:
-                def __init__(self) -> None:
-                    self.compilation_unit = CompilationUnit()
+                def __init__(self, units: list[CompilationUnit]) -> None:
+                    self.units = units
 
                 def iter_CUs(self) -> object:
-                    return iter([self.compilation_unit])
+                    return iter(self.units)
 
-            fake_elf = Elf([], DwarfInfo())
+            fake_elf = Elf([], DwarfInfo([CompilationUnit("selected.cpp", [1, 2])]))
             with patch.object(
                 generator,
                 "_require_pyelftools",
@@ -478,6 +505,52 @@ class FunctionRecoveryOracleGenerationTest(unittest.TestCase):
                     "1-record generation limit",
                 ):
                     generator.inspect_elf_functions(path, twin="rich")
+
+            fake_elf = Elf(
+                [],
+                DwarfInfo(
+                    [
+                        CompilationUnit("selected.cpp", [1]),
+                        CompilationUnit("excluded.cpp", [2, 3]),
+                    ]
+                ),
+            )
+            with patch.object(
+                generator,
+                "_require_pyelftools",
+                return_value=(
+                    lambda stream: fake_elf,
+                    SymbolTable,
+                    object,
+                    object,
+                    lambda form: None,
+                ),
+            ), patch.object(generator, "MAX_GENERATED_FUNCTIONS", 1):
+                selected = generator.inspect_elf_functions(
+                    path,
+                    twin="rich",
+                    compilation_unit_selector=lambda unit: unit == "selected.cpp",
+                )
+            self.assertEqual([1], [offset for offset, _ in selected.inline_only])
+
+            with patch.object(
+                generator,
+                "_require_pyelftools",
+                return_value=(
+                    lambda stream: fake_elf,
+                    SymbolTable,
+                    object,
+                    object,
+                    lambda form: None,
+                ),
+            ):
+                emitted_only = generator.inspect_elf_functions(
+                    path,
+                    twin="rich",
+                    compilation_unit_selector=lambda unit: unit == "selected.cpp",
+                    include_inline_only=False,
+                )
+            self.assertEqual((), emitted_only.inline_only)
 
     def test_exclusion_profile_is_closed_sorted_and_artifact_bound(self) -> None:
         artifact_sha256, exclusions = load_explicit_exclusions(EXCLUSIONS)
