@@ -1,7 +1,7 @@
-"""GCC benchmark adapter for the program-agnostic recovery scorer.
+"""GCC compatibility adapter for the program-agnostic recovery scorer.
 
-This module preserves the issue #39 import/CLI surface while adding only the
-GCC oracle-manifest and ELF-twin authentication profile. Matching, metrics,
+This module adds the source-bound oracle-manifest and ELF-twin authentication
+profile. Matching, metrics,
 model loading, report rendering, and schemas are defined by
 ``oracle.function_recovery`` and contain no GCC-specific semantics.
 """
@@ -396,7 +396,7 @@ def _verified_artifact_manifest_snapshot(
                 )
             )
 
-        # The legacy GCC derivation helpers are intentionally reused for their
+        # The shared ELF derivation helpers are intentionally reused for their
         # schema/signature/ELF checks, but they read by pathname.  Give them a
         # private tree of stable bounded snapshots rather than the mutable
         # original paths checked above.

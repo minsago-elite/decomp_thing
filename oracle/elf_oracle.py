@@ -283,21 +283,30 @@ def validate_build_record(
 ) -> dict[str, Any]:
     """Validate a closed, source-bound ELF oracle build record."""
 
+    schema_version = data.get("schemaVersion")
+    root_fields = {
+        "schemaVersion",
+        "oracle",
+        "environment",
+        "directories",
+        "commands",
+        "tools",
+        "outputs",
+    }
+    if schema_version == 2:
+        root_fields.add("buildSystem")
     root = _object(
         data,
         "build record",
-        {
-            "schemaVersion",
-            "oracle",
-            "environment",
-            "directories",
-            "commands",
-            "tools",
-            "outputs",
-        },
+        root_fields,
     )
-    if isinstance(root["schemaVersion"], bool) or root["schemaVersion"] != 1:
-        raise VerificationError("build record schemaVersion must be the integer 1")
+    if isinstance(schema_version, bool) or schema_version not in {1, 2}:
+        raise VerificationError("build record schemaVersion must be the integer 1 or 2")
+    build_system = "autoconf" if schema_version == 1 else _string(
+        root["buildSystem"], "build record.buildSystem"
+    )
+    if build_system not in {"autoconf", "cmake-ninja"}:
+        raise VerificationError("build record.buildSystem must be autoconf or cmake-ninja")
 
     oracle = _object(
         root["oracle"],
@@ -385,9 +394,22 @@ def validate_build_record(
         name: _command(command, f"build record.commands.{name}")
         for name, command in commands.items()
     }
-    expected_configure = f"{normalized_directories['source']}/configure"
-    if parsed_commands["configure"][0] != expected_configure:
-        raise VerificationError(f"configure command must start with {expected_configure}")
+    if build_system == "autoconf":
+        expected_configure = f"{normalized_directories['source']}/configure"
+        if parsed_commands["configure"][0] != expected_configure:
+            raise VerificationError(f"configure command must start with {expected_configure}")
+    else:
+        configure = parsed_commands["configure"]
+        if PurePosixPath(configure[0]).name != "cmake":
+            raise VerificationError("cmake-ninja configure command must invoke cmake")
+        expected_source = f"{normalized_directories['source']}/llvm"
+        required_pairs = (("-G", "Ninja"), ("-S", expected_source), ("-B", normalized_directories["build"]))
+        for option, expected in required_pairs:
+            positions = [index for index, value in enumerate(configure) if value == option]
+            if len(positions) != 1 or positions[0] + 1 >= len(configure) or configure[positions[0] + 1] != expected:
+                raise VerificationError(
+                    f"cmake-ninja configure command must contain {option} {expected} exactly once"
+                )
     if parsed_commands["stageFull"].count("{full}") != 1:
         raise VerificationError("stageFull command must contain {full} exactly once")
     if parsed_commands["strip"].count("{full}") != 1 or parsed_commands["strip"].count(

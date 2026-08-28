@@ -221,7 +221,8 @@ class GccOracleArtifactTest(unittest.TestCase):
 
         self.assertFalse(build_schema["additionalProperties"])
         self.assertEqual(set(build), set(build_schema["required"]))
-        self.assertEqual(set(build), set(build_schema["properties"]))
+        self.assertEqual(set(build) | {"buildSystem"}, set(build_schema["properties"]))
+        self.assertNotIn("buildSystem", build_schema["required"])
         self.assertFalse(manifest_schema["additionalProperties"])
         self.assertEqual(set(manifest), set(manifest_schema["required"]))
         self.assertEqual(set(manifest), set(manifest_schema["properties"]))
@@ -373,6 +374,33 @@ class GccOracleArtifactTest(unittest.TestCase):
 
         with self.staged_pair(mutate) as (manifest_path, source_lock, build_path, _, _):
             with self.assertRaisesRegex(VerificationError, "unexpected.*unchecked"):
+                create_oracle_manifest(manifest_path, source_lock, build_path)
+
+    def test_version_two_cmake_ninja_record_is_closed_and_directory_bound(self) -> None:
+        def cmake_record(build: dict[str, Any]) -> None:
+            build["schemaVersion"] = 2
+            build["buildSystem"] = "cmake-ninja"
+            source = build["directories"]["source"]
+            output = build["directories"]["build"]
+            build["commands"]["configure"] = [
+                "/usr/bin/cmake",
+                "-G",
+                "Ninja",
+                "-S",
+                f"{source}/llvm",
+                "-B",
+                output,
+            ]
+
+        with self.staged_pair(cmake_record) as (manifest_path, source_lock, build_path, _, _):
+            create_oracle_manifest(manifest_path, source_lock, build_path)
+
+        def escaped_source(build: dict[str, Any]) -> None:
+            cmake_record(build)
+            build["commands"]["configure"][4] = "/tmp/unbound/llvm"
+
+        with self.staged_pair(escaped_source) as (manifest_path, source_lock, build_path, _, _):
+            with self.assertRaisesRegex(VerificationError, "must contain -S"):
                 create_oracle_manifest(manifest_path, source_lock, build_path)
 
     def test_build_record_cannot_change_source_lock_binding(self) -> None:

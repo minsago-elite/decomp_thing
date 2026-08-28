@@ -1,4 +1,4 @@
-"""GCC benchmark profile for the generic ELF/DWARF oracle generator.
+"""GCC profile for the generic ELF/DWARF oracle generator.
 
 Only manifest authentication, artifact path binding, and the reviewed exclusion
 profile live here.  Extraction and normalization semantics are shared by any
@@ -25,7 +25,7 @@ from oracle.function_recovery_oracle import (
     oracle_json_bytes,
     write_oracle,
 )
-from oracle.gcc.score_function_recovery import (
+from oracle.function_recovery_profile import (
     _VerifiedArtifactManifestSnapshot,
     _artifact_metadata_from_manifest,
     _verified_artifact_manifest_snapshot,
@@ -91,7 +91,7 @@ def generate_gcc_profile_oracle(
     stripped_artifact_path: Path | None = None,
     near_miss_bytes: int = 16,
 ) -> dict[str, Any]:
-    """Authenticate the benchmark profile and publish its normalized oracle."""
+    """Authenticate a benchmark profile and publish its normalized oracle."""
 
     artifact_overrides = {
         name: path
