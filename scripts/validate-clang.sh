@@ -30,6 +30,11 @@ trap cleanup EXIT
 strict_flags=(-std=c11 -O1 -g -Wall -Wextra -Werror)
 sanitizer_flags=(-std=c11 -O1 -g -fno-omit-frame-pointer -fsanitize=address,undefined)
 
+if [[ ! -f benchmarks/fixtures/c-vul/src/01_out_of_bounds_write.c ]]; then
+  echo "Clang validation requires the initialized benchmarks/fixtures/c-vul submodule" >&2
+  exit 1
+fi
+
 for source in src/test/fixtures/c/*.c benchmarks/archival/*.c; do
   output="$validation_root/$(basename "${source%.c}")"
   "$clang_executable" "${strict_flags[@]}" "$source" -o "$output"
