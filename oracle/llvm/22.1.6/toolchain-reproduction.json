@@ -1,0 +1,15 @@
+{
+  "recipe": {
+    "baseImage": "ubuntu",
+    "baseImageDigest": "sha256:33ceb71981b602c1a7443a53469e4dba065f7503eab3078a2d7a57a2ab987517",
+    "dockerfile": "build-toolchain.Dockerfile",
+    "dockerfileSha256": "97e2d13915806242c14489b5a8b1417bd0478f3a11dc05e76888ba2ab43b1291",
+    "platform": "linux/amd64",
+    "sourceDateEpoch": "1779182222"
+  },
+  "recordedOrigin": {
+    "buildRecordSha256": "415afaf3554f954aed4442f0fa3c83ecc7e9f1fe0ddf68fb4c39e9231ece9005",
+    "imageDigest": "sha256:73285d9a2dad159a7171fe4bbcac7d97d285402955d8c6fb8b44b101cf2df550"
+  },
+  "schemaVersion": 1
+}

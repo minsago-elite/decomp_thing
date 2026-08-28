@@ -35,6 +35,10 @@ jobs:
             oracle/llvm/22.1.6
           observed="$(docker image inspect --format '{{.Id}}' \
             decomp-llvm-oracle-toolchain:22.1.6)"
+          docker image inspect "$observed" \
+            | python3 scripts/verify-toolchain-reproduction.py \
+                --lock oracle/llvm/22.1.6/toolchain-reproduction.json \
+                --build-record oracle/llvm/22.1.6/build-record.json
           docker run --rm \
             --platform linux/amd64 \
             --network none \
@@ -49,6 +53,7 @@ jobs:
             scripts/verify-llvm-oracle-build-record.py \
               --source-lock oracle/llvm/22.1.6/source-lock.json \
               --build-record oracle/llvm/22.1.6/build-record.json \
+              --reproduction-lock oracle/llvm/22.1.6/toolchain-reproduction.json \
               --container-digest "$observed"
       - name: Verify checked Clang ELF twins
         run: |
@@ -71,6 +76,7 @@ jobs:
         run: |
           python3 -m unittest \
             tests.oracle.test_capture_oracle_tools \
+            tests.oracle.test_stable_toolchain_reproduction \
             tests.oracle.test_llvm_source_lock \
             tests.oracle.test_llvm_oracle_profiles \
             tests.oracle.test_gcc_oracle_artifacts \

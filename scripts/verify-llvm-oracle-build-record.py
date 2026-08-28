@@ -13,19 +13,26 @@ sys.path.insert(0, str(REPOSITORY_ROOT))
 
 from oracle.elf_oracle import verify_build_environment  # noqa: E402
 from oracle.source_lock import VerificationError  # noqa: E402
+from oracle.toolchain_reproduction import verify_reproduction_recipe  # noqa: E402
 
 
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--source-lock", required=True, type=Path)
     parser.add_argument("--build-record", required=True, type=Path)
+    parser.add_argument("--reproduction-lock", required=True, type=Path)
     parser.add_argument("--container-digest", required=True)
     arguments = parser.parse_args()
     try:
+        reproduction = verify_reproduction_recipe(
+            arguments.reproduction_lock,
+            arguments.build_record,
+            running_image_digest=arguments.container_digest,
+        )
         record = verify_build_environment(
             arguments.build_record,
             arguments.source_lock,
-            arguments.container_digest,
+            reproduction["recordedOrigin"]["imageDigest"],
         )
     except VerificationError as error:
         print(f"verification failed: {error}", file=sys.stderr)
@@ -33,7 +40,8 @@ def main() -> int:
     print(
         "verified LLVM oracle build environment: "
         f"{record['environment']['container']['image']}@"
-        f"{record['environment']['container']['digest']}"
+        f"{record['environment']['container']['digest']} "
+        f"(running rebuild {arguments.container_digest})"
     )
     for tool in record["tools"]:
         print(f"  {tool['role']}: {tool['versionOutput'].splitlines()[0]}")

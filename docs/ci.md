@@ -41,7 +41,11 @@ The independent `GCC oracle model` and `LLVM oracle model` workflows verify
 authenticated upstream releases, immutable toolchain/build records,
 DWARF-rich and stripped ELF equivalence, deterministic function-recovery
 ground truth, and checked behavior evidence. The LLVM lane checks out Git LFS
-objects and fails if either Clang artifact is missing or still a pointer.
+objects and fails if either Clang artifact is missing or still a pointer. It
+also rebuilds the Clang toolchain recipe and checks its immutable base,
+Dockerfile, build-record binding, platform, and every recorded live tool's
+exact executable bytes and version output. The Docker image ID is retained as
+origin provenance rather than used as a false layer-reproducibility claim.
 
 The expensive source rebuild is intentionally manual. Run the `LLVM oracle
 clean rebuild` workflow when the source lock, toolchain, flags, or artifact

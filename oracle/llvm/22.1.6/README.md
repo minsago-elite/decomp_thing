@@ -14,6 +14,15 @@ The artifact files use Git LFS. Run `git lfs install` before cloning or use
 `git lfs pull` after installing LFS. Verification rejects pointer files and
 any artifact, source-lock, build-record, or manifest byte change.
 
+`toolchain-reproduction.json` separates stable rebuild identity from Docker
+layer identity. It locks the immutable Ubuntu base, Dockerfile bytes,
+`SOURCE_DATE_EPOCH`, and historical build-record bytes. CI then checks every
+live compiler, linker, stripper, CMake, and Ninja executable byte-for-byte and
+compares its exact version output with `build-record.json`. The originating
+image ID remains provenance for the checked artifacts; a fresh image ID is
+informational because repository metadata can change otherwise equivalent
+Docker layers.
+
 ## Scope
 
 The build uses `-Oz -g2`, an X86-only target set, and full-DWARF zlib
@@ -89,6 +98,11 @@ the upstream archive, disables network access for compilation, executes every
 command recorded in `build-record.json`, and uploads the full/stripped pair,
 tool records, and image digest for review. A rebuilt pair is not accepted
 until manifest generation and every verification command above pass.
+
+The required `LLVM oracle model` workflow separately rebuilds and verifies the
+stable toolchain recipe on every push and pull request. It rejects recipe,
+base-image, build-record, platform, tool-byte, or tool-version drift without
+requiring a fresh image's metadata-derived ID to equal the originating ID.
 
 Dispatch it from a clean `master`, wait for completion, and download the
 short-lived review bundle with:
