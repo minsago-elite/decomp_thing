@@ -105,6 +105,14 @@ and version output `Docker version 29.7.2, build a7dcaa6`. The upstream
 `docker-29.7.2.tgz` at
 `https://download.docker.com/linux/static/stable/x86_64/` has SHA-256
 `803d433f226db4776e1768fd319fc6c6e4935a456acf84fcc0080818b854bc8f`.
+The hosted rootless daemon is launched by Docker's matching
+`docker-rootless-extras-29.7.2.tgz`, exactly 12,000,464 bytes with SHA-256
+`15a5cb81f2c5cf15ea21427f2e8241eac0deb2221175f993b5e76926e705ec6a`.
+CI separately hashes its launcher and RootlessKit binary, requires RootlessKit
+3.0.2, and requires the live daemon to report Docker 29.7.2 before loading an
+oracle image. On Ubuntu 24.04, the authenticated RootlessKit binary is placed
+at `/usr/bin/rootlesskit` so the distribution AppArmor user-namespace profile
+applies.
 The checked generic engine profile exactly binds Docker Engine 29.7.2 and its
 commit/API and component digest, Linux amd64 kernel
 `7.1.8-gentoo-dist-hardened`, rootless mode, cgroup v2/systemd, overlay2, the

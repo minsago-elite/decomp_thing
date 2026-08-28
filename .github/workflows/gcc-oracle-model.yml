@@ -19,7 +19,7 @@ jobs:
       - run: |
           sudo apt-get update
           sudo apt-get install -y --no-install-recommends \
-            binutils build-essential dbus-user-session gnupg uidmap
+            apparmor binutils build-essential dbus-user-session gnupg uidmap
       - name: Verify source provenance metadata
         run: python3 scripts/verify-gcc-oracle-source.py --metadata-only
       - name: Fetch and fully verify the pinned source release
@@ -77,6 +77,31 @@ jobs:
           test "$(stat --format='%s' "$RUNNER_TEMP/docker-client/docker/docker")" = 42677472
           test "$("$RUNNER_TEMP/docker-client/docker/docker" --version)" = \
             'Docker version 29.7.2, build a7dcaa6'
+          curl --fail --silent --show-error --location \
+            https://download.docker.com/linux/static/stable/x86_64/docker-rootless-extras-29.7.2.tgz \
+            --output "$RUNNER_TEMP/docker-client/docker-rootless-extras-29.7.2.tgz"
+          echo "15a5cb81f2c5cf15ea21427f2e8241eac0deb2221175f993b5e76926e705ec6a  $RUNNER_TEMP/docker-client/docker-rootless-extras-29.7.2.tgz" \
+            | sha256sum --check --strict
+          tar --extract --gzip \
+            --file "$RUNNER_TEMP/docker-client/docker-rootless-extras-29.7.2.tgz" \
+            --directory "$RUNNER_TEMP/docker-client"
+          rootless="$RUNNER_TEMP/docker-client/docker-rootless-extras"
+          echo "98f07e783dd6b3cd236c7865d1dce7937e645ec74a0fe2971725449af074f466  $rootless/rootlesskit" \
+            | sha256sum --check --strict
+          echo "904c9b9e35f6927c0a5e65afb4d35b6bc9eb1278c878044501281fc728c9be46  $rootless/dockerd-rootless.sh" \
+            | sha256sum --check --strict
+          echo "1c9f0dc93ebb3d75255254ec760d26a912affba7f329ab8abffe8e25eb0b3f94  $rootless/dockerd-rootless-setuptool.sh" \
+            | sha256sum --check --strict
+          test "$(stat --format='%s' "$rootless/rootlesskit")" = 23922644
+          test "$(stat --format='%s' "$rootless/dockerd-rootless.sh")" = 10532
+          test "$("$rootless/rootlesskit" --version)" = \
+            'rootlesskit version 3.0.2'
+          bash -n \
+            "$rootless/dockerd-rootless.sh" \
+            "$rootless/dockerd-rootless-setuptool.sh"
+          sudo install -m 0755 "$rootless/rootlesskit" /usr/bin/rootlesskit
+          test "$(sha256sum /usr/bin/rootlesskit | cut -d' ' -f1)" = \
+            98f07e783dd6b3cd236c7865d1dce7937e645ec74a0fe2971725449af074f466
       - name: Start the pinned rootless generic behavior executor
         run: |
           docker image save decomp-gcc-oracle-toolchain:16.2.0 \
@@ -89,11 +114,11 @@ jobs:
             "$RUNNER_TEMP/rootless-data" \
             "$RUNNER_TEMP/rootless-exec" \
             "$RUNNER_TEMP/rootless-state"
-          export PATH="$RUNNER_TEMP/docker-client/docker:$PATH"
+          export PATH="/usr/bin:$RUNNER_TEMP/docker-client/docker:$PATH"
           export XDG_RUNTIME_DIR="$runtime_directory"
           export DOCKERD_ROOTLESS_ROOTLESSKIT_STATE_DIR="$RUNNER_TEMP/rootless-state"
           socket="$runtime_directory/decomp-behavior-docker.sock"
-          dockerd-rootless.sh \
+          "$RUNNER_TEMP/docker-client/docker-rootless-extras/dockerd-rootless.sh" \
             --data-root="$RUNNER_TEMP/rootless-data" \
             --exec-root="$RUNNER_TEMP/rootless-exec" \
             --pidfile="$RUNNER_TEMP/rootless-dockerd.pid" \
@@ -117,6 +142,9 @@ jobs:
             sed -n '1,240p' "$RUNNER_TEMP/rootless-dockerd.log"
             exit 1
           fi
+          test "$(DOCKER_HOST="unix://$socket" \
+            "$RUNNER_TEMP/docker-client/docker/docker" version \
+              --format '{{.Server.Version}}')" = 29.7.2
           DOCKER_HOST="unix://$socket" \
             "$RUNNER_TEMP/docker-client/docker/docker" image load \
               --input "$RUNNER_TEMP/gcc-oracle-image.tar"

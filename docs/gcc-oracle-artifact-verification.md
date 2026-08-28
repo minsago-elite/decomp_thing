@@ -258,9 +258,11 @@ executable bytes have SHA-256
 `0c2639a4c2e662205c79515424f1d4b28fb2d6602324ce10c0b575ca3d312499`.
 The rich file has DWARF and a static symbol table; the stripped twin has
 neither. The checked-in workflow fetches and fully verifies the exact signed
-source release, rebuilds and authenticates the toolchain image, and verifies
-the formal schemas, production manifest, complete artifact hashes, and every
-recorded ELF relationship on pushes and pull requests.
+source release, rebuilds and authenticates the toolchain image, authenticates
+the matching Docker 29.7.2 client and rootless extras before starting its
+unprivileged daemon, and verifies the formal schemas, production manifest,
+complete artifact hashes, and every recorded ELF relationship on pushes and
+pull requests.
 
 The executable pair is derived from GPL-licensed GCC sources. Exact source
 bytes, signatures, signer identity, license texts, and the complete rebuild
