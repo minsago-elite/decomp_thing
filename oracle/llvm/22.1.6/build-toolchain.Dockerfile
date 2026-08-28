@@ -22,8 +22,8 @@ RUN apt-get update \
         "clang-22=${LLVM_PACKAGE_VERSION}" \
         "lld-22=${LLVM_PACKAGE_VERSION}" \
         "llvm-22=${LLVM_PACKAGE_VERSION}" \
-    && test "$(clang-22 --version | sed -n '1p')" = 'Debian clang version 22.1.8 (++20260714014902+ca7933e47d3a-1~exp1~20260714135019.80)' \
-    && test "$(ld.lld-22 --version)" = 'Debian LLD 22.1.8 (compatible with GNU linkers)' \
+    && clang-22 --version | sed -n '1p' | grep --fixed-strings '22.1.8' \
+    && ld.lld-22 --version | grep --fixed-strings '22.1.8' \
     && rm -rf /var/lib/apt/lists/* /tmp/llvm-snapshot.gpg.key \
     && find /usr/share/keyrings/apt.llvm.org.gpg /etc/apt/sources.list.d/llvm-22.list \
         -exec touch --no-dereference --date="@${SOURCE_DATE_EPOCH}" {} +

@@ -70,8 +70,8 @@ jobs:
                 -DCMAKE_CXX_COMPILER=/usr/lib/llvm-22/bin/clang++ \
                 -DCMAKE_AR=/usr/lib/llvm-22/bin/llvm-ar \
                 -DCMAKE_RANLIB=/usr/lib/llvm-22/bin/llvm-ranlib \
-                "-DCMAKE_EXE_LINKER_FLAGS=-fuse-ld=lld -Wl,--build-id=sha1 -Wl,--compress-debug-sections=zstd" \
-                "-DCMAKE_SHARED_LINKER_FLAGS=-fuse-ld=lld -Wl,--build-id=sha1 -Wl,--compress-debug-sections=zstd" \
+                "-DCMAKE_EXE_LINKER_FLAGS=-fuse-ld=lld -Wl,--build-id=sha1 -Wl,--compress-debug-sections=zlib" \
+                "-DCMAKE_SHARED_LINKER_FLAGS=-fuse-ld=lld -Wl,--build-id=sha1 -Wl,--compress-debug-sections=zlib" \
                 "-DCMAKE_C_FLAGS_RELWITHDEBINFO=-Oz -g2 -DNDEBUG -ffile-prefix-map=/oracle=/usr/src/llvm-oracle" \
                 "-DCMAKE_CXX_FLAGS_RELWITHDEBINFO=-Oz -g2 -DNDEBUG -ffile-prefix-map=/oracle=/usr/src/llvm-oracle"
               cmake --build /oracle/build --target clang -- -j4
