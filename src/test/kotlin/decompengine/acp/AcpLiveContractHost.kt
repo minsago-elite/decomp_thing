@@ -22,6 +22,7 @@ internal object AcpLiveContractHost {
     private const val ELF_PT_INTERP = 3L
     private const val ELF_PN_XNUM = 0xffff
     private const val PROBE_TIMEOUT_SECONDS = 10L
+    private const val MAXIMUM_RUNTIME_FILE_ALIASES = 64
 
     private val defaultPythonCandidates = listOf(
         Path.of("/usr/bin/python3"),
@@ -187,10 +188,11 @@ internal object AcpLiveContractHost {
     }
 
     /**
-     * Expands only verified FHS compatibility symlinks for an already authenticated runtime file.
+     * Expands only verified SONAME and FHS compatibility symlinks for an already authenticated
+     * runtime file.
      * The kernel reports canonical `/usr/lib*` paths in `/proc/self/maps`, while an ELF loader may
-     * still search `/lib*`. A fresh bubblewrap root has no host symlinks, so both destinations must
-     * name the same pinned source file explicitly.
+     * reopen a sibling SONAME such as `libz.so.1` and may search `/lib*`. A fresh bubblewrap root has
+     * no host symlinks, so every verified destination must name the same pinned source explicitly.
      */
     internal fun runtimeAliasDestinations(
         source: Path,
@@ -199,18 +201,34 @@ internal object AcpLiveContractHost {
         requireAbsoluteNormalized("Python native runtime source", source)
         val canonicalSource = source.toRealPath()
         check(source == canonicalSource) { "Python native runtime source is not canonical: $source" }
-        val destinations = linkedSetOf(source)
+        val canonicalDestinations = linkedSetOf(source)
+        Files.newDirectoryStream(source.parent).use { siblings ->
+            siblings.asSequence()
+                .filter { Files.isSymbolicLink(it) }
+                .filter { runCatching { Files.isSameFile(source, it) }.getOrDefault(false) }
+                .sortedBy(Path::toString)
+                .forEach { sibling ->
+                    check(canonicalDestinations.size < MAXIMUM_RUNTIME_FILE_ALIASES) {
+                        "Python native runtime file has too many verified aliases: $source"
+                    }
+                    canonicalDestinations.add(sibling)
+                }
+        }
+        val destinations = linkedSetOf<Path>()
+        destinations.addAll(canonicalDestinations)
         aliasRoots.distinct().sortedBy(Path::toString).forEach { aliasRoot ->
             requireAbsoluteNormalized("runtime alias root", aliasRoot)
             if (!Files.isSymbolicLink(aliasRoot)) return@forEach
             val canonicalRoot = aliasRoot.toRealPath()
-            if (!Files.isDirectory(canonicalRoot) || !source.startsWith(canonicalRoot)) return@forEach
-            val destination = aliasRoot.resolve(canonicalRoot.relativize(source)).normalize()
-            check(destination.startsWith(aliasRoot)) { "runtime alias escaped its root: $destination" }
-            check(Files.isSameFile(source, destination)) {
-                "runtime alias does not identify its canonical source: $destination"
+            if (!Files.isDirectory(canonicalRoot)) return@forEach
+            canonicalDestinations.filter { it.startsWith(canonicalRoot) }.forEach { canonicalDestination ->
+                val destination = aliasRoot.resolve(canonicalRoot.relativize(canonicalDestination)).normalize()
+                check(destination.startsWith(aliasRoot)) { "runtime alias escaped its root: $destination" }
+                check(Files.isSameFile(source, destination)) {
+                    "runtime alias does not identify its canonical source: $destination"
+                }
+                destinations.add(destination)
             }
-            destinations.add(destination)
         }
         return destinations.sortedBy(Path::toString)
     }

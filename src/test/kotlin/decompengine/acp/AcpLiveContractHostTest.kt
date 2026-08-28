@@ -58,6 +58,8 @@ class AcpLiveContractHostTest {
         val root = createTempDirectory("acp-runtime-alias-")
         val canonicalRoot = root.resolve("usr/lib64").createDirectories()
         val runtimeFile = canonicalRoot.resolve("libfixture.so").apply { writeText("fixture") }
+        val soname = canonicalRoot.resolve("libfixture.so.1")
+            .createSymbolicLinkPointingTo(runtimeFile.fileName)
         val aliasRoot = root.resolve("lib64").createSymbolicLinkPointingTo(Path.of("usr/lib64"))
 
         val destinations = AcpLiveContractHost.runtimeAliasDestinations(
@@ -66,7 +68,12 @@ class AcpLiveContractHostTest {
         )
 
         assertEquals(
-            listOf(aliasRoot.resolve("libfixture.so"), runtimeFile).sortedBy(Path::toString),
+            listOf(
+                aliasRoot.resolve("libfixture.so"),
+                aliasRoot.resolve("libfixture.so.1"),
+                runtimeFile,
+                soname,
+            ).sortedBy(Path::toString),
             destinations,
         )
         assertTrue(destinations.all { Files.isSameFile(runtimeFile, it) })
