@@ -172,10 +172,12 @@ python3 scripts/check-behavior-corpus-evidence.py \
   --evidence oracle/gcc/16.2.0/behavior-corpus-evidence.json
 ```
 
-The oracle workflow builds and authenticates the exact image before Python
-test discovery, downloads and hashes the locked control client, and exports its
-absolute path to a rootless test daemon. Generic adversarial cases derive and
-assert that live daemon's exact profile. The checked GCC evidence is
+The oracle workflow builds and authenticates the separately locked
+deterministic reproduction before Python test discovery, while retaining the
+historical image digest in the build record and artifact evidence. It then
+downloads and hashes the locked control client and exports its absolute path
+to a rootless test daemon. Generic adversarial cases derive and assert that
+live daemon's exact profile. The checked GCC evidence is
 regenerated and byte-compared only when the daemon, including kernel version,
 matches this profile. Hosted Ubuntu emits an explicit skip notice rather than
 claiming reproduction on a different kernel; its offline corpus/evidence,

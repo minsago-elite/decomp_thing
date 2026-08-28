@@ -36,14 +36,15 @@ jobs:
             --tag decomp-gcc-oracle-toolchain:16.2.0 \
             --file oracle/gcc/16.2.0/build-toolchain.Dockerfile \
             oracle/gcc/16.2.0
-          expected=sha256:510c510f300d811df22c7769633575a94939073b529a73125bf96cfb96dc7248
           observed="$(docker image inspect --format '{{.Id}}' decomp-gcc-oracle-toolchain:16.2.0)"
-          echo "recorded origin image: $expected"
+          echo "recorded origin image: sha256:510c510f300d811df22c7769633575a94939073b529a73125bf96cfb96dc7248"
           echo "reproduced image: $observed"
           docker image inspect \
-            --format 'rootfs={{json .RootFS.Layers}} config={{json .Config}} created={{json .Created}}' \
-            decomp-gcc-oracle-toolchain:16.2.0
-          test "$observed" = "$expected"
+            decomp-gcc-oracle-toolchain:16.2.0 \
+            | python3 scripts/verify-gcc-toolchain-reproduction.py \
+                --lock oracle/gcc/16.2.0/toolchain-reproduction.json \
+                --build-record oracle/gcc/16.2.0/build-record.json
+          echo "GCC_TOOLCHAIN_IMAGE_ID=$observed" >> "$GITHUB_ENV"
           docker run --rm \
             --platform linux/amd64 \
             --network none \
@@ -54,11 +55,12 @@ jobs:
             --mount "type=bind,src=$GITHUB_WORKSPACE,dst=/oracle,readonly" \
             --workdir /oracle \
             --entrypoint /usr/bin/python3 \
-            "$expected" \
+            "$observed" \
             scripts/verify-gcc-oracle-build-record.py \
             --source-lock oracle/gcc/16.2.0/source-lock.json \
             --build-record oracle/gcc/16.2.0/build-record.json \
-            --container-digest "$expected"
+            --container-digest "$observed" \
+            --reproduction-lock oracle/gcc/16.2.0/toolchain-reproduction.json
       - name: Authenticate the behavior-corpus control client
         run: |
           install -d "$RUNNER_TEMP/docker-client"
@@ -121,8 +123,7 @@ jobs:
           observed="$(DOCKER_HOST="unix://$socket" \
             "$RUNNER_TEMP/docker-client/docker/docker" image inspect \
               --format '{{.Id}}' decomp-gcc-oracle-toolchain:16.2.0)"
-          test "$observed" = \
-            sha256:510c510f300d811df22c7769633575a94939073b529a73125bf96cfb96dc7248
+          test "$observed" = "$GCC_TOOLCHAIN_IMAGE_ID"
           echo "DOCKER=$RUNNER_TEMP/docker-client/docker/docker" >> "$GITHUB_ENV"
           echo "DOCKER_HOST=unix://$socket" >> "$GITHUB_ENV"
       - name: Test oracle schemas and ELF twin verifier

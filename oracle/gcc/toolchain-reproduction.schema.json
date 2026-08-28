@@ -1,0 +1,52 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://github.com/minsago-elite/decomp_thing/oracle/gcc/toolchain-reproduction.schema.json",
+  "title": "GCC oracle toolchain reproduction lock",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schemaVersion", "recordedOrigin", "recipe", "reproducedImage"],
+  "properties": {
+    "schemaVersion": {"const": 1},
+    "recordedOrigin": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["buildRecordSha256", "imageDigest"],
+      "properties": {
+        "buildRecordSha256": {"$ref": "#/$defs/sha256"},
+        "imageDigest": {"$ref": "#/$defs/digest"}
+      }
+    },
+    "recipe": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["baseImageDigest", "dockerfile", "dockerfileSha256", "platform", "sourceDateEpoch"],
+      "properties": {
+        "baseImageDigest": {"$ref": "#/$defs/digest"},
+        "dockerfile": {"const": "build-toolchain.Dockerfile"},
+        "dockerfileSha256": {"$ref": "#/$defs/sha256"},
+        "platform": {"const": "linux/amd64"},
+        "sourceDateEpoch": {"type": "string", "pattern": "^[1-9][0-9]*$"}
+      }
+    },
+    "reproducedImage": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["configSha256", "created", "imageDigest", "rootfsDiffIds"],
+      "properties": {
+        "configSha256": {"$ref": "#/$defs/sha256"},
+        "created": {"const": "2026-08-07T00:00:00Z"},
+        "imageDigest": {"$ref": "#/$defs/digest"},
+        "rootfsDiffIds": {
+          "type": "array",
+          "minItems": 1,
+          "uniqueItems": true,
+          "items": {"$ref": "#/$defs/digest"}
+        }
+      }
+    }
+  },
+  "$defs": {
+    "sha256": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
+    "digest": {"type": "string", "pattern": "^sha256:[0-9a-f]{64}$"}
+  }
+}

@@ -12,6 +12,7 @@ REPOSITORY_ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(REPOSITORY_ROOT))
 
 from oracle.gcc.verify_oracle_artifacts import verify_build_environment  # noqa: E402
+from oracle.gcc.toolchain_reproduction import approved_origin_digest  # noqa: E402
 from oracle.gcc.verify_source_lock import VerificationError  # noqa: E402
 
 
@@ -30,13 +31,27 @@ def main() -> int:
         required=True,
         help="sha256:<hex> digest of the image used to launch this environment",
     )
+    parser.add_argument(
+        "--reproduction-lock",
+        type=Path,
+        help=(
+            "approved reproduction lock mapping the running image to the "
+            "historical artifact-origin image"
+        ),
+    )
     arguments = parser.parse_args()
 
     try:
+        artifact_origin_digest = arguments.container_digest
+        if arguments.reproduction_lock is not None:
+            artifact_origin_digest = approved_origin_digest(
+                arguments.reproduction_lock,
+                arguments.container_digest,
+            )
         record = verify_build_environment(
             arguments.build_record,
             arguments.source_lock,
-            arguments.container_digest,
+            artifact_origin_digest,
         )
     except VerificationError as error:
         print(f"verification failed: {error}", file=sys.stderr)
@@ -45,7 +60,8 @@ def main() -> int:
     print(
         "verified GCC oracle build environment: "
         f"{record['environment']['container']['image']}@"
-        f"{record['environment']['container']['digest']}"
+        f"{record['environment']['container']['digest']} "
+        f"(running {arguments.container_digest})"
     )
     for tool in record["tools"]:
         first_line = tool["versionOutput"].splitlines()[0]

@@ -20,7 +20,7 @@ remain deliberately small fixtures and are never substituted for that pair.
 
 ## Versioned formats
 
-Two closed JSON formats are enforced by the standard-library verifier:
+Three closed JSON formats are enforced by the standard-library verifier:
 
 - `oracle/gcc/build-record.schema.json` describes the build environment and
   recipe. It binds the exact source-lock bytes and revision; an immutable
@@ -32,6 +32,11 @@ Two closed JSON formats are enforced by the standard-library verifier:
   It binds both input JSON files, complete artifact hashes, ELF headers,
   program headers, sections, GNU Build IDs, DWARF and symbol-table presence,
   and the full/stripped equivalence proof.
+- `oracle/gcc/toolchain-reproduction.schema.json` keeps a current,
+  independently checked reproduction identity separate from the historical
+  image identity in the artifact build record. It locks the build-record and
+  Dockerfile bytes, base image, platform, source date, reproduced OCI config,
+  and every ordered rootfs diff ID.
 
 The Python verifier treats every object as closed even when a JSON Schema
 library is not installed. Duplicate keys, missing fields, extra fields,
@@ -65,7 +70,8 @@ same independently resolved image digest used to start it:
 python3 scripts/verify-gcc-oracle-build-record.py \
   --source-lock oracle/gcc/16.2.0/source-lock.json \
   --build-record oracle/gcc/16.2.0/build-record.json \
-  --container-digest sha256:<immutable-image-digest>
+  --container-digest sha256:<reproduced-image-digest> \
+  --reproduction-lock oracle/gcc/16.2.0/toolchain-reproduction.json
 ```
 
 This gate validates the build record against the source lock, requires a
@@ -91,13 +97,32 @@ docker buildx build \
 docker image inspect --format '{{.Id}}' decomp-gcc-oracle-toolchain:16.2.0
 ```
 
-The inspected ID must be
+Authenticate the resulting inspect response against the reproduction lock:
+
+```bash
+docker image inspect decomp-gcc-oracle-toolchain:16.2.0 \
+  | python3 scripts/verify-gcc-toolchain-reproduction.py \
+      --lock oracle/gcc/16.2.0/toolchain-reproduction.json \
+      --build-record oracle/gcc/16.2.0/build-record.json
+```
+
+The historical artifact origin remains
 `sha256:510c510f300d811df22c7769633575a94939073b529a73125bf96cfb96dc7248`.
-The Dockerfile itself has SHA-256
+Current no-cache hosted builds deterministically produce
+`sha256:807f16e03368e1e0ff3c904f21f1a13c260d78a8b7226a52284a2ee68a4d1511`.
+The separate lock approves that reproduction only when the Dockerfile and
+build record have their exact checked hashes, all `FROM` instructions use the
+locked base digest, the OCI config hashes exactly, and all nine ordered rootfs
+diff IDs match. Any drift fails closed even if a mutable tag has the expected
+name.
+
+This does not relabel the historical artifacts or claim that the two OCI
+config blobs are byte-identical. The original image config blob is not
+available from hosted CI, so equality is established at the reproducible
+recipe/rootfs and exact live tool-byte/version boundaries. The Dockerfile
+itself has SHA-256
 `8b0af79ba3426f49ba599eb0c7eea433c62ac5bb6ab5e7797f7d09d978f43543`.
-An image-ID mismatch fails closed even if a mutable tag has the expected name.
-Two independent no-cache builds must produce that same image ID. The
-discarded download stage verifies exact Debian package hashes; the final
+The discarded download stage verifies exact Debian package hashes; the final
 layer copies only the required headers, libraries, and notices and normalizes
 all changed timestamps to `SOURCE_DATE_EPOCH`.
 

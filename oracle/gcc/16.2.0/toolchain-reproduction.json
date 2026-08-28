@@ -1,0 +1,30 @@
+{
+  "recipe": {
+    "baseImageDigest": "sha256:2e6f4ae27ab8ad6f9617b46f0468889d368fdd91f2ea29aff98e4d5d1a3637f0",
+    "dockerfile": "build-toolchain.Dockerfile",
+    "dockerfileSha256": "8b0af79ba3426f49ba599eb0c7eea433c62ac5bb6ab5e7797f7d09d978f43543",
+    "platform": "linux/amd64",
+    "sourceDateEpoch": "1786060800"
+  },
+  "recordedOrigin": {
+    "buildRecordSha256": "f91a68ffde054b9598cba8506bbf6b3b373b35b8680fddb54f76bffa9db23637",
+    "imageDigest": "sha256:510c510f300d811df22c7769633575a94939073b529a73125bf96cfb96dc7248"
+  },
+  "reproducedImage": {
+    "configSha256": "a37cfb8bb642cf983412ee578635f3e18be03a2326ceb7955fb9565300b87a5f",
+    "created": "2026-08-07T00:00:00Z",
+    "imageDigest": "sha256:807f16e03368e1e0ff3c904f21f1a13c260d78a8b7226a52284a2ee68a4d1511",
+    "rootfsDiffIds": [
+      "sha256:31631a95db7cd650d1c826f269b9e93b57d9f418128bf7c5499b4403be4d44d0",
+      "sha256:7c367ef8c1ea18872336c6bc0672b2ff7fee5dc56c055ce54e62f2ccfde4f847",
+      "sha256:144ea2bdbdf828c7c9867865b4eeffc5ec977e8e686cdfd1e240a890e9d4cf8e",
+      "sha256:758a60093d45fcab0f50466c34253fcdaea5dbb0bacd6495bda7d4e8d90e61d6",
+      "sha256:bd3697430d9c1e3d4cf6044fed4feb40ddfbec5d01420b2fd6d9565779423d99",
+      "sha256:c103436de306bfcb20eb5265f729760010d0c7bfdd10c937664882ecc1d8db5d",
+      "sha256:91b571880d8f2325dfaf81992875cbdaceefe7110cc448ff3271e9ae82606dff",
+      "sha256:13edf68405b45fb51540a7cea394c1b6856ee27cb4fadc2f6738896d1529b0e8",
+      "sha256:fc0f59678a37682ac1b60b253df3dc1383cded10a10f3d83372b13b67a3a7321"
+    ]
+  },
+  "schemaVersion": 1
+}
