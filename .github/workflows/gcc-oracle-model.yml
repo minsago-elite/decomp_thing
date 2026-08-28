@@ -172,6 +172,7 @@ jobs:
           test "$observed" = "$GCC_TOOLCHAIN_IMAGE_ID"
           echo "DOCKER=$RUNNER_TEMP/docker-client/docker/docker" >> "$GITHUB_ENV"
           echo "DOCKER_HOST=unix://$socket" >> "$GITHUB_ENV"
+          echo "DECOMP_TEST_OCI_IMAGE_DIGEST=$observed" >> "$GITHUB_ENV"
       - name: Test oracle schemas and ELF twin verifier
         env:
           DOCKER: ${{ runner.temp }}/docker-client/docker/docker

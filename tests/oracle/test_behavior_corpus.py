@@ -159,7 +159,10 @@ def stream(payload: bytes, *normalizations: str) -> dict[str, object]:
 
 
 class BehaviorCorpusTest(unittest.TestCase):
-    image_digest = "sha256:510c510f300d811df22c7769633575a94939073b529a73125bf96cfb96dc7248"
+    image_digest = os.environ.get(
+        "DECOMP_TEST_OCI_IMAGE_DIGEST",
+        "sha256:510c510f300d811df22c7769633575a94939073b529a73125bf96cfb96dc7248",
+    )
     executable: Path
     executable_payload: bytes
     runtime: Path | None

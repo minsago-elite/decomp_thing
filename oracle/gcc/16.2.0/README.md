@@ -206,6 +206,12 @@ deferred infrastructure. `tests/oracle/test_gcc_behavior_corpus.py` checks
 every acceptance category and proves that artifact or runtime substitution is
 rejected.
 
+The generic live adversarial fixtures run against the separately authenticated
+reproduction image through `DECOMP_TEST_OCI_IMAGE_DIGEST`; they do not claim to
+reproduce the checked GCC evidence. The production adapter continues to require
+the historical digest and exact executor profile above, so that narrower live
+comparison skips rather than silently substituting the reproduction identity.
+
 That skip is deliberately narrow: only a well-formed executor that retains all
 mandatory isolation capabilities but differs from an authenticated exact
 profile field returns status 78. A client/image/runtime lookup failure, daemon
