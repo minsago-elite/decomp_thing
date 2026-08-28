@@ -23,6 +23,7 @@ REPOSITORY_ROOT = Path(__file__).resolve().parents[2]
 from oracle.behavior_corpus import (  # noqa: E402
     BehaviorCorpusError,
     ExactExecutorProfileMismatch,
+    MAX_EXECUTABLE_BYTES,
     PYTHON_PREEXEC_ENFORCER_V1,
     _engine_components_sha256,
     corpus_json_bytes,
@@ -172,6 +173,16 @@ class BehaviorCorpusTest(unittest.TestCase):
     engine_profile: dict[str, object]
     image_environment: list[str]
     image_environment_sentinel: str
+
+    def test_executable_size_bound_admits_clang_but_remains_finite(self) -> None:
+        clang_sized = self.corpus()
+        clang_sized["executable"]["bytes"] = 96 * 1024 * 1024
+        self.assertIs(clang_sized, validate_corpus(clang_sized))
+
+        oversized = self.corpus()
+        oversized["executable"]["bytes"] = MAX_EXECUTABLE_BYTES + 1
+        with self.assertRaisesRegex(BehaviorCorpusError, "between 1 and"):
+            validate_corpus(oversized)
 
     @classmethod
     def setUpClass(cls) -> None:

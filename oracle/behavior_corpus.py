@@ -33,7 +33,9 @@ _ORIGINAL_SIGNAL = signal.signal
 
 
 MAX_CORPUS_BYTES = 16 * 1024 * 1024
-MAX_EXECUTABLE_BYTES = 64 * 1024 * 1024
+# Large, statically linked compiler drivers are legitimate behavior targets.
+# Keep the snapshot bounded while admitting the checked LLVM 22 Clang driver.
+MAX_EXECUTABLE_BYTES = 128 * 1024 * 1024
 MAX_CASES = 256
 MAX_INPUTS_PER_CASE = 256
 MAX_ARTIFACTS_PER_CASE = 256
