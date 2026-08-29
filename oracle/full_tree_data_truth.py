@@ -14,7 +14,7 @@ class FullTreeDataTruthError(ValueError):
     """Raised when ODR-equivalent data evidence is incompatible or incomplete."""
 
 
-POLICY = {"id": "full-tree-data-truth", "version": 13, "typeIdentity": "tag-qualified-lexical-context-name-or-anonymous-declaration-with-observation-owned-lambda-and-lossy-local-contexts", "globalIdentity": "rva-or-source-aligned-name-declaration-or-producer-observation", "owner": "lowest-unit-id", "typeReferences": "exact-dwarf-offset-chain-with-bounded-authenticated-candidate-commitments-and-no-ambiguous-target-substitution", "maximumDatabaseBytes": 8 * 1024 * 1024 * 1024}
+POLICY = {"id": "full-tree-data-truth", "version": 14, "typeIdentity": "tag-qualified-lexical-context-name-or-anonymous-declaration-with-observation-owned-lambda-and-lossy-local-contexts", "globalIdentity": "rva-or-source-aligned-name-declaration-or-producer-observation", "owner": "lowest-unit-id", "typeReferences": "exact-dwarf-offset-chain-with-conditional-bounded-authenticated-candidate-commitments-and-no-ambiguous-target-substitution", "maximumDatabaseBytes": 8 * 1024 * 1024 * 1024}
 
 REFERENCE_SAMPLE_LIMIT = 16
 
@@ -190,19 +190,26 @@ def _merge_type_references(references: Iterable[dict[str, Any]], identity: str) 
                 canonical_json_bytes(item),
             )
         )
-    return {
-        "candidateTargetCount": len(ordered_candidates),
-        "candidateTargets": ordered_candidates[:REFERENCE_SAMPLE_LIMIT],
-        "candidateTargetsSha256": _sha(canonical_json_bytes(ordered_candidates)),
-        "evidenceDieOffsetCount": len(evidence_offsets),
+    merged = {
         "evidenceDieOffsets": evidence_offsets[:REFERENCE_SAMPLE_LIMIT],
-        "evidenceDieOffsetsSha256": _sha(canonical_json_bytes(evidence_offsets)),
         "modifierTags": selected["modifierTags"],
         "reasonCode": selected["reasonCode"],
         "resolutionCode": resolution_code,
         "targetOwnerShardId": selected["targetOwnerShardId"],
         "targetTypeId": selected["targetTypeId"],
     }
+    if len(ordered_candidates) > 1:
+        merged.update({
+            "candidateTargetCount": len(ordered_candidates),
+            "candidateTargets": ordered_candidates[:REFERENCE_SAMPLE_LIMIT],
+            "candidateTargetsSha256": _sha(canonical_json_bytes(ordered_candidates)),
+        })
+    if len(evidence_offsets) > REFERENCE_SAMPLE_LIMIT:
+        merged.update({
+            "evidenceDieOffsetCount": len(evidence_offsets),
+            "evidenceDieOffsetsSha256": _sha(canonical_json_bytes(evidence_offsets)),
+        })
+    return merged
 
 
 def _validate_document(document: dict[str, Any]) -> None:
@@ -323,14 +330,24 @@ def validate_full_tree_data_truth_index(
         for reference in references:
             target = reference["targetTypeId"]
             owner = reference["targetOwnerShardId"]
-            candidates = reference["candidateTargets"]
-            if reference["candidateTargetCount"] < len(candidates):
+            candidate_fields = ("candidateTargetCount", "candidateTargets", "candidateTargetsSha256")
+            if any(field in reference for field in candidate_fields) != all(field in reference for field in candidate_fields):
+                raise FullTreeDataTruthError("type reference candidate commitment is incomplete")
+            evidence_fields = ("evidenceDieOffsetCount", "evidenceDieOffsetsSha256")
+            if any(field in reference for field in evidence_fields) != all(field in reference for field in evidence_fields):
+                raise FullTreeDataTruthError("type reference evidence commitment is incomplete")
+            candidates = reference.get("candidateTargets", [])
+            candidate_count = reference.get("candidateTargetCount", len(candidates))
+            candidate_commitment = reference.get("candidateTargetsSha256")
+            if candidate_count < len(candidates):
                 raise FullTreeDataTruthError("type reference candidate sample exceeds its committed count")
-            if reference["evidenceDieOffsetCount"] < len(reference["evidenceDieOffsets"]):
+            evidence_count = reference.get("evidenceDieOffsetCount", len(reference["evidenceDieOffsets"]))
+            evidence_commitment = reference.get("evidenceDieOffsetsSha256")
+            if evidence_count < len(reference["evidenceDieOffsets"]):
                 raise FullTreeDataTruthError("type reference evidence sample exceeds its committed count")
-            if reference["candidateTargetCount"] == len(candidates) and reference["candidateTargetsSha256"] != _sha(canonical_json_bytes(candidates)):
+            if candidate_commitment is not None and candidate_count == len(candidates) and candidate_commitment != _sha(canonical_json_bytes(candidates)):
                 raise FullTreeDataTruthError("type reference candidate commitment differs")
-            if reference["evidenceDieOffsetCount"] == len(reference["evidenceDieOffsets"]) and reference["evidenceDieOffsetsSha256"] != _sha(canonical_json_bytes(reference["evidenceDieOffsets"])):
+            if evidence_commitment is not None and evidence_count == len(reference["evidenceDieOffsets"]) and evidence_commitment != _sha(canonical_json_bytes(reference["evidenceDieOffsets"])):
                 raise FullTreeDataTruthError("type reference evidence commitment differs")
             for candidate in candidates:
                 if type_owners.get(candidate["targetTypeId"]) != candidate["targetOwnerShardId"]:
@@ -338,13 +355,13 @@ def validate_full_tree_data_truth_index(
             if target is None:
                 if owner is not None or reference["reasonCode"] is None:
                     raise FullTreeDataTruthError("unresolved type reference has contradictory evidence")
-                if reference["resolutionCode"] == "unresolved-authenticated-target-set" and reference["candidateTargetCount"] < 2:
-                    raise FullTreeDataTruthError("ambiguous type reference has fewer than two candidates")
+                if reference["resolutionCode"] == "unresolved-authenticated-target-set" and (candidate_count < 2 or not all(field in reference for field in candidate_fields)):
+                    raise FullTreeDataTruthError("ambiguous type reference has incomplete candidate evidence")
             elif reference["reasonCode"] is not None or type_owners.get(target) != owner:
                 raise FullTreeDataTruthError(
                     f"type reference {target} has a dangling or substituted owner"
                 )
-            elif not any(candidate["targetTypeId"] == target and candidate["targetOwnerShardId"] == owner for candidate in candidates):
+            elif candidates and not any(candidate["targetTypeId"] == target and candidate["targetOwnerShardId"] == owner for candidate in candidates):
                 raise FullTreeDataTruthError("resolved type reference is absent from its candidate evidence")
 
 
@@ -435,7 +452,7 @@ def generate_full_tree_data_truth(*, scope: dict[str, Any], scope_sha256: str, i
                 if entities > scope["bounds"]["perShard"]["entities"]:
                     raise FullTreeDataTruthError(f"data truth shard {shard['id']} exceeds its entity bound")
                 if len(payload) > scope["bounds"]["perShard"]["serializedBytes"]:
-                    raise FullTreeDataTruthError(f"data truth shard {shard['id']} exceeds its byte bound")
+                    raise FullTreeDataTruthError(f"data truth shard {shard['id']} has {len(payload)} bytes and exceeds its {scope['bounds']['perShard']['serializedBytes']}-byte bound")
                 total_output_bytes += len(payload)
                 relative = f"shards/{shard['id']}.json"; path = output_root / relative; path.parent.mkdir(parents=True, exist_ok=True); path.write_bytes(payload)
                 shard_records.append({"id": shard["id"], "path": relative, "bytes": len(payload), "sha256": _sha(payload), **counts})

@@ -53,6 +53,9 @@ class FullTreeElfDataTest(unittest.TestCase):
         merged = _merge_type_references([declaration, base], "fixture-member")
         self.assertEqual(base["targetTypeId"], merged["targetTypeId"])
         self.assertEqual("odr-member-sole-source-aligned-target", merged["resolutionCode"])
+        exact = _merge_type_references([base], "fixture-exact-member")
+        self.assertNotIn("candidateTargets", exact)
+        self.assertNotIn("evidenceDieOffsetsSha256", exact)
         conflicting = {**declaration, "_targetQuality": "source-aligned"}
         ambiguous = _merge_type_references([conflicting, base], "fixture-member")
         self.assertIsNone(ambiguous["targetTypeId"])
