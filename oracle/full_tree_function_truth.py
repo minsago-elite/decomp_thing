@@ -6,8 +6,10 @@ from collections import defaultdict
 import hashlib
 import json
 from pathlib import Path
+import resource
 import sqlite3
 import tempfile
+import time
 from typing import Any, Iterable
 
 from oracle.bounded_shards import load_complete_shard_index
@@ -157,6 +159,28 @@ def _database(path: Path) -> sqlite3.Connection:
     return connection
 
 
+def _check_runtime_bounds(
+    scope: dict[str, Any],
+    *,
+    started: float,
+    cpu_started: float,
+    database_path: Path,
+) -> None:
+    bounds = scope["bounds"]["wholeRun"]
+    if time.monotonic() - started > bounds["wallClockSeconds"]:
+        raise FullTreeFunctionTruthError("function truth merge exceeded its wall-clock bound")
+    if time.process_time() - cpu_started > bounds["cpuSeconds"]:
+        raise FullTreeFunctionTruthError("function truth merge exceeded its CPU-time bound")
+    if int(resource.getrusage(resource.RUSAGE_SELF).ru_maxrss) * 1024 > bounds["maximumResidentBytes"]:
+        raise FullTreeFunctionTruthError("function truth merge exceeded its resident-byte bound")
+    try:
+        database_bytes = database_path.stat().st_size
+    except FileNotFoundError:
+        database_bytes = 0
+    if database_bytes > bounds["serializedBytes"]:
+        raise FullTreeFunctionTruthError("function truth merge database exceeded its byte bound")
+
+
 def validate_full_tree_function_truth_index(
     index: dict[str, Any],
     *,
@@ -265,6 +289,8 @@ def reconcile_full_tree_function_truth(
 ) -> dict[str, Any]:
     """Merge bounded inputs through disk-backed state and publish only complete truth."""
 
+    started = time.monotonic()
+    cpu_started = time.process_time()
     observation_index = load_complete_shard_index(observation_root)
     observation_index_payload = (observation_root / "index.json").read_bytes()
     elf_payload = elf_index_path.read_bytes()
@@ -299,6 +325,7 @@ def reconcile_full_tree_function_truth(
     output_root.mkdir(parents=True, exist_ok=True)
     with tempfile.NamedTemporaryFile(prefix=".function-truth-", suffix=".sqlite", dir=output_root) as database_file:
         connection = _database(Path(database_file.name))
+        database_path = Path(database_file.name)
         try:
             connection.executemany(
                 "INSERT INTO elf VALUES (?, ?)",
@@ -331,16 +358,29 @@ def reconcile_full_tree_function_truth(
                     ),
                 )
                 connection.commit()
+                _check_runtime_bounds(
+                    scope,
+                    started=started,
+                    cpu_started=cpu_started,
+                    database_path=database_path,
+                )
 
             functions_by_shard: dict[str, list[dict[str, Any]]] = defaultdict(list)
             exclusions: list[dict[str, Any]] = []
             dwarf_rvas = 0
             scored_rvas = 0
             dwarf_only = 0
-            for rva, elf_raw in connection.execute(
+            for rva_index, (rva, elf_raw) in enumerate(connection.execute(
                 "SELECT r.rva, e.payload FROM (SELECT rva FROM elf UNION SELECT rva FROM emitted) r "
                 "LEFT JOIN elf e ON e.rva=r.rva ORDER BY r.rva"
-            ):
+            )):
+                if rva_index % 4096 == 0:
+                    _check_runtime_bounds(
+                        scope,
+                        started=started,
+                        cpu_started=cpu_started,
+                        database_path=database_path,
+                    )
                 dwarf_records = [
                     json.loads(row[0])
                     for row in connection.execute("SELECT payload FROM emitted WHERE rva=? ORDER BY shard_id", (rva,))
@@ -380,7 +420,16 @@ def reconcile_full_tree_function_truth(
 
             inline_by_shard: dict[str, list[dict[str, Any]]] = defaultdict(list)
             inline_observations = int(connection.execute("SELECT COUNT(*) FROM inline").fetchone()[0])
-            for (identity,) in connection.execute("SELECT DISTINCT identity FROM inline ORDER BY identity"):
+            for inline_index, (identity,) in enumerate(
+                connection.execute("SELECT DISTINCT identity FROM inline ORDER BY identity")
+            ):
+                if inline_index % 4096 == 0:
+                    _check_runtime_bounds(
+                        scope,
+                        started=started,
+                        cpu_started=cpu_started,
+                        database_path=database_path,
+                    )
                 records = [
                     json.loads(row[0])
                     for row in connection.execute("SELECT payload FROM inline WHERE identity=? ORDER BY observation_id", (identity,))
@@ -449,6 +498,9 @@ def reconcile_full_tree_function_truth(
                 raise FullTreeFunctionTruthError("ELF function denominator does not reconcile")
             if counts["dwarfRvas"] != counts["scoredRvas"] + counts["dwarfOnlyRvas"]:
                 raise FullTreeFunctionTruthError("DWARF function denominator does not reconcile")
+            total_entities = counts["elfRvas"] + counts["dwarfOnlyRvas"] + counts["inlineUnique"]
+            if total_entities > scope["bounds"]["wholeRun"]["entities"]:
+                raise FullTreeFunctionTruthError("function truth exceeds its whole-run entity bound")
             index_without_hash = {
                 "complete": True,
                 "counts": counts,
@@ -469,6 +521,15 @@ def reconcile_full_tree_function_truth(
                 inventory=inventory,
                 observation_index_sha256=oracle["observationIndexSha256"],
                 elf_index_sha256=oracle["elfIndexSha256"],
+            )
+            total_output_bytes = sum(item["bytes"] for item in shard_files) + exclusion_file["bytes"]
+            if total_output_bytes > scope["bounds"]["wholeRun"]["serializedBytes"]:
+                raise FullTreeFunctionTruthError("function truth exceeds its whole-run output bound")
+            _check_runtime_bounds(
+                scope,
+                started=started,
+                cpu_started=cpu_started,
+                database_path=database_path,
             )
             _write(output_root / "index.json", index)
             return index
