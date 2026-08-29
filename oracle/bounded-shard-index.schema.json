@@ -1,0 +1,104 @@
+{
+  "$id": "https://github.com/minsago-elite/decomp_thing/oracle/bounded-shard-index.schema.json",
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "additionalProperties": false,
+  "properties": {
+    "complete": {
+      "const": true
+    },
+    "counts": {
+      "additionalProperties": false,
+      "properties": {
+        "entities": {
+          "minimum": 0,
+          "type": "integer"
+        },
+        "serializedBytes": {
+          "minimum": 1,
+          "type": "integer"
+        },
+        "shards": {
+          "minimum": 1,
+          "type": "integer"
+        }
+      },
+      "required": [
+        "entities",
+        "serializedBytes",
+        "shards"
+      ],
+      "type": "object"
+    },
+    "indexSha256": {
+      "pattern": "^[0-9a-f]{64}$",
+      "type": "string"
+    },
+    "runSha256": {
+      "pattern": "^[0-9a-f]{64}$",
+      "type": "string"
+    },
+    "schemaVersion": {
+      "const": 1
+    },
+    "shards": {
+      "items": {
+        "additionalProperties": false,
+        "properties": {
+          "entities": {
+            "minimum": 0,
+            "type": "integer"
+          },
+          "inputSha256": {
+            "pattern": "^[0-9a-f]{64}$",
+            "type": "string"
+          },
+          "outputBytes": {
+            "minimum": 1,
+            "type": "integer"
+          },
+          "outputSha256": {
+            "pattern": "^[0-9a-f]{64}$",
+            "type": "string"
+          },
+          "runSha256": {
+            "pattern": "^[0-9a-f]{64}$",
+            "type": "string"
+          },
+          "schemaVersion": {
+            "const": 1
+          },
+          "shardId": {
+            "pattern": "^[a-z0-9]+(?:-[a-z0-9]+)*$",
+            "type": "string"
+          },
+          "status": {
+            "const": "complete"
+          }
+        },
+        "required": [
+          "entities",
+          "inputSha256",
+          "outputBytes",
+          "outputSha256",
+          "runSha256",
+          "schemaVersion",
+          "shardId",
+          "status"
+        ],
+        "type": "object"
+      },
+      "minItems": 1,
+      "type": "array"
+    }
+  },
+  "required": [
+    "complete",
+    "counts",
+    "indexSha256",
+    "runSha256",
+    "schemaVersion",
+    "shards"
+  ],
+  "title": "Authenticated bounded shard run index",
+  "type": "object"
+}
