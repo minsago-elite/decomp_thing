@@ -31,8 +31,8 @@ class FullTreeDataObservationError(ValueError):
 
 POLICY = {
     "id": "full-tree-data-observations",
-    "version": 5,
-    "globals": "static-storage-or-linkage-bearing-dwarf-variables",
+    "version": 6,
+    "globals": "non-declaration-static-storage-or-linkage-bearing-dwarf-variables",
     "types": "class-struct-union-enum-definitions-and-declarations",
     "typeReferences": "compact-immediate-and-aggregate-dwarf-offsets-with-modifier-chain-or-closed-reason",
     "flags": "dwarf-boolean-and-integral-forms-normalized-to-boolean",
@@ -229,6 +229,8 @@ def produce_data_observation_shard(rich_artifact: Path, *, scope: dict[str, Any]
                     identity = hashlib.sha256(f"{unit['id']}:{hex(int(die.offset))}".encode()).hexdigest()[:32]
                     types.append({"alignment": _integer_attribute(die, "DW_AT_alignment"), "byteSize": _integer_attribute(die, "DW_AT_byte_size"), "context": _type_context(die), "declaration": _declaration(die, dwarf, scope, unit), "declarationOnly": _boolean_attribute(die, "DW_AT_declaration"), "dieOffset": hex(int(die.offset)), "id": f"type-observation-{identity}", "members": members, "name": _name(die), "tag": TYPE_TAGS[die.tag], "unitId": unit["id"]})
                 elif die.tag == "DW_TAG_variable":
+                    if _boolean_attribute(die, "DW_AT_declaration"):
+                        continue
                     names = _names(die)
                     parent = die.get_parent()
                     external = _boolean_attribute(die, "DW_AT_external")
