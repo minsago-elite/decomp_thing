@@ -1,0 +1,66 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://github.com/minsago-elite/decomp_thing/oracle/full-tree-source-inventory.schema.json",
+  "type": "object", "additionalProperties": false,
+  "required": ["schemaVersion", "oracle", "build", "counts", "sourceUnits", "tablegenInputs", "generatedCompilationUnits", "reportSha256"],
+  "properties": {
+    "schemaVersion": {"const": 1},
+    "oracle": {
+      "type": "object", "additionalProperties": false,
+      "required": ["configurationSha256", "scopeSha256", "inventoryIndexSha256", "sourceLockSha256", "buildRecordSha256", "sourceArchiveSha256", "sourceArchiveBytes"],
+      "properties": {
+        "configurationSha256": {"$ref": "#/$defs/sha"}, "scopeSha256": {"$ref": "#/$defs/sha"},
+        "inventoryIndexSha256": {"$ref": "#/$defs/sha"}, "sourceLockSha256": {"$ref": "#/$defs/sha"},
+        "buildRecordSha256": {"$ref": "#/$defs/sha"}, "sourceArchiveSha256": {"$ref": "#/$defs/sha"},
+        "sourceArchiveBytes": {"type": "integer", "minimum": 1, "maximum": 536870912}
+      }
+    },
+    "build": {
+      "type": "object", "additionalProperties": false,
+      "required": ["configureSha256", "enabledProjects", "disabledProjects", "targets"],
+      "properties": {
+        "configureSha256": {"$ref": "#/$defs/sha"},
+        "enabledProjects": {"type": "array", "minItems": 2, "uniqueItems": true, "items": {"type": "string"}},
+        "disabledProjects": {"type": "array", "uniqueItems": true, "items": {"type": "string"}},
+        "targets": {"type": "array", "minItems": 1, "uniqueItems": true, "items": {"type": "string"}}
+      }
+    },
+    "counts": {
+      "type": "object", "additionalProperties": false,
+      "required": ["candidateTranslationUnits", "linkedSourceUnits", "sourceOnlyUnits", "tablegenInputs", "generatedCompilationUnits", "disabledProjects"],
+      "properties": {
+        "candidateTranslationUnits": {"type": "integer", "minimum": 1}, "linkedSourceUnits": {"type": "integer", "minimum": 1},
+        "sourceOnlyUnits": {"type": "integer", "minimum": 0}, "tablegenInputs": {"type": "integer", "minimum": 0},
+        "generatedCompilationUnits": {"type": "integer", "minimum": 0}, "disabledProjects": {"type": "integer", "minimum": 0}
+      }
+    },
+    "sourceUnits": {"type": "array", "items": {"$ref": "#/$defs/sourceUnit"}},
+    "tablegenInputs": {"type": "array", "items": {"$ref": "#/$defs/tablegen"}},
+    "generatedCompilationUnits": {"type": "array", "items": {"$ref": "#/$defs/generated"}},
+    "reportSha256": {"$ref": "#/$defs/sha"}
+  },
+  "$defs": {
+    "sha": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
+    "identifier": {"type": "string", "pattern": "^[a-z0-9]+(?:-[a-z0-9]+)*$"},
+    "path": {"type": "string", "pattern": "^source/[A-Za-z0-9._+/-]+$", "maxLength": 4096},
+    "sourceUnit": {
+      "type": "object", "additionalProperties": false,
+      "required": ["path", "classification", "reasonCode", "shardId", "unitId"],
+      "properties": {
+        "path": {"$ref": "#/$defs/path"}, "classification": {"enum": ["linked", "source-only"]},
+        "reasonCode": {"type": ["string", "null"], "enum": [null, "tool-not-linked-into-clang-driver", "target-not-enabled-or-not-linked", "not-selected-by-authenticated-build-graph"]},
+        "shardId": {"$ref": "#/$defs/identifier"}, "unitId": {"type": ["string", "null"]}
+      }
+    },
+    "tablegen": {
+      "type": "object", "additionalProperties": false,
+      "required": ["path", "classification"],
+      "properties": {"path": {"$ref": "#/$defs/path"}, "classification": {"enum": ["enabled-project-input", "disabled-project-input"]}}
+    },
+    "generated": {
+      "type": "object", "additionalProperties": false,
+      "required": ["path", "shardId", "unitId"],
+      "properties": {"path": {"type": "string", "pattern": "^generated/[A-Za-z0-9._+/-]+$", "maxLength": 4096}, "shardId": {"$ref": "#/$defs/identifier"}, "unitId": {"type": "string"}}
+    }
+  }
+}

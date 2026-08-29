@@ -88,6 +88,12 @@ non-moving [`clang-llvm-22.1.6-a13-v1`](https://github.com/minsago-elite/decomp_
 release. `full-tree-release-assets.json` locks every asset URL, byte length,
 and SHA-256 digest.
 
+`full-tree-source-inventory.json` independently scans the locked upstream
+archive and reconciles 4,474 candidate translation units with DWARF: all 2,149
+handwritten linked units are present, 2,325 source-only units carry explicit
+build/target exclusion reasons, the generated driver CU is separate, and
+1,666 TableGen inputs plus 21 disabled projects remain visible.
+
 ## Verify
 
 Install the exact Python generation dependencies, then run:
