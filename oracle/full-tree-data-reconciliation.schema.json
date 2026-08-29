@@ -1,0 +1,79 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://github.com/minsago-elite/decomp_thing/oracle/full-tree-data-reconciliation.schema.json",
+  "title": "DWARF and ELF full-tree data reconciliation",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schemaVersion", "oracle", "counts", "globals", "dwarfOnlyScoredGlobals", "abiObjects", "reportSha256"],
+  "properties": {
+    "schemaVersion": {"const": 1},
+    "oracle": {"type": "object"},
+    "counts": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["abiObjects", "abiResolvedSlots", "abiSlots", "dwarfGlobals", "dwarfOnlyScoredGlobals", "dwarfScoredGlobals", "dwarfTypes", "dwarfUnobservableGlobals", "elfGlobals", "elfOnlyGlobals", "matchedElfGlobals", "unexplainedEntities"],
+      "properties": {
+        "abiObjects": {"type": "integer", "minimum": 0},
+        "abiResolvedSlots": {"type": "integer", "minimum": 0},
+        "abiSlots": {"type": "integer", "minimum": 0},
+        "dwarfGlobals": {"type": "integer", "minimum": 0},
+        "dwarfOnlyScoredGlobals": {"type": "integer", "minimum": 0},
+        "dwarfScoredGlobals": {"type": "integer", "minimum": 0},
+        "dwarfTypes": {"type": "integer", "minimum": 0},
+        "dwarfUnobservableGlobals": {"type": "integer", "minimum": 0},
+        "elfGlobals": {"type": "integer", "minimum": 0},
+        "elfOnlyGlobals": {"type": "integer", "minimum": 0},
+        "matchedElfGlobals": {"type": "integer", "minimum": 0},
+        "unexplainedEntities": {"const": 0}
+      }
+    },
+    "globals": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["elfGlobalId", "addressKind", "address", "aliasNames", "dwarfTruthIds", "ownerShardIds", "reconciliation"],
+        "properties": {
+          "elfGlobalId": {"type": "string"},
+          "addressKind": {"enum": ["image-rva", "tls-offset"]},
+          "address": {"type": "string"},
+          "aliasNames": {"type": "array", "minItems": 1, "uniqueItems": true, "items": {"type": "string"}},
+          "dwarfTruthIds": {"type": "array", "uniqueItems": true, "items": {"type": "string"}},
+          "ownerShardIds": {"type": "array", "minItems": 1, "uniqueItems": true, "items": {"type": "string"}},
+          "reconciliation": {"enum": ["matched-by-rva", "matched-tls-by-linkage-name", "elf-only"]}
+        }
+      }
+    },
+    "dwarfOnlyScoredGlobals": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["truthId", "shardId", "addressRva"],
+        "properties": {
+          "truthId": {"type": "string"},
+          "shardId": {"type": "string"},
+          "addressRva": {"type": "string"}
+        }
+      }
+    },
+    "abiObjects": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["elfGlobalId", "aliasName", "kind", "ownerMangledName", "ownerShardIds", "slots", "resolvedSlots"],
+        "properties": {
+          "elfGlobalId": {"type": "string"},
+          "aliasName": {"type": "string"},
+          "kind": {"enum": ["vtable", "vtt", "typeinfo", "typeinfo-name"]},
+          "ownerMangledName": {"type": "string"},
+          "ownerShardIds": {"type": "array", "minItems": 1, "uniqueItems": true, "items": {"type": "string"}},
+          "slots": {"type": "integer", "minimum": 0},
+          "resolvedSlots": {"type": "integer", "minimum": 0}
+        }
+      }
+    },
+    "reportSha256": {"type": "string", "pattern": "^[0-9a-f]{64}$"}
+  }
+}

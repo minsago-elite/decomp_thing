@@ -90,11 +90,17 @@ def _type_reference(die: Any) -> tuple[str | None, Any | None]:
 
 def _location(die: Any, dwarf: Any, image_base: int) -> tuple[int | None, bool]:
     attribute = die.attributes.get("DW_AT_location")
-    if attribute is None or not isinstance(attribute.value, bytes):
+    if attribute is None or not isinstance(attribute.value, (bytes, bytearray, list, tuple)):
         return None, False
     from elftools.dwarf.dwarf_expr import DWARFExprParser  # type: ignore[import-untyped]
-    operations = DWARFExprParser(die.cu.structs).parse_expr(attribute.value)
+    try:
+        expression = bytes(attribute.value)
+    except (TypeError, ValueError):
+        return None, False
+    operations = DWARFExprParser(die.cu.structs).parse_expr(expression)
     tls = any(operation.op_name in {"DW_OP_form_tls_address", "DW_OP_GNU_push_tls_address"} for operation in operations)
+    if tls and len(operations) == 2 and operations[1].op_name in {"DW_OP_form_tls_address", "DW_OP_GNU_push_tls_address"} and operations[0].op_name in {"DW_OP_const1u", "DW_OP_const2u", "DW_OP_const4u", "DW_OP_const8u", "DW_OP_constu"}:
+        return int(operations[0].args[0]), True
     if len(operations) == 1 and operations[0].op_name == "DW_OP_addr":
         address = int(operations[0].args[0])
         return address - image_base if address >= image_base else None, tls

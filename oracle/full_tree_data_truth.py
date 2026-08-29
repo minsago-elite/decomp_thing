@@ -82,6 +82,50 @@ def _validate_document(document: dict[str, Any]) -> None:
         raise FullTreeDataTruthError("data truth counts do not reconcile")
 
 
+def validate_full_tree_data_truth_index(
+    index: dict[str, Any],
+    *,
+    output_root: Path,
+    scope_sha256: str,
+    inventory: dict[str, Any],
+) -> None:
+    """Validate every data-truth shard and its independently hashed index."""
+
+    if index.get("schemaVersion") != 1 or index.get("complete") is not True:
+        raise FullTreeDataTruthError("data truth index is not complete schema version 1")
+    without_hash = {key: value for key, value in index.items() if key != "indexSha256"}
+    if index.get("indexSha256") != _sha(canonical_json_bytes(without_hash)):
+        raise FullTreeDataTruthError("data truth index hash does not reconcile")
+    oracle = index.get("oracle")
+    if not isinstance(oracle, dict):
+        raise FullTreeDataTruthError("data truth index has no oracle bindings")
+    if oracle.get("scopeSha256") != scope_sha256 or oracle.get("inventoryIndexSha256") != inventory["indexSha256"]:
+        raise FullTreeDataTruthError("data truth index scope or inventory binding differs")
+    expected_ids = [shard["id"] for shard in inventory["shards"]]
+    records = index.get("shards")
+    if not isinstance(records, list) or [record.get("id") for record in records] != expected_ids:
+        raise FullTreeDataTruthError("data truth shard population or ordering differs")
+    aggregate: dict[str, int] = {}
+    for record, inventory_shard in zip(records, inventory["shards"], strict=True):
+        path = output_root / record["path"]
+        payload = path.read_bytes()
+        if len(payload) != record["bytes"] or _sha(payload) != record["sha256"]:
+            raise FullTreeDataTruthError(f"data truth shard {record['id']} changed")
+        document = json.loads(payload)
+        _validate_document(document)
+        if document["oracle"] != oracle or document["shard"] != {
+            "id": record["id"],
+            "unitIds": inventory_shard["unitIds"],
+        }:
+            raise FullTreeDataTruthError(f"data truth shard {record['id']} bindings differ")
+        for name, value in document["counts"].items():
+            if record.get(name) != value:
+                raise FullTreeDataTruthError(f"data truth shard {record['id']} count differs")
+            aggregate[name] = aggregate.get(name, 0) + value
+    if index.get("counts") != dict(sorted(aggregate.items())):
+        raise FullTreeDataTruthError("data truth aggregate counts do not reconcile")
+
+
 def generate_full_tree_data_truth(*, scope: dict[str, Any], scope_sha256: str, inventory: dict[str, Any], observation_root: Path, output_root: Path) -> dict[str, Any]:
     observation_index = load_complete_shard_index(observation_root)
     observation_payload = (observation_root / "index.json").read_bytes()
@@ -132,7 +176,7 @@ def generate_full_tree_data_truth(*, scope: dict[str, Any], scope_sha256: str, i
                 shard_records.append({"id": shard["id"], "path": relative, "bytes": len(payload), "sha256": _sha(payload), **counts})
                 for name, value in counts.items(): aggregate[name] = aggregate.get(name, 0) + value
             without_hash = {"complete": True, "counts": dict(sorted(aggregate.items())), "oracle": oracle, "schemaVersion": 1, "shards": shard_records}
-            index = {**without_hash, "indexSha256": _sha(canonical_json_bytes(without_hash))}; (output_root / "index.json").write_bytes(canonical_json_bytes(index)); return index
+            index = {**without_hash, "indexSha256": _sha(canonical_json_bytes(without_hash))}; (output_root / "index.json").write_bytes(canonical_json_bytes(index)); validate_full_tree_data_truth_index(index, output_root=output_root, scope_sha256=scope_sha256, inventory=inventory); return index
         except (OSError, sqlite3.Error, KeyError, TypeError, ValueError) as error:
             if isinstance(error, FullTreeDataTruthError): raise
             raise FullTreeDataTruthError(f"cannot generate data truth: {error}") from error

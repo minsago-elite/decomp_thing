@@ -3,6 +3,13 @@ import hashlib, json, subprocess, tempfile, unittest
 from pathlib import Path
 REPOSITORY_ROOT = Path(__file__).resolve().parents[2]
 from oracle.full_tree_elf_data import FullTreeElfDataError, generate_full_tree_elf_data_index  # noqa: E402
+from oracle.full_tree_data_observations import run_full_tree_data_observations  # noqa: E402
+from oracle.full_tree_data_reconciliation import (  # noqa: E402
+    FullTreeDataReconciliationError,
+    generate_full_tree_data_reconciliation,
+    validate_full_tree_data_reconciliation,
+)
+from oracle.full_tree_data_truth import generate_full_tree_data_truth  # noqa: E402
 from oracle.full_tree_inventory import generate_inventory  # noqa: E402
 from oracle.full_tree_scope import canonical_json_bytes  # noqa: E402
 
@@ -26,10 +33,53 @@ class FullTreeElfDataTest(unittest.TestCase):
             self.assertTrue(vtables); self.assertGreater(len(vtables[0]["abi"]["slots"]), 0)
             self.assertGreater(first["counts"]["abiResolvedSlots"], 0)
             self.assertTrue(any(slot["targetKind"] == "code" for alias in vtables for slot in alias["abi"]["slots"]))
+            observations = root / "data-observations"
+            run_full_tree_data_observations(
+                rich,
+                scope=scope,
+                scope_sha256=scope_sha256,
+                inventory=inventory,
+                output_root=observations,
+                maximum_workers=1,
+            )
+            truth_root = root / "data-truth"
+            generate_full_tree_data_truth(
+                scope=scope,
+                scope_sha256=scope_sha256,
+                inventory=inventory,
+                observation_root=observations,
+                output_root=truth_root,
+            )
+            elf_path = root / "elf-data.json"
+            elf_path.write_bytes(canonical_json_bytes(first))
+            reconciliation = generate_full_tree_data_reconciliation(
+                data_truth_root=truth_root,
+                elf_data_index_path=elf_path,
+                inventory=inventory,
+                scope=scope,
+                scope_sha256=scope_sha256,
+            )
+            self.assertEqual(0, reconciliation["counts"]["unexplainedEntities"])
+            self.assertGreater(
+                reconciliation["counts"]["matchedElfGlobals"],
+                0,
+                reconciliation,
+            )
+            self.assertGreater(reconciliation["counts"]["dwarfTypes"], 0)
             forged = json.loads(json.dumps(first)); forged_vtable = next(alias for item in forged["globals"] for alias in item["aliases"] if alias["abi"] and alias["abi"]["kind"] == "vtable"); current_slot = forged_vtable["abi"]["slots"][0]["rawLittleEndian"]; forged_vtable["abi"]["slots"][0]["rawLittleEndian"] = ("ff" if current_slot == "00" * 8 else "00") * 8
             with self.assertRaisesRegex(FullTreeElfDataError, "hash"):
                 from oracle.full_tree_elf_data import validate_full_tree_elf_data_index
                 validate_full_tree_elf_data_index(forged, scope=scope, scope_sha256=scope_sha256, inventory=inventory)
+            forged_report = json.loads(json.dumps(reconciliation))
+            forged_report["globals"][0]["ownerShardIds"] = ["forged-owner"]
+            with self.assertRaisesRegex(FullTreeDataReconciliationError, "hash"):
+                validate_full_tree_data_reconciliation(
+                    forged_report,
+                    data_truth_index_sha256=hashlib.sha256((truth_root / "index.json").read_bytes()).hexdigest(),
+                    elf_data_index_sha256=hashlib.sha256(elf_path.read_bytes()).hexdigest(),
+                    inventory=inventory,
+                    scope_sha256=scope_sha256,
+                )
             substituted = json.loads(json.dumps(scope)); substituted["oracle"]["richArtifactSha256"] = "0" * 64
             with self.assertRaisesRegex(FullTreeElfDataError, "SHA-256"):
                 generate_full_tree_elf_data_index(rich, stripped, scope=substituted, scope_sha256=scope_sha256, inventory=inventory)
