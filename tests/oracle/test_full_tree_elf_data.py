@@ -13,6 +13,7 @@ from oracle.full_tree_data_truth import (  # noqa: E402
     FullTreeDataTruthError,
     _global_key,
     _merge_type_references,
+    _partition_truth_entities,
     _type_key,
     generate_full_tree_data_truth,
     validate_full_tree_data_truth_index,
@@ -26,6 +27,16 @@ from oracle.full_tree_inventory import generate_inventory  # noqa: E402
 from oracle.full_tree_scope import canonical_json_bytes  # noqa: E402
 
 class FullTreeElfDataTest(unittest.TestCase):
+    def test_truth_entities_partition_deterministically_under_byte_budget(self) -> None:
+        globals_ = [{"id": f"global-{index}", "payload": "x" * 40} for index in range(3)]
+        types = [{"id": f"type-{index}", "payload": "y" * 40} for index in range(3)]
+        first = _partition_truth_entities(globals_, types, entity_byte_budget=110)
+        second = _partition_truth_entities(globals_, types, entity_byte_budget=110)
+        self.assertEqual(first, second)
+        self.assertGreater(len(first), 1)
+        self.assertEqual(globals_, [item for partition, _ in first for item in partition])
+        self.assertEqual(types, [item for _, partition in first for item in partition])
+
     def test_dwarf_flag_present_is_a_true_boolean(self) -> None:
         class Die:
             attributes = {"DW_AT_declaration": type("Attribute", (), {"value": True})()}

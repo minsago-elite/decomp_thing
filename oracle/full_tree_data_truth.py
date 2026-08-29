@@ -14,7 +14,7 @@ class FullTreeDataTruthError(ValueError):
     """Raised when ODR-equivalent data evidence is incompatible or incomplete."""
 
 
-POLICY = {"id": "full-tree-data-truth", "version": 14, "typeIdentity": "tag-qualified-lexical-context-name-or-anonymous-declaration-with-observation-owned-lambda-and-lossy-local-contexts", "globalIdentity": "rva-or-source-aligned-name-declaration-or-producer-observation", "owner": "lowest-unit-id", "typeReferences": "exact-dwarf-offset-chain-with-conditional-bounded-authenticated-candidate-commitments-and-no-ambiguous-target-substitution", "maximumDatabaseBytes": 8 * 1024 * 1024 * 1024}
+POLICY = {"id": "full-tree-data-truth", "version": 15, "typeIdentity": "tag-qualified-lexical-context-name-or-anonymous-declaration-with-observation-owned-lambda-and-lossy-local-contexts", "globalIdentity": "rva-or-source-aligned-name-declaration-or-producer-observation", "owner": "lowest-unit-id", "typeReferences": "exact-dwarf-offset-chain-with-conditional-bounded-authenticated-candidate-commitments-and-no-ambiguous-target-substitution", "truthSharding": "inventory-owner-with-deterministic-bounded-entity-partitions", "maximumDatabaseBytes": 8 * 1024 * 1024 * 1024}
 
 REFERENCE_SAMPLE_LIMIT = 16
 
@@ -212,6 +212,35 @@ def _merge_type_references(references: Iterable[dict[str, Any]], identity: str) 
     return merged
 
 
+def _partition_truth_entities(
+    globals_: list[dict[str, Any]],
+    types: list[dict[str, Any]],
+    *,
+    entity_byte_budget: int,
+) -> list[tuple[list[dict[str, Any]], list[dict[str, Any]]]]:
+    if entity_byte_budget < 1:
+        raise FullTreeDataTruthError("data truth partition budget is invalid")
+    partitions: list[tuple[list[dict[str, Any]], list[dict[str, Any]]]] = []
+    partition_globals: list[dict[str, Any]] = []
+    partition_types: list[dict[str, Any]] = []
+    estimated_bytes = 0
+    for kind, item in itertools.chain(
+        (("global", item) for item in globals_),
+        (("type", item) for item in types),
+    ):
+        item_bytes = len(canonical_json_bytes(item)) + 1
+        if estimated_bytes and estimated_bytes + item_bytes > entity_byte_budget:
+            partitions.append((partition_globals, partition_types))
+            partition_globals = []
+            partition_types = []
+            estimated_bytes = 0
+        (partition_globals if kind == "global" else partition_types).append(item)
+        estimated_bytes += item_bytes
+    if partition_globals or partition_types:
+        partitions.append((partition_globals, partition_types))
+    return partitions or [([], [])]
+
+
 def _validate_document(document: dict[str, Any]) -> None:
     try:
         import fastjsonschema  # type: ignore[import-untyped]
@@ -292,13 +321,24 @@ def validate_full_tree_data_truth_index(
     if oracle.get("scopeSha256") != scope_sha256 or oracle.get("inventoryIndexSha256") != inventory["indexSha256"]:
         raise FullTreeDataTruthError("data truth index scope or inventory binding differs")
     expected_ids = [shard["id"] for shard in inventory["shards"]]
+    inventory_by_id = {shard["id"]: shard for shard in inventory["shards"]}
+    inventory_order = {shard_id: index for index, shard_id in enumerate(expected_ids)}
     records = index.get("shards")
-    if not isinstance(records, list) or [record.get("id") for record in records] != expected_ids:
+    if not isinstance(records, list) or {record.get("id") for record in records} != set(expected_ids) or [inventory_order.get(record.get("id"), -1) for record in records] != sorted(inventory_order.get(record.get("id"), -1) for record in records):
         raise FullTreeDataTruthError("data truth shard population or ordering differs")
     aggregate: dict[str, int] = {}
     documents: list[dict[str, Any]] = []
     type_owners: dict[str, str] = {}
-    for record, inventory_shard in zip(records, inventory["shards"], strict=True):
+    owner_positions: dict[str, int] = {}
+    owner_totals = {shard_id: sum(record.get("id") == shard_id for record in records) for shard_id in expected_ids}
+    for record in records:
+        inventory_shard = inventory_by_id[record["id"]]
+        partition_index = owner_positions.get(record["id"], 0)
+        partition_total = owner_totals[record["id"]]
+        owner_positions[record["id"]] = partition_index + 1
+        expected_path = f"shards/{record['id']}.json" if partition_total == 1 else f"shards/{record['id']}.part-{partition_index:03d}.json"
+        if record.get("path") != expected_path:
+            raise FullTreeDataTruthError(f"data truth shard {record['id']} partition path differs")
         path = output_root / record["path"]
         payload = path.read_bytes()
         if len(payload) != record["bytes"] or _sha(payload) != record["sha256"]:
@@ -306,10 +346,13 @@ def validate_full_tree_data_truth_index(
         document = json.loads(payload)
         documents.append(document)
         _validate_document(document)
-        if document["oracle"] != oracle or document["shard"] != {
+        expected_shard = {
             "id": record["id"],
             "unitIds": inventory_shard["unitIds"],
-        }:
+        }
+        if partition_total > 1:
+            expected_shard["partition"] = {"index": partition_index, "total": partition_total}
+        if document["oracle"] != oracle or document["shard"] != expected_shard:
             raise FullTreeDataTruthError(f"data truth shard {record['id']} bindings differ")
         for name, value in document["counts"].items():
             if record.get(name) != value:
@@ -447,20 +490,27 @@ def generate_full_tree_data_truth(*, scope: dict[str, Any], scope_sha256: str, i
                 _check_runtime_bounds(scope, started=started, cpu_started=cpu_started, database_path=Path(temporary.name))
                 globals_ = [json.loads(row[0]) for row in database.execute("SELECT payload FROM merged WHERE owner_shard=? AND kind='global' ORDER BY identity", (shard["id"],))]
                 types = [json.loads(row[0]) for row in database.execute("SELECT payload FROM merged WHERE owner_shard=? AND kind='type' ORDER BY identity", (shard["id"],))]
-                references = [item["typeReference"] for item in globals_] + [member["typeReference"] for item in types for member in item["members"]]
-                counts = {"ambiguousTypeReferences": sum(item["resolutionCode"] == "unresolved-authenticated-target-set" for item in references), "bases": sum(member["kind"] == "base" for item in types for member in item["members"]), "crossShardTypeReferences": sum(item["targetOwnerShardId"] is not None and item["targetOwnerShardId"] != shard["id"] for item in references), "enumerators": sum(member["kind"] == "enumerator" for item in types for member in item["members"]), "fields": sum(member["kind"] == "field" for item in types for member in item["members"]), "globals": len(globals_), "resolvedTypeReferences": sum(item["targetTypeId"] is not None for item in references), "types": len(types), "unobservableGlobals": sum(item["population"] == "unobservable" for item in globals_), "unobservableTypes": sum(item["population"] == "unobservable" for item in types), "unresolvedTypeReferences": sum(item["targetTypeId"] is None for item in references)}
-                document = {"counts": counts, "globals": globals_, "oracle": oracle, "schemaVersion": 1, "shard": {"id": shard["id"], "unitIds": shard["unitIds"]}, "types": types}
-                _validate_document(document)
-                payload = canonical_json_bytes(document)
-                entities = counts["globals"] + counts["types"]
-                if entities > scope["bounds"]["perShard"]["entities"]:
-                    raise FullTreeDataTruthError(f"data truth shard {shard['id']} exceeds its entity bound")
-                if len(payload) > scope["bounds"]["perShard"]["serializedBytes"]:
-                    raise FullTreeDataTruthError(f"data truth shard {shard['id']} has {len(payload)} bytes and exceeds its {scope['bounds']['perShard']['serializedBytes']}-byte bound")
-                total_output_bytes += len(payload)
-                relative = f"shards/{shard['id']}.json"; path = output_root / relative; path.parent.mkdir(parents=True, exist_ok=True); path.write_bytes(payload)
-                shard_records.append({"id": shard["id"], "path": relative, "bytes": len(payload), "sha256": _sha(payload), **counts})
-                for name, value in counts.items(): aggregate[name] = aggregate.get(name, 0) + value
+                partition_budget = scope["bounds"]["perShard"]["serializedBytes"] * 9 // 10
+                partitions = _partition_truth_entities(globals_, types, entity_byte_budget=partition_budget)
+                for partition_index, (partition_globals, partition_types) in enumerate(partitions):
+                    references = [item["typeReference"] for item in partition_globals] + [member["typeReference"] for item in partition_types for member in item["members"]]
+                    counts = {"ambiguousTypeReferences": sum(item["resolutionCode"] == "unresolved-authenticated-target-set" for item in references), "bases": sum(member["kind"] == "base" for item in partition_types for member in item["members"]), "crossShardTypeReferences": sum(item["targetOwnerShardId"] is not None and item["targetOwnerShardId"] != shard["id"] for item in references), "enumerators": sum(member["kind"] == "enumerator" for item in partition_types for member in item["members"]), "fields": sum(member["kind"] == "field" for item in partition_types for member in item["members"]), "globals": len(partition_globals), "resolvedTypeReferences": sum(item["targetTypeId"] is not None for item in references), "types": len(partition_types), "unobservableGlobals": sum(item["population"] == "unobservable" for item in partition_globals), "unobservableTypes": sum(item["population"] == "unobservable" for item in partition_types), "unresolvedTypeReferences": sum(item["targetTypeId"] is None for item in references)}
+                    shard_binding = {"id": shard["id"], "unitIds": shard["unitIds"]}
+                    if len(partitions) > 1:
+                        shard_binding["partition"] = {"index": partition_index, "total": len(partitions)}
+                    document = {"counts": counts, "globals": partition_globals, "oracle": oracle, "schemaVersion": 1, "shard": shard_binding, "types": partition_types}
+                    _validate_document(document)
+                    payload = canonical_json_bytes(document)
+                    entities = counts["globals"] + counts["types"]
+                    if entities > scope["bounds"]["perShard"]["entities"]:
+                        raise FullTreeDataTruthError(f"data truth shard {shard['id']} partition {partition_index} exceeds its entity bound")
+                    if len(payload) > scope["bounds"]["perShard"]["serializedBytes"]:
+                        raise FullTreeDataTruthError(f"data truth shard {shard['id']} partition {partition_index} has {len(payload)} bytes and exceeds its {scope['bounds']['perShard']['serializedBytes']}-byte bound")
+                    total_output_bytes += len(payload)
+                    relative = f"shards/{shard['id']}.json" if len(partitions) == 1 else f"shards/{shard['id']}.part-{partition_index:03d}.json"
+                    path = output_root / relative; path.parent.mkdir(parents=True, exist_ok=True); path.write_bytes(payload)
+                    shard_records.append({"id": shard["id"], "path": relative, "bytes": len(payload), "sha256": _sha(payload), **counts})
+                    for name, value in counts.items(): aggregate[name] = aggregate.get(name, 0) + value
             total_entities = aggregate.get("globals", 0) + aggregate.get("types", 0)
             if total_entities > scope["bounds"]["wholeRun"]["entities"]:
                 raise FullTreeDataTruthError("data truth exceeds its whole-run entity bound")
