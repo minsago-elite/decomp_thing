@@ -1,0 +1,556 @@
+{
+  "artifacts": [
+    {
+      "bytes": 21600,
+      "role": "call-truth-index",
+      "sha256": "68ce9b3350b5aa421710c248b1ad5cbadf1eb73721128f9eda7cd2b936789b33"
+    },
+    {
+      "bytes": 44743523,
+      "role": "data-elf-index",
+      "sha256": "6ea92c5f691878b2440842746c112fb6fdcb997d87c042eb25c37f2a66dd45bf"
+    },
+    {
+      "bytes": 6559999,
+      "role": "data-reconciliation",
+      "sha256": "5e19359c542796112668701ae91cd7ee38fff4fa19652fffe0c8588a05ddfbdf"
+    },
+    {
+      "bytes": 22142,
+      "role": "data-truth-index",
+      "sha256": "77bb19eb9fcbea981e57ba2816c0820d11c3c0b9856c3fbda35eaebed5b21db6"
+    },
+    {
+      "bytes": 166106703,
+      "role": "function-elf-index",
+      "sha256": "e0340d3ce85b8757442dae52753add264da9f92221c48d7768ca1dd77e427d58"
+    },
+    {
+      "bytes": 15356,
+      "role": "function-truth-index",
+      "sha256": "ecc9a75662a95eef05a8bd4cb62017ae0541146bb0bfaf4e94f9306227a7bcfa"
+    }
+  ],
+  "baselines": {
+    "calls": {
+      "aggregate": {
+        "denominator": 708535,
+        "exact": 671455,
+        "excluded": 813142,
+        "fabricated": 0,
+        "missing": 0,
+        "partial": 37080
+      },
+      "artifact": {
+        "bytes": 8335661,
+        "role": "calls-baseline",
+        "sha256": "6a6ff847598ce6130dd515b9fc6497f9f76c12648d90cec282c8c0a37cd300a7"
+      },
+      "reportSha256": "0885e66fb34419f20579fda32a503add51af61a85ae2179556bce61cad6e1f55"
+    },
+    "data": {
+      "aggregate": {
+        "abiObjects": {
+          "denominator": 5656,
+          "exact": 5329,
+          "excluded": 0,
+          "fabricated": 0,
+          "missing": 0,
+          "partial": 327
+        },
+        "globals": {
+          "denominator": 13732,
+          "exact": 7,
+          "excluded": 15658,
+          "fabricated": 0,
+          "missing": 1,
+          "partial": 13724
+        },
+        "types": {
+          "denominator": 261232,
+          "exact": 261232,
+          "excluded": 358505,
+          "fabricated": 0,
+          "missing": 0,
+          "partial": 0
+        }
+      },
+      "artifact": {
+        "bytes": 3622513,
+        "role": "data-baseline",
+        "sha256": "a2ac3fe54c83990f305d5745332200b607dbefd4d3ca2ec6493680ceeece3f3e"
+      },
+      "reportSha256": "9869c5492cd8ac2c26982b817a44e317a43674ec1a344a7bcc2100316e3d2ca9"
+    },
+    "functions": {
+      "aggregate": {
+        "denominator": 267944,
+        "excluded": 9,
+        "fabricated": 0,
+        "missing": 189841,
+        "recallDenominator": 267944,
+        "recallNumerator": 78103,
+        "recovered": 78103
+      },
+      "artifact": {
+        "bytes": 34700055,
+        "role": "functions-baseline",
+        "sha256": "2974c6d807c220533525995f5b88c07e45e8ed43cd72d15880895627c69ccb61"
+      },
+      "reportSha256": "994abd8f2ed72237b5b1cf702bd5b7a82266a33606dd760d40195fd5e647af22"
+    }
+  },
+  "complete": true,
+  "inventory": {
+    "compilationUnits": 2150,
+    "indexSha256": "95b00830d3ad2fe95ca8635806e03040c01ca1c93fe69c800eeb14a17bf2830d",
+    "shards": 57
+  },
+  "observations": {
+    "calls": {
+      "counts": {
+        "entities": 1521677,
+        "serializedBytes": 956663784,
+        "shards": 57
+      },
+      "determinism": {
+        "contentContractSha256": "09cd1924b74a3c02992fba6a7e2f35076038278f3d8bc34feb93b790ff629627",
+        "differingShards": [],
+        "firstIndexSha256": "72be1504fce4dd24f7611e2403dbba0b386660a91685cde316e643dd9ba3146a",
+        "firstRun": {
+          "maximumWorkers": 2,
+          "runSha256": "2cb7cf44c10bb51990cc91e23099e2e977a5d2cde2e3b645f3ca5724f8d9edd7"
+        },
+        "identical": true,
+        "reportSha256": "82bbaa66721f5ed050a8805219184a428d27256314fa6d90b3aa5799f4cbf658",
+        "schemaVersion": 2,
+        "secondIndexSha256": "f8a3475dcaf7fea6eb36bc9f97ddba72bfca0fab3a5546916a2423a48fd0648e",
+        "secondRun": {
+          "maximumWorkers": 4,
+          "runSha256": "9d2c618d2f95ea0751092af74271c889c4ec484c265f750069b0ab353bb70d73"
+        },
+        "shards": 57
+      },
+      "executions": [
+        {
+          "artifact": {
+            "bytes": 26270,
+            "role": "execution-evidence",
+            "sha256": "7f0343e7b671459263f87736488750ccd828dff102d13e9a18b4e2a456823817"
+          },
+          "bounds": {
+            "perShard": {
+              "compilationUnits": 1000,
+              "cpuSeconds": 2400,
+              "entities": 320000,
+              "maximumResidentBytes": 4294967296,
+              "serializedBytes": 536870912,
+              "wallClockSeconds": 1200
+            },
+            "wholeRun": {
+              "compilationUnits": 3000,
+              "cpuSeconds": 7200,
+              "entities": 2500000,
+              "maximumResidentBytes": 17179869184,
+              "serializedBytes": 4294967296,
+              "wallClockSeconds": 1800
+            }
+          },
+          "evidenceSha256": "04405412a58a7ea1811a7a40aa81186bc7bb78b6981956c3dcb6c4e3c9450f6b",
+          "observed": {
+            "entities": 1521677,
+            "maximumResidentBytes": 2327138304,
+            "serializedBytes": 956663784,
+            "systemCpuSeconds": 60.297447,
+            "userCpuSeconds": 1181.510173,
+            "wallClockSeconds": 744.0065428300295
+          },
+          "runSha256": "2cb7cf44c10bb51990cc91e23099e2e977a5d2cde2e3b645f3ca5724f8d9edd7"
+        },
+        {
+          "artifact": {
+            "bytes": 26287,
+            "role": "execution-evidence",
+            "sha256": "b9a654d016590fb6c783e463e72a7b332eb303c78597bdffcdf262b9ba8e8db2"
+          },
+          "bounds": {
+            "perShard": {
+              "compilationUnits": 1000,
+              "cpuSeconds": 2400,
+              "entities": 320000,
+              "maximumResidentBytes": 4294967296,
+              "serializedBytes": 536870912,
+              "wallClockSeconds": 1200
+            },
+            "wholeRun": {
+              "compilationUnits": 3000,
+              "cpuSeconds": 7200,
+              "entities": 2500000,
+              "maximumResidentBytes": 17179869184,
+              "serializedBytes": 4294967296,
+              "wallClockSeconds": 1800
+            }
+          },
+          "evidenceSha256": "0510dc966bd020e09e371dedfa8a7b31151393d5f596fa5374a9dd6a0f30ec3d",
+          "observed": {
+            "entities": 1521677,
+            "maximumResidentBytes": 2318200832,
+            "serializedBytes": 956663784,
+            "systemCpuSeconds": 72.879135,
+            "userCpuSeconds": 1760.826354,
+            "wallClockSeconds": 631.0043563218787
+          },
+          "runSha256": "9d2c618d2f95ea0751092af74271c889c4ec484c265f750069b0ab353bb70d73"
+        }
+      ],
+      "indexes": [
+        {
+          "bytes": 24504,
+          "role": "calls-observations-first",
+          "sha256": "72be1504fce4dd24f7611e2403dbba0b386660a91685cde316e643dd9ba3146a"
+        },
+        {
+          "bytes": 24504,
+          "role": "calls-observations-second",
+          "sha256": "f8a3475dcaf7fea6eb36bc9f97ddba72bfca0fab3a5546916a2423a48fd0648e"
+        }
+      ]
+    },
+    "data": {
+      "counts": {
+        "entities": 1662172,
+        "serializedBytes": 2571361899,
+        "shards": 57
+      },
+      "determinism": {
+        "contentContractSha256": "4add7d21f8394e72ba0180d4106da8f073eda75cd5d97fa5f753cf84774594df",
+        "differingShards": [],
+        "firstIndexSha256": "e2365f6171f256c54993d5aaa677855a8bae77e70e956fe204a868958359b88c",
+        "firstRun": {
+          "maximumWorkers": 4,
+          "runSha256": "cb837d67308d80d7deb71d90b92dfa558049b81681db1803b6dae1c46260415a"
+        },
+        "identical": true,
+        "reportSha256": "dcf1bfb1953c398b411aaa166117493de31a46c37cda9bbf68b7f4abe61516e7",
+        "schemaVersion": 2,
+        "secondIndexSha256": "e2365f6171f256c54993d5aaa677855a8bae77e70e956fe204a868958359b88c",
+        "secondRun": {
+          "maximumWorkers": 4,
+          "runSha256": "cb837d67308d80d7deb71d90b92dfa558049b81681db1803b6dae1c46260415a"
+        },
+        "shards": 57
+      },
+      "executions": [
+        {
+          "artifact": {
+            "bytes": 26322,
+            "role": "execution-evidence",
+            "sha256": "1e68b44c63071d96befd268515bc3c0527a66c4d6b33ce82e5be764d93d3aaaa"
+          },
+          "bounds": {
+            "perShard": {
+              "compilationUnits": 1000,
+              "cpuSeconds": 2400,
+              "entities": 320000,
+              "maximumResidentBytes": 4294967296,
+              "serializedBytes": 536870912,
+              "wallClockSeconds": 1200
+            },
+            "wholeRun": {
+              "compilationUnits": 3000,
+              "cpuSeconds": 7200,
+              "entities": 2500000,
+              "maximumResidentBytes": 17179869184,
+              "serializedBytes": 4294967296,
+              "wallClockSeconds": 1800
+            }
+          },
+          "evidenceSha256": "0bbbd29d30ba989999bfa7e7ff0b775147426f01e95faa846f51f360912bf673",
+          "observed": {
+            "entities": 1662172,
+            "maximumResidentBytes": 2840469504,
+            "serializedBytes": 2571361899,
+            "systemCpuSeconds": 77.780756,
+            "userCpuSeconds": 1923.450254,
+            "wallClockSeconds": 700.1807095140684
+          },
+          "runSha256": "cb837d67308d80d7deb71d90b92dfa558049b81681db1803b6dae1c46260415a"
+        },
+        {
+          "artifact": {
+            "bytes": 26337,
+            "role": "execution-evidence",
+            "sha256": "4ab2838686d33882516e5453c481bd2dd349e5e782c1b7f83e2bebc507b2348f"
+          },
+          "bounds": {
+            "perShard": {
+              "compilationUnits": 1000,
+              "cpuSeconds": 2400,
+              "entities": 320000,
+              "maximumResidentBytes": 4294967296,
+              "serializedBytes": 536870912,
+              "wallClockSeconds": 1200
+            },
+            "wholeRun": {
+              "compilationUnits": 3000,
+              "cpuSeconds": 7200,
+              "entities": 2500000,
+              "maximumResidentBytes": 17179869184,
+              "serializedBytes": 4294967296,
+              "wallClockSeconds": 1800
+            }
+          },
+          "evidenceSha256": "1a54a93a245b0c78cbcb86f3e1d6b2048eaf4164e45c64f5dd1df8cb48526e76",
+          "observed": {
+            "entities": 1662172,
+            "maximumResidentBytes": 2855227392,
+            "serializedBytes": 2571361899,
+            "systemCpuSeconds": 78.516605,
+            "userCpuSeconds": 1967.683941,
+            "wallClockSeconds": 708.491666581016
+          },
+          "runSha256": "cb837d67308d80d7deb71d90b92dfa558049b81681db1803b6dae1c46260415a"
+        }
+      ],
+      "indexes": [
+        {
+          "bytes": 24533,
+          "role": "data-observations-first",
+          "sha256": "e2365f6171f256c54993d5aaa677855a8bae77e70e956fe204a868958359b88c"
+        },
+        {
+          "bytes": 24533,
+          "role": "data-observations-second",
+          "sha256": "e2365f6171f256c54993d5aaa677855a8bae77e70e956fe204a868958359b88c"
+        }
+      ]
+    },
+    "functions": {
+      "counts": {
+        "entities": 1512960,
+        "serializedBytes": 1985159826,
+        "shards": 57
+      },
+      "determinism": {
+        "contentContractSha256": "ff46abbd41dbc22beb0d6c72032282fe55df9171251295bad438d828ae8d07e1",
+        "differingShards": [],
+        "firstIndexSha256": "e0b70cdd5750e1456b403a385b659a7911ea144524576f55e1fcdf41a4fcfc14",
+        "firstRun": {
+          "maximumWorkers": 2,
+          "runSha256": "be76c77767640b7f09a6d1a9a96fd38c5f0d96c0e577d5a1f2a408947e43bab3"
+        },
+        "identical": true,
+        "reportSha256": "9f6df9db7d73e6dd23e42cbd246e807ed7eb4f5b334f6027cd975050fda53ddb",
+        "schemaVersion": 2,
+        "secondIndexSha256": "e0b70cdd5750e1456b403a385b659a7911ea144524576f55e1fcdf41a4fcfc14",
+        "secondRun": {
+          "maximumWorkers": 2,
+          "runSha256": "be76c77767640b7f09a6d1a9a96fd38c5f0d96c0e577d5a1f2a408947e43bab3"
+        },
+        "shards": 57
+      },
+      "executions": [
+        {
+          "artifact": {
+            "bytes": 26292,
+            "role": "execution-evidence",
+            "sha256": "e0c803ace8e1d310d0a55344f3e415767b4c4c2ed40fd79f93e2f5759adaeb2f"
+          },
+          "bounds": {
+            "perShard": {
+              "compilationUnits": 1000,
+              "cpuSeconds": 2400,
+              "entities": 320000,
+              "maximumResidentBytes": 4294967296,
+              "serializedBytes": 536870912,
+              "wallClockSeconds": 1200
+            },
+            "wholeRun": {
+              "compilationUnits": 3000,
+              "cpuSeconds": 7200,
+              "entities": 2500000,
+              "maximumResidentBytes": 17179869184,
+              "serializedBytes": 4294967296,
+              "wallClockSeconds": 1800
+            }
+          },
+          "evidenceSha256": "9731c6fea59f9632419cb159cfd79d4d586bbf180f33d6134c854c0e42b7c902",
+          "observed": {
+            "entities": 1512960,
+            "maximumResidentBytes": 3167035392,
+            "serializedBytes": 1985159826,
+            "systemCpuSeconds": 79.261147,
+            "userCpuSeconds": 1310.362793,
+            "wallClockSeconds": 862.242052257061
+          },
+          "runSha256": "be76c77767640b7f09a6d1a9a96fd38c5f0d96c0e577d5a1f2a408947e43bab3"
+        },
+        {
+          "artifact": {
+            "bytes": 26275,
+            "role": "execution-evidence",
+            "sha256": "d54913ee22d8fff2c69d81fdcd678df2e9c283b34983808c09f46e816f86be67"
+          },
+          "bounds": {
+            "perShard": {
+              "compilationUnits": 1000,
+              "cpuSeconds": 2400,
+              "entities": 320000,
+              "maximumResidentBytes": 4294967296,
+              "serializedBytes": 536870912,
+              "wallClockSeconds": 1200
+            },
+            "wholeRun": {
+              "compilationUnits": 3000,
+              "cpuSeconds": 7200,
+              "entities": 2500000,
+              "maximumResidentBytes": 17179869184,
+              "serializedBytes": 4294967296,
+              "wallClockSeconds": 1800
+            }
+          },
+          "evidenceSha256": "e827887409750f52791d28272d90376cd1cc50a5d68507871701c92cd026e430",
+          "observed": {
+            "entities": 1512960,
+            "maximumResidentBytes": 3171037184,
+            "serializedBytes": 1985159826,
+            "systemCpuSeconds": 77.780983,
+            "userCpuSeconds": 1305.066792,
+            "wallClockSeconds": 850.3774184659123
+          },
+          "runSha256": "be76c77767640b7f09a6d1a9a96fd38c5f0d96c0e577d5a1f2a408947e43bab3"
+        }
+      ],
+      "indexes": [
+        {
+          "bytes": 24529,
+          "role": "functions-observations-first",
+          "sha256": "e0b70cdd5750e1456b403a385b659a7911ea144524576f55e1fcdf41a4fcfc14"
+        },
+        {
+          "bytes": 24529,
+          "role": "functions-observations-second",
+          "sha256": "e0b70cdd5750e1456b403a385b659a7911ea144524576f55e1fcdf41a4fcfc14"
+        }
+      ]
+    }
+  },
+  "oracle": {
+    "richArtifactSha256": "c36ea7da092273ee53d6955557cd8eb7dcd38da92e1f577249968330a275981a",
+    "scopeSha256": "48d15d0db12c67944473feae016123195cf9e1da37c5849d9131ba31248c4b57",
+    "strippedArtifactSha256": "65e57857bfaf9f98a552f2fd371938e11175158bc4c11c849bd6ecbfef30c006"
+  },
+  "reconciliation": {
+    "abiObjects": 5656,
+    "abiResolvedSlots": 153145,
+    "abiSlots": 153538,
+    "dwarfGlobals": 15666,
+    "dwarfOnlyScoredGlobals": 1,
+    "dwarfScoredGlobals": 8,
+    "dwarfTypes": 619737,
+    "dwarfUnobservableGlobals": 15658,
+    "elfGlobals": 13731,
+    "elfOnlyGlobals": 13724,
+    "matchedElfGlobals": 7,
+    "unexplainedEntities": 0
+  },
+  "reportSha256": "02e74c5f72fe71585c7cc24e49a2668ee5bd41c7190bfcaf3b91e06b5e2b9ddc",
+  "schemaVersion": 1,
+  "truth": {
+    "calls": {
+      "counts": {
+        "directInternal": 790081,
+        "edges": 1521677,
+        "external": 12420,
+        "indirectUnresolved": 719176,
+        "observations": 1521677,
+        "unobservable": 813142
+      },
+      "determinism": {
+        "differingFiles": [],
+        "files": 58,
+        "firstIndexSha256": "68ce9b3350b5aa421710c248b1ad5cbadf1eb73721128f9eda7cd2b936789b33",
+        "identical": true,
+        "reportSha256": "42ec6cfc09c4daf86698c301d9e9f1d0428bf6468830c4aac53a1803a8d59bca",
+        "schemaVersion": 1,
+        "secondIndexSha256": "68ce9b3350b5aa421710c248b1ad5cbadf1eb73721128f9eda7cd2b936789b33"
+      },
+      "indexes": [
+        {
+          "bytes": 21600,
+          "role": "calls-truth-first",
+          "sha256": "68ce9b3350b5aa421710c248b1ad5cbadf1eb73721128f9eda7cd2b936789b33"
+        },
+        {
+          "bytes": 21600,
+          "role": "calls-truth-second",
+          "sha256": "68ce9b3350b5aa421710c248b1ad5cbadf1eb73721128f9eda7cd2b936789b33"
+        }
+      ]
+    },
+    "data": {
+      "counts": {
+        "bases": 85176,
+        "enumerators": 2174808,
+        "fields": 212430,
+        "globals": 15666,
+        "types": 619737,
+        "unobservableGlobals": 15658,
+        "unobservableTypes": 358505
+      },
+      "determinism": {
+        "differingFiles": [],
+        "files": 58,
+        "firstIndexSha256": "77bb19eb9fcbea981e57ba2816c0820d11c3c0b9856c3fbda35eaebed5b21db6",
+        "identical": true,
+        "reportSha256": "58939321be4275bcfa25fa540987032358a229600167379c0739ff501f18da35",
+        "schemaVersion": 1,
+        "secondIndexSha256": "77bb19eb9fcbea981e57ba2816c0820d11c3c0b9856c3fbda35eaebed5b21db6"
+      },
+      "indexes": [
+        {
+          "bytes": 22142,
+          "role": "data-truth-first",
+          "sha256": "77bb19eb9fcbea981e57ba2816c0820d11c3c0b9856c3fbda35eaebed5b21db6"
+        },
+        {
+          "bytes": 22142,
+          "role": "data-truth-second",
+          "sha256": "77bb19eb9fcbea981e57ba2816c0820d11c3c0b9856c3fbda35eaebed5b21db6"
+        }
+      ]
+    },
+    "functions": {
+      "counts": {
+        "dwarfOnlyRvas": 1,
+        "dwarfRvas": 267945,
+        "elfOnlyRvas": 8,
+        "elfRvas": 267952,
+        "inlineObservations": 1245015,
+        "inlineUnique": 988799,
+        "scoredRvas": 267944
+      },
+      "determinism": {
+        "differingFiles": [],
+        "files": 59,
+        "firstIndexSha256": "ecc9a75662a95eef05a8bd4cb62017ae0541146bb0bfaf4e94f9306227a7bcfa",
+        "identical": true,
+        "reportSha256": "5f63231e6d120d57c51cdce145b6163035e06fdece62c84bd82b50dfaf5987f2",
+        "schemaVersion": 1,
+        "secondIndexSha256": "ecc9a75662a95eef05a8bd4cb62017ae0541146bb0bfaf4e94f9306227a7bcfa"
+      },
+      "indexes": [
+        {
+          "bytes": 15356,
+          "role": "functions-truth-first",
+          "sha256": "ecc9a75662a95eef05a8bd4cb62017ae0541146bb0bfaf4e94f9306227a7bcfa"
+        },
+        {
+          "bytes": 15356,
+          "role": "functions-truth-second",
+          "sha256": "ecc9a75662a95eef05a8bd4cb62017ae0541146bb0bfaf4e94f9306227a7bcfa"
+        }
+      ]
+    }
+  }
+}

@@ -72,6 +72,17 @@ reference compiler first creates the authenticated PCH, its length and SHA-256
 are verified, and only then is that exact artifact injected into the reuse
 case.
 
+## Full-tree structural evidence
+
+The checked [A13 summary](full-tree-release-evidence.md) and canonical
+`full-tree-release-evidence.json` bind the 2,150-unit, 57-shard production
+pass to the source/artifact locks. The release gate independently validates
+function, call, global/type, ELF, ABI, reconciliation, resource, determinism,
+and per-shard baseline evidence before it writes either report. Run
+`scripts/generate-llvm-full-tree-release-evidence.py --help` for the complete
+reproduction interface; every large input is identified in the machine report
+by byte length and SHA-256 rather than by a local path.
+
 ## Verify
 
 Install the exact Python generation dependencies, then run:
