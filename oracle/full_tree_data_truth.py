@@ -14,7 +14,7 @@ class FullTreeDataTruthError(ValueError):
     """Raised when ODR-equivalent data evidence is incompatible or incomplete."""
 
 
-POLICY = {"id": "full-tree-data-truth", "version": 3, "typeIdentity": "tag-qualified-lexical-context-name-declaration-with-producer-unit-for-anonymous-namespace-or-observation", "globalIdentity": "rva-or-name-declaration", "owner": "lowest-unit-id"}
+POLICY = {"id": "full-tree-data-truth", "version": 4, "typeIdentity": "tag-qualified-lexical-context-name-declaration-with-producer-unit-for-anonymous-namespace-or-observation", "globalIdentity": "rva-or-name-declaration", "owner": "lowest-unit-id", "maximumDatabaseBytes": 8 * 1024 * 1024 * 1024}
 
 
 def _sha(payload: bytes) -> str:
@@ -35,7 +35,7 @@ def _check_runtime_bounds(
         raise FullTreeDataTruthError("data truth merge exceeded its CPU-time bound")
     if int(resource.getrusage(resource.RUSAGE_SELF).ru_maxrss) * 1024 > bounds["maximumResidentBytes"]:
         raise FullTreeDataTruthError("data truth merge exceeded its resident-byte bound")
-    if database_path.exists() and database_path.stat().st_size > bounds["serializedBytes"]:
+    if database_path.exists() and database_path.stat().st_size > POLICY["maximumDatabaseBytes"]:
         raise FullTreeDataTruthError("data truth merge database exceeded its byte bound")
 
 
@@ -194,7 +194,7 @@ def generate_full_tree_data_truth(*, scope: dict[str, Any], scope_sha256: str, i
                     merged = {"addressRva": address, "alignment": _one_compatible(records, "alignment", identity), "declarations": _unique(records, "declaration"), "external": bool(_one_compatible(records, "external", identity) or False), "id": f"global-{identity[:32]}", "mutability": _one_compatible(records, "mutability", identity) or "unknown", "names": sorted({name for item in records for name in item["names"]}), "observationIds": sorted(item["id"] for item in records), "ownerUnitId": owner, "population": "scored" if address is not None else "unobservable", "reasonCode": None if address is not None else records[0]["reasonCode"], "size": _one_compatible(records, "size", identity), "tls": bool(_one_compatible(records, "tls", identity) or False), "visibility": _one_compatible(records, "visibility", identity) or "unknown"}
                 database.execute("INSERT INTO merged VALUES (?,?,?,?)", (kind, unit_to_shard[owner], identity, canonical_json_bytes(merged)))
             database.commit()
-            shard_records = []; aggregate: dict[str, int] = {}
+            shard_records = []; aggregate: dict[str, int] = {}; total_output_bytes = 0
             for shard in inventory["shards"]:
                 _check_runtime_bounds(scope, started=started, cpu_started=cpu_started, database_path=Path(temporary.name))
                 globals_ = [json.loads(row[0]) for row in database.execute("SELECT payload FROM merged WHERE owner_shard=? AND kind='global' ORDER BY identity", (shard["id"],))]
@@ -202,9 +202,21 @@ def generate_full_tree_data_truth(*, scope: dict[str, Any], scope_sha256: str, i
                 counts = {"bases": sum(member["kind"] == "base" for item in types for member in item["members"]), "enumerators": sum(member["kind"] == "enumerator" for item in types for member in item["members"]), "fields": sum(member["kind"] == "field" for item in types for member in item["members"]), "globals": len(globals_), "types": len(types), "unobservableGlobals": sum(item["population"] == "unobservable" for item in globals_), "unobservableTypes": sum(item["population"] == "unobservable" for item in types)}
                 document = {"counts": counts, "globals": globals_, "oracle": oracle, "schemaVersion": 1, "shard": {"id": shard["id"], "unitIds": shard["unitIds"]}, "types": types}
                 _validate_document(document)
-                payload = canonical_json_bytes(document); relative = f"shards/{shard['id']}.json"; path = output_root / relative; path.parent.mkdir(parents=True, exist_ok=True); path.write_bytes(payload)
+                payload = canonical_json_bytes(document)
+                entities = counts["globals"] + counts["types"]
+                if entities > scope["bounds"]["perShard"]["entities"]:
+                    raise FullTreeDataTruthError(f"data truth shard {shard['id']} exceeds its entity bound")
+                if len(payload) > scope["bounds"]["perShard"]["serializedBytes"]:
+                    raise FullTreeDataTruthError(f"data truth shard {shard['id']} exceeds its byte bound")
+                total_output_bytes += len(payload)
+                relative = f"shards/{shard['id']}.json"; path = output_root / relative; path.parent.mkdir(parents=True, exist_ok=True); path.write_bytes(payload)
                 shard_records.append({"id": shard["id"], "path": relative, "bytes": len(payload), "sha256": _sha(payload), **counts})
                 for name, value in counts.items(): aggregate[name] = aggregate.get(name, 0) + value
+            total_entities = aggregate.get("globals", 0) + aggregate.get("types", 0)
+            if total_entities > scope["bounds"]["wholeRun"]["entities"]:
+                raise FullTreeDataTruthError("data truth exceeds its whole-run entity bound")
+            if total_output_bytes > scope["bounds"]["wholeRun"]["serializedBytes"]:
+                raise FullTreeDataTruthError("data truth exceeds its whole-run output bound")
             without_hash = {"complete": True, "counts": dict(sorted(aggregate.items())), "oracle": oracle, "schemaVersion": 1, "shards": shard_records}
             index = {**without_hash, "indexSha256": _sha(canonical_json_bytes(without_hash))}; (output_root / "index.json").write_bytes(canonical_json_bytes(index)); validate_full_tree_data_truth_index(index, output_root=output_root, scope_sha256=scope_sha256, inventory=inventory); return index
         except (OSError, sqlite3.Error, KeyError, TypeError, ValueError) as error:
