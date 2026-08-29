@@ -1,0 +1,48 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://github.com/minsago-elite/decomp_thing/oracle/full-tree-data-truth-index.schema.json",
+  "title": "Canonical full-tree data-truth index",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schemaVersion", "complete", "oracle", "counts", "shards", "indexSha256"],
+  "properties": {
+    "schemaVersion": {"const": 1},
+    "complete": {"const": true},
+    "oracle": {"type": "object"},
+    "counts": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["globals", "types", "unobservableGlobals", "unobservableTypes", "fields", "bases", "enumerators"],
+      "properties": {
+        "globals": {"type": "integer", "minimum": 0},
+        "types": {"type": "integer", "minimum": 0},
+        "unobservableGlobals": {"type": "integer", "minimum": 0},
+        "unobservableTypes": {"type": "integer", "minimum": 0},
+        "fields": {"type": "integer", "minimum": 0},
+        "bases": {"type": "integer", "minimum": 0},
+        "enumerators": {"type": "integer", "minimum": 0}
+      }
+    },
+    "shards": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "required": ["id", "path", "bytes", "sha256", "globals", "types", "unobservableGlobals", "unobservableTypes", "fields", "bases", "enumerators"],
+        "properties": {
+          "id": {"type": "string"},
+          "path": {"type": "string"},
+          "bytes": {"type": "integer", "minimum": 0},
+          "sha256": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
+          "globals": {"type": "integer", "minimum": 0},
+          "types": {"type": "integer", "minimum": 0},
+          "unobservableGlobals": {"type": "integer", "minimum": 0},
+          "unobservableTypes": {"type": "integer", "minimum": 0},
+          "fields": {"type": "integer", "minimum": 0},
+          "bases": {"type": "integer", "minimum": 0},
+          "enumerators": {"type": "integer", "minimum": 0}
+        }
+      }
+    },
+    "indexSha256": {"type": "string", "pattern": "^[0-9a-f]{64}$"}
+  }
+}

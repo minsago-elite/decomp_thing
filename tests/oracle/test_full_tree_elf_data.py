@@ -10,6 +10,11 @@ from oracle.full_tree_data_reconciliation import (  # noqa: E402
     validate_full_tree_data_reconciliation,
 )
 from oracle.full_tree_data_truth import generate_full_tree_data_truth  # noqa: E402
+from oracle.full_tree_data_baseline import (  # noqa: E402
+    FullTreeDataBaselineError,
+    generate_full_tree_data_baseline,
+    require_no_data_baseline_regression,
+)
 from oracle.full_tree_inventory import generate_inventory  # noqa: E402
 from oracle.full_tree_scope import canonical_json_bytes  # noqa: E402
 
@@ -66,6 +71,34 @@ class FullTreeElfDataTest(unittest.TestCase):
                 reconciliation,
             )
             self.assertGreater(reconciliation["counts"]["dwarfTypes"], 0)
+            reconciliation_path = root / "data-reconciliation.json"
+            reconciliation_path.write_bytes(canonical_json_bytes(reconciliation))
+            baseline = generate_full_tree_data_baseline(
+                data_truth_root=truth_root,
+                reconciliation_report_path=reconciliation_path,
+                inventory=inventory,
+                scope_sha256=scope_sha256,
+            )
+            self.assertGreater(baseline["aggregate"]["types"]["exact"], 0)
+            self.assertEqual(
+                baseline["aggregate"]["globals"]["denominator"],
+                baseline["aggregate"]["globals"]["exact"]
+                + baseline["aggregate"]["globals"]["partial"]
+                + baseline["aggregate"]["globals"]["missing"],
+            )
+            require_no_data_baseline_regression(baseline, baseline)
+            regressed = json.loads(json.dumps(baseline))
+            owner = next(
+                shard for shard in regressed["shards"] if shard["types"]["exact"]
+            )
+            owner["types"]["exact"] -= 1
+            owner["types"]["partial"] += 1
+            regressed["aggregate"]["types"]["exact"] -= 1
+            regressed["aggregate"]["types"]["partial"] += 1
+            without_hash = {key: value for key, value in regressed.items() if key != "reportSha256"}
+            regressed["reportSha256"] = hashlib.sha256(canonical_json_bytes(without_hash)).hexdigest()
+            with self.assertRaisesRegex(FullTreeDataBaselineError, "regressed"):
+                require_no_data_baseline_regression(regressed, baseline)
             forged = json.loads(json.dumps(first)); forged_vtable = next(alias for item in forged["globals"] for alias in item["aliases"] if alias["abi"] and alias["abi"]["kind"] == "vtable"); current_slot = forged_vtable["abi"]["slots"][0]["rawLittleEndian"]; forged_vtable["abi"]["slots"][0]["rawLittleEndian"] = ("ff" if current_slot == "00" * 8 else "00") * 8
             with self.assertRaisesRegex(FullTreeElfDataError, "hash"):
                 from oracle.full_tree_elf_data import validate_full_tree_elf_data_index

@@ -91,8 +91,15 @@ def validate_full_tree_data_truth_index(
 ) -> None:
     """Validate every data-truth shard and its independently hashed index."""
 
-    if index.get("schemaVersion") != 1 or index.get("complete") is not True:
-        raise FullTreeDataTruthError("data truth index is not complete schema version 1")
+    try:
+        import fastjsonschema  # type: ignore[import-untyped]
+
+        schema = json.loads(
+            Path(__file__).with_name("full-tree-data-truth-index.schema.json").read_text(encoding="utf-8")
+        )
+        fastjsonschema.compile(schema)(index)
+    except Exception as error:
+        raise FullTreeDataTruthError(f"data truth index fails schema validation: {error}") from error
     without_hash = {key: value for key, value in index.items() if key != "indexSha256"}
     if index.get("indexSha256") != _sha(canonical_json_bytes(without_hash)):
         raise FullTreeDataTruthError("data truth index hash does not reconcile")
