@@ -88,6 +88,44 @@ the oracle test suite. The
 documents clean reproduction and the CI gate. GCC remains one substantial C
 benchmark, not an engine-specific code path.
 
+## Compiler-engine benchmark twins
+
+`compiler-engines.json` extends the same authenticated source and toolchain
+profile to the installed `cc1` and `lto1` programs. It supplies the benchmark
+export/planning ceilings (30 minutes and 16 GiB) as profile data rather than
+generic defaults. The derived build records and oracle manifests bind these
+clean-build ELF pairs:
+
+- `cc1`: full `ba9b2f314bfb3d92a172e67f8ce993a2e98b9bc14aabf00ff6d58e4631037621`
+  (374,477,144 bytes), stripped
+  `e51bf6e3f3300d31ce9713e2160c6fe5895d1e4914fb25562c3542b161427905`
+  (41,935,768 bytes).
+- `lto1`: full `255246e259b194e40fb3f053eafad5a9fdada983404bdae90fc1b9fddfa585e1`
+  (362,827,816 bytes), stripped
+  `35d73b94b8e33cd482095016de28ebaa4e71835720e39b7c5aa82206b562361f`
+  (40,497,008 bytes).
+
+The compiler-engine runner first reproduces and authenticates the base driver
+build, then stages and strips both engines from that retained build. Initial
+manifests are written outside the repository. Promotion is a separate
+fail-closed operation that requires byte equality with the manifests retained
+in the clean-build workspace:
+
+```bash
+python3 scripts/rebuild-gcc-compiler-engines.py \
+  --workspace /absolute/path/to/clean-workspace \
+  --source-cache /absolute/path/to/authenticated-cache \
+  --candidate-manifest-root /absolute/path/to/candidates
+python3 scripts/rebuild-gcc-compiler-engines.py \
+  --workspace /absolute/path/to/clean-workspace \
+  --candidate-manifest-root /absolute/path/to/candidates \
+  --promote-existing
+```
+
+These twins establish authenticated A10 inputs. Reconstruction archives,
+engine-specific structural truth, and integrated behavior evidence remain
+separate gates and cannot be inferred from the presence of these manifests.
+
 ## Driver behavior benchmark
 
 The adjacent behavior corpus is a thin GCC 16.2.0 profile of the

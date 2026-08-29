@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import copy
+import hashlib
 import json
 from pathlib import Path
 import shutil
@@ -30,6 +31,38 @@ class GccCompilerEngineProfileTest(unittest.TestCase):
             self.assertEqual(engine["fullArtifact"], record["outputs"]["full"])
             checked = PROFILE.parent / engine["buildRecord"]
             self.assertEqual(canonical_json_bytes(record), checked.read_bytes())
+
+    def test_clean_build_manifests_bind_both_compiler_engine_twins(self) -> None:
+        expected = {
+            "cc1": {
+                "full": (374477144, "ba9b2f314bfb3d92a172e67f8ce993a2e98b9bc14aabf00ff6d58e4631037621"),
+                "stripped": (41935768, "e51bf6e3f3300d31ce9713e2160c6fe5895d1e4914fb25562c3542b161427905"),
+            },
+            "lto1": {
+                "full": (362827816, "255246e259b194e40fb3f053eafad5a9fdada983404bdae90fc1b9fddfa585e1"),
+                "stripped": (40497008, "35d73b94b8e33cd482095016de28ebaa4e71835720e39b7c5aa82206b562361f"),
+            },
+        }
+        profile, records = load_compiler_engine_profile(PROFILE)
+        for engine in profile["engines"]:
+            identifier = engine["id"]
+            manifest_path = PROFILE.parent / engine["oracleManifest"]
+            manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+            self.assertEqual(
+                {
+                    "bytes": len(canonical_json_bytes(records[identifier])),
+                    "path": engine["buildRecord"],
+                    "sha256": hashlib.sha256(canonical_json_bytes(records[identifier])).hexdigest(),
+                },
+                manifest["inputs"]["buildRecord"],
+            )
+            for role, (size, digest) in expected[identifier].items():
+                self.assertEqual(size, manifest["artifacts"][role]["bytes"])
+                self.assertEqual(digest, manifest["artifacts"][role]["sha256"])
+                self.assertEqual(
+                    records[identifier]["outputs"][role],
+                    manifest["artifacts"][role]["path"],
+                )
 
     def test_cross_engine_substitution_unknown_fields_and_hash_drift_fail_closed(self) -> None:
         base = json.loads(PROFILE.read_text(encoding="utf-8"))
