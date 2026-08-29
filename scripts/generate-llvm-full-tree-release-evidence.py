@@ -32,6 +32,7 @@ def main() -> int:
     parser.add_argument("--source-lock", type=Path, default=profile / "source-lock.json")
     parser.add_argument("--manifest", type=Path, default=profile / "oracle-manifest.json")
     parser.add_argument("--inventory", type=Path, default=profile / "full-tree-inventory.json")
+    parser.add_argument("--source-inventory", type=Path, default=profile / "full-tree-source-inventory.json")
     parser.add_argument("--function-elf", type=Path, required=True)
     _pair(parser, "function-observations"); _pair(parser, "function-truth")
     parser.add_argument("--function-baseline", type=Path, required=True)
@@ -49,6 +50,7 @@ def main() -> int:
         inventory = json.loads(arguments.inventory.read_text(encoding="utf-8"))
         report = generate_full_tree_release_evidence(
             scope=scope, scope_sha256=hashlib.sha256(arguments.scope.read_bytes()).hexdigest(), inventory=inventory,
+            source_inventory_path=arguments.source_inventory,
             function_elf_path=arguments.function_elf,
             function_observation_roots=(arguments.function_observations_first, arguments.function_observations_second),
             function_truth_roots=(arguments.function_truth_first, arguments.function_truth_second), function_baseline_path=arguments.function_baseline,

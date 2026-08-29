@@ -14,6 +14,8 @@ Scope `48d15d0db12c67944473feae016123195cf9e1da37c5849d9131ba31248c4b57` covers 
 | Canonical aggregate types | 619,737 |
 | ABI objects | 5,656 |
 | ABI slots | 153,538 |
+| Source-only translation units | 2,325 |
+| TableGen inputs | 1,666 |
 
 | Baseline | Exact/recovered | Partial | Missing | Excluded | Fabricated |
 | --- | ---: | ---: | ---: | ---: | ---: |
@@ -23,4 +25,4 @@ Scope `48d15d0db12c67944473feae016123195cf9e1da37c5849d9131ba31248c4b57` covers 
 | Data: types | 261,232 | 0 | 0 | 358,505 | 0 |
 | Data: abiObjects | 5,329 | 327 | 0 | 0 | 0 |
 
-Machine report SHA-256: `02e74c5f72fe71585c7cc24e49a2668ee5bd41c7190bfcaf3b91e06b5e2b9ddc`
+Machine report SHA-256: `0b806fa10d19110bfa8b877f7c532867d082944f56a6441e46df753d2e5f9ffc`

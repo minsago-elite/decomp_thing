@@ -84,7 +84,7 @@ reproduction interface; every large input is identified in the machine report
 by byte length and SHA-256 rather than by a local path.
 
 The complete canonical observation/truth shards are published under the
-non-moving [`clang-llvm-22.1.6-a13-v1`](https://github.com/minsago-elite/decomp_thing-oracle-artifacts/releases/tag/clang-llvm-22.1.6-a13-v1)
+non-moving [`clang-llvm-22.1.6-a13-v2`](https://github.com/minsago-elite/decomp_thing-oracle-artifacts/releases/tag/clang-llvm-22.1.6-a13-v2)
 release. `full-tree-release-assets.json` locks every asset URL, byte length,
 and SHA-256 digest.
 

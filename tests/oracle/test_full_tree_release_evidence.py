@@ -87,6 +87,7 @@ class FullTreeReleaseEvidenceTest(unittest.TestCase):
             "oracle": {"richArtifactSha256": SHA, "scopeSha256": SHA, "strippedArtifactSha256": SHA},
             "reconciliation": {"abiObjects": 1, "abiSlots": 1, "unexplainedEntities": 0},
             "schemaVersion": 1,
+            "sourceInventory": {"artifact": _artifact("source-inventory"), "counts": {"sourceOnlyUnits": 1, "tablegenInputs": 1}, "reportSha256": SHA},
             "truth": {
                 "calls": {**truth_stage, "counts": {"directInternal": 1, "edges": 1, "external": 0, "indirectUnresolved": 0}},
                 "data": {**truth_stage, "counts": {"globals": 1, "types": 1}},

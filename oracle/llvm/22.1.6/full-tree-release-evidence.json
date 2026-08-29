@@ -454,8 +454,24 @@
     "matchedElfGlobals": 7,
     "unexplainedEntities": 0
   },
-  "reportSha256": "02e74c5f72fe71585c7cc24e49a2668ee5bd41c7190bfcaf3b91e06b5e2b9ddc",
+  "reportSha256": "0b806fa10d19110bfa8b877f7c532867d082944f56a6441e46df753d2e5f9ffc",
   "schemaVersion": 1,
+  "sourceInventory": {
+    "artifact": {
+      "bytes": 1275638,
+      "role": "source-inventory",
+      "sha256": "33e53beb62221888abbf5e198a4da2abe3b5c29c809bb90f1faff15c3829edc4"
+    },
+    "counts": {
+      "candidateTranslationUnits": 4474,
+      "disabledProjects": 21,
+      "generatedCompilationUnits": 1,
+      "linkedSourceUnits": 2149,
+      "sourceOnlyUnits": 2325,
+      "tablegenInputs": 1666
+    },
+    "reportSha256": "a1b552d01d412c48635e56b09d74d456957fc901fa7f811ababd7f64d8226c4c"
+  },
   "truth": {
     "calls": {
       "counts": {

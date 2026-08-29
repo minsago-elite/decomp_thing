@@ -2,7 +2,7 @@
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "$id": "https://github.com/minsago-elite/decomp_thing/oracle/full-tree-release-evidence.schema.json",
   "type": "object", "additionalProperties": false,
-  "required": ["schemaVersion", "complete", "oracle", "inventory", "observations", "truth", "reconciliation", "baselines", "artifacts", "reportSha256"],
+  "required": ["schemaVersion", "complete", "oracle", "inventory", "sourceInventory", "observations", "truth", "reconciliation", "baselines", "artifacts", "reportSha256"],
   "properties": {
     "schemaVersion": {"const": 1}, "complete": {"const": true},
     "oracle": {
@@ -14,6 +14,11 @@
       "type": "object", "additionalProperties": false,
       "required": ["compilationUnits", "shards", "indexSha256"],
       "properties": {"compilationUnits": {"type": "integer", "minimum": 1}, "shards": {"type": "integer", "minimum": 1}, "indexSha256": {"$ref": "#/$defs/sha"}}
+    },
+    "sourceInventory": {
+      "type": "object", "additionalProperties": false,
+      "required": ["artifact", "counts", "reportSha256"],
+      "properties": {"artifact": {"$ref": "#/$defs/artifact"}, "counts": {"$ref": "#/$defs/counts"}, "reportSha256": {"$ref": "#/$defs/sha"}}
     },
     "observations": {"$ref": "#/$defs/stageGroup"},
     "truth": {"$ref": "#/$defs/truthGroup"},

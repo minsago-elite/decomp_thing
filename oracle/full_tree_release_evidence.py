@@ -23,6 +23,7 @@ from oracle.full_tree_materialization_determinism import (
     validate_full_tree_materialization_determinism,
 )
 from oracle.full_tree_scope import canonical_json_bytes
+from oracle.full_tree_source_inventory import validate_full_tree_source_inventory
 
 
 class FullTreeReleaseEvidenceError(ValueError):
@@ -128,10 +129,13 @@ def _truth_stage(role: str, first_root: Path, second_root: Path, counts: dict[st
 def generate_full_tree_release_evidence(
     *,
     scope: dict[str, Any], scope_sha256: str, inventory: dict[str, Any],
+    source_inventory_path: Path,
     function_elf_path: Path, function_observation_roots: tuple[Path, Path], function_truth_roots: tuple[Path, Path], function_baseline_path: Path,
     call_observation_roots: tuple[Path, Path], call_truth_roots: tuple[Path, Path], call_baseline_path: Path,
     data_elf_path: Path, data_observation_roots: tuple[Path, Path], data_truth_roots: tuple[Path, Path], data_reconciliation_path: Path, data_baseline_path: Path,
 ) -> dict[str, Any]:
+    source_inventory, source_inventory_payload = _load(source_inventory_path)
+    validate_full_tree_source_inventory(source_inventory, inventory=inventory, scope_sha256=scope_sha256)
     function_elf, function_elf_payload = _load(function_elf_path)
     validate_full_tree_elf_function_index(function_elf, scope=scope, scope_sha256=scope_sha256, inventory=inventory)
     function_observations = _observation_stage("functions", *function_observation_roots)
@@ -187,6 +191,7 @@ def generate_full_tree_release_evidence(
         "oracle": {"richArtifactSha256": scope["oracle"]["richArtifactSha256"], "scopeSha256": scope_sha256, "strippedArtifactSha256": scope["oracle"]["strippedArtifactSha256"]},
         "reconciliation": reconciliation["counts"],
         "schemaVersion": 1,
+        "sourceInventory": {"artifact": _artifact("source-inventory", source_inventory_payload), "counts": source_inventory["counts"], "reportSha256": source_inventory["reportSha256"]},
         "truth": {"calls": call_truth, "data": data_truth, "functions": function_truth},
     }
     report = {**without_hash, "reportSha256": _sha(canonical_json_bytes(without_hash))}
@@ -250,6 +255,8 @@ def render_full_tree_release_summary(report: dict[str, Any]) -> str:
         f"| Canonical aggregate types | {data['types']:,} |",
         f"| ABI objects | {report['reconciliation']['abiObjects']:,} |",
         f"| ABI slots | {report['reconciliation']['abiSlots']:,} |",
+        f"| Source-only translation units | {report['sourceInventory']['counts']['sourceOnlyUnits']:,} |",
+        f"| TableGen inputs | {report['sourceInventory']['counts']['tablegenInputs']:,} |",
         "",
         "| Baseline | Exact/recovered | Partial | Missing | Excluded | Fabricated |",
         "| --- | ---: | ---: | ---: | ---: | ---: |",

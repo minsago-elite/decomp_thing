@@ -10,12 +10,12 @@
       "required": ["repository", "tag", "pageUrl"],
       "properties": {
         "repository": {"const": "minsago-elite/decomp_thing-oracle-artifacts"},
-        "tag": {"const": "clang-llvm-22.1.6-a13-v1"},
+        "tag": {"const": "clang-llvm-22.1.6-a13-v2"},
         "pageUrl": {"type": "string", "format": "uri"}
       }
     },
     "assets": {
-      "type": "array", "minItems": 5, "maxItems": 5,
+      "type": "array", "minItems": 6, "maxItems": 6,
       "items": {
         "type": "object", "additionalProperties": false,
         "required": ["name", "bytes", "sha256", "url"],
