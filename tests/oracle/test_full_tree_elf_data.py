@@ -9,7 +9,7 @@ from oracle.full_tree_data_reconciliation import (  # noqa: E402
     generate_full_tree_data_reconciliation,
     validate_full_tree_data_reconciliation,
 )
-from oracle.full_tree_data_truth import generate_full_tree_data_truth  # noqa: E402
+from oracle.full_tree_data_truth import _type_key, generate_full_tree_data_truth  # noqa: E402
 from oracle.full_tree_data_baseline import (  # noqa: E402
     FullTreeDataBaselineError,
     generate_full_tree_data_baseline,
@@ -19,6 +19,22 @@ from oracle.full_tree_inventory import generate_inventory  # noqa: E402
 from oracle.full_tree_scope import canonical_json_bytes  # noqa: E402
 
 class FullTreeElfDataTest(unittest.TestCase):
+    def test_anonymous_namespace_type_identity_is_producer_owned(self) -> None:
+        base = {
+            "declaration": {
+                "column": None,
+                "externalPathSha256": "a" * 64,
+                "line": 7,
+                "sourcePath": None,
+            },
+            "id": "type-observation-a",
+            "name": "Box<(anonymous namespace)::Value>",
+            "tag": "struct",
+            "unitId": "cu-a",
+        }
+        other = {**base, "id": "type-observation-b", "unitId": "cu-b"}
+        self.assertNotEqual(_type_key(base), _type_key(other))
+
     def test_globals_tls_vtable_rtti_and_slots_are_twin_bound(self) -> None:
         with tempfile.TemporaryDirectory(prefix="full-tree-elf-data-") as temporary:
             root = Path(temporary); source = root / "source/clang/lib/CodeGen"; source.mkdir(parents=True)

@@ -14,7 +14,7 @@ class FullTreeDataTruthError(ValueError):
     """Raised when ODR-equivalent data evidence is incompatible or incomplete."""
 
 
-POLICY = {"id": "full-tree-data-truth", "version": 1, "typeIdentity": "tag-name-declaration-or-observation", "globalIdentity": "rva-or-name-declaration", "owner": "lowest-unit-id"}
+POLICY = {"id": "full-tree-data-truth", "version": 2, "typeIdentity": "tag-name-declaration-with-producer-unit-for-anonymous-namespace-or-observation", "globalIdentity": "rva-or-name-declaration", "owner": "lowest-unit-id"}
 
 
 def _sha(payload: bytes) -> str:
@@ -46,7 +46,12 @@ def _declaration_key(declaration: dict[str, Any]) -> dict[str, Any]:
 def _type_key(item: dict[str, Any]) -> str:
     declaration = _declaration_key(item["declaration"])
     observable_location = declaration["sourcePath"] is not None or declaration["externalPathSha256"] is not None
-    identity = {"tag": item["tag"], "name": item["name"], "declaration": declaration} if item["name"] is not None and observable_location else {"observationId": item["id"]}
+    if item["name"] is not None and observable_location:
+        identity = {"tag": item["tag"], "name": item["name"], "declaration": declaration}
+        if "anonymous namespace" in item["name"]:
+            identity["producerUnitId"] = item["unitId"]
+    else:
+        identity = {"observationId": item["id"]}
     return _sha(canonical_json_bytes(identity))
 
 
