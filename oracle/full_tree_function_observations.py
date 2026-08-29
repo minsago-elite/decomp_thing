@@ -40,11 +40,12 @@ class FullTreeFunctionObservationError(ValueError):
 
 PRODUCER_POLICY = {
     "id": "full-tree-function-observations",
-    "version": 1,
+    "version": 2,
     "emittedIdentity": "image-relative-start-rva",
     "ownershipCandidates": "all-source-aligned-dwarf-compilation-units",
     "declarationPaths": "explicit-scope-map-or-external-path-sha256",
-    "inlineObservationIdentity": "unit-id-and-die-relative-offset",
+    "nonEmittedIdentity": "unit-id-and-die-relative-offset",
+    "nonEmissionReasons": "dwarf-inline-attribute-or-definition-without-emitted-range",
 }
 MAX_FULL_TREE_NAME_CHARACTERS = 16_384
 
@@ -157,7 +158,7 @@ def validate_function_observation_shard(
         raise FullTreeFunctionObservationError("function observation shard bindings do not match")
     unit_ids = {unit["id"] for unit in units}
     emitted = document["emitted"]
-    inline_only = document["inlineOnly"]
+    non_emitted = document["nonEmitted"]
     if emitted != sorted(emitted, key=lambda item: int(item["rva"], 16)):
         raise FullTreeFunctionObservationError("emitted observations are not ordered by RVA")
     if len({item["rva"] for item in emitted}) != len(emitted):
@@ -177,22 +178,22 @@ def validate_function_observation_shard(
         for alias in item["aliases"]:
             if any(evidence["unitId"] not in item["ownerUnitIds"] for evidence in alias["evidence"]):
                 raise FullTreeFunctionObservationError("alias evidence is outside emitted ownership")
-    if inline_only != sorted(
-        inline_only,
+    if non_emitted != sorted(
+        non_emitted,
         key=lambda item: (item["unitId"], int(item["dieOffset"], 16), item["id"]),
     ):
-        raise FullTreeFunctionObservationError("inline observations are not canonically ordered")
-    if any(item["unitId"] not in unit_ids for item in inline_only):
-        raise FullTreeFunctionObservationError("inline observation ownership is invalid")
+        raise FullTreeFunctionObservationError("non-emitted observations are not canonically ordered")
+    if any(item["unitId"] not in unit_ids for item in non_emitted):
+        raise FullTreeFunctionObservationError("non-emitted observation ownership is invalid")
     expected_counts = {
         "emittedRvas": len(emitted),
-        "inlineOnly": len(inline_only),
+        "nonEmitted": len(non_emitted),
         "scannedDies": document["counts"]["scannedDies"],
         "units": len(units),
     }
     if document["counts"] != expected_counts:
         raise FullTreeFunctionObservationError("function observation counts do not reconcile")
-    if len(emitted) + len(inline_only) > scope["bounds"]["perShard"]["entities"]:
+    if len(emitted) + len(non_emitted) > scope["bounds"]["perShard"]["entities"]:
         raise FullTreeFunctionObservationError("function observation shard exceeds its entity bound")
 
 
@@ -326,7 +327,7 @@ def _produce_shard(
             )
         )
         by_rva: dict[int, dict[str, Any]] = {}
-        inline_only: list[dict[str, Any]] = []
+        non_emitted: list[dict[str, Any]] = []
         scanned_dies = 0
         for unit in units:
             offset = int(unit["dwarfOffset"], 16)
@@ -384,8 +385,8 @@ def _produce_shard(
                                 record["aliases"][name].add((item.kind, item.locator, unit["id"]))
                 else:
                     inline = die.attributes.get("DW_AT_inline")
-                    if inline is not None and int(inline.value) in {1, 3}:
-                        inline_only.append(
+                    if names:
+                        non_emitted.append(
                             {
                                 "aliases": [
                                     {
@@ -403,8 +404,12 @@ def _produce_shard(
                                 ],
                                 "dieOffset": hex(int(die.offset)),
                                 "declaration": declaration,
-                                "id": f"inline-{unit['id']}-{hex(int(die.offset) - offset)}",
-                                "reasonCode": "inline-no-emitted-range",
+                                "id": f"non-emitted-{unit['id']}-{hex(int(die.offset) - offset)}",
+                                "reasonCode": (
+                                    "inline-no-emitted-range"
+                                    if inline is not None and int(inline.value) in {1, 3}
+                                    else "definition-no-emitted-range"
+                                ),
                                 "unitId": unit["id"],
                             }
                         )
@@ -442,18 +447,18 @@ def _produce_shard(
                     "rva": hex(rva),
                 }
             )
-        inline_only.sort(
+        non_emitted.sort(
             key=lambda item: (item["unitId"], int(item["dieOffset"], 16), item["id"])
         )
         document = {
             "counts": {
                 "emittedRvas": len(emitted),
-                "inlineOnly": len(inline_only),
+                "nonEmitted": len(non_emitted),
                 "scannedDies": scanned_dies,
                 "units": len(units),
             },
             "emitted": emitted,
-            "inlineOnly": inline_only,
+            "nonEmitted": non_emitted,
             "oracle": {
                 "configurationSha256": _configuration_sha256(),
                 "inventoryIndexSha256": inventory["indexSha256"],
@@ -487,7 +492,7 @@ def _produce_shard(
         ):
             raise FullTreeFunctionObservationError("rich artifact changed during shard observation")
         output.write_bytes(canonical_json_bytes(document))
-        return len(emitted) + len(inline_only)
+        return len(emitted) + len(non_emitted)
     except FullTreeFunctionObservationError:
         raise
     except (KeyError, TypeError, ValueError, OSError) as error:

@@ -91,7 +91,7 @@ class FullTreeReleaseEvidenceTest(unittest.TestCase):
             "truth": {
                 "calls": {**truth_stage, "counts": {"directInternal": 1, "edges": 1, "external": 0, "indirectUnresolved": 0}},
                 "data": {**truth_stage, "counts": {"globals": 1, "types": 1}},
-                "functions": {**truth_stage, "counts": {"inlineUnique": 1, "scoredRvas": 1}},
+                "functions": {**truth_stage, "counts": {"nonEmittedUnique": 1, "inlineOnlyUnique": 1, "selectedElsewhereUnique": 0, "coalescedEmittedRvas": 0, "scoredRvas": 1}},
             },
         }
         return _hashed(without_hash, "reportSha256")

@@ -10,12 +10,14 @@
     "oracle": {"type": "object"},
     "counts": {
       "type": "object", "additionalProperties": false,
-      "required": ["elfRvas", "dwarfRvas", "scoredRvas", "elfOnlyRvas", "dwarfOnlyRvas", "inlineObservations", "inlineUnique"],
+      "required": ["elfRvas", "dwarfRvas", "scoredRvas", "elfOnlyRvas", "dwarfOnlyRvas", "nonEmittedObservations", "nonEmittedUnique", "inlineOnlyUnique", "selectedElsewhereUnique", "definitionNoRangeUnique", "coalescedEmittedRvas"],
       "properties": {
         "elfRvas": {"type": "integer", "minimum": 0}, "dwarfRvas": {"type": "integer", "minimum": 0},
         "scoredRvas": {"type": "integer", "minimum": 0}, "elfOnlyRvas": {"type": "integer", "minimum": 0},
-        "dwarfOnlyRvas": {"type": "integer", "minimum": 0}, "inlineObservations": {"type": "integer", "minimum": 0},
-        "inlineUnique": {"type": "integer", "minimum": 0}
+        "dwarfOnlyRvas": {"type": "integer", "minimum": 0}, "nonEmittedObservations": {"type": "integer", "minimum": 0},
+        "nonEmittedUnique": {"type": "integer", "minimum": 0}, "inlineOnlyUnique": {"type": "integer", "minimum": 0},
+        "selectedElsewhereUnique": {"type": "integer", "minimum": 0}, "definitionNoRangeUnique": {"type": "integer", "minimum": 0},
+        "coalescedEmittedRvas": {"type": "integer", "minimum": 0}
       }
     },
     "shards": {"type": "array", "items": {"$ref": "#/$defs/file"}},
@@ -26,11 +28,11 @@
     "sha256": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
     "file": {
       "type": "object", "additionalProperties": false,
-      "required": ["id", "path", "sha256", "bytes", "functions", "inlineOnly"],
+      "required": ["id", "path", "sha256", "bytes", "functions", "nonEmitted"],
       "properties": {
         "id": {"type": "string", "minLength": 1, "maxLength": 256}, "path": {"type": "string", "minLength": 1, "maxLength": 4096},
         "sha256": {"$ref": "#/$defs/sha256"}, "bytes": {"type": "integer", "minimum": 1},
-        "functions": {"type": "integer", "minimum": 0}, "inlineOnly": {"type": "integer", "minimum": 0}
+        "functions": {"type": "integer", "minimum": 0}, "nonEmitted": {"type": "integer", "minimum": 0}
       }
     }
   }

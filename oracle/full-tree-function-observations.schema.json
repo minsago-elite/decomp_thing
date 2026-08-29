@@ -10,7 +10,7 @@
           "minimum": 0,
           "type": "integer"
         },
-        "inlineOnly": {
+        "nonEmitted": {
           "minimum": 0,
           "type": "integer"
         },
@@ -25,7 +25,7 @@
       },
       "required": [
         "emittedRvas",
-        "inlineOnly",
+        "nonEmitted",
         "scannedDies",
         "units"
       ],
@@ -77,7 +77,7 @@
       },
       "type": "array"
     },
-    "inlineOnly": {
+    "nonEmitted": {
       "items": {
         "additionalProperties": false,
         "properties": {
@@ -95,11 +95,11 @@
             "$ref": "#/$defs/declaration"
           },
           "id": {
-            "pattern": "^inline-cu-[0-9a-f]{32}-0x(?:0|[1-9a-f][0-9a-f]*)$",
+            "pattern": "^non-emitted-cu-[0-9a-f]{32}-0x(?:0|[1-9a-f][0-9a-f]*)$",
             "type": "string"
           },
           "reasonCode": {
-            "const": "inline-no-emitted-range"
+            "enum": ["inline-no-emitted-range", "definition-no-emitted-range"]
           },
           "unitId": {
             "$ref": "#/$defs/unitId"
@@ -165,7 +165,7 @@
   "required": [
     "counts",
     "emitted",
-    "inlineOnly",
+    "nonEmitted",
     "oracle",
     "schemaVersion",
     "shard"

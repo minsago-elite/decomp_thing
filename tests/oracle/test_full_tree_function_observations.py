@@ -41,6 +41,7 @@ from oracle.full_tree_function_observations import (  # noqa: E402
 )
 from oracle.full_tree_function_truth import (  # noqa: E402
     FullTreeFunctionTruthError,
+    _validate_shard,
     reconcile_full_tree_function_truth,
     validate_full_tree_function_truth_index,
 )
@@ -96,12 +97,13 @@ class FullTreeFunctionObservationTest(unittest.TestCase):
             include.mkdir(parents=True)
             (include / "api.hpp").write_text(
                 "struct Base { virtual ~Base(); virtual int value(int); };\n"
+                "__attribute__((noinline)) inline int shared_comdat(int x){ return x+5; }\n"
                 "int a(int); int b(int); int apply(int (*)(int), int); int call_virtual(Base *, int);\n",
                 encoding="utf-8",
             )
             sources = {
-                "A": "int b(int); int a(int x){ return x ? b(x-1) : 1; } extern \"C\" int alias_a(int) __attribute__((alias(\"_Z1ai\")));\n",
-                "B": "int a(int); int b(int x){ return x ? a(x-1) : 2; } int apply(int (*fn)(int), int x){ return fn(x); }\n",
+                "A": "int b(int); int a(int x){ return x ? b(x-1) : 1; } int use_shared_a(int x){return shared_comdat(x);} extern \"C\" int alias_a(int) __attribute__((alias(\"_Z1ai\")));\n",
+                "B": "int a(int); int b(int x){ return x ? a(x-1) : 2; } int apply(int (*fn)(int), int x){ return fn(x); } int use_shared_b(int x){return shared_comdat(x);}\n",
                 "C": "#include <cstdio>\nBase::~Base()=default; int Base::value(int x){return x;} struct Derived final: Base { int value(int x) override { return x+1; } }; int call_virtual(Base *p,int x){return p->value(x);} static int leaf(int x){return x+3;} int main(){Derived d; std::puts(\"fixture\"); return a(2)+apply(leaf,2)+call_virtual(&d,2);}\n",
             }
             objects = []
@@ -161,13 +163,56 @@ class FullTreeFunctionObservationTest(unittest.TestCase):
             self.assertGreater(call_index["counts"]["external"], 0)
             function_owners = {}
             alias_groups = []
+            function_documents = []
             for record in json.loads((function_truth_root / "index.json").read_text())["shards"]:
                 document = json.loads((function_truth_root / record["path"]).read_text())
+                function_documents.append(document)
                 for item in document["functions"]:
                     function_owners[item["id"]] = record["id"]
                     if {"_Z1ai", "alias_a"}.issubset({alias["name"] for alias in item["aliases"]}):
                         alias_groups.append(item)
             self.assertEqual(1, len(alias_groups))
+            function_index = json.loads((function_truth_root / "index.json").read_text())
+            self.assertGreater(function_index["counts"]["coalescedEmittedRvas"], 0)
+            coalesced_document = next(
+                document
+                for document in function_documents
+                if any(item["emissionKind"] == "coalesced-odr-or-comdat" for item in document["functions"])
+            )
+            forged_comdat = json.loads(json.dumps(coalesced_document))
+            next(
+                item for item in forged_comdat["functions"]
+                if item["emissionKind"] == "coalesced-odr-or-comdat"
+            )["emissionKind"] = "single-definition"
+            with self.assertRaisesRegex(FullTreeFunctionTruthError, "COMDAT/ODR"):
+                _validate_shard(forged_comdat)
+            forged_thunk = json.loads(json.dumps(coalesced_document))
+            ordinary = next(item for item in forged_thunk["functions"] if item["entityKind"] == "function")
+            ordinary["entityKind"] = "thunk"
+            with self.assertRaisesRegex(FullTreeFunctionTruthError, "function/thunk"):
+                _validate_shard(forged_thunk)
+            promoted_inline = json.loads(json.dumps(coalesced_document))
+            source_function = promoted_inline["functions"][0]
+            promoted_inline["nonEmitted"].append(
+                {
+                    "aliases": source_function["aliases"],
+                    "declarations": source_function["declarations"],
+                    "id": "non-emitted-function-" + "a" * 32,
+                    "observationIds": ["non-emitted-cu-" + "b" * 32 + "-0x1"],
+                    "ownerUnitId": source_function["ownerUnitId"],
+                    "population": "scored",
+                    "reasonCode": "inline-no-emitted-range",
+                }
+            )
+            promoted_inline["nonEmitted"].sort(key=lambda item: item["id"])
+            promoted_inline["counts"]["nonEmitted"] += 1
+            with self.assertRaisesRegex(FullTreeFunctionTruthError, "JSON Schema"):
+                _validate_shard(promoted_inline)
+            split_alias = json.loads(json.dumps(coalesced_document))
+            split_alias["functions"].insert(1, json.loads(json.dumps(split_alias["functions"][0])))
+            split_alias["counts"]["functions"] += 1
+            with self.assertRaisesRegex(FullTreeFunctionTruthError, "duplicates an RVA"):
+                _validate_shard(split_alias)
             cross_shard = False
             for record in call_index["shards"]:
                 document = json.loads((call_truth_root / record["path"]).read_text())

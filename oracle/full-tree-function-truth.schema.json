@@ -4,7 +4,7 @@
   "title": "Reconciled full-tree function truth shard",
   "type": "object",
   "additionalProperties": false,
-  "required": ["schemaVersion", "oracle", "shard", "counts", "functions", "inlineOnly"],
+  "required": ["schemaVersion", "oracle", "shard", "counts", "functions", "nonEmitted"],
   "properties": {
     "schemaVersion": {"const": 1},
     "oracle": {
@@ -28,14 +28,14 @@
     },
     "counts": {
       "type": "object", "additionalProperties": false,
-      "required": ["functions", "inlineOnly"],
+      "required": ["functions", "nonEmitted"],
       "properties": {
         "functions": {"type": "integer", "minimum": 0},
-        "inlineOnly": {"type": "integer", "minimum": 0}
+        "nonEmitted": {"type": "integer", "minimum": 0}
       }
     },
     "functions": {"type": "array", "items": {"$ref": "#/$defs/function"}},
-    "inlineOnly": {"type": "array", "items": {"$ref": "#/$defs/inline"}}
+    "nonEmitted": {"type": "array", "items": {"$ref": "#/$defs/nonEmitted"}}
   },
   "$defs": {
     "sha256": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
@@ -64,26 +64,27 @@
     },
     "function": {
       "type": "object", "additionalProperties": false,
-      "required": ["id", "rva", "population", "reasonCode", "entityKind", "ownerUnitId", "ownershipCandidates", "aliases", "declarations"],
+      "required": ["id", "rva", "population", "reasonCode", "entityKind", "emissionKind", "ownerUnitId", "ownershipCandidates", "aliases", "declarations"],
       "properties": {
         "id": {"type": "string", "pattern": "^function-rva-0x(?:0|[1-9a-f][0-9a-f]{0,15})$"},
         "rva": {"$ref": "#/$defs/rva"},
         "population": {"enum": ["scored", "excluded"]},
         "reasonCode": {"oneOf": [{"enum": ["dwarf-rva-without-elf-function"]}, {"type": "null"}]},
         "entityKind": {"enum": ["function", "thunk"]},
+        "emissionKind": {"enum": ["single-definition", "coalesced-odr-or-comdat"]},
         "ownerUnitId": {"$ref": "#/$defs/id"},
         "ownershipCandidates": {"type": "array", "minItems": 1, "uniqueItems": true, "items": {"$ref": "#/$defs/id"}},
         "aliases": {"type": "array", "minItems": 1, "items": {"$ref": "#/$defs/alias"}},
         "declarations": {"type": "array", "minItems": 1, "uniqueItems": true, "items": {"$ref": "#/$defs/declaration"}}
       }
     },
-    "inline": {
+    "nonEmitted": {
       "type": "object", "additionalProperties": false,
       "required": ["id", "population", "reasonCode", "ownerUnitId", "observationIds", "aliases", "declarations"],
       "properties": {
-        "id": {"type": "string", "pattern": "^inline-declaration-[0-9a-f]{32}$"},
+        "id": {"type": "string", "pattern": "^non-emitted-function-[0-9a-f]{32}$"},
         "population": {"const": "unobservable"},
-        "reasonCode": {"const": "inline-no-emitted-range"},
+        "reasonCode": {"enum": ["inline-no-emitted-range", "definition-no-emitted-range", "comdat-or-odr-selected-elsewhere"]},
         "ownerUnitId": {"$ref": "#/$defs/id"},
         "observationIds": {"type": "array", "minItems": 1, "uniqueItems": true, "items": {"$ref": "#/$defs/id"}},
         "aliases": {"type": "array", "minItems": 1, "items": {"$ref": "#/$defs/alias"}},

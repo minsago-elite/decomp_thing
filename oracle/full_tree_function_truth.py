@@ -28,10 +28,11 @@ class FullTreeFunctionTruthError(ValueError):
 
 PRODUCER_POLICY = {
     "id": "full-tree-function-truth",
-    "version": 1,
+    "version": 2,
     "emittedIdentity": "one-record-per-rva",
     "ownerSelection": "lowest-source-aligned-unit-id",
-    "inlineIdentity": "declaration-and-alias-name-sha256-prefix-128",
+    "nonEmittedIdentity": "declaration-and-alias-name-sha256-prefix-128",
+    "nonEmissionPolicy": "inline-or-definition-without-range-and-emitted-alias-reconciliation",
     "elfOnlyPopulation": "excluded-elf-no-source-aligned-dwarf",
 }
 
@@ -97,7 +98,7 @@ def _is_thunk(aliases: list[dict[str, Any]]) -> bool:
     return any(alias["name"].startswith(("_ZTh", "_ZTv", "_ZTc")) for alias in aliases)
 
 
-def _inline_identity(record: dict[str, Any]) -> str:
+def _non_emitted_identity(record: dict[str, Any]) -> str:
     declaration = dict(record["declaration"])
     declaration.pop("unitSourcePath", None)
     payload = canonical_json_bytes(
@@ -106,7 +107,7 @@ def _inline_identity(record: dict[str, Any]) -> str:
             "declaration": declaration,
         }
     )
-    return "inline-declaration-" + _sha256(payload)[:32]
+    return "non-emitted-function-" + _sha256(payload)[:32]
 
 
 def _write(path: Path, document: dict[str, Any]) -> dict[str, Any]:
@@ -126,19 +127,29 @@ def _validate_shard(document: dict[str, Any]) -> None:
             raise FullTreeFunctionTruthError(f"function truth shard fails JSON Schema: {error}") from error
         raise
     functions = document["functions"]
-    inline = document["inlineOnly"]
+    non_emitted = document["nonEmitted"]
     if functions != sorted(functions, key=lambda item: int(item["rva"], 16)):
         raise FullTreeFunctionTruthError("function truth records are not RVA ordered")
     if len({item["rva"] for item in functions}) != len(functions):
         raise FullTreeFunctionTruthError("function truth shard duplicates an RVA")
-    if inline != sorted(inline, key=lambda item: item["id"]):
-        raise FullTreeFunctionTruthError("inline truth records are not identity ordered")
-    for item in functions + inline:
+    if non_emitted != sorted(non_emitted, key=lambda item: item["id"]):
+        raise FullTreeFunctionTruthError("non-emitted truth records are not identity ordered")
+    for item in functions + non_emitted:
         if item["aliases"] != sorted(item["aliases"], key=lambda alias: alias["name"]):
             raise FullTreeFunctionTruthError("function truth aliases are not ordered")
         if item["ownerUnitId"] not in document["shard"]["unitIds"]:
             raise FullTreeFunctionTruthError("function truth owner is outside its shard")
-    if document["counts"] != {"functions": len(functions), "inlineOnly": len(inline)}:
+    for item in functions:
+        if item["entityKind"] != ("thunk" if _is_thunk(item["aliases"]) else "function"):
+            raise FullTreeFunctionTruthError("function/thunk classification contradicts authenticated aliases")
+        expected_emission = (
+            "coalesced-odr-or-comdat"
+            if len(item["ownershipCandidates"]) > 1
+            else "single-definition"
+        )
+        if item["emissionKind"] != expected_emission:
+            raise FullTreeFunctionTruthError("COMDAT/ODR emission classification contradicts ownership evidence")
+    if document["counts"] != {"functions": len(functions), "nonEmitted": len(non_emitted)}:
         raise FullTreeFunctionTruthError("function truth shard counts do not reconcile")
 
 
@@ -151,10 +162,10 @@ def _database(path: Path) -> sqlite3.Connection:
         CREATE TABLE elf (rva INTEGER PRIMARY KEY, payload BLOB NOT NULL);
         CREATE TABLE emitted (rva INTEGER NOT NULL, shard_id TEXT NOT NULL, payload BLOB NOT NULL,
                               PRIMARY KEY (rva, shard_id));
-        CREATE TABLE inline (identity TEXT NOT NULL, shard_id TEXT NOT NULL, unit_id TEXT NOT NULL,
+        CREATE TABLE non_emitted (identity TEXT NOT NULL, shard_id TEXT NOT NULL, unit_id TEXT NOT NULL,
                              observation_id TEXT NOT NULL UNIQUE, payload BLOB NOT NULL);
         CREATE INDEX emitted_rva ON emitted(rva);
-        CREATE INDEX inline_identity ON inline(identity);
+        CREATE INDEX non_emitted_identity ON non_emitted(identity);
         """
     )
     return connection
@@ -215,10 +226,14 @@ def validate_full_tree_function_truth_index(
     if [item["id"] for item in index["shards"]] != sorted(expected_shards):
         raise FullTreeFunctionTruthError("function truth index does not cover every inventory shard")
     seen_rvas: set[str] = set()
-    seen_inline: set[str] = set()
+    seen_non_emitted: set[str] = set()
     scored = 0
     dwarf_only = 0
-    inline_observations = 0
+    coalesced_emitted = 0
+    non_emitted_observations = 0
+    reason_counts: dict[str, int] = defaultdict(int)
+    emitted_alias_names: set[str] = set()
+    non_emitted_records: list[dict[str, Any]] = []
     for record in index["shards"]:
         path = output_root / record["path"]
         payload = path.read_bytes()
@@ -230,21 +245,30 @@ def validate_full_tree_function_truth_index(
         if document["oracle"] != expected_oracle or document["shard"] != expected_shards[record["id"]]:
             raise FullTreeFunctionTruthError(f"function truth shard {record['id']} bindings do not match")
         _validate_shard(document)
-        if record["functions"] != len(document["functions"]) or record["inlineOnly"] != len(document["inlineOnly"]):
+        if record["functions"] != len(document["functions"]) or record["nonEmitted"] != len(document["nonEmitted"]):
             raise FullTreeFunctionTruthError(f"function truth shard {record['id']} index counts differ")
         for function in document["functions"]:
             if function["rva"] in seen_rvas:
                 raise FullTreeFunctionTruthError(f"function RVA {function['rva']} has duplicate ownership")
             seen_rvas.add(function["rva"])
+            emitted_alias_names.update(alias["name"] for alias in function["aliases"])
+            if function["emissionKind"] == "coalesced-odr-or-comdat":
+                coalesced_emitted += 1
             if function["population"] == "scored":
                 scored += 1
             else:
                 dwarf_only += 1
-        for inline in document["inlineOnly"]:
-            if inline["id"] in seen_inline:
-                raise FullTreeFunctionTruthError(f"inline identity {inline['id']} has duplicate ownership")
-            seen_inline.add(inline["id"])
-            inline_observations += len(inline["observationIds"])
+        for item in document["nonEmitted"]:
+            non_emitted_records.append(item)
+            if item["id"] in seen_non_emitted:
+                raise FullTreeFunctionTruthError(f"non-emitted identity {item['id']} has duplicate ownership")
+            seen_non_emitted.add(item["id"])
+            non_emitted_observations += len(item["observationIds"])
+            reason_counts[item["reasonCode"]] += 1
+    for item in non_emitted_records:
+        overlaps_emitted = any(alias["name"] in emitted_alias_names for alias in item["aliases"])
+        if item["reasonCode"] == "comdat-or-odr-selected-elsewhere" and not overlaps_emitted:
+            raise FullTreeFunctionTruthError("selected-elsewhere reason lacks emitted alias evidence")
     exclusion_record = index["exclusions"]
     exclusion_path = output_root / exclusion_record["path"]
     exclusion_payload = exclusion_path.read_bytes()
@@ -262,15 +286,19 @@ def validate_full_tree_function_truth_index(
         raise FullTreeFunctionTruthError("ELF-only exclusions are not RVA ordered")
     if len(set(exclusion_rvas)) != len(exclusion_rvas) or seen_rvas.intersection(exclusion_rvas):
         raise FullTreeFunctionTruthError("ELF-only exclusions duplicate a function RVA")
-    if exclusion_record["functions"] != len(exclusion_rvas) or exclusion_record["inlineOnly"] != 0:
+    if exclusion_record["functions"] != len(exclusion_rvas) or exclusion_record["nonEmitted"] != 0:
         raise FullTreeFunctionTruthError("ELF-only exclusion index counts differ")
     expected_counts = {
         "dwarfOnlyRvas": dwarf_only,
         "dwarfRvas": len(seen_rvas),
         "elfOnlyRvas": len(exclusion_rvas),
         "elfRvas": scored + len(exclusion_rvas),
-        "inlineObservations": inline_observations,
-        "inlineUnique": len(seen_inline),
+        "nonEmittedObservations": non_emitted_observations,
+        "nonEmittedUnique": len(seen_non_emitted),
+        "inlineOnlyUnique": reason_counts["inline-no-emitted-range"],
+        "selectedElsewhereUnique": reason_counts["comdat-or-odr-selected-elsewhere"],
+        "definitionNoRangeUnique": reason_counts["definition-no-emitted-range"],
+        "coalescedEmittedRvas": coalesced_emitted,
         "scoredRvas": scored,
     }
     if index["counts"] != expected_counts:
@@ -352,10 +380,10 @@ def reconcile_full_tree_function_truth(
                     ((int(item["rva"], 16), shard_id, canonical_json_bytes(item)) for item in document["emitted"]),
                 )
                 connection.executemany(
-                    "INSERT INTO inline VALUES (?, ?, ?, ?, ?)",
+                    "INSERT INTO non_emitted VALUES (?, ?, ?, ?, ?)",
                     (
-                        (_inline_identity(item), shard_id, item["unitId"], item["id"], canonical_json_bytes(item))
-                        for item in document["inlineOnly"]
+                        (_non_emitted_identity(item), shard_id, item["unitId"], item["id"], canonical_json_bytes(item))
+                        for item in document["nonEmitted"]
                     ),
                 )
                 connection.commit()
@@ -371,6 +399,7 @@ def reconcile_full_tree_function_truth(
             dwarf_rvas = 0
             scored_rvas = 0
             dwarf_only = 0
+            coalesced_emitted = 0
             emitted_cursor = connection.execute(
                 "SELECT r.rva, e.payload, d.payload "
                 "FROM (SELECT rva FROM elf UNION SELECT rva FROM emitted) r "
@@ -411,6 +440,9 @@ def reconcile_full_tree_function_truth(
                     "aliases": aliases,
                     "declarations": _declarations(dwarf_records, "declarations"),
                     "entityKind": "thunk" if _is_thunk(aliases) else "function",
+                    "emissionKind": (
+                        "coalesced-odr-or-comdat" if len(candidates) > 1 else "single-definition"
+                    ),
                     "id": f"function-rva-{hex(rva)}",
                     "ownerUnitId": owner,
                     "ownershipCandidates": candidates,
@@ -421,18 +453,26 @@ def reconcile_full_tree_function_truth(
                 functions_by_shard[unit_to_shard[owner]].append(item)
                 if elf_record:
                     scored_rvas += 1
+                    if len(candidates) > 1:
+                        coalesced_emitted += 1
                 else:
                     dwarf_only += 1
 
-            inline_by_shard: dict[str, list[dict[str, Any]]] = defaultdict(list)
-            inline_observations = int(connection.execute("SELECT COUNT(*) FROM inline").fetchone()[0])
-            inline_cursor = connection.execute(
-                "SELECT identity,payload FROM inline ORDER BY identity,observation_id"
+            emitted_alias_names = {
+                alias["name"]
+                for functions in functions_by_shard.values()
+                for function in functions
+                for alias in function["aliases"]
+            }
+            non_emitted_by_shard: dict[str, list[dict[str, Any]]] = defaultdict(list)
+            non_emitted_observations = int(connection.execute("SELECT COUNT(*) FROM non_emitted").fetchone()[0])
+            non_emitted_cursor = connection.execute(
+                "SELECT identity,payload FROM non_emitted ORDER BY identity,observation_id"
             )
-            for inline_index, (identity, rows) in enumerate(
-                itertools.groupby(inline_cursor, key=lambda row: row[0])
+            for non_emitted_index, (identity, rows) in enumerate(
+                itertools.groupby(non_emitted_cursor, key=lambda row: row[0])
             ):
-                if inline_index % 4096 == 0:
+                if non_emitted_index % 4096 == 0:
                     _check_runtime_bounds(
                         scope,
                         started=started,
@@ -441,7 +481,17 @@ def reconcile_full_tree_function_truth(
                     )
                 records = [json.loads(row[1]) for row in rows]
                 owner = min(item["unitId"] for item in records)
-                inline_by_shard[unit_to_shard[owner]].append(
+                alias_names = {alias["name"] for item in records for alias in item["aliases"]}
+                observed_reasons = {item["reasonCode"] for item in records}
+                if "definition-no-emitted-range" in observed_reasons:
+                    reason_code = (
+                        "comdat-or-odr-selected-elsewhere"
+                        if alias_names.intersection(emitted_alias_names)
+                        else "definition-no-emitted-range"
+                    )
+                else:
+                    reason_code = "inline-no-emitted-range"
+                non_emitted_by_shard[unit_to_shard[owner]].append(
                     {
                         "aliases": _alias_records(records),
                         "declarations": _declarations(records, "declaration"),
@@ -449,7 +499,7 @@ def reconcile_full_tree_function_truth(
                         "observationIds": sorted(item["id"] for item in records),
                         "ownerUnitId": owner,
                         "population": "unobservable",
-                        "reasonCode": "inline-no-emitted-range",
+                        "reasonCode": reason_code,
                     }
                 )
 
@@ -460,10 +510,10 @@ def reconcile_full_tree_function_truth(
                 document = {
                     "counts": {
                         "functions": len(functions_by_shard[shard_id]),
-                        "inlineOnly": len(inline_by_shard[shard_id]),
+                        "nonEmitted": len(non_emitted_by_shard[shard_id]),
                     },
                     "functions": functions_by_shard[shard_id],
-                    "inlineOnly": sorted(inline_by_shard[shard_id], key=lambda item: item["id"]),
+                    "nonEmitted": sorted(non_emitted_by_shard[shard_id], key=lambda item: item["id"]),
                     "oracle": oracle,
                     "schemaVersion": 1,
                     "shard": {"id": shard_id, "unitIds": shard["unitIds"]},
@@ -489,22 +539,26 @@ def reconcile_full_tree_function_truth(
                 "path": "exclusions.json",
                 **exclusion_written,
                 "functions": len(exclusions),
-                "inlineOnly": 0,
+                "nonEmitted": 0,
             }
             counts = {
                 "dwarfOnlyRvas": dwarf_only,
                 "dwarfRvas": dwarf_rvas,
                 "elfOnlyRvas": len(exclusions),
                 "elfRvas": len(elf_index["functions"]),
-                "inlineObservations": inline_observations,
-                "inlineUnique": sum(len(items) for items in inline_by_shard.values()),
+                "nonEmittedObservations": non_emitted_observations,
+                "nonEmittedUnique": sum(len(items) for items in non_emitted_by_shard.values()),
+                "inlineOnlyUnique": sum(item["reasonCode"] == "inline-no-emitted-range" for items in non_emitted_by_shard.values() for item in items),
+                "selectedElsewhereUnique": sum(item["reasonCode"] == "comdat-or-odr-selected-elsewhere" for items in non_emitted_by_shard.values() for item in items),
+                "definitionNoRangeUnique": sum(item["reasonCode"] == "definition-no-emitted-range" for items in non_emitted_by_shard.values() for item in items),
+                "coalescedEmittedRvas": coalesced_emitted,
                 "scoredRvas": scored_rvas,
             }
             if counts["elfRvas"] != counts["scoredRvas"] + counts["elfOnlyRvas"]:
                 raise FullTreeFunctionTruthError("ELF function denominator does not reconcile")
             if counts["dwarfRvas"] != counts["scoredRvas"] + counts["dwarfOnlyRvas"]:
                 raise FullTreeFunctionTruthError("DWARF function denominator does not reconcile")
-            total_entities = counts["elfRvas"] + counts["dwarfOnlyRvas"] + counts["inlineUnique"]
+            total_entities = counts["elfRvas"] + counts["dwarfOnlyRvas"] + counts["nonEmittedUnique"]
             if total_entities > scope["bounds"]["wholeRun"]["entities"]:
                 raise FullTreeFunctionTruthError("function truth exceeds its whole-run entity bound")
             index_without_hash = {
