@@ -11,6 +11,7 @@ from oracle.full_tree_data_reconciliation import (  # noqa: E402
 )
 from oracle.full_tree_data_truth import (  # noqa: E402
     FullTreeDataTruthError,
+    _global_key,
     _type_key,
     generate_full_tree_data_truth,
     validate_full_tree_data_truth_index,
@@ -24,6 +25,15 @@ from oracle.full_tree_inventory import generate_inventory  # noqa: E402
 from oracle.full_tree_scope import canonical_json_bytes  # noqa: E402
 
 class FullTreeElfDataTest(unittest.TestCase):
+    def test_source_unaligned_nonaddress_globals_do_not_merge_by_name(self) -> None:
+        base = {
+            "addressRva": None,
+            "declaration": {"column": None, "externalPathSha256": None, "line": 7, "sourcePath": None},
+            "id": "global-observation-a",
+            "names": ["shared_name"],
+        }
+        self.assertNotEqual(_global_key(base), _global_key({**base, "id": "global-observation-b"}))
+
     def test_cross_shard_type_references_use_authenticated_type_ids(self) -> None:
         with tempfile.TemporaryDirectory(prefix="full-tree-type-references-") as temporary:
             root = Path(temporary)

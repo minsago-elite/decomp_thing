@@ -14,7 +14,7 @@ class FullTreeDataTruthError(ValueError):
     """Raised when ODR-equivalent data evidence is incompatible or incomplete."""
 
 
-POLICY = {"id": "full-tree-data-truth", "version": 5, "typeIdentity": "tag-qualified-lexical-context-name-declaration-with-producer-unit-for-anonymous-namespace-or-observation", "globalIdentity": "rva-or-name-declaration", "owner": "lowest-unit-id", "typeReferences": "exact-dwarf-offset-chain-resolved-through-authenticated-observation-index", "maximumDatabaseBytes": 8 * 1024 * 1024 * 1024}
+POLICY = {"id": "full-tree-data-truth", "version": 6, "typeIdentity": "tag-qualified-lexical-context-name-declaration-with-producer-unit-for-anonymous-namespace-or-observation", "globalIdentity": "rva-or-source-aligned-name-declaration-or-producer-observation", "owner": "lowest-unit-id", "typeReferences": "exact-dwarf-offset-chain-resolved-through-authenticated-observation-index", "maximumDatabaseBytes": 8 * 1024 * 1024 * 1024}
 
 
 def _sha(payload: bytes) -> str:
@@ -56,7 +56,14 @@ def _type_key(item: dict[str, Any]) -> str:
 
 
 def _global_key(item: dict[str, Any]) -> str:
-    identity = {"rva": item["addressRva"]} if item["addressRva"] is not None else {"names": item["names"], "declaration": _declaration_key(item["declaration"])}
+    declaration = _declaration_key(item["declaration"])
+    observable_location = declaration["sourcePath"] is not None or declaration["externalPathSha256"] is not None
+    if item["addressRva"] is not None:
+        identity = {"rva": item["addressRva"]}
+    elif observable_location:
+        identity = {"names": item["names"], "declaration": declaration}
+    else:
+        identity = {"observationId": item["id"]}
     return _sha(canonical_json_bytes(identity))
 
 
