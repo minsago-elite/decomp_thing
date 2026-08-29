@@ -89,6 +89,19 @@ class FullTreeElfDataTest(unittest.TestCase):
         }
         self.assertNotEqual(_global_key(base), _global_key({**base, "id": "global-observation-b"}))
 
+    def test_lambda_dependent_types_remain_producer_observations(self) -> None:
+        base = {
+            "context": ["DW_TAG_namespace:std"],
+            "declaration": {"column": None, "externalPathSha256": "a" * 64, "line": 381, "sourcePath": None},
+            "id": "type-observation-a",
+            "name": "_Iter_negate<(lambda at /producer/source.cpp:2762:33)>",
+            "tag": "class",
+            "unitId": "same-unit",
+        }
+        self.assertNotEqual(_type_key(base), _type_key({**base, "id": "type-observation-b"}))
+        ordinary = {**base, "name": "ArrayRef<int>", "id": "type-observation-a"}
+        self.assertEqual(_type_key(ordinary), _type_key({**ordinary, "id": "type-observation-b"}))
+
     def test_cross_shard_type_references_use_authenticated_type_ids(self) -> None:
         with tempfile.TemporaryDirectory(prefix="full-tree-type-references-") as temporary:
             root = Path(temporary)

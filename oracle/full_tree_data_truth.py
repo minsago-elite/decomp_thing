@@ -50,7 +50,9 @@ def _type_key(item: dict[str, Any]) -> str:
     observable_location = declaration["sourcePath"] is not None or declaration["externalPathSha256"] is not None
     if item["name"] is not None and observable_location:
         identity = {"tag": item["tag"], "context": item["context"], "name": item["name"], "declaration": declaration}
-        if "anonymous namespace" in item["name"] or any("anonymous namespace" in component for component in item["context"]):
+        if "lambda at " in item["name"]:
+            identity["producerObservationId"] = item["id"]
+        elif "anonymous namespace" in item["name"] or any("anonymous namespace" in component for component in item["context"]):
             identity["producerUnitId"] = item["unitId"]
     else:
         identity = {"observationId": item["id"]}
