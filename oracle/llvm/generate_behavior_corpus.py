@@ -8,6 +8,7 @@ from pathlib import Path
 from typing import Any, Mapping
 
 from oracle.behavior_corpus import (
+    BehaviorCorpusError,
     MAX_EXECUTABLE_BYTES,
     _read_regular_snapshot,
     record_corpus_expectations,
@@ -74,7 +75,9 @@ def sandbox_profile() -> dict[str, Any]:
     return shared_executor_profile()
 
 
-def build_draft(executable_path: Path) -> dict[str, Any]:
+def build_draft(
+    executable_path: Path, *, authenticated_pch: bytes | None = None
+) -> dict[str, Any]:
     executable = _read_regular_snapshot(
         executable_path, "Clang behavior executable", MAX_EXECUTABLE_BYTES
     )
@@ -240,6 +243,31 @@ def build_draft(executable_path: Path) -> dict[str, Any]:
             ],
         ),
         _case(
+            "include-cycle-guarded",
+            ["include-guards", "include-search", "preprocessing", "stdout"],
+            ["-E", "-P", "-nostdinc", "-I", "include", "cycle.c"],
+            inputs=[
+                _input(
+                    "include/a.h",
+                    b"#ifndef A_H\n#define A_H\n#include \"b.h\"\n#define A_VALUE 20\n#endif\n",
+                ),
+                _input(
+                    "include/b.h",
+                    b"#ifndef B_H\n#define B_H\n#include \"a.h\"\n#define B_VALUE 22\n#endif\n",
+                ),
+                _input("cycle.c", b"#include \"a.h\"\nint answer = A_VALUE + B_VALUE;\n"),
+            ],
+        ),
+        _case(
+            "include-framework-order",
+            ["framework-includes", "include-search", "preprocessing", "stdout"],
+            ["-E", "-P", "-nostdinc", "-F", "frameworks", "framework.c"],
+            inputs=[
+                _input("frameworks/Answer.framework/Headers/answer.h", b"#define ANSWER 42\n"),
+                _input("framework.c", b"#include <Answer/answer.h>\nint answer = ANSWER;\n"),
+            ],
+        ),
+        _case(
             "link-program",
             ["artifacts", "linking", "produced-program"],
             [
@@ -327,6 +355,22 @@ def build_draft(executable_path: Path) -> dict[str, Any]:
             ],
         ),
         _case(
+            "preprocess-malformed-macro",
+            ["diagnostics", "exit-status", "macros", "preprocessing", "stderr"],
+            ["-E", "-P", "-nostdinc", "malformed.c"],
+            inputs=[_input("malformed.c", b"#define BROKEN(value value\nBROKEN(42)\n")],
+            exit_code=1,
+        ),
+        _case(
+            "preprocess-pragma-once",
+            ["include-search", "pragma", "preprocessing", "stdout"],
+            ["-E", "-P", "-nostdinc", "-I", "include", "pragma.c"],
+            inputs=[
+                _input("include/once.h", b"#pragma once\nint once_only = 42;\n"),
+                _input("pragma.c", b"#include \"once.h\"\n#include \"once.h\"\n"),
+            ],
+        ),
+        _case(
             "response-file",
             ["artifacts", "option-handling", "response-files"],
             ["@compile.rsp"],
@@ -353,6 +397,22 @@ def build_draft(executable_path: Path) -> dict[str, Any]:
             exit_code=1,
         ),
         _case(
+            "response-file-quoted-paths",
+            ["artifacts", "option-handling", "quoted-arguments", "response-files"],
+            ["@quoted.rsp"],
+            inputs=[
+                _input("quoted.rsp", b"-nostdinc -c \"response source.c\" -o \"quoted response.o\"\n"),
+                _input("response source.c", source),
+            ],
+        ),
+        _case(
+            "response-file-stdin",
+            ["artifacts", "option-handling", "response-files", "stdin"],
+            ["@stdin.rsp"],
+            stdin=source,
+            inputs=[_input("stdin.rsp", b"-nostdinc -x c -c - -o response-stdin.o\n")],
+        ),
+        _case(
             "target-i386-object",
             ["artifacts", "object-emission", "target-i386", "target-selection"],
             ["--target=i386-unknown-linux-gnu", "-nostdinc", "-c", "source.c", "-o", "i386.o"],
@@ -372,6 +432,54 @@ def build_draft(executable_path: Path) -> dict[str, Any]:
             ["--target=x86_64-unknown-linux-gnu", "-nostdinc", "-dM", "-E", "-x", "c", "/dev/null"],
         ),
     ]
+    if authenticated_pch is not None:
+        pch_inputs = [
+            _input("answer.h", b"#ifndef ANSWER_H\n#define ANSWER_H\n#define ANSWER 42\n#endif\n"),
+            _input("answer.pch", authenticated_pch),
+            _input("pch-user.c", b"int answer(void) { return ANSWER; }\n"),
+        ]
+        cases.extend(
+            [
+                _case(
+                    "pch-reuse-valid",
+                    ["artifacts", "cache-reuse", "pch", "preprocessing-state"],
+                    [
+                        "-nostdinc",
+                        "-include-pch",
+                        "answer.pch",
+                        "-c",
+                        "pch-user.c",
+                        "-o",
+                        "pch-user.o",
+                    ],
+                    inputs=pch_inputs,
+                ),
+                _case(
+                    "pch-reuse-wrong-target",
+                    [
+                        "cache-invalidation",
+                        "diagnostics",
+                        "exit-status",
+                        "pch",
+                        "preprocessing-state",
+                        "target-selection",
+                    ],
+                    [
+                        "--target=i386-unknown-linux-gnu",
+                        "-nostdinc",
+                        "-include-pch",
+                        "answer.pch",
+                        "-c",
+                        "pch-user.c",
+                        "-o",
+                        "pch-user.o",
+                    ],
+                    inputs=pch_inputs,
+                    exit_code=1,
+                    absent=("pch-user.o",),
+                ),
+            ]
+        )
     return {
         "schemaVersion": 1,
         "scope": "production",
@@ -418,8 +526,32 @@ def generate_corpus(
     container_runtime: Path,
     container_runtime_environment: Mapping[str, str] | None = None,
 ) -> dict[str, Any]:
-    return record_corpus_expectations(
+    bootstrap = record_corpus_expectations(
         build_draft(executable_path),
+        executable_path,
+        container_runtime=container_runtime,
+        container_runtime_environment=container_runtime_environment,
+    )
+    precompile = next(
+        case for case in bootstrap["cases"] if case["id"] == "precompile-header"
+    )
+    artifact = next(
+        item
+        for item in precompile["expected"]["artifacts"]
+        if item["path"] == "answer.pch"
+    )
+    if not artifact["present"] or artifact["base64"] is None:
+        raise BehaviorCorpusError("authenticated PCH bootstrap artifact is absent")
+    try:
+        authenticated_pch = base64.b64decode(artifact["base64"], validate=True)
+    except ValueError as error:
+        raise BehaviorCorpusError(
+            "authenticated PCH bootstrap artifact is not valid base64"
+        ) from error
+    if len(authenticated_pch) != artifact["bytes"] or _blob(authenticated_pch)["sha256"] != artifact["sha256"]:
+        raise BehaviorCorpusError("authenticated PCH bootstrap artifact does not reconcile")
+    return record_corpus_expectations(
+        build_draft(executable_path, authenticated_pch=authenticated_pch),
         executable_path,
         container_runtime=container_runtime,
         container_runtime_environment=container_runtime_environment,

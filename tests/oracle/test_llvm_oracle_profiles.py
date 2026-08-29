@@ -54,7 +54,7 @@ class LlvmOracleProfilesTest(unittest.TestCase):
             corpus = build_draft(executable)
         self.assertIs(corpus, validate_corpus(corpus))
         self.assertEqual("production", corpus["scope"])
-        self.assertEqual(40, len(corpus["cases"]))
+        self.assertEqual(46, len(corpus["cases"]))
         categories = {
             category for case in corpus["cases"] for category in case["categories"]
         }
@@ -85,6 +85,22 @@ class LlvmOracleProfilesTest(unittest.TestCase):
             sandbox_profile()["imageDigest"],
         )
 
+    def test_behavior_draft_binds_pch_reuse_and_invalidation_inputs(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            executable = Path(directory) / "clang"
+            executable.write_bytes(b"bounded fixture")
+            executable.chmod(0o500)
+            corpus = build_draft(executable, authenticated_pch=b"authenticated-pch")
+        self.assertIs(corpus, validate_corpus(corpus))
+        cases = {case["id"]: case for case in corpus["cases"]}
+        self.assertEqual(48, len(cases))
+        valid = cases["pch-reuse-valid"]
+        invalid = cases["pch-reuse-wrong-target"]
+        self.assertEqual(valid["inputs"], invalid["inputs"])
+        pch = next(item for item in valid["inputs"] if item["path"] == "answer.pch")
+        self.assertEqual(hashlib.sha256(b"authenticated-pch").hexdigest(), pch["sha256"])
+        self.assertEqual(1, invalid["expected"]["exitCode"])
+
     def test_program_neutral_contracts_contain_no_llvm_identity(self) -> None:
         for relative in (
             "oracle/elf_oracle.py",
@@ -110,8 +126,8 @@ class LlvmOracleProfilesTest(unittest.TestCase):
                 corpus_payload=corpus_payload,
             ),
         )
-        self.assertEqual(40, report["summary"]["cases"])
-        self.assertEqual(40, report["summary"]["passed"])
+        self.assertEqual(48, report["summary"]["cases"])
+        self.assertEqual(48, report["summary"]["passed"])
         self.assertEqual(
             {
                 "bytes": 84561368,
@@ -124,6 +140,10 @@ class LlvmOracleProfilesTest(unittest.TestCase):
         self.assertEqual(1, cases["diagnostic-syntax"]["exitCode"])
         self.assertEqual(1, cases["target-unsupported-aarch64"]["exitCode"])
         self.assertEqual(1, cases["driver-missing-linker"]["exitCode"])
+        self.assertEqual(1, cases["pch-reuse-wrong-target"]["exitCode"])
+        self.assertEqual(0, cases["pch-reuse-valid"]["exitCode"])
+        self.assertEqual(0, cases["response-file-quoted-paths"]["exitCode"])
+        self.assertEqual(0, cases["response-file-stdin"]["exitCode"])
         self.assertGreater(cases["diagnostic-color-always"]["stderr"]["bytes"], 0)
         self.assertGreater(cases["diagnostic-fixit"]["stderr"]["bytes"], 0)
         self.assertGreater(cases["diagnostic-template-backtrace"]["stderr"]["bytes"], 0)
