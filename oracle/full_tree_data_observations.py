@@ -4,12 +4,17 @@ from __future__ import annotations
 
 import hashlib
 import json
+import os
 from pathlib import Path
+import signal
+import subprocess
+import sys
 import threading
+import time
 from typing import Any
 
-from oracle.bounded_shards import ShardInput
-from oracle.full_tree_function_observations import _declaration
+from oracle.bounded_shards import ShardBounds, ShardInput, run_bounded_shards
+from oracle.full_tree_function_observations import _artifact_identity, _declaration, _process_resident_bytes
 from oracle.full_tree_scope import canonical_json_bytes
 from oracle.function_recovery_oracle import _attribute_chain, _decode_dwarf_string
 
@@ -185,3 +190,69 @@ def produce_data_observation_shard(rich_artifact: Path, *, scope: dict[str, Any]
         return len(globals_) + len(types)
     finally:
         stream.close()
+
+
+def run_full_tree_data_observations(rich_artifact: Path, *, scope: dict[str, Any], scope_sha256: str, inventory: dict[str, Any], output_root: Path, maximum_workers: int) -> dict[str, Any]:
+    rich_sha256, before = _artifact_identity(rich_artifact, scope["oracle"]["richArtifactSha256"])
+    inputs, _ = data_shard_inputs(inventory, scope_sha256=scope_sha256, rich_sha256=rich_sha256)
+    per_shard = scope["bounds"]["perShard"]
+    whole = scope["bounds"]["wholeRun"]
+    bounds = ShardBounds(
+        maximum_shards=len(inputs), per_shard_entities=per_shard["entities"], whole_run_entities=whole["entities"],
+        per_shard_bytes=per_shard["serializedBytes"], whole_run_bytes=whole["serializedBytes"],
+        per_shard_seconds=per_shard["wallClockSeconds"], whole_run_seconds=whole["wallClockSeconds"],
+        per_shard_cpu_seconds=per_shard["cpuSeconds"], whole_run_cpu_seconds=whole["cpuSeconds"],
+        maximum_resident_bytes=whole["maximumResidentBytes"], maximum_workers=min(maximum_workers, len(inputs)),
+    )
+    control = output_root / "control"
+    control.mkdir(parents=True, exist_ok=True)
+    scope_path = control / "scope.json"
+    inventory_path = control / "inventory.json"
+    for path, payload, label in ((scope_path, canonical_json_bytes(scope), "scope"), (inventory_path, canonical_json_bytes(inventory), "inventory")):
+        if path.exists() and (path.is_symlink() or not path.is_file() or path.read_bytes() != payload):
+            raise FullTreeDataObservationError(f"isolated data worker {label} changed")
+        if not path.exists():
+            path.write_bytes(payload)
+
+    def producer(shard: ShardInput, output: Path, cancelled: threading.Event) -> int:
+        process = subprocess.Popen(
+            [sys.executable, os.fspath(Path(__file__).resolve().parents[1] / "scripts/full-tree-data-shard-worker.py"),
+             "--rich-artifact", os.fspath(rich_artifact.absolute()), "--scope", os.fspath(scope_path.absolute()),
+             "--scope-sha256", scope_sha256, "--inventory", os.fspath(inventory_path.absolute()),
+             "--shard", shard.identifier, "--input-sha256", shard.input_sha256, "--output", os.fspath(output.absolute())],
+            stdin=subprocess.DEVNULL, stdout=subprocess.PIPE, stderr=subprocess.PIPE, start_new_session=True,
+        )
+        deadline = time.monotonic() + per_shard["wallClockSeconds"]
+        while True:
+            resident = _process_resident_bytes(process) if process.poll() is None else 0
+            over_memory = resident > per_shard["maximumResidentBytes"]
+            if cancelled.is_set() or time.monotonic() >= deadline or over_memory:
+                os.killpg(process.pid, signal.SIGTERM)
+                try:
+                    process.wait(timeout=5)
+                except subprocess.TimeoutExpired:
+                    os.killpg(process.pid, signal.SIGKILL); process.wait()
+                raise FullTreeDataObservationError(f"isolated data shard {shard.identifier} exceeded a runtime bound")
+            try:
+                stdout, stderr = process.communicate(timeout=0.25); break
+            except subprocess.TimeoutExpired:
+                continue
+        if process.returncode != 0:
+            raise FullTreeDataObservationError(f"isolated data shard {shard.identifier} failed: {stderr[:65536].decode('utf-8', 'replace').strip()}")
+        if len(stdout) > 4096 or len(stderr) > 65536:
+            raise FullTreeDataObservationError(f"isolated data shard {shard.identifier} exceeded control output bounds")
+        try:
+            usage = json.loads(stdout); entities = usage["entities"]; resident = usage["maximumResidentBytes"]
+        except (json.JSONDecodeError, KeyError, TypeError) as error:
+            raise FullTreeDataObservationError(f"isolated data shard {shard.identifier} returned malformed usage") from error
+        if isinstance(entities, bool) or not isinstance(entities, int) or entities < 0:
+            raise FullTreeDataObservationError(f"isolated data shard {shard.identifier} returned invalid entities")
+        if isinstance(resident, bool) or not isinstance(resident, int) or resident > per_shard["maximumResidentBytes"]:
+            raise FullTreeDataObservationError(f"isolated data shard {shard.identifier} exceeded its resident-byte bound")
+        return entities
+
+    index = run_bounded_shards(output_root, run_id="full-tree-data-" + scope_sha256[:16], inputs=inputs, bounds=bounds, producer=producer)
+    _, after = _artifact_identity(rich_artifact, rich_sha256)
+    if before != after:
+        raise FullTreeDataObservationError("rich artifact changed during the data run")
+    return index

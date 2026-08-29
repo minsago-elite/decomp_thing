@@ -39,6 +39,7 @@ from oracle.full_tree_function_truth import (  # noqa: E402
 from oracle.full_tree_data_observations import (  # noqa: E402
     data_shard_inputs,
     produce_data_observation_shard,
+    run_full_tree_data_observations,
 )
 from oracle.full_tree_inventory import generate_inventory  # noqa: E402
 from oracle.full_tree_scope import canonical_json_bytes  # noqa: E402
@@ -154,6 +155,20 @@ class FullTreeFunctionObservationTest(unittest.TestCase):
             self.assertEqual(data_count, data_document["counts"]["globals"] + data_document["counts"]["types"])
             self.assertTrue(any("global_pair" in item["names"] for item in data_document["globals"]))
             self.assertTrue(any(item["tag"] == "struct" and item["name"] == "pair" for item in data_document["types"]))
+            data_root = root / "bounded-data-observations"
+            data_index = run_full_tree_data_observations(
+                artifact,
+                scope=scope,
+                scope_sha256=scope_sha256,
+                inventory=inventory,
+                output_root=data_root,
+                maximum_workers=1,
+            )
+            self.assertEqual(data_count, data_index["counts"]["entities"])
+            self.assertEqual(
+                data_output.read_bytes(),
+                next((data_root / "outputs").glob("*.json")).read_bytes(),
+            )
             call_root = root / "bounded-call-observations"
             call_index = run_full_tree_call_observations(
                 artifact,
