@@ -54,8 +54,11 @@ class FullTreeElfDataTest(unittest.TestCase):
         self.assertEqual(base["targetTypeId"], merged["targetTypeId"])
         self.assertEqual("odr-member-sole-source-aligned-target", merged["resolutionCode"])
         conflicting = {**declaration, "_targetQuality": "source-aligned"}
+        ambiguous = _merge_type_references([conflicting, base], "fixture-member")
+        self.assertIsNone(ambiguous["targetTypeId"])
+        self.assertEqual("ambiguous-authenticated-targets", ambiguous["reasonCode"])
         with self.assertRaisesRegex(FullTreeDataTruthError, "incompatible type references"):
-            _merge_type_references([conflicting, base], "fixture-member")
+            _merge_type_references([{**conflicting, "modifierTags": []}, base], "fixture-member")
 
     def test_odr_member_reference_preserves_ambiguous_producer_targets(self) -> None:
         references = [
@@ -73,7 +76,7 @@ class FullTreeElfDataTest(unittest.TestCase):
         merged = _merge_type_references(references, "fixture-member")
         self.assertIsNone(merged["targetTypeId"])
         self.assertIsNone(merged["targetOwnerShardId"])
-        self.assertEqual("ambiguous-producer-only-targets", merged["reasonCode"])
+        self.assertEqual("ambiguous-authenticated-targets", merged["reasonCode"])
         self.assertEqual("unresolved-authenticated-target-set", merged["resolutionCode"])
         self.assertEqual(20, merged["candidateTargetCount"])
         self.assertEqual(16, len(merged["candidateTargets"]))
@@ -81,7 +84,7 @@ class FullTreeElfDataTest(unittest.TestCase):
         self.assertEqual(16, len(merged["evidenceDieOffsets"]))
         definition = {**references[0], "targetTypeId": "type-" + "f" * 32, "_targetQuality": "producer-definition"}
         merged_definition = _merge_type_references([references[0], definition], "fixture-definition-member")
-        self.assertEqual("ambiguous-producer-only-targets", merged_definition["reasonCode"])
+        self.assertEqual("ambiguous-authenticated-targets", merged_definition["reasonCode"])
         self.assertIsNone(merged_definition["targetTypeId"])
 
     def test_source_unaligned_nonaddress_globals_do_not_merge_by_name(self) -> None:
@@ -139,10 +142,9 @@ class FullTreeElfDataTest(unittest.TestCase):
             _type_key({**base, "id": "type-observation-b", "unitId": "unit-b"}),
         )
         named = {**base, "name": "Local", "id": "type-observation-a"}
-        self.assertEqual(_type_key(named), _type_key({**named, "id": "type-observation-b"}))
         self.assertNotEqual(
             _type_key(named),
-            _type_key({**named, "id": "type-observation-c", "unitId": "unit-b"}),
+            _type_key({**named, "id": "type-observation-b"}),
         )
 
     def test_cross_shard_type_references_use_authenticated_type_ids(self) -> None:
