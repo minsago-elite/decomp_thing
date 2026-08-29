@@ -7,6 +7,7 @@ import subprocess
 import tempfile
 from types import SimpleNamespace
 import unittest
+from unittest.mock import patch
 
 
 REPOSITORY_ROOT = Path(__file__).resolve().parents[2]
@@ -20,6 +21,7 @@ from oracle.full_tree_function_baseline import (  # noqa: E402
 )
 from oracle.full_tree_function_observations import (  # noqa: E402
     MAX_FULL_TREE_NAME_CHARACTERS,
+    _process_resident_bytes,
     run_full_tree_function_observations,
 )
 from oracle.full_tree_function_truth import (  # noqa: E402
@@ -33,6 +35,11 @@ from oracle.function_recovery_oracle import OracleGenerationError, _dwarf_names 
 
 
 class FullTreeFunctionObservationTest(unittest.TestCase):
+    def test_exited_zombie_worker_has_no_current_resident_bytes(self) -> None:
+        process = SimpleNamespace(pid=1234, poll=lambda: None)
+        with patch.object(Path, "read_text", return_value="Name:\tpython\nState:\tZ (zombie)\n"):
+            self.assertEqual(0, _process_resident_bytes(process))
+
     def test_full_tree_name_limit_covers_authenticated_large_template_spelling(self) -> None:
         name = b"T" * 8_192
         die = SimpleNamespace(

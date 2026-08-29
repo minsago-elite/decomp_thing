@@ -246,7 +246,10 @@ def _process_resident_bytes(process: subprocess.Popen[bytes]) -> int:
             if len(fields) != 3 or fields[2] != "kB" or not fields[1].isdigit():
                 break
             return int(fields[1]) * 1024
-    if process.poll() is not None:
+    if process.poll() is not None or any(
+        line.startswith("State:") and "Z" in line.split()[1:2]
+        for line in status.splitlines()
+    ):
         return 0
     raise FullTreeFunctionObservationError(
         f"isolated shard worker {process.pid} has malformed resident-memory status"
