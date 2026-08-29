@@ -15,6 +15,7 @@ REPOSITORY_ROOT = Path(__file__).resolve().parents[2]
 
 from oracle.bounded_shards import load_complete_shard_index  # noqa: E402
 from oracle.full_tree_elf_functions import generate_full_tree_elf_function_index  # noqa: E402
+from oracle.full_tree_determinism import compare_full_tree_runs  # noqa: E402
 from oracle.full_tree_call_observations import (  # noqa: E402
     call_shard_inputs,
     produce_call_observation_shard,
@@ -249,6 +250,9 @@ class FullTreeFunctionObservationTest(unittest.TestCase):
             )
             self.assertEqual(first["indexSha256"], execution_evidence["indexSha256"])
             self.assertEqual(first["counts"]["entities"], execution_evidence["observed"]["entities"])
+            determinism = compare_full_tree_runs(output, isolated)
+            self.assertTrue(determinism["identical"])
+            self.assertEqual(1, determinism["shards"])
             stripped = root / "fixture.stripped"
             subprocess.run(
                 ["objcopy", "--strip-all", artifact, stripped],

@@ -1,0 +1,12 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://github.com/minsago-elite/decomp_thing/oracle/full-tree-determinism-report.schema.json",
+  "type": "object", "additionalProperties": false,
+  "required": ["schemaVersion", "firstIndexSha256", "secondIndexSha256", "runSha256", "shards", "differingShards", "identical", "reportSha256"],
+  "properties": {
+    "schemaVersion": {"const": 1}, "firstIndexSha256": {"$ref": "#/$defs/sha"}, "secondIndexSha256": {"$ref": "#/$defs/sha"},
+    "runSha256": {"$ref": "#/$defs/sha"}, "shards": {"type": "integer", "minimum": 1},
+    "differingShards": {"type": "array", "uniqueItems": true, "items": {"type": "string"}}, "identical": {"type": "boolean"},
+    "reportSha256": {"$ref": "#/$defs/sha"}
+  }, "$defs": {"sha": {"type": "string", "pattern": "^[0-9a-f]{64}$"}}
+}
