@@ -16,6 +16,11 @@ from typing import Any
 
 from oracle.bounded_shards import ShardBounds, ShardInput, run_bounded_shards
 from oracle.full_tree_function_observations import _artifact_identity, _declaration, _process_resident_bytes
+from oracle.full_tree_execution_evidence import (
+    FullTreeExecutionEvidenceError,
+    persist_shard_execution_usage,
+    write_full_tree_execution_evidence,
+)
 from oracle.full_tree_scope import canonical_json_bytes
 from oracle.function_recovery_oracle import _attribute_chain, _decode_dwarf_string
 
@@ -205,6 +210,7 @@ def produce_data_observation_shard(rich_artifact: Path, *, scope: dict[str, Any]
 
 
 def run_full_tree_data_observations(rich_artifact: Path, *, scope: dict[str, Any], scope_sha256: str, inventory: dict[str, Any], output_root: Path, maximum_workers: int) -> dict[str, Any]:
+    run_started = time.monotonic()
     rich_sha256, before = _artifact_identity(rich_artifact, scope["oracle"]["richArtifactSha256"])
     inputs, _ = data_shard_inputs(inventory, scope_sha256=scope_sha256, rich_sha256=rich_sha256)
     per_shard = scope["bounds"]["perShard"]
@@ -220,6 +226,8 @@ def run_full_tree_data_observations(rich_artifact: Path, *, scope: dict[str, Any
     control.mkdir(parents=True, exist_ok=True)
     scope_path = control / "scope.json"
     inventory_path = control / "inventory.json"
+    usage_directory = output_root / "usage"
+    usage_directory.mkdir(parents=True, exist_ok=True)
     for path, payload, label in ((scope_path, canonical_json_bytes(scope), "scope"), (inventory_path, canonical_json_bytes(inventory), "inventory")):
         if path.exists() and (path.is_symlink() or not path.is_file() or path.read_bytes() != payload):
             raise FullTreeDataObservationError(f"isolated data worker {label} changed")
@@ -227,6 +235,7 @@ def run_full_tree_data_observations(rich_artifact: Path, *, scope: dict[str, Any
             path.write_bytes(payload)
 
     def producer(shard: ShardInput, output: Path, cancelled: threading.Event) -> int:
+        worker_started = time.monotonic()
         process = subprocess.Popen(
             [sys.executable, os.fspath(Path(__file__).resolve().parents[1] / "scripts/full-tree-data-shard-worker.py"),
              "--rich-artifact", os.fspath(rich_artifact.absolute()), "--scope", os.fspath(scope_path.absolute()),
@@ -254,17 +263,40 @@ def run_full_tree_data_observations(rich_artifact: Path, *, scope: dict[str, Any
         if len(stdout) > 4096 or len(stderr) > 65536:
             raise FullTreeDataObservationError(f"isolated data shard {shard.identifier} exceeded control output bounds")
         try:
-            usage = json.loads(stdout); entities = usage["entities"]; resident = usage["maximumResidentBytes"]
+            usage = json.loads(stdout); entities = usage["entities"]; resident = usage["maximumResidentBytes"]; system_cpu = usage["systemCpuSeconds"]; user_cpu = usage["userCpuSeconds"]
         except (json.JSONDecodeError, KeyError, TypeError) as error:
             raise FullTreeDataObservationError(f"isolated data shard {shard.identifier} returned malformed usage") from error
         if isinstance(entities, bool) or not isinstance(entities, int) or entities < 0:
             raise FullTreeDataObservationError(f"isolated data shard {shard.identifier} returned invalid entities")
         if isinstance(resident, bool) or not isinstance(resident, int) or resident > per_shard["maximumResidentBytes"]:
             raise FullTreeDataObservationError(f"isolated data shard {shard.identifier} exceeded its resident-byte bound")
+        for value, label in ((system_cpu, "system CPU"), (user_cpu, "user CPU")):
+            if isinstance(value, bool) or not isinstance(value, (int, float)) or value < 0:
+                raise FullTreeDataObservationError(f"isolated data shard {shard.identifier} returned invalid {label} usage")
+        persist_shard_execution_usage(
+            usage_directory=usage_directory,
+            shard=shard,
+            output=output,
+            entities=entities,
+            maximum_resident_bytes=resident,
+            user_cpu_seconds=user_cpu,
+            system_cpu_seconds=system_cpu,
+            wall_clock_seconds=time.monotonic() - worker_started,
+        )
         return entities
 
     index = run_bounded_shards(output_root, run_id="full-tree-data-" + scope_sha256[:16], inputs=inputs, bounds=bounds, producer=producer)
     _, after = _artifact_identity(rich_artifact, rich_sha256)
     if before != after:
         raise FullTreeDataObservationError("rich artifact changed during the data run")
+    try:
+        write_full_tree_execution_evidence(
+            output_root=output_root,
+            index=index,
+            per_shard_bounds=per_shard,
+            whole_run_bounds=whole,
+            run_started=run_started,
+        )
+    except FullTreeExecutionEvidenceError as error:
+        raise FullTreeDataObservationError(str(error)) from error
     return index

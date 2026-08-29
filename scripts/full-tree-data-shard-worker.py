@@ -27,9 +27,10 @@ def main() -> int:
             raise FullTreeDataObservationError("worker shard binding does not match")
         entities = produce_data_observation_shard(arguments.rich_artifact, scope=scope, scope_sha256=arguments.scope_sha256, inventory=inventory, shard=selected[0], units=units[arguments.shard], output=arguments.output, cancelled=threading.Event())
         resident = int(resource.getrusage(resource.RUSAGE_SELF).ru_maxrss) * 1024
+        usage = resource.getrusage(resource.RUSAGE_SELF)
     except (FullTreeDataObservationError, OSError, json.JSONDecodeError) as error:
         print(f"data shard worker failed: {error}", file=sys.stderr); return 1
-    print(json.dumps({"entities": entities, "maximumResidentBytes": resident}, sort_keys=True, separators=(",", ":"))); return 0
+    print(json.dumps({"entities": entities, "maximumResidentBytes": resident, "systemCpuSeconds": usage.ru_stime, "userCpuSeconds": usage.ru_utime}, sort_keys=True, separators=(",", ":"))); return 0
 
 if __name__ == "__main__":
     raise SystemExit(main())

@@ -61,10 +61,11 @@ def main() -> int:
             cancelled=threading.Event(),
         )
         maximum_resident_bytes = int(resource.getrusage(resource.RUSAGE_SELF).ru_maxrss) * 1024
+        usage = resource.getrusage(resource.RUSAGE_SELF)
     except (FullTreeCallObservationError, OSError, json.JSONDecodeError) as error:
         print(f"call shard worker failed: {error}", file=sys.stderr)
         return 1
-    print(json.dumps({"entities": entities, "maximumResidentBytes": maximum_resident_bytes}, sort_keys=True, separators=(",", ":")))
+    print(json.dumps({"entities": entities, "maximumResidentBytes": maximum_resident_bytes, "systemCpuSeconds": usage.ru_stime, "userCpuSeconds": usage.ru_utime}, sort_keys=True, separators=(",", ":")))
     return 0
 
 

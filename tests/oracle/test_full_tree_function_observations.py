@@ -182,6 +182,10 @@ class FullTreeFunctionObservationTest(unittest.TestCase):
                 maximum_workers=1,
             )
             self.assertEqual(data_count, data_index["counts"]["entities"])
+            data_execution = json.loads(
+                (data_root / "execution-evidence.json").read_text(encoding="utf-8")
+            )
+            self.assertEqual(data_index["indexSha256"], data_execution["indexSha256"])
             self.assertEqual(
                 data_output.read_bytes(),
                 next((data_root / "outputs").glob("*.json")).read_bytes(),
@@ -206,6 +210,10 @@ class FullTreeFunctionObservationTest(unittest.TestCase):
                 maximum_workers=1,
             )
             self.assertEqual(call_count, call_index["counts"]["entities"])
+            call_execution = json.loads(
+                (call_root / "execution-evidence.json").read_text(encoding="utf-8")
+            )
+            self.assertEqual(call_index["indexSha256"], call_execution["indexSha256"])
             self.assertEqual(
                 call_output.read_bytes(),
                 next((call_root / "outputs").glob("*.json")).read_bytes(),
