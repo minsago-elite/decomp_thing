@@ -377,6 +377,10 @@ def generate_full_tree_data_truth(*, scope: dict[str, Any], scope_sha256: str, i
     with tempfile.NamedTemporaryFile(prefix=".data-truth-", suffix=".sqlite", dir=output_root) as temporary:
         database = sqlite3.connect(temporary.name)
         try:
+            # This database is disposable scratch state: only fully written and
+            # semantically revalidated JSON shards are promoted. Avoid durable
+            # journal I/O that can consume the bounded production run.
+            database.executescript("PRAGMA journal_mode=OFF; PRAGMA synchronous=OFF; PRAGMA temp_store=FILE;")
             database.executescript("CREATE TABLE observations (kind TEXT, identity TEXT, observation_id TEXT PRIMARY KEY, payload BLOB); CREATE INDEX observations_identity ON observations(kind,identity); CREATE TABLE type_targets (die_offset TEXT PRIMARY KEY, identity TEXT NOT NULL, unit_id TEXT NOT NULL, quality TEXT NOT NULL); CREATE INDEX type_targets_identity ON type_targets(identity); CREATE TABLE merged (kind TEXT, owner_shard TEXT, identity TEXT PRIMARY KEY, payload BLOB); CREATE INDEX merged_owner ON merged(owner_shard,kind,identity);")
             for checkpoint in observation_index["shards"]:
                 _check_runtime_bounds(scope, started=started, cpu_started=cpu_started, database_path=Path(temporary.name))
