@@ -1,0 +1,90 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://github.com/minsago-elite/decomp_thing/oracle/full-tree-elf-data.schema.json",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schemaVersion", "oracle", "artifacts", "counts", "globals", "externalGlobals", "indexSha256"],
+  "properties": {
+    "schemaVersion": {"const": 1},
+    "indexSha256": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
+    "oracle": {"type": "object"},
+    "artifacts": {"type": "object"},
+    "counts": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["globalRvas", "aliases", "externalGlobals", "abiObjects", "abiSlots"],
+      "properties": {
+        "globalRvas": {"type": "integer"},
+        "aliases": {"type": "integer"},
+        "externalGlobals": {"type": "integer"},
+        "abiObjects": {"type": "integer"},
+        "abiSlots": {"type": "integer"}
+      }
+    },
+    "globals": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["id", "addressKind", "address", "aliases"],
+        "properties": {
+          "id": {"type": "string"},
+          "addressKind": {"enum": ["image-rva", "tls-offset"]},
+          "address": {"type": "string"},
+          "aliases": {"type": "array", "minItems": 1, "items": {"$ref": "#/$defs/alias"}}
+        }
+      }
+    },
+    "externalGlobals": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["name", "evidence"],
+        "properties": {
+          "name": {"type": "string"},
+          "evidence": {"type": "array", "items": {"type": "string"}}
+        }
+      }
+    }
+  },
+  "$defs": {
+    "slot": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["index", "rva", "rawLittleEndian"],
+      "properties": {
+        "index": {"type": "integer"},
+        "rva": {"type": "string"},
+        "rawLittleEndian": {"type": "string", "pattern": "^[0-9a-f]{16}$"}
+      }
+    },
+    "abi": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["kind", "ownerMangledName", "slots"],
+      "properties": {
+        "kind": {"enum": ["vtable", "vtt", "typeinfo", "typeinfo-name"]},
+        "ownerMangledName": {"type": "string"},
+        "slots": {"type": "array", "items": {"$ref": "#/$defs/slot"}}
+      }
+    },
+    "alias": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["name", "kind", "binding", "visibility", "size", "alignment", "mutability", "availability", "evidence", "abi"],
+      "properties": {
+        "name": {"type": "string", "maxLength": 16384},
+        "kind": {"enum": ["object", "tls"]},
+        "binding": {"type": "string"},
+        "visibility": {"type": "string"},
+        "size": {"type": "integer"},
+        "alignment": {"type": "integer"},
+        "mutability": {"enum": ["constant", "mutable"]},
+        "availability": {"type": "object"},
+        "evidence": {"type": "array", "items": {"type": "string"}},
+        "abi": {"oneOf": [{"type": "null"}, {"$ref": "#/$defs/abi"}]}
+      }
+    }
+  }
+}
