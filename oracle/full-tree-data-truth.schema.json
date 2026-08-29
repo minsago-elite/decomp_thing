@@ -48,11 +48,12 @@
     },
     "typeReference": {
       "type": "object", "additionalProperties": false,
-      "required": ["evidenceDieOffsets", "modifierTags", "reasonCode", "targetOwnerShardId", "targetTypeId"],
+      "required": ["evidenceDieOffsets", "modifierTags", "reasonCode", "resolutionCode", "targetOwnerShardId", "targetTypeId"],
       "properties": {
         "evidenceDieOffsets": {"type": "array", "maxItems": 64, "uniqueItems": true, "items": {"type": "string", "pattern": "^0x(?:0|[1-9a-f][0-9a-f]{0,15})$"}},
         "modifierTags": {"type": "array", "maxItems": 64, "items": {"type": "string", "pattern": "^DW_TAG_"}},
         "reasonCode": {"type": ["string", "null"], "enum": [null, "no-type-attribute", "non-aggregate-terminal-type"]},
+        "resolutionCode": {"enum": ["unresolved", "exact-dwarf-offset", "odr-member-sole-source-aligned-target"]},
         "targetOwnerShardId": {"type": ["string", "null"]},
         "targetTypeId": {"oneOf": [{"type": "string", "pattern": "^type-[0-9a-f]{32}$"}, {"type": "null"}]}
       }

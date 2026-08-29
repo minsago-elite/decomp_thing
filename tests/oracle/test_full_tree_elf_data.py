@@ -3,7 +3,7 @@ import hashlib, json, subprocess, tempfile, unittest
 from pathlib import Path
 REPOSITORY_ROOT = Path(__file__).resolve().parents[2]
 from oracle.full_tree_elf_data import FullTreeElfDataError, generate_full_tree_elf_data_index  # noqa: E402
-from oracle.full_tree_data_observations import run_full_tree_data_observations  # noqa: E402
+from oracle.full_tree_data_observations import _boolean_attribute, run_full_tree_data_observations  # noqa: E402
 from oracle.full_tree_data_reconciliation import (  # noqa: E402
     FullTreeDataReconciliationError,
     generate_full_tree_data_reconciliation,
@@ -12,6 +12,7 @@ from oracle.full_tree_data_reconciliation import (  # noqa: E402
 from oracle.full_tree_data_truth import (  # noqa: E402
     FullTreeDataTruthError,
     _global_key,
+    _merge_type_references,
     _type_key,
     generate_full_tree_data_truth,
     validate_full_tree_data_truth_index,
@@ -25,6 +26,37 @@ from oracle.full_tree_inventory import generate_inventory  # noqa: E402
 from oracle.full_tree_scope import canonical_json_bytes  # noqa: E402
 
 class FullTreeElfDataTest(unittest.TestCase):
+    def test_dwarf_flag_present_is_a_true_boolean(self) -> None:
+        class Die:
+            attributes = {"DW_AT_declaration": type("Attribute", (), {"value": True})()}
+            offset = 1
+
+        self.assertTrue(_boolean_attribute(Die(), "DW_AT_declaration"))
+
+    def test_odr_member_reference_uses_sole_source_aligned_target(self) -> None:
+        base = {
+            "evidenceDieOffsets": ["0x1"],
+            "modifierTags": ["DW_TAG_pointer_type"],
+            "reasonCode": None,
+            "resolutionCode": "exact-dwarf-offset",
+            "targetOwnerShardId": "owner",
+            "targetTypeId": "type-" + "a" * 32,
+            "_targetQuality": "source-aligned",
+        }
+        declaration = {
+            **base,
+            "evidenceDieOffsets": ["0x2"],
+            "targetOwnerShardId": "declaration-owner",
+            "targetTypeId": "type-" + "b" * 32,
+            "_targetQuality": "producer-declaration",
+        }
+        merged = _merge_type_references([declaration, base], "fixture-member")
+        self.assertEqual(base["targetTypeId"], merged["targetTypeId"])
+        self.assertEqual("odr-member-sole-source-aligned-target", merged["resolutionCode"])
+        conflicting = {**declaration, "_targetQuality": "source-aligned"}
+        with self.assertRaisesRegex(FullTreeDataTruthError, "incompatible type references"):
+            _merge_type_references([conflicting, base], "fixture-member")
+
     def test_source_unaligned_nonaddress_globals_do_not_merge_by_name(self) -> None:
         base = {
             "addressRva": None,

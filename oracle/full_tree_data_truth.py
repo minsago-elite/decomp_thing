@@ -14,7 +14,7 @@ class FullTreeDataTruthError(ValueError):
     """Raised when ODR-equivalent data evidence is incompatible or incomplete."""
 
 
-POLICY = {"id": "full-tree-data-truth", "version": 6, "typeIdentity": "tag-qualified-lexical-context-name-declaration-with-producer-unit-for-anonymous-namespace-or-observation", "globalIdentity": "rva-or-source-aligned-name-declaration-or-producer-observation", "owner": "lowest-unit-id", "typeReferences": "exact-dwarf-offset-chain-resolved-through-authenticated-observation-index", "maximumDatabaseBytes": 8 * 1024 * 1024 * 1024}
+POLICY = {"id": "full-tree-data-truth", "version": 7, "typeIdentity": "tag-qualified-lexical-context-name-declaration-with-producer-unit-for-anonymous-namespace-or-observation", "globalIdentity": "rva-or-source-aligned-name-declaration-or-producer-observation", "owner": "lowest-unit-id", "typeReferences": "exact-dwarf-offset-chain-with-odr-member-position-coalescence-only-to-a-sole-source-aligned-target", "maximumDatabaseBytes": 8 * 1024 * 1024 * 1024}
 
 
 def _sha(payload: bytes) -> str:
@@ -85,7 +85,7 @@ def _type_layout(item: dict[str, Any]) -> bytes:
             **{key: member[key] for key in ("kind", "name", "byteOffset", "bitOffset", "bitSize", "value", "virtuality")},
             "typeReference": {
                 key: member["typeReference"][key]
-                for key in ("modifierTags", "reasonCode", "targetTypeId")
+                for key in ("modifierTags", "reasonCode")
             },
         }
         for member in item["members"]
@@ -104,11 +104,13 @@ def _resolve_type_reference(
             "evidenceDieOffsets": [] if immediate_offset is None else [immediate_offset],
             "modifierTags": modifier_tags,
             "reasonCode": reason_code,
+            "resolutionCode": "unresolved",
             "targetOwnerShardId": None,
             "targetTypeId": None,
+            "_targetQuality": None,
         }
     row = database.execute(
-        "SELECT target.identity,MIN(owner.unit_id) "
+        "SELECT target.identity,MIN(owner.unit_id),target.quality "
         "FROM type_targets target JOIN type_targets owner ON owner.identity=target.identity "
         "WHERE target.die_offset=? GROUP BY target.identity",
         (aggregate_offset,),
@@ -121,28 +123,52 @@ def _resolve_type_reference(
         "evidenceDieOffsets": sorted({immediate_offset, aggregate_offset}, key=lambda value: int(value, 16)),
         "modifierTags": modifier_tags,
         "reasonCode": None,
+        "resolutionCode": "exact-dwarf-offset",
         "targetOwnerShardId": unit_to_shard[row[1]],
         "targetTypeId": f"type-{row[0][:32]}",
+        "_targetQuality": row[2],
     }
 
 
 def _merge_type_references(references: Iterable[dict[str, Any]], identity: str) -> dict[str, Any]:
     records = list(references)
-    semantic = {
-        canonical_json_bytes(
-            {key: item[key] for key in ("modifierTags", "reasonCode", "targetOwnerShardId", "targetTypeId")}
-        )
-        for item in records
-    }
-    if len(semantic) != 1:
+    modifiers = {canonical_json_bytes(item["modifierTags"]) for item in records}
+    reasons = {item["reasonCode"] for item in records}
+    if len(modifiers) != 1 or len(reasons) != 1:
         raise FullTreeDataTruthError(f"incompatible type references for {identity}")
-    first = records[0]
+    targets = {item["targetTypeId"] for item in records if item["targetTypeId"] is not None}
+    if not targets:
+        selected = records[0]
+        resolution_code = "unresolved"
+    elif len(targets) == 1:
+        selected = next(item for item in records if item["targetTypeId"] is not None)
+        resolution_code = "exact-dwarf-offset"
+    else:
+        source_aligned = {
+            item["targetTypeId"]
+            for item in records
+            if item["_targetQuality"] == "source-aligned"
+        }
+        other_qualities = {
+            item["_targetQuality"]
+            for item in records
+            if item["targetTypeId"] not in source_aligned
+        }
+        if len(source_aligned) != 1 or not other_qualities <= {"producer-declaration"}:
+            raise FullTreeDataTruthError(f"incompatible type references for {identity}")
+        selected_id = next(iter(source_aligned))
+        selected = next(item for item in records if item["targetTypeId"] == selected_id)
+        resolution_code = "odr-member-sole-source-aligned-target"
     return {
         "evidenceDieOffsets": sorted(
             {offset for item in records for offset in item["evidenceDieOffsets"]},
             key=lambda value: int(value, 16),
         ),
-        **{key: first[key] for key in ("modifierTags", "reasonCode", "targetOwnerShardId", "targetTypeId")},
+        "modifierTags": selected["modifierTags"],
+        "reasonCode": selected["reasonCode"],
+        "resolutionCode": resolution_code,
+        "targetOwnerShardId": selected["targetOwnerShardId"],
+        "targetTypeId": selected["targetTypeId"],
     }
 
 
@@ -277,7 +303,7 @@ def generate_full_tree_data_truth(*, scope: dict[str, Any], scope_sha256: str, i
     with tempfile.NamedTemporaryFile(prefix=".data-truth-", suffix=".sqlite", dir=output_root) as temporary:
         database = sqlite3.connect(temporary.name)
         try:
-            database.executescript("CREATE TABLE observations (kind TEXT, identity TEXT, observation_id TEXT PRIMARY KEY, payload BLOB); CREATE INDEX observations_identity ON observations(kind,identity); CREATE TABLE type_targets (die_offset TEXT PRIMARY KEY, identity TEXT NOT NULL, unit_id TEXT NOT NULL); CREATE INDEX type_targets_identity ON type_targets(identity); CREATE TABLE merged (kind TEXT, owner_shard TEXT, identity TEXT PRIMARY KEY, payload BLOB); CREATE INDEX merged_owner ON merged(owner_shard,kind,identity);")
+            database.executescript("CREATE TABLE observations (kind TEXT, identity TEXT, observation_id TEXT PRIMARY KEY, payload BLOB); CREATE INDEX observations_identity ON observations(kind,identity); CREATE TABLE type_targets (die_offset TEXT PRIMARY KEY, identity TEXT NOT NULL, unit_id TEXT NOT NULL, quality TEXT NOT NULL); CREATE INDEX type_targets_identity ON type_targets(identity); CREATE TABLE merged (kind TEXT, owner_shard TEXT, identity TEXT PRIMARY KEY, payload BLOB); CREATE INDEX merged_owner ON merged(owner_shard,kind,identity);")
             for checkpoint in observation_index["shards"]:
                 _check_runtime_bounds(scope, started=started, cpu_started=cpu_started, database_path=Path(temporary.name))
                 shard_id = checkpoint["shardId"]
@@ -286,7 +312,7 @@ def generate_full_tree_data_truth(*, scope: dict[str, Any], scope_sha256: str, i
                     raise FullTreeDataTruthError(f"data observation shard {shard_id} changed")
                 document = json.loads(payload)
                 validate_data_observation_shard(document, scope=scope, scope_sha256=scope_sha256, inventory=inventory, shard=expected[shard_id], units=units[shard_id])
-                database.executemany("INSERT INTO type_targets VALUES (?,?,?)", ((item["dieOffset"], _type_key(item), item["unitId"]) for item in document["types"]))
+                database.executemany("INSERT INTO type_targets VALUES (?,?,?,?)", ((item["dieOffset"], _type_key(item), item["unitId"], "source-aligned" if item["declaration"]["sourcePath"] is not None or item["declaration"]["externalPathSha256"] is not None else "producer-declaration" if item["declarationOnly"] else "producer-definition") for item in document["types"]))
                 database.executemany("INSERT INTO observations VALUES ('type',?,?,?)", ((_type_key(item), item["id"], canonical_json_bytes(item)) for item in document["types"]))
                 database.executemany("INSERT INTO observations VALUES ('global',?,?,?)", ((_global_key(item), item["id"], canonical_json_bytes(item)) for item in document["globals"]))
                 database.commit()
@@ -316,7 +342,21 @@ def generate_full_tree_data_truth(*, scope: dict[str, Any], scope_sha256: str, i
                     layouts = {_type_layout(item) for item in definitions}
                     if len(layouts) > 1:
                         raise FullTreeDataTruthError(f"incompatible aggregate definitions for type-{identity[:32]}")
-                    layout = definitions[0] if definitions else records[0]
+                    layout_records = definitions if definitions else records
+                    layout = layout_records[0]
+                    layout = {
+                        **layout,
+                        "members": [
+                            {
+                                **member,
+                                "typeReference": _merge_type_references(
+                                    [item["members"][member_index]["typeReference"] for item in layout_records],
+                                    f"type-{identity[:32]}-member-{member_index}",
+                                ),
+                            }
+                            for member_index, member in enumerate(layout["members"])
+                        ],
+                    }
                     merged = {"alignment": layout["alignment"], "byteSize": layout["byteSize"], "context": layout["context"], "declarations": _unique(records, "declaration"), "id": f"type-{identity[:32]}", "members": layout["members"], "name": layout["name"], "observationIds": sorted(item["id"] for item in records), "ownerUnitId": owner, "population": "scored" if definitions and layout["byteSize"] is not None else "unobservable", "reasonCode": None if definitions and layout["byteSize"] is not None else "declaration-only-or-size-unobservable", "tag": layout["tag"]}
                 else:
                     address = _one_compatible(records, "addressRva", identity)
