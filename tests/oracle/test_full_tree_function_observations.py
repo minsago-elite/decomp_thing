@@ -244,6 +244,11 @@ class FullTreeFunctionObservationTest(unittest.TestCase):
                 next((output / "outputs").glob("*.json")).read_bytes(),
                 next((isolated / "outputs").glob("*.json")).read_bytes(),
             )
+            execution_evidence = json.loads(
+                (isolated / "execution-evidence.json").read_text(encoding="utf-8")
+            )
+            self.assertEqual(first["indexSha256"], execution_evidence["indexSha256"])
+            self.assertEqual(first["counts"]["entities"], execution_evidence["observed"]["entities"])
             stripped = root / "fixture.stripped"
             subprocess.run(
                 ["objcopy", "--strip-all", artifact, stripped],

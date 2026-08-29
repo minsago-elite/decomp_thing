@@ -13,8 +13,10 @@ import signal
 import stat
 import subprocess
 import sys
+import tempfile
 import threading
 import time
+import platform
 from typing import Any
 
 from oracle.bounded_shards import ShardBounds, ShardInput, run_bounded_shards
@@ -511,6 +513,7 @@ def run_full_tree_function_observations(
 ) -> dict[str, Any]:
     """Produce or resume all inventory shards without loading a monolithic model."""
 
+    run_started = time.monotonic()
     rich_sha256, before = _artifact_identity(
         rich_artifact, scope["oracle"]["richArtifactSha256"]
     )
@@ -542,6 +545,8 @@ def run_full_tree_function_observations(
             raise FullTreeFunctionObservationError("worker control directory must not be a symlink")
         scope_path = control / "scope.json"
         inventory_path = control / "inventory.json"
+        usage_directory = output_root / "usage"
+        usage_directory.mkdir(parents=True, exist_ok=True)
         for path, payload, label in (
             (scope_path, canonical_json_bytes(scope), "scope"),
             (inventory_path, canonical_json_bytes(inventory), "inventory"),
@@ -553,6 +558,7 @@ def run_full_tree_function_observations(
                 path.write_bytes(payload)
 
         def producer(shard: ShardInput, output: Path, cancelled: threading.Event) -> int:
+            worker_started = time.monotonic()
             command = [
                 sys.executable,
                 os.fspath(Path(__file__).resolve().parents[1] / "scripts/full-tree-function-shard-worker.py"),
@@ -617,6 +623,8 @@ def run_full_tree_function_observations(
                 result = json.loads(stdout.decode("utf-8"))
                 entities = result["entities"]
                 resident = result["maximumResidentBytes"]
+                user_cpu = result["userCpuSeconds"]
+                system_cpu = result["systemCpuSeconds"]
             except (UnicodeDecodeError, json.JSONDecodeError, KeyError, TypeError) as error:
                 raise FullTreeFunctionObservationError(
                     f"isolated function shard {shard.identifier} returned malformed usage"
@@ -634,6 +642,39 @@ def run_full_tree_function_observations(
                 raise FullTreeFunctionObservationError(
                     f"isolated function shard {shard.identifier} exceeded its resident-byte bound"
                 )
+            for value, label in ((user_cpu, "user CPU"), (system_cpu, "system CPU")):
+                if isinstance(value, bool) or not isinstance(value, (int, float)) or value < 0:
+                    raise FullTreeFunctionObservationError(
+                        f"isolated function shard {shard.identifier} returned invalid {label} usage"
+                    )
+            output_payload = output.read_bytes()
+            usage = canonical_json_bytes(
+                {
+                    "entities": entities,
+                    "id": shard.identifier,
+                    "inputSha256": shard.input_sha256,
+                    "maximumResidentBytes": resident,
+                    "outputSha256": hashlib.sha256(output_payload).hexdigest(),
+                    "serializedBytes": len(output_payload),
+                    "systemCpuSeconds": system_cpu,
+                    "userCpuSeconds": user_cpu,
+                    "wallClockSeconds": time.monotonic() - worker_started,
+                }
+            )
+            descriptor, temporary_name = tempfile.mkstemp(
+                prefix=f".{shard.identifier}.", suffix=".usage", dir=usage_directory
+            )
+            try:
+                with os.fdopen(descriptor, "wb") as usage_output:
+                    usage_output.write(usage)
+                    usage_output.flush()
+                    os.fsync(usage_output.fileno())
+                os.replace(temporary_name, usage_directory / f"{shard.identifier}.json")
+            finally:
+                try:
+                    Path(temporary_name).unlink()
+                except FileNotFoundError:
+                    pass
             return entities
 
     else:
@@ -659,4 +700,73 @@ def run_full_tree_function_observations(
     _, after = _artifact_identity(rich_artifact, rich_sha256)
     if before != after:
         raise FullTreeFunctionObservationError("rich artifact changed during the shard run")
+    if isolate_workers:
+        usage_records = []
+        for checkpoint in index["shards"]:
+            path = output_root / "usage" / f"{checkpoint['shardId']}.json"
+            try:
+                record = json.loads(path.read_text(encoding="utf-8"))
+            except (OSError, json.JSONDecodeError) as error:
+                raise FullTreeFunctionObservationError(
+                    f"missing or malformed execution evidence for {checkpoint['shardId']}"
+                ) from error
+            if record["id"] != checkpoint["shardId"] or any(
+                record[field] != checkpoint[checkpoint_field]
+                for field, checkpoint_field in (
+                    ("inputSha256", "inputSha256"),
+                    ("outputSha256", "outputSha256"),
+                    ("serializedBytes", "outputBytes"),
+                    ("entities", "entities"),
+                )
+            ):
+                raise FullTreeFunctionObservationError(
+                    f"execution evidence differs from checkpoint {checkpoint['shardId']}"
+                )
+            usage_records.append(record)
+        evidence_without_hash = {
+            "bounds": {
+                "perShard": per_shard,
+                "wholeRun": whole_run,
+            },
+            "environment": {
+                "platform": platform.platform(),
+                "python": platform.python_version(),
+            },
+            "indexSha256": index["indexSha256"],
+            "observed": {
+                "entities": sum(item["entities"] for item in usage_records),
+                "maximumResidentBytes": max(item["maximumResidentBytes"] for item in usage_records),
+                "serializedBytes": sum(item["serializedBytes"] for item in usage_records),
+                "systemCpuSeconds": sum(item["systemCpuSeconds"] for item in usage_records),
+                "userCpuSeconds": sum(item["userCpuSeconds"] for item in usage_records),
+                "wallClockSeconds": time.monotonic() - run_started,
+            },
+            "runSha256": index["runSha256"],
+            "schemaVersion": 1,
+            "shards": usage_records,
+        }
+        evidence = {
+            **evidence_without_hash,
+            "evidenceSha256": hashlib.sha256(canonical_json_bytes(evidence_without_hash)).hexdigest(),
+        }
+        observed = evidence["observed"]
+        if (
+            observed["entities"] != index["counts"]["entities"]
+            or observed["serializedBytes"] != index["counts"]["serializedBytes"]
+            or observed["maximumResidentBytes"] > per_shard["maximumResidentBytes"]
+            or observed["userCpuSeconds"] + observed["systemCpuSeconds"] > whole_run["cpuSeconds"]
+            or observed["wallClockSeconds"] > whole_run["wallClockSeconds"]
+        ):
+            raise FullTreeFunctionObservationError("execution evidence exceeds or differs from run bounds")
+        try:
+            import fastjsonschema  # type: ignore[import-untyped]
+            schema = json.loads(
+                Path(__file__).with_name("full-tree-execution-evidence.schema.json").read_text(encoding="utf-8")
+            )
+            fastjsonschema.compile(schema)(evidence)
+        except ModuleNotFoundError as error:
+            raise FullTreeFunctionObservationError("execution evidence validation requires pinned dependencies") from error
+        except (OSError, json.JSONDecodeError, fastjsonschema.JsonSchemaException) as error:
+            raise FullTreeFunctionObservationError(f"execution evidence fails validation: {error}") from error
+        (output_root / "execution-evidence.json").write_bytes(canonical_json_bytes(evidence))
     return index

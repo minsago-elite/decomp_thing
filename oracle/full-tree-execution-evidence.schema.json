@@ -1,0 +1,16 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://github.com/minsago-elite/decomp_thing/oracle/full-tree-execution-evidence.schema.json",
+  "title": "Authenticated bounded full-tree execution evidence",
+  "type": "object", "additionalProperties": false,
+  "required": ["schemaVersion", "runSha256", "indexSha256", "environment", "bounds", "observed", "shards", "evidenceSha256"],
+  "properties": {
+    "schemaVersion": {"const": 1}, "runSha256": {"$ref": "#/$defs/sha"}, "indexSha256": {"$ref": "#/$defs/sha"},
+    "environment": {"type": "object", "additionalProperties": false, "required": ["python", "platform"], "properties": {"python": {"type": "string"}, "platform": {"type": "string"}}},
+    "bounds": {"type": "object"},
+    "observed": {"type": "object", "additionalProperties": false, "required": ["entities", "serializedBytes", "maximumResidentBytes", "userCpuSeconds", "systemCpuSeconds", "wallClockSeconds"], "properties": {"entities": {"type": "integer"}, "serializedBytes": {"type": "integer"}, "maximumResidentBytes": {"type": "integer"}, "userCpuSeconds": {"type": "number"}, "systemCpuSeconds": {"type": "number"}, "wallClockSeconds": {"type": "number"}}},
+    "shards": {"type": "array", "items": {"type": "object", "additionalProperties": false, "required": ["id", "inputSha256", "outputSha256", "entities", "serializedBytes", "maximumResidentBytes", "userCpuSeconds", "systemCpuSeconds", "wallClockSeconds"], "properties": {"id": {"type": "string"}, "inputSha256": {"$ref": "#/$defs/sha"}, "outputSha256": {"$ref": "#/$defs/sha"}, "entities": {"type": "integer"}, "serializedBytes": {"type": "integer"}, "maximumResidentBytes": {"type": "integer"}, "userCpuSeconds": {"type": "number"}, "systemCpuSeconds": {"type": "number"}, "wallClockSeconds": {"type": "number"}}}},
+    "evidenceSha256": {"$ref": "#/$defs/sha"}
+  },
+  "$defs": {"sha": {"type": "string", "pattern": "^[0-9a-f]{64}$"}}
+}

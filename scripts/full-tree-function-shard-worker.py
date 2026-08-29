@@ -61,7 +61,8 @@ def main() -> int:
             output=arguments.output,
             cancelled=threading.Event(),
         )
-        maximum_resident_bytes = int(resource.getrusage(resource.RUSAGE_SELF).ru_maxrss) * 1024
+        usage = resource.getrusage(resource.RUSAGE_SELF)
+        maximum_resident_bytes = int(usage.ru_maxrss) * 1024
     except (FullTreeFunctionObservationError, OSError, json.JSONDecodeError) as error:
         print(f"shard worker failed: {error}", file=sys.stderr)
         return 1
@@ -70,6 +71,8 @@ def main() -> int:
             {
                 "entities": entities,
                 "maximumResidentBytes": maximum_resident_bytes,
+                "systemCpuSeconds": usage.ru_stime,
+                "userCpuSeconds": usage.ru_utime,
             },
             sort_keys=True,
             separators=(",", ":"),
