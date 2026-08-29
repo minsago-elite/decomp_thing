@@ -12,13 +12,14 @@
     "counts": {
       "type": "object",
       "additionalProperties": false,
-      "required": ["globalRvas", "aliases", "externalGlobals", "abiObjects", "abiSlots"],
+      "required": ["globalRvas", "aliases", "externalGlobals", "abiObjects", "abiSlots", "abiResolvedSlots"],
       "properties": {
         "globalRvas": {"type": "integer"},
         "aliases": {"type": "integer"},
         "externalGlobals": {"type": "integer"},
         "abiObjects": {"type": "integer"},
-        "abiSlots": {"type": "integer"}
+        "abiSlots": {"type": "integer"},
+        "abiResolvedSlots": {"type": "integer"}
       }
     },
     "globals": {
@@ -52,11 +53,13 @@
     "slot": {
       "type": "object",
       "additionalProperties": false,
-      "required": ["index", "rva", "rawLittleEndian"],
+      "required": ["index", "rva", "rawLittleEndian", "targetKind", "targetRva"],
       "properties": {
         "index": {"type": "integer"},
         "rva": {"type": "string"},
-        "rawLittleEndian": {"type": "string", "pattern": "^[0-9a-f]{16}$"}
+        "rawLittleEndian": {"type": "string", "pattern": "^[0-9a-f]{16}$"},
+        "targetKind": {"type": ["string", "null"], "enum": [null, "code", "data"]},
+        "targetRva": {"type": ["string", "null"]}
       }
     },
     "abi": {

@@ -24,6 +24,8 @@ class FullTreeElfDataTest(unittest.TestCase):
             self.assertTrue(any(alias["name"] == "global_base" for alias in aliases)); self.assertTrue(any(alias["kind"] == "tls" for alias in aliases))
             vtables = [alias for alias in aliases if alias["abi"] and alias["abi"]["kind"] == "vtable"]
             self.assertTrue(vtables); self.assertGreater(len(vtables[0]["abi"]["slots"]), 0)
+            self.assertGreater(first["counts"]["abiResolvedSlots"], 0)
+            self.assertTrue(any(slot["targetKind"] == "code" for alias in vtables for slot in alias["abi"]["slots"]))
             forged = json.loads(json.dumps(first)); forged_vtable = next(alias for item in forged["globals"] for alias in item["aliases"] if alias["abi"] and alias["abi"]["kind"] == "vtable"); current_slot = forged_vtable["abi"]["slots"][0]["rawLittleEndian"]; forged_vtable["abi"]["slots"][0]["rawLittleEndian"] = ("ff" if current_slot == "00" * 8 else "00") * 8
             with self.assertRaisesRegex(FullTreeElfDataError, "hash"):
                 from oracle.full_tree_elf_data import validate_full_tree_elf_data_index

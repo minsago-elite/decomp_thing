@@ -9,7 +9,7 @@ from oracle.full_tree_scope import canonical_json_bytes
 class FullTreeElfDataError(ValueError):
     """Raised when ELF data twins cannot produce a closed index."""
 
-POLICY = {"id": "full-tree-elf-data", "version": 1, "identity": "one-record-per-defined-object-rva", "abiSlots": "authenticated-eight-byte-little-endian-object-words"}
+POLICY = {"id": "full-tree-elf-data", "version": 2, "identity": "one-record-per-defined-object-rva", "abiSlots": "authenticated-eight-byte-little-endian-object-words-with-loaded-image-pointer-resolution"}
 ABI_PREFIXES = {"_ZTV": "vtable", "_ZTT": "vtt", "_ZTI": "typeinfo", "_ZTS": "typeinfo-name"}
 MAX_SYMBOLS = 2_000_000; MAX_ABI_OBJECT_BYTES = 1024 * 1024; MAX_ABI_SLOTS = 2_000_000
 
@@ -28,6 +28,7 @@ def _scan(path: Path, label: str, expected_sha256: str) -> dict[str, Any]:
         while block := stream.read(1024 * 1024): digest.update(block)
         if digest.hexdigest() != expected_sha256: raise FullTreeElfDataError(f"{label} SHA-256 differs from scope")
         stream.seek(0); elf = ELFFile(stream); loads = [segment for segment in elf.iter_segments() if segment["p_type"] == "PT_LOAD" and int(segment["p_memsz"]) > 0]; image_base = min(int(segment["p_vaddr"]) for segment in loads)
+        loaded_ranges = tuple((int(segment["p_vaddr"]), int(segment["p_vaddr"]) + int(segment["p_memsz"]), bool(int(segment["p_flags"]) & 1)) for segment in loads)
         aliases: dict[tuple[str, int], dict[str, dict[str, Any]]] = defaultdict(dict); externals: dict[str, set[str]] = defaultdict(set); scanned = 0; abi_slots = 0
         for section_index, section in enumerate(elf.iter_sections()):
             if not isinstance(section, SymbolTableSection): continue
@@ -49,7 +50,10 @@ def _scan(path: Path, label: str, expected_sha256: str) -> dict[str, Any]:
                         for index in range(0, len(data) - (len(data) % 8), 8):
                             abi_slots += 1
                             if abi_slots > MAX_ABI_SLOTS: raise FullTreeElfDataError(f"{label} exceeds ABI slot bound")
-                            slots.append({"index": index // 8, "rawLittleEndian": data[index:index + 8].hex(), "rva": hex(address + index - image_base)})
+                            word = data[index:index + 8]
+                            value = int.from_bytes(word, byteorder="little", signed=False)
+                            target = next(((start, executable) for start, end, executable in loaded_ranges if start <= value < end), None)
+                            slots.append({"index": index // 8, "rawLittleEndian": word.hex(), "rva": hex(address + index - image_base), "targetKind": None if target is None else "code" if target[1] else "data", "targetRva": None if target is None else hex(value - image_base)})
                         abi = {"kind": kind, "ownerMangledName": symbol.name[len(prefix):], "slots": slots}; break
                 address_kind = "tls-offset" if symbol_type == "STT_TLS" else "image-rva"
                 normalized_address = address if symbol_type == "STT_TLS" else address - image_base
@@ -72,7 +76,7 @@ def generate_full_tree_elf_data_index(rich_path: Path, stripped_path: Path, *, s
             aliases.append({**record, "availability": {"rich": "surviving", "stripped": "surviving" if stripped_record else "removed"}, "evidence": sorted(record["evidence"] + (stripped_record["evidence"] if stripped_record else []))})
         globals_.append({"address": hex(address), "addressKind": address_kind, "aliases": aliases, "id": f"global-{'rva' if address_kind == 'image-rva' else 'tls'}-{hex(address)}"})
     external = [{"evidence": sorted(evidence), "name": name} for name, evidence in sorted(rich["externals"].items())]
-    without_hash = {"artifacts": {label: {"inputSha256": item["inputSha256"], "scannedSymbols": item["scannedSymbols"], "sizeBytes": item["sizeBytes"]} for label, item in (("rich", rich), ("stripped", stripped))}, "counts": {"abiObjects": sum(alias["abi"] is not None for item in globals_ for alias in item["aliases"]), "abiSlots": sum(len(alias["abi"]["slots"]) for item in globals_ for alias in item["aliases"] if alias["abi"]), "aliases": sum(len(item["aliases"]) for item in globals_), "externalGlobals": len(external), "globalRvas": len(globals_)}, "externalGlobals": external, "globals": globals_, "oracle": {"configurationSha256": _configuration_sha256(), "inventoryIndexSha256": inventory["indexSha256"], "scopeSha256": scope_sha256}, "schemaVersion": 1}
+    without_hash = {"artifacts": {label: {"inputSha256": item["inputSha256"], "scannedSymbols": item["scannedSymbols"], "sizeBytes": item["sizeBytes"]} for label, item in (("rich", rich), ("stripped", stripped))}, "counts": {"abiObjects": sum(alias["abi"] is not None for item in globals_ for alias in item["aliases"]), "abiSlots": sum(len(alias["abi"]["slots"]) for item in globals_ for alias in item["aliases"] if alias["abi"]), "abiResolvedSlots": sum(slot["targetRva"] is not None for item in globals_ for alias in item["aliases"] if alias["abi"] for slot in alias["abi"]["slots"]), "aliases": sum(len(item["aliases"]) for item in globals_), "externalGlobals": len(external), "globalRvas": len(globals_)}, "externalGlobals": external, "globals": globals_, "oracle": {"configurationSha256": _configuration_sha256(), "inventoryIndexSha256": inventory["indexSha256"], "scopeSha256": scope_sha256}, "schemaVersion": 1}
     document = {**without_hash, "indexSha256": _sha(canonical_json_bytes(without_hash))}
     validate_full_tree_elf_data_index(document, scope=scope, scope_sha256=scope_sha256, inventory=inventory); return document
 
@@ -86,5 +90,5 @@ def validate_full_tree_elf_data_index(document: dict[str, Any], *, scope: dict[s
     if document["indexSha256"] != _sha(canonical_json_bytes(without_hash)): raise FullTreeElfDataError("ELF data index hash does not reconcile")
     ordering = lambda item: (item["addressKind"], int(item["address"], 16))
     if document["globals"] != sorted(document["globals"], key=ordering) or len({(item["addressKind"], item["address"]) for item in document["globals"]}) != len(document["globals"]): raise FullTreeElfDataError("ELF global address ordering or uniqueness differs")
-    counts = {"abiObjects": sum(alias["abi"] is not None for item in document["globals"] for alias in item["aliases"]), "abiSlots": sum(len(alias["abi"]["slots"]) for item in document["globals"] for alias in item["aliases"] if alias["abi"]), "aliases": sum(len(item["aliases"]) for item in document["globals"]), "externalGlobals": len(document["externalGlobals"]), "globalRvas": len(document["globals"])}
+    counts = {"abiObjects": sum(alias["abi"] is not None for item in document["globals"] for alias in item["aliases"]), "abiSlots": sum(len(alias["abi"]["slots"]) for item in document["globals"] for alias in item["aliases"] if alias["abi"]), "abiResolvedSlots": sum(slot["targetRva"] is not None for item in document["globals"] for alias in item["aliases"] if alias["abi"] for slot in alias["abi"]["slots"]), "aliases": sum(len(item["aliases"]) for item in document["globals"]), "externalGlobals": len(document["externalGlobals"]), "globalRvas": len(document["globals"])}
     if document["counts"] != counts: raise FullTreeElfDataError("ELF data counts do not reconcile")
