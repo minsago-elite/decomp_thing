@@ -7,8 +7,10 @@ import hashlib
 import itertools
 import json
 from pathlib import Path
+import resource
 import sqlite3
 import tempfile
+import time
 from typing import Any
 
 from oracle.bounded_shards import load_complete_shard_index
@@ -42,6 +44,20 @@ def _configuration_sha256() -> str:
 
 def _external_id(name: str) -> str:
     return "external-function-" + _sha(name.encode("utf-8"))[:32]
+
+
+def _check_runtime_bounds(
+    scope: dict[str, Any], *, started: float, cpu_started: float, database_path: Path
+) -> None:
+    bounds = scope["bounds"]["wholeRun"]
+    if time.monotonic() - started > bounds["wallClockSeconds"]:
+        raise FullTreeCallTruthError("call truth merge exceeded its wall-clock bound")
+    if time.process_time() - cpu_started > bounds["cpuSeconds"]:
+        raise FullTreeCallTruthError("call truth merge exceeded its CPU-time bound")
+    if int(resource.getrusage(resource.RUSAGE_SELF).ru_maxrss) * 1024 > bounds["maximumResidentBytes"]:
+        raise FullTreeCallTruthError("call truth merge exceeded its resident-byte bound")
+    if database_path.exists() and database_path.stat().st_size > bounds["serializedBytes"]:
+        raise FullTreeCallTruthError("call truth merge database exceeded its byte bound")
 
 
 def _validate_document(document: dict[str, Any]) -> None:
@@ -121,6 +137,8 @@ def generate_full_tree_call_truth(
     call_observation_root: Path,
     output_root: Path,
 ) -> dict[str, Any]:
+    started = time.monotonic()
+    cpu_started = time.process_time()
     function_index_payload = (function_truth_root / "index.json").read_bytes()
     function_index = json.loads(function_index_payload.decode("utf-8"))
     validate_full_tree_function_truth_index(
@@ -178,6 +196,12 @@ def generate_full_tree_call_truth(
                 """
             )
             for checkpoint in call_index["shards"]:
+                _check_runtime_bounds(
+                    scope,
+                    started=started,
+                    cpu_started=cpu_started,
+                    database_path=Path(database_file.name),
+                )
                 shard_id = checkpoint["shardId"]
                 path = call_observation_root / "outputs" / f"{shard_id}.json"
                 payload = path.read_bytes()
@@ -211,7 +235,16 @@ def generate_full_tree_call_truth(
             observation_cursor = database.execute(
                 "SELECT edge_key,source_shard,payload FROM observations ORDER BY edge_key,observation_id"
             )
-            for edge_key, rows in itertools.groupby(observation_cursor, key=lambda row: row[0]):
+            for edge_index, (edge_key, rows) in enumerate(
+                itertools.groupby(observation_cursor, key=lambda row: row[0])
+            ):
+                if edge_index % 4096 == 0:
+                    _check_runtime_bounds(
+                        scope,
+                        started=started,
+                        cpu_started=cpu_started,
+                        database_path=Path(database_file.name),
+                    )
                 grouped_rows = list(rows)
                 observations = [json.loads(row[2]) for row in grouped_rows]
                 first = observations[0]
@@ -276,6 +309,12 @@ def generate_full_tree_call_truth(
             shard_records = []
             aggregate = defaultdict(int)
             for shard in inventory["shards"]:
+                _check_runtime_bounds(
+                    scope,
+                    started=started,
+                    cpu_started=cpu_started,
+                    database_path=Path(database_file.name),
+                )
                 calls = sorted(by_shard[shard["id"]], key=lambda item: item["id"])
                 counts = {
                     "directInternal": sum(item["targetKind"] == "direct-internal" for item in calls),

@@ -1,7 +1,7 @@
 """ODR-aware reconciliation for full-tree globals and aggregate layouts."""
 
 from __future__ import annotations
-import hashlib, itertools, json, sqlite3, tempfile
+import hashlib, itertools, json, resource, sqlite3, tempfile, time
 from pathlib import Path
 from typing import Any, Iterable
 
@@ -23,6 +23,20 @@ def _sha(payload: bytes) -> str:
 
 def _configuration_sha256() -> str:
     return _sha(canonical_json_bytes(POLICY) + Path(__file__).with_name("full-tree-data-truth.schema.json").read_bytes())
+
+
+def _check_runtime_bounds(
+    scope: dict[str, Any], *, started: float, cpu_started: float, database_path: Path
+) -> None:
+    bounds = scope["bounds"]["wholeRun"]
+    if time.monotonic() - started > bounds["wallClockSeconds"]:
+        raise FullTreeDataTruthError("data truth merge exceeded its wall-clock bound")
+    if time.process_time() - cpu_started > bounds["cpuSeconds"]:
+        raise FullTreeDataTruthError("data truth merge exceeded its CPU-time bound")
+    if int(resource.getrusage(resource.RUSAGE_SELF).ru_maxrss) * 1024 > bounds["maximumResidentBytes"]:
+        raise FullTreeDataTruthError("data truth merge exceeded its resident-byte bound")
+    if database_path.exists() and database_path.stat().st_size > bounds["serializedBytes"]:
+        raise FullTreeDataTruthError("data truth merge database exceeded its byte bound")
 
 
 def _declaration_key(declaration: dict[str, Any]) -> dict[str, Any]:
@@ -134,6 +148,7 @@ def validate_full_tree_data_truth_index(
 
 
 def generate_full_tree_data_truth(*, scope: dict[str, Any], scope_sha256: str, inventory: dict[str, Any], observation_root: Path, output_root: Path) -> dict[str, Any]:
+    started = time.monotonic(); cpu_started = time.process_time()
     observation_index = load_complete_shard_index(observation_root)
     observation_payload = (observation_root / "index.json").read_bytes()
     inputs, units = data_shard_inputs(inventory, scope_sha256=scope_sha256, rich_sha256=scope["oracle"]["richArtifactSha256"])
@@ -146,6 +161,7 @@ def generate_full_tree_data_truth(*, scope: dict[str, Any], scope_sha256: str, i
         try:
             database.executescript("CREATE TABLE observations (kind TEXT, identity TEXT, observation_id TEXT PRIMARY KEY, payload BLOB); CREATE INDEX observations_identity ON observations(kind,identity); CREATE TABLE merged (kind TEXT, owner_shard TEXT, identity TEXT PRIMARY KEY, payload BLOB); CREATE INDEX merged_owner ON merged(owner_shard,kind,identity);")
             for checkpoint in observation_index["shards"]:
+                _check_runtime_bounds(scope, started=started, cpu_started=cpu_started, database_path=Path(temporary.name))
                 shard_id = checkpoint["shardId"]
                 payload = (observation_root / "outputs" / f"{shard_id}.json").read_bytes()
                 if _sha(payload) != checkpoint["outputSha256"]:
@@ -157,7 +173,8 @@ def generate_full_tree_data_truth(*, scope: dict[str, Any], scope_sha256: str, i
                 database.commit()
 
             cursor = database.execute("SELECT kind,identity,payload FROM observations ORDER BY kind,identity,observation_id")
-            for (kind, identity), rows in itertools.groupby(cursor, key=lambda row: (row[0], row[1])):
+            for merge_index, ((kind, identity), rows) in enumerate(itertools.groupby(cursor, key=lambda row: (row[0], row[1]))):
+                if merge_index % 4096 == 0: _check_runtime_bounds(scope, started=started, cpu_started=cpu_started, database_path=Path(temporary.name))
                 records = [json.loads(row[2]) for row in rows]
                 owner = min(item["unitId"] for item in records)
                 if kind == "type":
@@ -174,6 +191,7 @@ def generate_full_tree_data_truth(*, scope: dict[str, Any], scope_sha256: str, i
             database.commit()
             shard_records = []; aggregate: dict[str, int] = {}
             for shard in inventory["shards"]:
+                _check_runtime_bounds(scope, started=started, cpu_started=cpu_started, database_path=Path(temporary.name))
                 globals_ = [json.loads(row[0]) for row in database.execute("SELECT payload FROM merged WHERE owner_shard=? AND kind='global' ORDER BY identity", (shard["id"],))]
                 types = [json.loads(row[0]) for row in database.execute("SELECT payload FROM merged WHERE owner_shard=? AND kind='type' ORDER BY identity", (shard["id"],))]
                 counts = {"bases": sum(member["kind"] == "base" for item in types for member in item["members"]), "enumerators": sum(member["kind"] == "enumerator" for item in types for member in item["members"]), "fields": sum(member["kind"] == "field" for item in types for member in item["members"]), "globals": len(globals_), "types": len(types), "unobservableGlobals": sum(item["population"] == "unobservable" for item in globals_), "unobservableTypes": sum(item["population"] == "unobservable" for item in types)}
