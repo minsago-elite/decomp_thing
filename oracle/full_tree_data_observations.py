@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import gc
 import hashlib
 import json
 import os
@@ -181,7 +182,12 @@ def produce_data_observation_shard(rich_artifact: Path, *, scope: dict[str, Any]
                     identity = hashlib.sha256(f"{unit['id']}:{hex(int(die.offset))}".encode()).hexdigest()[:32]
                     visibility = {1: "local", 2: "exported", 3: "qualified"}.get(_integer_attribute(die, "DW_AT_visibility"), "default" if external else "unknown")
                     globals_.append({"addressRva": hex(address) if address is not None else None, "alignment": _integer_attribute(type_die, "DW_AT_alignment") if type_die else None, "declaration": _declaration(die, dwarf, scope, unit), "dieOffset": hex(int(die.offset)), "external": external, "id": f"global-observation-{identity}", "mutability": "constant" if "DW_AT_const_value" in die.attributes else "mutable" if address is not None or tls else "unknown", "names": names, "reasonCode": None if address is not None else "tls-no-image-rva" if tls else "optimized-out-or-nonaddress-location", "size": _integer_attribute(type_die, "DW_AT_byte_size") if type_die else None, "tls": tls, "typeDieOffset": type_offset, "unitId": unit["id"], "visibility": visibility})
-            dwarf._cu_cache.clear(); dwarf._cu_offsets_map.clear(); dwarf._linetable_cache.clear()
+            del die
+            del cu
+            dwarf._cu_cache.clear()
+            dwarf._cu_offsets_map.clear()
+            dwarf._linetable_cache.clear()
+            gc.collect()
         globals_.sort(key=lambda item: item["id"]); types.sort(key=lambda item: item["id"])
         counts = {"bases": sum(member["kind"] == "base" for item in types for member in item["members"]), "enumerators": sum(member["kind"] == "enumerator" for item in types for member in item["members"]), "fields": sum(member["kind"] == "field" for item in types for member in item["members"]), "globals": len(globals_), "scannedDies": scanned, "types": len(types), "units": len(units)}
         document = {"counts": counts, "globals": globals_, "oracle": {"configurationSha256": _configuration_sha256(), "inventoryIndexSha256": inventory["indexSha256"], "richArtifactSha256": scope["oracle"]["richArtifactSha256"], "scopeSha256": scope_sha256}, "schemaVersion": 1, "shard": {"id": shard.identifier, "inputSha256": shard.input_sha256}, "types": types}
