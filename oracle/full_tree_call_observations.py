@@ -74,8 +74,14 @@ def call_shard_inputs(
 
 
 def _address(attribute: Any, dwarf: Any, cu: Any) -> int:
+    # pyelftools resolves DW_FORM_addrx* through .debug_addr while decoding the
+    # DIE and retains the encoded index separately as ``raw_value``.  Resolving
+    # ``value`` a second time treats the address as an index and can read beyond
+    # .debug_addr on large DWARF 5 artifacts.
     value = int(attribute.value)
-    return dwarf.get_addr(cu, value) if attribute.form.startswith("DW_FORM_addrx") else value
+    if value < 0 or value >= 1 << 64:
+        raise FullTreeCallObservationError("call-site address is outside unsigned 64-bit range")
+    return value
 
 
 def _parent_subprogram(die: Any) -> Any | None:

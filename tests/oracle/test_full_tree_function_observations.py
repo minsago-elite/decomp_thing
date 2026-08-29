@@ -17,6 +17,7 @@ from oracle.bounded_shards import load_complete_shard_index  # noqa: E402
 from oracle.full_tree_elf_functions import generate_full_tree_elf_function_index  # noqa: E402
 from oracle.full_tree_determinism import compare_full_tree_runs  # noqa: E402
 from oracle.full_tree_call_observations import (  # noqa: E402
+    _address,
     call_shard_inputs,
     produce_call_observation_shard,
     run_full_tree_call_observations,
@@ -49,6 +50,15 @@ from oracle.function_recovery_oracle import OracleGenerationError, _dwarf_names 
 
 
 class FullTreeFunctionObservationTest(unittest.TestCase):
+    def test_indexed_call_address_uses_pyelftools_resolved_value(self) -> None:
+        attribute = SimpleNamespace(
+            form="DW_FORM_addrx",
+            raw_value=70,
+            value=0x268F46C,
+        )
+        dwarf = SimpleNamespace(get_addr=lambda *_: self.fail("address resolved twice"))
+        self.assertEqual(0x268F46C, _address(attribute, dwarf, SimpleNamespace()))
+
     def test_worker_without_kernel_memory_mapping_has_zero_current_resident_bytes(self) -> None:
         process = SimpleNamespace(pid=1234, poll=lambda: None)
         with patch.object(Path, "read_text", return_value="Name:\tpython\nState:\tR (running)\n"):
