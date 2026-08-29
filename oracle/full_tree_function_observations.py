@@ -31,6 +31,21 @@ class FullTreeFunctionObservationError(ValueError):
     """Raised when the complete DWARF inventory cannot be observed safely."""
 
 
+PRODUCER_POLICY = {
+    "id": "full-tree-function-observations",
+    "version": 1,
+    "emittedIdentity": "image-relative-start-rva",
+    "ownershipCandidates": "all-source-aligned-dwarf-compilation-units",
+    "declarationPaths": "explicit-scope-map-or-external-path-sha256",
+    "inlineObservationIdentity": "unit-id-and-die-relative-offset",
+}
+
+
+def _configuration_sha256() -> str:
+    schema = Path(__file__).with_name("full-tree-function-observations.schema.json").read_bytes()
+    return hashlib.sha256(canonical_json_bytes(PRODUCER_POLICY) + schema).hexdigest()
+
+
 def _dwarf_text(value: Any, label: str) -> str:
     if not isinstance(value, bytes):
         raise FullTreeFunctionObservationError(f"{label} is not a DWARF byte string")
@@ -126,6 +141,7 @@ def validate_function_observation_shard(
     except (OSError, json.JSONDecodeError, fastjsonschema.JsonSchemaException) as error:
         raise FullTreeFunctionObservationError(f"function observation shard fails JSON Schema: {error}") from error
     if document["oracle"] != {
+        "configurationSha256": _configuration_sha256(),
         "inventoryIndexSha256": inventory["indexSha256"],
         "richArtifactSha256": scope["oracle"]["richArtifactSha256"],
         "scopeSha256": scope_sha256,
@@ -225,6 +241,7 @@ def _shard_inputs(
         payload = canonical_json_bytes(
             {
                 "inventoryIndexSha256": inventory["indexSha256"],
+                "producerConfigurationSha256": _configuration_sha256(),
                 "richArtifactSha256": rich_sha256,
                 "scopeSha256": scope_sha256,
                 "shardId": shard["id"],
@@ -392,6 +409,7 @@ def _produce_shard(
             "emitted": emitted,
             "inlineOnly": inline_only,
             "oracle": {
+                "configurationSha256": _configuration_sha256(),
                 "inventoryIndexSha256": inventory["indexSha256"],
                 "richArtifactSha256": scope["oracle"]["richArtifactSha256"],
                 "scopeSha256": scope_sha256,

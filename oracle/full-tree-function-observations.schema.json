@@ -120,6 +120,9 @@
     "oracle": {
       "additionalProperties": false,
       "properties": {
+        "configurationSha256": {
+          "$ref": "#/$defs/sha256"
+        },
         "inventoryIndexSha256": {
           "$ref": "#/$defs/sha256"
         },
@@ -131,6 +134,7 @@
         }
       },
       "required": [
+        "configurationSha256",
         "inventoryIndexSha256",
         "richArtifactSha256",
         "scopeSha256"
