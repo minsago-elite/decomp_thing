@@ -64,6 +64,15 @@ jobs:
           python3 scripts/verify-llvm-oracle-artifacts.py \
             oracle/llvm/22.1.6/oracle-manifest.json \
             --artifact-root "$LLVM_ORACLE_ARTIFACT_ROOT"
+      - name: Reconcile the complete Clang/LLVM compilation-unit inventory
+        run: |
+          python3 scripts/verify-llvm-full-tree-scope.py
+          python3 scripts/generate-llvm-full-tree-inventory.py \
+            --rich-artifact \
+              "$LLVM_ORACLE_ARTIFACT_ROOT/artifacts/clang-driver.full" \
+            --output "$RUNNER_TEMP/full-tree-inventory.json"
+          cmp "$RUNNER_TEMP/full-tree-inventory.json" \
+            oracle/llvm/22.1.6/full-tree-inventory.json
       - name: Regenerate deterministic Clang function oracle
         run: |
           python3 scripts/generate-llvm-function-recovery-oracle.py \
