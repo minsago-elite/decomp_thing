@@ -19,6 +19,8 @@ OWNER_BY_CASE = {
     "diagnostic-missing-include": "clang-lex", "diagnostic-syntax": "clang-parser",
     "diagnostic-template-backtrace": "clang-sema", "diagnostic-warning-option": "clang-sema",
     "driver-missing-linker": "clang-driver-toolchain", "link-undefined-symbol": "clang-driver-linker",
+    "pch-reuse-wrong-target": "clang-serialization",
+    "preprocess-malformed-macro": "clang-lex",
     "response-file-recursion": "clang-driver-response-files", "target-unsupported-aarch64": "clang-driver-targets",
 }
 

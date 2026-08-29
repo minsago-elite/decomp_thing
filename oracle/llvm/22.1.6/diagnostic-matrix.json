@@ -280,6 +280,55 @@
     },
     {
       "categories": [
+        "cache-invalidation",
+        "diagnostics",
+        "exit-status",
+        "pch",
+        "preprocessing-state",
+        "target-selection"
+      ],
+      "exitCode": 1,
+      "id": "pch-reuse-wrong-target",
+      "mismatchIds": {
+        "exitCode": "clang-diagnostic-6aa3d3ce7e18306b11d00534581532f3",
+        "order": "clang-diagnostic-380d86f5899b773aa23f3538a98d800b",
+        "stderr": "clang-diagnostic-7fb22bc2830677713fa5d372537c894a",
+        "stdout": "clang-diagnostic-f8364d8a05653061b5f77feadaccef8d"
+      },
+      "normalizations": {
+        "stderr": [],
+        "stdout": []
+      },
+      "ownerSubsystem": "clang-serialization",
+      "stderrSha256": "a19e7859ef0e69daf23531370273fafeabd77dedba468822e6d924f469ff6901",
+      "stdoutSha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+    },
+    {
+      "categories": [
+        "diagnostics",
+        "exit-status",
+        "macros",
+        "preprocessing",
+        "stderr"
+      ],
+      "exitCode": 1,
+      "id": "preprocess-malformed-macro",
+      "mismatchIds": {
+        "exitCode": "clang-diagnostic-faf4d0a3d1f74fad8af543ca6dab1b08",
+        "order": "clang-diagnostic-8cf396d1f71d5dc8491691b08c72e5ac",
+        "stderr": "clang-diagnostic-b88a62fc25173215f8e524160742e77a",
+        "stdout": "clang-diagnostic-c2d3e8f4ec67c978d50ccae2ac3f578f"
+      },
+      "normalizations": {
+        "stderr": [],
+        "stdout": []
+      },
+      "ownerSubsystem": "clang-lex",
+      "stderrSha256": "2702ba7427c06d1b4b7b8a567852abeaacf528de28e6c777c70c87904b89dd2d",
+      "stdoutSha256": "70b59c074f861fc44ba0b570c2a58b8d31304d9e0ae6b744bba820f2e091c8cd"
+    },
+    {
+      "categories": [
         "diagnostics",
         "exit-status",
         "response-files",
@@ -325,9 +374,9 @@
       "stdoutSha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
     }
   ],
-  "corpusSha256": "383bd65c89deae15e8c0d3b133228eeec674c6ff45238d8597731607b70804c9",
+  "corpusSha256": "acaa7b33c390b2c9fde15b4e21b0a899ffff62fe98ce22226866272b4efe8d5b",
   "id": "clang-22.1.6-diagnostics-v1",
-  "matrixSha256": "dc8a92f667743ff1ebeec79503dfe2bd06b6c0d427c1f70fdc2cb6cbee748d72",
+  "matrixSha256": "fc8145038141fca072d506391b4d93311aa3842ea6bfa088285c5dce7943ed3b",
   "policy": {
     "forbiddenNormalizations": [
       "diagnostic-wording",
