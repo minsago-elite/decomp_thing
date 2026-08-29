@@ -160,7 +160,11 @@ def _sha256_file(stream: BinaryIO) -> str:
     return digest.hexdigest()
 
 
-def _decode_dwarf_string(value: Any, locator: str) -> str:
+def _decode_dwarf_string(
+    value: Any,
+    locator: str,
+    maximum_characters: int = MAX_GENERATED_NAME_CHARACTERS,
+) -> str:
     if isinstance(value, bytes):
         try:
             result = value.decode("utf-8")
@@ -174,9 +178,9 @@ def _decode_dwarf_string(value: Any, locator: str) -> str:
         raise OracleGenerationError(f"{locator} is not a DWARF string")
     if not result or "\x00" in result:
         raise OracleGenerationError(f"{locator} is empty or contains NUL")
-    if len(result) > MAX_GENERATED_NAME_CHARACTERS:
+    if len(result) > maximum_characters:
         raise OracleGenerationError(
-            f"{locator} exceeds the {MAX_GENERATED_NAME_CHARACTERS}-character "
+            f"{locator} exceeds the {maximum_characters}-character "
             "name limit"
         )
     return result
@@ -211,7 +215,11 @@ def _attribute_chain(die: Any) -> tuple[Any, ...]:
     return tuple(result)
 
 
-def _dwarf_names(die: Any, twin: str) -> Mapping[str, tuple[GenerationEvidence, ...]]:
+def _dwarf_names(
+    die: Any,
+    twin: str,
+    maximum_name_characters: int = MAX_GENERATED_NAME_CHARACTERS,
+) -> Mapping[str, tuple[GenerationEvidence, ...]]:
     facts: dict[str, set[GenerationEvidence]] = defaultdict(set)
     for source in _attribute_chain(die):
         for attribute_name in (
@@ -226,7 +234,11 @@ def _dwarf_names(die: Any, twin: str) -> Mapping[str, tuple[GenerationEvidence, 
                 f"{twin}:.debug_info:die={hex(die.offset)}:"
                 f"{attribute_name}@{hex(source.offset)}"
             )
-            name = _decode_dwarf_string(attribute.value, locator)
+            name = _decode_dwarf_string(
+                attribute.value,
+                locator,
+                maximum_characters=maximum_name_characters,
+            )
             facts[name].add(GenerationEvidence("dwarf-subprogram", locator))
     if not facts:
         raise OracleGenerationError(

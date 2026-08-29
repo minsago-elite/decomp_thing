@@ -43,6 +43,7 @@ PRODUCER_POLICY = {
     "declarationPaths": "explicit-scope-map-or-external-path-sha256",
     "inlineObservationIdentity": "unit-id-and-die-relative-offset",
 }
+MAX_FULL_TREE_NAME_CHARACTERS = 16_384
 
 
 def _configuration_sha256() -> str:
@@ -326,7 +327,11 @@ def _produce_shard(
                         RangeEntry,
                         describe_form_class,
                     )
-                    names = _dwarf_names(die, "rich")
+                    names = _dwarf_names(
+                        die,
+                        "rich",
+                        maximum_name_characters=MAX_FULL_TREE_NAME_CHARACTERS,
+                    )
                     declaration = _declaration(die, dwarf, scope, unit)
                 except OracleGenerationError as error:
                     raise FullTreeFunctionObservationError(str(error)) from error

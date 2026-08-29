@@ -5,18 +5,42 @@ import json
 from pathlib import Path
 import subprocess
 import tempfile
+from types import SimpleNamespace
 import unittest
 
 
 REPOSITORY_ROOT = Path(__file__).resolve().parents[2]
 
 from oracle.bounded_shards import load_complete_shard_index  # noqa: E402
-from oracle.full_tree_function_observations import run_full_tree_function_observations  # noqa: E402
+from oracle.full_tree_function_observations import (  # noqa: E402
+    MAX_FULL_TREE_NAME_CHARACTERS,
+    run_full_tree_function_observations,
+)
+from oracle.function_recovery_oracle import OracleGenerationError, _dwarf_names  # noqa: E402
 from oracle.full_tree_inventory import generate_inventory  # noqa: E402
 from oracle.full_tree_scope import canonical_json_bytes  # noqa: E402
 
 
 class FullTreeFunctionObservationTest(unittest.TestCase):
+    def test_full_tree_name_limit_covers_authenticated_large_template_spelling(self) -> None:
+        name = b"T" * 8_192
+        die = SimpleNamespace(
+            attributes={"DW_AT_linkage_name": SimpleNamespace(value=name)},
+            offset=0x123,
+        )
+        with self.assertRaisesRegex(OracleGenerationError, "4096-character name limit"):
+            _dwarf_names(die, "rich")
+        self.assertEqual(
+            [name.decode("ascii")],
+            list(
+                _dwarf_names(
+                    die,
+                    "rich",
+                    maximum_name_characters=MAX_FULL_TREE_NAME_CHARACTERS,
+                )
+            ),
+        )
+
     def test_all_units_are_observed_once_and_repeated_runs_are_identical(self) -> None:
         with tempfile.TemporaryDirectory(prefix="full-tree-functions-") as temporary:
             root = Path(temporary)
