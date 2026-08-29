@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from collections import defaultdict
+import gc
 import hashlib
 import json
 import os
@@ -230,6 +231,26 @@ def _artifact_identity(path: Path, expected_sha256: str) -> tuple[str, tuple[int
         os.close(descriptor)
 
 
+def _process_resident_bytes(process: subprocess.Popen[bytes]) -> int:
+    try:
+        status = Path(f"/proc/{process.pid}/status").read_text(encoding="ascii")
+    except (FileNotFoundError, ProcessLookupError):
+        return 0
+    except OSError as error:
+        raise FullTreeFunctionObservationError(
+            f"cannot measure isolated shard worker {process.pid}: {error}"
+        ) from error
+    for line in status.splitlines():
+        if line.startswith("VmRSS:"):
+            fields = line.split()
+            if len(fields) != 3 or fields[2] != "kB" or not fields[1].isdigit():
+                break
+            return int(fields[1]) * 1024
+    raise FullTreeFunctionObservationError(
+        f"isolated shard worker {process.pid} has malformed resident-memory status"
+    )
+
+
 def _shard_inputs(
     inventory: dict[str, Any],
     *,
@@ -383,6 +404,17 @@ def _produce_shard(
                                 "unitId": unit["id"],
                             }
                         )
+            # pyelftools intentionally caches CUs and line tables. Keeping those
+            # caches across a production subsystem makes RSS proportional to every
+            # previously scanned DIE even though the emitted facts are detached.
+            # The dependency is version-pinned, so clear its documented internal
+            # cache pairs after each independently addressed inventory CU.
+            del die
+            del compilation_unit
+            dwarf._cu_cache.clear()
+            dwarf._cu_offsets_map.clear()
+            dwarf._linetable_cache.clear()
+            gc.collect()
         emitted = []
         for rva, record in sorted(by_rva.items()):
             emitted.append(
@@ -546,14 +578,22 @@ def run_full_tree_function_observations(
             )
             deadline = time.monotonic() + per_shard["wallClockSeconds"]
             while True:
-                if cancelled.is_set() or time.monotonic() >= deadline:
+                resident = _process_resident_bytes(process) if process.poll() is None else 0
+                memory_exceeded = resident > per_shard["maximumResidentBytes"]
+                if cancelled.is_set() or time.monotonic() >= deadline or memory_exceeded:
                     os.killpg(process.pid, signal.SIGTERM)
                     try:
                         process.wait(timeout=5)
                     except subprocess.TimeoutExpired:
                         os.killpg(process.pid, signal.SIGKILL)
                         process.wait()
-                    reason = "cancelled" if cancelled.is_set() else "timed out"
+                    reason = (
+                        "cancelled"
+                        if cancelled.is_set()
+                        else "exceeded its resident-byte bound"
+                        if memory_exceeded
+                        else "timed out"
+                    )
                     raise FullTreeFunctionObservationError(
                         f"isolated function shard {shard.identifier} {reason}"
                     )
