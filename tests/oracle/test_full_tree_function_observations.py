@@ -12,11 +12,13 @@ import unittest
 REPOSITORY_ROOT = Path(__file__).resolve().parents[2]
 
 from oracle.bounded_shards import load_complete_shard_index  # noqa: E402
+from oracle.full_tree_elf_functions import generate_full_tree_elf_function_index  # noqa: E402
 from oracle.full_tree_function_observations import (  # noqa: E402
     MAX_FULL_TREE_NAME_CHARACTERS,
     run_full_tree_function_observations,
 )
 from oracle.function_recovery_oracle import OracleGenerationError, _dwarf_names  # noqa: E402
+from oracle.full_tree_function_truth import reconcile_full_tree_function_truth  # noqa: E402
 from oracle.full_tree_inventory import generate_inventory  # noqa: E402
 from oracle.full_tree_scope import canonical_json_bytes  # noqa: E402
 
@@ -132,6 +134,67 @@ class FullTreeFunctionObservationTest(unittest.TestCase):
                 next((output / "outputs").glob("*.json")).read_bytes(),
                 next((isolated / "outputs").glob("*.json")).read_bytes(),
             )
+            stripped = root / "fixture.stripped"
+            subprocess.run(
+                ["objcopy", "--strip-all", artifact, stripped],
+                check=True,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+            )
+            scope["oracle"]["strippedArtifactSha256"] = hashlib.sha256(stripped.read_bytes()).hexdigest()
+            scope_sha256 = hashlib.sha256(canonical_json_bytes(scope)).hexdigest()
+            inventory = generate_inventory(artifact, scope, scope_sha256)
+            reconciled_observations = root / "reconciled-observations"
+            run_full_tree_function_observations(
+                artifact,
+                scope=scope,
+                scope_sha256=scope_sha256,
+                inventory=inventory,
+                output_root=reconciled_observations,
+                maximum_workers=2,
+            )
+            elf_index = generate_full_tree_elf_function_index(
+                artifact,
+                stripped,
+                scope=scope,
+                scope_sha256=scope_sha256,
+                inventory=inventory,
+            )
+            elf_path = root / "elf-functions.json"
+            elf_path.write_bytes(canonical_json_bytes(elf_index))
+            first_truth_root = root / "function-truth-first"
+            first_truth = reconcile_full_tree_function_truth(
+                scope=scope,
+                scope_sha256=scope_sha256,
+                inventory=inventory,
+                elf_index_path=elf_path,
+                observation_root=reconciled_observations,
+                output_root=first_truth_root,
+            )
+            second_truth_root = root / "function-truth-second"
+            second_truth = reconcile_full_tree_function_truth(
+                scope=scope,
+                scope_sha256=scope_sha256,
+                inventory=inventory,
+                elf_index_path=elf_path,
+                observation_root=reconciled_observations,
+                output_root=second_truth_root,
+            )
+            self.assertEqual(first_truth, second_truth)
+            self.assertEqual(
+                (first_truth_root / "index.json").read_bytes(),
+                (second_truth_root / "index.json").read_bytes(),
+            )
+            self.assertEqual(
+                first_truth["counts"]["elfRvas"],
+                first_truth["counts"]["scoredRvas"] + first_truth["counts"]["elfOnlyRvas"],
+            )
+            self.assertEqual(
+                first_truth["counts"]["dwarfRvas"],
+                first_truth["counts"]["scoredRvas"] + first_truth["counts"]["dwarfOnlyRvas"],
+            )
+            self.assertGreater(first_truth["counts"]["scoredRvas"], 0)
+            self.assertEqual(len(inventory["shards"]), len(first_truth["shards"]))
 
 
 if __name__ == "__main__":

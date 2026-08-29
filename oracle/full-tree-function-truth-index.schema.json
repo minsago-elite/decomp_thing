@@ -1,0 +1,37 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://github.com/minsago-elite/decomp_thing/oracle/full-tree-function-truth-index.schema.json",
+  "title": "Authenticated full-tree function truth index",
+  "type": "object", "additionalProperties": false,
+  "required": ["schemaVersion", "complete", "oracle", "counts", "shards", "exclusions", "indexSha256"],
+  "properties": {
+    "schemaVersion": {"const": 1},
+    "complete": {"const": true},
+    "oracle": {"type": "object"},
+    "counts": {
+      "type": "object", "additionalProperties": false,
+      "required": ["elfRvas", "dwarfRvas", "scoredRvas", "elfOnlyRvas", "dwarfOnlyRvas", "inlineObservations", "inlineUnique"],
+      "properties": {
+        "elfRvas": {"type": "integer", "minimum": 0}, "dwarfRvas": {"type": "integer", "minimum": 0},
+        "scoredRvas": {"type": "integer", "minimum": 0}, "elfOnlyRvas": {"type": "integer", "minimum": 0},
+        "dwarfOnlyRvas": {"type": "integer", "minimum": 0}, "inlineObservations": {"type": "integer", "minimum": 0},
+        "inlineUnique": {"type": "integer", "minimum": 0}
+      }
+    },
+    "shards": {"type": "array", "items": {"$ref": "#/$defs/file"}},
+    "exclusions": {"$ref": "#/$defs/file"},
+    "indexSha256": {"$ref": "#/$defs/sha256"}
+  },
+  "$defs": {
+    "sha256": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
+    "file": {
+      "type": "object", "additionalProperties": false,
+      "required": ["id", "path", "sha256", "bytes", "functions", "inlineOnly"],
+      "properties": {
+        "id": {"type": "string", "minLength": 1, "maxLength": 256}, "path": {"type": "string", "minLength": 1, "maxLength": 4096},
+        "sha256": {"$ref": "#/$defs/sha256"}, "bytes": {"type": "integer", "minimum": 1},
+        "functions": {"type": "integer", "minimum": 0}, "inlineOnly": {"type": "integer", "minimum": 0}
+      }
+    }
+  }
+}
