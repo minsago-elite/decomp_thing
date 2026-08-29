@@ -12,13 +12,16 @@
     "counts": {
       "type": "object",
       "additionalProperties": false,
-      "required": ["edges", "observations", "directInternal", "external", "indirectUnresolved", "unobservable"],
+      "required": ["edges", "observations", "directInternal", "external", "indirectProven", "indirectUnresolved", "virtualUnresolved", "tailCalls", "unobservable"],
       "properties": {
         "edges": {"type": "integer", "minimum": 0},
         "observations": {"type": "integer", "minimum": 0},
         "directInternal": {"type": "integer", "minimum": 0},
         "external": {"type": "integer", "minimum": 0},
+        "indirectProven": {"type": "integer", "minimum": 0},
         "indirectUnresolved": {"type": "integer", "minimum": 0},
+        "virtualUnresolved": {"type": "integer", "minimum": 0},
+        "tailCalls": {"type": "integer", "minimum": 0},
         "unobservable": {"type": "integer", "minimum": 0}
       }
     },
@@ -27,7 +30,7 @@
       "items": {
         "type": "object",
         "additionalProperties": false,
-        "required": ["id", "path", "bytes", "sha256", "edges", "observations", "directInternal", "external", "indirectUnresolved", "unobservable"],
+        "required": ["id", "path", "bytes", "sha256", "edges", "observations", "directInternal", "external", "indirectProven", "indirectUnresolved", "virtualUnresolved", "tailCalls", "unobservable"],
         "properties": {
           "id": {"type": "string"},
           "path": {"type": "string"},
@@ -37,7 +40,10 @@
           "observations": {"type": "integer", "minimum": 0},
           "directInternal": {"type": "integer", "minimum": 0},
           "external": {"type": "integer", "minimum": 0},
+          "indirectProven": {"type": "integer", "minimum": 0},
           "indirectUnresolved": {"type": "integer", "minimum": 0},
+          "virtualUnresolved": {"type": "integer", "minimum": 0},
+          "tailCalls": {"type": "integer", "minimum": 0},
           "unobservable": {"type": "integer", "minimum": 0}
         }
       }

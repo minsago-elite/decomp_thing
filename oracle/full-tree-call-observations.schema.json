@@ -32,7 +32,7 @@
       "type": "array",
       "items": {
         "type": "object", "additionalProperties": false,
-        "required": ["id", "unitId", "dieOffset", "population", "reasonCode", "callerId", "callerLocalReturnOffset", "returnPcRva", "target"],
+        "required": ["id", "unitId", "dieOffset", "population", "reasonCode", "callerId", "callerLocalReturnOffset", "returnPcRva", "target", "tailCall"],
         "properties": {
           "id": {"type": "string", "pattern": "^call-[0-9a-f]{32}$"}, "unitId": {"$ref": "#/$defs/id"},
           "dieOffset": {"$ref": "#/$defs/address"}, "population": {"enum": ["scored", "unobservable"]},
@@ -40,14 +40,18 @@
           "callerId": {"oneOf": [{"type": "string", "pattern": "^function-rva-0x(?:0|[1-9a-f][0-9a-f]{0,15})$"}, {"type": "null"}]},
           "callerLocalReturnOffset": {"oneOf": [{"$ref": "#/$defs/address"}, {"type": "null"}]},
           "returnPcRva": {"oneOf": [{"$ref": "#/$defs/address"}, {"type": "null"}]},
+          "tailCall": {"type": "boolean"},
           "target": {
             "type": "object", "additionalProperties": false,
-            "required": ["kind", "functionId", "aliases", "originDieOffset"],
+            "required": ["kind", "dispatchKind", "functionId", "aliases", "originDieOffset", "provenFunctionIds", "targetEvidence"],
             "properties": {
-              "kind": {"enum": ["direct-internal", "external-unresolved", "indirect-unresolved"]},
+              "kind": {"enum": ["direct-internal", "external-unresolved", "indirect-proven", "indirect-unresolved", "virtual-unresolved"]},
+              "dispatchKind": {"enum": ["direct", "indirect-proven", "indirect-unresolved", "virtual-unresolved"]},
               "functionId": {"oneOf": [{"type": "string", "pattern": "^function-rva-0x(?:0|[1-9a-f][0-9a-f]{0,15})$"}, {"type": "null"}]},
               "aliases": {"type": "array", "uniqueItems": true, "items": {"type": "string", "minLength": 1, "maxLength": 16384}},
-              "originDieOffset": {"oneOf": [{"$ref": "#/$defs/address"}, {"type": "null"}]}
+              "originDieOffset": {"oneOf": [{"$ref": "#/$defs/address"}, {"type": "null"}]},
+              "provenFunctionIds": {"type": "array", "maxItems": 16, "uniqueItems": true, "items": {"type": "string", "pattern": "^function-rva-0x(?:0|[1-9a-f][0-9a-f]{0,15})$"}},
+              "targetEvidence": {"enum": ["none", "call-target-expression", "call-target-clobbered-expression", "call-target-and-clobbered-expressions"]}
             }
           }
         }

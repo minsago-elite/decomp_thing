@@ -28,6 +28,7 @@ from oracle.full_tree_execution_evidence import (
 from oracle.full_tree_scope import canonical_json_bytes
 from oracle.function_recovery_oracle import (
     OracleGenerationError,
+    _attribute_chain,
     _dwarf_names,
     _dwarf_starts,
     _in_executable_range,
@@ -40,10 +41,11 @@ class FullTreeCallObservationError(ValueError):
 
 PRODUCER_POLICY = {
     "id": "full-tree-call-observations",
-    "version": 1,
+    "version": 2,
     "siteIdentity": "caller-id-return-pc-rva-or-unit-die-offset",
     "siteLocator": "dwarf-call-return-pc",
-    "targetPolicy": "call-origin-address-or-closed-unresolved-classification",
+    "targetPolicy": "call-origin-address-virtuality-and-target-expression-closed-classification",
+    "tailCalls": "dwarf-call-tail-call-flag",
 }
 
 
@@ -100,13 +102,34 @@ def _parent_subprogram(die: Any) -> Any | None:
 
 def _target(die: Any, dwarf: Any, image_base: int, executable_ranges: tuple[tuple[int, int], ...], helpers: tuple[Any, Any, Any]) -> dict[str, Any]:
     BaseAddressEntry, RangeEntry, describe_form_class = helpers
+    has_target = "DW_AT_call_target" in die.attributes
+    has_clobbered_target = "DW_AT_call_target_clobbered" in die.attributes
+    target_evidence = (
+        "call-target-and-clobbered-expressions" if has_target and has_clobbered_target
+        else "call-target-expression" if has_target
+        else "call-target-clobbered-expression" if has_clobbered_target
+        else "none"
+    )
+    proven_function_ids: list[str] = []
+    target_attribute = die.attributes.get("DW_AT_call_target")
+    if target_attribute is not None and isinstance(target_attribute.value, (bytes, bytearray, list, tuple)):
+        from elftools.dwarf.dwarf_expr import DWARFExprParser  # type: ignore[import-untyped]
+
+        operations = DWARFExprParser(die.cu.structs).parse_expr(bytes(target_attribute.value))
+        if len(operations) == 1 and operations[0].op_name == "DW_OP_addr":
+            address = int(operations[0].args[0])
+            if _in_executable_range(address, image_base, executable_ranges):
+                proven_function_ids = [f"function-rva-{hex(address - image_base)}"]
     origin_attribute = die.attributes.get("DW_AT_call_origin")
     if origin_attribute is None:
         return {
             "aliases": [],
+            "dispatchKind": "indirect-proven" if proven_function_ids else "indirect-unresolved",
             "functionId": None,
-            "kind": "indirect-unresolved",
+            "kind": "indirect-proven" if proven_function_ids else "indirect-unresolved",
             "originDieOffset": None,
+            "provenFunctionIds": proven_function_ids,
+            "targetEvidence": target_evidence,
         }
     try:
         origin = die.get_DIE_from_attribute("DW_AT_call_origin")
@@ -137,11 +160,33 @@ def _target(die: Any, dwarf: Any, image_base: int, executable_ranges: tuple[tupl
         raise FullTreeCallObservationError(
             f"call origin at {hex(int(die.offset))} has ambiguous emitted starts"
         )
+    virtuality = next(
+        (
+            int(attribute.value)
+            for source in _attribute_chain(origin)
+            for attribute in [source.attributes.get("DW_AT_virtuality")]
+            if attribute is not None
+        ),
+        0,
+    )
+    if virtuality:
+        return {
+            "aliases": names,
+            "dispatchKind": "virtual-unresolved",
+            "functionId": None,
+            "kind": "virtual-unresolved",
+            "originDieOffset": hex(int(origin.offset)),
+            "provenFunctionIds": [],
+            "targetEvidence": target_evidence,
+        }
     return {
         "aliases": names,
+        "dispatchKind": "direct",
         "functionId": f"function-rva-{hex(internal[0])}" if internal else None,
         "kind": "direct-internal" if internal else "external-unresolved",
         "originDieOffset": hex(int(origin.offset)),
+        "provenFunctionIds": [],
+        "targetEvidence": target_evidence,
     }
 
 
@@ -259,6 +304,10 @@ def produce_call_observation_shard(
                         "reasonCode": reason,
                         "returnPcRva": hex(return_rva) if return_rva is not None else None,
                         "target": _target(die, dwarf, image_base, executable_ranges, helpers),
+                        "tailCall": bool(
+                            die.attributes.get("DW_AT_call_tail_call")
+                            and die.attributes["DW_AT_call_tail_call"].value
+                        ),
                         "unitId": unit["id"],
                     }
                 )

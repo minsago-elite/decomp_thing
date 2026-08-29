@@ -17,8 +17,8 @@ class FullTreeCallBaselineError(ValueError):
 
 POLICY = {
     "id": "full-tree-call-baseline",
-    "version": 1,
-    "exact": "resolved-direct-semantic-or-external-target",
+    "version": 2,
+    "exact": "resolved-direct-semantic-external-or-independently-proven-target-set",
     "partial": "observed-site-with-unresolved-indirect-or-thunk-semantic-target",
     "excluded": "unobservable-call-site",
 }
@@ -66,6 +66,8 @@ def generate_full_tree_call_baseline(
                 counts["excluded"] += 1
                 continue
             if call["targetKind"] == "external" and call["externalTargetIds"]:
+                kind = "exact"
+            elif call["targetKind"] == "indirect-proven" and call["provenTargetIds"]:
                 kind = "exact"
             elif call["targetKind"] == "direct-internal" and call["semanticTargetId"] is not None:
                 kind = "exact"

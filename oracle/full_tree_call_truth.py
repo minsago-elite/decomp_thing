@@ -26,10 +26,11 @@ class FullTreeCallTruthError(ValueError):
 
 POLICY = {
     "id": "full-tree-call-truth",
-    "version": 1,
+    "version": 2,
     "identity": "caller-id-and-return-pc-rva",
     "externalNamespace": "exact-undefined-elf-function-name",
     "thunkPolicy": "physical-target-retained-semantic-target-explicitly-unresolved",
+    "dispatchPolicy": "direct-virtual-indirect-preserved-without-name-inference",
 }
 
 
@@ -74,11 +75,25 @@ def _validate_document(document: dict[str, Any]) -> None:
         raise FullTreeCallTruthError("call truth edges are not ordered")
     if len({item["id"] for item in calls}) != len(calls):
         raise FullTreeCallTruthError("call truth duplicates an edge identity")
+    for item in calls:
+        if item["targetKind"] == "direct-internal" and item["physicalTargetId"] is None:
+            raise FullTreeCallTruthError("direct call has no physical target")
+        if item["targetKind"] != "direct-internal" and item["physicalTargetId"] is not None:
+            raise FullTreeCallTruthError("non-direct call has a physical target")
+        if item["targetKind"] == "virtual-unresolved" and (
+            item["dispatchKind"] != "virtual-unresolved" or item["population"] != "unobservable"
+        ):
+            raise FullTreeCallTruthError("virtual call classification is contradictory")
+        if bool(item["provenTargetIds"]) != (item["targetKind"] == "indirect-proven"):
+            raise FullTreeCallTruthError("proven target set classification is contradictory")
     expected = {
         "directInternal": sum(item["targetKind"] == "direct-internal" for item in calls),
         "edges": len(calls),
         "external": sum(item["targetKind"] == "external" for item in calls),
         "indirectUnresolved": sum(item["targetKind"] == "indirect-unresolved" for item in calls),
+        "indirectProven": sum(item["targetKind"] == "indirect-proven" for item in calls),
+        "virtualUnresolved": sum(item["targetKind"] == "virtual-unresolved" for item in calls),
+        "tailCalls": sum(item["tailCall"] for item in calls),
         "observations": sum(len(item["observationIds"]) for item in calls),
         "unobservable": sum(item["population"] == "unobservable" for item in calls),
     }
@@ -263,6 +278,7 @@ def generate_full_tree_call_truth(
                             "reasonCode": item["reasonCode"],
                             "returnPcRva": item["returnPcRva"],
                             "target": item["target"],
+                            "tailCall": item["tailCall"],
                         }
                     )
                     for item in observations
@@ -279,6 +295,7 @@ def generate_full_tree_call_truth(
                 physical = None
                 semantic = None
                 external_ids: list[str] = []
+                proven_target_ids: list[str] = []
                 target_kind = target["kind"]
                 if target_kind == "direct-internal":
                     target_row = function_namespace.get(target["functionId"])
@@ -317,6 +334,18 @@ def generate_full_tree_call_truth(
                         if not external_ids:
                             population = "unobservable"
                             reason = "external-without-elf-evidence"
+                elif target_kind == "indirect-proven":
+                    if len(target["provenFunctionIds"]) > 16:
+                        raise FullTreeCallTruthError("proven target set exceeds its bound")
+                    for function_id in target["provenFunctionIds"]:
+                        if function_id not in function_namespace:
+                            raise FullTreeCallTruthError(
+                                f"call {first['id']} has a dangling proven target"
+                            )
+                    proven_target_ids = sorted(target["provenFunctionIds"])
+                elif target_kind == "virtual-unresolved":
+                    population = "unobservable"
+                    reason = "virtual-target-set-unproven"
                 item = {
                     "callerId": first["callerId"],
                     "callerLocalReturnOffset": first["callerLocalReturnOffset"],
@@ -324,11 +353,15 @@ def generate_full_tree_call_truth(
                     "id": "call-edge-" + edge_key[:32],
                     "observationIds": sorted(observation["id"] for observation in observations),
                     "physicalTargetId": physical,
+                    "provenTargetIds": proven_target_ids,
                     "population": population,
                     "reasonCode": reason,
                     "returnPcRva": first["returnPcRva"],
                     "semanticTargetId": semantic,
                     "targetKind": target_kind,
+                    "dispatchKind": target["dispatchKind"],
+                    "tailCall": first["tailCall"],
+                    "targetEvidence": target["targetEvidence"],
                 }
                 merged_batch.append((owner_shard, item["id"], canonical_json_bytes(item)))
                 if len(merged_batch) == 4096:
@@ -361,6 +394,9 @@ def generate_full_tree_call_truth(
                     "edges": len(calls),
                     "external": sum(item["targetKind"] == "external" for item in calls),
                     "indirectUnresolved": sum(item["targetKind"] == "indirect-unresolved" for item in calls),
+                    "indirectProven": sum(item["targetKind"] == "indirect-proven" for item in calls),
+                    "virtualUnresolved": sum(item["targetKind"] == "virtual-unresolved" for item in calls),
+                    "tailCalls": sum(item["tailCall"] for item in calls),
                     "observations": sum(len(item["observationIds"]) for item in calls),
                     "unobservable": sum(item["population"] == "unobservable" for item in calls),
                 }
