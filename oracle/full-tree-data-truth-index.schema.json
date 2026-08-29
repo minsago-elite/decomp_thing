@@ -12,7 +12,7 @@
     "counts": {
       "type": "object",
       "additionalProperties": false,
-      "required": ["globals", "types", "unobservableGlobals", "unobservableTypes", "fields", "bases", "enumerators"],
+      "required": ["globals", "types", "unobservableGlobals", "unobservableTypes", "fields", "bases", "enumerators", "resolvedTypeReferences", "unresolvedTypeReferences", "crossShardTypeReferences"],
       "properties": {
         "globals": {"type": "integer", "minimum": 0},
         "types": {"type": "integer", "minimum": 0},
@@ -20,7 +20,10 @@
         "unobservableTypes": {"type": "integer", "minimum": 0},
         "fields": {"type": "integer", "minimum": 0},
         "bases": {"type": "integer", "minimum": 0},
-        "enumerators": {"type": "integer", "minimum": 0}
+        "enumerators": {"type": "integer", "minimum": 0},
+        "resolvedTypeReferences": {"type": "integer", "minimum": 0},
+        "unresolvedTypeReferences": {"type": "integer", "minimum": 0},
+        "crossShardTypeReferences": {"type": "integer", "minimum": 0}
       }
     },
     "shards": {
@@ -28,7 +31,7 @@
       "items": {
         "type": "object",
         "additionalProperties": false,
-        "required": ["id", "path", "bytes", "sha256", "globals", "types", "unobservableGlobals", "unobservableTypes", "fields", "bases", "enumerators"],
+        "required": ["id", "path", "bytes", "sha256", "globals", "types", "unobservableGlobals", "unobservableTypes", "fields", "bases", "enumerators", "resolvedTypeReferences", "unresolvedTypeReferences", "crossShardTypeReferences"],
         "properties": {
           "id": {"type": "string"},
           "path": {"type": "string"},
@@ -40,7 +43,10 @@
           "unobservableTypes": {"type": "integer", "minimum": 0},
           "fields": {"type": "integer", "minimum": 0},
           "bases": {"type": "integer", "minimum": 0},
-          "enumerators": {"type": "integer", "minimum": 0}
+          "enumerators": {"type": "integer", "minimum": 0},
+          "resolvedTypeReferences": {"type": "integer", "minimum": 0},
+          "unresolvedTypeReferences": {"type": "integer", "minimum": 0},
+          "crossShardTypeReferences": {"type": "integer", "minimum": 0}
         }
       }
     },

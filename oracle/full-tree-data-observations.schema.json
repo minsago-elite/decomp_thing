@@ -22,13 +22,24 @@
   "$defs": {
     "nullableInteger": {"type": ["integer", "null"], "minimum": 0},
     "nullableString": {"type": ["string", "null"], "maxLength": 16384},
+    "address": {"type": "string", "pattern": "^0x(?:0|[1-9a-f][0-9a-f]{0,15})$"},
+    "typeReference": {
+      "type": "object", "additionalProperties": false,
+      "required": ["aggregateDieOffset", "dieOffsets", "modifierTags", "reasonCode"],
+      "properties": {
+        "aggregateDieOffset": {"oneOf": [{"$ref": "#/$defs/address"}, {"type": "null"}]},
+        "dieOffsets": {"type": "array", "maxItems": 64, "uniqueItems": true, "items": {"$ref": "#/$defs/address"}},
+        "modifierTags": {"type": "array", "maxItems": 64, "items": {"type": "string", "pattern": "^DW_TAG_"}},
+        "reasonCode": {"type": ["string", "null"], "enum": [null, "no-type-attribute", "non-aggregate-terminal-type"]}
+      }
+    },
     "declaration": {"type": "object"},
     "member": {
       "type": "object", "additionalProperties": false,
-      "required": ["kind", "name", "typeDieOffset", "byteOffset", "bitOffset", "bitSize", "value", "virtuality"],
+      "required": ["kind", "name", "typeReference", "byteOffset", "bitOffset", "bitSize", "value", "virtuality"],
       "properties": {
         "kind": {"enum": ["field", "base", "enumerator"]}, "name": {"$ref": "#/$defs/nullableString"},
-        "typeDieOffset": {"$ref": "#/$defs/nullableString"}, "byteOffset": {"$ref": "#/$defs/nullableInteger"},
+        "typeReference": {"$ref": "#/$defs/typeReference"}, "byteOffset": {"$ref": "#/$defs/nullableInteger"},
         "bitOffset": {"$ref": "#/$defs/nullableInteger"}, "bitSize": {"$ref": "#/$defs/nullableInteger"},
         "value": {"type": ["integer", "null"]}, "virtuality": {"$ref": "#/$defs/nullableInteger"}
       }
@@ -48,7 +59,7 @@
     },
     "global": {
       "type": "object", "additionalProperties": false,
-      "required": ["id", "unitId", "dieOffset", "names", "declaration", "addressRva", "size", "alignment", "external", "visibility", "tls", "mutability", "typeDieOffset", "reasonCode"],
+      "required": ["id", "unitId", "dieOffset", "names", "declaration", "addressRva", "size", "alignment", "external", "visibility", "tls", "mutability", "typeReference", "reasonCode"],
       "properties": {
         "id": {"type": "string", "pattern": "^global-observation-[0-9a-f]{32}$"}, "unitId": {"type": "string"},
         "dieOffset": {"type": "string"}, "names": {"type": "array", "minItems": 1, "uniqueItems": true, "items": {"type": "string", "maxLength": 16384}},
@@ -56,7 +67,7 @@
         "size": {"$ref": "#/$defs/nullableInteger"}, "alignment": {"$ref": "#/$defs/nullableInteger"},
         "external": {"type": "boolean"}, "visibility": {"enum": ["default", "local", "exported", "qualified", "unknown"]},
         "tls": {"type": "boolean"}, "mutability": {"enum": ["constant", "mutable", "unknown"]},
-        "typeDieOffset": {"$ref": "#/$defs/nullableString"}, "reasonCode": {"type": ["string", "null"]}
+        "typeReference": {"$ref": "#/$defs/typeReference"}, "reasonCode": {"type": ["string", "null"]}
       }
     }
   }

@@ -31,9 +31,10 @@ class FullTreeDataObservationError(ValueError):
 
 POLICY = {
     "id": "full-tree-data-observations",
-    "version": 2,
+    "version": 3,
     "globals": "static-storage-or-linkage-bearing-dwarf-variables",
     "types": "class-struct-union-enum-definitions-and-declarations",
+    "typeReferences": "exact-dwarf-type-chain-to-aggregate-or-closed-nonaggregate-reason",
 }
 
 TYPE_TAGS = {
@@ -107,11 +108,44 @@ def _type_context(die: Any) -> list[str]:
     return list(reversed(components))
 
 
-def _type_reference(die: Any) -> tuple[str | None, Any | None]:
+def _type_reference(die: Any) -> tuple[dict[str, Any], Any | None]:
     if "DW_AT_type" not in die.attributes:
-        return None, None
+        return {
+            "aggregateDieOffset": None,
+            "dieOffsets": [],
+            "modifierTags": [],
+            "reasonCode": "no-type-attribute",
+        }, None
     target = die.get_DIE_from_attribute("DW_AT_type")
-    return hex(int(target.offset)), target
+    immediate = target
+    offsets: list[str] = []
+    modifiers: list[str] = []
+    seen: set[int] = set()
+    for _ in range(64):
+        offset = int(target.offset)
+        if offset in seen:
+            raise FullTreeDataObservationError(
+                f"cyclic DWARF type reference at {hex(offset)}"
+            )
+        seen.add(offset)
+        offsets.append(hex(offset))
+        if target.tag in TYPE_TAGS:
+            return {
+                "aggregateDieOffset": hex(offset),
+                "dieOffsets": offsets,
+                "modifierTags": modifiers,
+                "reasonCode": None,
+            }, immediate
+        modifiers.append(target.tag)
+        if "DW_AT_type" not in target.attributes:
+            return {
+                "aggregateDieOffset": None,
+                "dieOffsets": offsets,
+                "modifierTags": modifiers,
+                "reasonCode": "non-aggregate-terminal-type",
+            }, immediate
+        target = target.get_DIE_from_attribute("DW_AT_type")
+    raise FullTreeDataObservationError("DWARF type reference exceeds 64 links")
 
 
 def _location(die: Any, dwarf: Any, image_base: int) -> tuple[int | None, bool]:
@@ -143,7 +177,7 @@ def _member(child: Any) -> dict[str, Any]:
         "byteOffset": byte_offset,
         "kind": kind,
         "name": _name(child),
-        "typeDieOffset": reference,
+        "typeReference": reference,
         "value": _integer_attribute(child, "DW_AT_const_value") if kind == "enumerator" else None,
         "virtuality": _integer_attribute(child, "DW_AT_virtuality") if kind == "base" else None,
     }
@@ -210,10 +244,10 @@ def produce_data_observation_shard(rich_artifact: Path, *, scope: dict[str, Any]
                         or tls
                     ):
                         continue
-                    type_offset, type_die = _type_reference(die)
+                    type_reference, type_die = _type_reference(die)
                     identity = hashlib.sha256(f"{unit['id']}:{hex(int(die.offset))}".encode()).hexdigest()[:32]
                     visibility = {1: "local", 2: "exported", 3: "qualified"}.get(_integer_attribute(die, "DW_AT_visibility"), "default" if external else "unknown")
-                    globals_.append({"addressRva": hex(address) if address is not None else None, "alignment": _integer_attribute(type_die, "DW_AT_alignment") if type_die else None, "declaration": _declaration(die, dwarf, scope, unit), "dieOffset": hex(int(die.offset)), "external": external, "id": f"global-observation-{identity}", "mutability": "constant" if "DW_AT_const_value" in die.attributes else "mutable" if address is not None or tls else "unknown", "names": names, "reasonCode": None if address is not None else "tls-no-image-rva" if tls else "optimized-out-or-nonaddress-location", "size": _integer_attribute(type_die, "DW_AT_byte_size") if type_die else None, "tls": tls, "typeDieOffset": type_offset, "unitId": unit["id"], "visibility": visibility})
+                    globals_.append({"addressRva": hex(address) if address is not None else None, "alignment": _integer_attribute(type_die, "DW_AT_alignment") if type_die else None, "declaration": _declaration(die, dwarf, scope, unit), "dieOffset": hex(int(die.offset)), "external": external, "id": f"global-observation-{identity}", "mutability": "constant" if "DW_AT_const_value" in die.attributes else "mutable" if address is not None or tls else "unknown", "names": names, "reasonCode": None if address is not None else "tls-no-image-rva" if tls else "optimized-out-or-nonaddress-location", "size": _integer_attribute(type_die, "DW_AT_byte_size") if type_die else None, "tls": tls, "typeReference": type_reference, "unitId": unit["id"], "visibility": visibility})
             del die
             del cu
             dwarf._cu_cache.clear()

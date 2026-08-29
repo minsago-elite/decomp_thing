@@ -14,7 +14,7 @@ class FullTreeDataTruthError(ValueError):
     """Raised when ODR-equivalent data evidence is incompatible or incomplete."""
 
 
-POLICY = {"id": "full-tree-data-truth", "version": 4, "typeIdentity": "tag-qualified-lexical-context-name-declaration-with-producer-unit-for-anonymous-namespace-or-observation", "globalIdentity": "rva-or-name-declaration", "owner": "lowest-unit-id", "maximumDatabaseBytes": 8 * 1024 * 1024 * 1024}
+POLICY = {"id": "full-tree-data-truth", "version": 5, "typeIdentity": "tag-qualified-lexical-context-name-declaration-with-producer-unit-for-anonymous-namespace-or-observation", "globalIdentity": "rva-or-name-declaration", "owner": "lowest-unit-id", "typeReferences": "exact-dwarf-offset-chain-resolved-through-authenticated-observation-index", "maximumDatabaseBytes": 8 * 1024 * 1024 * 1024}
 
 
 def _sha(payload: bytes) -> str:
@@ -74,10 +74,69 @@ def _one_compatible(records: list[dict[str, Any]], field: str, identity: str) ->
 
 def _type_layout(item: dict[str, Any]) -> bytes:
     members = [
-        {key: member[key] for key in ("kind", "name", "byteOffset", "bitOffset", "bitSize", "value", "virtuality")}
+        {
+            **{key: member[key] for key in ("kind", "name", "byteOffset", "bitOffset", "bitSize", "value", "virtuality")},
+            "typeReference": {
+                key: member["typeReference"][key]
+                for key in ("modifierTags", "reasonCode", "targetTypeId")
+            },
+        }
         for member in item["members"]
     ]
     return canonical_json_bytes({"alignment": item["alignment"], "byteSize": item["byteSize"], "members": members})
+
+
+def _resolve_type_reference(
+    reference: dict[str, Any],
+    database: sqlite3.Connection,
+    unit_to_shard: dict[str, str],
+) -> dict[str, Any]:
+    aggregate_offset = reference["aggregateDieOffset"]
+    if aggregate_offset is None:
+        return {
+            "evidenceDieOffsets": reference["dieOffsets"],
+            "modifierTags": reference["modifierTags"],
+            "reasonCode": reference["reasonCode"],
+            "targetOwnerShardId": None,
+            "targetTypeId": None,
+        }
+    row = database.execute(
+        "SELECT target.identity,MIN(owner.unit_id) "
+        "FROM type_targets target JOIN type_targets owner ON owner.identity=target.identity "
+        "WHERE target.die_offset=? GROUP BY target.identity",
+        (aggregate_offset,),
+    ).fetchone()
+    if row is None:
+        raise FullTreeDataTruthError(
+            f"aggregate reference {aggregate_offset} is outside the authenticated type index"
+        )
+    return {
+        "evidenceDieOffsets": reference["dieOffsets"],
+        "modifierTags": reference["modifierTags"],
+        "reasonCode": None,
+        "targetOwnerShardId": unit_to_shard[row[1]],
+        "targetTypeId": f"type-{row[0][:32]}",
+    }
+
+
+def _merge_type_references(references: Iterable[dict[str, Any]], identity: str) -> dict[str, Any]:
+    records = list(references)
+    semantic = {
+        canonical_json_bytes(
+            {key: item[key] for key in ("modifierTags", "reasonCode", "targetOwnerShardId", "targetTypeId")}
+        )
+        for item in records
+    }
+    if len(semantic) != 1:
+        raise FullTreeDataTruthError(f"incompatible type references for {identity}")
+    first = records[0]
+    return {
+        "evidenceDieOffsets": sorted(
+            {offset for item in records for offset in item["evidenceDieOffsets"]},
+            key=lambda value: int(value, 16),
+        ),
+        **{key: first[key] for key in ("modifierTags", "reasonCode", "targetOwnerShardId", "targetTypeId")},
+    }
 
 
 def _validate_document(document: dict[str, Any]) -> None:
@@ -96,6 +155,30 @@ def _validate_document(document: dict[str, Any]) -> None:
         "globals": len(document["globals"]), "types": len(document["types"]),
         "unobservableGlobals": sum(item["population"] == "unobservable" for item in document["globals"]),
         "unobservableTypes": sum(item["population"] == "unobservable" for item in document["types"]),
+        "resolvedTypeReferences": sum(
+            reference["targetTypeId"] is not None
+            for item in document["globals"]
+            for reference in [item["typeReference"]]
+        ) + sum(
+            member["typeReference"]["targetTypeId"] is not None
+            for item in document["types"] for member in item["members"]
+        ),
+        "unresolvedTypeReferences": sum(
+            reference["targetTypeId"] is None
+            for item in document["globals"]
+            for reference in [item["typeReference"]]
+        ) + sum(
+            member["typeReference"]["targetTypeId"] is None
+            for item in document["types"] for member in item["members"]
+        ),
+        "crossShardTypeReferences": sum(
+            reference["targetOwnerShardId"] is not None and reference["targetOwnerShardId"] != document["shard"]["id"]
+            for item in document["globals"]
+            for reference in [item["typeReference"]]
+        ) + sum(
+            member["typeReference"]["targetOwnerShardId"] is not None and member["typeReference"]["targetOwnerShardId"] != document["shard"]["id"]
+            for item in document["types"] for member in item["members"]
+        ),
     }
     if document["counts"] != expected:
         raise FullTreeDataTruthError("data truth counts do not reconcile")
@@ -132,12 +215,15 @@ def validate_full_tree_data_truth_index(
     if not isinstance(records, list) or [record.get("id") for record in records] != expected_ids:
         raise FullTreeDataTruthError("data truth shard population or ordering differs")
     aggregate: dict[str, int] = {}
+    documents: list[dict[str, Any]] = []
+    type_owners: dict[str, str] = {}
     for record, inventory_shard in zip(records, inventory["shards"], strict=True):
         path = output_root / record["path"]
         payload = path.read_bytes()
         if len(payload) != record["bytes"] or _sha(payload) != record["sha256"]:
             raise FullTreeDataTruthError(f"data truth shard {record['id']} changed")
         document = json.loads(payload)
+        documents.append(document)
         _validate_document(document)
         if document["oracle"] != oracle or document["shard"] != {
             "id": record["id"],
@@ -148,8 +234,28 @@ def validate_full_tree_data_truth_index(
             if record.get(name) != value:
                 raise FullTreeDataTruthError(f"data truth shard {record['id']} count differs")
             aggregate[name] = aggregate.get(name, 0) + value
+        for item in document["types"]:
+            if item["id"] in type_owners:
+                raise FullTreeDataTruthError(f"duplicate canonical type identity {item['id']}")
+            type_owners[item["id"]] = record["id"]
     if index.get("counts") != dict(sorted(aggregate.items())):
         raise FullTreeDataTruthError("data truth aggregate counts do not reconcile")
+    for document in documents:
+        references = [item["typeReference"] for item in document["globals"]] + [
+            member["typeReference"]
+            for item in document["types"]
+            for member in item["members"]
+        ]
+        for reference in references:
+            target = reference["targetTypeId"]
+            owner = reference["targetOwnerShardId"]
+            if target is None:
+                if owner is not None or reference["reasonCode"] is None:
+                    raise FullTreeDataTruthError("unresolved type reference has contradictory evidence")
+            elif reference["reasonCode"] is not None or type_owners.get(target) != owner:
+                raise FullTreeDataTruthError(
+                    f"type reference {target} has a dangling or substituted owner"
+                )
 
 
 def generate_full_tree_data_truth(*, scope: dict[str, Any], scope_sha256: str, inventory: dict[str, Any], observation_root: Path, output_root: Path) -> dict[str, Any]:
@@ -164,7 +270,7 @@ def generate_full_tree_data_truth(*, scope: dict[str, Any], scope_sha256: str, i
     with tempfile.NamedTemporaryFile(prefix=".data-truth-", suffix=".sqlite", dir=output_root) as temporary:
         database = sqlite3.connect(temporary.name)
         try:
-            database.executescript("CREATE TABLE observations (kind TEXT, identity TEXT, observation_id TEXT PRIMARY KEY, payload BLOB); CREATE INDEX observations_identity ON observations(kind,identity); CREATE TABLE merged (kind TEXT, owner_shard TEXT, identity TEXT PRIMARY KEY, payload BLOB); CREATE INDEX merged_owner ON merged(owner_shard,kind,identity);")
+            database.executescript("CREATE TABLE observations (kind TEXT, identity TEXT, observation_id TEXT PRIMARY KEY, payload BLOB); CREATE INDEX observations_identity ON observations(kind,identity); CREATE TABLE type_targets (die_offset TEXT PRIMARY KEY, identity TEXT NOT NULL, unit_id TEXT NOT NULL); CREATE INDEX type_targets_identity ON type_targets(identity); CREATE TABLE merged (kind TEXT, owner_shard TEXT, identity TEXT PRIMARY KEY, payload BLOB); CREATE INDEX merged_owner ON merged(owner_shard,kind,identity);")
             for checkpoint in observation_index["shards"]:
                 _check_runtime_bounds(scope, started=started, cpu_started=cpu_started, database_path=Path(temporary.name))
                 shard_id = checkpoint["shardId"]
@@ -173,6 +279,7 @@ def generate_full_tree_data_truth(*, scope: dict[str, Any], scope_sha256: str, i
                     raise FullTreeDataTruthError(f"data observation shard {shard_id} changed")
                 document = json.loads(payload)
                 validate_data_observation_shard(document, scope=scope, scope_sha256=scope_sha256, inventory=inventory, shard=expected[shard_id], units=units[shard_id])
+                database.executemany("INSERT INTO type_targets VALUES (?,?,?)", ((item["dieOffset"], _type_key(item), item["unitId"]) for item in document["types"]))
                 database.executemany("INSERT INTO observations VALUES ('type',?,?,?)", ((_type_key(item), item["id"], canonical_json_bytes(item)) for item in document["types"]))
                 database.executemany("INSERT INTO observations VALUES ('global',?,?,?)", ((_global_key(item), item["id"], canonical_json_bytes(item)) for item in document["globals"]))
                 database.commit()
@@ -183,6 +290,21 @@ def generate_full_tree_data_truth(*, scope: dict[str, Any], scope_sha256: str, i
                 records = [json.loads(row[2]) for row in rows]
                 owner = min(item["unitId"] for item in records)
                 if kind == "type":
+                    records = [
+                        {
+                            **item,
+                            "members": [
+                                {
+                                    **member,
+                                    "typeReference": _resolve_type_reference(
+                                        member["typeReference"], database, unit_to_shard
+                                    ),
+                                }
+                                for member in item["members"]
+                            ],
+                        }
+                        for item in records
+                    ]
                     definitions = [item for item in records if not item["declarationOnly"]]
                     layouts = {_type_layout(item) for item in definitions}
                     if len(layouts) > 1:
@@ -191,7 +313,8 @@ def generate_full_tree_data_truth(*, scope: dict[str, Any], scope_sha256: str, i
                     merged = {"alignment": layout["alignment"], "byteSize": layout["byteSize"], "context": layout["context"], "declarations": _unique(records, "declaration"), "id": f"type-{identity[:32]}", "members": layout["members"], "name": layout["name"], "observationIds": sorted(item["id"] for item in records), "ownerUnitId": owner, "population": "scored" if definitions and layout["byteSize"] is not None else "unobservable", "reasonCode": None if definitions and layout["byteSize"] is not None else "declaration-only-or-size-unobservable", "tag": layout["tag"]}
                 else:
                     address = _one_compatible(records, "addressRva", identity)
-                    merged = {"addressRva": address, "alignment": _one_compatible(records, "alignment", identity), "declarations": _unique(records, "declaration"), "external": bool(_one_compatible(records, "external", identity) or False), "id": f"global-{identity[:32]}", "mutability": _one_compatible(records, "mutability", identity) or "unknown", "names": sorted({name for item in records for name in item["names"]}), "observationIds": sorted(item["id"] for item in records), "ownerUnitId": owner, "population": "scored" if address is not None else "unobservable", "reasonCode": None if address is not None else records[0]["reasonCode"], "size": _one_compatible(records, "size", identity), "tls": bool(_one_compatible(records, "tls", identity) or False), "visibility": _one_compatible(records, "visibility", identity) or "unknown"}
+                    references = [_resolve_type_reference(item["typeReference"], database, unit_to_shard) for item in records]
+                    merged = {"addressRva": address, "alignment": _one_compatible(records, "alignment", identity), "declarations": _unique(records, "declaration"), "external": bool(_one_compatible(records, "external", identity) or False), "id": f"global-{identity[:32]}", "mutability": _one_compatible(records, "mutability", identity) or "unknown", "names": sorted({name for item in records for name in item["names"]}), "observationIds": sorted(item["id"] for item in records), "ownerUnitId": owner, "population": "scored" if address is not None else "unobservable", "reasonCode": None if address is not None else records[0]["reasonCode"], "size": _one_compatible(records, "size", identity), "tls": bool(_one_compatible(records, "tls", identity) or False), "typeReference": _merge_type_references(references, f"global-{identity[:32]}"), "visibility": _one_compatible(records, "visibility", identity) or "unknown"}
                 database.execute("INSERT INTO merged VALUES (?,?,?,?)", (kind, unit_to_shard[owner], identity, canonical_json_bytes(merged)))
             database.commit()
             shard_records = []; aggregate: dict[str, int] = {}; total_output_bytes = 0
@@ -199,7 +322,8 @@ def generate_full_tree_data_truth(*, scope: dict[str, Any], scope_sha256: str, i
                 _check_runtime_bounds(scope, started=started, cpu_started=cpu_started, database_path=Path(temporary.name))
                 globals_ = [json.loads(row[0]) for row in database.execute("SELECT payload FROM merged WHERE owner_shard=? AND kind='global' ORDER BY identity", (shard["id"],))]
                 types = [json.loads(row[0]) for row in database.execute("SELECT payload FROM merged WHERE owner_shard=? AND kind='type' ORDER BY identity", (shard["id"],))]
-                counts = {"bases": sum(member["kind"] == "base" for item in types for member in item["members"]), "enumerators": sum(member["kind"] == "enumerator" for item in types for member in item["members"]), "fields": sum(member["kind"] == "field" for item in types for member in item["members"]), "globals": len(globals_), "types": len(types), "unobservableGlobals": sum(item["population"] == "unobservable" for item in globals_), "unobservableTypes": sum(item["population"] == "unobservable" for item in types)}
+                references = [item["typeReference"] for item in globals_] + [member["typeReference"] for item in types for member in item["members"]]
+                counts = {"bases": sum(member["kind"] == "base" for item in types for member in item["members"]), "crossShardTypeReferences": sum(item["targetOwnerShardId"] is not None and item["targetOwnerShardId"] != shard["id"] for item in references), "enumerators": sum(member["kind"] == "enumerator" for item in types for member in item["members"]), "fields": sum(member["kind"] == "field" for item in types for member in item["members"]), "globals": len(globals_), "resolvedTypeReferences": sum(item["targetTypeId"] is not None for item in references), "types": len(types), "unobservableGlobals": sum(item["population"] == "unobservable" for item in globals_), "unobservableTypes": sum(item["population"] == "unobservable" for item in types), "unresolvedTypeReferences": sum(item["targetTypeId"] is None for item in references)}
                 document = {"counts": counts, "globals": globals_, "oracle": oracle, "schemaVersion": 1, "shard": {"id": shard["id"], "unitIds": shard["unitIds"]}, "types": types}
                 _validate_document(document)
                 payload = canonical_json_bytes(document)

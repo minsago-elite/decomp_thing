@@ -9,7 +9,12 @@ from oracle.full_tree_data_reconciliation import (  # noqa: E402
     generate_full_tree_data_reconciliation,
     validate_full_tree_data_reconciliation,
 )
-from oracle.full_tree_data_truth import _type_key, generate_full_tree_data_truth  # noqa: E402
+from oracle.full_tree_data_truth import (  # noqa: E402
+    FullTreeDataTruthError,
+    _type_key,
+    generate_full_tree_data_truth,
+    validate_full_tree_data_truth_index,
+)
 from oracle.full_tree_data_baseline import (  # noqa: E402
     FullTreeDataBaselineError,
     generate_full_tree_data_baseline,
@@ -19,6 +24,95 @@ from oracle.full_tree_inventory import generate_inventory  # noqa: E402
 from oracle.full_tree_scope import canonical_json_bytes  # noqa: E402
 
 class FullTreeElfDataTest(unittest.TestCase):
+    def test_cross_shard_type_references_use_authenticated_type_ids(self) -> None:
+        with tempfile.TemporaryDirectory(prefix="full-tree-type-references-") as temporary:
+            root = Path(temporary)
+            include = root / "source/clang/include"
+            include.mkdir(parents=True)
+            (include / "shared.hpp").write_text(
+                "struct Shared { int value; };\n", encoding="utf-8"
+            )
+            objects = []
+            for component, body in (
+                ("A", "Shared first = {1}; int read_first(){return first.value;}\n"),
+                ("B", "Shared second = {2}; int read_second(){return second.value;}\n"),
+                ("C", "Shared third = {3}; int read_first(); int read_second(); int main(){return read_first()+read_second()+third.value;}\n"),
+            ):
+                source = root / f"source/clang/lib/{component}/fixture.cpp"
+                source.parent.mkdir(parents=True)
+                source.write_text('#include "shared.hpp"\n' + body, encoding="utf-8")
+                target = root / f"{component}.o"
+                subprocess.run(
+                    ["g++", "-g", "-O0", "-I", include, "-c", source, "-o", target],
+                    check=True,
+                    stdout=subprocess.PIPE,
+                    stderr=subprocess.PIPE,
+                )
+                objects.append(target)
+            rich = root / "fixture.full"
+            subprocess.run(
+                ["g++", "-no-pie", *objects, "-o", rich],
+                check=True,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+            )
+            scope = json.loads((REPOSITORY_ROOT / "oracle/llvm/22.1.6/full-tree-scope.json").read_text())
+            scope["oracle"]["richArtifactSha256"] = hashlib.sha256(rich.read_bytes()).hexdigest()
+            scope["pathPolicy"]["prefixMaps"] = [{"from": f"{root}/", "to": "source/"}]
+            scope["sharding"]["rules"] = [{"componentDepth": 1, "pathPrefix": "source/source/clang/lib/", "shardPrefix": "clang-lib"}]
+            scope_sha256 = hashlib.sha256(canonical_json_bytes(scope)).hexdigest()
+            inventory = generate_inventory(rich, scope, scope_sha256)
+            self.assertEqual(3, len(inventory["shards"]))
+            observations = root / "observations"
+            run_full_tree_data_observations(
+                rich,
+                scope=scope,
+                scope_sha256=scope_sha256,
+                inventory=inventory,
+                output_root=observations,
+                maximum_workers=2,
+            )
+            truth_root = root / "truth"
+            index = generate_full_tree_data_truth(
+                scope=scope,
+                scope_sha256=scope_sha256,
+                inventory=inventory,
+                observation_root=observations,
+                output_root=truth_root,
+            )
+            self.assertGreaterEqual(index["counts"]["crossShardTypeReferences"], 2)
+            forged_root = root / "forged"
+            forged_root.mkdir()
+            for record in index["shards"]:
+                source = truth_root / record["path"]
+                target = forged_root / record["path"]
+                target.parent.mkdir(parents=True, exist_ok=True)
+                target.write_bytes(source.read_bytes())
+            forged = json.loads(json.dumps(index))
+            record = next(item for item in forged["shards"] if item["crossShardTypeReferences"])
+            path = forged_root / record["path"]
+            document = json.loads(path.read_text())
+            reference = next(
+                item["typeReference"]
+                for item in document["globals"]
+                if item["typeReference"]["targetTypeId"] is not None
+                and item["typeReference"]["targetOwnerShardId"] != document["shard"]["id"]
+            )
+            reference["targetOwnerShardId"] = "forged-owner"
+            payload = canonical_json_bytes(document)
+            path.write_bytes(payload)
+            record["bytes"] = len(payload)
+            record["sha256"] = hashlib.sha256(payload).hexdigest()
+            without_hash = {key: value for key, value in forged.items() if key != "indexSha256"}
+            forged["indexSha256"] = hashlib.sha256(canonical_json_bytes(without_hash)).hexdigest()
+            with self.assertRaisesRegex(FullTreeDataTruthError, "dangling or substituted owner"):
+                validate_full_tree_data_truth_index(
+                    forged,
+                    output_root=forged_root,
+                    scope_sha256=scope_sha256,
+                    inventory=inventory,
+                )
+
     def test_anonymous_namespace_type_identity_is_producer_owned(self) -> None:
         base = {
             "context": [],

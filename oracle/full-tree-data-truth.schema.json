@@ -8,11 +8,12 @@
     "schemaVersion": {"const": 1}, "oracle": {"type": "object"}, "shard": {"type": "object"},
     "counts": {
       "type": "object", "additionalProperties": false,
-      "required": ["globals", "types", "unobservableGlobals", "unobservableTypes", "fields", "bases", "enumerators"],
+      "required": ["globals", "types", "unobservableGlobals", "unobservableTypes", "fields", "bases", "enumerators", "resolvedTypeReferences", "unresolvedTypeReferences", "crossShardTypeReferences"],
       "properties": {
         "globals": {"type": "integer", "minimum": 0}, "types": {"type": "integer", "minimum": 0},
         "unobservableGlobals": {"type": "integer", "minimum": 0}, "unobservableTypes": {"type": "integer", "minimum": 0},
-        "fields": {"type": "integer", "minimum": 0}, "bases": {"type": "integer", "minimum": 0}, "enumerators": {"type": "integer", "minimum": 0}
+        "fields": {"type": "integer", "minimum": 0}, "bases": {"type": "integer", "minimum": 0}, "enumerators": {"type": "integer", "minimum": 0},
+        "resolvedTypeReferences": {"type": "integer", "minimum": 0}, "unresolvedTypeReferences": {"type": "integer", "minimum": 0}, "crossShardTypeReferences": {"type": "integer", "minimum": 0}
       }
     },
     "globals": {"type": "array", "items": {"$ref": "#/$defs/global"}},
@@ -29,19 +30,31 @@
         "ownerUnitId": {"type": "string"}, "observationIds": {"type": "array", "minItems": 1, "uniqueItems": true, "items": {"type": "string"}},
         "declarations": {"type": "array", "minItems": 1, "uniqueItems": true, "items": {"type": "object"}},
         "byteSize": {"type": ["integer", "null"]}, "alignment": {"type": ["integer", "null"]},
-        "members": {"type": "array", "items": {"type": "object"}}
+        "members": {"type": "array", "items": {"type": "object", "required": ["typeReference"], "properties": {"typeReference": {"$ref": "#/$defs/typeReference"}}}}
       }
     },
     "global": {
       "type": "object", "additionalProperties": false,
-      "required": ["id", "names", "population", "reasonCode", "ownerUnitId", "observationIds", "declarations", "addressRva", "size", "alignment", "external", "visibility", "tls", "mutability"],
+      "required": ["id", "names", "population", "reasonCode", "ownerUnitId", "observationIds", "declarations", "addressRva", "size", "alignment", "external", "visibility", "tls", "mutability", "typeReference"],
       "properties": {
         "id": {"type": "string", "pattern": "^global-[0-9a-f]{32}$"}, "names": {"type": "array", "minItems": 1, "uniqueItems": true, "items": {"type": "string"}},
         "population": {"enum": ["scored", "unobservable"]}, "reasonCode": {"type": ["string", "null"]},
         "ownerUnitId": {"type": "string"}, "observationIds": {"type": "array", "minItems": 1, "uniqueItems": true, "items": {"type": "string"}},
         "declarations": {"type": "array", "minItems": 1, "uniqueItems": true, "items": {"type": "object"}},
         "addressRva": {"type": ["string", "null"]}, "size": {"type": ["integer", "null"]}, "alignment": {"type": ["integer", "null"]},
-        "external": {"type": "boolean"}, "visibility": {"type": "string"}, "tls": {"type": "boolean"}, "mutability": {"type": "string"}
+        "external": {"type": "boolean"}, "visibility": {"type": "string"}, "tls": {"type": "boolean"}, "mutability": {"type": "string"},
+        "typeReference": {"$ref": "#/$defs/typeReference"}
+      }
+    },
+    "typeReference": {
+      "type": "object", "additionalProperties": false,
+      "required": ["evidenceDieOffsets", "modifierTags", "reasonCode", "targetOwnerShardId", "targetTypeId"],
+      "properties": {
+        "evidenceDieOffsets": {"type": "array", "maxItems": 64, "uniqueItems": true, "items": {"type": "string", "pattern": "^0x(?:0|[1-9a-f][0-9a-f]{0,15})$"}},
+        "modifierTags": {"type": "array", "maxItems": 64, "items": {"type": "string", "pattern": "^DW_TAG_"}},
+        "reasonCode": {"type": ["string", "null"], "enum": [null, "no-type-attribute", "non-aggregate-terminal-type"]},
+        "targetOwnerShardId": {"type": ["string", "null"]},
+        "targetTypeId": {"oneOf": [{"type": "string", "pattern": "^type-[0-9a-f]{32}$"}, {"type": "null"}]}
       }
     }
   }
