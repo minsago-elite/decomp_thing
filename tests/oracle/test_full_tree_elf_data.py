@@ -102,6 +102,25 @@ class FullTreeElfDataTest(unittest.TestCase):
         ordinary = {**base, "name": "ArrayRef<int>", "id": "type-observation-a"}
         self.assertEqual(_type_key(ordinary), _type_key({**ordinary, "id": "type-observation-b"}))
 
+    def test_source_aligned_anonymous_nested_types_merge_by_declaration(self) -> None:
+        base = {
+            "context": ["DW_TAG_namespace:llvm", "DW_TAG_class_type:Container"],
+            "declaration": {"column": None, "externalPathSha256": None, "line": 104, "sourcePath": "source/container.h"},
+            "id": "type-observation-a",
+            "name": None,
+            "tag": "union",
+            "unitId": "unit-a",
+        }
+        self.assertEqual(
+            _type_key(base),
+            _type_key({**base, "id": "type-observation-b", "unitId": "unit-b"}),
+        )
+        producer_only = {**base, "declaration": {**base["declaration"], "sourcePath": None}}
+        self.assertNotEqual(
+            _type_key(producer_only),
+            _type_key({**producer_only, "id": "type-observation-b", "unitId": "unit-b"}),
+        )
+
     def test_cross_shard_type_references_use_authenticated_type_ids(self) -> None:
         with tempfile.TemporaryDirectory(prefix="full-tree-type-references-") as temporary:
             root = Path(temporary)
