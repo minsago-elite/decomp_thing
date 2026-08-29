@@ -13,14 +13,23 @@ REPOSITORY_ROOT = Path(__file__).resolve().parents[2]
 
 from oracle.bounded_shards import load_complete_shard_index  # noqa: E402
 from oracle.full_tree_elf_functions import generate_full_tree_elf_function_index  # noqa: E402
+from oracle.full_tree_function_baseline import (  # noqa: E402
+    FullTreeFunctionBaselineError,
+    generate_full_tree_function_baseline,
+    require_no_function_baseline_regression,
+)
 from oracle.full_tree_function_observations import (  # noqa: E402
     MAX_FULL_TREE_NAME_CHARACTERS,
     run_full_tree_function_observations,
 )
-from oracle.function_recovery_oracle import OracleGenerationError, _dwarf_names  # noqa: E402
-from oracle.full_tree_function_truth import reconcile_full_tree_function_truth  # noqa: E402
+from oracle.full_tree_function_truth import (  # noqa: E402
+    FullTreeFunctionTruthError,
+    reconcile_full_tree_function_truth,
+    validate_full_tree_function_truth_index,
+)
 from oracle.full_tree_inventory import generate_inventory  # noqa: E402
 from oracle.full_tree_scope import canonical_json_bytes  # noqa: E402
+from oracle.function_recovery_oracle import OracleGenerationError, _dwarf_names  # noqa: E402
 
 
 class FullTreeFunctionObservationTest(unittest.TestCase):
@@ -195,6 +204,42 @@ class FullTreeFunctionObservationTest(unittest.TestCase):
             )
             self.assertGreater(first_truth["counts"]["scoredRvas"], 0)
             self.assertEqual(len(inventory["shards"]), len(first_truth["shards"]))
+            mutated = json.loads(json.dumps(second_truth))
+            mutated["counts"]["scoredRvas"] += 1
+            without_hash = {key: value for key, value in mutated.items() if key != "indexSha256"}
+            mutated["indexSha256"] = hashlib.sha256(canonical_json_bytes(without_hash)).hexdigest()
+            with self.assertRaisesRegex(FullTreeFunctionTruthError, "aggregate counts"):
+                validate_full_tree_function_truth_index(
+                    mutated,
+                    output_root=second_truth_root,
+                    scope=scope,
+                    scope_sha256=scope_sha256,
+                    inventory=inventory,
+                    observation_index_sha256=mutated["oracle"]["observationIndexSha256"],
+                    elf_index_sha256=mutated["oracle"]["elfIndexSha256"],
+                )
+            baseline = generate_full_tree_function_baseline(
+                first_truth,
+                truth_root=first_truth_root,
+                scope=scope,
+                scope_sha256=scope_sha256,
+                inventory=inventory,
+            )
+            require_no_function_baseline_regression(baseline, baseline)
+            regressed = json.loads(json.dumps(baseline))
+            scored_shard = next(
+                item for item in regressed["shards"] if item["id"] != "elf-only-exclusions"
+            )
+            scored_shard["metric"]["fabricated"] += 1
+            regressed["aggregate"]["fabricated"] += 1
+            report_without_hash = {
+                key: value for key, value in regressed.items() if key != "reportSha256"
+            }
+            regressed["reportSha256"] = hashlib.sha256(
+                canonical_json_bytes(report_without_hash)
+            ).hexdigest()
+            with self.assertRaisesRegex(FullTreeFunctionBaselineError, "regressed"):
+                require_no_function_baseline_regression(regressed, baseline)
 
 
 if __name__ == "__main__":

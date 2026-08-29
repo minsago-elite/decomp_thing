@@ -1,0 +1,48 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://github.com/minsago-elite/decomp_thing/oracle/full-tree-function-baseline.schema.json",
+  "title": "Per-shard full-tree function recovery baseline",
+  "type": "object", "additionalProperties": false,
+  "required": ["schemaVersion", "truthIndexSha256", "configurationSha256", "aggregate", "shards", "mismatches", "reportSha256"],
+  "properties": {
+    "schemaVersion": {"const": 1},
+    "truthIndexSha256": {"$ref": "#/$defs/sha256"},
+    "configurationSha256": {"$ref": "#/$defs/sha256"},
+    "aggregate": {"$ref": "#/$defs/metric"},
+    "shards": {
+      "type": "array",
+      "items": {
+        "type": "object", "additionalProperties": false,
+        "required": ["id", "metric"],
+        "properties": {"id": {"type": "string", "minLength": 1, "maxLength": 256}, "metric": {"$ref": "#/$defs/metric"}}
+      }
+    },
+    "mismatches": {
+      "type": "array",
+      "items": {
+        "type": "object", "additionalProperties": false,
+        "required": ["id", "kind", "shardId", "truthId"],
+        "properties": {
+          "id": {"type": "string", "pattern": "^(missing|fabricated)-function-[0-9a-f]{32}$"},
+          "kind": {"enum": ["missing", "fabricated"]},
+          "shardId": {"type": ["string", "null"]},
+          "truthId": {"type": "string", "minLength": 1, "maxLength": 256}
+        }
+      }
+    },
+    "reportSha256": {"$ref": "#/$defs/sha256"}
+  },
+  "$defs": {
+    "sha256": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
+    "metric": {
+      "type": "object", "additionalProperties": false,
+      "required": ["denominator", "recovered", "missing", "fabricated", "excluded", "recallNumerator", "recallDenominator"],
+      "properties": {
+        "denominator": {"type": "integer", "minimum": 0}, "recovered": {"type": "integer", "minimum": 0},
+        "missing": {"type": "integer", "minimum": 0}, "fabricated": {"type": "integer", "minimum": 0},
+        "excluded": {"type": "integer", "minimum": 0}, "recallNumerator": {"type": "integer", "minimum": 0},
+        "recallDenominator": {"type": "integer", "minimum": 0}
+      }
+    }
+  }
+}
