@@ -1,0 +1,46 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://github.com/minsago-elite/decomp_thing/oracle/full-tree-call-truth-index.schema.json",
+  "title": "Canonical full-tree call-truth index",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schemaVersion", "complete", "oracle", "counts", "shards", "indexSha256"],
+  "properties": {
+    "schemaVersion": {"const": 1},
+    "complete": {"const": true},
+    "oracle": {"type": "object"},
+    "counts": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["edges", "observations", "directInternal", "external", "indirectUnresolved", "unobservable"],
+      "properties": {
+        "edges": {"type": "integer", "minimum": 0},
+        "observations": {"type": "integer", "minimum": 0},
+        "directInternal": {"type": "integer", "minimum": 0},
+        "external": {"type": "integer", "minimum": 0},
+        "indirectUnresolved": {"type": "integer", "minimum": 0},
+        "unobservable": {"type": "integer", "minimum": 0}
+      }
+    },
+    "shards": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "required": ["id", "path", "bytes", "sha256", "edges", "observations", "directInternal", "external", "indirectUnresolved", "unobservable"],
+        "properties": {
+          "id": {"type": "string"},
+          "path": {"type": "string"},
+          "bytes": {"type": "integer", "minimum": 0},
+          "sha256": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
+          "edges": {"type": "integer", "minimum": 0},
+          "observations": {"type": "integer", "minimum": 0},
+          "directInternal": {"type": "integer", "minimum": 0},
+          "external": {"type": "integer", "minimum": 0},
+          "indirectUnresolved": {"type": "integer", "minimum": 0},
+          "unobservable": {"type": "integer", "minimum": 0}
+        }
+      }
+    },
+    "indexSha256": {"type": "string", "pattern": "^[0-9a-f]{64}$"}
+  }
+}

@@ -23,6 +23,11 @@ from oracle.full_tree_call_observations import (  # noqa: E402
     run_full_tree_call_observations,
 )
 from oracle.full_tree_call_truth import generate_full_tree_call_truth  # noqa: E402
+from oracle.full_tree_call_baseline import (  # noqa: E402
+    FullTreeCallBaselineError,
+    generate_full_tree_call_baseline,
+    require_no_call_baseline_regression,
+)
 from oracle.full_tree_function_baseline import (  # noqa: E402
     FullTreeFunctionBaselineError,
     generate_full_tree_function_baseline,
@@ -325,6 +330,40 @@ class FullTreeFunctionObservationTest(unittest.TestCase):
                 + call_truth["counts"]["external"]
                 + call_truth["counts"]["indirectUnresolved"],
             )
+            call_truth_root = root / "call-truth"
+            call_baseline = generate_full_tree_call_baseline(
+                call_truth,
+                truth_root=call_truth_root,
+                inventory=inventory,
+            )
+            self.assertEqual(
+                call_baseline["aggregate"]["denominator"],
+                call_baseline["aggregate"]["exact"]
+                + call_baseline["aggregate"]["partial"]
+                + call_baseline["aggregate"]["missing"],
+            )
+            require_no_call_baseline_regression(call_baseline, call_baseline)
+            regressed_call_baseline = json.loads(json.dumps(call_baseline))
+            metric = regressed_call_baseline["shards"][0]["metric"]
+            if metric["exact"]:
+                metric["exact"] -= 1
+                metric["partial"] += 1
+                aggregate = regressed_call_baseline["aggregate"]
+                aggregate["exact"] -= 1
+                aggregate["partial"] += 1
+                without_hash = {
+                    key: value
+                    for key, value in regressed_call_baseline.items()
+                    if key != "reportSha256"
+                }
+                regressed_call_baseline["reportSha256"] = hashlib.sha256(
+                    canonical_json_bytes(without_hash)
+                ).hexdigest()
+                with self.assertRaisesRegex(FullTreeCallBaselineError, "regressed"):
+                    require_no_call_baseline_regression(
+                        regressed_call_baseline,
+                        call_baseline,
+                    )
             second_truth_root = root / "function-truth-second"
             second_truth = reconcile_full_tree_function_truth(
                 scope=scope,

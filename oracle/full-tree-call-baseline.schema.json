@@ -1,0 +1,54 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://github.com/minsago-elite/decomp_thing/oracle/full-tree-call-baseline.schema.json",
+  "title": "Per-shard full-tree call observability baseline",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schemaVersion", "configurationSha256", "truthIndexSha256", "aggregate", "shards", "mismatches", "reportSha256"],
+  "properties": {
+    "schemaVersion": {"const": 1},
+    "configurationSha256": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
+    "truthIndexSha256": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
+    "aggregate": {"$ref": "#/$defs/metric"},
+    "shards": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["id", "metric"],
+        "properties": {"id": {"type": "string"}, "metric": {"$ref": "#/$defs/metric"}}
+      }
+    },
+    "mismatches": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["id", "kind", "truthId", "shardId", "reasonCode"],
+        "properties": {
+          "id": {"type": "string", "pattern": "^(partial|missing)-call-[0-9a-f]{32}$"},
+          "kind": {"enum": ["partial", "missing"]},
+          "truthId": {"type": "string"},
+          "shardId": {"type": "string"},
+          "reasonCode": {"type": ["string", "null"]}
+        }
+      }
+    },
+    "reportSha256": {"type": "string", "pattern": "^[0-9a-f]{64}$"}
+  },
+  "$defs": {
+    "metric": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["denominator", "exact", "partial", "missing", "fabricated", "excluded"],
+      "properties": {
+        "denominator": {"type": "integer", "minimum": 0},
+        "exact": {"type": "integer", "minimum": 0},
+        "partial": {"type": "integer", "minimum": 0},
+        "missing": {"type": "integer", "minimum": 0},
+        "fabricated": {"type": "integer", "minimum": 0},
+        "excluded": {"type": "integer", "minimum": 0}
+      }
+    }
+  }
+}

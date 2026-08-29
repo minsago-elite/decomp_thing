@@ -69,6 +69,47 @@ def _validate_document(document: dict[str, Any]) -> None:
         raise FullTreeCallTruthError("call truth counts do not reconcile")
 
 
+def validate_full_tree_call_truth_index(
+    index: dict[str, Any],
+    *,
+    output_root: Path,
+    inventory: dict[str, Any],
+    expected_oracle: dict[str, Any] | None = None,
+) -> None:
+    try:
+        import fastjsonschema  # type: ignore[import-untyped]
+
+        schema = json.loads(
+            Path(__file__).with_name("full-tree-call-truth-index.schema.json").read_text(encoding="utf-8")
+        )
+        fastjsonschema.compile(schema)(index)
+    except Exception as error:
+        raise FullTreeCallTruthError(f"call truth index fails validation: {error}") from error
+    if expected_oracle is not None and index["oracle"] != expected_oracle:
+        raise FullTreeCallTruthError("call truth index oracle bindings differ")
+    without_hash = {key: value for key, value in index.items() if key != "indexSha256"}
+    if index["indexSha256"] != _sha(canonical_json_bytes(without_hash)):
+        raise FullTreeCallTruthError("call truth index hash does not reconcile")
+    expected_ids = [shard["id"] for shard in inventory["shards"]]
+    if [record["id"] for record in index["shards"]] != expected_ids:
+        raise FullTreeCallTruthError("call truth shard population or ordering differs")
+    aggregate: dict[str, int] = defaultdict(int)
+    for record in index["shards"]:
+        payload = (output_root / record["path"]).read_bytes()
+        if len(payload) != record["bytes"] or _sha(payload) != record["sha256"]:
+            raise FullTreeCallTruthError(f"call truth shard {record['id']} changed")
+        document = json.loads(payload)
+        _validate_document(document)
+        if document["oracle"] != index["oracle"] or document["shard"] != {"id": record["id"]}:
+            raise FullTreeCallTruthError(f"call truth shard {record['id']} bindings differ")
+        for name, value in document["counts"].items():
+            if record[name] != value:
+                raise FullTreeCallTruthError(f"call truth shard {record['id']} count differs")
+            aggregate[name] += value
+    if index["counts"] != dict(sorted(aggregate.items())):
+        raise FullTreeCallTruthError("call truth aggregate counts do not reconcile")
+
+
 def generate_full_tree_call_truth(
     *,
     scope: dict[str, Any],
@@ -254,6 +295,12 @@ def generate_full_tree_call_truth(
             index_without_hash = {"complete": True, "counts": dict(sorted(aggregate.items())), "oracle": oracle, "schemaVersion": 1, "shards": shard_records}
             index = {**index_without_hash, "indexSha256": _sha(canonical_json_bytes(index_without_hash))}
             (output_root / "index.json").write_bytes(canonical_json_bytes(index))
+            validate_full_tree_call_truth_index(
+                index,
+                output_root=output_root,
+                inventory=inventory,
+                expected_oracle=oracle,
+            )
             return index
         except (OSError, sqlite3.Error, KeyError, TypeError, ValueError) as error:
             if isinstance(error, FullTreeCallTruthError):
