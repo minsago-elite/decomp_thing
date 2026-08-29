@@ -154,27 +154,28 @@ def generate_full_tree_call_truth(
         "scopeSha256": scope_sha256,
     }
     output_root.mkdir(parents=True, exist_ok=True)
+    function_namespace: dict[str, tuple[str, str]] = {}
+    for shard_record in function_index["shards"]:
+        document = json.loads((function_truth_root / shard_record["path"]).read_text(encoding="utf-8"))
+        for item in document["functions"]:
+            if item["id"] in function_namespace:
+                raise FullTreeCallTruthError(f"duplicate function identity {item['id']}")
+            function_namespace[item["id"]] = (shard_record["id"], item["entityKind"])
+    external_namespace = {
+        item["name"]: _external_id(item["name"])
+        for item in elf_index["externalFunctions"]
+    }
     with tempfile.NamedTemporaryFile(prefix=".call-truth-", suffix=".sqlite", dir=output_root) as database_file:
         database = sqlite3.connect(database_file.name)
         try:
             database.executescript(
                 """
-                CREATE TABLE functions (id TEXT PRIMARY KEY, owner_shard TEXT NOT NULL, entity_kind TEXT NOT NULL);
-                CREATE TABLE externals (name TEXT PRIMARY KEY, id TEXT NOT NULL);
-                CREATE TABLE observations (edge_key TEXT NOT NULL, observation_id TEXT PRIMARY KEY,
+                PRAGMA journal_mode=OFF;
+                PRAGMA synchronous=OFF;
+                PRAGMA locking_mode=EXCLUSIVE;
+                CREATE TABLE observations (edge_key TEXT NOT NULL, observation_id TEXT NOT NULL,
                                            source_shard TEXT NOT NULL, payload BLOB NOT NULL);
-                CREATE INDEX observations_edge ON observations(edge_key);
                 """
-            )
-            for shard_record in function_index["shards"]:
-                document = json.loads((function_truth_root / shard_record["path"]).read_text(encoding="utf-8"))
-                database.executemany(
-                    "INSERT INTO functions VALUES (?, ?, ?)",
-                    ((item["id"], shard_record["id"], item["entityKind"]) for item in document["functions"]),
-                )
-            database.executemany(
-                "INSERT INTO externals VALUES (?, ?)",
-                ((item["name"], _external_id(item["name"])) for item in elf_index["externalFunctions"]),
             )
             for checkpoint in call_index["shards"]:
                 shard_id = checkpoint["shardId"]
@@ -203,6 +204,10 @@ def generate_full_tree_call_truth(
                 database.commit()
 
             by_shard: dict[str, list[dict[str, Any]]] = defaultdict(list)
+            database.executescript(
+                "CREATE UNIQUE INDEX observations_id ON observations(observation_id);"
+                "CREATE INDEX observations_edge ON observations(edge_key,observation_id);"
+            )
             observation_cursor = database.execute(
                 "SELECT edge_key,source_shard,payload FROM observations ORDER BY edge_key,observation_id"
             )
@@ -225,10 +230,7 @@ def generate_full_tree_call_truth(
                 }
                 if len(signatures) != 1:
                     raise FullTreeCallTruthError(f"incompatible duplicate call observations for {edge_key}")
-                caller_row = (
-                    database.execute("SELECT owner_shard FROM functions WHERE id=?", (first["callerId"],)).fetchone()
-                    if first["callerId"] is not None else None
-                )
+                caller_row = function_namespace.get(first["callerId"]) if first["callerId"] is not None else None
                 if first["population"] == "scored" and caller_row is None:
                     raise FullTreeCallTruthError(f"call {first['id']} has a dangling caller identity")
                 owner_shard = caller_row[0] if caller_row else min(row[1] for row in grouped_rows)
@@ -240,18 +242,18 @@ def generate_full_tree_call_truth(
                 external_ids: list[str] = []
                 target_kind = target["kind"]
                 if target_kind == "direct-internal":
-                    target_row = database.execute("SELECT entity_kind FROM functions WHERE id=?", (target["functionId"],)).fetchone()
+                    target_row = function_namespace.get(target["functionId"])
                     if target_row is None:
                         raise FullTreeCallTruthError(f"call {first['id']} has a dangling direct target")
                     physical = target["functionId"]
-                    if target_row[0] == "thunk":
+                    if target_row[1] == "thunk":
                         reason = "thunk-semantic-target-unresolved"
                     else:
                         semantic = physical
                 elif target_kind == "external-unresolved":
                     target_kind = "external"
                     external_ids = sorted(
-                        {row[0] for name in target["aliases"] if (row := database.execute("SELECT id FROM externals WHERE name=?", (name,)).fetchone())}
+                        {external_namespace[name] for name in target["aliases"] if name in external_namespace}
                     )
                     if not external_ids:
                         population = "unobservable"
