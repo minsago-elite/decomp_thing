@@ -27,6 +27,7 @@
       "type": "array",
       "items": {
         "type": "object",
+        "additionalProperties": false,
         "required": ["id", "path", "bytes", "sha256", "globals", "types", "unobservableGlobals", "unobservableTypes", "fields", "bases", "enumerators"],
         "properties": {
           "id": {"type": "string"},
