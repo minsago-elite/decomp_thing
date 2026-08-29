@@ -73,12 +73,16 @@ class FullTreeElfDataTest(unittest.TestCase):
         merged = _merge_type_references(references, "fixture-member")
         self.assertIsNone(merged["targetTypeId"])
         self.assertIsNone(merged["targetOwnerShardId"])
-        self.assertEqual("ambiguous-producer-declaration-targets", merged["reasonCode"])
+        self.assertEqual("ambiguous-producer-only-targets", merged["reasonCode"])
         self.assertEqual("unresolved-authenticated-target-set", merged["resolutionCode"])
         self.assertEqual(20, merged["candidateTargetCount"])
         self.assertEqual(16, len(merged["candidateTargets"]))
         self.assertEqual(20, merged["evidenceDieOffsetCount"])
         self.assertEqual(16, len(merged["evidenceDieOffsets"]))
+        definition = {**references[0], "targetTypeId": "type-" + "f" * 32, "_targetQuality": "producer-definition"}
+        merged_definition = _merge_type_references([references[0], definition], "fixture-definition-member")
+        self.assertEqual("ambiguous-producer-only-targets", merged_definition["reasonCode"])
+        self.assertIsNone(merged_definition["targetTypeId"])
 
     def test_source_unaligned_nonaddress_globals_do_not_merge_by_name(self) -> None:
         base = {

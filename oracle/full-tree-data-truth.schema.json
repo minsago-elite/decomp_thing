@@ -57,7 +57,7 @@
         "evidenceDieOffsets": {"type": "array", "maxItems": 16, "uniqueItems": true, "items": {"type": "string", "pattern": "^0x(?:0|[1-9a-f][0-9a-f]{0,15})$"}},
         "evidenceDieOffsetsSha256": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
         "modifierTags": {"type": "array", "maxItems": 64, "items": {"type": "string", "pattern": "^DW_TAG_"}},
-        "reasonCode": {"type": ["string", "null"], "enum": [null, "no-type-attribute", "non-aggregate-terminal-type", "ambiguous-producer-declaration-targets"]},
+        "reasonCode": {"type": ["string", "null"], "enum": [null, "no-type-attribute", "non-aggregate-terminal-type", "ambiguous-producer-only-targets"]},
         "resolutionCode": {"enum": ["unresolved", "unresolved-authenticated-target-set", "exact-dwarf-offset", "odr-member-sole-source-aligned-target"]},
         "targetOwnerShardId": {"type": ["string", "null"]},
         "targetTypeId": {"oneOf": [{"type": "string", "pattern": "^type-[0-9a-f]{32}$"}, {"type": "null"}]}

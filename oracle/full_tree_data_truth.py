@@ -14,7 +14,7 @@ class FullTreeDataTruthError(ValueError):
     """Raised when ODR-equivalent data evidence is incompatible or incomplete."""
 
 
-POLICY = {"id": "full-tree-data-truth", "version": 10, "typeIdentity": "tag-qualified-lexical-context-name-or-anonymous-declaration-with-observation-owned-lambda-and-lossy-local-contexts", "globalIdentity": "rva-or-source-aligned-name-declaration-or-producer-observation", "owner": "lowest-unit-id", "typeReferences": "exact-dwarf-offset-chain-with-bounded-authenticated-candidate-commitments-and-no-ambiguous-target-substitution", "maximumDatabaseBytes": 8 * 1024 * 1024 * 1024}
+POLICY = {"id": "full-tree-data-truth", "version": 11, "typeIdentity": "tag-qualified-lexical-context-name-or-anonymous-declaration-with-observation-owned-lambda-and-lossy-local-contexts", "globalIdentity": "rva-or-source-aligned-name-declaration-or-producer-observation", "owner": "lowest-unit-id", "typeReferences": "exact-dwarf-offset-chain-with-bounded-authenticated-candidate-commitments-and-no-ambiguous-target-substitution", "maximumDatabaseBytes": 8 * 1024 * 1024 * 1024}
 
 REFERENCE_SAMPLE_LIMIT = 16
 
@@ -176,8 +176,8 @@ def _merge_type_references(references: Iterable[dict[str, Any]], identity: str) 
             selected_id = next(iter(source_aligned))
             selected = next(item for item in records if item["targetTypeId"] == selected_id)
             resolution_code = "odr-member-sole-source-aligned-target"
-        elif not source_aligned and other_qualities <= {"producer-declaration"}:
-            selected = {**records[0], "reasonCode": "ambiguous-producer-declaration-targets", "targetOwnerShardId": None, "targetTypeId": None}
+        elif not source_aligned and other_qualities <= {"producer-declaration", "producer-definition"}:
+            selected = {**records[0], "reasonCode": "ambiguous-producer-only-targets", "targetOwnerShardId": None, "targetTypeId": None}
             resolution_code = "unresolved-authenticated-target-set"
         else:
             raise FullTreeDataTruthError(f"incompatible type references for {identity}")
