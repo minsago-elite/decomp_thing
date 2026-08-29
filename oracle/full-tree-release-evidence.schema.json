@@ -1,0 +1,68 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://github.com/minsago-elite/decomp_thing/oracle/full-tree-release-evidence.schema.json",
+  "type": "object", "additionalProperties": false,
+  "required": ["schemaVersion", "complete", "oracle", "inventory", "observations", "truth", "reconciliation", "baselines", "artifacts", "reportSha256"],
+  "properties": {
+    "schemaVersion": {"const": 1}, "complete": {"const": true},
+    "oracle": {
+      "type": "object", "additionalProperties": false,
+      "required": ["scopeSha256", "richArtifactSha256", "strippedArtifactSha256"],
+      "properties": {"scopeSha256": {"$ref": "#/$defs/sha"}, "richArtifactSha256": {"$ref": "#/$defs/sha"}, "strippedArtifactSha256": {"$ref": "#/$defs/sha"}}
+    },
+    "inventory": {
+      "type": "object", "additionalProperties": false,
+      "required": ["compilationUnits", "shards", "indexSha256"],
+      "properties": {"compilationUnits": {"type": "integer", "minimum": 1}, "shards": {"type": "integer", "minimum": 1}, "indexSha256": {"$ref": "#/$defs/sha"}}
+    },
+    "observations": {"$ref": "#/$defs/stageGroup"},
+    "truth": {"$ref": "#/$defs/truthGroup"},
+    "reconciliation": {"$ref": "#/$defs/counts"},
+    "baselines": {
+      "type": "object", "additionalProperties": false,
+      "required": ["functions", "calls", "data"],
+      "properties": {"functions": {"$ref": "#/$defs/baseline"}, "calls": {"$ref": "#/$defs/baseline"}, "data": {"$ref": "#/$defs/baseline"}}
+    },
+    "artifacts": {"type": "array", "minItems": 6, "uniqueItems": true, "items": {"$ref": "#/$defs/artifact"}},
+    "reportSha256": {"$ref": "#/$defs/sha"}
+  },
+  "$defs": {
+    "sha": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
+    "counts": {"type": "object", "minProperties": 1, "additionalProperties": {"type": "integer", "minimum": 0}},
+    "artifact": {
+      "type": "object", "additionalProperties": false,
+      "required": ["role", "bytes", "sha256"],
+      "properties": {"role": {"type": "string", "pattern": "^[a-z]+(?:-[a-z]+)*$"}, "bytes": {"type": "integer", "minimum": 1}, "sha256": {"$ref": "#/$defs/sha"}}
+    },
+    "execution": {
+      "type": "object", "additionalProperties": false,
+      "required": ["artifact", "bounds", "observed", "runSha256", "evidenceSha256"],
+      "properties": {"artifact": {"$ref": "#/$defs/artifact"}, "bounds": {"type": "object"}, "observed": {"type": "object"}, "runSha256": {"$ref": "#/$defs/sha"}, "evidenceSha256": {"$ref": "#/$defs/sha"}}
+    },
+    "observationStage": {
+      "type": "object", "additionalProperties": false,
+      "required": ["counts", "determinism", "executions", "indexes"],
+      "properties": {"counts": {"$ref": "#/$defs/counts"}, "determinism": {"type": "object"}, "executions": {"type": "array", "minItems": 2, "maxItems": 2, "items": {"$ref": "#/$defs/execution"}}, "indexes": {"type": "array", "minItems": 2, "maxItems": 2, "items": {"$ref": "#/$defs/artifact"}}}
+    },
+    "truthStage": {
+      "type": "object", "additionalProperties": false,
+      "required": ["counts", "determinism", "indexes"],
+      "properties": {"counts": {"$ref": "#/$defs/counts"}, "determinism": {"type": "object"}, "indexes": {"type": "array", "minItems": 2, "maxItems": 2, "items": {"$ref": "#/$defs/artifact"}}}
+    },
+    "stageGroup": {
+      "type": "object", "additionalProperties": false,
+      "required": ["functions", "calls", "data"],
+      "properties": {"functions": {"$ref": "#/$defs/observationStage"}, "calls": {"$ref": "#/$defs/observationStage"}, "data": {"$ref": "#/$defs/observationStage"}}
+    },
+    "truthGroup": {
+      "type": "object", "additionalProperties": false,
+      "required": ["functions", "calls", "data"],
+      "properties": {"functions": {"$ref": "#/$defs/truthStage"}, "calls": {"$ref": "#/$defs/truthStage"}, "data": {"$ref": "#/$defs/truthStage"}}
+    },
+    "baseline": {
+      "type": "object", "additionalProperties": false,
+      "required": ["aggregate", "artifact", "reportSha256"],
+      "properties": {"aggregate": {"type": "object"}, "artifact": {"$ref": "#/$defs/artifact"}, "reportSha256": {"$ref": "#/$defs/sha"}}
+    }
+  }
+}
