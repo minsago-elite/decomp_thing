@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from collections import defaultdict
 import hashlib
+import itertools
 import json
 from pathlib import Path
 import sqlite3
@@ -202,11 +203,12 @@ def generate_full_tree_call_truth(
                 database.commit()
 
             by_shard: dict[str, list[dict[str, Any]]] = defaultdict(list)
-            for (edge_key,) in database.execute("SELECT DISTINCT edge_key FROM observations ORDER BY edge_key"):
-                observations = [
-                    json.loads(row[0])
-                    for row in database.execute("SELECT payload FROM observations WHERE edge_key=? ORDER BY observation_id", (edge_key,))
-                ]
+            observation_cursor = database.execute(
+                "SELECT edge_key,source_shard,payload FROM observations ORDER BY edge_key,observation_id"
+            )
+            for edge_key, rows in itertools.groupby(observation_cursor, key=lambda row: row[0]):
+                grouped_rows = list(rows)
+                observations = [json.loads(row[2]) for row in grouped_rows]
                 first = observations[0]
                 signatures = {
                     canonical_json_bytes(
@@ -229,9 +231,7 @@ def generate_full_tree_call_truth(
                 )
                 if first["population"] == "scored" and caller_row is None:
                     raise FullTreeCallTruthError(f"call {first['id']} has a dangling caller identity")
-                owner_shard = caller_row[0] if caller_row else database.execute(
-                    "SELECT source_shard FROM observations WHERE edge_key=? ORDER BY source_shard LIMIT 1", (edge_key,)
-                ).fetchone()[0]
+                owner_shard = caller_row[0] if caller_row else min(row[1] for row in grouped_rows)
                 target = first["target"]
                 population = first["population"]
                 reason = first["reasonCode"]
