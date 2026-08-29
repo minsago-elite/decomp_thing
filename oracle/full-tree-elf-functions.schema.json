@@ -1,0 +1,235 @@
+{
+  "$id": "https://github.com/minsago-elite/decomp_thing/oracle/full-tree-elf-functions.schema.json",
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "additionalProperties": false,
+  "properties": {
+    "artifacts": {
+      "additionalProperties": false,
+      "properties": {
+        "rich": {
+          "$ref": "#/$defs/artifact"
+        },
+        "stripped": {
+          "$ref": "#/$defs/artifact"
+        }
+      },
+      "required": [
+        "rich",
+        "stripped"
+      ],
+      "type": "object"
+    },
+    "counts": {
+      "additionalProperties": false,
+      "properties": {
+        "aliases": {
+          "minimum": 1,
+          "type": "integer"
+        },
+        "functionRvas": {
+          "minimum": 1,
+          "type": "integer"
+        },
+        "strippedFunctionRvas": {
+          "minimum": 0,
+          "type": "integer"
+        }
+      },
+      "required": [
+        "aliases",
+        "functionRvas",
+        "strippedFunctionRvas"
+      ],
+      "type": "object"
+    },
+    "functions": {
+      "items": {
+        "additionalProperties": false,
+        "properties": {
+          "aliases": {
+            "items": {
+              "additionalProperties": false,
+              "properties": {
+                "availability": {
+                  "additionalProperties": false,
+                  "properties": {
+                    "rich": {
+                      "const": "surviving"
+                    },
+                    "stripped": {
+                      "enum": [
+                        "removed",
+                        "surviving"
+                      ]
+                    }
+                  },
+                  "required": [
+                    "rich",
+                    "stripped"
+                  ],
+                  "type": "object"
+                },
+                "evidence": {
+                  "items": {
+                    "additionalProperties": false,
+                    "properties": {
+                      "kind": {
+                        "const": "elf-symbol"
+                      },
+                      "locator": {
+                        "maxLength": 16384,
+                        "minLength": 1,
+                        "type": "string"
+                      }
+                    },
+                    "required": [
+                      "kind",
+                      "locator"
+                    ],
+                    "type": "object"
+                  },
+                  "minItems": 1,
+                  "type": "array",
+                  "uniqueItems": true
+                },
+                "name": {
+                  "maxLength": 4096,
+                  "minLength": 1,
+                  "type": "string"
+                }
+              },
+              "required": [
+                "availability",
+                "evidence",
+                "name"
+              ],
+              "type": "object"
+            },
+            "minItems": 1,
+            "type": "array"
+          },
+          "id": {
+            "pattern": "^function-rva-0x(?:0|[1-9a-f][0-9a-f]{0,15})$",
+            "type": "string"
+          },
+          "rva": {
+            "$ref": "#/$defs/address"
+          }
+        },
+        "required": [
+          "aliases",
+          "id",
+          "rva"
+        ],
+        "type": "object"
+      },
+      "minItems": 1,
+      "type": "array"
+    },
+    "image": {
+      "additionalProperties": false,
+      "properties": {
+        "elfType": {
+          "enum": [
+            "ET_DYN",
+            "ET_EXEC"
+          ]
+        },
+        "executableRanges": {
+          "items": {
+            "additionalProperties": false,
+            "properties": {
+              "endExclusive": {
+                "$ref": "#/$defs/address"
+              },
+              "start": {
+                "$ref": "#/$defs/address"
+              }
+            },
+            "required": [
+              "endExclusive",
+              "start"
+            ],
+            "type": "object"
+          },
+          "minItems": 1,
+          "type": "array"
+        },
+        "imageBase": {
+          "$ref": "#/$defs/address"
+        }
+      },
+      "required": [
+        "elfType",
+        "executableRanges",
+        "imageBase"
+      ],
+      "type": "object"
+    },
+    "oracle": {
+      "additionalProperties": false,
+      "properties": {
+        "configurationSha256": {
+          "$ref": "#/$defs/sha256"
+        },
+        "inventoryIndexSha256": {
+          "$ref": "#/$defs/sha256"
+        },
+        "scopeSha256": {
+          "$ref": "#/$defs/sha256"
+        }
+      },
+      "required": [
+        "configurationSha256",
+        "inventoryIndexSha256",
+        "scopeSha256"
+      ],
+      "type": "object"
+    },
+    "schemaVersion": {
+      "const": 1
+    }
+  },
+  "required": [
+    "artifacts",
+    "counts",
+    "functions",
+    "image",
+    "oracle",
+    "schemaVersion"
+  ],
+  "title": "Authenticated full-tree ELF function index",
+  "type": "object",
+  "$defs": {
+    "address": {
+      "pattern": "^0x(?:0|[1-9a-f][0-9a-f]{0,15})$",
+      "type": "string"
+    },
+    "artifact": {
+      "additionalProperties": false,
+      "properties": {
+        "inputSha256": {
+          "$ref": "#/$defs/sha256"
+        },
+        "scannedSymbols": {
+          "minimum": 1,
+          "type": "integer"
+        },
+        "sizeBytes": {
+          "minimum": 1,
+          "type": "integer"
+        }
+      },
+      "required": [
+        "inputSha256",
+        "scannedSymbols",
+        "sizeBytes"
+      ],
+      "type": "object"
+    },
+    "sha256": {
+      "pattern": "^[0-9a-f]{64}$",
+      "type": "string"
+    }
+  }
+}
