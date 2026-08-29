@@ -53,6 +53,17 @@ profile. The build image proves how Clang was produced; the sandbox image
 proves how observable behavior was recorded. These are deliberately separate
 authorities.
 
+The 40 sorted reference cases cover C17, C++20 templates, Objective-C,
+syntax-only and module flags, preprocessing text and macro state, include
+search/tracing, dependency files, PCH emission, LLVM IR, assembly and ELF
+object emission, x86-64/i386 and explicitly unsupported target selection,
+driver metadata, nested and recursive response files, assembler/linker
+success and failure, and diagnostics for syntax, templates, warnings, fix-its,
+color, fatal includes, and error limits. Inputs, argv, environment, exit code,
+stdout/stderr, absent paths, and every emitted artifact byte are authenticated.
+The corpus uses no output normalization. Two independent clean recordings must
+be byte-identical before changed reference evidence is accepted.
+
 ## Verify
 
 Install the exact Python generation dependencies, then run:

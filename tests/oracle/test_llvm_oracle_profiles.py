@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import base64
 import hashlib
 import json
 from pathlib import Path
@@ -53,7 +54,7 @@ class LlvmOracleProfilesTest(unittest.TestCase):
             corpus = build_draft(executable)
         self.assertIs(corpus, validate_corpus(corpus))
         self.assertEqual("production", corpus["scope"])
-        self.assertEqual(11, len(corpus["cases"]))
+        self.assertEqual(40, len(corpus["cases"]))
         categories = {
             category for case in corpus["cases"] for category in case["categories"]
         }
@@ -66,6 +67,17 @@ class LlvmOracleProfilesTest(unittest.TestCase):
                 "option-handling",
                 "linking",
                 "produced-program",
+                "cxx",
+                "objective-c",
+                "llvm-ir",
+                "assembly-emission",
+                "dependency-output",
+                "pch",
+                "target-selection",
+                "unsupported-mode",
+                "fix-its",
+                "color",
+                "missing-tools",
             }.issubset(categories)
         )
         self.assertEqual(
@@ -98,8 +110,8 @@ class LlvmOracleProfilesTest(unittest.TestCase):
                 corpus_payload=corpus_payload,
             ),
         )
-        self.assertEqual(11, report["summary"]["cases"])
-        self.assertEqual(11, report["summary"]["passed"])
+        self.assertEqual(40, report["summary"]["cases"])
+        self.assertEqual(40, report["summary"]["passed"])
         self.assertEqual(
             {
                 "bytes": 84561368,
@@ -110,12 +122,44 @@ class LlvmOracleProfilesTest(unittest.TestCase):
         cases = {case["id"]: case for case in report["cases"]}
         self.assertEqual(1, cases["diagnostic-invalid-option"]["exitCode"])
         self.assertEqual(1, cases["diagnostic-syntax"]["exitCode"])
+        self.assertEqual(1, cases["target-unsupported-aarch64"]["exitCode"])
+        self.assertEqual(1, cases["driver-missing-linker"]["exitCode"])
+        self.assertGreater(cases["diagnostic-color-always"]["stderr"]["bytes"], 0)
+        self.assertGreater(cases["diagnostic-fixit"]["stderr"]["bytes"], 0)
+        self.assertGreater(cases["diagnostic-template-backtrace"]["stderr"]["bytes"], 0)
         linked = cases["link-program"]["artifacts"]
         self.assertEqual(1, len(linked))
         self.assertEqual("program", linked[0]["path"])
         self.assertTrue(linked[0]["present"])
         self.assertEqual("0o755", linked[0]["mode"])
         self.assertGreater(linked[0]["bytes"], 0)
+        emitted = {
+            case_id: cases[case_id]["artifacts"][0]
+            for case_id in (
+                "assemble-valid",
+                "emit-assembly",
+                "emit-llvm-ir",
+                "precompile-header",
+                "target-i386-object",
+            )
+        }
+        self.assertTrue(all(artifact["present"] for artifact in emitted.values()))
+        self.assertTrue(all(artifact["bytes"] > 0 for artifact in emitted.values()))
+
+    def test_diagnostic_matrix_retains_semantic_bytes_without_normalization(self) -> None:
+        corpus, _ = load_corpus(self.PROFILE / "behavior-corpus.json")
+        self.assertEqual([], corpus["normalizations"])
+        cases = {case["id"]: case for case in corpus["cases"]}
+
+        def stderr(identifier: str) -> bytes:
+            return base64.b64decode(cases[identifier]["expected"]["stderr"]["base64"])
+
+        self.assertIn(b"\x1b[", stderr("diagnostic-color-always"))
+        self.assertNotIn(b"\x1b[", stderr("diagnostic-color-never"))
+        self.assertIn(b'fix-it:"fixit.c":', stderr("diagnostic-fixit"))
+        self.assertIn(b"[-Wunused-parameter]", stderr("diagnostic-warning-option"))
+        self.assertIn(b"note: in instantiation of function template", stderr("diagnostic-template-backtrace"))
+        self.assertIn(b"fatal error: 'absent.h' file not found", stderr("diagnostic-missing-include"))
 
     def test_checked_function_oracle_is_manifest_bound_and_driver_scoped(self) -> None:
         manifest_payload = (self.PROFILE / "oracle-manifest.json").read_bytes()
