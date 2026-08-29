@@ -24,13 +24,19 @@ from oracle.full_tree_scope import load_full_tree_scope  # noqa: E402
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--scope", type=Path, default=REPOSITORY_ROOT / "oracle/llvm/22.1.6/full-tree-scope.json")
+    parser.add_argument("--source-lock", type=Path, default=REPOSITORY_ROOT / "oracle/llvm/22.1.6/source-lock.json")
+    parser.add_argument("--manifest", type=Path, default=REPOSITORY_ROOT / "oracle/llvm/22.1.6/oracle-manifest.json")
     parser.add_argument("--inventory", type=Path, default=REPOSITORY_ROOT / "oracle/llvm/22.1.6/full-tree-inventory.json")
     parser.add_argument("--rich-artifact", type=Path, required=True)
     parser.add_argument("--output-root", type=Path, required=True)
     parser.add_argument("--workers", type=int, default=2)
     arguments = parser.parse_args()
     try:
-        scope = load_full_tree_scope(arguments.scope)
+        scope = load_full_tree_scope(
+            arguments.scope,
+            source_lock_path=arguments.source_lock,
+            artifact_manifest_path=arguments.manifest,
+        )
         inventory = json.loads(arguments.inventory.read_text(encoding="utf-8"))
         index = run_full_tree_call_observations(
             arguments.rich_artifact,

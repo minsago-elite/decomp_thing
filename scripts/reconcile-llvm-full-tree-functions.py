@@ -23,13 +23,19 @@ from oracle.full_tree_scope import canonical_json_bytes, load_full_tree_scope  #
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--scope", type=Path, default=REPOSITORY_ROOT / "oracle/llvm/22.1.6/full-tree-scope.json")
+    parser.add_argument("--source-lock", type=Path, default=REPOSITORY_ROOT / "oracle/llvm/22.1.6/source-lock.json")
+    parser.add_argument("--manifest", type=Path, default=REPOSITORY_ROOT / "oracle/llvm/22.1.6/oracle-manifest.json")
     parser.add_argument("--inventory", type=Path, default=REPOSITORY_ROOT / "oracle/llvm/22.1.6/full-tree-inventory.json")
     parser.add_argument("--elf-index", type=Path, required=True)
     parser.add_argument("--observations", type=Path, required=True)
     parser.add_argument("--output-root", type=Path, required=True)
     arguments = parser.parse_args()
     try:
-        scope = load_full_tree_scope(arguments.scope)
+        scope = load_full_tree_scope(
+            arguments.scope,
+            source_lock_path=arguments.source_lock,
+            artifact_manifest_path=arguments.manifest,
+        )
         inventory_payload = arguments.inventory.read_bytes()
         inventory = json.loads(inventory_payload.decode("utf-8"))
         if inventory_payload != canonical_json_bytes(inventory):
