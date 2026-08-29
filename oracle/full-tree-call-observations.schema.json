@@ -1,0 +1,62 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://github.com/minsago-elite/decomp_thing/oracle/full-tree-call-observations.schema.json",
+  "title": "Source-owned DWARF call-site observations",
+  "type": "object", "additionalProperties": false,
+  "required": ["schemaVersion", "oracle", "shard", "counts", "calls"],
+  "properties": {
+    "schemaVersion": {"const": 1},
+    "oracle": {
+      "type": "object", "additionalProperties": false,
+      "required": ["scopeSha256", "inventoryIndexSha256", "richArtifactSha256", "configurationSha256"],
+      "properties": {
+        "scopeSha256": {"$ref": "#/$defs/sha256"}, "inventoryIndexSha256": {"$ref": "#/$defs/sha256"},
+        "richArtifactSha256": {"$ref": "#/$defs/sha256"}, "configurationSha256": {"$ref": "#/$defs/sha256"}
+      }
+    },
+    "shard": {
+      "type": "object", "additionalProperties": false,
+      "required": ["id", "inputSha256"],
+      "properties": {"id": {"$ref": "#/$defs/id"}, "inputSha256": {"$ref": "#/$defs/sha256"}}
+    },
+    "counts": {
+      "type": "object", "additionalProperties": false,
+      "required": ["units", "scannedDies", "observedCallSites", "scored", "unobservable"],
+      "properties": {
+        "units": {"type": "integer", "minimum": 1}, "scannedDies": {"type": "integer", "minimum": 1},
+        "observedCallSites": {"type": "integer", "minimum": 0}, "scored": {"type": "integer", "minimum": 0},
+        "unobservable": {"type": "integer", "minimum": 0}
+      }
+    },
+    "calls": {
+      "type": "array",
+      "items": {
+        "type": "object", "additionalProperties": false,
+        "required": ["id", "unitId", "dieOffset", "population", "reasonCode", "callerId", "callerLocalReturnOffset", "returnPcRva", "target"],
+        "properties": {
+          "id": {"type": "string", "pattern": "^call-[0-9a-f]{32}$"}, "unitId": {"$ref": "#/$defs/id"},
+          "dieOffset": {"$ref": "#/$defs/address"}, "population": {"enum": ["scored", "unobservable"]},
+          "reasonCode": {"type": ["string", "null"], "enum": [null, "call-site-no-address", "caller-no-emitted-range"]},
+          "callerId": {"oneOf": [{"type": "string", "pattern": "^function-rva-0x(?:0|[1-9a-f][0-9a-f]{0,15})$"}, {"type": "null"}]},
+          "callerLocalReturnOffset": {"oneOf": [{"$ref": "#/$defs/address"}, {"type": "null"}]},
+          "returnPcRva": {"oneOf": [{"$ref": "#/$defs/address"}, {"type": "null"}]},
+          "target": {
+            "type": "object", "additionalProperties": false,
+            "required": ["kind", "functionId", "aliases", "originDieOffset"],
+            "properties": {
+              "kind": {"enum": ["direct-internal", "external-unresolved", "indirect-unresolved"]},
+              "functionId": {"oneOf": [{"type": "string", "pattern": "^function-rva-0x(?:0|[1-9a-f][0-9a-f]{0,15})$"}, {"type": "null"}]},
+              "aliases": {"type": "array", "uniqueItems": true, "items": {"type": "string", "minLength": 1, "maxLength": 16384}},
+              "originDieOffset": {"oneOf": [{"$ref": "#/$defs/address"}, {"type": "null"}]}
+            }
+          }
+        }
+      }
+    }
+  },
+  "$defs": {
+    "sha256": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
+    "id": {"type": "string", "minLength": 1, "maxLength": 256},
+    "address": {"type": "string", "pattern": "^0x(?:0|[1-9a-f][0-9a-f]{0,15})$"}
+  }
+}

@@ -5,6 +5,7 @@ import json
 from pathlib import Path
 import subprocess
 import tempfile
+import threading
 from types import SimpleNamespace
 import unittest
 from unittest.mock import patch
@@ -14,6 +15,11 @@ REPOSITORY_ROOT = Path(__file__).resolve().parents[2]
 
 from oracle.bounded_shards import load_complete_shard_index  # noqa: E402
 from oracle.full_tree_elf_functions import generate_full_tree_elf_function_index  # noqa: E402
+from oracle.full_tree_call_observations import (  # noqa: E402
+    call_shard_inputs,
+    produce_call_observation_shard,
+    run_full_tree_call_observations,
+)
 from oracle.full_tree_function_baseline import (  # noqa: E402
     FullTreeFunctionBaselineError,
     generate_full_tree_function_baseline,
@@ -100,6 +106,39 @@ class FullTreeFunctionObservationTest(unittest.TestCase):
             ]
             scope_sha256 = hashlib.sha256(canonical_json_bytes(scope)).hexdigest()
             inventory = generate_inventory(artifact, scope, scope_sha256)
+            call_inputs, call_units = call_shard_inputs(
+                inventory,
+                scope_sha256=scope_sha256,
+                rich_sha256=scope["oracle"]["richArtifactSha256"],
+            )
+            call_output = root / "call-observations.json"
+            call_count = produce_call_observation_shard(
+                artifact,
+                scope=scope,
+                scope_sha256=scope_sha256,
+                inventory=inventory,
+                shard=call_inputs[0],
+                units=call_units[call_inputs[0].identifier],
+                output=call_output,
+                cancelled=threading.Event(),
+            )
+            call_document = json.loads(call_output.read_text(encoding="utf-8"))
+            self.assertEqual(call_count, call_document["counts"]["observedCallSites"])
+            self.assertGreater(call_count, 0)
+            call_root = root / "bounded-call-observations"
+            call_index = run_full_tree_call_observations(
+                artifact,
+                scope=scope,
+                scope_sha256=scope_sha256,
+                inventory=inventory,
+                output_root=call_root,
+                maximum_workers=1,
+            )
+            self.assertEqual(call_count, call_index["counts"]["entities"])
+            self.assertEqual(
+                call_output.read_bytes(),
+                next((call_root / "outputs").glob("*.json")).read_bytes(),
+            )
             output = root / "observations"
             first = run_full_tree_function_observations(
                 artifact,
