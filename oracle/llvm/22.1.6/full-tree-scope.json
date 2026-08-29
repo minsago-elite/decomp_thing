@@ -3,7 +3,7 @@
     "perShard": {
       "compilationUnits": 1000,
       "cpuSeconds": 2400,
-      "entities": 300000,
+      "entities": 320000,
       "maximumResidentBytes": 4294967296,
       "serializedBytes": 536870912,
       "wallClockSeconds": 1200
