@@ -173,12 +173,15 @@ def generate_full_tree_call_truth(
     }
     output_root.mkdir(parents=True, exist_ok=True)
     function_namespace: dict[str, tuple[str, str]] = {}
+    internal_alias_namespace: dict[str, set[str]] = defaultdict(set)
     for shard_record in function_index["shards"]:
         document = json.loads((function_truth_root / shard_record["path"]).read_text(encoding="utf-8"))
         for item in document["functions"]:
             if item["id"] in function_namespace:
                 raise FullTreeCallTruthError(f"duplicate function identity {item['id']}")
             function_namespace[item["id"]] = (shard_record["id"], item["entityKind"])
+            for alias in item["aliases"]:
+                internal_alias_namespace[alias["name"]].add(item["id"])
     external_namespace = {
         item["name"]: _external_id(item["name"])
         for item in elf_index["externalFunctions"]
@@ -287,13 +290,33 @@ def generate_full_tree_call_truth(
                     else:
                         semantic = physical
                 elif target_kind == "external-unresolved":
-                    target_kind = "external"
-                    external_ids = sorted(
-                        {external_namespace[name] for name in target["aliases"] if name in external_namespace}
+                    internal_ids = sorted(
+                        {
+                            function_id
+                            for name in target["aliases"]
+                            for function_id in internal_alias_namespace.get(name, ())
+                        }
                     )
-                    if not external_ids:
+                    if len(internal_ids) == 1:
+                        target_kind = "direct-internal"
+                        physical = internal_ids[0]
+                        target_record = function_namespace[physical]
+                        if target_record[1] == "thunk":
+                            reason = "thunk-semantic-target-unresolved"
+                        else:
+                            semantic = physical
+                    elif len(internal_ids) > 1:
+                        target_kind = "indirect-unresolved"
                         population = "unobservable"
-                        reason = "external-without-elf-evidence"
+                        reason = "ambiguous-authenticated-internal-aliases"
+                    else:
+                        target_kind = "external"
+                        external_ids = sorted(
+                            {external_namespace[name] for name in target["aliases"] if name in external_namespace}
+                        )
+                        if not external_ids:
+                            population = "unobservable"
+                            reason = "external-without-elf-evidence"
                 item = {
                     "callerId": first["callerId"],
                     "callerLocalReturnOffset": first["callerLocalReturnOffset"],

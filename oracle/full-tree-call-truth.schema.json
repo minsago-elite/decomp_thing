@@ -25,7 +25,7 @@
         "properties": {
           "id": {"type": "string", "pattern": "^call-edge-[0-9a-f]{32}$"},
           "population": {"enum": ["scored", "unobservable"]},
-          "reasonCode": {"type": ["string", "null"], "enum": [null, "call-site-no-address", "caller-no-emitted-range", "external-without-elf-evidence", "thunk-semantic-target-unresolved"]},
+          "reasonCode": {"type": ["string", "null"], "enum": [null, "ambiguous-authenticated-internal-aliases", "call-site-no-address", "caller-no-emitted-range", "external-without-elf-evidence", "thunk-semantic-target-unresolved"]},
           "callerId": {"type": ["string", "null"]}, "callerLocalReturnOffset": {"type": ["string", "null"]},
           "returnPcRva": {"type": ["string", "null"]},
           "targetKind": {"enum": ["direct-internal", "external", "indirect-unresolved"]},
