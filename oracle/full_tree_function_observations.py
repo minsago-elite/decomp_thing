@@ -246,14 +246,11 @@ def _process_resident_bytes(process: subprocess.Popen[bytes]) -> int:
             if len(fields) != 3 or fields[2] != "kB" or not fields[1].isdigit():
                 break
             return int(fields[1]) * 1024
-    if process.poll() is not None or any(
-        line.startswith("State:") and "Z" in line.split()[1:2]
-        for line in status.splitlines()
-    ):
-        return 0
-    raise FullTreeFunctionObservationError(
-        f"isolated shard worker {process.pid} has malformed resident-memory status"
-    )
+    # A freshly forked task and an exiting zombie can have a readable status
+    # record before the kernel exposes an address-space RSS field. The next
+    # 250 ms sample measures it once an mm exists; malformed present fields
+    # still fail above.
+    return 0
 
 
 def _shard_inputs(

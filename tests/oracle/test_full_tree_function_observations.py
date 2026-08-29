@@ -41,9 +41,9 @@ from oracle.function_recovery_oracle import OracleGenerationError, _dwarf_names 
 
 
 class FullTreeFunctionObservationTest(unittest.TestCase):
-    def test_exited_zombie_worker_has_no_current_resident_bytes(self) -> None:
+    def test_worker_without_kernel_memory_mapping_has_zero_current_resident_bytes(self) -> None:
         process = SimpleNamespace(pid=1234, poll=lambda: None)
-        with patch.object(Path, "read_text", return_value="Name:\tpython\nState:\tZ (zombie)\n"):
+        with patch.object(Path, "read_text", return_value="Name:\tpython\nState:\tR (running)\n"):
             self.assertEqual(0, _process_resident_bytes(process))
 
     def test_full_tree_name_limit_covers_authenticated_large_template_spelling(self) -> None:
