@@ -20,6 +20,7 @@ from oracle.full_tree_call_observations import (  # noqa: E402
     produce_call_observation_shard,
     run_full_tree_call_observations,
 )
+from oracle.full_tree_call_truth import generate_full_tree_call_truth  # noqa: E402
 from oracle.full_tree_function_baseline import (  # noqa: E402
     FullTreeFunctionBaselineError,
     generate_full_tree_function_baseline,
@@ -208,6 +209,15 @@ class FullTreeFunctionObservationTest(unittest.TestCase):
                 output_root=reconciled_observations,
                 maximum_workers=2,
             )
+            truth_call_root = root / "truth-call-observations"
+            run_full_tree_call_observations(
+                artifact,
+                scope=scope,
+                scope_sha256=scope_sha256,
+                inventory=inventory,
+                output_root=truth_call_root,
+                maximum_workers=1,
+            )
             elf_index = generate_full_tree_elf_function_index(
                 artifact,
                 stripped,
@@ -225,6 +235,22 @@ class FullTreeFunctionObservationTest(unittest.TestCase):
                 elf_index_path=elf_path,
                 observation_root=reconciled_observations,
                 output_root=first_truth_root,
+            )
+            call_truth = generate_full_tree_call_truth(
+                scope=scope,
+                scope_sha256=scope_sha256,
+                inventory=inventory,
+                elf_index_path=elf_path,
+                function_truth_root=first_truth_root,
+                call_observation_root=truth_call_root,
+                output_root=root / "call-truth",
+            )
+            self.assertGreater(call_truth["counts"]["edges"], 0)
+            self.assertEqual(
+                call_truth["counts"]["edges"],
+                call_truth["counts"]["directInternal"]
+                + call_truth["counts"]["external"]
+                + call_truth["counts"]["indirectUnresolved"],
             )
             second_truth_root = root / "function-truth-second"
             second_truth = reconcile_full_tree_function_truth(

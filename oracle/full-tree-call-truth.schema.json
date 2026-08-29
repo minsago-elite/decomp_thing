@@ -1,0 +1,39 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://github.com/minsago-elite/decomp_thing/oracle/full-tree-call-truth.schema.json",
+  "title": "Reconciled cross-shard call truth",
+  "type": "object", "additionalProperties": false,
+  "required": ["schemaVersion", "oracle", "shard", "counts", "calls"],
+  "properties": {
+    "schemaVersion": {"const": 1},
+    "oracle": {"type": "object"},
+    "shard": {"type": "object", "required": ["id"], "properties": {"id": {"type": "string"}}},
+    "counts": {
+      "type": "object", "additionalProperties": false,
+      "required": ["edges", "observations", "directInternal", "external", "indirectUnresolved", "unobservable"],
+      "properties": {
+        "edges": {"type": "integer", "minimum": 0}, "observations": {"type": "integer", "minimum": 0},
+        "directInternal": {"type": "integer", "minimum": 0}, "external": {"type": "integer", "minimum": 0},
+        "indirectUnresolved": {"type": "integer", "minimum": 0}, "unobservable": {"type": "integer", "minimum": 0}
+      }
+    },
+    "calls": {
+      "type": "array",
+      "items": {
+        "type": "object", "additionalProperties": false,
+        "required": ["id", "population", "reasonCode", "callerId", "callerLocalReturnOffset", "returnPcRva", "targetKind", "physicalTargetId", "semanticTargetId", "externalTargetIds", "observationIds"],
+        "properties": {
+          "id": {"type": "string", "pattern": "^call-edge-[0-9a-f]{32}$"},
+          "population": {"enum": ["scored", "unobservable"]},
+          "reasonCode": {"type": ["string", "null"], "enum": [null, "call-site-no-address", "caller-no-emitted-range", "external-without-elf-evidence", "thunk-semantic-target-unresolved"]},
+          "callerId": {"type": ["string", "null"]}, "callerLocalReturnOffset": {"type": ["string", "null"]},
+          "returnPcRva": {"type": ["string", "null"]},
+          "targetKind": {"enum": ["direct-internal", "external", "indirect-unresolved"]},
+          "physicalTargetId": {"type": ["string", "null"]}, "semanticTargetId": {"type": ["string", "null"]},
+          "externalTargetIds": {"type": "array", "uniqueItems": true, "items": {"type": "string", "pattern": "^external-function-[0-9a-f]{32}$"}},
+          "observationIds": {"type": "array", "minItems": 1, "uniqueItems": true, "items": {"type": "string"}}
+        }
+      }
+    }
+  }
+}
