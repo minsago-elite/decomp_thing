@@ -56,6 +56,72 @@ def _configuration_sha256() -> str:
     return hashlib.sha256(canonical_json_bytes(PRODUCER_POLICY) + schema).hexdigest()
 
 
+def _accumulate_non_emitted(
+    groups: dict[str, dict[str, Any]],
+    item: dict[str, Any],
+    *,
+    shard_id: str,
+) -> None:
+    declaration_identity = dict(item["declaration"])
+    declaration_identity.pop("unitSourcePath", None)
+    identity = hashlib.sha256(
+        canonical_json_bytes(
+            {
+                "aliasNames": sorted(alias["name"] for alias in item["aliases"]),
+                "declaration": declaration_identity,
+            }
+        )
+    ).hexdigest()[:32]
+    grouped = groups.setdefault(
+        identity,
+        {
+            "aliases": {},
+            "declaration": item["declaration"],
+            "dieOffsets": [],
+            "id": "non-emitted-observation-"
+            + hashlib.sha256(f"{shard_id}:{identity}".encode()).hexdigest()[:32],
+            "reasonCodes": set(),
+            "unitIds": set(),
+        },
+    )
+    if canonical_json_bytes(grouped["declaration"]) != canonical_json_bytes(item["declaration"]):
+        grouped["declaration"] = min(
+            (grouped["declaration"], item["declaration"]), key=canonical_json_bytes
+        )
+    grouped["dieOffsets"].append(
+        {"dieOffset": item["dieOffset"], "unitId": item["unitId"]}
+    )
+    grouped["reasonCodes"].add(item["reasonCode"])
+    grouped["unitIds"].add(item["unitId"])
+    for alias in item["aliases"]:
+        evidence = grouped["aliases"].setdefault(alias["name"], {})
+        for raw in alias["evidence"]:
+            evidence[canonical_json_bytes(raw)] = raw
+
+
+def _freeze_non_emitted(groups: dict[str, dict[str, Any]]) -> list[dict[str, Any]]:
+    result = []
+    for identity in sorted(groups):
+        item = groups.pop(identity)
+        result.append(
+            {
+            **{key: value for key, value in item.items() if key not in {"aliases", "reasonCodes", "unitIds"}},
+            "aliases": [
+                {"evidence": [value for _, value in sorted(evidence.items())], "name": name}
+                for name, evidence in sorted(item["aliases"].items())
+            ],
+            "dieOffsets": sorted(
+                item["dieOffsets"],
+                key=lambda value: (value["unitId"], int(value["dieOffset"], 16)),
+            ),
+            "reasonCodes": sorted(item["reasonCodes"]),
+            "unitIds": sorted(item["unitIds"]),
+            }
+        )
+    result.sort(key=lambda item: item["id"])
+    return result
+
+
 def _dwarf_text(value: Any, label: str) -> str:
     if not isinstance(value, bytes):
         raise FullTreeFunctionObservationError(f"{label} is not a DWARF byte string")
@@ -335,7 +401,7 @@ def _produce_shard(
             )
         )
         by_rva: dict[int, dict[str, Any]] = {}
-        non_emitted: list[dict[str, Any]] = []
+        non_emitted_groups: dict[str, dict[str, Any]] = {}
         scanned_dies = 0
         for unit in units:
             offset = int(unit["dwarfOffset"], 16)
@@ -394,7 +460,8 @@ def _produce_shard(
                 else:
                     inline = die.attributes.get("DW_AT_inline")
                     if names:
-                        non_emitted.append(
+                        _accumulate_non_emitted(
+                            non_emitted_groups,
                             {
                                 "aliases": [
                                     {
@@ -419,7 +486,8 @@ def _produce_shard(
                                     else "definition-no-emitted-range"
                                 ),
                                 "unitId": unit["id"],
-                            }
+                            },
+                            shard_id=shard.identifier,
                         )
             # pyelftools intentionally caches CUs and line tables. Keeping those
             # caches across a production subsystem makes RSS proportional to every
@@ -455,61 +523,7 @@ def _produce_shard(
                     "rva": hex(rva),
                 }
             )
-        grouped_non_emitted: dict[str, dict[str, Any]] = {}
-        for item in non_emitted:
-            declaration_identity = dict(item["declaration"])
-            declaration_identity.pop("unitSourcePath", None)
-            identity = hashlib.sha256(
-                canonical_json_bytes(
-                    {
-                        "aliasNames": sorted(alias["name"] for alias in item["aliases"]),
-                        "declaration": declaration_identity,
-                    }
-                )
-            ).hexdigest()[:32]
-            grouped = grouped_non_emitted.setdefault(
-                identity,
-                {
-                    "aliases": {},
-                    "declaration": item["declaration"],
-                    "dieOffsets": [],
-                    "id": "non-emitted-observation-"
-                    + hashlib.sha256(f"{shard.identifier}:{identity}".encode()).hexdigest()[:32],
-                    "reasonCodes": set(),
-                    "unitIds": set(),
-                },
-            )
-            if canonical_json_bytes(grouped["declaration"]) != canonical_json_bytes(item["declaration"]):
-                # Unit source paths may differ for a shared source declaration;
-                # retain the canonical lowest declaration payload.
-                grouped["declaration"] = min(
-                    (grouped["declaration"], item["declaration"]),
-                    key=canonical_json_bytes,
-                )
-            grouped["dieOffsets"].append(
-                {"dieOffset": item["dieOffset"], "unitId": item["unitId"]}
-            )
-            grouped["reasonCodes"].add(item["reasonCode"])
-            grouped["unitIds"].add(item["unitId"])
-            for alias in item["aliases"]:
-                aliases = grouped["aliases"]
-                evidence = aliases.setdefault(alias["name"], {})
-                for raw in alias["evidence"]:
-                    evidence[canonical_json_bytes(raw)] = raw
-        non_emitted = [
-            {
-                **{key: value for key, value in item.items() if key not in {"aliases", "reasonCodes", "unitIds"}},
-                "aliases": [
-                    {"evidence": [value for _, value in sorted(evidence.items())], "name": name}
-                    for name, evidence in sorted(item["aliases"].items())
-                ],
-                "dieOffsets": sorted(item["dieOffsets"], key=lambda value: (value["unitId"], int(value["dieOffset"], 16))),
-                "reasonCodes": sorted(item["reasonCodes"]),
-                "unitIds": sorted(item["unitIds"]),
-            }
-            for _, item in sorted(grouped_non_emitted.items())
-        ]
-        non_emitted.sort(key=lambda item: item["id"])
+        non_emitted = _freeze_non_emitted(non_emitted_groups)
         document = {
             "counts": {
                 "emittedRvas": len(emitted),
