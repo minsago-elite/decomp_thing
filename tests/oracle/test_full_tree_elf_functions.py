@@ -78,6 +78,13 @@ class FullTreeElfFunctionTest(unittest.TestCase):
             self.assertEqual(1, len(aliases))
             self.assertEqual(aliases[0]["id"], f"function-rva-{aliases[0]['rva']}")
             self.assertGreater(first["counts"]["functionRvas"], 1)
+            self.assertEqual(
+                first["counts"]["externalFunctions"],
+                len(first["externalFunctions"]),
+            )
+            self.assertTrue(
+                any(item["name"].startswith("__libc_start_main") for item in first["externalFunctions"])
+            )
 
             substituted = json.loads(json.dumps(scope))
             substituted["oracle"]["strippedArtifactSha256"] = "0" * 64

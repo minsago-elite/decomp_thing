@@ -76,6 +76,7 @@ def validate_full_tree_elf_function_index(
                 raise FullTreeElfFunctionError("ELF alias evidence is not ordered")
     expected_counts = {
         "aliases": sum(len(item["aliases"]) for item in functions),
+        "externalFunctions": len(document["externalFunctions"]),
         "functionRvas": len(functions),
         "strippedFunctionRvas": sum(
             any(alias["availability"]["stripped"] == "surviving" for alias in item["aliases"])
@@ -84,6 +85,11 @@ def validate_full_tree_elf_function_index(
     }
     if document["counts"] != expected_counts:
         raise FullTreeElfFunctionError("ELF function counts do not reconcile")
+    externals = document["externalFunctions"]
+    if externals != sorted(externals, key=lambda item: item["name"]):
+        raise FullTreeElfFunctionError("external ELF functions are not ordered")
+    if len({item["name"] for item in externals}) != len(externals):
+        raise FullTreeElfFunctionError("external ELF functions contain duplicate names")
 
 
 def _open(path: Path, label: str) -> tuple[Any, os.stat_result]:
@@ -146,6 +152,7 @@ def _scan(path: Path, label: str, expected_sha256: str) -> dict[str, Any]:
             )
         )
         aliases: dict[int, dict[str, set[str]]] = defaultdict(lambda: defaultdict(set))
+        externals: dict[str, set[str]] = defaultdict(set)
         scanned = 0
         for section_index, section in enumerate(elf.iter_sections()):
             if not isinstance(section, SymbolTableSection):
@@ -154,7 +161,7 @@ def _scan(path: Path, label: str, expected_sha256: str) -> dict[str, Any]:
                 scanned += 1
                 if scanned > MAX_SYMBOLS:
                     raise FullTreeElfFunctionError(f"{label} exceeds the {MAX_SYMBOLS}-symbol bound")
-                if symbol["st_info"]["type"] != "STT_FUNC" or symbol["st_shndx"] == "SHN_UNDEF" or not symbol.name:
+                if symbol["st_info"]["type"] != "STT_FUNC" or not symbol.name:
                     continue
                 try:
                     symbol.name.encode("utf-8")
@@ -162,6 +169,10 @@ def _scan(path: Path, label: str, expected_sha256: str) -> dict[str, Any]:
                     raise FullTreeElfFunctionError(f"{label} contains a non-UTF-8 function alias") from error
                 if len(symbol.name) > 4096:
                     raise FullTreeElfFunctionError(f"{label} contains an overlong function alias")
+                locator = f"{label}:section[{section_index}]={section.name}:symbol[{symbol_index}]"
+                if symbol["st_shndx"] == "SHN_UNDEF":
+                    externals[symbol.name].add(locator)
+                    continue
                 address = int(symbol["st_value"])
                 if address < image_base:
                     continue
@@ -170,15 +181,14 @@ def _scan(path: Path, label: str, expected_sha256: str) -> dict[str, Any]:
                     continue
                 if symbol.name not in aliases[rva] and len(aliases[rva]) >= MAX_ALIASES_PER_RVA:
                     raise FullTreeElfFunctionError(f"{label} RVA {hex(rva)} exceeds its alias bound")
-                aliases[rva][symbol.name].add(
-                    f"{label}:section[{section_index}]={section.name}:symbol[{symbol_index}]"
-                )
+                aliases[rva][symbol.name].add(locator)
         after = os.fstat(stream.fileno())
         if _identity(before) != _identity(after):
             raise FullTreeElfFunctionError(f"{label} changed while it was indexed")
         return {
             "aliases": aliases,
             "elfType": str(elf.header["e_type"]),
+            "externals": externals,
             "executableRanges": executable,
             "imageBase": image_base,
             "inputSha256": observed_sha256,
@@ -238,6 +248,26 @@ def generate_full_tree_elf_function_index(
                 "rva": hex(rva),
             }
         )
+    rich_externals = rich["externals"]
+    stripped_externals = stripped["externals"]
+    if extra_external := set(stripped_externals) - set(rich_externals):
+        raise FullTreeElfFunctionError(
+            f"stripped ELF introduces external function {min(extra_external)!r}"
+        )
+    external_functions = [
+        {
+            "availability": {
+                "rich": "surviving",
+                "stripped": "surviving" if name in stripped_externals else "removed",
+            },
+            "evidence": [
+                {"kind": "elf-symbol", "locator": locator}
+                for locator in sorted(rich_externals[name] | stripped_externals.get(name, set()))
+            ],
+            "name": name,
+        }
+        for name in sorted(rich_externals)
+    ]
     if not functions or len(functions) > scope["bounds"]["wholeRun"]["entities"]:
         raise FullTreeElfFunctionError("ELF function count is outside the full-tree entity bound")
     document = {
@@ -251,9 +281,11 @@ def generate_full_tree_elf_function_index(
         },
         "counts": {
             "aliases": sum(len(item["aliases"]) for item in functions),
+            "externalFunctions": len(external_functions),
             "functionRvas": len(functions),
             "strippedFunctionRvas": len(stripped_rvas),
         },
+        "externalFunctions": external_functions,
         "functions": functions,
         "image": {
             "elfType": rich["elfType"],

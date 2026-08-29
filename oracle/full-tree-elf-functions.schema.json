@@ -26,6 +26,10 @@
           "minimum": 1,
           "type": "integer"
         },
+        "externalFunctions": {
+          "minimum": 0,
+          "type": "integer"
+        },
         "functionRvas": {
           "minimum": 1,
           "type": "integer"
@@ -37,10 +41,17 @@
       },
       "required": [
         "aliases",
+        "externalFunctions",
         "functionRvas",
         "strippedFunctionRvas"
       ],
       "type": "object"
+    },
+    "externalFunctions": {
+      "items": {
+        "$ref": "#/$defs/externalFunction"
+      },
+      "type": "array"
     },
     "functions": {
       "items": {
@@ -193,6 +204,7 @@
   "required": [
     "artifacts",
     "counts",
+    "externalFunctions",
     "functions",
     "image",
     "oracle",
@@ -225,6 +237,37 @@
         "scannedSymbols",
         "sizeBytes"
       ],
+      "type": "object"
+    },
+    "externalFunction": {
+      "additionalProperties": false,
+      "properties": {
+        "availability": {
+          "additionalProperties": false,
+          "properties": {
+            "rich": {"const": "surviving"},
+            "stripped": {"enum": ["removed", "surviving"]}
+          },
+          "required": ["rich", "stripped"],
+          "type": "object"
+        },
+        "evidence": {
+          "items": {
+            "additionalProperties": false,
+            "properties": {
+              "kind": {"const": "elf-symbol"},
+              "locator": {"maxLength": 16384, "minLength": 1, "type": "string"}
+            },
+            "required": ["kind", "locator"],
+            "type": "object"
+          },
+            "minItems": 1,
+            "type": "array",
+            "uniqueItems": true
+        },
+        "name": {"maxLength": 4096, "minLength": 1, "type": "string"}
+      },
+      "required": ["availability", "evidence", "name"],
       "type": "object"
     },
     "sha256": {
