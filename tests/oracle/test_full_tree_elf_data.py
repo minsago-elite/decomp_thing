@@ -138,6 +138,12 @@ class FullTreeElfDataTest(unittest.TestCase):
             _type_key(base),
             _type_key({**base, "id": "type-observation-b", "unitId": "unit-b"}),
         )
+        named = {**base, "name": "Local", "id": "type-observation-a"}
+        self.assertEqual(_type_key(named), _type_key({**named, "id": "type-observation-b"}))
+        self.assertNotEqual(
+            _type_key(named),
+            _type_key({**named, "id": "type-observation-c", "unitId": "unit-b"}),
+        )
 
     def test_cross_shard_type_references_use_authenticated_type_ids(self) -> None:
         with tempfile.TemporaryDirectory(prefix="full-tree-type-references-") as temporary:
