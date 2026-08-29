@@ -82,6 +82,13 @@ class FullTreeFunctionObservationTest(unittest.TestCase):
             shard = json.loads(next((output / "outputs").glob("*.json")).read_text(encoding="utf-8"))
             self.assertEqual(2, shard["counts"]["units"])
             self.assertGreaterEqual(shard["counts"]["emittedRvas"], 2)
+            self.assertTrue(
+                any(
+                    declaration["sourcePath"] is not None
+                    for function in shard["emitted"]
+                    for declaration in function["declarations"]
+                )
+            )
             self.assertEqual(
                 sorted(item["rva"] for item in shard["emitted"]),
                 [item["rva"] for item in shard["emitted"]],

@@ -46,6 +46,14 @@
             "pattern": "^function-rva-0x(?:0|[1-9a-f][0-9a-f]{0,15})$",
             "type": "string"
           },
+          "declarations": {
+            "items": {
+              "$ref": "#/$defs/declaration"
+            },
+            "minItems": 1,
+            "type": "array",
+            "uniqueItems": true
+          },
           "ownerUnitIds": {
             "items": {
               "$ref": "#/$defs/unitId"
@@ -60,6 +68,7 @@
         },
         "required": [
           "aliases",
+          "declarations",
           "id",
           "ownerUnitIds",
           "rva"
@@ -82,6 +91,9 @@
           "dieOffset": {
             "$ref": "#/$defs/address"
           },
+          "declaration": {
+            "$ref": "#/$defs/declaration"
+          },
           "id": {
             "pattern": "^inline-cu-[0-9a-f]{32}-0x(?:0|[1-9a-f][0-9a-f]*)$",
             "type": "string"
@@ -95,6 +107,7 @@
         },
         "required": [
           "aliases",
+          "declaration",
           "dieOffset",
           "id",
           "reasonCode",
@@ -199,6 +212,80 @@
       "required": [
         "evidence",
         "name"
+      ],
+      "type": "object"
+    },
+    "declaration": {
+      "additionalProperties": false,
+      "properties": {
+        "column": {
+          "oneOf": [
+            {
+              "minimum": 0,
+              "type": "integer"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "externalPathSha256": {
+          "oneOf": [
+            {
+              "$ref": "#/$defs/sha256"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "fileIndex": {
+          "oneOf": [
+            {
+              "minimum": 0,
+              "type": "integer"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "line": {
+          "oneOf": [
+            {
+              "minimum": 0,
+              "type": "integer"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "sourcePath": {
+          "oneOf": [
+            {
+              "maxLength": 4096,
+              "minLength": 1,
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "unitSourcePath": {
+          "maxLength": 4096,
+          "minLength": 1,
+          "type": "string"
+        }
+      },
+      "required": [
+        "column",
+        "externalPathSha256",
+        "fileIndex",
+        "line",
+        "sourcePath",
+        "unitSourcePath"
       ],
       "type": "object"
     },

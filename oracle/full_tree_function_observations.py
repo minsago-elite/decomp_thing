@@ -7,14 +7,20 @@ import hashlib
 import json
 import os
 from pathlib import Path
+import posixpath
 import stat
 import threading
 from typing import Any
 
 from oracle.bounded_shards import ShardBounds, ShardInput, run_bounded_shards
-from oracle.full_tree_scope import canonical_json_bytes
+from oracle.full_tree_scope import (
+    FullTreeScopeError,
+    canonical_json_bytes,
+    normalize_source_path,
+)
 from oracle.function_recovery_oracle import (
     OracleGenerationError,
+    _attribute_chain,
     _dwarf_names,
     _dwarf_starts,
     _in_executable_range,
@@ -23,6 +29,81 @@ from oracle.function_recovery_oracle import (
 
 class FullTreeFunctionObservationError(ValueError):
     """Raised when the complete DWARF inventory cannot be observed safely."""
+
+
+def _dwarf_text(value: Any, label: str) -> str:
+    if not isinstance(value, bytes):
+        raise FullTreeFunctionObservationError(f"{label} is not a DWARF byte string")
+    try:
+        result = value.decode("utf-8")
+    except UnicodeDecodeError as error:
+        raise FullTreeFunctionObservationError(f"{label} is not UTF-8") from error
+    if not result or "\x00" in result or len(result) > 16384:
+        raise FullTreeFunctionObservationError(f"{label} is invalid")
+    return result
+
+
+def _declaration(die: Any, dwarf: Any, scope: dict[str, Any], unit: dict[str, Any]) -> dict[str, Any]:
+    attributes: dict[str, Any] = {}
+    for source in _attribute_chain(die):
+        for name in ("DW_AT_decl_file", "DW_AT_decl_line", "DW_AT_decl_column"):
+            if name not in attributes and name in source.attributes:
+                attributes[name] = source.attributes[name].value
+    file_index = attributes.get("DW_AT_decl_file")
+    line = attributes.get("DW_AT_decl_line")
+    column = attributes.get("DW_AT_decl_column")
+    for value, label in ((file_index, "file"), (line, "line"), (column, "column")):
+        if value is not None and (isinstance(value, bool) or not isinstance(value, int) or value < 0):
+            raise FullTreeFunctionObservationError(f"DWARF declaration {label} is invalid")
+    raw_path: str | None = None
+    if file_index is not None:
+        line_program = dwarf.line_program_for_CU(die.cu)
+        if line_program is not None:
+            entries = list(line_program.header["file_entry"])
+            entry_index = file_index if int(die.cu["version"]) >= 5 else file_index - 1
+            if 0 <= entry_index < len(entries):
+                entry = entries[entry_index]
+                name = _dwarf_text(entry.name, "DWARF declaration file")
+                if name.startswith("/"):
+                    raw_path = name
+                else:
+                    directory_index = int(entry.dir_index)
+                    directories = list(line_program.header["include_directory"])
+                    if int(die.cu["version"]) >= 5:
+                        directory = (
+                            _dwarf_text(directories[directory_index], "DWARF declaration directory")
+                            if 0 <= directory_index < len(directories)
+                            else None
+                        )
+                    elif directory_index == 0:
+                        directory = None
+                        top_directory = die.cu.get_top_DIE().attributes.get("DW_AT_comp_dir")
+                        if top_directory is not None:
+                            directory = _dwarf_text(top_directory.value, "DWARF compilation directory")
+                    else:
+                        adjusted = directory_index - 1
+                        directory = (
+                            _dwarf_text(directories[adjusted], "DWARF declaration directory")
+                            if 0 <= adjusted < len(directories)
+                            else None
+                        )
+                    if directory is not None:
+                        raw_path = posixpath.normpath(posixpath.join(directory, name))
+    source_path: str | None = None
+    external_sha256: str | None = None
+    if raw_path is not None and raw_path.startswith("/"):
+        try:
+            source_path = normalize_source_path(scope, raw_path)
+        except FullTreeScopeError:
+            external_sha256 = hashlib.sha256(raw_path.encode("utf-8")).hexdigest()
+    return {
+        "column": column,
+        "externalPathSha256": external_sha256,
+        "fileIndex": file_index,
+        "line": line,
+        "sourcePath": source_path,
+        "unitSourcePath": unit["sourcePath"],
+    }
 
 
 def validate_function_observation_shard(
@@ -64,6 +145,11 @@ def validate_function_observation_shard(
             raise FullTreeFunctionObservationError("emitted observation ownership is invalid")
         if item["aliases"] != sorted(item["aliases"], key=lambda alias: alias["name"]):
             raise FullTreeFunctionObservationError("emitted aliases are not canonically ordered")
+        if item["declarations"] != sorted(
+            item["declarations"],
+            key=lambda declaration: canonical_json_bytes(declaration),
+        ):
+            raise FullTreeFunctionObservationError("emitted declarations are not canonically ordered")
         for alias in item["aliases"]:
             if any(evidence["unitId"] not in item["ownerUnitIds"] for evidence in alias["evidence"]):
                 raise FullTreeFunctionObservationError("alias evidence is outside emitted ownership")
@@ -219,6 +305,7 @@ def _produce_shard(
                         describe_form_class,
                     )
                     names = _dwarf_names(die, "rich")
+                    declaration = _declaration(die, dwarf, scope, unit)
                 except OracleGenerationError as error:
                     raise FullTreeFunctionObservationError(str(error)) from error
                 observed_starts = [
@@ -231,9 +318,15 @@ def _produce_shard(
                         rva = address - image_base
                         record = by_rva.setdefault(
                             rva,
-                            {"aliases": defaultdict(set), "ownerUnitIds": set()},
+                            {
+                                "aliases": defaultdict(set),
+                                "declarations": {},
+                                "ownerUnitIds": set(),
+                            },
                         )
                         record["ownerUnitIds"].add(unit["id"])
+                        declaration_payload = canonical_json_bytes(declaration)
+                        record["declarations"][declaration_payload] = declaration
                         for name, evidence in names.items():
                             for item in evidence:
                                 record["aliases"][name].add((item.kind, item.locator, unit["id"]))
@@ -257,6 +350,7 @@ def _produce_shard(
                                     for name, evidence in names.items()
                                 ],
                                 "dieOffset": hex(int(die.offset)),
+                                "declaration": declaration,
                                 "id": f"inline-{unit['id']}-{hex(int(die.offset) - offset)}",
                                 "reasonCode": "inline-no-emitted-range",
                                 "unitId": unit["id"],
@@ -277,6 +371,10 @@ def _produce_shard(
                         for name, evidence in sorted(record["aliases"].items())
                     ],
                     "id": f"function-rva-{hex(rva)}",
+                    "declarations": [
+                        declaration
+                        for _, declaration in sorted(record["declarations"].items())
+                    ],
                     "ownerUnitIds": sorted(record["ownerUnitIds"]),
                     "rva": hex(rva),
                 }
