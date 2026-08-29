@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from collections import defaultdict
 import hashlib
+import itertools
 import json
 from pathlib import Path
 import resource
@@ -370,10 +371,16 @@ def reconcile_full_tree_function_truth(
             dwarf_rvas = 0
             scored_rvas = 0
             dwarf_only = 0
-            for rva_index, (rva, elf_raw) in enumerate(connection.execute(
-                "SELECT r.rva, e.payload FROM (SELECT rva FROM elf UNION SELECT rva FROM emitted) r "
-                "LEFT JOIN elf e ON e.rva=r.rva ORDER BY r.rva"
-            )):
+            emitted_cursor = connection.execute(
+                "SELECT r.rva, e.payload, d.payload "
+                "FROM (SELECT rva FROM elf UNION SELECT rva FROM emitted) r "
+                "LEFT JOIN elf e ON e.rva=r.rva "
+                "LEFT JOIN emitted d ON d.rva=r.rva "
+                "ORDER BY r.rva,d.shard_id"
+            )
+            for rva_index, (rva, rows) in enumerate(
+                itertools.groupby(emitted_cursor, key=lambda row: row[0])
+            ):
                 if rva_index % 4096 == 0:
                     _check_runtime_bounds(
                         scope,
@@ -381,10 +388,9 @@ def reconcile_full_tree_function_truth(
                         cpu_started=cpu_started,
                         database_path=database_path,
                     )
-                dwarf_records = [
-                    json.loads(row[0])
-                    for row in connection.execute("SELECT payload FROM emitted WHERE rva=? ORDER BY shard_id", (rva,))
-                ]
+                joined = list(rows)
+                elf_raw = joined[0][1]
+                dwarf_records = [json.loads(row[2]) for row in joined if row[2] is not None]
                 if not dwarf_records:
                     elf_record = json.loads(elf_raw)
                     exclusions.append(
@@ -420,8 +426,11 @@ def reconcile_full_tree_function_truth(
 
             inline_by_shard: dict[str, list[dict[str, Any]]] = defaultdict(list)
             inline_observations = int(connection.execute("SELECT COUNT(*) FROM inline").fetchone()[0])
-            for inline_index, (identity,) in enumerate(
-                connection.execute("SELECT DISTINCT identity FROM inline ORDER BY identity")
+            inline_cursor = connection.execute(
+                "SELECT identity,payload FROM inline ORDER BY identity,observation_id"
+            )
+            for inline_index, (identity, rows) in enumerate(
+                itertools.groupby(inline_cursor, key=lambda row: row[0])
             ):
                 if inline_index % 4096 == 0:
                     _check_runtime_bounds(
@@ -430,10 +439,7 @@ def reconcile_full_tree_function_truth(
                         cpu_started=cpu_started,
                         database_path=database_path,
                     )
-                records = [
-                    json.loads(row[0])
-                    for row in connection.execute("SELECT payload FROM inline WHERE identity=? ORDER BY observation_id", (identity,))
-                ]
+                records = [json.loads(row[1]) for row in rows]
                 owner = min(item["unitId"] for item in records)
                 inline_by_shard[unit_to_shard[owner]].append(
                     {
