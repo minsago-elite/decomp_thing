@@ -41,6 +41,7 @@ from oracle.full_tree_data_observations import (  # noqa: E402
     produce_data_observation_shard,
     run_full_tree_data_observations,
 )
+from oracle.full_tree_data_truth import generate_full_tree_data_truth  # noqa: E402
 from oracle.full_tree_inventory import generate_inventory  # noqa: E402
 from oracle.full_tree_scope import canonical_json_bytes  # noqa: E402
 from oracle.function_recovery_oracle import OracleGenerationError, _dwarf_names  # noqa: E402
@@ -169,6 +170,16 @@ class FullTreeFunctionObservationTest(unittest.TestCase):
                 data_output.read_bytes(),
                 next((data_root / "outputs").glob("*.json")).read_bytes(),
             )
+            data_truth_root = root / "data-truth"
+            data_truth = generate_full_tree_data_truth(
+                scope=scope,
+                scope_sha256=scope_sha256,
+                inventory=inventory,
+                observation_root=data_root,
+                output_root=data_truth_root,
+            )
+            self.assertGreater(data_truth["counts"]["globals"], 0)
+            self.assertGreater(data_truth["counts"]["types"], 0)
             call_root = root / "bounded-call-observations"
             call_index = run_full_tree_call_observations(
                 artifact,

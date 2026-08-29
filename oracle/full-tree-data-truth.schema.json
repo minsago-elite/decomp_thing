@@ -1,0 +1,47 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://github.com/minsago-elite/decomp_thing/oracle/full-tree-data-truth.schema.json",
+  "title": "Canonical full-tree global and aggregate truth",
+  "type": "object", "additionalProperties": false,
+  "required": ["schemaVersion", "oracle", "shard", "counts", "globals", "types"],
+  "properties": {
+    "schemaVersion": {"const": 1}, "oracle": {"type": "object"}, "shard": {"type": "object"},
+    "counts": {
+      "type": "object", "additionalProperties": false,
+      "required": ["globals", "types", "unobservableGlobals", "unobservableTypes", "fields", "bases", "enumerators"],
+      "properties": {
+        "globals": {"type": "integer", "minimum": 0}, "types": {"type": "integer", "minimum": 0},
+        "unobservableGlobals": {"type": "integer", "minimum": 0}, "unobservableTypes": {"type": "integer", "minimum": 0},
+        "fields": {"type": "integer", "minimum": 0}, "bases": {"type": "integer", "minimum": 0}, "enumerators": {"type": "integer", "minimum": 0}
+      }
+    },
+    "globals": {"type": "array", "items": {"$ref": "#/$defs/global"}},
+    "types": {"type": "array", "items": {"$ref": "#/$defs/type"}}
+  },
+  "$defs": {
+    "type": {
+      "type": "object", "additionalProperties": false,
+      "required": ["id", "tag", "name", "population", "reasonCode", "ownerUnitId", "observationIds", "declarations", "byteSize", "alignment", "members"],
+      "properties": {
+        "id": {"type": "string", "pattern": "^type-[0-9a-f]{32}$"}, "tag": {"type": "string"}, "name": {"type": ["string", "null"]},
+        "population": {"enum": ["scored", "unobservable"]}, "reasonCode": {"type": ["string", "null"]},
+        "ownerUnitId": {"type": "string"}, "observationIds": {"type": "array", "minItems": 1, "uniqueItems": true, "items": {"type": "string"}},
+        "declarations": {"type": "array", "minItems": 1, "uniqueItems": true, "items": {"type": "object"}},
+        "byteSize": {"type": ["integer", "null"]}, "alignment": {"type": ["integer", "null"]},
+        "members": {"type": "array", "items": {"type": "object"}}
+      }
+    },
+    "global": {
+      "type": "object", "additionalProperties": false,
+      "required": ["id", "names", "population", "reasonCode", "ownerUnitId", "observationIds", "declarations", "addressRva", "size", "alignment", "external", "visibility", "tls", "mutability"],
+      "properties": {
+        "id": {"type": "string", "pattern": "^global-[0-9a-f]{32}$"}, "names": {"type": "array", "minItems": 1, "uniqueItems": true, "items": {"type": "string"}},
+        "population": {"enum": ["scored", "unobservable"]}, "reasonCode": {"type": ["string", "null"]},
+        "ownerUnitId": {"type": "string"}, "observationIds": {"type": "array", "minItems": 1, "uniqueItems": true, "items": {"type": "string"}},
+        "declarations": {"type": "array", "minItems": 1, "uniqueItems": true, "items": {"type": "object"}},
+        "addressRva": {"type": ["string", "null"]}, "size": {"type": ["integer", "null"]}, "alignment": {"type": ["integer", "null"]},
+        "external": {"type": "boolean"}, "visibility": {"type": "string"}, "tls": {"type": "boolean"}, "mutability": {"type": "string"}
+      }
+    }
+  }
+}

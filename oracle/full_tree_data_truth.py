@@ -1,0 +1,140 @@
+"""ODR-aware reconciliation for full-tree globals and aggregate layouts."""
+
+from __future__ import annotations
+import hashlib, itertools, json, sqlite3, tempfile
+from pathlib import Path
+from typing import Any, Iterable
+
+from oracle.bounded_shards import load_complete_shard_index
+from oracle.full_tree_data_observations import data_shard_inputs, validate_data_observation_shard
+from oracle.full_tree_scope import canonical_json_bytes
+
+
+class FullTreeDataTruthError(ValueError):
+    """Raised when ODR-equivalent data evidence is incompatible or incomplete."""
+
+
+POLICY = {"id": "full-tree-data-truth", "version": 1, "typeIdentity": "tag-name-declaration-or-observation", "globalIdentity": "rva-or-name-declaration", "owner": "lowest-unit-id"}
+
+
+def _sha(payload: bytes) -> str:
+    return hashlib.sha256(payload).hexdigest()
+
+
+def _configuration_sha256() -> str:
+    return _sha(canonical_json_bytes(POLICY) + Path(__file__).with_name("full-tree-data-truth.schema.json").read_bytes())
+
+
+def _declaration_key(declaration: dict[str, Any]) -> dict[str, Any]:
+    return {key: declaration[key] for key in ("sourcePath", "externalPathSha256", "line", "column")}
+
+
+def _type_key(item: dict[str, Any]) -> str:
+    declaration = _declaration_key(item["declaration"])
+    observable_location = declaration["sourcePath"] is not None or declaration["externalPathSha256"] is not None
+    identity = {"tag": item["tag"], "name": item["name"], "declaration": declaration} if item["name"] is not None and observable_location else {"observationId": item["id"]}
+    return _sha(canonical_json_bytes(identity))
+
+
+def _global_key(item: dict[str, Any]) -> str:
+    identity = {"rva": item["addressRva"]} if item["addressRva"] is not None else {"names": item["names"], "declaration": _declaration_key(item["declaration"])}
+    return _sha(canonical_json_bytes(identity))
+
+
+def _unique(records: Iterable[dict[str, Any]], field: str) -> list[Any]:
+    values = {canonical_json_bytes(item[field]): item[field] for item in records}
+    return [value for _, value in sorted(values.items())]
+
+
+def _one_compatible(records: list[dict[str, Any]], field: str, identity: str) -> Any:
+    known = {canonical_json_bytes(item[field]): item[field] for item in records if item[field] is not None and item[field] != "unknown"}
+    if len(known) > 1:
+        raise FullTreeDataTruthError(f"incompatible {field} definitions for {identity}")
+    return next(iter(known.values()), None)
+
+
+def _type_layout(item: dict[str, Any]) -> bytes:
+    members = [
+        {key: member[key] for key in ("kind", "name", "byteOffset", "bitOffset", "bitSize", "value", "virtuality")}
+        for member in item["members"]
+    ]
+    return canonical_json_bytes({"alignment": item["alignment"], "byteSize": item["byteSize"], "members": members})
+
+
+def _validate_document(document: dict[str, Any]) -> None:
+    try:
+        import fastjsonschema  # type: ignore[import-untyped]
+        schema = json.loads(Path(__file__).with_name("full-tree-data-truth.schema.json").read_text(encoding="utf-8"))
+        fastjsonschema.compile(schema)(document)
+    except Exception as error:
+        raise FullTreeDataTruthError(f"data truth fails schema validation: {error}") from error
+    if document["types"] != sorted(document["types"], key=lambda item: item["id"]) or document["globals"] != sorted(document["globals"], key=lambda item: item["id"]):
+        raise FullTreeDataTruthError("data truth records are not ordered")
+    expected = {
+        "bases": sum(member["kind"] == "base" for item in document["types"] for member in item["members"]),
+        "enumerators": sum(member["kind"] == "enumerator" for item in document["types"] for member in item["members"]),
+        "fields": sum(member["kind"] == "field" for item in document["types"] for member in item["members"]),
+        "globals": len(document["globals"]), "types": len(document["types"]),
+        "unobservableGlobals": sum(item["population"] == "unobservable" for item in document["globals"]),
+        "unobservableTypes": sum(item["population"] == "unobservable" for item in document["types"]),
+    }
+    if document["counts"] != expected:
+        raise FullTreeDataTruthError("data truth counts do not reconcile")
+
+
+def generate_full_tree_data_truth(*, scope: dict[str, Any], scope_sha256: str, inventory: dict[str, Any], observation_root: Path, output_root: Path) -> dict[str, Any]:
+    observation_index = load_complete_shard_index(observation_root)
+    observation_payload = (observation_root / "index.json").read_bytes()
+    inputs, units = data_shard_inputs(inventory, scope_sha256=scope_sha256, rich_sha256=scope["oracle"]["richArtifactSha256"])
+    expected = {item.identifier: item for item in inputs}
+    unit_to_shard = {unit["id"]: unit["shardId"] for unit in inventory["units"]}
+    oracle = {"configurationSha256": _configuration_sha256(), "dataObservationIndexSha256": _sha(observation_payload), "inventoryIndexSha256": inventory["indexSha256"], "scopeSha256": scope_sha256}
+    output_root.mkdir(parents=True, exist_ok=True)
+    with tempfile.NamedTemporaryFile(prefix=".data-truth-", suffix=".sqlite", dir=output_root) as temporary:
+        database = sqlite3.connect(temporary.name)
+        try:
+            database.executescript("CREATE TABLE observations (kind TEXT, identity TEXT, observation_id TEXT PRIMARY KEY, payload BLOB); CREATE INDEX observations_identity ON observations(kind,identity); CREATE TABLE merged (kind TEXT, owner_shard TEXT, identity TEXT PRIMARY KEY, payload BLOB); CREATE INDEX merged_owner ON merged(owner_shard,kind,identity);")
+            for checkpoint in observation_index["shards"]:
+                shard_id = checkpoint["shardId"]
+                payload = (observation_root / "outputs" / f"{shard_id}.json").read_bytes()
+                if _sha(payload) != checkpoint["outputSha256"]:
+                    raise FullTreeDataTruthError(f"data observation shard {shard_id} changed")
+                document = json.loads(payload)
+                validate_data_observation_shard(document, scope=scope, scope_sha256=scope_sha256, inventory=inventory, shard=expected[shard_id], units=units[shard_id])
+                database.executemany("INSERT INTO observations VALUES ('type',?,?,?)", ((_type_key(item), item["id"], canonical_json_bytes(item)) for item in document["types"]))
+                database.executemany("INSERT INTO observations VALUES ('global',?,?,?)", ((_global_key(item), item["id"], canonical_json_bytes(item)) for item in document["globals"]))
+                database.commit()
+
+            cursor = database.execute("SELECT kind,identity,payload FROM observations ORDER BY kind,identity,observation_id")
+            for (kind, identity), rows in itertools.groupby(cursor, key=lambda row: (row[0], row[1])):
+                records = [json.loads(row[2]) for row in rows]
+                owner = min(item["unitId"] for item in records)
+                if kind == "type":
+                    definitions = [item for item in records if not item["declarationOnly"]]
+                    layouts = {_type_layout(item) for item in definitions}
+                    if len(layouts) > 1:
+                        raise FullTreeDataTruthError(f"incompatible aggregate definitions for type-{identity[:32]}")
+                    layout = definitions[0] if definitions else records[0]
+                    merged = {"alignment": layout["alignment"], "byteSize": layout["byteSize"], "declarations": _unique(records, "declaration"), "id": f"type-{identity[:32]}", "members": layout["members"], "name": layout["name"], "observationIds": sorted(item["id"] for item in records), "ownerUnitId": owner, "population": "scored" if definitions and layout["byteSize"] is not None else "unobservable", "reasonCode": None if definitions and layout["byteSize"] is not None else "declaration-only-or-size-unobservable", "tag": layout["tag"]}
+                else:
+                    address = _one_compatible(records, "addressRva", identity)
+                    merged = {"addressRva": address, "alignment": _one_compatible(records, "alignment", identity), "declarations": _unique(records, "declaration"), "external": bool(_one_compatible(records, "external", identity) or False), "id": f"global-{identity[:32]}", "mutability": _one_compatible(records, "mutability", identity) or "unknown", "names": sorted({name for item in records for name in item["names"]}), "observationIds": sorted(item["id"] for item in records), "ownerUnitId": owner, "population": "scored" if address is not None else "unobservable", "reasonCode": None if address is not None else records[0]["reasonCode"], "size": _one_compatible(records, "size", identity), "tls": bool(_one_compatible(records, "tls", identity) or False), "visibility": _one_compatible(records, "visibility", identity) or "unknown"}
+                database.execute("INSERT INTO merged VALUES (?,?,?,?)", (kind, unit_to_shard[owner], identity, canonical_json_bytes(merged)))
+            database.commit()
+            shard_records = []; aggregate: dict[str, int] = {}
+            for shard in inventory["shards"]:
+                globals_ = [json.loads(row[0]) for row in database.execute("SELECT payload FROM merged WHERE owner_shard=? AND kind='global' ORDER BY identity", (shard["id"],))]
+                types = [json.loads(row[0]) for row in database.execute("SELECT payload FROM merged WHERE owner_shard=? AND kind='type' ORDER BY identity", (shard["id"],))]
+                counts = {"bases": sum(member["kind"] == "base" for item in types for member in item["members"]), "enumerators": sum(member["kind"] == "enumerator" for item in types for member in item["members"]), "fields": sum(member["kind"] == "field" for item in types for member in item["members"]), "globals": len(globals_), "types": len(types), "unobservableGlobals": sum(item["population"] == "unobservable" for item in globals_), "unobservableTypes": sum(item["population"] == "unobservable" for item in types)}
+                document = {"counts": counts, "globals": globals_, "oracle": oracle, "schemaVersion": 1, "shard": {"id": shard["id"], "unitIds": shard["unitIds"]}, "types": types}
+                _validate_document(document)
+                payload = canonical_json_bytes(document); relative = f"shards/{shard['id']}.json"; path = output_root / relative; path.parent.mkdir(parents=True, exist_ok=True); path.write_bytes(payload)
+                shard_records.append({"id": shard["id"], "path": relative, "bytes": len(payload), "sha256": _sha(payload), **counts})
+                for name, value in counts.items(): aggregate[name] = aggregate.get(name, 0) + value
+            without_hash = {"complete": True, "counts": dict(sorted(aggregate.items())), "oracle": oracle, "schemaVersion": 1, "shards": shard_records}
+            index = {**without_hash, "indexSha256": _sha(canonical_json_bytes(without_hash))}; (output_root / "index.json").write_bytes(canonical_json_bytes(index)); return index
+        except (OSError, sqlite3.Error, KeyError, TypeError, ValueError) as error:
+            if isinstance(error, FullTreeDataTruthError): raise
+            raise FullTreeDataTruthError(f"cannot generate data truth: {error}") from error
+        finally:
+            database.close()
