@@ -31,10 +31,10 @@ class FullTreeDataObservationError(ValueError):
 
 POLICY = {
     "id": "full-tree-data-observations",
-    "version": 3,
+    "version": 4,
     "globals": "static-storage-or-linkage-bearing-dwarf-variables",
     "types": "class-struct-union-enum-definitions-and-declarations",
-    "typeReferences": "exact-dwarf-type-chain-to-aggregate-or-closed-nonaggregate-reason",
+    "typeReferences": "compact-immediate-and-aggregate-dwarf-offsets-with-modifier-chain-or-closed-reason",
 }
 
 TYPE_TAGS = {
@@ -108,14 +108,9 @@ def _type_context(die: Any) -> list[str]:
     return list(reversed(components))
 
 
-def _type_reference(die: Any) -> tuple[dict[str, Any], Any | None]:
+def _type_reference(die: Any) -> tuple[list[Any], Any | None]:
     if "DW_AT_type" not in die.attributes:
-        return {
-            "aggregateDieOffset": None,
-            "dieOffsets": [],
-            "modifierTags": [],
-            "reasonCode": "no-type-attribute",
-        }, None
+        return [None, None, [], "no-type-attribute"], None
     target = die.get_DIE_from_attribute("DW_AT_type")
     immediate = target
     offsets: list[str] = []
@@ -130,20 +125,10 @@ def _type_reference(die: Any) -> tuple[dict[str, Any], Any | None]:
         seen.add(offset)
         offsets.append(hex(offset))
         if target.tag in TYPE_TAGS:
-            return {
-                "aggregateDieOffset": hex(offset),
-                "dieOffsets": offsets,
-                "modifierTags": modifiers,
-                "reasonCode": None,
-            }, immediate
+            return [offsets[0], hex(offset), modifiers, None], immediate
         modifiers.append(target.tag)
         if "DW_AT_type" not in target.attributes:
-            return {
-                "aggregateDieOffset": None,
-                "dieOffsets": offsets,
-                "modifierTags": modifiers,
-                "reasonCode": "non-aggregate-terminal-type",
-            }, immediate
+            return [offsets[0], None, modifiers, "non-aggregate-terminal-type"], immediate
         target = target.get_DIE_from_attribute("DW_AT_type")
     raise FullTreeDataObservationError("DWARF type reference exceeds 64 links")
 

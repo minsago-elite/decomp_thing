@@ -24,14 +24,13 @@
     "nullableString": {"type": ["string", "null"], "maxLength": 16384},
     "address": {"type": "string", "pattern": "^0x(?:0|[1-9a-f][0-9a-f]{0,15})$"},
     "typeReference": {
-      "type": "object", "additionalProperties": false,
-      "required": ["aggregateDieOffset", "dieOffsets", "modifierTags", "reasonCode"],
-      "properties": {
-        "aggregateDieOffset": {"oneOf": [{"$ref": "#/$defs/address"}, {"type": "null"}]},
-        "dieOffsets": {"type": "array", "maxItems": 64, "uniqueItems": true, "items": {"$ref": "#/$defs/address"}},
-        "modifierTags": {"type": "array", "maxItems": 64, "items": {"type": "string", "pattern": "^DW_TAG_"}},
-        "reasonCode": {"type": ["string", "null"], "enum": [null, "no-type-attribute", "non-aggregate-terminal-type"]}
-      }
+      "type": "array", "minItems": 4, "maxItems": 4,
+      "prefixItems": [
+        {"oneOf": [{"$ref": "#/$defs/address"}, {"type": "null"}]},
+        {"oneOf": [{"$ref": "#/$defs/address"}, {"type": "null"}]},
+        {"type": "array", "maxItems": 64, "items": {"type": "string", "pattern": "^DW_TAG_"}},
+        {"type": ["string", "null"], "enum": [null, "no-type-attribute", "non-aggregate-terminal-type"]}
+      ]
     },
     "declaration": {"type": "object"},
     "member": {

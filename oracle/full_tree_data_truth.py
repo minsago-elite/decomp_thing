@@ -91,12 +91,12 @@ def _resolve_type_reference(
     database: sqlite3.Connection,
     unit_to_shard: dict[str, str],
 ) -> dict[str, Any]:
-    aggregate_offset = reference["aggregateDieOffset"]
+    immediate_offset, aggregate_offset, modifier_tags, reason_code = reference
     if aggregate_offset is None:
         return {
-            "evidenceDieOffsets": reference["dieOffsets"],
-            "modifierTags": reference["modifierTags"],
-            "reasonCode": reference["reasonCode"],
+            "evidenceDieOffsets": [] if immediate_offset is None else [immediate_offset],
+            "modifierTags": modifier_tags,
+            "reasonCode": reason_code,
             "targetOwnerShardId": None,
             "targetTypeId": None,
         }
@@ -111,8 +111,8 @@ def _resolve_type_reference(
             f"aggregate reference {aggregate_offset} is outside the authenticated type index"
         )
     return {
-        "evidenceDieOffsets": reference["dieOffsets"],
-        "modifierTags": reference["modifierTags"],
+        "evidenceDieOffsets": sorted({immediate_offset, aggregate_offset}, key=lambda value: int(value, 16)),
+        "modifierTags": modifier_tags,
         "reasonCode": None,
         "targetOwnerShardId": unit_to_shard[row[1]],
         "targetTypeId": f"type-{row[0][:32]}",
