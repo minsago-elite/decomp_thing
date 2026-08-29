@@ -1,0 +1,115 @@
+{
+  "buildSystem": "autoconf",
+  "commands": {
+    "compile": [
+      "/usr/bin/make",
+      "-j4",
+      "all-gcc"
+    ],
+    "configure": [
+      "/oracle/source/gcc-16.2.0/configure",
+      "--prefix=/oracle/install",
+      "--enable-languages=c",
+      "--disable-bootstrap",
+      "--disable-multilib",
+      "--disable-nls",
+      "--disable-libsanitizer",
+      "--disable-libquadmath",
+      "--disable-libgomp",
+      "--disable-libatomic",
+      "--disable-libssp",
+      "--disable-libvtv",
+      "--disable-libstdcxx-pch",
+      "--with-system-zlib",
+      "--enable-checking=release",
+      "--with-arch=x86-64",
+      "--with-tune=generic"
+    ],
+    "install": [
+      "/usr/bin/make",
+      "install-gcc"
+    ],
+    "stageFull": [
+      "/usr/bin/install",
+      "-m",
+      "0755",
+      "/oracle/build/gcc/lto1",
+      "{full}"
+    ],
+    "strip": [
+      "/usr/bin/x86_64-linux-gnu-strip",
+      "--strip-all",
+      "-o",
+      "{stripped}",
+      "{full}"
+    ]
+  },
+  "directories": {
+    "build": "/oracle/build",
+    "install": "/oracle/install",
+    "source": "/oracle/source/gcc-16.2.0"
+  },
+  "environment": {
+    "container": {
+      "digest": "sha256:510c510f300d811df22c7769633575a94939073b529a73125bf96cfb96dc7248",
+      "image": "decomp-gcc-oracle-toolchain:16.2.0",
+      "platform": "linux/amd64"
+    },
+    "variables": {
+      "CFLAGS": "-O1 -g3 -fno-omit-frame-pointer -ffile-prefix-map=/oracle=/usr/src/gcc-oracle",
+      "CXXFLAGS": "-O1 -g3 -fno-omit-frame-pointer -ffile-prefix-map=/oracle=/usr/src/gcc-oracle",
+      "LC_ALL": "C",
+      "LDFLAGS": "-Wl,--build-id=sha1",
+      "PATH": "/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin",
+      "SOURCE_DATE_EPOCH": "1786060800",
+      "TZ": "UTC"
+    }
+  },
+  "oracle": {
+    "id": "gcc-lto1-16.2.0",
+    "sourceLockSha256": "e2930ecc9748b40e56d6fe09dbe88f21f735953d4e6da50403f2cc0aa5b650cc",
+    "sourceProfileId": "gcc-driver-16.2.0",
+    "sourceRevision": "78d4ac73dd391005b895a6148cd9831e28e1208b",
+    "version": "16.2.0"
+  },
+  "outputs": {
+    "full": "artifacts/gcc-lto1.full",
+    "stripped": "artifacts/gcc-lto1.stripped"
+  },
+  "schemaVersion": 3,
+  "tools": [
+    {
+      "executableBytes": 2459872,
+      "executableSha256": "c1ff0a4fe7916ae6f4e18645a0e854077148b3ebb9d30b1e50e9672e8c5a1236",
+      "path": "/usr/local/bin/gcc",
+      "role": "compiler",
+      "versionCommand": [
+        "/usr/local/bin/gcc",
+        "--version"
+      ],
+      "versionOutput": "gcc (GCC) 16.2.0\nCopyright (C) 2026 Free Software Foundation, Inc.\nThis is free software; see the source for copying conditions.  There is NO\nwarranty; not even for MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.\n\n"
+    },
+    {
+      "executableBytes": 1861256,
+      "executableSha256": "d2766988b6a1b1d1518cdc09242e726d1f24e151e16410ada3092b11ffd9081b",
+      "path": "/usr/bin/x86_64-linux-gnu-ld.bfd",
+      "role": "linker",
+      "versionCommand": [
+        "/usr/bin/x86_64-linux-gnu-ld.bfd",
+        "--version"
+      ],
+      "versionOutput": "GNU ld (GNU Binutils for Debian) 2.44\nCopyright (C) 2025 Free Software Foundation, Inc.\nThis program is free software; you may redistribute it under the terms of\nthe GNU General Public License version 3 or (at your option) a later version.\nThis program has absolutely no warranty.\n"
+    },
+    {
+      "executableBytes": 159600,
+      "executableSha256": "a97ae77cd5d88799edc0edb31caa2fc81d32eecaa9619d329bed890f6fd06e3a",
+      "path": "/usr/bin/x86_64-linux-gnu-strip",
+      "role": "stripper",
+      "versionCommand": [
+        "/usr/bin/x86_64-linux-gnu-strip",
+        "--version"
+      ],
+      "versionOutput": "GNU strip (GNU Binutils for Debian) 2.44\nCopyright (C) 2025 Free Software Foundation, Inc.\nThis program is free software; you may redistribute it under the terms of\nthe GNU General Public License version 3 or (at your option) any later version.\nThis program has absolutely no warranty.\n"
+    }
+  ]
+}

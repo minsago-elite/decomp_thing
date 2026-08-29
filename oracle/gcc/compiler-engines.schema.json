@@ -1,0 +1,67 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://github.com/minsago-elite/decomp_thing/oracle/gcc/compiler-engines.schema.json",
+  "title": "GCC compiler-engine reconstruction benchmark profile",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schemaVersion", "benchmark", "provenance", "budgets", "engines"],
+  "properties": {
+    "schemaVersion": {"const": 1},
+    "benchmark": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["id", "version", "target"],
+      "properties": {
+        "id": {"const": "gcc-compiler-engines-16.2.0"},
+        "version": {"const": "16.2.0"},
+        "target": {"const": "x86_64-linux-gnu"}
+      }
+    },
+    "provenance": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["sourceLockPath", "sourceLockSha256", "baseBuildRecordPath", "baseBuildRecordSha256", "toolchainReproductionPath", "toolchainReproductionSha256"],
+      "properties": {
+        "sourceLockPath": {"const": "source-lock.json"},
+        "sourceLockSha256": {"$ref": "#/$defs/sha256"},
+        "baseBuildRecordPath": {"const": "build-record.json"},
+        "baseBuildRecordSha256": {"$ref": "#/$defs/sha256"},
+        "toolchainReproductionPath": {"const": "toolchain-reproduction.json"},
+        "toolchainReproductionSha256": {"$ref": "#/$defs/sha256"}
+      }
+    },
+    "budgets": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["exportWallClockSeconds", "exportMaximumResidentBytes", "plannerMaximumEntities", "plannerMaximumDependencyEdges", "plannerMaximumWorkUnits"],
+      "properties": {
+        "exportWallClockSeconds": {"const": 1800},
+        "exportMaximumResidentBytes": {"const": 17179869184},
+        "plannerMaximumEntities": {"type": "integer", "minimum": 1},
+        "plannerMaximumDependencyEdges": {"type": "integer", "minimum": 1},
+        "plannerMaximumWorkUnits": {"type": "integer", "minimum": 1}
+      }
+    },
+    "engines": {
+      "type": "array",
+      "minItems": 2,
+      "maxItems": 2,
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["id", "buildOutput", "fullArtifact", "strippedArtifact", "buildRecord", "oracleManifest", "functionOracle", "reconstructionArchive"],
+        "properties": {
+          "id": {"enum": ["cc1", "lto1"]},
+          "buildOutput": {"type": "string", "pattern": "^/oracle/build/gcc/(cc1|lto1)$"},
+          "fullArtifact": {"type": "string", "pattern": "^artifacts/gcc-(cc1|lto1)\\.full$"},
+          "strippedArtifact": {"type": "string", "pattern": "^artifacts/gcc-(cc1|lto1)\\.stripped$"},
+          "buildRecord": {"type": "string", "pattern": "^(cc1|lto1)-build-record\\.json$"},
+          "oracleManifest": {"type": "string", "pattern": "^(cc1|lto1)-oracle-manifest\\.json$"},
+          "functionOracle": {"type": "string", "pattern": "^(cc1|lto1)-function-recovery-oracle\\.json$"},
+          "reconstructionArchive": {"type": "string", "pattern": "^(cc1|lto1)-reconstruction\\.zip$"}
+        }
+      }
+    }
+  },
+  "$defs": {"sha256": {"type": "string", "pattern": "^[0-9a-f]{64}$"}}
+}

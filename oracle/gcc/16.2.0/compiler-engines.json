@@ -1,0 +1,45 @@
+{
+  "benchmark": {
+    "id": "gcc-compiler-engines-16.2.0",
+    "target": "x86_64-linux-gnu",
+    "version": "16.2.0"
+  },
+  "budgets": {
+    "exportMaximumResidentBytes": 17179869184,
+    "exportWallClockSeconds": 1800,
+    "plannerMaximumDependencyEdges": 8000000,
+    "plannerMaximumEntities": 500000,
+    "plannerMaximumWorkUnits": 200000000
+  },
+  "engines": [
+    {
+      "buildOutput": "/oracle/build/gcc/cc1",
+      "buildRecord": "cc1-build-record.json",
+      "fullArtifact": "artifacts/gcc-cc1.full",
+      "functionOracle": "cc1-function-recovery-oracle.json",
+      "id": "cc1",
+      "oracleManifest": "cc1-oracle-manifest.json",
+      "reconstructionArchive": "cc1-reconstruction.zip",
+      "strippedArtifact": "artifacts/gcc-cc1.stripped"
+    },
+    {
+      "buildOutput": "/oracle/build/gcc/lto1",
+      "buildRecord": "lto1-build-record.json",
+      "fullArtifact": "artifacts/gcc-lto1.full",
+      "functionOracle": "lto1-function-recovery-oracle.json",
+      "id": "lto1",
+      "oracleManifest": "lto1-oracle-manifest.json",
+      "reconstructionArchive": "lto1-reconstruction.zip",
+      "strippedArtifact": "artifacts/gcc-lto1.stripped"
+    }
+  ],
+  "provenance": {
+    "baseBuildRecordPath": "build-record.json",
+    "baseBuildRecordSha256": "f91a68ffde054b9598cba8506bbf6b3b373b35b8680fddb54f76bffa9db23637",
+    "sourceLockPath": "source-lock.json",
+    "sourceLockSha256": "e2930ecc9748b40e56d6fe09dbe88f21f735953d4e6da50403f2cc0aa5b650cc",
+    "toolchainReproductionPath": "toolchain-reproduction.json",
+    "toolchainReproductionSha256": "5c2c159d7287305159a220a1260f6ff6bffe9ec78bb1cbe2fb24f85b68a7d4de"
+  },
+  "schemaVersion": 1
+}

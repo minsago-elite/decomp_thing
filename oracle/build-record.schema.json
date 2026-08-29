@@ -15,7 +15,7 @@
   ],
   "properties": {
     "schemaVersion": {
-      "enum": [1, 2]
+      "enum": [1, 2, 3]
     },
     "buildSystem": {"enum": ["autoconf", "cmake-ninja"]},
     "oracle": {
@@ -24,6 +24,7 @@
       "required": ["id", "version", "sourceRevision", "sourceLockSha256"],
       "properties": {
         "id": {"type": "string", "minLength": 1},
+        "sourceProfileId": {"type": "string", "minLength": 1},
         "version": {"type": "string", "pattern": "^[0-9]+\\.[0-9]+\\.[0-9]+$"},
         "sourceRevision": {"$ref": "#/$defs/gitObject"},
         "sourceLockSha256": {"$ref": "#/$defs/sha256"}
@@ -120,6 +121,17 @@
     {
       "if": {"properties": {"schemaVersion": {"const": 2}}},
       "then": {"required": ["buildSystem"]}
+    },
+    {
+      "if": {"properties": {"schemaVersion": {"const": 3}}},
+      "then": {
+        "required": ["buildSystem"],
+        "properties": {"oracle": {"required": ["sourceProfileId"]}}
+      }
+    },
+    {
+      "if": {"properties": {"schemaVersion": {"enum": [1, 2]}}},
+      "then": {"properties": {"oracle": {"not": {"required": ["sourceProfileId"]}}}}
     },
     {
       "if": {"properties": {"schemaVersion": {"const": 1}}},

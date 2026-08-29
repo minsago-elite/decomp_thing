@@ -293,29 +293,38 @@ def validate_build_record(
         "tools",
         "outputs",
     }
-    if schema_version == 2:
+    if schema_version in {2, 3}:
         root_fields.add("buildSystem")
     root = _object(
         data,
         "build record",
         root_fields,
     )
-    if isinstance(schema_version, bool) or schema_version not in {1, 2}:
-        raise VerificationError("build record schemaVersion must be the integer 1 or 2")
+    if isinstance(schema_version, bool) or schema_version not in {1, 2, 3}:
+        raise VerificationError("build record schemaVersion must be the integer 1, 2, or 3")
     build_system = "autoconf" if schema_version == 1 else _string(
         root["buildSystem"], "build record.buildSystem"
     )
     if build_system not in {"autoconf", "cmake-ninja"}:
         raise VerificationError("build record.buildSystem must be autoconf or cmake-ninja")
 
+    oracle_fields = {"id", "version", "sourceRevision", "sourceLockSha256"}
+    if schema_version == 3:
+        oracle_fields.add("sourceProfileId")
     oracle = _object(
         root["oracle"],
         "build record.oracle",
-        {"id", "version", "sourceRevision", "sourceLockSha256"},
+        oracle_fields,
     )
     expected_oracle = source_lock["oracle"]
-    if _string(oracle["id"], "build record.oracle.id") != expected_oracle["id"]:
-        raise VerificationError("build record oracle.id does not match the source lock")
+    artifact_id = _string(oracle["id"], "build record.oracle.id")
+    source_profile_id = (
+        _string(oracle["sourceProfileId"], "build record.oracle.sourceProfileId")
+        if schema_version == 3
+        else artifact_id
+    )
+    if source_profile_id != expected_oracle["id"]:
+        raise VerificationError("build record source profile does not match the source lock")
     if _matches(oracle["version"], "build record.oracle.version", _VERSION) != (
         expected_oracle["version"]
     ):
