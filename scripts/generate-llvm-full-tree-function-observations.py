@@ -53,6 +53,7 @@ def main() -> int:
             inventory=inventory,
             output_root=arguments.output_root,
             maximum_workers=arguments.workers,
+            isolate_workers=True,
         )
     except (
         BoundedShardError,

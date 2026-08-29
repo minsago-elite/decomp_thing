@@ -93,6 +93,21 @@ class FullTreeFunctionObservationTest(unittest.TestCase):
                 sorted(item["rva"] for item in shard["emitted"]),
                 [item["rva"] for item in shard["emitted"]],
             )
+            isolated = root / "isolated-observations"
+            isolated_index = run_full_tree_function_observations(
+                artifact,
+                scope=scope,
+                scope_sha256=scope_sha256,
+                inventory=inventory,
+                output_root=isolated,
+                maximum_workers=1,
+                isolate_workers=True,
+            )
+            self.assertEqual(first, isolated_index)
+            self.assertEqual(
+                next((output / "outputs").glob("*.json")).read_bytes(),
+                next((isolated / "outputs").glob("*.json")).read_bytes(),
+            )
 
 
 if __name__ == "__main__":

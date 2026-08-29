@@ -8,8 +8,12 @@ import json
 import os
 from pathlib import Path
 import posixpath
+import signal
 import stat
+import subprocess
+import sys
 import threading
+import time
 from typing import Any
 
 from oracle.bounded_shards import ShardBounds, ShardInput, run_bounded_shards
@@ -276,6 +280,7 @@ def _produce_shard(
 
     try:
         stream = rich_artifact.open("rb")
+        stream_before = os.fstat(stream.fileno())
         elf = ELFFile(stream)
         dwarf = elf.get_dwarf_info(follow_links=False)
         loads = [
@@ -425,6 +430,21 @@ def _produce_shard(
             shard=shard,
             units=units,
         )
+        stream_after = os.fstat(stream.fileno())
+        if (
+            stream_before.st_dev,
+            stream_before.st_ino,
+            stream_before.st_size,
+            stream_before.st_mtime_ns,
+            stream_before.st_ctime_ns,
+        ) != (
+            stream_after.st_dev,
+            stream_after.st_ino,
+            stream_after.st_size,
+            stream_after.st_mtime_ns,
+            stream_after.st_ctime_ns,
+        ):
+            raise FullTreeFunctionObservationError("rich artifact changed during shard observation")
         output.write_bytes(canonical_json_bytes(document))
         return len(emitted) + len(inline_only)
     except FullTreeFunctionObservationError:
@@ -448,6 +468,7 @@ def run_full_tree_function_observations(
     inventory: dict[str, Any],
     output_root: Path,
     maximum_workers: int,
+    isolate_workers: bool = False,
 ) -> dict[str, Any]:
     """Produce or resume all inventory shards without loading a monolithic model."""
 
@@ -475,17 +496,111 @@ def run_full_tree_function_observations(
         maximum_workers=min(maximum_workers, len(inputs)),
     )
 
-    def producer(shard: ShardInput, output: Path, cancelled: threading.Event) -> int:
-        return _produce_shard(
-            rich_artifact,
-            scope=scope,
-            scope_sha256=scope_sha256,
-            inventory=inventory,
-            shard=shard,
-            units=units[shard.identifier],
-            output=output,
-            cancelled=cancelled,
-        )
+    if isolate_workers:
+        control = output_root / "control"
+        control.mkdir(parents=True, exist_ok=True)
+        if control.is_symlink() or not control.is_dir():
+            raise FullTreeFunctionObservationError("worker control directory must not be a symlink")
+        scope_path = control / "scope.json"
+        inventory_path = control / "inventory.json"
+        for path, payload, label in (
+            (scope_path, canonical_json_bytes(scope), "scope"),
+            (inventory_path, canonical_json_bytes(inventory), "inventory"),
+        ):
+            if path.exists():
+                if path.is_symlink() or not path.is_file() or path.read_bytes() != payload:
+                    raise FullTreeFunctionObservationError(f"isolated worker {label} changed")
+            else:
+                path.write_bytes(payload)
+
+        def producer(shard: ShardInput, output: Path, cancelled: threading.Event) -> int:
+            command = [
+                sys.executable,
+                os.fspath(Path(__file__).resolve().parents[1] / "scripts/full-tree-function-shard-worker.py"),
+                "--rich-artifact",
+                os.fspath(rich_artifact.absolute()),
+                "--scope",
+                os.fspath(scope_path.absolute()),
+                "--scope-sha256",
+                scope_sha256,
+                "--inventory",
+                os.fspath(inventory_path.absolute()),
+                "--shard",
+                shard.identifier,
+                "--input-sha256",
+                shard.input_sha256,
+                "--output",
+                os.fspath(output.absolute()),
+            ]
+            process = subprocess.Popen(
+                command,
+                stdin=subprocess.DEVNULL,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                start_new_session=True,
+            )
+            deadline = time.monotonic() + per_shard["wallClockSeconds"]
+            while True:
+                if cancelled.is_set() or time.monotonic() >= deadline:
+                    os.killpg(process.pid, signal.SIGTERM)
+                    try:
+                        process.wait(timeout=5)
+                    except subprocess.TimeoutExpired:
+                        os.killpg(process.pid, signal.SIGKILL)
+                        process.wait()
+                    reason = "cancelled" if cancelled.is_set() else "timed out"
+                    raise FullTreeFunctionObservationError(
+                        f"isolated function shard {shard.identifier} {reason}"
+                    )
+                try:
+                    stdout, stderr = process.communicate(timeout=0.25)
+                    break
+                except subprocess.TimeoutExpired:
+                    continue
+            if len(stdout) > 4096 or len(stderr) > 65536:
+                raise FullTreeFunctionObservationError(
+                    f"isolated function shard {shard.identifier} exceeded control capture bounds"
+                )
+            if process.returncode != 0:
+                detail = stderr.decode("utf-8", "replace").strip()
+                raise FullTreeFunctionObservationError(
+                    f"isolated function shard {shard.identifier} failed: {detail}"
+                )
+            try:
+                result = json.loads(stdout.decode("utf-8"))
+                entities = result["entities"]
+                resident = result["maximumResidentBytes"]
+            except (UnicodeDecodeError, json.JSONDecodeError, KeyError, TypeError) as error:
+                raise FullTreeFunctionObservationError(
+                    f"isolated function shard {shard.identifier} returned malformed usage"
+                ) from error
+            if isinstance(entities, bool) or not isinstance(entities, int) or entities < 0:
+                raise FullTreeFunctionObservationError(
+                    f"isolated function shard {shard.identifier} returned an invalid entity count"
+                )
+            if (
+                isinstance(resident, bool)
+                or not isinstance(resident, int)
+                or resident < 0
+                or resident > per_shard["maximumResidentBytes"]
+            ):
+                raise FullTreeFunctionObservationError(
+                    f"isolated function shard {shard.identifier} exceeded its resident-byte bound"
+                )
+            return entities
+
+    else:
+        def producer(shard: ShardInput, output: Path, cancelled: threading.Event) -> int:
+            return _produce_shard(
+                rich_artifact,
+                scope=scope,
+                scope_sha256=scope_sha256,
+                inventory=inventory,
+                shard=shard,
+                units=units[shard.identifier],
+                output=output,
+                cancelled=cancelled,
+            )
 
     index = run_bounded_shards(
         output_root,
