@@ -199,6 +199,7 @@ class FullTreeFunctionObservationTest(unittest.TestCase):
                     "declarations": source_function["declarations"],
                     "id": "non-emitted-function-" + "a" * 32,
                     "observationIds": ["non-emitted-cu-" + "b" * 32 + "-0x1"],
+                    "observationDieOffsets": [{"dieOffset": "0x1", "unitId": source_function["ownerUnitId"]}],
                     "ownerUnitId": source_function["ownerUnitId"],
                     "population": "scored",
                     "reasonCode": "inline-no-emitted-range",

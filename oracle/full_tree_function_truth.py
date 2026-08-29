@@ -263,7 +263,7 @@ def validate_full_tree_function_truth_index(
             if item["id"] in seen_non_emitted:
                 raise FullTreeFunctionTruthError(f"non-emitted identity {item['id']} has duplicate ownership")
             seen_non_emitted.add(item["id"])
-            non_emitted_observations += len(item["observationIds"])
+            non_emitted_observations += len(item["observationDieOffsets"])
             reason_counts[item["reasonCode"]] += 1
     for item in non_emitted_records:
         overlaps_emitted = any(alias["name"] in emitted_alias_names for alias in item["aliases"])
@@ -382,7 +382,7 @@ def reconcile_full_tree_function_truth(
                 connection.executemany(
                     "INSERT INTO non_emitted VALUES (?, ?, ?, ?, ?)",
                     (
-                        (_non_emitted_identity(item), shard_id, item["unitId"], item["id"], canonical_json_bytes(item))
+                        (_non_emitted_identity(item), shard_id, min(item["unitIds"]), item["id"], canonical_json_bytes(item))
                         for item in document["nonEmitted"]
                     ),
                 )
@@ -465,7 +465,7 @@ def reconcile_full_tree_function_truth(
                 for alias in function["aliases"]
             }
             non_emitted_by_shard: dict[str, list[dict[str, Any]]] = defaultdict(list)
-            non_emitted_observations = int(connection.execute("SELECT COUNT(*) FROM non_emitted").fetchone()[0])
+            non_emitted_observations = 0
             non_emitted_cursor = connection.execute(
                 "SELECT identity,payload FROM non_emitted ORDER BY identity,observation_id"
             )
@@ -480,9 +480,17 @@ def reconcile_full_tree_function_truth(
                         database_path=database_path,
                     )
                 records = [json.loads(row[1]) for row in rows]
-                owner = min(item["unitId"] for item in records)
+                owner = min(unit for item in records for unit in item["unitIds"])
                 alias_names = {alias["name"] for item in records for alias in item["aliases"]}
-                observed_reasons = {item["reasonCode"] for item in records}
+                observed_reasons = {reason for item in records for reason in item["reasonCodes"]}
+                observation_die_offsets = sorted(
+                    {
+                        canonical_json_bytes(locator): locator
+                        for item in records for locator in item["dieOffsets"]
+                    }.values(),
+                    key=lambda value: (value["unitId"], int(value["dieOffset"], 16)),
+                )
+                non_emitted_observations += len(observation_die_offsets)
                 if "definition-no-emitted-range" in observed_reasons:
                     reason_code = (
                         "comdat-or-odr-selected-elsewhere"
@@ -497,6 +505,7 @@ def reconcile_full_tree_function_truth(
                         "declarations": _declarations(records, "declaration"),
                         "id": identity,
                         "observationIds": sorted(item["id"] for item in records),
+                        "observationDieOffsets": observation_die_offsets,
                         "ownerUnitId": owner,
                         "population": "unobservable",
                         "reasonCode": reason_code,

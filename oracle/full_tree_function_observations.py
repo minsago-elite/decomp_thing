@@ -40,12 +40,13 @@ class FullTreeFunctionObservationError(ValueError):
 
 PRODUCER_POLICY = {
     "id": "full-tree-function-observations",
-    "version": 2,
+    "version": 3,
     "emittedIdentity": "image-relative-start-rva",
     "ownershipCandidates": "all-source-aligned-dwarf-compilation-units",
     "declarationPaths": "explicit-scope-map-or-external-path-sha256",
     "nonEmittedIdentity": "unit-id-and-die-relative-offset",
     "nonEmissionReasons": "dwarf-inline-attribute-or-definition-without-emitted-range",
+    "nonEmittedCanonicalization": "declaration-and-alias-names-with-all-unit-die-locators-retained",
 }
 MAX_FULL_TREE_NAME_CHARACTERS = 16_384
 
@@ -178,16 +179,23 @@ def validate_function_observation_shard(
         for alias in item["aliases"]:
             if any(evidence["unitId"] not in item["ownerUnitIds"] for evidence in alias["evidence"]):
                 raise FullTreeFunctionObservationError("alias evidence is outside emitted ownership")
-    if non_emitted != sorted(
-        non_emitted,
-        key=lambda item: (item["unitId"], int(item["dieOffset"], 16), item["id"]),
-    ):
+    if non_emitted != sorted(non_emitted, key=lambda item: item["id"]):
         raise FullTreeFunctionObservationError("non-emitted observations are not canonically ordered")
-    if any(item["unitId"] not in unit_ids for item in non_emitted):
+    if any(not set(item["unitIds"]) <= unit_ids for item in non_emitted):
         raise FullTreeFunctionObservationError("non-emitted observation ownership is invalid")
+    if len({item["id"] for item in non_emitted}) != len(non_emitted):
+        raise FullTreeFunctionObservationError("non-emitted observation identities are duplicated")
+    for item in non_emitted:
+        if item["unitIds"] != sorted(item["unitIds"]) or item["reasonCodes"] != sorted(item["reasonCodes"]):
+            raise FullTreeFunctionObservationError("non-emitted observation sets are not ordered")
+        if item["dieOffsets"] != sorted(
+            item["dieOffsets"], key=lambda value: (value["unitId"], int(value["dieOffset"], 16))
+        ) or any(value["unitId"] not in item["unitIds"] for value in item["dieOffsets"]):
+            raise FullTreeFunctionObservationError("non-emitted DIE evidence is invalid")
     expected_counts = {
         "emittedRvas": len(emitted),
         "nonEmitted": len(non_emitted),
+        "nonEmittedDies": sum(len(item["dieOffsets"]) for item in non_emitted),
         "scannedDies": document["counts"]["scannedDies"],
         "units": len(units),
     }
@@ -447,13 +455,66 @@ def _produce_shard(
                     "rva": hex(rva),
                 }
             )
-        non_emitted.sort(
-            key=lambda item: (item["unitId"], int(item["dieOffset"], 16), item["id"])
-        )
+        grouped_non_emitted: dict[str, dict[str, Any]] = {}
+        for item in non_emitted:
+            declaration_identity = dict(item["declaration"])
+            declaration_identity.pop("unitSourcePath", None)
+            identity = hashlib.sha256(
+                canonical_json_bytes(
+                    {
+                        "aliasNames": sorted(alias["name"] for alias in item["aliases"]),
+                        "declaration": declaration_identity,
+                    }
+                )
+            ).hexdigest()[:32]
+            grouped = grouped_non_emitted.setdefault(
+                identity,
+                {
+                    "aliases": {},
+                    "declaration": item["declaration"],
+                    "dieOffsets": [],
+                    "id": "non-emitted-observation-"
+                    + hashlib.sha256(f"{shard.identifier}:{identity}".encode()).hexdigest()[:32],
+                    "reasonCodes": set(),
+                    "unitIds": set(),
+                },
+            )
+            if canonical_json_bytes(grouped["declaration"]) != canonical_json_bytes(item["declaration"]):
+                # Unit source paths may differ for a shared source declaration;
+                # retain the canonical lowest declaration payload.
+                grouped["declaration"] = min(
+                    (grouped["declaration"], item["declaration"]),
+                    key=canonical_json_bytes,
+                )
+            grouped["dieOffsets"].append(
+                {"dieOffset": item["dieOffset"], "unitId": item["unitId"]}
+            )
+            grouped["reasonCodes"].add(item["reasonCode"])
+            grouped["unitIds"].add(item["unitId"])
+            for alias in item["aliases"]:
+                aliases = grouped["aliases"]
+                evidence = aliases.setdefault(alias["name"], {})
+                for raw in alias["evidence"]:
+                    evidence[canonical_json_bytes(raw)] = raw
+        non_emitted = [
+            {
+                **{key: value for key, value in item.items() if key not in {"aliases", "reasonCodes", "unitIds"}},
+                "aliases": [
+                    {"evidence": [value for _, value in sorted(evidence.items())], "name": name}
+                    for name, evidence in sorted(item["aliases"].items())
+                ],
+                "dieOffsets": sorted(item["dieOffsets"], key=lambda value: (value["unitId"], int(value["dieOffset"], 16))),
+                "reasonCodes": sorted(item["reasonCodes"]),
+                "unitIds": sorted(item["unitIds"]),
+            }
+            for _, item in sorted(grouped_non_emitted.items())
+        ]
+        non_emitted.sort(key=lambda item: item["id"])
         document = {
             "counts": {
                 "emittedRvas": len(emitted),
                 "nonEmitted": len(non_emitted),
+                "nonEmittedDies": sum(len(item["dieOffsets"]) for item in non_emitted),
                 "scannedDies": scanned_dies,
                 "units": len(units),
             },

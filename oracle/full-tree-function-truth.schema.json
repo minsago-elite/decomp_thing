@@ -80,13 +80,21 @@
     },
     "nonEmitted": {
       "type": "object", "additionalProperties": false,
-      "required": ["id", "population", "reasonCode", "ownerUnitId", "observationIds", "aliases", "declarations"],
+      "required": ["id", "population", "reasonCode", "ownerUnitId", "observationIds", "observationDieOffsets", "aliases", "declarations"],
       "properties": {
         "id": {"type": "string", "pattern": "^non-emitted-function-[0-9a-f]{32}$"},
         "population": {"const": "unobservable"},
         "reasonCode": {"enum": ["inline-no-emitted-range", "definition-no-emitted-range", "comdat-or-odr-selected-elsewhere"]},
         "ownerUnitId": {"$ref": "#/$defs/id"},
         "observationIds": {"type": "array", "minItems": 1, "uniqueItems": true, "items": {"$ref": "#/$defs/id"}},
+        "observationDieOffsets": {
+          "type": "array", "minItems": 1, "uniqueItems": true,
+          "items": {
+            "type": "object", "additionalProperties": false,
+            "required": ["unitId", "dieOffset"],
+            "properties": {"unitId": {"$ref": "#/$defs/id"}, "dieOffset": {"$ref": "#/$defs/rva"}}
+          }
+        },
         "aliases": {"type": "array", "minItems": 1, "items": {"$ref": "#/$defs/alias"}},
         "declarations": {"type": "array", "minItems": 1, "uniqueItems": true, "items": {"$ref": "#/$defs/declaration"}}
       }
