@@ -2,11 +2,23 @@
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "$id": "https://github.com/minsago-elite/decomp_thing/oracle/full-tree-determinism-report.schema.json",
   "type": "object", "additionalProperties": false,
-  "required": ["schemaVersion", "firstIndexSha256", "secondIndexSha256", "runSha256", "shards", "differingShards", "identical", "reportSha256"],
+  "required": ["schemaVersion", "contentContractSha256", "firstIndexSha256", "secondIndexSha256", "firstRun", "secondRun", "shards", "differingShards", "identical", "reportSha256"],
   "properties": {
-    "schemaVersion": {"const": 1}, "firstIndexSha256": {"$ref": "#/$defs/sha"}, "secondIndexSha256": {"$ref": "#/$defs/sha"},
-    "runSha256": {"$ref": "#/$defs/sha"}, "shards": {"type": "integer", "minimum": 1},
+    "schemaVersion": {"const": 2}, "contentContractSha256": {"$ref": "#/$defs/sha"},
+    "firstIndexSha256": {"$ref": "#/$defs/sha"}, "secondIndexSha256": {"$ref": "#/$defs/sha"},
+    "firstRun": {"$ref": "#/$defs/run"}, "secondRun": {"$ref": "#/$defs/run"},
+    "shards": {"type": "integer", "minimum": 1},
     "differingShards": {"type": "array", "uniqueItems": true, "items": {"type": "string"}}, "identical": {"type": "boolean"},
     "reportSha256": {"$ref": "#/$defs/sha"}
-  }, "$defs": {"sha": {"type": "string", "pattern": "^[0-9a-f]{64}$"}}
+  }, "$defs": {
+    "sha": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
+    "run": {
+      "type": "object", "additionalProperties": false,
+      "required": ["maximumWorkers", "runSha256"],
+      "properties": {
+        "maximumWorkers": {"type": "integer", "minimum": 1, "maximum": 32},
+        "runSha256": {"$ref": "#/$defs/sha"}
+      }
+    }
+  }
 }

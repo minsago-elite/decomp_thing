@@ -19,6 +19,7 @@ from oracle.bounded_shards import (  # noqa: E402
     run_bounded_shards,
 )
 from oracle.full_tree_scope import canonical_json_bytes  # noqa: E402
+from oracle.full_tree_determinism import compare_full_tree_runs  # noqa: E402
 
 
 BOUNDS = ShardBounds(
@@ -58,6 +59,31 @@ def producer(shard: ShardInput, output: Path, cancelled: threading.Event) -> int
 
 
 class BoundedShardRunTest(unittest.TestCase):
+    def test_determinism_ignores_only_authenticated_worker_concurrency(self) -> None:
+        with tempfile.TemporaryDirectory(prefix="bounded-shards-determinism-") as temporary:
+            root = Path(temporary)
+            first_root = root / "first"
+            second_root = root / "second"
+            run_bounded_shards(
+                first_root,
+                run_id="fixture-run",
+                inputs=INPUTS,
+                bounds=ShardBounds(**{**BOUNDS.__dict__, "maximum_workers": 1}),
+                producer=producer,
+            )
+            run_bounded_shards(
+                second_root,
+                run_id="fixture-run",
+                inputs=INPUTS,
+                bounds=BOUNDS,
+                producer=producer,
+            )
+            report = compare_full_tree_runs(first_root, second_root)
+            self.assertTrue(report["identical"])
+            self.assertNotEqual(report["firstRun"], report["secondRun"])
+            self.assertEqual(1, report["firstRun"]["maximumWorkers"])
+            self.assertEqual(3, report["secondRun"]["maximumWorkers"])
+
     def test_parallel_order_resume_and_index_are_byte_deterministic(self) -> None:
         with tempfile.TemporaryDirectory(prefix="bounded-shards-") as temporary:
             root = Path(temporary)
