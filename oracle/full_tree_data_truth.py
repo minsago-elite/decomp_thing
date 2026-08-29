@@ -14,7 +14,7 @@ class FullTreeDataTruthError(ValueError):
     """Raised when ODR-equivalent data evidence is incompatible or incomplete."""
 
 
-POLICY = {"id": "full-tree-data-truth", "version": 15, "typeIdentity": "tag-qualified-lexical-context-name-or-anonymous-declaration-with-observation-owned-lambda-and-lossy-local-contexts", "globalIdentity": "rva-or-source-aligned-name-declaration-or-producer-observation", "owner": "lowest-unit-id", "typeReferences": "exact-dwarf-offset-chain-with-conditional-bounded-authenticated-candidate-commitments-and-no-ambiguous-target-substitution", "truthSharding": "inventory-owner-with-deterministic-bounded-entity-partitions", "maximumDatabaseBytes": 8 * 1024 * 1024 * 1024}
+POLICY = {"id": "full-tree-data-truth", "version": 16, "typeIdentity": "tag-qualified-lexical-context-name-or-anonymous-declaration-with-observation-owned-lambda-and-lossy-local-contexts", "globalIdentity": "rva-or-source-aligned-name-declaration-or-producer-observation", "owner": "lowest-unit-id", "typeReferences": "exact-dwarf-offset-chain-with-conditional-bounded-authenticated-candidate-commitments-and-no-ambiguous-target-substitution", "truthSharding": "inventory-owner-with-deterministic-two-thirds-byte-budget-entity-partitions", "maximumDatabaseBytes": 8 * 1024 * 1024 * 1024}
 
 REFERENCE_SAMPLE_LIMIT = 16
 
@@ -490,7 +490,7 @@ def generate_full_tree_data_truth(*, scope: dict[str, Any], scope_sha256: str, i
                 _check_runtime_bounds(scope, started=started, cpu_started=cpu_started, database_path=Path(temporary.name))
                 globals_ = [json.loads(row[0]) for row in database.execute("SELECT payload FROM merged WHERE owner_shard=? AND kind='global' ORDER BY identity", (shard["id"],))]
                 types = [json.loads(row[0]) for row in database.execute("SELECT payload FROM merged WHERE owner_shard=? AND kind='type' ORDER BY identity", (shard["id"],))]
-                partition_budget = scope["bounds"]["perShard"]["serializedBytes"] * 9 // 10
+                partition_budget = scope["bounds"]["perShard"]["serializedBytes"] * 2 // 3
                 partitions = _partition_truth_entities(globals_, types, entity_byte_budget=partition_budget)
                 for partition_index, (partition_globals, partition_types) in enumerate(partitions):
                     references = [item["typeReference"] for item in partition_globals] + [member["typeReference"] for item in partition_types for member in item["members"]]
