@@ -36,6 +36,10 @@ from oracle.full_tree_function_truth import (  # noqa: E402
     reconcile_full_tree_function_truth,
     validate_full_tree_function_truth_index,
 )
+from oracle.full_tree_data_observations import (  # noqa: E402
+    data_shard_inputs,
+    produce_data_observation_shard,
+)
 from oracle.full_tree_inventory import generate_inventory  # noqa: E402
 from oracle.full_tree_scope import canonical_json_bytes  # noqa: E402
 from oracle.function_recovery_oracle import OracleGenerationError, _dwarf_names  # noqa: E402
@@ -72,6 +76,10 @@ class FullTreeFunctionObservationTest(unittest.TestCase):
             source = root / "source/clang/lib/Driver"
             source.mkdir(parents=True)
             (source / "first.c").write_text(
+                "struct pair { int left; int right; };\n"
+                "enum mode { MODE_FIRST = 1, MODE_SECOND = 2 };\n"
+                "struct pair global_pair = {1, 2};\n"
+                "__thread int global_tls = 3;\n"
                 "extern int second(int); int first(int value) { return second(value); }\n",
                 encoding="utf-8",
             )
@@ -126,6 +134,26 @@ class FullTreeFunctionObservationTest(unittest.TestCase):
             call_document = json.loads(call_output.read_text(encoding="utf-8"))
             self.assertEqual(call_count, call_document["counts"]["observedCallSites"])
             self.assertGreater(call_count, 0)
+            data_inputs, data_units = data_shard_inputs(
+                inventory,
+                scope_sha256=scope_sha256,
+                rich_sha256=scope["oracle"]["richArtifactSha256"],
+            )
+            data_output = root / "data-observations.json"
+            data_count = produce_data_observation_shard(
+                artifact,
+                scope=scope,
+                scope_sha256=scope_sha256,
+                inventory=inventory,
+                shard=data_inputs[0],
+                units=data_units[data_inputs[0].identifier],
+                output=data_output,
+                cancelled=threading.Event(),
+            )
+            data_document = json.loads(data_output.read_text(encoding="utf-8"))
+            self.assertEqual(data_count, data_document["counts"]["globals"] + data_document["counts"]["types"])
+            self.assertTrue(any("global_pair" in item["names"] for item in data_document["globals"]))
+            self.assertTrue(any(item["tag"] == "struct" and item["name"] == "pair" for item in data_document["types"]))
             call_root = root / "bounded-call-observations"
             call_index = run_full_tree_call_observations(
                 artifact,

@@ -1,0 +1,61 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://github.com/minsago-elite/decomp_thing/oracle/full-tree-data-observations.schema.json",
+  "title": "Source-owned DWARF global and aggregate observations",
+  "type": "object", "additionalProperties": false,
+  "required": ["schemaVersion", "oracle", "shard", "counts", "globals", "types"],
+  "properties": {
+    "schemaVersion": {"const": 1}, "oracle": {"type": "object"}, "shard": {"type": "object"},
+    "counts": {
+      "type": "object", "additionalProperties": false,
+      "required": ["units", "scannedDies", "globals", "types", "fields", "bases", "enumerators"],
+      "properties": {
+        "units": {"type": "integer", "minimum": 1}, "scannedDies": {"type": "integer", "minimum": 1},
+        "globals": {"type": "integer", "minimum": 0}, "types": {"type": "integer", "minimum": 0},
+        "fields": {"type": "integer", "minimum": 0}, "bases": {"type": "integer", "minimum": 0},
+        "enumerators": {"type": "integer", "minimum": 0}
+      }
+    },
+    "globals": {"type": "array", "items": {"$ref": "#/$defs/global"}},
+    "types": {"type": "array", "items": {"$ref": "#/$defs/type"}}
+  },
+  "$defs": {
+    "nullableInteger": {"type": ["integer", "null"], "minimum": 0},
+    "nullableString": {"type": ["string", "null"], "maxLength": 16384},
+    "declaration": {"type": "object"},
+    "member": {
+      "type": "object", "additionalProperties": false,
+      "required": ["kind", "name", "typeDieOffset", "byteOffset", "bitOffset", "bitSize", "value", "virtuality"],
+      "properties": {
+        "kind": {"enum": ["field", "base", "enumerator"]}, "name": {"$ref": "#/$defs/nullableString"},
+        "typeDieOffset": {"$ref": "#/$defs/nullableString"}, "byteOffset": {"$ref": "#/$defs/nullableInteger"},
+        "bitOffset": {"$ref": "#/$defs/nullableInteger"}, "bitSize": {"$ref": "#/$defs/nullableInteger"},
+        "value": {"type": ["integer", "null"]}, "virtuality": {"$ref": "#/$defs/nullableInteger"}
+      }
+    },
+    "type": {
+      "type": "object", "additionalProperties": false,
+      "required": ["id", "unitId", "dieOffset", "tag", "name", "declaration", "declarationOnly", "byteSize", "alignment", "members"],
+      "properties": {
+        "id": {"type": "string", "pattern": "^type-observation-[0-9a-f]{32}$"}, "unitId": {"type": "string"},
+        "dieOffset": {"type": "string"}, "tag": {"enum": ["class", "struct", "union", "enum"]},
+        "name": {"$ref": "#/$defs/nullableString"}, "declaration": {"$ref": "#/$defs/declaration"},
+        "declarationOnly": {"type": "boolean"}, "byteSize": {"$ref": "#/$defs/nullableInteger"},
+        "alignment": {"$ref": "#/$defs/nullableInteger"}, "members": {"type": "array", "items": {"$ref": "#/$defs/member"}}
+      }
+    },
+    "global": {
+      "type": "object", "additionalProperties": false,
+      "required": ["id", "unitId", "dieOffset", "names", "declaration", "addressRva", "size", "alignment", "external", "visibility", "tls", "mutability", "typeDieOffset", "reasonCode"],
+      "properties": {
+        "id": {"type": "string", "pattern": "^global-observation-[0-9a-f]{32}$"}, "unitId": {"type": "string"},
+        "dieOffset": {"type": "string"}, "names": {"type": "array", "minItems": 1, "uniqueItems": true, "items": {"type": "string", "maxLength": 16384}},
+        "declaration": {"$ref": "#/$defs/declaration"}, "addressRva": {"$ref": "#/$defs/nullableString"},
+        "size": {"$ref": "#/$defs/nullableInteger"}, "alignment": {"$ref": "#/$defs/nullableInteger"},
+        "external": {"type": "boolean"}, "visibility": {"enum": ["default", "local", "exported", "qualified", "unknown"]},
+        "tls": {"type": "boolean"}, "mutability": {"enum": ["constant", "mutable", "unknown"]},
+        "typeDieOffset": {"$ref": "#/$defs/nullableString"}, "reasonCode": {"type": ["string", "null"]}
+      }
+    }
+  }
+}
