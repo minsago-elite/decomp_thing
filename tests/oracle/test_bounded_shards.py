@@ -4,6 +4,7 @@ import hashlib
 import json
 from pathlib import Path
 import tempfile
+import threading
 import time
 import unittest
 
@@ -40,7 +41,9 @@ INPUTS = [
 ]
 
 
-def producer(shard: ShardInput, output: Path) -> int:
+def producer(shard: ShardInput, output: Path, cancelled: threading.Event) -> int:
+    if cancelled.is_set():
+        raise RuntimeError("cancelled")
     output.write_bytes(
         canonical_json_bytes(
             {
@@ -67,7 +70,7 @@ class BoundedShardRunTest(unittest.TestCase):
             )
             index_bytes = (root / "index.json").read_bytes()
 
-            def must_not_run(shard: ShardInput, output: Path) -> int:
+            def must_not_run(shard: ShardInput, output: Path, cancelled: threading.Event) -> int:
                 raise AssertionError(f"completed shard reran: {shard.identifier}")
 
             resumed = run_bounded_shards(
@@ -100,10 +103,10 @@ class BoundedShardRunTest(unittest.TestCase):
             root = Path(temporary)
             interrupted_bounds = ShardBounds(**{**BOUNDS.__dict__, "maximum_workers": 1})
 
-            def interrupted(shard: ShardInput, output: Path) -> int:
+            def interrupted(shard: ShardInput, output: Path, cancelled: threading.Event) -> int:
                 if shard.identifier == "second":
                     raise KeyboardInterrupt("fixture interruption")
-                return producer(shard, output)
+                return producer(shard, output, cancelled)
 
             with self.assertRaises(KeyboardInterrupt):
                 run_bounded_shards(
@@ -138,9 +141,9 @@ class BoundedShardRunTest(unittest.TestCase):
 
     def test_entity_output_and_wall_clock_bounds_fail_before_completion(self) -> None:
         mutations = (
-            (lambda shard, output: (output.write_bytes(b"{}\n"), 9)[1], "entity bound"),
-            (lambda shard, output: (output.write_bytes(b"x" * 4097), 1)[1], "size"),
-            (lambda shard, output: (time.sleep(0.01), output.write_bytes(b"{}\n"), 1)[2], "wall-clock"),
+            (lambda shard, output, cancelled: (output.write_bytes(b"{}\n"), 9)[1], "entity bound"),
+            (lambda shard, output, cancelled: (output.write_bytes(b"x" * 4097), 1)[1], "size"),
+            (lambda shard, output, cancelled: (time.sleep(0.01), output.write_bytes(b"{}\n"), 1)[2], "wall-clock"),
         )
         for implementation, message in mutations:
             with self.subTest(message=message), tempfile.TemporaryDirectory(prefix="bounded-shards-bound-") as temporary:
@@ -157,7 +160,7 @@ class BoundedShardRunTest(unittest.TestCase):
                     )
 
     def test_cpu_time_bound_fails_before_checkpoint(self) -> None:
-        def expensive(shard: ShardInput, output: Path) -> int:
+        def expensive(shard: ShardInput, output: Path, cancelled: threading.Event) -> int:
             started = time.process_time()
             value = b"fixture"
             while time.process_time() - started < 0.02:

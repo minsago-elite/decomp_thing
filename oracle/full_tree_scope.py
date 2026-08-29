@@ -121,7 +121,7 @@ def load_full_tree_scope(
     for rule in rules:
         if not any(rule["pathPrefix"].startswith(target) for target in targets):
             raise FullTreeScopeError("full-tree shard rule is outside normalized prefix-map targets")
-    for category in ("compilationUnits", "entities", "serializedBytes", "wallClockSeconds", "maximumResidentBytes"):
+    for category in ("compilationUnits", "cpuSeconds", "entities", "serializedBytes", "wallClockSeconds", "maximumResidentBytes"):
         if scope["bounds"]["perShard"][category] > scope["bounds"]["wholeRun"][category]:
             raise FullTreeScopeError(f"per-shard {category} bound exceeds the whole-run bound")
     return scope

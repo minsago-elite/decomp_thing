@@ -2,6 +2,7 @@
   "bounds": {
     "perShard": {
       "compilationUnits": 1000,
+      "cpuSeconds": 2400,
       "entities": 150000,
       "maximumResidentBytes": 4294967296,
       "serializedBytes": 536870912,
@@ -9,6 +10,7 @@
     },
     "wholeRun": {
       "compilationUnits": 3000,
+      "cpuSeconds": 7200,
       "entities": 500000,
       "maximumResidentBytes": 17179869184,
       "serializedBytes": 4294967296,

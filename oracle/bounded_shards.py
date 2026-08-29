@@ -47,7 +47,7 @@ class ShardBounds:
     maximum_workers: int
 
 
-ShardProducer = Callable[[ShardInput, Path], int]
+ShardProducer = Callable[[ShardInput, Path, threading.Event], int]
 
 
 def _sha256_file(path: Path, maximum: int) -> tuple[str, int]:
@@ -277,6 +277,7 @@ def run_bounded_shards(
     started = time.monotonic()
     cpu_started = _cpu_seconds()
     lock = threading.Lock()
+    cancelled = threading.Event()
 
     def execute(shard: ShardInput) -> dict[str, Any]:
         shard_started = time.monotonic()
@@ -287,7 +288,7 @@ def run_bounded_shards(
         os.close(descriptor)
         temporary = Path(temporary_name)
         try:
-            entities = producer(shard, temporary)
+            entities = producer(shard, temporary, cancelled)
             elapsed = time.monotonic() - shard_started
             if isinstance(entities, bool) or not isinstance(entities, int) or not 0 <= entities <= bounds.per_shard_entities:
                 raise BoundedShardError(f"shard {shard.identifier} exceeded its entity bound")
@@ -342,6 +343,7 @@ def run_bounded_shards(
                 if _cpu_seconds() - cpu_started > bounds.whole_run_cpu_seconds:
                     raise BoundedShardError("shard run exceeded its whole-run CPU-time bound")
         except BaseException:
+            cancelled.set()
             for future in futures:
                 future.cancel()
             raise

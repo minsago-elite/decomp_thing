@@ -103,9 +103,10 @@
     "bounds": {
       "type": "object",
       "additionalProperties": false,
-      "required": ["compilationUnits", "entities", "serializedBytes", "wallClockSeconds", "maximumResidentBytes"],
+      "required": ["compilationUnits", "cpuSeconds", "entities", "serializedBytes", "wallClockSeconds", "maximumResidentBytes"],
       "properties": {
         "compilationUnits": {"type": "integer", "minimum": 1},
+        "cpuSeconds": {"type": "integer", "minimum": 1},
         "entities": {"type": "integer", "minimum": 1},
         "serializedBytes": {"type": "integer", "minimum": 1},
         "wallClockSeconds": {"type": "integer", "minimum": 1},

@@ -1,0 +1,214 @@
+{
+  "$id": "https://github.com/minsago-elite/decomp_thing/oracle/full-tree-function-observations.schema.json",
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "additionalProperties": false,
+  "properties": {
+    "counts": {
+      "additionalProperties": false,
+      "properties": {
+        "emittedRvas": {
+          "minimum": 0,
+          "type": "integer"
+        },
+        "inlineOnly": {
+          "minimum": 0,
+          "type": "integer"
+        },
+        "scannedDies": {
+          "minimum": 1,
+          "type": "integer"
+        },
+        "units": {
+          "minimum": 1,
+          "type": "integer"
+        }
+      },
+      "required": [
+        "emittedRvas",
+        "inlineOnly",
+        "scannedDies",
+        "units"
+      ],
+      "type": "object"
+    },
+    "emitted": {
+      "items": {
+        "additionalProperties": false,
+        "properties": {
+          "aliases": {
+            "items": {
+              "$ref": "#/$defs/alias"
+            },
+            "minItems": 1,
+            "type": "array"
+          },
+          "id": {
+            "pattern": "^function-rva-0x(?:0|[1-9a-f][0-9a-f]{0,15})$",
+            "type": "string"
+          },
+          "ownerUnitIds": {
+            "items": {
+              "$ref": "#/$defs/unitId"
+            },
+            "minItems": 1,
+            "type": "array",
+            "uniqueItems": true
+          },
+          "rva": {
+            "$ref": "#/$defs/address"
+          }
+        },
+        "required": [
+          "aliases",
+          "id",
+          "ownerUnitIds",
+          "rva"
+        ],
+        "type": "object"
+      },
+      "type": "array"
+    },
+    "inlineOnly": {
+      "items": {
+        "additionalProperties": false,
+        "properties": {
+          "aliases": {
+            "items": {
+              "$ref": "#/$defs/alias"
+            },
+            "minItems": 1,
+            "type": "array"
+          },
+          "dieOffset": {
+            "$ref": "#/$defs/address"
+          },
+          "id": {
+            "pattern": "^inline-cu-[0-9a-f]{32}-0x(?:0|[1-9a-f][0-9a-f]*)$",
+            "type": "string"
+          },
+          "reasonCode": {
+            "const": "inline-no-emitted-range"
+          },
+          "unitId": {
+            "$ref": "#/$defs/unitId"
+          }
+        },
+        "required": [
+          "aliases",
+          "dieOffset",
+          "id",
+          "reasonCode",
+          "unitId"
+        ],
+        "type": "object"
+      },
+      "type": "array"
+    },
+    "oracle": {
+      "additionalProperties": false,
+      "properties": {
+        "inventoryIndexSha256": {
+          "$ref": "#/$defs/sha256"
+        },
+        "richArtifactSha256": {
+          "$ref": "#/$defs/sha256"
+        },
+        "scopeSha256": {
+          "$ref": "#/$defs/sha256"
+        }
+      },
+      "required": [
+        "inventoryIndexSha256",
+        "richArtifactSha256",
+        "scopeSha256"
+      ],
+      "type": "object"
+    },
+    "schemaVersion": {
+      "const": 1
+    },
+    "shard": {
+      "additionalProperties": false,
+      "properties": {
+        "id": {
+          "pattern": "^[a-z0-9]+(?:-[a-z0-9]+)*$",
+          "type": "string"
+        },
+        "inputSha256": {
+          "$ref": "#/$defs/sha256"
+        }
+      },
+      "required": [
+        "id",
+        "inputSha256"
+      ],
+      "type": "object"
+    }
+  },
+  "required": [
+    "counts",
+    "emitted",
+    "inlineOnly",
+    "oracle",
+    "schemaVersion",
+    "shard"
+  ],
+  "title": "Full-tree DWARF function observation shard",
+  "type": "object",
+  "$defs": {
+    "address": {
+      "pattern": "^0x(?:0|[1-9a-f][0-9a-f]{0,15})$",
+      "type": "string"
+    },
+    "alias": {
+      "additionalProperties": false,
+      "properties": {
+        "evidence": {
+          "items": {
+            "additionalProperties": false,
+            "properties": {
+              "kind": {
+                "const": "dwarf-subprogram"
+              },
+              "locator": {
+                "maxLength": 16384,
+                "minLength": 1,
+                "type": "string"
+              },
+              "unitId": {
+                "$ref": "#/$defs/unitId"
+              }
+            },
+            "required": [
+              "kind",
+              "locator",
+              "unitId"
+            ],
+            "type": "object"
+          },
+          "minItems": 1,
+          "type": "array",
+          "uniqueItems": true
+        },
+        "name": {
+          "maxLength": 4096,
+          "minLength": 1,
+          "type": "string"
+        }
+      },
+      "required": [
+        "evidence",
+        "name"
+      ],
+      "type": "object"
+    },
+    "sha256": {
+      "pattern": "^[0-9a-f]{64}$",
+      "type": "string"
+    },
+    "unitId": {
+      "pattern": "^cu-[0-9a-f]{32}$",
+      "type": "string"
+    }
+  }
+}
