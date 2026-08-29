@@ -53,7 +53,7 @@ profile. The build image proves how Clang was produced; the sandbox image
 proves how observable behavior was recorded. These are deliberately separate
 authorities.
 
-The 40 sorted reference cases cover C17, C++20 templates, Objective-C,
+The 48 sorted reference cases cover C17, C++20 templates, Objective-C,
 syntax-only and module flags, preprocessing text and macro state, include
 search/tracing, dependency files, PCH emission, LLVM IR, assembly and ELF
 object emission, x86-64/i386 and explicitly unsupported target selection,
@@ -63,6 +63,14 @@ color, fatal includes, and error limits. Inputs, argv, environment, exit code,
 stdout/stderr, absent paths, and every emitted artifact byte are authenticated.
 The corpus uses no output normalization. Two independent clean recordings must
 be byte-identical before changed reference evidence is accepted.
+
+The preprocessing state-machine cases additionally cover guarded include
+cycles, framework lookup, malformed macro definitions, `#pragma once`, quoted
+response-file paths, response-file stdin, exact valid-PCH reuse, and rejection
+of a PCH built for the wrong target. PCH reuse is recorded in two passes: the
+reference compiler first creates the authenticated PCH, its length and SHA-256
+are verified, and only then is that exact artifact injected into the reuse
+case.
 
 ## Verify
 
