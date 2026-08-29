@@ -1,0 +1,14 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://github.com/minsago-elite/decomp_thing/oracle/clang-diagnostic-matrix.schema.json",
+  "title": "Versioned Clang diagnostic fidelity matrix",
+  "type": "object", "additionalProperties": false,
+  "required": ["schemaVersion", "id", "corpusSha256", "policy", "cases", "matrixSha256"],
+  "properties": {
+    "schemaVersion": {"const": 1}, "id": {"type": "string"}, "corpusSha256": {"$ref": "#/$defs/sha"},
+    "policy": {"type": "object", "additionalProperties": false, "required": ["locale", "terminalWidth", "forbiddenNormalizations", "pathNormalization"], "properties": {"locale": {"const": "C"}, "terminalWidth": {"const": "non-tty-no-width"}, "forbiddenNormalizations": {"type": "array", "items": {"type": "string"}}, "pathNormalization": {"type": "string"}}},
+    "cases": {"type": "array", "items": {"type": "object", "additionalProperties": false, "required": ["id", "ownerSubsystem", "categories", "exitCode", "stdoutSha256", "stderrSha256", "normalizations", "mismatchIds"], "properties": {"id": {"type": "string"}, "ownerSubsystem": {"type": "string"}, "categories": {"type": "array", "items": {"type": "string"}}, "exitCode": {"type": "integer"}, "stdoutSha256": {"$ref": "#/$defs/sha"}, "stderrSha256": {"$ref": "#/$defs/sha"}, "normalizations": {"type": "object"}, "mismatchIds": {"type": "object", "additionalProperties": {"type": "string", "pattern": "^clang-diagnostic-[0-9a-f]{32}$"}}}}},
+    "matrixSha256": {"$ref": "#/$defs/sha"}
+  },
+  "$defs": {"sha": {"type": "string", "pattern": "^[0-9a-f]{64}$"}}
+}

@@ -1,0 +1,345 @@
+{
+  "cases": [
+    {
+      "categories": [
+        "assembler",
+        "diagnostics",
+        "exit-status",
+        "stderr"
+      ],
+      "exitCode": 1,
+      "id": "assemble-invalid",
+      "mismatchIds": {
+        "exitCode": "clang-diagnostic-89da5031b79aa3b5522a32ca9f426c54",
+        "order": "clang-diagnostic-8fe3a4b93ddbd3e61f528233c9272c57",
+        "stderr": "clang-diagnostic-4b1adbf6deccad05267572bb293b18c6",
+        "stdout": "clang-diagnostic-e67754c0ee86a706e8fbc2ba40d0a125"
+      },
+      "normalizations": {
+        "stderr": [],
+        "stdout": []
+      },
+      "ownerSubsystem": "clang-integrated-assembler",
+      "stderrSha256": "312e40d49b1039eb9cde140249c46081779c27e049b384c776c7d0fc415b7bc3",
+      "stdoutSha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+    },
+    {
+      "categories": [
+        "color",
+        "diagnostics",
+        "exit-status",
+        "stderr"
+      ],
+      "exitCode": 1,
+      "id": "diagnostic-color-always",
+      "mismatchIds": {
+        "exitCode": "clang-diagnostic-e38737afb544aefaec3d2aecf1db8fa9",
+        "order": "clang-diagnostic-d3da0ce6aa6fcc1b932ffdabeeac4670",
+        "stderr": "clang-diagnostic-2f9755a6d74f20ede934e5272967a8ef",
+        "stdout": "clang-diagnostic-4ce18ea9415d878b28a0cf3514266952"
+      },
+      "normalizations": {
+        "stderr": [],
+        "stdout": []
+      },
+      "ownerSubsystem": "clang-diagnostics-renderer",
+      "stderrSha256": "cd7cdddf4cb3e801ddc7811e36c24b080a42d83fcd48a7bf6d86cda800348c15",
+      "stdoutSha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+    },
+    {
+      "categories": [
+        "color",
+        "diagnostics",
+        "exit-status",
+        "stderr"
+      ],
+      "exitCode": 1,
+      "id": "diagnostic-color-never",
+      "mismatchIds": {
+        "exitCode": "clang-diagnostic-675af275a160a80a6733d8874ce7ac28",
+        "order": "clang-diagnostic-36eedf3cf2eb79b808722b095f26f5f0",
+        "stderr": "clang-diagnostic-e65b4e9cbabee9f5bd2b5617aeb78dfb",
+        "stdout": "clang-diagnostic-6c5d3dee52c0e6a211e390d0ab7e0d8b"
+      },
+      "normalizations": {
+        "stderr": [],
+        "stdout": []
+      },
+      "ownerSubsystem": "clang-diagnostics-renderer",
+      "stderrSha256": "f505eb61062759fde30b4db5550ef7d6d7c3239afcf548c0a67e6197d9e034df",
+      "stdoutSha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+    },
+    {
+      "categories": [
+        "diagnostic-limits",
+        "diagnostics",
+        "exit-status",
+        "stderr"
+      ],
+      "exitCode": 1,
+      "id": "diagnostic-error-limit",
+      "mismatchIds": {
+        "exitCode": "clang-diagnostic-90ecc7b759c8aaeb82fc885a59a8d426",
+        "order": "clang-diagnostic-215146213adca882d8efcc5a7ece531d",
+        "stderr": "clang-diagnostic-05820cda7e76d0e1f5e3bcd7cd2f10a2",
+        "stdout": "clang-diagnostic-57899ba7d7796aa0dd4e552d2d405e01"
+      },
+      "normalizations": {
+        "stderr": [],
+        "stdout": []
+      },
+      "ownerSubsystem": "clang-diagnostics-engine",
+      "stderrSha256": "e3b25c66c9a86e89a4335acc695b28150ece6453bcc423775c7d8871f5b2ddd0",
+      "stdoutSha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+    },
+    {
+      "categories": [
+        "caret-ranges",
+        "diagnostics",
+        "exit-status",
+        "fix-its",
+        "stderr"
+      ],
+      "exitCode": 1,
+      "id": "diagnostic-fixit",
+      "mismatchIds": {
+        "exitCode": "clang-diagnostic-40edbc1196fa708bac77ef089efb81c5",
+        "order": "clang-diagnostic-9d7a5112258a42b0e4f42e108a1fb68e",
+        "stderr": "clang-diagnostic-271d53836576152aa288d1bc35cebb65",
+        "stdout": "clang-diagnostic-add8f59d541d55154a14a3c6681f5fb4"
+      },
+      "normalizations": {
+        "stderr": [],
+        "stdout": []
+      },
+      "ownerSubsystem": "clang-parser",
+      "stderrSha256": "8691aa04c30a9acbce50c62e184319a70f6304bbddfad710c28da9cea39e0b0d",
+      "stdoutSha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+    },
+    {
+      "categories": [
+        "diagnostics",
+        "exit-status",
+        "option-handling",
+        "stderr"
+      ],
+      "exitCode": 1,
+      "id": "diagnostic-invalid-option",
+      "mismatchIds": {
+        "exitCode": "clang-diagnostic-285e2a6a34134b159138c3d7c7ea1171",
+        "order": "clang-diagnostic-be4a4f2b147cc3552d1f3b279de71767",
+        "stderr": "clang-diagnostic-196b2c54c3515b227f49ed85182f5465",
+        "stdout": "clang-diagnostic-2d4e4a29d40f0a24fa108ae1fee12a7d"
+      },
+      "normalizations": {
+        "stderr": [],
+        "stdout": []
+      },
+      "ownerSubsystem": "clang-driver-options",
+      "stderrSha256": "4c13e0488ee5daa7c579eab82beadcb2b22cbb8a06d0a87faaa36f6200477e41",
+      "stdoutSha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+    },
+    {
+      "categories": [
+        "diagnostics",
+        "fatal-errors",
+        "include-search",
+        "stderr"
+      ],
+      "exitCode": 1,
+      "id": "diagnostic-missing-include",
+      "mismatchIds": {
+        "exitCode": "clang-diagnostic-64276cf450a0e4b7c912a5ed34f71060",
+        "order": "clang-diagnostic-9603c64bbad953112fe7c29834da2604",
+        "stderr": "clang-diagnostic-88f3d4dd77bed1646a0dcbc8609aca0a",
+        "stdout": "clang-diagnostic-4b2b2e3a3d0d377f5d1d15e1aaff882a"
+      },
+      "normalizations": {
+        "stderr": [],
+        "stdout": []
+      },
+      "ownerSubsystem": "clang-lex",
+      "stderrSha256": "eb7d238250b103d61cc01d26abc0f583aff7bb08b5c9d46ba1491b39f8c54d76",
+      "stdoutSha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+    },
+    {
+      "categories": [
+        "diagnostics",
+        "exit-status",
+        "stderr"
+      ],
+      "exitCode": 1,
+      "id": "diagnostic-syntax",
+      "mismatchIds": {
+        "exitCode": "clang-diagnostic-3c12107d9b4d6d933e20019cab584e05",
+        "order": "clang-diagnostic-00e52b364244dee0a4267ad6c0e8b1ca",
+        "stderr": "clang-diagnostic-4994e6e8ca6823330aa55db623217108",
+        "stdout": "clang-diagnostic-9fcdefdeb79d80c75e4608dce2e472cf"
+      },
+      "normalizations": {
+        "stderr": [],
+        "stdout": []
+      },
+      "ownerSubsystem": "clang-parser",
+      "stderrSha256": "f505eb61062759fde30b4db5550ef7d6d7c3239afcf548c0a67e6197d9e034df",
+      "stdoutSha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+    },
+    {
+      "categories": [
+        "cxx",
+        "diagnostics",
+        "notes",
+        "stderr",
+        "templates"
+      ],
+      "exitCode": 1,
+      "id": "diagnostic-template-backtrace",
+      "mismatchIds": {
+        "exitCode": "clang-diagnostic-803fd8201432222f4e0624b8c6f40cb0",
+        "order": "clang-diagnostic-7f06795a60aed1ebcae7eda45c7dedee",
+        "stderr": "clang-diagnostic-39e900c01fe3410cac12c51e705dfb23",
+        "stdout": "clang-diagnostic-9c9a019a16f6e1940c53a6b76127f4fb"
+      },
+      "normalizations": {
+        "stderr": [],
+        "stdout": []
+      },
+      "ownerSubsystem": "clang-sema",
+      "stderrSha256": "6bf49fcd6289a42582e39b5b951ae0d6c45f11090a65c4049957a65af9e1afa7",
+      "stdoutSha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+    },
+    {
+      "categories": [
+        "diagnostics",
+        "option-provenance",
+        "stderr",
+        "warnings"
+      ],
+      "exitCode": 0,
+      "id": "diagnostic-warning-option",
+      "mismatchIds": {
+        "exitCode": "clang-diagnostic-870b12b37eadc315a041ac7e8206215d",
+        "order": "clang-diagnostic-2d1f6120119965e75c88694ae03e2c22",
+        "stderr": "clang-diagnostic-a0b07ddd623e19883b6a73a99436cf50",
+        "stdout": "clang-diagnostic-dbb31151ee54dfc3c41f67ee5aeeffe6"
+      },
+      "normalizations": {
+        "stderr": [],
+        "stdout": []
+      },
+      "ownerSubsystem": "clang-sema",
+      "stderrSha256": "2f44dbe8f89c036d1d7d41a152cfa20f974567e85fc4dad479f5ee98c77a0da3",
+      "stdoutSha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+    },
+    {
+      "categories": [
+        "diagnostics",
+        "exit-status",
+        "linking",
+        "missing-tools",
+        "stderr"
+      ],
+      "exitCode": 1,
+      "id": "driver-missing-linker",
+      "mismatchIds": {
+        "exitCode": "clang-diagnostic-746d6abcf5e402807e920c28e72366b8",
+        "order": "clang-diagnostic-27d419ab160b817f9dfff3aecd4755e5",
+        "stderr": "clang-diagnostic-53f650376cb173274067ed6f74bbe751",
+        "stdout": "clang-diagnostic-2d61d7afee9930936104f91025958237"
+      },
+      "normalizations": {
+        "stderr": [],
+        "stdout": []
+      },
+      "ownerSubsystem": "clang-driver-toolchain",
+      "stderrSha256": "9bbcfbe3fa8d798a9392baa9b4e4c0662c99389ed8b0e9de9e0a7e43a73f46da",
+      "stdoutSha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+    },
+    {
+      "categories": [
+        "diagnostics",
+        "exit-status",
+        "linking",
+        "stderr"
+      ],
+      "exitCode": 1,
+      "id": "link-undefined-symbol",
+      "mismatchIds": {
+        "exitCode": "clang-diagnostic-b1748710209e2d03d75ab2327d3998bb",
+        "order": "clang-diagnostic-e3ff552ec68b154c558c6420a4a4d9c4",
+        "stderr": "clang-diagnostic-a24593d75a3cab67d2ecb9a1d2e3cd6e",
+        "stdout": "clang-diagnostic-959da1568102c9cb103c64835713ec57"
+      },
+      "normalizations": {
+        "stderr": [],
+        "stdout": []
+      },
+      "ownerSubsystem": "clang-driver-linker",
+      "stderrSha256": "28f05c5e83e3242fa698fb943b16fd4bc51ccc2f398433cee182acf369183533",
+      "stdoutSha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+    },
+    {
+      "categories": [
+        "diagnostics",
+        "exit-status",
+        "response-files",
+        "stderr"
+      ],
+      "exitCode": 1,
+      "id": "response-file-recursion",
+      "mismatchIds": {
+        "exitCode": "clang-diagnostic-d7cc8e832f186c7c439c5742ec2969bf",
+        "order": "clang-diagnostic-4a736b3024bf614bbf31674419df35cf",
+        "stderr": "clang-diagnostic-ecff0592d880944f451886cb2cbb2898",
+        "stdout": "clang-diagnostic-07e0d5fac0f1a9093f4af3a9aadedb17"
+      },
+      "normalizations": {
+        "stderr": [],
+        "stdout": []
+      },
+      "ownerSubsystem": "clang-driver-response-files",
+      "stderrSha256": "6b9f806c8964a8e39c055790ba693747da790ba643e43bd91ab127f4b0973e30",
+      "stdoutSha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+    },
+    {
+      "categories": [
+        "diagnostics",
+        "exit-status",
+        "target-selection",
+        "unsupported-mode"
+      ],
+      "exitCode": 1,
+      "id": "target-unsupported-aarch64",
+      "mismatchIds": {
+        "exitCode": "clang-diagnostic-8bca1aa5140b7fcb6c56734cb7cbffad",
+        "order": "clang-diagnostic-77a4171e41b06037b568587550f7d7f1",
+        "stderr": "clang-diagnostic-4139850ad901583f6df664565feba6d3",
+        "stdout": "clang-diagnostic-af1301eff91aabe29a39f486364eca94"
+      },
+      "normalizations": {
+        "stderr": [],
+        "stdout": []
+      },
+      "ownerSubsystem": "clang-driver-targets",
+      "stderrSha256": "eabaea2b1ac71b1b6b8847bfaa8dc4c82baece22364b855dbae6ebb1a72c4d9a",
+      "stdoutSha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+    }
+  ],
+  "corpusSha256": "383bd65c89deae15e8c0d3b133228eeec674c6ff45238d8597731607b70804c9",
+  "id": "clang-22.1.6-diagnostics-v1",
+  "matrixSha256": "dc8a92f667743ff1ebeec79503dfe2bd06b6c0d427c1f70fdc2cb6cbee748d72",
+  "policy": {
+    "forbiddenNormalizations": [
+      "diagnostic-wording",
+      "identifier",
+      "line-column",
+      "option-name",
+      "ordering",
+      "severity"
+    ],
+    "locale": "C",
+    "pathNormalization": "only exact authenticated workspace/oracle roots",
+    "terminalWidth": "non-tty-no-width"
+  },
+  "schemaVersion": 1
+}
