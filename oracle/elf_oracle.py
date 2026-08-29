@@ -1086,6 +1086,7 @@ def _assemble_manifest(
     source_relative: str,
     build_path: Path,
     build_relative: str,
+    artifact_root: Path | None = None,
 ) -> dict[str, Any]:
     source_payload = _read_regular_file(source_path, "source lock")
     source_sha256 = _sha256_bytes(source_payload)
@@ -1095,8 +1096,11 @@ def _assemble_manifest(
 
     full_relative = build_record["outputs"]["full"]
     stripped_relative = build_record["outputs"]["stripped"]
-    full_path = _resolve_within(manifest_directory, full_relative, "full artifact")
-    stripped_path = _resolve_within(manifest_directory, stripped_relative, "stripped artifact")
+    resolved_artifact_root = manifest_directory if artifact_root is None else artifact_root
+    full_path = _resolve_within(resolved_artifact_root, full_relative, "full artifact")
+    stripped_path = _resolve_within(
+        resolved_artifact_root, stripped_relative, "stripped artifact"
+    )
     full = _artifact_record(full_path, full_relative, "full artifact")
     stripped = _artifact_record(stripped_path, stripped_relative, "stripped artifact")
     equivalence = _derive_equivalence(full, stripped)
@@ -1120,6 +1124,8 @@ def create_oracle_manifest(
     manifest_path: Path,
     source_lock_path: Path,
     build_record_path: Path,
+    *,
+    artifact_root: Path | None = None,
 ) -> dict[str, Any]:
     """Create a manifest after proving the supplied ELF twin contract."""
 
@@ -1139,6 +1145,7 @@ def create_oracle_manifest(
         source_relative,
         build_record_path.absolute(),
         build_relative,
+        None if artifact_root is None else artifact_root.absolute(),
     )
     temporary_path: Path | None = None
     try:
@@ -1203,7 +1210,11 @@ def _compare_exact(recorded: Any, observed: Any, path: str) -> None:
         )
 
 
-def verify_oracle_manifest(manifest_path: Path) -> dict[str, Any]:
+def verify_oracle_manifest(
+    manifest_path: Path,
+    *,
+    artifact_root: Path | None = None,
+) -> dict[str, Any]:
     """Recompute every recorded input, artifact, and equivalence field."""
 
     manifest_path = manifest_path.absolute()
@@ -1235,6 +1246,7 @@ def verify_oracle_manifest(manifest_path: Path) -> dict[str, Any]:
         source_record["path"],
         build_path,
         build_record["path"],
+        None if artifact_root is None else artifact_root.absolute(),
     )
     _compare_exact(data, expected, "oracle artifact manifest")
     return data

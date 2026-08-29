@@ -12,8 +12,6 @@ jobs:
     timeout-minutes: 120
     steps:
       - uses: actions/checkout@v7
-        with:
-          lfs: true
       - name: Build the pinned LLVM toolchain image
         run: |
           docker buildx build \
@@ -27,7 +25,10 @@ jobs:
           docker image inspect --format '{{.Id}}' decomp-llvm-oracle-toolchain:22.1.6 \
             | tee "$RUNNER_TEMP/image-digest.txt"
       - name: Fetch and authenticate LLVM 22.1.6
-        run: python3 scripts/fetch-llvm-oracle-source.py "$RUNNER_TEMP/source-cache"
+        run: |
+          python3 scripts/fetch-llvm-oracle-source.py "$RUNNER_TEMP/source-cache"
+          python3 scripts/fetch-llvm-oracle-artifacts.py \
+            "$RUNNER_TEMP/reference-oracle"
       - name: Build the monolithic Clang oracle pair
         run: |
           # The container intentionally drops every capability, including the
@@ -97,14 +98,15 @@ jobs:
           cp "$RUNNER_TEMP/image-digest.txt" "$RUNNER_TEMP/oracle-output/"
           sha256sum "$RUNNER_TEMP/oracle-output"/clang-driver.*
           stat --format='%n %s' "$RUNNER_TEMP/oracle-output"/clang-driver.*
-      - name: Prove the clean rebuild matches the checked oracle pair
+      - name: Prove the clean rebuild matches the released oracle pair
         run: |
           cmp "$RUNNER_TEMP/oracle-output/clang-driver.full" \
-            oracle/llvm/22.1.6/artifacts/clang-driver.full
+            "$RUNNER_TEMP/reference-oracle/artifacts/clang-driver.full"
           cmp "$RUNNER_TEMP/oracle-output/clang-driver.stripped" \
-            oracle/llvm/22.1.6/artifacts/clang-driver.stripped
+            "$RUNNER_TEMP/reference-oracle/artifacts/clang-driver.stripped"
           python3 scripts/verify-llvm-oracle-artifacts.py \
-            oracle/llvm/22.1.6/oracle-manifest.json
+            oracle/llvm/22.1.6/oracle-manifest.json \
+            --artifact-root "$RUNNER_TEMP/reference-oracle"
       - uses: actions/upload-artifact@v7
         with:
           name: llvm-oracle-rebuild

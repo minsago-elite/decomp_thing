@@ -1,0 +1,28 @@
+{
+  "artifacts": {
+    "full": {
+      "bytes": 529730248,
+      "path": "artifacts/clang-driver.full",
+      "sha256": "c36ea7da092273ee53d6955557cd8eb7dcd38da92e1f577249968330a275981a",
+      "url": "https://github.com/minsago-elite/decomp_thing-oracle-artifacts/releases/download/clang-llvm-22.1.6-v1/clang-driver.full"
+    },
+    "stripped": {
+      "bytes": 84561368,
+      "path": "artifacts/clang-driver.stripped",
+      "sha256": "65e57857bfaf9f98a552f2fd371938e11175158bc4c11c849bd6ecbfef30c006",
+      "url": "https://github.com/minsago-elite/decomp_thing-oracle-artifacts/releases/download/clang-llvm-22.1.6-v1/clang-driver.stripped"
+    }
+  },
+  "oracle": {
+    "artifactManifestPath": "oracle-manifest.json",
+    "artifactManifestSha256": "5b6f6e923e05ae4d51aefab55c8028d543d05e76b25a7c075c4e884005ce6b40",
+    "id": "clang-driver-22.1.6",
+    "version": "22.1.6"
+  },
+  "release": {
+    "pageUrl": "https://github.com/minsago-elite/decomp_thing-oracle-artifacts/releases/tag/clang-llvm-22.1.6-v1",
+    "repository": "minsago-elite/decomp_thing-oracle-artifacts",
+    "tag": "clang-llvm-22.1.6-v1"
+  },
+  "schemaVersion": 1
+}

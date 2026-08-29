@@ -1,0 +1,54 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://github.com/minsago-elite/decomp_thing/oracle/release-artifacts.schema.json",
+  "title": "Oracle release artifact lock",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schemaVersion", "oracle", "release", "artifacts"],
+  "properties": {
+    "schemaVersion": {"const": 1},
+    "oracle": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["id", "version", "artifactManifestPath", "artifactManifestSha256"],
+      "properties": {
+        "id": {"type": "string", "minLength": 1},
+        "version": {"type": "string", "minLength": 1},
+        "artifactManifestPath": {"type": "string", "pattern": "^[^/]+$"},
+        "artifactManifestSha256": {"type": "string", "pattern": "^[0-9a-f]{64}$"}
+      }
+    },
+    "release": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["repository", "tag", "pageUrl"],
+      "properties": {
+        "repository": {"type": "string", "pattern": "^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+$"},
+        "tag": {"type": "string", "pattern": "^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$"},
+        "pageUrl": {"type": "string", "format": "uri", "pattern": "^https://github\\.com/"}
+      }
+    },
+    "artifacts": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["full", "stripped"],
+      "properties": {
+        "full": {"$ref": "#/$defs/artifact"},
+        "stripped": {"$ref": "#/$defs/artifact"}
+      }
+    }
+  },
+  "$defs": {
+    "artifact": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["path", "bytes", "sha256", "url"],
+      "properties": {
+        "path": {"type": "string", "pattern": "^artifacts/[^/]+$"},
+        "bytes": {"type": "integer", "minimum": 1, "maximum": 1073741824},
+        "sha256": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
+        "url": {"type": "string", "format": "uri", "pattern": "^https://github\\.com/"}
+      }
+    }
+  }
+}

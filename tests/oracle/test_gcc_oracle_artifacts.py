@@ -276,6 +276,27 @@ class GccOracleArtifactTest(unittest.TestCase):
                 created["equivalence"]["metadataDelta"]["removedDwarfSections"],
             )
 
+    def test_manifest_verification_accepts_an_explicit_artifact_root(self) -> None:
+        with self.staged_pair() as (manifest_path, source_lock, build_path, full, stripped):
+            created = create_oracle_manifest(manifest_path, source_lock, build_path)
+            with tempfile.TemporaryDirectory(prefix="external-oracle-artifacts-") as temporary:
+                external_root = Path(temporary)
+                external = external_root / "artifacts"
+                external.mkdir()
+                shutil.copyfile(full, external / full.name)
+                shutil.copyfile(stripped, external / stripped.name)
+                full.unlink()
+                stripped.unlink()
+
+                verified = verify_oracle_manifest(
+                    manifest_path,
+                    artifact_root=external_root,
+                )
+
+            self.assertEqual(created, verified)
+            with self.assertRaisesRegex(VerificationError, "full artifact"):
+                verify_oracle_manifest(manifest_path)
+
     def test_executable_load_byte_mutation_breaks_twin_creation(self) -> None:
         with self.staged_pair() as (manifest_path, source_lock, build_path, _, stripped):
             inspected = inspect_elf(stripped)

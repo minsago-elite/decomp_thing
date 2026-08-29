@@ -10,8 +10,6 @@ jobs:
     timeout-minutes: 45
     steps:
       - uses: actions/checkout@v7
-        with:
-          lfs: true
       - uses: actions/setup-python@v7
         with:
           python-version: "3.12"
@@ -23,6 +21,12 @@ jobs:
         run: |
           python3 scripts/verify-llvm-oracle-source.py --metadata-only
           python3 scripts/fetch-llvm-oracle-source.py "$RUNNER_TEMP/llvm-source"
+      - name: Fetch hash-locked Clang release artifacts
+        run: |
+          python3 scripts/fetch-llvm-oracle-artifacts.py \
+            "$RUNNER_TEMP/llvm-oracle-release"
+          echo "LLVM_ORACLE_ARTIFACT_ROOT=$RUNNER_TEMP/llvm-oracle-release" \
+            >> "$GITHUB_ENV"
       - name: Reproduce and verify the recorded LLVM toolchain image
         run: |
           docker buildx build \
@@ -58,12 +62,17 @@ jobs:
       - name: Verify checked Clang ELF twins
         run: |
           python3 scripts/verify-llvm-oracle-artifacts.py \
-            oracle/llvm/22.1.6/oracle-manifest.json
+            oracle/llvm/22.1.6/oracle-manifest.json \
+            --artifact-root "$LLVM_ORACLE_ARTIFACT_ROOT"
       - name: Regenerate deterministic Clang function oracle
         run: |
           python3 scripts/generate-llvm-function-recovery-oracle.py \
             --manifest oracle/llvm/22.1.6/oracle-manifest.json \
             --exclusions oracle/llvm/22.1.6/function-recovery-exclusions.json \
+            --rich-artifact \
+              "$LLVM_ORACLE_ARTIFACT_ROOT/artifacts/clang-driver.full" \
+            --stripped-artifact \
+              "$LLVM_ORACLE_ARTIFACT_ROOT/artifacts/clang-driver.stripped" \
             --output "$RUNNER_TEMP/function-recovery-oracle.json"
           cmp "$RUNNER_TEMP/function-recovery-oracle.json" \
             oracle/llvm/22.1.6/function-recovery-oracle.json
@@ -76,6 +85,7 @@ jobs:
         run: |
           python3 -m unittest \
             tests.oracle.test_capture_oracle_tools \
+            tests.oracle.test_release_artifacts \
             tests.oracle.test_stable_toolchain_reproduction \
             tests.oracle.test_llvm_source_lock \
             tests.oracle.test_llvm_oracle_profiles \

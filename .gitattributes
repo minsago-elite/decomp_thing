@@ -1,1 +1,0 @@
-oracle/llvm/*/artifacts/* filter=lfs diff=lfs merge=lfs -text

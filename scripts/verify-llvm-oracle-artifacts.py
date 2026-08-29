@@ -18,9 +18,17 @@ from oracle.source_lock import VerificationError  # noqa: E402
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("manifest", type=Path)
+    parser.add_argument(
+        "--artifact-root",
+        type=Path,
+        help="root containing the manifest-recorded artifacts/ paths",
+    )
     arguments = parser.parse_args()
     try:
-        manifest = verify_oracle_manifest(arguments.manifest)
+        manifest = verify_oracle_manifest(
+            arguments.manifest,
+            artifact_root=arguments.artifact_root,
+        )
     except VerificationError as error:
         print(f"verification failed: {error}", file=sys.stderr)
         return 1
@@ -33,4 +41,3 @@ def main() -> int:
 
 if __name__ == "__main__":
     raise SystemExit(main())
-

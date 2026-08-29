@@ -3,16 +3,21 @@
 This profile is the source-aligned Clang counterpart to the GCC oracle. It
 pins the signed upstream LLVM 22.1.6 release, rebuilds a monolithic X86 Clang
 driver in a closed Ubuntu/LLVM/CMake/Ninja environment, and checks in two
-code-identical ELF artifacts:
+code-identical ELF artifact identities:
 
 - `artifacts/clang-driver.full` retains zlib-compressed DWARF and `.symtab`;
 - `artifacts/clang-driver.stripped` removes DWARF and static symbols without
   changing allocated sections, executable load bytes, ELF identity, or the
   GNU Build ID.
 
-The artifact files use Git LFS. Run `git lfs install` before cloning or use
-`git lfs pull` after installing LFS. Verification rejects pointer files and
-any artifact, source-lock, build-record, or manifest byte change.
+The binary files are not stored in this repository or in Git history. They are
+ordinary release assets in the separate
+[`minsago-elite/decomp_thing-oracle-artifacts`](https://github.com/minsago-elite/decomp_thing-oracle-artifacts)
+repository under the non-moving `clang-llvm-22.1.6-v1` release tag.
+`release-artifacts.json` locks that repository, tag, URLs, byte lengths, and
+SHA-256 digests. The bounded fetcher downloads into a caller-selected temporary
+root, rejects untrusted redirects or encodings, and installs a file only after
+full verification.
 
 `toolchain-reproduction.json` separates stable rebuild identity from Docker
 layer identity. It locks the immutable Ubuntu base, Dockerfile bytes,
@@ -56,17 +61,23 @@ Install the exact Python generation dependencies, then run:
 python3 -m pip install -r requirements/oracle-generation.txt
 python3 scripts/verify-llvm-oracle-source.py --metadata-only
 python3 scripts/fetch-llvm-oracle-source.py /tmp/llvm-oracle-source
+python3 scripts/fetch-llvm-oracle-artifacts.py /tmp/llvm-oracle-release
 python3 scripts/verify-llvm-oracle-artifacts.py \
-  oracle/llvm/22.1.6/oracle-manifest.json
+  oracle/llvm/22.1.6/oracle-manifest.json \
+  --artifact-root /tmp/llvm-oracle-release
+cp -a oracle/llvm/22.1.6 /tmp/llvm-oracle-manifest
 python3 scripts/create-llvm-oracle-manifest.py \
-  --source-lock oracle/llvm/22.1.6/source-lock.json \
-  --build-record oracle/llvm/22.1.6/build-record.json \
-  --output /tmp/llvm-oracle-manifest.json
-cmp /tmp/llvm-oracle-manifest.json \
+  --source-lock /tmp/llvm-oracle-manifest/source-lock.json \
+  --build-record /tmp/llvm-oracle-manifest/build-record.json \
+  --artifact-root /tmp/llvm-oracle-release \
+  --output /tmp/llvm-oracle-manifest/oracle-manifest.generated.json
+cmp /tmp/llvm-oracle-manifest/oracle-manifest.generated.json \
   oracle/llvm/22.1.6/oracle-manifest.json
 python3 scripts/generate-llvm-function-recovery-oracle.py \
   --manifest oracle/llvm/22.1.6/oracle-manifest.json \
   --exclusions oracle/llvm/22.1.6/function-recovery-exclusions.json \
+  --rich-artifact /tmp/llvm-oracle-release/artifacts/clang-driver.full \
+  --stripped-artifact /tmp/llvm-oracle-release/artifacts/clang-driver.stripped \
   --output /tmp/llvm-function-oracle.json
 cmp /tmp/llvm-function-oracle.json \
   oracle/llvm/22.1.6/function-recovery-oracle.json
@@ -97,7 +108,8 @@ rebuild. It constructs the pinned toolchain image, fetches and authenticates
 the upstream archive, disables network access for compilation, executes every
 command recorded in `build-record.json`, and uploads the full/stripped pair,
 tool records, and image digest for review. A rebuilt pair is not accepted
-until manifest generation and every verification command above pass.
+until it matches the separately released pair byte-for-byte and every
+verification command above passes.
 
 The required `LLVM oracle model` workflow separately rebuilds and verifies the
 stable toolchain recipe on every push and pull request. It rejects recipe,

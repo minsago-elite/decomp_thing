@@ -22,10 +22,18 @@ def main() -> int:
     parser.add_argument("--source-lock", required=True, type=Path)
     parser.add_argument("--build-record", required=True, type=Path)
     parser.add_argument("--output", required=True, type=Path)
+    parser.add_argument(
+        "--artifact-root",
+        type=Path,
+        help="root containing the build-record artifacts/ paths",
+    )
     arguments = parser.parse_args()
     try:
         manifest = create_oracle_manifest(
-            arguments.output, arguments.source_lock, arguments.build_record
+            arguments.output,
+            arguments.source_lock,
+            arguments.build_record,
+            artifact_root=arguments.artifact_root,
         )
     except VerificationError as error:
         print(f"manifest creation failed: {error}", file=sys.stderr)
@@ -39,4 +47,3 @@ def main() -> int:
 
 if __name__ == "__main__":
     raise SystemExit(main())
-

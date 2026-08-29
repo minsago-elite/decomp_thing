@@ -7,3 +7,4 @@ input/
 output/
 __pycache__/
 *.py[cod]
+oracle/llvm/*/artifacts/
