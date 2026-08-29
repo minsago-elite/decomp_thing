@@ -29,6 +29,28 @@ class FullTreeReleaseEvidenceError(ValueError):
     """Raised when full-tree release evidence is incomplete or inconsistent."""
 
 
+def validate_full_tree_release_asset_lock(lock: dict[str, Any], *, report_payload: bytes) -> None:
+    try:
+        import fastjsonschema  # type: ignore[import-untyped]
+        schema = json.loads(Path(__file__).with_name("full-tree-release-assets.schema.json").read_text(encoding="utf-8"))
+        fastjsonschema.compile(schema)(lock)
+    except Exception as error:
+        raise FullTreeReleaseEvidenceError(f"release asset lock fails validation: {error}") from error
+    release = lock["release"]
+    expected_page = f"https://github.com/{release['repository']}/releases/tag/{release['tag']}"
+    if release["pageUrl"] != expected_page:
+        raise FullTreeReleaseEvidenceError("release asset page URL differs")
+    assets = lock["assets"]
+    if assets != sorted(assets, key=lambda item: item["name"]) or len({item["name"] for item in assets}) != len(assets):
+        raise FullTreeReleaseEvidenceError("release assets are not ordered and unique")
+    base = f"https://github.com/{release['repository']}/releases/download/{release['tag']}"
+    if any(item["url"] != f"{base}/{item['name']}" for item in assets):
+        raise FullTreeReleaseEvidenceError("release asset URL differs")
+    report = next((item for item in assets if item["name"] == "full-tree-release-evidence.json"), None)
+    if report is None or report["bytes"] != len(report_payload) or report["sha256"] != _sha(report_payload):
+        raise FullTreeReleaseEvidenceError("release asset lock does not bind the checked machine report")
+
+
 def _sha(payload: bytes) -> str:
     return hashlib.sha256(payload).hexdigest()
 

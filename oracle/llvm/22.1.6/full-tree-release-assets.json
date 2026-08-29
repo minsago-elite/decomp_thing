@@ -1,0 +1,40 @@
+{
+  "assets": [
+    {
+      "bytes": 18981,
+      "name": "full-tree-release-evidence.json",
+      "sha256": "37873286f59b7d3e38262d31aa102d8f282adcf0f2a39e1407a8fb9447b3b7ef",
+      "url": "https://github.com/minsago-elite/decomp_thing-oracle-artifacts/releases/download/clang-llvm-22.1.6-a13-v1/full-tree-release-evidence.json"
+    },
+    {
+      "bytes": 1100,
+      "name": "full-tree-release-evidence.md",
+      "sha256": "6c28338ddf35461451f26157d6c6925313bac53011dfe4781d6bbd7a85d68382",
+      "url": "https://github.com/minsago-elite/decomp_thing-oracle-artifacts/releases/download/clang-llvm-22.1.6-a13-v1/full-tree-release-evidence.md"
+    },
+    {
+      "bytes": 169088842,
+      "name": "llvm-22.1.6-a13-calls.tar.zst",
+      "sha256": "b0899439bfebe1b67d50e5a53ca9f416ac3ca25b7c96c92c732767766e59ba8b",
+      "url": "https://github.com/minsago-elite/decomp_thing-oracle-artifacts/releases/download/clang-llvm-22.1.6-a13-v1/llvm-22.1.6-a13-calls.tar.zst"
+    },
+    {
+      "bytes": 197876552,
+      "name": "llvm-22.1.6-a13-data.tar.zst",
+      "sha256": "6976bd74e18fe9506a543abe522585f1ac535baaeabcac45655a6a89282f27d7",
+      "url": "https://github.com/minsago-elite/decomp_thing-oracle-artifacts/releases/download/clang-llvm-22.1.6-a13-v1/llvm-22.1.6-a13-data.tar.zst"
+    },
+    {
+      "bytes": 180706054,
+      "name": "llvm-22.1.6-a13-functions.tar.zst",
+      "sha256": "e367c6a8427e11027918c431934941cd2a3723d8069ba10159ca05954c179cf5",
+      "url": "https://github.com/minsago-elite/decomp_thing-oracle-artifacts/releases/download/clang-llvm-22.1.6-a13-v1/llvm-22.1.6-a13-functions.tar.zst"
+    }
+  ],
+  "release": {
+    "pageUrl": "https://github.com/minsago-elite/decomp_thing-oracle-artifacts/releases/tag/clang-llvm-22.1.6-a13-v1",
+    "repository": "minsago-elite/decomp_thing-oracle-artifacts",
+    "tag": "clang-llvm-22.1.6-a13-v1"
+  },
+  "schemaVersion": 1
+}

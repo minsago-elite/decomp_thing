@@ -83,6 +83,11 @@ and per-shard baseline evidence before it writes either report. Run
 reproduction interface; every large input is identified in the machine report
 by byte length and SHA-256 rather than by a local path.
 
+The complete canonical observation/truth shards are published under the
+non-moving [`clang-llvm-22.1.6-a13-v1`](https://github.com/minsago-elite/decomp_thing-oracle-artifacts/releases/tag/clang-llvm-22.1.6-a13-v1)
+release. `full-tree-release-assets.json` locks every asset URL, byte length,
+and SHA-256 digest.
+
 ## Verify
 
 Install the exact Python generation dependencies, then run:

@@ -10,6 +10,7 @@ REPOSITORY_ROOT = Path(__file__).resolve().parents[2]
 from oracle.full_tree_release_evidence import (  # noqa: E402
     FullTreeReleaseEvidenceError,
     render_full_tree_release_summary,
+    validate_full_tree_release_asset_lock,
     validate_full_tree_release_evidence,
 )
 from oracle.full_tree_scope import canonical_json_bytes  # noqa: E402
@@ -33,6 +34,18 @@ def _metric(**changes: int) -> dict:
 
 
 class FullTreeReleaseEvidenceTest(unittest.TestCase):
+    def test_checked_release_asset_lock_binds_machine_report_and_urls(self) -> None:
+        profile = REPOSITORY_ROOT / "oracle/llvm/22.1.6"
+        lock_payload = (profile / "full-tree-release-assets.json").read_bytes()
+        lock = json.loads(lock_payload)
+        self.assertEqual(canonical_json_bytes(lock), lock_payload)
+        report_payload = (profile / "full-tree-release-evidence.json").read_bytes()
+        validate_full_tree_release_asset_lock(lock, report_payload=report_payload)
+        mutated = json.loads(json.dumps(lock))
+        mutated["assets"][0]["bytes"] += 1
+        with self.assertRaisesRegex(FullTreeReleaseEvidenceError, "machine report"):
+            validate_full_tree_release_asset_lock(mutated, report_payload=report_payload)
+
     def _report(self) -> dict:
         observation_determinism = _hashed(
             {
