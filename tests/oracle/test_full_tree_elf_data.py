@@ -121,6 +121,20 @@ class FullTreeElfDataTest(unittest.TestCase):
             _type_key({**producer_only, "id": "type-observation-b", "unitId": "unit-b"}),
         )
 
+    def test_lossy_anonymous_subprogram_types_remain_observation_owned(self) -> None:
+        base = {
+            "context": ["DW_TAG_subprogram:(anonymous)"],
+            "declaration": {"column": None, "externalPathSha256": None, "line": 241, "sourcePath": "source/template.h"},
+            "id": "type-observation-a",
+            "name": None,
+            "tag": "class",
+            "unitId": "unit-a",
+        }
+        self.assertNotEqual(
+            _type_key(base),
+            _type_key({**base, "id": "type-observation-b", "unitId": "unit-b"}),
+        )
+
     def test_cross_shard_type_references_use_authenticated_type_ids(self) -> None:
         with tempfile.TemporaryDirectory(prefix="full-tree-type-references-") as temporary:
             root = Path(temporary)

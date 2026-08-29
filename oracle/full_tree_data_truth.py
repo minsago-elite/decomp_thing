@@ -14,7 +14,7 @@ class FullTreeDataTruthError(ValueError):
     """Raised when ODR-equivalent data evidence is incompatible or incomplete."""
 
 
-POLICY = {"id": "full-tree-data-truth", "version": 9, "typeIdentity": "tag-qualified-lexical-context-name-or-anonymous-declaration-with-producer-unit-for-anonymous-namespace-or-observation", "globalIdentity": "rva-or-source-aligned-name-declaration-or-producer-observation", "owner": "lowest-unit-id", "typeReferences": "exact-dwarf-offset-chain-with-bounded-authenticated-candidate-commitments-and-no-ambiguous-target-substitution", "maximumDatabaseBytes": 8 * 1024 * 1024 * 1024}
+POLICY = {"id": "full-tree-data-truth", "version": 10, "typeIdentity": "tag-qualified-lexical-context-name-or-anonymous-declaration-with-observation-owned-lambda-and-lossy-local-contexts", "globalIdentity": "rva-or-source-aligned-name-declaration-or-producer-observation", "owner": "lowest-unit-id", "typeReferences": "exact-dwarf-offset-chain-with-bounded-authenticated-candidate-commitments-and-no-ambiguous-target-substitution", "maximumDatabaseBytes": 8 * 1024 * 1024 * 1024}
 
 REFERENCE_SAMPLE_LIMIT = 16
 
@@ -50,7 +50,7 @@ def _type_key(item: dict[str, Any]) -> str:
     observable_location = declaration["sourcePath"] is not None or declaration["externalPathSha256"] is not None
     if observable_location:
         identity = {"tag": item["tag"], "context": item["context"], "name": item["name"], "declaration": declaration}
-        if item["name"] is not None and "lambda at " in item["name"]:
+        if (item["name"] is not None and "lambda at " in item["name"]) or "DW_TAG_subprogram:(anonymous)" in item["context"]:
             identity["producerObservationId"] = item["id"]
         elif (item["name"] is not None and "anonymous namespace" in item["name"]) or any("anonymous namespace" in component for component in item["context"]):
             identity["producerUnitId"] = item["unitId"]
