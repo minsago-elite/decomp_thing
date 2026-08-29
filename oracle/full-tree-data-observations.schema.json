@@ -35,11 +35,13 @@
     },
     "type": {
       "type": "object", "additionalProperties": false,
-      "required": ["id", "unitId", "dieOffset", "tag", "name", "declaration", "declarationOnly", "byteSize", "alignment", "members"],
+      "required": ["id", "unitId", "dieOffset", "tag", "name", "context", "declaration", "declarationOnly", "byteSize", "alignment", "members"],
       "properties": {
         "id": {"type": "string", "pattern": "^type-observation-[0-9a-f]{32}$"}, "unitId": {"type": "string"},
         "dieOffset": {"type": "string"}, "tag": {"enum": ["class", "struct", "union", "enum"]},
-        "name": {"$ref": "#/$defs/nullableString"}, "declaration": {"$ref": "#/$defs/declaration"},
+        "name": {"$ref": "#/$defs/nullableString"},
+        "context": {"type": "array", "items": {"type": "string", "maxLength": 16384}},
+        "declaration": {"$ref": "#/$defs/declaration"},
         "declarationOnly": {"type": "boolean"}, "byteSize": {"$ref": "#/$defs/nullableInteger"},
         "alignment": {"$ref": "#/$defs/nullableInteger"}, "members": {"type": "array", "items": {"$ref": "#/$defs/member"}}
       }

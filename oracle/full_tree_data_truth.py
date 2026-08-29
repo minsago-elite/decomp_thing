@@ -14,7 +14,7 @@ class FullTreeDataTruthError(ValueError):
     """Raised when ODR-equivalent data evidence is incompatible or incomplete."""
 
 
-POLICY = {"id": "full-tree-data-truth", "version": 2, "typeIdentity": "tag-name-declaration-with-producer-unit-for-anonymous-namespace-or-observation", "globalIdentity": "rva-or-name-declaration", "owner": "lowest-unit-id"}
+POLICY = {"id": "full-tree-data-truth", "version": 3, "typeIdentity": "tag-qualified-lexical-context-name-declaration-with-producer-unit-for-anonymous-namespace-or-observation", "globalIdentity": "rva-or-name-declaration", "owner": "lowest-unit-id"}
 
 
 def _sha(payload: bytes) -> str:
@@ -47,8 +47,8 @@ def _type_key(item: dict[str, Any]) -> str:
     declaration = _declaration_key(item["declaration"])
     observable_location = declaration["sourcePath"] is not None or declaration["externalPathSha256"] is not None
     if item["name"] is not None and observable_location:
-        identity = {"tag": item["tag"], "name": item["name"], "declaration": declaration}
-        if "anonymous namespace" in item["name"]:
+        identity = {"tag": item["tag"], "context": item["context"], "name": item["name"], "declaration": declaration}
+        if "anonymous namespace" in item["name"] or any("anonymous namespace" in component for component in item["context"]):
             identity["producerUnitId"] = item["unitId"]
     else:
         identity = {"observationId": item["id"]}
@@ -188,7 +188,7 @@ def generate_full_tree_data_truth(*, scope: dict[str, Any], scope_sha256: str, i
                     if len(layouts) > 1:
                         raise FullTreeDataTruthError(f"incompatible aggregate definitions for type-{identity[:32]}")
                     layout = definitions[0] if definitions else records[0]
-                    merged = {"alignment": layout["alignment"], "byteSize": layout["byteSize"], "declarations": _unique(records, "declaration"), "id": f"type-{identity[:32]}", "members": layout["members"], "name": layout["name"], "observationIds": sorted(item["id"] for item in records), "ownerUnitId": owner, "population": "scored" if definitions and layout["byteSize"] is not None else "unobservable", "reasonCode": None if definitions and layout["byteSize"] is not None else "declaration-only-or-size-unobservable", "tag": layout["tag"]}
+                    merged = {"alignment": layout["alignment"], "byteSize": layout["byteSize"], "context": layout["context"], "declarations": _unique(records, "declaration"), "id": f"type-{identity[:32]}", "members": layout["members"], "name": layout["name"], "observationIds": sorted(item["id"] for item in records), "ownerUnitId": owner, "population": "scored" if definitions and layout["byteSize"] is not None else "unobservable", "reasonCode": None if definitions and layout["byteSize"] is not None else "declaration-only-or-size-unobservable", "tag": layout["tag"]}
                 else:
                     address = _one_compatible(records, "addressRva", identity)
                     merged = {"addressRva": address, "alignment": _one_compatible(records, "alignment", identity), "declarations": _unique(records, "declaration"), "external": bool(_one_compatible(records, "external", identity) or False), "id": f"global-{identity[:32]}", "mutability": _one_compatible(records, "mutability", identity) or "unknown", "names": sorted({name for item in records for name in item["names"]}), "observationIds": sorted(item["id"] for item in records), "ownerUnitId": owner, "population": "scored" if address is not None else "unobservable", "reasonCode": None if address is not None else records[0]["reasonCode"], "size": _one_compatible(records, "size", identity), "tls": bool(_one_compatible(records, "tls", identity) or False), "visibility": _one_compatible(records, "visibility", identity) or "unknown"}

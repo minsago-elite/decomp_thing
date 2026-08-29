@@ -21,9 +21,10 @@
   "$defs": {
     "type": {
       "type": "object", "additionalProperties": false,
-      "required": ["id", "tag", "name", "population", "reasonCode", "ownerUnitId", "observationIds", "declarations", "byteSize", "alignment", "members"],
+      "required": ["id", "tag", "name", "context", "population", "reasonCode", "ownerUnitId", "observationIds", "declarations", "byteSize", "alignment", "members"],
       "properties": {
         "id": {"type": "string", "pattern": "^type-[0-9a-f]{32}$"}, "tag": {"type": "string"}, "name": {"type": ["string", "null"]},
+        "context": {"type": "array", "items": {"type": "string", "maxLength": 16384}},
         "population": {"enum": ["scored", "unobservable"]}, "reasonCode": {"type": ["string", "null"]},
         "ownerUnitId": {"type": "string"}, "observationIds": {"type": "array", "minItems": 1, "uniqueItems": true, "items": {"type": "string"}},
         "declarations": {"type": "array", "minItems": 1, "uniqueItems": true, "items": {"type": "object"}},

@@ -21,6 +21,7 @@ from oracle.full_tree_scope import canonical_json_bytes  # noqa: E402
 class FullTreeElfDataTest(unittest.TestCase):
     def test_anonymous_namespace_type_identity_is_producer_owned(self) -> None:
         base = {
+            "context": [],
             "declaration": {
                 "column": None,
                 "externalPathSha256": "a" * 64,
@@ -33,6 +34,31 @@ class FullTreeElfDataTest(unittest.TestCase):
             "unitId": "cu-a",
         }
         other = {**base, "id": "type-observation-b", "unitId": "cu-b"}
+        self.assertNotEqual(_type_key(base), _type_key(other))
+
+    def test_nested_type_identity_includes_lexical_context(self) -> None:
+        base = {
+            "context": [
+                "DW_TAG_class_type:OnDiskChainedHashTableGenerator<KeyA>",
+            ],
+            "declaration": {
+                "column": 9,
+                "externalPathSha256": None,
+                "line": 60,
+                "sourcePath": "source/llvm/include/llvm/Support/OnDiskHashTable.h",
+            },
+            "id": "type-observation-a",
+            "name": "Item",
+            "tag": "class",
+            "unitId": "cu-a",
+        }
+        other = {
+            **base,
+            "context": [
+                "DW_TAG_class_type:OnDiskChainedHashTableGenerator<KeyB>",
+            ],
+            "id": "type-observation-b",
+        }
         self.assertNotEqual(_type_key(base), _type_key(other))
 
     def test_globals_tls_vtable_rtti_and_slots_are_twin_bound(self) -> None:

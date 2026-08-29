@@ -31,7 +31,7 @@ class FullTreeDataObservationError(ValueError):
 
 POLICY = {
     "id": "full-tree-data-observations",
-    "version": 1,
+    "version": 2,
     "globals": "static-storage-or-linkage-bearing-dwarf-variables",
     "types": "class-struct-union-enum-definitions-and-declarations",
 }
@@ -84,6 +84,27 @@ def _names(die: Any) -> list[str]:
             if attribute is not None:
                 result.add(_decode_dwarf_string(attribute.value, f"DIE {hex(int(die.offset))} {key}", 16_384))
     return sorted(result)
+
+
+def _type_context(die: Any) -> list[str]:
+    components = []
+    current = die.get_parent()
+    context_tags = {
+        "DW_TAG_class_type",
+        "DW_TAG_enumeration_type",
+        "DW_TAG_namespace",
+        "DW_TAG_structure_type",
+        "DW_TAG_subprogram",
+        "DW_TAG_union_type",
+    }
+    while current is not None and current.tag != "DW_TAG_compile_unit":
+        if current.tag in context_tags:
+            name = _name(current)
+            if current.tag == "DW_TAG_namespace" and name is None:
+                name = "(anonymous namespace)"
+            components.append(f"{current.tag}:{name or '(anonymous)'}")
+        current = current.get_parent()
+    return list(reversed(components))
 
 
 def _type_reference(die: Any) -> tuple[str | None, Any | None]:
@@ -174,7 +195,7 @@ def produce_data_observation_shard(rich_artifact: Path, *, scope: dict[str, Any]
                 if die.tag in TYPE_TAGS:
                     members = [_member(child) for child in die.iter_children() if child.tag in {"DW_TAG_member", "DW_TAG_inheritance", "DW_TAG_enumerator"}]
                     identity = hashlib.sha256(f"{unit['id']}:{hex(int(die.offset))}".encode()).hexdigest()[:32]
-                    types.append({"alignment": _integer_attribute(die, "DW_AT_alignment"), "byteSize": _integer_attribute(die, "DW_AT_byte_size"), "declaration": _declaration(die, dwarf, scope, unit), "declarationOnly": bool(_integer_attribute(die, "DW_AT_declaration") or 0), "dieOffset": hex(int(die.offset)), "id": f"type-observation-{identity}", "members": members, "name": _name(die), "tag": TYPE_TAGS[die.tag], "unitId": unit["id"]})
+                    types.append({"alignment": _integer_attribute(die, "DW_AT_alignment"), "byteSize": _integer_attribute(die, "DW_AT_byte_size"), "context": _type_context(die), "declaration": _declaration(die, dwarf, scope, unit), "declarationOnly": bool(_integer_attribute(die, "DW_AT_declaration") or 0), "dieOffset": hex(int(die.offset)), "id": f"type-observation-{identity}", "members": members, "name": _name(die), "tag": TYPE_TAGS[die.tag], "unitId": unit["id"]})
                 elif die.tag == "DW_TAG_variable":
                     names = _names(die)
                     parent = die.get_parent()
