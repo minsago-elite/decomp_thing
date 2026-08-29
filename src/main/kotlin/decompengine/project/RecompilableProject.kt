@@ -12,6 +12,9 @@ import java.nio.file.Files
 import java.nio.file.LinkOption
 import java.nio.file.Path
 import java.security.MessageDigest
+import java.util.concurrent.CompletableFuture
+import java.util.concurrent.CompletionException
+import java.util.concurrent.TimeUnit
 import kotlin.io.path.createDirectories
 import kotlin.io.path.exists
 import kotlin.io.path.isRegularFile
@@ -36,6 +39,9 @@ data class ProjectBuildConfiguration(
     val compilerExecutable: String = "gcc",
     val parallelism: Int = 4,
     val cFlags: List<String> = listOf("-std=c11", "-g", "-Wall", "-Wextra", "-Werror", "-Iinclude"),
+    val wallClockTimeoutMillis: Long = 10L * 60 * 1_000,
+    val maximumOutputBytes: Long = 32L * 1024 * 1024,
+    val terminationGraceMillis: Long = 5_000,
 ) {
     init {
         require(makeExecutable.isNotBlank() && '\n' !in makeExecutable && '\r' !in makeExecutable) {
@@ -52,6 +58,11 @@ data class ProjectBuildConfiguration(
         require(cFlags.none { it == "-w" || it.startsWith("-Wno-error") }) {
             "C flags cannot disable warnings-as-errors"
         }
+        require(wallClockTimeoutMillis > 0) { "build wall-clock limit must be positive" }
+        require(maximumOutputBytes in 1 until Int.MAX_VALUE.toLong()) {
+            "build output limit must be positive and smaller than 2 GiB"
+        }
+        require(terminationGraceMillis in 0..30_000) { "build termination grace must be between zero and 30 seconds" }
     }
 
     fun command(): List<String> = listOf(
@@ -241,8 +252,37 @@ object MakeProjectBuilder {
         sanitizeBuildEnvironment(processBuilder.environment())
         processBuilder.environment()["PWD"] = projectRoot.toString()
         val process = processBuilder.start()
-        val output = process.inputStream.bufferedReader().readText()
-        val returnCode = process.waitFor()
+        val outputFuture = CompletableFuture.supplyAsync {
+            val output = java.io.ByteArrayOutputStream()
+            val buffer = ByteArray(DEFAULT_BUFFER_SIZE)
+            process.inputStream.use { input ->
+                while (true) {
+                    val count = input.read(buffer)
+                    if (count < 0) break
+                    if (output.size().toLong() + count > configuration.maximumOutputBytes) {
+                        terminateBuildProcess(process, configuration.terminationGraceMillis)
+                        throw BuildException(
+                            "build output exceeds ${configuration.maximumOutputBytes} bytes",
+                        )
+                    }
+                    output.write(buffer, 0, count)
+                }
+            }
+            output.toString(Charsets.UTF_8)
+        }
+        val completed = process.waitFor(configuration.wallClockTimeoutMillis, TimeUnit.MILLISECONDS)
+        if (!completed) {
+            terminateBuildProcess(process, configuration.terminationGraceMillis)
+        }
+        val output = try {
+            outputFuture.join()
+        } catch (failure: CompletionException) {
+            throw (failure.cause ?: failure)
+        }
+        if (!completed) {
+            throw BuildException("generated project build exceeded ${configuration.wallClockTimeoutMillis} milliseconds")
+        }
+        val returnCode = process.exitValue()
         val sourceRevisionAfterBuild = captureBuildSourceRevision(projectRoot)
         val sourceStableDuringBuild = sourceRevisionBeforeBuild == sourceRevisionAfterBuild
         val artifact = projectRoot.resolve("build/reconstructed").takeIf {
@@ -292,6 +332,20 @@ object MakeProjectBuilder {
             failedOwners = failedOwners,
             command = command,
         )
+    }
+
+    private fun terminateBuildProcess(process: Process, graceMillis: Long) {
+        val handles = (process.toHandle().descendants().toList().asReversed() + process.toHandle()).distinct()
+        handles.forEach { if (it.isAlive) it.destroy() }
+        val deadline = System.nanoTime() + TimeUnit.MILLISECONDS.toNanos(graceMillis)
+        handles.forEach { handle ->
+            val remaining = deadline - System.nanoTime()
+            if (handle.isAlive && remaining > 0) {
+                runCatching { handle.onExit().get(remaining, TimeUnit.NANOSECONDS) }
+            }
+        }
+        handles.forEach { if (it.isAlive) it.destroyForcibly() }
+        handles.forEach { handle -> if (handle.isAlive) runCatching { handle.onExit().get(5, TimeUnit.SECONDS) } }
     }
 
     private fun discoverOwners(projectDir: Path): List<BuildOwner> {
@@ -450,6 +504,8 @@ object MakeProjectBuilder {
         append("\n  \"command\": [")
         append(command.joinToString(",") { "\"${it.escapeJson()}\"" })
         append("],\n  \"parallelism\": ").append(configuration.parallelism).append(',')
+        append("\n  \"wallClockTimeoutMillis\": ").append(configuration.wallClockTimeoutMillis).append(',')
+        append("\n  \"maximumOutputBytes\": ").append(configuration.maximumOutputBytes).append(',')
         append("\n  \"warningsAsErrors\": true,")
         append("\n  \"reproduciblePathMapping\": true,")
         append("\n  \"declaredDependencies\": [\"GNU Make\",\"C compiler (")

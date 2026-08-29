@@ -182,6 +182,30 @@ class StrictProjectBuildTest {
     }
 
     @Test
+    fun `build fails closed at profile supplied time and output bounds`() {
+        val timeoutProject = createTempDirectory("strict-build-timeout-")
+        SourceTreeGenerator.generate(buildableModel(), timeoutProject)
+        timeoutProject.resolve("Makefile").writeText("all:\n\t@sleep 30\n")
+
+        val timeout = assertFailsWith<BuildException> {
+            MakeProjectBuilder.build(
+                timeoutProject,
+                ProjectBuildConfiguration(wallClockTimeoutMillis = 100, terminationGraceMillis = 100),
+            )
+        }
+        assertTrue(timeout.message.orEmpty().contains("exceeded 100 milliseconds"), timeout.message)
+
+        val outputProject = createTempDirectory("strict-build-output-")
+        SourceTreeGenerator.generate(buildableModel(), outputProject)
+        outputProject.resolve("Makefile").writeText("all:\n\t@yes x | head -c 4096\n")
+
+        val output = assertFailsWith<BuildException> {
+            MakeProjectBuilder.build(outputProject, ProjectBuildConfiguration(maximumOutputBytes = 128))
+        }
+        assertTrue(output.message.orEmpty().contains("output exceeds 128 bytes"), output.message)
+    }
+
+    @Test
     fun `build rejects symbolic output paths before writing host files`() {
         val temp = createTempDirectory("strict-build-symlink-")
         val project = temp.resolve("project")

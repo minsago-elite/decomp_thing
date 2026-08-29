@@ -63,6 +63,16 @@ class GhidraProgramModelExporterTest {
     }
 
     @Test
+    fun `export timeout is supplied by the authenticated reconstruction profile`() {
+        val profile = GeneratedCMakeReconstructionProfile.descriptor
+
+        val limits = GhidraProgramModelExportLimits.from(profile)
+
+        assertEquals(profile.budgets.exportWallClockMillis, limits.wallClockTimeout.toMillis())
+        assertEquals(profile.budgets.exportMaximumResidentBytes, limits.maximumResidentBytes)
+    }
+
+    @Test
     fun `opt in real Ghidra reuses accepted function records deterministically`() {
         if (System.getenv("RUN_REAL_GHIDRA") != "true") return
         val home = System.getenv("GHIDRA_HOME")?.let(Path::of)

@@ -56,9 +56,15 @@ private data class AffinityIndexes(
 class DeterministicModulePlanner(
     private val maximumFunctionsPerModule: Int = 24,
     private val layout: ProjectLayoutProfile = GeneratedCMakeReconstructionProfile.descriptor.layout,
+    private val maximumEntities: Int = Int.MAX_VALUE,
+    private val maximumDependencyEdges: Long = Long.MAX_VALUE,
+    private val maximumWorkUnits: Long = Long.MAX_VALUE,
 ) {
     init {
         require(maximumFunctionsPerModule > 0)
+        require(maximumEntities > 0)
+        require(maximumDependencyEdges > 0)
+        require(maximumWorkUnits > 0)
     }
 
     fun plan(model: RecoveredProgramModel, overrides: Map<String, String> = emptyMap()): ModulePlan =
@@ -68,6 +74,16 @@ class DeterministicModulePlanner(
         model: RecoveredProgramModel,
         overrides: Map<String, String> = emptyMap(),
     ): IndexedPlannerRun {
+        val entityCount = Math.addExact(Math.addExact(model.functions.size, model.globals.size), model.types.size)
+        require(entityCount <= maximumEntities) {
+            "module planning requires $entityCount entities; limit=$maximumEntities"
+        }
+        val dependencyEdges = model.functions.fold(0L) { total, function ->
+            Math.addExact(total, Math.addExact(function.calls.size.toLong(), function.referencedGlobals.size.toLong()))
+        }
+        require(dependencyEdges <= maximumDependencyEdges) {
+            "module planning requires $dependencyEdges dependency edges; limit=$maximumDependencyEdges"
+        }
         val complexity = MutablePlannerComplexity()
         val functions = model.functions.sortedWith(compareBy<RecoveredFunction> { it.address }.thenBy { it.id })
         val functionById = functions.associateBy { it.id }
@@ -145,7 +161,11 @@ class DeterministicModulePlanner(
 
         requireExactOwnership(model, modules)
         val plan = ModulePlan(modules = modules, dependencyCycles = dependencyCycles(dependenciesByModule, complexity))
-        return IndexedPlannerRun(plan, complexity.snapshot(functions.size, model.globals.size))
+        val measured = complexity.snapshot(functions.size, model.globals.size)
+        require(measured.sparseWorkUnits <= maximumWorkUnits) {
+            "module planning required ${measured.sparseWorkUnits} work units; limit=$maximumWorkUnits"
+        }
+        return IndexedPlannerRun(plan, measured)
     }
 
     private fun buildAffinityIndexes(

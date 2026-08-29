@@ -2,6 +2,7 @@ package decompengine.project
 
 import kotlin.test.Test
 import kotlin.test.assertEquals
+import kotlin.test.assertFailsWith
 import kotlin.test.assertTrue
 import kotlin.time.Duration.Companion.seconds
 import kotlin.time.measureTime
@@ -40,6 +41,22 @@ class DeterministicModulePlannerScaleTest {
             run.complexity.indexedEvidenceEntries < 20L * (model.functions.size + model.globals.size),
             "planner retained more than sparse evidence indexes: ${run.complexity}",
         )
+    }
+
+    @Test
+    fun `planner fails closed at every profile supplied structural bound`() {
+        val model = sparseModel(functionCount = 8, globalCount = 4)
+        val dependencyEdges = model.functions.sumOf { it.calls.size.toLong() + it.referencedGlobals.size }
+
+        assertFailsWith<IllegalArgumentException> {
+            DeterministicModulePlanner(maximumEntities = 11).plan(model)
+        }
+        assertFailsWith<IllegalArgumentException> {
+            DeterministicModulePlanner(maximumDependencyEdges = dependencyEdges - 1).plan(model)
+        }
+        assertFailsWith<IllegalArgumentException> {
+            DeterministicModulePlanner(maximumWorkUnits = 1).plan(model)
+        }
     }
 
     private fun sparseModel(functionCount: Int, globalCount: Int): RecoveredProgramModel {

@@ -6,6 +6,8 @@ import java.nio.file.Path
 import java.time.Duration
 import java.util.concurrent.CompletableFuture
 import java.util.concurrent.TimeUnit
+import java.util.concurrent.atomic.AtomicBoolean
+import java.util.concurrent.atomic.AtomicLong
 import kotlin.io.path.createDirectories
 import kotlin.io.path.isExecutable
 import kotlin.io.path.pathString
@@ -20,14 +22,24 @@ fun interface ProgramModelAnalyzer {
 data class GhidraProgramModelExportLimits(
     val wallClockTimeout: Duration = Duration.ofMinutes(10),
     val terminationGrace: Duration = Duration.ofSeconds(5),
+    val maximumResidentBytes: Long = 4L * 1024 * 1024 * 1024,
 ) {
     init {
-        require(!wallClockTimeout.isZero && !wallClockTimeout.isNegative && wallClockTimeout <= Duration.ofMinutes(10)) {
-            "Ghidra export timeout must be positive and at most 10 minutes"
+        require(!wallClockTimeout.isZero && !wallClockTimeout.isNegative && wallClockTimeout <= Duration.ofHours(24)) {
+            "Ghidra export timeout must be positive and at most 24 hours"
         }
         require(!terminationGrace.isNegative && terminationGrace <= Duration.ofSeconds(30)) {
             "Ghidra termination grace must be between zero and 30 seconds"
         }
+        require(maximumResidentBytes > 0) { "Ghidra resident-memory limit must be positive" }
+    }
+
+    companion object {
+        fun from(profile: ReconstructionProfile): GhidraProgramModelExportLimits =
+            GhidraProgramModelExportLimits(
+                wallClockTimeout = Duration.ofMillis(profile.budgets.exportWallClockMillis),
+                maximumResidentBytes = profile.budgets.exportMaximumResidentBytes,
+            )
     }
 }
 
@@ -57,18 +69,41 @@ class GhidraHeadlessProgramModelAnalyzer(
         val process = ProcessBuilder(command)
             .directory(workDir.toFile())
             .start()
+        val peakResidentBytes = AtomicLong(0)
+        val memoryExceeded = AtomicBoolean(false)
+        val memoryMonitor = CompletableFuture.runAsync {
+            while (process.isAlive) {
+                val observed = residentBytes(process)
+                peakResidentBytes.accumulateAndGet(observed, ::maxOf)
+                if (observed > limits.maximumResidentBytes) {
+                    memoryExceeded.set(true)
+                    terminateProcessTree(process, limits.terminationGrace)
+                    break
+                }
+                Thread.sleep(25)
+            }
+        }
         val stdout = CompletableFuture.supplyAsync { process.inputStream.bufferedReader().readText() }
         val stderr = CompletableFuture.supplyAsync { process.errorStream.bufferedReader().readText() }
         val completed = process.waitFor(limits.wallClockTimeout.toMillis(), TimeUnit.MILLISECONDS)
         if (!completed) {
-            process.destroy()
-            if (!process.waitFor(limits.terminationGrace.toMillis(), TimeUnit.MILLISECONDS)) {
-                process.destroyForcibly().waitFor()
-            }
+            terminateProcessTree(process, limits.terminationGrace)
         }
         val exitCode = if (completed) process.exitValue() else -1
         reports.resolve("ghidra_stdout.log").writeText(stdout.join())
         reports.resolve("ghidra_stderr.log").writeText(stderr.join())
+        memoryMonitor.join()
+        reports.resolve("ghidra_resource_usage.json").writeText(
+            "{\"maximumResidentBytesLimit\":${limits.maximumResidentBytes}," +
+                "\"maximumResidentBytesObserved\":${peakResidentBytes.get()}," +
+                "\"wallClockMillisLimit\":${limits.wallClockTimeout.toMillis()}}\n",
+        )
+        if (memoryExceeded.get()) {
+            throw GhidraAnalysisException(
+                "Ghidra program recovery exceeded ${limits.maximumResidentBytes} resident bytes; " +
+                    "rerun with the same output directory to resume durable function checkpoints",
+            )
+        }
         if (!completed) {
             throw GhidraAnalysisException(
                 "Ghidra program recovery exceeded ${limits.wallClockTimeout.toSeconds()} seconds; " +
@@ -81,11 +116,43 @@ class GhidraHeadlessProgramModelAnalyzer(
         return ProgramModelJson.read(output.readText())
     }
 
+    private fun residentBytes(process: Process): Long {
+        val handles = process.toHandle().descendants().toList() + process.toHandle()
+        return handles.distinctBy { it.pid() }.sumOf { handle ->
+            runCatching {
+                Files.readAllLines(Path.of("/proc/${handle.pid()}/status"))
+                    .firstOrNull { it.startsWith("VmRSS:") }
+                    ?.split(Regex("\\s+"))
+                    ?.getOrNull(1)
+                    ?.toLong()
+                    ?.let { Math.multiplyExact(it, 1024L) }
+                    ?: 0L
+            }.getOrDefault(0L)
+        }
+    }
+
+    private fun terminateProcessTree(process: Process, grace: Duration) {
+        val handles = (process.toHandle().descendants().toList().asReversed() + process.toHandle()).distinct()
+        handles.forEach { if (it.isAlive) it.destroy() }
+        val deadline = System.nanoTime() + grace.toNanos()
+        handles.forEach { handle ->
+            val remaining = deadline - System.nanoTime()
+            if (handle.isAlive && remaining > 0) {
+                runCatching { handle.onExit().get(remaining, TimeUnit.NANOSECONDS) }
+            }
+        }
+        handles.forEach { if (it.isAlive) it.destroyForcibly() }
+        handles.forEach { handle -> if (handle.isAlive) runCatching { handle.onExit().get(5, TimeUnit.SECONDS) } }
+    }
+
     companion object {
-        fun fromEnvironment(environment: Map<String, String> = System.getenv()): GhidraHeadlessProgramModelAnalyzer {
+        fun fromEnvironment(
+            environment: Map<String, String> = System.getenv(),
+            profile: ReconstructionProfile = GeneratedCMakeReconstructionProfile.descriptor,
+        ): GhidraHeadlessProgramModelAnalyzer {
             val home = environment["GHIDRA_HOME"]?.takeIf(String::isNotBlank)
                 ?: error("GHIDRA_HOME is required for source-tree reconstruction")
-            return GhidraHeadlessProgramModelAnalyzer(Path.of(home))
+            return GhidraHeadlessProgramModelAnalyzer(Path.of(home), GhidraProgramModelExportLimits.from(profile))
         }
     }
 }
@@ -99,7 +166,13 @@ data class ArchivalReconstructionResult(
 class ArchivalReconstructionService(
     private val analyzer: ProgramModelAnalyzer,
     private val reconstructor: ModuleReconstructor = EvidenceModuleReconstructor(),
+    private val profile: ReconstructionProfile = GeneratedCMakeReconstructionProfile.descriptor,
+    hostSafetyLimits: ReconstructionHostSafetyLimits = ReconstructionHostSafetyLimits(profile.budgets),
 ) {
+    init {
+        hostSafetyLimits.requireAllows(profile.budgets)
+    }
+
     fun reconstruct(binaryPath: Path, outputDir: Path): ArchivalReconstructionResult {
         outputDir.createDirectories()
         val model = analyzer.analyze(binaryPath, outputDir.resolve("analysis"))
@@ -108,12 +181,44 @@ class ArchivalReconstructionService(
         progressPath.writeText("{\"phase\":\"planning\",\"completed\":0,\"total\":0}\n")
         var moduleTotal = 0
         val observedBehavior = outputDir.resolve("exploration.json").takeIf { Files.isRegularFile(it) }?.readText()
-        SourceTreeGenerator.generate(model, project, reconstructor = reconstructor, observedBehavior = observedBehavior) { completed, total, module ->
+        val planner = DeterministicModulePlanner(
+            maximumFunctionsPerModule = profile.budgets.maximumFunctionsPerModule,
+            layout = profile.layout,
+            maximumEntities = profile.budgets.plannerMaximumEntities,
+            maximumDependencyEdges = profile.budgets.plannerMaximumDependencyEdges,
+            maximumWorkUnits = profile.budgets.plannerMaximumWorkUnits,
+        )
+        SourceTreeGenerator.generate(
+            model,
+            project,
+            planner = planner,
+            reconstructor = reconstructor,
+            observedBehavior = observedBehavior,
+            profile = profile,
+        ) { completed, total, module ->
             moduleTotal = total
             progressPath.writeText("{\"phase\":\"modules\",\"completed\":$completed,\"total\":$total,\"module\":\"$module\"}\n")
         }
-        val build = MakeProjectBuilder.build(project)
-        val bundle = ArchivalPackager.create(project, outputDir.resolve("source-tree.zip"))
+        val build = MakeProjectBuilder.build(
+            project,
+            ProjectBuildConfiguration(
+                makeExecutable = profile.adapterConfiguration["build-executable"]?.singleOrNull() ?: "make",
+                compilerExecutable = profile.adapterConfiguration["compiler-driver"]?.singleOrNull() ?: "gcc",
+                cFlags = profile.adapterConfiguration["compiler-flags"] ?: ProjectBuildConfiguration().cFlags,
+                wallClockTimeoutMillis = profile.budgets.buildWallClockMillis,
+                maximumOutputBytes = profile.budgets.buildMaximumOutputBytes,
+            ),
+        )
+        val bundle = ArchivalPackager.create(
+            project,
+            outputDir.resolve("source-tree.zip"),
+            ArchivalBundleLimits(
+                maximumEntries = profile.budgets.archiveMaximumEntries,
+                maximumFileBytes = profile.budgets.archiveMaximumFileBytes,
+                maximumTotalBytes = profile.budgets.archiveMaximumTotalBytes,
+            ),
+            profile,
+        )
         progressPath.writeText("{\"phase\":\"complete\",\"completed\":$moduleTotal,\"total\":$moduleTotal}\n")
         outputDir.resolve("reconstruction.json").writeText(
             """
@@ -122,7 +227,9 @@ class ArchivalReconstructionService(
               "project": "source-tree",
               "archive": "source-tree.zip",
               "archiveSha256": "${bundle.archiveSha256}",
-              "moduleCount": ${DeterministicModulePlanner().plan(model).modules.size},
+              "profileId": "${profile.id}",
+              "profileSha256": "${profile.sha256}",
+              "moduleCount": ${planner.plan(model).modules.size},
               "functionCount": ${model.functions.size},
               "globalCount": ${model.globals.size},
               "typeCount": ${model.types.size},
