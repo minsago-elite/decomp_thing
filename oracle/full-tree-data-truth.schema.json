@@ -8,12 +8,12 @@
     "schemaVersion": {"const": 1}, "oracle": {"type": "object"}, "shard": {"type": "object"},
     "counts": {
       "type": "object", "additionalProperties": false,
-      "required": ["globals", "types", "unobservableGlobals", "unobservableTypes", "fields", "bases", "enumerators", "resolvedTypeReferences", "unresolvedTypeReferences", "crossShardTypeReferences"],
+      "required": ["globals", "types", "unobservableGlobals", "unobservableTypes", "fields", "bases", "enumerators", "resolvedTypeReferences", "unresolvedTypeReferences", "ambiguousTypeReferences", "crossShardTypeReferences"],
       "properties": {
         "globals": {"type": "integer", "minimum": 0}, "types": {"type": "integer", "minimum": 0},
         "unobservableGlobals": {"type": "integer", "minimum": 0}, "unobservableTypes": {"type": "integer", "minimum": 0},
         "fields": {"type": "integer", "minimum": 0}, "bases": {"type": "integer", "minimum": 0}, "enumerators": {"type": "integer", "minimum": 0},
-        "resolvedTypeReferences": {"type": "integer", "minimum": 0}, "unresolvedTypeReferences": {"type": "integer", "minimum": 0}, "crossShardTypeReferences": {"type": "integer", "minimum": 0}
+        "resolvedTypeReferences": {"type": "integer", "minimum": 0}, "unresolvedTypeReferences": {"type": "integer", "minimum": 0}, "ambiguousTypeReferences": {"type": "integer", "minimum": 0}, "crossShardTypeReferences": {"type": "integer", "minimum": 0}
       }
     },
     "globals": {"type": "array", "items": {"$ref": "#/$defs/global"}},
@@ -48,12 +48,17 @@
     },
     "typeReference": {
       "type": "object", "additionalProperties": false,
-      "required": ["evidenceDieOffsets", "modifierTags", "reasonCode", "resolutionCode", "targetOwnerShardId", "targetTypeId"],
+      "required": ["candidateTargetCount", "candidateTargets", "candidateTargetsSha256", "evidenceDieOffsetCount", "evidenceDieOffsets", "evidenceDieOffsetsSha256", "modifierTags", "reasonCode", "resolutionCode", "targetOwnerShardId", "targetTypeId"],
       "properties": {
-        "evidenceDieOffsets": {"type": "array", "maxItems": 64, "uniqueItems": true, "items": {"type": "string", "pattern": "^0x(?:0|[1-9a-f][0-9a-f]{0,15})$"}},
+        "candidateTargetCount": {"type": "integer", "minimum": 0},
+        "candidateTargets": {"type": "array", "maxItems": 16, "uniqueItems": true, "items": {"type": "object", "additionalProperties": false, "required": ["targetOwnerShardId", "targetTypeId"], "properties": {"targetOwnerShardId": {"type": "string"}, "targetTypeId": {"type": "string", "pattern": "^type-[0-9a-f]{32}$"}}}},
+        "candidateTargetsSha256": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
+        "evidenceDieOffsetCount": {"type": "integer", "minimum": 0},
+        "evidenceDieOffsets": {"type": "array", "maxItems": 16, "uniqueItems": true, "items": {"type": "string", "pattern": "^0x(?:0|[1-9a-f][0-9a-f]{0,15})$"}},
+        "evidenceDieOffsetsSha256": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
         "modifierTags": {"type": "array", "maxItems": 64, "items": {"type": "string", "pattern": "^DW_TAG_"}},
-        "reasonCode": {"type": ["string", "null"], "enum": [null, "no-type-attribute", "non-aggregate-terminal-type"]},
-        "resolutionCode": {"enum": ["unresolved", "exact-dwarf-offset", "odr-member-sole-source-aligned-target"]},
+        "reasonCode": {"type": ["string", "null"], "enum": [null, "no-type-attribute", "non-aggregate-terminal-type", "ambiguous-producer-declaration-targets"]},
+        "resolutionCode": {"enum": ["unresolved", "unresolved-authenticated-target-set", "exact-dwarf-offset", "odr-member-sole-source-aligned-target"]},
         "targetOwnerShardId": {"type": ["string", "null"]},
         "targetTypeId": {"oneOf": [{"type": "string", "pattern": "^type-[0-9a-f]{32}$"}, {"type": "null"}]}
       }

@@ -57,6 +57,29 @@ class FullTreeElfDataTest(unittest.TestCase):
         with self.assertRaisesRegex(FullTreeDataTruthError, "incompatible type references"):
             _merge_type_references([conflicting, base], "fixture-member")
 
+    def test_odr_member_reference_preserves_ambiguous_producer_targets(self) -> None:
+        references = [
+            {
+                "evidenceDieOffsets": [f"0x{index + 1:x}"],
+                "modifierTags": ["DW_TAG_pointer_type"],
+                "reasonCode": None,
+                "resolutionCode": "exact-dwarf-offset",
+                "targetOwnerShardId": f"owner-{index:02d}",
+                "targetTypeId": f"type-{index:032x}",
+                "_targetQuality": "producer-declaration",
+            }
+            for index in range(20)
+        ]
+        merged = _merge_type_references(references, "fixture-member")
+        self.assertIsNone(merged["targetTypeId"])
+        self.assertIsNone(merged["targetOwnerShardId"])
+        self.assertEqual("ambiguous-producer-declaration-targets", merged["reasonCode"])
+        self.assertEqual("unresolved-authenticated-target-set", merged["resolutionCode"])
+        self.assertEqual(20, merged["candidateTargetCount"])
+        self.assertEqual(16, len(merged["candidateTargets"]))
+        self.assertEqual(20, merged["evidenceDieOffsetCount"])
+        self.assertEqual(16, len(merged["evidenceDieOffsets"]))
+
     def test_source_unaligned_nonaddress_globals_do_not_merge_by_name(self) -> None:
         base = {
             "addressRva": None,

@@ -14,7 +14,9 @@ class FullTreeDataTruthError(ValueError):
     """Raised when ODR-equivalent data evidence is incompatible or incomplete."""
 
 
-POLICY = {"id": "full-tree-data-truth", "version": 7, "typeIdentity": "tag-qualified-lexical-context-name-declaration-with-producer-unit-for-anonymous-namespace-or-observation", "globalIdentity": "rva-or-source-aligned-name-declaration-or-producer-observation", "owner": "lowest-unit-id", "typeReferences": "exact-dwarf-offset-chain-with-odr-member-position-coalescence-only-to-a-sole-source-aligned-target", "maximumDatabaseBytes": 8 * 1024 * 1024 * 1024}
+POLICY = {"id": "full-tree-data-truth", "version": 8, "typeIdentity": "tag-qualified-lexical-context-name-declaration-with-producer-unit-for-anonymous-namespace-or-observation", "globalIdentity": "rva-or-source-aligned-name-declaration-or-producer-observation", "owner": "lowest-unit-id", "typeReferences": "exact-dwarf-offset-chain-with-bounded-authenticated-candidate-commitments-and-no-ambiguous-target-substitution", "maximumDatabaseBytes": 8 * 1024 * 1024 * 1024}
+
+REFERENCE_SAMPLE_LIMIT = 16
 
 
 def _sha(payload: bytes) -> str:
@@ -136,7 +138,21 @@ def _merge_type_references(references: Iterable[dict[str, Any]], identity: str) 
     reasons = {item["reasonCode"] for item in records}
     if len(modifiers) != 1 or len(reasons) != 1:
         raise FullTreeDataTruthError(f"incompatible type references for {identity}")
-    targets = {item["targetTypeId"] for item in records if item["targetTypeId"] is not None}
+    candidates = {
+        canonical_json_bytes(
+            {
+                "targetOwnerShardId": item["targetOwnerShardId"],
+                "targetTypeId": item["targetTypeId"],
+            }
+        ): {
+            "targetOwnerShardId": item["targetOwnerShardId"],
+            "targetTypeId": item["targetTypeId"],
+        }
+        for item in records
+        if item["targetTypeId"] is not None
+    }
+    ordered_candidates = [value for _, value in sorted(candidates.items())]
+    targets = {item["targetTypeId"] for item in ordered_candidates}
     if not targets:
         selected = records[0]
         resolution_code = "unresolved"
@@ -154,16 +170,33 @@ def _merge_type_references(references: Iterable[dict[str, Any]], identity: str) 
             for item in records
             if item["targetTypeId"] not in source_aligned
         }
-        if len(source_aligned) != 1 or not other_qualities <= {"producer-declaration"}:
+        if len(source_aligned) == 1 and other_qualities <= {"producer-declaration"}:
+            selected_id = next(iter(source_aligned))
+            selected = next(item for item in records if item["targetTypeId"] == selected_id)
+            resolution_code = "odr-member-sole-source-aligned-target"
+        elif not source_aligned and other_qualities <= {"producer-declaration"}:
+            selected = {**records[0], "reasonCode": "ambiguous-producer-declaration-targets", "targetOwnerShardId": None, "targetTypeId": None}
+            resolution_code = "unresolved-authenticated-target-set"
+        else:
             raise FullTreeDataTruthError(f"incompatible type references for {identity}")
-        selected_id = next(iter(source_aligned))
-        selected = next(item for item in records if item["targetTypeId"] == selected_id)
-        resolution_code = "odr-member-sole-source-aligned-target"
+    evidence_offsets = sorted(
+        {offset for item in records for offset in item["evidenceDieOffsets"]},
+        key=lambda value: int(value, 16),
+    )
+    if selected["targetTypeId"] is not None:
+        ordered_candidates.sort(
+            key=lambda item: (
+                item["targetTypeId"] != selected["targetTypeId"],
+                canonical_json_bytes(item),
+            )
+        )
     return {
-        "evidenceDieOffsets": sorted(
-            {offset for item in records for offset in item["evidenceDieOffsets"]},
-            key=lambda value: int(value, 16),
-        ),
+        "candidateTargetCount": len(ordered_candidates),
+        "candidateTargets": ordered_candidates[:REFERENCE_SAMPLE_LIMIT],
+        "candidateTargetsSha256": _sha(canonical_json_bytes(ordered_candidates)),
+        "evidenceDieOffsetCount": len(evidence_offsets),
+        "evidenceDieOffsets": evidence_offsets[:REFERENCE_SAMPLE_LIMIT],
+        "evidenceDieOffsetsSha256": _sha(canonical_json_bytes(evidence_offsets)),
         "modifierTags": selected["modifierTags"],
         "reasonCode": selected["reasonCode"],
         "resolutionCode": resolution_code,
@@ -182,6 +215,14 @@ def _validate_document(document: dict[str, Any]) -> None:
     if document["types"] != sorted(document["types"], key=lambda item: item["id"]) or document["globals"] != sorted(document["globals"], key=lambda item: item["id"]):
         raise FullTreeDataTruthError("data truth records are not ordered")
     expected = {
+        "ambiguousTypeReferences": sum(
+            reference["resolutionCode"] == "unresolved-authenticated-target-set"
+            for item in document["globals"]
+            for reference in [item["typeReference"]]
+        ) + sum(
+            member["typeReference"]["resolutionCode"] == "unresolved-authenticated-target-set"
+            for item in document["types"] for member in item["members"]
+        ),
         "bases": sum(member["kind"] == "base" for item in document["types"] for member in item["members"]),
         "enumerators": sum(member["kind"] == "enumerator" for item in document["types"] for member in item["members"]),
         "fields": sum(member["kind"] == "field" for item in document["types"] for member in item["members"]),
@@ -282,13 +323,29 @@ def validate_full_tree_data_truth_index(
         for reference in references:
             target = reference["targetTypeId"]
             owner = reference["targetOwnerShardId"]
+            candidates = reference["candidateTargets"]
+            if reference["candidateTargetCount"] < len(candidates):
+                raise FullTreeDataTruthError("type reference candidate sample exceeds its committed count")
+            if reference["evidenceDieOffsetCount"] < len(reference["evidenceDieOffsets"]):
+                raise FullTreeDataTruthError("type reference evidence sample exceeds its committed count")
+            if reference["candidateTargetCount"] == len(candidates) and reference["candidateTargetsSha256"] != _sha(canonical_json_bytes(candidates)):
+                raise FullTreeDataTruthError("type reference candidate commitment differs")
+            if reference["evidenceDieOffsetCount"] == len(reference["evidenceDieOffsets"]) and reference["evidenceDieOffsetsSha256"] != _sha(canonical_json_bytes(reference["evidenceDieOffsets"])):
+                raise FullTreeDataTruthError("type reference evidence commitment differs")
+            for candidate in candidates:
+                if type_owners.get(candidate["targetTypeId"]) != candidate["targetOwnerShardId"]:
+                    raise FullTreeDataTruthError("type reference candidate has a dangling or substituted owner")
             if target is None:
                 if owner is not None or reference["reasonCode"] is None:
                     raise FullTreeDataTruthError("unresolved type reference has contradictory evidence")
+                if reference["resolutionCode"] == "unresolved-authenticated-target-set" and reference["candidateTargetCount"] < 2:
+                    raise FullTreeDataTruthError("ambiguous type reference has fewer than two candidates")
             elif reference["reasonCode"] is not None or type_owners.get(target) != owner:
                 raise FullTreeDataTruthError(
                     f"type reference {target} has a dangling or substituted owner"
                 )
+            elif not any(candidate["targetTypeId"] == target and candidate["targetOwnerShardId"] == owner for candidate in candidates):
+                raise FullTreeDataTruthError("resolved type reference is absent from its candidate evidence")
 
 
 def generate_full_tree_data_truth(*, scope: dict[str, Any], scope_sha256: str, inventory: dict[str, Any], observation_root: Path, output_root: Path) -> dict[str, Any]:
@@ -370,7 +427,7 @@ def generate_full_tree_data_truth(*, scope: dict[str, Any], scope_sha256: str, i
                 globals_ = [json.loads(row[0]) for row in database.execute("SELECT payload FROM merged WHERE owner_shard=? AND kind='global' ORDER BY identity", (shard["id"],))]
                 types = [json.loads(row[0]) for row in database.execute("SELECT payload FROM merged WHERE owner_shard=? AND kind='type' ORDER BY identity", (shard["id"],))]
                 references = [item["typeReference"] for item in globals_] + [member["typeReference"] for item in types for member in item["members"]]
-                counts = {"bases": sum(member["kind"] == "base" for item in types for member in item["members"]), "crossShardTypeReferences": sum(item["targetOwnerShardId"] is not None and item["targetOwnerShardId"] != shard["id"] for item in references), "enumerators": sum(member["kind"] == "enumerator" for item in types for member in item["members"]), "fields": sum(member["kind"] == "field" for item in types for member in item["members"]), "globals": len(globals_), "resolvedTypeReferences": sum(item["targetTypeId"] is not None for item in references), "types": len(types), "unobservableGlobals": sum(item["population"] == "unobservable" for item in globals_), "unobservableTypes": sum(item["population"] == "unobservable" for item in types), "unresolvedTypeReferences": sum(item["targetTypeId"] is None for item in references)}
+                counts = {"ambiguousTypeReferences": sum(item["resolutionCode"] == "unresolved-authenticated-target-set" for item in references), "bases": sum(member["kind"] == "base" for item in types for member in item["members"]), "crossShardTypeReferences": sum(item["targetOwnerShardId"] is not None and item["targetOwnerShardId"] != shard["id"] for item in references), "enumerators": sum(member["kind"] == "enumerator" for item in types for member in item["members"]), "fields": sum(member["kind"] == "field" for item in types for member in item["members"]), "globals": len(globals_), "resolvedTypeReferences": sum(item["targetTypeId"] is not None for item in references), "types": len(types), "unobservableGlobals": sum(item["population"] == "unobservable" for item in globals_), "unobservableTypes": sum(item["population"] == "unobservable" for item in types), "unresolvedTypeReferences": sum(item["targetTypeId"] is None for item in references)}
                 document = {"counts": counts, "globals": globals_, "oracle": oracle, "schemaVersion": 1, "shard": {"id": shard["id"], "unitIds": shard["unitIds"]}, "types": types}
                 _validate_document(document)
                 payload = canonical_json_bytes(document)
