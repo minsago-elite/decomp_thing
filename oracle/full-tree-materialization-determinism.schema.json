@@ -1,0 +1,16 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://github.com/minsago-elite/decomp_thing/oracle/full-tree-materialization-determinism.schema.json",
+  "type": "object", "additionalProperties": false,
+  "required": ["schemaVersion", "firstIndexSha256", "secondIndexSha256", "files", "differingFiles", "identical", "reportSha256"],
+  "properties": {
+    "schemaVersion": {"const": 1},
+    "firstIndexSha256": {"$ref": "#/$defs/sha"},
+    "secondIndexSha256": {"$ref": "#/$defs/sha"},
+    "files": {"type": "integer", "minimum": 1},
+    "differingFiles": {"type": "array", "uniqueItems": true, "items": {"type": "string", "minLength": 1}},
+    "identical": {"type": "boolean"},
+    "reportSha256": {"$ref": "#/$defs/sha"}
+  },
+  "$defs": {"sha": {"type": "string", "pattern": "^[0-9a-f]{64}$"}}
+}

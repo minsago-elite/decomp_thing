@@ -20,6 +20,9 @@ from oracle.bounded_shards import (  # noqa: E402
 )
 from oracle.full_tree_scope import canonical_json_bytes  # noqa: E402
 from oracle.full_tree_determinism import compare_full_tree_runs  # noqa: E402
+from oracle.full_tree_materialization_determinism import (  # noqa: E402
+    compare_full_tree_materializations,
+)
 
 
 BOUNDS = ShardBounds(
@@ -59,6 +62,25 @@ def producer(shard: ShardInput, output: Path, cancelled: threading.Event) -> int
 
 
 class BoundedShardRunTest(unittest.TestCase):
+    def test_truth_materialization_comparison_detects_exact_file_drift(self) -> None:
+        with tempfile.TemporaryDirectory(prefix="truth-materialization-") as temporary:
+            root = Path(temporary)
+            first = root / "first"
+            second = root / "second"
+            for target in (first, second):
+                (target / "shards").mkdir(parents=True)
+                (target / "shards/one.json").write_bytes(b"{}")
+                (target / "index.json").write_bytes(
+                    canonical_json_bytes({"schemaVersion": 1, "shards": [{"path": "shards/one.json"}]})
+                )
+            report = compare_full_tree_materializations(first, second)
+            self.assertTrue(report["identical"])
+            self.assertEqual(2, report["files"])
+            (second / "shards/one.json").write_bytes(b'{"changed":true}')
+            drift = compare_full_tree_materializations(first, second)
+            self.assertFalse(drift["identical"])
+            self.assertEqual(["shards/one.json"], drift["differingFiles"])
+
     def test_determinism_ignores_only_authenticated_worker_concurrency(self) -> None:
         with tempfile.TemporaryDirectory(prefix="bounded-shards-determinism-") as temporary:
             root = Path(temporary)
