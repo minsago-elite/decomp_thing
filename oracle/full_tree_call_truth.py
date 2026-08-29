@@ -193,6 +193,9 @@ def generate_full_tree_call_truth(
                 PRAGMA locking_mode=EXCLUSIVE;
                 CREATE TABLE observations (edge_key TEXT NOT NULL, observation_id TEXT NOT NULL,
                                            source_shard TEXT NOT NULL, payload BLOB NOT NULL);
+                CREATE TABLE merged (owner_shard TEXT NOT NULL, edge_id TEXT PRIMARY KEY,
+                                     payload BLOB NOT NULL);
+                CREATE INDEX merged_owner ON merged(owner_shard,edge_id);
                 """
             )
             for checkpoint in call_index["shards"]:
@@ -227,7 +230,7 @@ def generate_full_tree_call_truth(
                 database.executemany("INSERT INTO observations VALUES (?, ?, ?, ?)", rows)
                 database.commit()
 
-            by_shard: dict[str, list[dict[str, Any]]] = defaultdict(list)
+            merged_batch: list[tuple[str, str, bytes]] = []
             database.executescript(
                 "CREATE UNIQUE INDEX observations_id ON observations(observation_id);"
                 "CREATE INDEX observations_edge ON observations(edge_key,observation_id);"
@@ -304,7 +307,15 @@ def generate_full_tree_call_truth(
                     "semanticTargetId": semantic,
                     "targetKind": target_kind,
                 }
-                by_shard[owner_shard].append(item)
+                merged_batch.append((owner_shard, item["id"], canonical_json_bytes(item)))
+                if len(merged_batch) == 4096:
+                    database.executemany("INSERT INTO merged VALUES (?,?,?)", merged_batch)
+                    database.commit()
+                    merged_batch.clear()
+
+            if merged_batch:
+                database.executemany("INSERT INTO merged VALUES (?,?,?)", merged_batch)
+                database.commit()
 
             shard_records = []
             aggregate = defaultdict(int)
@@ -315,7 +326,13 @@ def generate_full_tree_call_truth(
                     cpu_started=cpu_started,
                     database_path=Path(database_file.name),
                 )
-                calls = sorted(by_shard[shard["id"]], key=lambda item: item["id"])
+                calls = [
+                    json.loads(row[0])
+                    for row in database.execute(
+                        "SELECT payload FROM merged WHERE owner_shard=? ORDER BY edge_id",
+                        (shard["id"],),
+                    )
+                ]
                 counts = {
                     "directInternal": sum(item["targetKind"] == "direct-internal" for item in calls),
                     "edges": len(calls),
