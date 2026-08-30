@@ -46,6 +46,29 @@ GENERIC_CONTRACT_MODES = {
     "wait-for-cancel",
     "wrong-jsonrpc-prompt",
 }
+MVP_VULNERABLE_SOURCE = """#include <stdio.h>
+int main(void) {
+    char badge[8];
+    const char *message = "[03] Alexandria Stone";
+    for (volatile int i = 0; message[i] != '\\0'; i++) {
+        badge[i] = message[i];
+    }
+    puts("[03] Alexandria Stone");
+    return badge[0] == 0;
+}
+"""
+MVP_PATCHED_SOURCE = """#include <stdio.h>
+int main(void) {
+    puts("[03] Alexandria Stone");
+    return 0;
+}
+"""
+MVP_BAD_PATCH_SOURCE = """#include <stdio.h>
+int main(void) {
+    puts("wrong behavior");
+    return 0;
+}
+"""
 
 if PARENT_SECRET_ENVIRONMENT_NAME in os.environ:
     sys.stderr.write("fatal: ambient parent-secret canary reached the ACP sandbox\n")
@@ -138,6 +161,8 @@ expected_fs = {
     "fs-cap-read-only": {"readTextFile": True, "writeTextFile": False},
     "fs-cap-write-only": {"readTextFile": False, "writeTextFile": True},
     "fs-cap-none": None,
+    "mvp-patch": {"readTextFile": True, "writeTextFile": True},
+    "mvp-patch-bad-fix": {"readTextFile": True, "writeTextFile": True},
 }.get(MODE, "unchecked")
 if expected_fs != "unchecked":
     actual_fs = initialize.get("params", {}).get("clientCapabilities", {}).get("fs")
@@ -238,9 +263,16 @@ prompt = read_message()
 if prompt is None or prompt.get("method") != "session/prompt":
     raise SystemExit(94)
 prompt_text = prompt.get("params", {}).get("prompt", [{}])[0].get("text", "")
-expected_objective = "exercise the protocol fixture" if MODE in GENERIC_CONTRACT_MODES else "edit the fixture"
-expected_context = "protocol evidence" if MODE in GENERIC_CONTRACT_MODES else "compiler evidence"
-if expected_objective not in prompt_text or expected_context not in prompt_text:
+if MODE in ("mvp-patch", "mvp-patch-bad-fix"):
+    prompt_valid = (
+        "Convert the Ghidra decompiler output" in prompt_text
+        or "Apply the smallest clear memory-safety fix" in prompt_text
+    ) and "decompengine.failure-kind" in prompt_text
+else:
+    expected_objective = "exercise the protocol fixture" if MODE in GENERIC_CONTRACT_MODES else "edit the fixture"
+    expected_context = "protocol evidence" if MODE in GENERIC_CONTRACT_MODES else "compiler evidence"
+    prompt_valid = expected_objective in prompt_text and expected_context in prompt_text
+if not prompt_valid:
     respond(prompt, error={"code": -32602, "message": "prompt lost objective or context"})
     raise SystemExit(95)
 
@@ -792,12 +824,22 @@ update({
     "status": "in_progress",
 })
 
-source = join_path(
-    cwd,
-    "contract/artifact.txt" if MODE in GENERIC_CONTRACT_MODES else "src/module.c",
-)
-if MODE not in ("fs-read-write", "repair-quota-retry"):
+if MODE in ("mvp-patch", "mvp-patch-bad-fix"):
+    reconstructing = "Convert the Ghidra decompiler output" in prompt_text
+    source = join_path(cwd, "decompiled.c" if reconstructing else "patched.c")
+    if reconstructing:
+        content = MVP_VULNERABLE_SOURCE
+    elif MODE == "mvp-patch-bad-fix":
+        content = MVP_BAD_PATCH_SOURCE
+    else:
+        content = MVP_PATCHED_SOURCE
+else:
+    source = join_path(
+        cwd,
+        "contract/artifact.txt" if MODE in GENERIC_CONTRACT_MODES else "src/module.c",
+    )
     content = "updated artifact\n" if MODE in GENERIC_CONTRACT_MODES else "new source\n"
+if MODE not in ("fs-read-write", "repair-quota-retry"):
     write_workspace_file(source, content, 803)
 
 update({
