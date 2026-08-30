@@ -1,0 +1,150 @@
+{
+  "aggregate": {
+    "abiObjects": {
+      "denominator": 2,
+      "exact": 0,
+      "excluded": 0,
+      "fabricated": 0,
+      "missing": 0,
+      "partial": 2
+    },
+    "globals": {
+      "denominator": 4,
+      "exact": 2,
+      "excluded": 1,
+      "fabricated": 0,
+      "missing": 1,
+      "partial": 1
+    },
+    "types": {
+      "denominator": 1,
+      "exact": 1,
+      "excluded": 0,
+      "fabricated": 0,
+      "missing": 0,
+      "partial": 0
+    }
+  },
+  "configurationSha256": "27151643e613d66dc0ea9d640c3e300f9f6c1c4c835af20d6dd6913da449695d",
+  "dataTruthIndexSha256": "714ce2ecb009ded8d993610d625d361eb49ab34d3214c3a0c0158f9e7576fe78",
+  "mismatches": [
+    {
+      "dimension": "globals",
+      "id": "missing-global-9e28bc6d6ff0bd07a8d84d6b3fc5bfd8",
+      "kind": "missing",
+      "reasonCode": "dwarf-address-without-elf-object",
+      "shardId": "shard-b",
+      "truthId": "global-33333333333333333333333333333333"
+    },
+    {
+      "dimension": "abiObjects",
+      "id": "partial-abi-object-695b49a8f201531dfcb9bf44301fee8e",
+      "kind": "partial",
+      "reasonCode": "abi-object-has-unresolved-slot-words",
+      "shardId": "elf-only",
+      "truthId": "global-rva-0x20:😀-object"
+    },
+    {
+      "dimension": "abiObjects",
+      "id": "partial-abi-object-a405b683196d3da9cb4cad87f3ec275b",
+      "kind": "partial",
+      "reasonCode": "abi-object-has-unresolved-slot-words",
+      "shardId": "elf-only",
+      "truthId": "global-rva-0x20:-object"
+    },
+    {
+      "dimension": "globals",
+      "id": "partial-global-332d52b3d508bf432fb3fcdd37aaa286",
+      "kind": "partial",
+      "reasonCode": "elf-object-without-dwarf-owner",
+      "shardId": "elf-only",
+      "truthId": "global-rva-0x20"
+    }
+  ],
+  "reconciliationReportSha256": "cfcca6e636f058c9670b39495fb0d4516c1a287d54ec45b85560b5c4810bf5d4",
+  "reportSha256": "d3203e8b4c0b7bba1563e25d080ebf7ed73616d996111e931a28fa625585ae11",
+  "schemaVersion": 1,
+  "shards": [
+    {
+      "abiObjects": {
+        "denominator": 2,
+        "exact": 0,
+        "excluded": 0,
+        "fabricated": 0,
+        "missing": 0,
+        "partial": 2
+      },
+      "globals": {
+        "denominator": 1,
+        "exact": 0,
+        "excluded": 0,
+        "fabricated": 0,
+        "missing": 0,
+        "partial": 1
+      },
+      "id": "elf-only",
+      "types": {
+        "denominator": 0,
+        "exact": 0,
+        "excluded": 0,
+        "fabricated": 0,
+        "missing": 0,
+        "partial": 0
+      }
+    },
+    {
+      "abiObjects": {
+        "denominator": 0,
+        "exact": 0,
+        "excluded": 0,
+        "fabricated": 0,
+        "missing": 0,
+        "partial": 0
+      },
+      "globals": {
+        "denominator": 2,
+        "exact": 2,
+        "excluded": 0,
+        "fabricated": 0,
+        "missing": 0,
+        "partial": 0
+      },
+      "id": "shard-a",
+      "types": {
+        "denominator": 1,
+        "exact": 1,
+        "excluded": 0,
+        "fabricated": 0,
+        "missing": 0,
+        "partial": 0
+      }
+    },
+    {
+      "abiObjects": {
+        "denominator": 0,
+        "exact": 0,
+        "excluded": 0,
+        "fabricated": 0,
+        "missing": 0,
+        "partial": 0
+      },
+      "globals": {
+        "denominator": 1,
+        "exact": 0,
+        "excluded": 1,
+        "fabricated": 0,
+        "missing": 1,
+        "partial": 0
+      },
+      "id": "shard-b",
+      "types": {
+        "denominator": 0,
+        "exact": 0,
+        "excluded": 0,
+        "fabricated": 0,
+        "missing": 0,
+        "partial": 0
+      }
+    }
+  ]
+}
