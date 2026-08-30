@@ -13,6 +13,7 @@ import com.agentclientprotocol.model.ClientCapabilities
 import com.agentclientprotocol.model.ContentBlock
 import com.agentclientprotocol.model.CreateTerminalResponse
 import com.agentclientprotocol.model.EnvVariable
+import com.agentclientprotocol.model.FileSystemCapability
 import com.agentclientprotocol.model.Implementation
 import com.agentclientprotocol.model.KillTerminalCommandResponse
 import com.agentclientprotocol.model.PermissionOption
@@ -36,8 +37,10 @@ import com.agentclientprotocol.rpc.JsonRpcErrorCode
 import com.agentclientprotocol.rpc.decodeJsonRpcMessage
 import com.agentclientprotocol.transport.StdioTransport
 import decompengine.agent.AgentCancellation
+import decompengine.agent.AgentAccessPolicy
 import decompengine.agent.AgentExecutionEvent
 import decompengine.agent.AgentExecutionException
+import decompengine.agent.AgentExecutionLimits
 import decompengine.agent.AgentExecutionRequest
 import decompengine.agent.AgentExecutionResult
 import decompengine.agent.AgentFailure
@@ -60,6 +63,7 @@ import decompengine.agent.AgentToolEvent
 import decompengine.agent.AgentToolStatus
 import decompengine.agent.AgentUsage
 import decompengine.agent.AgentWorkspacePath
+import decompengine.agent.AgentWorkspaceRoot
 import decompengine.repair.BoundedRepairOutput
 import decompengine.repair.CapturedRepairAgentHarness
 import java.io.ByteArrayOutputStream
@@ -104,8 +108,10 @@ import kotlinx.serialization.json.JsonPrimitive
 /**
  * Stable ACP v1 adapter for the provider-neutral [AgentHarness] boundary.
  *
- * Every execution starts one explicitly configured process, negotiates only protocol version 1,
- * opens one session, executes one prompt turn, and tears the complete process tree down.
+ * Every model execution starts one explicitly configured process, negotiates only protocol version
+ * 1, opens one session, executes one prompt turn, and tears the complete process tree down. The
+ * operator preflight shares that launch/negotiation/teardown path but deliberately stops before
+ * session creation.
  */
 class AcpAgentHarness(
     private val configuration: AcpProcessConfiguration,
@@ -137,6 +143,33 @@ class AcpAgentHarness(
 
     override fun latestAcpExecutionEvidence(): AcpExecutionEvidenceSnapshot? = executionEvidence.get()
 
+    /**
+     * Launches the production-contained agent, negotiates stable ACP v1, and tears it down without
+     * creating a session or sending a model prompt.
+     */
+    fun preflight(workflow: AcpPreflightWorkflow = AcpPreflightWorkflow.ALL): AcpAgentPreflightResult {
+        val requiredCapabilities = configuration.requiredAgentCapabilities + workflow.requiredAgentCapabilities
+        executeInternal(
+            request = preflightRequest(),
+            onEvent = {},
+            capturedFilesystem = null,
+            preflightWorkflow = workflow,
+        )
+        return AcpAgentPreflightResult(
+            workflow = workflow,
+            negotiatedAgent = requireNotNull(negotiatedAgentEvidence.get()) {
+                "successful ACP preflight is missing initialize evidence"
+            },
+            requiredAgentCapabilities = requiredCapabilities,
+            diagnostics = requireNotNull(diagnostics.get()) {
+                "successful ACP preflight is missing process diagnostics"
+            },
+            sandboxEvidence = requireNotNull(sandboxEvidence.get()) {
+                "successful ACP preflight is missing sandbox evidence"
+            },
+        )
+    }
+
     /** Package-owned one-time binding; preserves the single public constructor security surface. */
     internal fun bindFactoryProvenance(provenance: AcpHarnessProvenance): AcpAgentHarness {
         require(provenance.harness == "acp" && provenance.implementationId == configuration.implementationId) {
@@ -151,7 +184,12 @@ class AcpAgentHarness(
     override fun execute(
         request: AgentExecutionRequest,
         onEvent: (AgentExecutionEvent) -> Unit,
-    ): AgentExecutionResult = executeInternal(request, onEvent, capturedFilesystem = null)
+    ): AgentExecutionResult = executeInternal(
+        request,
+        onEvent,
+        capturedFilesystem = null,
+        preflightWorkflow = null,
+    )
 
     override fun executeCaptured(
         request: AgentExecutionRequest,
@@ -162,6 +200,7 @@ class AcpAgentHarness(
         request,
         onEvent,
         AcpCapturedRepairFilesystem(initialFiles, output),
+        preflightWorkflow = null,
     )
 
     @OptIn(UnstableApi::class)
@@ -169,6 +208,7 @@ class AcpAgentHarness(
         request: AgentExecutionRequest,
         onEvent: (AgentExecutionEvent) -> Unit,
         capturedFilesystem: AcpCapturedRepairFilesystem?,
+        preflightWorkflow: AcpPreflightWorkflow?,
     ): AgentExecutionResult {
         unresolvedCleanupFailure.get()?.let { throw it }
         diagnostics.set(null)
@@ -178,7 +218,9 @@ class AcpAgentHarness(
         sandboxEvidence.set(null)
         negotiatedAgentEvidence.set(null)
         executionEvidence.set(null)
-        if (capturedFilesystem == null) {
+        if (preflightWorkflow != null) {
+            require(capturedFilesystem == null) { "ACP preflight cannot open a workflow filesystem" }
+        } else if (capturedFilesystem == null) {
             validateRequest(request)
         } else {
             capturedFilesystem.preflight(request, configuration.filesystemLimits)
@@ -189,7 +231,7 @@ class AcpAgentHarness(
 
         val startedAt = System.nanoTime()
         val wallDeadline = MonotonicDeadline(request.limits.wallClockTimeout)
-        val before = if (capturedFilesystem == null) {
+        val before = if (capturedFilesystem == null && preflightWorkflow == null) {
             try {
                 WorkspaceSnapshot.capture(
                     request,
@@ -304,6 +346,7 @@ class AcpAgentHarness(
                         permissionAuditRecorder = permissionAuditRecorder,
                         sandboxExecution = sandboxExecution,
                         capturedFilesystem = capturedFilesystem,
+                        preflightWorkflow = preflightWorkflow,
                     )
                 }
             } catch (failure: Throwable) {
@@ -506,7 +549,9 @@ class AcpAgentHarness(
         }
 
         val finished = requireNotNull(outcome)
-        val changes = if (capturedFilesystem != null) {
+        val changes = if (preflightWorkflow != null) {
+            emptyList()
+        } else if (capturedFilesystem != null) {
             capturedFilesystem.changes()
         } else {
             try {
@@ -570,7 +615,7 @@ class AcpAgentHarness(
             session = translator.sessionReference(),
             usage = usage,
         )
-        factoryProvenance.get()?.let { provenance ->
+        if (preflightWorkflow == null) factoryProvenance.get()?.let { provenance ->
             executionEvidence.set(
                 AcpExecutionEvidenceSnapshot(
                     factoryProvenance = provenance,
@@ -595,6 +640,22 @@ class AcpAgentHarness(
         return result
     }
 
+    private fun preflightRequest(): AgentExecutionRequest = AgentExecutionRequest(
+        objective = "negotiate the configured ACP agent without opening a session",
+        workspaceRoots = listOf(AgentWorkspaceRoot("preflight", ACP_PREFLIGHT_WORKSPACE)),
+        accessPolicy = AgentAccessPolicy(emptyList(), emptySet()),
+        limits = AgentExecutionLimits(
+            wallClockTimeout = configuration.timeouts.startup.plus(configuration.timeouts.shutdown),
+            idleTimeout = configuration.timeouts.startup,
+            maxTurns = 1,
+            maxToolCalls = 1,
+            maxOutputBytes = Math.addExact(
+                configuration.maximumFrameBytes.toLong(),
+                configuration.maximumStderrBytes.toLong(),
+            ),
+        ),
+    )
+
     @OptIn(UnstableApi::class)
     private suspend fun runProtocol(
         request: AgentExecutionRequest,
@@ -610,6 +671,7 @@ class AcpAgentHarness(
         permissionAuditRecorder: AcpPermissionAuditRecorder,
         sandboxExecution: ProductionAcpSandboxExecution,
         capturedFilesystem: AcpCapturedRepairFilesystem?,
+        preflightWorkflow: AcpPreflightWorkflow?,
     ): PromptOutcome {
         val protocolScope = CoroutineScope(SupervisorJob() + Dispatchers.Default)
         protocolScopeReference.set(protocolScope)
@@ -629,6 +691,38 @@ class AcpAgentHarness(
         transport.onClose { running.fail(AcpEofFailure("ACP stdout closed")) }
         val client = Client(protocol)
         protocol.start()
+        if (preflightWorkflow != null) {
+            val filesystemCapability = if (
+                preflightWorkflow.filesystemRead || preflightWorkflow.filesystemWrite
+            ) {
+                FileSystemCapability(
+                    readTextFile = preflightWorkflow.filesystemRead,
+                    writeTextFile = preflightWorkflow.filesystemWrite,
+                )
+            } else {
+                null
+            }
+            negotiatedAgentEvidence.set(
+                initializeAgent(
+                    client = client,
+                    clientCapabilities = ClientCapabilities(
+                        fs = filesystemCapability,
+                        terminal = preflightWorkflow.terminal,
+                    ),
+                    requiredCapabilities =
+                        configuration.requiredAgentCapabilities + preflightWorkflow.requiredAgentCapabilities,
+                    running = running,
+                    wallDeadline = wallDeadline,
+                    cancellation = request.cancellation,
+                    protocolScope = protocolScope,
+                ),
+            )
+            return PromptOutcome(
+                stopReason = AgentStopReason.COMPLETED,
+                response = null,
+                summary = "ACP v1 initialize preflight completed",
+            )
+        }
         val filesystem = capturedFilesystem?.open(
             request,
             configuration.filesystemLimits,
@@ -654,53 +748,18 @@ class AcpAgentHarness(
             permissionAuditRecorder,
         )
 
-        val agentInfo = awaitPhase(
-            phase = "initialize",
-            phaseDeadline = MonotonicDeadline(configuration.timeouts.startup),
-            wallDeadline = wallDeadline,
-            running = running,
-            cancellation = request.cancellation,
-            operationScope = protocolScope,
-        ) {
-            client.initialize(
-                ClientInfo(
-                    protocolVersion = ACP_STABLE_PROTOCOL_VERSION,
-                    capabilities = ClientCapabilities(
-                        fs = filesystem.capability,
-                        terminal = terminal.capability,
-                    ),
-                    implementation = Implementation(
-                        ACP_CLIENT_IMPLEMENTATION_NAME,
-                        ACP_CLIENT_IMPLEMENTATION_VERSION,
-                    ),
-                    supportedProtocolVersions = setOf(ACP_STABLE_PROTOCOL_VERSION),
-                ),
-            )
-        }
-        if (agentInfo.protocolVersion != ACP_STABLE_PROTOCOL_VERSION) {
-            throw AcpProtocolFailure(
-                "ACP SDK accepted unexpected protocol version ${agentInfo.protocolVersion}",
-            )
-        }
-        validateCapabilities(agentInfo.capabilities, request)
-        val agentImplementation = agentInfo.implementation
-            ?: throw AcpProtocolFailure("ACP agent did not identify its implementation during initialize")
         negotiatedAgentEvidence.set(
-            AcpNegotiatedAgentEvidence(
-                protocolVersion = agentInfo.protocolVersion,
-                implementationName = agentImplementation.name,
-                implementationVersion = agentImplementation.version,
-                implementationTitle = agentImplementation.title,
-                capabilities = AcpNegotiatedCapabilitiesEvidence(
-                    loadSession = agentInfo.capabilities.loadSession,
-                    promptImage = agentInfo.capabilities.promptCapabilities.image,
-                    promptAudio = agentInfo.capabilities.promptCapabilities.audio,
-                    promptEmbeddedContext = agentInfo.capabilities.promptCapabilities.embeddedContext,
-                    mcpHttp = agentInfo.capabilities.mcpCapabilities.http,
-                    mcpSse = agentInfo.capabilities.mcpCapabilities.sse,
-                    sessionAdditionalDirectories =
-                        agentInfo.capabilities.sessionCapabilities.additionalDirectories != null,
+            initializeAgent(
+                client = client,
+                clientCapabilities = ClientCapabilities(
+                    fs = filesystem.capability,
+                    terminal = terminal.capability,
                 ),
+                requiredCapabilities = configuredCapabilitiesFor(request),
+                running = running,
+                wallDeadline = wallDeadline,
+                cancellation = request.cancellation,
+                protocolScope = protocolScope,
             ),
         )
 
@@ -755,6 +814,62 @@ class AcpAgentHarness(
         permissionAuditRecorder.failure()?.let { throw it }
         if (!outcome.hostCancellation) terminal.finishSession(session.sessionId.value)
         return outcome
+    }
+
+    @OptIn(UnstableApi::class)
+    private suspend fun initializeAgent(
+        client: Client,
+        clientCapabilities: ClientCapabilities,
+        requiredCapabilities: Set<AcpRequiredAgentCapability>,
+        running: RunningAcpProcess,
+        wallDeadline: MonotonicDeadline,
+        cancellation: AgentCancellation,
+        protocolScope: CoroutineScope,
+    ): AcpNegotiatedAgentEvidence {
+        val agentInfo = awaitPhase(
+            phase = "initialize",
+            phaseDeadline = MonotonicDeadline(configuration.timeouts.startup),
+            wallDeadline = wallDeadline,
+            running = running,
+            cancellation = cancellation,
+            operationScope = protocolScope,
+        ) {
+            client.initialize(
+                ClientInfo(
+                    protocolVersion = ACP_STABLE_PROTOCOL_VERSION,
+                    capabilities = clientCapabilities,
+                    implementation = Implementation(
+                        ACP_CLIENT_IMPLEMENTATION_NAME,
+                        ACP_CLIENT_IMPLEMENTATION_VERSION,
+                    ),
+                    supportedProtocolVersions = setOf(ACP_STABLE_PROTOCOL_VERSION),
+                ),
+            )
+        }
+        if (agentInfo.protocolVersion != ACP_STABLE_PROTOCOL_VERSION) {
+            throw AcpProtocolFailure(
+                "ACP SDK accepted unexpected protocol version ${agentInfo.protocolVersion}",
+            )
+        }
+        validateCapabilities(agentInfo.capabilities, requiredCapabilities)
+        val agentImplementation = agentInfo.implementation
+            ?: throw AcpProtocolFailure("ACP agent did not identify its implementation during initialize")
+        return AcpNegotiatedAgentEvidence(
+            protocolVersion = agentInfo.protocolVersion,
+            implementationName = agentImplementation.name,
+            implementationVersion = agentImplementation.version,
+            implementationTitle = agentImplementation.title,
+            capabilities = AcpNegotiatedCapabilitiesEvidence(
+                loadSession = agentInfo.capabilities.loadSession,
+                promptImage = agentInfo.capabilities.promptCapabilities.image,
+                promptAudio = agentInfo.capabilities.promptCapabilities.audio,
+                promptEmbeddedContext = agentInfo.capabilities.promptCapabilities.embeddedContext,
+                mcpHttp = agentInfo.capabilities.mcpCapabilities.http,
+                mcpSse = agentInfo.capabilities.mcpCapabilities.sse,
+                sessionAdditionalDirectories =
+                    agentInfo.capabilities.sessionCapabilities.additionalDirectories != null,
+            ),
+        )
     }
 
     private suspend fun <T> awaitPhase(
@@ -938,10 +1053,16 @@ class AcpAgentHarness(
         ),
     )
 
-    private fun validateCapabilities(capabilities: AgentCapabilities, request: AgentExecutionRequest) {
-        val required = configuration.requiredAgentCapabilities.toMutableSet()
-        if (request.workspaceRoots.size > 1) required += AcpRequiredAgentCapability.ADDITIONAL_DIRECTORIES
-        val missing = required.filterNot { capability -> capabilities.supports(capability) }
+    private fun configuredCapabilitiesFor(request: AgentExecutionRequest): Set<AcpRequiredAgentCapability> =
+        configuration.requiredAgentCapabilities.toMutableSet().apply {
+            if (request.workspaceRoots.size > 1) add(AcpRequiredAgentCapability.ADDITIONAL_DIRECTORIES)
+        }
+
+    private fun validateCapabilities(
+        capabilities: AgentCapabilities,
+        requiredCapabilities: Set<AcpRequiredAgentCapability>,
+    ) {
+        val missing = requiredCapabilities.filterNot { capability -> capabilities.supports(capability) }
         if (missing.isNotEmpty()) {
             throw AgentExecutionException(
                 AgentFailure(
@@ -2457,6 +2578,7 @@ private const val POLL_INTERVAL_MILLIS = 10L
 private const val NANOS_PER_MILLI = 1_000_000L
 private const val MAX_PROTOCOL_DIAGNOSTIC_CHARS = 256
 private const val SESSION_NEW_METHOD = "session/new"
+private val ACP_PREFLIGHT_WORKSPACE: Path = Path.of("/decomp-acp-preflight/workspace")
 private const val WORKSPACE_HASH_BUFFER_BYTES = 64 * 1024
 private const val SUMMARY_CHARACTER_LIMIT = 64 * 1024
 // Pinned acp-jvm 0.30.1 Client handlers whose request model carries AcpWithSessionId. Elicitation

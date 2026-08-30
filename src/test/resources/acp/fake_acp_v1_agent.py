@@ -164,6 +164,9 @@ expected_fs = {
     "fs-cap-none": None,
     "mvp-patch": {"readTextFile": True, "writeTextFile": True},
     "mvp-patch-bad-fix": {"readTextFile": True, "writeTextFile": True},
+    "doctor-preflight": {"readTextFile": True, "writeTextFile": True},
+    "doctor-preflight-child-hang": {"readTextFile": True, "writeTextFile": True},
+    "doctor-preflight-shutdown-burst": {"readTextFile": True, "writeTextFile": True},
 }.get(MODE, "unchecked")
 if expected_fs != "unchecked":
     actual_fs = initialize.get("params", {}).get("clientCapabilities", {}).get("fs")
@@ -227,6 +230,30 @@ if MODE == "duplicate-response-id":
 
 if MODE == "crash-after-initialize":
     raise SystemExit(17)
+
+if MODE in (
+    "doctor-preflight",
+    "doctor-preflight-child-hang",
+    "doctor-preflight-shutdown-burst",
+):
+    if MODE == "doctor-preflight-child-hang":
+        child_pid = os.fork()
+        if child_pid == 0:
+            signal.signal(signal.SIGTERM, signal.SIG_IGN)
+            time.sleep(30)
+            os._exit(0)
+    unexpected = read_message()
+    if unexpected is not None:
+        sys.stderr.write("doctor preflight received a post-initialize protocol message\n")
+        sys.stderr.flush()
+        raise SystemExit(121)
+    if MODE == "doctor-preflight-shutdown-burst":
+        chunk = b"x" * 8192
+        while True:
+            os.write(1, chunk)
+    if MODE == "doctor-preflight-child-hang":
+        time.sleep(30)
+    raise SystemExit(0)
 
 session_new = read_message()
 if session_new is None or session_new.get("method") != "session/new":

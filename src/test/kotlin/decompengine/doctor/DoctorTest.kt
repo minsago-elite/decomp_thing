@@ -6,6 +6,7 @@ import kotlin.io.path.createDirectories
 import kotlin.io.path.createTempDirectory
 import kotlin.io.path.writeText
 import kotlin.test.Test
+import kotlin.test.assertFailsWith
 import kotlin.test.assertFalse
 import kotlin.test.assertTrue
 
@@ -21,7 +22,6 @@ class DoctorTest {
         val doctor = Doctor(
             environment = mapOf(
                 "GHIDRA_HOME" to ghidra.toString(),
-                "ACP_HARNESS" to "legacy-openai",
                 "BASE_URL" to "https://models.example.test/v1",
                 "API_KEY" to "must-not-appear",
                 "MODEL" to "test-model",
@@ -37,7 +37,9 @@ class DoctorTest {
             },
         )
 
-        val report = doctor.inspect(DoctorOptions(temp.resolve("output")))
+        val report = doctor.inspect(
+            DoctorOptions(temp.resolve("output"), harnessOverride = "legacy-openai"),
+        )
 
         assertTrue(report.passed, report.checks.toString())
         assertTrue(report.checks.any { it.name == "GCC sanitizers" && it.passed })
@@ -50,8 +52,19 @@ class DoctorTest {
     @Test
     fun `retains actionable failures and skips credentials in tools only mode`() {
         val temp = createTempDirectory("doctor-fail-")
+        val environment = object : AbstractMap<String, String>() {
+            override val entries: Set<Map.Entry<String, String>>
+                get() = error("tools-only must not enumerate the ambient environment")
+
+            override fun get(key: String): String? {
+                check(!key.startsWith("ACP_") && key !in setOf("BASE_URL", "API_KEY", "MODEL")) {
+                    "tools-only attempted to resolve agent configuration: $key"
+                }
+                return null
+            }
+        }
         val doctor = Doctor(
-            environment = emptyMap(),
+            environment = environment,
             commandProbe = CommandProbe { command, _ ->
                 if (command.first() == "gcc" && command.any { it.startsWith("-fsanitize") }) {
                     CommandProbeResult(1, "cannot find libasan")
@@ -67,7 +80,48 @@ class DoctorTest {
         assertFalse(report.passed)
         assertTrue(report.checks.any { it.name == "Java" && !it.passed && it.detail.contains("Install") })
         assertTrue(report.checks.any { it.name == "GCC sanitizers" && !it.passed && it.detail.contains("libasan") })
+        assertFalse(report.checks.any { it.name == "ACP harness" || it.name == "ACP preflight" })
         assertFalse(report.checks.any { it.name.startsWith("LLM") })
+    }
+
+    @Test
+    fun `tools only contract rejects agent selectors`() {
+        val output = createTempDirectory("doctor-tools-contract-")
+
+        assertFailsWith<IllegalArgumentException> {
+            DoctorOptions(output, toolsOnly = true, harnessOverride = "acp")
+        }
+        assertFailsWith<IllegalArgumentException> {
+            DoctorOptions(
+                output,
+                toolsOnly = true,
+                workflowOverride = decompengine.acp.AcpPreflightWorkflow.PATCH,
+            )
+        }
+    }
+
+    @Test
+    fun `doctor harness and workflow selectors are exact`() {
+        val output = createTempDirectory("doctor-selector-contract-")
+        val doctor = Doctor(
+            environment = emptyMap(),
+            commandProbe = CommandProbe { _, _ -> CommandProbeResult(0, "available") },
+            connectivityProbe = ConnectivityProbe { _, _ -> error("invalid selection must not connect") },
+        )
+
+        listOf("direct", "ACP", " acp", "legacy-openai ", "").forEach { selected ->
+            val report = doctor.inspect(DoctorOptions(output, harnessOverride = selected))
+            assertTrue(
+                report.checks.any { it.name == "ACP harness" && !it.passed },
+                selected,
+            )
+            assertFalse(report.checks.any { it.name.startsWith("LLM") }, selected)
+        }
+        listOf("ALL", " patch", "repair ", "reconstruction", "").forEach { selected ->
+            assertFailsWith<IllegalArgumentException>(selected) {
+                decompengine.acp.AcpPreflightWorkflow.parse(selected)
+            }
+        }
     }
 
     @Test

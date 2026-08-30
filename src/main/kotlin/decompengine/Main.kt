@@ -10,6 +10,7 @@ import decompengine.mvp.MvpPatchOptions
 import decompengine.mvp.MvpPatchWorkflow
 import decompengine.mvp.BinaryRunnerService
 import decompengine.acp.AcpHarnessFactory
+import decompengine.acp.AcpPreflightWorkflow
 import decompengine.project.ArchivalReconstructionService
 import decompengine.project.BoundedLlmModuleReconstructor
 import decompengine.project.EvidenceModuleReconstructor
@@ -354,11 +355,28 @@ private fun runnerUsageError(message: String): Nothing {
 
 private fun runDoctor(args: List<String>) {
     var toolsOnly = false
+    var harnessOverride: String? = null
+    var workflowOverride: AcpPreflightWorkflow? = null
     var output = Path.of(System.getenv("OUTPUT_DIR") ?: if (Files.isDirectory(Path.of("/output"))) "/output" else "output")
     var index = 0
     while (index < args.size) {
         when (args[index]) {
             "--tools-only" -> { toolsOnly = true; index++ }
+            "--harness" -> {
+                if (index + 1 >= args.size) doctorUsageError("--harness requires acp or legacy-openai")
+                harnessOverride = args[index + 1]; index += 2
+            }
+            "--workflow" -> {
+                if (index + 1 >= args.size) {
+                    doctorUsageError("--workflow requires all, patch, reconstruct, repair, or web")
+                }
+                workflowOverride = try {
+                    AcpPreflightWorkflow.parse(args[index + 1])
+                } catch (failure: IllegalArgumentException) {
+                    doctorUsageError(failure.message ?: "invalid doctor workflow")
+                }
+                index += 2
+            }
             "--output" -> {
                 if (index + 1 >= args.size) doctorUsageError("--output requires a directory")
                 output = Path.of(args[index + 1]); index += 2
@@ -366,7 +384,20 @@ private fun runDoctor(args: List<String>) {
             else -> doctorUsageError("unexpected argument: ${args[index]}")
         }
     }
-    val report = Doctor().inspect(DoctorOptions(output, toolsOnly))
+    if (toolsOnly && harnessOverride != null) {
+        doctorUsageError("--tools-only cannot be combined with --harness")
+    }
+    if (toolsOnly && workflowOverride != null) {
+        doctorUsageError("--tools-only cannot be combined with --workflow")
+    }
+    val report = Doctor().inspect(
+        DoctorOptions(
+            outputDir = output,
+            toolsOnly = toolsOnly,
+            harnessOverride = harnessOverride,
+            workflowOverride = workflowOverride,
+        ),
+    )
     report.checks.forEach { check ->
         val stream = if (check.passed) System.out else System.err
         stream.println("[${if (check.passed) "ok" else "failed"}] ${check.name}: ${check.detail}")
@@ -382,7 +413,8 @@ private fun runDoctor(args: List<String>) {
 
 private fun doctorUsageError(message: String): Nothing {
     System.err.println(message)
-    System.err.println("usage: llm_bin_patch doctor [--tools-only] [--output <directory>]")
+    System.err.println("usage: llm_bin_patch doctor --tools-only [--output <directory>]")
+    System.err.println("   or: llm_bin_patch doctor [--output <directory>] [--harness acp|legacy-openai] [--workflow all|patch|reconstruct|repair|web]")
     kotlin.system.exitProcess(2)
 }
 
@@ -417,7 +449,8 @@ private fun printHelp() {
     println(
         """
         Usage:
-          llm_bin_patch doctor [--tools-only] [--output <directory>]
+          llm_bin_patch doctor --tools-only [--output <directory>]
+          llm_bin_patch doctor [--output <directory>] [--harness acp|legacy-openai] [--workflow all|patch|reconstruct|repair|web]
           llm_bin_patch patch <input-elf> --output <directory> [--yes] [--harness acp|legacy-openai]
           llm_bin_patch runner [--control-dir <directory>] [--root <directory>]...
           llm_bin_patch repair <original-binary> <project-dir> [--reports <directory>] [--max-iterations <count>] [--explore] [--harness acp|legacy-openai]
@@ -425,9 +458,11 @@ private fun printHelp() {
           llm_bin_patch reconstruct <binary> --output <directory> [--evidence-only] [--max-context-chars <count>] [--harness acp|legacy-openai]
           llm_bin_patch web [--host 127.0.0.1] [--port 8000] [--data-dir .decomp_engine/jobs]
 
-        Agent harness selection for patch, reconstruction, and repair:
+        Agent harness selection for doctor, patch, reconstruction, and repair:
           --harness acp            use the ACP agent provisioned by ACP_CONFIG_FILE (default)
           --harness legacy-openai  use the deprecated built-in OpenAI-compatible adapter
+          Doctor performs an initialize-only ACP v1 preflight for all workflows by default.
+          Doctor's --tools-only mode is agent-free and cannot be combined with agent selectors.
           Reconstruction's --evidence-only mode is agent-free and cannot be combined with --harness.
         """.trimIndent(),
     )

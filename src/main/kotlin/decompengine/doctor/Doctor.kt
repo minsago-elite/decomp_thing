@@ -3,6 +3,9 @@ package decompengine.doctor
 import decompengine.acp.AcpHarnessFactory
 import decompengine.acp.AcpHarnessKind
 import decompengine.acp.AcpHarnessSelection
+import decompengine.acp.AcpAgentHarness
+import decompengine.acp.AcpPreflightWorkflow
+import decompengine.agent.AgentExecutionException
 import java.net.URI
 import java.net.http.HttpClient
 import java.net.http.HttpRequest
@@ -10,6 +13,7 @@ import java.net.http.HttpResponse
 import java.nio.file.Files
 import java.nio.file.Path
 import java.time.Duration
+import java.util.Locale
 import kotlin.io.path.createDirectories
 import kotlin.io.path.isDirectory
 import kotlin.io.path.pathString
@@ -18,7 +22,18 @@ import kotlin.io.path.writeText
 data class DoctorOptions(
     val outputDir: Path,
     val toolsOnly: Boolean = false,
-)
+    val harnessOverride: String? = null,
+    val workflowOverride: AcpPreflightWorkflow? = null,
+) {
+    init {
+        require(!toolsOnly || harnessOverride == null) {
+            "doctor --tools-only cannot be combined with --harness"
+        }
+        require(!toolsOnly || workflowOverride == null) {
+            "doctor --tools-only cannot be combined with --workflow"
+        }
+    }
+}
 
 data class DoctorCheck(
     val name: String,
@@ -59,10 +74,17 @@ class Doctor(
         checks += sanitizerCheck()
         checks += bubblewrapCheck()
         checks += outputCheck(options.outputDir)
-        val harnessSelection = runCatching { AcpHarnessFactory.fromEnvironment(environment) }
-        checks += acpHarnessCheck(harnessSelection)
-        if (!options.toolsOnly && harnessSelection.getOrNull()?.kind == AcpHarnessKind.LEGACY_OPENAI) {
-            checks += llmChecks()
+        if (!options.toolsOnly) {
+            val harnessSelection = runCatching {
+                AcpHarnessFactory.fromEnvironment(withHarnessOverride(options.harnessOverride))
+            }
+            checks += agentHarnessChecks(
+                harnessSelection,
+                options.workflowOverride ?: AcpPreflightWorkflow.ALL,
+            )
+            if (harnessSelection.getOrNull()?.kind == AcpHarnessKind.LEGACY_OPENAI) {
+                checks += llmChecks()
+            }
         }
         return DoctorReport(checks)
     }
@@ -76,42 +98,86 @@ class Doctor(
             onFailure = { DoctorCheck(name, false, "$remediation ${it.message.orEmpty()}".trim()) },
         )
 
-    private fun acpHarnessCheck(selection: Result<AcpHarnessSelection>): DoctorCheck = selection.fold(
+    private fun agentHarnessChecks(
+        selection: Result<AcpHarnessSelection>,
+        workflow: AcpPreflightWorkflow,
+    ): List<DoctorCheck> = selection.fold(
         onSuccess = { resolved ->
             when (resolved.kind) {
                 AcpHarnessKind.ACP -> {
-                    val configuration = requireNotNull(resolved.configuration)
-                    val executable = configuration.executable
-                    if (!Files.isRegularFile(executable) || !Files.isExecutable(executable)) {
+                    val selectionCheck = DoctorCheck(
+                        "ACP harness",
+                        true,
+                        "Selected ${resolved.provenance.stableDescriptor}",
+                    )
+                    val preflightCheck = try {
+                        val harness = resolved.createHarness() as? AcpAgentHarness
+                            ?: error("ACP factory returned a non-ACP harness")
+                        val result = harness.preflight(workflow)
                         DoctorCheck(
-                            "ACP harness",
-                            false,
-                            "Provisioning was accepted, but the ACP agent is not an executable regular file at $executable.",
-                        )
-                    } else {
-                        DoctorCheck(
-                            "ACP harness",
+                            "ACP preflight",
                             true,
-                            "Default ACP provisioning accepted: ${resolved.provenance.stableDescriptor}; " +
-                                "the authenticated sandbox and ACP v1 handshake are verified for every execution.",
+                            result.stableDescriptor,
+                        )
+                    } catch (failure: Exception) {
+                        DoctorCheck(
+                            "ACP preflight",
+                            false,
+                            preflightFailureDetail(failure),
                         )
                     }
+                    listOf(selectionCheck, preflightCheck)
                 }
-                AcpHarnessKind.LEGACY_OPENAI -> DoctorCheck(
-                    "ACP harness",
-                    true,
-                    "Explicit legacy-openai compatibility selected (deprecated); migrate to the default ACP harness.",
+                AcpHarnessKind.LEGACY_OPENAI -> listOf(
+                    DoctorCheck(
+                        "ACP harness",
+                        true,
+                        "Selected ${resolved.provenance.stableDescriptor}; migrate to the default ACP harness.",
+                    ),
                 )
             }
         },
         onFailure = { failure ->
-            DoctorCheck(
-                "ACP harness",
-                false,
-                "ACP is the default agent harness and its provisioning is invalid: ${failure.message.orEmpty()}",
+            listOf(
+                DoctorCheck(
+                    "ACP harness",
+                    false,
+                    "ACP is the default agent harness and its provisioning is invalid: ${failure.message.orEmpty()}",
+                ),
             )
         },
     )
+
+    private fun withHarnessOverride(harnessOverride: String?): Map<String, String> =
+        if (harnessOverride == null) {
+            environment
+        } else {
+            object : Map<String, String> by environment {
+                override fun containsKey(key: String): Boolean =
+                    key == "ACP_HARNESS" || environment.containsKey(key)
+
+                override fun get(key: String): String? =
+                    if (key == "ACP_HARNESS") harnessOverride else environment[key]
+            }
+        }
+
+    private fun preflightFailureDetail(failure: Exception): String {
+        val execution = failure as? AgentExecutionException
+            ?: return "ACP preflight failed before a session was created; verify the authenticated provisioning and sandbox."
+        val safeDetails = execution.failure.details.entries
+            .filter { (name, _) -> name in PREFLIGHT_DIAGNOSTIC_FIELDS }
+            .sortedBy { it.key }
+            .joinToString(",") { (name, value) -> "$name=$value" }
+        return buildString {
+            append("ACP preflight failed before a session was created: kind=")
+            append(execution.failure.kind.name.lowercase(Locale.ROOT))
+            if (safeDetails.isNotEmpty()) {
+                append("; ")
+                append(safeDetails)
+            }
+            append(". Verify the configured agent's stable-v1 support, required capabilities, and sandbox cleanup.")
+        }
+    }
 
     private fun ghidraCheck(): DoctorCheck {
         val home = environment["GHIDRA_HOME"]?.trim()?.takeIf(String::isNotEmpty)?.let(Path::of)
@@ -236,3 +302,13 @@ private class HttpConnectivityProbe(
 }
 
 private fun String.firstLineOr(fallback: String): String = lineSequence().firstOrNull { it.isNotBlank() }?.trim() ?: fallback
+
+private val PREFLIGHT_DIAGNOSTIC_FIELDS = setOf(
+    "exitCode",
+    "missingCapabilities",
+    "offeredVersion",
+    "remainingPids",
+    "requestedVersion",
+    "sandboxCleanupVerified",
+    "supportedVersions",
+)
