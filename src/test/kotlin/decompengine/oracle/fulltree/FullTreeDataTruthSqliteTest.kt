@@ -5,6 +5,7 @@ import decompengine.oracle.core.OracleJson
 import java.nio.charset.StandardCharsets
 import java.nio.file.Files
 import java.nio.file.Path
+import java.nio.file.attribute.PosixFilePermission
 import java.security.MessageDigest
 import kotlin.io.path.createTempDirectory
 import kotlin.test.Test
@@ -35,13 +36,23 @@ class FullTreeDataTruthSqliteTest {
             assertEquals(directoryDigests(serialRoot), directoryDigests(parallelRoot))
             assertFalse(Files.exists(serialRoot.resolve(".scratch")))
             assertEquals(2, serial.partitionCount)
-            assertEquals(listOf("shard-b", "shard-a"), serial.index.requiredArray("shards").objects("truth shard").map {
+            assertEquals(listOf("shard-a", "shard-b"), serial.index.requiredArray("shards").objects("truth shard").map {
                 it.requiredString("id")
             })
             assertEquals(expectedCounts(), serial.index.requiredObject("counts"))
-            assertEquals(FROZEN_CONFIGURATION_SHA256, FullTreeDataTruthSqlite.configurationSha256)
-            assertEquals(FROZEN_INDEX_SHA256, serial.indexSha256)
-            assertEquals(FROZEN_ARTIFACTS, frozenArtifacts(serial.index))
+            assertEquals(HISTORICAL_V16_SCOPE_SHA256, fixture.scopeSha256)
+            assertEquals(
+                HISTORICAL_V16_INVENTORY_INDEX_SHA256,
+                fixture.inventory.requiredString("indexSha256"),
+            )
+            assertEquals(HISTORICAL_V16_CONFIGURATION_SHA256, FullTreeDataTruthSqlite.configurationSha256)
+            assertEquals(HISTORICAL_V16_OBSERVATION_INDEX_SHA256, serial.observationIndexSha256)
+            assertEquals(HISTORICAL_V16_TRUTH_INDEX_SHA256, serial.indexSha256)
+            assertEquals(
+                HISTORICAL_V16_TRUTH_INDEX_ARTIFACT_SHA256,
+                OracleArtifacts.sha256(Files.readAllBytes(serialRoot.resolve("index.json"))),
+            )
+            assertEquals(HISTORICAL_V16_ARTIFACTS, frozenArtifacts(serial.index))
 
             val truth = readTruthDocuments(serialRoot, serial.index)
             val shardB = truth.first { it.requiredObject("shard").requiredString("id") == "shard-b" }
@@ -51,7 +62,7 @@ class FullTreeDataTruthSqliteTest {
             assertEquals(1L, shardB.requiredObject("counts").requiredLong("crossShardTypeReferences"))
             assertEquals("shard-a", shardB.requiredArray("globals").objects("truth global").single()
                 .requiredObject("typeReference").requiredString("targetOwnerShardId"))
-            assertEquals("unit-a", shardA.requiredArray("types").objects("truth type").single()
+            assertEquals(CU_A, shardA.requiredArray("types").objects("truth type").single()
                 .requiredString("ownerUnitId"))
             assertEquals(2, shardA.requiredArray("types").objects("truth type").single()
                 .requiredArray("observationIds").size)
@@ -92,6 +103,28 @@ class FullTreeDataTruthSqliteTest {
                         this["shards"] = JsonArray(reversed)
                     }))
                 },
+                { fixture ->
+                    Files.writeString(fixture.observationRoot.resolve("outputs/stale-shard.json"), "stale")
+                },
+                { fixture ->
+                    Files.writeString(fixture.observationRoot.resolve("unexpected.json"), "unexpected")
+                },
+                { fixture ->
+                    val output = fixture.observationRoot.resolve("outputs/shard-a.json")
+                    val target = fixture.observationRoot.parent.resolve("symlink-target.json")
+                    Files.write(target, Files.readAllBytes(output))
+                    Files.delete(output)
+                    Files.createSymbolicLink(output, target)
+                },
+                { fixture ->
+                    Files.delete(fixture.observationRoot.resolve("checkpoints/shard-b.json"))
+                },
+                { fixture ->
+                    val output = fixture.observationRoot.resolve("outputs/shard-a.json")
+                    val permissions = Files.getPosixFilePermissions(output).toMutableSet()
+                    permissions += PosixFilePermission.GROUP_WRITE
+                    Files.setPosixFilePermissions(output, permissions)
+                },
             )
 
             mutations.forEachIndexed { index, mutate ->
@@ -106,6 +139,68 @@ class FullTreeDataTruthSqliteTest {
             val workerOutput = directory.resolve("worker-bound-output")
             assertFailsWith<FullTreeDataTruthException> { generate(workerFixture, workerOutput, workers = 3) }
             assertFalse(Files.exists(workerOutput))
+        }
+
+    @Test
+    fun `scope and inventory commitments ordering ownership and counts fail closed`() =
+        inTemporaryDirectory { directory ->
+            val scopeFixture = createFixture(directory.resolve("scope-binding"))
+            val wholeRun = scopeFixture.scope.requiredObject("bounds").requiredObject("wholeRun")
+            val mutatedScope = JsonObject(scopeFixture.scope.toMutableMap().apply {
+                this["bounds"] = JsonObject(scopeFixture.scope.requiredObject("bounds").toMutableMap().apply {
+                    this["wholeRun"] = JsonObject(wholeRun.toMutableMap().apply {
+                        this["cpuSeconds"] = JsonPrimitive(wholeRun.requiredLong("cpuSeconds") + 1L)
+                    })
+                })
+            })
+            val staleScopeOutput = directory.resolve("stale-scope-output")
+            assertFailsWith<FullTreeDataTruthException> {
+                generate(scopeFixture.copy(scope = mutatedScope), staleScopeOutput, workers = 1)
+            }
+            assertFalse(Files.exists(staleScopeOutput))
+
+            val inventoryMutations: List<(JsonObject) -> JsonObject> = listOf(
+                { inventory ->
+                    val units = inventory.requiredArray("units").objects("inventory unit").toMutableList()
+                    units[0] = JsonObject(units[0].toMutableMap().apply {
+                        this["producerSha256"] = JsonPrimitive("7".repeat(64))
+                    })
+                    JsonObject(inventory.toMutableMap().apply { this["units"] = JsonArray(units) })
+                },
+                { inventory ->
+                    JsonObject(inventory.toMutableMap().apply {
+                        this["shards"] = JsonArray(inventory.requiredArray("shards").reversed())
+                    })
+                },
+                { inventory ->
+                    val shards = inventory.requiredArray("shards").objects("inventory shard").toMutableList()
+                    val firstUnits = shards[0].requiredArray("unitIds")
+                    val secondUnits = shards[1].requiredArray("unitIds")
+                    shards[0] = JsonObject(shards[0].toMutableMap().apply { this["unitIds"] = secondUnits })
+                    shards[1] = JsonObject(shards[1].toMutableMap().apply { this["unitIds"] = firstUnits })
+                    JsonObject(inventory.toMutableMap().apply { this["shards"] = JsonArray(shards) })
+                },
+                { inventory ->
+                    val reversed = JsonArray(inventory.requiredArray("units").reversed())
+                    rebindInventoryIndex(JsonObject(inventory.toMutableMap().apply { this["units"] = reversed }))
+                },
+                { inventory ->
+                    JsonObject(inventory.toMutableMap().apply {
+                        this["counts"] = JsonObject(inventory.requiredObject("counts").toMutableMap().apply {
+                            this["generatedUnits"] = JsonPrimitive(1)
+                            this["handwrittenUnits"] = JsonPrimitive(1)
+                        })
+                    })
+                },
+            )
+            inventoryMutations.forEachIndexed { index, mutate ->
+                val fixture = createFixture(directory.resolve("inventory-binding-$index"))
+                val output = directory.resolve("inventory-binding-output-$index")
+                assertFailsWith<FullTreeDataTruthException> {
+                    generate(fixture.copy(inventory = mutate(fixture.inventory)), output, workers = 1)
+                }
+                assertFalse(Files.exists(output), "inventory mutation $index published data truth")
+            }
         }
 
     @Test
@@ -200,7 +295,7 @@ class FullTreeDataTruthSqliteTest {
         limits: FullTreeDataTruthGenerationLimits = FullTreeDataTruthGenerationLimits(),
     ): FullTreeDataTruthGeneration = FullTreeDataTruthSqlite.generate(
         scope = fixture.scope,
-        scopeSha256 = SCOPE_SHA256,
+        scopeSha256 = fixture.scopeSha256,
         inventory = fixture.inventory,
         observationRoot = fixture.observationRoot,
         outputRoot = output,
@@ -215,16 +310,17 @@ class FullTreeDataTruthSqliteTest {
         Files.createDirectories(root.resolve("outputs"))
         Files.createDirectories(root.resolve("checkpoints"))
         val scope = scope(options)
-        val inventory = inventory()
-        val inputs = FullTreeDataObservations.shardInputs(inventory, SCOPE_SHA256, RICH_SHA256)
+        val scopeSha256 = OracleArtifacts.sha256(OracleJson.canonicalBytes(scope))
+        val inventory = inventory(scopeSha256)
+        val inputs = FullTreeDataObservations.shardInputs(inventory, scopeSha256, RICH_SHA256)
             .sortedBy { it.identifier }
-        val run = observationRun(scope, inputs)
+        val run = observationRun(scope, scopeSha256, inputs)
         val runBytes = OracleJson.canonicalBytes(run)
         val runSha256 = OracleArtifacts.sha256(runBytes)
         Files.write(root.resolve("run.json"), runBytes)
         val checkpoints = inputs.mapIndexed { index, input ->
-            val document = observationDocument(input, index, scope, inventory, options)
-            FullTreeDataObservations.validateShard(document, scope, SCOPE_SHA256, inventory, input)
+            val document = observationDocument(input, index, scope, scopeSha256, inventory, options)
+            FullTreeDataObservations.validateShard(document, scope, scopeSha256, inventory, input)
             val outputBytes = OracleJson.canonicalBytes(document)
             Files.write(root.resolve("outputs/${input.identifier}.json"), outputBytes)
             JsonObject(
@@ -266,11 +362,12 @@ class FullTreeDataTruthSqliteTest {
             ),
         )
         writeCanonical(root.resolve("index.json"), index)
-        return Fixture(scope, inventory, root.toAbsolutePath().normalize())
+        return Fixture(scope, scopeSha256, inventory, root.toAbsolutePath().normalize())
     }
 
     private fun observationRun(
         scope: JsonObject,
+        scopeSha256: String,
         inputs: List<FullTreeDataObservationShardInput>,
     ): JsonObject {
         val perShard = scope.requiredObject("bounds").requiredObject("perShard")
@@ -292,7 +389,7 @@ class FullTreeDataTruthSqliteTest {
                         "wholeRunSeconds" to wholeRun.requiredElement("wallClockSeconds"),
                     ),
                 ),
-                "id" to JsonPrimitive("full-tree-data-${SCOPE_SHA256.take(16)}"),
+                "id" to JsonPrimitive("full-tree-data-${scopeSha256.take(16)}"),
                 "schemaVersion" to JsonPrimitive(1),
                 "shards" to JsonArray(inputs.map { input ->
                     JsonObject(
@@ -310,10 +407,11 @@ class FullTreeDataTruthSqliteTest {
         input: FullTreeDataObservationShardInput,
         index: Int,
         scope: JsonObject,
+        scopeSha256: String,
         inventory: JsonObject,
         options: FixtureOptions,
     ): JsonObject {
-        val unitId = if (index == 0) "unit-a" else "unit-b"
+        val unitId = if (index == 0) CU_A else CU_B
         val typeOffset = if (index == 1 && !options.duplicateDieOffset) "0x31" else "0x30"
         val targetOffset = if (index == 1 && options.danglingReference) "0x99" else typeOffset
         val globalId = if (index == 1 && options.duplicateObservationId) {
@@ -322,7 +420,7 @@ class FullTreeDataTruthSqliteTest {
             "global-observation-${(if (index == 0) "a" else "c").repeat(32)}"
         }
         val typeId = "type-observation-${(if (index == 0) "b" else "d").repeat(32)}"
-        val bindings = FullTreeDataObservations.authenticatedBindings(scope, SCOPE_SHA256, inventory, input)
+        val bindings = FullTreeDataObservations.authenticatedBindings(scope, scopeSha256, inventory, input)
         val declaration = JsonObject(
             mapOf(
                 "column" to JsonPrimitive(1),
@@ -455,13 +553,13 @@ class FullTreeDataTruthSqliteTest {
         )
     }
 
-    private fun inventory(): JsonObject {
-        fun unit(id: String, shard: String, source: String, offset: String): JsonObject = JsonObject(
+    private fun inventory(scopeSha256: String): JsonObject {
+        fun unit(shard: String, source: String, offset: String): JsonObject = JsonObject(
             mapOf(
                 "addressSize" to JsonPrimitive(8),
                 "dwarfOffset" to JsonPrimitive(offset),
                 "dwarfVersion" to JsonPrimitive(5),
-                "id" to JsonPrimitive(id),
+                "id" to JsonPrimitive(compilationUnitId(source)),
                 "language" to JsonPrimitive(29),
                 "producerSha256" to JsonPrimitive("9".repeat(64)),
                 "rawPathSha256" to JsonPrimitive("8".repeat(64)),
@@ -473,6 +571,16 @@ class FullTreeDataTruthSqliteTest {
         fun shard(id: String, unit: String): JsonObject = JsonObject(
             mapOf("id" to JsonPrimitive(id), "unitIds" to JsonArray(listOf(JsonPrimitive(unit)))),
         )
+        val units = listOf(
+            unit("shard-a", SOURCE_A, "0x10"),
+            unit("shard-b", SOURCE_B, "0x20"),
+        )
+        val inventoryIndexSha256 = MessageDigest.getInstance("SHA-256").apply {
+            update(INVENTORY_INDEX_DOMAIN)
+            units.forEach { unit ->
+                update(MessageDigest.getInstance("SHA-256").digest(OracleJson.canonicalBytes(unit)))
+            }
+        }.digest().hex()
         return JsonObject(
             mapOf(
                 "counts" to JsonObject(
@@ -483,26 +591,33 @@ class FullTreeDataTruthSqliteTest {
                         "shards" to JsonPrimitive(2),
                     ),
                 ),
-                "indexSha256" to JsonPrimitive(INVENTORY_INDEX_SHA256),
+                "indexSha256" to JsonPrimitive(inventoryIndexSha256),
                 "oracle" to JsonObject(
                     mapOf(
                         "artifactManifestSha256" to JsonPrimitive(ARTIFACT_MANIFEST_SHA256),
-                        "id" to JsonPrimitive("fixture-inventory"),
+                        "id" to JsonPrimitive("fixture"),
                         "richArtifactSha256" to JsonPrimitive(RICH_SHA256),
-                        "scopeSha256" to JsonPrimitive(SCOPE_SHA256),
+                        "scopeSha256" to JsonPrimitive(scopeSha256),
                         "sourceLockSha256" to JsonPrimitive(SOURCE_LOCK_SHA256),
                     ),
                 ),
                 "schemaVersion" to JsonPrimitive(1),
-                "shards" to JsonArray(listOf(shard("shard-b", "unit-b"), shard("shard-a", "unit-a"))),
-                "units" to JsonArray(
-                    listOf(
-                        unit("unit-b", "shard-b", "source/b.c", "0x20"),
-                        unit("unit-a", "shard-a", "source/a.c", "0x10"),
-                    ),
-                ),
+                "shards" to JsonArray(listOf(shard("shard-a", CU_A), shard("shard-b", CU_B))),
+                "units" to JsonArray(units),
             ),
         )
+    }
+
+    private fun rebindInventoryIndex(inventory: JsonObject): JsonObject {
+        val digest = MessageDigest.getInstance("SHA-256").apply {
+            update(INVENTORY_INDEX_DOMAIN)
+            inventory.requiredArray("units").forEach { unit ->
+                update(MessageDigest.getInstance("SHA-256").digest(OracleJson.canonicalBytes(unit)))
+            }
+        }.digest().hex()
+        return JsonObject(inventory.toMutableMap().apply {
+            this["indexSha256"] = JsonPrimitive(digest)
+        })
     }
 
     private fun expectedCounts(): JsonObject = JsonObject(
@@ -556,7 +671,12 @@ class FullTreeDataTruthSqliteTest {
         }
     }
 
-    private data class Fixture(val scope: JsonObject, val inventory: JsonObject, val observationRoot: Path)
+    private data class Fixture(
+        val scope: JsonObject,
+        val scopeSha256: String,
+        val inventory: JsonObject,
+        val observationRoot: Path,
+    )
 
     private data class FixtureOptions(
         val duplicateObservationId: Boolean = false,
@@ -570,20 +690,38 @@ class FullTreeDataTruthSqliteTest {
     )
 
     private companion object {
+        private fun compilationUnitId(sourcePath: String): String =
+            "cu-${OracleArtifacts.sha256(sourcePath.toByteArray(StandardCharsets.UTF_8)).take(32)}"
+
         val INDEX_DOMAIN: ByteArray = "bounded-shards-v1\u0000".toByteArray(StandardCharsets.UTF_8)
-        const val SCOPE_SHA256 = "2222222222222222222222222222222222222222222222222222222222222222"
+        val INVENTORY_INDEX_DOMAIN: ByteArray = "full-tree-index-v1\u0000".toByteArray(StandardCharsets.UTF_8)
+        const val SOURCE_A = "source/aaa.c"
+        const val SOURCE_B = "source/bbb.c"
+        val CU_A: String = compilationUnitId(SOURCE_A)
+        val CU_B: String = compilationUnitId(SOURCE_B)
         const val RICH_SHA256 = "3333333333333333333333333333333333333333333333333333333333333333"
         const val STRIPPED_SHA256 = "4444444444444444444444444444444444444444444444444444444444444444"
         const val SOURCE_LOCK_SHA256 = "5555555555555555555555555555555555555555555555555555555555555555"
         const val ARTIFACT_MANIFEST_SHA256 = "6666666666666666666666666666666666666666666666666666666666666666"
-        const val INVENTORY_INDEX_SHA256 = "1111111111111111111111111111111111111111111111111111111111111111"
-        const val FROZEN_CONFIGURATION_SHA256 = "90dd097ba542bc5297b37277125ce01e73355fe0e4cea3117b3240315fff5a5b"
-        const val FROZEN_INDEX_SHA256 = "b9dee11c1d2868347cf36e3d110960f1b6c12183dacaf6b9ba6f0bcd393e4e52"
-        val FROZEN_ARTIFACTS = mapOf(
+        // One-time differential values from the checked-in historical v16 implementation using this
+        // schema-valid fixture. Python is not invoked by this test or by production Kotlin authority.
+        const val HISTORICAL_V16_SCOPE_SHA256 =
+            "4b70c89f14a9a96567e4d3297a080fcfa4327c00e08ad6f471172e472db9731c"
+        const val HISTORICAL_V16_INVENTORY_INDEX_SHA256 =
+            "b4d12ad9da7af1ab92d4e82e89b1a30a8244f62613241e86b63a15b79e3f6a35"
+        const val HISTORICAL_V16_CONFIGURATION_SHA256 =
+            "90dd097ba542bc5297b37277125ce01e73355fe0e4cea3117b3240315fff5a5b"
+        const val HISTORICAL_V16_OBSERVATION_INDEX_SHA256 =
+            "4397cc3acf74df1dfebe4b91321efb77bc138dd4924903cceb99621b7a7f84e8"
+        const val HISTORICAL_V16_TRUTH_INDEX_SHA256 =
+            "82d24fc54a24fecdeb53993945def767221649816d14b43efa0db55e9f15133c"
+        const val HISTORICAL_V16_TRUTH_INDEX_ARTIFACT_SHA256 =
+            "50f7906f2bef885c89b967ea8f2e6f16e145aeee84e79ae7d5ee561c9cfa0968"
+        val HISTORICAL_V16_ARTIFACTS = mapOf(
             "shards/shard-b.json" to
-                "1803:5006b7a28ace298cf8fa75d1e02a424e27bd9839dd5590af5c2a82e9484f8b43",
+                "1861:11cf049478c9630632c6cc8e523ab952823c878911828ff2310c330dc1143755",
             "shards/shard-a.json" to
-                "2464:c4230bea1f0d73516512cbf9620dbe238adc906ff1dbfe5ac0ed06609c3bc618",
+                "2551:25e3ecbeeadd63241b2376101f45920e333d030e231b16526bdac1ba2cfad834",
         )
     }
 }

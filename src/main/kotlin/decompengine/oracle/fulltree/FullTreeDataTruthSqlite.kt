@@ -18,6 +18,7 @@ import java.nio.file.Path
 import java.nio.file.StandardCopyOption
 import java.nio.file.StandardOpenOption
 import java.nio.file.attribute.BasicFileAttributes
+import java.nio.file.attribute.FileTime
 import java.nio.file.attribute.PosixFileAttributeView
 import java.nio.file.attribute.PosixFilePermission
 import java.nio.file.attribute.PosixFilePermissions
@@ -91,7 +92,13 @@ data class FullTreeDataTruthGeneration(
     val outputBytes: Long,
 )
 
-/** Kotlin-owned authenticated orchestration and bounded SQLite data-truth publication. */
+/**
+ * Kotlin-owned authenticated orchestration and bounded SQLite data-truth publication.
+ *
+ * Java NIO cannot descriptor-stat every pathname across the complete multi-file run. Exact tree,
+ * identity, metadata, and digest checks detect ordinary replacement, but the owner of each verified
+ * non-group/other-writable directory is a cooperating member of this trust boundary.
+ */
 object FullTreeDataTruthSqlite {
     val configurationSha256: String by lazy {
         OracleSchemas.configurationSha256("full-tree-data-truth", POLICY)
@@ -108,7 +115,7 @@ object FullTreeDataTruthSqlite {
     ): FullTreeDataTruthGeneration {
         requireSha256(scopeSha256, "scope")
         require(maximumWorkers in 1..32) { "data truth worker count is outside 1..32" }
-        validateInputs(scope, scopeSha256, inventory)
+        validateInputs(scope, scopeSha256, inventory, limits)
         val authenticated = authenticateObservationRun(
             scope,
             scopeSha256,
@@ -142,6 +149,7 @@ object FullTreeDataTruthSqlite {
                 maximumWorkers,
                 limits,
             )
+            requireObservationTreeUnchanged(authenticated)
             requireScratchBound(scratch, limits.maximumScratchBytes)
 
             val truthDatabase = scratch.resolve("truth.sqlite")
@@ -187,7 +195,25 @@ object FullTreeDataTruthSqlite {
         }
     }
 
-    private fun validateInputs(scope: JsonObject, scopeSha256: String, inventory: JsonObject) {
+    private fun validateInputs(
+        scope: JsonObject,
+        scopeSha256: String,
+        inventory: JsonObject,
+        limits: FullTreeDataTruthGenerationLimits,
+    ) {
+        val canonicalScope = try {
+            canonicalBytes(scope, limits.maximumControlArtifactBytes)
+        } catch (failure: Exception) {
+            throw FullTreeDataTruthException("data truth scope is not bounded canonical JSON", failure)
+        }
+        if (OracleArtifacts.sha256(canonicalScope) != scopeSha256) {
+            throw FullTreeDataTruthException("data truth scope bytes do not match their authenticated digest")
+        }
+        try {
+            canonicalBytes(inventory, limits.maximumControlArtifactBytes)
+        } catch (failure: Exception) {
+            throw FullTreeDataTruthException("data truth inventory is not bounded canonical JSON", failure)
+        }
         try {
             OracleSchemas.validate("full-tree-scope", scope)
             OracleSchemas.validate("full-tree-inventory", inventory)
@@ -196,42 +222,72 @@ object FullTreeDataTruthSqlite {
         }
         val scopeOracle = scope.requiredObject("oracle")
         val inventoryOracle = inventory.requiredObject("oracle")
-        if (
-            inventoryOracle.requiredString("scopeSha256") != scopeSha256 ||
-            inventoryOracle.requiredString("richArtifactSha256") != scopeOracle.requiredString("richArtifactSha256") ||
-            inventoryOracle.requiredString("sourceLockSha256") != scopeOracle.requiredString("sourceLockSha256") ||
-            inventoryOracle.requiredString("artifactManifestSha256") !=
-            scopeOracle.requiredString("artifactManifestSha256")
-        ) {
+        val expectedInventoryOracle = JsonObject(
+            mapOf(
+                "artifactManifestSha256" to scopeOracle.requiredElement("artifactManifestSha256"),
+                "id" to scopeOracle.requiredElement("id"),
+                "richArtifactSha256" to scopeOracle.requiredElement("richArtifactSha256"),
+                "scopeSha256" to JsonPrimitive(scopeSha256),
+                "sourceLockSha256" to scopeOracle.requiredElement("sourceLockSha256"),
+            ),
+        )
+        if (inventoryOracle != expectedInventoryOracle) {
             throw FullTreeDataTruthException("data truth inventory bindings do not match the authenticated scope")
         }
         val units = inventory.requiredArray("units").objects("inventory unit")
         val shards = inventory.requiredArray("shards").objects("inventory shard")
+        if (units != units.sortedWith(INVENTORY_UNIT_COMPARATOR)) {
+            throw FullTreeDataTruthException("inventory units are not canonically ordered")
+        }
+        val inventoryIndexDigest = MessageDigest.getInstance("SHA-256").apply {
+            update(INVENTORY_INDEX_DOMAIN)
+            units.forEach { unit ->
+                update(
+                    MessageDigest.getInstance("SHA-256")
+                        .digest(canonicalBytes(unit, limits.maximumControlArtifactBytes)),
+                )
+            }
+        }.digest().hex()
+        if (inventory.requiredString("indexSha256") != inventoryIndexDigest) {
+            throw FullTreeDataTruthException("inventory index hash does not reconcile")
+        }
         if (units.size.toLong() > scope.requiredObject("bounds").requiredObject("wholeRun").requiredLong("compilationUnits")) {
             throw FullTreeDataTruthException("data truth inventory exceeds the whole-run compilation-unit bound")
         }
-        if (inventory.requiredObject("counts").requiredLong("compilationUnits") != units.size.toLong() ||
-            inventory.requiredObject("counts").requiredLong("shards") != shards.size.toLong()
-        ) {
+        val expectedCounts = JsonObject(
+            mapOf(
+                "compilationUnits" to JsonPrimitive(units.size),
+                "generatedUnits" to JsonPrimitive(units.count { it.requiredString("sourceKind") == "generated" }),
+                "handwrittenUnits" to JsonPrimitive(units.count { it.requiredString("sourceKind") == "handwritten" }),
+                "shards" to JsonPrimitive(shards.size),
+            ),
+        )
+        if (inventory.requiredObject("counts") != expectedCounts) {
             throw FullTreeDataTruthException("data truth inventory counts do not reconcile")
         }
         val unitById = units.associateBy { it.requiredString("id") }
         if (unitById.size != units.size) throw FullTreeDataTruthException("inventory unit identifiers are not unique")
-        val seenUnits = hashSetOf<String>()
-        val shardIds = hashSetOf<String>()
-        shards.forEach { shard ->
-            val shardId = shard.requiredString("id")
-            if (!shardIds.add(shardId)) throw FullTreeDataTruthException("inventory shard identifiers are not unique")
-            shard.requiredArray("unitIds").forEach { element ->
-                val unitId = element.requiredString("inventory shard unit")
-                val unit = unitById[unitId]
-                    ?: throw FullTreeDataTruthException("inventory shard references an unknown unit")
-                if (unit.requiredString("shardId") != shardId || !seenUnits.add(unitId)) {
-                    throw FullTreeDataTruthException("inventory unit ownership is duplicated or contradictory")
-                }
-            }
+        val expectedShardUnits = sortedMapOf<String, MutableList<String>>(CODE_POINT_STRING_COMPARATOR)
+        units.forEach { unit ->
+            expectedShardUnits.getOrPut(unit.requiredString("shardId")) { arrayListOf() }
+                .add(unit.requiredString("id"))
         }
-        if (seenUnits != unitById.keys) throw FullTreeDataTruthException("inventory unit ownership is incomplete")
+        val perShardCompilationUnits = scope.requiredObject("bounds").requiredObject("perShard")
+            .requiredLong("compilationUnits")
+        if (expectedShardUnits.values.any { it.size.toLong() > perShardCompilationUnits }) {
+            throw FullTreeDataTruthException("data truth inventory exceeds the per-shard compilation-unit bound")
+        }
+        val expectedShards = expectedShardUnits.map { (shardId, unitIds) ->
+            JsonObject(
+                mapOf(
+                    "id" to JsonPrimitive(shardId),
+                    "unitIds" to JsonArray(unitIds.sortedWith(CODE_POINT_STRING_COMPARATOR).map(::JsonPrimitive)),
+                ),
+            )
+        }
+        if (shards != expectedShards) {
+            throw FullTreeDataTruthException("inventory shard ownership or canonical ordering does not reconcile")
+        }
     }
 
     private fun authenticateObservationRun(
@@ -242,6 +298,12 @@ object FullTreeDataTruthSqlite {
         limits: FullTreeDataTruthGenerationLimits,
     ): AuthenticatedObservationRun {
         val root = requireRealDirectory(observationRoot, "data observation root")
+        val expectedInputs = FullTreeDataObservations.shardInputs(
+            inventory,
+            scopeSha256,
+            scope.requiredObject("oracle").requiredString("richArtifactSha256"),
+        ).sortedBy { it.identifier }
+        val treeSnapshot = observationTreeSnapshot(root, expectedInputs.map { it.identifier })
         val runArtifact = readCanonicalObject(root.resolve("run.json"), limits.maximumControlArtifactBytes)
         val indexArtifact = readCanonicalObject(root.resolve("index.json"), limits.maximumControlArtifactBytes)
         val run = runArtifact.document
@@ -252,11 +314,6 @@ object FullTreeDataTruthSqlite {
             throw FullTreeDataTruthException("data observation index fails schema validation: ${failure.message}", failure)
         }
 
-        val expectedInputs = FullTreeDataObservations.shardInputs(
-            inventory,
-            scopeSha256,
-            scope.requiredObject("oracle").requiredString("richArtifactSha256"),
-        ).sortedBy { it.identifier }
         val runWorkers = run.requiredObject("bounds").requiredLong("maximumWorkers")
         if (runWorkers !in 1L..minOf(32, expectedInputs.size).toLong()) {
             throw FullTreeDataTruthException("data observation run worker bound is invalid")
@@ -338,11 +395,15 @@ object FullTreeDataTruthSqlite {
             ),
         )
         if (index != expectedIndex) throw FullTreeDataTruthException("data observation index commitment differs")
+        if (observationTreeSnapshot(root, expectedInputs.map { it.identifier }) != treeSnapshot) {
+            throw FullTreeDataTruthException("data observation tree changed during authentication")
+        }
         return AuthenticatedObservationRun(
             root = root,
             maximumWorkers = runWorkers.toInt(),
             indexSha256 = OracleArtifacts.sha256(indexArtifact.bytes),
             shards = Collections.unmodifiableList(authenticatedShards),
+            treeSnapshot = treeSnapshot,
         )
     }
 
@@ -1119,12 +1180,7 @@ object FullTreeDataTruthSqlite {
                                 itemBytes,
                                 "partition estimate",
                             ) > partitionBudget
-                            val exceedsEntities = addExact(
-                                current.counts.entities,
-                                counts.entities,
-                                "partition entity",
-                            ) > entityLimit
-                            if (current.counts.entities > 0L && (exceedsBytes || exceedsEntities)) {
+                            if (current.counts.entities > 0L && exceedsBytes) {
                                 requirePartitionBound(current, entityLimit)
                                 plans += current
                                 if (plans.size >= limits.maximumPartitions) {
@@ -1610,6 +1666,110 @@ object FullTreeDataTruthSqlite {
         return real
     }
 
+    private fun requireObservationTreeUnchanged(authenticated: AuthenticatedObservationRun) {
+        val current = observationTreeSnapshot(
+            authenticated.root,
+            authenticated.shards.map { it.identifier },
+        )
+        if (current != authenticated.treeSnapshot) {
+            throw FullTreeDataTruthException("data observation tree changed during ingestion")
+        }
+    }
+
+    private fun observationTreeSnapshot(root: Path, shardIds: List<String>): ObservationTreeSnapshot {
+        val outputs = root.resolve("outputs")
+        val checkpoints = root.resolve("checkpoints")
+        val entries = linkedMapOf<Path, ObservationTreeEntry>()
+        entries[root] = observationTreeEntry(root, expectedDirectory = true, "data observation root")
+        captureObservationDirectory(
+            root,
+            mapOf(
+                root.resolve("run.json") to false,
+                root.resolve("index.json") to false,
+                outputs to true,
+                checkpoints to true,
+            ),
+            entries,
+            "data observation root",
+        )
+        captureObservationDirectory(
+            outputs,
+            shardIds.associate { outputs.resolve("$it.json") to false },
+            entries,
+            "data observation output directory",
+        )
+        captureObservationDirectory(
+            checkpoints,
+            shardIds.associate { checkpoints.resolve("$it.json") to false },
+            entries,
+            "data observation checkpoint directory",
+        )
+        return ObservationTreeSnapshot(Collections.unmodifiableMap(LinkedHashMap(entries)))
+    }
+
+    private fun captureObservationDirectory(
+        directory: Path,
+        expected: Map<Path, Boolean>,
+        entries: MutableMap<Path, ObservationTreeEntry>,
+        label: String,
+    ) {
+        val seen = hashSetOf<Path>()
+        try {
+            Files.newDirectoryStream(directory).use { children ->
+                children.forEach { child ->
+                    val path = child.toAbsolutePath().normalize()
+                    val expectedDirectory = expected[path]
+                        ?: throw FullTreeDataTruthException("$label contains an unindexed path")
+                    if (!seen.add(path)) {
+                        throw FullTreeDataTruthException("$label contains a duplicate path")
+                    }
+                    entries[path] = observationTreeEntry(path, expectedDirectory, "$label entry")
+                }
+            }
+        } catch (failure: FullTreeDataTruthException) {
+            throw failure
+        } catch (failure: Exception) {
+            throw FullTreeDataTruthException("$label membership is unavailable", failure)
+        }
+        if (seen != expected.keys) {
+            throw FullTreeDataTruthException("$label membership is incomplete")
+        }
+    }
+
+    private fun observationTreeEntry(
+        path: Path,
+        expectedDirectory: Boolean,
+        label: String,
+    ): ObservationTreeEntry {
+        val attributes = try {
+            Files.readAttributes(path, BasicFileAttributes::class.java, LinkOption.NOFOLLOW_LINKS)
+        } catch (failure: Exception) {
+            throw FullTreeDataTruthException("$label attributes are unavailable", failure)
+        }
+        if (attributes.isSymbolicLink || attributes.fileKey() == null ||
+            (expectedDirectory && !attributes.isDirectory) ||
+            (!expectedDirectory && !attributes.isRegularFile)
+        ) {
+            throw FullTreeDataTruthException("$label has an invalid path type")
+        }
+        if (expectedDirectory) requireTrustedDirectory(path, label)
+        val permissions = try {
+            Files.getPosixFilePermissions(path, LinkOption.NOFOLLOW_LINKS)
+        } catch (failure: Exception) {
+            throw FullTreeDataTruthException("$label permissions are unavailable", failure)
+        }
+        if (PosixFilePermission.GROUP_WRITE in permissions || PosixFilePermission.OTHERS_WRITE in permissions) {
+            throw FullTreeDataTruthException("$label is writable by an untrusted principal")
+        }
+        return ObservationTreeEntry(
+            identity = attributes.fileKey(),
+            size = attributes.size(),
+            modified = attributes.lastModifiedTime(),
+            directory = expectedDirectory,
+            permissions = Collections.unmodifiableSet(HashSet(permissions)),
+        )
+    }
+
     private fun requireTrustedDirectory(path: Path, label: String) {
         val permissions = Files.getFileAttributeView(
             path,
@@ -1677,6 +1837,17 @@ object FullTreeDataTruthSqlite {
         val maximumWorkers: Int,
         val indexSha256: String,
         val shards: List<AuthenticatedObservationShard>,
+        val treeSnapshot: ObservationTreeSnapshot,
+    )
+
+    private data class ObservationTreeSnapshot(val entries: Map<Path, ObservationTreeEntry>)
+
+    private data class ObservationTreeEntry(
+        val identity: Any,
+        val size: Long,
+        val modified: FileTime,
+        val directory: Boolean,
+        val permissions: Set<PosixFilePermission>,
     )
 
     private data class ObservationDatabase(
@@ -2066,6 +2237,29 @@ object FullTreeDataTruthSqlite {
     private const val OBSERVATION_SQLITE_SCHEMA_VERSION = 1
     private const val OBSERVATION_SQLITE_CACHE_BYTES = 4L * 1024L * 1024L
     private const val TRUTH_SQLITE_CACHE_BYTES = 16L * 1024L * 1024L
+    private val INVENTORY_INDEX_DOMAIN = "full-tree-index-v1\u0000".toByteArray(StandardCharsets.UTF_8)
+    private val CODE_POINT_STRING_COMPARATOR = Comparator<String> { left, right ->
+        var leftOffset = 0
+        var rightOffset = 0
+        while (leftOffset < left.length && rightOffset < right.length) {
+            val leftCodePoint = Character.codePointAt(left, leftOffset)
+            val rightCodePoint = Character.codePointAt(right, rightOffset)
+            if (leftCodePoint != rightCodePoint) return@Comparator leftCodePoint.compareTo(rightCodePoint)
+            leftOffset += Character.charCount(leftCodePoint)
+            rightOffset += Character.charCount(rightCodePoint)
+        }
+        (left.length - leftOffset).compareTo(right.length - rightOffset)
+    }
+    private val INVENTORY_UNIT_COMPARATOR = Comparator<JsonObject> { left, right ->
+        val path = CODE_POINT_STRING_COMPARATOR.compare(
+            left.requiredString("sourcePath"),
+            right.requiredString("sourcePath"),
+        )
+        if (path != 0) path else CODE_POINT_STRING_COMPARATOR.compare(
+            left.requiredString("id"),
+            right.requiredString("id"),
+        )
+    }
     private const val INSERT_MERGED_SQL =
         "INSERT INTO merged(kind, owner_shard, identity, canonical_id, payload, globals, types, " +
             "unobservable_globals, unobservable_types, fields, bases, enumerators, " +
