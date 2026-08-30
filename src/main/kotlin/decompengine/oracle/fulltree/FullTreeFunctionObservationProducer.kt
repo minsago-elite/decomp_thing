@@ -45,6 +45,25 @@ internal data class FullTreeFunctionObservationShardGeneration(
     val document: JsonObject,
 )
 
+/** Canonical control snapshots required by either observation sink. */
+internal class FullTreeFunctionObservationAuthenticatedInputs internal constructor(
+    val inventory: JsonObject,
+    val inventoryArtifactSha256: String,
+    val shard: FullTreeFunctionObservationShardInput,
+)
+
+/** Artifact identities and exact traversal counts returned before a sink may publish output. */
+internal data class FullTreeFunctionObservationArtifactScan(
+    val richArtifactSha256: String,
+    val scannedDies: Long,
+    val subprograms: Long,
+)
+
+private data class FullTreeFunctionObservationTraversalCounts(
+    val scannedDies: Long,
+    val subprograms: Long,
+)
+
 /**
  * Artifact-backed Kotlin/JVM reference producer for historical function-observation v3 facts.
  *
@@ -84,29 +103,8 @@ internal object FullTreeFunctionObservationProducer {
             FullTreeFunctionObservationProducerLimits(),
     ): FullTreeFunctionObservationShardGeneration {
         FullTreeScopeControl.validate(scope, controlLimits)
-        requireStableDirectory(scratchParent, "function-observation scratch parent")
-        val cachedUnits = producerLimits.maximumCachedCompilationUnits.toLong()
-        val modeledReferenceBytes = Math.addExact(
-            Math.multiplyExact(
-                producerLimits.dieLimits.maximumRetainedBytes,
-                Math.addExact(
-                    producerLimits.maximumReferenceChainEntries,
-                    producerLimits.maximumCachedCompilationUnits,
-                ).toLong(),
-            ),
-            Math.multiplyExact(
-                modeledLineTableRetainedBytes(producerLimits.lineTableLimits),
-                cachedUnits,
-            ),
-        )
-        if (
-            modeledReferenceBytes > scope.document.controlObject("bounds").controlObject("perShard")
-                .controlLong("maximumResidentBytes")
-        ) {
-            throw FullTreeControlException(
-                "function-observation DIE/reference cache model exceeds the authenticated resident-byte bound",
-            )
-        }
+        val modeledReferenceBytes = requireScannerResidentBudget(scope.document, producerLimits)
+        val inputs = authenticateShardInputs(inventoryPath, scope, shardId, controlLimits)
         val effectiveProducerLimits = producerLimits.copy(
             accumulatorLimits = boundedAccumulatorLimits(
                 producerLimits.accumulatorLimits,
@@ -114,6 +112,66 @@ internal object FullTreeFunctionObservationProducer {
                 modeledReferenceBytes,
             ),
         )
+        val accumulator = FullTreeFunctionObservationAccumulator(
+            inputs.shard,
+            effectiveProducerLimits.accumulatorLimits,
+        )
+        val scan = scanAuthenticatedShardWithLimits(
+            richArtifact = richArtifact,
+            scope = scope,
+            inputs = inputs,
+            scratchParent = scratchParent,
+            controlLimits = controlLimits,
+            producerLimits = effectiveProducerLimits,
+            recordScannedDies = accumulator::recordScannedDies,
+            accept = accumulator::accept,
+        )
+        val document = accumulator.finish(
+            inventoryIndexSha256 = inputs.inventory.controlString("indexSha256"),
+            richArtifactSha256 = scan.richArtifactSha256,
+            scopeSha256 = scope.sha256,
+        )
+        FullTreeFunctionObservations.validateEnvelope(
+            document,
+            scope.document,
+            scope.sha256,
+            inputs.inventory,
+            inputs.inventoryArtifactSha256,
+            inputs.shard,
+        )
+        val outputBytes = try {
+            FullTreeFunctionObservations.canonicalEnvelopeBytes(document)
+        } catch (failure: Exception) {
+            throw FullTreeControlException(
+                "function-observation output cannot be encoded as canonical JSON",
+                failure,
+            )
+        }
+        val counts = document.controlObject("counts")
+        val entities = Math.addExact(
+            counts.controlLong("emittedRvas"),
+            counts.controlLong("nonEmitted"),
+        )
+        return FullTreeFunctionObservationShardGeneration(
+            shardId = inputs.shard.identifier,
+            inputSha256 = inputs.shard.inputSha256,
+            inventoryArtifactSha256 = inputs.inventoryArtifactSha256,
+            richArtifactSha256 = scan.richArtifactSha256,
+            outputSha256 = OracleArtifacts.sha256(outputBytes),
+            outputBytes = outputBytes.size.toLong(),
+            entities = entities,
+            scannedDies = counts.controlLong("scannedDies"),
+            document = document,
+        )
+    }
+
+    internal fun authenticateShardInputs(
+        inventoryPath: Path,
+        scope: AuthenticatedFullTreeScope,
+        shardId: String,
+        controlLimits: FullTreeControlLimits = FullTreeControlLimits(),
+    ): FullTreeFunctionObservationAuthenticatedInputs {
+        FullTreeScopeControl.validate(scope, controlLimits)
         val (inventory, inventoryBytes) = readCanonicalControlObject(
             inventoryPath,
             controlLimits.maximumInventoryBytes,
@@ -131,7 +189,42 @@ internal object FullTreeFunctionObservationProducer {
             ?: throw FullTreeControlException(
                 "function-observation shard is absent from the authenticated inventory: $shardId",
             )
+        return FullTreeFunctionObservationAuthenticatedInputs(
+            inventory,
+            inventoryArtifactSha256,
+            shard,
+        )
+    }
 
+    internal fun scanAuthenticatedShardWithLimits(
+        richArtifact: Path,
+        scope: AuthenticatedFullTreeScope,
+        inputs: FullTreeFunctionObservationAuthenticatedInputs,
+        scratchParent: Path,
+        controlLimits: FullTreeControlLimits,
+        producerLimits: FullTreeFunctionObservationProducerLimits =
+            FullTreeFunctionObservationProducerLimits(),
+        recordScannedDies: (Long) -> Unit,
+        accept: (FullTreeObservedSubprogram) -> Unit,
+    ): FullTreeFunctionObservationArtifactScan {
+        FullTreeScopeControl.validate(scope, controlLimits)
+        requireStableDirectory(scratchParent, "function-observation scratch parent")
+        requireScannerResidentBudget(scope.document, producerLimits)
+        val authenticatedShard = FullTreeFunctionObservations.shardInputs(
+            inputs.inventory,
+            inputs.inventoryArtifactSha256,
+            scope.document,
+            scope.sha256,
+        ).singleOrNull { it.identifier == inputs.shard.identifier }
+            ?: throw FullTreeControlException(
+                "function-observation scan input is outside the authenticated inventory",
+            )
+        if (
+            authenticatedShard.inputSha256 != inputs.shard.inputSha256 ||
+            authenticatedShard.units != inputs.shard.units
+        ) {
+            throw FullTreeControlException("function-observation scan input is not authenticated")
+        }
         StableControlFile.open(
             richArtifact,
             controlLimits.maximumRichArtifactBytes,
@@ -147,69 +240,43 @@ internal object FullTreeFunctionObservationProducer {
                 scope.document,
                 controlLimits,
             )
-            authenticateInventoryAgainstArtifact(inventory, observedUnits, scope.document)
+            authenticateInventoryAgainstArtifact(inputs.inventory, observedUnits, scope.document)
             val layout = FullTreeElfLayout.scanLayout(
                 artifact,
                 "rich artifact",
-                effectiveProducerLimits.elfLayoutLimits,
+                producerLimits.elfLayoutLimits,
             )
             val executable = FullTreeElfExecutableMembership.fromSorted(layout.executableRanges)
 
-            val document = FullTreeDwarfSections.open(
+            val scan = FullTreeDwarfSections.open(
                 artifact,
                 scratchParent,
                 controlLimits,
                 FullTreeDwarfSections.FUNCTION_OBSERVATION_SECTION_NAMES,
             ).use { sections ->
-                produceDocument(
+                scanSections(
                     sections = sections,
                     layout = layout,
                     executable = executable,
-                    inventory = inventory,
-                    shard = shard,
+                    inventory = inputs.inventory,
+                    shard = inputs.shard,
                     scope = scope,
                     controlLimits = controlLimits,
-                    producerLimits = effectiveProducerLimits,
+                    producerLimits = producerLimits,
+                    recordScannedDies = recordScannedDies,
+                    accept = accept,
                 )
             }
-            FullTreeFunctionObservations.validateEnvelope(
-                document,
-                scope.document,
-                scope.sha256,
-                inventory,
-                inventoryArtifactSha256,
-                shard,
-            )
             artifact.verifyUnchanged("rich artifact after function observation")
-
-            val outputBytes = try {
-                FullTreeFunctionObservations.canonicalEnvelopeBytes(document)
-            } catch (failure: Exception) {
-                throw FullTreeControlException(
-                    "function-observation output cannot be encoded as canonical JSON",
-                    failure,
-                )
-            }
-            val counts = document.controlObject("counts")
-            val entities = Math.addExact(
-                counts.controlLong("emittedRvas"),
-                counts.controlLong("nonEmitted"),
-            )
-            return FullTreeFunctionObservationShardGeneration(
-                shardId = shard.identifier,
-                inputSha256 = shard.inputSha256,
-                inventoryArtifactSha256 = inventoryArtifactSha256,
+            return FullTreeFunctionObservationArtifactScan(
                 richArtifactSha256 = richArtifactSha256,
-                outputSha256 = OracleArtifacts.sha256(outputBytes),
-                outputBytes = outputBytes.size.toLong(),
-                entities = entities,
-                scannedDies = counts.controlLong("scannedDies"),
-                document = document,
+                scannedDies = scan.scannedDies,
+                subprograms = scan.subprograms,
             )
         }
     }
 
-    private fun produceDocument(
+    private fun scanSections(
         sections: FullTreeDwarfSections,
         layout: FullTreeElfCoreLayout,
         executable: FullTreeElfExecutableMembership,
@@ -218,7 +285,9 @@ internal object FullTreeFunctionObservationProducer {
         scope: AuthenticatedFullTreeScope,
         controlLimits: FullTreeControlLimits,
         producerLimits: FullTreeFunctionObservationProducerLimits,
-    ): JsonObject {
+        recordScannedDies: (Long) -> Unit,
+        accept: (FullTreeObservedSubprogram) -> Unit,
+    ): FullTreeFunctionObservationTraversalCounts {
         val info = sections.required(".debug_info")
         val parseBudget = FullTreeDwarfParseBudget(controlLimits.maximumDwarfParseSteps)
         val inventoryUnits = inventory.controlArray("units").controlObjects("inventory units")
@@ -231,21 +300,20 @@ internal object FullTreeFunctionObservationProducer {
             producerLimits,
             parseBudget,
         )
-        val accumulator = FullTreeFunctionObservationAccumulator(
-            shard,
-            producerLimits.accumulatorLimits,
-        )
+        var scannedDies = 0L
+        var subprograms = 0L
         shard.units.forEach { unit ->
             val offset = parseDwarfOffset(unit.controlString("dwarfOffset"), "inventory DWARF offset")
             val header = headersByOffset[offset]
                 ?: throw FullTreeControlException(
                     "inventory compilation-unit offset is absent from the rich artifact: ${unit.controlString("id")}",
-                )
+            )
             val owner = repository.load(header)
-            accumulator.recordScannedDies(owner.index.physicalRecordCount)
+            recordScannedDies(owner.index.physicalRecordCount)
+            scannedDies = Math.addExact(scannedDies, owner.index.physicalRecordCount)
             owner.index.recordsInPhysicalOrder.forEach { record ->
                 if (record.tag == DW_TAG_SUBPROGRAM && !record.truthy(DW_AT_DECLARATION, "DW_AT_declaration")) {
-                    accumulator.accept(
+                    accept(
                         observeSubprogram(
                             owner,
                             record,
@@ -257,14 +325,11 @@ internal object FullTreeFunctionObservationProducer {
                             producerLimits,
                         ),
                     )
+                    subprograms = Math.addExact(subprograms, 1L)
                 }
             }
         }
-        return accumulator.finish(
-            inventoryIndexSha256 = inventory.controlString("indexSha256"),
-            richArtifactSha256 = scope.document.controlObject("oracle").controlString("richArtifactSha256"),
-            scopeSha256 = scope.sha256,
-        )
+        return FullTreeFunctionObservationTraversalCounts(scannedDies, subprograms)
     }
 
     private fun observeSubprogram(
@@ -350,8 +415,7 @@ internal object FullTreeFunctionObservationProducer {
             owner.lineTable(lineLimits)?.resolveDeclarationPath(
                 boundedLong(index, "DWARF declaration file"),
                 owner.header.version,
-                owner.compilationDirectory(),
-            )
+            ) { owner.compilationDirectory() }
         }
         var sourcePath: String? = null
         var externalPathSha256: String? = null
@@ -519,6 +583,35 @@ internal object FullTreeFunctionObservationProducer {
             maximumNonEmittedGroups = minOf(configured.maximumNonEmittedGroups, maximumEntities),
             maximumRetainedBytes = maximumRetainedBytes,
         )
+    }
+
+    private fun requireScannerResidentBudget(
+        scope: JsonObject,
+        producerLimits: FullTreeFunctionObservationProducerLimits,
+    ): Long {
+        val cachedUnits = producerLimits.maximumCachedCompilationUnits.toLong()
+        val modeledReferenceBytes = Math.addExact(
+            Math.multiplyExact(
+                producerLimits.dieLimits.maximumRetainedBytes,
+                Math.addExact(
+                    producerLimits.maximumReferenceChainEntries,
+                    producerLimits.maximumCachedCompilationUnits,
+                ).toLong(),
+            ),
+            Math.multiplyExact(
+                modeledLineTableRetainedBytes(producerLimits.lineTableLimits),
+                cachedUnits,
+            ),
+        )
+        if (
+            modeledReferenceBytes > scope.controlObject("bounds").controlObject("perShard")
+                .controlLong("maximumResidentBytes")
+        ) {
+            throw FullTreeControlException(
+                "function-observation DIE/reference cache model exceeds the authenticated resident-byte bound",
+            )
+        }
+        return modeledReferenceBytes
     }
 }
 
