@@ -48,6 +48,112 @@ switching to the service user. Packaging does not weaken the runtime prerequisit
 user namespaces, bubblewrap, a user systemd manager and cgroup-v2 authority. If those authorities are unavailable, ACP
 preflight and launch fail closed; the image does not add `SYS_ADMIN`, privileged mode, or a fallback sandbox.
 
+## Operator provisioning and preflight
+
+[`config/acp-v1.example.json`](../config/acp-v1.example.json) is the bounded minimal ACP configuration template. It is
+intentionally not runnable as checked in: every all-zero digest is a fail-closed placeholder, the user-systemd runtime
+path is UID-specific, and the example agent path does not exist until it is provisioned. Copy it to a private regular
+file owned by the dedicated service UID with mode `0600`; `ACP_CONFIG_FILE` must be its absolute normalized path.
+
+Provision the components in this order:
+
+1. Create a dedicated, uncompromised service account. Enable and start its user systemd manager, ensure its live
+   `/run/user/<uid>/bus` is accessible to that same UID, and verify unified cgroup v2. The account is the trust boundary:
+   an unrelated process already running as that UID can interfere through same-UID Linux powers.
+2. Install a locally runnable, network-free native ACP v1 executable at
+   `/opt/decomp-acp-agent/bin/acp-agent` and its read-only dependency closure at
+   `/opt/decomp-acp-agent/runtime`. Direct scripts are not valid executable targets; provision a native interpreter as
+   the executable and put the script in a separately manifested read-only mount if that is the reviewed design.
+3. Run `./gradlew installDist`, then install the verified static
+   `build/install/llm_bin_patch/libexec/decomp-acp-gate-helper` at
+   `/opt/decomp-acp-host/decomp-acp-gate-helper`. Verify its distribution sidecar before copying it:
+
+   ```bash
+   (cd build/install/llm_bin_patch/libexec && \
+     sha256sum --check --strict decomp-acp-gate-helper.sha256)
+   sudo install -d -o root -g root -m 0755 /opt/decomp-acp-host
+   sudo install -o root -g root -m 0755 \
+     build/install/llm_bin_patch/libexec/decomp-acp-gate-helper \
+     /opt/decomp-acp-host/decomp-acp-gate-helper
+   ```
+4. On the final installed inodes, compute content SHA-256 for `/usr/bin/bwrap`, `/usr/bin/prlimit`,
+   `/usr/bin/systemd-run`, `/usr/bin/systemctl`, `/usr/bin/bash`, and the gate helper with `sha256sum`. Compute the
+   versioned metadata manifests for the agent executable, agent runtime closure, and gate helper with the repository's
+   public production algorithm:
+
+   ```bash
+   sha256sum /usr/bin/bwrap /usr/bin/prlimit /usr/bin/systemd-run \
+     /usr/bin/systemctl /usr/bin/bash /opt/decomp-acp-host/decomp-acp-gate-helper
+   scripts/calculate-acp-runtime-manifest.sh /opt/decomp-acp-agent/bin/acp-agent
+   scripts/calculate-acp-runtime-manifest.sh /opt/decomp-acp-agent/runtime
+   scripts/calculate-acp-runtime-manifest.sh /opt/decomp-acp-host/decomp-acp-gate-helper
+   ```
+
+   Run those commands only during trusted provisioning and persist the results in the private configuration. Never
+   calculate an expected digest from the live path immediately before launch. The helper script uses the exact
+   `AcpRuntimeClosureLimits` encoded by the template; if those limits change, the provisioning computation must use the
+   same reviewed values.
+5. Copy the template with `install -m 600`, replace every zero digest, change
+   `systemdUserRuntimeDirectory` to the dedicated UID, and review the exact ordered argv. The example is the literal
+   vector `[/opt/decomp-acp-agent/bin/acp-agent, --stdio, --non-interactive]`; no shell parses it. Add only capabilities
+   the agent must support globally. `doctor --workflow all` adds the bounded capability requirements of every selected
+   workflow before accepting the handshake.
+6. Keep the template's `environment: []` for a literally credential-free local agent. If a workflow genuinely needs a
+   secret, add only an exact reviewed binding such as the following and supply the named source in the service
+   environment:
+
+   ```json
+   "environment": [
+     {
+       "name": "ACP_AGENT_SECRET",
+       "provenance": "secret",
+       "valueFromEnvironment": "ACP_AGENT_SECRET"
+     }
+   ]
+   ```
+
+   The configuration stores the source name and provenance, never the value; `inheritParentEnvironment` must remain
+   `false`, and no ambient environment is serialized or forwarded. Once a secret binding is configured, preflight
+   resolves and forwards that exact variable to the agent even though it never creates a session or sends a prompt.
+   Host-native execution can export that one name. Compose requires the same explicit one-name opt-in rather than an
+   ambient environment file:
+
+   ```bash
+   export ACP_AGENT_SECRET
+   docker compose --profile acp-host run --rm --no-deps \
+     -e ACP_AGENT_SECRET llm-bin-patch doctor --workflow all --output /output
+   ```
+
+Perform the real credential-free initialize preflight before any workflow:
+
+```bash
+export ACP_CONFIG_FILE=/absolute/private/path/acp-v1.json
+build/install/llm_bin_patch/bin/llm_bin_patch doctor --workflow all --output ./output
+```
+
+This uses the same strict factory and production sandbox as agent execution. It sends `initialize`, requires stable ACP
+v1 and every configured plus selected-workflow capability, then shuts down and proves cleanup. The checked template
+requires no credential and the preflight never sends `session/new` or `session/prompt`. A configured secret is still
+available to the launched agent during initialize; do not claim that a third-party agent will ignore it. A missing
+capability, incompatible ACP version, agent crash, stale process, or cleanup failure makes the preflight fail.
+
+The Compose `acp-host` profile is only a host-prerequisite qualification surface. It deliberately uses host PID and
+cgroup namespaces plus read-only binds of `/sys/fs/cgroup` and the dedicated UID's user bus so the existing production
+scope inspection can run. It also declares `userns_mode: host`: Docker UID remapping is deliberately disabled for the
+non-root ACP application and runner so their configured numeric UID is the same host identity that owns the user bus
+and private control volume. This grants the container process exactly the repository's documented same-UID host trust
+boundary. The service has a read-only root, drops all capabilities, sets `no-new-privileges`, and keeps the outer agent
+network isolated. It never requests `SYS_ADMIN`, privileged mode, or an unconfined seccomp profile. Therefore only a
+local network-free agent is usable. Remote or provider-backed ACP agents are not supported by this namespace today.
+Rootless or remapped daemons may reject the host user-namespace mode. If the host user manager,
+`systemd-run --scope`, cgroup visibility, nested unprivileged user namespaces, or the container runtime's default
+seccomp policy prevents the production checks, `doctor` must fail and the host is unqualified; do not bypass the check.
+
+`doctor --tools-only` remains useful for checking the bundled compiler/decompiler toolchain, but it intentionally does
+not resolve `ACP_CONFIG_FILE` or launch an agent and cannot qualify an ACP deployment. The old OpenAI-compatible
+`GET /models` probe is available only through exact `--harness legacy-openai`; its variables live in
+`.env.legacy-openai.example` and are deprecated compatibility inputs.
+
 The 0.30.1 SDK marks three optional v1 schema extensions used at the contract boundary as `UnstableApi`: additional
 session directories, prompt token usage, and message identifiers. Opt-in is deliberately scoped to the adapter code
 that reads those fields. They do not change version negotiation: they remain v1 fields, additional directories are

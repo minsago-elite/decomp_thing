@@ -42,6 +42,7 @@ class DockerMvpContractTest {
     fun `end to end validation script checks pinned input output layout and evidence`() {
         val script = Path.of("scripts/validate-mvp-docker.sh").readText()
 
+        assertTrue(script.contains("config_file=\${1:-.env.legacy-openai}"))
         assertTrue(script.contains("git submodule update --init --recursive benchmarks/fixtures/c-vul"))
         assertTrue(script.contains("actual_fixture_commit"))
         assertTrue(script.contains("the MVP acceptance run requires a clean checkout"))
@@ -60,7 +61,9 @@ class DockerMvpContractTest {
         assertTrue(script.contains("--entrypoint /input/binary_01 binary-runner"))
         assertTrue(script.contains("up --detach --wait --wait-timeout 30 mvp-fake-provider"))
         assertTrue(script.contains("accepted mvp request 2: memory-safety"))
-        assertTrue(script.contains("patch /input/binary_01 --output /output/mvp --yes"))
+        assertTrue(script.contains("application_service=llm-bin-patch-legacy"))
+        assertTrue(script.contains("build_profile=(--profile legacy-acceptance)"))
+        assertTrue(script.contains("patch /input/binary_01 --output /output/mvp --yes --harness legacy-openai"))
         assertTrue(script.contains("[03] Alexandria Stone"))
         assertTrue(script.contains("cwe-787-sanitizer.txt"))
         assertTrue(script.contains("networkIsolated=true; credentialsIsolated=true"))
@@ -77,6 +80,7 @@ class DockerMvpContractTest {
         val provider = Path.of("benchmarks/fixtures/mvp-c-vul/fake_openai_provider.py").readText()
 
         assertTrue(config.contains("MVP_FAKE_PROVIDER=true"))
+        assertTrue(config.contains("ACP_HARNESS=legacy-openai"))
         assertTrue(config.contains("API_KEY=mvp-fixture-not-a-secret-v1"))
         assertTrue(provider.contains("MAXIMUM_REQUEST_BYTES = 4 * 1024 * 1024"))
         assertTrue(provider.contains("EXPECTED_SEQUENCE = (\"binary-reconstruction\", \"memory-safety\")"))

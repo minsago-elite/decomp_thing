@@ -3,10 +3,10 @@ set -euo pipefail
 
 cd "$(dirname "$0")/.."
 
-config_file=${1:-.env}
+config_file=${1:-.env.legacy-openai}
 if [[ ! -f "$config_file" ]]; then
-  echo "missing runtime API configuration: $config_file" >&2
-  echo "copy .env.example to .env and set BASE_URL, API_KEY, and MODEL" >&2
+  echo "missing deprecated legacy OpenAI-compatible configuration: $config_file" >&2
+  echo "copy .env.legacy-openai.example to a private file and set BASE_URL, API_KEY, and MODEL" >&2
   exit 2
 fi
 
@@ -14,9 +14,14 @@ set -a
 # shellcheck disable=SC1090
 source "$config_file"
 set +a
+: "${ACP_HARNESS:?ACP_HARNESS is required in $config_file}"
 : "${BASE_URL:?BASE_URL is required in $config_file}"
 : "${API_KEY:?API_KEY is required in $config_file}"
 : "${MODEL:?MODEL is required in $config_file}"
+if [[ "$ACP_HARNESS" != "legacy-openai" ]]; then
+  echo "the pinned MVP acceptance fixture requires exact ACP_HARNESS=legacy-openai opt-in" >&2
+  exit 2
+fi
 
 fake_provider=${MVP_FAKE_PROVIDER:-false}
 case "$fake_provider" in
@@ -59,14 +64,16 @@ fi
 
 validation_root=$(mktemp -d /tmp/decomp-mvp-ci.XXXXXX)
 project_name="decomp-mvp-${RANDOM}-$$"
+application_service=llm-bin-patch-legacy
 binds_ready=false
 cleanup() {
   # Rootless Docker maps the non-root application user to a subordinate host UID. Empty the
   # private output bind through that same user before the host removes the temporary directory.
   if [[ "$binds_ready" == "true" && "${INPUT_DIR:-}" == "$validation_root/input" &&
         "${OUTPUT_DIR:-}" == "$validation_root/output" ]]; then
-    docker compose -p "$project_name" --env-file "$config_file" run --rm --no-deps \
-      --entrypoint find llm-bin-patch /output -depth -mindepth 1 -delete >/dev/null 2>&1 || true
+    docker compose -p "$project_name" --env-file "$config_file" --profile legacy-acceptance \
+      run --rm --no-deps --entrypoint find "$application_service" \
+      /output -depth -mindepth 1 -delete >/dev/null 2>&1 || true
   fi
   docker compose -p "$project_name" --env-file "$config_file" down --volumes --remove-orphans >/dev/null 2>&1 || true
   case "$validation_root" in
@@ -96,9 +103,9 @@ LOCAL_UID=$(id -u)
 LOCAL_GID=$(id -g)
 binds_ready=true
 
-build_profile=()
+build_profile=(--profile legacy-acceptance)
 if [[ "$fake_provider" == "true" ]]; then
-  build_profile=(--profile acceptance)
+  build_profile+=(--profile acceptance)
 fi
 docker compose -p "$project_name" --env-file "$config_file" "${build_profile[@]}" build
 compiler_version=$(docker compose -p "$project_name" --env-file "$config_file" --profile acceptance run --rm --no-deps --entrypoint clang fixture-builder --version | head -n 1)
@@ -119,8 +126,8 @@ if [[ "$original_output" != "[03] Alexandria Stone" ]]; then
 fi
 
 # Prove the source used to build the acceptance input is absent from both runtime services.
-for service in llm-bin-patch binary-runner; do
-  docker compose -p "$project_name" --env-file "$config_file" run --rm --no-deps \
+for service in "$application_service" binary-runner; do
+  docker compose -p "$project_name" --env-file "$config_file" --profile legacy-acceptance run --rm --no-deps \
     --entrypoint sh "$service" -c \
     'test ! -e /opt/fixtures/c-vul && test ! -e /workspace/benchmarks/fixtures/c-vul'
 done
@@ -129,9 +136,9 @@ if [[ "$fake_provider" == "true" ]]; then
   docker compose -p "$project_name" --env-file "$config_file" --profile acceptance \
     up --detach --wait --wait-timeout 30 mvp-fake-provider
 fi
-docker compose -p "$project_name" --env-file "$config_file" up --detach binary-runner
-docker compose -p "$project_name" --env-file "$config_file" run --rm --no-deps \
-  llm-bin-patch patch /input/binary_01 --output /output/mvp --yes
+docker compose -p "$project_name" --env-file "$config_file" --profile legacy-acceptance up --detach binary-runner
+docker compose -p "$project_name" --env-file "$config_file" --profile legacy-acceptance run --rm --no-deps \
+  "$application_service" patch /input/binary_01 --output /output/mvp --yes --harness legacy-openai
 
 if [[ "$fake_provider" == "true" ]]; then
   fake_provider_logs=$(docker compose -p "$project_name" --env-file "$config_file" logs --no-color mvp-fake-provider)
@@ -161,8 +168,8 @@ grep -q 'networkIsolated=true; credentialsIsolated=true' "$summary"
 grep -q "$input_sha" "$summary"
 
 set +e
-docker compose -p "$project_name" --env-file "$config_file" run --rm --no-deps \
-  --entrypoint sh llm-bin-patch -c \
+docker compose -p "$project_name" --env-file "$config_file" --profile legacy-acceptance run --rm --no-deps \
+  --entrypoint sh "$application_service" -c \
   'grep -r --devices=skip --fixed-strings --quiet -- "$API_KEY" /output/mvp'
 api_scan_status=$?
 set -e
@@ -179,8 +186,8 @@ case "$api_scan_status" in
 esac
 
 set +e
-docker compose -p "$project_name" --env-file "$config_file" run --rm --no-deps \
-  -e MVP_FORBIDDEN_VALUE="$fixture_source_sha" --entrypoint sh llm-bin-patch -c \
+docker compose -p "$project_name" --env-file "$config_file" --profile legacy-acceptance run --rm --no-deps \
+  -e MVP_FORBIDDEN_VALUE="$fixture_source_sha" --entrypoint sh "$application_service" -c \
   'grep -r --devices=skip --fixed-strings --quiet -- "$MVP_FORBIDDEN_VALUE" /output/mvp'
 source_scan_status=$?
 set -e

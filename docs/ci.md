@@ -75,7 +75,10 @@ Install these system tools before running the test suite:
 Optional local integrations:
 
 - Set `ANGR_PYTHON` to an angr-enabled Python executable to run the real symbolic argv/stdin integration test. The Docker image pins angr for production exploration; ordinary JVM tests use a deterministic process-adapter fixture.
-- `BASE_URL`, `API_KEY`, and `MODEL` enable real OpenAI-compatible repair calls. Tests use a deterministic local compatible HTTP endpoint.
+- `ACP_CONFIG_FILE` selects the strict ACP v1 provisioning used by agent-backed workflows. Agent credentials remain in
+  the named secret environment sources declared by that private configuration; they are not serialized into it.
+- `BASE_URL`, `API_KEY`, and `MODEL` are deprecated compatibility inputs and are accepted only with exact
+  `ACP_HARNESS=legacy-openai` or `--harness legacy-openai`. The pinned MVP fixture retains that explicit legacy path.
 - Ghidra can be supplied through the Kotlin JVM adapter. Fast tests use a fake JVM entrypoint; the archival Docker CI job uses the pinned real Ghidra release and bundled exporter.
 
 ## GitHub Actions Consumer Example

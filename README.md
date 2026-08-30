@@ -2,25 +2,63 @@
 
 LLM-assisted binary-to-C reconstruction tooling for Linux x86-64 ELF binaries.
 
-## Docker Environment
+## ACP setup (default)
 
-Create the local API configuration:
+ACP v1 is the standard agent path. Build the distribution, copy
+[`config/acp-v1.example.json`](config/acp-v1.example.json) to a private mode-`0600` absolute path, and replace every
+zero digest with a value measured during trusted provisioning. The credential-free template fixes the ordered agent
+argv, disables parent-environment inheritance, and bounds protocol, filesystem, process, memory, CPU, file, and
+runtime-closure use. Optional secret provenance is configured explicitly as described in the complete procedure at
+[docs/acp-v1-client.md](docs/acp-v1-client.md#operator-provisioning-and-preflight).
 
 ```bash
-cp .env.example .env
+./gradlew installDist
+install -m 600 config/acp-v1.example.json /absolute/private/path/acp-v1.json
+# Provision the pinned local agent, runtime closure, helper, and tool digests first.
+export ACP_CONFIG_FILE=/absolute/private/path/acp-v1.json
+build/install/llm_bin_patch/bin/llm_bin_patch doctor --workflow all --output ./output
 ```
 
-Set `BASE_URL`, `API_KEY`, `MODEL`, and optional `REASONING_EFFORT` in `.env`, then build and verify the environment. Supported reasoning values are `none`, `minimal`, `low`, `medium`, `high`, and `xhigh`; leave it blank to omit the API field.
+Full `doctor` loads the same strict `AcpHarnessFactory` selection used by workflows, launches the production sandbox,
+negotiates stable ACP v1 and all configured plus selected-workflow capabilities, and proves process-tree cleanup. It
+does not create a session or send a model prompt. `doctor --tools-only` is explicitly agent-free and does not read or
+resolve ACP configuration. The deprecated direct `GET /models` probe exists only behind exact
+`--harness legacy-openai` opt-in.
+
+### Docker qualification profile
+
+Host-native execution under a dedicated service UID is the primary supported ACP deployment. Compose exposes an
+explicit `acp-host` qualification profile for hosts that deliberately provide that same trust boundary. Copy
+`.env.example` to a private `.env`, fill in absolute paths, and run the real initialize preflight:
 
 ```bash
 mkdir -p input output
-docker compose build
-docker compose run --rm llm-bin-patch doctor --tools-only --output /output
+cp .env.example .env
+chmod 600 .env
+# Edit .env and finish config/acp-v1.example.json provisioning as documented.
+docker compose --profile acp-host build llm-bin-patch binary-runner-acp
+docker compose --profile acp-host run --rm --no-deps llm-bin-patch \
+  doctor --workflow all --output /output
 ```
 
-The container includes JDK 21, headless Ghidra, GCC, Make, binutils, sanitizers, bubblewrap, Python, and a pinned angr installation. Input files are mounted read-only from `./input`; generated artifacts are written to `/output`. `doctor --tools-only` checks only the local toolchain and is explicitly agent-free. Full `doctor` defaults to the ACP harness provisioned by `ACP_CONFIG_FILE`: it launches the production sandbox, negotiates stable ACP v1 and the selected workflow capabilities, and proves process-tree cleanup without creating a session or sending a model prompt. The deprecated direct `GET /models` preflight is available only with exact `--harness legacy-openai` opt-in.
+This profile is qualified only when the container runs as the dedicated, uncompromised host service UID and can see
+that UID's live user-systemd bus, host PIDs, and cgroup-v2 hierarchy. The user bus and `/sys/fs/cgroup` are mounted
+read-only. `userns_mode: host` deliberately disables Docker UID remapping for these two non-root services so the numeric
+UID, user bus owner, and private runner volume share one honest host identity. The application has a read-only root,
+drops every capability, sets `no-new-privileges`, uses no `SYS_ADMIN`, privileged mode, or seccomp bypass, and has
+`network_mode: none`. Consequently the ACP agent must be a locally runnable, network-free native executable with an
+explicitly mounted runtime closure. Remote or provider-backed agents do not work in the production outer-agent
+namespace today. Rootless or remapped daemons may reject this host-namespace requirement. If user
+`systemd-run --scope`, cgroup inspection, nested unprivileged user namespaces, or the Docker runtime's default seccomp
+policy cannot satisfy the production boundary, `doctor` fails and that host is unqualified; do not weaken the profile
+to make it pass.
 
-Compose runs analyzed binaries in the separate `binary-runner` service. That service receives no `.env`, has `network_mode: none`, a read-only root filesystem, no Linux capabilities, read-only input/output mounts, and only a narrow writable request volume. The application service does not add `SYS_ADMIN` or run as privileged. Outside Compose, binary execution requires a working bubblewrap user/network namespace and starts with a cleared, allowlisted environment.
+The container includes JDK 21, headless Ghidra, GCC, Make, binutils, sanitizers, bubblewrap, Python, and a pinned angr
+installation. Input files are mounted read-only from `./input`; generated artifacts are written to `/output`.
+Analyzed binaries run in the separate `binary-runner`, which receives no agent or provider credentials, has no network,
+a read-only root, no Linux capabilities, read-only input/output mounts, and only a narrow writable request volume. The
+ACP profile uses its own `binary-runner-acp` and control volume built with the exact same dedicated UID/GID as the ACP
+application; the deprecated legacy profile retains the separate local-UID runner.
 
 Run the complete pinned c-vul acceptance flow deterministically and without credentials from a clean checkout:
 
@@ -29,13 +67,20 @@ git submodule update --init --recursive
 scripts/validate-mvp-docker.sh benchmarks/fixtures/mvp-c-vul/fake-provider.env
 ```
 
-The checked fake provider is an explicit MVP fixture, not reusable reconstruction logic or evidence of model quality. It is non-root, read-only, reachable only on an internal Compose network, accepts a bounded request body, and returns exactly the two fixture responses needed to exercise reconstruction and repair. The normal application and isolated binary-runner services still receive no fixture source. The same validation script also supports a real OpenAI-compatible model configuration:
+The checked fake provider is an explicit, deprecated `legacy-openai` MVP fixture, not reusable reconstruction logic,
+an ACP agent, or evidence of model quality. The script requires exact `ACP_HARNESS=legacy-openai`; the fixture is
+non-root, read-only, reachable only on an internal Compose network, accepts a bounded request body, and returns exactly
+the two fixture responses needed to exercise reconstruction and repair. The application and isolated binary-runner
+services still receive no fixture source. This acceptance fixture has not yet migrated to ACP. The same script can use
+a real OpenAI-compatible endpoint only through the explicit deprecated profile:
 
 ```bash
 git submodule update --init --recursive
-cp .env.example .env
-# Edit .env, then:
-scripts/validate-mvp-docker.sh .env
+cp .env.legacy-openai.example .env.legacy-openai
+# Keep this file private and edit the deprecated provider settings.
+chmod 600 .env.legacy-openai
+# Edit .env.legacy-openai, then:
+scripts/validate-mvp-docker.sh .env.legacy-openai
 ```
 
 The script uses the no-network, read-only `fixture-builder` profile with a bounded temporary filesystem to compile only `01_out_of_bounds_write.c` with pinned Clang flags into an isolated `binary_01` input directory. Fixture source is mounted read-only only in that builder and is absent from both runtime services. The script then runs `llm_bin_patch patch` through Compose and checks original CWE-787 evidence, isolated execution guarantees, exact `[03] Alexandria Stone` behavior, hashes, logs, secret redaction, and stable output layout. Successful runs contain `decompile/decompiled.c`, `patched_c/patched.c`, `patched_binary/patched_binary`, `evidence/`, `logs/`, and `summary/SUMMARY.md`; failed runs keep available evidence but never publish the final binary.
@@ -65,9 +110,7 @@ Generate a buildable multi-file project and deterministic ZIP bundle with Ghidra
 
 ```bash
 export GHIDRA_HOME=/path/to/ghidra
-export BASE_URL=https://api.example.com/v1
-export API_KEY=...
-export MODEL=...
+export ACP_CONFIG_FILE=/absolute/private/path/acp-v1.json
 llm_bin_patch reconstruct ./input/program --output ./output/program-source
 ```
 

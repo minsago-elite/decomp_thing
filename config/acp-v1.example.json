@@ -1,0 +1,69 @@
+{
+  "schemaVersion": 1,
+  "implementationId": "local-network-free-acp-v1",
+  "agent": {
+    "executable": "/opt/decomp-acp-agent/bin/acp-agent",
+    "arguments": [
+      "--stdio",
+      "--non-interactive"
+    ],
+    "environment": [],
+    "inheritParentEnvironment": false,
+    "requiredCapabilities": [],
+    "timeoutsMillis": {
+      "startup": 20000,
+      "request": 1200000,
+      "cancellationGrace": 2000,
+      "transportDrainGrace": 100,
+      "shutdown": 5000
+    },
+    "protocolLimits": {
+      "maximumFrameBytes": 1048576,
+      "maximumProtocolFrames": 1024,
+      "maximumStderrBytes": 262144
+    },
+    "filesystemLimits": {
+      "maximumReadBytes": 8388608,
+      "maximumWriteBytes": 8388608
+    },
+    "permissionMode": "default-deny",
+    "expectedExecutableManifestSha256": "0000000000000000000000000000000000000000000000000000000000000000"
+  },
+  "sandbox": {
+    "bubblewrapExecutable": "/usr/bin/bwrap",
+    "resourceLimiterExecutable": "/usr/bin/prlimit",
+    "scopeSupervisorExecutable": "/usr/bin/systemd-run",
+    "scopeInspectorExecutable": "/usr/bin/systemctl",
+    "environmentFdOpenerExecutable": "/usr/bin/bash",
+    "sandboxGateHelperExecutable": "/opt/decomp-acp-host/decomp-acp-gate-helper",
+    "systemdUserRuntimeDirectory": "/run/user/1000",
+    "agentWorkingDirectory": "/tmp",
+    "launcherRuntimeMounts": [],
+    "agentRuntimeMounts": [
+      {
+        "source": "/opt/decomp-acp-agent/runtime",
+        "destination": "/opt/decomp-acp-agent/runtime",
+        "expectedManifestSha256": "0000000000000000000000000000000000000000000000000000000000000000"
+      }
+    ],
+    "agentResourceLimits": {
+      "maximumProcesses": 16,
+      "maximumOpenFiles": 128,
+      "maximumFileBytes": 67108864,
+      "maximumAddressSpaceBytes": 536870912,
+      "maximumCpuSeconds": 20
+    },
+    "runtimeClosureLimits": {
+      "maximumEntries": 10000,
+      "maximumUserOwnedFileBytes": 536870912,
+      "maximumDepth": 32
+    },
+    "expectedBubblewrapSha256": "0000000000000000000000000000000000000000000000000000000000000000",
+    "expectedResourceLimiterSha256": "0000000000000000000000000000000000000000000000000000000000000000",
+    "expectedScopeSupervisorSha256": "0000000000000000000000000000000000000000000000000000000000000000",
+    "expectedScopeInspectorSha256": "0000000000000000000000000000000000000000000000000000000000000000",
+    "expectedEnvironmentFdOpenerSha256": "0000000000000000000000000000000000000000000000000000000000000000",
+    "expectedSandboxGateHelperSha256": "0000000000000000000000000000000000000000000000000000000000000000",
+    "expectedSandboxGateHelperManifestSha256": "0000000000000000000000000000000000000000000000000000000000000000"
+  }
+}

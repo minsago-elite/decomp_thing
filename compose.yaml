@@ -1,5 +1,72 @@
 services:
   llm-bin-patch:
+    profiles:
+      - acp-host
+    build:
+      context: .
+      args:
+        APP_UID: ${ACP_SERVICE_UID:-1000}
+        APP_GID: ${ACP_SERVICE_GID:-1000}
+    user: "${ACP_SERVICE_UID:-1000}:${ACP_SERVICE_GID:-1000}"
+    userns_mode: host
+    init: true
+    stdin_open: true
+    tty: true
+    network_mode: none
+    pid: host
+    cgroup: host
+    read_only: true
+    cap_drop:
+      - ALL
+    security_opt:
+      - no-new-privileges:true
+    depends_on:
+      - binary-runner-acp
+    environment:
+      ACP_CONFIG_FILE: /run/decomp-engine/acp/config.json
+      BINARY_RUNNER_DIR: /runner
+    tmpfs:
+      - /tmp:size=512m,nosuid,nodev,mode=1777
+    volumes:
+      - ${INPUT_DIR:-./input}:/input:ro
+      - ${OUTPUT_DIR:-./output}:/output
+      - runner-control-acp:/runner
+      - ${ACP_CONFIG_FILE:-./config/acp-v1.example.json}:/run/decomp-engine/acp/config.json:ro
+      - ${ACP_AGENT_RUNTIME_ROOT:-./config/acp-host-prerequisites/agent-runtime}:/opt/decomp-acp-agent:ro
+      - ${ACP_SANDBOX_GATE_HELPER_FILE:-./config/acp-host-prerequisites/decomp-acp-gate-helper}:/opt/decomp-acp-host/decomp-acp-gate-helper:ro
+      - ${ACP_SYSTEMD_USER_RUNTIME:-./config/acp-host-prerequisites/user-runtime}:/run/user/${ACP_SERVICE_UID:-1000}:ro
+      - /sys/fs/cgroup:/sys/fs/cgroup:ro
+
+  binary-runner-acp:
+    profiles:
+      - acp-host
+    build:
+      context: .
+      args:
+        APP_UID: ${ACP_SERVICE_UID:-1000}
+        APP_GID: ${ACP_SERVICE_GID:-1000}
+    user: "${ACP_SERVICE_UID:-1000}:${ACP_SERVICE_GID:-1000}"
+    userns_mode: host
+    entrypoint: ["llm_bin_patch", "runner", "--control-dir", "/runner"]
+    init: true
+    network_mode: none
+    read_only: true
+    cap_drop:
+      - ALL
+    security_opt:
+      - no-new-privileges:true
+    environment:
+      RUNNER_NETWORK_ISOLATED: "true"
+    tmpfs:
+      - /tmp:size=64m,noexec,nosuid,nodev
+    volumes:
+      - ${INPUT_DIR:-./input}:/input:ro
+      - ${OUTPUT_DIR:-./output}:/output:ro
+      - runner-control-acp:/runner
+
+  llm-bin-patch-legacy:
+    profiles:
+      - legacy-acceptance
     build:
       context: .
       args:
@@ -8,14 +75,22 @@ services:
     init: true
     stdin_open: true
     tty: true
+    read_only: true
+    cap_drop:
+      - ALL
+    security_opt:
+      - no-new-privileges:true
     depends_on:
       - binary-runner
     environment:
+      ACP_HARNESS: legacy-openai
       BINARY_RUNNER_DIR: /runner
       BASE_URL: ${BASE_URL:-}
       API_KEY: ${API_KEY:-}
       MODEL: ${MODEL:-}
       REASONING_EFFORT: ${REASONING_EFFORT:-}
+    tmpfs:
+      - /tmp:size=512m,nosuid,nodev,mode=1777
     volumes:
       - ${INPUT_DIR:-./input}:/input:ro
       - ${OUTPUT_DIR:-./output}:/output
@@ -107,6 +182,7 @@ services:
       - ./benchmarks/fixtures/mvp-c-vul/fake_openai_provider.py:/provider/fake_openai_provider.py:ro
 
 volumes:
+  runner-control-acp:
   runner-control:
 
 networks:
