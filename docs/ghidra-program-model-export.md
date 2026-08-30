@@ -1,9 +1,15 @@
 # Resumable Ghidra program-model export
 
 Whole-program export is staged through durable records under
-`analysis/reports/program_model.json.export/`. Each accepted function is written and forced to disk atomically only
-after its referenced global and type records are durable. The final `program_model.json` is assembled in address order
-by streaming those records; the Ghidra script never retains all decompiled C bodies in memory.
+`analysis/reports/program_model.json.export/`. Full recovery forces each accepted function to disk atomically only
+after its referenced global and type records are durable. Metadata-only planning amortizes that durability cost across
+fixed 512-function batches under `planning-batches/`. Each batch has separately bounded function, global, type, and
+failure-diagnostic fragments, followed by one forced checkpoint that binds every fragment's exact identities, byte
+count, SHA-256, and recovery-status counts. The checkpoint also binds the exporter state and complete function
+inventory, and global/type identities have exactly one batch owner. The final `program_model.json` is assembled in
+address order by streaming function fragments and a bounded merge of globally ordered global/type identities. Every
+fragment's byte count and SHA-256 is rechecked while it is copied, so a post-checkpoint substitution cannot reach the
+published model. The Ghidra script never retains all decompiled C bodies in memory.
 
 `analysis/reports/program_model.json.progress.json` reports the current phase, completed and total function counts,
 recovered, partial, and failed counts, the number of checkpoints reused by this invocation, and the current function. A failed or
@@ -13,9 +19,12 @@ under `program_model.json.export/failures/`, so one bad function cannot abort th
 ## Resume procedure and bounds
 
 Run the same reconstruction command again with the same binary and output directory. The checkpoint identity binds the
-records to the input SHA-256, exact exporter SHA-256 and version, Ghidra language, and compiler specification. Accepted function records
-are reused without invoking the decompiler again. A mismatched binary or exporter is rejected instead of mixing
-evidence; start a new output directory when intentionally changing either.
+records to the input SHA-256, exact exporter SHA-256 and version, recovery mode, Ghidra language, and compiler
+specification. Accepted function records or a contiguous prefix of authenticated planning batches are reused. A crash
+before a planning checkpoint can leave fragments or deterministic `.pending` files only for the first incomplete
+batch; those incomplete artifacts are regenerated, while missing, extra, reordered, stale, cross-inventory, or
+cross-mode checkpoints are rejected. A mismatched binary or exporter is rejected instead of mixing evidence; start a
+new output directory when intentionally changing either.
 
 The reference GCC-driver budget is one 10-minute invocation and 4 GiB peak RSS. The Kotlin process adapter enforces the
 10-minute wall-clock ceiling and leaves completed records resumable on timeout. A benchmark profile supplies the exact
@@ -24,14 +33,23 @@ NSA's Ghidra 12.1.3 release archive (569,445,154 bytes; SHA-256
 `93a5d11a9ad510622acaaf908c556a7b9b764d338e78a7567f3689bf5081fd54`) and allows 30 minutes and 16 GiB for
 authenticated export plus ownership planning. Ghidra's `analyzeHeadless` launcher caps its Java heap independently;
 the Kotlin monitor measures the JVM and its complete descendant process tree against the profile ceiling.
-Each function decompilation has a 60-second timeout, and export is deliberately single-function staged so its live C
-body memory is bounded by the largest individual function rather than the complete program.
+Each full function decompilation has a 60-second timeout, and full export is deliberately single-function staged so its
+live C body memory is bounded by the largest individual function rather than the complete program. Planning batches
+contain no decompiled C: fragments are bounded to 64 MiB, evidence records to 1 MiB, and fan-in to 256 batches
+(131,072 functions). Assembly precomputes the exact model size and enforces the same 512 MiB limit through a counting
+output stream before atomic publication.
+
+The JVM consumer reads the completed model through a stable regular-file snapshot capped at 512 MiB, then requires the
+exact canonical UTF-8 fields, entity order, set order, whitespace, and bytes before planning. A merely parseable JSON
+variant is not accepted as oracle input.
 
 To test crash recovery, terminate the reconstruction container during the decompilation phase, retain the output
 volume, and rerun the identical command. The `reused` progress count must be nonzero, the completed total must be
 monotonic, and the final model must be byte-identical to an uninterrupted export of the same binary.
 
-The A10 production entry point is deliberately agent-free and JVM-owned:
+The A10 production entry point is deliberately agent-free and JVM-owned. Its planning-mode exporter recovers bounded
+function identities, prototypes, call edges, strings, globals, and types without paying the separate cost of producing
+full decompiled C bodies; those bodies belong to the later reconstruction phase:
 
 ```bash
 llm_bin_patch gcc-engine-plan cc1 /path/to/gcc-cc1.stripped \

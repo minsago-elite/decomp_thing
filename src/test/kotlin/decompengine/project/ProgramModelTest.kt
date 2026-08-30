@@ -64,6 +64,47 @@ class ProgramModelTest {
     }
 
     @Test
+    fun `canonical program model parser rejects alternate bytes and fields`() {
+        val model = fixtureModel()
+
+        assertEquals(model.toJson(), ProgramModelJson.readCanonical(model.toJson().toByteArray()).toJson())
+        assertFailsWith<IllegalArgumentException> {
+            ProgramModelJson.readCanonical(model.toJson().trim().toByteArray())
+        }
+        val extraField = model.toJson().replaceFirst("{\n", "{\n  \"unexpected\": true,\n")
+        assertFailsWith<IllegalArgumentException> { ProgramModelJson.readCanonical(extraField.toByteArray()) }
+    }
+
+    @Test
+    fun `canonical parser accepts exporter-shaped array bytes`() {
+        val exported = """
+            {
+              "schemaVersion": 1,
+              "inputSha256": "fixture",
+              "functions": [
+                {
+                  "id": "fn_0000000000001000",
+                  "name": "main",
+                  "address": "0x1000",
+                  "prototype": "int main(void)",
+                  "status": "partial",
+                  "calls": [],
+                  "referencedGlobals": [],
+                  "strings": [],
+                  "decompiledC": null
+                }
+              ],
+              "globals": [
+              ],
+              "types": [
+              ]
+            }
+        """.trimIndent() + "\n"
+
+        assertEquals(exported, ProgramModelJson.readCanonical(exported.toByteArray()).toJson())
+    }
+
+    @Test
     fun `symbol-bearing and stripped naming remain deterministic`() {
         val named = fixtureModel()
         val stripped = named.copy(functions = named.functions.map { it.copy(name = "FUN_${it.address.toString(16)}") })

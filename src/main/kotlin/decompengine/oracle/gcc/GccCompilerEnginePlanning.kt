@@ -96,6 +96,15 @@ class GccCompilerEnginePlanningService(private val analyzer: ProgramModelAnalyze
             engine.authenticateStrippedArtifact(artifact.path)
             val programModelPath = output.resolve("analysis/reports/program_model.json")
             val programModel = digestStableArtifact(programModelPath, MAXIMUM_PROGRAM_MODEL_BYTES, "program model")
+            val parsedModelBytes = model.toJson().toByteArray(Charsets.UTF_8)
+            if (
+                parsedModelBytes.size.toLong() != programModel.bytes ||
+                OracleArtifacts.sha256(parsedModelBytes) != programModel.sha256
+            ) {
+                throw GccCompilerEnginePlanningException(
+                    "program model was substituted after canonical parsing and before ownership publication",
+                )
+            }
             val planPath = output.resolve("planning/module_plan.json")
             planPath.parent.createDirectories()
             stableDirectory(planPath.parent, "module-plan directory")
@@ -266,6 +275,7 @@ class GccCompilerEnginePlanningService(private val analyzer: ProgramModelAnalyze
                     "exporterId" to JsonPrimitive(suite.analysis.exporterId),
                     "exporterVersion" to JsonPrimitive(suite.analysis.exporterVersion),
                     "exporterSha256" to JsonPrimitive(suite.analysis.exporterSha256),
+                    "exporterMode" to JsonPrimitive(suite.analysis.exporterMode),
                     "ghidraVersion" to JsonPrimitive(suite.analysis.ghidraVersion),
                     "ghidraArchiveSha256" to JsonPrimitive(suite.analysis.ghidraArchive.sha256),
                     "plannerId" to JsonPrimitive(suite.analysis.plannerId),
@@ -364,7 +374,7 @@ class GccCompilerEnginePlanningService(private val analyzer: ProgramModelAnalyze
         const val MAXIMUM_PROGRESS_BYTES = 1024 * 1024
         const val MAXIMUM_EVIDENCE_BYTES = 4 * 1024 * 1024
         const val MAXIMUM_MODULE_PLAN_BYTES = 512 * 1024 * 1024
-        const val MAXIMUM_PROGRAM_MODEL_BYTES = 8L * 1024 * 1024 * 1024
+        const val MAXIMUM_PROGRAM_MODEL_BYTES = 512L * 1024 * 1024
         val EXPORT_PROGRESS_KEYS = setOf(
             "schemaVersion",
             "phase",

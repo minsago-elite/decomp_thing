@@ -16,6 +16,7 @@ import decompengine.project.BoundedLlmModuleReconstructor
 import decompengine.project.EvidenceModuleReconstructor
 import decompengine.project.GhidraHeadlessProgramModelAnalyzer
 import decompengine.project.GhidraProgramModelExportLimits
+import decompengine.project.GhidraProgramModelRecoveryMode
 import decompengine.project.ModuleReconstructor
 import decompengine.agent.AgentHarness
 import decompengine.oracle.gcc.GccCompilerEnginePlanningService
@@ -95,6 +96,7 @@ private fun runGccEnginePlan(args: List<String>) {
         authenticatedGhidra.home,
         GhidraProgramModelExportLimits.from(reconstructionProfile),
         authenticatedGhidra.archiveSha256,
+        GhidraProgramModelRecoveryMode.fromWireName(suite.analysis.exporterMode),
     )
     val result = GccCompilerEnginePlanningService(analyzer).plan(suite, engineId, binary, output)
     println("engine: ${result.engineId}")

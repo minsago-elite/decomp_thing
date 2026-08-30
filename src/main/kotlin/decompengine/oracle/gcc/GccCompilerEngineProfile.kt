@@ -68,6 +68,7 @@ data class GccCompilerEngineAnalysisToolchain(
     val exporterId: String,
     val exporterVersion: Int,
     val exporterSha256: String,
+    val exporterMode: String,
     val ghidraVersion: String,
     val ghidraRelease: String,
     val ghidraArchive: GccCompilerEngineArtifactBinding,
@@ -204,6 +205,7 @@ object GccCompilerEngineProfiles {
             exporterId = exporter.stringField("id"),
             exporterVersion = exporter.intField("version"),
             exporterSha256 = exporter.stringField("sha256"),
+            exporterMode = exporter.stringField("recoveryMode"),
             ghidraVersion = ghidra.stringField("version"),
             ghidraRelease = ghidra.stringField("release"),
             ghidraArchive = GccCompilerEngineArtifactBinding(
@@ -271,7 +273,8 @@ object GccCompilerEngineProfiles {
 
     private fun authenticateAnalysisToolchain(analysis: GccCompilerEngineAnalysisToolchain) {
         if (
-            analysis.exporterId != "decompengine-ghidra-program-model" || analysis.exporterVersion != 4 ||
+            analysis.exporterId != "decompengine-ghidra-program-model" || analysis.exporterVersion != 9 ||
+            analysis.exporterMode != "planning" ||
             analysis.plannerId != "deterministic-module-planner" || analysis.plannerVersion != 1
         ) {
             fail("compiler-engine analysis implementation identity is unsupported")

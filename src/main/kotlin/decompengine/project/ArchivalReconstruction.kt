@@ -2,7 +2,9 @@ package decompengine.project
 
 import decompengine.analysis.GhidraAnalysisException
 import java.nio.file.Files
+import java.nio.file.LinkOption
 import java.nio.file.Path
+import java.nio.file.attribute.BasicFileAttributes
 import java.time.Duration
 import java.util.concurrent.CompletableFuture
 import java.util.concurrent.TimeUnit
@@ -23,6 +25,7 @@ data class GhidraProgramModelExportLimits(
     val wallClockTimeout: Duration = Duration.ofMinutes(10),
     val terminationGrace: Duration = Duration.ofSeconds(5),
     val maximumResidentBytes: Long = 4L * 1024 * 1024 * 1024,
+    val maximumProgramModelBytes: Long = 512L * 1024 * 1024,
 ) {
     init {
         require(!wallClockTimeout.isZero && !wallClockTimeout.isNegative && wallClockTimeout <= Duration.ofHours(24)) {
@@ -32,6 +35,9 @@ data class GhidraProgramModelExportLimits(
             "Ghidra termination grace must be between zero and 30 seconds"
         }
         require(maximumResidentBytes > 0) { "Ghidra resident-memory limit must be positive" }
+        require(maximumProgramModelBytes in 1..(512L * 1024 * 1024)) {
+            "Ghidra program-model byte limit must be positive and at most 512 MiB"
+        }
     }
 
     companion object {
@@ -47,6 +53,7 @@ class GhidraHeadlessProgramModelAnalyzer(
     private val ghidraHome: Path,
     private val limits: GhidraProgramModelExportLimits = GhidraProgramModelExportLimits(),
     private val analysisToolSha256: String = UNAUTHENTICATED_ANALYSIS_TOOL_SHA256,
+    private val recoveryMode: GhidraProgramModelRecoveryMode = GhidraProgramModelRecoveryMode.FULL,
 ) : ProgramModelAnalyzer {
     init {
         require(analysisToolSha256.matches(Regex("[0-9a-f]{64}"))) {
@@ -72,7 +79,12 @@ class GhidraHeadlessProgramModelAnalyzer(
             "-import", binaryPath.toAbsolutePath().normalize().pathString,
             "-overwrite",
             "-scriptPath", scripts.pathString,
-            "-postScript", "ExportProgramModel.java", exporterSha256, analysisToolSha256, output.pathString,
+            "-postScript",
+            "ExportProgramModel.java",
+            exporterSha256,
+            analysisToolSha256,
+            recoveryMode.wireName,
+            output.pathString,
         )
         val process = ProcessBuilder(command)
             .directory(workDir.toFile())
@@ -118,10 +130,25 @@ class GhidraHeadlessProgramModelAnalyzer(
                     "rerun with the same output directory to resume durable function checkpoints",
             )
         }
-        require(exitCode == 0 && Files.isRegularFile(output)) {
+        require(exitCode == 0 && Files.isRegularFile(output, LinkOption.NOFOLLOW_LINKS)) {
             "Ghidra program recovery failed with exit code $exitCode; see ${reports.resolve("ghidra_stderr.log")}"
         }
-        return ProgramModelJson.read(output.readText())
+        return ProgramModelJson.readCanonical(readStableProgramModel(output))
+    }
+
+    private fun readStableProgramModel(path: Path): ByteArray {
+        val before = Files.readAttributes(path, BasicFileAttributes::class.java, LinkOption.NOFOLLOW_LINKS)
+        require(before.isRegularFile && before.size() in 1..limits.maximumProgramModelBytes) {
+            "Ghidra program model exceeds its authenticated parser bound"
+        }
+        require(before.size() <= Int.MAX_VALUE) { "Ghidra program model cannot be represented by the bounded parser" }
+        val bytes = Files.readAllBytes(path)
+        val after = Files.readAttributes(path, BasicFileAttributes::class.java, LinkOption.NOFOLLOW_LINKS)
+        require(
+            after.isRegularFile && before.fileKey() == after.fileKey() && before.size() == after.size() &&
+                before.lastModifiedTime() == after.lastModifiedTime() && bytes.size.toLong() == before.size()
+        ) { "Ghidra program model changed while being read" }
+        return bytes
     }
 
     private fun residentBytes(process: Process): Long {
@@ -165,6 +192,17 @@ class GhidraHeadlessProgramModelAnalyzer(
                 ?: error("GHIDRA_HOME is required for source-tree reconstruction")
             return GhidraHeadlessProgramModelAnalyzer(Path.of(home), GhidraProgramModelExportLimits.from(profile))
         }
+    }
+}
+
+enum class GhidraProgramModelRecoveryMode(val wireName: String) {
+    FULL("full"),
+    PLANNING("planning"),
+    ;
+
+    companion object {
+        fun fromWireName(value: String): GhidraProgramModelRecoveryMode = entries.singleOrNull { it.wireName == value }
+            ?: throw IllegalArgumentException("unsupported Ghidra program-model recovery mode: $value")
     }
 }
 

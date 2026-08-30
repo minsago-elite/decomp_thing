@@ -15,10 +15,11 @@
         "exporter": {
           "type": "object",
           "additionalProperties": false,
-          "required": ["id", "version", "sha256"],
+          "required": ["id", "version", "sha256", "recoveryMode"],
           "properties": {
             "id": {"const": "decompengine-ghidra-program-model"},
-            "version": {"const": 4},
+            "version": {"const": 9},
+            "recoveryMode": {"const": "planning"},
             "sha256": {"$ref": "#/$defs/sha256"}
           }
         },

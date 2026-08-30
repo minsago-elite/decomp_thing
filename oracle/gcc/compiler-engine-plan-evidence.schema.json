@@ -23,12 +23,13 @@
     "implementation": {
       "type": "object",
       "additionalProperties": false,
-      "required": ["runtime", "exporterId", "exporterVersion", "exporterSha256", "ghidraVersion", "ghidraArchiveSha256", "plannerId", "plannerVersion", "reconstructionProfileSha256"],
+      "required": ["runtime", "exporterId", "exporterVersion", "exporterSha256", "exporterMode", "ghidraVersion", "ghidraArchiveSha256", "plannerId", "plannerVersion", "reconstructionProfileSha256"],
       "properties": {
         "runtime": {"const": "kotlin-jvm"},
         "exporterId": {"type": "string", "minLength": 1},
         "exporterVersion": {"type": "integer", "minimum": 1},
         "exporterSha256": {"$ref": "#/$defs/sha256"},
+        "exporterMode": {"const": "planning"},
         "ghidraVersion": {"type": "string", "minLength": 1},
         "ghidraArchiveSha256": {"$ref": "#/$defs/sha256"},
         "plannerId": {"type": "string", "minLength": 1},

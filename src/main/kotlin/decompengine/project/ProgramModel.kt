@@ -56,7 +56,8 @@ data class RecoveredProgramModel(
         append("{\n  \"schemaVersion\": ").append(schemaVersion)
         append(",\n  \"inputSha256\": \"").append(inputSha256.json()).append("\",")
         append("\n  \"functions\": [")
-        append(functions.sortedWith(compareBy<RecoveredFunction> { it.address }.thenBy { it.id }).joinToString(",") { function ->
+        if (functions.isNotEmpty()) append('\n')
+        append(functions.sortedWith(compareBy<RecoveredFunction> { it.address }.thenBy { it.id }).joinToString(",\n") { function ->
             """
             {
               "id": "${function.id.json()}",
@@ -71,7 +72,8 @@ data class RecoveredProgramModel(
             }""".trimIndent().prependIndent("    ")
         })
         append("\n  ],\n  \"globals\": [")
-        append(globals.sortedWith(compareBy<RecoveredGlobal> { it.address }.thenBy { it.id }).joinToString(",") { global ->
+        if (globals.isNotEmpty()) append('\n')
+        append(globals.sortedWith(compareBy<RecoveredGlobal> { it.address }.thenBy { it.id }).joinToString(",\n") { global ->
             """
             {
               "id": "${global.id.json()}",
@@ -83,7 +85,8 @@ data class RecoveredProgramModel(
             }""".trimIndent().prependIndent("    ")
         })
         append("\n  ],\n  \"types\": [")
-        append(types.sortedBy { it.id }.joinToString(",") { type ->
+        if (types.isNotEmpty()) append('\n')
+        append(types.sortedBy { it.id }.joinToString(",\n") { type ->
             """
             {
               "id": "${type.id.json()}",
@@ -97,6 +100,20 @@ data class RecoveredProgramModel(
 }
 
 object ProgramModelJson {
+    fun readCanonical(bytes: ByteArray): RecoveredProgramModel {
+        require(bytes.isNotEmpty()) { "program model must not be empty" }
+        val text = bytes.toString(Charsets.UTF_8)
+        require(bytes.contentEquals(text.toByteArray(Charsets.UTF_8))) {
+            "program model must be canonical UTF-8"
+        }
+        val model = read(text)
+        val canonical = model.toJson().toByteArray(Charsets.UTF_8)
+        require(MessageDigest.isEqual(bytes, canonical)) {
+            "program model must use exact canonical fields, entity order, sets, and bytes"
+        }
+        return model
+    }
+
     fun read(text: String): RecoveredProgramModel {
         val root = Json.parseToJsonElement(text).jsonObject
         val schemaVersion = root.int("schemaVersion", 1)

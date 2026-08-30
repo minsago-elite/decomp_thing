@@ -142,7 +142,9 @@ build/install/llm_bin_patch/bin/llm_bin_patch gcc-engine-plan cc1 \
   --output /absolute/path/to/cc1-plan
 ```
 
-Repeat with `lto1` and its stripped twin. Interrupted exports resume only
+The A10 planning profile exports identities, prototypes, calls, strings,
+globals, and types but intentionally leaves decompiled C bodies to the later
+reconstruction phase. Repeat with `lto1` and its stripped twin. Interrupted exports resume only
 when the input and exact exporter identity still match. The Kotlin/JVM gate
 refuses changed plan bytes, enforces the shared 30-minute/16-GiB ceiling,
 proves exact function/global/type ownership, and publishes self-hashed

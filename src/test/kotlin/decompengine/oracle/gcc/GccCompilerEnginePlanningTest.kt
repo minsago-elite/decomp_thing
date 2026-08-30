@@ -101,6 +101,31 @@ class GccCompilerEnginePlanningTest {
     }
 
     @Test
+    fun `program model substitution after parsing cannot bind an ownership plan`() {
+        val temporary = createTempDirectory("gcc-engine-model-substitution-").toAbsolutePath().normalize()
+        val inputBytes = "authenticated compiler engine".toByteArray()
+        val input = temporary.resolve("cc1.stripped")
+        input.writeBytes(inputBytes)
+        val parsed = model(OracleArtifacts.sha256(inputBytes))
+        val service = GccCompilerEnginePlanningService(ProgramModelAnalyzer { _, work ->
+            val reports = work.resolve("reports").createDirectories()
+            reports.resolve("program_model.json").writeText(
+                parsed.copy(functions = parsed.functions.map { it.copy(name = "substituted_${it.name}") }).toJson(),
+            )
+            reports.resolve("program_model.json.progress.json").writeText(
+                "{\"schemaVersion\":1,\"phase\":\"complete\",\"completed\":2,\"total\":2," +
+                    "\"recovered\":2,\"partial\":0,\"failed\":0,\"reused\":0,\"currentFunction\":null}\n",
+            )
+            parsed
+        })
+
+        assertFailsWith<GccCompilerEnginePlanningException> {
+            service.plan(suite(inputBytes), "cc1", input, temporary.resolve("output"))
+        }
+        assertFalse(temporary.resolve("output/planning/compiler_engine_plan_evidence.json").exists())
+    }
+
+    @Test
     fun `completed progress must have the exporter shape and agree with model statuses`() {
         val temporary = createTempDirectory("gcc-engine-plan-progress-").toAbsolutePath().normalize()
         val inputBytes = "authenticated compiler engine".toByteArray()
@@ -177,8 +202,9 @@ class GccCompilerEnginePlanningTest {
             sourceRevision = "78d4ac73dd391005b895a6148cd9831e28e1208b",
             analysis = GccCompilerEngineAnalysisToolchain(
                 exporterId = "decompengine-ghidra-program-model",
-                exporterVersion = 4,
+                exporterVersion = 9,
                 exporterSha256 = SHA_E,
+                exporterMode = "planning",
                 ghidraVersion = "12.1.3",
                 ghidraRelease = "PUBLIC",
                 ghidraArchive = GccCompilerEngineArtifactBinding("ghidra.zip", 1, SHA_F),

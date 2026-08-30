@@ -31,7 +31,8 @@ class GccCompilerEngineProfileTest {
         assertEquals("12.1.3", suite.analysis.ghidraVersion)
         assertEquals(569_445_154L, suite.analysis.ghidraArchive.bytes)
         assertEquals("93a5d11a9ad510622acaaf908c556a7b9b764d338e78a7567f3689bf5081fd54", suite.analysis.ghidraArchive.sha256)
-        assertEquals("9dc9d0067f9a296edf0b61137c7be07685103f05e5ae705dbd1884f5c6669878", suite.analysis.exporterSha256)
+        assertEquals("4b275c036456b48c271d9250f86adc03a8264c014a1fa8edd2ff188d85d231dd", suite.analysis.exporterSha256)
+        assertEquals("planning", suite.analysis.exporterMode)
         assertEquals(listOf("cc1", "lto1"), suite.engines.map(GccCompilerEngine::id))
 
         val cc1 = suite.engine("cc1")
