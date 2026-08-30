@@ -144,6 +144,46 @@ internal object ReconstructionAcpEvidenceArchiveVerifier {
         }
     }
 
+    /**
+     * Recomputes the provider-neutral release predicate for a schema-v2 ACP receipt. Workflow
+     * adapters still validate their task identity and exact candidate separately; this validates
+     * every retained lifecycle/protocol/session/event/audit/process/sandbox record which makes a
+     * `releaseComplete=true` marker meaningful.
+     */
+    internal fun verifyReleaseCompleteReceipt(root: JsonObject) {
+        val requestBounds = verifyGenericReceiptRequest(root)
+        val provider = root.requiredObject("provider", "ACP receipt")
+        provider.requireExactKeys(RECEIPT_PROVIDER_FIELDS, "ACP receipt provider")
+        require(provider.requiredString("id", "ACP receipt provider") == "acp" &&
+            provider.requiredLong("evidenceSchemaVersion", "ACP receipt provider") == 2L
+        ) { "release receipt is not invocation-bound ACP-v2 evidence" }
+
+        val lifecycle = root.requiredObject("lifecycle", "ACP receipt")
+        lifecycle.requireExactKeys(RECEIPT_LIFECYCLE_FIELDS, "ACP receipt lifecycle")
+        require(lifecycle.requiredString("phaseReached", "ACP receipt lifecycle") ==
+            "final-workspace-snapshot" &&
+            lifecycle.requiredString("cleanupDisposition", "ACP receipt lifecycle") == "verified" &&
+            lifecycle.requiredBoolean("filesystemAuditComplete", "ACP receipt lifecycle") &&
+            lifecycle.requiredBoolean("terminalAuditComplete", "ACP receipt lifecycle") &&
+            lifecycle.requiredBoolean("permissionAuditComplete", "ACP receipt lifecycle") &&
+            lifecycle.requiredBoolean("releaseComplete", "ACP receipt lifecycle")
+        ) { "ACP receipt release lifecycle is incomplete" }
+
+        val factory = verifyFactoryAndProtocol(root)
+        verifyReceiptAgentAndSession(root, factory.implementationId)
+        val eventChanges = verifyReceiptEvents(root.requiredObject("events", "ACP receipt"))
+        val resultChanges = verifyGenericReceiptOutcome(
+            root.requiredObject("outcome", "ACP receipt"),
+            requestBounds,
+        )
+        require(eventChanges == resultChanges) {
+            "ACP receipt events do not commit the complete returned change set"
+        }
+        verifyReceiptPolicyAudits(root)
+        verifyReceiptProcess(root)
+        verifyReceiptSandbox(root)
+    }
+
     private fun parseCheckpoint(
         bytes: ByteArray,
         moduleId: String,
@@ -356,6 +396,51 @@ internal object ReconstructionAcpEvidenceArchiveVerifier {
         )
     }
 
+    private fun verifyGenericReceiptRequest(root: JsonObject): ReceiptBounds {
+        val request = root.requiredObject("request", "ACP receipt")
+        request.requireExactKeys(RECEIPT_REQUEST_FIELDS, "ACP receipt request")
+        require(request.requiredLong("contractVersion", "ACP receipt request") ==
+            AGENT_EXECUTION_CONTRACT_VERSION.toLong()
+        ) { "ACP receipt request uses an unsupported contract" }
+        val requestSha256 = request.requiredSha256("requestSha256", "ACP receipt request")
+        request.requiredSha256("accessPolicySha256", "ACP receipt request")
+        verifyTextCommitment(
+            request.requiredObject("objective", "ACP receipt request"),
+            "ACP objective",
+            requireNonEmpty = true,
+        )
+        request.requiredSha256("promptSha256", "ACP receipt request")
+        request.requiredSha256("wirePromptSha256", "ACP receipt request")
+        verifyGenericTextCommitmentList(
+            request.requiredObject("workspaceRootIds", "ACP receipt request"),
+            "ACP workspace root IDs",
+            requireNonEmpty = true,
+        )
+        verifyGenericTextCommitmentList(
+            request.requiredObject("contextInputIds", "ACP receipt request"),
+            "ACP context input IDs",
+        )
+        request.requiredBoolean("filesystemCapabilityEnabled", "ACP receipt request")
+        request.requiredBoolean("terminalCapabilityEnabled", "ACP receipt request")
+        require(request.requiredNonNegativeLong("maximumTurns", "ACP receipt request") >= 1L) {
+            "ACP receipt request excludes its recorded turn"
+        }
+        val maximumToolCalls = request.requiredNonNegativeLong("maximumToolCalls", "ACP receipt request")
+        val maximumOutputBytes = request.requiredNonNegativeLong("maximumOutputBytes", "ACP receipt request")
+        require(maximumOutputBytes > 0L) { "ACP receipt request has no output-byte capacity" }
+        requireNonNegativeDecimal(request.requiredString("wallClockTimeoutNanos", "ACP receipt request"))
+        requireNonNegativeDecimal(request.requiredString("idleTimeoutNanos", "ACP receipt request"))
+        val maximumInputTokens = request.optionalNonNegativeLong("maximumInputTokens", "ACP receipt request")
+        val maximumOutputTokens = request.optionalNonNegativeLong("maximumOutputTokens", "ACP receipt request")
+        return ReceiptBounds(
+            requestSha256,
+            maximumToolCalls,
+            maximumOutputBytes,
+            maximumInputTokens,
+            maximumOutputTokens,
+        )
+    }
+
     private fun verifyReceiptAgentAndSession(root: JsonObject, implementationId: String) {
         val agent = root.requiredObject("agent", "ACP receipt")
         agent.requireExactKeys(AGENT_FIELDS, "ACP receipt agent")
@@ -507,6 +592,70 @@ internal object ReconstructionAcpEvidenceArchiveVerifier {
             }
         }
         return changes
+    }
+
+    private fun verifyGenericReceiptOutcome(
+        outcome: JsonObject,
+        bounds: ReceiptBounds,
+    ): List<ReceiptChange> {
+        outcome.requireExactKeys(RECEIPT_OUTCOME_FIELDS, "ACP receipt outcome")
+        require(outcome.requiredString("type", "ACP receipt outcome") == "returned" &&
+            outcome.getValue("failure") is JsonNull
+        ) { "release ACP receipt does not contain a returned outcome" }
+        val result = outcome.requiredObject("result", "ACP receipt outcome")
+        result.requireExactKeys(RECEIPT_RESULT_FIELDS, "ACP receipt result")
+        require(result.requiredString("stopReason", "ACP receipt result") == "completed") {
+            "release ACP receipt result is not completed"
+        }
+        result.getValue("summary").let { summary ->
+            if (summary !is JsonNull) verifyTextCommitment(
+                summary.requiredObject("ACP receipt result summary"),
+                "ACP result summary",
+            )
+        }
+        val changes = result.requiredObject("changes", "ACP receipt result")
+        changes.requireExactKeys(RECEIPT_CHANGE_SET_FIELDS, "ACP receipt result changes")
+        val observed = changes.requiredNonNegativeLong("observedCount", "ACP receipt result changes")
+        val retained = changes.requiredNonNegativeLong("retainedCount", "ACP receipt result changes")
+        require(changes.requiredBoolean("complete", "ACP receipt result changes")) {
+            "ACP receipt result changes are truncated"
+        }
+        // The aggregate commits the redacted raw values and is intentionally commitment-only.
+        changes.requiredSha256("aggregateSha256", "ACP receipt result changes")
+        val records = changes.requiredArray("records", "ACP receipt result changes")
+        require(observed == retained && retained == records.size.toLong() &&
+            retained <= MAXIMUM_RECONSTRUCTION_ACP_EVENTS.toLong()
+        ) { "ACP receipt result change counts disagree" }
+        val verifiedChanges = records.map(::verifyReceiptChange)
+
+        val usageElement = result.getValue("usage")
+        if (usageElement is JsonNull) {
+            require(bounds.maximumInputTokens == null && bounds.maximumOutputTokens == null) {
+                "ACP receipt omits token usage required by request ceilings"
+            }
+        } else {
+            val usage = usageElement.requiredObject("ACP receipt usage")
+            usage.requireExactKeys(RECEIPT_USAGE_FIELDS, "ACP receipt usage")
+            val input = usage.optionalNonNegativeLong("inputTokens", "ACP receipt usage")
+            val output = usage.optionalNonNegativeLong("outputTokens", "ACP receipt usage")
+            usage.optionalNonNegativeLong("cachedInputTokens", "ACP receipt usage")
+            val toolCalls = usage.optionalNonNegativeLong("toolCalls", "ACP receipt usage")
+            usage.getValue("wallClockNanos").let { wallClock ->
+                if (wallClock !is JsonNull) requireNonNegativeDecimal(
+                    wallClock.requiredString("ACP receipt wall-clock nanoseconds"),
+                )
+            }
+            require(bounds.maximumInputTokens == null ||
+                input?.let { it <= bounds.maximumInputTokens } == true
+            ) { "ACP receipt input-token usage is missing or exceeds its ceiling" }
+            require(bounds.maximumOutputTokens == null ||
+                output?.let { it <= bounds.maximumOutputTokens } == true
+            ) { "ACP receipt output-token usage is missing or exceeds its ceiling" }
+            require(toolCalls == null || toolCalls <= bounds.maximumToolCalls) {
+                "ACP receipt tool-call usage exceeds its ceiling"
+            }
+        }
+        return verifiedChanges
     }
 
     private fun verifyReceiptOutcome(
@@ -868,6 +1017,30 @@ internal object ReconstructionAcpEvidenceArchiveVerifier {
         }
     }
 
+    private fun verifyGenericTextCommitmentList(
+        value: JsonObject,
+        label: String,
+        requireNonEmpty: Boolean = false,
+    ) {
+        value.requireExactKeys(TEXT_COMMITMENT_LIST_FIELDS, label)
+        val observed = value.requiredNonNegativeLong("observedCount", label)
+        val retained = value.requiredNonNegativeLong("retainedCount", label)
+        require(value.requiredBoolean("complete", label)) { "$label is truncated" }
+        value.requiredSha256("aggregateSha256", label)
+        val records = value.requiredArray("records", label)
+        require(observed == retained && retained == records.size.toLong() &&
+            retained <= MAXIMUM_RECONSTRUCTION_ACP_REQUEST_IDENTIFIERS.toLong()
+        ) { "$label counts disagree" }
+        require(!requireNonEmpty || records.isNotEmpty()) { "$label must not be empty" }
+        records.forEach { element ->
+            verifyTextCommitment(
+                element.requiredObject("$label record"),
+                "$label record",
+                requireNonEmpty = true,
+            )
+        }
+    }
+
     private fun expectedTextCommitment(value: String): TextCommitment {
         val bytes = value.toByteArray(StandardCharsets.UTF_8)
         return TextCommitment(sha256(bytes), bytes.size.toLong(), "utf-8")
@@ -1093,6 +1266,7 @@ internal object ReconstructionAcpEvidenceArchiveVerifier {
     private const val MAXIMUM_RECONSTRUCTION_ACP_EVIDENCE_BYTES = 64 * 1024 * 1024
     private const val MAXIMUM_RECONSTRUCTION_ACP_EVENTS = 8_192
     private const val MAXIMUM_RECONSTRUCTION_ACP_AUDIT_RECORDS = 4_096
+    private const val MAXIMUM_RECONSTRUCTION_ACP_REQUEST_IDENTIFIERS = 1_024
     private const val MAXIMUM_NEGOTIATED_IDENTITY_BYTES = 4_096L
     private const val MAXIMUM_ARCHIVED_EVENT_PEER_BYTES = 16L * 1024L * 1024L
     private const val ACP_RECEIPT_GENERATOR = "acp-execution-receipt:v2"
