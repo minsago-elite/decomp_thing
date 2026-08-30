@@ -150,6 +150,80 @@ class FullTreeDataTruthSemanticsTest {
         )
     }
 
+    @Test
+    fun `authenticated raw references drive canonical type and global merges`() {
+        val identity = "a".repeat(64)
+        val target = FullTreeTypeTarget("b".repeat(64), "unit-b", "source-aligned")
+        val lookup: (String) -> FullTreeTypeTarget? = { offset -> if (offset == "0x40") target else null }
+        val unitToShard = mapOf("unit-a" to "shard-a", "unit-b" to "shard-b", "unit-z" to "shard-z")
+
+        val mergedType = FullTreeDataTruthSemantics.mergeTypeObservations(
+            identity,
+            listOf(
+                completeTypeObservation("type-observation-${"1".repeat(32)}", "unit-z"),
+                completeTypeObservation("type-observation-${"2".repeat(32)}", "unit-a"),
+            ),
+            lookup,
+            unitToShard,
+        )
+        assertEquals("type-${identity.take(32)}", mergedType.string("id"))
+        assertEquals("unit-a", mergedType.string("ownerUnitId"))
+        assertEquals("scored", mergedType.string("population"))
+        val memberReference = ((mergedType.getValue("members") as JsonArray).single() as JsonObject)
+            .getValue("typeReference") as JsonObject
+        assertEquals("type-${target.identity.take(32)}", memberReference.string("targetTypeId"))
+        assertEquals("shard-b", memberReference.string("targetOwnerShardId"))
+        assertEquals(listOf("0x30", "0x40"), memberReference.arrayStrings("evidenceDieOffsets"))
+
+        val mergedGlobal = FullTreeDataTruthSemantics.mergeGlobalObservations(
+            identity,
+            listOf(
+                completeGlobalObservation(
+                    "global-observation-${"1".repeat(32)}",
+                    "unit-z",
+                    listOf("\uD800\uDC00"),
+                ),
+                completeGlobalObservation(
+                    "global-observation-${"2".repeat(32)}",
+                    "unit-a",
+                    listOf("\uE000"),
+                ),
+            ),
+            lookup,
+            unitToShard,
+        )
+        assertEquals("global-${identity.take(32)}", mergedGlobal.string("id"))
+        assertEquals("unit-a", mergedGlobal.string("ownerUnitId"))
+        assertEquals(listOf("\uE000", "\uD800\uDC00"), mergedGlobal.arrayStrings("names"))
+        assertEquals(
+            "type-${target.identity.take(32)}",
+            (mergedGlobal.getValue("typeReference") as JsonObject).string("targetTypeId"),
+        )
+    }
+
+    @Test
+    fun `raw reference and aggregate layout inconsistencies fail closed`() {
+        val identity = "a".repeat(64)
+        assertFailsWith<FullTreeDataTruthException> {
+            FullTreeDataTruthSemantics.resolveTypeReference(
+                JsonArray(listOf(JsonNull, JsonPrimitive("0x40"), JsonArray(emptyList()), JsonNull)),
+                { FullTreeTypeTarget("b".repeat(64), "unit-b", "source-aligned") },
+                mapOf("unit-b" to "shard-b"),
+            )
+        }
+        assertFailsWith<FullTreeDataTruthException> {
+            FullTreeDataTruthSemantics.mergeTypeObservations(
+                identity,
+                listOf(
+                    completeTypeObservation("type-observation-${"1".repeat(32)}", "unit-a", byteSize = 8),
+                    completeTypeObservation("type-observation-${"2".repeat(32)}", "unit-b", byteSize = 16),
+                ),
+                { FullTreeTypeTarget("b".repeat(64), "unit-b", "source-aligned") },
+                mapOf("unit-a" to "shard-a", "unit-b" to "shard-b"),
+            )
+        }
+    }
+
     private fun typeObservation(
         id: String,
         unitId: String,
@@ -198,6 +272,73 @@ class FullTreeDataTruthSemanticsTest {
             "targetOwnerShardId" to (owner?.let(::JsonPrimitive) ?: JsonNull),
             "targetTypeId" to (target?.let(::JsonPrimitive) ?: JsonNull),
             "_targetQuality" to (quality?.let(::JsonPrimitive) ?: JsonNull),
+        ),
+    )
+
+    private fun completeTypeObservation(
+        id: String,
+        unitId: String,
+        byteSize: Int = 16,
+    ): JsonObject = JsonObject(
+        linkedMapOf(
+            "alignment" to JsonPrimitive(8),
+            "byteSize" to JsonPrimitive(byteSize),
+            "context" to JsonArray(listOf(JsonPrimitive("DW_TAG_namespace:demo"))),
+            "declaration" to declaration("/src/file.cc"),
+            "declarationOnly" to JsonPrimitive(false),
+            "dieOffset" to JsonPrimitive("0x20"),
+            "id" to JsonPrimitive(id),
+            "members" to JsonArray(
+                listOf(
+                    JsonObject(
+                        linkedMapOf(
+                            "bitOffset" to JsonNull,
+                            "bitSize" to JsonNull,
+                            "byteOffset" to JsonPrimitive(0),
+                            "kind" to JsonPrimitive("field"),
+                            "name" to JsonPrimitive("value"),
+                            "typeReference" to rawReference(),
+                            "value" to JsonNull,
+                            "virtuality" to JsonNull,
+                        ),
+                    ),
+                ),
+            ),
+            "name" to JsonPrimitive("Widget"),
+            "tag" to JsonPrimitive("struct"),
+            "unitId" to JsonPrimitive(unitId),
+        ),
+    )
+
+    private fun completeGlobalObservation(
+        id: String,
+        unitId: String,
+        names: List<String>,
+    ): JsonObject = JsonObject(
+        linkedMapOf(
+            "addressRva" to JsonPrimitive("0x100"),
+            "alignment" to JsonPrimitive(8),
+            "declaration" to declaration("/src/file.cc"),
+            "dieOffset" to JsonPrimitive("0x10"),
+            "external" to JsonPrimitive(true),
+            "id" to JsonPrimitive(id),
+            "mutability" to JsonPrimitive("mutable"),
+            "names" to JsonArray(names.map(::JsonPrimitive)),
+            "reasonCode" to JsonNull,
+            "size" to JsonPrimitive(8),
+            "tls" to JsonPrimitive(false),
+            "typeReference" to rawReference(),
+            "unitId" to JsonPrimitive(unitId),
+            "visibility" to JsonPrimitive("default"),
+        ),
+    )
+
+    private fun rawReference(): JsonArray = JsonArray(
+        listOf(
+            JsonPrimitive("0x30"),
+            JsonPrimitive("0x40"),
+            JsonArray(emptyList()),
+            JsonNull,
         ),
     )
 }

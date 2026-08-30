@@ -9,16 +9,31 @@ import kotlinx.serialization.json.JsonElement
 import kotlinx.serialization.json.JsonNull
 import kotlinx.serialization.json.JsonObject
 import kotlinx.serialization.json.JsonPrimitive
+import kotlinx.serialization.json.booleanOrNull
 import kotlinx.serialization.json.jsonArray
 import kotlinx.serialization.json.jsonObject
 import kotlinx.serialization.json.jsonPrimitive
 
-class FullTreeDataTruthException(message: String) : IllegalArgumentException(message)
+class FullTreeDataTruthException(message: String, cause: Throwable? = null) : IllegalArgumentException(message, cause)
 
 data class FullTreeDataTruthPartition(
     val globals: List<JsonObject>,
     val types: List<JsonObject>,
 )
+
+data class FullTreeTypeTarget(
+    val identity: String,
+    val ownerUnitId: String,
+    val quality: String,
+) {
+    init {
+        require(identity.matches(Regex("[0-9a-f]{64}"))) { "type target identity is invalid" }
+        require(ownerUnitId.isNotBlank()) { "type target owner unit is blank" }
+        require(quality in setOf("source-aligned", "producer-declaration", "producer-definition")) {
+            "type target quality is invalid"
+        }
+    }
+}
 
 /**
  * Pure canonical semantics shared by full-tree data-truth generation and validation.
@@ -98,6 +113,210 @@ object FullTreeDataTruthSemantics {
             throw FullTreeDataTruthException("incompatible $field definitions for $identity")
         }
         return known.values.singleOrNull()
+    }
+
+    fun typeLayout(item: JsonObject): JsonObject {
+        val members = item.required("members").jsonArray.map { element ->
+            val member = element.jsonObject
+            JsonObject(
+                linkedMapOf(
+                    "kind" to member.required("kind"),
+                    "name" to member.required("name"),
+                    "byteOffset" to member.required("byteOffset"),
+                    "bitOffset" to member.required("bitOffset"),
+                    "bitSize" to member.required("bitSize"),
+                    "value" to member.required("value"),
+                    "virtuality" to member.required("virtuality"),
+                    "typeReference" to member.required("typeReference").jsonObject.let { reference ->
+                        JsonObject(
+                            linkedMapOf(
+                                "modifierTags" to reference.required("modifierTags"),
+                                "reasonCode" to reference.required("reasonCode"),
+                            ),
+                        )
+                    },
+                ),
+            )
+        }
+        return JsonObject(
+            linkedMapOf(
+                "alignment" to item.required("alignment"),
+                "byteSize" to item.required("byteSize"),
+                "members" to JsonArray(members),
+            ),
+        )
+    }
+
+    fun resolveTypeReference(
+        reference: JsonArray,
+        targetLookup: (aggregateDieOffset: String) -> FullTreeTypeTarget?,
+        unitToShard: Map<String, String>,
+    ): JsonObject {
+        if (reference.size != 4) throw FullTreeDataTruthException("raw type reference must have four fields")
+        val immediateOffset = reference[0].nullableString()
+        val aggregateOffset = reference[1].nullableString()
+        val modifierTags = reference[2]
+        val reasonCode = reference[3]
+        immediateOffset?.let(::hexOffset)
+        if (aggregateOffset == null) {
+            return JsonObject(
+                linkedMapOf(
+                    "evidenceDieOffsets" to JsonArray(immediateOffset?.let { listOf(JsonPrimitive(it)) }.orEmpty()),
+                    "modifierTags" to modifierTags,
+                    "reasonCode" to reasonCode,
+                    "resolutionCode" to JsonPrimitive("unresolved"),
+                    "targetOwnerShardId" to JsonNull,
+                    "targetTypeId" to JsonNull,
+                    "_targetQuality" to JsonNull,
+                ),
+            )
+        }
+        if (immediateOffset == null) {
+            throw FullTreeDataTruthException("aggregate type reference has no immediate DWARF offset")
+        }
+        hexOffset(aggregateOffset)
+        val target = targetLookup(aggregateOffset)
+            ?: throw FullTreeDataTruthException(
+                "aggregate reference $aggregateOffset is outside the authenticated type index",
+            )
+        val ownerShard = unitToShard[target.ownerUnitId]
+            ?: throw FullTreeDataTruthException("type target owner is outside the authenticated inventory")
+        val offsets = listOfNotNull(immediateOffset, aggregateOffset).distinct().sortedBy(::hexOffset)
+        return JsonObject(
+            linkedMapOf(
+                "evidenceDieOffsets" to JsonArray(offsets.map(::JsonPrimitive)),
+                "modifierTags" to modifierTags,
+                "reasonCode" to JsonNull,
+                "resolutionCode" to JsonPrimitive("exact-dwarf-offset"),
+                "targetOwnerShardId" to JsonPrimitive(ownerShard),
+                "targetTypeId" to JsonPrimitive("type-${target.identity.take(32)}"),
+                "_targetQuality" to JsonPrimitive(target.quality),
+            ),
+        )
+    }
+
+    fun mergeTypeObservations(
+        identity: String,
+        observations: List<JsonObject>,
+        targetLookup: (aggregateDieOffset: String) -> FullTreeTypeTarget?,
+        unitToShard: Map<String, String>,
+        limits: StrictJsonLimits = StrictJsonLimits(),
+    ): JsonObject {
+        requireIdentity(identity, "type")
+        if (observations.isEmpty()) throw FullTreeDataTruthException("type observation population is empty")
+        val records = observations.map { item ->
+            JsonObject(item.toMutableMap().apply {
+                this["members"] = JsonArray(item.required("members").jsonArray.map { memberElement ->
+                    val member = memberElement.jsonObject
+                    JsonObject(member.toMutableMap().apply {
+                        this["typeReference"] = resolveTypeReference(
+                            member.required("typeReference").jsonArray,
+                            targetLookup,
+                            unitToShard,
+                        )
+                    })
+                })
+            })
+        }
+        val definitions = records.filterNot { it.requiredBoolean("declarationOnly") }
+        val layouts = definitions.mapTo(sortedSetOf()) {
+            CanonicalBytes(OracleJson.canonicalBytes(typeLayout(it), limits))
+        }
+        if (layouts.size > 1) {
+            throw FullTreeDataTruthException("incompatible aggregate definitions for type-${identity.take(32)}")
+        }
+        val layoutRecords = definitions.ifEmpty { records }
+        val first = layoutRecords.first()
+        val firstMembers = first.required("members").jsonArray
+        val members = firstMembers.mapIndexed { index, memberElement ->
+            val member = memberElement.jsonObject
+            JsonObject(member.toMutableMap().apply {
+                this["typeReference"] = mergeTypeReferences(
+                    layoutRecords.map { record ->
+                        val recordMembers = record.required("members").jsonArray
+                        if (recordMembers.size != firstMembers.size) {
+                            throw FullTreeDataTruthException(
+                                "incompatible aggregate definitions for type-${identity.take(32)}",
+                            )
+                        }
+                        recordMembers[index].jsonObject.required("typeReference").jsonObject
+                    },
+                    "type-${identity.take(32)}-member-$index",
+                    limits,
+                )
+            })
+        }
+        val owner = records.map { it.required("unitId").jsonPrimitive.content }.minOrNull()
+            ?: throw FullTreeDataTruthException("type observation has no owner")
+        val observable = definitions.isNotEmpty() && first.required("byteSize") !is JsonNull
+        return JsonObject(
+            linkedMapOf(
+                "alignment" to first.required("alignment"),
+                "byteSize" to first.required("byteSize"),
+                "context" to first.required("context"),
+                "declarations" to JsonArray(uniqueValues(records, "declaration", limits)),
+                "id" to JsonPrimitive("type-${identity.take(32)}"),
+                "members" to JsonArray(members),
+                "name" to first.required("name"),
+                "observationIds" to JsonArray(
+                    records.map { it.required("id").jsonPrimitive.content }.sorted().map(::JsonPrimitive),
+                ),
+                "ownerUnitId" to JsonPrimitive(owner),
+                "population" to JsonPrimitive(if (observable) "scored" else "unobservable"),
+                "reasonCode" to if (observable) JsonNull else JsonPrimitive("declaration-only-or-size-unobservable"),
+                "tag" to first.required("tag"),
+            ),
+        )
+    }
+
+    fun mergeGlobalObservations(
+        identity: String,
+        observations: List<JsonObject>,
+        targetLookup: (aggregateDieOffset: String) -> FullTreeTypeTarget?,
+        unitToShard: Map<String, String>,
+        limits: StrictJsonLimits = StrictJsonLimits(),
+    ): JsonObject {
+        requireIdentity(identity, "global")
+        if (observations.isEmpty()) throw FullTreeDataTruthException("global observation population is empty")
+        val owner = observations.map { it.required("unitId").jsonPrimitive.content }.minOrNull()
+            ?: throw FullTreeDataTruthException("global observation has no owner")
+        val address = oneCompatible(observations, "addressRva", identity, limits)
+        val references = observations.map { item ->
+            resolveTypeReference(item.required("typeReference").jsonArray, targetLookup, unitToShard)
+        }
+        val names = observations
+            .flatMap { it.required("names").jsonArray.map { name -> name.jsonPrimitive.content } }
+            .distinct()
+            .sortedWith(CODE_POINT_STRING_COMPARATOR)
+        return JsonObject(
+            linkedMapOf(
+                "addressRva" to (address ?: JsonNull),
+                "alignment" to (oneCompatible(observations, "alignment", identity, limits) ?: JsonNull),
+                "declarations" to JsonArray(uniqueValues(observations, "declaration", limits)),
+                "external" to JsonPrimitive(
+                    oneCompatible(observations, "external", identity, limits)?.strictBoolean("external") ?: false,
+                ),
+                "id" to JsonPrimitive("global-${identity.take(32)}"),
+                "mutability" to JsonPrimitive(
+                    oneCompatible(observations, "mutability", identity, limits)?.strictString("mutability") ?: "unknown",
+                ),
+                "names" to JsonArray(names.map(::JsonPrimitive)),
+                "observationIds" to JsonArray(
+                    observations.map { it.required("id").jsonPrimitive.content }.sorted().map(::JsonPrimitive),
+                ),
+                "ownerUnitId" to JsonPrimitive(owner),
+                "population" to JsonPrimitive(if (address != null) "scored" else "unobservable"),
+                "reasonCode" to if (address != null) JsonNull else observations.first().required("reasonCode"),
+                "size" to (oneCompatible(observations, "size", identity, limits) ?: JsonNull),
+                "tls" to JsonPrimitive(
+                    oneCompatible(observations, "tls", identity, limits)?.strictBoolean("tls") ?: false,
+                ),
+                "typeReference" to mergeTypeReferences(references, "global-${identity.take(32)}", limits),
+                "visibility" to JsonPrimitive(
+                    oneCompatible(observations, "visibility", identity, limits)?.strictString("visibility") ?: "unknown",
+                ),
+            ),
+        )
     }
 
     fun mergeTypeReferences(
@@ -266,7 +485,26 @@ object FullTreeDataTruthSemantics {
         }
     }
 
+    private fun requireIdentity(value: String, label: String) {
+        if (!value.matches(Regex("[0-9a-f]{64}"))) {
+            throw FullTreeDataTruthException("$label identity is invalid")
+        }
+    }
+
     private enum class EntityKind { GLOBAL, TYPE }
+
+    private val CODE_POINT_STRING_COMPARATOR = Comparator<String> { left, right ->
+        var leftOffset = 0
+        var rightOffset = 0
+        while (leftOffset < left.length && rightOffset < right.length) {
+            val leftCodePoint = Character.codePointAt(left, leftOffset)
+            val rightCodePoint = Character.codePointAt(right, rightOffset)
+            if (leftCodePoint != rightCodePoint) return@Comparator leftCodePoint.compareTo(rightCodePoint)
+            leftOffset += Character.charCount(leftCodePoint)
+            rightOffset += Character.charCount(rightCodePoint)
+        }
+        (left.length - leftOffset).compareTo(right.length - rightOffset)
+    }
 }
 
 private class CanonicalBytes(bytes: ByteArray) : Comparable<CanonicalBytes> {
@@ -293,4 +531,20 @@ private fun JsonElement.nullableString(): String? = when (this) {
     JsonNull -> null
     is JsonPrimitive -> if (isString) content else null
     else -> null
+}
+
+private fun JsonObject.requiredBoolean(name: String): Boolean = required(name).strictBoolean(name)
+
+private fun JsonElement.strictBoolean(label: String): Boolean {
+    val primitive = this as? JsonPrimitive
+        ?: throw FullTreeDataTruthException("$label is not a Boolean")
+    return primitive.booleanOrNull
+        ?: throw FullTreeDataTruthException("$label is not a Boolean")
+}
+
+private fun JsonElement.strictString(label: String): String {
+    val primitive = this as? JsonPrimitive
+        ?: throw FullTreeDataTruthException("$label is not a string")
+    if (!primitive.isString) throw FullTreeDataTruthException("$label is not a string")
+    return primitive.content
 }
