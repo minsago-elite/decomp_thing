@@ -1,12 +1,18 @@
 package decompengine.oracle.fulltree
 
 import decompengine.acp.LinuxDescriptor
+import decompengine.acp.LinuxFileIdentity
 import decompengine.acp.LinuxFilesystemSyscalls
+import decompengine.acp.LinuxSyscallException
+import decompengine.acp.permissions
 import decompengine.oracle.core.DescriptorBoundAtomicStateFile
+import decompengine.oracle.core.DescriptorBoundStateInspection
 import decompengine.oracle.core.DescriptorBoundStateFaultInjector
 import decompengine.oracle.core.OracleArtifacts
 import decompengine.oracle.core.OracleJson
 import decompengine.oracle.core.StrictJsonLimits
+import java.nio.file.Files
+import java.nio.file.LinkOption
 import java.nio.file.Path
 import kotlinx.serialization.json.JsonNull
 import kotlinx.serialization.json.JsonObject
@@ -512,34 +518,273 @@ internal class FullTreeFunctionObservationOperationHistory private constructor(
 }
 
 /**
- * Cooperative-single-writer append-only journal foundation for one operation.
+ * One process-wide namespace authority for parallel operation journals below a durable root.
+ *
+ * The root lock is retained for this object's lifetime while individual journal locks prevent two
+ * callers from owning one operation. All child creation and selection is descriptor-relative and
+ * revalidated against the retained root/name binding. Opening the authority synchronizes the
+ * preprovisioned root and its parent before use. The deployment must exclude a same-UID actor that
+ * ignores the root lock and replaces the root pathname itself.
+ */
+internal class FullTreeFunctionObservationJournalAuthority private constructor(
+    private val path: Path,
+    private val parentPath: Path,
+    private val parent: LinuxDescriptor,
+    private val rootName: String,
+    private val root: LinuxDescriptor,
+) : AutoCloseable {
+    private var activeJournals = 0
+    private var closed = false
+    private var poisoned = false
+
+    @Synchronized
+    fun createNew(
+        binding: FullTreeFunctionObservationOperationBinding,
+    ): FullTreeFunctionObservationOperationJournal = acquire(binding, create = true)
+        ?: error("new function-observation journal was not created")
+
+    @Synchronized
+    fun openExisting(
+        binding: FullTreeFunctionObservationOperationBinding,
+    ): FullTreeFunctionObservationOperationJournal? = acquire(binding, create = false)
+
+    private fun acquire(
+        binding: FullTreeFunctionObservationOperationBinding,
+        create: Boolean,
+    ): FullTreeFunctionObservationOperationJournal? {
+        checkOpen()
+        requireRootBindingOrPoison()
+        var child: LinuxDescriptor? = null
+        var childLocked = false
+        try {
+            if (create) {
+                LinuxFilesystemSyscalls.openPathAtOrNull(root.fd, binding.journalDirectoryName)?.use {
+                    journalFail("function-observation operation journal already exists")
+                }
+                LinuxFilesystemSyscalls.createDirectory(
+                    root.fd,
+                    binding.journalDirectoryName,
+                    OWNER_DIRECTORY_MODE,
+                )
+            }
+            child = try {
+                LinuxFilesystemSyscalls.openDirectoryAt(root.fd, binding.journalDirectoryName)
+            } catch (failure: LinuxSyscallException) {
+                if (!create && failure.errno == LinuxFilesystemSyscalls.ENOENT) return null
+                throw failure
+            }
+            if (create) {
+                LinuxFilesystemSyscalls.chmod(child, OWNER_DIRECTORY_MODE)
+            }
+            val childIdentity = LinuxFilesystemSyscalls.identity(child.fd)
+            requireManagedDirectory(childIdentity, root.identity, "function-observation journal directory")
+            requireNamedChild(binding.journalDirectoryName, childIdentity)
+            // Covers new mkdir state and a prior process that exposed state before its final sync.
+            LinuxFilesystemSyscalls.synchronize(child)
+            LinuxFilesystemSyscalls.synchronize(root)
+            if (!LinuxFilesystemSyscalls.tryExclusiveLock(child)) {
+                journalFail("function-observation operation journal is already locked")
+            }
+            childLocked = true
+            requireRootBindingOrPoison()
+            requireNamedChild(binding.journalDirectoryName, childIdentity)
+            activeJournals = Math.addExact(activeJournals, 1)
+            return FullTreeFunctionObservationOperationJournal(binding, this, child)
+        } catch (failure: Throwable) {
+            if (childLocked) {
+                child?.let { locked ->
+                    runCatching { LinuxFilesystemSyscalls.unlock(locked) }
+                        .exceptionOrNull()?.let(failure::addSuppressed)
+                }
+            }
+            child?.let { opened ->
+                runCatching { opened.close() }.exceptionOrNull()?.let(failure::addSuppressed)
+            }
+            throw failure
+        }
+    }
+
+    @Synchronized
+    internal fun requireBound(name: String, expected: LinuxFileIdentity) {
+        checkOpen()
+        requireRootBindingOrPoison()
+        requireNamedChild(name, expected)
+    }
+
+    @Synchronized
+    internal fun releaseJournal() {
+        check(activeJournals > 0) { "function-observation journal authority has no active journal" }
+        activeJournals -= 1
+    }
+
+    private fun requireRootBinding() {
+        val currentParent = LinuxFilesystemSyscalls.identity(parent.fd)
+        requireTrustedJournalParent(currentParent, parent.identity)
+        if (!Files.isSameFile(parentPath, LinuxFilesystemSyscalls.descriptorPath(parent))) {
+            journalFail("function-observation journal parent pathname changed")
+        }
+        val current = LinuxFilesystemSyscalls.identity(root.fd)
+        requireManagedDirectory(current, root.identity, "function-observation journal root")
+        val selected = try {
+            LinuxFilesystemSyscalls.openDirectoryAt(parent.fd, rootName)
+        } catch (failure: LinuxSyscallException) {
+            if (failure.errno == LinuxFilesystemSyscalls.ENOENT) {
+                journalFail("function-observation journal root was detached")
+            }
+            throw failure
+        }
+        selected.use {
+            if (!sameDirectory(LinuxFilesystemSyscalls.identity(selected.fd), current)) {
+                journalFail("function-observation journal root changed identity")
+            }
+        }
+        if (!Files.isSameFile(path, LinuxFilesystemSyscalls.descriptorPath(root))) {
+            journalFail("function-observation journal root pathname changed")
+        }
+    }
+
+    private fun requireRootBindingOrPoison() {
+        try {
+            requireRootBinding()
+        } catch (failure: Throwable) {
+            poisoned = true
+            throw failure
+        }
+    }
+
+    private fun requireNamedChild(name: String, expected: LinuxFileIdentity) {
+        val selected = try {
+            LinuxFilesystemSyscalls.openDirectoryAt(root.fd, name)
+        } catch (failure: LinuxSyscallException) {
+            if (failure.errno == LinuxFilesystemSyscalls.ENOENT) {
+                journalFail("function-observation journal directory was detached")
+            }
+            throw failure
+        }
+        selected.use {
+            val current = LinuxFilesystemSyscalls.identity(selected.fd)
+            requireManagedDirectory(current, root.identity, "function-observation journal directory")
+            if (!sameDirectory(current, expected)) {
+                journalFail("function-observation journal directory changed identity")
+            }
+        }
+    }
+
+    private fun checkOpen() {
+        check(!closed) { "function-observation journal authority is closed" }
+        check(!poisoned) { "function-observation journal authority is poisoned" }
+    }
+
+    @Synchronized
+    override fun close() {
+        if (closed) return
+        check(activeJournals == 0) { "function-observation journal authority still owns active journals" }
+        closed = true
+        var failure: Throwable? = null
+        runCatching { LinuxFilesystemSyscalls.unlock(root) }.exceptionOrNull()?.let { failure = it }
+        runCatching { root.close() }.exceptionOrNull()?.let { closeFailure ->
+            if (failure == null) failure = closeFailure else failure.addSuppressed(closeFailure)
+        }
+        runCatching { parent.close() }.exceptionOrNull()?.let { closeFailure ->
+            if (failure == null) failure = closeFailure else failure.addSuppressed(closeFailure)
+        }
+        failure?.let { throw it }
+    }
+
+    internal companion object {
+        fun open(path: Path): FullTreeFunctionObservationJournalAuthority {
+            val normalized = path.toAbsolutePath().normalize()
+            if (
+                !normalized.isAbsolute || normalized.parent == null ||
+                !Files.isDirectory(normalized, LinkOption.NOFOLLOW_LINKS) ||
+                normalized.toRealPath() != normalized
+            ) journalFail("function-observation journal root must be a canonical non-root directory")
+            LinuxFilesystemSyscalls.requireSupported(normalized)
+            val parentPath = normalized.parent
+            if (parentPath.toRealPath() != parentPath) {
+                journalFail("function-observation journal root parent must be canonical")
+            }
+            val parent = LinuxFilesystemSyscalls.openRoot(parentPath)
+            val root = try {
+                LinuxFilesystemSyscalls.openDirectoryAt(parent.fd, normalized.fileName.toString())
+            } catch (failure: Throwable) {
+                parent.close()
+                throw failure
+            }
+            var locked = false
+            try {
+                requireTrustedJournalParent(LinuxFilesystemSyscalls.identity(parent.fd), parent.identity)
+                requireManagedDirectory(
+                    LinuxFilesystemSyscalls.identity(root.fd),
+                    root.identity,
+                    "function-observation journal root",
+                )
+                if (!LinuxFilesystemSyscalls.tryExclusiveLock(root)) {
+                    journalFail("function-observation journal root is already locked")
+                }
+                locked = true
+                LinuxFilesystemSyscalls.synchronize(root)
+                LinuxFilesystemSyscalls.synchronize(parent)
+                return FullTreeFunctionObservationJournalAuthority(
+                    normalized,
+                    parentPath,
+                    parent,
+                    normalized.fileName.toString(),
+                    root,
+                ).also {
+                    it.requireRootBinding()
+                }
+            } catch (failure: Throwable) {
+                if (locked) {
+                    runCatching { LinuxFilesystemSyscalls.unlock(root) }
+                        .exceptionOrNull()?.let(failure::addSuppressed)
+                }
+                runCatching { root.close() }.exceptionOrNull()?.let(failure::addSuppressed)
+                runCatching { parent.close() }.exceptionOrNull()?.let(failure::addSuppressed)
+                throw failure
+            }
+        }
+    }
+}
+
+internal enum class FullTreeFunctionObservationColdCompletionKind {
+    NONE,
+    BINDING,
+    TRANSITION,
+}
+
+internal data class FullTreeFunctionObservationColdCompletion(
+    val kind: FullTreeFunctionObservationColdCompletionKind,
+    val history: FullTreeFunctionObservationOperationHistory?,
+)
+
+/**
+ * Root-authorized append-only journal for one operation.
  *
  * This type is intentionally not wired to the runner, cleanup, publication, or release evidence.
- * Its caller currently provisions the owner-only directory and must retry the exact intended
- * immutable publication after a fault. A descriptor-relative, parent-pinned journal-root manager
- * and cold temporary reconstruction are required before this record chain can authorize recovery.
+ * It records and recovers only immutable journal publications; it never treats the record chain as
+ * authority to kill a unit, delete scratch, revoke output, or certify a release.
  */
-internal class FullTreeFunctionObservationOperationJournal private constructor(
-    private val path: Path,
+internal class FullTreeFunctionObservationOperationJournal internal constructor(
+    private val expectedBinding: FullTreeFunctionObservationOperationBinding,
+    private val authority: FullTreeFunctionObservationJournalAuthority,
     private val directory: LinuxDescriptor,
 ) : AutoCloseable {
     private var closed = false
+    private var poisoned = false
 
     @Synchronized
     fun initialize(
-        binding: FullTreeFunctionObservationOperationBinding,
         faultInjector: DescriptorBoundStateFaultInjector? = null,
-    ): FullTreeFunctionObservationOperationHistory {
-        checkOpen()
-        requireDirectoryBinding(binding)
+    ): FullTreeFunctionObservationOperationHistory = boundOperation {
         DescriptorBoundAtomicStateFile.publishNoReplace(
             directory,
             OPERATION_BINDING_FILE,
-            binding.canonicalBytes(),
+            expectedBinding.canonicalBytes(),
             MAXIMUM_OPERATION_RECORD_BYTES,
             faultInjector,
         )
-        val initial = FullTreeFunctionObservationOperationTransition.initial(binding)
+        val initial = FullTreeFunctionObservationOperationTransition.initial(expectedBinding)
         DescriptorBoundAtomicStateFile.publishNoReplace(
             directory,
             initial.fileName,
@@ -547,20 +792,15 @@ internal class FullTreeFunctionObservationOperationJournal private constructor(
             MAXIMUM_OPERATION_RECORD_BYTES,
             faultInjector,
         )
-        return loadRequired(binding)
+        loadRequired()
     }
 
     @Synchronized
     fun append(
-        binding: FullTreeFunctionObservationOperationBinding,
         transition: FullTreeFunctionObservationOperationTransition,
         faultInjector: DescriptorBoundStateFaultInjector? = null,
-    ): FullTreeFunctionObservationOperationHistory {
-        checkOpen()
-        val current = loadRequired(
-            binding,
-            allowedAtomicTarget = transition.fileName,
-        )
+    ): FullTreeFunctionObservationOperationHistory = boundOperation {
+        val current = loadRequired(allowedAtomicTarget = transition.fileName)
         current.transitions.getOrNull(transition.sequence)?.let { existing ->
             if (!existing.canonicalBytes().contentEquals(transition.canonicalBytes())) {
                 journalFail("function-observation journal sequence already has different immutable bytes")
@@ -572,13 +812,13 @@ internal class FullTreeFunctionObservationOperationJournal private constructor(
                 MAXIMUM_OPERATION_RECORD_BYTES,
                 faultInjector,
             )
-            return loadRequired(binding)
+            return@boundOperation loadRequired()
         }
         if (transition.sequence != current.transitions.size) {
             journalFail("function-observation journal append sequence is not next")
         }
         FullTreeFunctionObservationOperationHistory.validate(
-            binding,
+            expectedBinding,
             current.transitions + transition,
         )
         DescriptorBoundAtomicStateFile.publishNoReplace(
@@ -588,23 +828,99 @@ internal class FullTreeFunctionObservationOperationJournal private constructor(
             MAXIMUM_OPERATION_RECORD_BYTES,
             faultInjector,
         )
-        return loadRequired(binding)
+        loadRequired()
     }
 
     @Synchronized
-    fun loadOrNull(): FullTreeFunctionObservationOperationHistory? = loadOrNull(allowedAtomicTarget = null)
+    fun loadOrNull(): FullTreeFunctionObservationOperationHistory? = boundOperation {
+        loadOrNull(allowedAtomicTarget = null)
+    }
+
+    /** Completes at most one exact, parsed journal temporary and touches no external resource. */
+    @Synchronized
+    fun completeExactPendingPublication(
+        faultInjector: DescriptorBoundStateFaultInjector? = null,
+        afterInspection: (() -> Unit)? = null,
+    ): FullTreeFunctionObservationColdCompletion = boundOperation {
+        val names = entryNames()
+        val atomicNames = names.filter(::isAtomicStateName)
+        if (atomicNames.size > 1) {
+            journalFail("function-observation operation journal contains multiple pending publications")
+        }
+        val atomicName = atomicNames.singleOrNull()
+        if (atomicName == null) {
+            loadOrNull(allowedAtomicTarget = null)
+            // A prior process may have died after rename and before its directory sync.
+            LinuxFilesystemSyscalls.synchronize(directory)
+            return@boundOperation FullTreeFunctionObservationColdCompletion(
+                FullTreeFunctionObservationColdCompletionKind.NONE,
+                loadOrNull(allowedAtomicTarget = null),
+            )
+        }
+        val targetName = when {
+            atomicName == DescriptorBoundAtomicStateFile.temporaryName(OPERATION_BINDING_FILE) ->
+                OPERATION_BINDING_FILE
+            atomicName.matches(ATOMIC_TRANSITION_FILE_NAME) ->
+                atomicName.removePrefix(".").removeSuffix(".atomic")
+            else -> journalFail("function-observation operation journal contains an unknown pending publication")
+        }
+        if (targetName in names) {
+            journalFail("function-observation operation journal contains a target and its pending publication")
+        }
+        if (targetName == OPERATION_BINDING_FILE) {
+            if (names != listOf(atomicName)) {
+                journalFail("pending function-observation binding has unbound journal residue")
+            }
+            inspectRequired(atomicName).use { pending ->
+                val parsed = FullTreeFunctionObservationOperationBinding.parseCanonical(pending.bytes)
+                requireDirectoryBinding(parsed)
+                afterInspection?.invoke()
+                DescriptorBoundAtomicStateFile.completeExistingTemporaryNoReplace(
+                    directory,
+                    OPERATION_BINDING_FILE,
+                    pending,
+                    MAXIMUM_OPERATION_RECORD_BYTES,
+                    faultInjector,
+                )
+            }
+            return@boundOperation FullTreeFunctionObservationColdCompletion(
+                FullTreeFunctionObservationColdCompletionKind.BINDING,
+                loadRequired(),
+            )
+        } else {
+            val prefix = loadRequired(allowedAtomicTarget = targetName)
+            inspectRequired(atomicName).use { pending ->
+                val transition = FullTreeFunctionObservationOperationTransition.parseCanonical(pending.bytes)
+                if (transition.fileName != targetName || transition.sequence != prefix.transitions.size) {
+                    journalFail("pending function-observation transition is not the exact next sequence")
+                }
+                FullTreeFunctionObservationOperationHistory.validate(
+                    expectedBinding,
+                    prefix.transitions + transition,
+                )
+                afterInspection?.invoke()
+                DescriptorBoundAtomicStateFile.completeExistingTemporaryNoReplace(
+                    directory,
+                    targetName,
+                    pending,
+                    MAXIMUM_OPERATION_RECORD_BYTES,
+                    faultInjector,
+                )
+            }
+            return@boundOperation FullTreeFunctionObservationColdCompletion(
+                FullTreeFunctionObservationColdCompletionKind.TRANSITION,
+                loadRequired(),
+            )
+        }
+    }
 
     private fun loadOrNull(
         allowedAtomicTarget: String?,
     ): FullTreeFunctionObservationOperationHistory? {
-        checkOpen()
-        val names = LinuxFilesystemSyscalls.directoryEntryNames(directory, MAXIMUM_JOURNAL_ENTRIES + 1).sorted()
-        if (names.size > MAXIMUM_JOURNAL_ENTRIES) {
-            journalFail("function-observation operation journal exceeds its entry bound")
-        }
+        val names = entryNames()
         if (names.isEmpty()) return null
         val allowedAtomicName = allowedAtomicTarget?.let(DescriptorBoundAtomicStateFile::temporaryName)
-        val atomicNames = names.filter { it.startsWith('.') && it.endsWith(".atomic") }
+        val atomicNames = names.filter(::isAtomicStateName)
         if (atomicNames.any { it != allowedAtomicName }) {
             journalFail("function-observation operation journal requires exact atomic-publication recovery")
         }
@@ -619,8 +935,8 @@ internal class FullTreeFunctionObservationOperationJournal private constructor(
             OPERATION_BINDING_FILE,
             MAXIMUM_OPERATION_RECORD_BYTES,
         ) ?: journalFail("function-observation operation journal is missing its binding")
-        val binding = FullTreeFunctionObservationOperationBinding.parseCanonical(bindingSnapshot.bytes)
-        requireDirectoryBinding(binding)
+        val actualBinding = FullTreeFunctionObservationOperationBinding.parseCanonical(bindingSnapshot.bytes)
+        requireDirectoryBinding(actualBinding)
         val transitions = names.filter(TRANSITION_FILE_NAME::matches).map { name ->
             val snapshot = DescriptorBoundAtomicStateFile.readOrNull(
                 directory,
@@ -633,28 +949,60 @@ internal class FullTreeFunctionObservationOperationJournal private constructor(
                 }
             }
         }
-        return FullTreeFunctionObservationOperationHistory.validate(binding, transitions)
+        return FullTreeFunctionObservationOperationHistory.validate(expectedBinding, transitions)
     }
 
     private fun loadRequired(
-        expected: FullTreeFunctionObservationOperationBinding,
         allowedAtomicTarget: String? = null,
     ): FullTreeFunctionObservationOperationHistory {
         val history = loadOrNull(allowedAtomicTarget)
             ?: journalFail("function-observation operation journal is empty")
-        if (!history.binding.canonicalBytes().contentEquals(expected.canonicalBytes())) {
-            journalFail("function-observation operation journal is bound to a different request")
-        }
         return history
     }
 
-    private fun requireDirectoryBinding(binding: FullTreeFunctionObservationOperationBinding) {
-        if (path.fileName?.toString() != binding.journalDirectoryName) {
-            journalFail("function-observation operation journal directory is not operation-derived")
+    private fun entryNames(): List<String> {
+        val names = LinuxFilesystemSyscalls.directoryEntryNames(
+            directory,
+            MAXIMUM_JOURNAL_ENTRIES + 1,
+        ).sorted()
+        if (names.size > MAXIMUM_JOURNAL_ENTRIES) {
+            journalFail("function-observation operation journal exceeds its entry bound")
+        }
+        return names
+    }
+
+    private fun inspectRequired(name: String): DescriptorBoundStateInspection =
+        DescriptorBoundAtomicStateFile.inspectOrNull(
+            directory,
+            name,
+            MAXIMUM_OPERATION_RECORD_BYTES,
+        ) ?: journalFail("function-observation operation journal entry disappeared: $name")
+
+    private fun requireDirectoryBinding(actual: FullTreeFunctionObservationOperationBinding) {
+        if (
+            actual.journalDirectoryName != expectedBinding.journalDirectoryName ||
+            !actual.canonicalBytes().contentEquals(expectedBinding.canonicalBytes())
+        ) journalFail("function-observation operation journal is bound to a different request")
+        authority.requireBound(expectedBinding.journalDirectoryName, directory.identity)
+    }
+
+    private inline fun <T> boundOperation(action: () -> T): T {
+        checkOpen()
+        return try {
+            requireDirectoryBinding(expectedBinding)
+            val result = action()
+            requireDirectoryBinding(expectedBinding)
+            result
+        } catch (failure: Throwable) {
+            poisoned = true
+            throw failure
         }
     }
 
-    private fun checkOpen() = check(!closed) { "function-observation operation journal is closed" }
+    private fun checkOpen() {
+        check(!closed) { "function-observation operation journal is closed" }
+        check(!poisoned) { "function-observation operation journal is poisoned" }
+    }
 
     @Synchronized
     override fun close() {
@@ -665,34 +1013,10 @@ internal class FullTreeFunctionObservationOperationJournal private constructor(
         runCatching { directory.close() }.exceptionOrNull()?.let { closeFailure ->
             if (failure == null) failure = closeFailure else failure.addSuppressed(closeFailure)
         }
-        failure?.let { throw it }
-    }
-
-    internal companion object {
-        fun open(path: Path): FullTreeFunctionObservationOperationJournal {
-            val normalized = path.toAbsolutePath().normalize()
-            if (!normalized.isAbsolute || normalized.parent == null || normalized.toRealPath() != normalized) {
-                journalFail("function-observation operation journal path must be canonical and non-root")
-            }
-            LinuxFilesystemSyscalls.requireSupported(normalized)
-            val directory = LinuxFilesystemSyscalls.openRoot(normalized)
-            try {
-                if (!LinuxFilesystemSyscalls.tryExclusiveLock(directory)) {
-                    journalFail("function-observation operation journal is already locked")
-                }
-                // Exercises the complete owner/mode/mount validation before ownership transfer.
-                DescriptorBoundAtomicStateFile.readOrNull(
-                    directory,
-                    OPERATION_BINDING_FILE,
-                    MAXIMUM_OPERATION_RECORD_BYTES,
-                )
-                return FullTreeFunctionObservationOperationJournal(normalized, directory)
-            } catch (failure: Throwable) {
-                runCatching { LinuxFilesystemSyscalls.unlock(directory) }.exceptionOrNull()?.let(failure::addSuppressed)
-                runCatching { directory.close() }.exceptionOrNull()?.let(failure::addSuppressed)
-                throw failure
-            }
+        runCatching { authority.releaseJournal() }.exceptionOrNull()?.let { releaseFailure ->
+            if (failure == null) failure = releaseFailure else failure.addSuppressed(releaseFailure)
         }
+        failure?.let { throw it }
     }
 }
 
@@ -722,6 +1046,36 @@ internal fun transitionFileName(sequence: Int): String {
     }
     return "transition-${sequence.toString().padStart(4, '0')}.json"
 }
+
+private fun isAtomicStateName(name: String): Boolean = name.startsWith('.') && name.endsWith(".atomic")
+
+private fun requireManagedDirectory(
+    actual: LinuxFileIdentity,
+    parent: LinuxFileIdentity,
+    label: String,
+) {
+    val uid = (Files.getAttribute(Path.of("/proc/self"), "unix:uid") as Number).toInt()
+    if (
+        !actual.isDirectory || actual.isRegularFile || actual.isSymbolicLink ||
+        actual.mountId != parent.mountId || actual.uid != uid || parent.uid != uid ||
+        actual.mode.permissions != OWNER_DIRECTORY_MODE
+    ) journalFail("$label is not an owner-only directory on its authorized filesystem")
+}
+
+private fun requireTrustedJournalParent(actual: LinuxFileIdentity, expected: LinuxFileIdentity) {
+    val uid = (Files.getAttribute(Path.of("/proc/self"), "unix:uid") as Number).toInt()
+    if (
+        !sameDirectory(actual, expected) || actual.uid !in setOf(0, uid) ||
+        actual.mode.permissions and GROUP_OR_OTHER_WRITE_MODE != 0
+    ) journalFail("function-observation journal root has an untrusted parent")
+}
+
+private fun sameDirectory(first: LinuxFileIdentity, second: LinuxFileIdentity): Boolean =
+    first.key == second.key && first.mountId == second.mountId &&
+        first.uid == second.uid && first.gid == second.gid &&
+        first.isDirectory && second.isDirectory &&
+        !first.isRegularFile && !second.isRegularFile &&
+        !first.isSymbolicLink && !second.isSymbolicLink
 
 private fun requireEvidenceContinuity(
     previous: FullTreeFunctionObservationOperationTransition,
@@ -841,6 +1195,8 @@ private const val OPERATION_TRANSITION_SCHEMA_VERSION = 1
 private const val OPERATION_PROVIDER = "kotlin-function-observation-operation-v1"
 private const val OPERATION_REQUEST_PROVIDER = "kotlin-function-observation-request-v1"
 private const val MINIMUM_LEASE_INODES = 4L
+private const val OWNER_DIRECTORY_MODE = 0x1c0 // 0700
+private const val GROUP_OR_OTHER_WRITE_MODE = 0x12 // 0022
 private const val MAXIMUM_OPERATION_TRANSITIONS = 8
 private const val MAXIMUM_OPERATION_RECORD_BYTES = 64 * 1024
 private const val MAXIMUM_JOURNAL_ENTRIES = MAXIMUM_OPERATION_TRANSITIONS + 4
@@ -849,6 +1205,7 @@ private val ZERO_SHA256 = "0".repeat(64)
 private val SHA256 = Regex("[0-9a-f]{64}")
 private val SHARD_IDENTIFIER = Regex("[a-z0-9]+(?:-[a-z0-9]+)*")
 private val TRANSITION_FILE_NAME = Regex("transition-[0-9]{4}\\.json")
+private val ATOMIC_TRANSITION_FILE_NAME = Regex("\\.transition-[0-9]{4}\\.json\\.atomic")
 private val OPERATION_JSON_LIMITS = StrictJsonLimits(
     maximumInputBytes = 64 * 1024,
     maximumCanonicalBytes = 64 * 1024,

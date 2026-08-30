@@ -2,12 +2,15 @@ package decompengine.oracle.fulltree
 
 import decompengine.oracle.core.OracleArtifacts
 import decompengine.oracle.core.OracleJson
+import decompengine.oracle.core.DescriptorBoundAtomicStateFile
 import decompengine.oracle.core.DescriptorBoundStateFaultInjector
 import decompengine.oracle.core.DescriptorBoundStateFaultPoint
 import java.nio.file.Files
 import java.nio.file.LinkOption
 import java.nio.file.Path
 import java.nio.file.attribute.PosixFilePermissions
+import java.util.concurrent.Executors
+import java.util.concurrent.TimeUnit
 import kotlinx.serialization.json.JsonObject
 import kotlinx.serialization.json.JsonNull
 import kotlinx.serialization.json.JsonPrimitive
@@ -16,6 +19,8 @@ import kotlin.test.Test
 import kotlin.test.assertContentEquals
 import kotlin.test.assertEquals
 import kotlin.test.assertFailsWith
+import kotlin.test.assertFalse
+import kotlin.test.assertTrue
 
 class FullTreeFunctionObservationOperationJournalTest {
     @Test
@@ -273,7 +278,7 @@ class FullTreeFunctionObservationOperationJournalTest {
     }
 
     @Test
-    fun `locked append only journal persists and reloads exact history`() = withJournalDirectory { directory ->
+    fun `locked append only journal persists and reloads exact history`() = withJournalRoot { root ->
         val binding = binding()
         val preparing = FullTreeFunctionObservationOperationTransition.initial(binding)
         val leased = FullTreeFunctionObservationOperationTransition.next(
@@ -283,30 +288,37 @@ class FullTreeFunctionObservationOperationJournalTest {
             diskEvidenceSha256 = "6".repeat(64),
         )
 
-        FullTreeFunctionObservationOperationJournal.open(directory).use { journal ->
-            assertFailsWith<FullTreeFunctionObservationOperationJournalException> {
-                FullTreeFunctionObservationOperationJournal.open(directory)
+        FullTreeFunctionObservationJournalAuthority.open(root).use { authority ->
+            authority.createNew(binding).use { journal ->
+                assertFailsWith<FullTreeFunctionObservationOperationJournalException> {
+                    authority.openExisting(binding)
+                }
+                assertFailsWith<FullTreeFunctionObservationOperationJournalException> {
+                    FullTreeFunctionObservationJournalAuthority.open(root)
+                }
+                assertEquals(listOf(preparing.transitionSha256), journal.initialize().transitions.map {
+                    it.transitionSha256
+                })
+                assertEquals(
+                    listOf(preparing.transitionSha256, leased.transitionSha256),
+                    journal.append(leased).transitions.map { it.transitionSha256 },
+                )
+                assertEquals(
+                    listOf(preparing.transitionSha256, leased.transitionSha256),
+                    journal.append(leased).transitions.map { it.transitionSha256 },
+                )
             }
-            assertEquals(listOf(preparing.transitionSha256), journal.initialize(binding).transitions.map {
-                it.transitionSha256
-            })
-            assertEquals(
-                listOf(preparing.transitionSha256, leased.transitionSha256),
-                journal.append(binding, leased).transitions.map { it.transitionSha256 },
-            )
-            assertEquals(
-                listOf(preparing.transitionSha256, leased.transitionSha256),
-                journal.append(binding, leased).transitions.map { it.transitionSha256 },
-            )
         }
 
-        FullTreeFunctionObservationOperationJournal.open(directory).use { reopened ->
-            val loaded = requireNotNull(reopened.loadOrNull())
-            assertContentEquals(binding.canonicalBytes(), loaded.binding.canonicalBytes())
-            assertEquals(
-                listOf(preparing.transitionSha256, leased.transitionSha256),
-                loaded.transitions.map { it.transitionSha256 },
-            )
+        FullTreeFunctionObservationJournalAuthority.open(root).use { authority ->
+            requireNotNull(authority.openExisting(binding)).use { reopened ->
+                val loaded = requireNotNull(reopened.loadOrNull())
+                assertContentEquals(binding.canonicalBytes(), loaded.binding.canonicalBytes())
+                assertEquals(
+                    listOf(preparing.transitionSha256, leased.transitionSha256),
+                    loaded.transitions.map { it.transitionSha256 },
+                )
+            }
         }
     }
 
@@ -314,27 +326,43 @@ class FullTreeFunctionObservationOperationJournalTest {
     fun `journal initialization converges after every atomic crash point`() {
         DescriptorBoundStateFaultPoint.entries.forEach { point ->
             for (crashOccurrence in 1..2) {
-                withJournalDirectory { directory ->
+                withJournalRoot { root ->
                     val binding = binding()
                     var occurrences = 0
                     assertFailsWith<SimulatedProcessDeath> {
-                        FullTreeFunctionObservationOperationJournal.open(directory).use { journal ->
-                            journal.initialize(
-                                binding,
-                                DescriptorBoundStateFaultInjector { observed ->
-                                    if (observed == point && ++occurrences == crashOccurrence) {
-                                        throw SimulatedProcessDeath()
-                                    }
-                                },
-                            )
+                        FullTreeFunctionObservationJournalAuthority.open(root).use { authority ->
+                            authority.createNew(binding).use { journal ->
+                                journal.initialize(
+                                    DescriptorBoundStateFaultInjector { observed ->
+                                        if (observed == point && ++occurrences == crashOccurrence) {
+                                            throw SimulatedProcessDeath()
+                                        }
+                                    },
+                                )
+                            }
                         }
                     }
-                    FullTreeFunctionObservationOperationJournal.open(directory).use { recovered ->
-                        val history = recovered.initialize(binding)
-                        assertEquals(
-                            listOf(FullTreeFunctionObservationOperationPhase.PREPARING),
-                            history.transitions.map { it.phase },
-                        )
+                    FullTreeFunctionObservationJournalAuthority.open(root).use { authority ->
+                        requireNotNull(authority.openExisting(binding)).use { recovered ->
+                            val cold = recovered.completeExactPendingPublication()
+                            val expectedCompletion = if (
+                                point == DescriptorBoundStateFaultPoint.AFTER_TEMPORARY_DIRECTORY_SYNC
+                            ) {
+                                if (crashOccurrence == 1) {
+                                    FullTreeFunctionObservationColdCompletionKind.BINDING
+                                } else {
+                                    FullTreeFunctionObservationColdCompletionKind.TRANSITION
+                                }
+                            } else {
+                                FullTreeFunctionObservationColdCompletionKind.NONE
+                            }
+                            assertEquals(expectedCompletion, cold.kind)
+                            val history = recovered.initialize()
+                            assertEquals(
+                                listOf(FullTreeFunctionObservationOperationPhase.PREPARING),
+                                history.transitions.map { it.phase },
+                            )
+                        }
                     }
                 }
             }
@@ -344,7 +372,7 @@ class FullTreeFunctionObservationOperationJournalTest {
     @Test
     fun `journal append converges after every atomic crash point`() {
         DescriptorBoundStateFaultPoint.entries.forEach { point ->
-            withJournalDirectory { directory ->
+            withJournalRoot { root ->
                 val binding = binding()
                 val preparing = FullTreeFunctionObservationOperationTransition.initial(binding)
                 val leased = FullTreeFunctionObservationOperationTransition.next(
@@ -353,40 +381,375 @@ class FullTreeFunctionObservationOperationJournalTest {
                     FullTreeFunctionObservationOperationPhase.LEASED,
                     diskEvidenceSha256 = "6".repeat(64),
                 )
-                FullTreeFunctionObservationOperationJournal.open(directory).use { it.initialize(binding) }
+                FullTreeFunctionObservationJournalAuthority.open(root).use { authority ->
+                    authority.createNew(binding).use { it.initialize() }
+                }
                 assertFailsWith<SimulatedProcessDeath> {
-                    FullTreeFunctionObservationOperationJournal.open(directory).use { journal ->
-                        journal.append(
-                            binding,
-                            leased,
-                            DescriptorBoundStateFaultInjector { observed ->
-                                if (observed == point) throw SimulatedProcessDeath()
-                            },
-                        )
+                    FullTreeFunctionObservationJournalAuthority.open(root).use { authority ->
+                        requireNotNull(authority.openExisting(binding)).use { journal ->
+                            journal.append(
+                                leased,
+                                DescriptorBoundStateFaultInjector { observed ->
+                                    if (observed == point) throw SimulatedProcessDeath()
+                                },
+                            )
+                        }
                     }
                 }
-                FullTreeFunctionObservationOperationJournal.open(directory).use { recovered ->
-                    val history = recovered.append(binding, leased)
-                    assertEquals(
-                        listOf(
+                FullTreeFunctionObservationJournalAuthority.open(root).use { authority ->
+                    requireNotNull(authority.openExisting(binding)).use { recovered ->
+                        val cold = recovered.completeExactPendingPublication()
+                        val expectedCompletion = if (
+                            point == DescriptorBoundStateFaultPoint.AFTER_TEMPORARY_DIRECTORY_SYNC
+                        ) FullTreeFunctionObservationColdCompletionKind.TRANSITION
+                        else FullTreeFunctionObservationColdCompletionKind.NONE
+                        assertEquals(expectedCompletion, cold.kind)
+                        val history = cold.history ?: recovered.loadOrNull()
+                        val expectedPhases = if (
+                            point == DescriptorBoundStateFaultPoint.AFTER_UNNAMED_FILE_SYNC
+                        ) listOf(FullTreeFunctionObservationOperationPhase.PREPARING)
+                        else listOf(
                             FullTreeFunctionObservationOperationPhase.PREPARING,
                             FullTreeFunctionObservationOperationPhase.LEASED,
-                        ),
-                        history.transitions.map { it.phase },
-                    )
+                        )
+                        assertEquals(expectedPhases, history?.transitions?.map { it.phase })
+                    }
                 }
             }
         }
     }
 
-    private fun binding() = FullTreeFunctionObservationOperationBinding.create(
-        operationId = "1".repeat(64),
+    @Test
+    fun `journal root authority creates exact directories and detects detach replacement permanently`() =
+        withJournalRoot { root ->
+            val binding = binding()
+            FullTreeFunctionObservationJournalAuthority.open(root).use { authority ->
+                authority.createNew(binding).use { journal ->
+                    journal.initialize()
+                    val directory = root.resolve(binding.journalDirectoryName)
+                    assertTrue(Files.isDirectory(directory, LinkOption.NOFOLLOW_LINKS))
+                    assertEquals(
+                        PosixFilePermissions.fromString("rwx------"),
+                        Files.getPosixFilePermissions(directory, LinkOption.NOFOLLOW_LINKS),
+                    )
+                    val detached = root.resolve("detached-operation")
+                    Files.move(directory, detached)
+                    Files.createDirectory(directory)
+                    Files.setPosixFilePermissions(directory, PosixFilePermissions.fromString("rwx------"))
+
+                    assertFailsWith<FullTreeFunctionObservationOperationJournalException> {
+                        journal.loadOrNull()
+                    }
+                    assertTrue(Files.list(directory).use { it.findAny().isEmpty })
+                    Files.delete(directory)
+                    Files.move(detached, directory)
+                    assertFailsWith<IllegalStateException> { journal.loadOrNull() }
+                }
+            }
+        }
+
+    @Test
+    fun `journal handle is poisoned when its configured root is detached and replaced`() =
+        withJournalRoot { root ->
+            val binding = binding()
+            val otherBinding = binding(operationSeed = "a")
+            FullTreeFunctionObservationJournalAuthority.open(root).use { authority ->
+                authority.createNew(binding).use { journal ->
+                    authority.createNew(otherBinding).use { other ->
+                        journal.initialize()
+                        other.initialize()
+                        val held = root.parent.resolve("held-root")
+                        Files.move(root, held)
+                        Files.createDirectory(root)
+                        Files.setPosixFilePermissions(root, PosixFilePermissions.fromString("rwx------"))
+                        assertFailsWith<FullTreeFunctionObservationOperationJournalException> {
+                            journal.loadOrNull()
+                        }
+                        assertTrue(Files.list(root).use { it.findAny().isEmpty })
+                        Files.delete(root)
+                        Files.move(held, root)
+                        assertFailsWith<IllegalStateException> { journal.loadOrNull() }
+                        assertFailsWith<IllegalStateException> { other.loadOrNull() }
+                        assertFailsWith<IllegalStateException> {
+                            authority.createNew(binding(operationSeed = "b"))
+                        }
+                    }
+                }
+            }
+        }
+
+    @Test
+    fun `one root authority supports parallel distinct operations while excluding duplicate ownership`() =
+        withJournalRoot { root ->
+            val firstBinding = binding()
+            val secondBinding = binding(operationSeed = "a")
+            FullTreeFunctionObservationJournalAuthority.open(root).use { authority ->
+                assertEquals(null, authority.openExisting(firstBinding))
+                authority.createNew(firstBinding).use { first ->
+                    authority.createNew(secondBinding).use { second ->
+                        assertEquals(firstBinding.bindingSha256, first.initialize().binding.bindingSha256)
+                        assertEquals(secondBinding.bindingSha256, second.initialize().binding.bindingSha256)
+                        assertFailsWith<FullTreeFunctionObservationOperationJournalException> {
+                            authority.openExisting(firstBinding)
+                        }
+                        assertFailsWith<FullTreeFunctionObservationOperationJournalException> {
+                            authority.createNew(firstBinding)
+                        }
+                    }
+                }
+            }
+        }
+
+    @Test
+    fun `journal root lock is released after separate JVM process death`() = withJournalRoot { root ->
+        val java = Path.of(System.getProperty("java.home"), "bin", "java")
+        val process = ProcessBuilder(
+            java.toString(),
+            "-cp",
+            System.getProperty("java.class.path"),
+            FullTreeFunctionObservationJournalLockProbe::class.java.name,
+            root.toString(),
+        ).redirectErrorStream(true).start()
+        val output = process.inputStream.bufferedReader()
+        val reader = Executors.newSingleThreadExecutor()
+        try {
+            assertEquals("READY", reader.submit<String?> { output.readLine() }.get(10, TimeUnit.SECONDS))
+            assertFailsWith<FullTreeFunctionObservationOperationJournalException> {
+                FullTreeFunctionObservationJournalAuthority.open(root)
+            }
+            process.destroyForcibly()
+            assertTrue(process.waitFor(10, TimeUnit.SECONDS), "journal lock probe did not die")
+            FullTreeFunctionObservationJournalAuthority.open(root).use { }
+        } finally {
+            reader.shutdownNow()
+            if (process.isAlive) process.destroyForcibly()
+        }
+    }
+
+    @Test
+    fun `cold completion rejects replacement missing collision multiple and unknown temporary residue`() {
+        withJournalRoot { root ->
+            val binding = binding()
+            val directory = root.resolve(binding.journalDirectoryName)
+            val bindingTemporary = DescriptorBoundAtomicStateFile.temporaryName("binding.json")
+
+            FullTreeFunctionObservationJournalAuthority.open(root).use { authority ->
+                authority.createNew(binding).use { journal ->
+                    writeImmutable(directory.resolve(bindingTemporary), binding.canonicalBytes())
+                    assertFailsWith<java.io.IOException> {
+                        journal.completeExactPendingPublication(afterInspection = {
+                            Files.delete(directory.resolve(bindingTemporary))
+                        })
+                    }
+                    assertFalse(Files.exists(directory.resolve("binding.json"), LinkOption.NOFOLLOW_LINKS))
+                }
+            }
+
+            writeImmutable(directory.resolve(bindingTemporary), binding.canonicalBytes())
+            FullTreeFunctionObservationJournalAuthority.open(root).use { authority ->
+                requireNotNull(authority.openExisting(binding)).use { journal ->
+                    assertFailsWith<java.io.IOException> {
+                        journal.completeExactPendingPublication(afterInspection = {
+                            val pending = directory.resolve(bindingTemporary)
+                            Files.delete(pending)
+                            writeImmutable(pending, binding.canonicalBytes())
+                        })
+                    }
+                    assertFalse(Files.exists(directory.resolve("binding.json"), LinkOption.NOFOLLOW_LINKS))
+                    assertTrue(Files.exists(directory.resolve(bindingTemporary), LinkOption.NOFOLLOW_LINKS))
+                }
+            }
+
+            Files.delete(directory.resolve(bindingTemporary))
+            FullTreeFunctionObservationJournalAuthority.open(root).use { authority ->
+                requireNotNull(authority.openExisting(binding)).use { journal -> journal.initialize() }
+            }
+            val initial = FullTreeFunctionObservationOperationTransition.initial(binding)
+            val initialTemporary = DescriptorBoundAtomicStateFile.temporaryName(initial.fileName)
+            writeImmutable(directory.resolve(initialTemporary), initial.canonicalBytes())
+            FullTreeFunctionObservationJournalAuthority.open(root).use { authority ->
+                requireNotNull(authority.openExisting(binding)).use { journal ->
+                    assertFailsWith<FullTreeFunctionObservationOperationJournalException> {
+                        journal.completeExactPendingPublication()
+                    }
+                }
+            }
+            assertTrue(Files.exists(directory.resolve(initial.fileName), LinkOption.NOFOLLOW_LINKS))
+            assertTrue(Files.exists(directory.resolve(initialTemporary), LinkOption.NOFOLLOW_LINKS))
+            Files.delete(directory.resolve(initialTemporary))
+
+            val unknown = ".unknown.atomic"
+            val another = ".another.atomic"
+            writeImmutable(directory.resolve(unknown), "unknown\n".toByteArray())
+            writeImmutable(directory.resolve(another), "another\n".toByteArray())
+            FullTreeFunctionObservationJournalAuthority.open(root).use { authority ->
+                requireNotNull(authority.openExisting(binding)).use { journal ->
+                    assertFailsWith<FullTreeFunctionObservationOperationJournalException> {
+                        journal.completeExactPendingPublication()
+                    }
+                }
+            }
+            assertTrue(Files.exists(directory.resolve(unknown), LinkOption.NOFOLLOW_LINKS))
+            assertTrue(Files.exists(directory.resolve(another), LinkOption.NOFOLLOW_LINKS))
+            Files.delete(directory.resolve(another))
+            FullTreeFunctionObservationJournalAuthority.open(root).use { authority ->
+                requireNotNull(authority.openExisting(binding)).use { journal ->
+                    assertFailsWith<FullTreeFunctionObservationOperationJournalException> {
+                        journal.completeExactPendingPublication()
+                    }
+                }
+            }
+            assertTrue(Files.exists(directory.resolve(unknown), LinkOption.NOFOLLOW_LINKS))
+        }
+    }
+
+    @Test
+    fun `cold completion rejects cross request gap and hash-valid evidence substitution`() {
+        withJournalRoot { root ->
+            val binding = binding()
+            val directory = root.resolve(binding.journalDirectoryName)
+            FullTreeFunctionObservationJournalAuthority.open(root).use { authority ->
+                authority.createNew(binding).use { journal -> journal.initialize() }
+            }
+            val preparing = FullTreeFunctionObservationOperationTransition.initial(binding)
+            val leased = FullTreeFunctionObservationOperationTransition.next(
+                binding,
+                preparing,
+                FullTreeFunctionObservationOperationPhase.LEASED,
+                diskEvidenceSha256 = "6".repeat(64),
+            )
+            val attached = FullTreeFunctionObservationOperationTransition.next(
+                binding,
+                leased,
+                FullTreeFunctionObservationOperationPhase.UNIT_ATTACHED,
+            )
+
+            writeImmutable(
+                directory.resolve(DescriptorBoundAtomicStateFile.temporaryName(attached.fileName)),
+                attached.canonicalBytes(),
+            )
+            FullTreeFunctionObservationJournalAuthority.open(root).use { authority ->
+                requireNotNull(authority.openExisting(binding)).use { journal ->
+                    assertFailsWith<FullTreeFunctionObservationOperationJournalException> {
+                        journal.completeExactPendingPublication()
+                    }
+                }
+            }
+            Files.delete(directory.resolve(DescriptorBoundAtomicStateFile.temporaryName(attached.fileName)))
+
+            FullTreeFunctionObservationJournalAuthority.open(root).use { authority ->
+                requireNotNull(authority.openExisting(binding)).use { journal -> journal.append(leased) }
+            }
+            val changedDisk = mutateTransition(attached, "diskEvidenceSha256", JsonPrimitive("8".repeat(64)))
+            val attachedTemporary = DescriptorBoundAtomicStateFile.temporaryName(attached.fileName)
+            writeImmutable(directory.resolve(attachedTemporary), changedDisk.canonicalBytes())
+            FullTreeFunctionObservationJournalAuthority.open(root).use { authority ->
+                requireNotNull(authority.openExisting(binding)).use { journal ->
+                    assertFailsWith<FullTreeFunctionObservationOperationJournalException> {
+                        journal.completeExactPendingPublication()
+                    }
+                }
+            }
+            assertFalse(Files.exists(directory.resolve(attached.fileName), LinkOption.NOFOLLOW_LINKS))
+            assertTrue(Files.exists(directory.resolve(attachedTemporary), LinkOption.NOFOLLOW_LINKS))
+            Files.delete(directory.resolve(attachedTemporary))
+
+            val aborted = FullTreeFunctionObservationOperationTransition.next(
+                binding,
+                leased,
+                FullTreeFunctionObservationOperationPhase.RECOVERED_ABORT,
+                outputSha256 = null,
+                outputBytes = null,
+            )
+            val droppedLease = mutateTransition(aborted, "diskEvidenceSha256", JsonNull)
+            writeImmutable(directory.resolve(attachedTemporary), droppedLease.canonicalBytes())
+            FullTreeFunctionObservationJournalAuthority.open(root).use { authority ->
+                requireNotNull(authority.openExisting(binding)).use { journal ->
+                    assertFailsWith<FullTreeFunctionObservationOperationJournalException> {
+                        journal.completeExactPendingPublication()
+                    }
+                }
+            }
+            assertFalse(Files.exists(directory.resolve(aborted.fileName), LinkOption.NOFOLLOW_LINKS))
+            assertTrue(Files.exists(directory.resolve(attachedTemporary), LinkOption.NOFOLLOW_LINKS))
+            Files.delete(directory.resolve(attachedTemporary))
+
+            val expectedRequest = binding(operationSeed = "c")
+            val crossRequest = binding(operationSeed = "c", isolationSeed = "b")
+            val crossDirectory = root.resolve(expectedRequest.journalDirectoryName)
+            FullTreeFunctionObservationJournalAuthority.open(root).use { authority ->
+                authority.createNew(expectedRequest).use { }
+            }
+            writeImmutable(crossDirectory.resolve(bindingTemporaryName()), crossRequest.canonicalBytes())
+            FullTreeFunctionObservationJournalAuthority.open(root).use { authority ->
+                requireNotNull(authority.openExisting(expectedRequest)).use { journal ->
+                    assertFailsWith<FullTreeFunctionObservationOperationJournalException> {
+                        journal.completeExactPendingPublication()
+                    }
+                }
+            }
+            assertTrue(Files.exists(crossDirectory.resolve(bindingTemporaryName()), LinkOption.NOFOLLOW_LINKS))
+        }
+    }
+
+    @Test
+    fun `cold completion reconstructs a recovered-abort link without caller transition state`() =
+        withJournalRoot { root ->
+            val binding = binding()
+            val preparing = FullTreeFunctionObservationOperationTransition.initial(binding)
+            val leased = FullTreeFunctionObservationOperationTransition.next(
+                binding,
+                preparing,
+                FullTreeFunctionObservationOperationPhase.LEASED,
+                diskEvidenceSha256 = "6".repeat(64),
+            )
+            val aborted = FullTreeFunctionObservationOperationTransition.next(
+                binding,
+                leased,
+                FullTreeFunctionObservationOperationPhase.RECOVERED_ABORT,
+                outputSha256 = null,
+                outputBytes = null,
+            )
+            FullTreeFunctionObservationJournalAuthority.open(root).use { authority ->
+                authority.createNew(binding).use { journal ->
+                    journal.initialize()
+                    journal.append(leased)
+                    assertFailsWith<SimulatedProcessDeath> {
+                        journal.append(
+                            aborted,
+                            DescriptorBoundStateFaultInjector { point ->
+                                if (point == DescriptorBoundStateFaultPoint.AFTER_TEMPORARY_DIRECTORY_SYNC) {
+                                    throw SimulatedProcessDeath()
+                                }
+                            },
+                        )
+                    }
+                }
+            }
+            FullTreeFunctionObservationJournalAuthority.open(root).use { authority ->
+                requireNotNull(authority.openExisting(binding)).use { journal ->
+                    val completion = journal.completeExactPendingPublication()
+                    assertEquals(FullTreeFunctionObservationColdCompletionKind.TRANSITION, completion.kind)
+                    assertEquals(
+                        FullTreeFunctionObservationOperationPhase.RECOVERED_ABORT,
+                        completion.history?.latest?.phase,
+                    )
+                    assertEquals("6".repeat(64), completion.history?.latest?.diskEvidenceSha256)
+                }
+            }
+        }
+
+    private fun binding(
+        operationSeed: String = "1",
+        isolationSeed: String = "6",
+    ) = FullTreeFunctionObservationOperationBinding.create(
+        operationId = operationSeed.repeat(64),
         shardId = "clang-lib-driver",
         shardInputSha256 = "2".repeat(64),
         scopeSha256 = "3".repeat(64),
         inventoryArtifactSha256 = "4".repeat(64),
         richArtifactSha256 = "5".repeat(64),
-        isolationSha256 = "6".repeat(64),
+        isolationSha256 = isolationSeed.repeat(64),
         output = Path.of("/var/lib/decomp-oracle/output/clang-lib-driver.json"),
         diskPolicy = FullTreeDiskScratchPolicy(
             requiredAvailableBytes = 1024,
@@ -413,19 +776,26 @@ class FullTreeFunctionObservationOperationJournalTest {
         )
     }
 
-    private inline fun withJournalDirectory(action: (Path) -> Unit) {
-        val parent = createTempDirectory("function-operation-journal-").toAbsolutePath().normalize()
-        val directory = parent.resolve(journalDirectoryName("1".repeat(64)))
-        Files.createDirectory(directory)
-        Files.setPosixFilePermissions(directory, PosixFilePermissions.fromString("rwx------"))
+    private fun bindingTemporaryName(): String = DescriptorBoundAtomicStateFile.temporaryName("binding.json")
+
+    private fun writeImmutable(path: Path, bytes: ByteArray) {
+        Files.write(path, bytes)
+        Files.setPosixFilePermissions(path, PosixFilePermissions.fromString("r--------"))
+    }
+
+    private inline fun withJournalRoot(action: (Path) -> Unit) {
+        val container = createTempDirectory("function-operation-journal-").toAbsolutePath().normalize()
+        Files.setPosixFilePermissions(container, PosixFilePermissions.fromString("rwx------"))
+        val root = Files.createDirectory(container.resolve("root"))
+        Files.setPosixFilePermissions(root, PosixFilePermissions.fromString("rwx------"))
         try {
-            action(directory)
+            action(root)
         } finally {
-            if (Files.exists(directory, LinkOption.NOFOLLOW_LINKS)) {
-                Files.list(directory).use { entries -> entries.toList() }.forEach(Files::deleteIfExists)
-                Files.deleteIfExists(directory)
+            if (Files.exists(container, LinkOption.NOFOLLOW_LINKS)) {
+                Files.walk(container).use { entries ->
+                    entries.sorted(Comparator.reverseOrder()).toList()
+                }.forEach(Files::deleteIfExists)
             }
-            Files.deleteIfExists(parent)
         }
     }
 

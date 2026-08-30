@@ -31,6 +31,22 @@ internal class DescriptorBoundStateSnapshot(
         get() = contents.copyOf()
 }
 
+/** One still-open immutable state inode retained across parse, validation, and recovery rename. */
+internal class DescriptorBoundStateInspection internal constructor(
+    bytes: ByteArray,
+    val identity: LinuxFileIdentity,
+    internal val descriptor: LinuxDescriptor,
+) : AutoCloseable {
+    private val contents = bytes.copyOf()
+
+    val bytes: ByteArray
+        get() = contents.copyOf()
+
+    fun snapshot(): DescriptorBoundStateSnapshot = DescriptorBoundStateSnapshot(contents, identity)
+
+    override fun close() = descriptor.close()
+}
+
 /**
  * Publishes one immutable state file through a pinned owner-controlled directory.
  *
@@ -120,20 +136,76 @@ internal object DescriptorBoundAtomicStateFile {
         parent: LinuxDescriptor,
         name: String,
         maximumBytes: Int,
-    ): DescriptorBoundStateSnapshot? {
+    ): DescriptorBoundStateSnapshot? = inspectOrNull(parent, name, maximumBytes)?.use { inspection ->
+        inspection.snapshot()
+    }
+
+    fun inspectOrNull(
+        parent: LinuxDescriptor,
+        name: String,
+        maximumBytes: Int,
+    ): DescriptorBoundStateInspection? {
         requireStateName(name)
         require(maximumBytes in 1..MAXIMUM_STATE_FILE_BYTES)
         requireParent(parent)
         val selected = LinuxFilesystemSyscalls.openRegularFileAtOrNull(parent.fd, name) ?: return null
-        selected.use { authorized ->
-            requireManagedFile(authorized.identity, parent.identity, "immutable state file")
-            val bytes = LinuxFilesystemSyscalls.openReadableFrom(authorized).use { readable ->
+        try {
+            requireManagedFile(selected.identity, parent.identity, "immutable state file")
+            val bytes = LinuxFilesystemSyscalls.openReadableFrom(selected).use { readable ->
                 LinuxFilesystemSyscalls.read(readable, maximumBytes) {}
             }
-            val after = LinuxFilesystemSyscalls.identity(authorized.fd)
-            if (after != authorized.identity) stateFail("immutable state file changed while it was read")
+            val after = selected.whileOpen(LinuxFilesystemSyscalls::identity)
+            if (after != selected.identity) stateFail("immutable state file changed while it was read")
             requireNamedIdentity(parent, name, after, "immutable state file")
-            return DescriptorBoundStateSnapshot(bytes, after)
+            return DescriptorBoundStateInspection(bytes, after, selected)
+        } catch (failure: Throwable) {
+            selected.close()
+            throw failure
+        }
+    }
+
+    /**
+     * Completes only the already-inspected deterministic temporary publication.
+     *
+     * Unlike [publishNoReplace], this recovery primitive never creates replacement bytes. The
+     * temporary must still have the exact inspected inode and contents, and the target must remain
+     * absent. Any collision or drift is retained and rejected.
+     */
+    fun completeExistingTemporaryNoReplace(
+        parent: LinuxDescriptor,
+        name: String,
+        expectedTemporary: DescriptorBoundStateInspection,
+        maximumBytes: Int,
+        faultInjector: DescriptorBoundStateFaultInjector? = null,
+    ): DescriptorBoundStateSnapshot {
+        requireName(name)
+        require(maximumBytes in 1..MAXIMUM_STATE_FILE_BYTES)
+        requireParent(parent)
+        val expectedBytes = expectedTemporary.bytes
+        require(expectedBytes.isNotEmpty() && expectedBytes.size <= maximumBytes) {
+            "immutable state bytes exceed their configured bound"
+        }
+        if (readOrNull(parent, name, maximumBytes) != null) {
+            stateFail("immutable state recovery target already exists")
+        }
+        val temporaryName = temporaryName(name)
+        val current = readOrNull(parent, temporaryName, maximumBytes)
+            ?: stateFail("immutable state recovery temporary is missing")
+        requireExactBytes(current.bytes, expectedBytes, "immutable state recovery temporary")
+        val pinnedIdentity = expectedTemporary.descriptor.whileOpen(LinuxFilesystemSyscalls::identity)
+        if (pinnedIdentity != expectedTemporary.identity || current.identity != pinnedIdentity) {
+            stateFail("immutable state recovery temporary changed identity")
+        }
+        requireNamedIdentity(parent, temporaryName, current.identity, "immutable state recovery temporary")
+        LinuxFilesystemSyscalls.renameNoReplace(parent.fd, temporaryName, name)
+        faultInjector?.hit(DescriptorBoundStateFaultPoint.AFTER_PUBLICATION_RENAME)
+        LinuxFilesystemSyscalls.synchronize(parent)
+        faultInjector?.hit(DescriptorBoundStateFaultPoint.AFTER_PUBLICATION_DIRECTORY_SYNC)
+        return readRequired(parent, name, maximumBytes).also { published ->
+            requireExactBytes(published.bytes, expectedBytes, "immutable state recovery target")
+            if (!sameFile(published.identity, pinnedIdentity)) {
+                stateFail("immutable state recovery target differs from its inspected temporary")
+            }
         }
     }
 
