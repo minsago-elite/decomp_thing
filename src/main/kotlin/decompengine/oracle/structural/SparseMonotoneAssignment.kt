@@ -57,18 +57,18 @@ internal object SparseMonotoneAssignment {
         maximumDistanceBytes: Int,
         limits: SparseMonotoneAssignmentLimits = SparseMonotoneAssignmentLimits(),
     ): SparseMonotoneAssignmentResult {
-        validateInput(leftRvas, limits.maximumLeftRecords, "left")
-        validateInput(rightRvas, limits.maximumRightRecords, "right")
         if (maximumDistanceBytes !in 0..limits.maximumDistanceBytes) {
             sparseAssignmentFail("distance bound exceeds the configured sparse-assignment limit")
         }
-        if (leftRvas.isEmpty() || rightRvas.isEmpty()) {
+        val left = RvaSnapshot.copyOf(leftRvas, limits.maximumLeftRecords, "left")
+        val right = RvaSnapshot.copyOf(rightRvas, limits.maximumRightRecords, "right")
+        if (left.isEmpty() || right.isEmpty()) {
             return SparseMonotoneAssignmentResult(emptyList(), emptyList(), 0, 0L, 0)
         }
 
         val candidateCount = countCandidateEdges(
-            leftRvas,
-            rightRvas,
+            left,
+            right,
             maximumDistanceBytes,
             limits.maximumCandidateEdges,
         )
@@ -78,14 +78,14 @@ internal object SparseMonotoneAssignment {
 
         try {
             val edges = CandidateEdges(candidateCount)
-            fillCandidateEdges(leftRvas, rightRvas, maximumDistanceBytes, edges)
+            fillCandidateEdges(left, right, maximumDistanceBytes, edges)
 
-            val fenwick = ObjectiveFenwick(rightRvas.size)
+            val fenwick = ObjectiveFenwick(right.size)
             computePrefixes(edges, fenwick)
-            val global = fenwick.query(rightRvas.size)
+            val global = fenwick.query(right.size)
             fenwick.clear()
-            computeSuffixes(edges, rightRvas.size, fenwick)
-            if (fenwick.query(rightRvas.size) != global) {
+            computeSuffixes(edges, right.size, fenwick)
+            if (fenwick.query(right.size) != global) {
                 sparseAssignmentFail("forward and backward sparse-assignment objectives disagree")
             }
 
@@ -112,6 +112,57 @@ internal object SparseMonotoneAssignment {
 }
 
 private data class AssignmentObjective(val count: Int, val cost: Long)
+
+/** One bounded sequential copy; all later passes are independent of caller-owned collections. */
+private class RvaSnapshot private constructor(private val words: LongArray) {
+    val size: Int
+        get() = words.size
+
+    fun isEmpty(): Boolean = words.isEmpty()
+
+    operator fun get(index: Int): ULong = words[index].toULong()
+
+    companion object {
+        fun copyOf(values: List<ULong>, maximumRecords: Int, label: String): RvaSnapshot {
+            val observedSize = try {
+                values.size
+            } catch (failure: RuntimeException) {
+                throw SparseMonotoneAssignmentException("$label input size could not be observed", failure)
+            }
+            if (observedSize !in 0..maximumRecords) {
+                sparseAssignmentFail("$label input exceeds its record limit")
+            }
+            val words = try {
+                LongArray(observedSize)
+            } catch (failure: OutOfMemoryError) {
+                throw SparseMonotoneAssignmentException("not enough memory for the bounded $label RVA snapshot", failure)
+            }
+            try {
+                var index = 0
+                val iterator = values.iterator()
+                while (iterator.hasNext()) {
+                    if (index >= words.size) sparseAssignmentFail("$label input changed while it was snapshotted")
+                    words[index++] = iterator.next().toLong()
+                }
+                if (index != words.size || values.size != observedSize) {
+                    sparseAssignmentFail("$label input changed while it was snapshotted")
+                }
+            } catch (failure: SparseMonotoneAssignmentException) {
+                throw failure
+            } catch (failure: OutOfMemoryError) {
+                throw SparseMonotoneAssignmentException("not enough memory to snapshot the bounded $label input", failure)
+            } catch (failure: RuntimeException) {
+                throw SparseMonotoneAssignmentException("$label input could not be snapshotted", failure)
+            }
+            for (index in 1 until words.size) {
+                if (java.lang.Long.compareUnsigned(words[index - 1], words[index]) >= 0) {
+                    sparseAssignmentFail("$label RVAs must be unique and strictly increasing")
+                }
+            }
+            return RvaSnapshot(words)
+        }
+    }
+}
 
 private class CandidateEdges(size: Int) {
     val left = IntArray(size)
@@ -164,18 +215,9 @@ private class ObjectiveFenwick(size: Int) {
     }
 }
 
-private fun validateInput(values: List<ULong>, maximumRecords: Int, label: String) {
-    if (values.size > maximumRecords) sparseAssignmentFail("$label input exceeds its record limit")
-    for (index in 1 until values.size) {
-        if (values[index - 1] >= values[index]) {
-            sparseAssignmentFail("$label RVAs must be unique and strictly increasing")
-        }
-    }
-}
-
 private fun countCandidateEdges(
-    left: List<ULong>,
-    right: List<ULong>,
+    left: RvaSnapshot,
+    right: RvaSnapshot,
     maximumDistanceBytes: Int,
     maximumCandidateEdges: Int,
 ): Int {
@@ -194,8 +236,8 @@ private fun countCandidateEdges(
 }
 
 private fun fillCandidateEdges(
-    left: List<ULong>,
-    right: List<ULong>,
+    left: RvaSnapshot,
+    right: RvaSnapshot,
     maximumDistanceBytes: Int,
     edges: CandidateEdges,
 ) {
@@ -212,15 +254,16 @@ private fun fillCandidateEdges(
 }
 
 private inline fun candidateWindows(
-    left: List<ULong>,
-    right: List<ULong>,
+    left: RvaSnapshot,
+    right: RvaSnapshot,
     maximumDistanceBytes: Int,
     visit: (leftIndex: Int, start: Int, endExclusive: Int) -> Unit,
 ) {
     val distance = maximumDistanceBytes.toULong()
     var start = 0
     var endExclusive = 0
-    left.forEachIndexed { leftIndex, leftRva ->
+    for (leftIndex in 0 until left.size) {
+        val leftRva = left[leftIndex]
         val minimum = if (leftRva >= distance) leftRva - distance else 0UL
         val maximum = if (ULong.MAX_VALUE - leftRva >= distance) leftRva + distance else ULong.MAX_VALUE
         while (start < right.size && right[start] < minimum) start++

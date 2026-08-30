@@ -11,8 +11,11 @@ import decompengine.project.RecoveredGlobal
 import decompengine.project.RecoveredProgramModel
 import decompengine.project.RecoveredType
 import decompengine.project.RecoveryStatus
+import java.util.Collections
 import java.util.LinkedHashSet
 import java.util.Locale
+
+private const val CANONICAL_MODEL_INPUT_SHA256_CODE_POINTS = 64
 
 /** Explicit allocation and syntax bounds for the canonical schema-v1 Ghidra program model. */
 internal data class CanonicalProgramModelStreamingLimits(
@@ -48,9 +51,9 @@ internal data class CanonicalProgramModelStreamingLimits(
         get() = minOf(
             maximumInputBytes.toLong(),
             2L * maxOf(
+                CANONICAL_MODEL_INPUT_SHA256_CODE_POINTS,
                 maximumIdentifierCodePoints,
-                maximumPrototypeCodePoints,
-                maximumTextCodePoints,
+                maxOf(maximumPrototypeCodePoints, maximumTextCodePoints),
             ).toLong(),
         ).toInt()
 
@@ -80,7 +83,7 @@ internal class CanonicalProgramModelSnapshot internal constructor(
  *
  * The input is copied only after its byte bound is checked. Jackson then enforces strict UTF-8,
  * duplicate-key, token, number, and nesting limits while this parser enforces the closed field
- * order and allocation counts before appending to any collection. Finally an allocation-free
+ * order and allocation counts before appending to any collection. Finally an output-buffer-free
  * renderer compares every canonical output byte with the private snapshot.
  */
 internal object CanonicalProgramModelStreaming {
@@ -148,7 +151,7 @@ private class TypedReader(
         expectField("inputSha256")
         val inputSha256 = readString(
             "program model inputSha256",
-            maximumCodePoints = limits.maximumIdentifierCodePoints,
+            maximumCodePoints = CANONICAL_MODEL_INPUT_SHA256_CODE_POINTS,
             allowEmpty = true,
         )
 
@@ -224,7 +227,7 @@ private class TypedReader(
                 status,
             )
         }
-        return result
+        return Collections.unmodifiableList(result)
     }
 
     private fun readGlobals(): List<RecoveredGlobal> {
@@ -260,7 +263,7 @@ private class TypedReader(
             requireToken(parser.nextToken(), JsonToken.END_OBJECT, "program model global has missing or extra fields")
             result += RecoveredGlobal(id, name, address, type, initializer, status)
         }
-        return result
+        return Collections.unmodifiableList(result)
     }
 
     private fun readTypes(): List<RecoveredType> {
@@ -290,7 +293,7 @@ private class TypedReader(
             requireToken(parser.nextToken(), JsonToken.END_OBJECT, "program model type has missing or extra fields")
             result += RecoveredType(id, declaration, sourceAddress, status)
         }
-        return result
+        return Collections.unmodifiableList(result)
     }
 
     private fun readStringSet(label: String, maximumCodePoints: Int): Set<String> {
@@ -312,7 +315,7 @@ private class TypedReader(
             result += value
             previous = value
         }
-        return result
+        return Collections.unmodifiableSet(result)
     }
 
     private fun expectField(expected: String) {

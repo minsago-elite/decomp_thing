@@ -283,6 +283,26 @@ class StructuralBoundaryReplayV1Test {
     }
 
     @Test
+    fun `replay derives facts from the authenticated parsed snapshot only`() = withReplayFixture { fixture ->
+        val forgedFunctions = fixture.model.functions.map { function ->
+            if (function.id == ALPHA_RECOVERED_ID) function.copy(address = 0x401000UL) else function
+        }
+        val switching = IterationSwitchingFunctionList(fixture.model.functions, forgedFunctions)
+        val callerModel = fixture.model.copy(functions = switching)
+
+        val binding = StructuralBoundaryReplayV1.replay(
+            fixture.oracle,
+            fixture.boundary,
+            callerModel,
+            fixture.modelBytes,
+            0x400000UL,
+        )
+
+        assertEquals(EXPECTED_OBSERVED_REPLAY_SHA256, binding.observedReplaySha256)
+        assertEquals(2, switching.iteratorCalls, "caller model must only be constructed and compared")
+    }
+
+    @Test
     fun `objective tie ambiguity and canonical-report claims are independently checked`() = withReplayFixture { fixture ->
         val rich = fixture.richTwin()
         val assignment = rich.objectField("nearMatchAssignment")
@@ -327,6 +347,26 @@ class StructuralBoundaryReplayV1Test {
         const val HISTORICAL_RICH_MODEL_SHA256 = "b15e5576ae86b07dbe561c40acfd57c6717ff66e77010e543de758f29e7138d5"
         const val RICH_MODEL_SHA256 = "aaa37c236f0c0f9f6f69a2bbd045d9d9cb234912008a7444d38c7c7b90132e51"
         const val EXPECTED_OBSERVED_REPLAY_SHA256 = "83906419c25178a1e2db674e7c3bec3b55aad9273eaf6da3bfcaf46545f4d6fa"
+    }
+}
+
+/** Presents canonical values for construction/equality, then forged values on any later traversal. */
+private class IterationSwitchingFunctionList(
+    private val canonical: List<RecoveredFunction>,
+    private val forged: List<RecoveredFunction>,
+) : java.util.AbstractList<RecoveredFunction>() {
+    var iteratorCalls: Int = 0
+        private set
+
+    override val size: Int
+        get() = canonical.size
+
+    override fun get(index: Int): RecoveredFunction = canonical[index]
+
+    override fun iterator(): MutableIterator<RecoveredFunction> {
+        iteratorCalls++
+        val selected = if (iteratorCalls <= 2) canonical else forged
+        return selected.toMutableList().iterator()
     }
 }
 

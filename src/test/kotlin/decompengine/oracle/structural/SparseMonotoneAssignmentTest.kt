@@ -72,6 +72,36 @@ class SparseMonotoneAssignmentTest {
     }
 
     @Test
+    fun `solver uses one bounded sequential snapshot of caller collections`() {
+        val left = SequencedRvaList(
+            first = listOf(0UL, 2UL),
+            later = listOf(100UL, 200UL),
+        )
+        val right = SequencedRvaList(
+            first = listOf(1UL, 3UL),
+            later = listOf(1_000UL, 2_000UL),
+        )
+
+        val result = SparseMonotoneAssignment.solve(left, right, maximumDistanceBytes = 1)
+
+        assertEquals(2, result.maximumCardinality)
+        assertEquals(2L, result.minimumTotalDistanceBytes)
+        assertEquals(1, left.iteratorCalls)
+        assertEquals(1, right.iteratorCalls)
+        assertEquals(0, left.randomAccessCalls)
+        assertEquals(0, right.randomAccessCalls)
+
+        val overproducing = object : java.util.AbstractList<ULong>() {
+            override val size: Int = 1
+            override fun get(index: Int): ULong = 0UL
+            override fun iterator(): MutableIterator<ULong> = mutableListOf(0UL, 1UL).iterator()
+        }
+        assertFailsWith<SparseMonotoneAssignmentException> {
+            SparseMonotoneAssignment.solve(overproducing, listOf(0UL), maximumDistanceBytes = 0)
+        }
+    }
+
+    @Test
     fun `cc1 scale remains sparse beyond every historical v1 function ceiling`() {
         val count = 50_228
         val left = List(count) { index -> index.toULong() * 64UL }
@@ -204,4 +234,27 @@ class SparseMonotoneAssignmentTest {
         val cost: Long,
         val candidateCount: Int,
     )
+}
+
+private class SequencedRvaList(
+    private val first: List<ULong>,
+    private val later: List<ULong>,
+) : java.util.AbstractList<ULong>() {
+    var iteratorCalls: Int = 0
+        private set
+    var randomAccessCalls: Int = 0
+        private set
+
+    override val size: Int
+        get() = first.size
+
+    override fun get(index: Int): ULong {
+        randomAccessCalls++
+        return first[index]
+    }
+
+    override fun iterator(): MutableIterator<ULong> {
+        val selected = if (iteratorCalls++ == 0) first else later
+        return selected.toMutableList().iterator()
+    }
 }

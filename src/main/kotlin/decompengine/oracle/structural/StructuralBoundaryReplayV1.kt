@@ -74,16 +74,17 @@ object StructuralBoundaryReplayV1 {
         validateCanonicalCandidate(candidate)
         validateUpstreamBinding(functionOracle, candidate, selectedModelImageBase)
         validatePolicy(candidate.document, functionOracle.nearMissBytes)
-        val modelSha256 = validateCanonicalModel(recoveredProgramModel, recoveredProgramModelBytes, limits)
+        val canonicalModel = validateCanonicalModel(recoveredProgramModel, recoveredProgramModelBytes, limits)
+        val replayModel = canonicalModel.model
 
         val artifact = functionOracle.artifacts[candidate.twin]
             ?: boundaryReplayFail("boundary replay twin is absent from the supplied function oracle")
-        if (recoveredProgramModel.inputSha256 != artifact.inputSha256 ||
-            recoveredProgramModel.inputSha256 != candidate.inputSha256
+        if (replayModel.inputSha256 != artifact.inputSha256 ||
+            replayModel.inputSha256 != candidate.inputSha256
         ) boundaryReplayFail("program model input SHA-256 does not match the selected artifact")
 
         val recovered = normalizeRecoveredFunctions(
-            recoveredProgramModel,
+            replayModel,
             selectedModelImageBase,
             artifact.executableRvaRanges,
             limits,
@@ -164,7 +165,7 @@ object StructuralBoundaryReplayV1 {
         val bindingBytes = observedBindingBytes(
             functionOracle,
             candidate,
-            modelSha256,
+            canonicalModel.sha256,
             selectedModelImageBase,
             exact.size,
             nearAssignment,
@@ -174,7 +175,7 @@ object StructuralBoundaryReplayV1 {
             observedReplaySha256 = OracleArtifacts.sha256(bindingBytes),
             functionOracleSha256 = functionOracle.snapshot.sha256,
             boundaryReportSha256 = candidate.snapshot.sha256,
-            recoveredProgramModelSha256 = modelSha256,
+            recoveredProgramModelSha256 = canonicalModel.sha256,
             twin = candidate.twin,
             inputSha256 = candidate.inputSha256,
             selectedModelImageBase = selectedModelImageBase,
@@ -331,7 +332,7 @@ private fun validateCanonicalModel(
     model: RecoveredProgramModel,
     bytes: ByteArray,
     limits: StructuralBoundaryReplayV1Limits,
-): String {
+): CanonicalProgramModelSnapshot {
     val snapshot = CanonicalProgramModelStreaming.readCanonical(
         bytes,
         CanonicalProgramModelStreamingLimits(
@@ -349,7 +350,7 @@ private fun validateCanonicalModel(
     if (!StructuralRecoveryV1Contract.SHA256.matches(snapshot.model.inputSha256)) {
         boundaryReplayFail("program model inputSha256 is not a lowercase SHA-256 digest")
     }
-    return snapshot.sha256
+    return snapshot
 }
 
 private fun normalizeRecoveredFunctions(

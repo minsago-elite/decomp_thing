@@ -1,6 +1,9 @@
 package decompengine.oracle.structural
 
 import decompengine.project.ProgramModelJson
+import decompengine.project.RecoveredFunction
+import decompengine.project.RecoveredProgramModel
+import decompengine.project.RecoveryStatus
 import java.nio.charset.StandardCharsets
 import kotlin.test.Test
 import kotlin.test.assertContentEquals
@@ -116,6 +119,66 @@ class CanonicalProgramModelStreamingTest {
             }
             assertTrue(failure.message.orEmpty().isNotBlank())
         }
+    }
+
+    @Test
+    fun `canonical extremes escaping scalar ordering and immutable snapshot round trip`() {
+        val model = RecoveredProgramModel(
+            inputSha256 = "0".repeat(64),
+            functions = listOf(
+                RecoveredFunction(
+                    id = "edge-zero",
+                    name = "quote\" slash\\ nul\u0000 cr\r astral-\ud83d\ude00",
+                    address = 0UL,
+                    prototype = "void edge_zero(void)",
+                    calls = linkedSetOf("\ud800\udc00", "\ue000"),
+                    status = RecoveryStatus.SYNTHETIC,
+                ),
+                RecoveredFunction(
+                    id = "edge-max",
+                    name = "edge_max",
+                    address = ULong.MAX_VALUE,
+                    prototype = "void edge_max(void)",
+                ),
+            ),
+        )
+        val bytes = model.toJson().toByteArray(StandardCharsets.UTF_8)
+        val snapshot = CanonicalProgramModelStreaming.readCanonical(bytes)
+
+        assertEquals(model, snapshot.model)
+        assertContentEquals(bytes, snapshot.model.toJson().toByteArray(StandardCharsets.UTF_8))
+        assertEquals(listOf("\ud800\udc00", "\ue000"), snapshot.model.functions.first().calls.toList())
+        assertFailsWith<UnsupportedOperationException> {
+            (snapshot.model.functions as MutableList<RecoveredFunction>).clear()
+        }
+        assertFailsWith<UnsupportedOperationException> {
+            (snapshot.model.functions.first().calls as MutableSet<String>).clear()
+        }
+    }
+
+    @Test
+    fun `fixed digest bound is independent of configurable entity string bounds`() {
+        val model = RecoveredProgramModel(
+            inputSha256 = "0".repeat(64),
+            functions = listOf(
+                RecoveredFunction(
+                    id = "a",
+                    name = "b",
+                    address = 0UL,
+                    prototype = "",
+                ),
+            ),
+        )
+        val snapshot = CanonicalProgramModelStreaming.readCanonical(
+            model.toJson().toByteArray(StandardCharsets.UTF_8),
+            CanonicalProgramModelStreamingLimits(
+                maximumIdentifierCodePoints = 1,
+                maximumPrototypeCodePoints = 1,
+                maximumTextCodePoints = 1,
+            ),
+        )
+
+        assertEquals(model, snapshot.model)
     }
 
     private fun resourceBytes(): ByteArray = checkNotNull(
