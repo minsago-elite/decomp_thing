@@ -451,116 +451,27 @@ private fun minimumCostNearAssignment(
     val cells = (oracle.size.toLong() + 1L) * width.toLong()
     if (cells > limits.maximumMatchingCells) boundaryReplayFail("near assignment exceeds the configured cell limit")
     try {
-        val suffixCounts = ShortArray(cells.toInt())
-        val suffixCosts = IntArray(cells.toInt())
-        for (oracleIndex in oracle.lastIndex downTo 0) {
-            val row = oracleIndex * width
-            val below = (oracleIndex + 1) * width
-            for (recoveredIndex in recovered.lastIndex downTo 0) {
-                var bestCount = suffixCounts[below + recoveredIndex].toInt()
-                var bestCost = suffixCosts[below + recoveredIndex]
-                val rightCount = suffixCounts[row + recoveredIndex + 1].toInt()
-                val rightCost = suffixCosts[row + recoveredIndex + 1]
-                if (betterObjective(rightCount, rightCost, bestCount, bestCost)) {
-                    bestCount = rightCount
-                    bestCost = rightCost
-                }
-                val distance = distanceWithinBound(oracle[oracleIndex].rva, recovered[recoveredIndex].rva, bound)
-                if (distance != null) {
-                    val matchCount = suffixCounts[below + recoveredIndex + 1].toInt() + 1
-                    val matchCost = suffixCosts[below + recoveredIndex + 1] + distance
-                    if (betterObjective(matchCount, matchCost, bestCount, bestCost)) {
-                        bestCount = matchCount
-                        bestCost = matchCost
-                    }
-                }
-                suffixCounts[row + recoveredIndex] = bestCount.toShort()
-                suffixCosts[row + recoveredIndex] = bestCost
-            }
+        // Preserve the historical v1 Cartesian-cell admission limit and report contract, but use
+        // the independently tested exact sparse solver after admission. This removes the dense
+        // allocation without silently widening what a v1 report is allowed to claim; a scaled
+        // scorer needs a separately versioned policy rather than reinterpreting maxMatchingCells.
+        val solved = SparseMonotoneAssignment.solve(
+            leftRvas = oracle.map { it.rva },
+            rightRvas = recovered.map { it.rva },
+            maximumDistanceBytes = bound,
+            limits = SparseMonotoneAssignmentLimits(
+                maximumLeftRecords = limits.maximumFunctionRecords,
+                maximumRightRecords = limits.maximumFunctionRecords,
+                maximumDistanceBytes = bound,
+                maximumCandidateEdges = limits.maximumMatchingCells,
+                maximumOptimalCandidateEdges = limits.maximumAmbiguityEdges,
+            ),
+        )
+        val selected = solved.selectedEdges.map { edge ->
+            ReplayPair(oracle[edge.leftIndex], recovered[edge.rightIndex])
         }
-
-        val maximumCardinality = suffixCounts[0].toInt()
-        val minimumCost = suffixCosts[0]
-        val selected = arrayListOf<ReplayPair>()
-        var startOracle = 0
-        var startRecovered = 0
-        var remainingCardinality = maximumCardinality
-        var remainingCost = minimumCost
-        while (remainingCardinality > 0) {
-            var chosenOracle = -1
-            var chosenRecovered = -1
-            var chosenDistance = -1
-            search@ for (oracleIndex in startOracle until oracle.size) {
-                val below = (oracleIndex + 1) * width
-                for (recoveredIndex in startRecovered until recovered.size) {
-                    val distance = distanceWithinBound(oracle[oracleIndex].rva, recovered[recoveredIndex].rva, bound)
-                        ?: continue
-                    val suffixIndex = below + recoveredIndex + 1
-                    if (suffixCounts[suffixIndex].toInt() + 1 == remainingCardinality &&
-                        suffixCosts[suffixIndex] + distance == remainingCost
-                    ) {
-                        chosenOracle = oracleIndex
-                        chosenRecovered = recoveredIndex
-                        chosenDistance = distance
-                        break@search
-                    }
-                }
-            }
-            if (chosenOracle < 0) boundaryReplayFail("near assignment reconstruction drifted from its objective")
-            selected += ReplayPair(oracle[chosenOracle], recovered[chosenRecovered])
-            startOracle = chosenOracle + 1
-            startRecovered = chosenRecovered + 1
-            remainingCardinality--
-            remainingCost -= chosenDistance
-        }
-
-        val optimalCandidates = arrayListOf<ReplayPair>()
-        var previousCounts = ShortArray(width)
-        var previousCosts = IntArray(width)
-        oracle.forEachIndexed { oracleIndex, oracleFunction ->
-            val currentCounts = ShortArray(width)
-            val currentCosts = IntArray(width)
-            val below = (oracleIndex + 1) * width
-            recovered.forEachIndexed { recoveredIndex, recoveredFunction ->
-                val distance = distanceWithinBound(oracleFunction.rva, recoveredFunction.rva, bound)
-                if (distance != null) {
-                    val suffixIndex = below + recoveredIndex + 1
-                    if (previousCounts[recoveredIndex].toInt() + 1 + suffixCounts[suffixIndex].toInt() ==
-                        maximumCardinality &&
-                        previousCosts[recoveredIndex] + distance + suffixCosts[suffixIndex] == minimumCost
-                    ) {
-                        optimalCandidates += ReplayPair(oracleFunction, recoveredFunction)
-                        if (optimalCandidates.size > limits.maximumAmbiguityEdges) {
-                            boundaryReplayFail("optimal near-assignment ambiguity exceeds the configured edge limit")
-                        }
-                    }
-                }
-
-                val cell = recoveredIndex + 1
-                var bestCount = previousCounts[cell].toInt()
-                var bestCost = previousCosts[cell]
-                val leftCount = currentCounts[cell - 1].toInt()
-                val leftCost = currentCosts[cell - 1]
-                if (betterObjective(leftCount, leftCost, bestCount, bestCost)) {
-                    bestCount = leftCount
-                    bestCost = leftCost
-                }
-                if (distance != null) {
-                    val matchCount = previousCounts[cell - 1].toInt() + 1
-                    val matchCost = previousCosts[cell - 1] + distance
-                    if (betterObjective(matchCount, matchCost, bestCount, bestCost)) {
-                        bestCount = matchCount
-                        bestCost = matchCost
-                    }
-                }
-                currentCounts[cell] = bestCount.toShort()
-                currentCosts[cell] = bestCost
-            }
-            previousCounts = currentCounts
-            previousCosts = currentCosts
-        }
-        if (previousCounts.last().toInt() != maximumCardinality || previousCosts.last() != minimumCost) {
-            boundaryReplayFail("forward and backward near-assignment objectives disagree")
+        val optimalCandidates = solved.optimalCandidateEdges.map { edge ->
+            ReplayPair(oracle[edge.leftIndex], recovered[edge.rightIndex])
         }
         val selectedOracle = selected.mapTo(hashSetOf()) { it.oracle.id }
         val selectedRecovered = selected.mapTo(hashSetOf()) { it.recovered.id }
@@ -568,16 +479,15 @@ private fun minimumCostNearAssignment(
             selected,
             oracle.filterNot { it.id in selectedOracle },
             recovered.filterNot { it.id in selectedRecovered },
-            minimumCost,
+            Math.toIntExact(solved.minimumTotalDistanceBytes),
             optimalCandidates,
         )
+    } catch (failure: SparseMonotoneAssignmentException) {
+        throw StructuralRecoveryV1Exception("sparse historical near assignment failed", failure)
     } catch (failure: OutOfMemoryError) {
         throw StructuralRecoveryV1Exception("not enough memory for the bounded near assignment", failure)
     }
 }
-
-private fun betterObjective(candidateCount: Int, candidateCost: Int, bestCount: Int, bestCost: Int): Boolean =
-    candidateCount > bestCount || candidateCount == bestCount && candidateCost < bestCost
 
 private fun distanceWithinBound(left: ULong, right: ULong, bound: Int): Int? {
     val distance = if (left >= right) left - right else right - left
