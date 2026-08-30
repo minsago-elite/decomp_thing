@@ -89,7 +89,10 @@ internal fun selectWebReconstructionStrategy(environment: Map<String, String>): 
             val selection = AcpHarnessFactory.fromEnvironment(environment)
             WebReconstructionStrategy(
                 WebReconstructionMode.AGENT,
-                BoundedLlmModuleReconstructor(selection.createHarness()),
+                BoundedLlmModuleReconstructor(
+                    selection.createHarness(),
+                    harnessProvenanceDescriptor = selection.provenance.stableDescriptor,
+                ),
                 selection.provenance,
             )
         }

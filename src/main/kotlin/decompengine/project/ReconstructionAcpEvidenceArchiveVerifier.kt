@@ -9,6 +9,7 @@ import decompengine.acp.LinuxFilesystemSyscalls
 import decompengine.agent.AGENT_EXECUTION_CONTRACT_VERSION
 import decompengine.oracle.core.OracleJson
 import decompengine.oracle.core.StrictJsonLimits
+import java.nio.charset.StandardCharsets
 import java.nio.file.Files
 import java.nio.file.Path
 import java.security.MessageDigest
@@ -189,6 +190,7 @@ internal object ReconstructionAcpEvidenceArchiveVerifier {
             generator,
             reconstructorIdentity,
             promptSha256,
+            promptBudgetCharacters,
             executionEvidencePath,
             executionEvidenceSha256,
             accepted,
@@ -214,14 +216,14 @@ internal object ReconstructionAcpEvidenceArchiveVerifier {
             "reconstruction ACP execution evidence names the wrong module: $moduleId"
         }
 
-        val implementationId = verifyFactoryAndProtocol(root)
-        require(source.generator == "agent:$implementationId" &&
+        val factory = verifyFactoryAndProtocol(root)
+        require(source.generator == "agent:${factory.implementationId}" &&
             checkpoint.generator == source.generator &&
-            checkpoint.reconstructorIdentity.startsWith("agent:$implementationId:")
+            checkpoint.reconstructorIdentity == checkpoint.expectedReconstructorIdentity(factory)
         ) {
             "ACP factory provenance differs from module generator provenance: $moduleId"
         }
-        verifyAgentAndSession(root, implementationId)
+        verifyAgentAndSession(root, factory.implementationId)
         val bounds = verifyTurnAndBounds(root, checkpoint)
         val eventChanges = verifyEvents(root.requiredArray("events", "ACP evidence"), bounds.archivedEventCount)
         val resultChanges = verifyResult(root, bounds, source, sourceBytes)
@@ -234,7 +236,7 @@ internal object ReconstructionAcpEvidenceArchiveVerifier {
         verifyValidation(root, source)
     }
 
-    private fun verifyFactoryAndProtocol(root: JsonObject): String {
+    private fun verifyFactoryAndProtocol(root: JsonObject): FactoryIdentity {
         val provenance = root.requiredObject("factoryProvenance", "ACP evidence")
         provenance.requireExactKeys(FACTORY_FIELDS, "ACP factory provenance")
         val descriptor = provenance.requiredString("descriptor", "ACP factory provenance")
@@ -273,7 +275,7 @@ internal object ReconstructionAcpEvidenceArchiveVerifier {
             "supported",
         ).joinToString(":")
         require(descriptor == expectedDescriptor) { "ACP factory descriptor is internally inconsistent" }
-        return implementationId
+        return FactoryIdentity(implementationId, descriptor)
     }
 
     private fun verifyAgentAndSession(root: JsonObject, implementationId: String) {
@@ -779,9 +781,23 @@ internal object ReconstructionAcpEvidenceArchiveVerifier {
         val generator: String,
         val reconstructorIdentity: String,
         val promptSha256: String,
+        val promptBudgetCharacters: Long?,
         val executionEvidencePath: String?,
         val executionEvidenceSha256: String?,
         val accepted: Boolean,
+    ) {
+        fun expectedReconstructorIdentity(factory: FactoryIdentity): String {
+            val budget = requireNotNull(promptBudgetCharacters) {
+                "agent reconstruction checkpoint is missing its prompt budget"
+            }
+            return "agent:${factory.implementationId}:context-$budget:" +
+                "factory-${sha256(factory.descriptor.toByteArray(StandardCharsets.UTF_8))}:v2"
+        }
+    }
+
+    private data class FactoryIdentity(
+        val implementationId: String,
+        val descriptor: String,
     )
 
     private data class EvidenceBounds(

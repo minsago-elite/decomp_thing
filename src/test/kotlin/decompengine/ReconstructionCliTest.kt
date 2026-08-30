@@ -75,6 +75,7 @@ class ReconstructionCliTest {
         )
 
         assertIs<BoundedLlmModuleReconstructor>(strategy.reconstructor)
+        assertTrue(!strategy.reconstructor.cacheIdentity().contains("factory-unbound"))
         assertEquals(
             "agent-harness-v1:legacy-openai:contract-1:acp-none:sdk-none:" +
                 "implementation-legacy-openai-compatible:configuration-none:deprecated",

@@ -111,7 +111,11 @@ internal fun selectReconstructionStrategy(
     val effectiveEnvironment = withHarnessOverride(environment, harnessOverride)
     val selection = AcpHarnessFactory.fromEnvironment(effectiveEnvironment)
     return ReconstructionStrategy(
-        BoundedLlmModuleReconstructor(selection.createHarness(), maximumContext),
+        BoundedLlmModuleReconstructor(
+            selection.createHarness(),
+            maximumContext,
+            selection.provenance.stableDescriptor,
+        ),
         selection.provenance.stableDescriptor,
     )
 }

@@ -23,10 +23,31 @@ import kotlin.test.Test
 import kotlin.test.assertEquals
 import kotlin.test.assertFalse
 import kotlin.test.assertFailsWith
+import kotlin.test.assertNotEquals
 import kotlin.test.assertNull
 import kotlin.test.assertTrue
 
 class SourceTreeTest {
+    @Test
+    fun `agent cache identity binds the complete factory provenance without exposing it`() {
+        val harness = AgentHarness { _, _ -> AgentExecutionResult(AgentStopReason.NO_CHANGES) }
+        val firstDescriptor = "agent-harness-v1:acp:configuration-${"a".repeat(64)}"
+        val secondDescriptor = "agent-harness-v1:acp:configuration-${"b".repeat(64)}"
+
+        val first = BoundedLlmModuleReconstructor(
+            harness,
+            harnessProvenanceDescriptor = firstDescriptor,
+        ).cacheIdentity()
+        val second = BoundedLlmModuleReconstructor(
+            harness,
+            harnessProvenanceDescriptor = secondDescriptor,
+        ).cacheIdentity()
+
+        assertNotEquals(first, second)
+        assertTrue(first.endsWith(":v2"))
+        assertFalse(first.contains(firstDescriptor))
+    }
+
     @Test
     fun `generator emits buildable multi-module tree and provenance manifest`() {
         val project = createTempDirectory("source-tree-")

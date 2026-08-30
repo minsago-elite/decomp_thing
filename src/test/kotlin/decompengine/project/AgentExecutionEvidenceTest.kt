@@ -73,6 +73,7 @@ class AgentExecutionEvidenceTest {
         val message = "peer assistant text must be represented by digest"
         val toolTitle = "peer tool title must be represented by digest"
         val harness = EvidenceHarness(sessionId, message, toolTitle)
+        val factoryProvenance = harness.factoryProvenance
 
         val manifest = SourceTreeGenerator.generate(
             RecoveredProgramModel(
@@ -89,7 +90,10 @@ class AgentExecutionEvidenceTest {
                 types = emptyList(),
             ),
             project,
-            reconstructor = BoundedLlmModuleReconstructor(harness),
+            reconstructor = BoundedLlmModuleReconstructor(
+                harness,
+                harnessProvenanceDescriptor = factoryProvenance.stableDescriptor,
+            ),
         )
 
         val evidencePath = "reports/agent-executions/parse.json"
@@ -156,6 +160,15 @@ class AgentExecutionEvidenceTest {
         private val toolTitle: String,
     ) : AgentHarness, AcpExecutionEvidenceSource {
         private var evidence: AcpExecutionEvidenceSnapshot? = null
+        val factoryProvenance = AcpHarnessProvenance(
+            harness = "acp",
+            implementationId = IMPLEMENTATION_ID,
+            agentExecutionContractVersion = 1,
+            acpProtocolVersion = ACP_STABLE_PROTOCOL_VERSION,
+            acpSdkVersion = ACP_KOTLIN_SDK_VERSION,
+            configurationSha256 = "b".repeat(64),
+            deprecated = false,
+        )
 
         override fun implementationIdentifier(): String = IMPLEMENTATION_ID
 
@@ -219,15 +232,7 @@ class AgentExecutionEvidenceTest {
                 outputTruncated = false,
             )
             return AcpExecutionEvidenceSnapshot(
-                factoryProvenance = AcpHarnessProvenance(
-                    harness = "acp",
-                    implementationId = IMPLEMENTATION_ID,
-                    agentExecutionContractVersion = 1,
-                    acpProtocolVersion = ACP_STABLE_PROTOCOL_VERSION,
-                    acpSdkVersion = ACP_KOTLIN_SDK_VERSION,
-                    configurationSha256 = "b".repeat(64),
-                    deprecated = false,
-                ),
+                factoryProvenance = factoryProvenance,
                 negotiatedAgent = AcpNegotiatedAgentEvidence(
                     ACP_STABLE_PROTOCOL_VERSION,
                     "fake-acp-agent",

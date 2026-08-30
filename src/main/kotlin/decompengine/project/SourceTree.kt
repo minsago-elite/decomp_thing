@@ -23,6 +23,7 @@ import kotlinx.serialization.json.jsonArray
 import kotlinx.serialization.json.jsonObject
 import kotlinx.serialization.json.jsonPrimitive
 import java.nio.file.AtomicMoveNotSupportedException
+import java.nio.charset.StandardCharsets
 import java.nio.file.Files
 import java.nio.file.Path
 import java.nio.file.StandardCopyOption
@@ -170,11 +171,22 @@ class RecoveredCModuleReconstructor : ModuleReconstructor by EvidenceModuleRecon
 class BoundedLlmModuleReconstructor(
     private val harness: AgentHarness,
     private val maximumContextCharacters: Int = 120_000,
+    harnessProvenanceDescriptor: String? = null,
 ) : ModuleReconstructor {
+    private val harnessProvenanceSha256 = harnessProvenanceDescriptor?.let { descriptor ->
+        require(descriptor.isNotBlank()) { "harness provenance descriptor must not be blank" }
+        val encoded = descriptor.toByteArray(StandardCharsets.UTF_8)
+        require(encoded.size <= MAXIMUM_HARNESS_PROVENANCE_BYTES) {
+            "harness provenance descriptor exceeds its byte limit"
+        }
+        sha256(encoded)
+    }
+
     init { require(maximumContextCharacters >= 4_096) }
 
     override fun cacheIdentity(): String =
-        "agent:${harness.implementationIdentifier() ?: "unspecified"}:context-$maximumContextCharacters:v1"
+        "agent:${harness.implementationIdentifier() ?: "unspecified"}:context-$maximumContextCharacters:" +
+            "factory-${harnessProvenanceSha256 ?: "unbound"}:v2"
 
     override fun requiresExecutionEvidenceForCheckpointReuse(): Boolean = true
 
@@ -306,6 +318,8 @@ class BoundedLlmModuleReconstructor(
         }
     }
 }
+
+private const val MAXIMUM_HARNESS_PROVENANCE_BYTES = 4 * 1024
 
 class ModuleContextBudgetExceededException(
     val moduleId: String,

@@ -42,6 +42,7 @@ class SourceTreeJobReconstructorTest {
 
         assertEquals(WebReconstructionMode.AGENT, strategy.mode)
         assertIs<BoundedLlmModuleReconstructor>(strategy.reconstructor)
+        assertTrue(!strategy.reconstructor.cacheIdentity().contains("factory-unbound"))
         val provenance = requireNotNull(strategy.harnessProvenance)
         assertEquals("legacy-openai", provenance.harness)
         assertTrue(provenance.deprecated)

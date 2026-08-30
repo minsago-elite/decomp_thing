@@ -89,7 +89,7 @@ class ReconstructionAcpEvidenceArchiveVerifierTest {
         val temp = createTempDirectory("acp-archive-checkpoint-")
         val baseline = createAgentProject(temp.resolve("baseline"), accepted = true)
 
-        listOf("path", "digest").forEach { mutation ->
+        listOf("path", "digest", "factory-cache-identity").forEach { mutation ->
             val project = temp.resolve(mutation)
             copyTree(baseline, project)
             rewriteCheckpointAndManifest(project) { checkpoint ->
@@ -98,9 +98,13 @@ class ReconstructionAcpEvidenceArchiveVerifierTest {
                         "\"executionEvidencePath\": \"$EVIDENCE_PATH\"",
                         "\"executionEvidencePath\": \"reports/agent-executions/stale.json\"",
                     )
-                    else -> checkpoint.replace(
+                    "digest" -> checkpoint.replace(
                         Regex("\"executionEvidenceSha256\": \"[0-9a-f]{64}\""),
                         "\"executionEvidenceSha256\": \"${"0".repeat(64)}\"",
+                    )
+                    else -> checkpoint.replace(
+                        Regex("factory-[0-9a-f]{64}:v2"),
+                        "factory-${"0".repeat(64)}:v2",
                     )
                 }
             }
@@ -145,6 +149,7 @@ class ReconstructionAcpEvidenceArchiveVerifierTest {
     }
 
     private fun createAgentProject(project: Path, accepted: Boolean): Path {
+        val harness = ArchiveEvidenceHarness(accepted)
         SourceTreeGenerator.generate(
             RecoveredProgramModel(
                 inputSha256 = "a".repeat(64),
@@ -158,7 +163,10 @@ class ReconstructionAcpEvidenceArchiveVerifierTest {
                 ),
             ),
             project,
-            reconstructor = BoundedLlmModuleReconstructor(ArchiveEvidenceHarness(accepted)),
+            reconstructor = BoundedLlmModuleReconstructor(
+                harness,
+                harnessProvenanceDescriptor = harness.factoryProvenance.stableDescriptor,
+            ),
         )
         MakeProjectBuilder.build(project)
         return project
@@ -212,6 +220,15 @@ class ReconstructionAcpEvidenceArchiveVerifierTest {
 
     private class ArchiveEvidenceHarness(private val accepted: Boolean) : AgentHarness, AcpExecutionEvidenceSource {
         private var evidence: AcpExecutionEvidenceSnapshot? = null
+        val factoryProvenance = AcpHarnessProvenance(
+            harness = "acp",
+            implementationId = IMPLEMENTATION_ID,
+            agentExecutionContractVersion = 1,
+            acpProtocolVersion = ACP_STABLE_PROTOCOL_VERSION,
+            acpSdkVersion = ACP_KOTLIN_SDK_VERSION,
+            configurationSha256 = "b".repeat(64),
+            deprecated = false,
+        )
 
         override fun implementationIdentifier(): String = IMPLEMENTATION_ID
 
@@ -251,15 +268,7 @@ class ReconstructionAcpEvidenceArchiveVerifierTest {
         override fun latestAcpExecutionEvidence(): AcpExecutionEvidenceSnapshot? = evidence
 
         private fun snapshot(): AcpExecutionEvidenceSnapshot = AcpExecutionEvidenceSnapshot(
-            factoryProvenance = AcpHarnessProvenance(
-                harness = "acp",
-                implementationId = IMPLEMENTATION_ID,
-                agentExecutionContractVersion = 1,
-                acpProtocolVersion = ACP_STABLE_PROTOCOL_VERSION,
-                acpSdkVersion = ACP_KOTLIN_SDK_VERSION,
-                configurationSha256 = "b".repeat(64),
-                deprecated = false,
-            ),
+            factoryProvenance = factoryProvenance,
             negotiatedAgent = AcpNegotiatedAgentEvidence(
                 ACP_STABLE_PROTOCOL_VERSION,
                 "archive-test-agent",
