@@ -4,6 +4,7 @@ import decompengine.agent.AGENT_EXECUTION_CONTRACT_VERSION
 import decompengine.repair.RepairClientAgentHarness
 import java.nio.file.Files
 import java.nio.file.Path
+import java.nio.file.StandardCopyOption
 import java.nio.file.attribute.PosixFilePermission
 import kotlin.io.path.createTempFile
 import kotlin.io.path.writeBytes
@@ -201,6 +202,25 @@ class AcpHarnessFactoryTest {
     }
 
     @Test
+    fun `strict document rejects non-ASCII digits in Unicode escapes`() {
+        val asciiEscape = validConfig().replace(
+            "\"implementationId\": \"fixture-acp\"",
+            "\"implementationId\": \"fixture-\\u0041cp\"",
+        )
+        val malformedEscape = validConfig().replace(
+            "\"implementationId\": \"fixture-acp\"",
+            "\"implementationId\": \"fixture-\\u٠٠٤١cp\"",
+        )
+
+        assertEquals("fixture-Acp", select(writeConfig(asciiEscape)).configuration?.implementationId)
+        val failure = assertFailsWith<IllegalArgumentException> {
+            select(writeConfig(malformedEscape))
+        }
+
+        assertTrue(failure.message.orEmpty().contains("Unicode escape is malformed"), failure.message)
+    }
+
+    @Test
     fun `structured collections reject duplicate environment and capability entries`() {
         val duplicateEnvironment = validConfig(
             environmentEntries = """
@@ -245,6 +265,65 @@ class AcpHarnessFactoryTest {
         makePrivate(oversized)
         val size = assertFailsWith<IllegalArgumentException> { select(oversized) }
         assertTrue(size.message.orEmpty().contains("between 1 and"))
+
+        val linked = writeConfig(validConfig())
+        val secondLink = linked.resolveSibling("${linked.fileName}.hard-link")
+        Files.createLink(secondLink, linked)
+        val links = assertFailsWith<IllegalArgumentException> { select(linked) }
+        assertTrue(links.message.orEmpty().contains("exactly one filesystem link"))
+
+        val symlinkTarget = writeConfig(validConfig())
+        val symlink = symlinkTarget.resolveSibling("${symlinkTarget.fileName}.symbolic-link")
+        Files.createSymbolicLink(symlink, symlinkTarget)
+        val symbolic = assertFailsWith<IllegalArgumentException> { select(symlink) }
+        assertTrue(symbolic.message.orEmpty().contains("regular file without following links"))
+    }
+
+    @Test
+    fun `configuration bytes stay bound to the pinned inode during pathname replacement`() {
+        val trusted = writeConfig(validConfig(implementationId = "trusted-acp"))
+        val replacement = writeConfig(validConfig(implementationId = "hostile-acp"))
+        val pinnedName = trusted.resolveSibling("${trusted.fileName}.pinned")
+        val expected = AcpHarnessProvisioning.load(
+            trusted.toString(),
+            mapOf("TEST_ACP_SECRET" to "secret"),
+        )
+        var swapped = false
+
+        val actual = try {
+            AcpHarnessProvisioning.loadForTesting(
+                trusted.toString(),
+                mapOf("TEST_ACP_SECRET" to "secret"),
+                AcpProvisioningReadTestHook(
+                    afterPinned = {
+                        Files.move(trusted, pinnedName)
+                        Files.move(replacement, trusted)
+                        Files.setPosixFilePermissions(
+                            trusted,
+                            setOf(PosixFilePermission.OWNER_READ, PosixFilePermission.GROUP_READ),
+                        )
+                        swapped = true
+                    },
+                    afterRead = {
+                        Files.move(trusted, replacement, StandardCopyOption.REPLACE_EXISTING)
+                        Files.move(pinnedName, trusted)
+                        swapped = false
+                    },
+                ),
+            )
+        } finally {
+            if (swapped || Files.exists(pinnedName)) {
+                if (Files.exists(trusted)) {
+                    Files.move(trusted, replacement, StandardCopyOption.REPLACE_EXISTING)
+                }
+                if (Files.exists(pinnedName)) {
+                    Files.move(pinnedName, trusted, StandardCopyOption.REPLACE_EXISTING)
+                }
+            }
+        }
+
+        assertEquals("trusted-acp", actual.configuration.implementationId)
+        assertEquals(expected.canonicalSha256, actual.canonicalSha256)
     }
 
     @Test
@@ -259,6 +338,30 @@ class AcpHarnessFactoryTest {
         )
         val overlapFailure = assertFailsWith<IllegalArgumentException> { select(writeConfig(overlap)) }
         assertTrue(overlapFailure.message.orEmpty().contains("overlap the agent executable"))
+    }
+
+    @Test
+    fun `static runtime mounts allow the full boundary count and reserve the executable separately`() {
+        val mounts = (0 until MAXIMUM_SANDBOX_MOUNTS).joinToString(",\n") { index ->
+            """{"source":"/opt/acp-runtime-$index","destination":"/runtime/acp-$index","expectedManifestSha256":"${"2".repeat(64)}"}"""
+        }
+        val atLimit = select(writeConfig(validConfig(
+            launcherMountEntries = mounts,
+            agentMountEntries = "",
+        )))
+        assertEquals(
+            MAXIMUM_SANDBOX_MOUNTS,
+            assertNotNull(atLimit.configuration?.sandboxBoundary).launcherRuntimeMounts.size,
+        )
+
+        val overLimit = assertFailsWith<IllegalArgumentException> {
+            select(writeConfig(validConfig(
+                launcherMountEntries = mounts,
+                agentMountEntries =
+                    """{"source":"/opt/acp-extra","destination":"/runtime/acp-extra","expectedManifestSha256":"${"3".repeat(64)}"}""",
+            )))
+        }
+        assertTrue(overLimit.message.orEmpty().contains("combined ACP runtime mounts exceed"))
     }
 
     private fun select(path: Path): AcpHarnessSelection = AcpHarnessFactory.fromEnvironment(
@@ -279,15 +382,20 @@ class AcpHarnessFactoryTest {
     }
 
     private fun validConfig(
+        implementationId: String = "fixture-acp",
         environmentEntries: String = """
             {"name":"PUBLIC_MODE","provenance":"public","value":"safe"},
             {"name":"AGENT_TOKEN","provenance":"secret","valueFromEnvironment":"TEST_ACP_SECRET"}
         """.trimIndent(),
         capabilities: String = "\"loadSession\", \"promptCapabilities.embeddedContext\"",
+        launcherMountEntries: String =
+            """{"source":"/usr/lib/liblauncher.so","destination":"/runtime/launcher/liblauncher.so","expectedManifestSha256":"${"2".repeat(64)}"}""",
+        agentMountEntries: String =
+            """{"source":"/opt/decomp/acp-runtime","destination":"/runtime/agent","expectedManifestSha256":"${"3".repeat(64)}"}""",
     ): String = """
         {
           "schemaVersion": 1,
-          "implementationId": "fixture-acp",
+          "implementationId": "$implementationId",
           "agent": {
             "executable": "/opt/decomp/acp-agent",
             "arguments": ["--mode", "two words", "", "literal-${'$'}()"],
@@ -323,10 +431,10 @@ class AcpHarnessFactoryTest {
             "systemdUserRuntimeDirectory": "/run/user/1000",
             "agentWorkingDirectory": "/tmp",
             "launcherRuntimeMounts": [
-              {"source":"/usr/lib/liblauncher.so","destination":"/runtime/launcher/liblauncher.so","expectedManifestSha256":"${"2".repeat(64)}"}
+              $launcherMountEntries
             ],
             "agentRuntimeMounts": [
-              {"source":"/opt/decomp/acp-runtime","destination":"/runtime/agent","expectedManifestSha256":"${"3".repeat(64)}"}
+              $agentMountEntries
             ],
             "agentResourceLimits": {
               "maximumProcesses": 32,

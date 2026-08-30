@@ -1,17 +1,12 @@
 package decompengine.acp
 
-import java.io.ByteArrayOutputStream
 import java.nio.ByteBuffer
 import java.nio.charset.CodingErrorAction
 import java.nio.charset.StandardCharsets
 import java.nio.file.Files
 import java.nio.file.InvalidPathException
-import java.nio.file.LinkOption
-import java.nio.file.OpenOption
 import java.nio.file.Path
-import java.nio.file.StandardOpenOption
 import java.nio.file.attribute.BasicFileAttributes
-import java.nio.file.attribute.PosixFilePermission
 import java.security.MessageDigest
 import java.time.Duration
 
@@ -20,11 +15,30 @@ internal data class ProvisionedAcpHarness(
     val canonicalSha256: String,
 )
 
+internal class AcpProvisioningReadTestHook(
+    val afterPinned: () -> Unit = {},
+    val afterRead: () -> Unit = {},
+)
+
 /** Strict, bounded provisioning for the complete static ACP process/sandbox authority. */
 internal object AcpHarnessProvisioning {
     fun load(configuredPath: String, hostEnvironment: Map<String, String>): ProvisionedAcpHarness {
+        return load(configuredPath, hostEnvironment, null)
+    }
+
+    internal fun loadForTesting(
+        configuredPath: String,
+        hostEnvironment: Map<String, String>,
+        readHook: AcpProvisioningReadTestHook,
+    ): ProvisionedAcpHarness = load(configuredPath, hostEnvironment, readHook)
+
+    private fun load(
+        configuredPath: String,
+        hostEnvironment: Map<String, String>,
+        readHook: AcpProvisioningReadTestHook?,
+    ): ProvisionedAcpHarness {
         val path = provisioningPath(configuredPath)
-        val bytes = readBoundedPrivateFile(path)
+        val bytes = readBoundedPrivateFile(path, readHook)
         val text = try {
             StandardCharsets.UTF_8.newDecoder()
                 .onMalformedInput(CodingErrorAction.REPORT)
@@ -217,7 +231,10 @@ internal object AcpHarnessProvisioning {
             MAXIMUM_SANDBOX_MOUNTS,
             "ACP sandbox configuration",
         ), "agent")
-        require(launcherMounts.size + agentMounts.size < MAXIMUM_SANDBOX_MOUNTS) {
+        // The static policy owns at most MAXIMUM_SANDBOX_MOUNTS entries. The outer launch's
+        // separately authenticated agent executable is the one additional mount accepted by the
+        // boundary, matching AcpLinuxSandboxConfiguration and buildBubblewrapCommand.
+        require(launcherMounts.size + agentMounts.size <= MAXIMUM_SANDBOX_MOUNTS) {
             "combined ACP runtime mounts exceed the authenticated count limit"
         }
         require((launcherMounts + agentMounts).none { mount ->
@@ -325,56 +342,70 @@ internal object AcpHarnessProvisioning {
         return path
     }
 
-    private fun readBoundedPrivateFile(path: Path): ByteArray {
+    private fun readBoundedPrivateFile(
+        path: Path,
+        readHook: AcpProvisioningReadTestHook?,
+    ): ByteArray {
         try {
-            val before = Files.readAttributes(path, BasicFileAttributes::class.java, LinkOption.NOFOLLOW_LINKS)
-            require(before.isRegularFile && !before.isSymbolicLink) {
-                "ACP_CONFIG_FILE must name a regular file without following links"
-            }
-            require(before.size() in 1..MAXIMUM_ACP_CONFIG_BYTES.toLong()) {
-                "ACP_CONFIG_FILE must contain between 1 and $MAXIMUM_ACP_CONFIG_BYTES bytes"
-            }
-            val permissions = Files.getPosixFilePermissions(path, LinkOption.NOFOLLOW_LINKS)
-            require(permissions.none { it in NON_OWNER_PERMISSIONS }) {
-                "ACP_CONFIG_FILE must not grant group or other permissions"
-            }
-            val currentUid = (Files.getAttribute(Path.of("/proc/self"), "unix:uid") as Number).toLong()
-            val ownerUid = (Files.getAttribute(path, "unix:uid", LinkOption.NOFOLLOW_LINKS) as Number).toLong()
-            require(ownerUid == currentUid) { "ACP_CONFIG_FILE must be owned by the current user" }
-            val linkCount = (Files.getAttribute(path, "unix:nlink", LinkOption.NOFOLLOW_LINKS) as Number).toLong()
-            require(linkCount == 1L) { "ACP_CONFIG_FILE must have exactly one filesystem link" }
-
-            val output = ByteArrayOutputStream(before.size().toInt())
-            val buffer = ByteBuffer.allocate(CONFIG_READ_BUFFER_BYTES)
-            val options = setOf<OpenOption>(StandardOpenOption.READ, LinkOption.NOFOLLOW_LINKS)
-            Files.newByteChannel(path, options).use { channel ->
-                while (true) {
-                    buffer.clear()
-                    val count = channel.read(buffer)
-                    if (count < 0) break
-                    if (count == 0) continue
-                    require(output.size().toLong() + count <= MAXIMUM_ACP_CONFIG_BYTES.toLong()) {
-                        "ACP_CONFIG_FILE exceeds the $MAXIMUM_ACP_CONFIG_BYTES-byte limit"
+            val authorized = LinuxFilesystemSyscalls.openAbsolutePathOrNull(path)
+                ?: throw IllegalArgumentException("ACP_CONFIG_FILE does not exist")
+            authorized.use { pinned ->
+                requirePrivateConfigurationIdentity(pinned.identity)
+                readHook?.afterPinned?.invoke()
+                LinuxFilesystemSyscalls.openReadableFrom(pinned).use { readable ->
+                    val identityBefore = LinuxFilesystemSyscalls.identity(readable.fd)
+                    requirePrivateConfigurationIdentity(identityBefore)
+                    require(identityBefore.key == pinned.identity.key && identityBefore.mountId == pinned.identity.mountId) {
+                        "ACP_CONFIG_FILE identity changed before it was read"
                     }
-                    output.write(buffer.array(), 0, count)
+                    val descriptorPath = LinuxFilesystemSyscalls.stableDescriptorPath(readable.fd)
+                    val before = Files.readAttributes(descriptorPath, BasicFileAttributes::class.java)
+                    require(before.isRegularFile && !before.isSymbolicLink) {
+                        "ACP_CONFIG_FILE must name a regular file without following links"
+                    }
+                    require(before.size() in 1..MAXIMUM_ACP_CONFIG_BYTES.toLong()) {
+                        "ACP_CONFIG_FILE must contain between 1 and $MAXIMUM_ACP_CONFIG_BYTES bytes"
+                    }
+                    val bytes = try {
+                        LinuxFilesystemSyscalls.read(readable, MAXIMUM_ACP_CONFIG_BYTES + 1) {}
+                    } catch (failure: LinuxResourceLimitException) {
+                        throw IllegalArgumentException(
+                            "ACP_CONFIG_FILE exceeds the $MAXIMUM_ACP_CONFIG_BYTES-byte limit",
+                            failure,
+                        )
+                    }
+                    readHook?.afterRead?.invoke()
+                    val identityAfter = LinuxFilesystemSyscalls.identity(readable.fd)
+                    val after = Files.readAttributes(descriptorPath, BasicFileAttributes::class.java)
+                    require(
+                        identityAfter == identityBefore &&
+                            after.isRegularFile &&
+                            !after.isSymbolicLink &&
+                            after.fileKey() == before.fileKey() &&
+                            after.size() == before.size() &&
+                            after.lastModifiedTime() == before.lastModifiedTime() &&
+                            bytes.size.toLong() == before.size()
+                    ) { "ACP_CONFIG_FILE changed while it was read" }
+                    return bytes
                 }
             }
-            val after = Files.readAttributes(path, BasicFileAttributes::class.java, LinkOption.NOFOLLOW_LINKS)
-            val ownerUidAfter = (Files.getAttribute(path, "unix:uid", LinkOption.NOFOLLOW_LINKS) as Number).toLong()
-            require(
-                after.isRegularFile &&
-                    after.fileKey() == before.fileKey() &&
-                    after.size() == before.size() &&
-                    after.lastModifiedTime() == before.lastModifiedTime() &&
-                    ownerUidAfter == ownerUid &&
-                    output.size().toLong() == before.size()
-            ) { "ACP_CONFIG_FILE changed while it was read" }
-            return output.toByteArray()
         } catch (failure: IllegalArgumentException) {
             throw failure
         } catch (failure: Exception) {
             throw IllegalArgumentException("ACP_CONFIG_FILE could not be read securely", failure)
         }
+    }
+
+    private fun requirePrivateConfigurationIdentity(identity: LinuxFileIdentity) {
+        require(identity.isRegularFile && !identity.isDirectory && !identity.isSymbolicLink) {
+            "ACP_CONFIG_FILE must name a regular file without following links"
+        }
+        require(identity.mode.permissions and NON_OWNER_PERMISSION_MASK == 0) {
+            "ACP_CONFIG_FILE must not grant group or other permissions"
+        }
+        val currentUid = (Files.getAttribute(Path.of("/proc/self"), "unix:uid") as Number).toInt()
+        require(identity.uid == currentUid) { "ACP_CONFIG_FILE must be owned by the current user" }
+        require(identity.linkCount == 1) { "ACP_CONFIG_FILE must have exactly one filesystem link" }
     }
 }
 
@@ -529,8 +560,12 @@ private class BoundedProvisioningJsonParser(private val source: String) {
         require(position + 4 <= source.length) { "ACP configuration Unicode escape is incomplete" }
         var value = 0
         repeat(4) {
-            val digit = source[position++].digitToIntOrNull(16)
-                ?: throw IllegalArgumentException("ACP configuration Unicode escape is malformed")
+            val digit = when (val character = source[position++]) {
+                in '0'..'9' -> character.code - '0'.code
+                in 'a'..'f' -> character.code - 'a'.code + 10
+                in 'A'..'F' -> character.code - 'A'.code + 10
+                else -> throw IllegalArgumentException("ACP configuration Unicode escape is malformed")
+            }
             value = value * 16 + digit
         }
         return value.toChar()
@@ -723,7 +758,6 @@ private fun sha256(bytes: ByteArray): String = MessageDigest.getInstance("SHA-25
 
 private const val CONFIG_SCHEMA_VERSION = 1
 private const val MAXIMUM_ACP_CONFIG_BYTES = 4 * 1024 * 1024
-private const val CONFIG_READ_BUFFER_BYTES = 16 * 1024
 private const val MAXIMUM_CONFIG_JSON_DEPTH = 16
 private const val MAXIMUM_CONFIG_JSON_NODES = 16_384
 private const val MAXIMUM_CONFIG_STRING_BYTES = 1024 * 1024
@@ -743,14 +777,7 @@ private const val MAXIMUM_CONFIGURED_CLOSURE_DEPTH = 64
 private const val MAXIMUM_TIMEOUT_MILLIS = 60L * 60 * 1000
 
 private val JSON_WHITESPACE = setOf(' ', '\t', '\r', '\n')
-private val NON_OWNER_PERMISSIONS = setOf(
-    PosixFilePermission.GROUP_READ,
-    PosixFilePermission.GROUP_WRITE,
-    PosixFilePermission.GROUP_EXECUTE,
-    PosixFilePermission.OTHERS_READ,
-    PosixFilePermission.OTHERS_WRITE,
-    PosixFilePermission.OTHERS_EXECUTE,
-)
+private const val NON_OWNER_PERMISSION_MASK = 0x3f // 0077
 private val ROOT_KEYS = setOf("schemaVersion", "implementationId", "agent", "sandbox")
 private val AGENT_KEYS = setOf(
     "executable",
