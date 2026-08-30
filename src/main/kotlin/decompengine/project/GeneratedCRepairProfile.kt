@@ -75,7 +75,7 @@ object GeneratedCRepairIndexProfile : RepairIndexProfile {
                 ownedPaths = (listOf(module.sourcePath, module.headerPath) + internal)
                     .filter { it in sourcePaths }.distinct().sorted(),
                 dependencyContextPaths = listOf(module.headerPath).filter { it in sourcePaths },
-                entityIds = (module.functionIds + module.globalIds).distinct().sorted(),
+                entityIds = (module.functionIds + module.globalIds + module.typeIds).distinct().sorted(),
             )
         }.sortedBy { it.id }
         val entities = buildList {
@@ -96,9 +96,16 @@ object GeneratedCRepairIndexProfile : RepairIndexProfile {
                     ),
                 )
             }
+            evidence.types.forEach { type ->
+                add(RepairEntityEvidence(id = type.id, relevanceTokens = listOf(type.id)))
+            }
         }.sortedBy { it.id }
-        val ownerByEntity = modules.flatMap { module -> module.entityIds.map { it to module.id } }.toMap()
-        require(ownerByEntity.keys == entities.mapTo(hashSetOf()) { it.id }) {
+        val ownershipRecords = modules.flatMap { module -> module.entityIds.map { it to module.id } }
+        val ownerByEntity = ownershipRecords.toMap()
+        require(
+            ownershipRecords.size == entities.size &&
+                ownerByEntity.keys == entities.mapTo(hashSetOf()) { it.id },
+        ) {
             "generated C module ownership does not exactly match program-model entities"
         }
         val explicitlyOwnedPaths = modules.flatMapTo(hashSetOf()) { it.ownedPaths }
@@ -197,6 +204,7 @@ object GeneratedCRepairIndexProfile : RepairIndexProfile {
         val headerPath: String,
         val functionIds: List<String>,
         val globalIds: List<String>,
+        val typeIds: List<String>,
     )
     private data class ProgramFunction(
         val id: String,
@@ -205,10 +213,12 @@ object GeneratedCRepairIndexProfile : RepairIndexProfile {
         val referencedGlobals: List<String>,
     )
     private data class ProgramGlobal(val id: String, val name: String)
+    private data class ProgramType(val id: String)
     private data class GeneratedCIndexEvidence(
         val modules: List<PlannedModule>,
         val functions: List<ProgramFunction>,
         val globals: List<ProgramGlobal>,
+        val types: List<ProgramType>,
     )
 
     private fun readIndexEvidence(
@@ -225,10 +235,11 @@ object GeneratedCRepairIndexProfile : RepairIndexProfile {
         require((planBytes == null) == (modelBytes == null)) {
             "generated C repair indexing requires module-plan and program-model evidence together"
         }
-        if (planBytes == null) return GeneratedCIndexEvidence(emptyList(), emptyList(), emptyList())
+        if (planBytes == null) return GeneratedCIndexEvidence(emptyList(), emptyList(), emptyList(), emptyList())
         val planRoot = Json.parseToJsonElement(decodeGeneratedCText(planBytes, planRelative)).jsonObject
         planRoot.requireExactKeys(PLAN_ROOT_KEYS, planRelative)
-        require(planRoot.requiredInt("schemaVersion", planRelative) == INDEX_EVIDENCE_SCHEMA_VERSION) {
+        val planSchemaVersion = planRoot.requiredInt("schemaVersion", planRelative)
+        require(planSchemaVersion in setOf(LEGACY_PLAN_SCHEMA_VERSION, PLAN_SCHEMA_VERSION)) {
             "unsupported generated C module-plan schemaVersion"
         }
         val moduleElements = planRoot.requiredArray("modules", planRelative)
@@ -258,18 +269,12 @@ object GeneratedCRepairIndexProfile : RepairIndexProfile {
         val functionElements = modelRoot.requiredArray("functions", modelRelative)
         val globalElements = modelRoot.requiredArray("globals", modelRelative)
         val typeElements = modelRoot.requiredArray("types", modelRelative)
-        val entityCount = Math.addExact(functionElements.size, globalElements.size)
+        val entityCount = Math.addExact(Math.addExact(functionElements.size, globalElements.size), typeElements.size)
         if (entityCount > budget.maximumIndexedEntities) {
             throw RepairBudgetExceededException(
                 "generated C model has $entityCount indexed entities; limit=${budget.maximumIndexedEntities}",
             )
         }
-        if (typeElements.size > budget.maximumIndexedEntities) {
-            throw RepairBudgetExceededException(
-                "generated C model has ${typeElements.size} type records; limit=${budget.maximumIndexedEntities}",
-            )
-        }
-
         val identifierLimit = evidenceIdentifierLimit(budget)
         val textLimit = evidenceTextLimit(budget)
         var structuralEntries = 0L
@@ -293,18 +298,28 @@ object GeneratedCRepairIndexProfile : RepairIndexProfile {
 
         moduleElements.forEach { element ->
             val module = element.jsonObject
-            module.requireExactKeys(PLAN_MODULE_KEYS, "$planRelative module")
+            module.requireExactKeys(
+                if (planSchemaVersion == PLAN_SCHEMA_VERSION) PLAN_MODULE_KEYS else LEGACY_PLAN_MODULE_KEYS,
+                "$planRelative module",
+            )
             module.requiredBoundedString("id", planRelative, identifierLimit)
             module.requiredBoundedString("sourcePath", planRelative, identifierLimit)
             module.requiredBoundedString("headerPath", planRelative, identifierLimit)
             val functionIds = module.requiredArray("functionIds", planRelative)
             val globalIds = module.requiredArray("globalIds", planRelative)
+            val typeIds = if (planSchemaVersion == PLAN_SCHEMA_VERSION) {
+                module.requiredArray("typeIds", planRelative)
+            } else {
+                JsonArray(emptyList())
+            }
             val boundaryEvidence = module.requiredArray("boundaryEvidence", planRelative)
             chargeStructural(functionIds.size, "generated C module function ownership")
             chargeStructural(globalIds.size, "generated C module global ownership")
+            chargeStructural(typeIds.size, "generated C module type ownership")
             chargeStructural(boundaryEvidence.size, "generated C module boundary evidence")
             functionIds.preflightStringElements(planRelative, identifierLimit)
             globalIds.preflightStringElements(planRelative, identifierLimit)
+            typeIds.preflightStringElements(planRelative, identifierLimit)
             boundaryEvidence.preflightStringElements(planRelative, textLimit, allowBlank = true)
         }
         cycleElements.forEach { element ->
@@ -358,6 +373,12 @@ object GeneratedCRepairIndexProfile : RepairIndexProfile {
                 .boundedUniqueStrings(planRelative, identifierLimit, "generated C module function IDs")
             val globalIds = module.requiredArray("globalIds", planRelative)
                 .boundedUniqueStrings(planRelative, identifierLimit, "generated C module global IDs")
+            val typeIds = if (planSchemaVersion == PLAN_SCHEMA_VERSION) {
+                module.requiredArray("typeIds", planRelative)
+                    .boundedUniqueStrings(planRelative, identifierLimit, "generated C module type IDs")
+            } else {
+                emptyList()
+            }
             PlannedModule(
                 id = module.requiredBoundedString("id", planRelative, identifierLimit),
                 sourcePath = normalizedProfilePath(
@@ -368,6 +389,7 @@ object GeneratedCRepairIndexProfile : RepairIndexProfile {
                 ),
                 functionIds = functionIds,
                 globalIds = globalIds,
+                typeIds = typeIds,
             )
         }.also { parsed ->
             requireUniqueValues(parsed.map { it.id }, "generated C module IDs")
@@ -413,6 +435,11 @@ object GeneratedCRepairIndexProfile : RepairIndexProfile {
         }.also { parsed ->
             requireUniqueValues(parsed.map { it.id }, "generated C global IDs")
         }
+        val types = typeElements.map { element ->
+            ProgramType(element.jsonObject.requiredBoundedString("id", modelRelative, identifierLimit))
+        }.also { parsed ->
+            requireUniqueValues(parsed.map { it.id }, "generated C type IDs")
+        }
         val functionIds = functions.mapTo(hashSetOf()) { it.id }
         val globalIds = globals.mapTo(hashSetOf()) { it.id }
         functions.forEach { function ->
@@ -421,7 +448,12 @@ object GeneratedCRepairIndexProfile : RepairIndexProfile {
                 "generated C function references an unknown global"
             }
         }
-        return GeneratedCIndexEvidence(modules.sortedBy { it.id }, functions.sortedBy { it.id }, globals.sortedBy { it.id })
+        return GeneratedCIndexEvidence(
+            modules.sortedBy { it.id },
+            functions.sortedBy { it.id },
+            globals.sortedBy { it.id },
+            if (planSchemaVersion == PLAN_SCHEMA_VERSION) types.sortedBy { it.id } else emptyList(),
+        )
     }
 
     private fun chargeBoundedCount(current: Long, addition: Int, limit: Long, subject: String): Long {
@@ -700,6 +732,8 @@ object GeneratedCRepairIndexProfile : RepairIndexProfile {
     }
 
     private const val INDEX_EVIDENCE_SCHEMA_VERSION = 1
+    private const val LEGACY_PLAN_SCHEMA_VERSION = 1
+    private const val PLAN_SCHEMA_VERSION = 2
     private const val BUILD_CONTRACT_SCHEMA_VERSION = 2
     private const val MAXIMUM_EVIDENCE_IDENTIFIER_CHARACTERS = 4_096
     private const val MAXIMUM_EVIDENCE_TEXT_CHARACTERS = 16 * 1024 * 1024
@@ -707,7 +741,7 @@ object GeneratedCRepairIndexProfile : RepairIndexProfile {
     private const val TYPES_HEADER = "include/decomp_types.h"
     private val SHARED_BUILD_OWNERS = setOf("link", "project")
     private val PLAN_ROOT_KEYS = setOf("schemaVersion", "modules", "dependencyCycles")
-    private val PLAN_MODULE_KEYS = setOf(
+    private val LEGACY_PLAN_MODULE_KEYS = setOf(
         "id",
         "sourcePath",
         "headerPath",
@@ -715,6 +749,7 @@ object GeneratedCRepairIndexProfile : RepairIndexProfile {
         "globalIds",
         "boundaryEvidence",
     )
+    private val PLAN_MODULE_KEYS = LEGACY_PLAN_MODULE_KEYS + "typeIds"
     private val MODEL_ROOT_KEYS = setOf("schemaVersion", "inputSha256", "functions", "globals", "types")
     private val MODEL_FUNCTION_KEYS = setOf(
         "id",

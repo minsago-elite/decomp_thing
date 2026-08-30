@@ -33,6 +33,7 @@ class GhidraProgramModelExporterTest {
         assertEquals(listOf("fn_0000000000001000"), model.functions.map { it.id })
         val invocation = work.resolve("invocation.txt").readText()
         assertTrue(invocation.contains("-postScript\nExportProgramModel.java"))
+        assertTrue(invocation.lineSequence().any { it.matches(Regex("[0-9a-f]{64}")) })
         assertTrue(invocation.endsWith("${work.resolve("reports/program_model.json").toAbsolutePath()}\n"))
         val exporter = work.resolve("scripts/ExportProgramModel.java").readText()
         assertTrue(exporter.contains("program-model export complete"))
@@ -40,6 +41,8 @@ class GhidraProgramModelExporterTest {
         assertTrue(exporter.contains("if (isAcceptedRecord(record)) continue"))
         assertTrue(exporter.contains("Files.copy(records.get(index), output)"))
         assertTrue(exporter.contains("DECOMPILE_TIMEOUT_SECONDS = 60"))
+        assertTrue(exporter.contains("exporterSha256"))
+        assertTrue(exporter.contains("analysisToolSha256"))
     }
 
     @Test

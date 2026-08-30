@@ -40,7 +40,7 @@ import ghidra.program.model.symbol.Reference;
 import ghidra.program.model.symbol.Symbol;
 
 public class ExportProgramModel extends GhidraScript {
-    private static final int EXPORTER_VERSION = 2;
+    private static final int EXPORTER_VERSION = 4;
     private static final int DECOMPILE_TIMEOUT_SECONDS = 60;
 
     private static final class GlobalEvidence {
@@ -438,8 +438,14 @@ public class ExportProgramModel extends GhidraScript {
     @Override
     protected void run() throws Exception {
         String[] arguments = getScriptArgs();
-        if (arguments.length != 1) throw new IllegalArgumentException("expected output path");
-        Path outputPath = Paths.get(arguments[0]).toAbsolutePath().normalize();
+        if (arguments.length != 3) {
+            throw new IllegalArgumentException("expected exporter SHA-256, analysis-tool SHA-256, and output path");
+        }
+        if (!arguments[0].matches("[0-9a-f]{64}")) throw new IllegalArgumentException("invalid exporter SHA-256");
+        if (!arguments[1].matches("[0-9a-f]{64}")) throw new IllegalArgumentException("invalid analysis-tool SHA-256");
+        String exporterSha256 = arguments[0];
+        String analysisToolSha256 = arguments[1];
+        Path outputPath = Paths.get(arguments[2]).toAbsolutePath().normalize();
         Path stateDirectory = outputPath.resolveSibling(outputPath.getFileName() + ".export");
         Path functionsDirectory = stateDirectory.resolve("functions");
         Path globalsDirectory = stateDirectory.resolve("globals");
@@ -454,6 +460,8 @@ public class ExportProgramModel extends GhidraScript {
         Path executablePath = Paths.get(currentProgram.getExecutablePath());
         String inputSha256 = sha256(executablePath);
         String state = "{\"schemaVersion\":1,\"exporterVersion\":" + EXPORTER_VERSION +
+            ",\"exporterSha256\":" + json(exporterSha256) +
+            ",\"analysisToolSha256\":" + json(analysisToolSha256) +
             ",\"inputSha256\":" + json(inputSha256) +
             ",\"language\":" + json(currentProgram.getLanguageID().toString()) +
             ",\"compilerSpec\":" + json(currentProgram.getCompilerSpec().getCompilerSpecID().toString()) + "}\n";

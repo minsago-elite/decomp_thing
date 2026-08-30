@@ -36,6 +36,7 @@ class DeterministicModulePlannerScaleTest {
         assertTrue(elapsed < 120.seconds, "GCC-sized synthetic plan took $elapsed")
         assertEquals(model.functions.map { it.id }.sorted(), run.plan.modules.flatMap { it.functionIds }.sorted())
         assertEquals(model.globals.map { it.id }.sorted(), run.plan.modules.flatMap { it.globalIds }.sorted())
+        assertEquals(model.types.map { it.id }.sorted(), run.plan.modules.flatMap { it.typeIds }.sorted())
         assertTrue(run.plan.modules.all { it.functionIds.isEmpty() || it.boundaryEvidence.isNotEmpty() })
         assertTrue(
             run.complexity.indexedEvidenceEntries < 20L * (model.functions.size + model.globals.size),

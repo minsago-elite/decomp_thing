@@ -126,6 +126,29 @@ These twins establish authenticated A10 inputs. Reconstruction archives,
 engine-specific structural truth, and integrated behavior evidence remain
 separate gates and cannot be inferred from the presence of these manifests.
 
+Deterministic export and ownership planning no longer use the Python oracle
+runtime. The checked profile binds the exact engine build records and
+manifests, bundled JVM exporter, deterministic planner, and NSA's official
+Ghidra 12.1.3 archive. The Kotlin gate verifies the complete installed Ghidra
+tree against that archive before execution. After building the distribution, run each
+authenticated stripped twin with a distinct durable output directory:
+
+```bash
+build/install/llm_bin_patch/bin/llm_bin_patch gcc-engine-plan cc1 \
+  /absolute/path/to/gcc-cc1.stripped \
+  --profile oracle/gcc/16.2.0/compiler-engines.json \
+  --ghidra-archive /absolute/path/to/ghidra_12.1.3_PUBLIC_20260817.zip \
+  --ghidra-home /absolute/path/to/ghidra_12.1.3_PUBLIC \
+  --output /absolute/path/to/cc1-plan
+```
+
+Repeat with `lto1` and its stripped twin. Interrupted exports resume only
+when the input and exact exporter identity still match. The Kotlin/JVM gate
+refuses changed plan bytes, enforces the shared 30-minute/16-GiB ceiling,
+proves exact function/global/type ownership, and publishes self-hashed
+planning evidence. This phase is agent-free; later ACP implementation and
+repair sessions can read the evidence but cannot replace or certify it.
+
 ## Driver behavior benchmark
 
 The adjacent behavior corpus is a thin GCC 16.2.0 profile of the

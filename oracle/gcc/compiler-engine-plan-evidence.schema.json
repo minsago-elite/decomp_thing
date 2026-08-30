@@ -1,0 +1,115 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://github.com/minsago-elite/decomp_thing/oracle/gcc/compiler-engine-plan-evidence.schema.json",
+  "title": "Authenticated GCC compiler-engine export and ownership-plan evidence",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schemaVersion", "complete", "benchmark", "implementation", "engine", "budgets", "results", "reportSha256"],
+  "properties": {
+    "schemaVersion": {"const": 1},
+    "complete": {"const": true},
+    "benchmark": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["id", "version", "target", "profileSha256", "sourceRevision"],
+      "properties": {
+        "id": {"type": "string", "minLength": 1},
+        "version": {"type": "string", "minLength": 1},
+        "target": {"type": "string", "minLength": 1},
+        "profileSha256": {"$ref": "#/$defs/sha256"},
+        "sourceRevision": {"type": "string", "pattern": "^[0-9a-f]{40}$"}
+      }
+    },
+    "implementation": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["runtime", "exporterId", "exporterVersion", "exporterSha256", "ghidraVersion", "ghidraArchiveSha256", "plannerId", "plannerVersion", "reconstructionProfileSha256"],
+      "properties": {
+        "runtime": {"const": "kotlin-jvm"},
+        "exporterId": {"type": "string", "minLength": 1},
+        "exporterVersion": {"type": "integer", "minimum": 1},
+        "exporterSha256": {"$ref": "#/$defs/sha256"},
+        "ghidraVersion": {"type": "string", "minLength": 1},
+        "ghidraArchiveSha256": {"$ref": "#/$defs/sha256"},
+        "plannerId": {"type": "string", "minLength": 1},
+        "plannerVersion": {"type": "integer", "minimum": 1},
+        "reconstructionProfileSha256": {"$ref": "#/$defs/sha256"}
+      }
+    },
+    "engine": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["id", "oracleManifestSha256", "inputPath", "inputBytes", "inputSha256"],
+      "properties": {
+        "id": {"enum": ["cc1", "lto1"]},
+        "oracleManifestSha256": {"$ref": "#/$defs/sha256"},
+        "inputPath": {"type": "string", "minLength": 1},
+        "inputBytes": {"type": "integer", "minimum": 1},
+        "inputSha256": {"$ref": "#/$defs/sha256"}
+      }
+    },
+    "budgets": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["wallClockMillis", "maximumResidentBytes", "plannerMaximumEntities", "plannerMaximumDependencyEdges", "plannerMaximumWorkUnits"],
+      "properties": {
+        "wallClockMillis": {"type": "integer", "minimum": 1},
+        "maximumResidentBytes": {"type": "integer", "minimum": 1},
+        "plannerMaximumEntities": {"type": "integer", "minimum": 1},
+        "plannerMaximumDependencyEdges": {"type": "integer", "minimum": 1},
+        "plannerMaximumWorkUnits": {"type": "integer", "minimum": 1}
+      }
+    },
+    "results": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["wallClockMillis", "maximumResidentBytesObserved", "export", "programModel", "modulePlan", "ownership"],
+      "properties": {
+        "wallClockMillis": {"type": "integer", "minimum": 0},
+        "maximumResidentBytesObserved": {"type": "integer", "minimum": 0},
+        "export": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["functions", "recovered", "partial", "failed", "reused"],
+          "properties": {
+            "functions": {"type": "integer", "minimum": 0},
+            "recovered": {"type": "integer", "minimum": 0},
+            "partial": {"type": "integer", "minimum": 0},
+            "failed": {"type": "integer", "minimum": 0},
+            "reused": {"type": "integer", "minimum": 0}
+          }
+        },
+        "programModel": {"$ref": "#/$defs/artifact"},
+        "modulePlan": {"$ref": "#/$defs/artifact"},
+        "ownership": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["modules", "functions", "globals", "types", "functionsAssignedExactlyOnce", "globalsAssignedExactlyOnce", "typesAssignedExactlyOnce"],
+          "properties": {
+            "modules": {"type": "integer", "minimum": 1},
+            "functions": {"type": "integer", "minimum": 0},
+            "globals": {"type": "integer", "minimum": 0},
+            "types": {"type": "integer", "minimum": 0},
+            "functionsAssignedExactlyOnce": {"const": true},
+            "globalsAssignedExactlyOnce": {"const": true},
+            "typesAssignedExactlyOnce": {"const": true}
+          }
+        }
+      }
+    },
+    "reportSha256": {"$ref": "#/$defs/sha256"}
+  },
+  "$defs": {
+    "sha256": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
+    "artifact": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["path", "bytes", "sha256"],
+      "properties": {
+        "path": {"type": "string", "pattern": "^(?!/)(?!.*(?:^|/)\\.{1,2}(?:/|$))(?!.*//)[^\\\\\\u0000]+$"},
+        "bytes": {"type": "integer", "minimum": 1},
+        "sha256": {"$ref": "#/$defs/sha256"}
+      }
+    }
+  }
+}

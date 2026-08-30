@@ -559,7 +559,13 @@ object SourceTreeGenerator {
         generated += evidence(profile, typesHeaderPath, typesHeader, "planner", model.types.map { it.id })
         headers.forEach { (id, content) ->
             val module = plan.modules.single { it.id == id }
-            generated += evidence(profile, module.headerPath, content, "planner", module.functionIds + module.globalIds)
+            generated += evidence(
+                profile,
+                module.headerPath,
+                content,
+                "planner",
+                module.functionIds + module.globalIds + module.typeIds,
+            )
         }
         privateHeaders.forEach { (id, content) ->
             val path = profile.layout.declaration("module-private-interface").materialize(mapOf("module" to id))
@@ -1482,10 +1488,11 @@ object SourceTreeGenerator {
                 item.calls.sorted().joinToString(","), item.referencedGlobals.sorted().joinToString(","), item.strings.sorted().joinToString(",")).joinToString("|")
         }
         val globals = module.globalIds.sorted().joinToString("\n") { id -> model.globals.single { it.id == id }.toString() }
+        val types = module.typeIds.sorted().joinToString("\n") { id -> model.types.single { it.id == id }.toString() }
         val dependencies = dependencyHeaders.toSortedMap().entries.joinToString("\n") { it.key + "\n" + it.value }
         return sha256(
             (
-                functions + "\n" + globals + "\n" + sharedHeader + moduleHeader + privateHeader +
+                functions + "\n" + globals + "\n" + types + "\n" + sharedHeader + moduleHeader + privateHeader +
                     dependencies + "\n" + observedBehavior.orEmpty() + "\n" + profileSha256
                 ).toByteArray(),
         )
@@ -1519,7 +1526,8 @@ object SourceTreeGenerator {
         }
         val moduleScores = plan.modules.map { module ->
             val statuses = module.functionIds.map { id -> model.functions.single { it.id == id }.status } +
-                module.globalIds.map { id -> model.globals.single { it.id == id }.status }
+                module.globalIds.map { id -> model.globals.single { it.id == id }.status } +
+                module.typeIds.map { id -> model.types.single { it.id == id }.status }
             module.id to if (statuses.isEmpty()) 0.0 else statuses.map(::score).average()
         }
         val allStatuses = model.functions.map { it.status } + model.globals.map { it.status } + model.types.map { it.status }

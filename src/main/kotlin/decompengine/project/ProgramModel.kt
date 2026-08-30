@@ -153,11 +153,12 @@ data class PlannedModule(
     val headerPath: String,
     val functionIds: List<String>,
     val globalIds: List<String>,
+    val typeIds: List<String> = emptyList(),
     val boundaryEvidence: List<String>,
 )
 
 data class ModulePlan(
-    val schemaVersion: Int = 1,
+    val schemaVersion: Int = 2,
     val modules: List<PlannedModule>,
     val dependencyCycles: List<List<String>> = emptyList(),
 ) {
@@ -171,6 +172,7 @@ data class ModulePlan(
               "headerPath": "${module.headerPath.json()}",
               "functionIds": [${module.functionIds.joinToString(", ") { "\"${it.json()}\"" }}],
               "globalIds": [${module.globalIds.joinToString(", ") { "\"${it.json()}\"" }}],
+              "typeIds": [${module.typeIds.joinToString(", ") { "\"${it.json()}\"" }}],
               "boundaryEvidence": [${module.boundaryEvidence.joinToString(", ") { "\"${it.json()}\"" }}]
             }""".trimIndent().prependIndent("    ")
         })

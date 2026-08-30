@@ -12,6 +12,7 @@ import java.util.TreeSet
 internal data class PlannerComplexity(
     val functionCount: Int,
     val globalCount: Int,
+    val typeCount: Int,
     val indexedEvidenceEntries: Long,
     val affinityPostingVisits: Long,
     val anonymousGraphVisits: Long,
@@ -19,7 +20,7 @@ internal data class PlannerComplexity(
     val groupingIndexVisits: Long,
 ) {
     val sparseWorkUnits: Long
-        get() = functionCount.toLong() + globalCount + indexedEvidenceEntries + affinityPostingVisits +
+        get() = functionCount.toLong() + globalCount + typeCount + indexedEvidenceEntries + affinityPostingVisits +
             anonymousGraphVisits + moduleGraphVisits + groupingIndexVisits
 }
 
@@ -32,9 +33,10 @@ private class MutablePlannerComplexity {
     var moduleGraphVisits = 0L
     var groupingIndexVisits = 0L
 
-    fun snapshot(functionCount: Int, globalCount: Int) = PlannerComplexity(
+    fun snapshot(functionCount: Int, globalCount: Int, typeCount: Int) = PlannerComplexity(
         functionCount = functionCount,
         globalCount = globalCount,
+        typeCount = typeCount,
         indexedEvidenceEntries = indexedEvidenceEntries,
         affinityPostingVisits = affinityPostingVisits,
         anonymousGraphVisits = anonymousGraphVisits,
@@ -88,7 +90,8 @@ class DeterministicModulePlanner(
         val functions = model.functions.sortedWith(compareBy<RecoveredFunction> { it.address }.thenBy { it.id })
         val functionById = functions.associateBy { it.id }
         val globalIds = model.globals.mapTo(hashSetOf()) { it.id }
-        require(overrides.keys.all { it in functionById || it in globalIds }) {
+        val typeIds = model.types.mapTo(hashSetOf()) { it.id }
+        require(overrides.keys.all { it in functionById || it in globalIds || it in typeIds }) {
             "module override references an unknown entity"
         }
 
@@ -136,6 +139,21 @@ class DeterministicModulePlanner(
             globalsByModule.getOrPut(module) { mutableListOf() } += global
         }
 
+        val firstModule = grouped.keys.first()
+        val functionOwnerByAddress = functions.groupBy(RecoveredFunction::address).mapValues { (_, candidates) ->
+            functionOwner.getValue(candidates.minBy(RecoveredFunction::id).id)
+        }
+        val typesByModule = linkedMapOf<String, MutableList<RecoveredType>>()
+        model.types.sortedWith(compareBy<RecoveredType> { it.sourceAddress ?: ULong.MAX_VALUE }.thenBy { it.id })
+            .forEach { type ->
+                val module = overrides[type.id]?.let(::safeIdentifier)
+                    ?: type.sourceAddress?.let(functionOwnerByAddress::get)
+                    ?: firstModule
+                grouped.putIfAbsent(module, mutableListOf())
+                typesByModule.getOrPut(module) { mutableListOf() } += type
+                complexity.groupingIndexVisits++
+            }
+
         val dependenciesByModule = linkedMapOf<String, Set<String>>()
         val modules = grouped.map { (id, members) ->
             val referencedModules = sortedSetOf<String>()
@@ -152,6 +170,7 @@ class DeterministicModulePlanner(
                 headerPath = layout.declaration("module-interface").materialize(mapOf("module" to id)),
                 functionIds = members.map { it.id },
                 globalIds = globalsByModule[id].orEmpty().map { it.id },
+                typeIds = typesByModule[id].orEmpty().map { it.id },
                 boundaryEvidence = buildList {
                     addAll(members.map { inference.getValue(it.id).second }.distinct().sorted())
                     if (referencedModules.isNotEmpty()) add("calls modules: ${referencedModules.joinToString(", ")}")
@@ -161,7 +180,7 @@ class DeterministicModulePlanner(
 
         requireExactOwnership(model, modules)
         val plan = ModulePlan(modules = modules, dependencyCycles = dependencyCycles(dependenciesByModule, complexity))
-        val measured = complexity.snapshot(functions.size, model.globals.size)
+        val measured = complexity.snapshot(functions.size, model.globals.size, model.types.size)
         require(measured.sparseWorkUnits <= maximumWorkUnits) {
             "module planning required ${measured.sparseWorkUnits} work units; limit=$maximumWorkUnits"
         }
@@ -460,11 +479,15 @@ class DeterministicModulePlanner(
     private fun requireExactOwnership(model: RecoveredProgramModel, modules: List<PlannedModule>) {
         val plannedFunctions = modules.flatMap { it.functionIds }
         val plannedGlobals = modules.flatMap { it.globalIds }
+        val plannedTypes = modules.flatMap { it.typeIds }
         require(plannedFunctions.size == model.functions.size && plannedFunctions.toSet() == model.functions.mapTo(hashSetOf()) { it.id }) {
             "planner must assign every function exactly once"
         }
         require(plannedGlobals.size == model.globals.size && plannedGlobals.toSet() == model.globals.mapTo(hashSetOf()) { it.id }) {
             "planner must assign every global exactly once"
+        }
+        require(plannedTypes.size == model.types.size && plannedTypes.toSet() == model.types.mapTo(hashSetOf()) { it.id }) {
+            "planner must assign every type exactly once"
         }
     }
 

@@ -175,6 +175,7 @@ object OracleSchemas {
         "function-recovery-score",
         "gcc/build-record",
         "gcc/compiler-engines",
+        "gcc/compiler-engine-plan-evidence",
         "gcc/oracle-manifest",
         "gcc/source-lock",
         "gcc/toolchain-reproduction",

@@ -46,7 +46,14 @@ data class GhidraProgramModelExportLimits(
 class GhidraHeadlessProgramModelAnalyzer(
     private val ghidraHome: Path,
     private val limits: GhidraProgramModelExportLimits = GhidraProgramModelExportLimits(),
+    private val analysisToolSha256: String = UNAUTHENTICATED_ANALYSIS_TOOL_SHA256,
 ) : ProgramModelAnalyzer {
+    init {
+        require(analysisToolSha256.matches(Regex("[0-9a-f]{64}"))) {
+            "Ghidra analysis-tool identity must be a lowercase SHA-256 digest"
+        }
+    }
+
     override fun analyze(binaryPath: Path, workDir: Path): RecoveredProgramModel {
         val executable = ghidraHome.resolve("support/analyzeHeadless")
         require(executable.isExecutable()) { "GHIDRA_HOME does not contain executable support/analyzeHeadless" }
@@ -55,6 +62,7 @@ class GhidraHeadlessProgramModelAnalyzer(
         val scriptBytes = javaClass.getResourceAsStream("/ghidra_scripts/ExportProgramModel.java")
             ?.use { it.readBytes() } ?: error("bundled ExportProgramModel.java is missing")
         scripts.resolve("ExportProgramModel.java").writeBytes(scriptBytes)
+        val exporterSha256 = sha256(scriptBytes)
         val output = reports.resolve("program_model.json")
         val project = workDir.resolve("ghidra_project").createDirectories()
         val command = listOf(
@@ -64,7 +72,7 @@ class GhidraHeadlessProgramModelAnalyzer(
             "-import", binaryPath.toAbsolutePath().normalize().pathString,
             "-overwrite",
             "-scriptPath", scripts.pathString,
-            "-postScript", "ExportProgramModel.java", output.pathString,
+            "-postScript", "ExportProgramModel.java", exporterSha256, analysisToolSha256, output.pathString,
         )
         val process = ProcessBuilder(command)
             .directory(workDir.toFile())
@@ -146,6 +154,9 @@ class GhidraHeadlessProgramModelAnalyzer(
     }
 
     companion object {
+        internal const val UNAUTHENTICATED_ANALYSIS_TOOL_SHA256 =
+            "0000000000000000000000000000000000000000000000000000000000000000"
+
         fun fromEnvironment(
             environment: Map<String, String> = System.getenv(),
             profile: ReconstructionProfile = GeneratedCMakeReconstructionProfile.descriptor,

@@ -15,8 +15,12 @@ import decompengine.project.ArchivalReconstructionService
 import decompengine.project.BoundedLlmModuleReconstructor
 import decompengine.project.EvidenceModuleReconstructor
 import decompengine.project.GhidraHeadlessProgramModelAnalyzer
+import decompengine.project.GhidraProgramModelExportLimits
 import decompengine.project.ModuleReconstructor
 import decompengine.agent.AgentHarness
+import decompengine.oracle.gcc.GccCompilerEnginePlanningService
+import decompengine.oracle.gcc.GccCompilerEngineProfiles
+import decompengine.oracle.gcc.authenticateGhidraInstallation
 import decompengine.repair.RepairRuntimeConfiguration
 import decompengine.repair.SecureRepairRuntime
 import decompengine.validation.ProcessInput
@@ -33,6 +37,7 @@ fun main(args: Array<String>) {
         "repair" -> runRepair(args.drop(1))
         "explore" -> runExplore(args.drop(1))
         "reconstruct" -> runReconstruct(args.drop(1))
+        "gcc-engine-plan" -> runGccEnginePlan(args.drop(1))
         "web" -> runWeb(args.drop(1))
         null, "help", "--help", "-h" -> printHelp()
         else -> {
@@ -41,6 +46,75 @@ fun main(args: Array<String>) {
             kotlin.system.exitProcess(2)
         }
     }
+}
+
+private fun runGccEnginePlan(args: List<String>) {
+    var engineId: String? = null
+    var binary: Path? = null
+    var profilePath: Path? = null
+    var ghidraHome: Path? = null
+    var ghidraArchive: Path? = null
+    var output: Path? = null
+    var index = 0
+    while (index < args.size) {
+        when (args[index]) {
+            "--profile" -> {
+                if (index + 1 >= args.size) gccEnginePlanUsageError("--profile requires a file")
+                profilePath = Path.of(args[index + 1]); index += 2
+            }
+            "--ghidra-home" -> {
+                if (index + 1 >= args.size) gccEnginePlanUsageError("--ghidra-home requires a directory")
+                ghidraHome = Path.of(args[index + 1]); index += 2
+            }
+            "--ghidra-archive" -> {
+                if (index + 1 >= args.size) gccEnginePlanUsageError("--ghidra-archive requires a file")
+                ghidraArchive = Path.of(args[index + 1]); index += 2
+            }
+            "--output" -> {
+                if (index + 1 >= args.size) gccEnginePlanUsageError("--output requires a directory")
+                output = Path.of(args[index + 1]); index += 2
+            }
+            else -> {
+                if (args[index].startsWith("-")) gccEnginePlanUsageError("unexpected argument: ${args[index]}")
+                if (engineId == null) engineId = args[index]
+                else if (binary == null) binary = Path.of(args[index])
+                else gccEnginePlanUsageError("unexpected argument: ${args[index]}")
+                index++
+            }
+        }
+    }
+    if (engineId == null || binary == null || profilePath == null || ghidraHome == null ||
+        ghidraArchive == null || output == null
+    ) {
+        gccEnginePlanUsageError("gcc-engine-plan requires an engine, binary, profile, Ghidra archive/home, and output")
+    }
+    val suite = GccCompilerEngineProfiles.load(profilePath)
+    val authenticatedGhidra = suite.analysis.authenticateGhidraInstallation(ghidraArchive, ghidraHome)
+    val reconstructionProfile = suite.reconstructionProfile()
+    val analyzer = GhidraHeadlessProgramModelAnalyzer(
+        authenticatedGhidra.home,
+        GhidraProgramModelExportLimits.from(reconstructionProfile),
+        authenticatedGhidra.archiveSha256,
+    )
+    val result = GccCompilerEnginePlanningService(analyzer).plan(suite, engineId, binary, output)
+    println("engine: ${result.engineId}")
+    println("program model: ${result.programModelPath}")
+    println("program model sha256: ${result.programModelSha256}")
+    println("module plan: ${result.modulePlanPath}")
+    println("module plan sha256: ${result.modulePlanSha256}")
+    println("evidence: ${result.evidencePath}")
+    println("evidence sha256: ${result.evidenceSha256}")
+    println("wall clock milliseconds: ${result.wallClockMillis}")
+    println("maximum resident bytes observed: ${result.maximumResidentBytesObserved}")
+}
+
+private fun gccEnginePlanUsageError(message: String): Nothing {
+    System.err.println(message)
+    System.err.println(
+        "usage: llm_bin_patch gcc-engine-plan <cc1|lto1> <stripped-binary> --profile <file> " +
+            "--ghidra-archive <file> --ghidra-home <directory> --output <directory>",
+    )
+    kotlin.system.exitProcess(2)
 }
 
 private fun runReconstruct(args: List<String>) {
@@ -460,6 +534,7 @@ private fun printHelp() {
           llm_bin_patch repair <original-binary> <project-dir> [--reports <directory>] [--max-iterations <count>] [--explore] [--harness acp|legacy-openai]
           llm_bin_patch explore <binary> --reports <directory> [--arg <value>] [--stdin <value>]
           llm_bin_patch reconstruct <binary> --output <directory> [--evidence-only] [--max-context-chars <count>] [--harness acp|legacy-openai]
+          llm_bin_patch gcc-engine-plan <cc1|lto1> <stripped-binary> --profile <file> --ghidra-archive <file> --ghidra-home <directory> --output <directory>
           llm_bin_patch web [--host 127.0.0.1] [--port 8000] [--data-dir .decomp_engine/jobs]
 
         Agent harness selection for doctor, patch, reconstruction, and repair:
@@ -468,6 +543,7 @@ private fun printHelp() {
           Doctor performs an initialize-only ACP v1 preflight for all workflows by default.
           Doctor's --tools-only mode is agent-free and cannot be combined with agent selectors.
           Reconstruction's --evidence-only mode is agent-free and cannot be combined with --harness.
+          gcc-engine-plan is deterministic, agent-free Kotlin/JVM oracle work; ACP never receives oracle write authority.
         """.trimIndent(),
     )
 }

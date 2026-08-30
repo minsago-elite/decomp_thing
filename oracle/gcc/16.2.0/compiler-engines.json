@@ -1,4 +1,22 @@
 {
+  "analysis": {
+    "exporter": {
+      "id": "decompengine-ghidra-program-model",
+      "sha256": "9dc9d0067f9a296edf0b61137c7be07685103f05e5ae705dbd1884f5c6669878",
+      "version": 4
+    },
+    "ghidra": {
+      "archiveBytes": 569445154,
+      "archiveFileName": "ghidra_12.1.3_PUBLIC_20260817.zip",
+      "archiveSha256": "93a5d11a9ad510622acaaf908c556a7b9b764d338e78a7567f3689bf5081fd54",
+      "release": "PUBLIC",
+      "version": "12.1.3"
+    },
+    "planner": {
+      "id": "deterministic-module-planner",
+      "version": 1
+    }
+  },
   "benchmark": {
     "id": "gcc-compiler-engines-16.2.0",
     "target": "x86_64-linux-gnu",
@@ -15,20 +33,24 @@
     {
       "buildOutput": "/oracle/build/gcc/cc1",
       "buildRecord": "cc1-build-record.json",
+      "buildRecordSha256": "f6b2711d4f82562195acebe7250d7dc62eb9425af4f736736e0ea69b65103e8e",
       "fullArtifact": "artifacts/gcc-cc1.full",
       "functionOracle": "cc1-function-recovery-oracle.json",
       "id": "cc1",
       "oracleManifest": "cc1-oracle-manifest.json",
+      "oracleManifestSha256": "dbef520c025d268f5126229ace8ad5b08a15722573d45b5e1ab934611905abb4",
       "reconstructionArchive": "cc1-reconstruction.zip",
       "strippedArtifact": "artifacts/gcc-cc1.stripped"
     },
     {
       "buildOutput": "/oracle/build/gcc/lto1",
       "buildRecord": "lto1-build-record.json",
+      "buildRecordSha256": "581a983e307a0a02895f1e878659c7f7934045a7141ebe3821837145aa97c5a5",
       "fullArtifact": "artifacts/gcc-lto1.full",
       "functionOracle": "lto1-function-recovery-oracle.json",
       "id": "lto1",
       "oracleManifest": "lto1-oracle-manifest.json",
+      "oracleManifestSha256": "5f7e686168d6a6e35ef3719d077b0bfb246085c2d3738835be13eeed5e0d0a41",
       "reconstructionArchive": "lto1-reconstruction.zip",
       "strippedArtifact": "artifacts/gcc-lto1.stripped"
     }

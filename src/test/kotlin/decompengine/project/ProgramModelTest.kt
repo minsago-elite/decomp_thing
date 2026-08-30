@@ -29,6 +29,7 @@ class ProgramModelTest {
 
         assertEquals(model.functions.map { it.id }.sorted(), plan.modules.flatMap { it.functionIds }.sorted())
         assertEquals(model.globals.map { it.id }.sorted(), plan.modules.flatMap { it.globalIds }.sorted())
+        assertEquals(model.types.map { it.id }.sorted(), plan.modules.flatMap { it.typeIds }.sorted())
         assertEquals("user_interface", plan.modules.single { "fn_0000000000401020" in it.functionIds }.id)
         assertTrue(plan.toJson().contains("symbol prefix"))
         assertTrue(plan.toJson().contains("user override"))
@@ -156,6 +157,25 @@ class ProgramModelTest {
     }
 
     @Test
+    fun `type ownership follows source addresses and explicit overrides`() {
+        val function = RecoveredFunction("fn_10", "parse_input", 0x10UL, "void parse_input(void)")
+        val addressed = RecoveredType("type_addressed", "typedef int addressed_t;", 0x10UL)
+        val overridden = RecoveredType("type_override", "typedef int override_t;")
+        val model = RecoveredProgramModel(
+            inputSha256 = "type-ownership",
+            functions = listOf(function),
+            types = listOf(overridden, addressed),
+        )
+
+        val plan = DeterministicModulePlanner().plan(model, mapOf(overridden.id to "Runtime Types"))
+
+        assertEquals(listOf(addressed.id), plan.modules.single { it.id == "parse" }.typeIds)
+        assertEquals(listOf(overridden.id), plan.modules.single { it.id == "runtime_types" }.typeIds)
+        assertEquals(model.types.map { it.id }.sorted(), plan.modules.flatMap { it.typeIds }.sorted())
+        assertEquals(2, plan.schemaVersion)
+    }
+
+    @Test
     fun `dependency diagnostics collapse overlapping cycles into one sparse component`() {
         val functions = listOf(
             RecoveredFunction("fn_1", "alpha_one", 1UL, "void alpha_one(void)", calls = setOf("fn_2", "fn_3")),
@@ -188,5 +208,6 @@ class ProgramModelTest {
             ),
         ),
         globals = listOf(RecoveredGlobal("global_404000", "page_count", 0x404000UL, "int")),
+        types = listOf(RecoveredType("type_page", "typedef int page_t;", 0x401000UL)),
     )
 }

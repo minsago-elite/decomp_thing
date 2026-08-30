@@ -55,9 +55,8 @@ object ArchivalProjectAuditor {
         val planJson = Json.parseToJsonElement(planText).jsonObject
         val manifestText = projectDir.resolve("source_tree_manifest.json").readText()
         val entities = model.functions.map { it.id } + model.globals.map { it.id } + model.types.map { it.id }
-        val ownedEntities = model.functions.map { it.id } + model.globals.map { it.id }
-        val missingModel = ownedEntities.filter { it !in planText || it !in manifestText } +
-            model.types.map { it.id }.filter { it !in manifestText }
+        val ownedEntities = entities
+        val missingModel = ownedEntities.filter { it !in planText || it !in manifestText }
         val sourceText = Files.walk(projectDir.resolve("src")).use { paths ->
             paths.filter { it.isRegularFile() && it.fileName.toString().endsWith(".c") }
                 .map { it.readText() }.toList().joinToString("\n")
