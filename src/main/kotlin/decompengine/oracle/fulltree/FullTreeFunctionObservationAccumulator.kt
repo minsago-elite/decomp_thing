@@ -1,6 +1,7 @@
 package decompengine.oracle.fulltree
 
 import decompengine.oracle.core.OracleJson
+import decompengine.oracle.core.StrictJsonLimits
 import java.nio.charset.StandardCharsets
 import java.security.MessageDigest
 import java.util.TreeMap
@@ -18,6 +19,8 @@ internal data class FullTreeFunctionObservationAccumulatorLimits(
     val maximumNonEmittedGroups: Int = 10_000_000,
     val maximumAliasesPerSubprogram: Int = 256,
     val maximumEvidencePerAliasPerSubprogram: Int = 256,
+    val maximumEvidencePerSubprogram: Int = 256,
+    val maximumCanonicalBytesPerSubprogram: Int = 64 * 1024 * 1024,
     val maximumAliasesPerEntity: Int = 1_000_000,
     val maximumEvidencePerAliasPerEntity: Int = 1_000_000,
     val maximumDeclarationsPerRva: Int = 1_000_000,
@@ -34,6 +37,8 @@ internal data class FullTreeFunctionObservationAccumulatorLimits(
         require(maximumNonEmittedGroups in 1..10_000_000)
         require(maximumAliasesPerSubprogram in 1..1_000_000)
         require(maximumEvidencePerAliasPerSubprogram in 1..1_000_000)
+        require(maximumEvidencePerSubprogram in 1..1_000_000)
+        require(maximumCanonicalBytesPerSubprogram in 1..64 * 1024 * 1024)
         require(maximumAliasesPerEntity in 1..1_000_000)
         require(maximumEvidencePerAliasPerEntity in 1..1_000_000)
         require(maximumDeclarationsPerRva in 1..1_000_000)
@@ -128,8 +133,9 @@ internal class FullTreeFunctionObservationAccumulator(
         if (observation.rvas.size > 1) {
             accumulatorFail("observed subprogram has more than one historical-v3 start RVA")
         }
-        val aliases = authenticateAliases(observation.aliases, observation.unitId)
-        val declaration = snapshotDeclaration(observation.declaration, unit)
+        val canonicalBudget = CanonicalObservationBudget(limits.maximumCanonicalBytesPerSubprogram)
+        val aliases = authenticateAliases(observation.aliases, observation.unitId, canonicalBudget)
+        val declaration = snapshotDeclaration(observation.declaration, unit, canonicalBudget)
         val rvas = observation.rvas.toSortedSet()
         if (rvas.size != observation.rvas.size) {
             accumulatorFail("observed subprogram contains duplicate emitted RVAs")
@@ -137,7 +143,7 @@ internal class FullTreeFunctionObservationAccumulator(
         if (rvas.isNotEmpty()) {
             rvas.forEach { rva -> acceptEmitted(rva, observation.unitId, aliases, declaration) }
         } else {
-            acceptNonEmitted(observation, aliases, declaration)
+            acceptNonEmitted(observation, aliases, declaration, canonicalBudget)
         }
     }
 
@@ -227,9 +233,11 @@ internal class FullTreeFunctionObservationAccumulator(
         observation: FullTreeObservedSubprogram,
         aliases: List<AuthenticatedFunctionAlias>,
         declaration: JsonObject,
+        canonicalBudget: CanonicalObservationBudget,
     ) {
         val identityDocument = nonEmittedIdentityDocument(aliases, declaration)
         val identityBytes = canonicalBytes(identityDocument, "non-emitted observation identity")
+        canonicalBudget.charge(identityBytes.size, "non-emitted observation identity")
         val identity = sha256(identityBytes).take(32)
         val group = nonEmitted[identity] ?: run {
             if (nonEmitted.size >= limits.maximumNonEmittedGroups) {
@@ -266,8 +274,10 @@ internal class FullTreeFunctionObservationAccumulator(
     private fun authenticateAliases(
         aliases: List<FullTreeObservedFunctionAlias>,
         unitId: String,
+        canonicalBudget: CanonicalObservationBudget,
     ): List<AuthenticatedFunctionAlias> {
         val names = HashSet<String>()
+        var evidenceItems = 0L
         return aliases.map { alias ->
             requireScalar(alias.name, limits.maximumNameCodePoints, "DWARF function name")
             if (!names.add(alias.name)) accumulatorFail("observed subprogram repeats an alias name")
@@ -276,6 +286,14 @@ internal class FullTreeFunctionObservationAccumulator(
                 alias.evidence.size > limits.maximumEvidencePerAliasPerSubprogram
             ) {
                 accumulatorFail("observed function alias evidence population is outside its bound")
+            }
+            evidenceItems = add(
+                evidenceItems,
+                alias.evidence.size.toLong(),
+                "subprogram alias evidence",
+            )
+            if (evidenceItems > limits.maximumEvidencePerSubprogram.toLong()) {
+                accumulatorFail("observed subprogram aggregate evidence population exceeds its bound")
             }
             val evidence = LinkedHashMap<ByteArrayKey, JsonObject>()
             alias.evidence.forEach { item ->
@@ -290,16 +308,23 @@ internal class FullTreeFunctionObservationAccumulator(
                         "unitId" to JsonPrimitive(item.unitId),
                     ),
                 )
-                evidence[ByteArrayKey(canonicalBytes(document, "function alias evidence"))] = document
+                val bytes = canonicalBytes(document, "function alias evidence")
+                canonicalBudget.charge(bytes.size, "function alias evidence")
+                evidence[ByteArrayKey(bytes)] = document
             }
             AuthenticatedFunctionAlias(alias.name, evidence.values.toList())
         }
     }
 
-    private fun snapshotDeclaration(declaration: JsonObject, unit: JsonObject): JsonObject {
+    private fun snapshotDeclaration(
+        declaration: JsonObject,
+        unit: JsonObject,
+        canonicalBudget: CanonicalObservationBudget,
+    ): JsonObject {
         val bytes = canonicalBytes(declaration, "function declaration")
+        canonicalBudget.charge(bytes.size, "function declaration")
         val snapshot = try {
-            OracleJson.parseCanonical(bytes) as? JsonObject
+            OracleJson.parseCanonical(bytes, FULL_TREE_FUNCTION_OBSERVATION_JSON_LIMITS) as? JsonObject
                 ?: accumulatorFail("function declaration root is not an object")
         } catch (failure: FullTreeFunctionObservationException) {
             throw failure
@@ -528,6 +553,17 @@ internal class FullTreeFunctionObservationAccumulator(
 
 private data class AuthenticatedFunctionAlias(val name: String, val evidence: List<JsonObject>)
 
+private class CanonicalObservationBudget(private val maximumBytes: Int) {
+    private var bytes = 0L
+
+    fun charge(count: Int, label: String) {
+        bytes = add(bytes, count.toLong(), "canonical observation byte")
+        if (bytes > maximumBytes.toLong()) {
+            accumulatorFail("$label exceeds the per-subprogram canonical byte bound")
+        }
+    }
+}
+
 private fun nonEmittedIdentityDocument(
     aliases: List<AuthenticatedFunctionAlias>,
     declaration: JsonObject,
@@ -576,10 +612,21 @@ private fun requireScalar(value: String, maximumCodePoints: Int, label: String) 
 }
 
 private fun canonicalBytes(value: JsonElement, label: String): ByteArray = try {
-    OracleJson.canonicalBytes(value)
+    OracleJson.canonicalBytes(value, FULL_TREE_FUNCTION_OBSERVATION_JSON_LIMITS)
 } catch (failure: Exception) {
     throw FullTreeFunctionObservationException("$label is not bounded canonical JSON", failure)
 }
+
+/**
+ * Transient canonicalization is independently capped while admitting the largest producer-valid
+ * alias identity. Per-string code-point and collection bounds are enforced before this limit.
+ */
+internal val FULL_TREE_FUNCTION_OBSERVATION_JSON_LIMITS = StrictJsonLimits(
+    maximumInputBytes = 64 * 1024 * 1024,
+    maximumCanonicalBytes = 64 * 1024 * 1024,
+    maximumStringBytes = 64 * 1024 * 1024,
+    maximumTotalStringBytes = 64 * 1024 * 1024,
+)
 
 private fun compareUnsigned(left: ByteArray, right: ByteArray): Int {
     val common = minOf(left.size, right.size)
