@@ -9,6 +9,12 @@ import decompengine.agent.AgentHarness
 import decompengine.agent.AgentOperation
 import decompengine.agent.AgentStopReason
 import decompengine.agent.AgentWorkspacePath
+import java.nio.ByteBuffer
+import java.nio.channels.FileChannel
+import java.nio.file.Files
+import java.nio.file.Path
+import java.nio.file.StandardOpenOption
+import kotlin.io.path.createDirectories
 import kotlin.io.path.createTempDirectory
 import kotlin.io.path.exists
 import kotlin.io.path.readText
@@ -17,6 +23,7 @@ import kotlin.test.Test
 import kotlin.test.assertEquals
 import kotlin.test.assertFalse
 import kotlin.test.assertFailsWith
+import kotlin.test.assertNull
 import kotlin.test.assertTrue
 
 class SourceTreeTest {
@@ -182,6 +189,172 @@ class SourceTreeTest {
     }
 
     @Test
+    fun `accepted checkpoints require the current reconstructor identity`() {
+        val project = createTempDirectory("source-tree-cache-identity-")
+        val input = oneModuleModel()
+        SourceTreeGenerator.generate(
+            input,
+            project,
+            reconstructor = cacheReconstructor("scripted-valid", "strategy-a"),
+        )
+        var calls = 0
+
+        SourceTreeGenerator.generate(
+            input,
+            project,
+            reconstructor = cacheReconstructor("scripted-valid", "strategy-b") { calls++ },
+        )
+
+        assertEquals(1, calls)
+    }
+
+    @Test
+    fun `legacy agent checkpoints without execution evidence are never reused`() {
+        val project = createTempDirectory("source-tree-legacy-cache-")
+        val input = oneModuleModel()
+        SourceTreeGenerator.generate(
+            input,
+            project,
+            reconstructor = cacheReconstructor("agent:legacy-openai", "agent:legacy-openai"),
+        )
+        assertTrue(
+            project.resolve("reports/modules/parse.json").readText()
+                .contains("\"executionEvidencePath\": null"),
+        )
+        var calls = 0
+
+        SourceTreeGenerator.generate(
+            input,
+            project,
+            reconstructor = cacheReconstructor("agent:legacy-openai", "agent:legacy-openai") { calls++ },
+        )
+
+        assertEquals(1, calls)
+    }
+
+    @Test
+    fun `agent strategy never reuses an evidence-free agent-free checkpoint`() {
+        val project = createTempDirectory("source-tree-required-evidence-cache-")
+        val input = oneModuleModel()
+        SourceTreeGenerator.generate(
+            input,
+            project,
+            reconstructor = cacheReconstructor("scripted-valid", "shared-strategy"),
+        )
+        var calls = 0
+
+        SourceTreeGenerator.generate(
+            input,
+            project,
+            reconstructor = cacheReconstructor(
+                generator = "agent:current",
+                identity = "shared-strategy",
+                executionEvidenceRequired = true,
+            ) { calls++ },
+        )
+
+        assertEquals(1, calls)
+    }
+
+    @Test
+    fun `agent-free checkpoint reuse remains available without execution evidence`() {
+        val project = createTempDirectory("source-tree-agent-free-cache-")
+        val input = oneModuleModel()
+        SourceTreeGenerator.generate(
+            input,
+            project,
+            reconstructor = cacheReconstructor("scripted-valid", "agent-free"),
+        )
+        val refusing = object : ModuleReconstructor {
+            override fun reconstruct(request: ModuleReconstructionRequest): ReconstructedModule =
+                error("agent-free checkpoint was regenerated")
+
+            override fun cacheIdentity(): String = "agent-free"
+        }
+
+        SourceTreeGenerator.generate(input, project, reconstructor = refusing)
+    }
+
+    @Test
+    fun `checkpoint evidence path mismatch is rejected before touching the named file`() {
+        val project = createTempDirectory("source-tree-evidence-path-mismatch-")
+        val input = oneModuleModel()
+        SourceTreeGenerator.generate(
+            input,
+            project,
+            reconstructor = cacheReconstructor("scripted-valid", "path-mismatch"),
+        )
+        val mismatched = project.resolve("reports/agent-executions/not-parse.json")
+        mismatched.parent.createDirectories()
+        Files.createSymbolicLink(mismatched, Path.of("/dev/zero"))
+        bindCheckpointEvidence(
+            project,
+            "reports/agent-executions/not-parse.json",
+            "0".repeat(64),
+        )
+        var calls = 0
+
+        SourceTreeGenerator.generate(
+            input,
+            project,
+            reconstructor = cacheReconstructor("scripted-valid", "path-mismatch") { calls++ },
+        )
+
+        assertEquals(1, calls)
+    }
+
+    @Test
+    fun `checkpoint evidence cache rejects symbolic links`() {
+        val temp = createTempDirectory("source-tree-evidence-symlink-")
+        val project = temp.resolve("project")
+        val input = oneModuleModel()
+        SourceTreeGenerator.generate(
+            input,
+            project,
+            reconstructor = cacheReconstructor("scripted-valid", "symlink-cache"),
+        )
+        val outside = temp.resolve("outside-evidence.json").also { it.writeText("outside evidence\n") }
+        val configured = project.resolve("reports/agent-executions/parse.json")
+        configured.parent.createDirectories()
+        Files.createSymbolicLink(configured, outside)
+        bindCheckpointEvidence(
+            project,
+            "reports/agent-executions/parse.json",
+            sha256(Files.readAllBytes(outside)),
+        )
+        var calls = 0
+
+        SourceTreeGenerator.generate(
+            input,
+            project,
+            reconstructor = cacheReconstructor("scripted-valid", "symlink-cache") { calls++ },
+        )
+
+        assertEquals(1, calls)
+        assertEquals("outside evidence\n", outside.readText())
+    }
+
+    @Test
+    fun `bounded checkpoint evidence reader rejects devices and oversized regular files`() {
+        val regularProject = createTempDirectory("source-tree-evidence-regular-")
+        val regular = regularProject.resolve("evidence.json").also { it.writeText("bounded evidence\n") }
+        assertEquals(
+            sha256(Files.readAllBytes(regular)),
+            boundedCheckpointExecutionEvidenceSha256(regularProject, "evidence.json"),
+        )
+        assertNull(boundedCheckpointExecutionEvidenceSha256(Path.of("/"), "dev/null"))
+
+        val project = createTempDirectory("source-tree-evidence-oversized-")
+        val evidence = project.resolve("oversized.json")
+        FileChannel.open(evidence, StandardOpenOption.CREATE_NEW, StandardOpenOption.WRITE).use { channel ->
+            channel.position(MAXIMUM_CHECKPOINT_EXECUTION_EVIDENCE_BYTES.toLong())
+            channel.write(ByteBuffer.wrap(byteArrayOf(0)))
+        }
+
+        assertNull(boundedCheckpointExecutionEvidenceSha256(project, "oversized.json"))
+    }
+
+    @Test
     fun `evidence-only placeholders are explicit unresolved implementations`() {
         val project = createTempDirectory("source-tree-evidence-only-")
 
@@ -333,7 +506,7 @@ class SourceTreeTest {
                 return validReconstructor().reconstruct(request)
             }
 
-            override fun cacheIdentity(): String = "resuming-test"
+            override fun cacheIdentity(): String = "interrupting-test"
         }
         val manifest = SourceTreeGenerator.generate(model(), project, reconstructor = resumed)
 
@@ -433,6 +606,38 @@ class SourceTreeTest {
         }
         ReconstructedModule(source, "scripted-valid", sha256(source.toByteArray()))
     }
+
+    private fun cacheReconstructor(
+        generator: String,
+        identity: String,
+        executionEvidenceRequired: Boolean = false,
+        onCall: () -> Unit = {},
+    ): ModuleReconstructor {
+        val delegate = validReconstructor(onCall)
+        return object : ModuleReconstructor {
+            override fun reconstruct(request: ModuleReconstructionRequest): ReconstructedModule =
+                delegate.reconstruct(request).copy(generator = generator)
+
+            override fun cacheIdentity(): String = identity
+
+            override fun requiresExecutionEvidenceForCheckpointReuse(): Boolean = executionEvidenceRequired
+        }
+    }
+
+    private fun bindCheckpointEvidence(project: Path, relativePath: String, digest: String) {
+        val checkpoint = project.resolve("reports/modules/parse.json")
+        val original = checkpoint.readText()
+        val updated = original
+            .replace("\"executionEvidencePath\": null", "\"executionEvidencePath\": \"$relativePath\"")
+            .replace("\"executionEvidenceSha256\": null", "\"executionEvidenceSha256\": \"$digest\"")
+        check(updated != original) { "test checkpoint did not contain empty execution-evidence fields" }
+        checkpoint.writeText(updated)
+    }
+
+    private fun oneModuleModel(): RecoveredProgramModel = model().copy(
+        functions = listOf(model().functions.first().copy(calls = emptySet())),
+        globals = emptyList(),
+    )
 
     private fun model() = RecoveredProgramModel(
         inputSha256 = "input-sha",

@@ -1,6 +1,8 @@
 package decompengine.project
 
 import decompengine.acp.AcpExecutionEvidenceSource
+import decompengine.acp.LinuxDescriptor
+import decompengine.acp.LinuxFilesystemSyscalls
 import decompengine.agent.AgentAccessPolicy
 import decompengine.agent.AgentContextInput
 import decompengine.agent.AgentExecutionRequest
@@ -67,6 +69,9 @@ fun interface ModuleReconstructor {
 
     /** Stable identity used only to resume a deliberate unresolved result from the same strategy. */
     fun cacheIdentity(): String = "custom"
+
+    /** Agent-backed strategies may resume only checkpoints carrying authenticated execution evidence. */
+    fun requiresExecutionEvidenceForCheckpointReuse(): Boolean = false
 }
 
 /** Emits buildable evidence stubs by default; raw recovered C remains in the program model for later refinement. */
@@ -170,6 +175,8 @@ class BoundedLlmModuleReconstructor(
 
     override fun cacheIdentity(): String =
         "agent:${harness.implementationIdentifier() ?: "unspecified"}:context-$maximumContextCharacters:v1"
+
+    override fun requiresExecutionEvidenceForCheckpointReuse(): Boolean = true
 
     override fun reconstruct(request: ModuleReconstructionRequest): ReconstructedModule {
         val target = request.module.sourcePath
@@ -413,6 +420,58 @@ class SourceTreeManifest(
     }
 }
 
+/**
+ * Hashes a cached execution-evidence artifact through a descriptor-pinned, symlink-free walk.
+ *
+ * Cache metadata is untrusted resumable state. Every component below [projectDir] is therefore
+ * opened relative to an already-pinned directory, and the regular file is size-checked before a
+ * bounded read. A concurrent pathname replacement cannot redirect the read after authorization.
+ */
+internal fun boundedCheckpointExecutionEvidenceSha256(
+    projectDir: Path,
+    relativePath: String,
+): String? {
+    val normalizedPath = try {
+        requireNormalizedProjectPath(relativePath, "module execution evidence path")
+    } catch (_: IllegalArgumentException) {
+        return null
+    }
+    val components = normalizedPath.split('/')
+    val directories = mutableListOf<LinuxDescriptor>()
+    return try {
+        val projectRoot = projectDir.toAbsolutePath().normalize()
+        LinuxFilesystemSyscalls.requireSupported(projectRoot)
+        var directory = LinuxFilesystemSyscalls.openRoot(projectRoot).also(directories::add)
+        components.dropLast(1).forEach { component ->
+            directory = LinuxFilesystemSyscalls.openDirectoryAt(directory.fd, component)
+                .also(directories::add)
+        }
+        val evidence = LinuxFilesystemSyscalls.openRegularFileAtOrNull(
+            directory.fd,
+            components.last(),
+        ) ?: return null
+        evidence.use { pinned ->
+            val pinnedPath = LinuxFilesystemSyscalls.stableDescriptorPath(pinned.fd)
+            if (Files.size(pinnedPath) > MAXIMUM_CHECKPOINT_EXECUTION_EVIDENCE_BYTES) return null
+            LinuxFilesystemSyscalls.openReadableFrom(pinned).use { readable ->
+                sha256(
+                    LinuxFilesystemSyscalls.read(
+                        readable,
+                        MAXIMUM_CHECKPOINT_EXECUTION_EVIDENCE_BYTES,
+                        cancellationCheck = {},
+                    ),
+                )
+            }
+        }
+    } catch (_: Exception) {
+        null
+    } finally {
+        directories.asReversed().forEach(LinuxDescriptor::close)
+    }
+}
+
+internal const val MAXIMUM_CHECKPOINT_EXECUTION_EVIDENCE_BYTES: Int = 64 * 1024 * 1024
+
 object SourceTreeGenerator {
     fun generate(
         model: RecoveredProgramModel,
@@ -495,8 +554,13 @@ object SourceTreeGenerator {
                 checkpoint.fingerprint == fingerprint &&
                     sourcePath.exists() &&
                     sha256(sourcePath.readBytes()) == checkpoint.sourceSha256 &&
-                    checkpoint.hasCurrentExecutionEvidence(projectDir) &&
-                    (checkpoint.accepted || (!checkpoint.retryable && checkpoint.reconstructorIdentity == cacheIdentity))
+                    checkpoint.reconstructorIdentity == cacheIdentity &&
+                    checkpoint.hasCurrentExecutionEvidence(
+                        projectDir = projectDir,
+                        configuredEvidencePath = configuredExecutionEvidencePath,
+                        evidenceRequired = reconstructor.requiresExecutionEvidenceForCheckpointReuse(),
+                    ) &&
+                    (checkpoint.accepted || !checkpoint.retryable)
             }
             val checkpoint = cached ?: run {
                 val attempted = try {
@@ -784,10 +848,21 @@ object SourceTreeGenerator {
             }
         }
 
-        fun hasCurrentExecutionEvidence(projectDir: Path): Boolean {
-            val evidencePath = executionEvidencePath ?: return true
-            val evidenceFile = projectDir.resolve(evidencePath)
-            return evidenceFile.exists() && sha256(evidenceFile.readBytes()) == executionEvidenceSha256
+        fun hasCurrentExecutionEvidence(
+            projectDir: Path,
+            configuredEvidencePath: String?,
+            evidenceRequired: Boolean,
+        ): Boolean {
+            val checkpointClaimsAgentExecution =
+                generator.startsWith("agent:") || reconstructorIdentity.startsWith("agent:")
+            val evidencePath = executionEvidencePath
+                ?: return !evidenceRequired && !checkpointClaimsAgentExecution
+
+            // Compare the untrusted checkpoint value with the profile-owned path before resolving,
+            // opening, sizing, or reading anything named by the checkpoint.
+            if (configuredEvidencePath == null || evidencePath != configuredEvidencePath) return false
+            val expectedDigest = requireNotNull(executionEvidenceSha256)
+            return boundedCheckpointExecutionEvidenceSha256(projectDir, evidencePath) == expectedDigest
         }
 
         fun toJson(): String = buildString {
