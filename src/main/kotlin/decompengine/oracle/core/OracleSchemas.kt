@@ -184,6 +184,8 @@ object OracleSchemas {
         "recovered-structure",
         "release-artifacts",
         "structural-identity-map",
+        "structural-identity-replay-receipt",
+        "structural-model-replay-receipt",
         "structural-oracle",
         "structural-score",
         "target-abi",

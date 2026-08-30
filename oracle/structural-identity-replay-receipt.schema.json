@@ -1,0 +1,206 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://github.com/minsago-elite/decomp_thing/oracle/structural-identity-replay-receipt.schema.json",
+  "title": "Structural identity replay receipt v1",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schemaVersion", "kind", "request", "observation", "boundaryReplay", "identityReplay", "identityMapPayloadSha256", "receiptSha256"],
+  "properties": {
+    "schemaVersion": {"const": 1},
+    "kind": {"const": "structural-identity-replay-receipt-v1"},
+    "request": {"$ref": "#/$defs/request"},
+    "observation": {"$ref": "#/$defs/observation"},
+    "boundaryReplay": {"$ref": "#/$defs/boundaryReplay"},
+    "identityReplay": {"$ref": "#/$defs/identityReplay"},
+    "identityMapPayloadSha256": {"$ref": "#/$defs/sha256"},
+    "receiptSha256": {"$ref": "#/$defs/sha256"}
+  },
+  "$defs": {
+    "sha256": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
+    "identifier": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 4096,
+      "pattern": "^[A-Za-z0-9][A-Za-z0-9._:/@+\\-]*$"
+    },
+    "address": {"type": "string", "pattern": "^0x(?:0|[1-9a-f][0-9a-f]{0,15})$"},
+    "tool": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["id", "version", "implementationSha256", "configurationSha256"],
+      "properties": {
+        "id": {"$ref": "#/$defs/identifier"},
+        "version": {"$ref": "#/$defs/identifier"},
+        "implementationSha256": {"$ref": "#/$defs/sha256"},
+        "configurationSha256": {"$ref": "#/$defs/sha256"}
+      }
+    },
+    "artifact": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["sha256", "bytes"],
+      "properties": {
+        "sha256": {"$ref": "#/$defs/sha256"},
+        "bytes": {"type": "integer", "minimum": 1, "maximum": 17179869184}
+      }
+    },
+    "request": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["profile", "artifactManifestSha256", "twin", "recoveryMode", "inputBinary", "targetAbi", "functionOracle", "structuralOracle", "normalizationProfile", "boundaryReport", "exporter", "loader", "runtime", "identityVerifier", "sandbox"],
+      "properties": {
+        "profile": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["id", "sha256"],
+          "properties": {"id": {"$ref": "#/$defs/identifier"}, "sha256": {"$ref": "#/$defs/sha256"}}
+        },
+        "artifactManifestSha256": {"$ref": "#/$defs/sha256"},
+        "twin": {"enum": ["rich", "stripped"]},
+        "recoveryMode": {"const": "full"},
+        "inputBinary": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["sha256", "bytes", "elfType", "imageBase", "executableRangesSha256"],
+          "properties": {
+            "sha256": {"$ref": "#/$defs/sha256"},
+            "bytes": {"type": "integer", "minimum": 1, "maximum": 17179869184},
+            "elfType": {"enum": ["ET_EXEC", "ET_DYN"]},
+            "imageBase": {"$ref": "#/$defs/address"},
+            "executableRangesSha256": {"$ref": "#/$defs/sha256"}
+          }
+        },
+        "targetAbi": {"$ref": "#/$defs/namedArtifact"},
+        "functionOracle": {"$ref": "#/$defs/namedArtifact"},
+        "structuralOracle": {"$ref": "#/$defs/namedArtifact"},
+        "normalizationProfile": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["id", "version", "configurationSha256"],
+          "properties": {
+            "id": {"$ref": "#/$defs/identifier"},
+            "version": {"$ref": "#/$defs/identifier"},
+            "configurationSha256": {"$ref": "#/$defs/sha256"}
+          }
+        },
+        "boundaryReport": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["sha256", "adapter"],
+          "properties": {"sha256": {"$ref": "#/$defs/sha256"}, "adapter": {"$ref": "#/$defs/tool"}}
+        },
+        "exporter": {"$ref": "#/$defs/tool"},
+        "loader": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["id", "version", "implementationSha256", "configurationSha256", "imageBase"],
+          "properties": {
+            "id": {"$ref": "#/$defs/identifier"},
+            "version": {"$ref": "#/$defs/identifier"},
+            "implementationSha256": {"$ref": "#/$defs/sha256"},
+            "configurationSha256": {"$ref": "#/$defs/sha256"},
+            "imageBase": {"$ref": "#/$defs/address"}
+          }
+        },
+        "runtime": {"$ref": "#/$defs/tool"},
+        "identityVerifier": {"$ref": "#/$defs/tool"},
+        "sandbox": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["launcherImplementationSha256", "policySha256"],
+          "properties": {
+            "launcherImplementationSha256": {"$ref": "#/$defs/sha256"},
+            "policySha256": {"$ref": "#/$defs/sha256"}
+          }
+        }
+      }
+    },
+    "namedArtifact": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["id", "sha256"],
+      "properties": {"id": {"$ref": "#/$defs/identifier"}, "sha256": {"$ref": "#/$defs/sha256"}}
+    },
+    "stream": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["sha256", "bytes", "truncated"],
+      "properties": {
+        "sha256": {"$ref": "#/$defs/sha256"},
+        "bytes": {"type": "integer", "minimum": 0, "maximum": 67108864},
+        "truncated": {"const": false}
+      }
+    },
+    "observation": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["execution", "outputTree", "programModel", "structuralObservation"],
+      "properties": {
+        "execution": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["logicalInvocationSha256", "environmentSha256", "sandboxEvidenceSha256", "networkIsolated", "exitCode", "terminalOutcome", "timedOut", "outOfMemory", "cleanupVerified", "stdout", "stderr"],
+          "properties": {
+            "logicalInvocationSha256": {"$ref": "#/$defs/sha256"},
+            "environmentSha256": {"$ref": "#/$defs/sha256"},
+            "sandboxEvidenceSha256": {"$ref": "#/$defs/sha256"},
+            "networkIsolated": {"const": true},
+            "exitCode": {"const": 0},
+            "terminalOutcome": {"const": "returned-completed"},
+            "timedOut": {"const": false},
+            "outOfMemory": {"const": false},
+            "cleanupVerified": {"const": true},
+            "stdout": {"$ref": "#/$defs/stream"},
+            "stderr": {"$ref": "#/$defs/stream"}
+          }
+        },
+        "outputTree": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["sha256", "fileCount", "totalBytes"],
+          "properties": {
+            "sha256": {"$ref": "#/$defs/sha256"},
+            "fileCount": {"const": 2},
+            "totalBytes": {"type": "integer", "minimum": 2, "maximum": 34359738368}
+          }
+        },
+        "programModel": {"$ref": "#/$defs/artifact"},
+        "structuralObservation": {"$ref": "#/$defs/artifact"}
+      }
+    },
+    "boundaryReplay": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["replaySha256", "rawRecoveredCount", "exactMatches", "nearMisses", "falsePositives", "falseNegatives", "ignoredExcludedRecoveries", "oracleUniverseSha256", "recoveredUniverseSha256", "selectedMappingSha256", "nameIndependent"],
+      "properties": {
+        "replaySha256": {"$ref": "#/$defs/sha256"},
+        "rawRecoveredCount": {"$ref": "#/$defs/count"},
+        "exactMatches": {"$ref": "#/$defs/count"},
+        "nearMisses": {"$ref": "#/$defs/count"},
+        "falsePositives": {"$ref": "#/$defs/count"},
+        "falseNegatives": {"$ref": "#/$defs/count"},
+        "ignoredExcludedRecoveries": {"$ref": "#/$defs/count"},
+        "oracleUniverseSha256": {"$ref": "#/$defs/sha256"},
+        "recoveredUniverseSha256": {"$ref": "#/$defs/sha256"},
+        "selectedMappingSha256": {"$ref": "#/$defs/sha256"},
+        "nameIndependent": {"const": true}
+      }
+    },
+    "identityReplay": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["replaySha256", "mappingCount", "oracleGlobalCount", "recoveredGlobalCount", "oracleTypeCount", "recoveredTypeCount", "mappingUniverseSha256", "complete"],
+      "properties": {
+        "replaySha256": {"$ref": "#/$defs/sha256"},
+        "mappingCount": {"$ref": "#/$defs/count"},
+        "oracleGlobalCount": {"$ref": "#/$defs/count"},
+        "recoveredGlobalCount": {"$ref": "#/$defs/count"},
+        "oracleTypeCount": {"$ref": "#/$defs/count"},
+        "recoveredTypeCount": {"$ref": "#/$defs/count"},
+        "mappingUniverseSha256": {"$ref": "#/$defs/sha256"},
+        "complete": {"const": true}
+      }
+    },
+    "count": {"type": "integer", "minimum": 0, "maximum": 10000000}
+  }
+}
