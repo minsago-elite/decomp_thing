@@ -10,18 +10,16 @@ import decompengine.mvp.MvpPatchOptions
 import decompengine.mvp.MvpPatchWorkflow
 import decompengine.mvp.BinaryRunnerService
 import decompengine.acp.AcpHarnessFactory
-import decompengine.acp.AcpHarnessKind
 import decompengine.project.ArchivalReconstructionService
 import decompengine.project.BoundedLlmModuleReconstructor
 import decompengine.project.EvidenceModuleReconstructor
 import decompengine.project.GhidraHeadlessProgramModelAnalyzer
 import decompengine.project.ModuleReconstructor
-import decompengine.repair.HttpOpenAiCompatibleRepairClient
+import decompengine.agent.AgentHarness
 import decompengine.repair.RepairRuntimeConfiguration
 import decompengine.repair.SecureRepairRuntime
 import decompengine.validation.ProcessInput
 import decompengine.web.UploadServer
-import java.net.URI
 import java.nio.file.Files
 import java.nio.file.Path
 import java.util.Locale
@@ -109,17 +107,7 @@ internal fun selectReconstructionStrategy(
         return ReconstructionStrategy(EvidenceModuleReconstructor(), null)
     }
 
-    val effectiveEnvironment = if (harnessOverride == null) {
-        environment
-    } else {
-        object : Map<String, String> by environment {
-            override fun containsKey(key: String): Boolean =
-                key == "ACP_HARNESS" || environment.containsKey(key)
-
-            override fun get(key: String): String? =
-                if (key == "ACP_HARNESS") harnessOverride else environment[key]
-        }
-    }
+    val effectiveEnvironment = withHarnessOverride(environment, harnessOverride)
     val selection = AcpHarnessFactory.fromEnvironment(effectiveEnvironment)
     return ReconstructionStrategy(
         BoundedLlmModuleReconstructor(selection.createHarness(), maximumContext),
@@ -205,7 +193,7 @@ private fun runRepair(args: List<String>) {
             }
             "--explore" -> { exploreInputs = true; index++ }
             "--harness" -> {
-                if (index + 1 >= args.size) repairUsageError("--harness requires direct or acp")
+                if (index + 1 >= args.size) repairUsageError("--harness requires acp or legacy-openai")
                 harnessOverride = args[index + 1]; index += 2
             }
             else -> {
@@ -216,17 +204,6 @@ private fun runRepair(args: List<String>) {
                 index++
             }
         }
-    }
-    val harnessEnv = harnessOverride?.let { mapOf("ACP_HARNESS" to it) } ?: emptyMap()
-    val harnessSelection = try {
-        AcpHarnessFactory.fromEnvironment(System.getenv() + harnessEnv)
-    } catch (e: IllegalArgumentException) {
-        repairUsageError(e.message ?: "invalid harness configuration")
-    }
-    if (harnessSelection.kind == AcpHarnessKind.ACP) {
-        println("harness: acp (${harnessSelection.configuration?.executable})")
-    } else {
-        println("harness: direct")
     }
     if (original == null || project == null) repairUsageError("repair requires an original binary and project directory")
     val reportsDir = reports ?: project.resolve("reports")
@@ -244,13 +221,20 @@ private fun runRepair(args: List<String>) {
     } else {
         listOf(ProcessInput("default"))
     }
-    val result = SecureRepairRuntime.open(
-        RepairRuntimeConfiguration(
-            profileId = "generated-c-make-v1",
-            historyPath = reportsDir.resolve("repair_history.json"),
-        ),
-    ).use { runtime ->
-        runtime.repairUntilValid(project, original, regressionInputs, reportsDir, maxIterations)
+    val runtime = try {
+        SecureRepairRuntime.open(
+            RepairRuntimeConfiguration(
+                profileId = "generated-c-make-v1",
+                historyPath = reportsDir.resolve("repair_history.json"),
+                harnessOverride = harnessOverride,
+            ),
+        )
+    } catch (failure: IllegalArgumentException) {
+        repairUsageError(failure.message ?: "invalid harness configuration")
+    }
+    val result = runtime.use {
+        println("harness provenance: ${it.harnessProvenance}")
+        it.repairUntilValid(project, original, regressionInputs, reportsDir, maxIterations)
     }
     result.iterations.forEach { iteration ->
         println("repair iteration ${iteration.index}: ${iteration.failureKind} - ${iteration.summary}")
@@ -260,7 +244,7 @@ private fun runRepair(args: List<String>) {
 
 private fun repairUsageError(message: String): Nothing {
     System.err.println(message)
-    System.err.println("usage: llm_bin_patch repair <original-binary> <project-dir> [--reports <directory>] [--max-iterations <count>] [--explore] [--harness direct|acp]")
+    System.err.println("usage: llm_bin_patch repair <original-binary> <project-dir> [--reports <directory>] [--max-iterations <count>] [--explore] [--harness acp|legacy-openai]")
     kotlin.system.exitProcess(2)
 }
 
@@ -268,6 +252,7 @@ private fun runPatch(args: List<String>) {
     var input: Path? = null
     var output: Path? = null
     var assumeYes = false
+    var harnessOverride: String? = null
     var index = 0
     while (index < args.size) {
         when (args[index]) {
@@ -276,6 +261,10 @@ private fun runPatch(args: List<String>) {
                 output = Path.of(args[index + 1]); index += 2
             }
             "--yes" -> { assumeYes = true; index++ }
+            "--harness" -> {
+                if (index + 1 >= args.size) patchUsageError("--harness requires acp or legacy-openai")
+                harnessOverride = args[index + 1]; index += 2
+            }
             else -> {
                 if (args[index].startsWith("-") || input != null) patchUsageError("unexpected argument: ${args[index]}")
                 input = Path.of(args[index]); index++
@@ -283,8 +272,18 @@ private fun runPatch(args: List<String>) {
         }
     }
     if (input == null || output == null) patchUsageError("patch requires an input ELF and output directory")
+    val strategy = try {
+        selectPatchStrategy(harnessOverride, System.getenv())
+    } catch (failure: IllegalArgumentException) {
+        patchUsageError(failure.message ?: "invalid harness configuration")
+    }
+    println("harness provenance: ${strategy.harnessProvenance}")
     try {
-        MvpPatchWorkflow(HttpOpenAiCompatibleRepairClient.fromEnvironment()).run(MvpPatchOptions(input, output, assumeYes))
+        MvpPatchWorkflow(
+            harness = strategy.harness,
+            environment = System.getenv(),
+            harnessProvenance = strategy.harnessProvenance,
+        ).run(MvpPatchOptions(input, output, assumeYes))
     } catch (failure: IllegalArgumentException) {
         System.err.println("configuration error: ${failure.message}"); kotlin.system.exitProcess(2)
     } catch (failure: MvpPatchException) {
@@ -294,8 +293,36 @@ private fun runPatch(args: List<String>) {
 
 private fun patchUsageError(message: String): Nothing {
     System.err.println(message)
-    System.err.println("usage: llm_bin_patch patch <input-elf> --output <directory> [--yes]")
+    System.err.println("usage: llm_bin_patch patch <input-elf> --output <directory> [--yes] [--harness acp|legacy-openai]")
     kotlin.system.exitProcess(2)
+}
+
+internal data class PatchStrategy(
+    val harness: AgentHarness,
+    val harnessProvenance: String,
+)
+
+internal fun selectPatchStrategy(
+    harnessOverride: String?,
+    environment: Map<String, String>,
+): PatchStrategy {
+    val selection = AcpHarnessFactory.fromEnvironment(withHarnessOverride(environment, harnessOverride))
+    return PatchStrategy(selection.createHarness(), selection.provenance.stableDescriptor)
+}
+
+private fun withHarnessOverride(
+    environment: Map<String, String>,
+    harnessOverride: String?,
+): Map<String, String> = if (harnessOverride == null) {
+    environment
+} else {
+    object : Map<String, String> by environment {
+        override fun containsKey(key: String): Boolean =
+            key == "ACP_HARNESS" || environment.containsKey(key)
+
+        override fun get(key: String): String? =
+            if (key == "ACP_HARNESS") harnessOverride else environment[key]
+    }
 }
 
 private fun runRunner(args: List<String>) {
@@ -391,17 +418,17 @@ private fun printHelp() {
         """
         Usage:
           llm_bin_patch doctor [--tools-only] [--output <directory>]
-          llm_bin_patch patch <input-elf> --output <directory> [--yes]
+          llm_bin_patch patch <input-elf> --output <directory> [--yes] [--harness acp|legacy-openai]
           llm_bin_patch runner [--control-dir <directory>] [--root <directory>]...
-          llm_bin_patch repair <original-binary> <project-dir> [--reports <directory>] [--max-iterations <count>] [--explore] [--harness direct|acp]
+          llm_bin_patch repair <original-binary> <project-dir> [--reports <directory>] [--max-iterations <count>] [--explore] [--harness acp|legacy-openai]
           llm_bin_patch explore <binary> --reports <directory> [--arg <value>] [--stdin <value>]
           llm_bin_patch reconstruct <binary> --output <directory> [--evidence-only] [--max-context-chars <count>] [--harness acp|legacy-openai]
           llm_bin_patch web [--host 127.0.0.1] [--port 8000] [--data-dir .decomp_engine/jobs]
 
-        Reconstruction harness selection:
+        Agent harness selection for patch, reconstruction, and repair:
           --harness acp            use the ACP agent provisioned by ACP_CONFIG_FILE (default)
           --harness legacy-openai  use the deprecated built-in OpenAI-compatible adapter
-          --evidence-only is agent-free and cannot be combined with --harness.
+          Reconstruction's --evidence-only mode is agent-free and cannot be combined with --harness.
         """.trimIndent(),
     )
 }
