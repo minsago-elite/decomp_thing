@@ -238,8 +238,7 @@ object FullTreeDataObservationSqlite {
         artifact: FullTreeDataObservationArtifactBinding,
         limits: FullTreeDataObservationIngestionLimits,
     ): ParsedShard {
-        val jdbcUrl = "jdbc:sqlite:${database.toAbsolutePath().normalize()}"
-        DriverManager.getConnection(jdbcUrl).use { connection ->
+        DriverManager.getConnection(SqliteJdbcPaths.create(database)).use { connection ->
             configureDatabase(connection, limits)
             connection.autoCommit = false
             try {
@@ -730,7 +729,7 @@ object FullTreeDataObservationSqlite {
 
     private fun logicalStateSha256(database: Path): String {
         val digest = MessageDigest.getInstance("SHA-256")
-        DriverManager.getConnection("jdbc:sqlite:file:${database.toAbsolutePath().normalize()}?mode=ro").use { connection ->
+        DriverManager.getConnection(SqliteJdbcPaths.readOnly(database)).use { connection ->
             connection.createStatement().use { statement ->
                 statement.executeQuery("SELECT key, value FROM metadata ORDER BY key").use { rows ->
                     while (rows.next()) {
