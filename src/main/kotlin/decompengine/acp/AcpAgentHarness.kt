@@ -560,6 +560,7 @@ class AcpAgentHarness(
                 )
             }
         } ?: AgentUsage(toolCalls = translator.toolCallCount(), wallClock = elapsed)
+        requireConfiguredTokenUsage(request, usage, translator.sessionReference())
         val limited = tokenLimitExceeded(request, usage)
 
         val result = AgentExecutionResult(
@@ -2225,8 +2226,28 @@ private fun renderPrompt(request: AgentExecutionRequest): String = buildString {
 }
 
 private fun tokenLimitExceeded(request: AgentExecutionRequest, usage: AgentUsage): Boolean =
-    request.limits.maxInputTokens?.let { (usage.inputTokens ?: 0) > it } == true ||
-        request.limits.maxOutputTokens?.let { (usage.outputTokens ?: 0) > it } == true
+    request.limits.maxInputTokens?.let { requireNotNull(usage.inputTokens) > it } == true ||
+        request.limits.maxOutputTokens?.let { requireNotNull(usage.outputTokens) > it } == true
+
+private fun requireConfiguredTokenUsage(
+    request: AgentExecutionRequest,
+    usage: AgentUsage,
+    session: AgentSessionReference?,
+) {
+    val missing = buildList {
+        if (request.limits.maxInputTokens != null && usage.inputTokens == null) add("inputTokens")
+        if (request.limits.maxOutputTokens != null && usage.outputTokens == null) add("outputTokens")
+    }
+    if (missing.isNotEmpty()) {
+        throw AgentExecutionException(
+            AgentFailure(
+                AgentFailureKind.PROTOCOL,
+                "ACP agent omitted token usage required by configured ceilings: ${missing.joinToString(",")}",
+                session = session,
+            ),
+        )
+    }
+}
 
 private fun decodeUtf8(bytes: ByteArray): String = try {
     StandardCharsets.UTF_8.newDecoder()

@@ -19,6 +19,7 @@ GENERIC_CONTRACT_MODES = {
     "late-response-id",
     "malformed-prompt",
     "missing-jsonrpc-prompt",
+    "missing-usage",
     "negative-usage",
     "numeric-jsonrpc-prompt",
     "oversized-frame-prompt",
@@ -849,15 +850,15 @@ update({
     "kind": "edit",
     "status": "completed",
 })
-respond(prompt, {
-    "stopReason": "end_turn",
-    "usage": {
+prompt_result = {"stopReason": "end_turn"}
+if MODE != "missing-usage":
+    prompt_result["usage"] = {
         "inputTokens": -1 if MODE == "negative-usage" else 11,
         "outputTokens": 7,
         "totalTokens": 18,
         "cachedReadTokens": 3,
-    },
-})
+    }
+respond(prompt, prompt_result)
 
 if MODE == "response-then-crash":
     raise SystemExit(31)

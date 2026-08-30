@@ -671,6 +671,17 @@ class AcpAgentHarnessTest {
         assertEquals(AgentFailureKind.PROTOCOL, negativeUsage.failure.kind)
         assertTrue(negativeUsage.message.orEmpty().contains("invalid prompt usage"))
 
+        val missingUsageFixture = fixture(genericContract = true)
+        val missingUsageHarness = harness("missing-usage")
+        val missingUsage = executeExpectingCleanFailure(
+            missingUsageHarness,
+            missingUsageFixture.request.withTokenLimits(1_000, 1_000),
+            "missing usage",
+            missingUsageFixture,
+        )
+        assertEquals(AgentFailureKind.PROTOCOL, missingUsage.failure.kind)
+        assertTrue(missingUsage.message.orEmpty().contains("inputTokens,outputTokens"))
+
         val eofFixture = fixture(genericContract = true)
         val eofHarness = harness("eof-prompt")
         val eof = executeExpectingCleanFailure(eofHarness, eofFixture.request, "clean EOF", eofFixture)
@@ -1438,6 +1449,24 @@ class AcpAgentHarnessTest {
                 maxOutputBytes = limits.maxOutputBytes,
                 maxInputTokens = limits.maxInputTokens,
                 maxOutputTokens = limits.maxOutputTokens,
+            ),
+            cancellation,
+        )
+
+    private fun AgentExecutionRequest.withTokenLimits(input: Long?, output: Long?): AgentExecutionRequest =
+        AgentExecutionRequest(
+            objective,
+            workspaceRoots,
+            contextInputs,
+            accessPolicy,
+            AgentExecutionLimits(
+                wallClockTimeout = limits.wallClockTimeout,
+                idleTimeout = limits.idleTimeout,
+                maxTurns = limits.maxTurns,
+                maxToolCalls = limits.maxToolCalls,
+                maxOutputBytes = limits.maxOutputBytes,
+                maxInputTokens = input,
+                maxOutputTokens = output,
             ),
             cancellation,
         )
