@@ -1,5 +1,6 @@
 package decompengine.oracle.fulltree
 
+import decompengine.oracle.core.DescriptorBoundAtomicStateFile
 import decompengine.oracle.core.DescriptorBoundStateFaultInjector
 import decompengine.oracle.core.DescriptorBoundStateFaultPoint
 import java.nio.file.Files
@@ -16,6 +17,498 @@ import kotlin.test.assertTrue
 import org.junit.jupiter.api.Assumptions.assumeTrue
 
 class FullTreeFunctionObservationOperationCoordinatorTest {
+    @Test
+    fun `cold leased coordinator reconciles exact evidence with both coarse disk populations`() {
+        val mount = provisionedMount()
+
+        listOf(false, true).forEachIndexed { index, activeRun ->
+            val operationBinding = binding(operationSeed = if (activeRun) "a" else "9")
+            assertTrue(entryNames(mount).isEmpty(), "provisioned ext4 slot is not empty")
+
+            withJournalRoot { root ->
+                val leaseRoot = mount.resolve(operationBinding.leaseDirectoryName)
+                val recordPath = leaseRoot.resolve(LEASE_RECORD_FILE)
+                val runPath = leaseRoot.resolve(runDirectoryName(operationBinding.operationId))
+                val opaqueRunContent = runPath.resolve("opaque-run-content")
+                var live: AutoCloseable? = null
+                try {
+                    FullTreeFunctionObservationJournalAuthority.open(root).use { authority ->
+                        val fresh = FullTreeFunctionObservationOperationCoordinator.prepareNew(
+                            authority,
+                            operationBinding,
+                            mount,
+                        )
+                        live = fresh
+                        if (activeRun) {
+                            val prepared = fresh.prepareRunRoot()
+                            live = prepared
+                            prepared.close()
+                        } else {
+                            fresh.close()
+                        }
+                        live = null
+                        if (activeRun) {
+                            Files.writeString(opaqueRunContent, "bounded opaque run content")
+                        }
+
+                        val journalDirectory = root.resolve(operationBinding.journalDirectoryName)
+                        val journalBefore = immutableFileSnapshot(journalDirectory)
+                        val mountNames = entryNames(mount)
+                        val leaseNames = entryNames(leaseRoot)
+                        val runNames = if (activeRun) entryNames(runPath) else emptyList()
+                        val opaqueBytes = if (activeRun) Files.readAllBytes(opaqueRunContent) else byteArrayOf()
+                        val recordBytes = Files.readAllBytes(recordPath)
+                        val expectedPopulation = if (activeRun) {
+                            FullTreeDiskScratchColdPopulation.ACTIVE_OPERATION_RUN
+                        } else {
+                            FullTreeDiskScratchColdPopulation.RECORD_ONLY
+                        }
+
+                        assertFailsWith<FullTreeDiskScratchException> {
+                            FullTreeFunctionObservationOperationCoordinator
+                                .openExistingLeasedReadOnly(
+                                    authority,
+                                    operationBinding,
+                                    root.resolve("missing-disk-mount"),
+                                )
+                        }
+                        requireNotNull(authority.openExisting(operationBinding)).close()
+                        assertEquals(journalBefore, immutableFileSnapshot(journalDirectory))
+
+                        val cold = FullTreeFunctionObservationOperationCoordinator
+                            .openExistingLeasedReadOnly(authority, operationBinding, mount)
+                        val stableHistory = cold.leasedHistory
+                        val stableEvidence = cold.diskEvidence
+                        try {
+                            assertEquals(
+                                FullTreeFunctionObservationOperationPhase.LEASED,
+                                stableHistory.latest?.phase,
+                            )
+                            assertSame(stableHistory.diskEvidence, stableEvidence)
+                            assertSame(
+                                stableEvidence,
+                                stableHistory.requireDiskEvidenceIntroducedAt(
+                                    FullTreeFunctionObservationOperationPhase.LEASED,
+                                ),
+                            )
+                            assertEquals(expectedPopulation, cold.observedPopulation)
+
+                            cold.requireCurrentReadOnly()
+                            cold.requireCurrentReadOnly()
+                            assertSame(stableHistory, cold.leasedHistory)
+                            assertSame(stableEvidence, cold.diskEvidence)
+                            assertEquals(expectedPopulation, cold.observedPopulation)
+
+                            assertFailsWith<FullTreeFunctionObservationOperationJournalException> {
+                                authority.openExisting(operationBinding)
+                            }
+                            assertFailsWith<FullTreeDiskScratchException> {
+                                FullTreeDiskScratchAuthority.openExistingReadOnly(
+                                    mount,
+                                    operationBinding.diskOperation(),
+                                    operationBinding.diskPolicy(),
+                                )
+                            }
+                            assertFailsWith<FullTreeDiskScratchException> {
+                                FullTreeDiskScratchAuthority.acquireDedicatedFilesystem(
+                                    mount,
+                                    binding(
+                                        operationSeed = if (index == 0) "b" else "c",
+                                    ).diskOperation(),
+                                    operationBinding.diskPolicy(),
+                                )
+                            }
+                        } finally {
+                            cold.close()
+                        }
+                        cold.close()
+                        assertFailsWith<IllegalStateException> {
+                            cold.requireCurrentReadOnly()
+                        }
+
+                        assertEquals(journalBefore, immutableFileSnapshot(journalDirectory))
+                        assertEquals(mountNames, entryNames(mount))
+                        assertEquals(leaseNames, entryNames(leaseRoot))
+                        assertContentEquals(recordBytes, Files.readAllBytes(recordPath))
+                        if (activeRun) {
+                            assertEquals(runNames, entryNames(runPath))
+                            assertContentEquals(opaqueBytes, Files.readAllBytes(opaqueRunContent))
+                        }
+
+                        requireNotNull(authority.openExisting(operationBinding)).use { journal ->
+                            val reopened = requireNotNull(journal.loadOrNull())
+                            val evidence = reopened.requireDiskEvidenceIntroducedAt(
+                                FullTreeFunctionObservationOperationPhase.LEASED,
+                            )
+                            assertContentEquals(stableEvidence.canonicalBytes(), evidence.canonicalBytes())
+                        }
+                        FullTreeDiskScratchAuthority.openExistingReadOnly(
+                            mount,
+                            operationBinding.diskOperation(),
+                            operationBinding.diskPolicy(),
+                        ).use { disk ->
+                            assertEquals(
+                                expectedPopulation,
+                                disk.requireCurrent(stableEvidence).population,
+                            )
+                        }
+
+                        assertEquals(journalBefore, immutableFileSnapshot(journalDirectory))
+                        assertEquals(mountNames, entryNames(mount))
+                        assertEquals(leaseNames, entryNames(leaseRoot))
+                        assertContentEquals(recordBytes, Files.readAllBytes(recordPath))
+                        if (activeRun) {
+                            assertEquals(runNames, entryNames(runPath))
+                            assertContentEquals(opaqueBytes, Files.readAllBytes(opaqueRunContent))
+                        }
+                    }
+                } finally {
+                    runCatching { live?.close() }
+                    if (activeRun) {
+                        Files.deleteIfExists(opaqueRunContent)
+                        removeActiveRunLease(leaseRoot, operationBinding.operationId)
+                    } else {
+                        removeRecordOnlyLease(leaseRoot)
+                    }
+                }
+            }
+            assertTrue(entryNames(mount).isEmpty())
+        }
+    }
+
+    @Test
+    fun `cold leased coordinator rejects preparing history without consulting disk or mutating journal`() =
+        withJournalRoot { root ->
+            val binding = binding(operationSeed = "d")
+            FullTreeFunctionObservationJournalAuthority.open(root).use { authority ->
+                authority.createNew(binding).use { journal ->
+                    assertEquals(
+                        FullTreeFunctionObservationOperationPhase.PREPARING,
+                        journal.initialize().latest?.phase,
+                    )
+                }
+                val journalDirectory = root.resolve(binding.journalDirectoryName)
+                val before = immutableFileSnapshot(journalDirectory)
+
+                assertFailsWith<FullTreeFunctionObservationOperationCoordinationException> {
+                    FullTreeFunctionObservationOperationCoordinator.openExistingLeasedReadOnly(
+                        authority,
+                        binding,
+                        root.resolve("missing-disk-mount"),
+                    )
+                }
+
+                assertEquals(before, immutableFileSnapshot(journalDirectory))
+                requireNotNull(authority.openExisting(binding)).use { journal ->
+                    val history = requireNotNull(journal.loadOrNull())
+                    assertEquals(
+                        listOf(FullTreeFunctionObservationOperationPhase.PREPARING),
+                        history.transitions.map { it.phase },
+                    )
+                }
+                assertEquals(before, immutableFileSnapshot(journalDirectory))
+            }
+        }
+
+    @Test
+    fun `cold leased coordinator leaves pending journal publication explicit and unlocks it`() =
+        withJournalRoot { root ->
+            val binding = binding(operationSeed = "e")
+            val pendingName = DescriptorBoundAtomicStateFile.temporaryName("transition-0000.json")
+            FullTreeFunctionObservationJournalAuthority.open(root).use { authority ->
+                var temporarySyncs = 0
+                authority.createNew(binding).use { journal ->
+                    assertFailsWith<SimulatedCoordinatorProcessDeath> {
+                        journal.initialize(
+                            DescriptorBoundStateFaultInjector { point ->
+                                if (
+                                    point == DescriptorBoundStateFaultPoint.AFTER_TEMPORARY_DIRECTORY_SYNC &&
+                                    ++temporarySyncs == 2
+                                ) {
+                                    throw SimulatedCoordinatorProcessDeath()
+                                }
+                            },
+                        )
+                    }
+                }
+                val journalDirectory = root.resolve(binding.journalDirectoryName)
+                val before = immutableFileSnapshot(journalDirectory)
+                assertTrue(pendingName in before)
+                assertTrue("transition-0000.json" !in before)
+
+                assertFailsWith<FullTreeFunctionObservationOperationJournalException> {
+                    FullTreeFunctionObservationOperationCoordinator.openExistingLeasedReadOnly(
+                        authority,
+                        binding,
+                        root.resolve("missing-disk-mount"),
+                    )
+                }
+
+                assertEquals(before, immutableFileSnapshot(journalDirectory))
+                requireNotNull(authority.openExisting(binding)).use { journal ->
+                    assertFailsWith<FullTreeFunctionObservationOperationJournalException> {
+                        journal.loadOrNull()
+                    }
+                }
+                assertEquals(before, immutableFileSnapshot(journalDirectory))
+                assertTrue(Files.exists(journalDirectory.resolve(pendingName), LinkOption.NOFOLLOW_LINKS))
+                assertTrue(
+                    !Files.exists(
+                        journalDirectory.resolve("transition-0000.json"),
+                        LinkOption.NOFOLLOW_LINKS,
+                    ),
+                )
+            }
+        }
+
+    @Test
+    fun `cold leased coordinator rejects published evidence beside preparing before consulting disk`() {
+        val mount = provisionedMount()
+        val binding = binding(operationSeed = "5")
+        val leaseRoot = mount.resolve(binding.leaseDirectoryName)
+        val recordPath = leaseRoot.resolve(LEASE_RECORD_FILE)
+        assertTrue(entryNames(mount).isEmpty(), "provisioned ext4 slot is not empty")
+
+        withJournalRoot { root ->
+            try {
+                FullTreeFunctionObservationJournalAuthority.open(root).use { authority ->
+                    assertFailsWith<SimulatedCoordinatorProcessDeath> {
+                        FullTreeFunctionObservationOperationCoordinator.prepareNew(
+                            authority,
+                            binding,
+                            mount,
+                            transitionFaultInjector = DescriptorBoundStateFaultInjector { point ->
+                                if (point == DescriptorBoundStateFaultPoint.AFTER_UNNAMED_FILE_SYNC) {
+                                    throw SimulatedCoordinatorProcessDeath()
+                                }
+                            },
+                        )
+                    }
+
+                    val journalDirectory = root.resolve(binding.journalDirectoryName)
+                    val before = immutableFileSnapshot(journalDirectory)
+                    val mountNames = entryNames(mount)
+                    val leaseNames = entryNames(leaseRoot)
+                    val recordBytes = Files.readAllBytes(recordPath)
+                    assertTrue(DISK_EVIDENCE_FILE in before)
+                    assertTrue("transition-0001.json" !in before)
+                    assertTrue(
+                        DescriptorBoundAtomicStateFile.temporaryName("transition-0001.json") !in before,
+                    )
+
+                    assertFailsWith<FullTreeFunctionObservationOperationCoordinationException> {
+                        FullTreeFunctionObservationOperationCoordinator.openExistingLeasedReadOnly(
+                            authority,
+                            binding,
+                            root.resolve("missing-disk-mount"),
+                        )
+                    }
+
+                    assertEquals(before, immutableFileSnapshot(journalDirectory))
+                    requireNotNull(authority.openExisting(binding)).use { journal ->
+                        val history = requireNotNull(journal.loadOrNull())
+                        assertEquals(
+                            listOf(FullTreeFunctionObservationOperationPhase.PREPARING),
+                            history.transitions.map { it.phase },
+                        )
+                        assertContentEquals(
+                            before.getValue(DISK_EVIDENCE_FILE).toByteArray(),
+                            requireNotNull(history.diskEvidence).canonicalBytes(),
+                        )
+                    }
+                    assertEquals(before, immutableFileSnapshot(journalDirectory))
+                    assertEquals(mountNames, entryNames(mount))
+                    assertEquals(leaseNames, entryNames(leaseRoot))
+                    assertContentEquals(recordBytes, Files.readAllBytes(recordPath))
+                }
+            } finally {
+                removeRecordOnlyLease(leaseRoot)
+            }
+        }
+        assertTrue(entryNames(mount).isEmpty())
+    }
+
+    @Test
+    fun `cold leased coordinator rejects pending leased link without completing it or consulting disk`() {
+        val mount = provisionedMount()
+        val binding = binding(operationSeed = "6")
+        val leaseRoot = mount.resolve(binding.leaseDirectoryName)
+        val recordPath = leaseRoot.resolve(LEASE_RECORD_FILE)
+        val pendingName = DescriptorBoundAtomicStateFile.temporaryName("transition-0001.json")
+        assertTrue(entryNames(mount).isEmpty(), "provisioned ext4 slot is not empty")
+
+        withJournalRoot { root ->
+            try {
+                FullTreeFunctionObservationJournalAuthority.open(root).use { authority ->
+                    assertFailsWith<SimulatedCoordinatorProcessDeath> {
+                        FullTreeFunctionObservationOperationCoordinator.prepareNew(
+                            authority,
+                            binding,
+                            mount,
+                            transitionFaultInjector = DescriptorBoundStateFaultInjector { point ->
+                                if (point == DescriptorBoundStateFaultPoint.AFTER_TEMPORARY_DIRECTORY_SYNC) {
+                                    throw SimulatedCoordinatorProcessDeath()
+                                }
+                            },
+                        )
+                    }
+
+                    val journalDirectory = root.resolve(binding.journalDirectoryName)
+                    val before = immutableFileSnapshot(journalDirectory)
+                    val mountNames = entryNames(mount)
+                    val leaseNames = entryNames(leaseRoot)
+                    val recordBytes = Files.readAllBytes(recordPath)
+                    assertTrue(DISK_EVIDENCE_FILE in before)
+                    assertTrue(pendingName in before)
+                    assertTrue("transition-0001.json" !in before)
+
+                    assertFailsWith<FullTreeFunctionObservationOperationJournalException> {
+                        FullTreeFunctionObservationOperationCoordinator.openExistingLeasedReadOnly(
+                            authority,
+                            binding,
+                            root.resolve("missing-disk-mount"),
+                        )
+                    }
+
+                    assertEquals(before, immutableFileSnapshot(journalDirectory))
+                    requireNotNull(authority.openExisting(binding)).use { journal ->
+                        assertFailsWith<FullTreeFunctionObservationOperationJournalException> {
+                            journal.loadOrNull()
+                        }
+                    }
+                    assertEquals(before, immutableFileSnapshot(journalDirectory))
+                    assertTrue(Files.exists(journalDirectory.resolve(pendingName), LinkOption.NOFOLLOW_LINKS))
+                    assertTrue(
+                        !Files.exists(
+                            journalDirectory.resolve("transition-0001.json"),
+                            LinkOption.NOFOLLOW_LINKS,
+                        ),
+                    )
+                    assertEquals(mountNames, entryNames(mount))
+                    assertEquals(leaseNames, entryNames(leaseRoot))
+                    assertContentEquals(recordBytes, Files.readAllBytes(recordPath))
+                }
+            } finally {
+                removeRecordOnlyLease(leaseRoot)
+            }
+        }
+        assertTrue(entryNames(mount).isEmpty())
+    }
+
+    @Test
+    fun `cold leased coordinator rejects fully published unit-attached before consulting disk`() {
+        val mount = provisionedMount()
+        val binding = binding(operationSeed = "7")
+        val leaseRoot = mount.resolve(binding.leaseDirectoryName)
+        val recordPath = leaseRoot.resolve(LEASE_RECORD_FILE)
+        var live: FullTreeFunctionObservationLeasedOperation? = null
+        assertTrue(entryNames(mount).isEmpty(), "provisioned ext4 slot is not empty")
+
+        withJournalRoot { root ->
+            try {
+                FullTreeFunctionObservationJournalAuthority.open(root).use { authority ->
+                    val leased = FullTreeFunctionObservationOperationCoordinator.prepareNew(
+                        authority,
+                        binding,
+                        mount,
+                    )
+                    live = leased
+                    leased.close()
+                    live = null
+
+                    requireNotNull(authority.openExisting(binding)).use { journal ->
+                        val history = requireNotNull(journal.loadOrNull())
+                        journal.append(
+                            FullTreeFunctionObservationOperationTransition.next(
+                                binding,
+                                checkNotNull(history.latest),
+                                FullTreeFunctionObservationOperationPhase.UNIT_ATTACHED,
+                            ),
+                        )
+                    }
+
+                    val journalDirectory = root.resolve(binding.journalDirectoryName)
+                    val before = immutableFileSnapshot(journalDirectory)
+                    val mountNames = entryNames(mount)
+                    val leaseNames = entryNames(leaseRoot)
+                    val recordBytes = Files.readAllBytes(recordPath)
+                    assertTrue("transition-0002.json" in before)
+
+                    assertFailsWith<FullTreeFunctionObservationOperationCoordinationException> {
+                        FullTreeFunctionObservationOperationCoordinator.openExistingLeasedReadOnly(
+                            authority,
+                            binding,
+                            root.resolve("missing-disk-mount"),
+                        )
+                    }
+
+                    assertEquals(before, immutableFileSnapshot(journalDirectory))
+                    requireNotNull(authority.openExisting(binding)).use { journal ->
+                        val history = requireNotNull(journal.loadOrNull())
+                        assertEquals(
+                            listOf(
+                                FullTreeFunctionObservationOperationPhase.PREPARING,
+                                FullTreeFunctionObservationOperationPhase.LEASED,
+                                FullTreeFunctionObservationOperationPhase.UNIT_ATTACHED,
+                            ),
+                            history.transitions.map { it.phase },
+                        )
+                    }
+                    assertEquals(before, immutableFileSnapshot(journalDirectory))
+                    assertEquals(mountNames, entryNames(mount))
+                    assertEquals(leaseNames, entryNames(leaseRoot))
+                    assertContentEquals(recordBytes, Files.readAllBytes(recordPath))
+                }
+            } finally {
+                runCatching { live?.close() }
+                removeRecordOnlyLease(leaseRoot)
+            }
+        }
+        assertTrue(entryNames(mount).isEmpty())
+    }
+
+    @Test
+    fun `cold leased coordinator rejects recovered abort before consulting disk`() =
+        withJournalRoot { root ->
+            val binding = binding(operationSeed = "8")
+            FullTreeFunctionObservationJournalAuthority.open(root).use { authority ->
+                authority.createNew(binding).use { journal ->
+                    val preparing = journal.initialize()
+                    journal.append(
+                        FullTreeFunctionObservationOperationTransition.recoveredAbort(
+                            binding,
+                            checkNotNull(preparing.latest),
+                        ),
+                    )
+                }
+
+                val journalDirectory = root.resolve(binding.journalDirectoryName)
+                val before = immutableFileSnapshot(journalDirectory)
+                assertTrue("transition-0001.json" in before)
+
+                assertFailsWith<FullTreeFunctionObservationOperationCoordinationException> {
+                    FullTreeFunctionObservationOperationCoordinator.openExistingLeasedReadOnly(
+                        authority,
+                        binding,
+                        root.resolve("missing-disk-mount"),
+                    )
+                }
+
+                assertEquals(before, immutableFileSnapshot(journalDirectory))
+                requireNotNull(authority.openExisting(binding)).use { journal ->
+                    val history = requireNotNull(journal.loadOrNull())
+                    assertEquals(
+                        listOf(
+                            FullTreeFunctionObservationOperationPhase.PREPARING,
+                            FullTreeFunctionObservationOperationPhase.RECOVERED_ABORT,
+                        ),
+                        history.transitions.map { it.phase },
+                    )
+                }
+                assertEquals(before, immutableFileSnapshot(journalDirectory))
+            }
+        }
+
     @Test
     fun `run root preparation transfers every authority and preserves exact active residue`() {
         val mount = provisionedMount()
@@ -471,6 +964,13 @@ class FullTreeFunctionObservationOperationCoordinatorTest {
     private fun entryNames(directory: Path): List<String> =
         Files.list(directory).use { entries ->
             entries.map { it.fileName.toString() }.sorted().toList()
+        }
+
+    private fun immutableFileSnapshot(directory: Path): Map<String, List<Byte>> =
+        Files.list(directory).use { entries ->
+            entries.sorted().toList().associate { path ->
+                path.fileName.toString() to Files.readAllBytes(path).toList()
+            }
         }
 
     private inline fun withJournalRoot(action: (Path) -> Unit) {

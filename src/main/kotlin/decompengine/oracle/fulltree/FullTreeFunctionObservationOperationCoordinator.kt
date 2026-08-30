@@ -13,7 +13,8 @@ internal class FullTreeFunctionObservationOperationCoordinationException(
  * journal root, operation journal, then disk-mount flock.
  *
  * This coordinator does not launch a worker, mutate recovery residue, publish output, or authorize
- * release. Its only state transition is PREPARING to an exactly evidenced LEASED operation.
+ * release. Its only state transition is PREPARING to an exactly evidenced LEASED operation; cold
+ * composition accepts only an already fully published LEASED history and observes disk read-only.
  */
 internal object FullTreeFunctionObservationOperationCoordinator {
     fun prepareNew(
@@ -61,6 +62,61 @@ internal object FullTreeFunctionObservationOperationCoordinator {
         } catch (failure: Throwable) {
             lease?.let { opened ->
                 runCatching { opened.abandonForRecovery() }.exceptionOrNull()?.let(failure::addSuppressed)
+            }
+            journal?.let { opened ->
+                runCatching { opened.close() }.exceptionOrNull()?.let(failure::addSuppressed)
+            }
+            throw failure
+        }
+    }
+
+    /**
+     * Reopens one fully published LEASED operation in journal-first lock order and reconciles its
+     * journal-derived evidence against the residual disk lease without completing or appending any
+     * journal publication. Pending, staged-only, post-LEASED, and terminal histories fail closed.
+     */
+    fun openExistingLeasedReadOnly(
+        authority: FullTreeFunctionObservationJournalAuthority,
+        binding: FullTreeFunctionObservationOperationBinding,
+        provisionedMount: Path,
+    ): FullTreeFunctionObservationColdLeasedOperation {
+        var journal: FullTreeFunctionObservationOperationJournal? = null
+        var coldLease: FullTreeDiskScratchColdLease? = null
+        try {
+            val ownedJournal = authority.openExisting(binding)
+                ?: coordinationFail("function-observation LEASED operation journal is absent")
+            journal = ownedJournal
+            val leasedHistory = ownedJournal.loadOrNull()
+                ?: coordinationFail("function-observation LEASED operation journal is empty")
+            val diskEvidence = requireExactlyLeasedHistory(leasedHistory)
+
+            val ownedColdLease = FullTreeDiskScratchAuthority.openExistingReadOnly(
+                provisionedMount,
+                binding.diskOperation(),
+                binding.diskPolicy(),
+            )
+            coldLease = ownedColdLease
+            val snapshot = requireCurrentColdLeasedOperation(
+                expectedHistory = leasedHistory,
+                expectedEvidence = diskEvidence,
+                expectedSnapshot = null,
+                journal = ownedJournal,
+                coldLease = ownedColdLease,
+            )
+            val opened = FullTreeFunctionObservationColdLeasedOperation.create(
+                leasedHistory = leasedHistory,
+                diskEvidence = diskEvidence,
+                initialSnapshot = snapshot,
+                journal = ownedJournal,
+                coldLease = ownedColdLease,
+                constructionPermit = COLD_LEASED_OPERATION_CONSTRUCTION_PERMIT,
+            )
+            journal = null
+            coldLease = null
+            return opened
+        } catch (failure: Throwable) {
+            coldLease?.let { opened ->
+                runCatching { opened.close() }.exceptionOrNull()?.let(failure::addSuppressed)
             }
             journal?.let { opened ->
                 runCatching { opened.close() }.exceptionOrNull()?.let(failure::addSuppressed)
@@ -221,6 +277,119 @@ internal class FullTreeFunctionObservationPreparedRun private constructor(
     }
 }
 
+private object COLD_LEASED_OPERATION_CONSTRUCTION_PERMIT
+
+/**
+ * Lock-retaining observation of one exact, fully published LEASED history and its residual disk
+ * population. The captured population is historical inspection data, not launch or mutation
+ * authority. Closing releases only descriptors and locks, disk first and journal second.
+ */
+internal class FullTreeFunctionObservationColdLeasedOperation private constructor(
+    val leasedHistory: FullTreeFunctionObservationOperationHistory,
+    val diskEvidence: FullTreeDiskScratchEvidence,
+    val observedPopulation: FullTreeDiskScratchColdPopulation,
+    private val initialSnapshot: FullTreeDiskScratchColdSnapshot,
+    private val journal: FullTreeFunctionObservationOperationJournal,
+    private val coldLease: FullTreeDiskScratchColdLease,
+) : AutoCloseable {
+    private var closed = false
+
+    init {
+        val acceptedEvidence = requireExactlyLeasedHistory(leasedHistory)
+        if (acceptedEvidence !== diskEvidence || observedPopulation != initialSnapshot.population) {
+            coordinationFail("cold LEASED operation did not retain its exact initial observation")
+        }
+        requireCurrentColdLeasedOperation(
+            expectedHistory = leasedHistory,
+            expectedEvidence = diskEvidence,
+            expectedSnapshot = initialSnapshot,
+            journal = journal,
+            coldLease = coldLease,
+        )
+    }
+
+    /**
+     * Repeats exact journal/evidence reconciliation around coarse disk-population inspections; the
+     * active run tree remains deliberately opaque and untraversed.
+     */
+    @Synchronized
+    fun requireCurrentReadOnly() {
+        check(!closed) { "function-observation cold LEASED operation is closed" }
+        requireCurrentColdLeasedOperation(
+            expectedHistory = leasedHistory,
+            expectedEvidence = diskEvidence,
+            expectedSnapshot = initialSnapshot,
+            journal = journal,
+            coldLease = coldLease,
+        )
+    }
+
+    @Synchronized
+    override fun close() {
+        if (closed) return
+        closed = true
+        closeColdOperationResources(coldLease, journal)?.let { throw it }
+    }
+
+    companion object {
+        internal fun create(
+            leasedHistory: FullTreeFunctionObservationOperationHistory,
+            diskEvidence: FullTreeDiskScratchEvidence,
+            initialSnapshot: FullTreeDiskScratchColdSnapshot,
+            journal: FullTreeFunctionObservationOperationJournal,
+            coldLease: FullTreeDiskScratchColdLease,
+            constructionPermit: Any,
+        ): FullTreeFunctionObservationColdLeasedOperation {
+            check(constructionPermit === COLD_LEASED_OPERATION_CONSTRUCTION_PERMIT) {
+                "cold LEASED capabilities can only be issued by the operation coordinator"
+            }
+            return FullTreeFunctionObservationColdLeasedOperation(
+                leasedHistory,
+                diskEvidence,
+                initialSnapshot.population,
+                initialSnapshot,
+                journal,
+                coldLease,
+            )
+        }
+    }
+}
+
+private fun requireExactlyLeasedHistory(
+    history: FullTreeFunctionObservationOperationHistory,
+): FullTreeDiskScratchEvidence {
+    if (
+        history.transitions.map { it.phase } != listOf(
+            FullTreeFunctionObservationOperationPhase.PREPARING,
+            FullTreeFunctionObservationOperationPhase.LEASED,
+        )
+    ) coordinationFail("cold composition requires one fully published LEASED operation")
+    return history.requireDiskEvidenceIntroducedAt(
+        FullTreeFunctionObservationOperationPhase.LEASED,
+    ).also { evidence ->
+        if (history.diskEvidence !== evidence) {
+            coordinationFail("cold LEASED history did not retain its parsed disk evidence")
+        }
+    }
+}
+
+private fun requireCurrentColdLeasedOperation(
+    expectedHistory: FullTreeFunctionObservationOperationHistory,
+    expectedEvidence: FullTreeDiskScratchEvidence,
+    expectedSnapshot: FullTreeDiskScratchColdSnapshot?,
+    journal: FullTreeFunctionObservationOperationJournal,
+    coldLease: FullTreeDiskScratchColdLease,
+): FullTreeDiskScratchColdSnapshot {
+    requireCurrentHistory(expectedHistory, expectedEvidence, journal)
+    val first = coldLease.requireCurrent(expectedEvidence)
+    requireCurrentHistory(expectedHistory, expectedEvidence, journal)
+    val second = coldLease.requireCurrent(expectedEvidence)
+    if (first != second || (expectedSnapshot != null && second != expectedSnapshot)) {
+        coordinationFail("cold LEASED disk population changed during exact reconciliation")
+    }
+    return second
+}
+
 private fun requireCurrentHistory(
     expectedHistory: FullTreeFunctionObservationOperationHistory,
     expectedEvidence: FullTreeDiskScratchEvidence,
@@ -241,6 +410,18 @@ private fun closeOperationResources(
 ): Throwable? {
     var failure: Throwable? = null
     runCatching { lease.abandonForRecovery() }.exceptionOrNull()?.let { failure = it }
+    runCatching { journal.close() }.exceptionOrNull()?.let { closeFailure ->
+        if (failure == null) failure = closeFailure else failure.addSuppressed(closeFailure)
+    }
+    return failure
+}
+
+private fun closeColdOperationResources(
+    coldLease: FullTreeDiskScratchColdLease,
+    journal: FullTreeFunctionObservationOperationJournal,
+): Throwable? {
+    var failure: Throwable? = null
+    runCatching { coldLease.close() }.exceptionOrNull()?.let { failure = it }
     runCatching { journal.close() }.exceptionOrNull()?.let { closeFailure ->
         if (failure == null) failure = closeFailure else failure.addSuppressed(closeFailure)
     }
