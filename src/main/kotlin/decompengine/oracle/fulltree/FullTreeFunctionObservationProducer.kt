@@ -654,6 +654,7 @@ private class FunctionDwarfUnitRepository(
             producerLimits.dieLimits,
             parseBudget,
             contextForAttribute = ::functionAttributeContext,
+            retainRecord = { tag, depth -> depth == 0 || tag == DW_TAG_SUBPROGRAM },
         )
         FunctionDwarfUnit(
             header,

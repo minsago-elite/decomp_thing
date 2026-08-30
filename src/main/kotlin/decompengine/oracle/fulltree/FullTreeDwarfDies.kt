@@ -65,10 +65,12 @@ internal class FullTreeDwarfDieRecord internal constructor(
 }
 
 /**
- * One fully scanned compilation unit, indexed only at non-null DIE boundaries.
+ * One fully scanned compilation unit, indexed at selected non-null DIE boundaries.
  *
- * Null records are intentionally counted but not indexable targets. [required] therefore rejects
- * null-record offsets, interior attribute bytes, and every offset outside this compilation unit.
+ * Physical and null record counts always describe the complete on-disk stream. The default reader
+ * selection retains every non-null DIE; specialized readers may retain a bounded subset after
+ * still decoding and validating every record and attribute. [required] rejects null, unselected,
+ * interior, and out-of-unit offsets.
  */
 internal class FullTreeDwarfDieIndex internal constructor(
     val compilationUnitOffset: Long,
@@ -92,12 +94,12 @@ internal class FullTreeDwarfDieIndex internal constructor(
     fun required(offset: Long, label: String = "DWARF DIE target"): FullTreeDwarfDieRecord =
         recordsByOffset[offset]
             ?: throw FullTreeControlException(
-                "$label does not identify a non-null DIE boundary in compilation unit " +
+                "$label does not identify a retained non-null DIE boundary in compilation unit " +
                     "0x${compilationUnitOffset.toString(16)}",
             )
 }
 
-/** Bounded, lossless raw-DIE indexing for later artifact-backed function observation readers. */
+/** Bounded raw-DIE traversal with lossless retention of every selected record. */
 internal object FullTreeDwarfDies {
     fun readCompilationUnit(
         info: FullTreeDwarfSection,
@@ -109,6 +111,7 @@ internal object FullTreeDwarfDies {
         contextForAttribute: (FullTreeDwarfAbbreviationAttribute) -> FullTreeDwarfFormContext = {
             FullTreeDwarfFormContext.GENERAL
         },
+        retainRecord: (tag: Long, depth: Int) -> Boolean = { _, _ -> true },
         observePhysicalRecord: (offset: Long, abbreviationCode: Long) -> Unit = { _, _ -> },
     ): FullTreeDwarfDieIndex {
         val retained = RetainedByteBudget(dieLimits.maximumRetainedBytes)
@@ -126,6 +129,7 @@ internal object FullTreeDwarfDies {
         val openParents = ArrayDeque<Long>()
         var physicalRecords = 0L
         var nullRecords = 0L
+        var nonNullRecords = 0L
         var decodedAttributes = 0L
         var treeTerminated = false
 
@@ -142,7 +146,7 @@ internal object FullTreeDwarfDies {
             if (abbreviationCode == 0L) {
                 nullRecords = addCount(nullRecords, 1L, "DWARF null-record count")
                 when {
-                    records.isEmpty() -> throw FullTreeControlException(
+                    nonNullRecords == 0L -> throw FullTreeControlException(
                         "DWARF compilation unit has a null record before its root DIE",
                     )
                     openParents.isNotEmpty() -> {
@@ -160,7 +164,7 @@ internal object FullTreeDwarfDies {
             if (treeTerminated) {
                 throw FullTreeControlException("DWARF compilation unit contains more than one root tree")
             }
-            if (records.size >= dieLimits.maximumNonNullRecords) {
+            if (nonNullRecords >= dieLimits.maximumNonNullRecords.toLong()) {
                 throw FullTreeControlException("DWARF DIE stream exceeds its non-null record bound")
             }
             val declaration = abbreviationTable[abbreviationCode]
@@ -171,8 +175,15 @@ internal object FullTreeDwarfDies {
             if (depth > dieLimits.maximumTreeDepth) {
                 throw FullTreeControlException("DWARF DIE tree exceeds its depth bound")
             }
-            retained.charge(MODELED_DIE_RECORD_BYTES, "DWARF DIE index")
-            val attributes = ArrayList<FullTreeDwarfDieAttribute>(declaration.attributes.size)
+            val isRoot = nonNullRecords == 0L
+            nonNullRecords = addCount(nonNullRecords, 1L, "DWARF non-null record count")
+            val retain = isRoot || retainRecord(declaration.tag, depth)
+            if (retain) retained.charge(MODELED_DIE_RECORD_BYTES, "DWARF DIE index")
+            val attributes = if (retain) {
+                ArrayList<FullTreeDwarfDieAttribute>(declaration.attributes.size)
+            } else {
+                null
+            }
             declaration.attributes.forEach { attribute ->
                 if (decodedAttributes >= dieLimits.maximumAttributes) {
                     throw FullTreeControlException("DWARF DIE stream exceeds its decoded-attribute bound")
@@ -200,40 +211,44 @@ internal object FullTreeDwarfDies {
                     )
                 }
                 decodedAttributes = addCount(decodedAttributes, 1L, "DWARF decoded-attribute count")
-                retained.charge(
-                    addCount(
-                        MODELED_DIE_ATTRIBUTE_BYTES,
-                        inlinePayloadBytes(value),
-                        "DWARF retained attribute size",
-                    ),
-                    "DWARF DIE index",
-                )
-                attributes += FullTreeDwarfDieAttribute(
-                    name = attribute.name,
-                    declaredForm = attribute.form,
-                    value = value,
-                )
+                if (attributes != null) {
+                    retained.charge(
+                        addCount(
+                            MODELED_DIE_ATTRIBUTE_BYTES,
+                            inlinePayloadBytes(value),
+                            "DWARF retained attribute size",
+                        ),
+                        "DWARF DIE index",
+                    )
+                    attributes += FullTreeDwarfDieAttribute(
+                        name = attribute.name,
+                        declaredForm = attribute.form,
+                        value = value,
+                    )
+                }
             }
-            val record = FullTreeDwarfDieRecord(
-                offset = recordOffset,
-                endOffset = cursor.position,
-                abbreviationCode = abbreviationCode,
-                tag = declaration.tag,
-                hasChildren = declaration.hasChildren == 1,
-                depth = depth,
-                parentOffset = openParents.lastOrNull(),
-                attributes = attributes,
-            )
-            if (recordsByOffset.put(recordOffset, record) != null) {
-                throw FullTreeControlException("DWARF DIE stream contains a duplicate record offset")
+            if (attributes != null) {
+                val record = FullTreeDwarfDieRecord(
+                    offset = recordOffset,
+                    endOffset = cursor.position,
+                    abbreviationCode = abbreviationCode,
+                    tag = declaration.tag,
+                    hasChildren = declaration.hasChildren == 1,
+                    depth = depth,
+                    parentOffset = openParents.lastOrNull(),
+                    attributes = attributes,
+                )
+                if (recordsByOffset.put(recordOffset, record) != null) {
+                    throw FullTreeControlException("DWARF DIE stream contains a duplicate record offset")
+                }
+                records += record
             }
-            records += record
-            if (record.hasChildren) {
+            if (declaration.hasChildren == 1) {
                 if (openParents.size >= dieLimits.maximumTreeDepth) {
                     throw FullTreeControlException("DWARF DIE tree exceeds its depth bound")
                 }
                 openParents.addLast(recordOffset)
-            } else if (records.size == 1) {
+            } else if (isRoot) {
                 treeTerminated = true
             }
         }
@@ -241,7 +256,7 @@ internal object FullTreeDwarfDies {
         if (cursor.position != header.endOffset) {
             throw FullTreeControlException("DWARF DIE traversal did not end at its compilation-unit bound")
         }
-        if (records.isEmpty()) {
+        if (nonNullRecords == 0L) {
             throw FullTreeControlException("DWARF compilation unit has no root DIE")
         }
         if (openParents.isNotEmpty() || !treeTerminated) {
@@ -331,8 +346,10 @@ internal object FullTreeDwarfDies {
         }
     }
 
-    private const val MODELED_ABBREVIATION_DECLARATION_BYTES = 96L
-    private const val MODELED_ABBREVIATION_ATTRIBUTE_BYTES = 48L
-    private const val MODELED_DIE_RECORD_BYTES = 128L
-    private const val MODELED_DIE_ATTRIBUTE_BYTES = 48L
+    // Includes collection slots/wrappers, boxed map keys and nodes, object headers, and the usual
+    // typed form-value object in addition to each logical record/attribute's scalar fields.
+    private const val MODELED_ABBREVIATION_DECLARATION_BYTES = 256L
+    private const val MODELED_ABBREVIATION_ATTRIBUTE_BYTES = 96L
+    private const val MODELED_DIE_RECORD_BYTES = 320L
+    private const val MODELED_DIE_ATTRIBUTE_BYTES = 96L
 }

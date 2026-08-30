@@ -212,6 +212,85 @@ class FullTreeDwarfDiesTest {
         }
     }
 
+    @Test
+    fun `filtered retention still parses counts and validates the complete DIE tree`() {
+        val abbreviations = byteArrayOf(
+            1, DW_TAG_COMPILE_UNIT.toByte(), 1, 0, 0,
+            2, DW_TAG_LEXICAL_BLOCK.toByte(), 1,
+            DW_AT_NAME.toByte(), FULL_TREE_DW_FORM_STRING.toByte(), 0, 0,
+            3, DW_TAG_SUBPROGRAM.toByte(), 0,
+            DW_AT_NAME.toByte(), FULL_TREE_DW_FORM_STRING.toByte(), 0, 0,
+            0,
+        )
+        val unit = compilationUnit(
+            byteArrayOf(1, 2) + utf8z("x".repeat(256)) +
+                byteArrayOf(3) + utf8z("kept") +
+                byteArrayOf(2) + utf8z("also-dropped") + byteArrayOf(0, 0, 0),
+        )
+        val limits = generousLimits().copy(maximumRetainedBytes = 1_800L)
+
+        assertFailsWith<FullTreeControlException> {
+            read(unit, abbreviations, limits)
+        }
+
+        val readFiltered = { selectedLimits: FullTreeDwarfDieLimits ->
+            FullTreeDwarfDies.readCompilationUnit(
+                info = unit.info,
+                abbreviations = section(abbreviations, ".debug_abbrev"),
+                header = unit.header,
+                controlLimits = FullTreeControlLimits(),
+                dieLimits = selectedLimits,
+                sharedParseBudget = FullTreeDwarfParseBudget(256L),
+                retainRecord = { tag, _ -> tag == DW_TAG_SUBPROGRAM.toLong() },
+            )
+        }
+        assertFailsWith<FullTreeControlException> {
+            readFiltered(limits.copy(maximumNonNullRecords = 3))
+        }
+        assertFailsWith<FullTreeControlException> {
+            readFiltered(limits.copy(maximumPhysicalRecords = 6L))
+        }
+        assertFailsWith<FullTreeControlException> {
+            readFiltered(limits.copy(maximumTreeDepth = 1))
+        }
+        assertFailsWith<FullTreeControlException> {
+            readFiltered(limits.copy(maximumAttributes = 2L))
+        }
+        val unterminated = compilationUnit(
+            byteArrayOf(1, 2) + utf8z("dropped") +
+                byteArrayOf(3) + utf8z("kept") + byteArrayOf(0),
+        )
+        assertFailsWith<FullTreeControlException> {
+            FullTreeDwarfDies.readCompilationUnit(
+                info = unterminated.info,
+                abbreviations = section(abbreviations, ".debug_abbrev"),
+                header = unterminated.header,
+                controlLimits = FullTreeControlLimits(),
+                dieLimits = generousLimits(),
+                sharedParseBudget = FullTreeDwarfParseBudget(256L),
+                retainRecord = { tag, _ -> tag == DW_TAG_SUBPROGRAM.toLong() },
+            )
+        }
+        val index = readFiltered(limits)
+
+        assertEquals(7L, index.physicalRecordCount)
+        assertEquals(3L, index.nullRecordCount)
+        assertEquals(
+            listOf(DW_TAG_COMPILE_UNIT.toLong(), DW_TAG_SUBPROGRAM.toLong()),
+            index.recordsInPhysicalOrder.map { it.tag },
+        )
+        val function = index.recordsInPhysicalOrder.single {
+            it.tag == DW_TAG_SUBPROGRAM.toLong()
+        }
+        assertEquals(
+            "kept",
+            assertIs<FullTreeDwarfInlineStringValue>(
+                function.optionalUniqueAttribute(DW_AT_NAME, "DW_AT_name")?.value,
+            ).bytes.toString(Charsets.UTF_8),
+        )
+        assertNull(index.find(checkNotNull(function.parentOffset)))
+    }
+
     private fun read(
         unit: TestUnit,
         abbreviationBytes: ByteArray,
