@@ -1,7 +1,6 @@
 package decompengine.oracle.structural
 
 import decompengine.oracle.core.OracleArtifacts
-import decompengine.project.ProgramModelJson
 import decompengine.project.RecoveredProgramModel
 import java.math.BigDecimal
 import java.math.RoundingMode
@@ -72,11 +71,10 @@ object StructuralBoundaryReplayV1 {
         selectedModelImageBase: ULong,
         limits: StructuralBoundaryReplayV1Limits = StructuralBoundaryReplayV1Limits(),
     ): StructuralBoundaryReplayBindingV1 {
-        val modelBytes = recoveredProgramModelBytes.copyOf()
         validateCanonicalCandidate(candidate)
         validateUpstreamBinding(functionOracle, candidate, selectedModelImageBase)
         validatePolicy(candidate.document, functionOracle.nearMissBytes)
-        validateCanonicalModel(recoveredProgramModel, modelBytes, limits)
+        val modelSha256 = validateCanonicalModel(recoveredProgramModel, recoveredProgramModelBytes, limits)
 
         val artifact = functionOracle.artifacts[candidate.twin]
             ?: boundaryReplayFail("boundary replay twin is absent from the supplied function oracle")
@@ -163,7 +161,6 @@ object StructuralBoundaryReplayV1 {
             ignored,
             allMatches,
         )
-        val modelSha256 = OracleArtifacts.sha256(modelBytes)
         val bindingBytes = observedBindingBytes(
             functionOracle,
             candidate,
@@ -209,8 +206,6 @@ private data class ReplayNearAssignment(
     val totalDistanceBytes: Int,
     val optimalCandidateEdges: List<ReplayPair>,
 )
-
-private const val MAXIMUM_PROTOTYPE_CHARACTERS = 1_048_576
 
 private val ORACLE_ORDER = Comparator<ReplayOracleFunction> { left, right ->
     left.rva.compareTo(right.rva).takeIf { it != 0 } ?: compareCodePoints(left.id, right.id)
@@ -336,50 +331,25 @@ private fun validateCanonicalModel(
     model: RecoveredProgramModel,
     bytes: ByteArray,
     limits: StructuralBoundaryReplayV1Limits,
-) {
-    if (bytes.isEmpty() || bytes.size > limits.maximumProgramModelBytes) {
-        boundaryReplayFail("program model bytes are empty or exceed the configured replay limit")
+): String {
+    val snapshot = CanonicalProgramModelStreaming.readCanonical(
+        bytes,
+        CanonicalProgramModelStreamingLimits(
+            maximumInputBytes = limits.maximumProgramModelBytes,
+            maximumFunctions = limits.maximumFunctionRecords,
+            maximumGlobals = limits.maximumModelGlobalsOrTypes,
+            maximumTypes = limits.maximumModelGlobalsOrTypes,
+            maximumReferencesPerFunction = limits.maximumReferencesPerFunction,
+            maximumTextCodePoints = limits.maximumTextCharacters,
+        ),
+    )
+    if (snapshot.model != model) {
+        boundaryReplayFail("program model bytes do not encode the supplied program model exactly")
     }
-    if (model.schemaVersion != 1) boundaryReplayFail("program model schemaVersion must be 1")
-    if (!StructuralRecoveryV1Contract.SHA256.matches(model.inputSha256)) {
+    if (!StructuralRecoveryV1Contract.SHA256.matches(snapshot.model.inputSha256)) {
         boundaryReplayFail("program model inputSha256 is not a lowercase SHA-256 digest")
     }
-    if (model.functions.size > limits.maximumFunctionRecords) {
-        boundaryReplayFail("program model exceeds the configured function-record limit")
-    }
-    if (model.globals.size > limits.maximumModelGlobalsOrTypes ||
-        model.types.size > limits.maximumModelGlobalsOrTypes
-    ) boundaryReplayFail("program model exceeds the configured global/type record limit")
-    model.functions.forEachIndexed { index, function ->
-        val path = "program model.functions[$index]"
-        requireModelText(function.id, "$path.id", 4096, allowEmpty = false)
-        requireModelText(function.name, "$path.name", 4096, allowEmpty = false)
-        requireModelText(function.prototype, "$path.prototype", MAXIMUM_PROTOTYPE_CHARACTERS, allowEmpty = true)
-        function.decompiledC?.let {
-            requireModelText(it, "$path.decompiledC", limits.maximumTextCharacters, allowEmpty = true)
-        }
-        listOf(function.calls, function.referencedGlobals, function.strings).forEach { values ->
-            if (values.size > limits.maximumReferencesPerFunction) {
-                boundaryReplayFail("$path exceeds the configured per-function reference limit")
-            }
-        }
-        function.calls.forEach { requireModelText(it, "$path.calls", 4096, allowEmpty = true) }
-        function.referencedGlobals.forEach { requireModelText(it, "$path.referencedGlobals", 4096, allowEmpty = true) }
-        function.strings.forEach {
-            requireModelText(it, "$path.strings", limits.maximumTextCharacters, allowEmpty = true)
-        }
-    }
-    val parsed = try {
-        ProgramModelJson.readCanonical(bytes)
-    } catch (failure: Exception) {
-        throw StructuralRecoveryV1Exception("program model bytes are not exact canonical schema-v1 bytes", failure)
-    }
-    if (parsed != model) boundaryReplayFail("program model bytes do not encode the supplied program model exactly")
-}
-
-private fun requireModelText(value: String, path: String, maximum: Int, allowEmpty: Boolean) {
-    val length = value.codePointLength()
-    if (length > maximum || !allowEmpty && length == 0) boundaryReplayFail("$path is outside its historical text bound")
+    return snapshot.sha256
 }
 
 private fun normalizeRecoveredFunctions(

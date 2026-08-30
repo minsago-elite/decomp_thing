@@ -1,0 +1,46 @@
+{
+  "schemaVersion": 1,
+  "inputSha256": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+  "functions": [
+    {
+      "id": "fn_0000000000001000",
+      "name": "alpha_λ",
+      "address": "0x1000",
+      "prototype": "int alpha_λ(void)",
+      "status": "recovered",
+      "calls": ["external_printf", "fn_0000000000002000"],
+      "referencedGlobals": ["global_0000000000003000"],
+      "strings": ["line\nbreak", "snowman ☃"],
+      "decompiledC": "int alpha_λ(void) {\n\treturn 1;\n}"
+    },
+    {
+      "id": "fn_0000000000002000",
+      "name": "beta",
+      "address": "0x2000",
+      "prototype": "void beta(void)",
+      "status": "partial",
+      "calls": [],
+      "referencedGlobals": [],
+      "strings": [],
+      "decompiledC": null
+    }
+  ],
+  "globals": [
+    {
+      "id": "global_0000000000003000",
+      "name": "counter",
+      "address": "0x3000",
+      "type": "unsigned long",
+      "initializer": "1",
+      "status": "recovered"
+    }
+  ],
+  "types": [
+    {
+      "id": "type_word",
+      "declaration": "typedef unsigned long word_t;",
+      "sourceAddress": "0x3000",
+      "status": "partial"
+    }
+  ]
+}
