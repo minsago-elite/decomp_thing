@@ -1,0 +1,12 @@
+{
+  "schemaVersion": 1,
+  "historicalImplementation": "oracle/function_recovery.py v1",
+  "sourceModel": "tests/oracle/fixtures/function_recovery/rich-model.json",
+  "sourceModelSha256": "b15e5576ae86b07dbe561c40acfd57c6717ff66e77010e543de758f29e7138d5",
+  "canonicalModel": "rich-model.json",
+  "canonicalModelSha256": "aaa37c236f0c0f9f6f69a2bbd045d9d9cb234912008a7444d38c7c7b90132e51",
+  "canonicalization": "semantic historical model rendered once by RecoveredProgramModel.toJson; historical bytes remain separately frozen",
+  "functionOracleSha256": "3239d0747456fb92edb48c322464cd76573236b107454d84b10553da23299f93",
+  "boundaryReportSha256": "b05d85d9f21e704c2581b84ded3ea5442eb4695ed75e74d25778e417a5a8d593",
+  "authority": "inert historical differential fixture; never a runtime oracle"
+}
