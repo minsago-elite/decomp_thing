@@ -444,12 +444,20 @@ private fun validateSourceManifest(
             "source tree manifest does not classify module implementation: ${file.path}"
         }
     }
+    val repairLineage = RepairAcpEvidenceArchiveVerifier.verifyIfPresent(
+        projectDir = projectDir,
+        payloadSha256 = payload.mapValues { (_, item) -> item.sha256 },
+        payloadSizes = payload.mapValues { (_, item) -> item.size },
+        manifest = manifest,
+        reconstructionProfile = expectedProfile,
+    )
     ReconstructionAcpEvidenceArchiveVerifier.verify(
         projectDir = projectDir,
         payloadSha256 = payload.mapValues { (_, item) -> item.sha256 },
         payloadSizes = payload.mapValues { (_, item) -> item.size },
         manifest = manifest,
         profile = expectedProfile,
+        repairLineage = repairLineage,
     )
 }
 

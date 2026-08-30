@@ -45,6 +45,7 @@ internal object ReconstructionAcpEvidenceArchiveVerifier {
         payloadSizes: Map<String, Long>,
         manifest: SourceTreeManifest,
         profile: ReconstructionProfile,
+        repairLineage: ArchivedRepairReleaseLineage = ArchivedRepairReleaseLineage.NONE,
     ) {
         val sourceDeclaration = profile.layout.declaration("module-implementation")
         val checkpointDeclaration = profile.layout.declaration("module-evidence")
@@ -57,6 +58,7 @@ internal object ReconstructionAcpEvidenceArchiveVerifier {
             .filter { ProjectFileRole.MODULE_IMPLEMENTATION in it.roles }
             .forEach { source ->
                 val moduleId = extractModuleId(sourceDeclaration, source.path)
+                val repairedSource = repairLineage.repairedSource(source.path)
                 val checkpointPath = checkpointDeclaration.materialize(mapOf("module" to moduleId))
                 val checkpointManifest = requireNotNull(manifestByPath[checkpointPath]) {
                     "agent evidence checkpoint is absent from the source manifest: $checkpointPath"
@@ -70,8 +72,20 @@ internal object ReconstructionAcpEvidenceArchiveVerifier {
                 require(sha256(checkpointBytes) == checkpointManifest.sha256) {
                     "agent evidence checkpoint differs from its source manifest: $checkpointPath"
                 }
-                val checkpoint = parseCheckpoint(checkpointBytes, moduleId, source)
-                val agentGenerated = source.generator.isAgentGenerated() ||
+                val checkpoint = parseCheckpoint(checkpointBytes, moduleId, source, repairedSource)
+                val receiptSource = repairedSource?.let { lineage ->
+                    GeneratedFileEvidence(
+                        path = source.path,
+                        sha256 = lineage.rootSha256,
+                        generator = checkpoint.generator,
+                        promptSha256 = checkpoint.promptSha256,
+                        entityIds = source.entityIds,
+                        acceptedImplementation = checkpoint.accepted,
+                        roles = source.roles,
+                        contentKind = source.contentKind,
+                    )
+                } ?: source
+                val agentGenerated = receiptSource.generator.isAgentGenerated() ||
                     checkpoint.generator.isAgentGenerated() ||
                     checkpoint.reconstructorIdentity.startsWith("agent:")
 
@@ -123,8 +137,8 @@ internal object ReconstructionAcpEvidenceArchiveVerifier {
                 verifyExecutionReceipt(
                     bytes = evidenceBytes,
                     moduleId = moduleId,
-                    source = source,
-                    sourceBytes = requirePayloadSize(source.path, payloadSizes),
+                    source = receiptSource,
+                    sourceBytes = repairedSource?.rootBytes ?: requirePayloadSize(source.path, payloadSizes),
                     checkpoint = checkpoint,
                 )
                 expectedExecutionPaths += evidencePath
@@ -188,6 +202,7 @@ internal object ReconstructionAcpEvidenceArchiveVerifier {
         bytes: ByteArray,
         moduleId: String,
         source: GeneratedFileEvidence,
+        repairedSource: ArchivedRepairSourceLineage?,
     ): ReconstructionCheckpoint {
         val root = strictObject(bytes, CHECKPOINT_JSON_LIMITS, "module checkpoint")
         val schemaVersion = root.requiredLong("schemaVersion", "module checkpoint")
@@ -255,10 +270,19 @@ internal object ReconstructionAcpEvidenceArchiveVerifier {
         require(accepted == issues.isEmpty()) {
             "module checkpoint acceptance and validation issues disagree: $moduleId"
         }
-        require(sourceSha256 == source.sha256 && generator == source.generator &&
-            accepted == source.acceptedImplementation && promptSha256 == source.promptSha256
-        ) {
-            "module checkpoint provenance differs from the source manifest: $moduleId"
+        if (repairedSource == null) {
+            require(sourceSha256 == source.sha256 && generator == source.generator &&
+                accepted == source.acceptedImplementation && promptSha256 == source.promptSha256
+            ) {
+                "module checkpoint provenance differs from the source manifest: $moduleId"
+            }
+        } else {
+            require(sourceSha256 == repairedSource.rootSha256 &&
+                source.sha256 == repairedSource.headSha256 && source.acceptedImplementation == true &&
+                source.generator == "repair-revision"
+            ) {
+                "historical reconstruction checkpoint is not bound to the accepted repair lineage: $moduleId"
+            }
         }
         return ReconstructionCheckpoint(
             schemaVersion,

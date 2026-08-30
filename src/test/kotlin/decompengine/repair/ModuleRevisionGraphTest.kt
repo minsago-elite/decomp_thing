@@ -38,6 +38,7 @@ import decompengine.project.BoundedAgentExecutionEventRecorder
 import decompengine.project.RecoveredFunction
 import decompengine.project.RecoveredProgramModel
 import decompengine.project.SourceTreeGenerator
+import decompengine.project.ArchivalBundleVerifier
 import decompengine.project.ArchivalPackager
 import decompengine.project.MakeProjectBuilder
 import decompengine.project.GeneratedCRepairIndexProfile
@@ -54,6 +55,10 @@ import java.util.concurrent.Executors
 import java.util.concurrent.TimeUnit
 import java.util.concurrent.TimeoutException
 import java.util.concurrent.atomic.AtomicReference
+import java.util.zip.CRC32
+import java.util.zip.ZipEntry
+import java.util.zip.ZipInputStream
+import java.util.zip.ZipOutputStream
 import kotlin.io.path.createDirectories
 import kotlin.io.path.createTempDirectory
 import kotlin.io.path.exists
@@ -2192,7 +2197,7 @@ class ModuleRevisionGraphTest {
     }
 
     @Test
-    fun `accepted non-ACP repair updates the manifest but cannot reuse a stale reconstruction checkpoint`() {
+    fun `accepted non-ACP repair remains explicitly non-release at the archive gate`() {
         val project = generatedProject()
         val betaPath = project.resolve("src/modules/beta.c")
         val repaired = betaPath.readText() + "\n/* accepted repair revision */\n"
@@ -2200,6 +2205,7 @@ class ModuleRevisionGraphTest {
             val attempt = graph.beginAttempt(listOf("src/modules/beta.c"))
             graph.installCandidate(attempt, mapOf("src/modules/beta.c" to repaired.toByteArray()))
             graph.accept(attempt, RepairEvidence("valid", "compile and retained behavior accepted"))
+            graph.synchronizeRepairHistory()
         }
 
         MakeProjectBuilder.build(project)
@@ -2208,8 +2214,142 @@ class ModuleRevisionGraphTest {
             ArchivalPackager.create(project, archive)
         }
 
-        assertTrue(failure.message.orEmpty().contains("checkpoint provenance"))
+        assertTrue(failure.message.orEmpty().contains("non-ACP repair evidence"))
         assertTrue(project.resolve("source_tree_manifest.json").readText().contains(sha256(repaired.toByteArray())))
+    }
+
+    @Test
+    fun `accepted ACP repair archives and extracts through its historical reconstruction lineage`() {
+        val fixture = releaseRepairFixture()
+        val archive = fixture.project.parent.resolve("repair-release.zip")
+
+        val bundle = ArchivalPackager.create(fixture.project, archive)
+        val extracted = fixture.project.parent.resolve("repair-release-extracted")
+        ArchivalBundleVerifier.extractAndVerify(bundle.archivePath, extracted)
+
+        assertContentEquals(fixture.after, extracted.resolve(fixture.relativePath).readBytes())
+        assertTrue(extracted.resolve("reports/repair_history.json").exists())
+        assertTrue(extracted.resolve(fixture.receiptPath).exists())
+    }
+
+    @Test
+    fun `archive creation rejects missing extra stale and cross-paired repair evidence`() {
+        data class Mutation(val label: String, val expected: String, val apply: (ReleaseRepairFixture) -> Unit)
+        val mutations = listOf(
+            Mutation("missing-graph", "missing repair_history", { fixture ->
+                Files.delete(fixture.project.resolve("reports/repair-revisions/graph.json"))
+            }),
+            Mutation("missing-history", "missing repair_history", { fixture ->
+                Files.delete(fixture.project.resolve("reports/repair_history.json"))
+            }),
+            Mutation("missing-receipt", "missing, extra, or stale ACP receipts", { fixture ->
+                Files.delete(fixture.project.resolve(fixture.receiptPath))
+            }),
+            Mutation("extra-receipt", "missing, extra, or stale ACP receipts", { fixture ->
+                Files.copy(
+                    fixture.project.resolve(fixture.receiptPath),
+                    fixture.project.resolve("reports/repair-revisions/revision_99999999_stale.acp-receipt.json"),
+                )
+            }),
+            Mutation("cross-paired", "cross-paired", { fixture ->
+                val graph = fixture.project.resolve("reports/repair-revisions/graph.json")
+                graph.writeText(
+                    graph.readText().replaceFirst(
+                        "\"requestSha256\":\"${fixture.requestSha256}\"",
+                        "\"requestSha256\":\"${"0".repeat(64)}\"",
+                    ),
+                )
+            }),
+            Mutation("stale-history", "history is cross-paired", { fixture ->
+                val history = fixture.project.resolve("reports/repair_history.json")
+                history.writeText(
+                    history.readText().replaceFirst(
+                        "\"assessmentStatus\":\"accepted\"",
+                        "\"assessmentStatus\":\"rejected\"",
+                    ),
+                )
+            }),
+            Mutation("legacy-schema", "schema-v1 repair evidence is non-release", { fixture ->
+                val graph = fixture.project.resolve("reports/repair-revisions/graph.json")
+                graph.writeText(graph.readText().replaceFirst("\"schemaVersion\": 2", "\"schemaVersion\": 1"))
+            }),
+        )
+
+        mutations.forEach { mutation ->
+            val fixture = releaseRepairFixture()
+            mutation.apply(fixture)
+            val failure = assertFailsWith<IllegalArgumentException>(mutation.label) {
+                ArchivalPackager.create(
+                    fixture.project,
+                    fixture.project.parent.resolve("${mutation.label}.zip"),
+                )
+            }
+            assertTrue(failure.message.orEmpty().contains(mutation.expected), failure.message)
+        }
+    }
+
+    @Test
+    fun `archive creation rejects a pending repair assessment`() {
+        val fixture = releaseRepairFixture()
+        ModuleRevisionGraph.open(fixture.project, GeneratedCRepairIndexProfile).use { graph ->
+            val corpus = graph.retainedRegressionCorpus()
+            graph.beginAttempt(
+                listOf(fixture.relativePath),
+                RevisionRepairMetadata(
+                    iterationIndex = 2,
+                    failureKind = "compile",
+                    prompt = "second bounded failure",
+                    summary = null,
+                    retainedRegressionIds = corpus.inputs.map(ProcessInput::id),
+                    before = null,
+                    regressionCorpusSha256 = corpus.sha256,
+                ),
+            )
+            graph.synchronizeRepairHistory()
+        }
+
+        val failure = assertFailsWith<IllegalArgumentException> {
+            ArchivalPackager.create(fixture.project, fixture.project.parent.resolve("pending.zip"))
+        }
+        assertTrue(failure.message.orEmpty().contains("pending workflow assessment"), failure.message)
+    }
+
+    @Test
+    fun `archive extraction independently rejects missing and stale repair assessments`() {
+        listOf("missing-receipt", "stale-history").forEach { mutation ->
+            val fixture = releaseRepairFixture()
+            val valid = ArchivalPackager.create(
+                fixture.project,
+                fixture.project.parent.resolve("valid-$mutation.zip"),
+            )
+            val tampered = fixture.project.parent.resolve("tampered-$mutation.zip")
+            rewriteArchive(valid.archivePath, tampered) { entries ->
+                when (mutation) {
+                    "missing-receipt" -> entries.remove(fixture.receiptPath)
+                    "stale-history" -> {
+                        val path = "reports/repair_history.json"
+                        entries[path] = requireNotNull(entries[path]).toString(Charsets.UTF_8)
+                            .replaceFirst(
+                                "\"assessmentStatus\":\"accepted\"",
+                                "\"assessmentStatus\":\"rejected\"",
+                            ).toByteArray()
+                    }
+                }
+            }
+
+            val failure = assertFailsWith<IllegalArgumentException>(mutation) {
+                ArchivalBundleVerifier.extractAndVerify(
+                    tampered,
+                    fixture.project.parent.resolve("extract-$mutation"),
+                )
+            }
+            val expected = if (mutation == "missing-receipt") {
+                "missing, extra, or stale ACP receipts"
+            } else {
+                "history is cross-paired"
+            }
+            assertTrue(failure.message.orEmpty().contains(expected), failure.message)
+        }
     }
 
     @Test
@@ -3114,6 +3254,81 @@ class ModuleRevisionGraphTest {
             project,
         )
         return project
+    }
+
+    private data class ReleaseRepairFixture(
+        val project: Path,
+        val relativePath: String,
+        val after: ByteArray,
+        val receiptPath: String,
+        val requestSha256: String,
+    )
+
+    private fun releaseRepairFixture(): ReleaseRepairFixture {
+        val project = generatedProject()
+        val relative = "src/modules/alpha.c"
+        val target = project.resolve(relative)
+        val before = target.readBytes()
+        val after = before + "\n/* archive release ACP repair */\n".toByteArray()
+        lateinit var binding: RepairAgentInvocationBinding
+        ModuleRevisionGraph.open(project, GeneratedCRepairIndexProfile).use { graph ->
+            val corpus = graph.retainedRegressionCorpus()
+            val attempt = graph.beginAttempt(
+                listOf(relative),
+                RevisionRepairMetadata(
+                    iterationIndex = 1,
+                    failureKind = "compile",
+                    prompt = "bounded failure",
+                    summary = null,
+                    retainedRegressionIds = corpus.inputs.map(ProcessInput::id),
+                    before = null,
+                    regressionCorpusSha256 = corpus.sha256,
+                ),
+            )
+            val document = completeAcpReceiptDocument(project, attempt, relative, before, after)
+            graph.persistAndBindAgentInvocation(attempt, document)
+            graph.installCandidate(attempt, mapOf(relative to after))
+            val accepted = graph.accept(attempt, RepairEvidence("valid", "candidate passed release validation"))
+            binding = requireNotNull(accepted.repairMetadata?.agentInvocation)
+            graph.synchronizeRepairHistory()
+        }
+        assertEquals(0, MakeProjectBuilder.build(project).returnCode)
+        return ReleaseRepairFixture(project, relative, after, binding.receiptPath, binding.requestSha256)
+    }
+
+    private fun rewriteArchive(
+        source: Path,
+        target: Path,
+        mutation: (MutableMap<String, ByteArray>) -> Unit,
+    ) {
+        val entries = linkedMapOf<String, ByteArray>()
+        ZipInputStream(Files.newInputStream(source)).use { zip ->
+            while (true) {
+                val entry = zip.nextEntry ?: break
+                entries[entry.name] = zip.readBytes()
+                zip.closeEntry()
+            }
+        }
+        entries.remove("ARCHIVE_MANIFEST.sha256")
+        mutation(entries)
+        entries["ARCHIVE_MANIFEST.sha256"] = entries.toSortedMap().entries.joinToString("") { (path, bytes) ->
+            "${sha256(bytes)}  $path\n"
+        }.toByteArray()
+        ZipOutputStream(Files.newOutputStream(target)).use { zip ->
+            entries.toSortedMap().forEach { (path, bytes) ->
+                val crc = CRC32().apply { update(bytes) }
+                val entry = ZipEntry(path).apply {
+                    method = ZipEntry.STORED
+                    size = bytes.size.toLong()
+                    compressedSize = size
+                    this.crc = crc.value
+                    time = 0L
+                }
+                zip.putNextEntry(entry)
+                zip.write(bytes)
+                zip.closeEntry()
+            }
+        }
     }
 
     private fun genericProject(prefix: String, files: Map<String, String>): Path {
