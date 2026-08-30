@@ -14,6 +14,7 @@ class RepairRuntimeConfiguration(
     profileId: String,
     historyPath: Path,
     val resourceBudget: RepairResourceBudget = RepairResourceBudget(),
+    harnessOverride: String? = null,
 ) {
     val profileId: String = profileId.also {
         require(it.matches(Regex("[A-Za-z0-9_][A-Za-z0-9_.-]{0,127}"))) { "invalid repair profile ID" }
@@ -24,4 +25,11 @@ class RepairRuntimeConfiguration(
             "secure repair history requires the default filesystem provider"
         }
     }.toAbsolutePath().normalize()
+
+    /** Exact data-only override; the Java gate still performs the sole factory selection. */
+    val harnessOverride: String? = harnessOverride.also { selected ->
+        require(selected == null || selected in setOf("acp", "legacy-openai")) {
+            "repair harness must be exactly acp or legacy-openai"
+        }
+    }
 }

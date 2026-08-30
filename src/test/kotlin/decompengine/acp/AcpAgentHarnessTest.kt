@@ -4,6 +4,7 @@ import com.agentclientprotocol.model.LATEST_PROTOCOL_VERSION
 import decompengine.agent.AgentAccessPolicy
 import decompengine.agent.AgentCancellation
 import decompengine.agent.AgentCancellationSource
+import decompengine.agent.AgentContextInput
 import decompengine.agent.AgentExecutionException
 import decompengine.agent.AgentExecutionEvent
 import decompengine.agent.AgentExecutionLimits
@@ -23,6 +24,8 @@ import decompengine.agent.AgentToolStatus
 import decompengine.agent.AgentWorkspacePath
 import decompengine.agent.AgentWorkspaceRoot
 import decompengine.agent.execute
+import decompengine.repair.CapturedRepairStagingAuthority
+import decompengine.repair.RepairResourceBudget
 import java.nio.file.Path
 import java.nio.file.Files
 import java.security.MessageDigest
@@ -38,6 +41,7 @@ import kotlin.io.path.exists
 import kotlin.io.path.readText
 import kotlin.io.path.writeText
 import kotlin.test.Test
+import kotlin.test.assertContentEquals
 import kotlin.test.assertEquals
 import kotlin.test.assertFailsWith
 import kotlin.test.assertFalse
@@ -116,7 +120,7 @@ class AcpAgentHarnessTest {
                 }
             }
         }
-        assertEquals(52, acpTestMethods.size, acpTestMethods.joinToString { it.name })
+        assertEquals(54, acpTestMethods.size, acpTestMethods.joinToString { it.name })
         assertTrue(
             acpTestMethods.all { it.returnType == Void.TYPE },
             acpTestMethods.filter { it.returnType != Void.TYPE }.joinToString {
@@ -1196,6 +1200,84 @@ class AcpAgentHarnessTest {
     }
 
     @Test
+    fun `captured repair writes traverse ACP without a writable host workspace`() {
+        val harness = harness("repair-direct-write")
+        val initial = mapOf("src/module.c" to "old source\n".toByteArray())
+        assertFalse(Files.exists(ACP_CAPTURED_REPAIR_WORKSPACE))
+
+        val execution = CapturedRepairStagingAuthority.execute(
+            harness = harness,
+            initialFiles = initial,
+            writablePaths = initial.keys,
+            budget = RepairResourceBudget(),
+            requestFactory = ::capturedRepairRequest,
+            onEvent = {},
+        )
+
+        assertEquals(AgentStopReason.COMPLETED, execution.result.stopReason)
+        assertContentEquals("new source\n".toByteArray(), execution.files.getValue("src/module.c"))
+        val change = execution.result.changes.single()
+        assertEquals(AgentFileChangeKind.MODIFIED, change.kind)
+        assertEquals("src/module.c", change.path.relativePath)
+        val write = harness.latestFilesystemAudit().single()
+        assertEquals("fs/write_text_file", write.method)
+        assertEquals(AcpFilesystemAuditOutcome.ALLOWED, write.outcome)
+        assertEquals(AcpFilesystemAuditReason.COMPLETED, write.reason)
+
+        // The direct sandbox write in this fixture is intentionally different from the callback
+        // body above. It dies with the namespace and cannot enter the host-owned captured result.
+        assertFalse(Files.exists(ACP_CAPTURED_REPAIR_WORKSPACE))
+        val diagnostics = assertNotNull(harness.latestDiagnostics())
+        assertTrue(diagnostics.remainingProcessIds.isEmpty())
+        assertTrue(diagnostics.sandboxCleanupVerified)
+        assertProcessStopped(diagnostics.pid)
+        val evidence = assertNotNull(harness.latestSandboxEvidence())
+        assertTrue(evidence.outerAgentContained)
+        assertTrue(evidence.networkIsolated)
+        assertTrue(evidence.cgroupV2PidsLimited)
+        assertTrue(evidence.cgroupV2MemoryLimited)
+        assertTrue(evidence.cgroupV2CpuLimited)
+        assertTrue(evidence.authorities.isEmpty(), "captured repair must not bind a host staging authority")
+        assertEquals(AcpSandboxLaunchPurpose.OUTER_AGENT, evidence.launches.single().purpose)
+        assertTrue(evidence.outerAgentLimits.maximumFileBytes > 0)
+        assertTrue(evidence.outerAgentLimits.maximumAddressSpaceBytes > 0)
+        assertTrue(evidence.outerAgentLimits.maximumCpuSeconds > 0)
+    }
+
+    @Test
+    fun `captured repair rejects an oversized ACP write and permits a bounded retry`() {
+        val harness = harness("repair-quota-retry")
+        val initial = mapOf("src/module.c" to "old source\n".toByteArray())
+
+        val execution = CapturedRepairStagingAuthority.execute(
+            harness = harness,
+            initialFiles = initial,
+            writablePaths = initial.keys,
+            budget = RepairResourceBudget(maximumPatchBytes = 4),
+            requestFactory = ::capturedRepairRequest,
+            onEvent = {},
+        )
+
+        assertEquals(AgentStopReason.COMPLETED, execution.result.stopReason)
+        assertContentEquals("fit\n".toByteArray(), execution.files.getValue("src/module.c"))
+        assertContentEquals("old source\n".toByteArray(), initial.getValue("src/module.c"))
+        assertEquals(4L, execution.result.changes.single().sizeBytes)
+        assertEquals(
+            listOf(AcpFilesystemAuditOutcome.DENIED, AcpFilesystemAuditOutcome.ALLOWED),
+            harness.latestFilesystemAudit().map { it.outcome },
+        )
+        assertEquals(
+            listOf(AcpFilesystemAuditReason.RESOURCE_LIMIT, AcpFilesystemAuditReason.COMPLETED),
+            harness.latestFilesystemAudit().map { it.reason },
+        )
+        assertFalse(Files.exists(ACP_CAPTURED_REPAIR_WORKSPACE))
+        val diagnostics = assertNotNull(harness.latestDiagnostics())
+        assertTrue(diagnostics.remainingProcessIds.isEmpty())
+        assertTrue(diagnostics.sandboxCleanupVerified)
+        assertProcessStopped(diagnostics.pid)
+    }
+
+    @Test
     fun `filesystem capability advertisement is frozen to each workflow allowlist`() {
         val readFixture = fixture()
         val readRequest = readFixture.request.withPolicy(
@@ -1252,6 +1334,28 @@ class AcpAgentHarnessTest {
         val forbiddenCanary: Path,
         val request: AgentExecutionRequest,
     )
+
+    private fun capturedRepairRequest(root: AgentWorkspaceRoot): AgentExecutionRequest =
+        AgentExecutionRequest(
+            objective = "edit the fixture",
+            workspaceRoots = listOf(root),
+            contextInputs = listOf(AgentContextInput("compiler", "compiler evidence")),
+            accessPolicy = AgentAccessPolicy(
+                listOf(
+                    AgentPathRule(
+                        AgentWorkspacePath(root.id, "src/module.c"),
+                        setOf(AgentOperation.READ_FILE, AgentOperation.WRITE_FILE),
+                    ),
+                ),
+            ),
+            limits = AgentExecutionLimits(
+                wallClockTimeout = Duration.ofSeconds(5),
+                idleTimeout = Duration.ofSeconds(1),
+                maxTurns = 1,
+                maxToolCalls = 4,
+                maxOutputBytes = 128L * 1024,
+            ),
+        )
 
     private fun fixture(
         idleMillis: Long = 1_000,

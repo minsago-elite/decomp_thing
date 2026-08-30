@@ -1,8 +1,11 @@
 package decompengine.repair;
 
+import decompengine.acp.AcpHarnessFactory;
+import decompengine.acp.AcpHarnessSelection;
 import decompengine.agent.AgentHarness;
 
 import java.nio.file.Path;
+import java.util.LinkedHashMap;
 import java.util.Map;
 import java.util.Objects;
 import java.util.ServiceLoader;
@@ -52,10 +55,20 @@ public final class SecureRepairRuntime {
             resolved.indexProfile()
         );
 
-        HttpOpenAiCompatibleRepairClient client = HttpOpenAiCompatibleRepairClient.Companion.fromEnvironment(
-            Map.copyOf(System.getenv())
+        Map<String, String> hostEnvironment = Map.copyOf(System.getenv());
+        String harnessOverride = configuration.getHarnessOverride();
+        Map<String, String> effectiveEnvironment = hostEnvironment;
+        if (harnessOverride != null) {
+            LinkedHashMap<String, String> overridden = new LinkedHashMap<>(hostEnvironment);
+            overridden.put("ACP_HARNESS", harnessOverride);
+            effectiveEnvironment = Map.copyOf(overridden);
+        }
+        // This is the sole repair harness selection. The caller supplies at most an exact string;
+        // it never receives or injects a transport, filesystem authority, or constructed harness.
+        AcpHarnessSelection harnessSelection = AcpHarnessFactory.INSTANCE.fromEnvironment(
+            effectiveEnvironment
         );
-        AgentHarness harness = new RepairClientAgentHarness(client);
+        AgentHarness harness = harnessSelection.createHarness();
         RepairHistory history = new RepairHistory(
             configuration.getHistoryPath(),
             configuration.getResourceBudget().getMaximumProjectionBytes()
@@ -73,7 +86,7 @@ public final class SecureRepairRuntime {
             configuration.getResourceBudget(),
             false
         );
-        return new SecureRepairSession(loop);
+        return new SecureRepairSession(loop, harnessSelection.getProvenance().getStableDescriptor());
     }
 
     /** Package-owned graph acquisition; callers cannot construct a {@link RegisteredProfile}. */

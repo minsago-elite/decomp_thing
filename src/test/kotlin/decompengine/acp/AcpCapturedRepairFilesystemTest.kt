@@ -2,7 +2,9 @@ package decompengine.acp
 
 import com.agentclientprotocol.protocol.AcpExpectedError
 import decompengine.agent.AgentAccessPolicy
+import decompengine.agent.AgentExecutionException
 import decompengine.agent.AgentExecutionRequest
+import decompengine.agent.AgentFailureKind
 import decompengine.agent.AgentOperation
 import decompengine.agent.AgentPathRule
 import decompengine.agent.AgentWorkspacePath
@@ -17,6 +19,29 @@ import kotlin.test.assertEquals
 import kotlin.test.assertFailsWith
 
 class AcpCapturedRepairFilesystemTest {
+    @Test
+    fun `captured text inputs fail preflight before a process can start`() {
+        val invalidUtf8 = mapOf("src/module.c" to byteArrayOf(0xc3.toByte(), 0x28))
+        val invalidOutput = BoundedRepairOutput(invalidUtf8, invalidUtf8.keys, RepairResourceBudget())
+        val invalid = AcpCapturedRepairFilesystem(invalidUtf8, invalidOutput)
+
+        val invalidFailure = assertFailsWith<AgentExecutionException> {
+            invalid.preflight(request(), AcpFilesystemLimits())
+        }
+        assertEquals(AgentFailureKind.WORKSPACE_VIOLATION, invalidFailure.failure.kind)
+
+        val oversized = mapOf("src/module.c" to "12345".toByteArray())
+        val oversizedOutput = BoundedRepairOutput(oversized, oversized.keys, RepairResourceBudget())
+        val oversizedFilesystem = AcpCapturedRepairFilesystem(oversized, oversizedOutput)
+        val oversizedFailure = assertFailsWith<AgentExecutionException> {
+            oversizedFilesystem.preflight(
+                request(),
+                AcpFilesystemLimits(maximumReadBytes = 4),
+            )
+        }
+        assertEquals(AgentFailureKind.RESOURCE_EXHAUSTED, oversizedFailure.failure.kind)
+    }
+
     @Test
     fun `captured callbacks read current bytes and publish only the final bounded replacement`() {
         val initial = mapOf("src/module.c" to "old source\n".toByteArray())

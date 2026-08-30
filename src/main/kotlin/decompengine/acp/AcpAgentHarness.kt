@@ -60,6 +60,8 @@ import decompengine.agent.AgentToolEvent
 import decompengine.agent.AgentToolStatus
 import decompengine.agent.AgentUsage
 import decompengine.agent.AgentWorkspacePath
+import decompengine.repair.BoundedRepairOutput
+import decompengine.repair.CapturedRepairAgentHarness
 import java.io.ByteArrayOutputStream
 import java.io.IOException
 import java.nio.ByteBuffer
@@ -107,7 +109,7 @@ import kotlinx.serialization.json.JsonPrimitive
  */
 class AcpAgentHarness(
     private val configuration: AcpProcessConfiguration,
-) : AgentHarness, AcpExecutionEvidenceSource {
+) : CapturedRepairAgentHarness, AcpExecutionEvidenceSource {
     private val factoryProvenance = AtomicReference<AcpHarnessProvenance?>()
     private val unresolvedCleanupFailure = AtomicReference<AgentExecutionException?>()
     private val diagnostics = AtomicReference<AcpProcessDiagnostics?>()
@@ -146,10 +148,27 @@ class AcpAgentHarness(
         return this
     }
 
-    @OptIn(UnstableApi::class)
     override fun execute(
         request: AgentExecutionRequest,
         onEvent: (AgentExecutionEvent) -> Unit,
+    ): AgentExecutionResult = executeInternal(request, onEvent, capturedFilesystem = null)
+
+    override fun executeCaptured(
+        request: AgentExecutionRequest,
+        initialFiles: Map<String, ByteArray>,
+        output: BoundedRepairOutput,
+        onEvent: (AgentExecutionEvent) -> Unit,
+    ): AgentExecutionResult = executeInternal(
+        request,
+        onEvent,
+        AcpCapturedRepairFilesystem(initialFiles, output),
+    )
+
+    @OptIn(UnstableApi::class)
+    private fun executeInternal(
+        request: AgentExecutionRequest,
+        onEvent: (AgentExecutionEvent) -> Unit,
+        capturedFilesystem: AcpCapturedRepairFilesystem?,
     ): AgentExecutionResult {
         unresolvedCleanupFailure.get()?.let { throw it }
         diagnostics.set(null)
@@ -159,22 +178,33 @@ class AcpAgentHarness(
         sandboxEvidence.set(null)
         negotiatedAgentEvidence.set(null)
         executionEvidence.set(null)
-        validateRequest(request)
+        if (capturedFilesystem == null) {
+            validateRequest(request)
+        } else {
+            capturedFilesystem.preflight(request, configuration.filesystemLimits)
+        }
         if (request.cancellation.isCancellationRequested()) {
             return AgentExecutionResult(AgentStopReason.CANCELLED, "cancelled before the ACP process started")
         }
 
         val startedAt = System.nanoTime()
         val wallDeadline = MonotonicDeadline(request.limits.wallClockTimeout)
-        val before = try {
-            WorkspaceSnapshot.capture(
-                request,
-                WorkspaceSnapshotBudget(request.cancellation, wallDeadline, honorCancellation = true),
-            )
-        } catch (_: WorkspaceSnapshotCancelled) {
-            return AgentExecutionResult(AgentStopReason.CANCELLED, "cancelled during the initial workspace snapshot")
-        } catch (_: WorkspaceSnapshotTimedOut) {
-            throw workspaceSnapshotTimeout("initial", null)
+        val before = if (capturedFilesystem == null) {
+            try {
+                WorkspaceSnapshot.capture(
+                    request,
+                    WorkspaceSnapshotBudget(request.cancellation, wallDeadline, honorCancellation = true),
+                )
+            } catch (_: WorkspaceSnapshotCancelled) {
+                return AgentExecutionResult(
+                    AgentStopReason.CANCELLED,
+                    "cancelled during the initial workspace snapshot",
+                )
+            } catch (_: WorkspaceSnapshotTimedOut) {
+                throw workspaceSnapshotTimeout("initial", null)
+            }
+        } else {
+            null
         }
         if (request.cancellation.isCancellationRequested()) {
             return AgentExecutionResult(AgentStopReason.CANCELLED, "cancelled before the ACP process started")
@@ -184,7 +214,7 @@ class AcpAgentHarness(
         val translator = AcpEventTranslator(request, emitter, configuration.implementationId)
         val protocolReference = AtomicReference<Protocol?>()
         val protocolScopeReference = AtomicReference<CoroutineScope?>()
-        val filesystemReference = AtomicReference<AcpFilesystemBroker?>()
+        val filesystemReference = AtomicReference<AcpFilesystemSession?>()
         val terminalReference = AtomicReference<AcpTerminalBroker?>()
         val filesystemAuditRecorder = AcpFilesystemAuditRecorder()
         val permissionAuditRecorder = AcpPermissionAuditRecorder()
@@ -273,6 +303,7 @@ class AcpAgentHarness(
                         terminalReference = terminalReference,
                         permissionAuditRecorder = permissionAuditRecorder,
                         sandboxExecution = sandboxExecution,
+                        capturedFilesystem = capturedFilesystem,
                     )
                 }
             } catch (failure: Throwable) {
@@ -475,26 +506,30 @@ class AcpAgentHarness(
         }
 
         val finished = requireNotNull(outcome)
-        val changes = try {
-            val finalBudget = WorkspaceSnapshotBudget(
-                request.cancellation,
-                wallDeadline,
-                // A cancellation already accepted by the prompt still needs an accurate final change set.
-                honorCancellation = finished.stopReason != AgentStopReason.CANCELLED,
-            )
-            val finalSnapshot = WorkspaceSnapshot.capture(request, finalBudget)
-            before.diff(finalSnapshot, request, finalBudget)
-        } catch (_: WorkspaceSnapshotCancelled) {
-            throw AgentExecutionException(
-                AgentFailure(
-                    AgentFailureKind.UNAVAILABLE,
-                    "ACP execution was cancelled while capturing final workspace state; changes are indeterminate",
-                    session = translator.sessionReference(),
-                    details = mapOf("phase" to "final-workspace-snapshot"),
-                ),
-            )
-        } catch (_: WorkspaceSnapshotTimedOut) {
-            throw workspaceSnapshotTimeout("final", translator.sessionReference())
+        val changes = if (capturedFilesystem != null) {
+            capturedFilesystem.changes()
+        } else {
+            try {
+                val finalBudget = WorkspaceSnapshotBudget(
+                    request.cancellation,
+                    wallDeadline,
+                    // A cancellation already accepted by the prompt still needs an accurate final change set.
+                    honorCancellation = finished.stopReason != AgentStopReason.CANCELLED,
+                )
+                val finalSnapshot = WorkspaceSnapshot.capture(request, finalBudget)
+                requireNotNull(before).diff(finalSnapshot, request, finalBudget)
+            } catch (_: WorkspaceSnapshotCancelled) {
+                throw AgentExecutionException(
+                    AgentFailure(
+                        AgentFailureKind.UNAVAILABLE,
+                        "ACP execution was cancelled while capturing final workspace state; changes are indeterminate",
+                        session = translator.sessionReference(),
+                        details = mapOf("phase" to "final-workspace-snapshot"),
+                    ),
+                )
+            } catch (_: WorkspaceSnapshotTimedOut) {
+                throw workspaceSnapshotTimeout("final", translator.sessionReference())
+            }
         }
         changes.forEach { change -> emitter.emit { sequence -> AgentFileChangeEvent(sequence, change) } }
         translator.completeMessages()
@@ -565,11 +600,12 @@ class AcpAgentHarness(
         protocolReference: AtomicReference<Protocol?>,
         protocolScopeReference: AtomicReference<CoroutineScope?>,
         filesystemAuditRecorder: AcpFilesystemAuditRecorder,
-        filesystemReference: AtomicReference<AcpFilesystemBroker?>,
+        filesystemReference: AtomicReference<AcpFilesystemSession?>,
         terminalAuditRecorder: AcpTerminalAuditRecorder,
         terminalReference: AtomicReference<AcpTerminalBroker?>,
         permissionAuditRecorder: AcpPermissionAuditRecorder,
         sandboxExecution: ProductionAcpSandboxExecution,
+        capturedFilesystem: AcpCapturedRepairFilesystem?,
     ): PromptOutcome {
         val protocolScope = CoroutineScope(SupervisorJob() + Dispatchers.Default)
         protocolScopeReference.set(protocolScope)
@@ -589,7 +625,11 @@ class AcpAgentHarness(
         transport.onClose { running.fail(AcpEofFailure("ACP stdout closed")) }
         val client = Client(protocol)
         protocol.start()
-        val filesystem = AcpFilesystemBroker.open(
+        val filesystem = capturedFilesystem?.open(
+            request,
+            configuration.filesystemLimits,
+            filesystemAuditRecorder,
+        ) ?: AcpFilesystemBroker.open(
             request,
             configuration.filesystemLimits,
             filesystemAuditRecorder,
@@ -1937,7 +1977,7 @@ private class AcpEventTranslator(
 
 private class PolicyClientOperations(
     private val translator: AcpEventTranslator,
-    private val filesystem: AcpFilesystemBroker,
+    private val filesystem: AcpFilesystemSession,
     private val terminal: AcpTerminalBroker,
     private val permission: AcpPermissionBroker,
     private val sessionId: String,

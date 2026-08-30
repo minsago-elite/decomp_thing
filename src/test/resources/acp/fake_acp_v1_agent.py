@@ -286,6 +286,17 @@ if MODE == "fs-denied-outside":
     respond(prompt, {"stopReason": "end_turn"})
     raise SystemExit(0)
 
+if MODE == "repair-direct-write":
+    # The outer agent sees only a private empty namespace anchor at cwd. A direct write here must
+    # never enter the host-owned captured repair output; only the ACP fs callback below may do so.
+    os.mkdir(join_path(cwd, "src"))
+    direct_path = join_path(cwd, "src/module.c")
+    direct_fd = os.open(direct_path, os.O_CREAT | os.O_WRONLY, 0o600)
+    try:
+        os.write(direct_fd, b"uncaptured direct sandbox write\n")
+    finally:
+        os.close(direct_fd)
+
 if MODE == "fs-read-write":
     source = join_path(cwd, "src/module.c")
     send({
@@ -317,6 +328,24 @@ if MODE == "fs-read-write":
     write_response = read_message()
     if write_response is None or write_response.get("id") != 101 or "error" in write_response:
         raise SystemExit(99)
+if MODE == "repair-quota-retry":
+    source = join_path(cwd, "src/module.c")
+    send({
+        "jsonrpc": "2.0",
+        "id": 140,
+        "method": "fs/write_text_file",
+        "params": {
+            "sessionId": "fixture-session",
+            "path": source,
+            "content": "oversized captured replacement\n",
+        },
+    })
+    denied_response = read_message()
+    if denied_response is None or denied_response.get("id") != 140:
+        raise SystemExit(140)
+    if denied_response.get("error", {}).get("code") != -32602:
+        raise SystemExit(141)
+    write_workspace_file(source, "fit\n", 141)
 if MODE == "pipelined-callbacks":
     source = join_path(cwd, "contract/artifact.txt")
     for request_id in (130, 131):
@@ -767,7 +796,7 @@ source = join_path(
     cwd,
     "contract/artifact.txt" if MODE in GENERIC_CONTRACT_MODES else "src/module.c",
 )
-if MODE != "fs-read-write":
+if MODE not in ("fs-read-write", "repair-quota-retry"):
     content = "updated artifact\n" if MODE in GENERIC_CONTRACT_MODES else "new source\n"
     write_workspace_file(source, content, 803)
 

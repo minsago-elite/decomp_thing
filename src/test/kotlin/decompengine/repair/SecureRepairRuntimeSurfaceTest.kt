@@ -26,6 +26,23 @@ import kotlin.test.assertTrue
 
 class SecureRepairRuntimeSurfaceTest {
     @Test
+    fun `repair configuration accepts only the exact gate-owned harness selectors`() {
+        val history = createTempDirectory("repair-harness-selection-").resolve("history.json")
+
+        assertEquals(null, RepairRuntimeConfiguration("profile", history).harnessOverride)
+        assertEquals("acp", RepairRuntimeConfiguration("profile", history, harnessOverride = "acp").harnessOverride)
+        assertEquals(
+            "legacy-openai",
+            RepairRuntimeConfiguration("profile", history, harnessOverride = "legacy-openai").harnessOverride,
+        )
+        listOf("", "direct", "ACP", " acp", "legacy_openai").forEach { invalid ->
+            assertFailsWith<IllegalArgumentException>(invalid) {
+                RepairRuntimeConfiguration("profile", history, harnessOverride = invalid)
+            }
+        }
+    }
+
+    @Test
     fun `unknown profile and unavailable validation fail before project history mutation`() {
         val root = createTempDirectory("secure-repair-open-")
         val unknownHistory = root.resolve("unknown/reports/repair_history.json")
@@ -57,6 +74,12 @@ class SecureRepairRuntimeSurfaceTest {
         assertTrue(gate.lineSequence().any { "public static decompengine.repair.SecureRepairSession open(" in it })
         assertFalse(gate.lineSequence().any { it.trimStart().startsWith("public") && "TraceGuidedRepairLoop" in it })
         assertFalse(session.lineSequence().any { it.trimStart().startsWith("public") && "TraceGuidedRepairLoop" in it })
+        assertTrue(
+            session.lineSequence().any {
+                it.trim() == "public java.lang.String getHarnessProvenance();"
+            },
+            session,
+        )
         assertOnlyGuardedSyntheticPublicConstructors(TraceGuidedRepairLoop::class.java)
         assertOnlyGuardedSyntheticPublicConstructors(ModuleRevisionGraph::class.java)
         assertOnlyGuardedSyntheticPublicConstructors(ModuleRepairIndex::class.java)
@@ -104,6 +127,13 @@ class SecureRepairRuntimeSurfaceTest {
             gateCode,
         )
         assertFalse(gateCode.contains("getContextClassLoader"), gateCode)
+        assertTrue(gateCode.contains("decompengine/acp/AcpHarnessFactory.INSTANCE"), gateCode)
+        assertTrue(gateCode.contains("decompengine/acp/AcpHarnessFactory.fromEnvironment"), gateCode)
+        assertTrue(gateCode.contains("decompengine/acp/AcpHarnessSelection.createHarness"), gateCode)
+        assertEquals(1, Regex("AcpHarnessFactory.fromEnvironment").findAll(gateCode).count(), gateCode)
+        assertEquals(1, Regex("AcpHarnessSelection.createHarness").findAll(gateCode).count(), gateCode)
+        assertFalse(gateCode.contains("decompengine/repair/HttpOpenAiCompatibleRepairClient"), gateCode)
+        assertFalse(gateCode.contains("decompengine/repair/RepairClientAgentHarness"), gateCode)
 
         assertFalse(Modifier.isPublic(RepairRuntimeProfileRegistry::class.java.modifiers))
         assertFalse(

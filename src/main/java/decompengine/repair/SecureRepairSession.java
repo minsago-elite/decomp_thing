@@ -18,10 +18,17 @@ import java.util.Objects;
  */
 public final class SecureRepairSession implements AutoCloseable {
     private final TraceGuidedRepairLoop loop;
+    private final String harnessProvenance;
     private boolean closed;
 
-    SecureRepairSession(TraceGuidedRepairLoop loop) {
+    SecureRepairSession(TraceGuidedRepairLoop loop, String harnessProvenance) {
         this.loop = Objects.requireNonNull(loop, "loop");
+        this.harnessProvenance = Objects.requireNonNull(harnessProvenance, "harnessProvenance");
+    }
+
+    /** Stable non-secret descriptor of the single harness selection made by the Java gate. */
+    public String getHarnessProvenance() {
+        return harnessProvenance;
     }
 
     public synchronized RepairIteration repairCompileError(

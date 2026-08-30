@@ -182,8 +182,8 @@ object CapturedRepairStagingAuthority : RepairStagingAuthority {
         val frozenWritable = Collections.unmodifiableSet(TreeSet(writablePaths))
         val harnessView = immutableRequiredCapturedFiles(frozenInitial)
         val output = BoundedRepairOutput(frozenInitial, frozenWritable, budget)
-        // This deliberately uncreatable procfs path satisfies the transport's lexical root contract
-        // without creating a writable host workspace.
+        // The ACP outer sandbox creates only an empty namespace anchor at this path. It is never a
+        // host bind: captured adapters can mutate source state only through the bounded sink.
         val request = requestFactory(AgentWorkspaceRoot("project", ACP_CAPTURED_REPAIR_WORKSPACE))
         val result = try {
             captured.executeCaptured(request, harnessView, output, onEvent)

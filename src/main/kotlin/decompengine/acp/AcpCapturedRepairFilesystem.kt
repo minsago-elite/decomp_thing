@@ -6,7 +6,10 @@ import com.agentclientprotocol.model.WriteTextFileResponse
 import com.agentclientprotocol.protocol.AcpExpectedError
 import decompengine.agent.AgentFileChange
 import decompengine.agent.AgentFileChangeKind
+import decompengine.agent.AgentExecutionException
 import decompengine.agent.AgentExecutionRequest
+import decompengine.agent.AgentFailure
+import decompengine.agent.AgentFailureKind
 import decompengine.agent.AgentOperation
 import decompengine.agent.AgentWorkspacePath
 import decompengine.repair.BoundedRepairOutput
@@ -57,12 +60,43 @@ internal class AcpCapturedRepairFilesystem(
         }
     }
 
+    /** Fails before the ACP process starts when captured inputs cannot satisfy the text bridge. */
+    fun preflight(request: AgentExecutionRequest, limits: AcpFilesystemLimits) = synchronized(lock) {
+        validateRequest(request)
+        initialFiles.forEach { (path, bytes) ->
+            if (bytes.size > limits.maximumReadBytes) {
+                throw AgentExecutionException(
+                    AgentFailure(
+                        AgentFailureKind.RESOURCE_EXHAUSTED,
+                        "captured ACP source exceeds the configured read limit: $path",
+                    ),
+                )
+            }
+            try {
+                decodeCapturedUtf8(bytes)
+            } catch (failure: CharacterCodingException) {
+                throw AgentExecutionException(
+                    AgentFailure(
+                        AgentFailureKind.WORKSPACE_VIOLATION,
+                        "captured ACP source is not valid UTF-8: $path",
+                    ),
+                    failure,
+                )
+            }
+        }
+    }
+
     fun open(
         request: AgentExecutionRequest,
         limits: AcpFilesystemLimits,
         audit: AcpFilesystemAuditRecorder,
     ): AcpFilesystemSession = synchronized(lock) {
         check(session == null) { "captured ACP filesystem is already open" }
+        validateRequest(request)
+        CapturedSession(request, limits, audit).also { session = it }
+    }
+
+    private fun validateRequest(request: AgentExecutionRequest) {
         require(request.workspaceRoots.size == 1) { "captured ACP repair requires exactly one workspace root" }
         require(request.workspaceRoots.single().path == ACP_CAPTURED_REPAIR_WORKSPACE) {
             "captured ACP repair requires its private namespace-only workspace root"
@@ -76,7 +110,6 @@ internal class AcpCapturedRepairFilesystem(
         require(request.accessPolicy.pathRules.all { rule -> rule.path.relativePath in initialFiles }) {
             "captured ACP repair policy references an unstaged path"
         }
-        CapturedSession(request, limits, audit).also { session = it }
     }
 
     fun changes(): List<AgentFileChange> = synchronized(lock) {
