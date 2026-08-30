@@ -158,7 +158,8 @@ class SourceTreeTest {
         assertTrue(project.resolve("src/modules/parse.c").readText().contains("parse_input"))
         assertTrue(project.resolve("source_tree_manifest.json").readText().contains("\"generator\": \"agent:unspecified\""))
         val checkpoint = project.resolve("reports/modules/parse.json").readText()
-        assertTrue(checkpoint.contains("\"accepted\": true"))
+        assertTrue(checkpoint.contains("\"accepted\": false"))
+        assertTrue(checkpoint.contains("agent-execution-evidence-incomplete"))
         assertTrue(checkpoint.contains("\"promptCharacters\":"))
         assertTrue(checkpoint.contains("\"promptBudgetCharacters\": 120000"))
     }

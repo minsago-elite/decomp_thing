@@ -189,12 +189,12 @@ private class RequestBindingDigest {
     private val digest = MessageDigest.getInstance("SHA-256")
 
     fun field(name: String, value: String?) {
-        component(strictReceiptUtf8(name))
+        component(receiptCommitmentBytes(name))
         if (value == null) {
             digest.update(0.toByte())
         } else {
             digest.update(1.toByte())
-            component(strictReceiptUtf8(value))
+            component(receiptCommitmentBytes(value))
         }
     }
 
@@ -211,7 +211,7 @@ private class RequestBindingDigest {
  * domain marker (impossible in valid UTF-8) followed by their raw UTF-16BE code units, preserving
  * injectivity without making malformed text archive-serializable.
  */
-private fun strictReceiptUtf8(value: String): ByteArray = try {
+internal fun receiptCommitmentBytes(value: String): ByteArray = try {
     val encoded = StandardCharsets.UTF_8.newEncoder()
         .onMalformedInput(CodingErrorAction.REPORT)
         .onUnmappableCharacter(CodingErrorAction.REPORT)

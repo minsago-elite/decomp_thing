@@ -1,15 +1,27 @@
 package decompengine.project
 
+import com.agentclientprotocol.model.PermissionOptionKind
 import decompengine.acp.ACP_CLIENT_IMPLEMENTATION_NAME
 import decompengine.acp.ACP_CLIENT_IMPLEMENTATION_VERSION
 import decompengine.acp.ACP_KOTLIN_SDK_VERSION
 import decompengine.acp.ACP_STABLE_PROTOCOL_VERSION
 import decompengine.acp.LinuxDescriptor
 import decompengine.acp.LinuxFilesystemSyscalls
+import decompengine.acp.AcpFilesystemAuditOutcome
+import decompengine.acp.AcpFilesystemAuditReason
+import decompengine.acp.AcpPermissionAuditOutcome
+import decompengine.acp.AcpPermissionAuditReason
+import decompengine.acp.AcpTerminalAuditOutcome
+import decompengine.acp.AcpTerminalAuditReason
 import decompengine.agent.AGENT_EXECUTION_CONTRACT_VERSION
+import decompengine.agent.AgentMessageRole
+import decompengine.agent.AgentPermissionDecision
+import decompengine.agent.AgentPlanStatus
+import decompengine.agent.AgentToolStatus
 import decompengine.oracle.core.OracleJson
 import decompengine.oracle.core.StrictJsonLimits
 import java.nio.charset.StandardCharsets
+import java.math.BigInteger
 import java.nio.file.Files
 import java.nio.file.Path
 import java.security.MessageDigest
@@ -64,7 +76,7 @@ internal object ReconstructionAcpEvidenceArchiveVerifier {
                     checkpoint.reconstructorIdentity.startsWith("agent:")
 
                 if (!agentGenerated) {
-                    require(checkpoint.executionEvidencePath == null && checkpoint.executionEvidenceSha256 == null) {
+                    require(checkpoint.hasNoExecutionEvidence()) {
                         "non-agent module retains stale ACP execution evidence: $moduleId"
                     }
                     return@forEach
@@ -76,6 +88,11 @@ internal object ReconstructionAcpEvidenceArchiveVerifier {
                 require(source.entityIds.none(manifest.unresolvedImplementationIds::contains)) {
                     "agent-generated module is unresolved at the archive release gate: $moduleId"
                 }
+                require(checkpoint.schemaVersion == 4L &&
+                    checkpoint.executionEvidenceSchemaVersion == 2L &&
+                    checkpoint.executionReleaseComplete == true &&
+                    checkpoint.executionTerminalOutcome == "returned-completed"
+                ) { "agent-generated module lacks release-complete receipt assessment: $moduleId" }
                 val evidenceDeclaration = requireNotNull(executionDeclaration) {
                     "reconstruction profile does not declare ACP execution evidence"
                 }
@@ -86,7 +103,7 @@ internal object ReconstructionAcpEvidenceArchiveVerifier {
                 val evidenceManifest = requireNotNull(manifestByPath[evidencePath]) {
                     "ACP execution evidence is absent from the source manifest: $evidencePath"
                 }
-                require(evidenceManifest.generator == ACP_EVIDENCE_GENERATOR &&
+                require(evidenceManifest.generator == ACP_RECEIPT_GENERATOR &&
                     evidenceManifest.entityIds == source.entityIds
                 ) {
                     "ACP execution evidence manifest provenance is invalid: $evidencePath"
@@ -103,7 +120,7 @@ internal object ReconstructionAcpEvidenceArchiveVerifier {
                 ) {
                     "module checkpoint ACP evidence digest does not identify the archived artifact: $moduleId"
                 }
-                verifyExecutionEvidence(
+                verifyExecutionReceipt(
                     bytes = evidenceBytes,
                     moduleId = moduleId,
                     source = source,
@@ -133,10 +150,11 @@ internal object ReconstructionAcpEvidenceArchiveVerifier {
         source: GeneratedFileEvidence,
     ): ReconstructionCheckpoint {
         val root = strictObject(bytes, CHECKPOINT_JSON_LIMITS, "module checkpoint")
-        root.requireExactKeys(CHECKPOINT_FIELDS, "module checkpoint")
-        require(root.requiredLong("schemaVersion", "module checkpoint") == 3L) {
+        val schemaVersion = root.requiredLong("schemaVersion", "module checkpoint")
+        require(schemaVersion == 4L) {
             "unsupported module checkpoint schema for ACP archive evidence: $moduleId"
         }
+        root.requireExactKeys(CHECKPOINT_V4_FIELDS, "module checkpoint")
         root.requiredSha256("fingerprint", "module checkpoint")
         val sourceSha256 = root.requiredSha256("sourceSha256", "module checkpoint")
         val generator = root.requiredString("generator", "module checkpoint")
@@ -152,6 +170,22 @@ internal object ReconstructionAcpEvidenceArchiveVerifier {
         val executionEvidenceSha256 = root.optionalSha256("executionEvidenceSha256", "module checkpoint")
         require((executionEvidencePath == null) == (executionEvidenceSha256 == null)) {
             "module checkpoint ACP evidence path and digest must be present together: $moduleId"
+        }
+        val executionEvidenceSchemaVersion =
+            root.optionalNonNegativeLong("executionEvidenceSchemaVersion", "module checkpoint")
+        val executionRequestSha256 = root.optionalSha256("executionRequestSha256", "module checkpoint")
+        val executionTerminalOutcome = root.optionalString("executionTerminalOutcome", "module checkpoint")
+        val executionReleaseComplete = root.optionalBoolean("executionReleaseComplete", "module checkpoint")
+        val fields = listOf(
+            executionEvidencePath,
+            executionEvidenceSha256,
+            executionEvidenceSchemaVersion,
+            executionRequestSha256,
+            executionTerminalOutcome,
+            executionReleaseComplete,
+        )
+        require(fields.all { it == null } || fields.all { it != null }) {
+            "module checkpoint receipt assessment binding is incomplete: $moduleId"
         }
         val accepted = root.requiredBoolean("accepted", "module checkpoint")
         root.requiredBoolean("retryable", "module checkpoint")
@@ -187,53 +221,662 @@ internal object ReconstructionAcpEvidenceArchiveVerifier {
             "module checkpoint provenance differs from the source manifest: $moduleId"
         }
         return ReconstructionCheckpoint(
+            schemaVersion,
             generator,
             reconstructorIdentity,
             promptSha256,
             promptBudgetCharacters,
             executionEvidencePath,
             executionEvidenceSha256,
+            executionEvidenceSchemaVersion,
+            executionRequestSha256,
+            executionTerminalOutcome,
+            executionReleaseComplete,
             accepted,
         )
     }
 
-    private fun verifyExecutionEvidence(
+    private fun verifyExecutionReceipt(
         bytes: ByteArray,
         moduleId: String,
         source: GeneratedFileEvidence,
         sourceBytes: Long,
         checkpoint: ReconstructionCheckpoint,
     ) {
-        val root = strictObject(bytes, EVIDENCE_JSON_LIMITS, "reconstruction ACP execution evidence")
-        root.requireExactKeys(EVIDENCE_FIELDS, "reconstruction ACP execution evidence")
-        require(root.requiredLong("schemaVersion", "ACP evidence") == 1L) {
-            "unsupported reconstruction ACP execution evidence schema: $moduleId"
+        val root = strictObject(bytes, EVIDENCE_JSON_LIMITS, "reconstruction ACP execution receipt")
+        root.requireExactKeys(RECEIPT_FIELDS, "reconstruction ACP execution receipt")
+        require(root.requiredLong("schemaVersion", "ACP receipt") == 2L) {
+            "unsupported reconstruction ACP execution receipt schema: $moduleId"
         }
-        require(root.requiredString("kind", "ACP evidence") == RECONSTRUCTION_ACP_EVIDENCE_KIND) {
-            "wrong reconstruction ACP execution evidence kind: $moduleId"
+        require(root.requiredString("kind", "ACP receipt") == RECONSTRUCTION_ACP_RECEIPT_KIND) {
+            "wrong reconstruction ACP execution receipt kind: $moduleId"
         }
-        require(root.requiredString("moduleId", "ACP evidence") == moduleId) {
-            "reconstruction ACP execution evidence names the wrong module: $moduleId"
+        require(root.requiredString("moduleId", "ACP receipt") == moduleId) {
+            "reconstruction ACP execution receipt names the wrong module: $moduleId"
         }
+
+        val requestBounds = verifyReceiptRequest(root, checkpoint)
+        val provider = root.requiredObject("provider", "ACP receipt")
+        provider.requireExactKeys(RECEIPT_PROVIDER_FIELDS, "ACP receipt provider")
+        require(provider.requiredString("id", "ACP receipt provider") == "acp" &&
+            provider.requiredLong("evidenceSchemaVersion", "ACP receipt provider") == 2L
+        ) { "reconstruction receipt is not invocation-bound ACP-v2 evidence" }
+
+        val lifecycle = root.requiredObject("lifecycle", "ACP receipt")
+        lifecycle.requireExactKeys(RECEIPT_LIFECYCLE_FIELDS, "ACP receipt lifecycle")
+        require(lifecycle.requiredString("phaseReached", "ACP receipt lifecycle") ==
+            "final-workspace-snapshot" &&
+            lifecycle.requiredString("cleanupDisposition", "ACP receipt lifecycle") == "verified" &&
+            lifecycle.requiredBoolean("filesystemAuditComplete", "ACP receipt lifecycle") &&
+            lifecycle.requiredBoolean("terminalAuditComplete", "ACP receipt lifecycle") &&
+            lifecycle.requiredBoolean("permissionAuditComplete", "ACP receipt lifecycle")
+        ) { "ACP receipt lifecycle is incomplete" }
 
         val factory = verifyFactoryAndProtocol(root)
         require(source.generator == "agent:${factory.implementationId}" &&
             checkpoint.generator == source.generator &&
             checkpoint.reconstructorIdentity == checkpoint.expectedReconstructorIdentity(factory)
-        ) {
-            "ACP factory provenance differs from module generator provenance: $moduleId"
-        }
-        verifyAgentAndSession(root, factory.implementationId)
-        val bounds = verifyTurnAndBounds(root, checkpoint)
-        val eventChanges = verifyEvents(root.requiredArray("events", "ACP evidence"), bounds.archivedEventCount)
-        val resultChanges = verifyResult(root, bounds, source, sourceBytes)
+        ) { "ACP receipt factory provenance differs from module generator provenance: $moduleId" }
+        verifyReceiptAgentAndSession(root, factory.implementationId)
+
+        val eventChanges = verifyReceiptEvents(root.requiredObject("events", "ACP receipt"))
+        val resultChanges = verifyReceiptOutcome(
+            root.requiredObject("outcome", "ACP receipt"),
+            requestBounds,
+            source,
+            sourceBytes,
+        )
         require(eventChanges == resultChanges) {
-            "ACP event evidence does not commit the complete result change set: $moduleId"
+            "ACP receipt events do not commit the complete returned change set: $moduleId"
         }
-        verifyPolicyAudits(root)
-        verifyProcess(root)
-        verifySandbox(root)
-        verifyValidation(root, source)
+        verifyReceiptPolicyAudits(root)
+        verifyReceiptProcess(root)
+        verifyReceiptSandbox(root)
+
+        require(lifecycle.requiredBoolean("releaseComplete", "ACP receipt lifecycle")) {
+            "ACP receipt release-complete marker is false"
+        }
+        require(checkpoint.executionRequestSha256 == requestBounds.requestSha256 &&
+            checkpoint.executionTerminalOutcome == "returned-completed" &&
+            checkpoint.executionReleaseComplete == true
+        ) { "checkpoint assessment is cross-paired with a different ACP invocation receipt" }
+    }
+
+    private fun verifyReceiptRequest(
+        root: JsonObject,
+        checkpoint: ReconstructionCheckpoint,
+    ): ReceiptBounds {
+        val request = root.requiredObject("request", "ACP receipt")
+        request.requireExactKeys(RECEIPT_REQUEST_FIELDS, "ACP receipt request")
+        require(request.requiredLong("contractVersion", "ACP receipt request") ==
+            AGENT_EXECUTION_CONTRACT_VERSION.toLong()
+        ) { "ACP receipt request uses an unsupported contract" }
+        val requestSha256 = request.requiredSha256("requestSha256", "ACP receipt request")
+        require(requestSha256 == checkpoint.executionRequestSha256) {
+            "ACP receipt request digest differs from its checkpoint assessment"
+        }
+        request.requiredSha256("accessPolicySha256", "ACP receipt request")
+        verifyTextCommitment(
+            request.requiredObject("objective", "ACP receipt request"),
+            "ACP objective",
+            requireNonEmpty = true,
+        )
+        require(request.requiredSha256("promptSha256", "ACP receipt request") == checkpoint.promptSha256) {
+            "ACP receipt prompt digest differs from the reconstruction checkpoint"
+        }
+        request.requiredSha256("wirePromptSha256", "ACP receipt request")
+        verifyTextCommitmentList(
+            request.requiredObject("workspaceRootIds", "ACP receipt request"),
+            listOf("project"),
+            "ACP workspace root IDs",
+        )
+        verifyTextCommitmentList(
+            request.requiredObject("contextInputIds", "ACP receipt request"),
+            listOf("recovered-module-evidence", "observed-behavior"),
+            "ACP context input IDs",
+        )
+        require(request.requiredBoolean("filesystemCapabilityEnabled", "ACP receipt request") &&
+            !request.requiredBoolean("terminalCapabilityEnabled", "ACP receipt request")
+        ) { "reconstruction ACP receipt has unexpected tool capabilities" }
+        require(request.requiredNonNegativeLong("maximumTurns", "ACP receipt request") >= 1L) {
+            "ACP receipt request excludes its recorded turn"
+        }
+        val maximumToolCalls = request.requiredNonNegativeLong("maximumToolCalls", "ACP receipt request")
+        val maximumOutputBytes = request.requiredNonNegativeLong("maximumOutputBytes", "ACP receipt request")
+        requireNonNegativeDecimal(request.requiredString("wallClockTimeoutNanos", "ACP receipt request"))
+        requireNonNegativeDecimal(request.requiredString("idleTimeoutNanos", "ACP receipt request"))
+        val maximumInputTokens = request.optionalNonNegativeLong("maximumInputTokens", "ACP receipt request")
+        val maximumOutputTokens = request.optionalNonNegativeLong("maximumOutputTokens", "ACP receipt request")
+        return ReceiptBounds(
+            requestSha256,
+            maximumToolCalls,
+            maximumOutputBytes,
+            maximumInputTokens,
+            maximumOutputTokens,
+        )
+    }
+
+    private fun verifyReceiptAgentAndSession(root: JsonObject, implementationId: String) {
+        val agent = root.requiredObject("agent", "ACP receipt")
+        agent.requireExactKeys(AGENT_FIELDS, "ACP receipt agent")
+        require(agent.requiredString("configuredImplementationId", "ACP receipt agent") == implementationId) {
+            "configured ACP receipt identity differs from factory provenance"
+        }
+        val negotiated = agent.requiredObject("negotiatedImplementation", "ACP receipt agent")
+        negotiated.requireExactKeys(RECEIPT_NEGOTIATED_IMPLEMENTATION_FIELDS, "negotiated ACP receipt implementation")
+        verifyTextCommitment(
+            negotiated.requiredObject("name", "negotiated ACP receipt implementation"),
+            "ACP agent name",
+            requireNonEmpty = true,
+            maximumBytes = MAXIMUM_NEGOTIATED_IDENTITY_BYTES,
+        )
+        verifyTextCommitment(
+            negotiated.requiredObject("version", "negotiated ACP receipt implementation"),
+            "ACP agent version",
+            requireNonEmpty = true,
+            maximumBytes = MAXIMUM_NEGOTIATED_IDENTITY_BYTES,
+        )
+        negotiated.getValue("title").let { title ->
+            if (title !is JsonNull) verifyTextCommitment(
+                title.requiredObject("ACP agent title"),
+                "ACP agent title",
+                maximumBytes = MAXIMUM_NEGOTIATED_IDENTITY_BYTES,
+            )
+        }
+        val capabilities = agent.requiredObject("negotiatedCapabilities", "ACP receipt agent")
+        capabilities.requireExactKeys(CAPABILITY_FIELDS, "negotiated ACP receipt capabilities")
+        CAPABILITY_FIELDS.forEach { capabilities.requiredBoolean(it, "negotiated ACP receipt capabilities") }
+
+        val session = root.requiredObject("session", "ACP receipt")
+        session.requireExactKeys(RECEIPT_SESSION_FIELDS, "ACP receipt session")
+        verifyTextCommitment(
+            session.requiredObject("harnessId", "ACP receipt session"),
+            "ACP session harness",
+            expected = implementationId,
+        )
+        verifyTextCommitment(
+            session.requiredObject("sessionId", "ACP receipt session"),
+            "ACP session ID",
+            requireNonEmpty = true,
+            maximumBytes = MAXIMUM_ARCHIVED_EVENT_PEER_BYTES,
+        )
+        session.getValue("resumeReference").let { resume ->
+            if (resume !is JsonNull) verifyTextCommitment(
+                resume.requiredObject("ACP session resume reference"),
+                "ACP session resume reference",
+            )
+        }
+    }
+
+    private fun verifyReceiptEvents(events: JsonObject): List<ReceiptChange> {
+        events.requireExactKeys(RECEIPT_EVENTS_FIELDS, "ACP receipt events")
+        require(events.requiredNonNegativeLong("maximumRetainedEvents", "ACP receipt events") ==
+            MAXIMUM_RECONSTRUCTION_ACP_EVENTS.toLong()
+        ) { "ACP receipt event bound is unsupported" }
+        val observed = events.requiredNonNegativeLong("observedEventCount", "ACP receipt events")
+        val retained = events.requiredNonNegativeLong("retainedEventCount", "ACP receipt events")
+        require(events.requiredBoolean("complete", "ACP receipt events") &&
+            events.getValue("truncationReason") is JsonNull
+        ) { "ACP receipt event stream is incomplete" }
+        val records = events.requiredArray("records", "ACP receipt events")
+        require(observed == retained && retained == records.size.toLong() &&
+            retained <= MAXIMUM_RECONSTRUCTION_ACP_EVENTS.toLong()
+        ) { "ACP receipt event counts disagree" }
+        val changes = mutableListOf<ReceiptChange>()
+        records.forEachIndexed { index, element ->
+            val event = element.requiredObject("ACP receipt event")
+            require(event.requiredLong("sequence", "ACP receipt event") == index.toLong()) {
+                "ACP receipt events are missing or reorder a sequence"
+            }
+            when (event.requiredString("type", "ACP receipt event")) {
+                "message" -> {
+                    event.requireExactKeys(RECEIPT_MESSAGE_EVENT_FIELDS, "ACP receipt message event")
+                    require(event.requiredString("role", "ACP receipt message event") in MESSAGE_ROLES) {
+                        "ACP receipt message role is invalid"
+                    }
+                    verifyTextCommitment(
+                        event.requiredObject("messageId", "ACP receipt message event"),
+                        "ACP message ID",
+                        requireNonEmpty = true,
+                    )
+                    verifyTextCommitment(event.requiredObject("text", "ACP receipt message event"), "ACP message text")
+                    event.requiredBoolean("completed", "ACP receipt message event")
+                }
+                "plan" -> {
+                    event.requireExactKeys(RECEIPT_PLAN_EVENT_FIELDS, "ACP receipt plan event")
+                    event.requiredArray("entries", "ACP receipt plan event").forEach { planElement ->
+                        val entry = planElement.requiredObject("ACP receipt plan entry")
+                        entry.requireExactKeys(RECEIPT_PLAN_ENTRY_FIELDS, "ACP receipt plan entry")
+                        verifyTextCommitment(
+                            entry.requiredObject("id", "ACP receipt plan entry"),
+                            "ACP plan entry ID",
+                            requireNonEmpty = true,
+                        )
+                        verifyTextCommitment(
+                            entry.requiredObject("description", "ACP receipt plan entry"),
+                            "ACP plan description",
+                            requireNonEmpty = true,
+                        )
+                        require(entry.requiredString("status", "ACP receipt plan entry") in PLAN_STATUSES) {
+                            "ACP receipt plan status is invalid"
+                        }
+                    }
+                }
+                "tool" -> {
+                    event.requireExactKeys(RECEIPT_TOOL_EVENT_FIELDS, "ACP receipt tool event")
+                    verifyTextCommitment(
+                        event.requiredObject("toolCallId", "ACP receipt tool event"),
+                        "ACP tool-call ID",
+                        requireNonEmpty = true,
+                    )
+                    verifyTextCommitment(
+                        event.requiredObject("title", "ACP receipt tool event"),
+                        "ACP tool title",
+                        requireNonEmpty = true,
+                    )
+                    require(event.requiredString("status", "ACP receipt tool event") in TOOL_STATUSES) {
+                        "ACP receipt tool status is invalid"
+                    }
+                    event.requiredSha256("detailsSha256", "ACP receipt tool event")
+                    event.requiredNonNegativeLong("detailCount", "ACP receipt tool event")
+                }
+                "permission" -> {
+                    event.requireExactKeys(RECEIPT_PERMISSION_EVENT_FIELDS, "ACP receipt permission event")
+                    verifyTextCommitment(
+                        event.requiredObject("requestId", "ACP receipt permission event"),
+                        "ACP permission request ID",
+                        requireNonEmpty = true,
+                    )
+                    require(event.requiredString("decision", "ACP receipt permission event") in PERMISSION_DECISIONS) {
+                        "ACP receipt permission decision is invalid"
+                    }
+                    listOf("selectedOptionId", "reason").forEach { field ->
+                        event.getValue(field).let { value ->
+                            if (value !is JsonNull) verifyTextCommitment(
+                                value.requiredObject("ACP receipt permission $field"),
+                                "ACP permission $field",
+                            )
+                        }
+                    }
+                }
+                "file-change" -> {
+                    event.requireExactKeys(FILE_CHANGE_EVENT_FIELDS, "ACP receipt file-change event")
+                    changes += verifyReceiptChange(event.requiredObject("change", "ACP receipt file-change event"))
+                }
+                else -> throw IllegalArgumentException("unknown ACP receipt event type")
+            }
+        }
+        return changes
+    }
+
+    private fun verifyReceiptOutcome(
+        outcome: JsonObject,
+        bounds: ReceiptBounds,
+        source: GeneratedFileEvidence,
+        sourceBytes: Long,
+    ): List<ReceiptChange> {
+        outcome.requireExactKeys(RECEIPT_OUTCOME_FIELDS, "ACP receipt outcome")
+        require(outcome.requiredString("type", "ACP receipt outcome") == "returned" &&
+            outcome.getValue("failure") is JsonNull
+        ) { "release ACP receipt does not contain a returned outcome" }
+        val result = outcome.requiredObject("result", "ACP receipt outcome")
+        result.requireExactKeys(RECEIPT_RESULT_FIELDS, "ACP receipt result")
+        require(result.requiredString("stopReason", "ACP receipt result") == "completed") {
+            "release ACP receipt result is not completed"
+        }
+        result.getValue("summary").let { summary ->
+            if (summary !is JsonNull) verifyTextCommitment(
+                summary.requiredObject("ACP receipt result summary"),
+                "ACP result summary",
+            )
+        }
+        val changes = result.requiredObject("changes", "ACP receipt result")
+        changes.requireExactKeys(RECEIPT_CHANGE_SET_FIELDS, "ACP receipt result changes")
+        val observed = changes.requiredNonNegativeLong("observedCount", "ACP receipt result changes")
+        val retained = changes.requiredNonNegativeLong("retainedCount", "ACP receipt result changes")
+        require(changes.requiredBoolean("complete", "ACP receipt result changes")) {
+            "ACP receipt result changes are truncated"
+        }
+        changes.requiredSha256("aggregateSha256", "ACP receipt result changes")
+        val records = changes.requiredArray("records", "ACP receipt result changes")
+        require(observed == retained && retained == records.size.toLong() &&
+            retained <= MAXIMUM_RECONSTRUCTION_ACP_EVENTS.toLong()
+        ) { "ACP receipt result change counts disagree" }
+        val verifiedChanges = records.map(::verifyReceiptChange)
+        val expectedRoot = expectedTextCommitment("project")
+        val expectedPath = expectedTextCommitment(source.path)
+        require(verifiedChanges.size == 1 &&
+            verifiedChanges.single().rootId == expectedRoot &&
+            verifiedChanges.single().relativePath == expectedPath &&
+            verifiedChanges.single().kind in setOf("created", "modified") &&
+            verifiedChanges.single().afterSha256 == source.sha256 &&
+            (verifiedChanges.single().sizeBytes == null || verifiedChanges.single().sizeBytes == sourceBytes) &&
+            sourceBytes <= bounds.maximumOutputBytes
+        ) { "ACP receipt result change does not identify the archived module source" }
+
+        val usageElement = result.getValue("usage")
+        if (usageElement is JsonNull) {
+            require(bounds.maximumInputTokens == null && bounds.maximumOutputTokens == null) {
+                "ACP receipt omits token usage required by request ceilings"
+            }
+        } else {
+            val usage = usageElement.requiredObject("ACP receipt usage")
+            usage.requireExactKeys(RECEIPT_USAGE_FIELDS, "ACP receipt usage")
+            val input = usage.optionalNonNegativeLong("inputTokens", "ACP receipt usage")
+            val output = usage.optionalNonNegativeLong("outputTokens", "ACP receipt usage")
+            usage.optionalNonNegativeLong("cachedInputTokens", "ACP receipt usage")
+            val toolCalls = usage.optionalNonNegativeLong("toolCalls", "ACP receipt usage")
+            usage.getValue("wallClockNanos").let { wallClock ->
+                if (wallClock !is JsonNull) requireNonNegativeDecimal(
+                    wallClock.requiredString("ACP receipt wall-clock nanoseconds"),
+                )
+            }
+            require(bounds.maximumInputTokens == null ||
+                input?.let { it <= bounds.maximumInputTokens } == true
+            ) { "ACP receipt input-token usage is missing or exceeds its ceiling" }
+            require(bounds.maximumOutputTokens == null ||
+                output?.let { it <= bounds.maximumOutputTokens } == true
+            ) { "ACP receipt output-token usage is missing or exceeds its ceiling" }
+            require(toolCalls == null || toolCalls <= bounds.maximumToolCalls) {
+                "ACP receipt tool-call usage exceeds its ceiling"
+            }
+        }
+        return verifiedChanges
+    }
+
+    private fun verifyReceiptChange(element: JsonElement): ReceiptChange {
+        val change = element.requiredObject("ACP receipt file change")
+        change.requireExactKeys(FILE_CHANGE_FIELDS, "ACP receipt file change")
+        val rootId = verifyTextCommitment(
+            change.requiredObject("rootId", "ACP receipt file change"),
+            "ACP change root ID",
+        )
+        val relativePath = verifyTextCommitment(
+            change.requiredObject("relativePath", "ACP receipt file change"),
+            "ACP change relative path",
+        )
+        val kind = change.requiredString("kind", "ACP receipt file change")
+        require(kind in setOf("created", "modified", "deleted")) { "ACP receipt file-change kind is invalid" }
+        val before = change.optionalSha256("beforeSha256", "ACP receipt file change")
+        val after = change.optionalSha256("afterSha256", "ACP receipt file change")
+        require(
+            when (kind) {
+                "created" -> before == null && after != null
+                "modified" -> before != null && after != null && before != after
+                else -> before != null && after == null
+            },
+        ) { "ACP receipt file-change digest transition is invalid" }
+        return ReceiptChange(
+            rootId,
+            relativePath,
+            kind,
+            before,
+            after,
+            change.optionalNonNegativeLong("sizeBytes", "ACP receipt file change"),
+        )
+    }
+
+    private fun verifyReceiptPolicyAudits(root: JsonObject) {
+        val audits = root.requiredObject("policyAudits", "ACP receipt")
+        audits.requireExactKeys(POLICY_AUDIT_FIELDS, "ACP receipt policy audits")
+        verifyReceiptAuditCollection(audits, "filesystem", RECEIPT_FILESYSTEM_AUDIT_FIELDS) { record ->
+            verifyTextCommitment(
+                record.requiredObject("sessionId", "ACP filesystem audit"),
+                "ACP audit session ID",
+                requireNonEmpty = true,
+            )
+            verifyTextCommitment(
+                record.requiredObject("method", "ACP filesystem audit"),
+                "ACP filesystem method",
+                requireNonEmpty = true,
+            )
+            verifyTextCommitment(
+                record.requiredObject("requestedPathSha256", "ACP filesystem audit"),
+                "ACP requested-path digest",
+            )
+            record.getValue("policyPath").let { pathElement ->
+                if (pathElement !is JsonNull) {
+                    val path = pathElement.requiredObject("ACP receipt policy path")
+                    path.requireExactKeys(RECEIPT_POLICY_PATH_FIELDS, "ACP receipt policy path")
+                    verifyTextCommitment(path.requiredObject("rootId", "ACP receipt policy path"), "ACP policy root ID")
+                    verifyTextCommitment(
+                        path.requiredObject("relativePath", "ACP receipt policy path"),
+                        "ACP policy relative path",
+                    )
+                }
+            }
+            require(record.requiredString("outcome", "ACP filesystem audit") in FILESYSTEM_AUDIT_OUTCOMES) {
+                "ACP filesystem audit outcome is invalid"
+            }
+            require(record.requiredString("reason", "ACP filesystem audit") in FILESYSTEM_AUDIT_REASONS) {
+                "ACP filesystem audit reason is invalid"
+            }
+        }
+        verifyReceiptAuditCollection(audits, "terminal", RECEIPT_TERMINAL_AUDIT_FIELDS) { record ->
+            verifyTextCommitment(
+                record.requiredObject("sessionId", "ACP terminal audit"),
+                "ACP audit session ID",
+                requireNonEmpty = true,
+            )
+            verifyTextCommitment(
+                record.requiredObject("method", "ACP terminal audit"),
+                "ACP terminal method",
+                requireNonEmpty = true,
+            )
+            verifyTextCommitment(
+                record.requiredObject("requestSha256", "ACP terminal audit"),
+                "ACP terminal request digest",
+            )
+            listOf("terminalIdSha256", "toolCallIdSha256").forEach { field ->
+                record.getValue(field).let { value ->
+                    if (value !is JsonNull) verifyTextCommitment(
+                        value.requiredObject("ACP terminal audit $field"),
+                        "ACP terminal $field",
+                    )
+                }
+            }
+            require(record.requiredString("outcome", "ACP terminal audit") in TERMINAL_AUDIT_OUTCOMES) {
+                "ACP terminal audit outcome is invalid"
+            }
+            require(record.requiredString("reason", "ACP terminal audit") in TERMINAL_AUDIT_REASONS) {
+                "ACP terminal audit reason is invalid"
+            }
+            record.requiredBoolean("networkIsolated", "ACP terminal audit")
+            record.optionalNonNegativeLong("retainedOutputBytes", "ACP terminal audit")
+            record.optionalNonNegativeLong("producedOutputBytes", "ACP terminal audit")
+            record.optionalBoolean("outputTruncated", "ACP terminal audit")
+        }
+        verifyReceiptAuditCollection(audits, "permission", RECEIPT_PERMISSION_AUDIT_FIELDS) { record ->
+            verifyTextCommitment(
+                record.requiredObject("sessionId", "ACP permission audit"),
+                "ACP audit session ID",
+                requireNonEmpty = true,
+            )
+            verifyTextCommitment(
+                record.requiredObject("toolCallIdSha256", "ACP permission audit"),
+                "ACP permission tool-call digest",
+            )
+            record.requiredNonNegativeLong("offeredOptionCount", "ACP permission audit")
+            record.getValue("selectedOptionIdSha256").let { value ->
+                if (value !is JsonNull) verifyTextCommitment(
+                    value.requiredObject("ACP permission selected option"),
+                    "ACP permission selected-option digest",
+                )
+            }
+            record.optionalString("selectedKind", "ACP permission audit")?.let { selectedKind ->
+                require(selectedKind in PERMISSION_OPTION_KINDS) { "ACP permission option kind is invalid" }
+            }
+            require(record.requiredString("outcome", "ACP permission audit") in PERMISSION_AUDIT_OUTCOMES) {
+                "ACP permission audit outcome is invalid"
+            }
+            require(record.requiredString("reason", "ACP permission audit") in PERMISSION_AUDIT_REASONS) {
+                "ACP permission audit reason is invalid"
+            }
+            require(!record.requiredBoolean("authorityExpanded", "ACP permission audit")) {
+                "ACP permission audit expands workflow authority"
+            }
+        }
+    }
+
+    private inline fun verifyReceiptAuditCollection(
+        audits: JsonObject,
+        field: String,
+        recordFields: Set<String>,
+        verifyRecord: (JsonObject) -> Unit,
+    ) {
+        val collection = audits.requiredObject(field, "ACP receipt policy audits")
+        collection.requireExactKeys(RECEIPT_AUDIT_COLLECTION_FIELDS, "ACP receipt $field audits")
+        require(collection.requiredNonNegativeLong("maximumRetainedRecords", "ACP receipt $field audits") ==
+            MAXIMUM_RECONSTRUCTION_ACP_AUDIT_RECORDS.toLong()
+        ) { "ACP receipt $field audit bound is unsupported" }
+        val count = collection.requiredNonNegativeLong("recordCount", "ACP receipt $field audits")
+        // This digest commits the unredacted, length-delimited record values. The archive exposes
+        // only injective text commitments, so release verification checks every retained record
+        // directly while treating this whole-list digest as a commitment, not a recomputable hash.
+        collection.requiredSha256("aggregateSha256", "ACP receipt $field audits")
+        val records = collection.requiredArray("records", "ACP receipt $field audits")
+        require(count == records.size.toLong() && count <= MAXIMUM_RECONSTRUCTION_ACP_AUDIT_RECORDS.toLong()) {
+            "ACP receipt $field audit counts disagree"
+        }
+        records.forEachIndexed { index, element ->
+            val record = element.requiredObject("ACP receipt $field audit")
+            record.requireExactKeys(recordFields, "ACP receipt $field audit")
+            require(record.requiredLong("sequence", "ACP receipt $field audit") == index.toLong()) {
+                "ACP receipt $field audits are missing or reorder a sequence"
+            }
+            verifyRecord(record)
+        }
+    }
+
+    private fun verifyReceiptProcess(root: JsonObject) {
+        val process = root.requiredObject("process", "ACP receipt")
+        process.requireExactKeys(RECEIPT_PROCESS_FIELDS, "ACP receipt process")
+        process.optionalLong("exitCode", "ACP receipt process")
+        verifyTextCommitment(process.requiredObject("stderr", "ACP receipt process"), "ACP process stderr")
+        process.requiredBoolean("stderrTruncated", "ACP receipt process")
+        val produced = process.requiredNonNegativeLong("producedOutputBytes", "ACP receipt process")
+        val maximum = process.requiredNonNegativeLong("producedOutputLimitBytes", "ACP receipt process")
+        require(produced <= maximum && !process.requiredBoolean("outputLimitExceeded", "ACP receipt process")) {
+            "completed ACP receipt process exceeded its output bound"
+        }
+        require(!process.requiredBoolean("forcedTermination", "ACP receipt process") &&
+            !process.requiredBoolean("rootTerminationRequested", "ACP receipt process") &&
+            process.requiredNonNegativeLong("remainingProcessCount", "ACP receipt process") == 0L &&
+            process.requiredBoolean("sandboxCleanupVerified", "ACP receipt process")
+        ) { "completed ACP receipt process lacks cleanup evidence" }
+        verifyTextCommitment(
+            process.requiredObject("containment", "ACP receipt process"),
+            "ACP process containment",
+        )
+        require(process.requiredBoolean("networkIsolated", "ACP receipt process")) {
+            "completed ACP receipt process lacks network isolation evidence"
+        }
+    }
+
+    private fun verifyReceiptSandbox(root: JsonObject) {
+        val sandbox = root.requiredObject("sandbox", "ACP receipt")
+        sandbox.requireExactKeys(RECEIPT_SANDBOX_FIELDS, "ACP receipt sandbox")
+        sandbox.requiredSha256("evidenceSha256", "ACP receipt sandbox")
+        require(!sandbox.requiredBoolean("detailsRetained", "ACP receipt sandbox")) {
+            "ACP receipt sandbox unexpectedly retains expanded detail lists"
+        }
+        verifyTextCommitment(sandbox.requiredObject("provider", "ACP receipt sandbox"), "ACP sandbox provider")
+        verifyTextCommitment(
+            sandbox.requiredObject("providerVersion", "ACP receipt sandbox"),
+            "ACP sandbox provider version",
+        )
+        listOf(
+            "providerExecutableSha256", "resourceLimiterSha256", "scopeSupervisorSha256",
+            "scopeInspectorSha256", "environmentFdOpenerSha256",
+        ).forEach { sandbox.requiredSha256(it, "ACP receipt sandbox") }
+        sandbox.requiredNonNegativeLong("providerExecutableMode", "ACP receipt sandbox")
+        sandbox.optionalSha256("policySha256", "ACP receipt sandbox")
+        listOf(
+            "networkIsolated", "outerAgentContained", "nestedUserNamespacesDisabled", "newSession",
+            "dieWithParent", "cgroupV2PidsLimited", "cgroupV2MemoryLimited", "cgroupV2CpuLimited",
+        ).forEach { field ->
+            require(sandbox.requiredBoolean(field, "ACP receipt sandbox")) {
+                "ACP receipt sandbox does not prove $field"
+            }
+        }
+        verifyResourceLimits(sandbox.requiredObject("outerAgentLimits", "ACP receipt sandbox"))
+        val closure = sandbox.requiredObject("runtimeClosureLimits", "ACP receipt sandbox")
+        closure.requireExactKeys(RUNTIME_CLOSURE_FIELDS, "ACP receipt runtime closure limits")
+        RUNTIME_CLOSURE_FIELDS.forEach { closure.requiredNonNegativeLong(it, "ACP receipt runtime closure limits") }
+        val securityExecutables = sandbox.requiredNonNegativeLong("securityExecutableCount", "ACP receipt sandbox")
+        val authorities = sandbox.requiredNonNegativeLong("authorityCount", "ACP receipt sandbox")
+        val launches = sandbox.requiredNonNegativeLong("launchCount", "ACP receipt sandbox")
+        val runtimeMounts = sandbox.requiredNonNegativeLong("runtimeMountCount", "ACP receipt sandbox")
+        val terminalAudits = sandbox.requiredNonNegativeLong("terminalAuditCount", "ACP receipt sandbox")
+        val maximumLaunches = sandbox.requiredNonNegativeLong("maximumRecordedLaunches", "ACP receipt sandbox")
+        val maximumMounts = sandbox.requiredNonNegativeLong("maximumRecordedRuntimeMounts", "ACP receipt sandbox")
+        require(securityExecutables <= 32L && authorities <= 64L && launches <= maximumLaunches &&
+            runtimeMounts <= maximumMounts && terminalAudits <= MAXIMUM_RECONSTRUCTION_ACP_AUDIT_RECORDS.toLong()
+        ) { "ACP receipt sandbox list counts exceed their authenticated bounds" }
+        require(sandbox.requiredNonNegativeLong("maximumCanonicalMetadataBytes", "ACP receipt sandbox") ==
+            MAXIMUM_RECONSTRUCTION_ACP_EVIDENCE_BYTES.toLong()
+        ) { "ACP receipt sandbox metadata bound is unsupported" }
+        sandbox.getValue("outerProcessOutput").let { outputElement ->
+            if (outputElement !is JsonNull) {
+                val output = outputElement.requiredObject("ACP receipt outer process output")
+                output.requireExactKeys(PRODUCED_OUTPUT_FIELDS, "ACP receipt outer process output")
+                val maximum = output.requiredNonNegativeLong("maximumBytes", "ACP receipt outer process output")
+                val observed = output.requiredNonNegativeLong("observedBytes", "ACP receipt outer process output")
+                require(observed <= maximum && !output.requiredBoolean("limitExceeded", "ACP receipt outer process output")) {
+                    "ACP receipt outer process output exceeds its bound"
+                }
+            }
+        }
+    }
+
+    private fun verifyTextCommitment(
+        value: JsonObject,
+        label: String,
+        expected: String? = null,
+        requireNonEmpty: Boolean = false,
+        maximumBytes: Long? = null,
+    ): TextCommitment {
+        value.requireExactKeys(TEXT_COMMITMENT_FIELDS, label)
+        val commitment = TextCommitment(
+            value.requiredSha256("sha256", label),
+            value.requiredNonNegativeLong("encodedBytes", label),
+            value.requiredString("encoding", label),
+        )
+        require(commitment.encoding == "utf-8") { "$label is not valid UTF-8 release evidence" }
+        require(!requireNonEmpty || commitment.encodedBytes > 0L) { "$label must not be empty" }
+        require(maximumBytes == null || commitment.encodedBytes <= maximumBytes) {
+            "$label exceeds its release evidence byte bound"
+        }
+        expected?.let {
+            require(commitment == expectedTextCommitment(it)) { "$label differs from its expected identity" }
+        }
+        return commitment
+    }
+
+    private fun verifyTextCommitmentList(value: JsonObject, expected: List<String>, label: String) {
+        value.requireExactKeys(TEXT_COMMITMENT_LIST_FIELDS, label)
+        val observed = value.requiredNonNegativeLong("observedCount", label)
+        val retained = value.requiredNonNegativeLong("retainedCount", label)
+        require(value.requiredBoolean("complete", label)) { "$label is truncated" }
+        value.requiredSha256("aggregateSha256", label)
+        val records = value.requiredArray("records", label)
+        require(observed == retained && retained == records.size.toLong() && records.size == expected.size) {
+            "$label counts disagree"
+        }
+        records.forEachIndexed { index, element ->
+            verifyTextCommitment(element.requiredObject("$label record"), "$label record", expected[index])
+        }
+    }
+
+    private fun expectedTextCommitment(value: String): TextCommitment {
+        val bytes = value.toByteArray(StandardCharsets.UTF_8)
+        return TextCommitment(sha256(bytes), bytes.size.toLong(), "utf-8")
+    }
+
+    private fun requireNonNegativeDecimal(value: String) {
+        require(value.matches(Regex("0|[1-9][0-9]{0,127}")) && BigInteger(value).signum() >= 0) {
+            "ACP receipt duration is not a bounded non-negative decimal"
+        }
     }
 
     private fun verifyFactoryAndProtocol(root: JsonObject): FactoryIdentity {
@@ -278,419 +921,9 @@ internal object ReconstructionAcpEvidenceArchiveVerifier {
         return FactoryIdentity(implementationId, descriptor)
     }
 
-    private fun verifyAgentAndSession(root: JsonObject, implementationId: String) {
-        val agent = root.requiredObject("agent", "ACP evidence")
-        agent.requireExactKeys(AGENT_FIELDS, "ACP agent")
-        require(agent.requiredString("configuredImplementationId", "ACP agent") == implementationId) {
-            "configured ACP agent identity differs from factory provenance"
-        }
-        val negotiated = agent.requiredObject("negotiatedImplementation", "ACP agent")
-        negotiated.requireExactKeys(NEGOTIATED_IMPLEMENTATION_FIELDS, "negotiated ACP implementation")
-        negotiated.requiredSha256("nameSha256", "negotiated ACP implementation")
-        negotiated.requiredNonNegativeLong("nameUtf8Bytes", "negotiated ACP implementation")
-        negotiated.requiredSha256("versionSha256", "negotiated ACP implementation")
-        negotiated.requiredNonNegativeLong("versionUtf8Bytes", "negotiated ACP implementation")
-        val titleSha256 = negotiated.optionalSha256("titleSha256", "negotiated ACP implementation")
-        val titleBytes = negotiated.optionalNonNegativeLong("titleUtf8Bytes", "negotiated ACP implementation")
-        require((titleSha256 == null) == (titleBytes == null)) {
-            "negotiated ACP title digest and length must be present together"
-        }
-        val capabilities = agent.requiredObject("negotiatedCapabilities", "ACP agent")
-        capabilities.requireExactKeys(CAPABILITY_FIELDS, "negotiated ACP capabilities")
-        CAPABILITY_FIELDS.forEach { capabilities.requiredBoolean(it, "negotiated ACP capabilities") }
-
-        val session = root.requiredObject("session", "ACP evidence")
-        session.requireExactKeys(SESSION_FIELDS, "ACP session")
-        require(session.requiredString("harnessId", "ACP session") == implementationId) {
-            "ACP session does not bind the configured factory implementation"
-        }
-        session.requiredSha256("sessionIdSha256", "ACP session")
-        session.optionalSha256("resumeReferenceSha256", "ACP session")
-    }
-
-    private fun verifyTurnAndBounds(root: JsonObject, checkpoint: ReconstructionCheckpoint): EvidenceBounds {
-        val turn = root.requiredObject("turn", "ACP evidence")
-        turn.requireExactKeys(TURN_FIELDS, "ACP turn")
-        require(turn.requiredLong("ordinal", "ACP turn") == 1L) {
-            "reconstruction ACP evidence must describe exactly one turn"
-        }
-        turn.requiredSha256("requestSha256", "ACP turn")
-        turn.requiredSha256("objectiveSha256", "ACP turn")
-        turn.requiredNonNegativeLong("objectiveUtf8Bytes", "ACP turn")
-        require(turn.requiredSha256("promptSha256", "ACP turn") == checkpoint.promptSha256) {
-            "ACP turn prompt digest differs from the reconstruction checkpoint"
-        }
-        turn.requiredSha256("wirePromptSha256", "ACP turn")
-        turn.requiredSha256("workspaceRootsSha256", "ACP turn")
-        turn.requiredSha256("contextInputsSha256", "ACP turn")
-        turn.requiredSha256("accessPolicySha256", "ACP turn")
-
-        val bounds = root.requiredObject("bounds", "ACP evidence")
-        bounds.requireExactKeys(BOUND_FIELDS, "ACP bounds")
-        require(bounds.requiredLong("maximumArchivedBytes", "ACP bounds") ==
-            MAXIMUM_RECONSTRUCTION_ACP_EVIDENCE_BYTES.toLong()
-        ) { "ACP evidence records an unsupported artifact byte bound" }
-        val maximumEvents = bounds.requiredNonNegativeLong("maximumArchivedEvents", "ACP bounds")
-        require(maximumEvents == MAXIMUM_RECONSTRUCTION_ACP_EVENTS.toLong()) {
-            "ACP evidence records an unsupported event-count bound"
-        }
-        val archivedEvents = bounds.requiredNonNegativeLong("archivedEventCount", "ACP bounds")
-        require(archivedEvents <= maximumEvents) { "ACP evidence event count exceeds its bound" }
-        val maximumTurns = bounds.requiredNonNegativeLong("maximumTurns", "ACP bounds")
-        require(maximumTurns >= 1L) { "ACP evidence turn bound excludes its recorded turn" }
-        val maximumToolCalls = bounds.requiredNonNegativeLong("maximumToolCalls", "ACP bounds")
-        val maximumOutputBytes = bounds.requiredNonNegativeLong("maximumOutputBytes", "ACP bounds")
-        bounds.requiredNonNegativeLong("wallClockTimeoutMillis", "ACP bounds")
-        bounds.requiredNonNegativeLong("idleTimeoutMillis", "ACP bounds")
-        val maximumInputTokens = bounds.optionalNonNegativeLong("maximumInputTokens", "ACP bounds")
-        val maximumOutputTokens = bounds.optionalNonNegativeLong("maximumOutputTokens", "ACP bounds")
-        require(bounds.requiredStringArray("workspaceRootIds", "ACP bounds", requireUnique = true) == listOf("project")) {
-            "reconstruction ACP evidence has unexpected workspace authority"
-        }
-        require(bounds.requiredStringArray("contextInputIds", "ACP bounds", requireUnique = true) ==
-            listOf("recovered-module-evidence", "observed-behavior")
-        ) { "reconstruction ACP evidence has unexpected context inputs" }
-        require(bounds.requiredBoolean("filesystemCapabilityEnabled", "ACP bounds") &&
-            !bounds.requiredBoolean("terminalCapabilityEnabled", "ACP bounds")
-        ) { "reconstruction ACP evidence has unexpected tool capabilities" }
-        return EvidenceBounds(
-            archivedEvents,
-            maximumToolCalls,
-            maximumOutputBytes,
-            maximumInputTokens,
-            maximumOutputTokens,
-        )
-    }
-
-    private fun verifyEvents(events: JsonArray, expectedCount: Long): List<EvidenceChange> {
-        require(events.size.toLong() == expectedCount) { "ACP event count differs from its recorded bound" }
-        val changes = mutableListOf<EvidenceChange>()
-        events.forEachIndexed { index, element ->
-            val event = element.requiredObject("ACP event")
-            require(event.requiredLong("sequence", "ACP event") == index.toLong()) {
-                "ACP events are missing or reorder a sequence"
-            }
-            when (event.requiredString("type", "ACP event")) {
-                "message" -> {
-                    event.requireExactKeys(MESSAGE_EVENT_FIELDS, "ACP message event")
-                    event.requiredString("role", "ACP message event")
-                    event.requiredSha256("messageIdSha256", "ACP message event")
-                    event.requiredSha256("textSha256", "ACP message event")
-                    event.requiredNonNegativeLong("textUtf8Bytes", "ACP message event")
-                    event.requiredBoolean("completed", "ACP message event")
-                }
-                "plan" -> {
-                    event.requireExactKeys(PLAN_EVENT_FIELDS, "ACP plan event")
-                    event.requiredArray("entries", "ACP plan event").forEach { planElement ->
-                        val entry = planElement.requiredObject("ACP plan entry")
-                        entry.requireExactKeys(PLAN_ENTRY_FIELDS, "ACP plan entry")
-                        entry.requiredSha256("idSha256", "ACP plan entry")
-                        entry.requiredSha256("descriptionSha256", "ACP plan entry")
-                        entry.requiredNonNegativeLong("descriptionUtf8Bytes", "ACP plan entry")
-                        entry.requiredString("status", "ACP plan entry")
-                    }
-                }
-                "tool" -> {
-                    event.requireExactKeys(TOOL_EVENT_FIELDS, "ACP tool event")
-                    event.requiredSha256("toolCallIdSha256", "ACP tool event")
-                    event.requiredSha256("titleSha256", "ACP tool event")
-                    event.requiredString("status", "ACP tool event")
-                    event.requiredSha256("detailsSha256", "ACP tool event")
-                    event.requiredNonNegativeLong("detailCount", "ACP tool event")
-                }
-                "permission" -> {
-                    event.requireExactKeys(PERMISSION_EVENT_FIELDS, "ACP permission event")
-                    event.requiredSha256("requestIdSha256", "ACP permission event")
-                    event.requiredString("decision", "ACP permission event")
-                    event.optionalSha256("selectedOptionIdSha256", "ACP permission event")
-                    event.optionalSha256("reasonSha256", "ACP permission event")
-                }
-                "file-change" -> {
-                    event.requireExactKeys(FILE_CHANGE_EVENT_FIELDS, "ACP file-change event")
-                    changes += verifyChange(event.requiredObject("change", "ACP file-change event"))
-                }
-                else -> throw IllegalArgumentException("unknown ACP event type")
-            }
-        }
-        return changes
-    }
-
-    private fun verifyResult(
-        root: JsonObject,
-        bounds: EvidenceBounds,
-        source: GeneratedFileEvidence,
-        sourceBytes: Long,
-    ): List<EvidenceChange> {
-        val result = root.requiredObject("result", "ACP evidence")
-        result.requireExactKeys(RESULT_FIELDS, "ACP result")
-        require(result.requiredString("stopReason", "ACP result") == "completed") {
-            "reconstruction ACP result is not completed"
-        }
-        val summarySha256 = result.optionalSha256("summarySha256", "ACP result")
-        val summaryBytes = result.optionalNonNegativeLong("summaryUtf8Bytes", "ACP result")
-        require((summarySha256 == null) == (summaryBytes == null)) {
-            "ACP result summary digest and length must be present together"
-        }
-        val changes = result.requiredArray("changes", "ACP result").map(::verifyChange)
-        require(changes.size == 1 && changes.single().rootId == "project" &&
-            changes.single().relativePath == source.path &&
-            changes.single().kind in setOf("created", "modified") &&
-            changes.single().afterSha256 == source.sha256 &&
-            (changes.single().sizeBytes == null || changes.single().sizeBytes == sourceBytes)
-        ) { "ACP result change does not identify the archived module source" }
-
-        val usageElement = result.getValue("usage")
-        if (usageElement !is JsonNull) {
-            val usage = usageElement.requiredObject("ACP usage")
-            usage.requireExactKeys(USAGE_FIELDS, "ACP usage")
-            val input = usage.optionalNonNegativeLong("inputTokens", "ACP usage")
-            val output = usage.optionalNonNegativeLong("outputTokens", "ACP usage")
-            usage.optionalNonNegativeLong("cachedInputTokens", "ACP usage")
-            val toolCalls = usage.optionalNonNegativeLong("toolCalls", "ACP usage")
-            usage.optionalNonNegativeLong("wallClockMillis", "ACP usage")
-            require(bounds.maximumInputTokens == null || input != null) {
-                "ACP evidence omits input-token usage required by its bound"
-            }
-            require(bounds.maximumOutputTokens == null || output != null) {
-                "ACP evidence omits output-token usage required by its bound"
-            }
-            require(input == null || bounds.maximumInputTokens == null || input <= bounds.maximumInputTokens) {
-                "ACP input-token usage exceeds its bound"
-            }
-            require(output == null || bounds.maximumOutputTokens == null || output <= bounds.maximumOutputTokens) {
-                "ACP output-token usage exceeds its bound"
-            }
-            require(toolCalls == null || toolCalls <= bounds.maximumToolCalls) {
-                "ACP tool-call usage exceeds its bound"
-            }
-        } else {
-            require(bounds.maximumInputTokens == null && bounds.maximumOutputTokens == null) {
-                "ACP evidence omits token usage required by its bounds"
-            }
-        }
-        return changes
-    }
-
-    private fun verifyChange(element: JsonElement): EvidenceChange {
-        val change = element.requiredObject("ACP file change")
-        change.requireExactKeys(FILE_CHANGE_FIELDS, "ACP file change")
-        val rootId = change.requiredString("rootId", "ACP file change")
-        val relativePath = requireNormalizedProjectPath(
-            change.requiredString("relativePath", "ACP file change"),
-            "ACP file-change path",
-        )
-        val kind = change.requiredString("kind", "ACP file change")
-        require(kind in setOf("created", "modified", "deleted")) { "ACP file-change kind is invalid" }
-        val before = change.optionalSha256("beforeSha256", "ACP file change")
-        val after = change.optionalSha256("afterSha256", "ACP file change")
-        val size = change.optionalNonNegativeLong("sizeBytes", "ACP file change")
-        return EvidenceChange(rootId, relativePath, kind, before, after, size)
-    }
-
-    private fun verifyPolicyAudits(root: JsonObject) {
-        val audits = root.requiredObject("policyAudits", "ACP evidence")
-        audits.requireExactKeys(POLICY_AUDIT_FIELDS, "ACP policy audits")
-        audits.requiredArray("filesystem", "ACP policy audits").forEach { element ->
-            val record = element.requiredObject("ACP filesystem audit")
-            record.requireExactKeys(FILESYSTEM_AUDIT_FIELDS, "ACP filesystem audit")
-            record.requiredNonNegativeLong("sequence", "ACP filesystem audit")
-            record.requiredSha256("sessionIdSha256", "ACP filesystem audit")
-            record.requiredString("method", "ACP filesystem audit")
-            record.requiredSha256("requestedPathSha256", "ACP filesystem audit")
-            record.getValue("policyPath").let { pathElement ->
-                if (pathElement !is JsonNull) {
-                    val path = pathElement.requiredObject("ACP policy path")
-                    path.requireExactKeys(POLICY_PATH_FIELDS, "ACP policy path")
-                    path.requiredString("rootId", "ACP policy path")
-                    requireNormalizedProjectPath(path.requiredString("relativePath", "ACP policy path"), "ACP policy path")
-                }
-            }
-            record.requiredString("outcome", "ACP filesystem audit")
-            record.requiredString("reason", "ACP filesystem audit")
-        }
-        audits.requiredArray("terminal", "ACP policy audits").forEach { element ->
-            val record = element.requiredObject("ACP terminal audit")
-            record.requireExactKeys(TERMINAL_AUDIT_FIELDS, "ACP terminal audit")
-            record.requiredNonNegativeLong("sequence", "ACP terminal audit")
-            record.requiredSha256("sessionIdSha256", "ACP terminal audit")
-            record.requiredString("method", "ACP terminal audit")
-            record.requiredSha256("requestSha256", "ACP terminal audit")
-            record.optionalSha256("terminalIdSha256", "ACP terminal audit")
-            record.optionalSha256("toolCallIdSha256", "ACP terminal audit")
-            record.requiredString("outcome", "ACP terminal audit")
-            record.requiredString("reason", "ACP terminal audit")
-            record.requiredBoolean("networkIsolated", "ACP terminal audit")
-            record.optionalNonNegativeLong("retainedOutputBytes", "ACP terminal audit")
-            record.optionalNonNegativeLong("producedOutputBytes", "ACP terminal audit")
-            record.optionalBoolean("outputTruncated", "ACP terminal audit")
-        }
-        audits.requiredArray("permission", "ACP policy audits").forEach { element ->
-            val record = element.requiredObject("ACP permission audit")
-            record.requireExactKeys(PERMISSION_AUDIT_FIELDS, "ACP permission audit")
-            record.requiredNonNegativeLong("sequence", "ACP permission audit")
-            record.requiredSha256("sessionIdSha256", "ACP permission audit")
-            record.requiredSha256("toolCallIdSha256", "ACP permission audit")
-            record.requiredNonNegativeLong("offeredOptionCount", "ACP permission audit")
-            record.optionalSha256("selectedOptionIdSha256", "ACP permission audit")
-            record.optionalString("selectedKind", "ACP permission audit")
-            record.requiredString("outcome", "ACP permission audit")
-            record.requiredString("reason", "ACP permission audit")
-            record.requiredBoolean("authorityExpanded", "ACP permission audit")
-        }
-    }
-
-    private fun verifyProcess(root: JsonObject) {
-        val process = root.requiredObject("process", "ACP evidence")
-        process.requireExactKeys(PROCESS_FIELDS, "ACP process")
-        process.optionalLong("exitCode", "ACP process")
-        process.requiredSha256("stderrSha256", "ACP process")
-        process.requiredNonNegativeLong("stderrUtf8Bytes", "ACP process")
-        process.requiredBoolean("stderrTruncated", "ACP process")
-        val produced = process.requiredNonNegativeLong("producedOutputBytes", "ACP process")
-        val maximum = process.requiredNonNegativeLong("producedOutputLimitBytes", "ACP process")
-        require(produced <= maximum && !process.requiredBoolean("outputLimitExceeded", "ACP process")) {
-            "completed ACP process exceeded its output bound"
-        }
-        require(!process.requiredBoolean("forcedTermination", "ACP process") &&
-            !process.requiredBoolean("rootTerminationRequested", "ACP process") &&
-            process.requiredNonNegativeLong("remainingProcessCount", "ACP process") == 0L &&
-            process.requiredBoolean("sandboxCleanupVerified", "ACP process")
-        ) { "completed ACP process lacks cleanup evidence" }
-        process.requiredString("containment", "ACP process")
-        process.requiredBoolean("networkIsolated", "ACP process")
-    }
-
-    private fun verifySandbox(root: JsonObject) {
-        val sandbox = root.requiredObject("sandbox", "ACP evidence")
-        sandbox.requireExactKeys(SANDBOX_FIELDS, "ACP sandbox")
-        listOf(
-            "evidenceSha256", "providerExecutableSha256", "resourceLimiterSha256",
-            "scopeSupervisorSha256", "scopeInspectorSha256", "environmentFdOpenerSha256",
-        ).forEach { sandbox.requiredSha256(it, "ACP sandbox") }
-        sandbox.requiredString("provider", "ACP sandbox")
-        sandbox.requiredString("providerVersion", "ACP sandbox")
-        sandbox.requiredNonNegativeLong("providerExecutableMode", "ACP sandbox")
-        sandbox.optionalSha256("policySha256", "ACP sandbox")
-        listOf(
-            "networkIsolated", "outerAgentContained", "nestedUserNamespacesDisabled", "newSession",
-            "dieWithParent", "cgroupV2PidsLimited", "cgroupV2MemoryLimited", "cgroupV2CpuLimited",
-        ).forEach { field ->
-            require(sandbox.requiredBoolean(field, "ACP sandbox")) {
-                "ACP sandbox evidence does not prove $field"
-            }
-        }
-        verifyResourceLimits(sandbox.requiredObject("outerAgentLimits", "ACP sandbox"))
-        val closure = sandbox.requiredObject("runtimeClosureLimits", "ACP sandbox")
-        closure.requireExactKeys(RUNTIME_CLOSURE_FIELDS, "ACP runtime closure limits")
-        RUNTIME_CLOSURE_FIELDS.forEach { closure.requiredNonNegativeLong(it, "ACP runtime closure limits") }
-        sandbox.requiredArray("securityExecutables", "ACP sandbox").forEach { element ->
-            val executable = element.requiredObject("ACP security executable")
-            executable.requireExactKeys(SECURITY_EXECUTABLE_FIELDS, "ACP security executable")
-            executable.requiredString("role", "ACP security executable")
-            executable.requiredSha256("canonicalPathSha256", "ACP security executable")
-            executable.requiredSha256("contentSha256", "ACP security executable")
-            executable.requiredNonNegativeLong("mode", "ACP security executable")
-            executable.requiredSha256("metadataSha256", "ACP security executable")
-        }
-        sandbox.requiredArray("authorities", "ACP sandbox").forEach { element ->
-            val authority = element.requiredObject("ACP sandbox authority")
-            authority.requireExactKeys(AUTHORITY_FIELDS, "ACP sandbox authority")
-            authority.requiredString("rootId", "ACP sandbox authority")
-            authority.requiredSha256("rootPathSha256", "ACP sandbox authority")
-            authority.requiredString("mode", "ACP sandbox authority")
-            authority.getValue("quota").let { quotaElement ->
-                if (quotaElement !is JsonNull) {
-                    val quota = quotaElement.requiredObject("ACP sandbox quota")
-                    quota.requireExactKeys(QUOTA_FIELDS, "ACP sandbox quota")
-                    quota.requiredString("provider", "ACP sandbox quota")
-                    quota.requiredNonNegativeLong("mountId", "ACP sandbox quota")
-                    quota.requiredNonNegativeLong("maximumBytes", "ACP sandbox quota")
-                    quota.requiredNonNegativeLong("maximumEntries", "ACP sandbox quota")
-                    quota.requiredSha256("mountPathSha256", "ACP sandbox quota")
-                }
-            }
-        }
-        sandbox.requiredArray("launches", "ACP sandbox").forEach(::verifySandboxLaunch)
-        sandbox.getValue("outerProcessOutput").let { outputElement ->
-            if (outputElement !is JsonNull) {
-                val output = outputElement.requiredObject("ACP outer process output")
-                output.requireExactKeys(PRODUCED_OUTPUT_FIELDS, "ACP outer process output")
-                val maximum = output.requiredNonNegativeLong("maximumBytes", "ACP outer process output")
-                val observed = output.requiredNonNegativeLong("observedBytes", "ACP outer process output")
-                val exceeded = output.requiredBoolean("limitExceeded", "ACP outer process output")
-                require(observed <= maximum && !exceeded) { "ACP outer process output exceeds its bound" }
-            }
-        }
-    }
-
-    private fun verifySandboxLaunch(element: JsonElement) {
-        val launch = element.requiredObject("ACP sandbox launch")
-        launch.requireExactKeys(SANDBOX_LAUNCH_FIELDS, "ACP sandbox launch")
-        launch.requiredString("purpose", "ACP sandbox launch")
-        verifyResourceLimits(launch.requiredObject("resourceLimits", "ACP sandbox launch"))
-        val controllers = launch.requiredObject("controllers", "ACP sandbox launch")
-        controllers.requireExactKeys(CONTROLLER_FIELDS, "ACP cgroup controllers")
-        (CONTROLLER_FIELDS - "memoryOomGroup").forEach {
-            controllers.requiredNonNegativeLong(it, "ACP cgroup controllers")
-        }
-        controllers.requiredBoolean("memoryOomGroup", "ACP cgroup controllers")
-        launch.requiredSha256("commandSha256", "ACP sandbox launch")
-        val gate = launch.requiredObject("startGate", "ACP sandbox launch")
-        gate.requireExactKeys(START_GATE_FIELDS, "ACP sandbox start gate")
-        gate.requiredNonNegativeLong("descriptor", "ACP sandbox start gate")
-        gate.requiredSha256("waiterExecutableSha256", "ACP sandbox start gate")
-        gate.requiredSha256("helperProtocolSha256", "ACP sandbox start gate")
-        require(gate.requiredBoolean("positiveByteRequired", "ACP sandbox start gate")) {
-            "ACP sandbox launch start gate is not fail-closed"
-        }
-        val environment = launch.requiredObject("environment", "ACP sandbox launch")
-        environment.requireExactKeys(ENVIRONMENT_FIELDS, "ACP sandbox environment")
-        environment.requiredSha256("sandboxPathSha256", "ACP sandbox environment")
-        environment.requiredSha256("bindingNamesSha256", "ACP sandbox environment")
-        (ENVIRONMENT_FIELDS - setOf("sandboxPathSha256", "bindingNamesSha256")).forEach {
-            environment.requiredNonNegativeLong(it, "ACP sandbox environment")
-        }
-        val rlimits = launch.requiredObject("effectiveRlimits", "ACP sandbox launch")
-        rlimits.requireExactKeys(EFFECTIVE_RLIMIT_FIELDS, "ACP effective rlimits")
-        EFFECTIVE_RLIMIT_FIELDS.forEach { rlimits.requiredNonNegativeLong(it, "ACP effective rlimits") }
-        verifyMount(launch.requiredObject("executableMount", "ACP sandbox launch"))
-        launch.requiredArray("runtimeMounts", "ACP sandbox launch").forEach { mount ->
-            verifyMount(mount.requiredObject("ACP sandbox mount"))
-        }
-    }
-
     private fun verifyResourceLimits(limits: JsonObject) {
         limits.requireExactKeys(RESOURCE_LIMIT_FIELDS, "ACP sandbox resource limits")
         RESOURCE_LIMIT_FIELDS.forEach { limits.requiredNonNegativeLong(it, "ACP sandbox resource limits") }
-    }
-
-    private fun verifyMount(mount: JsonObject) {
-        mount.requireExactKeys(MOUNT_FIELDS, "ACP sandbox mount")
-        mount.requiredSha256("sourcePathSha256", "ACP sandbox mount")
-        mount.requiredSha256("destinationPathSha256", "ACP sandbox mount")
-        mount.requiredSha256("manifestSha256", "ACP sandbox mount")
-        mount.requiredNonNegativeLong("device", "ACP sandbox mount")
-        mount.requiredNonNegativeLong("inode", "ACP sandbox mount")
-        mount.requiredNonNegativeLong("mode", "ACP sandbox mount")
-        mount.requiredBoolean("directory", "ACP sandbox mount")
-    }
-
-    private fun verifyValidation(root: JsonObject, source: GeneratedFileEvidence) {
-        val validation = root.requiredObject("validation", "ACP evidence")
-        validation.requireExactKeys(VALIDATION_FIELDS, "ACP validation")
-        require(validation.requiredBoolean("accepted", "ACP validation") &&
-            validation.requiredSha256("sourceSha256", "ACP validation") == source.sha256
-        ) { "ACP validation does not accept the archived module source" }
-        val issues = validation.requiredArray("issues", "ACP validation")
-        issues.forEach { element ->
-            val issue = element.requiredObject("ACP validation issue")
-            issue.requireExactKeys(VALIDATION_ISSUE_FIELDS, "ACP validation issue")
-            issue.requiredString("code", "ACP validation issue")
-            issue.requiredSha256("messageSha256", "ACP validation issue")
-            issue.requiredNonNegativeLong("messageUtf8Bytes", "ACP validation issue")
-            issue.requiredStringArray("entityIds", "ACP validation issue", requireUnique = true)
-        }
-        require(issues.isEmpty()) { "accepted ACP validation unexpectedly records rejection issues" }
     }
 
     private fun readBoundedRegularFile(projectDir: Path, relativePath: String, maximumBytes: Int): ByteArray {
@@ -773,19 +1006,35 @@ internal object ReconstructionAcpEvidenceArchiveVerifier {
 
     private fun String.isAgentGenerated(): Boolean = startsWith("agent:") || startsWith("unresolved:agent:")
 
+    private fun Enum<*>.wireName(): String = name.lowercase().replace('_', '-')
+
     private fun sha256(bytes: ByteArray): String = MessageDigest.getInstance("SHA-256")
         .digest(bytes)
         .joinToString("") { "%02x".format(it) }
 
     private data class ReconstructionCheckpoint(
+        val schemaVersion: Long,
         val generator: String,
         val reconstructorIdentity: String,
         val promptSha256: String,
         val promptBudgetCharacters: Long?,
         val executionEvidencePath: String?,
         val executionEvidenceSha256: String?,
+        val executionEvidenceSchemaVersion: Long?,
+        val executionRequestSha256: String?,
+        val executionTerminalOutcome: String?,
+        val executionReleaseComplete: Boolean?,
         val accepted: Boolean,
     ) {
+        fun hasNoExecutionEvidence(): Boolean = listOf(
+            executionEvidencePath,
+            executionEvidenceSha256,
+            executionEvidenceSchemaVersion,
+            executionRequestSha256,
+            executionTerminalOutcome,
+            executionReleaseComplete,
+        ).all { it == null }
+
         fun expectedReconstructorIdentity(factory: FactoryIdentity): String {
             val budget = requireNotNull(promptBudgetCharacters) {
                 "agent reconstruction checkpoint is missing its prompt budget"
@@ -800,17 +1049,23 @@ internal object ReconstructionAcpEvidenceArchiveVerifier {
         val descriptor: String,
     )
 
-    private data class EvidenceBounds(
-        val archivedEventCount: Long,
+    private data class ReceiptBounds(
+        val requestSha256: String,
         val maximumToolCalls: Long,
         val maximumOutputBytes: Long,
         val maximumInputTokens: Long?,
         val maximumOutputTokens: Long?,
     )
 
-    private data class EvidenceChange(
-        val rootId: String,
-        val relativePath: String,
+    private data class TextCommitment(
+        val sha256: String,
+        val encodedBytes: Long,
+        val encoding: String,
+    )
+
+    private data class ReceiptChange(
+        val rootId: TextCommitment,
+        val relativePath: TextCommitment,
         val kind: String,
         val beforeSha256: String?,
         val afterSha256: String?,
@@ -837,20 +1092,57 @@ internal object ReconstructionAcpEvidenceArchiveVerifier {
     private const val MAXIMUM_RECONSTRUCTION_CHECKPOINT_BYTES = 4 * 1024 * 1024
     private const val MAXIMUM_RECONSTRUCTION_ACP_EVIDENCE_BYTES = 64 * 1024 * 1024
     private const val MAXIMUM_RECONSTRUCTION_ACP_EVENTS = 8_192
-    private const val ACP_EVIDENCE_GENERATOR = "acp-execution-evidence:v1"
-    private const val RECONSTRUCTION_ACP_EVIDENCE_KIND = "decomp-engine.reconstruction-acp-execution"
+    private const val MAXIMUM_RECONSTRUCTION_ACP_AUDIT_RECORDS = 4_096
+    private const val MAXIMUM_NEGOTIATED_IDENTITY_BYTES = 4_096L
+    private const val MAXIMUM_ARCHIVED_EVENT_PEER_BYTES = 16L * 1024L * 1024L
+    private const val ACP_RECEIPT_GENERATOR = "acp-execution-receipt:v2"
+    private const val RECONSTRUCTION_ACP_RECEIPT_KIND =
+        "decomp-engine.reconstruction-acp-execution-receipt"
     private val PROVENANCE_ID = Regex("[A-Za-z0-9_][A-Za-z0-9_.-]{0,127}")
+    private val MESSAGE_ROLES = AgentMessageRole.entries.mapTo(linkedSetOf()) { it.wireName() }
+    private val PLAN_STATUSES = AgentPlanStatus.entries.mapTo(linkedSetOf()) { it.wireName() }
+    private val TOOL_STATUSES = AgentToolStatus.entries.mapTo(linkedSetOf()) { it.wireName() }
+    private val PERMISSION_DECISIONS = AgentPermissionDecision.entries.mapTo(linkedSetOf()) { it.wireName() }
+    private val FILESYSTEM_AUDIT_OUTCOMES =
+        AcpFilesystemAuditOutcome.entries.mapTo(linkedSetOf()) { it.wireName() }
+    private val FILESYSTEM_AUDIT_REASONS =
+        AcpFilesystemAuditReason.entries.mapTo(linkedSetOf()) { it.wireName() }
+    private val TERMINAL_AUDIT_OUTCOMES =
+        AcpTerminalAuditOutcome.entries.mapTo(linkedSetOf()) { it.wireName() }
+    private val TERMINAL_AUDIT_REASONS =
+        AcpTerminalAuditReason.entries.mapTo(linkedSetOf()) { it.wireName() }
+    private val PERMISSION_AUDIT_OUTCOMES =
+        AcpPermissionAuditOutcome.entries.mapTo(linkedSetOf()) { it.wireName() }
+    private val PERMISSION_AUDIT_REASONS =
+        AcpPermissionAuditReason.entries.mapTo(linkedSetOf()) { it.wireName() }
+    private val PERMISSION_OPTION_KINDS = PermissionOptionKind.entries.mapTo(linkedSetOf()) { it.wireName() }
 
-    private val CHECKPOINT_FIELDS = setOf(
+    private val CHECKPOINT_V3_FIELDS = setOf(
         "schemaVersion", "fingerprint", "sourceSha256", "generator", "reconstructorIdentity",
         "promptSha256", "promptCharacters", "promptBudgetCharacters", "executionEvidencePath",
         "executionEvidenceSha256", "accepted", "retryable", "entityStatuses", "issues",
     )
+    private val CHECKPOINT_V4_FIELDS = CHECKPOINT_V3_FIELDS + setOf(
+        "executionEvidenceSchemaVersion", "executionRequestSha256", "executionTerminalOutcome",
+        "executionReleaseComplete",
+    )
     private val ENTITY_STATUS_FIELDS = setOf("id", "status")
     private val CHECKPOINT_ISSUE_FIELDS = setOf("code", "message", "entityIds")
-    private val EVIDENCE_FIELDS = setOf(
-        "schemaVersion", "kind", "moduleId", "factoryProvenance", "protocol", "agent", "session",
-        "turn", "bounds", "events", "result", "policyAudits", "process", "sandbox", "validation",
+    private val RECEIPT_FIELDS = setOf(
+        "schemaVersion", "kind", "moduleId", "request", "provider", "lifecycle",
+        "factoryProvenance", "protocol", "agent", "session", "events", "outcome",
+        "policyAudits", "process", "sandbox",
+    )
+    private val RECEIPT_REQUEST_FIELDS = setOf(
+        "contractVersion", "requestSha256", "accessPolicySha256", "objective", "promptSha256",
+        "wirePromptSha256", "workspaceRootIds", "contextInputIds", "filesystemCapabilityEnabled",
+        "terminalCapabilityEnabled", "maximumTurns", "maximumToolCalls", "maximumOutputBytes",
+        "wallClockTimeoutNanos", "idleTimeoutNanos", "maximumInputTokens", "maximumOutputTokens",
+    )
+    private val RECEIPT_PROVIDER_FIELDS = setOf("id", "evidenceSchemaVersion")
+    private val RECEIPT_LIFECYCLE_FIELDS = setOf(
+        "phaseReached", "cleanupDisposition", "filesystemAuditComplete", "terminalAuditComplete",
+        "permissionAuditComplete", "releaseComplete",
     )
     private val FACTORY_FIELDS = setOf(
         "descriptor", "harness", "implementationId", "agentExecutionContractVersion",
@@ -859,104 +1151,81 @@ internal object ReconstructionAcpEvidenceArchiveVerifier {
     private val PROTOCOL_FIELDS = setOf("name", "version", "sdkVersion", "clientImplementation")
     private val CLIENT_FIELDS = setOf("name", "version")
     private val AGENT_FIELDS = setOf("configuredImplementationId", "negotiatedImplementation", "negotiatedCapabilities")
-    private val NEGOTIATED_IMPLEMENTATION_FIELDS = setOf(
-        "nameSha256", "nameUtf8Bytes", "versionSha256", "versionUtf8Bytes", "titleSha256", "titleUtf8Bytes",
-    )
+    private val RECEIPT_NEGOTIATED_IMPLEMENTATION_FIELDS = setOf("name", "version", "title")
     private val CAPABILITY_FIELDS = setOf(
         "loadSession", "promptImage", "promptAudio", "promptEmbeddedContext", "mcpHttp", "mcpSse",
         "sessionAdditionalDirectories",
     )
-    private val SESSION_FIELDS = setOf("harnessId", "sessionIdSha256", "resumeReferenceSha256")
-    private val TURN_FIELDS = setOf(
-        "ordinal", "requestSha256", "objectiveSha256", "objectiveUtf8Bytes", "promptSha256",
-        "wirePromptSha256", "workspaceRootsSha256", "contextInputsSha256", "accessPolicySha256",
-    )
-    private val BOUND_FIELDS = setOf(
-        "maximumArchivedBytes", "maximumArchivedEvents", "archivedEventCount", "maximumTurns",
-        "maximumToolCalls", "maximumOutputBytes", "wallClockTimeoutMillis", "idleTimeoutMillis",
-        "maximumInputTokens", "maximumOutputTokens", "workspaceRootIds", "contextInputIds",
-        "filesystemCapabilityEnabled", "terminalCapabilityEnabled",
-    )
-    private val MESSAGE_EVENT_FIELDS = setOf(
-        "sequence", "type", "role", "messageIdSha256", "textSha256", "textUtf8Bytes", "completed",
-    )
-    private val PLAN_EVENT_FIELDS = setOf("sequence", "type", "entries")
-    private val PLAN_ENTRY_FIELDS = setOf("idSha256", "descriptionSha256", "descriptionUtf8Bytes", "status")
-    private val TOOL_EVENT_FIELDS = setOf(
-        "sequence", "type", "toolCallIdSha256", "titleSha256", "status", "detailsSha256", "detailCount",
-    )
-    private val PERMISSION_EVENT_FIELDS = setOf(
-        "sequence", "type", "requestIdSha256", "decision", "selectedOptionIdSha256", "reasonSha256",
-    )
+    private val RECEIPT_SESSION_FIELDS = setOf("harnessId", "sessionId", "resumeReference")
     private val FILE_CHANGE_EVENT_FIELDS = setOf("sequence", "type", "change")
     private val FILE_CHANGE_FIELDS = setOf(
         "rootId", "relativePath", "kind", "beforeSha256", "afterSha256", "sizeBytes",
     )
-    private val RESULT_FIELDS = setOf("stopReason", "summarySha256", "summaryUtf8Bytes", "changes", "usage")
-    private val USAGE_FIELDS = setOf(
-        "inputTokens", "outputTokens", "cachedInputTokens", "toolCalls", "wallClockMillis",
+    private val RECEIPT_EVENTS_FIELDS = setOf(
+        "maximumRetainedEvents", "observedEventCount", "retainedEventCount", "complete",
+        "truncationReason", "records",
+    )
+    private val RECEIPT_MESSAGE_EVENT_FIELDS = setOf(
+        "sequence", "type", "role", "messageId", "text", "completed",
+    )
+    private val RECEIPT_PLAN_EVENT_FIELDS = setOf("sequence", "type", "entries")
+    private val RECEIPT_PLAN_ENTRY_FIELDS = setOf("id", "description", "status")
+    private val RECEIPT_TOOL_EVENT_FIELDS = setOf(
+        "sequence", "type", "toolCallId", "title", "status", "detailsSha256", "detailCount",
+    )
+    private val RECEIPT_PERMISSION_EVENT_FIELDS = setOf(
+        "sequence", "type", "requestId", "decision", "selectedOptionId", "reason",
+    )
+    private val RECEIPT_OUTCOME_FIELDS = setOf("type", "result", "failure")
+    private val RECEIPT_RESULT_FIELDS = setOf("stopReason", "summary", "changes", "usage")
+    private val RECEIPT_CHANGE_SET_FIELDS = setOf(
+        "observedCount", "retainedCount", "complete", "aggregateSha256", "records",
+    )
+    private val RECEIPT_USAGE_FIELDS = setOf(
+        "inputTokens", "outputTokens", "cachedInputTokens", "toolCalls", "wallClockNanos",
     )
     private val POLICY_AUDIT_FIELDS = setOf("filesystem", "terminal", "permission")
-    private val FILESYSTEM_AUDIT_FIELDS = setOf(
-        "sequence", "sessionIdSha256", "method", "requestedPathSha256", "policyPath", "outcome", "reason",
+    private val RECEIPT_AUDIT_COLLECTION_FIELDS = setOf(
+        "maximumRetainedRecords", "recordCount", "aggregateSha256", "records",
     )
-    private val POLICY_PATH_FIELDS = setOf("rootId", "relativePath")
-    private val TERMINAL_AUDIT_FIELDS = setOf(
-        "sequence", "sessionIdSha256", "method", "requestSha256", "terminalIdSha256", "toolCallIdSha256",
-        "outcome", "reason", "networkIsolated", "retainedOutputBytes", "producedOutputBytes", "outputTruncated",
+    private val RECEIPT_FILESYSTEM_AUDIT_FIELDS = setOf(
+        "sequence", "sessionId", "method", "requestedPathSha256", "policyPath", "outcome", "reason",
     )
-    private val PERMISSION_AUDIT_FIELDS = setOf(
-        "sequence", "sessionIdSha256", "toolCallIdSha256", "offeredOptionCount", "selectedOptionIdSha256",
-        "selectedKind", "outcome", "reason", "authorityExpanded",
+    private val RECEIPT_POLICY_PATH_FIELDS = setOf("rootId", "relativePath")
+    private val RECEIPT_TERMINAL_AUDIT_FIELDS = setOf(
+        "sequence", "sessionId", "method", "requestSha256", "terminalIdSha256",
+        "toolCallIdSha256", "outcome", "reason", "networkIsolated", "retainedOutputBytes",
+        "producedOutputBytes", "outputTruncated",
     )
-    private val PROCESS_FIELDS = setOf(
-        "exitCode", "stderrSha256", "stderrUtf8Bytes", "stderrTruncated", "producedOutputBytes",
-        "producedOutputLimitBytes", "outputLimitExceeded", "forcedTermination", "rootTerminationRequested",
-        "remainingProcessCount", "containment", "networkIsolated", "sandboxCleanupVerified",
+    private val RECEIPT_PERMISSION_AUDIT_FIELDS = setOf(
+        "sequence", "sessionId", "toolCallIdSha256", "offeredOptionCount",
+        "selectedOptionIdSha256", "selectedKind", "outcome", "reason", "authorityExpanded",
     )
-    private val SANDBOX_FIELDS = setOf(
-        "evidenceSha256", "provider", "providerVersion", "providerExecutableSha256", "providerExecutableMode",
-        "resourceLimiterSha256", "scopeSupervisorSha256", "scopeInspectorSha256", "environmentFdOpenerSha256",
-        "policySha256", "networkIsolated", "outerAgentContained", "nestedUserNamespacesDisabled", "newSession",
-        "dieWithParent", "cgroupV2PidsLimited", "cgroupV2MemoryLimited", "cgroupV2CpuLimited",
-        "outerAgentLimits", "runtimeClosureLimits", "securityExecutables", "authorities", "launches",
-        "outerProcessOutput",
+    private val RECEIPT_PROCESS_FIELDS = setOf(
+        "exitCode", "stderr", "stderrTruncated", "producedOutputBytes", "producedOutputLimitBytes",
+        "outputLimitExceeded", "forcedTermination", "rootTerminationRequested", "remainingProcessCount",
+        "containment", "networkIsolated", "sandboxCleanupVerified",
+    )
+    private val RECEIPT_SANDBOX_FIELDS = setOf(
+        "evidenceSha256", "detailsRetained", "provider", "providerVersion",
+        "providerExecutableSha256", "providerExecutableMode", "resourceLimiterSha256",
+        "scopeSupervisorSha256", "scopeInspectorSha256", "environmentFdOpenerSha256",
+        "policySha256", "networkIsolated", "outerAgentContained", "nestedUserNamespacesDisabled",
+        "newSession", "dieWithParent", "cgroupV2PidsLimited", "cgroupV2MemoryLimited",
+        "cgroupV2CpuLimited", "outerAgentLimits", "runtimeClosureLimits",
+        "securityExecutableCount", "authorityCount", "launchCount", "runtimeMountCount",
+        "terminalAuditCount", "maximumRecordedLaunches", "maximumRecordedRuntimeMounts",
+        "maximumCanonicalMetadataBytes", "outerProcessOutput",
+    )
+    private val TEXT_COMMITMENT_FIELDS = setOf("sha256", "encodedBytes", "encoding")
+    private val TEXT_COMMITMENT_LIST_FIELDS = setOf(
+        "observedCount", "retainedCount", "complete", "aggregateSha256", "records",
     )
     private val RESOURCE_LIMIT_FIELDS = setOf(
         "maximumProcesses", "maximumOpenFiles", "maximumFileBytes", "maximumAddressSpaceBytes", "maximumCpuSeconds",
     )
     private val RUNTIME_CLOSURE_FIELDS = setOf("maximumEntries", "maximumUserOwnedFileBytes", "maximumDepth")
-    private val SECURITY_EXECUTABLE_FIELDS = setOf(
-        "role", "canonicalPathSha256", "contentSha256", "mode", "metadataSha256",
-    )
-    private val AUTHORITY_FIELDS = setOf("rootId", "rootPathSha256", "mode", "quota")
-    private val QUOTA_FIELDS = setOf("provider", "mountId", "maximumBytes", "maximumEntries", "mountPathSha256")
     private val PRODUCED_OUTPUT_FIELDS = setOf("maximumBytes", "observedBytes", "limitExceeded")
-    private val SANDBOX_LAUNCH_FIELDS = setOf(
-        "purpose", "resourceLimits", "controllers", "commandSha256", "startGate", "environment",
-        "effectiveRlimits", "executableMount", "runtimeMounts",
-    )
-    private val CONTROLLER_FIELDS = setOf(
-        "pidsMax", "memoryMaxBytes", "memorySwapMaxBytes", "cpuQuotaMicros", "cpuPeriodMicros",
-        "memoryOomGroup", "runtimeMaxMicros", "timeoutStopMicros",
-    )
-    private val START_GATE_FIELDS = setOf(
-        "descriptor", "waiterExecutableSha256", "helperProtocolSha256", "positiveByteRequired",
-    )
-    private val ENVIRONMENT_FIELDS = setOf(
-        "sandboxPathSha256", "bindingNamesSha256", "bindingCount", "encodedBytes", "device", "inode",
-        "mountId", "mode", "linkCount",
-    )
-    private val EFFECTIVE_RLIMIT_FIELDS = setOf(
-        "processesSoft", "processesHard", "openFilesSoft", "openFilesHard", "fileBytesSoft", "fileBytesHard",
-        "coreBytesSoft", "coreBytesHard", "addressSpaceSoft", "addressSpaceHard", "cpuSecondsSoft",
-        "cpuSecondsHard",
-    )
-    private val MOUNT_FIELDS = setOf(
-        "sourcePathSha256", "destinationPathSha256", "manifestSha256", "device", "inode", "mode", "directory",
-    )
-    private val VALIDATION_FIELDS = setOf("accepted", "sourceSha256", "issues")
-    private val VALIDATION_ISSUE_FIELDS = setOf("code", "messageSha256", "messageUtf8Bytes", "entityIds")
 }
 
 private fun JsonObject.requireExactKeys(expected: Set<String>, label: String) {

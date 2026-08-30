@@ -3,8 +3,11 @@ package decompengine.project
 import decompengine.acp.ACP_KOTLIN_SDK_VERSION
 import decompengine.acp.ACP_STABLE_PROTOCOL_VERSION
 import decompengine.acp.AcpExecutionEvidenceSnapshot
-import decompengine.acp.AcpExecutionEvidenceSource
+import decompengine.acp.AcpExecutionCleanupDisposition
+import decompengine.acp.AcpExecutionEvidenceCompleteness
+import decompengine.acp.AcpExecutionLifecyclePhase
 import decompengine.acp.AcpHarnessProvenance
+import decompengine.acp.AcpInvocationEvidenceSnapshot
 import decompengine.acp.AcpNegotiatedAgentEvidence
 import decompengine.acp.AcpNegotiatedCapabilitiesEvidence
 import decompengine.acp.AcpProcessDiagnostics
@@ -14,11 +17,16 @@ import decompengine.acp.AcpSandboxEvidence
 import decompengine.acp.AcpSandboxResourceLimits
 import decompengine.agent.AgentExecutionEvent
 import decompengine.agent.AgentExecutionRequest
+import decompengine.agent.AgentExecutionRequestBinding
+import decompengine.agent.AgentExecutionOutcome
+import decompengine.agent.AgentExecutionReceipt
 import decompengine.agent.AgentExecutionResult
 import decompengine.agent.AgentFileChange
 import decompengine.agent.AgentFileChangeEvent
 import decompengine.agent.AgentFileChangeKind
 import decompengine.agent.AgentHarness
+import decompengine.agent.AgentMessageEvent
+import decompengine.agent.AgentMessageRole
 import decompengine.agent.AgentSessionReference
 import decompengine.agent.AgentStopReason
 import decompengine.agent.AgentUsage
@@ -56,19 +64,42 @@ class ReconstructionAcpEvidenceArchiveVerifierTest {
             },
             "unknown-nested-field" to { text ->
                 text.replaceFirst(
-                    "    \"maximumArchivedBytes\":",
-                    "    \"unknownBound\": true,\n    \"maximumArchivedBytes\":",
+                    "    \"contractVersion\":",
+                    "    \"unknownBound\": true,\n    \"contractVersion\":",
                 )
             },
-            "wrong-schema" to { text -> text.replaceFirst("\"schemaVersion\": 1", "\"schemaVersion\": 2") },
+            "wrong-schema" to { text -> text.replaceFirst("\"schemaVersion\": 2", "\"schemaVersion\": 1") },
             "wrong-kind" to { text -> text.replaceFirst(EVIDENCE_KIND, "decomp-engine.patch-acp-execution") },
             "wrong-module" to { text -> text.replaceFirst("\"moduleId\": \"parse\"", "\"moduleId\": \"other\"") },
-            "non-completed" to { text -> text.replaceFirst("\"stopReason\": \"completed\"", "\"stopReason\": \"refused\"") },
+            "non-completed" to { text -> text.replaceFirst("\"stopReason\":\"completed\"", "\"stopReason\":\"refused\"") },
             "deprecated-factory" to { text -> text.replaceFirst("\"deprecated\": false", "\"deprecated\": true") },
-            "validation-source" to { text ->
-                text.replaceFirst("\"sourceSha256\": \"$sourceSha256\"", "\"sourceSha256\": \"${"0".repeat(64)}\"")
+            "result-source" to { text ->
+                text.replaceFirst("\"afterSha256\":\"$sourceSha256\"", "\"afterSha256\":\"${"0".repeat(64)}\"")
             },
-            "validation-acceptance" to { text -> text.replaceFirst("\"accepted\": true", "\"accepted\": false") },
+            "release-complete" to { text ->
+                text.replaceFirst("\"releaseComplete\": true", "\"releaseComplete\": false")
+            },
+            "malformed-commitment" to { text ->
+                text.replaceFirst("\"encoding\":\"utf-8\"", "\"encoding\":\"jvm-utf16be\"")
+            },
+            "invalid-modified-change" to { text ->
+                text.replaceFirst(
+                    "\"kind\":\"created\",\"beforeSha256\":null",
+                    "\"kind\":\"modified\",\"beforeSha256\":null",
+                )
+            },
+            "invalid-modified-digest" to { text ->
+                text.replaceFirst(
+                    "\"kind\":\"created\",\"beforeSha256\":null,\"afterSha256\":\"$sourceSha256\"",
+                    "\"kind\":\"modified\",\"beforeSha256\":\"$sourceSha256\",\"afterSha256\":\"$sourceSha256\"",
+                )
+            },
+            "invalid-event-role" to { text ->
+                text.replaceFirst("\"role\":\"assistant\"", "\"role\":\"owner\"")
+            },
+            "process-network" to { text ->
+                text.replaceFirst("\"networkIsolated\": true", "\"networkIsolated\": false")
+            },
             "token-bound" to { text -> text.replaceFirst("\"maximumInputTokens\": null", "\"maximumInputTokens\": 5") },
         )
 
@@ -89,7 +120,7 @@ class ReconstructionAcpEvidenceArchiveVerifierTest {
         val temp = createTempDirectory("acp-archive-checkpoint-")
         val baseline = createAgentProject(temp.resolve("baseline"), accepted = true)
 
-        listOf("path", "digest", "factory-cache-identity").forEach { mutation ->
+        listOf("path", "digest", "factory-cache-identity", "request-binding", "terminal-outcome").forEach { mutation ->
             val project = temp.resolve(mutation)
             copyTree(baseline, project)
             rewriteCheckpointAndManifest(project) { checkpoint ->
@@ -102,6 +133,14 @@ class ReconstructionAcpEvidenceArchiveVerifierTest {
                         Regex("\"executionEvidenceSha256\": \"[0-9a-f]{64}\""),
                         "\"executionEvidenceSha256\": \"${"0".repeat(64)}\"",
                     )
+                    "request-binding" -> checkpoint.replace(
+                        Regex("\"executionRequestSha256\": \"[0-9a-f]{64}\""),
+                        "\"executionRequestSha256\": \"${"0".repeat(64)}\"",
+                    )
+                    "terminal-outcome" -> checkpoint.replace(
+                        "\"executionTerminalOutcome\": \"returned-completed\"",
+                        "\"executionTerminalOutcome\": \"returned-refused\"",
+                    )
                     else -> checkpoint.replace(
                         Regex("factory-[0-9a-f]{64}:v2"),
                         "factory-${"0".repeat(64)}:v2",
@@ -113,6 +152,20 @@ class ReconstructionAcpEvidenceArchiveVerifierTest {
                 ArchivalPackager.create(project, temp.resolve("checkpoint-$mutation.zip"))
             }
         }
+    }
+
+    @Test
+    fun `archive release gate rejects schema-v3 checkpoint downgrade`() {
+        val temp = createTempDirectory("acp-archive-downgrade-")
+        val project = createAgentProject(temp.resolve("project"), accepted = true)
+        rewriteCheckpointAndManifest(project) { checkpoint ->
+            checkpoint.replaceFirst("\"schemaVersion\": 4", "\"schemaVersion\": 3")
+        }
+
+        val failure = assertFailsWith<Exception> {
+            ArchivalPackager.create(project, temp.resolve("downgraded.zip"))
+        }
+        assertTrue(failure.message.orEmpty().contains("schema"))
     }
 
     @Test
@@ -218,8 +271,9 @@ class ReconstructionAcpEvidenceArchiveVerifierTest {
         }
     }
 
-    private class ArchiveEvidenceHarness(private val accepted: Boolean) : AgentHarness, AcpExecutionEvidenceSource {
+    private class ArchiveEvidenceHarness(private val accepted: Boolean) : AgentHarness {
         private var evidence: AcpExecutionEvidenceSnapshot? = null
+        private lateinit var requestBinding: AgentExecutionRequestBinding
         val factoryProvenance = AcpHarnessProvenance(
             harness = "acp",
             implementationId = IMPLEMENTATION_ID,
@@ -236,6 +290,7 @@ class ReconstructionAcpEvidenceArchiveVerifierTest {
             request: AgentExecutionRequest,
             onEvent: (AgentExecutionEvent) -> Unit,
         ): AgentExecutionResult {
+            requestBinding = AgentExecutionRequestBinding.capture(request)
             val target = request.accessPolicy.pathRules.single { rule ->
                 decompengine.agent.AgentOperation.WRITE_FILE in rule.operations
             }.path
@@ -254,7 +309,8 @@ class ReconstructionAcpEvidenceArchiveVerifierTest {
                 afterSha256 = sha256(bytes),
                 sizeBytes = bytes.size.toLong(),
             )
-            onEvent(AgentFileChangeEvent(0, change))
+            onEvent(AgentMessageEvent(0, "message", AgentMessageRole.ASSISTANT, "working", true))
+            onEvent(AgentFileChangeEvent(1, change))
             evidence = snapshot()
             return AgentExecutionResult(
                 AgentStopReason.COMPLETED,
@@ -265,7 +321,31 @@ class ReconstructionAcpEvidenceArchiveVerifierTest {
             )
         }
 
-        override fun latestAcpExecutionEvidence(): AcpExecutionEvidenceSnapshot? = evidence
+        override fun executeReceipt(
+            request: AgentExecutionRequest,
+            onEvent: (AgentExecutionEvent) -> Unit,
+        ): AgentExecutionReceipt {
+            val result = execute(request, onEvent)
+            val complete = requireNotNull(evidence)
+            return AgentExecutionReceipt(
+                requestBinding,
+                AgentExecutionOutcome.Returned(result),
+                AcpInvocationEvidenceSnapshot(
+                    factoryProvenance = complete.factoryProvenance,
+                    phaseReached = AcpExecutionLifecyclePhase.FINAL_WORKSPACE_SNAPSHOT,
+                    cleanupDisposition = AcpExecutionCleanupDisposition.VERIFIED,
+                    negotiatedAgent = complete.negotiatedAgent,
+                    wirePromptSha256 = complete.wirePromptSha256,
+                    diagnostics = complete.diagnostics,
+                    filesystemAudit = complete.filesystemAudit,
+                    terminalAudit = complete.terminalAudit,
+                    permissionAudit = complete.permissionAudit,
+                    sandboxEvidence = complete.sandboxEvidence,
+                    completeness = AcpExecutionEvidenceCompleteness(true, true, true),
+                    completeExecutionEvidence = complete,
+                ),
+            )
+        }
 
         private fun snapshot(): AcpExecutionEvidenceSnapshot = AcpExecutionEvidenceSnapshot(
             factoryProvenance = factoryProvenance,
@@ -330,7 +410,7 @@ class ReconstructionAcpEvidenceArchiveVerifierTest {
         const val SOURCE_PATH = "src/modules/parse.c"
         const val CHECKPOINT_PATH = "reports/modules/parse.json"
         const val EVIDENCE_PATH = "reports/agent-executions/parse.json"
-        const val EVIDENCE_KIND = "decomp-engine.reconstruction-acp-execution"
+        const val EVIDENCE_KIND = "decomp-engine.reconstruction-acp-execution-receipt"
 
         fun sha256(bytes: ByteArray): String = MessageDigest.getInstance("SHA-256")
             .digest(bytes)
