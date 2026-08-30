@@ -1,0 +1,3097 @@
+package decompengine.oracle.fulltree
+
+import decompengine.acp.AcpRuntimeClosureLimits
+import decompengine.acp.LinuxDescriptor
+import decompengine.acp.LinuxFileIdentity
+import decompengine.acp.LinuxFilesystemSyscalls
+import decompengine.acp.LinuxSyscallException
+import decompengine.acp.PinnedSecurityExecutable
+import decompengine.acp.PinnedSystemdBusEndpoint
+import decompengine.acp.deletePrivateTreeContents
+import decompengine.acp.permissions
+import java.nio.ByteBuffer
+import java.nio.channels.FileChannel
+import java.nio.file.Files
+import java.nio.file.LinkOption
+import java.nio.file.Path
+import java.nio.file.StandardOpenOption
+import java.security.MessageDigest
+import java.security.SecureRandom
+import java.time.Duration
+import java.util.UUID
+import java.util.concurrent.TimeUnit
+import java.util.concurrent.atomic.AtomicReference
+import kotlin.system.exitProcess
+
+internal class FullTreeFunctionObservationIsolationException(
+    message: String,
+    cause: Throwable? = null,
+) : IllegalArgumentException(message, cause)
+
+/** Exact authenticated files reloaded by the isolated Kotlin worker. */
+internal data class FullTreeFunctionObservationScopeFiles(
+    val scope: Path,
+    val sourceLock: Path,
+    val artifactManifest: Path,
+)
+
+/** One provisioned root-owned runtime tree mounted read-only at an exact synthetic-root path. */
+internal data class FullTreeFunctionObservationRuntimeMount(
+    val source: Path,
+    val destination: Path = source,
+    val expectedManifestSha256: String,
+) {
+    init {
+        require(source.isAbsolute && source.normalize() == source)
+        require(destination.isAbsolute && destination.normalize() == destination && destination != Path.of("/"))
+        require(expectedManifestSha256.matches(Regex("[0-9a-f]{64}")))
+    }
+}
+
+/** One regular-file JVM class-path artifact authenticated before it is privately snapshotted. */
+internal data class FullTreeFunctionObservationClassPathEntry(
+    val path: Path,
+    val expectedSha256: String,
+) {
+    init {
+        require(path.isAbsolute && path.normalize() == path)
+        require(expectedSha256.matches(Regex("[0-9a-f]{64}")))
+    }
+}
+
+/**
+ * Trusted host executables used to put one Kotlin derivation in a cgroup and read-only mount view.
+ *
+ * Digests are deliberately caller supplied: selecting whatever happens to occupy one of these
+ * paths at runtime would make executable pinning circular. Each deployment-owned JVM class-path
+ * file is separately authenticated, privately snapshotted, and mounted read-only.
+ */
+internal data class FullTreeFunctionObservationIsolationConfiguration(
+    val javaExecutable: Path,
+    val javaRuntime: FullTreeFunctionObservationRuntimeMount,
+    val systemLibraryMounts: List<FullTreeFunctionObservationRuntimeMount>,
+    val bubblewrapExecutable: Path,
+    val resourceLimiterExecutable: Path,
+    val scopeSupervisorExecutable: Path,
+    val scopeInspectorExecutable: Path,
+    val systemdUserRuntimeDirectory: Path,
+    val workerClassPath: List<FullTreeFunctionObservationClassPathEntry>,
+    val expectedJavaSha256: String,
+    val expectedBubblewrapSha256: String,
+    val expectedResourceLimiterSha256: String,
+    val expectedScopeSupervisorSha256: String,
+    val expectedScopeInspectorSha256: String,
+) {
+    init {
+        listOf(
+            javaExecutable,
+            bubblewrapExecutable,
+            resourceLimiterExecutable,
+            scopeSupervisorExecutable,
+            scopeInspectorExecutable,
+            systemdUserRuntimeDirectory,
+        ).forEach { path ->
+            require(path.isAbsolute && path.normalize() == path) {
+                "function-observation isolation paths must be absolute and normalized"
+            }
+        }
+        require(javaExecutable.startsWith(javaRuntime.source)) {
+            "function-observation Java executable must belong to its authenticated runtime"
+        }
+        require(systemLibraryMounts.isNotEmpty() && systemLibraryMounts.size <= MAXIMUM_RUNTIME_MOUNTS)
+        require(workerClassPath.isNotEmpty() && workerClassPath.size <= MAXIMUM_CLASSPATH_ENTRIES)
+        val runtimeMounts = listOf(javaRuntime) + systemLibraryMounts
+        require(runtimeMounts.none { mount ->
+            pathsOverlap(mount.source, systemdUserRuntimeDirectory) ||
+                pathsOverlap(mount.destination, systemdUserRuntimeDirectory)
+        }) { "function-observation runtime must not expose the systemd session runtime" }
+        runtimeMounts.forEachIndexed { index, mount ->
+            require(runtimeMounts.drop(index + 1).none { other ->
+                pathsOverlap(mount.destination, other.destination)
+            }) { "function-observation runtime mount destinations must not overlap" }
+        }
+        listOf(
+            expectedJavaSha256,
+            expectedBubblewrapSha256,
+            expectedResourceLimiterSha256,
+            expectedScopeSupervisorSha256,
+            expectedScopeInspectorSha256,
+        ).forEach { digest -> require(digest.matches(SHA256)) }
+    }
+}
+
+/**
+ * Provisioning helper for a root-owned runtime directory.
+ *
+ * Root ownership is the content trust root, as it is for the ACP launcher closure. The manifest is
+ * nevertheless caller-pinned and binds every entry's relative name, type, mode, owner, size,
+ * timestamp, and symlink target. Regular-file contents are not re-hashed because an unprivileged
+ * caller cannot replace bytes anywhere in the recursively non-group/world-writable closure.
+ */
+internal fun calculateFullTreeObservationRuntimeManifestSha256(source: Path): String {
+    val normalized = source.toAbsolutePath().normalize()
+    if (normalized == Path.of("/") || normalized.toRealPath() != normalized) {
+        isolationFail("isolated runtime root must be a canonical non-root directory")
+    }
+    requireRootOwnedRuntimeAncestors(normalized)
+    val rootAttributes = Files.readAttributes(
+        normalized,
+        java.nio.file.attribute.BasicFileAttributes::class.java,
+        LinkOption.NOFOLLOW_LINKS,
+    )
+    if (!rootAttributes.isDirectory || rootAttributes.isSymbolicLink) {
+        isolationFail("isolated runtime root must be a real directory")
+    }
+    val entries = Files.walk(normalized, MAXIMUM_RUNTIME_TREE_DEPTH).use { stream ->
+        stream.limit(MAXIMUM_RUNTIME_TREE_ENTRIES.toLong() + 1L).toList()
+    }
+    if (entries.size > MAXIMUM_RUNTIME_TREE_ENTRIES) {
+        isolationFail("isolated runtime root exceeds its entry bound")
+    }
+    entries.filter { path ->
+        normalized.relativize(path).nameCount == MAXIMUM_RUNTIME_TREE_DEPTH &&
+            Files.isDirectory(path, LinkOption.NOFOLLOW_LINKS)
+    }.forEach { boundary ->
+        Files.newDirectoryStream(boundary).use { children ->
+            if (children.iterator().hasNext()) isolationFail("isolated runtime root exceeds its depth bound")
+        }
+    }
+    val digest = MessageDigest.getInstance("SHA-256")
+    entries.sortedBy { normalized.relativize(it).toString() }.forEach { path ->
+        val attributes = Files.readAttributes(
+            path,
+            java.nio.file.attribute.BasicFileAttributes::class.java,
+            LinkOption.NOFOLLOW_LINKS,
+        )
+        val type = when {
+            attributes.isRegularFile -> "file"
+            attributes.isDirectory -> "directory"
+            attributes.isSymbolicLink -> "symlink"
+            else -> isolationFail("isolated runtime root contains a special file")
+        }
+        val uid = (Files.getAttribute(path, "unix:uid", LinkOption.NOFOLLOW_LINKS) as Number).toInt()
+        val mode = (Files.getAttribute(path, "unix:mode", LinkOption.NOFOLLOW_LINKS) as Number).toInt() and 0x1ff
+        if (uid != 0 || (!attributes.isSymbolicLink && mode and UNTRUSTED_RUNTIME_WRITE_MODE != 0)) {
+            isolationFail("isolated runtime root contains an untrusted writable entry")
+        }
+        val relative = if (path == normalized) "." else normalized.relativize(path).toString()
+        val target = if (attributes.isSymbolicLink) Files.readSymbolicLink(path).toString() else ""
+        digest.update(
+            (
+                "$relative\u0000$type\u0000$mode\u0000$uid\u0000${attributes.size()}\u0000" +
+                    "${attributes.lastModifiedTime().toMillis()}\u0000$target\u0000"
+                ).toByteArray(Charsets.UTF_8),
+        )
+    }
+    return digest.digest().hex()
+}
+
+private fun requireRootOwnedRuntimeAncestors(source: Path) {
+    var current = source.parent
+    while (current != null) {
+        val attributes = Files.readAttributes(
+            current,
+            java.nio.file.attribute.BasicFileAttributes::class.java,
+            LinkOption.NOFOLLOW_LINKS,
+        )
+        val uid = (Files.getAttribute(current, "unix:uid", LinkOption.NOFOLLOW_LINKS) as Number).toInt()
+        val mode = (Files.getAttribute(current, "unix:mode", LinkOption.NOFOLLOW_LINKS) as Number).toInt() and 0x1ff
+        if (
+            !attributes.isDirectory || attributes.isSymbolicLink || uid != 0 ||
+            mode and UNTRUSTED_RUNTIME_WRITE_MODE != 0
+        ) isolationFail("isolated runtime root has an untrusted ancestor")
+        current = current.parent
+    }
+}
+
+private fun pathsOverlap(first: Path, second: Path): Boolean =
+    first == second || first.startsWith(second) || second.startsWith(first)
+
+private class AuthenticatedObservationRuntime private constructor(
+    private val runtimeMounts: List<Pair<FullTreeFunctionObservationRuntimeMount, String>>,
+    private val classPath: List<Pair<FullTreeFunctionObservationClassPathEntry, StableControlFile>>,
+) : AutoCloseable {
+    val classPathBytes: Long = classPath.fold(0L) { total, (_, guard) ->
+        addExact(total, guard.size, "authenticated class-path byte count")
+    }
+
+    fun materializeClassPath(runTree: PrivateObservationRunTree): MaterializedObservationClassPath =
+        runTree.materializeClassPath(classPath)
+
+    fun mounts(): List<FullTreeFunctionObservationRuntimeMount> = runtimeMounts.map { it.first }
+
+    fun verify(label: String) {
+        runtimeMounts.forEach { (mount, expected) ->
+            if (calculateFullTreeObservationRuntimeManifestSha256(mount.source) != expected) {
+                isolationFail("isolated runtime mount changed $label: ${mount.source}")
+            }
+        }
+        classPath.forEachIndexed { index, (entry, guard) ->
+            if (guard.sha256(label = "isolated class-path entry $index $label") != entry.expectedSha256) {
+                isolationFail("isolated class-path entry digest changed $label")
+            }
+            guard.verifyUnchanged("isolated class-path entry $index $label")
+        }
+    }
+
+    override fun close() {
+        var failure: Throwable? = null
+        classPath.asReversed().forEach { (_, guard) ->
+            runCatching { guard.close() }.exceptionOrNull()?.let { closeFailure ->
+                if (failure == null) failure = closeFailure else failure.addSuppressed(closeFailure)
+            }
+        }
+        failure?.let { throw it }
+    }
+
+    companion object {
+        fun open(configuration: FullTreeFunctionObservationIsolationConfiguration): AuthenticatedObservationRuntime {
+            val mounts = listOf(configuration.javaRuntime) + configuration.systemLibraryMounts
+            mounts.forEachIndexed { index, mount ->
+                mounts.drop(index + 1).forEach { other ->
+                    if (pathsOverlap(mount.destination, other.destination)) {
+                        isolationFail("isolated runtime mount destinations overlap")
+                    }
+                }
+            }
+            val verifiedMounts = mounts.map { mount ->
+                val actual = calculateFullTreeObservationRuntimeManifestSha256(mount.source)
+                if (actual != mount.expectedManifestSha256) {
+                    isolationFail("isolated runtime manifest differs from its provisioned digest")
+                }
+                mount to actual
+            }
+            val opened = ArrayDeque<StableControlFile>()
+            try {
+                var total = 0L
+                val classPath = configuration.workerClassPath.mapIndexed { index, entry ->
+                    val remaining = MAXIMUM_AUTHENTICATED_CLASSPATH_BYTES - total
+                    if (remaining <= 0L) isolationFail("authenticated class path exceeds its aggregate byte bound")
+                    val guard = StableControlFile.open(
+                        entry.path,
+                        minOf(remaining, MAXIMUM_CLASSPATH_ENTRY_BYTES),
+                        "isolated class-path entry $index",
+                    ).also(opened::addFirst)
+                    val digest = guard.sha256(label = "isolated class-path entry $index at authorization")
+                    if (digest != entry.expectedSha256) {
+                        isolationFail("isolated class-path entry differs from its provisioned digest")
+                    }
+                    total = addExact(total, guard.size, "authenticated class-path byte count")
+                    entry to guard
+                }
+                opened.clear()
+                return AuthenticatedObservationRuntime(verifiedMounts, classPath)
+            } catch (failure: Throwable) {
+                opened.forEach { guard -> runCatching { guard.close() }.exceptionOrNull()?.let(failure::addSuppressed) }
+                throw failure
+            }
+        }
+    }
+}
+
+private class MaterializedObservationClassPath(
+    val paths: List<Path>,
+    private val expected: List<Pair<Long, String>>,
+) {
+    val encoded: String = validatedClassPath(paths)
+
+    fun verify(label: String) {
+        paths.zip(expected).forEachIndexed { index, (path, sizeAndDigest) ->
+            val (size, digest) = sizeAndDigest
+            StableControlFile.open(path, size, "materialized class-path entry $index").use { guard ->
+                if (guard.size != size || guard.sha256(label = "materialized class path $label") != digest) {
+                    isolationFail("materialized class-path entry changed $label")
+                }
+                guard.verifyUnchanged("materialized class-path entry $index $label")
+            }
+        }
+    }
+}
+
+internal data class FullTreeFunctionObservationCgroupReceipt(
+    val peakResidentBytes: Long,
+    val cpuNanos: Long,
+    val derivationWallNanos: Long,
+    val memoryMaxEvents: Long,
+    val memoryOomEvents: Long,
+    val memoryOomKillEvents: Long,
+)
+
+internal data class FullTreeFunctionObservationIsolatedFixturePublication(
+    val fixtureShard: FullTreeFunctionObservationPublishedShard,
+    val cgroup: FullTreeFunctionObservationCgroupReceipt,
+)
+
+/**
+ * Parent-owned, non-authoritative containment fixture for one function-observation shard.
+ *
+ * The worker sees a synthetic mount root containing only its authenticated JVM/runtime/class path
+ * and explicit read-only input binds. Its only host write authority is a fresh mode-0700
+ * disk-backed run directory. It derives and independently validates
+ * a private candidate there, then becomes quiescent at a READY/ACK barrier. A small Kotlin keeper
+ * launches that worker in the same boundary and remains blocked after proving the worker exited
+ * successfully. The parent then freezes the cgroup, verifies its complete process inventory, and
+ * samples the immutable live cgroup files before intentionally killing the frozen keeper. Only
+ * after the locally owned scope process has the exact expected SIGKILL status and both its unit and
+ * cgroup are absent does the parent copy the unlinked inode into a no-replace 0400 fixture output.
+ *
+ * The summed cleanup-byte ceiling is a fail-closed recoverability bound, not a live aggregate disk
+ * quota. RLIMIT_FSIZE independently limits each writable inode. Consequently this API and its
+ * receipt must never enter release evidence: an authoritative runner still requires an independently
+ * proven aggregate disk-quota authority plus durable operation identity and crash recovery.
+ */
+internal object FullTreeFunctionObservationIsolatedFixtureRunner {
+    fun generateFixtureNoReplace(
+        richArtifact: Path,
+        inventoryPath: Path,
+        scopeFiles: FullTreeFunctionObservationScopeFiles,
+        shardId: String,
+        scratchParent: Path,
+        output: Path,
+        configuration: FullTreeFunctionObservationIsolationConfiguration,
+    ): FullTreeFunctionObservationIsolatedFixturePublication = translateIsolationFailures {
+        val paths = IsolatedObservationPaths.normalize(
+            richArtifact,
+            inventoryPath,
+            scopeFiles,
+            scratchParent,
+            output,
+        )
+        val authenticated = FullTreeScopeControl.load(
+            paths.scopeFiles.scope,
+            paths.scopeFiles.sourceLock,
+            paths.scopeFiles.artifactManifest,
+        )
+        FullTreeScopeControl.validate(authenticated)
+        requireDistinctControlOutput(
+            paths.output,
+            "rich artifact" to paths.richArtifact,
+            "inventory" to paths.inventory,
+            "scope" to paths.scopeFiles.scope,
+            "source lock" to paths.scopeFiles.sourceLock,
+            "artifact manifest" to paths.scopeFiles.artifactManifest,
+        )
+        if (Files.exists(paths.output, LinkOption.NOFOLLOW_LINKS)) {
+            isolationFail("isolated function-observation publication target already exists")
+        }
+
+        AuthenticatedObservationRuntime.open(configuration).use { runtime ->
+            val resources = IsolatedObservationResources.derive(authenticated, runtime.classPathBytes)
+            ParentObservationInputGuards.open(paths, authenticated).use { guards ->
+                val parentInputs = FullTreeFunctionObservationProducer.authenticateShardInputs(
+                    inventoryPath = paths.inventory,
+                    scope = authenticated,
+                    shardId = shardId,
+                )
+                if (parentInputs.inventoryArtifactSha256 != guards.inventorySha256) {
+                    isolationFail("parent shard authentication differs from its pinned inventory")
+                }
+                PrivateObservationRunTree.create(paths.scratchParent, resources).use { runTree ->
+                    val classPath = runtime.materializeClassPath(runTree)
+                    runtime.verify("immediately before isolated launch")
+                    TrustedObservationBoundary(configuration, runtime, classPath).use { boundary ->
+                    val request = IsolatedWorkerRequest(
+                        nonce = randomHex(PROTOCOL_NONCE_BYTES),
+                        paths = paths,
+                        shardId = shardId,
+                        runDirectory = runTree.path,
+                    )
+                    boundary.launch(request, resources).use { unit ->
+                        unit.awaitBoot(request.nonce)
+                        unit.verifyLiveContainment(resources)
+                        val derivationStarted = System.nanoTime()
+                        writeProtocolFile(runTree.descriptor, START_FILE, protocol("START", request.nonce))
+                        val workerReceipt = unit.awaitReady(request.nonce, resources.wallSeconds)
+                        val derivationWallNanos = monotonicElapsed(
+                            derivationStarted,
+                            System.nanoTime(),
+                            "isolated function-observation derivation",
+                        )
+                        if (derivationWallNanos > secondsToNanos(resources.wallSeconds, "wall-clock")) {
+                            isolationFail("isolated function-observation derivation exceeded its wall bound")
+                        }
+                        requireWorkerReceipt(
+                            workerReceipt,
+                            authenticated,
+                            guards,
+                            parentInputs,
+                            shardId,
+                            resources,
+                        )
+
+                        PinnedObservationCandidate.open(
+                            runTree.descriptor,
+                            workerReceipt.outputBytes,
+                            workerReceipt.outputSha256,
+                            resources.maximumOutputBytes,
+                        ).use { candidate ->
+                            candidate.unlinkFrom(runTree.descriptor)
+                            writeProtocolFile(runTree.descriptor, ACK_FILE, protocol("ACK", request.nonce))
+                            unit.awaitDone(request.nonce)
+                            writeProtocolFile(
+                                runTree.descriptor,
+                                WORKER_RELEASE_FILE,
+                                protocol("RELEASE", request.nonce),
+                            )
+                            unit.awaitWorkerExited(request.nonce)
+                            val live = unit.freezeAndSampleRawCgroup(resources)
+                            unit.killFrozenKeeperAndProveRemoved(resources, live)
+                            if (live.peakResidentBytes < workerReceipt.peakResidentBytes) {
+                                isolationFail(
+                                    "post-exit cgroup peak is below the worker's resident-peak receipt",
+                                )
+                            }
+                            unit.stopAndProveRemoved()
+                            runTree.cleanAndRemove()
+
+                            val published = ParentObservationPublisher.publish(
+                                candidate = candidate,
+                                target = paths.output,
+                                expectedBytes = workerReceipt.outputBytes,
+                                expectedSha256 = workerReceipt.outputSha256,
+                                maximumBytes = resources.maximumOutputBytes,
+                                beforeCommit = {
+                                    boundary.verifyExecutablesForPublication()
+                                    guards.verifyDigests(workerReceipt)
+                                },
+                                afterCommit = {
+                                    boundary.verifyExecutablesForPublication()
+                                    guards.verifyDigests(workerReceipt)
+                                },
+                            )
+                            check(published.bytes == workerReceipt.outputBytes)
+                            check(published.sha256 == workerReceipt.outputSha256)
+                            FullTreeFunctionObservationIsolatedFixturePublication(
+                                fixtureShard = workerReceipt.copy(peakResidentBytes = live.peakResidentBytes),
+                                cgroup = FullTreeFunctionObservationCgroupReceipt(
+                                    peakResidentBytes = live.peakResidentBytes,
+                                    cpuNanos = live.cpuNanos,
+                                    derivationWallNanos = derivationWallNanos,
+                                    memoryMaxEvents = live.memoryMaxEvents,
+                                    memoryOomEvents = live.memoryOomEvents,
+                                    memoryOomKillEvents = live.memoryOomKillEvents,
+                                ),
+                            )
+                        }
+                    }
+                    }
+                }
+            }
+        }
+    }
+}
+
+/** Process entry point used only inside [FullTreeFunctionObservationIsolatedFixtureRunner]'s boundary. */
+internal object FullTreeFunctionObservationIsolatedWorker {
+    @JvmStatic
+    fun main(arguments: Array<String>) {
+        var root: LinuxDescriptor? = null
+        var nonce: String? = null
+        try {
+            val request = IsolatedWorkerRequest.parse(arguments)
+            nonce = request.nonce
+            val (_, identity) = requireStableDirectory(request.runDirectory, "isolated worker run directory")
+            root = LinuxFilesystemSyscalls.openRoot(request.runDirectory)
+            if (!Files.isSameFile(
+                    request.runDirectory,
+                    LinuxFilesystemSyscalls.stableDescriptorPath(root.fd),
+                ) || identity != Files.readAttributes(
+                    request.runDirectory,
+                    java.nio.file.attribute.BasicFileAttributes::class.java,
+                    LinkOption.NOFOLLOW_LINKS,
+                ).fileKey()
+            ) {
+                isolationFail("isolated worker run directory changed during startup")
+            }
+            requirePrivateDirectory(root, "isolated worker run directory")
+            writeProtocolFile(root, BOOT_FILE, protocol("BOOT", request.nonce))
+            awaitWorkerProtocol(root, START_FILE, protocol("START", request.nonce), WORKER_START_TIMEOUT)
+
+            val scope = FullTreeScopeControl.load(
+                request.paths.scopeFiles.scope,
+                request.paths.scopeFiles.sourceLock,
+                request.paths.scopeFiles.artifactManifest,
+            )
+            val receipt = FullTreeFunctionObservationShardPublisher.generateAndPublish(
+                richArtifact = request.paths.richArtifact,
+                inventoryPath = request.paths.inventory,
+                scope = scope,
+                shardId = request.shardId,
+                scratchParent = request.runDirectory.resolve(SCRATCH_DIRECTORY),
+                output = request.runDirectory.resolve(CANDIDATE_FILE),
+                limits = ISOLATED_PUBLISHER_LIMITS,
+            )
+            writeProtocolFile(root, READY_FILE, encodeReady(request.nonce, receipt))
+            awaitWorkerProtocol(root, ACK_FILE, protocol("ACK", request.nonce), WORKER_ACK_TIMEOUT)
+            writeProtocolFile(root, DONE_FILE, protocol("DONE", request.nonce))
+            awaitWorkerProtocol(
+                root,
+                WORKER_RELEASE_FILE,
+                protocol("RELEASE", request.nonce),
+                WORKER_EXIT_TIMEOUT,
+            )
+            root.close()
+            Runtime.getRuntime().halt(0)
+        } catch (failure: Throwable) {
+            val descriptor = root
+            val token = nonce
+            if (descriptor != null && token != null) {
+                runCatching {
+                    writeProtocolFile(descriptor, FAILURE_FILE, encodeFailure(token, failure))
+                }
+                runCatching { Thread.sleep(WORKER_FAILURE_OBSERVATION_MILLIS) }
+            }
+            if (descriptor != null) {
+                runCatching { deletePrivateTreeContents(descriptor, WORKER_FAILURE_CLEANUP_LIMITS) }
+            }
+            runCatching { descriptor?.close() }
+            System.err.println("isolated function-observation worker failed safely")
+            exitProcess(WORKER_FAILURE_EXIT)
+        }
+    }
+}
+
+/**
+ * Tiny same-cgroup keeper which turns worker exit into a parent-observable, freezable barrier.
+ *
+ * It never receives an output path outside the private run tree. Once the child has exited zero it
+ * writes a durable proof containing its PID-namespace identity and blocks without further work.
+ * The trusted parent verifies that this JVM and bubblewrap are the only remaining processes before
+ * freezing and intentionally killing the cgroup.
+ */
+internal object FullTreeFunctionObservationIsolatedSupervisor {
+    @JvmStatic
+    fun main(arguments: Array<String>) {
+        var root: LinuxDescriptor? = null
+        var child: Process? = null
+        var nonce: String? = null
+        try {
+            val request = IsolatedSupervisorRequest.parse(arguments)
+            nonce = request.worker.nonce
+            val (_, identity) = requireStableDirectory(
+                request.worker.runDirectory,
+                "isolated supervisor run directory",
+            )
+            root = LinuxFilesystemSyscalls.openRoot(request.worker.runDirectory)
+            if (!Files.isSameFile(
+                    request.worker.runDirectory,
+                    LinuxFilesystemSyscalls.stableDescriptorPath(root.fd),
+                ) || identity != Files.readAttributes(
+                    request.worker.runDirectory,
+                    java.nio.file.attribute.BasicFileAttributes::class.java,
+                    LinkOption.NOFOLLOW_LINKS,
+                ).fileKey()
+            ) {
+                isolationFail("isolated supervisor run directory changed during startup")
+            }
+            requirePrivateDirectory(root, "isolated supervisor run directory")
+
+            val workerProcess = ProcessBuilder(request.workerCommand())
+                .directory(request.worker.runDirectory.toFile())
+                .redirectInput(ProcessBuilder.Redirect.PIPE)
+                .redirectOutput(ProcessBuilder.Redirect.DISCARD)
+                .redirectError(ProcessBuilder.Redirect.DISCARD)
+                .also { builder ->
+                    builder.environment().clear()
+                    builder.environment()["HOME"] = request.worker.runDirectory.toString()
+                    builder.environment()["TMPDIR"] =
+                        request.worker.runDirectory.resolve(TEMP_DIRECTORY).toString()
+                }
+                .start()
+            child = workerProcess
+            workerProcess.outputStream.close()
+            val status = workerProcess.waitFor()
+            if (status != 0) isolationFail("isolated worker exited unsuccessfully")
+            writeProtocolFile(
+                root,
+                WORKER_EXITED_FILE,
+                keeperProtocol(request.worker.nonce, ProcessHandle.current().pid()),
+            )
+
+            // A successful run ends only when the parent SIGKILLs this frozen keeper. Sleeping
+            // forever makes the post-proof state allocation-free and CPU-quiescent.
+            while (true) Thread.sleep(Long.MAX_VALUE)
+        } catch (failure: Throwable) {
+            val process = child
+            if (process != null && process.isAlive) {
+                runCatching { process.destroyForcibly() }
+                runCatching {
+                    process.waitFor(WORKER_EXIT_TIMEOUT.toMillis(), TimeUnit.MILLISECONDS)
+                }
+            }
+            val descriptor = root
+            val token = nonce
+            if (descriptor != null && token != null) {
+                runCatching {
+                    writeProtocolFile(descriptor, SUPERVISOR_FAILURE_FILE, encodeFailure(token, failure))
+                }
+                runCatching { Thread.sleep(WORKER_FAILURE_OBSERVATION_MILLIS) }
+            }
+            runCatching { descriptor?.close() }
+            System.err.println("isolated function-observation supervisor failed safely")
+            Runtime.getRuntime().halt(SUPERVISOR_FAILURE_EXIT)
+        }
+    }
+}
+
+private data class IsolatedObservationPaths(
+    val richArtifact: Path,
+    val inventory: Path,
+    val scopeFiles: FullTreeFunctionObservationScopeFiles,
+    val scratchParent: Path,
+    val output: Path,
+) {
+    companion object {
+        fun normalize(
+            richArtifact: Path,
+            inventory: Path,
+            scopeFiles: FullTreeFunctionObservationScopeFiles,
+            scratchParent: Path,
+            output: Path,
+        ): IsolatedObservationPaths = IsolatedObservationPaths(
+            richArtifact.toAbsolutePath().normalize(),
+            inventory.toAbsolutePath().normalize(),
+            FullTreeFunctionObservationScopeFiles(
+                scopeFiles.scope.toAbsolutePath().normalize(),
+                scopeFiles.sourceLock.toAbsolutePath().normalize(),
+                scopeFiles.artifactManifest.toAbsolutePath().normalize(),
+            ),
+            scratchParent.toAbsolutePath().normalize(),
+            output.toAbsolutePath().normalize(),
+        )
+    }
+}
+
+private data class IsolatedObservationResources(
+    val maximumResidentBytes: Long,
+    val maximumAddressSpaceBytes: Long,
+    val maximumOutputBytes: Long,
+    val maximumDatabaseBytes: Long,
+    val maximumFileBytes: Long,
+    val maximumEntities: Long,
+    val cpuSeconds: Long,
+    val wallSeconds: Long,
+    val serviceRuntimeSeconds: Long,
+    val cleanupLimits: AcpRuntimeClosureLimits,
+) {
+    companion object {
+        fun derive(
+            scope: AuthenticatedFullTreeScope,
+            classPathBytes: Long,
+        ): IsolatedObservationResources {
+            val perShard = scope.document.controlObject("bounds").controlObject("perShard")
+            val authenticatedOutput = perShard.controlLong("serializedBytes")
+            val maximumOutput = minOf(authenticatedOutput, ISOLATED_PUBLISHER_LIMITS.maximumOutputBytes)
+            if (maximumOutput <= 0L) isolationFail("authenticated isolated output bound is empty")
+            val expanded = multiplyExact(authenticatedOutput, SQLITE_EXPANSION, "SQLite scratch bound")
+            val maximumDatabase = minOf(expanded, ISOLATED_PUBLISHER_LIMITS.maximumDatabaseBytes)
+            val resident = perShard.controlLong("maximumResidentBytes")
+            val entities = perShard.controlLong("entities")
+            val cpu = perShard.controlLong("cpuSeconds")
+            val wall = perShard.controlLong("wallClockSeconds")
+            if (resident < MINIMUM_WORKER_MEMORY_BYTES || entities <= 0L || cpu <= 0L || wall <= 0L) {
+                isolationFail("authenticated isolated runtime bounds are not usable")
+            }
+            val runtimeOverhead = listOf(
+                WORKER_START_TIMEOUT,
+                WORKER_ACK_TIMEOUT,
+                WORKER_EXIT_TIMEOUT,
+                WORKER_EXIT_TIMEOUT,
+                CGROUP_FREEZE_TIMEOUT,
+                SERVICE_CLEANUP_TIMEOUT,
+            ).fold(0L) { total, timeout ->
+                addExact(total, timeout.seconds, "systemd runtime overhead")
+            }
+            val runtime = addExact(wall, runtimeOverhead, "systemd runtime bound")
+            val cleanupBytes = isolatedObservationCleanupBytes(
+                maximumOutput,
+                maximumDatabase,
+                DEFAULT_CONTROL_LIMITS.maximumDwarfScratchBytes,
+                addExact(
+                    PROTOCOL_CLEANUP_ALLOWANCE_BYTES,
+                    classPathBytes,
+                    "private cleanup runtime allowance",
+                ),
+            )
+            val maximumFile = maxOf(
+                maximumOutput,
+                maximumDatabase,
+                DEFAULT_CONTROL_LIMITS.maximumDwarfSectionBytes,
+            )
+            val modeledAddressSpace = multiplyExact(resident, ADDRESS_SPACE_FACTOR, "address-space backstop")
+            val addressSpace = minOf(
+                maxOf(MINIMUM_WORKER_ADDRESS_SPACE_BYTES, modeledAddressSpace),
+                MAXIMUM_WORKER_ADDRESS_SPACE_BYTES,
+            )
+            if (addressSpace < resident) isolationFail("isolated address-space backstop is below resident memory")
+            return IsolatedObservationResources(
+                resident,
+                addressSpace,
+                maximumOutput,
+                maximumDatabase,
+                maximumFile,
+                entities,
+                cpu,
+                wall,
+                runtime,
+                AcpRuntimeClosureLimits(
+                    maximumEntries = MAXIMUM_PRIVATE_ENTRIES,
+                    maximumUserOwnedFileBytes = cleanupBytes,
+                    maximumDepth = MAXIMUM_PRIVATE_DEPTH,
+                ),
+            )
+        }
+    }
+}
+
+private data class IsolatedWorkerRequest(
+    val nonce: String,
+    val paths: IsolatedObservationPaths,
+    val shardId: String,
+    val runDirectory: Path,
+) {
+    fun arguments(): List<String> = listOf(
+        WORKER_PROTOCOL_VERSION,
+        nonce,
+        paths.richArtifact.toString(),
+        paths.inventory.toString(),
+        paths.scopeFiles.scope.toString(),
+        paths.scopeFiles.sourceLock.toString(),
+        paths.scopeFiles.artifactManifest.toString(),
+        shardId,
+        runDirectory.toString(),
+    )
+
+    companion object {
+        fun parse(arguments: Array<String>): IsolatedWorkerRequest {
+            if (arguments.size != WORKER_ARGUMENTS || arguments[0] != WORKER_PROTOCOL_VERSION) {
+                isolationFail("isolated worker request has an unsupported shape")
+            }
+            val nonce = arguments[1]
+            if (!nonce.matches(PROTOCOL_NONCE)) isolationFail("isolated worker nonce is invalid")
+            val absolute = arguments.slice(2..6).map { value ->
+                Path.of(value).also { path ->
+                    if (!path.isAbsolute || path.normalize() != path) {
+                        isolationFail("isolated worker input path is not absolute and normalized")
+                    }
+                }
+            }
+            val shardId = arguments[7]
+            if (!shardId.matches(SHARD_IDENTIFIER)) isolationFail("isolated worker shard identifier is invalid")
+            val run = Path.of(arguments[8])
+            if (!run.isAbsolute || run.normalize() != run) {
+                isolationFail("isolated worker run path is not absolute and normalized")
+            }
+            return IsolatedWorkerRequest(
+                nonce,
+                IsolatedObservationPaths(
+                    absolute[0],
+                    absolute[1],
+                    FullTreeFunctionObservationScopeFiles(absolute[2], absolute[3], absolute[4]),
+                    run.parent ?: isolationFail("isolated worker run path has no parent"),
+                    run.resolve(CANDIDATE_FILE),
+                ),
+                shardId,
+                run,
+            )
+        }
+    }
+}
+
+private data class IsolatedSupervisorRequest(
+    val javaExecutable: Path,
+    val classPath: String,
+    val worker: IsolatedWorkerRequest,
+) {
+    fun workerCommand(): List<String> = buildList {
+        add(javaExecutable.toString())
+        add("-XX:+UseSerialGC")
+        add("-XX:ActiveProcessorCount=1")
+        add("-XX:-UsePerfData")
+        add("-XX:MaxRAMPercentage=50")
+        add("-Djava.io.tmpdir=${worker.runDirectory.resolve(TEMP_DIRECTORY)}")
+        add("-classpath")
+        add(classPath)
+        add(FullTreeFunctionObservationIsolatedWorker::class.java.name)
+        addAll(worker.arguments())
+    }
+
+    companion object {
+        fun parse(arguments: Array<String>): IsolatedSupervisorRequest {
+            if (
+                arguments.size != SUPERVISOR_ARGUMENTS ||
+                arguments[0] != SUPERVISOR_PROTOCOL_VERSION
+            ) isolationFail("isolated supervisor request has an unsupported shape")
+            val javaExecutable = Path.of(arguments[1])
+            if (
+                !javaExecutable.isAbsolute || javaExecutable.normalize() != javaExecutable ||
+                !Files.isRegularFile(javaExecutable, LinkOption.NOFOLLOW_LINKS) ||
+                !Files.isExecutable(javaExecutable)
+            ) isolationFail("isolated supervisor Java executable is unavailable")
+            val classPath = arguments[2]
+            if (
+                classPath.toByteArray(Charsets.UTF_8).size > MAXIMUM_CLASSPATH_BYTES ||
+                classPath != System.getProperty("java.class.path")
+            ) isolationFail("isolated supervisor class path differs from its launch boundary")
+            val entries = classPath.split(java.io.File.pathSeparator)
+                .filter(String::isNotEmpty)
+                .map { Path.of(it) }
+            if (validatedClassPath(entries) != classPath) {
+                isolationFail("isolated supervisor class path is not canonical")
+            }
+            return IsolatedSupervisorRequest(
+                javaExecutable = javaExecutable,
+                classPath = classPath,
+                worker = IsolatedWorkerRequest.parse(arguments.copyOfRange(3, arguments.size)),
+            )
+        }
+    }
+}
+
+private class ParentObservationInputGuards private constructor(
+    private val scope: StableControlFile,
+    private val sourceLock: StableControlFile,
+    private val manifest: StableControlFile,
+    private val inventory: StableControlFile,
+    private val rich: StableControlFile,
+    private val initialScopeSha256: String,
+    private val initialSourceLockSha256: String,
+    private val initialManifestSha256: String,
+    val inventorySha256: String,
+    val richSha256: String,
+) : AutoCloseable {
+    fun verifyDigests(receipt: FullTreeFunctionObservationPublishedShard) {
+        if (
+            scope.sha256(label = "isolated scope before publication") != initialScopeSha256 ||
+            sourceLock.sha256(label = "isolated source lock before publication") != initialSourceLockSha256 ||
+            manifest.sha256(label = "isolated manifest before publication") != initialManifestSha256 ||
+            inventory.sha256(label = "isolated inventory before publication") != inventorySha256 ||
+            rich.sha256(label = "isolated rich artifact before publication") != richSha256
+        ) isolationFail("authenticated isolated inputs changed before parent publication")
+        if (
+            receipt.scopeSha256 != initialScopeSha256 ||
+            receipt.inventoryArtifactSha256 != inventorySha256 ||
+            receipt.richArtifactSha256 != richSha256
+        ) isolationFail("isolated worker receipt is not bound to the parent's pinned inputs")
+        verifyMetadata()
+    }
+
+    fun verifyMetadata() {
+        scope.verifyUnchanged("isolated scope during publication")
+        sourceLock.verifyUnchanged("isolated source lock during publication")
+        manifest.verifyUnchanged("isolated manifest during publication")
+        inventory.verifyUnchanged("isolated inventory during publication")
+        rich.verifyUnchanged("isolated rich artifact during publication")
+    }
+
+    override fun close() {
+        var failure: Throwable? = null
+        listOf(rich, inventory, manifest, sourceLock, scope).forEach { guard ->
+            try {
+                guard.close()
+            } catch (closeFailure: Throwable) {
+                if (failure == null) failure = closeFailure else failure.addSuppressed(closeFailure)
+            }
+        }
+        failure?.let { throw it }
+    }
+
+    companion object {
+        fun open(
+            paths: IsolatedObservationPaths,
+            authenticated: AuthenticatedFullTreeScope,
+        ): ParentObservationInputGuards {
+            val opened = ArrayDeque<StableControlFile>()
+            try {
+                fun guard(path: Path, maximum: Long, label: String): StableControlFile =
+                    StableControlFile.open(path, maximum, label).also(opened::addFirst)
+                val scope = guard(paths.scopeFiles.scope, DEFAULT_CONTROL_LIMITS.maximumScopeBytes.toLong(), "scope")
+                val lock = guard(
+                    paths.scopeFiles.sourceLock,
+                    DEFAULT_CONTROL_LIMITS.maximumSourceLockBytes.toLong(),
+                    "source lock",
+                )
+                val manifest = guard(
+                    paths.scopeFiles.artifactManifest,
+                    DEFAULT_CONTROL_LIMITS.maximumArtifactManifestBytes.toLong(),
+                    "artifact manifest",
+                )
+                val inventory = guard(
+                    paths.inventory,
+                    DEFAULT_CONTROL_LIMITS.maximumInventoryBytes.toLong(),
+                    "function-observation inventory",
+                )
+                val rich = guard(
+                    paths.richArtifact,
+                    DEFAULT_CONTROL_LIMITS.maximumRichArtifactBytes,
+                    "function-observation rich artifact",
+                )
+                val scopeSha = scope.sha256(label = "isolated scope at authorization")
+                val lockSha = lock.sha256(label = "isolated source lock at authorization")
+                val manifestSha = manifest.sha256(label = "isolated manifest at authorization")
+                val inventorySha = inventory.sha256(label = "isolated inventory at authorization")
+                val richSha = rich.sha256(label = "isolated rich artifact at authorization")
+                if (
+                    scopeSha != authenticated.sha256 || lockSha != authenticated.sourceLockSha256 ||
+                    manifestSha != authenticated.artifactManifestSha256
+                ) isolationFail("parent control snapshots differ from the authenticated isolated scope")
+                if (
+                    richSha != authenticated.document.controlObject("oracle")
+                        .controlString("richArtifactSha256")
+                ) isolationFail("parent rich artifact differs from the authenticated isolated scope")
+                opened.clear()
+                return ParentObservationInputGuards(
+                    scope,
+                    lock,
+                    manifest,
+                    inventory,
+                    rich,
+                    scopeSha,
+                    lockSha,
+                    manifestSha,
+                    inventorySha,
+                    richSha,
+                )
+            } catch (failure: Throwable) {
+                opened.forEach { guard -> runCatching { guard.close() }.exceptionOrNull()?.let(failure::addSuppressed) }
+                throw failure
+            }
+        }
+    }
+}
+
+/** Fresh descriptor-pinned disk tree; cleanup is bounded and rejects links or special files. */
+private class PrivateObservationRunTree private constructor(
+    val path: Path,
+    private val parent: Path,
+    private val parentIdentity: Any,
+    private val parentDescriptor: LinuxDescriptor,
+    private val name: String,
+    val descriptor: LinuxDescriptor,
+    private val cleanupLimits: AcpRuntimeClosureLimits,
+) : AutoCloseable {
+    private var removed = false
+
+    fun materializeClassPath(
+        entries: List<Pair<FullTreeFunctionObservationClassPathEntry, StableControlFile>>,
+    ): MaterializedObservationClassPath {
+        val paths = mutableListOf<Path>()
+        val expected = mutableListOf<Pair<Long, String>>()
+        LinuxFilesystemSyscalls.openDirectoryAt(descriptor.fd, RUNTIME_DIRECTORY).use { runtime ->
+            entries.forEachIndexed { index, (entry, source) ->
+                val name = "classpath-$index.jar"
+                val target = runtime.whileOpen { fd ->
+                    LinuxFilesystemSyscalls.createRegularFile(fd, name, OWNER_READ_WRITE_MODE)
+                }
+                try {
+                    val digest = MessageDigest.getInstance("SHA-256")
+                    FileChannel.open(
+                        LinuxFilesystemSyscalls.stableDescriptorPath(target.fd),
+                        StandardOpenOption.WRITE,
+                        StandardOpenOption.TRUNCATE_EXISTING,
+                    ).use { output ->
+                        source.slice().use { input ->
+                            val bytes = ByteArray(COPY_BUFFER_BYTES)
+                            var total = 0L
+                            while (true) {
+                                val count = input.read(bytes)
+                                if (count < 0) break
+                                if (count == 0) continue
+                                digest.update(bytes, 0, count)
+                                var buffer = ByteBuffer.wrap(bytes, 0, count)
+                                while (buffer.hasRemaining()) output.write(buffer)
+                                total = addExact(total, count.toLong(), "materialized class-path bytes")
+                            }
+                            if (total != source.size) {
+                                isolationFail("authenticated class-path snapshot has the wrong byte count")
+                            }
+                        }
+                        output.force(true)
+                    }
+                    val actualDigest = digest.digest().hex()
+                    if (actualDigest != entry.expectedSha256) {
+                        isolationFail("authenticated class-path snapshot has the wrong digest")
+                    }
+                    LinuxFilesystemSyscalls.chmod(target, OWNER_READ_ONLY_MODE)
+                    LinuxFilesystemSyscalls.synchronize(target)
+                    paths.add(path.resolve(RUNTIME_DIRECTORY).resolve(name))
+                    expected += source.size to actualDigest
+                } finally {
+                    target.close()
+                }
+            }
+            LinuxFilesystemSyscalls.synchronize(runtime)
+        }
+        return MaterializedObservationClassPath(paths, expected).also {
+            it.verify("immediately after snapshotting")
+        }
+    }
+
+    fun cleanAndRemove() {
+        if (removed) return
+        requireParent("before isolated run-tree cleanup")
+        requireNamedRoot("before isolated run-tree cleanup")
+        deletePrivateTreeContents(descriptor, cleanupLimits)
+        if (LinuxFilesystemSyscalls.directoryEntryNames(descriptor, 1).isNotEmpty()) {
+            isolationFail("isolated run tree is not empty after bounded cleanup")
+        }
+        val quarantine = ".function-observation-run-delete-${UUID.randomUUID()}"
+        parentDescriptor.whileOpen { parentFd ->
+            LinuxFilesystemSyscalls.renameNoReplace(parentFd, name, quarantine)
+            LinuxFilesystemSyscalls.openDirectoryAt(parentFd, quarantine).use { selected ->
+                val pinned = LinuxFilesystemSyscalls.identity(descriptor.fd)
+                if (!sameDirectory(pinned, selected.identity)) {
+                    isolationFail("isolated run-tree cleanup selected a replacement directory")
+                }
+            }
+            LinuxFilesystemSyscalls.removeDirectory(parentFd, quarantine)
+            LinuxFilesystemSyscalls.openPathAtOrNull(parentFd, name)?.use {
+                isolationFail("isolated run tree remains linked after cleanup")
+            }
+            LinuxFilesystemSyscalls.openPathAtOrNull(parentFd, quarantine)?.use {
+                isolationFail("isolated run-tree quarantine remains linked after cleanup")
+            }
+        }
+        LinuxFilesystemSyscalls.synchronize(parentDescriptor)
+        if (LinuxFilesystemSyscalls.identity(descriptor.fd).linkCount != 0) {
+            isolationFail("isolated run-tree descriptor remains linked after cleanup")
+        }
+        removed = true
+    }
+
+    private fun requireParent(label: String) {
+        val (_, current) = requireStableDirectory(parent, "isolated scratch parent")
+        if (current != parentIdentity) isolationFail("isolated scratch parent changed $label")
+        parentDescriptor.whileOpen { fd ->
+            if (!Files.isSameFile(parent, LinuxFilesystemSyscalls.stableDescriptorPath(fd))) {
+                isolationFail("isolated scratch parent changed $label")
+            }
+        }
+    }
+
+    private fun requireNamedRoot(label: String) {
+        parentDescriptor.whileOpen { fd ->
+            LinuxFilesystemSyscalls.openDirectoryAt(fd, name).use { selected ->
+                val pinned = LinuxFilesystemSyscalls.identity(descriptor.fd)
+                if (!sameDirectory(pinned, selected.identity)) isolationFail("isolated run tree changed $label")
+            }
+        }
+        requirePrivateDirectory(descriptor, "isolated run tree")
+    }
+
+    override fun close() {
+        var failure: Throwable? = null
+        try {
+            cleanAndRemove()
+        } catch (cleanupFailure: Throwable) {
+            failure = cleanupFailure
+        }
+        try {
+            descriptor.close()
+        } catch (closeFailure: Throwable) {
+            if (failure == null) failure = closeFailure else failure.addSuppressed(closeFailure)
+        }
+        try {
+            parentDescriptor.close()
+        } catch (closeFailure: Throwable) {
+            if (failure == null) failure = closeFailure else failure.addSuppressed(closeFailure)
+        }
+        failure?.let { throw it }
+    }
+
+    companion object {
+        fun create(
+            scratchParent: Path,
+            resources: IsolatedObservationResources,
+        ): PrivateObservationRunTree {
+            LinuxFilesystemSyscalls.requireSupported(scratchParent)
+            val (parent, identity) = requireStableDirectory(scratchParent, "isolated scratch parent")
+            val fileSystemType = try {
+                Files.getFileStore(parent).type().lowercase(java.util.Locale.ROOT)
+            } catch (failure: Exception) {
+                throw FullTreeFunctionObservationIsolationException(
+                    "cannot prove the isolated scratch filesystem type",
+                    failure,
+                )
+            }
+            if (fileSystemType in MEMORY_BACKED_FILE_SYSTEMS) {
+                isolationFail("isolated SQLite scratch must be disk-backed, not $fileSystemType")
+            }
+            val parentDescriptor = LinuxFilesystemSyscalls.openRoot(parent)
+            try {
+                if (!Files.isSameFile(parent, LinuxFilesystemSyscalls.stableDescriptorPath(parentDescriptor.fd))) {
+                    isolationFail("isolated scratch parent changed during authorization")
+                }
+                repeat(MAXIMUM_RUN_NAME_ATTEMPTS) {
+                    val name = ".function-observation-run-${randomHex(RUN_RANDOM_BYTES)}"
+                    try {
+                        parentDescriptor.whileOpen { fd ->
+                            LinuxFilesystemSyscalls.createDirectory(fd, name, OWNER_DIRECTORY_MODE)
+                        }
+                    } catch (failure: LinuxSyscallException) {
+                        if (failure.errno == LinuxFilesystemSyscalls.EEXIST) return@repeat
+                        throw failure
+                    }
+                    val root = parentDescriptor.whileOpen { fd ->
+                        LinuxFilesystemSyscalls.openDirectoryAt(fd, name)
+                    }
+                    try {
+                        LinuxFilesystemSyscalls.chmod(root, OWNER_DIRECTORY_MODE)
+                        requirePrivateDirectory(root, "created isolated run tree")
+                        if (root.identity.mountId != parentDescriptor.identity.mountId) {
+                            isolationFail("isolated run tree crossed its disk-backed scratch mount")
+                        }
+                        root.whileOpen { fd ->
+                            LinuxFilesystemSyscalls.createDirectory(fd, SCRATCH_DIRECTORY, OWNER_DIRECTORY_MODE)
+                            LinuxFilesystemSyscalls.createDirectory(fd, TEMP_DIRECTORY, OWNER_DIRECTORY_MODE)
+                            LinuxFilesystemSyscalls.createDirectory(fd, RUNTIME_DIRECTORY, OWNER_DIRECTORY_MODE)
+                        }
+                        LinuxFilesystemSyscalls.openDirectoryAt(root.fd, SCRATCH_DIRECTORY).use {
+                            LinuxFilesystemSyscalls.chmod(it, OWNER_DIRECTORY_MODE)
+                            requirePrivateDirectory(it, "isolated SQLite scratch directory")
+                        }
+                        LinuxFilesystemSyscalls.openDirectoryAt(root.fd, TEMP_DIRECTORY).use {
+                            LinuxFilesystemSyscalls.chmod(it, OWNER_DIRECTORY_MODE)
+                            requirePrivateDirectory(it, "isolated JVM temporary directory")
+                        }
+                        LinuxFilesystemSyscalls.openDirectoryAt(root.fd, RUNTIME_DIRECTORY).use {
+                            LinuxFilesystemSyscalls.chmod(it, OWNER_DIRECTORY_MODE)
+                            requirePrivateDirectory(it, "isolated authenticated runtime directory")
+                        }
+                        LinuxFilesystemSyscalls.synchronize(root)
+                        LinuxFilesystemSyscalls.synchronize(parentDescriptor)
+                        return PrivateObservationRunTree(
+                            parent.resolve(name),
+                            parent,
+                            identity,
+                            parentDescriptor,
+                            name,
+                            root,
+                            resources.cleanupLimits,
+                        )
+                    } catch (failure: Throwable) {
+                        runCatching { deletePrivateTreeContents(root, resources.cleanupLimits) }
+                            .exceptionOrNull()?.let(failure::addSuppressed)
+                        runCatching { root.close() }.exceptionOrNull()?.let(failure::addSuppressed)
+                        runCatching {
+                            parentDescriptor.whileOpen { fd -> LinuxFilesystemSyscalls.removeDirectory(fd, name) }
+                        }.exceptionOrNull()?.let(failure::addSuppressed)
+                        throw failure
+                    }
+                }
+                isolationFail("cannot allocate a unique isolated run directory")
+            } catch (failure: Throwable) {
+                parentDescriptor.close()
+                throw failure
+            }
+        }
+    }
+}
+
+private class TrustedObservationBoundary(
+    private val configuration: FullTreeFunctionObservationIsolationConfiguration,
+    private val authenticatedRuntime: AuthenticatedObservationRuntime,
+    private val materializedClassPath: MaterializedObservationClassPath,
+) : AutoCloseable {
+    private val java = PinnedSecurityExecutable.pin(
+        configuration.javaExecutable,
+        "isolated Java runtime",
+        configuration.expectedJavaSha256,
+    )
+    private val bubblewrap = PinnedSecurityExecutable.pin(
+        configuration.bubblewrapExecutable,
+        "isolated bubblewrap boundary",
+        configuration.expectedBubblewrapSha256,
+    )
+    private val resourceLimiter = PinnedSecurityExecutable.pin(
+        configuration.resourceLimiterExecutable,
+        "isolated resource limiter",
+        configuration.expectedResourceLimiterSha256,
+    )
+    private val supervisor = PinnedSecurityExecutable.pin(
+        configuration.scopeSupervisorExecutable,
+        "isolated scope supervisor",
+        configuration.expectedScopeSupervisorSha256,
+    )
+    private val inspector = PinnedSecurityExecutable.pin(
+        configuration.scopeInspectorExecutable,
+        "isolated scope inspector",
+        configuration.expectedScopeInspectorSha256,
+    )
+    private val bus = PinnedSystemdBusEndpoint.pin(configuration.systemdUserRuntimeDirectory)
+    private var active: ManagedObservationUnit? = null
+
+    init {
+        probeBoundaries()
+    }
+
+    fun launch(
+        request: IsolatedWorkerRequest,
+        resources: IsolatedObservationResources,
+    ): ManagedObservationUnit {
+        check(active == null) { "one isolation boundary may launch only one worker" }
+        requireUnchanged()
+        authenticatedRuntime.verify("at isolated boundary launch")
+        materializedClassPath.verify("at isolated boundary launch")
+        val unitName = "decomp-oracle-function-${UUID.randomUUID()}.scope"
+        val controller = ObservationSystemdController(inspector, bus, unitName)
+        controller.requireAbsent()
+        val worker = buildWorkerCommand(request, resources)
+        val scoped = buildScopeCommand(unitName, resources, worker)
+        val command = buildResourceLimitedCommand(resources, scoped)
+        var process: Process? = null
+        var processHandle: decompengine.acp.LinuxProcessDescriptor? = null
+        try {
+            val started = ProcessBuilder(command)
+                .redirectInput(ProcessBuilder.Redirect.PIPE)
+                .redirectOutput(ProcessBuilder.Redirect.DISCARD)
+                .redirectError(ProcessBuilder.Redirect.DISCARD)
+                .also { builder ->
+                    builder.environment().clear()
+                    builder.environment().putAll(bus.controlEnvironment)
+                }
+                .start()
+            process = started
+            val pinnedProcess = LinuxFilesystemSyscalls.openProcessHandle(started.pid())
+            processHandle = pinnedProcess
+            if (!started.isAlive) isolationFail("isolated local scope process exited before pidfd pinning")
+            started.outputStream.close()
+            val managed = ManagedObservationUnit(
+                controller,
+                request.runDirectory,
+                request.nonce,
+                bubblewrap,
+                java,
+                resources,
+                started,
+                pinnedProcess,
+                configuration.systemdUserRuntimeDirectory,
+            )
+            processHandle = null
+            managed.awaitScopeAttached()
+            requireUnchanged()
+            authenticatedRuntime.verify("immediately after isolated scope attachment")
+            materializedClassPath.verify("immediately after isolated scope attachment")
+            return managed.also { active = it }
+        } catch (failure: Throwable) {
+            runCatching { controller.killStopAndRequireAbsent(null, process, processHandle) }
+                .exceptionOrNull()?.let(failure::addSuppressed)
+            runCatching { processHandle?.close() }.exceptionOrNull()?.let(failure::addSuppressed)
+            throw failure
+        }
+    }
+
+    internal fun buildWorkerCommand(
+        request: IsolatedWorkerRequest,
+        resources: IsolatedObservationResources,
+    ): List<String> {
+        val readOnlyInputs = listOf(
+            request.paths.richArtifact,
+            request.paths.inventory,
+            request.paths.scopeFiles.scope,
+            request.paths.scopeFiles.sourceLock,
+            request.paths.scopeFiles.artifactManifest,
+        ).distinct()
+        if (readOnlyInputs.any { it.startsWith(configuration.systemdUserRuntimeDirectory) }) {
+            isolationFail("isolated inputs must not expose the systemd session runtime")
+        }
+        val mounts = authenticatedRuntime.mounts()
+        val javaRelative = configuration.javaRuntime.source.relativize(java.path)
+        val sandboxJava = configuration.javaRuntime.destination.resolve(javaRelative).normalize()
+        requireSyntheticMountPlan(mounts, readOnlyInputs, request.runDirectory)
+        val destinations = mounts.map { it.destination } + readOnlyInputs +
+            materializedClassPath.paths + listOf(request.runDirectory)
+        val directories = syntheticDestinationParents(destinations)
+        return buildList {
+            add(bubblewrap.path.toString())
+            addAll(listOf("--die-with-parent", "--new-session", "--unshare-all", "--unshare-user"))
+            addAll(listOf("--disable-userns", "--assert-userns-disabled", "--clearenv"))
+            addAll(listOf("--cap-drop", "ALL", "--hostname", "decomp-oracle"))
+            addAll(listOf("--tmpfs", "/"))
+            directories.forEach { directory -> addAll(listOf("--dir", directory.toString())) }
+            mounts.forEach { mount ->
+                addAll(listOf("--ro-bind", mount.source.toString(), mount.destination.toString()))
+            }
+            readOnlyInputs.forEach { input ->
+                addAll(listOf("--ro-bind", input.toString(), input.toString()))
+            }
+            addAll(listOf("--bind", request.runDirectory.toString(), request.runDirectory.toString()))
+            materializedClassPath.paths.forEach { entry ->
+                addAll(listOf("--ro-bind", entry.toString(), entry.toString()))
+            }
+            addAll(listOf("--proc", "/proc", "--dev", "/dev"))
+            addAll(listOf("--chdir", request.runDirectory.toString()))
+            addAll(listOf("--setenv", "HOME", request.runDirectory.toString()))
+            addAll(listOf("--setenv", "TMPDIR", request.runDirectory.resolve(TEMP_DIRECTORY).toString()))
+            add("--")
+            add(sandboxJava.toString())
+            add("-Xms16m")
+            add("-Xmx64m")
+            add("-XX:+UseSerialGC")
+            add("-XX:ActiveProcessorCount=1")
+            add("-XX:-UsePerfData")
+            add("-XX:MaxMetaspaceSize=64m")
+            add("-XX:ReservedCodeCacheSize=32m")
+            add("-XX:MaxDirectMemorySize=16m")
+            add("-Djava.io.tmpdir=${request.runDirectory.resolve(TEMP_DIRECTORY)}")
+            add("-classpath")
+            add(materializedClassPath.encoded)
+            add(FullTreeFunctionObservationIsolatedSupervisor::class.java.name)
+            add(SUPERVISOR_PROTOCOL_VERSION)
+            add(sandboxJava.toString())
+            add(materializedClassPath.encoded)
+            addAll(request.arguments())
+        }
+    }
+
+    private fun requireSyntheticMountPlan(
+        mounts: List<FullTreeFunctionObservationRuntimeMount>,
+        readOnlyInputs: List<Path>,
+        runDirectory: Path,
+    ) {
+        val reserved = listOf(Path.of("/proc"), Path.of("/dev"), configuration.systemdUserRuntimeDirectory)
+        if (reserved.any { pathsOverlap(runDirectory, it) }) {
+            isolationFail("isolated writable run tree overlaps a reserved synthetic-root path")
+        }
+        readOnlyInputs.forEach { input ->
+            if (pathsOverlap(input, runDirectory) || reserved.any { pathsOverlap(input, it) }) {
+                isolationFail("isolated input overlaps writable or reserved synthetic-root authority")
+            }
+        }
+        mounts.forEach { mount ->
+            if (
+                pathsOverlap(mount.destination, runDirectory) ||
+                readOnlyInputs.any { pathsOverlap(mount.destination, it) } ||
+                reserved.any { pathsOverlap(mount.destination, it) }
+            ) isolationFail("isolated runtime mount overlaps another synthetic-root authority")
+        }
+        val classPathRoot = runDirectory.resolve(RUNTIME_DIRECTORY)
+        materializedClassPath.paths.forEach { entry ->
+            if (entry.parent != classPathRoot || !Files.isRegularFile(entry, LinkOption.NOFOLLOW_LINKS)) {
+                isolationFail("isolated class-path snapshot escaped its private runtime directory")
+            }
+        }
+    }
+
+    private fun buildResourceLimitedCommand(
+        resources: IsolatedObservationResources,
+        command: List<String>,
+    ): List<String> = buildList {
+            add(resourceLimiter.path.toString())
+            add("--nproc=$RLIMIT_NPROC:$RLIMIT_NPROC")
+            add("--nofile=$RLIMIT_NOFILE:$RLIMIT_NOFILE")
+            add("--fsize=${resources.maximumFileBytes}:${resources.maximumFileBytes}")
+            add("--core=0:0")
+            add("--as=${resources.maximumAddressSpaceBytes}:${resources.maximumAddressSpaceBytes}")
+            add("--cpu=${resources.cpuSeconds}:${resources.cpuSeconds}")
+            add("--")
+            addAll(command)
+    }
+
+    internal fun buildScopeCommand(
+        unitName: String,
+        resources: IsolatedObservationResources,
+        worker: List<String>,
+    ): List<String> = buildList {
+        add(supervisor.path.toString())
+        add("--user")
+        add("--scope")
+        add("--quiet")
+        add("--collect")
+        add("--expand-environment=no")
+        add("--unit=$unitName")
+        add("--property=TasksMax=$CGROUP_TASKS_MAX")
+        add("--property=MemoryMax=${resources.maximumResidentBytes}")
+        add("--property=MemorySwapMax=0")
+        add("--property=OOMPolicy=kill")
+        add("--property=CPUQuota=100%")
+        add("--property=KillMode=control-group")
+        add("--property=SendSIGKILL=yes")
+        add("--property=RuntimeMaxSec=${resources.serviceRuntimeSeconds}s")
+        add("--property=TimeoutStopSec=${SERVICE_CLEANUP_TIMEOUT.seconds}s")
+        add("--property=Delegate=no")
+        add("--")
+        addAll(worker)
+    }
+
+    private fun probeBoundaries() {
+        requireUnchanged()
+        val bwrapVersion = runTrustedCommand(
+            listOf(bubblewrap.path.toString(), "--version"),
+            emptyMap(),
+            PROBE_TIMEOUT,
+            "bubblewrap version probe",
+        )
+        if (bwrapVersion.exitCode != 0 || !bwrapVersion.output.trim().matches(BUBBLEWRAP_VERSION)) {
+            isolationFail("configured isolated bubblewrap returned an unrecognized version")
+        }
+        val bwrapHelp = runTrustedCommand(
+            listOf(bubblewrap.path.toString(), "--help"),
+            emptyMap(),
+            PROBE_TIMEOUT,
+            "bubblewrap feature probe",
+        )
+        REQUIRED_BWRAP_OPTIONS.forEach { option ->
+            if (option !in bwrapHelp.output) isolationFail("isolated bubblewrap lacks $option")
+        }
+        val prlimit = runTrustedCommand(
+            listOf(resourceLimiter.path.toString(), "--version"),
+            emptyMap(),
+            PROBE_TIMEOUT,
+            "resource-limiter version probe",
+        )
+        if (prlimit.exitCode != 0 || !prlimit.output.lineSequence().first().startsWith("prlimit from util-linux ")) {
+            isolationFail("configured isolated resource limiter is not util-linux prlimit")
+        }
+        val systemdHelp = runTrustedCommand(
+            listOf(supervisor.path.toString(), "--help"),
+            emptyMap(),
+            PROBE_TIMEOUT,
+            "systemd-run feature probe",
+        )
+        REQUIRED_SYSTEMD_RUN_OPTIONS.forEach { option ->
+            if (option !in systemdHelp.output) isolationFail("isolated systemd supervisor lacks $option")
+        }
+        val manager = ObservationSystemdController(inspector, bus, "decomp-oracle-probe.scope")
+            .managerVersion()
+        if (!manager.matches(SYSTEMD_MANAGER_VERSION)) {
+            isolationFail("systemd user manager is unavailable to the isolated worker")
+        }
+        val systemctlHelp = runTrustedCommand(
+            listOf(inspector.path.toString(), "--help"),
+            bus.controlEnvironment,
+            PROBE_TIMEOUT,
+            "systemd controller feature probe",
+        )
+        if (systemctlHelp.exitCode != 0) {
+            isolationFail("configured systemd controller did not provide help")
+        }
+        REQUIRED_SYSTEMCTL_COMMANDS.forEach { command ->
+            if (!Regex("(?m)^\\s+$command(?:\\s|$)").containsMatchIn(systemctlHelp.output)) {
+                isolationFail("isolated systemd controller lacks $command")
+            }
+        }
+        requireUnchanged()
+    }
+
+    private fun requireUnchanged() {
+        java.requireUnchanged()
+        bubblewrap.requireUnchanged()
+        resourceLimiter.requireUnchanged()
+        supervisor.requireUnchanged()
+        inspector.requireUnchanged()
+        bus.requireUnchanged()
+    }
+
+    fun verifyExecutablesForPublication() {
+        requireUnchanged()
+        authenticatedRuntime.verify("before parent publication")
+    }
+
+    override fun close() {
+        val unit = active
+        if (unit != null && !unit.cleaned) unit.close()
+    }
+}
+
+private class ObservationSystemdController(
+    private val inspector: PinnedSecurityExecutable,
+    private val bus: PinnedSystemdBusEndpoint,
+    val unitName: String,
+) {
+    fun managerVersion(): String = systemctl(
+        listOf("show", "--property=Version", "--value"),
+    ).output.trim()
+
+    fun requireAbsent() {
+        if (show()["LoadState"] != "not-found") {
+            isolationFail("random isolated systemd unit name is already in use")
+        }
+    }
+
+    fun freeze() {
+        val result = systemctl(listOf("freeze", unitName))
+        if (result.output.isNotBlank()) isolationFail("isolated systemd freeze was not quiet")
+    }
+
+    fun killFrozenKeeper() {
+        val result = systemctl(
+            listOf("kill", "--kill-whom=all", "--signal=SIGKILL", unitName),
+        )
+        if (result.output.isNotBlank()) isolationFail("isolated frozen-keeper kill was not quiet")
+    }
+
+    fun show(): Map<String, String> {
+        val result = systemctl(
+            listOf(
+                "show",
+                unitName,
+                "--property=${SYSTEMD_PROPERTIES.joinToString(",")}",
+            ),
+            allowedExitCodes = setOf(0, 1, 4),
+        )
+        val values = linkedMapOf<String, String>()
+        result.output.lineSequence().filter(String::isNotBlank).forEach { line ->
+            if ('=' !in line) isolationFail("systemd returned malformed isolated unit metadata")
+            val name = line.substringBefore('=')
+            if (name !in SYSTEMD_PROPERTIES || values.put(name, line.substringAfter('=')) != null) {
+                isolationFail("systemd returned duplicate or unexpected isolated unit metadata")
+            }
+        }
+        return values
+    }
+
+    fun killStopAndRequireAbsent(
+        knownCgroup: Path? = null,
+        process: Process? = null,
+        processHandle: decompengine.acp.LinuxProcessDescriptor? = null,
+    ) {
+        val deadline = deadlineAfter(SERVICE_CLEANUP_TIMEOUT, "systemd cleanup")
+        var last: Throwable? = null
+        var exactCgroup = knownCgroup
+        while (System.nanoTime() < deadline) {
+            runCatching {
+                if (processHandle != null) LinuxFilesystemSyscalls.killProcess(processHandle)
+                else if (process?.isAlive == true) process.destroyForcibly()
+            }.exceptionOrNull()?.let { last = it }
+            val before = runCatching { show() }.getOrElse { failure ->
+                last = failure
+                emptyMap()
+            }
+            before["ControlGroup"]?.takeIf(String::isNotBlank)?.let { controlGroup ->
+                runCatching { requireCgroupPathForUnit(controlGroup) }.onSuccess { discovered ->
+                    if (exactCgroup != null && exactCgroup != discovered) {
+                        isolationFail("isolated cleanup discovered a different cgroup")
+                    }
+                    exactCgroup = discovered
+                }.exceptionOrNull()?.let { last = it }
+            }
+            if (before["LoadState"] != "not-found") {
+                runObservationSystemdCleanupFallback(unitName) { arguments, allowedExitCodes ->
+                    systemctl(arguments, allowedExitCodes)
+                }
+            }
+            runCatching { process?.waitFor(SYSTEMD_POLL_MILLIS, TimeUnit.MILLISECONDS) }
+            try {
+                val absent = show()["LoadState"] == "not-found"
+                val candidates = exactCgroup?.let(::listOf) ?: findObservationCgroupsForUnit(unitName)
+                val cgroupAbsent = candidates.none { Files.exists(it, LinkOption.NOFOLLOW_LINKS) }
+                if (absent && cgroupAbsent && process?.isAlive != true) return
+            } catch (failure: Throwable) {
+                last = failure
+            }
+            Thread.sleep(SYSTEMD_POLL_MILLIS)
+        }
+        throw FullTreeFunctionObservationIsolationException(
+            "isolated systemd unit or cgroup cleanup was not proven",
+            last,
+        )
+    }
+
+    private fun requireCgroupPathForUnit(controlGroup: String): Path {
+        if (!controlGroup.startsWith('/') || controlGroup.contains('\u0000')) {
+            isolationFail("systemd returned an invalid isolated cgroup path")
+        }
+        val path = CGROUP_ROOT.resolve(controlGroup.removePrefix("/")).normalize()
+        if (!path.startsWith(CGROUP_ROOT) || path == CGROUP_ROOT || path.fileName?.toString() != unitName) {
+            isolationFail("systemd returned an unsafe isolated cgroup path")
+        }
+        return path
+    }
+
+    private fun systemctl(
+        arguments: List<String>,
+        allowedExitCodes: Set<Int> = setOf(0),
+    ): TrustedCommandResult {
+        inspector.requireUnchanged()
+        bus.requireUnchanged()
+        val result = runTrustedCommand(
+            listOf(inspector.path.toString(), "--user") + arguments,
+            bus.controlEnvironment,
+            SYSTEMD_CONTROL_TIMEOUT,
+            "isolated systemd control",
+        )
+        if (result.exitCode !in allowedExitCodes) isolationFail("isolated systemd control failed safely")
+        inspector.requireUnchanged()
+        bus.requireUnchanged()
+        return result
+    }
+}
+
+/** Ordered, best-effort teardown. Absence is still proved separately by the caller. */
+internal fun runObservationSystemdCleanupFallback(
+    unitName: String,
+    command: (arguments: List<String>, allowedExitCodes: Set<Int>) -> Unit,
+) {
+    val allowed = setOf(0, 1, 4, 5)
+    val kill = listOf("kill", "--kill-whom=all", "--signal=SIGKILL", unitName)
+    // Some manager/kernel combinations require an explicit thaw before a frozen unit can finish
+    // teardown. The second kill also covers a process that raced or survived the first attempt.
+    listOf(
+        kill,
+        listOf("thaw", unitName),
+        kill,
+        listOf("stop", unitName),
+        listOf("reset-failed", unitName),
+    ).forEach { arguments -> runCatching { command(arguments, allowed) } }
+}
+
+private data class RawObservationCgroupSample(
+    val peakResidentBytes: Long,
+    val cpuNanos: Long,
+    val memoryMaxEvents: Long,
+    val memoryOomEvents: Long,
+    val memoryOomKillEvents: Long,
+)
+
+private data class ObservationProcessIdentity(
+    val parentPid: Long,
+    val namespacePids: List<Long>,
+)
+
+internal fun requireNoHostSessionDescriptorAuthority(
+    targets: Collection<String>,
+    systemdUserRuntimeDirectory: Path,
+) {
+    val userRuntimeRoot = Path.of("/run/user")
+    targets.forEach { target ->
+        if (target.startsWith("socket:[")) {
+            isolationFail("isolated JVM inherited a Unix or network socket descriptor")
+        }
+        val liveTarget = target.removeSuffix(" (deleted)")
+        if (liveTarget.startsWith('/')) {
+            val path = runCatching { Path.of(liveTarget).normalize() }.getOrNull()
+            if (
+                path != null &&
+                (pathsOverlap(path, userRuntimeRoot) || pathsOverlap(path, systemdUserRuntimeDirectory))
+            ) isolationFail("isolated JVM inherited a host session-runtime descriptor")
+        }
+    }
+}
+
+private class ManagedObservationUnit(
+    private val controller: ObservationSystemdController,
+    private val runDirectory: Path,
+    private val nonce: String,
+    private val bubblewrap: PinnedSecurityExecutable,
+    private val java: PinnedSecurityExecutable,
+    private val resources: IsolatedObservationResources,
+    private val process: Process,
+    private val processHandle: decompengine.acp.LinuxProcessDescriptor,
+    private val systemdUserRuntimeDirectory: Path,
+) : AutoCloseable {
+    private var cgroupPath: Path? = null
+    private val mainPid: Long = process.pid()
+    private var keeperPids: Set<Long>? = null
+    private var frozen = false
+    var cleaned: Boolean = false
+        private set
+
+    fun awaitScopeAttached() {
+        val deadline = deadlineAfter(SYSTEMD_LAUNCH_TIMEOUT, "isolated local scope attachment")
+        var last: Throwable? = null
+        while (System.nanoTime() < deadline) {
+            if (!process.isAlive) isolationFail("isolated local scope process exited before attachment")
+            try {
+                val properties = controller.show()
+                requireLiveProperties(properties, resources, allowActivating = true)
+                val cgroup = requireCgroupPath(properties["ControlGroup"].orEmpty())
+                requireLocalLeader(cgroup)
+                requireActualControllers(cgroup, resources)
+                cgroupPath = cgroup
+                return
+            } catch (failure: FullTreeFunctionObservationIsolationException) {
+                last = failure
+            }
+            Thread.sleep(SYSTEMD_POLL_MILLIS)
+        }
+        throw FullTreeFunctionObservationIsolationException(
+            "isolated local scope could not be attached and verified",
+            last,
+        )
+    }
+
+    fun awaitBoot(expectedNonce: String) {
+        check(expectedNonce == nonce)
+        val deadline = deadlineAfter(WORKER_START_TIMEOUT, "isolated worker bootstrap")
+        var nextStatus = 0L
+        while (System.nanoTime() < deadline) {
+            protocolFileOrNull(runDirectory, BOOT_FILE)?.let { content ->
+                if (content != protocol("BOOT", nonce)) isolationFail("isolated worker BOOT proof is invalid")
+                return
+            }
+            protocolFileOrNull(runDirectory, FAILURE_FILE)?.let {
+                isolationFail("isolated worker failed before its BOOT proof")
+            }
+            protocolFileOrNull(runDirectory, SUPERVISOR_FAILURE_FILE)?.let {
+                isolationFail("isolated supervisor failed before the worker BOOT proof")
+            }
+            val now = System.nanoTime()
+            if (now >= nextStatus) {
+                requireUnitStillRunning(controller.show(), "before BOOT")
+                nextStatus = addNanos(now, STATUS_POLL_INTERVAL.toNanos(), "status poll")
+            }
+            Thread.sleep(PROTOCOL_POLL_MILLIS)
+        }
+        isolationFail("isolated worker did not reach its BOOT barrier")
+    }
+
+    fun verifyLiveContainment(expected: IsolatedObservationResources) {
+        val properties = controller.show()
+        requireLiveProperties(properties, expected)
+        val controlGroup = properties["ControlGroup"].orEmpty()
+        val cgroup = requireCgroupPath(controlGroup)
+        requireLocalLeader(cgroup)
+        requireActualControllers(cgroup, expected)
+        val javaProcesses = readCgroupProcesses(cgroup).filter { pid ->
+            LinuxFilesystemSyscalls.openProcessExecutable(pid).use { executable ->
+                executable.identity.key.device == java.identity.device &&
+                    executable.identity.key.inode == java.identity.inode
+            }
+        }
+        if (javaProcesses.size != 2) {
+            isolationFail("isolated startup does not contain exactly the supervisor and worker JVMs")
+        }
+        javaProcesses.forEach(::requireNoHostSessionAuthority)
+    }
+
+    private fun requireActualControllers(cgroup: Path, expected: IsolatedObservationResources) {
+        val pidsMax = readRequiredLong(cgroup.resolve("pids.max"), "isolated pids.max")
+        val memoryMax = readRequiredLong(cgroup.resolve("memory.max"), "isolated memory.max")
+        val swapMax = readRequiredLong(cgroup.resolve("memory.swap.max"), "isolated memory.swap.max")
+        val oomGroup = readBoundedText(cgroup.resolve("memory.oom.group"), CGROUP_TEXT_BYTES).trim()
+        val cpu = readBoundedText(cgroup.resolve("cpu.max"), CGROUP_TEXT_BYTES)
+            .trim().split(Regex("\\s+"))
+        val quota = cpu.getOrNull(0)?.toLongOrNull()
+        val period = cpu.getOrNull(1)?.toLongOrNull()
+        if (
+            pidsMax != CGROUP_TASKS_MAX.toLong() || memoryMax != expected.maximumResidentBytes ||
+            swapMax != 0L || oomGroup != "1" || cpu.size != 2 || quota == null || period == null ||
+            quota <= 0L || quota != period
+        ) isolationFail("isolated cgroup controllers differ from the authenticated runtime policy")
+        val procs = readCgroupProcesses(cgroup)
+        if (mainPid !in procs) isolationFail("isolated bubblewrap leader is absent from its cgroup")
+        val populated = parseFlatCounters(
+            readBoundedText(cgroup.resolve("cgroup.events"), CGROUP_TEXT_BYTES),
+            "cgroup.events",
+        )["populated"]
+        if (populated != 1L) isolationFail("isolated worker cgroup is not populated")
+    }
+
+    fun awaitReady(
+        expectedNonce: String,
+        wallSeconds: Long,
+    ): FullTreeFunctionObservationPublishedShard {
+        check(expectedNonce == nonce)
+        val deadline = deadlineAfter(Duration.ofSeconds(wallSeconds), "isolated derivation")
+        var nextStatus = 0L
+        while (System.nanoTime() < deadline) {
+            protocolFileOrNull(runDirectory, READY_FILE)?.let { return decodeReady(nonce, it) }
+            protocolFileOrNull(runDirectory, FAILURE_FILE)?.let {
+                isolationFail("isolated worker rejected the function-observation derivation")
+            }
+            protocolFileOrNull(runDirectory, SUPERVISOR_FAILURE_FILE)?.let {
+                isolationFail("isolated supervisor failed during function-observation derivation")
+            }
+            val now = System.nanoTime()
+            if (now >= nextStatus) {
+                requireUnitStillRunning(controller.show(), "during derivation")
+                nextStatus = addNanos(now, STATUS_POLL_INTERVAL.toNanos(), "status poll")
+            }
+            Thread.sleep(PROTOCOL_POLL_MILLIS)
+        }
+        isolationFail("isolated worker exceeded its authenticated wall-clock bound")
+    }
+
+    fun awaitDone(expectedNonce: String) {
+        check(expectedNonce == nonce)
+        val deadline = deadlineAfter(WORKER_EXIT_TIMEOUT, "isolated worker exit acknowledgement")
+        while (System.nanoTime() < deadline) {
+            protocolFileOrNull(runDirectory, DONE_FILE)?.let { content ->
+                if (content != protocol("DONE", nonce)) isolationFail("isolated worker DONE proof is invalid")
+                return
+            }
+            protocolFileOrNull(runDirectory, FAILURE_FILE)?.let {
+                isolationFail("isolated worker failed after the parent ACK")
+            }
+            protocolFileOrNull(runDirectory, SUPERVISOR_FAILURE_FILE)?.let {
+                isolationFail("isolated supervisor failed after the parent ACK")
+            }
+            Thread.sleep(PROTOCOL_POLL_MILLIS)
+        }
+        isolationFail("isolated worker did not acknowledge shutdown")
+    }
+
+    fun awaitWorkerExited(expectedNonce: String) {
+        check(expectedNonce == nonce)
+        val deadline = deadlineAfter(WORKER_EXIT_TIMEOUT, "isolated inner-worker exit")
+        var nextStatus = 0L
+        while (System.nanoTime() < deadline) {
+            protocolFileOrNull(runDirectory, WORKER_EXITED_FILE)?.let { content ->
+                val namespacePid = decodeKeeperProtocol(nonce, content)
+                keeperPids = requireKeeperProcesses(namespacePid)
+                return
+            }
+            protocolFileOrNull(runDirectory, FAILURE_FILE)?.let {
+                isolationFail("isolated worker failed during its final exit")
+            }
+            protocolFileOrNull(runDirectory, SUPERVISOR_FAILURE_FILE)?.let {
+                isolationFail("isolated supervisor rejected the inner-worker exit")
+            }
+            val now = System.nanoTime()
+            if (now >= nextStatus) {
+                requireUnitStillRunning(controller.show(), "while awaiting inner-worker exit")
+                nextStatus = addNanos(now, STATUS_POLL_INTERVAL.toNanos(), "status poll")
+            }
+            Thread.sleep(PROTOCOL_POLL_MILLIS)
+        }
+        isolationFail("isolated supervisor did not prove inner-worker exit")
+    }
+
+    fun freezeAndSampleRawCgroup(expected: IsolatedObservationResources): RawObservationCgroupSample {
+        val cgroup = cgroupPath ?: isolationFail("isolated cgroup was not verified")
+        val expectedKeepers = keeperPids ?: isolationFail("isolated keeper inventory was not verified")
+        val namespacePid = decodeKeeperProtocol(
+            nonce,
+            protocolFileOrNull(runDirectory, WORKER_EXITED_FILE)
+                ?: isolationFail("isolated worker-exit proof disappeared before cgroup freeze"),
+        )
+        if (requireKeeperProcesses(namespacePid) != expectedKeepers) {
+            isolationFail("isolated keeper process inventory changed before cgroup freeze")
+        }
+        controller.freeze()
+        val deadline = deadlineAfter(CGROUP_FREEZE_TIMEOUT, "isolated cgroup freeze")
+        while (System.nanoTime() < deadline) {
+            val events = parseFlatCounters(
+                readBoundedText(cgroup.resolve("cgroup.events"), CGROUP_TEXT_BYTES),
+                "cgroup.events",
+            )
+            if (events["frozen"] == 1L && events["populated"] == 1L) {
+                frozen = true
+                break
+            }
+            if (events["populated"] != 1L) {
+                isolationFail("isolated cgroup emptied before its frozen accounting barrier")
+            }
+            Thread.sleep(SYSTEMD_POLL_MILLIS)
+        }
+        if (!frozen) isolationFail("isolated cgroup freeze was not proven")
+        if (requireKeeperProcesses(namespacePid) != expectedKeepers) {
+            isolationFail("isolated keeper process inventory changed at the frozen barrier")
+        }
+        requireLiveProperties(controller.show(), expected)
+
+        val eventsBefore = readMemoryEvents(cgroup)
+        val peakBefore = readRequiredLong(cgroup.resolve("memory.peak"), "isolated memory.peak")
+        val cpuBefore = parseFlatCounters(
+            readBoundedText(cgroup.resolve("cpu.stat"), CGROUP_TEXT_BYTES),
+            "cpu.stat",
+        )
+        val eventsAfter = readMemoryEvents(cgroup)
+        val peakAfter = readRequiredLong(cgroup.resolve("memory.peak"), "isolated memory.peak")
+        val cpuAfter = parseFlatCounters(
+            readBoundedText(cgroup.resolve("cpu.stat"), CGROUP_TEXT_BYTES),
+            "cpu.stat",
+        )
+        val cgroupEvents = parseFlatCounters(
+            readBoundedText(cgroup.resolve("cgroup.events"), CGROUP_TEXT_BYTES),
+            "cgroup.events",
+        )
+        if (
+            eventsBefore != eventsAfter || peakBefore != peakAfter || cpuBefore != cpuAfter ||
+            cgroupEvents["frozen"] != 1L || cgroupEvents["populated"] != 1L
+        ) isolationFail("isolated cgroup accounting changed across its frozen sample")
+
+        val peak = peakAfter
+        val cpuUsec = cpuAfter["usage_usec"] ?: isolationFail("isolated cpu.stat lacks usage_usec")
+        val max = eventsAfter["max"] ?: isolationFail("isolated memory.events lacks max")
+        val oom = eventsAfter["oom"] ?: isolationFail("isolated memory.events lacks oom")
+        val oomKill = addExact(
+            eventsAfter["oom_kill"] ?: isolationFail("isolated memory.events lacks oom_kill"),
+            eventsAfter["oom_group_kill"] ?: 0L,
+            "isolated OOM kill count",
+        )
+        val cpuNanos = multiplyExact(cpuUsec, 1_000L, "isolated cgroup CPU time")
+        if (
+            peak !in 1L..expected.maximumResidentBytes ||
+            cpuNanos > secondsToNanos(expected.cpuSeconds, "CPU") ||
+            max != 0L || oom != 0L || oomKill != 0L
+        ) isolationFail("isolated cgroup exceeded a resource bound before its frozen sample")
+        return RawObservationCgroupSample(peak, cpuNanos, max, oom, oomKill)
+    }
+
+    fun killFrozenKeeperAndProveRemoved(
+        expected: IsolatedObservationResources,
+        live: RawObservationCgroupSample,
+    ) {
+        val cgroup = cgroupPath ?: isolationFail("isolated cgroup was not verified")
+        if (!frozen) isolationFail("isolated keeper cannot be terminated before cgroup freeze")
+        val events = parseFlatCounters(
+            readBoundedText(cgroup.resolve("cgroup.events"), CGROUP_TEXT_BYTES),
+            "cgroup.events",
+        )
+        if (events["frozen"] != 1L || events["populated"] != 1L) {
+            isolationFail("isolated cgroup left its frozen barrier before keeper termination")
+        }
+        controller.killFrozenKeeper()
+        val deadline = deadlineAfter(WORKER_EXIT_TIMEOUT, "isolated frozen-keeper cgroup drain")
+        while (System.nanoTime() < deadline) {
+            process.waitFor(SYSTEMD_POLL_MILLIS, TimeUnit.MILLISECONDS)
+            val absent = controller.show()["LoadState"] == "not-found"
+            if (!process.isAlive && absent && !Files.exists(cgroup, LinkOption.NOFOLLOW_LINKS)) break
+            Thread.sleep(SYSTEMD_POLL_MILLIS)
+        }
+        if (
+            process.isAlive || process.exitValue() != LOCAL_SIGKILL_EXIT ||
+            controller.show()["LoadState"] != "not-found" ||
+            Files.exists(cgroup, LinkOption.NOFOLLOW_LINKS)
+        ) isolationFail("isolated frozen keeper did not reach exact local SIGKILL and scope absence")
+        if (LinuxFilesystemSyscalls.killProcess(processHandle)) {
+            isolationFail("isolated pidfd remained live after local SIGKILL exit")
+        }
+        frozen = false
+        if (
+            live.peakResidentBytes !in 1L..expected.maximumResidentBytes ||
+            live.cpuNanos > secondsToNanos(expected.cpuSeconds, "CPU")
+        ) isolationFail("frozen final cgroup sample violates the authenticated resource bounds")
+    }
+
+    private fun requireKeeperProcesses(supervisorNamespacePid: Long): Set<Long> {
+        val cgroup = cgroupPath ?: isolationFail("isolated cgroup was not verified")
+        val leader = mainPid
+        requireLiveProperties(controller.show(), resources)
+        val before = readCgroupProcesses(cgroup)
+        if (before.size != KEEPER_PROCESS_COUNT || leader !in before) {
+            isolationFail("isolated keeper cgroup has an unexpected process count or leader")
+        }
+        var namespaceInit: Long? = null
+        var javaKeeper: Long? = null
+        before.forEach { pid ->
+            LinuxFilesystemSyscalls.openProcessExecutable(pid).use { executable ->
+                val identity = executable.identity
+                val isJava = identity.key.device == java.identity.device &&
+                    identity.key.inode == java.identity.inode
+                val isBubblewrap = identity.key.device == bubblewrap.identity.device &&
+                    identity.key.inode == bubblewrap.identity.inode
+                when {
+                    pid == leader -> {
+                        if (!isBubblewrap) {
+                            isolationFail("isolated keeper cgroup leader is not the pinned bubblewrap")
+                        }
+                        val status = readProcessIdentity(pid)
+                        if (status.namespacePids != listOf(pid)) {
+                            isolationFail("isolated outer bubblewrap has an unexpected PID namespace")
+                        }
+                    }
+
+                    isJava -> {
+                        if (javaKeeper != null) {
+                            isolationFail("isolated cgroup contains multiple Kotlin keepers")
+                        }
+                        val status = readProcessIdentity(pid)
+                        if (
+                            status.namespacePids != listOf(pid, supervisorNamespacePid) ||
+                            supervisorNamespacePid <= 1L
+                        ) {
+                            isolationFail("isolated Java keeper has the wrong PID-namespace identity")
+                        }
+                        javaKeeper = pid
+                        requireNoHostSessionAuthority(pid)
+                    }
+
+                    isBubblewrap -> {
+                        if (namespaceInit != null) {
+                            isolationFail("isolated cgroup contains multiple namespace-init processes")
+                        }
+                        val status = readProcessIdentity(pid)
+                        if (status.namespacePids != listOf(pid, 1L)) {
+                            isolationFail("isolated inner bubblewrap is not the PID-namespace init")
+                        }
+                        namespaceInit = pid
+                    }
+
+                    else -> isolationFail("isolated keeper cgroup contains an unexpected executable")
+                }
+            }
+        }
+        val initPid = namespaceInit ?: isolationFail("isolated cgroup lacks its namespace-init bubblewrap")
+        val keeperPid = javaKeeper ?: isolationFail("isolated cgroup lacks its Kotlin keeper")
+        if (
+            readProcessIdentity(initPid).parentPid != leader ||
+            readProcessIdentity(keeperPid).parentPid != initPid
+        ) isolationFail("isolated keeper processes do not have the exact expected parent chain")
+        val after = readCgroupProcesses(cgroup)
+        if (after != before) isolationFail("isolated keeper process inventory changed while verified")
+        return before
+    }
+
+    private fun requireLocalLeader(cgroup: Path) {
+        if (!process.isAlive) isolationFail("isolated pidfd-pinned scope leader exited unexpectedly")
+        val procCgroup = readBoundedText(Path.of("/proc/$mainPid/cgroup"), MAXIMUM_PROC_CGROUP_BYTES)
+            .lineSequence().singleOrNull { it.startsWith("0::") }
+            ?.removePrefix("0::")
+            ?: isolationFail("isolated local process is not in one cgroup-v2 leaf")
+        val actual = CGROUP_ROOT.resolve(procCgroup.removePrefix("/")).normalize()
+        if (actual != cgroup) isolationFail("isolated local process is outside its reported scope")
+        LinuxFilesystemSyscalls.openProcessExecutable(mainPid).use { executable ->
+            if (
+                executable.identity.key.device != bubblewrap.identity.device ||
+                executable.identity.key.inode != bubblewrap.identity.inode
+            ) isolationFail("pidfd-pinned local process did not transition to the pinned bubblewrap")
+        }
+    }
+
+    private fun requireNoHostSessionAuthority(pid: Long) {
+        val processRoot = Path.of("/proc/$pid/root")
+        val sessionRelative = systemdUserRuntimeDirectory.toString().removePrefix("/")
+        if (
+            Files.exists(processRoot.resolve(sessionRelative), LinkOption.NOFOLLOW_LINKS) ||
+            Files.exists(processRoot.resolve("run/user"), LinkOption.NOFOLLOW_LINKS)
+        ) isolationFail("isolated synthetic root exposes a host session-runtime path")
+        val environment = readBoundedText(Path.of("/proc/$pid/environ"), MAXIMUM_PROC_ENVIRONMENT_BYTES)
+            .split('\u0000').filter(String::isNotEmpty)
+        if (environment.any { value ->
+                value.startsWith("DBUS_SESSION_BUS_ADDRESS=") || value.startsWith("XDG_RUNTIME_DIR=")
+            }
+        ) isolationFail("isolated JVM retained host session-bus environment authority")
+        val descriptors = Files.newDirectoryStream(Path.of("/proc/$pid/fd")).use { entries ->
+            entries.toList()
+        }
+        if (descriptors.size > RLIMIT_NOFILE) {
+            isolationFail("isolated JVM exceeds its descriptor inventory bound")
+        }
+        val targets = descriptors.map { descriptor ->
+            val number = descriptor.fileName.toString().toIntOrNull()
+                ?.takeIf { it in 0 until RLIMIT_NOFILE }
+                ?: isolationFail("isolated JVM has an invalid or out-of-policy descriptor number")
+            val target = runCatching { Files.readSymbolicLink(descriptor).toString() }
+                .getOrElse { failure ->
+                    throw FullTreeFunctionObservationIsolationException(
+                        "isolated JVM descriptor $number changed while inspected",
+                        failure,
+                    )
+                }
+            if (target.length > MAXIMUM_PROC_DESCRIPTOR_TARGET_CHARS || '\u0000' in target) {
+                isolationFail("isolated JVM descriptor target exceeds its text bound")
+            }
+            target
+        }
+        requireNoHostSessionDescriptorAuthority(targets, systemdUserRuntimeDirectory)
+    }
+
+    private fun readCgroupProcesses(cgroup: Path): Set<Long> {
+        val lines = readBoundedText(cgroup.resolve("cgroup.procs"), CGROUP_PROCS_BYTES)
+            .lineSequence().filter(String::isNotBlank).toList()
+        val processes = lines.map { line ->
+            line.trim().toLongOrNull()?.takeIf { it in 1L..Int.MAX_VALUE }
+                ?: isolationFail("isolated cgroup.procs contains an invalid PID")
+        }
+        if (processes.toSet().size != processes.size) {
+            isolationFail("isolated cgroup.procs contains a duplicate PID")
+        }
+        return processes.toSet()
+    }
+
+    private fun readProcessIdentity(hostPid: Long): ObservationProcessIdentity {
+        val status = readBoundedText(Path.of("/proc/$hostPid/status"), MAXIMUM_PROC_STATUS_BYTES)
+        val namespaceLine = status.lineSequence().singleOrNull { it.startsWith("NSpid:") }
+            ?: isolationFail("isolated keeper process lacks one NSpid record")
+        val namespacePids = namespaceLine.removePrefix("NSpid:").trim().split(Regex("[ \\t]+"))
+            .filter(String::isNotEmpty)
+            .map { value ->
+                value.toLongOrNull()?.takeIf { it in 1L..Int.MAX_VALUE }
+                    ?: isolationFail("isolated keeper NSpid record is invalid")
+            }
+        if (namespacePids.firstOrNull() != hostPid || namespacePids.size !in 1..2) {
+            isolationFail("isolated keeper NSpid record has an unexpected namespace chain")
+        }
+        val parentLine = status.lineSequence().singleOrNull { it.startsWith("PPid:") }
+            ?: isolationFail("isolated keeper process lacks one PPid record")
+        val parentPid = parentLine.removePrefix("PPid:").trim().toLongOrNull()
+            ?.takeIf { it in 0L..Int.MAX_VALUE }
+            ?: isolationFail("isolated keeper PPid record is invalid")
+        return ObservationProcessIdentity(parentPid, namespacePids)
+    }
+
+    private fun readMemoryEvents(cgroup: Path): Map<String, Long> = parseFlatCounters(
+        readBoundedText(cgroup.resolve("memory.events"), CGROUP_TEXT_BYTES),
+        "memory.events",
+    )
+
+    fun stopAndProveRemoved() {
+        if (cleaned) return
+        controller.killStopAndRequireAbsent(cgroupPath, process, processHandle)
+        processHandle.close()
+        cleaned = true
+    }
+
+    override fun close() {
+        if (!cleaned) {
+            controller.killStopAndRequireAbsent(cgroupPath, process, processHandle)
+            processHandle.close()
+            cleaned = true
+        }
+    }
+
+    private fun requireUnitStillRunning(properties: Map<String, String>, label: String) {
+        if (
+            properties["LoadState"] != "loaded" || properties["ActiveState"] != "active" ||
+            properties["SubState"] != "running" || !process.isAlive
+        ) isolationFail(
+            "isolated worker systemd scope stopped $label " +
+                "(load=${properties["LoadState"]}, active=${properties["ActiveState"]}, " +
+                "sub=${properties["SubState"]}, localAlive=${process.isAlive})",
+        )
+    }
+
+    private fun requireLiveProperties(
+        properties: Map<String, String>,
+        expected: IsolatedObservationResources,
+        allowActivating: Boolean = false,
+    ) {
+        val stateOkay = properties["LoadState"] == "loaded" && process.isAlive &&
+            if (allowActivating) properties["ActiveState"] in setOf("active", "activating")
+            else properties["ActiveState"] == "active" && properties["SubState"] == "running"
+        if (!stateOkay) isolationFail("isolated systemd scope is not live during containment verification")
+        val mismatches = buildList {
+            addAll(staticPolicyMismatches(properties, expected))
+        }
+        if (mismatches.isNotEmpty()) {
+            isolationFail("isolated systemd policy differs: ${mismatches.joinToString(",")}")
+        }
+    }
+
+    private fun staticPolicyMismatches(
+        properties: Map<String, String>,
+        expected: IsolatedObservationResources,
+    ): List<String> = buildList {
+        if (properties["Id"] != controller.unitName) add("Id")
+        if (properties["CollectMode"] != "inactive-or-failed") add("CollectMode")
+        if (properties["TasksMax"] != CGROUP_TASKS_MAX.toString()) add("TasksMax")
+        if (properties["MemoryMax"] != expected.maximumResidentBytes.toString()) add("MemoryMax")
+        if (properties["MemorySwapMax"] != "0") add("MemorySwapMax")
+        if (properties["OOMPolicy"] != "kill") add("OOMPolicy")
+        if (properties["CPUQuotaPerSecUSec"] !in setOf("1s", "1000000us")) add("CPUQuota")
+        if (properties["KillMode"] != "control-group") add("KillMode")
+        if (properties["SendSIGKILL"] != "yes") add("SendSIGKILL")
+        if (properties["Delegate"] != "no") add("Delegate")
+        if (
+            parseSystemdMicros(properties["RuntimeMaxUSec"]) !=
+            multiplyExact(expected.serviceRuntimeSeconds, 1_000_000L, "systemd runtime microseconds")
+        ) {
+            add("RuntimeMaxUSec")
+        }
+        if (
+            parseSystemdMicros(properties["TimeoutStopUSec"]) !=
+            SERVICE_CLEANUP_TIMEOUT.toNanos() / 1_000L
+        ) add("TimeoutStopUSec")
+    }
+
+    private fun requireCgroupPath(controlGroup: String): Path {
+        if (!controlGroup.startsWith('/') || controlGroup.contains('\u0000')) {
+            isolationFail("systemd returned an invalid isolated cgroup path")
+        }
+        val path = CGROUP_ROOT.resolve(controlGroup.removePrefix("/")).normalize()
+        if (!path.startsWith(CGROUP_ROOT) || path.fileName?.toString() != controller.unitName ||
+            !Files.isDirectory(path, LinkOption.NOFOLLOW_LINKS)
+        ) isolationFail("systemd returned an unsafe or missing isolated cgroup")
+        val previous = cgroupPath
+        if (previous != null && previous != path) isolationFail("isolated cgroup path changed")
+        return path
+    }
+}
+
+private class PinnedObservationCandidate private constructor(
+    private val descriptor: LinuxDescriptor,
+    val channel: FileChannel,
+    val bytes: Long,
+    val sha256: String,
+) : AutoCloseable {
+    private var unlinked = false
+
+    fun unlinkFrom(root: LinuxDescriptor) {
+        if (unlinked) isolationFail("isolated candidate was already unlinked")
+        root.whileOpen { rootFd ->
+            LinuxFilesystemSyscalls.openRegularFileAtOrNull(rootFd, CANDIDATE_FILE).use { selected ->
+                if (selected == null || !sameRegularFile(selected.identity, descriptor.identity)) {
+                    isolationFail("isolated candidate changed before unlink")
+                }
+            }
+            LinuxFilesystemSyscalls.unlink(rootFd, CANDIDATE_FILE)
+            LinuxFilesystemSyscalls.openPathAtOrNull(rootFd, CANDIDATE_FILE)?.use {
+                isolationFail("isolated candidate remains named after unlink")
+            }
+        }
+        LinuxFilesystemSyscalls.synchronize(root)
+        if (LinuxFilesystemSyscalls.identity(descriptor.fd).linkCount != 0) {
+            isolationFail("isolated candidate remains linked after parent pinning")
+        }
+        unlinked = true
+    }
+
+    fun requireUnlinked() {
+        if (!unlinked || LinuxFilesystemSyscalls.identity(descriptor.fd).linkCount != 0) {
+            isolationFail("parent publication candidate is not an unlinked pinned inode")
+        }
+        val identity = LinuxFilesystemSyscalls.identity(descriptor.fd)
+        if (!identity.isRegularFile || identity.isSymbolicLink || identity.mode.permissions != OWNER_READ_ONLY_MODE) {
+            isolationFail("parent publication candidate changed type or mode")
+        }
+        if (channel.size() != bytes || digestChannel(channel, bytes) != sha256) {
+            isolationFail("parent publication candidate changed after worker exit")
+        }
+    }
+
+    override fun close() {
+        var failure: Throwable? = null
+        try {
+            channel.close()
+        } catch (closeFailure: Throwable) {
+            failure = closeFailure
+        }
+        try {
+            descriptor.close()
+        } catch (closeFailure: Throwable) {
+            if (failure == null) failure = closeFailure else failure.addSuppressed(closeFailure)
+        }
+        failure?.let { throw it }
+    }
+
+    companion object {
+        fun open(
+            root: LinuxDescriptor,
+            expectedBytes: Long,
+            expectedSha256: String,
+            maximumBytes: Long,
+        ): PinnedObservationCandidate {
+            if (expectedBytes !in 1L..maximumBytes || !expectedSha256.matches(SHA256)) {
+                isolationFail("isolated worker reported an invalid candidate digest")
+            }
+            val descriptor = root.whileOpen { fd ->
+                LinuxFilesystemSyscalls.openRegularFileAtOrNull(fd, CANDIDATE_FILE)
+                    ?: isolationFail("isolated worker candidate is absent")
+            }
+            try {
+                val identity = descriptor.identity
+                if (
+                    !identity.isRegularFile || identity.isSymbolicLink || identity.linkCount != 1 ||
+                    identity.mode.permissions != OWNER_READ_ONLY_MODE
+                ) isolationFail("isolated worker candidate is not a private 0400 regular file")
+                val channel = FileChannel.open(
+                    LinuxFilesystemSyscalls.stableDescriptorPath(descriptor.fd),
+                    StandardOpenOption.READ,
+                )
+                try {
+                    if (channel.size() != expectedBytes || digestChannel(channel, expectedBytes) != expectedSha256) {
+                        isolationFail("isolated worker candidate differs from its READY receipt")
+                    }
+                    val after = LinuxFilesystemSyscalls.identity(descriptor.fd)
+                    if (!sameRegularFile(identity, after)) {
+                        isolationFail("isolated worker candidate changed while it was pinned")
+                    }
+                    return PinnedObservationCandidate(descriptor, channel, expectedBytes, expectedSha256)
+                } catch (failure: Throwable) {
+                    channel.close()
+                    throw failure
+                }
+            } catch (failure: Throwable) {
+                descriptor.close()
+                throw failure
+            }
+        }
+    }
+}
+
+private data class ParentPublishedDigest(val sha256: String, val bytes: Long)
+
+private object ParentObservationPublisher {
+    fun publish(
+        candidate: PinnedObservationCandidate,
+        target: Path,
+        expectedBytes: Long,
+        expectedSha256: String,
+        maximumBytes: Long,
+        beforeCommit: () -> Unit,
+        afterCommit: () -> Unit,
+    ): ParentPublishedDigest {
+        candidate.requireUnlinked()
+        val normalized = target.toAbsolutePath().normalize()
+        val parentPath = normalized.parent ?: isolationFail("isolated publication target has no parent")
+        val targetName = normalized.fileName?.toString()
+            ?: isolationFail("isolated publication target has no file name")
+        LinuxFilesystemSyscalls.requireSupported(parentPath)
+        val (stableParent, parentIdentity) = requireStableDirectory(
+            parentPath,
+            "isolated publication parent",
+        )
+        LinuxFilesystemSyscalls.openRoot(stableParent).use { parent ->
+            if (!Files.isSameFile(stableParent, LinuxFilesystemSyscalls.stableDescriptorPath(parent.fd))) {
+                isolationFail("isolated publication parent changed during authorization")
+            }
+            parent.whileOpen { fd ->
+                LinuxFilesystemSyscalls.openPathAtOrNull(fd, targetName)?.use {
+                    isolationFail("isolated function-observation publication target already exists")
+                }
+            }
+            val stageName = ".function-observation-parent-${randomHex(STAGE_RANDOM_BYTES)}.tmp"
+            val stage = parent.whileOpen { fd ->
+                LinuxFilesystemSyscalls.createRegularFile(fd, stageName, OWNER_READ_WRITE_MODE)
+            }
+            var linkedName = stageName
+            var committed = false
+            try {
+                val digest = copyCandidate(candidate, stage, expectedBytes, expectedSha256, maximumBytes)
+                LinuxFilesystemSyscalls.chmod(stage, OWNER_READ_ONLY_MODE)
+                LinuxFilesystemSyscalls.synchronize(stage)
+                requireStage(stage, expectedBytes, "parent staging output")
+                if (digest.sha256 != expectedSha256 || digest.bytes != expectedBytes) {
+                    isolationFail("parent staging output differs from the isolated candidate")
+                }
+                beforeCommit()
+                val (_, currentParentIdentity) = requireStableDirectory(
+                    stableParent,
+                    "isolated publication parent",
+                )
+                if (currentParentIdentity != parentIdentity) {
+                    isolationFail("isolated publication parent changed before commit")
+                }
+                parent.whileOpen { fd ->
+                    LinuxFilesystemSyscalls.openPathAtOrNull(fd, targetName)?.use {
+                        isolationFail("isolated function-observation publication target already exists")
+                    }
+                    try {
+                        LinuxFilesystemSyscalls.renameNoReplace(fd, stageName, targetName)
+                    } catch (failure: LinuxSyscallException) {
+                        if (failure.errno == LinuxFilesystemSyscalls.EEXIST) {
+                            throw FullTreeFunctionObservationIsolationException(
+                                "isolated function-observation publication target already exists",
+                                failure,
+                            )
+                        }
+                        throw failure
+                    }
+                    linkedName = targetName
+                }
+                LinuxFilesystemSyscalls.synchronize(parent)
+                parent.whileOpen { fd ->
+                    LinuxFilesystemSyscalls.openRegularFileAtOrNull(fd, targetName).use { named ->
+                        if (named == null || !sameRegularFile(named.identity, stage.identity)) {
+                            isolationFail("parent publication selected a different output inode")
+                        }
+                    }
+                }
+                requireStage(stage, expectedBytes, "published isolated output")
+                if (digestDescriptor(stage, expectedBytes) != expectedSha256) {
+                    isolationFail("published isolated output differs from the pinned candidate")
+                }
+                afterCommit()
+                committed = true
+                return digest
+            } finally {
+                if (!committed) {
+                    parent.whileOpen { fd ->
+                        LinuxFilesystemSyscalls.openRegularFileAtOrNull(fd, linkedName).use { selected ->
+                            if (selected != null) {
+                                if (!sameRegularFile(selected.identity, stage.identity)) {
+                                    isolationFail("refusing to revoke a replaced parent staging output")
+                                }
+                                LinuxFilesystemSyscalls.unlink(fd, linkedName)
+                            }
+                        }
+                    }
+                    LinuxFilesystemSyscalls.synchronize(parent)
+                }
+                stage.close()
+            }
+        }
+    }
+
+    private fun copyCandidate(
+        candidate: PinnedObservationCandidate,
+        stage: LinuxDescriptor,
+        expectedBytes: Long,
+        expectedSha256: String,
+        maximumBytes: Long,
+    ): ParentPublishedDigest {
+        if (expectedBytes !in 1L..maximumBytes) isolationFail("isolated candidate exceeds output bound")
+        candidate.requireUnlinked()
+        val digest = MessageDigest.getInstance("SHA-256")
+        candidate.channel.position(0L)
+        LinuxFilesystemSyscalls.reopenWritable(stage).use { writable ->
+            FileChannel.open(
+                LinuxFilesystemSyscalls.stableDescriptorPath(writable.fd),
+                StandardOpenOption.WRITE,
+            ).use { output ->
+                output.truncate(0L)
+                val buffer = ByteBuffer.allocate(COPY_BUFFER_BYTES)
+                var copied = 0L
+                while (copied < expectedBytes) {
+                    buffer.clear()
+                    buffer.limit(minOf(buffer.capacity().toLong(), expectedBytes - copied).toInt())
+                    val read = candidate.channel.read(buffer)
+                    if (read <= 0) isolationFail("isolated candidate ended during parent copy")
+                    digest.update(buffer.array(), 0, read)
+                    buffer.flip()
+                    while (buffer.hasRemaining()) output.write(buffer)
+                    copied = addExact(copied, read.toLong(), "parent publication byte count")
+                }
+                if (candidate.channel.read(ByteBuffer.allocate(1)) >= 0) {
+                    isolationFail("isolated candidate grew beyond its receipt")
+                }
+                output.force(true)
+                val actualSha = digest.digest().hex()
+                if (actualSha != expectedSha256) isolationFail("isolated candidate changed during parent copy")
+                return ParentPublishedDigest(actualSha, copied)
+            }
+        }
+    }
+
+    private fun requireStage(stage: LinuxDescriptor, expectedBytes: Long, label: String) {
+        val identity = LinuxFilesystemSyscalls.identity(stage.fd)
+        if (
+            !identity.isRegularFile || identity.isSymbolicLink || identity.linkCount != 1 ||
+            identity.mode.permissions != OWNER_READ_ONLY_MODE ||
+            Files.size(LinuxFilesystemSyscalls.stableDescriptorPath(stage.fd)) != expectedBytes
+        ) isolationFail("$label changed identity, size, or mode")
+    }
+}
+
+private fun requireWorkerReceipt(
+    receipt: FullTreeFunctionObservationPublishedShard,
+    authenticated: AuthenticatedFullTreeScope,
+    guards: ParentObservationInputGuards,
+    parentInputs: FullTreeFunctionObservationAuthenticatedInputs,
+    shardId: String,
+    resources: IsolatedObservationResources,
+) {
+    val projectedEntities = addExact(
+        receipt.emittedRvas,
+        receipt.nonEmitted,
+        "isolated READY entity count",
+    )
+    if (
+        receipt.shardId != shardId || receipt.scopeSha256 != authenticated.sha256 ||
+        receipt.inputSha256 != parentInputs.shard.inputSha256 ||
+        receipt.units != parentInputs.shard.units.size.toLong() ||
+        receipt.inventoryArtifactSha256 != guards.inventorySha256 ||
+        receipt.richArtifactSha256 != guards.richSha256 ||
+        receipt.outputBytes !in 1L..resources.maximumOutputBytes ||
+        receipt.databaseHighWaterBytes !in 1L..resources.maximumDatabaseBytes ||
+        receipt.peakResidentBytes !in 1L..resources.maximumResidentBytes ||
+        receipt.entities > resources.maximumEntities ||
+        receipt.units <= 0L || receipt.entities < 0L || receipt.scannedDies < 0L ||
+        receipt.subprograms < 0L || receipt.entities != projectedEntities ||
+        receipt.nonEmittedDies < receipt.nonEmitted || receipt.scannedDies < receipt.subprograms ||
+        !receipt.outputSha256.matches(SHA256)
+    ) isolationFail("isolated worker READY receipt violates its authenticated bindings or bounds")
+}
+
+private fun writeProtocolFile(root: LinuxDescriptor, name: String, content: String) {
+    val bytes = content.toByteArray(Charsets.UTF_8)
+    if (bytes.isEmpty() || bytes.size > MAXIMUM_PROTOCOL_BYTES || !content.endsWith('\n')) {
+        isolationFail("isolated worker protocol record is not bounded canonical text")
+    }
+    val stageName = ".protocol-${randomHex(PROTOCOL_STAGE_RANDOM_BYTES)}.tmp"
+    val stage = root.whileOpen { fd ->
+        LinuxFilesystemSyscalls.createRegularFile(fd, stageName, OWNER_READ_WRITE_MODE)
+    }
+    var linked = true
+    try {
+        FileChannel.open(
+            LinuxFilesystemSyscalls.stableDescriptorPath(stage.fd),
+            StandardOpenOption.WRITE,
+            StandardOpenOption.TRUNCATE_EXISTING,
+        ).use { channel ->
+            var buffer = ByteBuffer.wrap(bytes)
+            while (buffer.hasRemaining()) channel.write(buffer)
+            channel.force(true)
+        }
+        LinuxFilesystemSyscalls.chmod(stage, OWNER_READ_ONLY_MODE)
+        LinuxFilesystemSyscalls.synchronize(stage)
+        root.whileOpen { fd -> LinuxFilesystemSyscalls.renameNoReplace(fd, stageName, name) }
+        linked = false
+        LinuxFilesystemSyscalls.synchronize(root)
+        root.whileOpen { fd ->
+            LinuxFilesystemSyscalls.openRegularFileAtOrNull(fd, name).use { selected ->
+                if (selected == null || !sameRegularFile(selected.identity, stage.identity)) {
+                    isolationFail("isolated protocol publication selected a different inode")
+                }
+            }
+        }
+    } finally {
+        if (linked) root.whileOpen { fd -> LinuxFilesystemSyscalls.unlinkIfPresent(fd, stageName) }
+        stage.close()
+    }
+}
+
+private fun protocolFileOrNull(rootPath: Path, name: String): String? =
+    LinuxFilesystemSyscalls.openRoot(rootPath).use { root -> protocolFileOrNull(root, name) }
+
+private fun protocolFileOrNull(root: LinuxDescriptor, name: String): String? = root.whileOpen { fd ->
+    val selected = LinuxFilesystemSyscalls.openRegularFileAtOrNull(fd, name) ?: return@whileOpen null
+    selected.use { descriptor ->
+        val identity = descriptor.identity
+        if (
+            !identity.isRegularFile || identity.isSymbolicLink || identity.linkCount != 1 ||
+            identity.mode.permissions != OWNER_READ_ONLY_MODE
+        ) isolationFail("isolated protocol file $name has unsafe identity or mode")
+        val size = Files.size(LinuxFilesystemSyscalls.stableDescriptorPath(descriptor.fd))
+        if (size !in 1L..MAXIMUM_PROTOCOL_BYTES.toLong()) {
+            isolationFail("isolated protocol file $name exceeds its byte bound")
+        }
+        val bytes = LinuxFilesystemSyscalls.openReadableFrom(descriptor).use { readable ->
+            LinuxFilesystemSyscalls.read(readable, MAXIMUM_PROTOCOL_BYTES, {})
+        }
+        if (bytes.size.toLong() != size) isolationFail("isolated protocol file $name changed while read")
+        val after = LinuxFilesystemSyscalls.identity(descriptor.fd)
+        if (!sameRegularFile(identity, after)) isolationFail("isolated protocol file $name changed identity")
+        val text = bytes.toString(Charsets.UTF_8)
+        if (!text.endsWith('\n') || text.dropLast(1).contains('\n') || text.contains('\r')) {
+            isolationFail("isolated protocol file $name is not one canonical line")
+        }
+        text
+    }
+}
+
+private fun awaitWorkerProtocol(
+    root: LinuxDescriptor,
+    name: String,
+    expected: String,
+    timeout: Duration,
+) {
+    val deadline = deadlineAfter(timeout, "isolated worker protocol wait")
+    while (System.nanoTime() < deadline) {
+        protocolFileOrNull(root, name)?.let { actual ->
+            if (actual != expected) isolationFail("isolated worker protocol $name is invalid")
+            return
+        }
+        Thread.sleep(PROTOCOL_POLL_MILLIS)
+    }
+    isolationFail("isolated worker protocol $name timed out")
+}
+
+private fun protocol(kind: String, nonce: String): String =
+    "$kind\t$WORKER_PROTOCOL_VERSION\t$nonce\n"
+
+private fun keeperProtocol(nonce: String, namespacePid: Long): String {
+    if (namespacePid !in 1L..Int.MAX_VALUE) isolationFail("isolated keeper PID is invalid")
+    return "WORKER_EXITED\t$WORKER_PROTOCOL_VERSION\t$nonce\t$namespacePid\n"
+}
+
+private fun decodeKeeperProtocol(nonce: String, value: String): Long {
+    val fields = value.removeSuffix("\n").split('\t')
+    if (
+        fields.size != KEEPER_FIELD_COUNT || fields[0] != "WORKER_EXITED" ||
+        fields[1] != WORKER_PROTOCOL_VERSION || fields[2] != nonce
+    ) isolationFail("isolated worker-exit record has an unsupported shape")
+    return fields[3].toLongOrNull()?.takeIf { it in 1L..Int.MAX_VALUE }
+        ?: isolationFail("isolated worker-exit record has an invalid keeper PID")
+}
+
+private fun encodeReady(
+    nonce: String,
+    receipt: FullTreeFunctionObservationPublishedShard,
+): String = listOf(
+    "READY",
+    WORKER_PROTOCOL_VERSION,
+    nonce,
+    receipt.shardId,
+    receipt.inputSha256,
+    receipt.inventoryArtifactSha256,
+    receipt.richArtifactSha256,
+    receipt.scopeSha256,
+    receipt.outputSha256,
+    receipt.outputBytes.toString(),
+    receipt.units.toString(),
+    receipt.emittedRvas.toString(),
+    receipt.nonEmitted.toString(),
+    receipt.nonEmittedDies.toString(),
+    receipt.entities.toString(),
+    receipt.scannedDies.toString(),
+    receipt.subprograms.toString(),
+    receipt.databaseHighWaterBytes.toString(),
+    receipt.peakResidentBytes.toString(),
+).joinToString("\t", postfix = "\n")
+
+private fun decodeReady(
+    nonce: String,
+    value: String,
+): FullTreeFunctionObservationPublishedShard {
+    val fields = value.removeSuffix("\n").split('\t')
+    if (
+        fields.size != READY_FIELD_COUNT || fields[0] != "READY" ||
+        fields[1] != WORKER_PROTOCOL_VERSION || fields[2] != nonce
+    ) isolationFail("isolated worker READY record has an unsupported shape")
+    val hashes = fields.slice(4..8)
+    if (!fields[3].matches(SHARD_IDENTIFIER) || hashes.any { !it.matches(SHA256) }) {
+        isolationFail("isolated worker READY record contains an invalid identity")
+    }
+    fun count(index: Int, label: String): Long = fields[index].toLongOrNull()
+        ?.takeIf { it >= 0L }
+        ?: isolationFail("isolated worker READY $label is invalid")
+    return FullTreeFunctionObservationPublishedShard(
+        shardId = fields[3],
+        inputSha256 = fields[4],
+        inventoryArtifactSha256 = fields[5],
+        richArtifactSha256 = fields[6],
+        scopeSha256 = fields[7],
+        outputSha256 = fields[8],
+        outputBytes = count(9, "output bytes"),
+        units = count(10, "unit count"),
+        emittedRvas = count(11, "emitted count"),
+        nonEmitted = count(12, "non-emitted count"),
+        nonEmittedDies = count(13, "non-emitted DIE count"),
+        entities = count(14, "entity count"),
+        scannedDies = count(15, "scanned-DIE count"),
+        subprograms = count(16, "subprogram count"),
+        databaseHighWaterBytes = count(17, "database high-water bytes"),
+        peakResidentBytes = count(18, "resident peak"),
+    )
+}
+
+private fun encodeFailure(nonce: String, failure: Throwable): String {
+    val message = failure.message.orEmpty()
+        .replace(Regex("[\\r\\n\\t\\p{Cc}]"), " ")
+        .take(MAXIMUM_FAILURE_MESSAGE_CHARS)
+    return listOf(
+        "FAIL",
+        WORKER_PROTOCOL_VERSION,
+        nonce,
+        failure::class.java.name.take(MAXIMUM_FAILURE_CLASS_CHARS),
+        message,
+    ).joinToString("\t", postfix = "\n")
+}
+
+private fun readRequiredLong(path: Path, label: String): Long =
+    readBoundedText(path, CGROUP_TEXT_BYTES).trim().toLongOrNull()
+        ?.takeIf { it >= 0L }
+        ?: isolationFail("$label is not a finite non-negative integer")
+
+private fun readBoundedText(path: Path, maximumBytes: Int): String {
+    if (maximumBytes <= 0) isolationFail("bounded text limit is empty")
+    val bytes = try {
+        Files.newInputStream(path, LinkOption.NOFOLLOW_LINKS).use { input ->
+            input.readNBytes(maximumBytes + 1)
+        }
+    } catch (failure: Exception) {
+        throw FullTreeFunctionObservationIsolationException("cannot read isolated accounting file $path", failure)
+    }
+    if (bytes.size > maximumBytes) isolationFail("isolated accounting file exceeds its byte bound")
+    return bytes.toString(Charsets.UTF_8)
+}
+
+private fun parseFlatCounters(value: String, label: String): Map<String, Long> {
+    val counters = linkedMapOf<String, Long>()
+    value.lineSequence().filter(String::isNotBlank).forEach { line ->
+        val fields = line.trim().split(Regex("\\s+"))
+        if (
+            fields.size != 2 || !fields[0].matches(COUNTER_NAME) ||
+            fields[1].toLongOrNull()?.takeIf { it >= 0L } == null ||
+            counters.put(fields[0], fields[1].toLong()) != null
+        ) isolationFail("isolated $label is malformed")
+    }
+    if (counters.isEmpty()) isolationFail("isolated $label is empty")
+    return counters
+}
+
+private fun digestChannel(channel: FileChannel, expectedBytes: Long): String {
+    if (expectedBytes <= 0L || channel.size() != expectedBytes) {
+        isolationFail("pinned isolated file has an invalid size")
+    }
+    val digest = MessageDigest.getInstance("SHA-256")
+    val buffer = ByteBuffer.allocate(COPY_BUFFER_BYTES)
+    var offset = 0L
+    while (offset < expectedBytes) {
+        buffer.clear()
+        buffer.limit(minOf(buffer.capacity().toLong(), expectedBytes - offset).toInt())
+        val read = channel.read(buffer, offset)
+        if (read <= 0) isolationFail("pinned isolated file ended while hashing")
+        digest.update(buffer.array(), 0, read)
+        offset = addExact(offset, read.toLong(), "pinned isolated file byte count")
+    }
+    if (channel.read(ByteBuffer.allocate(1), expectedBytes) >= 0) {
+        isolationFail("pinned isolated file grew while hashing")
+    }
+    return digest.digest().hex()
+}
+
+private fun digestDescriptor(descriptor: LinuxDescriptor, expectedBytes: Long): String =
+    FileChannel.open(
+        LinuxFilesystemSyscalls.stableDescriptorPath(descriptor.fd),
+        StandardOpenOption.READ,
+    ).use { channel -> digestChannel(channel, expectedBytes) }
+
+private fun requirePrivateDirectory(descriptor: LinuxDescriptor, label: String) {
+    val identity = LinuxFilesystemSyscalls.identity(descriptor.fd)
+    if (
+        !identity.isDirectory || identity.isRegularFile || identity.isSymbolicLink ||
+        identity.mode.permissions != OWNER_DIRECTORY_MODE || identity.linkCount < 1
+    ) isolationFail("$label is not a private mode-0700 directory")
+}
+
+private fun sameRegularFile(first: LinuxFileIdentity, second: LinuxFileIdentity): Boolean =
+    first.key == second.key && first.mountId == second.mountId &&
+        first.isRegularFile && second.isRegularFile &&
+        !first.isDirectory && !second.isDirectory &&
+        !first.isSymbolicLink && !second.isSymbolicLink
+
+private fun sameDirectory(first: LinuxFileIdentity, second: LinuxFileIdentity): Boolean =
+    first.key == second.key && first.mountId == second.mountId &&
+        first.isDirectory && second.isDirectory &&
+        !first.isRegularFile && !second.isRegularFile &&
+        !first.isSymbolicLink && !second.isSymbolicLink
+
+private data class TrustedCommandResult(val exitCode: Int, val output: String)
+
+private fun runTrustedCommand(
+    command: List<String>,
+    environment: Map<String, String>,
+    timeout: Duration,
+    label: String,
+): TrustedCommandResult {
+    if (command.isEmpty() || command.size > MAXIMUM_COMMAND_ARGUMENTS ||
+        command.sumOf { it.toByteArray(Charsets.UTF_8).size.toLong() } > MAXIMUM_COMMAND_BYTES
+    ) isolationFail("$label command exceeds its argument bound")
+    val process = ProcessBuilder(command).redirectErrorStream(true).also { builder ->
+        builder.environment().clear()
+        builder.environment().putAll(environment)
+    }.start()
+    val output = AtomicReference<ByteArray?>()
+    val outputFailure = AtomicReference<Throwable?>()
+    val reader = Thread({
+        try {
+            output.set(process.inputStream.use { it.readNBytes(MAXIMUM_TRUSTED_OUTPUT_BYTES + 1) })
+        } catch (failure: Throwable) {
+            outputFailure.set(failure)
+        }
+    }, "isolated-trusted-command-output").also { it.isDaemon = true; it.start() }
+    val deadline = deadlineAfter(timeout, label)
+    try {
+        while (process.isAlive && System.nanoTime() < deadline) {
+            process.waitFor(TRUSTED_PROCESS_POLL_MILLIS, TimeUnit.MILLISECONDS)
+        }
+        if (process.isAlive) isolationFail("$label timed out")
+        reader.join(PROBE_READER_JOIN_TIMEOUT.toMillis())
+        if (reader.isAlive) isolationFail("$label output reader did not terminate")
+        outputFailure.get()?.let { throw it }
+        val bytes = output.get() ?: isolationFail("$label produced no bounded output result")
+        if (bytes.size > MAXIMUM_TRUSTED_OUTPUT_BYTES) isolationFail("$label output exceeds its byte bound")
+        return TrustedCommandResult(process.exitValue(), bytes.toString(Charsets.UTF_8))
+    } catch (failure: Throwable) {
+        process.destroyForcibly()
+        runCatching { process.waitFor(PROBE_READER_JOIN_TIMEOUT.toMillis(), TimeUnit.MILLISECONDS) }
+        throw failure
+    }
+}
+
+private fun validatedClassPath(entries: List<Path>): String {
+    if (entries.isEmpty() || entries.size > MAXIMUM_CLASSPATH_ENTRIES) {
+        isolationFail("isolated worker class path has an invalid entry count")
+    }
+    entries.forEach { path ->
+        if (!path.isAbsolute || path.normalize() != path ||
+            (!Files.isDirectory(path, LinkOption.NOFOLLOW_LINKS) &&
+                !Files.isRegularFile(path, LinkOption.NOFOLLOW_LINKS))
+        ) isolationFail("isolated worker class path contains an unavailable entry")
+    }
+    val encoded = entries.joinToString(java.io.File.pathSeparator, transform = Path::toString)
+    if (encoded.toByteArray(Charsets.UTF_8).size > MAXIMUM_CLASSPATH_BYTES) {
+        isolationFail("isolated worker class path exceeds its byte bound")
+    }
+    return encoded
+}
+
+private fun syntheticDestinationParents(destinations: Collection<Path>): List<Path> {
+    val parents = LinkedHashSet<Path>()
+    destinations.forEach { destination ->
+        if (!destination.isAbsolute || destination.normalize() != destination || destination == Path.of("/")) {
+            isolationFail("isolated synthetic-root destination is invalid")
+        }
+        var current = destination.parent
+        while (current != null && current != Path.of("/")) {
+            parents.add(current)
+            if (parents.size > MAXIMUM_SYNTHETIC_DIRECTORIES) {
+                isolationFail("isolated synthetic root exceeds its directory bound")
+            }
+            current = current.parent
+        }
+    }
+    return parents.sortedWith(compareBy<Path>({ it.nameCount }, { it.toString() }))
+}
+
+/** Bounded absence proof for attachment failures before systemd reports ControlGroup. */
+private fun findObservationCgroupsForUnit(unitName: String): List<Path> {
+    if (!unitName.matches(Regex("decomp-oracle-function-[0-9a-f-]+\\.scope"))) {
+        isolationFail("isolated scope name is unsafe for cgroup absence verification")
+    }
+    val matches = mutableListOf<Path>()
+    val pending = ArrayDeque<Pair<Path, Int>>()
+    pending += CGROUP_ROOT to 0
+    var entries = 0
+    while (pending.isNotEmpty()) {
+        val (directory, depth) = pending.removeFirst()
+        Files.newDirectoryStream(directory).use { children ->
+            children.forEach { child ->
+                entries = Math.addExact(entries, 1)
+                if (entries > MAXIMUM_CGROUP_SEARCH_ENTRIES) {
+                    isolationFail("isolated cgroup cleanup search exceeds its entry bound")
+                }
+                if (!Files.isDirectory(child, LinkOption.NOFOLLOW_LINKS)) return@forEach
+                val normalized = child.toAbsolutePath().normalize()
+                if (!normalized.startsWith(CGROUP_ROOT)) {
+                    isolationFail("isolated cgroup cleanup search escaped cgroup v2")
+                }
+                if (normalized.fileName?.toString() == unitName) matches.add(normalized)
+                if (depth >= MAXIMUM_CGROUP_SEARCH_DEPTH) {
+                    Files.newDirectoryStream(normalized).use { descendants ->
+                        if (descendants.any { Files.isDirectory(it, LinkOption.NOFOLLOW_LINKS) }) {
+                            isolationFail("isolated cgroup cleanup search exceeds its depth bound")
+                        }
+                    }
+                } else {
+                    pending += normalized to depth + 1
+                }
+            }
+        }
+    }
+    return matches
+}
+
+private fun parseSystemdMicros(raw: String?): Long? {
+    val value = raw?.trim().orEmpty()
+    if (value.isEmpty()) return null
+    var total = 0L
+    value.split(Regex("[ \\t]+")).forEach { component ->
+        val match = Regex("([0-9]+)(us|ms|s|min|h)").matchEntire(component) ?: return null
+        val amount = match.groupValues[1].toLongOrNull() ?: return null
+        val factor = when (match.groupValues[2]) {
+            "us" -> 1L
+            "ms" -> 1_000L
+            "s" -> 1_000_000L
+            "min" -> 60_000_000L
+            "h" -> 3_600_000_000L
+            else -> return null
+        }
+        total = runCatching { Math.addExact(total, Math.multiplyExact(amount, factor)) }.getOrNull()
+            ?: return null
+    }
+    return total
+}
+
+private fun deadlineAfter(timeout: Duration, label: String): Long =
+    addNanos(System.nanoTime(), timeout.toNanos(), "$label deadline")
+
+private fun monotonicElapsed(start: Long, end: Long, label: String): Long {
+    if (end < start) isolationFail("$label clock moved backwards")
+    return try {
+        Math.subtractExact(end, start)
+    } catch (failure: ArithmeticException) {
+        throw FullTreeFunctionObservationIsolationException("$label elapsed time overflows", failure)
+    }
+}
+
+private fun secondsToNanos(seconds: Long, label: String): Long =
+    multiplyExact(seconds, 1_000_000_000L, "$label nanosecond bound")
+
+private fun addNanos(start: Long, amount: Long, label: String): Long =
+    addExact(start, amount, label)
+
+private fun addExact(left: Long, right: Long, label: String): Long = try {
+    Math.addExact(left, right)
+} catch (failure: ArithmeticException) {
+    throw FullTreeFunctionObservationIsolationException("$label overflows", failure)
+}
+
+internal fun isolatedObservationCleanupBytes(
+    maximumOutputBytes: Long,
+    maximumDatabaseBytes: Long,
+    maximumDwarfScratchBytes: Long,
+    protocolAllowanceBytes: Long,
+): Long {
+    if (
+        maximumOutputBytes < 0L || maximumDatabaseBytes < 0L ||
+        maximumDwarfScratchBytes < 0L || protocolAllowanceBytes < 0L
+    ) isolationFail("private cleanup byte bound contains a negative component")
+    return addExact(
+        addExact(
+            addExact(maximumOutputBytes, maximumDatabaseBytes, "private cleanup byte bound"),
+            maximumDwarfScratchBytes,
+            "private cleanup byte bound",
+        ),
+        protocolAllowanceBytes,
+        "private cleanup byte bound",
+    )
+}
+
+private fun multiplyExact(left: Long, right: Long, label: String): Long = try {
+    Math.multiplyExact(left, right)
+} catch (failure: ArithmeticException) {
+    throw FullTreeFunctionObservationIsolationException("$label overflows", failure)
+}
+
+private fun randomHex(bytes: Int): String = ByteArray(bytes).also(SECURE_RANDOM::nextBytes).hex()
+
+private inline fun <T> translateIsolationFailures(action: () -> T): T = try {
+    action()
+} catch (failure: FullTreeFunctionObservationIsolationException) {
+    throw failure
+} catch (failure: Throwable) {
+    throw FullTreeFunctionObservationIsolationException(
+        "isolated function-observation publication failed: ${failure.message}",
+        failure,
+    )
+}
+
+private fun isolationFail(message: String): Nothing =
+    throw FullTreeFunctionObservationIsolationException(message)
+
+private const val WORKER_PROTOCOL_VERSION = "1"
+private const val WORKER_ARGUMENTS = 9
+private const val SUPERVISOR_PROTOCOL_VERSION = "1"
+private const val SUPERVISOR_ARGUMENTS = WORKER_ARGUMENTS + 3
+private const val READY_FIELD_COUNT = 19
+private const val KEEPER_FIELD_COUNT = 4
+private const val WORKER_FAILURE_EXIT = 73
+private const val SUPERVISOR_FAILURE_EXIT = 74
+private const val LOCAL_SIGKILL_EXIT = 137
+private const val BOOT_FILE = "worker.boot"
+private const val START_FILE = "parent.start"
+private const val READY_FILE = "worker.ready"
+private const val ACK_FILE = "parent.ack"
+private const val DONE_FILE = "worker.done"
+private const val WORKER_RELEASE_FILE = "parent.worker-release"
+private const val WORKER_EXITED_FILE = "supervisor.worker-exited"
+private const val FAILURE_FILE = "worker.failure"
+private const val SUPERVISOR_FAILURE_FILE = "supervisor.failure"
+private const val CANDIDATE_FILE = "candidate.json"
+private const val SCRATCH_DIRECTORY = "scratch"
+private const val TEMP_DIRECTORY = "tmp"
+private const val RUNTIME_DIRECTORY = "runtime"
+private const val OWNER_DIRECTORY_MODE = 0x1c0 // 0700
+private const val OWNER_READ_WRITE_MODE = 0x180 // 0600
+private const val OWNER_READ_ONLY_MODE = 0x100 // 0400
+private const val UNTRUSTED_RUNTIME_WRITE_MODE = 0x12 // 0022
+private const val PROTOCOL_NONCE_BYTES = 32
+private const val PROTOCOL_STAGE_RANDOM_BYTES = 12
+private const val RUN_RANDOM_BYTES = 16
+private const val STAGE_RANDOM_BYTES = 16
+private const val MAXIMUM_RUN_NAME_ATTEMPTS = 32
+private const val MAXIMUM_PROTOCOL_BYTES = 16 * 1024
+private const val MAXIMUM_FAILURE_MESSAGE_CHARS = 1024
+private const val MAXIMUM_FAILURE_CLASS_CHARS = 256
+private const val COPY_BUFFER_BYTES = 1024 * 1024
+private const val MAXIMUM_PRIVATE_ENTRIES = 100_000
+private const val MAXIMUM_PRIVATE_DEPTH = 64
+private const val PROTOCOL_CLEANUP_ALLOWANCE_BYTES = 64L * 1024L * 1024L
+private const val SQLITE_EXPANSION = 4L
+private const val MINIMUM_WORKER_MEMORY_BYTES = 256L * 1024L * 1024L
+private const val MINIMUM_WORKER_ADDRESS_SPACE_BYTES = 8L * 1024L * 1024L * 1024L
+private const val MAXIMUM_WORKER_ADDRESS_SPACE_BYTES = 64L * 1024L * 1024L * 1024L
+private const val ADDRESS_SPACE_FACTOR = 4L
+private const val CGROUP_TASKS_MAX = 256
+private const val RLIMIT_NPROC = 4096
+private const val RLIMIT_NOFILE = 512
+private const val MAXIMUM_CLASSPATH_ENTRIES = 512
+private const val MAXIMUM_CLASSPATH_BYTES = 1024 * 1024
+private const val MAXIMUM_CLASSPATH_ENTRY_BYTES = 1024L * 1024L * 1024L
+private const val MAXIMUM_AUTHENTICATED_CLASSPATH_BYTES = 2L * 1024L * 1024L * 1024L
+private const val MAXIMUM_RUNTIME_MOUNTS = 16
+private const val MAXIMUM_RUNTIME_TREE_ENTRIES = 100_000
+private const val MAXIMUM_RUNTIME_TREE_DEPTH = 64
+private const val MAXIMUM_SYNTHETIC_DIRECTORIES = 1024
+private const val MAXIMUM_COMMAND_ARGUMENTS = 2048
+private const val MAXIMUM_COMMAND_BYTES = 2L * 1024L * 1024L
+private const val MAXIMUM_TRUSTED_OUTPUT_BYTES = 64 * 1024
+private const val MAXIMUM_PROC_CGROUP_BYTES = 1024 * 1024
+private const val MAXIMUM_PROC_STATUS_BYTES = 1024 * 1024
+private const val MAXIMUM_PROC_ENVIRONMENT_BYTES = 1024 * 1024
+private const val CGROUP_TEXT_BYTES = 64 * 1024
+private const val CGROUP_PROCS_BYTES = 1024 * 1024
+private const val KEEPER_PROCESS_COUNT = 3
+private const val MAXIMUM_PROC_DESCRIPTOR_TARGET_CHARS = 8192
+private const val MAXIMUM_CGROUP_SEARCH_ENTRIES = 100_000
+private const val MAXIMUM_CGROUP_SEARCH_DEPTH = 32
+private const val PROTOCOL_POLL_MILLIS = 20L
+private const val SYSTEMD_POLL_MILLIS = 20L
+private const val TRUSTED_PROCESS_POLL_MILLIS = 20L
+private const val WORKER_FAILURE_OBSERVATION_MILLIS = 1_000L
+private val WORKER_START_TIMEOUT = Duration.ofSeconds(30)
+private val WORKER_ACK_TIMEOUT = Duration.ofMinutes(5)
+private val WORKER_EXIT_TIMEOUT = Duration.ofSeconds(10)
+private val CGROUP_FREEZE_TIMEOUT = Duration.ofSeconds(5)
+private val SERVICE_CLEANUP_TIMEOUT = Duration.ofSeconds(5)
+private val SYSTEMD_LAUNCH_TIMEOUT = Duration.ofSeconds(10)
+private val SYSTEMD_CONTROL_TIMEOUT = Duration.ofSeconds(3)
+private val PROBE_TIMEOUT = Duration.ofSeconds(3)
+private val PROBE_READER_JOIN_TIMEOUT = Duration.ofSeconds(1)
+private val STATUS_POLL_INTERVAL = Duration.ofSeconds(2)
+private val ISOLATED_PUBLISHER_LIMITS = FullTreeFunctionObservationShardPublisherLimits()
+private val DEFAULT_CONTROL_LIMITS = ISOLATED_PUBLISHER_LIMITS.control
+private val WORKER_FAILURE_CLEANUP_LIMITS = AcpRuntimeClosureLimits(
+    maximumEntries = MAXIMUM_PRIVATE_ENTRIES,
+    maximumUserOwnedFileBytes = isolatedObservationCleanupBytes(
+        ISOLATED_PUBLISHER_LIMITS.maximumOutputBytes,
+        ISOLATED_PUBLISHER_LIMITS.maximumDatabaseBytes,
+        DEFAULT_CONTROL_LIMITS.maximumDwarfScratchBytes,
+        addExact(
+            PROTOCOL_CLEANUP_ALLOWANCE_BYTES,
+            MAXIMUM_AUTHENTICATED_CLASSPATH_BYTES,
+            "worker-failure cleanup runtime allowance",
+        ),
+    ),
+    maximumDepth = MAXIMUM_PRIVATE_DEPTH,
+)
+private val CGROUP_ROOT = Path.of("/sys/fs/cgroup")
+private val SECURE_RANDOM = SecureRandom()
+private val SHA256 = Regex("[0-9a-f]{64}")
+private val PROTOCOL_NONCE = Regex("[0-9a-f]{64}")
+private val SHARD_IDENTIFIER = Regex("[a-z0-9]+(?:-[a-z0-9]+)*")
+private val COUNTER_NAME = Regex("[a-z][a-z0-9_.]*")
+private val MEMORY_BACKED_FILE_SYSTEMS = setOf("tmpfs", "ramfs", "hugetlbfs")
+private val BUBBLEWRAP_VERSION = Regex("bubblewrap [0-9]+(?:\\.[0-9]+){1,2}")
+private val SYSTEMD_MANAGER_VERSION = Regex("[0-9][0-9A-Za-z.+~:_-]*")
+private val REQUIRED_BWRAP_OPTIONS = listOf(
+    "--unshare-all",
+    "--unshare-user",
+    "--new-session",
+    "--die-with-parent",
+    "--clearenv",
+    "--disable-userns",
+    "--assert-userns-disabled",
+    "--proc",
+    "--dev",
+    "--tmpfs",
+    "--dir",
+    "--cap-drop",
+    "--hostname",
+    "--ro-bind",
+    "--bind",
+    "--chdir",
+)
+private val REQUIRED_SYSTEMD_RUN_OPTIONS = listOf(
+    "--user",
+    "--scope",
+    "--collect",
+    "--property",
+    "--unit",
+    "--expand-environment",
+)
+private val REQUIRED_SYSTEMCTL_COMMANDS = listOf("freeze", "thaw", "kill")
+private val SYSTEMD_PROPERTIES = setOf(
+    "Id",
+    "LoadState",
+    "ActiveState",
+    "SubState",
+    "CollectMode",
+    "ControlGroup",
+    "TasksMax",
+    "MemoryMax",
+    "MemorySwapMax",
+    "OOMPolicy",
+    "CPUQuotaPerSecUSec",
+    "KillMode",
+    "SendSIGKILL",
+    "RuntimeMaxUSec",
+    "TimeoutStopUSec",
+    "Delegate",
+)
