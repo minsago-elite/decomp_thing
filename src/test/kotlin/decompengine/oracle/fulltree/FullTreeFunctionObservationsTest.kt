@@ -267,6 +267,158 @@ class FullTreeFunctionObservationsTest {
         assertEquals(fixture.units.first().string("sourcePath"), isolated.units.single().string("sourcePath"))
     }
 
+    @Test
+    fun `Kotlin accumulator reproduces historical grouping independent of traversal order`() {
+        val fixture = fixture(listOf("source/\n.cpp", "source/!.cpp"))
+        val input = FullTreeFunctionObservations.shardInputs(
+            fixture.inventory,
+            fixture.inventoryArtifactSha256,
+            fixture.scope,
+            fixture.scopeSha256,
+        ).single()
+        val firstUnit = fixture.units[0]
+        val secondUnit = fixture.units[1]
+        val firstId = firstUnit.string("id")
+        val secondId = secondUnit.string("id")
+        val bmp = "\ue000"
+        val astral = "\ud800\udc00"
+        val observations = listOf(
+            FullTreeObservedSubprogram(
+                unitId = firstId,
+                dieOffset = 0x4uL,
+                rvas = listOf(0x40uL),
+                aliases = listOf(
+                    observedAlias(astral, "rich:.debug_info:die=0x4:DW_AT_name@0x4", firstId),
+                    observedAlias("alpha", "rich:.debug_info:die=0x4:DW_AT_linkage_name@0x4", firstId),
+                ),
+                declaration = declaration(firstUnit.string("sourcePath")),
+                inlineWithoutEmittedRange = false,
+            ),
+            FullTreeObservedSubprogram(
+                unitId = secondId,
+                dieOffset = 0x18uL,
+                rvas = listOf(0x40uL),
+                aliases = listOf(
+                    observedAlias(bmp, "rich:.debug_info:die=0x18:DW_AT_name@0x18", secondId),
+                    observedAlias("alpha", "rich:.debug_info:die=0x18:DW_AT_linkage_name@0x18", secondId),
+                ),
+                declaration = declaration(secondUnit.string("sourcePath")),
+                inlineWithoutEmittedRange = false,
+            ),
+            FullTreeObservedSubprogram(
+                unitId = firstId,
+                dieOffset = 0x8uL,
+                rvas = emptyList(),
+                aliases = listOf(
+                    observedAlias("inline-alpha", "rich:.debug_info:die=0x8:DW_AT_name@0x8", firstId),
+                ),
+                declaration = declaration(firstUnit.string("sourcePath")),
+                inlineWithoutEmittedRange = false,
+            ),
+            FullTreeObservedSubprogram(
+                unitId = secondId,
+                dieOffset = 0x30uL,
+                rvas = emptyList(),
+                aliases = listOf(
+                    observedAlias("inline-alpha", "rich:.debug_info:die=0x30:DW_AT_name@0x30", secondId),
+                ),
+                declaration = declaration(secondUnit.string("sourcePath")),
+                inlineWithoutEmittedRange = true,
+            ),
+        )
+
+        fun accumulate(items: List<FullTreeObservedSubprogram>): JsonObject {
+            val accumulator = FullTreeFunctionObservationAccumulator(input)
+            repeat(6) { accumulator.recordScannedDie() }
+            items.forEach(accumulator::accept)
+            return accumulator.finish(
+                inventoryIndexSha256 = fixture.inventory.string("indexSha256"),
+                richArtifactSha256 = fixture.scope.objectValue("oracle").string("richArtifactSha256"),
+                scopeSha256 = fixture.scopeSha256,
+            )
+        }
+
+        val forward = accumulate(observations)
+        val reverse = accumulate(observations.reversed())
+        assertTrue(
+            OracleJson.canonicalBytes(forward).contentEquals(OracleJson.canonicalBytes(reverse)),
+            "canonical output changed with physical DIE traversal order",
+        )
+        validate(forward, fixture, input)
+        validate(reverse, fixture, input)
+
+        val emitted = forward.array("emitted").single() as JsonObject
+        assertEquals("function-rva-0x40", emitted.string("id"))
+        assertEquals(
+            listOf("alpha", bmp, astral),
+            emitted.array("aliases").map { (it as JsonObject).string("name") },
+        )
+        val nonEmitted = forward.array("nonEmitted").single() as JsonObject
+        assertEquals(
+            listOf("definition-no-emitted-range", "inline-no-emitted-range"),
+            nonEmitted.array("reasonCodes").map { (it as JsonPrimitive).content },
+        )
+        assertEquals("source/!.cpp", nonEmitted.objectValue("declaration").string("unitSourcePath"))
+        assertEquals(6L, forward.objectValue("counts")["scannedDies"]?.let { (it as JsonPrimitive).content.toLong() })
+    }
+
+    @Test
+    fun `Kotlin accumulator fails closed on duplicate DIE bounds coverage and reuse`() {
+        val fixture = fixture()
+        val input = FullTreeFunctionObservations.shardInputs(
+            fixture.inventory,
+            fixture.inventoryArtifactSha256,
+            fixture.scope,
+            fixture.scopeSha256,
+        ).single()
+        val unit = fixture.units.first()
+        val unitId = unit.string("id")
+        val observation = FullTreeObservedSubprogram(
+            unitId = unitId,
+            dieOffset = 0x8uL,
+            rvas = emptyList(),
+            aliases = listOf(observedAlias("alpha", "rich:.debug_info:die=0x8:DW_AT_name@0x8", unitId)),
+            declaration = declaration(unit.string("sourcePath")),
+            inlineWithoutEmittedRange = false,
+        )
+
+        val duplicate = FullTreeFunctionObservationAccumulator(input)
+        duplicate.accept(observation)
+        assertFailsWithMessage("same subprogram DIE") { duplicate.accept(observation) }
+
+        val insufficient = FullTreeFunctionObservationAccumulator(input)
+        repeat(2) { insufficient.recordScannedDie() }
+        insufficient.accept(observation)
+        assertFailsWithMessage("cannot cover") {
+            insufficient.finish(
+                fixture.inventory.string("indexSha256"),
+                fixture.scope.objectValue("oracle").string("richArtifactSha256"),
+                fixture.scopeSha256,
+            )
+        }
+
+        val bounded = FullTreeFunctionObservationAccumulator(
+            input,
+            FullTreeFunctionObservationAccumulatorLimits(maximumAliasesPerSubprogram = 1),
+        )
+        assertFailsWithMessage("alias population") {
+            bounded.accept(observation.copy(aliases = listOf(
+                observedAlias("alpha", "locator-a", unitId),
+                observedAlias("beta", "locator-b", unitId),
+            )))
+        }
+
+        val frozen = FullTreeFunctionObservationAccumulator(input)
+        repeat(3) { frozen.recordScannedDie() }
+        frozen.accept(observation)
+        frozen.finish(
+            fixture.inventory.string("indexSha256"),
+            fixture.scope.objectValue("oracle").string("richArtifactSha256"),
+            fixture.scopeSha256,
+        )
+        assertFailsWithMessage("already frozen") { frozen.recordScannedDie() }
+    }
+
     private fun assertFailsWithMessage(fragment: String, block: () -> Unit) {
         val failure = assertFailsWith<FullTreeFunctionObservationException> { block() }
         assertTrue(failure.message.orEmpty().contains(fragment), failure.message)
@@ -586,6 +738,15 @@ class FullTreeFunctionObservationsTest {
             "locator" to JsonPrimitive(locator),
             "unitId" to JsonPrimitive(unitId),
         ),
+    )
+
+    private fun observedAlias(
+        name: String,
+        locator: String,
+        unitId: String,
+    ): FullTreeObservedFunctionAlias = FullTreeObservedFunctionAlias(
+        name,
+        listOf(FullTreeObservedFunctionEvidence(locator, unitId)),
     )
 
     private fun declaration(unitSourcePath: String): JsonObject = JsonObject(
