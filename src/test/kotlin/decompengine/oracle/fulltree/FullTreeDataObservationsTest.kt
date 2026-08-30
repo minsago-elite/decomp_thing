@@ -92,6 +92,18 @@ class FullTreeDataObservationsTest {
         }
         assertTrue(orderingFailure.message.orEmpty().contains("not ordered"))
 
+        val duplicate = observationDocument(
+            input,
+            globals = listOf(
+                globalObservation("global-observation-${"a".repeat(32)}", "unit-a"),
+                globalObservation("global-observation-${"a".repeat(32)}", "unit-a"),
+            ),
+        )
+        val duplicateFailure = assertFailsWith<FullTreeDataTruthException> {
+            FullTreeDataObservations.validateShard(duplicate, scope, "2".repeat(64), inventory, input)
+        }
+        assertTrue(duplicateFailure.message.orEmpty().contains("repeat an identifier"))
+
         val badCount = JsonObject(valid.toMutableMap().apply {
             this["counts"] = JsonObject((getValue("counts") as JsonObject).toMutableMap().apply {
                 this["globals"] = JsonPrimitive(1)

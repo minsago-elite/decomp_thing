@@ -1,0 +1,124 @@
+{
+  "counts": {
+    "bases": 1,
+    "enumerators": 1,
+    "fields": 1,
+    "globals": 1,
+    "scannedDies": 7,
+    "types": 1,
+    "units": 1
+  },
+  "globals": [
+    {
+      "addressRva": "0x40",
+      "alignment": 8,
+      "declaration": {
+        "column": 3,
+        "externalPathSha256": null,
+        "line": 12,
+        "sourcePath": "sample.c"
+      },
+      "dieOffset": "0x11",
+      "external": true,
+      "id": "global-observation-aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "mutability": "mutable",
+      "names": [
+        "sample_global"
+      ],
+      "reasonCode": null,
+      "size": 8,
+      "tls": false,
+      "typeReference": [
+        "0x20",
+        "0x30",
+        [
+          "DW_TAG_const_type"
+        ],
+        null
+      ],
+      "unitId": "unit-a",
+      "visibility": "default"
+    }
+  ],
+  "oracle": {
+    "configurationSha256": "5fab5ac3b18c3a29e9809d8d6ad62e6a917360b13e2dddab52b6377dcc3a09ff",
+    "inventoryIndexSha256": "1111111111111111111111111111111111111111111111111111111111111111",
+    "richArtifactSha256": "3333333333333333333333333333333333333333333333333333333333333333",
+    "scopeSha256": "2222222222222222222222222222222222222222222222222222222222222222"
+  },
+  "schemaVersion": 1,
+  "shard": {
+    "id": "shard-a",
+    "inputSha256": "10ba71206acf6a006f6721639fdad9368a9443e14a7986bdc675860c4c0b7681"
+  },
+  "types": [
+    {
+      "alignment": 8,
+      "byteSize": 16,
+      "context": [
+        "DW_TAG_namespace:sample"
+      ],
+      "declaration": {
+        "column": 1,
+        "externalPathSha256": null,
+        "line": 4,
+        "sourcePath": "sample.c"
+      },
+      "declarationOnly": false,
+      "dieOffset": "0x30",
+      "id": "type-observation-bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+      "members": [
+        {
+          "bitOffset": null,
+          "bitSize": null,
+          "byteOffset": 0,
+          "kind": "field",
+          "name": "value",
+          "typeReference": [
+            "0x40",
+            null,
+            [
+              "DW_TAG_pointer_type"
+            ],
+            "non-aggregate-terminal-type"
+          ],
+          "value": null,
+          "virtuality": null
+        },
+        {
+          "bitOffset": null,
+          "bitSize": null,
+          "byteOffset": 0,
+          "kind": "base",
+          "name": null,
+          "typeReference": [
+            "0x50",
+            "0x60",
+            [],
+            null
+          ],
+          "value": null,
+          "virtuality": 0
+        },
+        {
+          "bitOffset": null,
+          "bitSize": null,
+          "byteOffset": null,
+          "kind": "enumerator",
+          "name": "choice",
+          "typeReference": [
+            null,
+            null,
+            [],
+            "no-type-attribute"
+          ],
+          "value": 1,
+          "virtuality": null
+        }
+      ],
+      "name": "Sample",
+      "tag": "struct",
+      "unitId": "unit-a"
+    }
+  ]
+}

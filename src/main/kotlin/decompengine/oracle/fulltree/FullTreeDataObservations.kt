@@ -97,65 +97,55 @@ object FullTreeDataObservations {
         } catch (failure: Exception) {
             throw FullTreeDataTruthException("data observations fail schema validation: ${failure.message}", failure)
         }
-        val richArtifactSha256 = scope.requiredObject("oracle").requiredString("richArtifactSha256")
-        val authenticatedShard = shardInputs(inventory, scopeSha256, richArtifactSha256)
-            .singleOrNull { it.identifier == shard.identifier }
-            ?: throw FullTreeDataTruthException("data observation shard is outside the authenticated inventory")
-        if (
-            shard.inputSha256 != authenticatedShard.inputSha256 ||
-            shard.units != authenticatedShard.units
-        ) {
-            throw FullTreeDataTruthException("data observation shard input is not authenticated")
-        }
-        val expectedOracle = JsonObject(
-            mapOf(
-                "configurationSha256" to JsonPrimitive(configurationSha256),
-                "inventoryIndexSha256" to JsonPrimitive(inventory.requiredString("indexSha256")),
-                "richArtifactSha256" to JsonPrimitive(richArtifactSha256),
-                "scopeSha256" to JsonPrimitive(scopeSha256),
-            ),
-        )
-        val expectedShard = JsonObject(
-            mapOf(
-                "id" to JsonPrimitive(shard.identifier),
-                "inputSha256" to JsonPrimitive(shard.inputSha256),
-            ),
-        )
+        val bindings = authenticatedBindings(scope, scopeSha256, inventory, shard)
+        val expectedOracle = bindings.oracle
+        val expectedShard = bindings.shard
         if (document.requiredObject("oracle") != expectedOracle || document.requiredObject("shard") != expectedShard) {
             throw FullTreeDataTruthException("data observation bindings do not match")
         }
 
         val globals = document.requiredArray("globals").objects("data observation global")
         val types = document.requiredArray("types").objects("data observation type")
-        requireOrderedById(globals, "globals")
-        requireOrderedById(types, "types")
-        val unitIds = shard.units.mapTo(hashSetOf()) { it.requiredString("id") }
-        if ((globals + types).any { it.requiredString("unitId") !in unitIds }) {
-            throw FullTreeDataTruthException("data observation owner is outside its shard")
-        }
-
-        val members = types.flatMap { it.requiredArray("members").objects("data observation member") }
-        val expectedCounts = JsonObject(
-            mapOf(
-                "bases" to JsonPrimitive(members.count { it.requiredString("kind") == "base" }),
-                "enumerators" to JsonPrimitive(members.count { it.requiredString("kind") == "enumerator" }),
-                "fields" to JsonPrimitive(members.count { it.requiredString("kind") == "field" }),
-                "globals" to JsonPrimitive(globals.size),
-                "scannedDies" to JsonPrimitive(document.requiredObject("counts").requiredLong("scannedDies")),
-                "types" to JsonPrimitive(types.size),
-                "units" to JsonPrimitive(shard.units.size),
-            ),
+        val semantics = FullTreeDataObservationSemantics(shard.units)
+        globals.forEach(semantics::acceptGlobal)
+        types.forEach(semantics::acceptType)
+        val expectedCounts = semantics.expectedCounts(
+            document.requiredObject("counts").requiredLong("scannedDies"),
         )
         if (document.requiredObject("counts") != expectedCounts) {
             throw FullTreeDataTruthException("data observation counts do not reconcile")
         }
     }
 
-    private fun requireOrderedById(records: List<JsonObject>, label: String) {
-        val identifiers = records.map { it.requiredString("id") }
-        if (identifiers != identifiers.sorted()) {
-            throw FullTreeDataTruthException("data observation $label are not ordered")
+    internal fun authenticatedBindings(
+        scope: JsonObject,
+        scopeSha256: String,
+        inventory: JsonObject,
+        shard: FullTreeDataObservationShardInput,
+    ): FullTreeDataObservationBindings {
+        val richArtifactSha256 = scope.requiredObject("oracle").requiredString("richArtifactSha256")
+        val authenticatedShard = shardInputs(inventory, scopeSha256, richArtifactSha256)
+            .singleOrNull { it.identifier == shard.identifier }
+            ?: throw FullTreeDataTruthException("data observation shard is outside the authenticated inventory")
+        if (shard.inputSha256 != authenticatedShard.inputSha256 || shard.units != authenticatedShard.units) {
+            throw FullTreeDataTruthException("data observation shard input is not authenticated")
         }
+        return FullTreeDataObservationBindings(
+            oracle = JsonObject(
+                mapOf(
+                    "configurationSha256" to JsonPrimitive(configurationSha256),
+                    "inventoryIndexSha256" to JsonPrimitive(inventory.requiredString("indexSha256")),
+                    "richArtifactSha256" to JsonPrimitive(richArtifactSha256),
+                    "scopeSha256" to JsonPrimitive(scopeSha256),
+                ),
+            ),
+            shard = JsonObject(
+                mapOf(
+                    "id" to JsonPrimitive(shard.identifier),
+                    "inputSha256" to JsonPrimitive(shard.inputSha256),
+                ),
+            ),
+        )
     }
 
     private fun requireSha256(value: String, label: String) {
@@ -176,6 +166,80 @@ object FullTreeDataObservations {
             "flags" to JsonPrimitive("dwarf-boolean-and-integral-forms-normalized-to-boolean"),
         ),
     )
+}
+
+internal data class FullTreeDataObservationBindings(
+    val oracle: JsonObject,
+    val shard: JsonObject,
+)
+
+/** Stateful O(1)-identity-memory semantics shared by tree and streaming validation. */
+internal class FullTreeDataObservationSemantics(units: List<JsonObject>) {
+    private val unitIds = units.mapTo(hashSetOf()) { it.requiredString("id") }
+    private val unitCount = units.size.toLong()
+    private var previousGlobalId: String? = null
+    private var previousTypeId: String? = null
+    private var globals = 0L
+    private var types = 0L
+    private var fields = 0L
+    private var bases = 0L
+    private var enumerators = 0L
+
+    fun acceptGlobal(record: JsonObject) {
+        previousGlobalId = requireStrictlyIncreasing(record.requiredString("id"), previousGlobalId, "globals")
+        requireOwner(record)
+        globals = increment(globals, "global")
+    }
+
+    fun acceptType(record: JsonObject) {
+        previousTypeId = requireStrictlyIncreasing(record.requiredString("id"), previousTypeId, "types")
+        requireOwner(record)
+        record.requiredArray("members").objects("data observation member").forEach { member ->
+            when (member.requiredString("kind")) {
+                "field" -> fields = increment(fields, "field")
+                "base" -> bases = increment(bases, "base")
+                "enumerator" -> enumerators = increment(enumerators, "enumerator")
+                else -> throw FullTreeDataTruthException("data observation member kind is invalid")
+            }
+        }
+        types = increment(types, "type")
+    }
+
+    fun entityCount(): Long = Math.addExact(globals, types)
+
+    fun expectedCounts(scannedDies: Long): JsonObject = JsonObject(
+        mapOf(
+            "bases" to JsonPrimitive(bases),
+            "enumerators" to JsonPrimitive(enumerators),
+            "fields" to JsonPrimitive(fields),
+            "globals" to JsonPrimitive(globals),
+            "scannedDies" to JsonPrimitive(scannedDies),
+            "types" to JsonPrimitive(types),
+            "units" to JsonPrimitive(unitCount),
+        ),
+    )
+
+    private fun requireOwner(record: JsonObject) {
+        if (record.requiredString("unitId") !in unitIds) {
+            throw FullTreeDataTruthException("data observation owner is outside its shard")
+        }
+    }
+
+    private fun requireStrictlyIncreasing(current: String, previous: String?, label: String): String {
+        if (previous == current) {
+            throw FullTreeDataTruthException("data observation $label repeat an identifier")
+        }
+        if (previous != null && previous > current) {
+            throw FullTreeDataTruthException("data observation $label are not ordered")
+        }
+        return current
+    }
+
+    private fun increment(value: Long, label: String): Long = try {
+        Math.addExact(value, 1L)
+    } catch (failure: ArithmeticException) {
+        throw FullTreeDataTruthException("data observation $label count exceeds the supported range", failure)
+    }
 }
 
 internal fun JsonObject.requiredElement(name: String): JsonElement =
