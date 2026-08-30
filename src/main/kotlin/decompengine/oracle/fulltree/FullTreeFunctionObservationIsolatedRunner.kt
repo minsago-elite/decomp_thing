@@ -9,6 +9,9 @@ import decompengine.acp.PinnedSecurityExecutable
 import decompengine.acp.PinnedSystemdBusEndpoint
 import decompengine.acp.deletePrivateTreeContents
 import decompengine.acp.permissions
+import decompengine.oracle.core.OracleArtifacts
+import decompengine.oracle.core.OracleJson
+import decompengine.oracle.core.StrictJsonLimits
 import java.nio.ByteBuffer
 import java.nio.channels.FileChannel
 import java.nio.file.Files
@@ -22,6 +25,9 @@ import java.util.UUID
 import java.util.concurrent.TimeUnit
 import java.util.concurrent.atomic.AtomicReference
 import kotlin.system.exitProcess
+import kotlinx.serialization.json.JsonArray
+import kotlinx.serialization.json.JsonObject
+import kotlinx.serialization.json.JsonPrimitive
 
 internal class FullTreeFunctionObservationIsolationException(
     message: String,
@@ -65,23 +71,38 @@ internal data class FullTreeFunctionObservationClassPathEntry(
  * Digests are deliberately caller supplied: selecting whatever happens to occupy one of these
  * paths at runtime would make executable pinning circular. Each deployment-owned JVM class-path
  * file is separately authenticated, privately snapshotted, and mounted read-only.
+ *
+ * [canonicalSha256] commits to this declared configuration; it is not proof that the paths contain
+ * those bytes and does not cover derived resource limits. Runtime descriptor pinning supplies the
+ * former, and a later operation resource contract must supply the latter. Any semantic change to
+ * this encoding, its ordering, an entry point, or a protocol requires a schema/provider bump.
  */
-internal data class FullTreeFunctionObservationIsolationConfiguration(
+internal class FullTreeFunctionObservationIsolationConfiguration(
     val javaExecutable: Path,
     val javaRuntime: FullTreeFunctionObservationRuntimeMount,
-    val systemLibraryMounts: List<FullTreeFunctionObservationRuntimeMount>,
+    systemLibraryMounts: List<FullTreeFunctionObservationRuntimeMount>,
     val bubblewrapExecutable: Path,
     val resourceLimiterExecutable: Path,
     val scopeSupervisorExecutable: Path,
     val scopeInspectorExecutable: Path,
     val systemdUserRuntimeDirectory: Path,
-    val workerClassPath: List<FullTreeFunctionObservationClassPathEntry>,
+    workerClassPath: List<FullTreeFunctionObservationClassPathEntry>,
     val expectedJavaSha256: String,
     val expectedBubblewrapSha256: String,
     val expectedResourceLimiterSha256: String,
     val expectedScopeSupervisorSha256: String,
     val expectedScopeInspectorSha256: String,
 ) {
+    val systemLibraryMounts: List<FullTreeFunctionObservationRuntimeMount> =
+        java.util.List.copyOf(systemLibraryMounts)
+    val workerClassPath: List<FullTreeFunctionObservationClassPathEntry> =
+        java.util.List.copyOf(workerClassPath)
+
+    /** Canonical identity consumed by the durable operation binding; never caller supplied. */
+    val canonicalSha256: String by lazy {
+        OracleArtifacts.sha256(canonicalBytes())
+    }
+
     init {
         listOf(
             javaExecutable,
@@ -118,7 +139,58 @@ internal data class FullTreeFunctionObservationIsolationConfiguration(
             expectedScopeInspectorSha256,
         ).forEach { digest -> require(digest.matches(SHA256)) }
     }
+
+    internal fun canonicalBytesForTest(): ByteArray = canonicalBytes()
+
+    private fun canonicalBytes(): ByteArray = OracleJson.canonicalBytes(
+        JsonObject(
+            mapOf(
+                "bubblewrapExecutable" to JsonPrimitive(bubblewrapExecutable.toString()),
+                "expectedBubblewrapSha256" to JsonPrimitive(expectedBubblewrapSha256),
+                "expectedJavaSha256" to JsonPrimitive(expectedJavaSha256),
+                "expectedResourceLimiterSha256" to JsonPrimitive(expectedResourceLimiterSha256),
+                "expectedScopeInspectorSha256" to JsonPrimitive(expectedScopeInspectorSha256),
+                "expectedScopeSupervisorSha256" to JsonPrimitive(expectedScopeSupervisorSha256),
+                "javaExecutable" to JsonPrimitive(javaExecutable.toString()),
+                "javaRuntime" to javaRuntime.canonicalIdentity(),
+                "producerConfigurationSha256" to
+                    JsonPrimitive(FullTreeFunctionObservations.configurationSha256),
+                "provider" to JsonPrimitive(ISOLATION_CONFIGURATION_PROVIDER),
+                "resourceLimiterExecutable" to JsonPrimitive(resourceLimiterExecutable.toString()),
+                "schemaVersion" to JsonPrimitive(ISOLATION_CONFIGURATION_SCHEMA_VERSION),
+                "scopeInspectorExecutable" to JsonPrimitive(scopeInspectorExecutable.toString()),
+                "scopeSupervisorExecutable" to JsonPrimitive(scopeSupervisorExecutable.toString()),
+                "supervisorEntryPoint" to
+                    JsonPrimitive(FullTreeFunctionObservationIsolatedSupervisor::class.java.name),
+                "supervisorProtocolVersion" to JsonPrimitive(SUPERVISOR_PROTOCOL_VERSION),
+                "systemLibraryMounts" to JsonArray(systemLibraryMounts.map { it.canonicalIdentity() }),
+                "systemdUserRuntimeDirectory" to JsonPrimitive(systemdUserRuntimeDirectory.toString()),
+                "workerClassPath" to JsonArray(
+                    workerClassPath.map { entry ->
+                        JsonObject(
+                            mapOf(
+                                "expectedSha256" to JsonPrimitive(entry.expectedSha256),
+                                "path" to JsonPrimitive(entry.path.toString()),
+                            ),
+                        )
+                    },
+                ),
+                "workerEntryPoint" to
+                    JsonPrimitive(FullTreeFunctionObservationIsolatedWorker::class.java.name),
+                "workerProtocolVersion" to JsonPrimitive(WORKER_PROTOCOL_VERSION),
+            ),
+        ),
+        ISOLATION_CONFIGURATION_JSON_LIMITS,
+    )
 }
+
+private fun FullTreeFunctionObservationRuntimeMount.canonicalIdentity(): JsonObject = JsonObject(
+    mapOf(
+        "destination" to JsonPrimitive(destination.toString()),
+        "expectedManifestSha256" to JsonPrimitive(expectedManifestSha256),
+        "source" to JsonPrimitive(source.toString()),
+    ),
+)
 
 /**
  * Provisioning helper for a root-owned runtime directory.
@@ -2945,6 +3017,9 @@ private inline fun <T> translateIsolationFailures(action: () -> T): T = try {
 private fun isolationFail(message: String): Nothing =
     throw FullTreeFunctionObservationIsolationException(message)
 
+private const val ISOLATION_CONFIGURATION_SCHEMA_VERSION = 1
+private const val ISOLATION_CONFIGURATION_PROVIDER =
+    "kotlin-full-tree-function-observation-isolation-configuration-v1"
 private const val WORKER_PROTOCOL_VERSION = "1"
 private const val WORKER_ARGUMENTS = 9
 private const val SUPERVISOR_PROTOCOL_VERSION = "1"
@@ -3011,6 +3086,15 @@ private const val KEEPER_PROCESS_COUNT = 3
 private const val MAXIMUM_PROC_DESCRIPTOR_TARGET_CHARS = 8192
 private const val MAXIMUM_CGROUP_SEARCH_ENTRIES = 100_000
 private const val MAXIMUM_CGROUP_SEARCH_DEPTH = 32
+private val ISOLATION_CONFIGURATION_JSON_LIMITS = StrictJsonLimits(
+    maximumInputBytes = 2 * 1024 * 1024,
+    maximumCanonicalBytes = 2 * 1024 * 1024,
+    maximumDepth = 6,
+    maximumNodes = 4096,
+    maximumStringBytes = 64 * 1024,
+    maximumTotalStringBytes = 1024 * 1024,
+    maximumNumberCharacters = 32,
+)
 private const val PROTOCOL_POLL_MILLIS = 20L
 private const val SYSTEMD_POLL_MILLIS = 20L
 private const val TRUSTED_PROCESS_POLL_MILLIS = 20L

@@ -94,7 +94,7 @@ internal class FullTreeDiskScratchEvidence private constructor(
 ) {
     init {
         require(schemaVersion == DISK_SCRATCH_EVIDENCE_SCHEMA_VERSION)
-        require(provider == DISK_SCRATCH_PROVIDER)
+        require(provider == FULL_TREE_DISK_SCRATCH_PROVIDER)
         require(operationId.matches(SHA256))
         require(requestSha256.matches(SHA256))
         require(shardId.matches(SHARD_IDENTIFIER))
@@ -201,7 +201,7 @@ internal class FullTreeDiskScratchEvidence private constructor(
     ) {
         fun evidence(selfHash: String) = FullTreeDiskScratchEvidence(
             schemaVersion = DISK_SCRATCH_EVIDENCE_SCHEMA_VERSION,
-            provider = DISK_SCRATCH_PROVIDER,
+            provider = FULL_TREE_DISK_SCRATCH_PROVIDER,
             operationId = operation.operationId,
             requestSha256 = operation.requestSha256,
             shardId = operation.shardId,
@@ -653,7 +653,7 @@ private fun leaseRecordBytes(
             "mountId" to JsonPrimitive(mountIdentity.mountId),
             "mountPathSha256" to JsonPrimitive(sha256(mountPath.toString())),
             "operationId" to JsonPrimitive(operation.operationId),
-            "provider" to JsonPrimitive(DISK_SCRATCH_PROVIDER),
+            "provider" to JsonPrimitive(FULL_TREE_DISK_SCRATCH_PROVIDER),
             "requestSha256" to JsonPrimitive(operation.requestSha256),
             "requiredAvailableBytes" to JsonPrimitive(policy.requiredAvailableBytes),
             "requiredAvailableInodes" to JsonPrimitive(policy.requiredAvailableInodes),
@@ -778,7 +778,7 @@ private fun scratchFail(message: String): Nothing = throw FullTreeDiskScratchExc
 
 private const val DISK_SCRATCH_EVIDENCE_SCHEMA_VERSION = 1
 private const val DISK_SCRATCH_LEASE_SCHEMA_VERSION = 1
-private const val DISK_SCRATCH_PROVIDER = "dedicated-ext4-filesystem-v1"
+internal const val FULL_TREE_DISK_SCRATCH_PROVIDER = "dedicated-ext4-filesystem-v1"
 private const val REQUIRED_FILESYSTEM_TYPE = "ext4"
 private const val OWNER_DIRECTORY_MODE = 0x1c0 // 0700
 private const val OWNER_READ_WRITE_MODE = 0x180 // 0600

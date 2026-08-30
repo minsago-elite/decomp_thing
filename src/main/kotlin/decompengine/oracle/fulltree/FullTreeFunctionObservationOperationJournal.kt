@@ -23,7 +23,13 @@ internal class FullTreeFunctionObservationOperationJournalException(
     cause: Throwable? = null,
 ) : IllegalArgumentException(message, cause)
 
-/** Immutable request preimage and deterministic names shared by every operation-owned resource. */
+/**
+ * Immutable request preimage and deterministic names shared by every operation-owned resource.
+ *
+ * Version 2 intentionally rejects version-1 journals: the request now commits to a Kotlin-derived
+ * isolation-configuration identity and the exact fixed-disk authority provider. These commitments
+ * still do not authorize a launch, recovery mutation, lease release, or output publication.
+ */
 internal class FullTreeFunctionObservationOperationBinding private constructor(
     val schemaVersion: Int,
     val provider: String,
@@ -34,7 +40,8 @@ internal class FullTreeFunctionObservationOperationBinding private constructor(
     val scopeSha256: String,
     val inventoryArtifactSha256: String,
     val richArtifactSha256: String,
-    val isolationSha256: String,
+    val isolationConfigurationSha256: String,
+    val diskAuthorityProvider: String,
     val outputPathSha256: String,
     val requiredAvailableBytes: Long,
     val maximumFilesystemBytes: Long,
@@ -56,7 +63,8 @@ internal class FullTreeFunctionObservationOperationBinding private constructor(
             !operationId.matches(SHA256) || !requestSha256.matches(SHA256) ||
             !shardId.matches(SHARD_IDENTIFIER) || !shardInputSha256.matches(SHA256) ||
             !scopeSha256.matches(SHA256) || !inventoryArtifactSha256.matches(SHA256) ||
-            !richArtifactSha256.matches(SHA256) || !isolationSha256.matches(SHA256) ||
+            !richArtifactSha256.matches(SHA256) || !isolationConfigurationSha256.matches(SHA256) ||
+            diskAuthorityProvider != FULL_TREE_DISK_SCRATCH_PROVIDER ||
             !outputPathSha256.matches(SHA256) || !bindingSha256.matches(SHA256)
         ) journalFail("function-observation operation binding has invalid identities")
         if (
@@ -104,8 +112,9 @@ internal class FullTreeFunctionObservationOperationBinding private constructor(
         JsonObject(
             buildMap {
                 if (includeSelfHash) put("bindingSha256", JsonPrimitive(bindingSha256))
+                put("diskAuthorityProvider", JsonPrimitive(diskAuthorityProvider))
                 put("journalDirectoryName", JsonPrimitive(journalDirectoryName))
-                put("isolationSha256", JsonPrimitive(isolationSha256))
+                put("isolationConfigurationSha256", JsonPrimitive(isolationConfigurationSha256))
                 put("inventoryArtifactSha256", JsonPrimitive(inventoryArtifactSha256))
                 put("leaseDirectoryName", JsonPrimitive(leaseDirectoryName))
                 put("leaseFailureQuarantineDirectoryName", JsonPrimitive(leaseFailureQuarantineDirectoryName))
@@ -139,8 +148,9 @@ internal class FullTreeFunctionObservationOperationBinding private constructor(
     private fun canonicalRequestBytes(): ByteArray = OracleJson.canonicalBytes(
         JsonObject(
             mapOf(
+                "diskAuthorityProvider" to JsonPrimitive(diskAuthorityProvider),
                 "inventoryArtifactSha256" to JsonPrimitive(inventoryArtifactSha256),
-                "isolationSha256" to JsonPrimitive(isolationSha256),
+                "isolationConfigurationSha256" to JsonPrimitive(isolationConfigurationSha256),
                 "maximumFilesystemBytes" to JsonPrimitive(maximumFilesystemBytes),
                 "maximumFilesystemInodes" to JsonPrimitive(maximumFilesystemInodes),
                 "operationId" to JsonPrimitive(operationId),
@@ -166,7 +176,7 @@ internal class FullTreeFunctionObservationOperationBinding private constructor(
             scopeSha256: String,
             inventoryArtifactSha256: String,
             richArtifactSha256: String,
-            isolationSha256: String,
+            isolationConfiguration: FullTreeFunctionObservationIsolationConfiguration,
             output: Path,
             diskPolicy: FullTreeDiskScratchPolicy,
         ): FullTreeFunctionObservationOperationBinding {
@@ -181,7 +191,7 @@ internal class FullTreeFunctionObservationOperationBinding private constructor(
                 scopeSha256,
                 inventoryArtifactSha256,
                 richArtifactSha256,
-                isolationSha256,
+                isolationConfiguration.canonicalSha256,
                 sha256(normalizedOutput.toString().toByteArray(Charsets.UTF_8)),
                 diskPolicy,
             )
@@ -208,7 +218,9 @@ internal class FullTreeFunctionObservationOperationBinding private constructor(
                     scopeSha256 = root.journalString("scopeSha256"),
                     inventoryArtifactSha256 = root.journalString("inventoryArtifactSha256"),
                     richArtifactSha256 = root.journalString("richArtifactSha256"),
-                    isolationSha256 = root.journalString("isolationSha256"),
+                    isolationConfigurationSha256 =
+                        root.journalString("isolationConfigurationSha256"),
+                    diskAuthorityProvider = root.journalString("diskAuthorityProvider"),
                     outputPathSha256 = root.journalString("outputPathSha256"),
                     requiredAvailableBytes = root.journalLong("requiredAvailableBytes"),
                     maximumFilesystemBytes = root.journalLong("maximumFilesystemBytes"),
@@ -240,7 +252,7 @@ internal class FullTreeFunctionObservationOperationBinding private constructor(
         val scopeSha256: String,
         val inventoryArtifactSha256: String,
         val richArtifactSha256: String,
-        val isolationSha256: String,
+        val isolationConfigurationSha256: String,
         val outputPathSha256: String,
         val diskPolicy: FullTreeDiskScratchPolicy,
     ) {
@@ -254,7 +266,8 @@ internal class FullTreeFunctionObservationOperationBinding private constructor(
             scopeSha256 = scopeSha256,
             inventoryArtifactSha256 = inventoryArtifactSha256,
             richArtifactSha256 = richArtifactSha256,
-            isolationSha256 = isolationSha256,
+            isolationConfigurationSha256 = isolationConfigurationSha256,
+            diskAuthorityProvider = FULL_TREE_DISK_SCRATCH_PROVIDER,
             outputPathSha256 = outputPathSha256,
             requiredAvailableBytes = diskPolicy.requiredAvailableBytes,
             maximumFilesystemBytes = diskPolicy.maximumFilesystemBytes,
@@ -1189,11 +1202,11 @@ private fun sha256(bytes: ByteArray): String = OracleArtifacts.sha256(bytes)
 private fun journalFail(message: String): Nothing =
     throw FullTreeFunctionObservationOperationJournalException(message)
 
-private const val OPERATION_BINDING_SCHEMA_VERSION = 1
-private const val OPERATION_REQUEST_SCHEMA_VERSION = 1
-private const val OPERATION_TRANSITION_SCHEMA_VERSION = 1
-private const val OPERATION_PROVIDER = "kotlin-function-observation-operation-v1"
-private const val OPERATION_REQUEST_PROVIDER = "kotlin-function-observation-request-v1"
+private const val OPERATION_BINDING_SCHEMA_VERSION = 2
+private const val OPERATION_REQUEST_SCHEMA_VERSION = 2
+private const val OPERATION_TRANSITION_SCHEMA_VERSION = 2
+private const val OPERATION_PROVIDER = "kotlin-function-observation-operation-v2"
+private const val OPERATION_REQUEST_PROVIDER = "kotlin-function-observation-request-v2"
 private const val MINIMUM_LEASE_INODES = 4L
 private const val OWNER_DIRECTORY_MODE = 0x1c0 // 0700
 private const val GROUP_OR_OTHER_WRITE_MODE = 0x12 // 0022
@@ -1217,8 +1230,9 @@ private val OPERATION_JSON_LIMITS = StrictJsonLimits(
 )
 private val OPERATION_BINDING_FIELDS = setOf(
     "bindingSha256",
+    "diskAuthorityProvider",
     "inventoryArtifactSha256",
-    "isolationSha256",
+    "isolationConfigurationSha256",
     "journalDirectoryName",
     "leaseDirectoryName",
     "leaseFailureQuarantineDirectoryName",

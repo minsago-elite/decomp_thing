@@ -1,5 +1,7 @@
 package decompengine.oracle.fulltree
 
+import decompengine.oracle.core.OracleArtifacts
+import decompengine.oracle.core.OracleJson
 import java.io.File
 import java.nio.ByteBuffer
 import java.nio.channels.FileChannel
@@ -16,10 +18,170 @@ import kotlin.test.Test
 import kotlin.test.assertContentEquals
 import kotlin.test.assertEquals
 import kotlin.test.assertFailsWith
+import kotlin.test.assertNotEquals
 import kotlin.test.assertTrue
 import org.junit.jupiter.api.Assumptions.assumeTrue
 
 class FullTreeFunctionObservationIsolatedFixtureRunnerTest {
+    @Test
+    fun `isolation configuration has immutable canonical Kotlin owned identity`() {
+        val mounts = mutableListOf(
+            FullTreeFunctionObservationRuntimeMount(
+                Path.of("/provisioned/libraries-a"),
+                Path.of("/runtime/libraries-a"),
+                "2".repeat(64),
+            ),
+            FullTreeFunctionObservationRuntimeMount(
+                Path.of("/provisioned/libraries-b"),
+                Path.of("/runtime/libraries-b"),
+                "3".repeat(64),
+            ),
+        )
+        val classPath = mutableListOf(
+            FullTreeFunctionObservationClassPathEntry(
+                Path.of("/provisioned/application/worker-a.jar"),
+                "4".repeat(64),
+            ),
+            FullTreeFunctionObservationClassPathEntry(
+                Path.of("/provisioned/application/worker-b.jar"),
+                "5".repeat(64),
+            ),
+        )
+        val configuration = syntheticConfiguration(mounts, classPath)
+        val canonical = configuration.canonicalBytesForTest()
+
+        assertEquals(configuration.canonicalSha256, OracleArtifacts.sha256(canonical))
+        assertContentEquals(canonical, OracleJson.canonicalBytes(OracleJson.parseCanonical(canonical)))
+        assertEquals(FROZEN_ISOLATION_CONFIGURATION_SHA256, configuration.canonicalSha256)
+
+        mounts.clear()
+        classPath.clear()
+        assertContentEquals(canonical, configuration.canonicalBytesForTest())
+        assertEquals(2, configuration.systemLibraryMounts.size)
+        assertEquals(2, configuration.workerClassPath.size)
+
+        assertNotEquals(
+            configuration.canonicalSha256,
+            syntheticConfiguration(
+                configuration.systemLibraryMounts.reversed(),
+                configuration.workerClassPath,
+            ).canonicalSha256,
+        )
+        assertNotEquals(
+            configuration.canonicalSha256,
+            syntheticConfiguration(
+                configuration.systemLibraryMounts,
+                configuration.workerClassPath.reversed(),
+            ).canonicalSha256,
+        )
+        assertNotEquals(
+            configuration.canonicalSha256,
+            syntheticConfiguration(
+                configuration.systemLibraryMounts,
+                configuration.workerClassPath,
+                expectedJavaSha256 = "e".repeat(64),
+            ).canonicalSha256,
+        )
+
+        val changedConfigurations = listOf(
+            syntheticConfiguration(
+                configuration.systemLibraryMounts,
+                configuration.workerClassPath,
+                javaExecutable = Path.of("/provisioned/java/bin/java-alt"),
+            ),
+            syntheticConfiguration(
+                configuration.systemLibraryMounts,
+                configuration.workerClassPath,
+                javaRuntime = configuration.javaRuntime.copy(destination = Path.of("/runtime/java-alt")),
+            ),
+            syntheticConfiguration(
+                configuration.systemLibraryMounts,
+                configuration.workerClassPath,
+                javaRuntime = configuration.javaRuntime.copy(expectedManifestSha256 = "a".repeat(64)),
+            ),
+            syntheticConfiguration(
+                listOf(configuration.systemLibraryMounts.first().copy(source = Path.of("/alt/libraries-a"))) +
+                    configuration.systemLibraryMounts.drop(1),
+                configuration.workerClassPath,
+            ),
+            syntheticConfiguration(
+                listOf(
+                    configuration.systemLibraryMounts.first()
+                        .copy(destination = Path.of("/runtime/libraries-alt")),
+                ) + configuration.systemLibraryMounts.drop(1),
+                configuration.workerClassPath,
+            ),
+            syntheticConfiguration(
+                listOf(
+                    configuration.systemLibraryMounts.first()
+                        .copy(expectedManifestSha256 = "b".repeat(64)),
+                ) + configuration.systemLibraryMounts.drop(1),
+                configuration.workerClassPath,
+            ),
+            syntheticConfiguration(
+                configuration.systemLibraryMounts,
+                listOf(
+                    configuration.workerClassPath.first()
+                        .copy(path = Path.of("/provisioned/application/worker-alt.jar")),
+                ) + configuration.workerClassPath.drop(1),
+            ),
+            syntheticConfiguration(
+                configuration.systemLibraryMounts,
+                listOf(
+                    configuration.workerClassPath.first().copy(expectedSha256 = "c".repeat(64)),
+                ) + configuration.workerClassPath.drop(1),
+            ),
+            syntheticConfiguration(
+                configuration.systemLibraryMounts,
+                configuration.workerClassPath,
+                bubblewrapExecutable = Path.of("/provisioned/tools/bwrap-alt"),
+            ),
+            syntheticConfiguration(
+                configuration.systemLibraryMounts,
+                configuration.workerClassPath,
+                resourceLimiterExecutable = Path.of("/provisioned/tools/prlimit-alt"),
+            ),
+            syntheticConfiguration(
+                configuration.systemLibraryMounts,
+                configuration.workerClassPath,
+                scopeSupervisorExecutable = Path.of("/provisioned/tools/systemd-run-alt"),
+            ),
+            syntheticConfiguration(
+                configuration.systemLibraryMounts,
+                configuration.workerClassPath,
+                scopeInspectorExecutable = Path.of("/provisioned/tools/systemctl-alt"),
+            ),
+            syntheticConfiguration(
+                configuration.systemLibraryMounts,
+                configuration.workerClassPath,
+                systemdUserRuntimeDirectory = Path.of("/run/user/1001"),
+            ),
+            syntheticConfiguration(
+                configuration.systemLibraryMounts,
+                configuration.workerClassPath,
+                expectedBubblewrapSha256 = "d".repeat(64),
+            ),
+            syntheticConfiguration(
+                configuration.systemLibraryMounts,
+                configuration.workerClassPath,
+                expectedResourceLimiterSha256 = "e".repeat(64),
+            ),
+            syntheticConfiguration(
+                configuration.systemLibraryMounts,
+                configuration.workerClassPath,
+                expectedScopeSupervisorSha256 = "f".repeat(64),
+            ),
+            syntheticConfiguration(
+                configuration.systemLibraryMounts,
+                configuration.workerClassPath,
+                expectedScopeInspectorSha256 = "a".repeat(64),
+            ),
+        )
+        changedConfigurations.forEach { changed ->
+            assertNotEquals(configuration.canonicalSha256, changed.canonicalSha256)
+        }
+    }
+
     @Test
     fun `cleanup fallback always thaws and retries kill before stop and reset`() {
         val calls = mutableListOf<Pair<List<String>, Set<Int>>>()
@@ -301,6 +463,44 @@ class FullTreeFunctionObservationIsolatedFixtureRunnerTest {
         )
     }
 
+    private fun syntheticConfiguration(
+        mounts: List<FullTreeFunctionObservationRuntimeMount>,
+        classPath: List<FullTreeFunctionObservationClassPathEntry>,
+        expectedJavaSha256: String = "1".repeat(64),
+        javaRuntime: FullTreeFunctionObservationRuntimeMount = FullTreeFunctionObservationRuntimeMount(
+            Path.of("/provisioned/java"),
+            Path.of("/runtime/java"),
+            "0".repeat(64),
+        ),
+        javaExecutable: Path = javaRuntime.source.resolve("bin/java"),
+        bubblewrapExecutable: Path = Path.of("/provisioned/tools/bwrap"),
+        resourceLimiterExecutable: Path = Path.of("/provisioned/tools/prlimit"),
+        scopeSupervisorExecutable: Path = Path.of("/provisioned/tools/systemd-run"),
+        scopeInspectorExecutable: Path = Path.of("/provisioned/tools/systemctl"),
+        systemdUserRuntimeDirectory: Path = Path.of("/run/user/1000"),
+        expectedBubblewrapSha256: String = "6".repeat(64),
+        expectedResourceLimiterSha256: String = "7".repeat(64),
+        expectedScopeSupervisorSha256: String = "8".repeat(64),
+        expectedScopeInspectorSha256: String = "9".repeat(64),
+    ): FullTreeFunctionObservationIsolationConfiguration {
+        return FullTreeFunctionObservationIsolationConfiguration(
+            javaExecutable = javaExecutable,
+            javaRuntime = javaRuntime,
+            systemLibraryMounts = mounts,
+            bubblewrapExecutable = bubblewrapExecutable,
+            resourceLimiterExecutable = resourceLimiterExecutable,
+            scopeSupervisorExecutable = scopeSupervisorExecutable,
+            scopeInspectorExecutable = scopeInspectorExecutable,
+            systemdUserRuntimeDirectory = systemdUserRuntimeDirectory,
+            workerClassPath = classPath,
+            expectedJavaSha256 = expectedJavaSha256,
+            expectedBubblewrapSha256 = expectedBubblewrapSha256,
+            expectedResourceLimiterSha256 = expectedResourceLimiterSha256,
+            expectedScopeSupervisorSha256 = expectedScopeSupervisorSha256,
+            expectedScopeInspectorSha256 = expectedScopeInspectorSha256,
+        )
+    }
+
     private fun createRuntimeJar(source: Path, target: Path) {
         JarOutputStream(Files.newOutputStream(target)).use { jar ->
             Files.walk(source).use { paths ->
@@ -365,5 +565,7 @@ class FullTreeFunctionObservationIsolatedFixtureRunnerTest {
     private companion object {
         const val ZERO_SHA256 =
             "0000000000000000000000000000000000000000000000000000000000000000"
+        const val FROZEN_ISOLATION_CONFIGURATION_SHA256 =
+            "996c3815ddd9f6330fbf9f404353a2f28fa81ba47d58a3eff4ff57e83cd71e95"
     }
 }

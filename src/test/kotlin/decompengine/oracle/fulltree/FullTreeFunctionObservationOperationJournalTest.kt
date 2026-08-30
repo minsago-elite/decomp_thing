@@ -26,6 +26,7 @@ class FullTreeFunctionObservationOperationJournalTest {
     @Test
     fun `operation binding is canonical self hashed and fixes every runtime name`() {
         val binding = binding()
+        val isolationConfiguration = isolationConfiguration("6")
 
         assertEquals(".function-observation-operation-${"1".repeat(64)}", binding.journalDirectoryName)
         assertEquals(".decomp-oracle-lease-${"1".repeat(64)}", binding.leaseDirectoryName)
@@ -44,6 +45,8 @@ class FullTreeFunctionObservationOperationJournalTest {
         )
         assertEquals("decomp-oracle-function-${"1".repeat(64)}.scope", binding.unitName)
         assertEquals(".function-observation-output-${"1".repeat(64)}.atomic", binding.outputStageName)
+        assertEquals(isolationConfiguration.canonicalSha256, binding.isolationConfigurationSha256)
+        assertEquals(FULL_TREE_DISK_SCRATCH_PROVIDER, binding.diskAuthorityProvider)
         assertEquals(
             binding.requestSha256,
             OracleArtifacts.sha256(binding.canonicalRequestBytesForTest()),
@@ -87,7 +90,8 @@ class FullTreeFunctionObservationOperationJournalTest {
             FullTreeFunctionObservationOperationBinding.parseCanonical(mutatedHash)
         }
 
-        val changedIsolation = root + ("isolationSha256" to JsonPrimitive("a".repeat(64)))
+        val changedIsolation = root +
+            ("isolationConfigurationSha256" to JsonPrimitive("a".repeat(64)))
         val changedIsolationHash = OracleArtifacts.sha256(
             OracleJson.canonicalBytes(JsonObject(changedIsolation - "bindingSha256")),
         )
@@ -97,6 +101,66 @@ class FullTreeFunctionObservationOperationJournalTest {
                     JsonObject(changedIsolation + ("bindingSha256" to JsonPrimitive(changedIsolationHash))),
                 ),
             )
+        }
+
+        val wrongDiskProvider = root + ("diskAuthorityProvider" to JsonPrimitive("ordinary-directory-v1"))
+        val wrongDiskProviderHash = OracleArtifacts.sha256(
+            OracleJson.canonicalBytes(JsonObject(wrongDiskProvider - "bindingSha256")),
+        )
+        assertFailsWith<FullTreeFunctionObservationOperationJournalException> {
+            FullTreeFunctionObservationOperationBinding.parseCanonical(
+                OracleJson.canonicalBytes(
+                    JsonObject(
+                        wrongDiskProvider +
+                            ("bindingSha256" to JsonPrimitive(wrongDiskProviderHash)),
+                    ),
+                ),
+            )
+        }
+    }
+
+    @Test
+    fun `v2 journal rejects legacy v1 binding bytes without mutation`() = withJournalRoot { root ->
+        val binding = binding()
+        val current = OracleJson.parse(binding.canonicalBytes()) as JsonObject
+        val legacyWithoutHash = current
+            .minus("bindingSha256")
+            .minus("diskAuthorityProvider")
+            .minus("isolationConfigurationSha256") +
+            mapOf(
+                "isolationSha256" to JsonPrimitive(binding.isolationConfigurationSha256),
+                "provider" to JsonPrimitive("kotlin-function-observation-operation-v1"),
+                "schemaVersion" to JsonPrimitive(1),
+            )
+        val legacy = OracleJson.canonicalBytes(
+            JsonObject(
+                legacyWithoutHash +
+                    ("bindingSha256" to JsonPrimitive(
+                        OracleArtifacts.sha256(OracleJson.canonicalBytes(JsonObject(legacyWithoutHash))),
+                    )),
+            ),
+        )
+
+        FullTreeFunctionObservationJournalAuthority.open(root).use { authority ->
+            authority.createNew(binding).use { journal ->
+                val path = root.resolve(binding.journalDirectoryName).resolve("binding.json")
+                writeImmutable(path, legacy)
+                val namesBefore = Files.list(path.parent).use { entries ->
+                    entries.map { it.fileName.toString() }.sorted().toList()
+                }
+
+                assertFailsWith<FullTreeFunctionObservationOperationJournalException> {
+                    journal.loadOrNull()
+                }
+
+                assertContentEquals(legacy, Files.readAllBytes(path))
+                assertEquals(
+                    namesBefore,
+                    Files.list(path.parent).use { entries ->
+                        entries.map { it.fileName.toString() }.sorted().toList()
+                    },
+                )
+            }
         }
     }
 
@@ -749,7 +813,7 @@ class FullTreeFunctionObservationOperationJournalTest {
         scopeSha256 = "3".repeat(64),
         inventoryArtifactSha256 = "4".repeat(64),
         richArtifactSha256 = "5".repeat(64),
-        isolationSha256 = isolationSeed.repeat(64),
+        isolationConfiguration = isolationConfiguration(isolationSeed),
         output = Path.of("/var/lib/decomp-oracle/output/clang-lib-driver.json"),
         diskPolicy = FullTreeDiskScratchPolicy(
             requiredAvailableBytes = 1024,
@@ -758,6 +822,42 @@ class FullTreeFunctionObservationOperationJournalTest {
             maximumFilesystemInodes = 64,
         ),
     )
+
+    private fun isolationConfiguration(seed: String): FullTreeFunctionObservationIsolationConfiguration {
+        val javaRuntime = Path.of("/provisioned/java")
+        val tool = Path.of("/provisioned/tools")
+        return FullTreeFunctionObservationIsolationConfiguration(
+            javaExecutable = javaRuntime.resolve("bin/java"),
+            javaRuntime = FullTreeFunctionObservationRuntimeMount(
+                javaRuntime,
+                Path.of("/runtime/java"),
+                "7".repeat(64),
+            ),
+            systemLibraryMounts = listOf(
+                FullTreeFunctionObservationRuntimeMount(
+                    Path.of("/provisioned/libraries"),
+                    Path.of("/runtime/libraries"),
+                    "8".repeat(64),
+                ),
+            ),
+            bubblewrapExecutable = tool.resolve("bwrap"),
+            resourceLimiterExecutable = tool.resolve("prlimit"),
+            scopeSupervisorExecutable = tool.resolve("systemd-run"),
+            scopeInspectorExecutable = tool.resolve("systemctl"),
+            systemdUserRuntimeDirectory = Path.of("/run/user/1000"),
+            workerClassPath = listOf(
+                FullTreeFunctionObservationClassPathEntry(
+                    Path.of("/provisioned/application/worker.jar"),
+                    "9".repeat(64),
+                ),
+            ),
+            expectedJavaSha256 = seed.repeat(64),
+            expectedBubblewrapSha256 = "a".repeat(64),
+            expectedResourceLimiterSha256 = "b".repeat(64),
+            expectedScopeSupervisorSha256 = "c".repeat(64),
+            expectedScopeInspectorSha256 = "d".repeat(64),
+        )
+    }
 
     private fun mutateTransition(
         transition: FullTreeFunctionObservationOperationTransition,
@@ -802,12 +902,12 @@ class FullTreeFunctionObservationOperationJournalTest {
     private class SimulatedProcessDeath : Error()
 
     private companion object {
-        const val FROZEN_BINDING_SHA256 = "c133c50e9eb12900e2d8a886f36655eb894b84eb8e221e3d169c9f773fbf7ecf"
+        const val FROZEN_BINDING_SHA256 = "6300f8fab1437d65e5dbe8f4446c5b06ae4541c4239f67317de9fec3b5a3d004"
         const val FROZEN_BINDING_ARTIFACT_SHA256 =
-            "e72942fa18b92c41c02aa9ea8147268325bbe602a871f7db5333dc34398e19f5"
+            "b077857d0ed082d04e1b657b0320554be85a6299df5f2da86e56370b35ce7a75"
         const val FROZEN_INITIAL_TRANSITION_SHA256 =
-            "792a7684c901a6c2447953cbf5cd857ac47a88b107057abc169b75569896b290"
+            "cabba2a2d307e94ace6f7470d7708a5e047582346286463de8607f719ad15de0"
         const val FROZEN_COMPLETE_TRANSITION_SHA256 =
-            "4c2c14d78ab2ecc2d39cddd80cd3f7d5329768b25b8775ad03b1bfb18412bffd"
+            "4c33ec3621fb4c178556ad8c0ec0eab7e062f448debd4dfbccb719e999d8da60"
     }
 }
