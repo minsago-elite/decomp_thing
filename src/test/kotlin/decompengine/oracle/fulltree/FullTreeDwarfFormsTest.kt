@@ -292,6 +292,59 @@ class FullTreeDwarfFormsTest {
     }
 
     @Test
+    fun `pre DWARF4 range offsets retain their legacy data form through resolution`() {
+        val ranges = section(ByteArray(32), ".debug_ranges")
+        listOf(
+            Triple(FULL_TREE_DW_FORM_DATA4, 4, 8UL),
+            Triple(FULL_TREE_DW_FORM_DATA8, 8, 16UL),
+        ).forEach { (form, offsetSize, raw) ->
+            val value = assertIs<FullTreeDwarfRangeSectionOffsetValue>(
+                readForm(
+                    unsigned(raw, offsetSize),
+                    form,
+                    version = 3,
+                    offsetSize = offsetSize,
+                    context = FullTreeDwarfFormContext.RANGE_LIST,
+                ),
+            )
+            assertEquals(form, value.resolvedForm)
+            assertEquals(raw, value.rawValue)
+
+            val input = FullTreeDwarfRangeListResolver(
+                version = 3,
+                addressSize = 8,
+                offsetSize = offsetSize,
+                debugRanges = ranges,
+                debugRnglists = null,
+                rnglistsBase = null,
+                parseBudget = FullTreeDwarfParseBudget(4L),
+            ).resolve(value)
+            assertEquals(FullTreeDwarfRangeListEncoding.DEBUG_RANGES, input.encoding)
+            assertEquals(raw.toLong(), input.offset)
+            assertEquals(3, input.dwarfVersion)
+        }
+
+        assertIs<FullTreeDwarfNumericValue>(
+            readForm(
+                unsigned(8UL, 4),
+                FULL_TREE_DW_FORM_DATA4,
+                version = 4,
+                offsetSize = 4,
+                context = FullTreeDwarfFormContext.RANGE_LIST,
+            ),
+        )
+        assertIs<FullTreeDwarfNumericValue>(
+            readForm(
+                unsigned(8UL, 2),
+                FULL_TREE_DW_FORM_DATA2,
+                version = 3,
+                offsetSize = 4,
+                context = FullTreeDwarfFormContext.RANGE_LIST,
+            ),
+        )
+    }
+
+    @Test
     fun `indirect forms retain effective form raw value and nesting depth`() {
         val bytes = byteArrayOf(
             FULL_TREE_DW_FORM_INDIRECT.toByte(),

@@ -13,6 +13,7 @@ import kotlinx.serialization.json.JsonPrimitive
 internal data class FullTreeFunctionObservationAccumulatorLimits(
     val maximumScannedDies: Long = 50_000_000L,
     val maximumSubprograms: Long = 10_000_000L,
+    val maximumEntities: Int = 10_000_000,
     val maximumEmittedRvas: Int = 10_000_000,
     val maximumNonEmittedGroups: Int = 10_000_000,
     val maximumAliasesPerSubprogram: Int = 256,
@@ -23,10 +24,12 @@ internal data class FullTreeFunctionObservationAccumulatorLimits(
     val maximumOwnersPerEntity: Int = 1_000_000,
     val maximumNameCodePoints: Int = 16_384,
     val maximumLocatorCodePoints: Int = 16_384,
+    val maximumRetainedBytes: Long = 1024L * 1024L * 1024L,
 ) {
     init {
         require(maximumScannedDies in 1L..50_000_000L)
         require(maximumSubprograms in 1L..maximumScannedDies)
+        require(maximumEntities in 1..10_000_000)
         require(maximumEmittedRvas in 1..10_000_000)
         require(maximumNonEmittedGroups in 1..10_000_000)
         require(maximumAliasesPerSubprogram in 1..1_000_000)
@@ -37,6 +40,7 @@ internal data class FullTreeFunctionObservationAccumulatorLimits(
         require(maximumOwnersPerEntity in 1..1_000_000)
         require(maximumNameCodePoints in 1..16_384)
         require(maximumLocatorCodePoints in 1..16_384)
+        require(maximumRetainedBytes in 1L..16L * 1024L * 1024L * 1024L)
     }
 }
 
@@ -79,6 +83,7 @@ internal class FullTreeFunctionObservationAccumulator(
     private val observedSubprogramDies = HashSet<ULong>()
     private var scannedDies = 0L
     private var subprograms = 0L
+    private var modeledRetainedBytes = 0L
     private var finished = false
 
     init {
@@ -116,6 +121,7 @@ internal class FullTreeFunctionObservationAccumulator(
         if (!observedSubprogramDies.add(observation.dieOffset)) {
             accumulatorFail("artifact scan emitted the same subprogram DIE more than once")
         }
+        retain(MODELED_OBSERVED_DIE_BYTES, "observed DIE index")
         if (observation.aliases.isEmpty() || observation.aliases.size > limits.maximumAliasesPerSubprogram) {
             accumulatorFail("observed subprogram alias population is outside its bound")
         }
@@ -204,11 +210,13 @@ internal class FullTreeFunctionObservationAccumulator(
         aliases: List<AuthenticatedFunctionAlias>,
         declaration: JsonObject,
     ) {
-        val group = emitted.getOrPut(rva) {
+        val group = emitted[rva] ?: run {
             if (emitted.size >= limits.maximumEmittedRvas) {
                 accumulatorFail("function-observation emitted-RVA population exceeds its bound")
             }
-            MutableEmitted()
+            requireEntityCapacity()
+            retain(MODELED_EMITTED_GROUP_BYTES, "emitted observation")
+            MutableEmitted().also { emitted[rva] = it }
         }
         group.addOwner(unitId)
         group.addDeclaration(declaration)
@@ -223,16 +231,22 @@ internal class FullTreeFunctionObservationAccumulator(
         val identityDocument = nonEmittedIdentityDocument(aliases, declaration)
         val identityBytes = canonicalBytes(identityDocument, "non-emitted observation identity")
         val identity = sha256(identityBytes).take(32)
-        val group = nonEmitted.getOrPut(identity) {
+        val group = nonEmitted[identity] ?: run {
             if (nonEmitted.size >= limits.maximumNonEmittedGroups) {
                 accumulatorFail("function-observation non-emitted population exceeds its bound")
             }
+            requireEntityCapacity()
+            retain(
+                modeledCanonicalRetention(identityBytes.size, MODELED_NON_EMITTED_GROUP_BYTES),
+                "non-emitted observation",
+            )
+            retainCanonical(declaration, "non-emitted declaration")
             MutableNonEmitted(
                 identityBytes = identityBytes,
                 identifier = "non-emitted-observation-" +
                     sha256("${shard.identifier}:$identity".toByteArray(StandardCharsets.UTF_8)).take(32),
                 initialDeclaration = declaration,
-            )
+            ).also { nonEmitted[identity] = it }
         }
         if (!group.identityBytes.contentEquals(identityBytes)) {
             accumulatorFail("non-emitted observation identity digest collision")
@@ -302,20 +316,50 @@ internal class FullTreeFunctionObservationAccumulator(
         if (finished) accumulatorFail("function-observation accumulator is already frozen")
     }
 
+    private fun requireEntityCapacity() {
+        val entities = Math.addExact(emitted.size, nonEmitted.size)
+        if (entities >= limits.maximumEntities) {
+            accumulatorFail("function-observation entity population exceeds its bound")
+        }
+    }
+
+    private fun retainCanonical(value: JsonElement, label: String) {
+        val bytes = canonicalBytes(value, label)
+        retain(modeledCanonicalRetention(bytes.size, MODELED_JSON_VALUE_BYTES), label)
+    }
+
+    private fun retain(bytes: Long, label: String) {
+        if (bytes < 0L) accumulatorFail("function-observation $label retained-byte charge is invalid")
+        modeledRetainedBytes = add(modeledRetainedBytes, bytes, "$label retained byte")
+        if (modeledRetainedBytes > limits.maximumRetainedBytes) {
+            accumulatorFail("function-observation retained-byte model exceeds its bound")
+        }
+    }
+
     private inner class MutableEmitted {
         private val aliases = TreeMap<String, LinkedHashMap<ByteArrayKey, JsonObject>>(FULL_TREE_CODE_POINT_ORDER)
         private val declarations = LinkedHashMap<ByteArrayKey, JsonObject>()
         private val ownerUnitIds = java.util.TreeSet<String>(FULL_TREE_CODE_POINT_ORDER)
 
         fun addOwner(unitId: String) {
-            ownerUnitIds += unitId
+            if (ownerUnitIds.add(unitId)) {
+                retain(modeledStringRetention(unitId, MODELED_SET_ENTRY_BYTES), "emitted owner")
+            }
             if (ownerUnitIds.size > limits.maximumOwnersPerEntity) {
                 accumulatorFail("emitted observation owner population exceeds its bound")
             }
         }
 
         fun addDeclaration(declaration: JsonObject) {
-            declarations[ByteArrayKey(canonicalBytes(declaration, "emitted declaration"))] = declaration
+            val bytes = canonicalBytes(declaration, "emitted declaration")
+            val key = ByteArrayKey(bytes)
+            if (key !in declarations) {
+                retain(
+                    modeledCanonicalRetention(bytes.size, MODELED_MAP_ENTRY_BYTES),
+                    "emitted declaration",
+                )
+                declarations[key] = declaration
+            }
             if (declarations.size > limits.maximumDeclarationsPerRva) {
                 accumulatorFail("emitted observation declaration population exceeds its bound")
             }
@@ -323,9 +367,20 @@ internal class FullTreeFunctionObservationAccumulator(
 
         fun addAliases(observed: List<AuthenticatedFunctionAlias>) {
             observed.forEach { alias ->
-                val evidence = aliases.getOrPut(alias.name) { LinkedHashMap() }
+                val evidence = aliases[alias.name] ?: run {
+                    retain(modeledStringRetention(alias.name, MODELED_MAP_ENTRY_BYTES), "emitted alias")
+                    LinkedHashMap<ByteArrayKey, JsonObject>().also { aliases[alias.name] = it }
+                }
                 alias.evidence.forEach { item ->
-                    evidence[ByteArrayKey(canonicalBytes(item, "emitted alias evidence"))] = item
+                    val bytes = canonicalBytes(item, "emitted alias evidence")
+                    val key = ByteArrayKey(bytes)
+                    if (key !in evidence) {
+                        retain(
+                            modeledCanonicalRetention(bytes.size, MODELED_MAP_ENTRY_BYTES),
+                            "emitted alias evidence",
+                        )
+                        evidence[key] = item
+                    }
                 }
                 if (evidence.size > limits.maximumEvidencePerAliasPerEntity) {
                     accumulatorFail("emitted alias evidence population exceeds its bound")
@@ -363,9 +418,20 @@ internal class FullTreeFunctionObservationAccumulator(
 
         fun addAliases(observed: List<AuthenticatedFunctionAlias>) {
             observed.forEach { alias ->
-                val evidence = aliases.getOrPut(alias.name) { LinkedHashMap() }
+                val evidence = aliases[alias.name] ?: run {
+                    retain(modeledStringRetention(alias.name, MODELED_MAP_ENTRY_BYTES), "non-emitted alias")
+                    LinkedHashMap<ByteArrayKey, JsonObject>().also { aliases[alias.name] = it }
+                }
                 alias.evidence.forEach { item ->
-                    evidence[ByteArrayKey(canonicalBytes(item, "non-emitted alias evidence"))] = item
+                    val bytes = canonicalBytes(item, "non-emitted alias evidence")
+                    val key = ByteArrayKey(bytes)
+                    if (key !in evidence) {
+                        retain(
+                            modeledCanonicalRetention(bytes.size, MODELED_MAP_ENTRY_BYTES),
+                            "non-emitted alias evidence",
+                        )
+                        evidence[key] = item
+                    }
                 }
                 if (evidence.size > limits.maximumEvidencePerAliasPerEntity) {
                     accumulatorFail("non-emitted alias evidence population exceeds its bound")
@@ -382,20 +448,26 @@ internal class FullTreeFunctionObservationAccumulator(
                     canonicalBytes(declaration, "non-emitted declaration"),
                 ) < 0
             ) {
+                retainCanonical(candidate, "non-emitted declaration")
                 declaration = candidate
             }
         }
 
         fun addDie(unitId: String, dieOffset: ULong) {
             dieOffsets += DieOffset(unitId, dieOffset)
-            unitIds += unitId
+            retain(MODELED_DIE_OFFSET_BYTES, "non-emitted DIE evidence")
+            if (unitIds.add(unitId)) {
+                retain(modeledStringRetention(unitId, MODELED_SET_ENTRY_BYTES), "non-emitted owner")
+            }
             if (unitIds.size > limits.maximumOwnersPerEntity) {
                 accumulatorFail("non-emitted observation owner population exceeds its bound")
             }
         }
 
         fun addReason(reason: String) {
-            reasonCodes += reason
+            if (reasonCodes.add(reason)) {
+                retain(modeledStringRetention(reason, MODELED_SET_ENTRY_BYTES), "non-emission reason")
+            }
         }
 
         fun freeze(): JsonObject = JsonObject(
@@ -434,6 +506,24 @@ internal class FullTreeFunctionObservationAccumulator(
     }
 
     private data class DieOffset(val unitId: String, val offset: ULong)
+
+    private companion object {
+        const val MODELED_OBSERVED_DIE_BYTES = 64L
+        const val MODELED_EMITTED_GROUP_BYTES = 512L
+        const val MODELED_NON_EMITTED_GROUP_BYTES = 1024L
+        const val MODELED_JSON_VALUE_BYTES = 256L
+        const val MODELED_MAP_ENTRY_BYTES = 192L
+        const val MODELED_SET_ENTRY_BYTES = 128L
+        const val MODELED_DIE_OFFSET_BYTES = 96L
+
+        fun modeledCanonicalRetention(byteCount: Int, overhead: Long): Long =
+            Math.addExact(Math.multiplyExact(byteCount.toLong(), 2L), overhead)
+
+        fun modeledStringRetention(value: String, overhead: Long): Long = Math.addExact(
+            Math.multiplyExact(value.toByteArray(StandardCharsets.UTF_8).size.toLong(), 2L),
+            overhead,
+        )
+    }
 }
 
 private data class AuthenticatedFunctionAlias(val name: String, val evidence: List<JsonObject>)

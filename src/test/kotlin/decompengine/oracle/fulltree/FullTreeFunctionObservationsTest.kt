@@ -477,6 +477,21 @@ class FullTreeFunctionObservationsTest {
             ),
         )
         assertFailsWithMessage("exceeds its DIE bound") { scannedBound.recordScannedDies(3L) }
+
+        val entityBound = FullTreeFunctionObservationAccumulator(
+            input,
+            FullTreeFunctionObservationAccumulatorLimits(maximumEntities = 1),
+        )
+        entityBound.accept(observation.copy(rvas = listOf(0x40uL)))
+        assertFailsWithMessage("entity population") {
+            entityBound.accept(observation.copy(dieOffset = 0x9uL, rvas = listOf(0x50uL)))
+        }
+
+        val retainedBound = FullTreeFunctionObservationAccumulator(
+            input,
+            FullTreeFunctionObservationAccumulatorLimits(maximumRetainedBytes = 63L),
+        )
+        assertFailsWithMessage("retained-byte model") { retainedBound.accept(observation) }
     }
 
     private fun assertFailsWithMessage(fragment: String, block: () -> Unit) {

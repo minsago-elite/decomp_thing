@@ -398,9 +398,15 @@ internal object FullTreeDwarfForms {
                 cursor.skipBounded(length, limits.maximumDwarfAttributeBytes)
                 FullTreeDwarfIgnoredValue
             }
-            FULL_TREE_DW_FORM_DATA2 -> readUnsignedConstant(cursor, form, 2, indirectDepth, context)
-            FULL_TREE_DW_FORM_DATA4 -> readUnsignedConstant(cursor, form, 4, indirectDepth, context)
-            FULL_TREE_DW_FORM_DATA8 -> readUnsignedConstant(cursor, form, 8, indirectDepth, context)
+            FULL_TREE_DW_FORM_DATA2 -> readUnsignedConstant(
+                cursor, form, 2, indirectDepth, context, version, offsetSize,
+            )
+            FULL_TREE_DW_FORM_DATA4 -> readUnsignedConstant(
+                cursor, form, 4, indirectDepth, context, version, offsetSize,
+            )
+            FULL_TREE_DW_FORM_DATA8 -> readUnsignedConstant(
+                cursor, form, 8, indirectDepth, context, version, offsetSize,
+            )
             FULL_TREE_DW_FORM_STRING -> FullTreeDwarfInlineStringValue(
                 cursor.readNullTerminated(limits.maximumDwarfAttributeBytes),
             )
@@ -412,7 +418,9 @@ internal object FullTreeDwarfForms {
                 cursor.skipBounded(length, limits.maximumDwarfAttributeBytes)
                 FullTreeDwarfIgnoredValue
             }
-            FULL_TREE_DW_FORM_DATA1 -> readUnsignedConstant(cursor, form, 1, indirectDepth, context)
+            FULL_TREE_DW_FORM_DATA1 -> readUnsignedConstant(
+                cursor, form, 1, indirectDepth, context, version, offsetSize,
+            )
             FULL_TREE_DW_FORM_FLAG -> FullTreeDwarfNumericValue(cursor.readUnsigned(1))
             FULL_TREE_DW_FORM_SDATA -> cursor.readSleb128().let { raw ->
                 if (context == FullTreeDwarfFormContext.CONSTANT) {
@@ -576,10 +584,14 @@ internal object FullTreeDwarfForms {
         width: Int,
         indirectDepth: Int,
         context: FullTreeDwarfFormContext,
-    ): FullTreeDwarfFormValue = if (context == FullTreeDwarfFormContext.CONSTANT) {
-        FullTreeDwarfUnsignedConstantValue(form, cursor.readUnsignedBits(width), indirectDepth)
-    } else {
-        FullTreeDwarfNumericValue(cursor.readUnsigned(width))
+        version: Int,
+        offsetSize: Int,
+    ): FullTreeDwarfFormValue = when {
+        context == FullTreeDwarfFormContext.CONSTANT ->
+            FullTreeDwarfUnsignedConstantValue(form, cursor.readUnsignedBits(width), indirectDepth)
+        context == FullTreeDwarfFormContext.RANGE_LIST && version <= 3 && width == offsetSize ->
+            FullTreeDwarfRangeSectionOffsetValue(form, cursor.readUnsignedBits(width), indirectDepth)
+        else -> FullTreeDwarfNumericValue(cursor.readUnsigned(width))
     }
 
     fun decodeString(
@@ -771,7 +783,12 @@ internal class FullTreeDwarfRangeListResolver(
     }
 
     private fun resolveSectionOffset(value: FullTreeDwarfRangeSectionOffsetValue): FullTreeDwarfRangeListInput {
-        if (value.resolvedForm != FULL_TREE_DW_FORM_SEC_OFFSET) {
+        val expectedForm = when {
+            version <= 3 && offsetSize == 4 -> FULL_TREE_DW_FORM_DATA4
+            version <= 3 && offsetSize == 8 -> FULL_TREE_DW_FORM_DATA8
+            else -> FULL_TREE_DW_FORM_SEC_OFFSET
+        }
+        if (value.resolvedForm != expectedForm) {
             throw FullTreeControlException("DWARF range section offset has an inconsistent resolved form")
         }
         val offset = fullTreeDwarfBoundedLong(value.rawValue, "DWARF range section offset")
