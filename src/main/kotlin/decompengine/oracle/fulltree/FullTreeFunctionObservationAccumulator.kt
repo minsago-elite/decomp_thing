@@ -16,7 +16,9 @@ internal data class FullTreeFunctionObservationAccumulatorLimits(
     val maximumEmittedRvas: Int = 10_000_000,
     val maximumNonEmittedGroups: Int = 10_000_000,
     val maximumAliasesPerSubprogram: Int = 256,
-    val maximumEvidencePerAlias: Int = 4096,
+    val maximumEvidencePerAliasPerSubprogram: Int = 256,
+    val maximumAliasesPerEntity: Int = 1_000_000,
+    val maximumEvidencePerAliasPerEntity: Int = 1_000_000,
     val maximumDeclarationsPerRva: Int = 1_000_000,
     val maximumOwnersPerEntity: Int = 1_000_000,
     val maximumNameCodePoints: Int = 16_384,
@@ -28,7 +30,9 @@ internal data class FullTreeFunctionObservationAccumulatorLimits(
         require(maximumEmittedRvas in 1..10_000_000)
         require(maximumNonEmittedGroups in 1..10_000_000)
         require(maximumAliasesPerSubprogram in 1..1_000_000)
-        require(maximumEvidencePerAlias in 1..1_000_000)
+        require(maximumEvidencePerAliasPerSubprogram in 1..1_000_000)
+        require(maximumAliasesPerEntity in 1..1_000_000)
+        require(maximumEvidencePerAliasPerEntity in 1..1_000_000)
         require(maximumDeclarationsPerRva in 1..1_000_000)
         require(maximumOwnersPerEntity in 1..1_000_000)
         require(maximumNameCodePoints in 1..16_384)
@@ -107,6 +111,9 @@ internal class FullTreeFunctionObservationAccumulator(
         if (observation.aliases.isEmpty() || observation.aliases.size > limits.maximumAliasesPerSubprogram) {
             accumulatorFail("observed subprogram alias population is outside its bound")
         }
+        if (observation.rvas.size > 1) {
+            accumulatorFail("observed subprogram has more than one historical-v3 start RVA")
+        }
         val aliases = authenticateAliases(observation.aliases, observation.unitId)
         val declaration = snapshotDeclaration(observation.declaration, unit)
         val rvas = observation.rvas.toSortedSet()
@@ -135,7 +142,7 @@ internal class FullTreeFunctionObservationAccumulator(
         }
         val minimumScannedDies = add(
             shard.units.size.toLong(),
-            nonEmittedDies,
+            subprograms,
             "minimum scanned DIE",
         )
         if (scannedDies < minimumScannedDies) {
@@ -242,7 +249,10 @@ internal class FullTreeFunctionObservationAccumulator(
         return aliases.map { alias ->
             requireScalar(alias.name, limits.maximumNameCodePoints, "DWARF function name")
             if (!names.add(alias.name)) accumulatorFail("observed subprogram repeats an alias name")
-            if (alias.evidence.isEmpty() || alias.evidence.size > limits.maximumEvidencePerAlias) {
+            if (
+                alias.evidence.isEmpty() ||
+                alias.evidence.size > limits.maximumEvidencePerAliasPerSubprogram
+            ) {
                 accumulatorFail("observed function alias evidence population is outside its bound")
             }
             val evidence = LinkedHashMap<ByteArrayKey, JsonObject>()
@@ -309,11 +319,11 @@ internal class FullTreeFunctionObservationAccumulator(
                 alias.evidence.forEach { item ->
                     evidence[ByteArrayKey(canonicalBytes(item, "emitted alias evidence"))] = item
                 }
-                if (evidence.size > limits.maximumEvidencePerAlias) {
+                if (evidence.size > limits.maximumEvidencePerAliasPerEntity) {
                     accumulatorFail("emitted alias evidence population exceeds its bound")
                 }
             }
-            if (aliases.size > limits.maximumAliasesPerSubprogram) {
+            if (aliases.size > limits.maximumAliasesPerEntity) {
                 accumulatorFail("emitted alias population exceeds its bound")
             }
         }
@@ -349,11 +359,11 @@ internal class FullTreeFunctionObservationAccumulator(
                 alias.evidence.forEach { item ->
                     evidence[ByteArrayKey(canonicalBytes(item, "non-emitted alias evidence"))] = item
                 }
-                if (evidence.size > limits.maximumEvidencePerAlias) {
+                if (evidence.size > limits.maximumEvidencePerAliasPerEntity) {
                     accumulatorFail("non-emitted alias evidence population exceeds its bound")
                 }
             }
-            if (aliases.size > limits.maximumAliasesPerSubprogram) {
+            if (aliases.size > limits.maximumAliasesPerEntity) {
                 accumulatorFail("non-emitted alias population exceeds its bound")
             }
         }

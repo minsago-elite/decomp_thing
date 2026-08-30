@@ -397,6 +397,22 @@ class FullTreeFunctionObservationsTest {
             )
         }
 
+        val omittedEmittedDie = FullTreeFunctionObservationAccumulator(input)
+        repeat(2) { omittedEmittedDie.recordScannedDie() }
+        omittedEmittedDie.accept(observation.copy(rvas = listOf(0x40uL)))
+        assertFailsWithMessage("cannot cover") {
+            omittedEmittedDie.finish(
+                fixture.inventory.string("indexSha256"),
+                fixture.scope.objectValue("oracle").string("richArtifactSha256"),
+                fixture.scopeSha256,
+            )
+        }
+
+        val multipleStarts = FullTreeFunctionObservationAccumulator(input)
+        assertFailsWithMessage("more than one") {
+            multipleStarts.accept(observation.copy(rvas = listOf(0x40uL, 0x50uL)))
+        }
+
         val bounded = FullTreeFunctionObservationAccumulator(
             input,
             FullTreeFunctionObservationAccumulatorLimits(maximumAliasesPerSubprogram = 1),
@@ -407,6 +423,34 @@ class FullTreeFunctionObservationsTest {
                 observedAlias("beta", "locator-b", unitId),
             )))
         }
+
+        val coalesced = FullTreeFunctionObservationAccumulator(
+            input,
+            FullTreeFunctionObservationAccumulatorLimits(
+                maximumAliasesPerSubprogram = 1,
+                maximumAliasesPerEntity = 2,
+            ),
+        )
+        repeat(4) { coalesced.recordScannedDie() }
+        coalesced.accept(observation.copy(rvas = listOf(0x40uL)))
+        coalesced.accept(
+            observation.copy(
+                dieOffset = 0x9uL,
+                rvas = listOf(0x40uL),
+                aliases = listOf(observedAlias("beta", "locator-b", unitId)),
+            ),
+        )
+        val coalescedDocument = coalesced.finish(
+            fixture.inventory.string("indexSha256"),
+            fixture.scope.objectValue("oracle").string("richArtifactSha256"),
+            fixture.scopeSha256,
+        )
+        assertEquals(
+            listOf("alpha", "beta"),
+            (coalescedDocument.array("emitted").single() as JsonObject).array("aliases")
+                .map { (it as JsonObject).string("name") },
+        )
+        validate(coalescedDocument, fixture, input)
 
         val frozen = FullTreeFunctionObservationAccumulator(input)
         repeat(3) { frozen.recordScannedDie() }
