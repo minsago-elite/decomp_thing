@@ -281,6 +281,7 @@ class FullTreeDiskScratchAuthorityTest {
         val operation = operation()
         val lease = FullTreeDiskScratchAuthority.acquireDedicatedFilesystem(mount, operation, policy)
         var active: Path? = null
+        var displaced: Path? = null
         var released = false
         try {
             lease.requireCurrent(FullTreeDiskScratchStage.AUTHORIZED)
@@ -303,10 +304,37 @@ class FullTreeDiskScratchAuthorityTest {
             }
             Files.delete(wrongRun)
             active = null
-            val run = lease.scratchParent.resolve(".function-observation-run-${operation.operationId}")
+            val preparedRun = lease.createEmptyOperationRunRoot()
+            val run = lease.scratchParent.resolve(runDirectoryName(operation.operationId))
+            active = run
+            assertTrue(entryNames(run).isEmpty())
+            assertEquals(
+                PosixFilePermissions.fromString("rwx------"),
+                Files.getPosixFilePermissions(run, LinkOption.NOFOLLOW_LINKS),
+            )
+            lease.requireCurrentOperationRunRoot(
+                preparedRun,
+                FullTreeDiskScratchStage.BEFORE_LAUNCH,
+            )
+            lease.requireCurrent(FullTreeDiskScratchStage.BEFORE_LAUNCH)
+            assertFailsWith<FullTreeDiskScratchException> {
+                lease.createEmptyOperationRunRoot()
+            }
+
+            val replacement = mount.resolve(
+                ".function-observation-run-replacement-${operation.operationId}",
+            )
+            Files.move(run, replacement)
+            displaced = replacement
             Files.createDirectory(run)
             Files.setPosixFilePermissions(run, PosixFilePermissions.fromString("rwx------"))
-            active = run
+            val replacementFailure = assertFailsWith<FullTreeDiskScratchException> {
+                lease.requireCurrent(FullTreeDiskScratchStage.BEFORE_LAUNCH)
+            }
+            assertTrue(replacementFailure.message.orEmpty().contains("pinned descriptor"))
+            Files.delete(run)
+            Files.move(replacement, run)
+            displaced = null
             lease.requireCurrent(FullTreeDiskScratchStage.BEFORE_LAUNCH)
             lease.requireCurrent(FullTreeDiskScratchStage.AFTER_SCOPE_ATTACHMENT)
             lease.requireCurrent(FullTreeDiskScratchStage.FROZEN_BARRIER)
@@ -325,6 +353,7 @@ class FullTreeDiskScratchAuthorityTest {
             assertTrue(Files.list(mount).use { it.findAny().isEmpty })
         } finally {
             active?.let(Files::deleteIfExists)
+            displaced?.let(Files::deleteIfExists)
             if (!released) runCatching { lease.requireCleanAndRelease() }
             runCatching { lease.close() }
         }
@@ -360,8 +389,12 @@ class FullTreeDiskScratchAuthorityTest {
                 )
                 lease = acquired
                 if (activeRun) {
-                    Files.createDirectory(runPath)
-                    Files.setPosixFilePermissions(runPath, PosixFilePermissions.fromString("rwx------"))
+                    val runRoot = acquired.createEmptyOperationRunRoot()
+                    assertTrue(Files.isDirectory(runPath, LinkOption.NOFOLLOW_LINKS))
+                    acquired.requireCurrentOperationRunRoot(
+                        runRoot,
+                        FullTreeDiskScratchStage.BEFORE_LAUNCH,
+                    )
                     acquired.requireCurrent(FullTreeDiskScratchStage.BEFORE_LAUNCH)
                 } else {
                     acquired.requireCurrent(FullTreeDiskScratchStage.AUTHORIZED)
@@ -427,6 +460,89 @@ class FullTreeDiskScratchAuthorityTest {
             }
         }
         assertTrue(Files.list(mount).use { it.findAny().isEmpty })
+    }
+
+    @Test
+    fun `run-root faults preserve bounded immediately visible active residue`() {
+        val configured = System.getenv("DECOMP_TEST_ORACLE_EXT4_SCRATCH")
+        assumeTrue(
+            !configured.isNullOrBlank(),
+            "set DECOMP_TEST_ORACLE_EXT4_SCRATCH for run-root fault coverage",
+        )
+        val mount = Path.of(configured).toAbsolutePath().normalize()
+        val policy = FullTreeDiskScratchPolicy(
+            requiredAvailableBytes = 1,
+            maximumFilesystemBytes = EXPECTED_MAXIMUM_FILESYSTEM_BYTES,
+            requiredAvailableInodes = 4,
+            maximumFilesystemInodes = EXPECTED_MAXIMUM_FILESYSTEM_INODES,
+        )
+
+        FullTreeDiskScratchRunRootFaultPoint.entries.forEachIndexed { index, faultPoint ->
+            val operation = operation(('a'.code + index).toChar().toString())
+            val leaseRoot = mount.resolve(leaseDirectoryName(operation.operationId))
+            val recordPath = leaseRoot.resolve("lease.json")
+            val runPath = leaseRoot.resolve(runDirectoryName(operation.operationId))
+            var lease: FullTreeDiskScratchLease? = null
+            try {
+                assertTrue(entryNames(mount).isEmpty())
+                val acquired = FullTreeDiskScratchAuthority.acquireDedicatedFilesystem(
+                    mount,
+                    operation,
+                    policy,
+                )
+                lease = acquired
+                val expectedEvidence = acquired.evidence
+                val observed = mutableListOf<FullTreeDiskScratchRunRootFaultPoint>()
+
+                assertFailsWith<SimulatedRunRootPublicationFailure> {
+                    acquired.createEmptyOperationRunRoot(
+                        FullTreeDiskScratchRunRootFaultInjector { observedPoint ->
+                            observed += observedPoint
+                            if (observedPoint == faultPoint) {
+                                throw SimulatedRunRootPublicationFailure()
+                            }
+                        },
+                    )
+                }
+
+                assertEquals(
+                    FullTreeDiskScratchRunRootFaultPoint.entries.take(index + 1),
+                    observed,
+                )
+                assertEquals(
+                    listOf("lease.json", runDirectoryName(operation.operationId)).sorted(),
+                    entryNames(leaseRoot),
+                )
+                assertTrue(entryNames(runPath).isEmpty())
+                assertEquals(
+                    PosixFilePermissions.fromString("rwx------"),
+                    Files.getPosixFilePermissions(runPath, LinkOption.NOFOLLOW_LINKS),
+                )
+                acquired.requireCurrent(FullTreeDiskScratchStage.BEFORE_LAUNCH)
+                acquired.close()
+
+                // This is same-kernel cold reconciliation after dropping every live descriptor.
+                // Only AFTER_LEASE_SYNC proves that the parent name survives power loss.
+                FullTreeDiskScratchAuthority.openExistingReadOnly(mount, operation, policy).use { cold ->
+                    val snapshot = cold.requireCurrent(expectedEvidence)
+                    assertEquals(
+                        FullTreeDiskScratchColdPopulation.ACTIVE_OPERATION_RUN,
+                        snapshot.population,
+                    )
+                    assertEquals(expectedEvidence.leaseRecordSha256, snapshot.leaseRecordSha256)
+                }
+                assertEquals(
+                    listOf("lease.json", runDirectoryName(operation.operationId)).sorted(),
+                    entryNames(leaseRoot),
+                )
+            } finally {
+                runCatching { lease?.close() }
+                Files.deleteIfExists(runPath)
+                Files.deleteIfExists(recordPath)
+                Files.deleteIfExists(leaseRoot)
+            }
+        }
+        assertTrue(entryNames(mount).isEmpty())
     }
 
     @Test
@@ -691,6 +807,8 @@ class FullTreeDiskScratchAuthorityTest {
             .joinToString("") { byte -> "%02x".format(byte) }
 
     private class SimulatedLeaseUseFailure : RuntimeException()
+
+    private class SimulatedRunRootPublicationFailure : RuntimeException()
 
     private fun leaseRecord(): FullTreeDiskScratchLeaseRecord = FullTreeDiskScratchLeaseRecord.create(
         operation = operation(),

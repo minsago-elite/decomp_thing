@@ -17,6 +17,202 @@ import org.junit.jupiter.api.Assumptions.assumeTrue
 
 class FullTreeFunctionObservationOperationCoordinatorTest {
     @Test
+    fun `run root preparation transfers every authority and preserves exact active residue`() {
+        val mount = provisionedMount()
+        val binding = binding(operationSeed = "3")
+        assertTrue(entryNames(mount).isEmpty(), "provisioned ext4 slot is not empty")
+
+        withJournalRoot { root ->
+            val leaseRoot = mount.resolve(binding.leaseDirectoryName)
+            val recordPath = leaseRoot.resolve(LEASE_RECORD_FILE)
+            val expectedRunRoot = leaseRoot.resolve(runDirectoryName(binding.operationId))
+            var leased: FullTreeFunctionObservationLeasedOperation? = null
+            var prepared: FullTreeFunctionObservationPreparedRun? = null
+            try {
+                FullTreeFunctionObservationJournalAuthority.open(root).use { authority ->
+                    val operation = FullTreeFunctionObservationOperationCoordinator.prepareNew(
+                        authority,
+                        binding,
+                        mount,
+                    )
+                    leased = operation
+                    val run = operation.prepareRunRoot()
+                    prepared = run
+
+                    assertSame(operation.leasedHistory, run.leasedHistory)
+                    assertSame(operation.diskEvidence, run.diskEvidence)
+                    assertEquals(
+                        FullTreeFunctionObservationOperationPhase.LEASED,
+                        run.leasedHistory.latest?.phase,
+                    )
+                    assertTrue(
+                        Files.isDirectory(expectedRunRoot, LinkOption.NOFOLLOW_LINKS),
+                        "prepared operation run root is not a directory",
+                    )
+                    assertEquals(
+                        PosixFilePermissions.fromString("rwx------"),
+                        Files.getPosixFilePermissions(expectedRunRoot, LinkOption.NOFOLLOW_LINKS),
+                    )
+                    assertTrue(entryNames(expectedRunRoot).isEmpty())
+
+                    assertFailsWith<IllegalStateException> {
+                        operation.requireCurrentAuthorized()
+                    }
+                    assertFailsWith<IllegalStateException> {
+                        operation.prepareRunRoot()
+                    }
+                    operation.close()
+                    leased = null
+
+                    run.requireCurrentBeforeLaunch()
+                    assertFailsWith<FullTreeFunctionObservationOperationJournalException> {
+                        FullTreeFunctionObservationJournalAuthority.open(root)
+                    }
+                    assertFailsWith<FullTreeFunctionObservationOperationJournalException> {
+                        authority.openExisting(binding)
+                    }
+                    assertFailsWith<FullTreeDiskScratchException> {
+                        FullTreeDiskScratchAuthority.openExistingReadOnly(
+                            mount,
+                            binding.diskOperation(),
+                            binding.diskPolicy(),
+                        )
+                    }
+
+                    val recordBytes = Files.readAllBytes(recordPath)
+                    val evidenceBytes = run.diskEvidence.canonicalBytes()
+                    val mountNames = entryNames(mount)
+                    val leaseNames = entryNames(leaseRoot)
+                    run.close()
+                    prepared = null
+                    run.close()
+
+                    assertFailsWith<IllegalStateException> {
+                        run.requireCurrentBeforeLaunch()
+                    }
+                    assertEquals(mountNames, entryNames(mount))
+                    assertEquals(leaseNames, entryNames(leaseRoot))
+                    assertTrue(entryNames(expectedRunRoot).isEmpty())
+                    assertContentEquals(recordBytes, Files.readAllBytes(recordPath))
+
+                    requireNotNull(authority.openExisting(binding)).use { journal ->
+                        val reopened = requireNotNull(journal.loadOrNull())
+                        val journalEvidence = reopened.requireDiskEvidenceIntroducedAt(
+                            FullTreeFunctionObservationOperationPhase.LEASED,
+                        )
+                        assertEquals(
+                            FullTreeFunctionObservationOperationPhase.LEASED,
+                            reopened.latest?.phase,
+                        )
+                        assertContentEquals(evidenceBytes, journalEvidence.canonicalBytes())
+
+                        FullTreeDiskScratchAuthority.openExistingReadOnly(
+                            mount,
+                            binding.diskOperation(),
+                            binding.diskPolicy(),
+                        ).use { cold ->
+                            val snapshot = cold.requireCurrent(journalEvidence)
+                            assertEquals(
+                                FullTreeDiskScratchColdPopulation.ACTIVE_OPERATION_RUN,
+                                snapshot.population,
+                            )
+                            assertEquals(
+                                journalEvidence.leaseRecordSha256,
+                                snapshot.leaseRecordSha256,
+                            )
+                        }
+                    }
+
+                    assertEquals(mountNames, entryNames(mount))
+                    assertEquals(leaseNames, entryNames(leaseRoot))
+                    assertTrue(entryNames(expectedRunRoot).isEmpty())
+                    assertContentEquals(recordBytes, Files.readAllBytes(recordPath))
+                }
+            } finally {
+                runCatching { prepared?.close() }
+                runCatching { leased?.close() }
+                removeActiveRunLease(leaseRoot, binding.operationId)
+            }
+        }
+        assertTrue(entryNames(mount).isEmpty())
+    }
+
+    @Test
+    fun `run root synchronization fault leaves a closed lease and exact active residue`() {
+        val mount = provisionedMount()
+        val binding = binding(operationSeed = "4")
+        assertTrue(entryNames(mount).isEmpty(), "provisioned ext4 slot is not empty")
+
+        withJournalRoot { root ->
+            val leaseRoot = mount.resolve(binding.leaseDirectoryName)
+            val recordPath = leaseRoot.resolve(LEASE_RECORD_FILE)
+            val runPath = leaseRoot.resolve(runDirectoryName(binding.operationId))
+            var leased: FullTreeFunctionObservationLeasedOperation? = null
+            val fault = FullTreeDiskScratchRunRootFaultInjector { point ->
+                if (point == FullTreeDiskScratchRunRootFaultPoint.AFTER_ROOT_SYNC) {
+                    throw SimulatedCoordinatorProcessDeath()
+                }
+            }
+            try {
+                FullTreeFunctionObservationJournalAuthority.open(root).use { authority ->
+                    val operation = FullTreeFunctionObservationOperationCoordinator.prepareNew(
+                        authority,
+                        binding,
+                        mount,
+                    )
+                    leased = operation
+                    assertFailsWith<SimulatedCoordinatorProcessDeath> {
+                        operation.prepareRunRoot(fault)
+                    }
+                    leased = null
+
+                    assertFailsWith<IllegalStateException> {
+                        operation.requireCurrentAuthorized()
+                    }
+                    assertTrue(Files.isDirectory(runPath, LinkOption.NOFOLLOW_LINKS))
+                    assertTrue(entryNames(runPath).isEmpty())
+                    val recordBytes = Files.readAllBytes(recordPath)
+                    val mountNames = entryNames(mount)
+                    val leaseNames = entryNames(leaseRoot)
+
+                    requireNotNull(authority.openExisting(binding)).use { journal ->
+                        val history = requireNotNull(journal.loadOrNull())
+                        val evidence = history.requireDiskEvidenceIntroducedAt(
+                            FullTreeFunctionObservationOperationPhase.LEASED,
+                        )
+                        assertEquals(
+                            FullTreeFunctionObservationOperationPhase.LEASED,
+                            history.latest?.phase,
+                        )
+
+                        FullTreeDiskScratchAuthority.openExistingReadOnly(
+                            mount,
+                            binding.diskOperation(),
+                            binding.diskPolicy(),
+                        ).use { cold ->
+                            val snapshot = cold.requireCurrent(evidence)
+                            assertEquals(
+                                FullTreeDiskScratchColdPopulation.ACTIVE_OPERATION_RUN,
+                                snapshot.population,
+                            )
+                            assertEquals(evidence.leaseRecordSha256, snapshot.leaseRecordSha256)
+                        }
+                    }
+
+                    assertEquals(mountNames, entryNames(mount))
+                    assertEquals(leaseNames, entryNames(leaseRoot))
+                    assertTrue(entryNames(runPath).isEmpty())
+                    assertContentEquals(recordBytes, Files.readAllBytes(recordPath))
+                }
+            } finally {
+                runCatching { leased?.close() }
+                removeActiveRunLease(leaseRoot, binding.operationId)
+            }
+        }
+        assertTrue(entryNames(mount).isEmpty())
+    }
+
+    @Test
     fun `prepared operation retains all authorities and reopens against exact journal evidence`() {
         val mount = provisionedMount()
         val binding = binding(operationSeed = "1")
@@ -51,7 +247,7 @@ class FullTreeFunctionObservationOperationCoordinatorTest {
                                 root.resolve(binding.journalDirectoryName).resolve(DISK_EVIDENCE_FILE),
                             ),
                         )
-                        operation.requireCurrent(FullTreeDiskScratchStage.AUTHORIZED)
+                        operation.requireCurrentAuthorized()
 
                         assertFailsWith<FullTreeFunctionObservationOperationJournalException> {
                             FullTreeFunctionObservationJournalAuthority.open(root)
@@ -265,6 +461,11 @@ class FullTreeFunctionObservationOperationCoordinatorTest {
     private fun removeRecordOnlyLease(leaseRoot: Path) {
         Files.deleteIfExists(leaseRoot.resolve(LEASE_RECORD_FILE))
         Files.deleteIfExists(leaseRoot)
+    }
+
+    private fun removeActiveRunLease(leaseRoot: Path, operationId: String) {
+        Files.deleteIfExists(leaseRoot.resolve(runDirectoryName(operationId)))
+        removeRecordOnlyLease(leaseRoot)
     }
 
     private fun entryNames(directory: Path): List<String> =

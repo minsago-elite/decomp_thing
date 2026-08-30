@@ -95,37 +95,156 @@ internal class FullTreeFunctionObservationLeasedOperation internal constructor(
         )
     }
 
-    /** Revalidates the unchanged LEASED journal and live lease twice while all locks remain held. */
+    /** Revalidates the unchanged LEASED journal and record-only lease while all locks remain held. */
     @Synchronized
-    fun requireCurrent(stage: FullTreeDiskScratchStage) {
+    fun requireCurrentAuthorized() {
         check(!closed) { "function-observation leased operation is closed" }
-        requireCurrentHistory()
-        lease.requireCurrent(stage)
-        requireCurrentHistory()
-        lease.requireCurrent(stage)
+        requireCurrent(FullTreeDiskScratchStage.AUTHORIZED)
     }
 
-    private fun requireCurrentHistory() {
-        val current = journal.loadOrNull()
-            ?: coordinationFail("function-observation leased operation journal disappeared")
-        val currentEvidence = current.requireDiskEvidenceIntroducedAt(
-            FullTreeFunctionObservationOperationPhase.LEASED,
-        )
-        requireExactEvidence(diskEvidence, currentEvidence)
-        requireExactHistory(leasedHistory, current)
+    /**
+     * Creates the deterministic empty run root and transfers ownership into the typed pre-launch
+     * state. A failure closes locks/descriptors without removing any run, lease, or journal member.
+     */
+    @Synchronized
+    fun prepareRunRoot(
+        faultInjector: FullTreeDiskScratchRunRootFaultInjector? = null,
+    ): FullTreeFunctionObservationPreparedRun {
+        check(!closed) { "function-observation leased operation is closed" }
+        return try {
+            requireCurrent(FullTreeDiskScratchStage.AUTHORIZED)
+            val runRoot = lease.createEmptyOperationRunRoot(faultInjector)
+            requireCurrent(FullTreeDiskScratchStage.BEFORE_LAUNCH)
+            val prepared = FullTreeFunctionObservationPreparedRun.create(
+                leasedHistory = leasedHistory,
+                diskEvidence = diskEvidence,
+                runRoot = runRoot,
+                journal = journal,
+                lease = lease,
+                constructionPermit = PREPARED_RUN_CONSTRUCTION_PERMIT,
+            )
+            closed = true
+            prepared
+        } catch (failure: Throwable) {
+            runCatching { close() }.exceptionOrNull()?.let(failure::addSuppressed)
+            throw failure
+        }
+    }
+
+    private fun requireCurrent(stage: FullTreeDiskScratchStage) {
+        requireCurrentHistory(leasedHistory, diskEvidence, journal)
+        lease.requireCurrent(stage)
+        requireCurrentHistory(leasedHistory, diskEvidence, journal)
+        lease.requireCurrent(stage)
     }
 
     @Synchronized
     override fun close() {
         if (closed) return
         closed = true
-        var failure: Throwable? = null
-        runCatching { lease.abandonForRecovery() }.exceptionOrNull()?.let { failure = it }
-        runCatching { journal.close() }.exceptionOrNull()?.let { closeFailure ->
-            if (failure == null) failure = closeFailure else failure.addSuppressed(closeFailure)
-        }
-        failure?.let { throw it }
+        closeOperationResources(lease, journal)?.let { throw it }
     }
+}
+
+/**
+ * Typed LEASED operation with one pinned deterministic run root and no worker/cgroup claim.
+ * Closing preserves the active-run residue and releases run, mount, then journal authorities.
+ */
+private object PREPARED_RUN_CONSTRUCTION_PERMIT
+
+internal class FullTreeFunctionObservationPreparedRun private constructor(
+    val leasedHistory: FullTreeFunctionObservationOperationHistory,
+    val diskEvidence: FullTreeDiskScratchEvidence,
+    private val runRoot: FullTreeDiskScratchRunRoot,
+    private val journal: FullTreeFunctionObservationOperationJournal,
+    private val lease: FullTreeDiskScratchLease,
+) : AutoCloseable {
+    private var closed = false
+
+    init {
+        if (
+            leasedHistory.latest?.phase != FullTreeFunctionObservationOperationPhase.LEASED ||
+            leasedHistory.diskEvidence !== diskEvidence
+        ) coordinationFail("prepared run is not bound to one fresh leased operation")
+        leasedHistory.requireDiskEvidenceIntroducedAt(
+            FullTreeFunctionObservationOperationPhase.LEASED,
+        )
+        lease.requireCurrentOperationRunRoot(
+            runRoot,
+            FullTreeDiskScratchStage.BEFORE_LAUNCH,
+        )
+    }
+
+    /** Revalidates the unchanged LEASED journal and exact active run before any worker launch. */
+    @Synchronized
+    fun requireCurrentBeforeLaunch() {
+        check(!closed) { "function-observation prepared run is closed" }
+        requireCurrentHistory(leasedHistory, diskEvidence, journal)
+        lease.requireCurrentOperationRunRoot(
+            runRoot,
+            FullTreeDiskScratchStage.BEFORE_LAUNCH,
+        )
+        requireCurrentHistory(leasedHistory, diskEvidence, journal)
+        lease.requireCurrentOperationRunRoot(
+            runRoot,
+            FullTreeDiskScratchStage.BEFORE_LAUNCH,
+        )
+    }
+
+    @Synchronized
+    override fun close() {
+        if (closed) return
+        closed = true
+        closeOperationResources(lease, journal)?.let { throw it }
+    }
+
+    companion object {
+        internal fun create(
+            leasedHistory: FullTreeFunctionObservationOperationHistory,
+            diskEvidence: FullTreeDiskScratchEvidence,
+            runRoot: FullTreeDiskScratchRunRoot,
+            journal: FullTreeFunctionObservationOperationJournal,
+            lease: FullTreeDiskScratchLease,
+            constructionPermit: Any,
+        ): FullTreeFunctionObservationPreparedRun {
+            check(constructionPermit === PREPARED_RUN_CONSTRUCTION_PERMIT) {
+                "prepared-run capabilities can only be issued by the operation coordinator"
+            }
+            return FullTreeFunctionObservationPreparedRun(
+                leasedHistory,
+                diskEvidence,
+                runRoot,
+                journal,
+                lease,
+            )
+        }
+    }
+}
+
+private fun requireCurrentHistory(
+    expectedHistory: FullTreeFunctionObservationOperationHistory,
+    expectedEvidence: FullTreeDiskScratchEvidence,
+    journal: FullTreeFunctionObservationOperationJournal,
+) {
+    val current = journal.loadOrNull()
+        ?: coordinationFail("function-observation leased operation journal disappeared")
+    val currentEvidence = current.requireDiskEvidenceIntroducedAt(
+        FullTreeFunctionObservationOperationPhase.LEASED,
+    )
+    requireExactEvidence(expectedEvidence, currentEvidence)
+    requireExactHistory(expectedHistory, current)
+}
+
+private fun closeOperationResources(
+    lease: FullTreeDiskScratchLease,
+    journal: FullTreeFunctionObservationOperationJournal,
+): Throwable? {
+    var failure: Throwable? = null
+    runCatching { lease.abandonForRecovery() }.exceptionOrNull()?.let { failure = it }
+    runCatching { journal.close() }.exceptionOrNull()?.let { closeFailure ->
+        if (failure == null) failure = closeFailure else failure.addSuppressed(closeFailure)
+    }
+    return failure
 }
 
 private fun requireExactEvidence(

@@ -62,6 +62,38 @@ internal enum class FullTreeDiskScratchStage {
     RELEASE,
 }
 
+internal enum class FullTreeDiskScratchRunRootFaultPoint {
+    /** The private root is pinned and name-bound, but neither it nor its parent is synchronized. */
+    AFTER_CREATE,
+
+    /** Root metadata is synchronized; the parent name is not yet proven durable. */
+    AFTER_ROOT_SYNC,
+
+    /** Root metadata and the parent name have both been synchronized. */
+    AFTER_LEASE_SYNC,
+}
+
+internal fun interface FullTreeDiskScratchRunRootFaultInjector {
+    fun after(point: FullTreeDiskScratchRunRootFaultPoint)
+}
+
+private object FullTreeDiskScratchRunRootConstructionPermit
+
+/**
+ * Opaque proof that one live disk lease created and pinned its deterministic run root. The token
+ * deliberately exposes neither a path nor an identity: only its issuing lease can authenticate it.
+ */
+internal class FullTreeDiskScratchRunRoot private constructor() {
+    companion object {
+        internal fun create(constructionPermit: Any): FullTreeDiskScratchRunRoot {
+            check(constructionPermit === FullTreeDiskScratchRunRootConstructionPermit) {
+                "disk-scratch run-root tokens can only be issued by the disk authority"
+            }
+            return FullTreeDiskScratchRunRoot()
+        }
+    }
+}
+
 /** Canonical historical acquisition record; this artifact is not current or release authority. */
 internal class FullTreeDiskScratchLeaseRecord private constructor(
     val schemaVersion: Int,
@@ -485,6 +517,8 @@ internal class FullTreeDiskScratchLease internal constructor(
     private val authorizedCapacity: LinuxFilesystemCapacity,
 ) : AutoCloseable {
     private var closed = false
+    private var operationRunDescriptor: LinuxDescriptor? = null
+    private var operationRunRoot: FullTreeDiskScratchRunRoot? = null
 
     @Synchronized
     fun requireCurrent(stage: FullTreeDiskScratchStage) {
@@ -545,7 +579,99 @@ internal class FullTreeDiskScratchLease internal constructor(
                     identity.uid != mountDescriptor.identity.uid ||
                     identity.mode.permissions != OWNER_DIRECTORY_MODE || identity.isSymbolicLink
                 ) scratchFail("disk-scratch active run root is not private at $stage")
+                operationRunDescriptor?.let { pinned ->
+                    val pinnedIdentity = LinuxFilesystemSyscalls.identity(pinned.fd)
+                    if (!sameDirectory(pinnedIdentity, identity)) {
+                        scratchFail("disk-scratch active run root changed from its pinned descriptor at $stage")
+                    }
+                }
             }
+        }
+    }
+
+    /**
+     * Creates and pins the sole deterministic, initially empty operation run root. No journal phase,
+     * worker, cgroup, cleanup, or release claim is produced by this filesystem mutation.
+     */
+    @Synchronized
+    fun createEmptyOperationRunRoot(
+        faultInjector: FullTreeDiskScratchRunRootFaultInjector? = null,
+    ): FullTreeDiskScratchRunRoot {
+        check(!closed) { "disk-scratch lease is closed" }
+        if (operationRunDescriptor != null || operationRunRoot != null) {
+            scratchFail("disk-scratch operation run root was already prepared")
+        }
+        requireCurrent(FullTreeDiskScratchStage.AUTHORIZED)
+        val name = runDirectoryName(evidence.operationId)
+        leaseDescriptor.whileOpen { leaseFd ->
+            LinuxFilesystemSyscalls.createDirectory(leaseFd, name, OWNER_DIRECTORY_MODE)
+        }
+        val created = LinuxFilesystemSyscalls.openDirectoryAt(leaseDescriptor.fd, name)
+        try {
+            LinuxFilesystemSyscalls.chmod(created, OWNER_DIRECTORY_MODE)
+            val identity = LinuxFilesystemSyscalls.identity(created.fd)
+            requireManagedLeaseDirectory(identity, mountDescriptor.identity, "disk-scratch operation run root")
+            requireSameDirectory(scratchParent.resolve(name), created, "disk-scratch operation run root")
+            if (LinuxFilesystemSyscalls.directoryEntryNames(created, 1).isNotEmpty()) {
+                scratchFail("new disk-scratch operation run root is not empty")
+            }
+            val prepared = FullTreeDiskScratchRunRoot.create(
+                FullTreeDiskScratchRunRootConstructionPermit,
+            )
+            operationRunDescriptor = created
+            operationRunRoot = prepared
+            faultInjector?.after(FullTreeDiskScratchRunRootFaultPoint.AFTER_CREATE)
+            requireCurrentOperationRunRoot(
+                prepared,
+                FullTreeDiskScratchStage.BEFORE_LAUNCH,
+            )
+            LinuxFilesystemSyscalls.synchronize(created)
+            faultInjector?.after(FullTreeDiskScratchRunRootFaultPoint.AFTER_ROOT_SYNC)
+            LinuxFilesystemSyscalls.synchronize(leaseDescriptor)
+            faultInjector?.after(FullTreeDiskScratchRunRootFaultPoint.AFTER_LEASE_SYNC)
+            LinuxFilesystemSyscalls.openDirectoryAt(leaseDescriptor.fd, name).use { selected ->
+                if (!sameDirectory(LinuxFilesystemSyscalls.identity(created.fd), selected.identity)) {
+                    scratchFail("disk-scratch operation run root changed after synchronization")
+                }
+            }
+            val finalIdentity = LinuxFilesystemSyscalls.identity(created.fd)
+            if (!sameDirectory(identity, finalIdentity)) {
+                scratchFail("disk-scratch operation run root identity changed after synchronization")
+            }
+            requireManagedLeaseDirectory(
+                finalIdentity,
+                mountDescriptor.identity,
+                "disk-scratch operation run root",
+            )
+            if (LinuxFilesystemSyscalls.directoryEntryNames(created, 1).isNotEmpty()) {
+                scratchFail("new disk-scratch operation run root changed before authorization")
+            }
+            requireCurrentOperationRunRoot(
+                prepared,
+                FullTreeDiskScratchStage.BEFORE_LAUNCH,
+            )
+            return prepared
+        } catch (failure: Throwable) {
+            if (operationRunDescriptor === created) operationRunDescriptor = null
+            operationRunRoot = null
+            runCatching { created.close() }.exceptionOrNull()?.let(failure::addSuppressed)
+            throw failure
+        }
+    }
+
+    /** Proves that this still-live lease owns the exact opaque run-root token. */
+    @Synchronized
+    fun requireCurrentOperationRunRoot(
+        expected: FullTreeDiskScratchRunRoot,
+        stage: FullTreeDiskScratchStage,
+    ) {
+        check(!closed) { "disk-scratch lease is closed" }
+        if (operationRunRoot !== expected || operationRunDescriptor == null) {
+            scratchFail("disk-scratch run-root token is not owned by this live lease")
+        }
+        requireCurrent(stage)
+        if (operationRunRoot !== expected || operationRunDescriptor == null) {
+            scratchFail("disk-scratch run-root token changed during revalidation")
         }
     }
 
@@ -624,6 +750,13 @@ internal class FullTreeDiskScratchLease internal constructor(
         if (closed) return priorFailure
         closed = true
         var failure = priorFailure
+        operationRunDescriptor?.let { run ->
+            runCatching { run.close() }.exceptionOrNull()?.let { closeFailure ->
+                val prior = failure
+                if (prior == null) failure = closeFailure else prior.addSuppressed(closeFailure)
+            }
+        }
+        operationRunDescriptor = null
         runCatching { leaseDescriptor.close() }.exceptionOrNull()?.let { closeFailure ->
             if (failure == null) failure = closeFailure else failure.addSuppressed(closeFailure)
         }
