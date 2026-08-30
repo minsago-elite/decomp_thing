@@ -65,21 +65,133 @@ class FullTreeElfLayoutTest {
                 val path = writeElf(directory.resolve("variant-$index.elf"), bytes)
                 val symbols = arrayListOf<FullTreeElfFunctionSymbol>()
                 StableControlFile.open(path, bytes.size.toLong(), "test ELF").use { source ->
-                    val layout = FullTreeElfLayout.scanFunctions(source, "test", consume = symbols::add)
-                    assertEquals(if (variant.is64Bit) 2 else 1, layout.elfClass)
-                    assertEquals(if (variant.littleEndian) 1 else 2, layout.byteOrder)
-                    assertEquals("ET_DYN", layout.elfType)
-                    assertEquals(4L, layout.scannedSymbols)
-                    assertEquals(0x400000UL, layout.imageBase)
-                    assertEquals(1, layout.executableRanges.size)
-                    assertEquals(0UL, layout.executableRanges.single().start)
-                    assertEquals(bytes.size.toULong(), layout.executableRanges.single().endExclusive)
+                    val core = FullTreeElfLayout.scanLayout(source, "test layout")
+                    val observed = FullTreeElfLayout.scanFunctions(source, "test", consume = symbols::add)
+                    assertEquals(if (variant.is64Bit) 2 else 1, core.elfClass)
+                    assertEquals(if (variant.littleEndian) 1 else 2, core.byteOrder)
+                    assertEquals("ET_DYN", core.elfType)
+                    assertEquals(0x400000UL, core.imageBase)
+                    assertEquals(1, core.executableRanges.size)
+                    assertEquals(0UL, core.executableRanges.single().start)
+                    assertEquals(bytes.size.toULong(), core.executableRanges.single().endExclusive)
+                    assertEquals(core.elfClass, observed.elfClass)
+                    assertEquals(core.byteOrder, observed.byteOrder)
+                    assertEquals(core.elfType, observed.elfType)
+                    assertEquals(core.machine, observed.machine)
+                    assertEquals(core.osAbi, observed.osAbi)
+                    assertEquals(core.abiVersion, observed.abiVersion)
+                    assertEquals(core.imageBase, observed.imageBase)
+                    assertEquals(core.executableRanges, observed.executableRanges)
+                    assertEquals(4L, observed.scannedSymbols)
                     source.verifyUnchanged("test ELF")
                 }
                 assertEquals(listOf("first", "second", "external"), symbols.map { it.name })
                 assertEquals(listOf(0x100UL, 0x110UL, null), symbols.map { it.rva })
                 assertTrue(symbols.all { it.locator.startsWith("test:section[2]=.symtab:symbol[") })
             }
+        }
+
+    @Test
+    fun `layout-only scan ignores malformed symbol policy while function scan remains strict`() =
+        inControlTemporaryDirectory { directory ->
+            val malformedSymbols = FullTreeElfTestBytes.build(
+                TestElfVariant(true, true, extendedNumbering = false, shndx = false),
+                listOf(TestElfSymbol("defined", 0x100UL)),
+            ).also { bytes ->
+                FullTreeElfTestBytes.put32(
+                    bytes,
+                    FullTreeElfTestBytes.symbolTableOffset(bytes),
+                    1,
+                    littleEndian = true,
+                )
+            }
+            val path = writeElf(directory.resolve("malformed-symbol-policy.elf"), malformedSymbols)
+            StableControlFile.open(path, malformedSymbols.size.toLong(), "layout-only ELF").use { source ->
+                val layout = FullTreeElfLayout.scanLayout(
+                    source,
+                    "layout-only",
+                    FullTreeElfLayoutLimits(
+                        maximumSymbols = 1,
+                        maximumSectionNameBytes = 1,
+                        maximumTotalSectionNameBytes = 1,
+                    ),
+                )
+                assertEquals(2, layout.elfClass)
+                assertEquals(1, layout.byteOrder)
+                assertEquals("ET_DYN", layout.elfType)
+                assertEquals(0x400000UL, layout.imageBase)
+                assertEquals(1, layout.executableRanges.size)
+            }
+            StableControlFile.open(path, malformedSymbols.size.toLong(), "strict ELF").use { source ->
+                assertFailsWith<FullTreeControlException> {
+                    FullTreeElfLayout.scanFunctions(source, "strict") {}
+                }
+            }
+            Unit
+        }
+
+    @Test
+    fun `layout-only scan enforces header and step bounds and reports checkpoints`() =
+        inControlTemporaryDirectory { directory ->
+            val twoProgramHeaders = FullTreeElfTestBytes.build(
+                TestElfVariant(true, true, extendedNumbering = false, shndx = false),
+                listOf(TestElfSymbol("defined", 0x100UL)),
+            ).also { bytes ->
+                FullTreeElfTestBytes.put16(bytes, 56, 2, littleEndian = true)
+            }
+            val path = writeElf(directory.resolve("two-program-headers.elf"), twoProgramHeaders)
+            StableControlFile.open(path, twoProgramHeaders.size.toLong(), "checkpoint ELF").use { source ->
+                val checkpoints = arrayListOf<String>()
+                val layout = FullTreeElfLayout.scanLayout(source, "checkpoint", checkpoint = checkpoints::add)
+                assertEquals(1, layout.executableRanges.size)
+                assertEquals(listOf("while parsing checkpoint program headers"), checkpoints)
+            }
+            StableControlFile.open(path, twoProgramHeaders.size.toLong(), "program-bound ELF").use { source ->
+                assertFailsWith<FullTreeControlException> {
+                    FullTreeElfLayout.scanLayout(
+                        source,
+                        "program-bound",
+                        FullTreeElfLayoutLimits(maximumProgramHeaders = 1),
+                    )
+                }
+            }
+            StableControlFile.open(path, twoProgramHeaders.size.toLong(), "section-bound ELF").use { source ->
+                assertFailsWith<FullTreeControlException> {
+                    FullTreeElfLayout.scanLayout(
+                        source,
+                        "section-bound",
+                        FullTreeElfLayoutLimits(maximumSectionHeaders = 4),
+                    )
+                }
+            }
+            StableControlFile.open(path, twoProgramHeaders.size.toLong(), "step-bound ELF").use { source ->
+                assertFailsWith<FullTreeControlException> {
+                    FullTreeElfLayout.scanLayout(
+                        source,
+                        "step-bound",
+                        FullTreeElfLayoutLimits(maximumParseSteps = 1),
+                    )
+                }
+            }
+            Unit
+        }
+
+    @Test
+    fun `layout-only result does not escape a changed stable file`() =
+        inControlTemporaryDirectory { directory ->
+            val bytes = FullTreeElfTestBytes.build(
+                TestElfVariant(false, false, extendedNumbering = false, shndx = false),
+                listOf(TestElfSymbol("defined", 0x100UL)),
+            )
+            val path = writeElf(directory.resolve("permission-change.elf"), bytes)
+            StableControlFile.open(path, bytes.size.toLong(), "changing ELF").use { source ->
+                assertFailsWith<FullTreeControlException> {
+                    FullTreeElfLayout.scanLayout(source, "changing") {
+                        Files.setPosixFilePermissions(path, PosixFilePermissions.fromString("r--------"))
+                    }
+                }
+            }
+            Unit
         }
 
     @Test

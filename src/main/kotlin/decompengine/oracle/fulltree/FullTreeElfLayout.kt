@@ -3,6 +3,7 @@ package decompengine.oracle.fulltree
 import java.nio.ByteBuffer
 import java.nio.charset.CodingErrorAction
 import java.nio.charset.StandardCharsets
+import java.util.Collections
 
 data class FullTreeElfLayoutLimits(
     val maximumProgramHeaders: Int = 65_535,
@@ -42,6 +43,18 @@ data class FullTreeElfLayoutLimits(
 internal data class FullTreeElfExecutableRange(
     val start: ULong,
     val endExclusive: ULong,
+)
+
+/** Core ELF facts authenticated without traversing section names or symbol-table contents. */
+internal data class FullTreeElfCoreLayout(
+    val elfClass: Int,
+    val byteOrder: Int,
+    val elfType: String,
+    val machine: Int,
+    val osAbi: Int,
+    val abiVersion: Int,
+    val imageBase: ULong,
+    val executableRanges: List<FullTreeElfExecutableRange>,
 )
 
 /** Merged interval index used only for membership; emitted v1 ranges remain unmerged. */
@@ -127,13 +140,28 @@ internal data class FullTreeElfFunctionSymbol(
  * involved.
  */
 internal object FullTreeElfLayout {
+    /**
+     * Reads only ELF identity, extended header metadata, and PT_LOAD layout. The returned layout
+     * is path-identity checked before it escapes; section names and symbol tables are not visited.
+     */
+    fun scanLayout(
+        file: StableControlFile,
+        label: String,
+        limits: FullTreeElfLayoutLimits = FullTreeElfLayoutLimits(),
+        checkpoint: (String) -> Unit = {},
+    ): FullTreeElfCoreLayout {
+        val layout = ElfReader(file, label, limits, checkpoint).scanLayout()
+        file.verifyUnchanged("$label ELF layout source")
+        return layout
+    }
+
     fun scanFunctions(
         file: StableControlFile,
         label: String,
         limits: FullTreeElfLayoutLimits = FullTreeElfLayoutLimits(),
         checkpoint: (String) -> Unit = {},
         consume: (FullTreeElfFunctionSymbol) -> Unit,
-    ): FullTreeElfLayoutObservation = ElfReader(file, label, limits, checkpoint).scan(consume)
+    ): FullTreeElfLayoutObservation = ElfReader(file, label, limits, checkpoint).scanFunctions(consume)
 }
 
 private class ElfReader(
@@ -145,99 +173,16 @@ private class ElfReader(
     private val window = ElfWindow(file, label)
     private var parseSteps = 0L
 
-    fun scan(consume: (FullTreeElfFunctionSymbol) -> Unit): FullTreeElfLayoutObservation {
-        if (file.size < ELF32_HEADER_BYTES) fail("ELF header is truncated")
-        val identification = window.bytes(0L, ELF_IDENT_BYTES)
-        if (!identification.copyOfRange(0, 4).contentEquals(ELF_MAGIC)) fail("input is not ELF")
-        val elfClass = identification[EI_CLASS].toInt() and 0xff
-        if (elfClass != ELFCLASS32 && elfClass != ELFCLASS64) fail("ELF class is unsupported")
-        val byteOrder = identification[EI_DATA].toInt() and 0xff
-        if (byteOrder != ELFDATA2LSB && byteOrder != ELFDATA2MSB) fail("ELF byte order is unsupported")
-        if ((identification[EI_VERSION].toInt() and 0xff) != EV_CURRENT) fail("ELF identification version is invalid")
-        val headerBytes = if (elfClass == ELFCLASS64) ELF64_HEADER_BYTES else ELF32_HEADER_BYTES
-        if (file.size < headerBytes) fail("ELF header is truncated")
-        val header = window.bytes(0L, headerBytes)
-        val elfTypeValue = u16(header, 16, byteOrder)
-        val elfType = when (elfTypeValue) {
-            ET_EXEC -> "ET_EXEC"
-            ET_DYN -> "ET_DYN"
-            else -> fail("ELF type is not ET_EXEC or ET_DYN")
-        }
-        val machine = u16(header, 18, byteOrder)
-        if (u32(header, 20, byteOrder) != EV_CURRENT.toLong()) fail("ELF header version is invalid")
-        val headerSize = u16(header, if (elfClass == ELFCLASS64) 52 else 40, byteOrder)
-        if (headerSize != headerBytes) fail("ELF header size is noncanonical")
+    fun scanLayout(): FullTreeElfCoreLayout = readCoreLayout(parseHeaders())
 
-        val programOffset = if (elfClass == ELFCLASS64) {
-            fileOffset(u64(header, 32, byteOrder), "program-header offset")
-        } else {
-            u32(header, 28, byteOrder)
-        }
-        val sectionOffset = if (elfClass == ELFCLASS64) {
-            fileOffset(u64(header, 40, byteOrder), "section-header offset")
-        } else {
-            u32(header, 32, byteOrder)
-        }
-        val programEntrySize = u16(header, if (elfClass == ELFCLASS64) 54 else 42, byteOrder)
-        val rawProgramCount = u16(header, if (elfClass == ELFCLASS64) 56 else 44, byteOrder)
-        val sectionEntrySize = u16(header, if (elfClass == ELFCLASS64) 58 else 46, byteOrder)
-        val rawSectionCount = u16(header, if (elfClass == ELFCLASS64) 60 else 48, byteOrder)
-        val rawNameIndex = u16(header, if (elfClass == ELFCLASS64) 62 else 50, byteOrder)
-        val minimumSectionEntry = if (elfClass == ELFCLASS64) ELF64_SECTION_BYTES else ELF32_SECTION_BYTES
-        if (sectionOffset <= 0L || sectionEntrySize < minimumSectionEntry) {
-            fail("ELF section table is malformed")
-        }
-        requireFileRange(sectionOffset, sectionEntrySize.toLong(), "ELF section zero")
-        val sectionZero = readSection(sectionOffset, sectionEntrySize, elfClass, byteOrder, 0)
-        validateSectionZero(sectionZero)
-
-        val sectionCount = when (rawSectionCount) {
-            0 -> {
-                if (sectionZero.size < SHN_LORESERVE.toULong()) {
-                    fail("extended section-header count is below the ELF threshold")
-                }
-                boundedCount(sectionZero.size, limits.maximumSectionHeaders, "section-header count")
-            }
-            else -> rawSectionCount.also {
-                if (it >= SHN_LORESERVE) fail("direct section-header count uses a reserved value")
-                if (it > limits.maximumSectionHeaders) fail("section-header count exceeds its bound")
-                if (sectionZero.size != 0UL) fail("section zero carries an unrequested extended section count")
-            }
-        }
-        if (sectionCount <= 0) fail("ELF has no section headers")
-        val sectionTableBytes = checkedMultiply(sectionCount.toLong(), sectionEntrySize.toLong(), "section table")
-        requireFileRange(sectionOffset, sectionTableBytes, "ELF section table")
-        val nameIndex = when (rawNameIndex) {
-            SHN_XINDEX -> sectionZero.link.also {
-                if (it !in SHN_LORESERVE until sectionCount) {
-                    fail("extended ELF section-name index is invalid or below its threshold")
-                }
-            }
-            else -> rawNameIndex.also {
-                if (sectionZero.link != 0) fail("section zero carries an unrequested extended name index")
-                if (it >= SHN_LORESERVE) fail("direct ELF section-name index uses a reserved value")
-                if (it !in 0 until sectionCount) fail("ELF section-name index is invalid")
-            }
-        }
-
-        val programCount = when (rawProgramCount) {
-            PN_XNUM -> sectionZero.info.also {
-                if (it !in PN_XNUM..limits.maximumProgramHeaders) {
-                    fail("extended program-header count is invalid, below its threshold, or exceeds its bound")
-                }
-            }
-            else -> rawProgramCount.also {
-                if (sectionZero.info != 0) fail("section zero carries an unrequested extended program count")
-                if (it !in 1..limits.maximumProgramHeaders) fail("ELF has no bounded program-header table")
-            }
-        }
-        val minimumProgramEntry = if (elfClass == ELFCLASS64) ELF64_PROGRAM_BYTES else ELF32_PROGRAM_BYTES
-        if (programOffset <= 0L || programEntrySize < minimumProgramEntry) fail("ELF program table is malformed")
-        requireFileRange(
-            programOffset,
-            checkedMultiply(programCount.toLong(), programEntrySize.toLong(), "program table"),
-            "ELF program table",
-        )
+    fun scanFunctions(consume: (FullTreeElfFunctionSymbol) -> Unit): FullTreeElfLayoutObservation {
+        val headers = parseHeaders()
+        val elfClass = headers.elfClass
+        val byteOrder = headers.byteOrder
+        val sectionOffset = headers.sectionOffset
+        val sectionEntrySize = headers.sectionEntrySize
+        val sectionCount = headers.sectionCount
+        val nameIndex = headers.nameIndex
 
         val sections = ArrayList<FunctionElfSection>(sectionCount)
         repeat(sectionCount) { index ->
@@ -250,10 +195,9 @@ private class ElfReader(
             sections += readSection(offset, sectionEntrySize, elfClass, byteOrder, index)
         }
         val namedSections = attachSectionNames(sections, nameIndex)
-        val ranges = readExecutableRanges(programOffset, programEntrySize, programCount, elfClass, byteOrder)
-        val imageBase = ranges.imageBase
-        val executable = ranges.executable.sortedWith(compareBy<FullTreeElfExecutableRange> { it.start }.thenBy { it.endExclusive })
-        if (executable.isEmpty()) fail("ELF has no nonempty executable PT_LOAD segment")
+        val coreLayout = readCoreLayout(headers)
+        val imageBase = coreLayout.imageBase
+        val executable = coreLayout.executableRanges
         val executableMembership = FullTreeElfExecutableMembership.fromSorted(executable) {
             step("executable-range membership index")
         }
@@ -370,15 +314,150 @@ private class ElfReader(
             }
         }
         return FullTreeElfLayoutObservation(
+            elfClass = coreLayout.elfClass,
+            byteOrder = coreLayout.byteOrder,
+            elfType = coreLayout.elfType,
+            machine = coreLayout.machine,
+            osAbi = coreLayout.osAbi,
+            abiVersion = coreLayout.abiVersion,
+            imageBase = coreLayout.imageBase,
+            executableRanges = coreLayout.executableRanges,
+            scannedSymbols = scanned,
+        )
+    }
+
+    private fun parseHeaders(): ParsedElfHeaders {
+        if (file.size < ELF32_HEADER_BYTES) fail("ELF header is truncated")
+        val identification = window.bytes(0L, ELF_IDENT_BYTES)
+        if (!identification.copyOfRange(0, 4).contentEquals(ELF_MAGIC)) fail("input is not ELF")
+        val elfClass = identification[EI_CLASS].toInt() and 0xff
+        if (elfClass != ELFCLASS32 && elfClass != ELFCLASS64) fail("ELF class is unsupported")
+        val byteOrder = identification[EI_DATA].toInt() and 0xff
+        if (byteOrder != ELFDATA2LSB && byteOrder != ELFDATA2MSB) fail("ELF byte order is unsupported")
+        if ((identification[EI_VERSION].toInt() and 0xff) != EV_CURRENT) fail("ELF identification version is invalid")
+        val headerBytes = if (elfClass == ELFCLASS64) ELF64_HEADER_BYTES else ELF32_HEADER_BYTES
+        if (file.size < headerBytes) fail("ELF header is truncated")
+        val header = window.bytes(0L, headerBytes)
+        val elfTypeValue = u16(header, 16, byteOrder)
+        val elfType = when (elfTypeValue) {
+            ET_EXEC -> "ET_EXEC"
+            ET_DYN -> "ET_DYN"
+            else -> fail("ELF type is not ET_EXEC or ET_DYN")
+        }
+        val machine = u16(header, 18, byteOrder)
+        if (u32(header, 20, byteOrder) != EV_CURRENT.toLong()) fail("ELF header version is invalid")
+        val headerSize = u16(header, if (elfClass == ELFCLASS64) 52 else 40, byteOrder)
+        if (headerSize != headerBytes) fail("ELF header size is noncanonical")
+
+        val programOffset = if (elfClass == ELFCLASS64) {
+            fileOffset(u64(header, 32, byteOrder), "program-header offset")
+        } else {
+            u32(header, 28, byteOrder)
+        }
+        val sectionOffset = if (elfClass == ELFCLASS64) {
+            fileOffset(u64(header, 40, byteOrder), "section-header offset")
+        } else {
+            u32(header, 32, byteOrder)
+        }
+        val programEntrySize = u16(header, if (elfClass == ELFCLASS64) 54 else 42, byteOrder)
+        val rawProgramCount = u16(header, if (elfClass == ELFCLASS64) 56 else 44, byteOrder)
+        val sectionEntrySize = u16(header, if (elfClass == ELFCLASS64) 58 else 46, byteOrder)
+        val rawSectionCount = u16(header, if (elfClass == ELFCLASS64) 60 else 48, byteOrder)
+        val rawNameIndex = u16(header, if (elfClass == ELFCLASS64) 62 else 50, byteOrder)
+        val minimumSectionEntry = if (elfClass == ELFCLASS64) ELF64_SECTION_BYTES else ELF32_SECTION_BYTES
+        if (sectionOffset <= 0L || sectionEntrySize < minimumSectionEntry) {
+            fail("ELF section table is malformed")
+        }
+        requireFileRange(sectionOffset, sectionEntrySize.toLong(), "ELF section zero")
+        val sectionZero = readSection(sectionOffset, sectionEntrySize, elfClass, byteOrder, 0)
+        validateSectionZero(sectionZero)
+
+        val sectionCount = when (rawSectionCount) {
+            0 -> {
+                if (sectionZero.size < SHN_LORESERVE.toULong()) {
+                    fail("extended section-header count is below the ELF threshold")
+                }
+                boundedCount(sectionZero.size, limits.maximumSectionHeaders, "section-header count")
+            }
+            else -> rawSectionCount.also {
+                if (it >= SHN_LORESERVE) fail("direct section-header count uses a reserved value")
+                if (it > limits.maximumSectionHeaders) fail("section-header count exceeds its bound")
+                if (sectionZero.size != 0UL) fail("section zero carries an unrequested extended section count")
+            }
+        }
+        if (sectionCount <= 0) fail("ELF has no section headers")
+        val sectionTableBytes = checkedMultiply(sectionCount.toLong(), sectionEntrySize.toLong(), "section table")
+        requireFileRange(sectionOffset, sectionTableBytes, "ELF section table")
+        val nameIndex = when (rawNameIndex) {
+            SHN_XINDEX -> sectionZero.link.also {
+                if (it !in SHN_LORESERVE until sectionCount) {
+                    fail("extended ELF section-name index is invalid or below its threshold")
+                }
+            }
+            else -> rawNameIndex.also {
+                if (sectionZero.link != 0) fail("section zero carries an unrequested extended name index")
+                if (it >= SHN_LORESERVE) fail("direct ELF section-name index uses a reserved value")
+                if (it !in 0 until sectionCount) fail("ELF section-name index is invalid")
+            }
+        }
+
+        val programCount = when (rawProgramCount) {
+            PN_XNUM -> sectionZero.info.also {
+                if (it !in PN_XNUM..limits.maximumProgramHeaders) {
+                    fail("extended program-header count is invalid, below its threshold, or exceeds its bound")
+                }
+            }
+            else -> rawProgramCount.also {
+                if (sectionZero.info != 0) fail("section zero carries an unrequested extended program count")
+                if (it !in 1..limits.maximumProgramHeaders) fail("ELF has no bounded program-header table")
+            }
+        }
+        val minimumProgramEntry = if (elfClass == ELFCLASS64) ELF64_PROGRAM_BYTES else ELF32_PROGRAM_BYTES
+        if (programOffset <= 0L || programEntrySize < minimumProgramEntry) fail("ELF program table is malformed")
+        requireFileRange(
+            programOffset,
+            checkedMultiply(programCount.toLong(), programEntrySize.toLong(), "program table"),
+            "ELF program table",
+        )
+
+        return ParsedElfHeaders(
             elfClass = elfClass,
             byteOrder = byteOrder,
             elfType = elfType,
             machine = machine,
             osAbi = identification[EI_OSABI].toInt() and 0xff,
             abiVersion = identification[EI_ABIVERSION].toInt() and 0xff,
-            imageBase = imageBase,
-            executableRanges = executable,
-            scannedSymbols = scanned,
+            programOffset = programOffset,
+            programEntrySize = programEntrySize,
+            programCount = programCount,
+            sectionOffset = sectionOffset,
+            sectionEntrySize = sectionEntrySize,
+            sectionCount = sectionCount,
+            nameIndex = nameIndex,
+        )
+    }
+
+    private fun readCoreLayout(headers: ParsedElfHeaders): FullTreeElfCoreLayout {
+        val ranges = readExecutableRanges(
+            headers.programOffset,
+            headers.programEntrySize,
+            headers.programCount,
+            headers.elfClass,
+            headers.byteOrder,
+        )
+        val executable = ranges.executable.sortedWith(
+            compareBy<FullTreeElfExecutableRange> { it.start }.thenBy { it.endExclusive },
+        )
+        if (executable.isEmpty()) fail("ELF has no nonempty executable PT_LOAD segment")
+        return FullTreeElfCoreLayout(
+            elfClass = headers.elfClass,
+            byteOrder = headers.byteOrder,
+            elfType = headers.elfType,
+            machine = headers.machine,
+            osAbi = headers.osAbi,
+            abiVersion = headers.abiVersion,
+            imageBase = ranges.imageBase,
+            executableRanges = Collections.unmodifiableList(ArrayList(executable)),
         )
     }
 
@@ -629,6 +708,22 @@ private class ElfReader(
 
     private fun fail(message: String): Nothing = throw FullTreeControlException("$label $message")
 }
+
+private data class ParsedElfHeaders(
+    val elfClass: Int,
+    val byteOrder: Int,
+    val elfType: String,
+    val machine: Int,
+    val osAbi: Int,
+    val abiVersion: Int,
+    val programOffset: Long,
+    val programEntrySize: Int,
+    val programCount: Int,
+    val sectionOffset: Long,
+    val sectionEntrySize: Int,
+    val sectionCount: Int,
+    val nameIndex: Int,
+)
 
 private data class LoadedRanges(
     val imageBase: ULong,
