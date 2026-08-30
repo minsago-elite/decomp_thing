@@ -628,7 +628,9 @@ internal enum class FullTreeDiskScratchColdPopulation {
 }
 
 internal data class FullTreeDiskScratchColdSnapshot(
+    /** SHA-256 of the complete canonical lease.json bytes, including its recordSha256 field. */
     val leaseRecordSha256: String,
+    /** Self hash of the lease record preimage, excluding its recordSha256 field. */
     val recordSelfSha256: String,
     val population: FullTreeDiskScratchColdPopulation,
 )
@@ -659,8 +661,27 @@ internal class FullTreeDiskScratchColdLease internal constructor(
 ) : AutoCloseable {
     private var closed = false
 
+    init {
+        // Construction is not published until this descriptor-pinned, lock-held inspection passes.
+        requireCurrentInternal(expectedEvidence = null)
+    }
+
+    /**
+     * Reauthenticates the residual lease against one exact caller-supplied acquisition artifact.
+     * The caller must obtain the artifact from a validated operation history whose disk-bearing
+     * transition names its evidenceSha256; the evidence self hash alone does not prove provenance.
+     * The evidence's initial availability remains historical: it is range checked against the
+     * current immutable filesystem totals and active policy, but is never compared to cold statfs
+     * availability. This method observes only and retains the mount flock until close.
+     */
     @Synchronized
-    fun requireCurrent(): FullTreeDiskScratchColdSnapshot {
+    fun requireCurrent(
+        expectedEvidence: FullTreeDiskScratchEvidence,
+    ): FullTreeDiskScratchColdSnapshot = requireCurrentInternal(expectedEvidence)
+
+    private fun requireCurrentInternal(
+        expectedEvidence: FullTreeDiskScratchEvidence?,
+    ): FullTreeDiskScratchColdSnapshot {
         check(!closed) { "disk-scratch cold lease is closed" }
         requireTrustedMountAncestors(mountPath)
         val authorized = requireMountCurrent(
@@ -731,15 +752,17 @@ internal class FullTreeDiskScratchColdLease internal constructor(
             leaseDescriptor,
             mountDescriptor.identity,
         )
+        val finalMountIdentity = LinuxFilesystemSyscalls.identity(mountDescriptor.fd)
+        val finalLeaseIdentity = LinuxFilesystemSyscalls.identity(leaseDescriptor.fd)
         requireLeaseRecordMatches(
             record,
             operation,
             policy,
             mountPath,
             finalAuthorized.mount,
-            LinuxFilesystemSyscalls.identity(mountDescriptor.fd),
+            finalMountIdentity,
             finalAuthorized.capacity,
-            LinuxFilesystemSyscalls.identity(leaseDescriptor.fd),
+            finalLeaseIdentity,
         )
         val finalPopulation = requireColdPopulation(
             leaseDescriptor,
@@ -753,6 +776,18 @@ internal class FullTreeDiskScratchColdLease internal constructor(
             (firstRunIdentity == null) != (finalRunIdentity == null) ||
             firstRunIdentity != null && !sameDirectory(firstRunIdentity, checkNotNull(finalRunIdentity))
         ) scratchFail("cold disk-scratch lease population changed before its snapshot")
+        expectedEvidence?.let { expected ->
+            requireColdEvidenceMatches(
+                expected,
+                operation,
+                policy,
+                mountPath,
+                finalAuthorized,
+                finalMountIdentity,
+                finalLeaseIdentity,
+                recordBytes,
+            )
+        }
         return FullTreeDiskScratchColdSnapshot(
             leaseRecordSha256 = sha256(recordBytes),
             recordSelfSha256 = record.recordSha256,
@@ -856,7 +891,6 @@ internal object FullTreeDiskScratchAuthority {
                 authorizedMount = authorized.mount,
                 authorizedCapacity = authorized.capacity,
             )
-            cold.requireCurrent()
             recordDescriptor = null
             leaseDescriptor = null
             locked = false
@@ -1083,6 +1117,36 @@ private fun requireMountCurrent(
             capacity.maximumNameBytes != expectedCapacity.maximumNameBytes)
     ) scratchFail("dedicated disk-scratch filesystem capacity changed")
     return AuthorizedDiskScratch(mount, capacity)
+}
+
+private fun requireColdEvidenceMatches(
+    expected: FullTreeDiskScratchEvidence,
+    operation: FullTreeDiskScratchOperation,
+    policy: FullTreeDiskScratchPolicy,
+    mountPath: Path,
+    authorized: AuthorizedDiskScratch,
+    mountIdentity: LinuxFileIdentity,
+    leaseIdentity: LinuxFileIdentity,
+    recordBytes: ByteArray,
+) {
+    val observed = translateScratchFailures {
+        FullTreeDiskScratchEvidence.create(
+            operation = operation,
+            policy = policy,
+            mountPathSha256 = sha256(mountPath.toString()),
+            mount = authorized.mount,
+            mountIdentity = mountIdentity,
+            capacity = authorized.capacity.copy(
+                availableBytes = expected.initialAvailableBytes,
+                availableInodes = expected.initialAvailableInodes,
+            ),
+            leaseIdentity = leaseIdentity,
+            leaseRecordSha256 = sha256(recordBytes),
+        )
+    }
+    if (!MessageDigest.isEqual(observed.canonicalBytes(), expected.canonicalBytes())) {
+        scratchFail("cold disk-scratch lease does not match exact acquisition evidence")
+    }
 }
 
 private fun requireTrustedMountAncestors(path: Path) {

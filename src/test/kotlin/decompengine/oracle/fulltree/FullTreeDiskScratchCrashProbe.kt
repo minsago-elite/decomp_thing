@@ -3,6 +3,7 @@ package decompengine.oracle.fulltree
 import java.nio.file.Files
 import java.nio.file.Path
 import java.nio.file.attribute.PosixFilePermissions
+import java.util.Base64
 
 /** Separate-process fixture that intentionally exits without releasing an acquired ext4 lease. */
 internal object FullTreeDiskScratchCrashProbe {
@@ -35,7 +36,8 @@ internal object FullTreeDiskScratchCrashProbe {
             Files.createDirectory(run)
             Files.setPosixFilePermissions(run, PosixFilePermissions.fromString("rwx------"))
         }
-        println("READY:${lease.evidence.leaseRecordSha256}")
+        val encodedEvidence = Base64.getEncoder().encodeToString(lease.evidence.canonicalBytes())
+        println("READY:$encodedEvidence")
         System.out.flush()
         Runtime.getRuntime().halt(0)
     }

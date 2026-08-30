@@ -12,13 +12,16 @@ import java.nio.file.Path
 import java.nio.file.attribute.FileTime
 import java.nio.file.attribute.PosixFilePermissions
 import java.time.Instant
+import java.util.Base64
 import java.util.concurrent.TimeUnit
 import kotlin.io.path.createTempDirectory
 import kotlin.test.Test
 import kotlin.test.assertEquals
 import kotlin.test.assertFailsWith
+import kotlin.test.assertNotEquals
 import kotlin.test.assertTrue
 import kotlinx.serialization.json.JsonArray
+import kotlinx.serialization.json.JsonElement
 import kotlinx.serialization.json.JsonObject
 import kotlinx.serialization.json.JsonPrimitive
 import org.junit.jupiter.api.Assumptions.assumeTrue
@@ -132,6 +135,21 @@ class FullTreeDiskScratchAuthorityTest {
                     "mountFlags",
                     JsonArray(listOf("nodev", "noexec", "nosuid", "rw").map(::JsonPrimitive)),
                 ),
+            )
+        }
+        assertFailsWith<FullTreeDiskScratchException> {
+            FullTreeDiskScratchEvidence.parseCanonical(
+                mutateEvidence(evidence, "mode", JsonPrimitive(0x1e0)),
+            )
+        }
+        assertFailsWith<FullTreeDiskScratchException> {
+            FullTreeDiskScratchEvidence.parseCanonical(
+                mutateEvidence(evidence, "initialAvailableBytes", JsonPrimitive(1023)),
+            )
+        }
+        assertFailsWith<FullTreeDiskScratchException> {
+            FullTreeDiskScratchEvidence.parseCanonical(
+                mutateEvidence(evidence, "initialAvailableInodes", JsonPrimitive(3)),
             )
         }
         assertFailsWith<FullTreeDiskScratchException> {
@@ -317,9 +335,6 @@ class FullTreeDiskScratchAuthorityTest {
             "set DECOMP_TEST_ORACLE_EXT4_SCRATCH for cold lease integration coverage",
         )
         val mount = Path.of(configured).toAbsolutePath().normalize()
-        val capacity = LinuxFilesystemSyscalls.openRoot(mount).use {
-            LinuxFilesystemSyscalls.filesystemCapacity(it)
-        }
         val policy = FullTreeDiskScratchPolicy(
             requiredAvailableBytes = 1,
             maximumFilesystemBytes = EXPECTED_MAXIMUM_FILESYSTEM_BYTES,
@@ -334,12 +349,16 @@ class FullTreeDiskScratchAuthorityTest {
             val runPath = leaseRoot.resolve(runDirectoryName(operation.operationId))
             try {
                 assertTrue(Files.list(mount).use { it.findAny().isEmpty })
-                val expectedRecordArtifactSha256 = leaveCrashedLease(
+                val expectedEvidence = leaveCrashedLease(
                     mount,
                     operation,
                     activeRun,
                 )
+                val expectedRecordArtifactSha256 = expectedEvidence.leaseRecordSha256
                 val recordBytes = Files.readAllBytes(recordPath)
+                val residualCapacity = LinuxFilesystemSyscalls.openRoot(mount).use {
+                    LinuxFilesystemSyscalls.filesystemCapacity(it)
+                }
                 val mountNames = entryNames(mount)
                 val leaseNames = entryNames(leaseRoot)
                 val observedPaths = buildList {
@@ -358,6 +377,10 @@ class FullTreeDiskScratchAuthorityTest {
                 }
 
                 assertEquals(expectedRecordArtifactSha256, sha256(recordBytes))
+                assertTrue(
+                    residualCapacity.availableInodes < expectedEvidence.initialAvailableInodes,
+                    "cold disk-scratch availability must remain historical after lease artifacts consume inodes",
+                )
                 listOf(
                     operation.copy(requestSha256 = "a".repeat(64)),
                     operation.copy(shardId = "different-shard"),
@@ -383,20 +406,79 @@ class FullTreeDiskScratchAuthorityTest {
                 assertEquals(leaseNames, entryNames(leaseRoot))
 
                 FullTreeDiskScratchAuthority.openExistingReadOnly(mount, operation, policy).use { cold ->
-                    val first = cold.requireCurrent()
-                    val second = cold.requireCurrent()
+                    val leaseRecord = FullTreeDiskScratchLeaseRecord.parseCanonical(recordBytes)
+                    assertNotEquals(expectedRecordArtifactSha256, leaseRecord.recordSha256)
+                    val first = cold.requireCurrent(expectedEvidence)
+                    val second = cold.requireCurrent(expectedEvidence)
                     val expectedPopulation = if (activeRun) {
                         FullTreeDiskScratchColdPopulation.ACTIVE_OPERATION_RUN
                     } else {
                         FullTreeDiskScratchColdPopulation.RECORD_ONLY
                     }
                     assertEquals(expectedRecordArtifactSha256, first.leaseRecordSha256)
-                    assertEquals(
-                        FullTreeDiskScratchLeaseRecord.parseCanonical(recordBytes).recordSha256,
-                        first.recordSelfSha256,
-                    )
+                    assertEquals(leaseRecord.recordSha256, first.recordSelfSha256)
                     assertEquals(expectedPopulation, first.population)
                     assertEquals(expectedPopulation, second.population)
+
+                    listOf(
+                        "initialAvailableBytes" to JsonPrimitive(
+                            differentHistoricalAvailability(
+                                expectedEvidence.initialAvailableBytes,
+                                expectedEvidence.requiredAvailableBytes,
+                                expectedEvidence.totalBytes,
+                            ),
+                        ),
+                        "initialAvailableInodes" to JsonPrimitive(
+                            differentHistoricalAvailability(
+                                expectedEvidence.initialAvailableInodes,
+                                expectedEvidence.requiredAvailableInodes,
+                                expectedEvidence.totalInodes,
+                            ),
+                        ),
+                    ).forEach { (field, value) ->
+                        val alternateHistory = validMutatedEvidence(expectedEvidence, field, value)
+                        assertEquals(expectedPopulation, cold.requireCurrent(alternateHistory).population)
+                    }
+
+                    val selfHashSubstitution = validMutatedEvidence(
+                        expectedEvidence,
+                        "leaseRecordSha256",
+                        JsonPrimitive(leaseRecord.recordSha256),
+                    )
+                    assertFailsWith<FullTreeDiskScratchException> {
+                        cold.requireCurrent(selfHashSubstitution)
+                    }
+
+                    val mismatches: List<Pair<String, JsonElement>> = buildList {
+                        add("requestSha256" to JsonPrimitive("a".repeat(64)))
+                        add("mountPathSha256" to JsonPrimitive("b".repeat(64)))
+                        add("mountId" to JsonPrimitive(differentPositive(expectedEvidence.mountId)))
+                        add(
+                            "mountFlags" to JsonArray(
+                                (expectedEvidence.mountFlags + "zztest").distinct().sorted().map(::JsonPrimitive),
+                            ),
+                        )
+                        add("fragmentBytes" to JsonPrimitive(differentPositive(expectedEvidence.fragmentBytes)))
+                        add("ownerUid" to JsonPrimitive(if (expectedEvidence.ownerUid == 0) 1 else 0))
+                        add(
+                            "maximumFilesystemBytes" to
+                                JsonPrimitive(Math.addExact(expectedEvidence.maximumFilesystemBytes, 1L)),
+                        )
+                        add(
+                            "leaseRootInode" to
+                                JsonPrimitive(differentPositive(expectedEvidence.leaseRootInode)),
+                        )
+                    }
+                    mismatches.forEach { (field, value) ->
+                        val mismatch = validMutatedEvidence(expectedEvidence, field, value)
+                        assertFailsWith<FullTreeDiskScratchException>(
+                            "cold disk-scratch evidence accepted mismatched $field",
+                        ) {
+                            cold.requireCurrent(mismatch)
+                        }
+                    }
+
+                    assertEquals(expectedPopulation, cold.requireCurrent(expectedEvidence).population)
                     assertFailsWith<FullTreeDiskScratchException> {
                         FullTreeDiskScratchAuthority.openExistingReadOnly(mount, operation, policy)
                     }
@@ -457,7 +539,7 @@ class FullTreeDiskScratchAuthorityTest {
         mount: Path,
         operation: FullTreeDiskScratchOperation,
         activeRun: Boolean,
-    ): String {
+    ): FullTreeDiskScratchEvidence {
         val java = Path.of(System.getProperty("java.home"), "bin", "java")
         val process = ProcessBuilder(
             java.toString(),
@@ -476,10 +558,14 @@ class FullTreeDiskScratchAuthorityTest {
             process.waitFor(5, TimeUnit.SECONDS)
         }
         assertTrue(exited, "crash-lease child process did not exit")
-        val output = process.inputStream.readNBytes(64 * 1024 + 1).decodeToString().trim()
+        val rawOutput = process.inputStream.readNBytes(64 * 1024 + 1).decodeToString()
+        val output = rawOutput.removeSuffix("\n").removeSuffix("\r")
         assertEquals(0, process.exitValue(), output)
-        assertTrue(output.matches(Regex("READY:[0-9a-f]{64}")), output)
-        return output.removePrefix("READY:")
+        assertTrue(output.matches(CRASH_EVIDENCE_OUTPUT), output)
+        val encoded = output.removePrefix("READY:")
+        val evidenceBytes = Base64.getDecoder().decode(encoded)
+        assertEquals(encoded, Base64.getEncoder().encodeToString(evidenceBytes))
+        return FullTreeDiskScratchEvidence.parseCanonical(evidenceBytes)
     }
 
     private fun entryNames(directory: Path): List<String> = Files.list(directory).use { entries ->
@@ -559,6 +645,20 @@ class FullTreeDiskScratchAuthorityTest {
         )
     }
 
+    private fun validMutatedEvidence(
+        evidence: FullTreeDiskScratchEvidence,
+        field: String,
+        value: JsonElement,
+    ): FullTreeDiskScratchEvidence = FullTreeDiskScratchEvidence.parseCanonical(
+        mutateEvidence(evidence, field, value),
+    )
+
+    private fun differentPositive(value: Long): Long =
+        if (value == Long.MAX_VALUE) value - 1L else value + 1L
+
+    private fun differentHistoricalAvailability(value: Long, minimum: Long, total: Long): Long =
+        if (value > minimum) value - 1L else Math.addExact(value, 1L).also { require(it <= total) }
+
     private fun requireByteExhaustion(run: Path, totalBytes: Long) {
         assumeTrue(totalBytes <= 128L * 1024 * 1024, "integration scratch is too large for exhaustion coverage")
         LinuxFilesystemSyscalls.openRoot(run).use { root ->
@@ -626,6 +726,7 @@ class FullTreeDiskScratchAuthorityTest {
         const val BYTE_EXHAUSTION_TOLERANCE_BYTES = 4L * 1024 * 1024
         const val OWNER_FILE_MODE = 0x180 // 0600
         const val BYTE_EXHAUSTION_FILE = "byte-exhaustion"
+        val CRASH_EVIDENCE_OUTPUT = Regex("READY:[A-Za-z0-9+/]+={0,2}")
         val SENTINEL_ACCESS_TIME: FileTime = FileTime.from(Instant.parse("2000-01-01T00:00:00Z"))
         const val FROZEN_EVIDENCE_SHA256 = "b9d2cce2265e1b35b2905baddd4d6b0fd4cd12bcbc3faab81490aad122faf2ec"
         const val FROZEN_EVIDENCE_ARTIFACT_SHA256 =
