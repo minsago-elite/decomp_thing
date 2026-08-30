@@ -42,7 +42,10 @@ import decompengine.agent.AgentExecutionEvent
 import decompengine.agent.AgentExecutionException
 import decompengine.agent.AgentExecutionLimits
 import decompengine.agent.AgentExecutionRequest
+import decompengine.agent.AgentExecutionRequestBinding
+import decompengine.agent.AgentExecutionReceipt
 import decompengine.agent.AgentExecutionResult
+import decompengine.agent.AgentExecutionOutcome
 import decompengine.agent.AgentFailure
 import decompengine.agent.AgentFailureKind
 import decompengine.agent.AgentFileChange
@@ -118,30 +121,35 @@ class AcpAgentHarness(
 ) : CapturedRepairAgentHarness, AcpExecutionEvidenceSource {
     private val factoryProvenance = AtomicReference<AcpHarnessProvenance?>()
     private val unresolvedCleanupFailure = AtomicReference<AgentExecutionException?>()
-    private val diagnostics = AtomicReference<AcpProcessDiagnostics?>()
-    private val filesystemAudit = AtomicReference<List<AcpFilesystemAuditRecord>>(emptyList())
-    private val terminalAudit = AtomicReference<List<AcpTerminalAuditRecord>>(emptyList())
-    private val permissionAudit = AtomicReference<List<AcpPermissionAuditRecord>>(emptyList())
-    private val sandboxEvidence = AtomicReference<AcpSandboxEvidence?>()
-    private val negotiatedAgentEvidence = AtomicReference<AcpNegotiatedAgentEvidence?>()
-    private val executionEvidence = AtomicReference<AcpExecutionEvidenceSnapshot?>()
+    private val latestDiagnosticsReference = AtomicReference<AcpProcessDiagnostics?>()
+    private val latestFilesystemAuditReference = AtomicReference<List<AcpFilesystemAuditRecord>>(emptyList())
+    private val latestTerminalAuditReference = AtomicReference<List<AcpTerminalAuditRecord>>(emptyList())
+    private val latestPermissionAuditReference = AtomicReference<List<AcpPermissionAuditRecord>>(emptyList())
+    private val latestSandboxEvidenceReference = AtomicReference<AcpSandboxEvidence?>()
+    private val latestExecutionEvidenceReference = AtomicReference<AcpExecutionEvidenceSnapshot?>()
 
     override fun implementationIdentifier(): String = configuration.implementationId
 
-    fun latestDiagnostics(): AcpProcessDiagnostics? = diagnostics.get()
+    @Deprecated("Use invocation-bound ACP provider evidence from executeReceipt")
+    fun latestDiagnostics(): AcpProcessDiagnostics? = latestDiagnosticsReference.get()
 
     /** Metadata-only filesystem decisions from the latest execution on this harness. */
-    fun latestFilesystemAudit(): List<AcpFilesystemAuditRecord> = filesystemAudit.get()
+    @Deprecated("Use invocation-bound ACP provider evidence from executeReceipt")
+    fun latestFilesystemAudit(): List<AcpFilesystemAuditRecord> = latestFilesystemAuditReference.get()
 
     /** Metadata-only terminal lifecycle and authorization decisions from the latest execution. */
-    fun latestTerminalAudit(): List<AcpTerminalAuditRecord> = terminalAudit.get()
+    @Deprecated("Use invocation-bound ACP provider evidence from executeReceipt")
+    fun latestTerminalAudit(): List<AcpTerminalAuditRecord> = latestTerminalAuditReference.get()
 
     /** Metadata-only ACP permission decisions from the latest execution. */
-    fun latestPermissionAudit(): List<AcpPermissionAuditRecord> = permissionAudit.get()
+    @Deprecated("Use invocation-bound ACP provider evidence from executeReceipt")
+    fun latestPermissionAudit(): List<AcpPermissionAuditRecord> = latestPermissionAuditReference.get()
 
-    fun latestSandboxEvidence(): AcpSandboxEvidence? = sandboxEvidence.get()
+    @Deprecated("Use invocation-bound ACP provider evidence from executeReceipt")
+    fun latestSandboxEvidence(): AcpSandboxEvidence? = latestSandboxEvidenceReference.get()
 
-    override fun latestAcpExecutionEvidence(): AcpExecutionEvidenceSnapshot? = executionEvidence.get()
+    @Deprecated("Use invocation-bound ACP provider evidence from executeReceipt")
+    override fun latestAcpExecutionEvidence(): AcpExecutionEvidenceSnapshot? = latestExecutionEvidenceReference.get()
 
     /**
      * Launches the production-contained agent, negotiates stable ACP v1, and tears it down without
@@ -149,22 +157,25 @@ class AcpAgentHarness(
      */
     fun preflight(workflow: AcpPreflightWorkflow = AcpPreflightWorkflow.ALL): AcpAgentPreflightResult {
         val requiredCapabilities = configuration.requiredAgentCapabilities + workflow.requiredAgentCapabilities
-        executeInternal(
+        val receipt = executeInternalReceipt(
             request = preflightRequest(),
             onEvent = {},
             capturedFilesystem = null,
             preflightWorkflow = workflow,
         )
+        receipt.requireResult()
+        val evidence = receipt.providerEvidence as? AcpInvocationEvidenceSnapshot
+            ?: error("successful ACP preflight is missing invocation evidence")
         return AcpAgentPreflightResult(
             workflow = workflow,
-            negotiatedAgent = requireNotNull(negotiatedAgentEvidence.get()) {
+            negotiatedAgent = requireNotNull(evidence.negotiatedAgent) {
                 "successful ACP preflight is missing initialize evidence"
             },
             requiredAgentCapabilities = requiredCapabilities,
-            diagnostics = requireNotNull(diagnostics.get()) {
+            diagnostics = requireNotNull(evidence.diagnostics) {
                 "successful ACP preflight is missing process diagnostics"
             },
-            sandboxEvidence = requireNotNull(sandboxEvidence.get()) {
+            sandboxEvidence = requireNotNull(evidence.sandboxEvidence) {
                 "successful ACP preflight is missing sandbox evidence"
             },
         )
@@ -184,7 +195,12 @@ class AcpAgentHarness(
     override fun execute(
         request: AgentExecutionRequest,
         onEvent: (AgentExecutionEvent) -> Unit,
-    ): AgentExecutionResult = executeInternal(
+    ): AgentExecutionResult = executeReceipt(request, onEvent).requireResult()
+
+    override fun executeReceipt(
+        request: AgentExecutionRequest,
+        onEvent: (AgentExecutionEvent) -> Unit,
+    ): AgentExecutionReceipt = executeInternalReceipt(
         request,
         onEvent,
         capturedFilesystem = null,
@@ -196,28 +212,94 @@ class AcpAgentHarness(
         initialFiles: Map<String, ByteArray>,
         output: BoundedRepairOutput,
         onEvent: (AgentExecutionEvent) -> Unit,
-    ): AgentExecutionResult = executeInternal(
+    ): AgentExecutionResult = executeCapturedReceipt(request, initialFiles, output, onEvent).requireResult()
+
+    override fun executeCapturedReceipt(
+        request: AgentExecutionRequest,
+        initialFiles: Map<String, ByteArray>,
+        output: BoundedRepairOutput,
+        onEvent: (AgentExecutionEvent) -> Unit,
+    ): AgentExecutionReceipt = executeInternalReceipt(
         request,
         onEvent,
         AcpCapturedRepairFilesystem(initialFiles, output),
         preflightWorkflow = null,
     )
 
-    @OptIn(UnstableApi::class)
-    private fun executeInternal(
+    private fun executeInternalReceipt(
         request: AgentExecutionRequest,
         onEvent: (AgentExecutionEvent) -> Unit,
         capturedFilesystem: AcpCapturedRepairFilesystem?,
         preflightWorkflow: AcpPreflightWorkflow?,
+    ): AgentExecutionReceipt {
+        val binding = AgentExecutionRequestBinding.capture(request)
+        val evidenceState = AcpInvocationEvidenceState(factoryProvenance.get())
+        var cause: Throwable? = null
+        val outcome = try {
+            AgentExecutionOutcome.Returned(
+                executeInternalResult(
+                    request,
+                    onEvent,
+                    capturedFilesystem,
+                    preflightWorkflow,
+                    evidenceState,
+                ),
+            )
+        } catch (failure: Error) {
+            throw failure
+        } catch (failure: AgentExecutionException) {
+            // Preserve the typed exception itself as the compatibility exception's cause. This
+            // retains its original stack, nested cause, and suppressed cleanup diagnostics.
+            cause = failure
+            AgentExecutionOutcome.Failed(failure.failure)
+        } catch (failure: Exception) {
+            cause = failure
+            AgentExecutionOutcome.Failed(
+                AgentFailure(
+                    kind = if (failure is IllegalArgumentException) {
+                        AgentFailureKind.INVALID_REQUEST
+                    } else {
+                        AgentFailureKind.INTERNAL
+                    },
+                    message = if (failure is IllegalArgumentException) {
+                        "ACP execution request was rejected"
+                    } else {
+                        "ACP execution failed without a typed terminal outcome"
+                    },
+                    details = mapOf("exception" to failure.javaClass.name),
+                ),
+            )
+        }
+        val evidence = evidenceState.snapshot(
+            includeCompleteExecution = preflightWorkflow == null && outcome is AgentExecutionOutcome.Returned,
+        )
+        publishCompatibilityEvidence(evidence, modelExecution = preflightWorkflow == null)
+        return AgentExecutionReceipt(binding, outcome, evidence, cause)
+    }
+
+    private fun publishCompatibilityEvidence(
+        evidence: AcpInvocationEvidenceSnapshot,
+        modelExecution: Boolean,
+    ) {
+        latestDiagnosticsReference.set(evidence.diagnostics)
+        latestFilesystemAuditReference.set(evidence.filesystemAudit)
+        latestTerminalAuditReference.set(evidence.terminalAudit)
+        latestPermissionAuditReference.set(evidence.permissionAudit)
+        latestSandboxEvidenceReference.set(evidence.sandboxEvidence)
+        latestExecutionEvidenceReference.set(
+            evidence.completeExecutionEvidence.takeIf { modelExecution },
+        )
+    }
+
+    @OptIn(UnstableApi::class)
+    private fun executeInternalResult(
+        request: AgentExecutionRequest,
+        onEvent: (AgentExecutionEvent) -> Unit,
+        capturedFilesystem: AcpCapturedRepairFilesystem?,
+        preflightWorkflow: AcpPreflightWorkflow?,
+        evidenceState: AcpInvocationEvidenceState,
     ): AgentExecutionResult {
         unresolvedCleanupFailure.get()?.let { throw it }
-        diagnostics.set(null)
-        filesystemAudit.set(emptyList())
-        terminalAudit.set(emptyList())
-        permissionAudit.set(emptyList())
-        sandboxEvidence.set(null)
-        negotiatedAgentEvidence.set(null)
-        executionEvidence.set(null)
         if (preflightWorkflow != null) {
             require(capturedFilesystem == null) { "ACP preflight cannot open a workflow filesystem" }
         } else if (capturedFilesystem == null) {
@@ -232,6 +314,7 @@ class AcpAgentHarness(
         val startedAt = System.nanoTime()
         val wallDeadline = MonotonicDeadline(request.limits.wallClockTimeout)
         val before = if (capturedFilesystem == null && preflightWorkflow == null) {
+            evidenceState.reach(AcpExecutionLifecyclePhase.WORKSPACE_SNAPSHOT)
             try {
                 WorkspaceSnapshot.capture(
                     request,
@@ -296,6 +379,7 @@ class AcpAgentHarness(
         }
 
         var processDiagnostics: AcpProcessDiagnostics? = null
+        evidenceState.beginSandboxLaunch()
         val sandboxExecution = try {
             ProductionAcpSandboxExecution(
                 configuration,
@@ -315,6 +399,7 @@ class AcpAgentHarness(
             }
             throw failure
         }
+        evidenceState.sandboxStarted()
         try {
             // This guard begins with the first operation after a successful outer launch. Even
             // evidence/recorder construction failures therefore cannot bypass boundary cleanup.
@@ -323,7 +408,7 @@ class AcpAgentHarness(
                 networkIsolated = sandboxExecution.networkIsolated,
             ).also { terminalAuditRecorderReference = it }
             try {
-                sandboxEvidence.set(
+                evidenceState.recordSandboxEvidence(
                     sandboxExecution.evidence(
                         configuration.terminalPolicy?.takeIf {
                             AgentOperation.EXECUTE_COMMAND in request.accessPolicy.allowedOperations
@@ -347,6 +432,7 @@ class AcpAgentHarness(
                         sandboxExecution = sandboxExecution,
                         capturedFilesystem = capturedFilesystem,
                         preflightWorkflow = preflightWorkflow,
+                        evidenceState = evidenceState,
                     )
                 }
             } catch (failure: Throwable) {
@@ -388,7 +474,7 @@ class AcpAgentHarness(
             }
             if (processDiagnostics != null) {
                 try {
-                    sandboxEvidence.set(
+                    evidenceState.recordSandboxEvidence(
                         sandboxExecution.evidence(
                             configuration.terminalPolicy?.takeIf {
                                 AgentOperation.EXECUTE_COMMAND in request.accessPolicy.allowedOperations
@@ -440,24 +526,27 @@ class AcpAgentHarness(
                 // Publish every bounded recorder independently. Evidence construction and boundary
                 // cleanup failures must not erase the diagnostic trail needed to audit teardown.
                 try {
-                    filesystemAudit.set(filesystemAuditRecorder.snapshot())
+                    evidenceState.recordFilesystemAudit(filesystemAuditRecorder.snapshot())
                 } catch (failure: Throwable) {
+                    evidenceState.markFilesystemAuditIncomplete()
                     recordPrimaryFailure(failure)
                 }
                 try {
-                    terminalAudit.set(terminalAuditRecorderReference?.snapshot().orEmpty())
+                    evidenceState.recordTerminalAudit(terminalAuditRecorderReference?.snapshot().orEmpty())
                 } catch (failure: Throwable) {
+                    evidenceState.markTerminalAuditIncomplete()
                     recordPrimaryFailure(failure)
                 }
                 try {
-                    permissionAudit.set(permissionAuditRecorder.snapshot())
+                    evidenceState.recordPermissionAudit(permissionAuditRecorder.snapshot())
                 } catch (failure: Throwable) {
+                    evidenceState.markPermissionAuditIncomplete()
                     recordPrimaryFailure(failure)
                 }
             }
         }
         val running = requireNotNull(runningReference)
-        processDiagnostics?.let(diagnostics::set)
+        processDiagnostics?.let(evidenceState::recordDiagnostics)
         val completedDiagnostics = processDiagnostics
         running.failure.get()?.let { terminal ->
             if (terminal is AcpOutputLimitFailure && (
@@ -529,6 +618,7 @@ class AcpAgentHarness(
         }
         if (cleanupFailure == null) cleanupFailure = processCleanupFailure
         else processCleanupFailure?.let { cleanupFailure.addSuppressed(it) }
+        evidenceState.finishCleanup(cleanupFailure == null && processCleanupFailure == null)
 
         val fatalCleanup = cleanupFailure
         (primaryFailure as? Error)?.let { fatal ->
@@ -554,6 +644,7 @@ class AcpAgentHarness(
         } else if (capturedFilesystem != null) {
             capturedFilesystem.changes()
         } else {
+            evidenceState.reach(AcpExecutionLifecyclePhase.FINAL_WORKSPACE_SNAPSHOT)
             try {
                 val finalBudget = WorkspaceSnapshotBudget(
                     request.cancellation,
@@ -615,28 +706,6 @@ class AcpAgentHarness(
             session = translator.sessionReference(),
             usage = usage,
         )
-        if (preflightWorkflow == null) factoryProvenance.get()?.let { provenance ->
-            executionEvidence.set(
-                AcpExecutionEvidenceSnapshot(
-                    factoryProvenance = provenance,
-                    negotiatedAgent = requireNotNull(negotiatedAgentEvidence.get()) {
-                        "successful ACP turn is missing initialize evidence"
-                    },
-                    wirePromptSha256 = sha256(
-                        renderPrompt(request).toByteArray(StandardCharsets.UTF_8),
-                    ),
-                    diagnostics = requireNotNull(completedDiagnostics) {
-                        "successful ACP turn is missing process diagnostics"
-                    },
-                    filesystemAudit = filesystemAudit.get(),
-                    terminalAudit = terminalAudit.get(),
-                    permissionAudit = permissionAudit.get(),
-                    sandboxEvidence = requireNotNull(sandboxEvidence.get()) {
-                        "successful ACP turn is missing sandbox evidence"
-                    },
-                ),
-            )
-        }
         return result
     }
 
@@ -672,6 +741,7 @@ class AcpAgentHarness(
         sandboxExecution: ProductionAcpSandboxExecution,
         capturedFilesystem: AcpCapturedRepairFilesystem?,
         preflightWorkflow: AcpPreflightWorkflow?,
+        evidenceState: AcpInvocationEvidenceState,
     ): PromptOutcome {
         val protocolScope = CoroutineScope(SupervisorJob() + Dispatchers.Default)
         protocolScopeReference.set(protocolScope)
@@ -691,6 +761,7 @@ class AcpAgentHarness(
         transport.onClose { running.fail(AcpEofFailure("ACP stdout closed")) }
         val client = Client(protocol)
         protocol.start()
+        evidenceState.reach(AcpExecutionLifecyclePhase.INITIALIZE)
         if (preflightWorkflow != null) {
             val filesystemCapability = if (
                 preflightWorkflow.filesystemRead || preflightWorkflow.filesystemWrite
@@ -702,7 +773,7 @@ class AcpAgentHarness(
             } else {
                 null
             }
-            negotiatedAgentEvidence.set(
+            evidenceState.recordNegotiatedAgent(
                 initializeAgent(
                     client = client,
                     clientCapabilities = ClientCapabilities(
@@ -717,6 +788,7 @@ class AcpAgentHarness(
                     protocolScope = protocolScope,
                 ),
             )
+            evidenceState.reach(AcpExecutionLifecyclePhase.INITIALIZED)
             return PromptOutcome(
                 stopReason = AgentStopReason.COMPLETED,
                 response = null,
@@ -748,7 +820,7 @@ class AcpAgentHarness(
             permissionAuditRecorder,
         )
 
-        negotiatedAgentEvidence.set(
+        evidenceState.recordNegotiatedAgent(
             initializeAgent(
                 client = client,
                 clientCapabilities = ClientCapabilities(
@@ -762,6 +834,7 @@ class AcpAgentHarness(
                 protocolScope = protocolScope,
             ),
         )
+        evidenceState.reach(AcpExecutionLifecyclePhase.INITIALIZED)
 
         val primaryRoot = request.workspaceRoots.first()
         val additionalRoots = request.workspaceRoots.drop(1).map { it.path.toString() }
@@ -798,6 +871,7 @@ class AcpAgentHarness(
         running.bindSession(session.sessionId.value)
         translator.recordSession(session.sessionId.value)
         terminal.bindSession(session.sessionId.value)
+        evidenceState.reach(AcpExecutionLifecyclePhase.SESSION_CREATED)
         val outcome = runPrompt(
             request,
             session,
@@ -808,6 +882,7 @@ class AcpAgentHarness(
             permissionAuditRecorder,
             wallDeadline,
             protocolScope,
+            evidenceState,
         )
         terminal.throwIfFailed()
         filesystemAuditRecorder.failure()?.let { throw it }
@@ -918,11 +993,14 @@ class AcpAgentHarness(
         permissionAudit: AcpPermissionAuditRecorder,
         wallDeadline: MonotonicDeadline,
         operationScope: CoroutineScope,
+        evidenceState: AcpInvocationEvidenceState,
     ): PromptOutcome {
         val requestDeadline = MonotonicDeadline(configuration.timeouts.request)
         val promptResponse = AtomicReference<PromptResponse?>()
+        val wirePrompt = renderPrompt(request)
         val promptJob = operationScope.async {
-            session.prompt(listOf(ContentBlock.Text(renderPrompt(request)))).collect { event ->
+            evidenceState.recordWirePrompt(wirePrompt)
+            session.prompt(listOf(ContentBlock.Text(wirePrompt))).collect { event ->
                 when (event) {
                     is Event.SessionUpdateEvent -> {
                         // Prompt updates arrive on this event flow, not necessarily through
@@ -955,6 +1033,7 @@ class AcpAgentHarness(
                 terminal.throwIfFailed()
                 filesystemAudit.failure()?.let { throw it }
                 permissionAudit.failure()?.let { throw it }
+                evidenceState.reach(AcpExecutionLifecyclePhase.PROMPT_COMPLETED)
                 return PromptOutcome(response.stopReason.toContractStopReason(), response)
             }
             translator.callbackFailure.get()?.let { callbackFailure ->
@@ -983,6 +1062,7 @@ class AcpAgentHarness(
                     terminal.throwIfFailed()
                     filesystemAudit.failure()?.let { throw it }
                     permissionAudit.failure()?.let { throw it }
+                    evidenceState.reach(AcpExecutionLifecyclePhase.PROMPT_COMPLETED)
                     return PromptOutcome(response.stopReason.toContractStopReason(), response)
                 }
                 promptJob.cancel()
@@ -1198,6 +1278,151 @@ class AcpAgentHarness(
                 details = mapOf("exception" to failure.javaClass.name),
             ),
             failure,
+        )
+    }
+}
+
+/** Mutable only within one invocation; its snapshots are detached before leaving the harness. */
+private class AcpInvocationEvidenceState(
+    private val factoryProvenance: AcpHarnessProvenance?,
+) {
+    private val phase = AtomicReference(AcpExecutionLifecyclePhase.REQUEST_BOUND)
+    private val cleanup = AtomicReference(AcpExecutionCleanupDisposition.NOT_REQUIRED)
+    private val negotiatedAgent = AtomicReference<AcpNegotiatedAgentEvidence?>()
+    private val wirePromptSha256 = AtomicReference<String?>()
+    private val diagnostics = AtomicReference<AcpProcessDiagnostics?>()
+    private val filesystemAudit = AtomicReference<List<AcpFilesystemAuditRecord>>(emptyList())
+    private val terminalAudit = AtomicReference<List<AcpTerminalAuditRecord>>(emptyList())
+    private val permissionAudit = AtomicReference<List<AcpPermissionAuditRecord>>(emptyList())
+    private val sandboxEvidence = AtomicReference<AcpSandboxEvidence?>()
+    private val filesystemAuditComplete = AtomicBoolean(true)
+    private val terminalAuditComplete = AtomicBoolean(true)
+    private val permissionAuditComplete = AtomicBoolean(true)
+
+    fun reach(candidate: AcpExecutionLifecyclePhase) {
+        while (true) {
+            val observed = phase.get()
+            if (candidate.ordinal <= observed.ordinal || phase.compareAndSet(observed, candidate)) return
+        }
+    }
+
+    fun beginSandboxLaunch() {
+        reach(AcpExecutionLifecyclePhase.SANDBOX_LAUNCH)
+        cleanup.set(AcpExecutionCleanupDisposition.UNVERIFIED)
+    }
+
+    fun sandboxStarted() {
+        reach(AcpExecutionLifecyclePhase.SANDBOX_STARTED)
+    }
+
+    fun recordNegotiatedAgent(value: AcpNegotiatedAgentEvidence) {
+        negotiatedAgent.set(value)
+    }
+
+    fun recordWirePrompt(prompt: String) {
+        wirePromptSha256.set(sha256(prompt.toByteArray(StandardCharsets.UTF_8)))
+        reach(AcpExecutionLifecyclePhase.PROMPT_DISPATCHED)
+    }
+
+    fun recordDiagnostics(value: AcpProcessDiagnostics) {
+        diagnostics.set(value)
+    }
+
+    fun recordSandboxEvidence(value: AcpSandboxEvidence) {
+        sandboxEvidence.set(value)
+    }
+
+    fun recordFilesystemAudit(value: List<AcpFilesystemAuditRecord>) {
+        filesystemAudit.set(ArrayList(value))
+    }
+
+    fun recordTerminalAudit(value: List<AcpTerminalAuditRecord>) {
+        terminalAudit.set(ArrayList(value))
+    }
+
+    fun recordPermissionAudit(value: List<AcpPermissionAuditRecord>) {
+        permissionAudit.set(ArrayList(value))
+    }
+
+    fun markFilesystemAuditIncomplete() {
+        filesystemAuditComplete.set(false)
+    }
+
+    fun markTerminalAuditIncomplete() {
+        terminalAuditComplete.set(false)
+    }
+
+    fun markPermissionAuditIncomplete() {
+        permissionAuditComplete.set(false)
+    }
+
+    fun finishCleanup(clean: Boolean) {
+        cleanup.set(
+            if (clean && diagnostics.get()?.let {
+                    it.remainingProcessIds.isEmpty() && it.sandboxCleanupVerified
+                } == true
+            ) {
+                AcpExecutionCleanupDisposition.VERIFIED
+            } else {
+                AcpExecutionCleanupDisposition.UNVERIFIED
+            },
+        )
+    }
+
+    fun snapshot(includeCompleteExecution: Boolean): AcpInvocationEvidenceSnapshot {
+        val phaseSnapshot = phase.get()
+        val cleanupSnapshot = cleanup.get()
+        val negotiatedSnapshot = negotiatedAgent.get()
+        val wirePromptSnapshot = wirePromptSha256.get()
+        val diagnosticsSnapshot = diagnostics.get()
+        val filesystemSnapshot = ArrayList(filesystemAudit.get())
+        val terminalSnapshot = ArrayList(terminalAudit.get())
+        val permissionSnapshot = ArrayList(permissionAudit.get())
+        val sandboxSnapshot = sandboxEvidence.get()
+        val provenanceSnapshot = factoryProvenance
+        val completeness = AcpExecutionEvidenceCompleteness(
+            filesystemAuditComplete.get(),
+            terminalAuditComplete.get(),
+            permissionAuditComplete.get(),
+        )
+        val complete = if (
+            includeCompleteExecution &&
+            cleanupSnapshot == AcpExecutionCleanupDisposition.VERIFIED &&
+            completeness.allPolicyAuditsComplete &&
+            provenanceSnapshot != null &&
+            negotiatedSnapshot != null &&
+            wirePromptSnapshot != null &&
+            diagnosticsSnapshot != null &&
+            sandboxSnapshot != null
+        ) {
+            runCatching {
+                AcpExecutionEvidenceSnapshot(
+                    factoryProvenance = provenanceSnapshot,
+                    negotiatedAgent = negotiatedSnapshot,
+                    wirePromptSha256 = wirePromptSnapshot,
+                    diagnostics = diagnosticsSnapshot,
+                    filesystemAudit = filesystemSnapshot,
+                    terminalAudit = terminalSnapshot,
+                    permissionAudit = permissionSnapshot,
+                    sandboxEvidence = sandboxSnapshot,
+                )
+            }.getOrNull()
+        } else {
+            null
+        }
+        return AcpInvocationEvidenceSnapshot(
+            factoryProvenance = provenanceSnapshot,
+            phaseReached = phaseSnapshot,
+            cleanupDisposition = cleanupSnapshot,
+            negotiatedAgent = negotiatedSnapshot,
+            wirePromptSha256 = wirePromptSnapshot,
+            diagnostics = diagnosticsSnapshot,
+            filesystemAudit = filesystemSnapshot,
+            terminalAudit = terminalSnapshot,
+            permissionAudit = permissionSnapshot,
+            sandboxEvidence = sandboxSnapshot,
+            completeness = completeness,
+            completeExecutionEvidence = complete,
         )
     }
 }

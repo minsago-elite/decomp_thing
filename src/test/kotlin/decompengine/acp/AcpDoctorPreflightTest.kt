@@ -1,6 +1,7 @@
 package decompengine.acp
 
 import decompengine.agent.AgentExecutionException
+import decompengine.agent.AgentExecutionOutcome
 import decompengine.agent.AgentFailureKind
 import decompengine.doctor.CommandProbe
 import decompengine.doctor.CommandProbeResult
@@ -18,8 +19,8 @@ import kotlin.test.Test
 import kotlin.test.assertEquals
 import kotlin.test.assertFailsWith
 import kotlin.test.assertFalse
+import kotlin.test.assertIs
 import kotlin.test.assertNotNull
-import kotlin.test.assertNull
 import kotlin.test.assertTrue
 import kotlinx.serialization.json.add
 import kotlinx.serialization.json.buildJsonArray
@@ -109,7 +110,12 @@ class AcpDoctorPreflightTest {
 
             assertEquals(case.failureKind, failure.failure.kind, case.mode)
             assertTrue(case.expectedDetail in failure.failure.details, case.mode)
-            val diagnostics = assertNotNull(harness.latestDiagnostics(), case.mode)
+            val receipt = assertNotNull(failure.receipt, case.mode)
+            assertIs<AgentExecutionOutcome.Failed>(receipt.outcome, case.mode)
+            val invocation = assertIs<AcpInvocationEvidenceSnapshot>(receipt.providerEvidence, case.mode)
+            assertEquals(AcpExecutionCleanupDisposition.VERIFIED, invocation.cleanupDisposition, case.mode)
+            assertEquals(null, invocation.completeExecutionEvidence, case.mode)
+            val diagnostics = assertNotNull(invocation.diagnostics, case.mode)
             assertTrue(diagnostics.remainingProcessIds.isEmpty(), case.mode)
             assertTrue(diagnostics.sandboxCleanupVerified, case.mode)
         }
@@ -129,7 +135,7 @@ class AcpDoctorPreflightTest {
         assertTrue(childResult.diagnostics.forcedTermination)
         assertTrue(childResult.diagnostics.remainingProcessIds.isEmpty())
         assertTrue(childResult.diagnostics.sandboxCleanupVerified)
-        assertNull(childHarness.latestAcpExecutionEvidence(), "preflight must not claim a model turn")
+        assertTrue(childResult.stableDescriptor.startsWith("acp-preflight-v1:workflow-repair:"))
         val burstHarness = factoryHarness(writeProvisioning(
             temporary.resolve("burst.json"),
             mode = "doctor-preflight-shutdown-burst",
@@ -140,7 +146,12 @@ class AcpDoctorPreflightTest {
         }
 
         assertEquals(AgentFailureKind.RESOURCE_EXHAUSTED, overflow.failure.kind)
-        val diagnostics = assertNotNull(burstHarness.latestDiagnostics())
+        val receipt = assertNotNull(overflow.receipt)
+        assertIs<AgentExecutionOutcome.Failed>(receipt.outcome)
+        val invocation = assertIs<AcpInvocationEvidenceSnapshot>(receipt.providerEvidence)
+        assertEquals(AcpExecutionCleanupDisposition.VERIFIED, invocation.cleanupDisposition)
+        assertEquals(null, invocation.completeExecutionEvidence)
+        val diagnostics = assertNotNull(invocation.diagnostics)
         assertTrue(diagnostics.outputLimitExceeded)
         assertTrue(diagnostics.remainingProcessIds.isEmpty())
         assertTrue(diagnostics.sandboxCleanupVerified)

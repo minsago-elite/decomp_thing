@@ -13,6 +13,7 @@ import decompengine.acp.AcpSandboxResourceLimits
 import decompengine.acp.AcpTerminalAuditRecord
 import decompengine.agent.AgentExecutionEvent
 import decompengine.agent.AgentExecutionRequest
+import decompengine.agent.AgentExecutionRequestBinding
 import decompengine.agent.AgentExecutionResult
 import decompengine.agent.AgentFileChange
 import decompengine.agent.AgentFileChangeEvent
@@ -160,16 +161,18 @@ internal class BoundedAcpExecutionArtifact private constructor(
             result: AgentExecutionResult,
             events: Collection<ArchivedAgentEvent>,
             acp: AcpExecutionEvidenceSnapshot,
-        ): BoundedAcpExecutionArtifact = BoundedAcpExecutionArtifact(
-            ArchivedAgentRequest(
-                requestSha256 = digestAgentRequest(request),
+        ): BoundedAcpExecutionArtifact {
+            val requestBinding = AgentExecutionRequestBinding.capture(request)
+            return BoundedAcpExecutionArtifact(
+                ArchivedAgentRequest(
+                requestSha256 = requestBinding.requestSha256,
                 objectiveSha256 = digest(request.objective),
                 objectiveUtf8Bytes = utf8Bytes(request.objective),
                 promptSha256 = promptSha256,
                 wirePromptSha256 = acp.wirePromptSha256,
                 workspaceRootsSha256 = digestWorkspaceRoots(request),
                 contextInputsSha256 = digestContextInputs(request),
-                accessPolicySha256 = digestAgentAccessPolicy(request),
+                accessPolicySha256 = requestBinding.accessPolicySha256,
                 workspaceRootIds = request.workspaceRoots.map { it.id },
                 contextInputIds = request.contextInputs.map { it.id },
                 filesystemEnabled = request.accessPolicy.allowedOperations.any { it.name.endsWith("FILE") },
@@ -182,10 +185,11 @@ internal class BoundedAcpExecutionArtifact private constructor(
                 maximumInputTokens = request.limits.maxInputTokens,
                 maximumOutputTokens = request.limits.maxOutputTokens,
             ),
-            result,
-            events,
-            acp,
-        )
+                result,
+                events,
+                acp,
+            )
+        }
     }
 }
 
@@ -835,21 +839,6 @@ private fun digest(value: String): String = MessageDigest.getInstance("SHA-256")
 
 private fun utf8Bytes(value: String): Int = strictUtf8(value).size
 
-private fun digestAgentRequest(request: AgentExecutionRequest): String = LengthDelimitedEvidenceDigest().apply {
-    field("contract", request.schemaVersion.toString())
-    field("objective", request.objective)
-    field("workspaceRootsSha256", digestWorkspaceRoots(request))
-    field("contextInputsSha256", digestContextInputs(request))
-    field("accessPolicySha256", digestAgentAccessPolicy(request))
-    field("wallClockTimeoutNanos", request.limits.wallClockTimeout.toNanos().toString())
-    field("idleTimeoutNanos", request.limits.idleTimeout.toNanos().toString())
-    field("maximumTurns", request.limits.maxTurns.toString())
-    field("maximumToolCalls", request.limits.maxToolCalls.toString())
-    field("maximumOutputBytes", request.limits.maxOutputBytes.toString())
-    field("maximumInputTokens", request.limits.maxInputTokens?.toString())
-    field("maximumOutputTokens", request.limits.maxOutputTokens?.toString())
-}.finish()
-
 private fun digestWorkspaceRoots(request: AgentExecutionRequest): String = LengthDelimitedEvidenceDigest().apply {
     field("count", request.workspaceRoots.size.toString())
     request.workspaceRoots.forEachIndexed { index, root ->
@@ -865,31 +854,6 @@ private fun digestContextInputs(request: AgentExecutionRequest): String = Length
         field("context[$index].mediaType", context.mediaType)
         field("context[$index].description", context.description)
         field("context[$index].content", context.content)
-    }
-}.finish()
-
-private fun digestAgentAccessPolicy(request: AgentExecutionRequest): String = LengthDelimitedEvidenceDigest().apply {
-    val operations = request.accessPolicy.allowedOperations.map { it.name }.sorted()
-    field("allowedOperationCount", operations.size.toString())
-    operations.forEachIndexed { index, operation -> field("allowedOperation[$index]", operation) }
-    val rules = request.accessPolicy.pathRules.sortedWith(
-        compareBy(
-            { it.path.rootId },
-            { it.path.relativePath },
-            { it.recursive },
-            { it.operations.map { operation -> operation.name }.sorted().joinToString(",") },
-        ),
-    )
-    field("pathRuleCount", rules.size.toString())
-    rules.forEachIndexed { index, rule ->
-        field("pathRule[$index].rootId", rule.path.rootId)
-        field("pathRule[$index].relativePath", rule.path.relativePath)
-        field("pathRule[$index].recursive", rule.recursive.toString())
-        val ruleOperations = rule.operations.map { it.name }.sorted()
-        field("pathRule[$index].operationCount", ruleOperations.size.toString())
-        ruleOperations.forEachIndexed { operationIndex, operation ->
-            field("pathRule[$index].operation[$operationIndex]", operation)
-        }
     }
 }.finish()
 

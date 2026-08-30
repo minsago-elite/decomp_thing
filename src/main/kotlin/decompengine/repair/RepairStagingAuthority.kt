@@ -4,9 +4,11 @@ import decompengine.acp.LinuxDescriptor
 import decompengine.acp.ACP_CAPTURED_REPAIR_WORKSPACE
 import decompengine.agent.AgentExecutionEvent
 import decompengine.agent.AgentExecutionRequest
+import decompengine.agent.AgentExecutionReceipt
 import decompengine.agent.AgentExecutionResult
 import decompengine.agent.AgentHarness
 import decompengine.agent.AgentWorkspaceRoot
+import decompengine.agent.captureAgentExecutionReceipt
 import java.nio.file.Path
 import java.util.Collections
 import java.util.LinkedHashMap
@@ -53,6 +55,16 @@ interface CapturedRepairAgentHarness : AgentHarness {
         output: BoundedRepairOutput,
         onEvent: (AgentExecutionEvent) -> Unit,
     ): AgentExecutionResult
+
+    /** Receipt-returning seam retained alongside the version-1 captured-harness contract. */
+    fun executeCapturedReceipt(
+        request: AgentExecutionRequest,
+        initialFiles: Map<String, ByteArray>,
+        output: BoundedRepairOutput,
+        onEvent: (AgentExecutionEvent) -> Unit,
+    ): AgentExecutionReceipt = captureAgentExecutionReceipt(request) {
+        executeCaptured(request, initialFiles, output, onEvent)
+    }
 }
 
 /** The only mutation surface exposed by [CapturedRepairStagingAuthority]. */

@@ -2,6 +2,7 @@ package decompengine.agent
 
 import decompengine.project.sha256
 import java.nio.file.Files
+import java.nio.file.Path
 import java.time.Duration
 import kotlin.io.path.createDirectories
 import kotlin.io.path.createTempDirectory
@@ -164,6 +165,97 @@ class AgentExecutionContractTest {
         assertEquals(AgentFailureKind.TRANSPORT, failure.failure.kind)
         assertTrue(failure.failure.retryable)
         assertEquals("stream", failure.failure.details["phase"])
+    }
+
+    @Test
+    fun `receipt compatibility binds returned and failed outcomes to the exact request`() {
+        val fixture = fixture("unchanged\n")
+        val typedFailure = AgentFailure(AgentFailureKind.TRANSPORT, "typed failure", retryable = true)
+        val harness = DeterministicFakeAgentHarness(
+            FakeAgentScript(stopReason = AgentStopReason.REFUSED, summary = "refused"),
+            FakeAgentScript(failure = typedFailure),
+        )
+
+        val returned = harness.executeReceipt(fixture.request)
+        val failed = harness.executeReceipt(fixture.request)
+
+        assertEquals(AgentExecutionRequestBinding.capture(fixture.request), returned.requestBinding)
+        assertEquals(AgentStopReason.REFUSED, assertIs<AgentExecutionOutcome.Returned>(returned.outcome).result.stopReason)
+        assertEquals(typedFailure, assertIs<AgentExecutionOutcome.Failed>(failed.outcome).failure)
+        val compatibility = assertFailsWith<AgentExecutionException> { failed.requireResult() }
+        assertTrue(compatibility.receipt === failed)
+        assertIs<AgentExecutionException>(compatibility.cause)
+    }
+
+    @Test
+    fun `request binding preserves the schema one archive digest vector`() {
+        val source = AgentWorkspacePath("project", "src/module.c")
+        val request = AgentExecutionRequest(
+            objective = "repair module",
+            workspaceRoots = listOf(AgentWorkspaceRoot("project", Path.of("/workspace/project"))),
+            contextInputs = listOf(
+                AgentContextInput("evidence", "immutable evidence", "text/plain", "compiler"),
+            ),
+            accessPolicy = AgentAccessPolicy(
+                listOf(
+                    AgentPathRule(
+                        source,
+                        setOf(AgentOperation.READ_FILE, AgentOperation.WRITE_FILE),
+                    ),
+                ),
+            ),
+            limits = AgentExecutionLimits(
+                wallClockTimeout = Duration.ofSeconds(30),
+                idleTimeout = Duration.ofSeconds(5),
+                maxTurns = 3,
+                maxToolCalls = 4,
+                maxOutputBytes = 1_024,
+                maxInputTokens = 200,
+                maxOutputTokens = 100,
+            ),
+        )
+
+        val binding = AgentExecutionRequestBinding.capture(request)
+
+        assertEquals("41698299a4c9ceb169d13015f3675f2fb107ec4394bc96480496a7189065c2b6", binding.requestSha256)
+        assertEquals("4b7d1a5842b8df7aa9462194c3645c2075cfa87eb1a98a24671719f4c95a35b6", binding.accessPolicySha256)
+    }
+
+    @Test
+    fun `request binding is deterministic and total for every constructible request value`() {
+        val fixture = fixture("unchanged\n")
+        val unusual = AgentExecutionRequest(
+            objective = "malformed-surrogate-\ud800",
+            workspaceRoots = fixture.request.workspaceRoots,
+            contextInputs = listOf(AgentContextInput("evidence", "context-\udfff")),
+            accessPolicy = fixture.request.accessPolicy,
+            limits = AgentExecutionLimits(
+                wallClockTimeout = Duration.ofSeconds(Long.MAX_VALUE, 999_999_999),
+                idleTimeout = Duration.ofSeconds(Long.MAX_VALUE, 1),
+            ),
+        )
+
+        val first = AgentExecutionRequestBinding.capture(unusual)
+        val second = AgentExecutionRequestBinding.capture(unusual)
+        val distinctMalformed = AgentExecutionRequest(
+            objective = "malformed-surrogate-\ud801",
+            workspaceRoots = unusual.workspaceRoots,
+            contextInputs = unusual.contextInputs,
+            accessPolicy = unusual.accessPolicy,
+            limits = unusual.limits,
+        )
+        val changedPolicy = AgentExecutionRequest(
+            unusual.objective,
+            unusual.workspaceRoots,
+            unusual.contextInputs,
+            AgentAccessPolicy(emptyList(), emptySet()),
+            unusual.limits,
+        )
+
+        assertEquals(first, second)
+        assertFalse(first.requestSha256 == AgentExecutionRequestBinding.capture(distinctMalformed).requestSha256)
+        assertFalse(first.requestSha256 == AgentExecutionRequestBinding.capture(changedPolicy).requestSha256)
+        assertFalse(first.accessPolicySha256 == AgentExecutionRequestBinding.capture(changedPolicy).accessPolicySha256)
     }
 
     private data class Fixture(

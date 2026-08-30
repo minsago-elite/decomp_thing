@@ -8,7 +8,10 @@ import decompengine.agent.AgentContextInput
 import decompengine.agent.AgentExecutionException
 import decompengine.agent.AgentExecutionEvent
 import decompengine.agent.AgentExecutionLimits
+import decompengine.agent.AgentExecutionOutcome
 import decompengine.agent.AgentExecutionRequest
+import decompengine.agent.AgentExecutionRequestBinding
+import decompengine.agent.AgentExecutionReceipt
 import decompengine.agent.AgentFailureKind
 import decompengine.agent.AgentFileChangeEvent
 import decompengine.agent.AgentFileChangeKind
@@ -24,6 +27,7 @@ import decompengine.agent.AgentToolStatus
 import decompengine.agent.AgentWorkspacePath
 import decompengine.agent.AgentWorkspaceRoot
 import decompengine.agent.execute
+import decompengine.agent.executeReceipt
 import decompengine.repair.CapturedRepairStagingAuthority
 import decompengine.repair.RepairResourceBudget
 import java.nio.file.Path
@@ -35,6 +39,7 @@ import java.util.concurrent.ExecutionException
 import java.util.concurrent.Executors
 import java.util.concurrent.TimeUnit
 import java.util.concurrent.atomic.AtomicInteger
+import java.util.concurrent.atomic.AtomicBoolean
 import kotlin.io.path.createDirectories
 import kotlin.io.path.createTempDirectory
 import kotlin.io.path.exists
@@ -45,6 +50,7 @@ import kotlin.test.assertContentEquals
 import kotlin.test.assertEquals
 import kotlin.test.assertFailsWith
 import kotlin.test.assertFalse
+import kotlin.test.assertIs
 import kotlin.test.assertNotNull
 import kotlin.test.assertNull
 import kotlin.test.assertTrue
@@ -63,6 +69,12 @@ class AcpAgentHarnessTest {
 
         assertEquals(AgentFailureKind.CONFIGURATION, failure.failure.kind)
         assertTrue(failure.failure.message.contains("sandbox"))
+        val receipt = assertNotNull(failure.receipt)
+        assertIs<AgentExecutionOutcome.Failed>(receipt.outcome)
+        val invocation = assertIs<AcpInvocationEvidenceSnapshot>(receipt.providerEvidence)
+        assertEquals(AcpExecutionLifecyclePhase.SANDBOX_LAUNCH, invocation.phaseReached)
+        assertEquals(AcpExecutionCleanupDisposition.UNVERIFIED, invocation.cleanupDisposition)
+        assertNull(invocation.completeExecutionEvidence)
         assertNull(harness.latestDiagnostics())
         assertNull(harness.latestSandboxEvidence(), "failed launch must not claim successful containment")
     }
@@ -120,7 +132,7 @@ class AcpAgentHarnessTest {
                 }
             }
         }
-        assertEquals(54, acpTestMethods.size, acpTestMethods.joinToString { it.name })
+        assertEquals(55, acpTestMethods.size, acpTestMethods.joinToString { it.name })
         assertTrue(
             acpTestMethods.all { it.returnType == Void.TYPE },
             acpTestMethods.filter { it.returnType != Void.TYPE }.joinToString {
@@ -198,12 +210,69 @@ class AcpAgentHarnessTest {
             val fixture = fixture(genericContract = true)
             val harness = harness(mode)
 
-            val result = harness.execute(fixture.request)
+            val receipt = harness.executeReceipt(fixture.request)
+            val result = assertIs<AgentExecutionOutcome.Returned>(receipt.outcome).result
+            val invocation = assertIs<AcpInvocationEvidenceSnapshot>(receipt.providerEvidence)
 
             assertEquals(expected, result.stopReason, mode)
+            assertEquals(AcpExecutionCleanupDisposition.VERIFIED, invocation.cleanupDisposition, mode)
+            assertEquals(AcpExecutionLifecyclePhase.FINAL_WORKSPACE_SNAPSHOT, invocation.phaseReached, mode)
+            assertNotNull(invocation.completeExecutionEvidence, mode)
             assertEquals("original artifact\n", fixture.source.readText(), mode)
             assertEquals(FORBIDDEN_CANARY_CONTENT, fixture.forbiddenCanary.readText(), mode)
             assertCleanTermination(harness, mode)
+        }
+    }
+
+    @Test
+    fun `overlapping receipts retain their own request prompt and provider evidence`() {
+        val firstFixture = fixture()
+        val secondFixture = fixture()
+        val firstRequest = firstFixture.request.withContextMarker("first-turn-marker")
+        val secondRequest = secondFixture.request.withContextMarker("second-turn-marker")
+        val harness = harness("success")
+        val callbacksEntered = CountDownLatch(2)
+        val executor = Executors.newFixedThreadPool(2)
+
+        fun submit(request: AgentExecutionRequest) = executor.submit<AgentExecutionReceipt> {
+            val firstCallback = AtomicBoolean(true)
+            harness.executeReceipt(request) {
+                if (firstCallback.compareAndSet(true, false)) {
+                    callbacksEntered.countDown()
+                    check(callbacksEntered.await(10, TimeUnit.SECONDS)) {
+                        "overlapping ACP invocation did not reach its event callback"
+                    }
+                }
+            }
+        }
+
+        try {
+            val firstFuture = submit(firstRequest)
+            val secondFuture = submit(secondRequest)
+            val first = firstFuture.get(20, TimeUnit.SECONDS)
+            val second = secondFuture.get(20, TimeUnit.SECONDS)
+            val firstEvidence = assertIs<AcpInvocationEvidenceSnapshot>(first.providerEvidence)
+            val secondEvidence = assertIs<AcpInvocationEvidenceSnapshot>(second.providerEvidence)
+
+            assertEquals(AgentExecutionRequestBinding.capture(firstRequest), first.requestBinding)
+            assertEquals(AgentExecutionRequestBinding.capture(secondRequest), second.requestBinding)
+            assertEquals(expectedWirePromptSha256(firstRequest), firstEvidence.wirePromptSha256)
+            assertEquals(expectedWirePromptSha256(secondRequest), secondEvidence.wirePromptSha256)
+            assertFalse(firstEvidence.wirePromptSha256 == secondEvidence.wirePromptSha256)
+            assertEquals(
+                firstEvidence.wirePromptSha256,
+                assertNotNull(firstEvidence.completeExecutionEvidence).wirePromptSha256,
+            )
+            assertEquals(
+                secondEvidence.wirePromptSha256,
+                assertNotNull(secondEvidence.completeExecutionEvidence).wirePromptSha256,
+            )
+            assertEquals(AgentStopReason.COMPLETED, assertIs<AgentExecutionOutcome.Returned>(first.outcome).result.stopReason)
+            assertEquals(AgentStopReason.COMPLETED, assertIs<AgentExecutionOutcome.Returned>(second.outcome).result.stopReason)
+            assertEquals("new source\n", firstFixture.source.readText())
+            assertEquals("new source\n", secondFixture.source.readText())
+        } finally {
+            executor.shutdownNow()
         }
     }
 
@@ -1121,10 +1190,18 @@ class AcpAgentHarnessTest {
         val cancelledFixture = fixture()
         val cancelledHarness = harness("success")
 
-        val cancelled = cancelledHarness.execute(cancelledFixture.request.withCancellation(cancellation))
+        val cancelledReceipt = cancelledHarness.executeReceipt(
+            cancelledFixture.request.withCancellation(cancellation),
+        )
+        val cancelled = assertIs<AgentExecutionOutcome.Returned>(cancelledReceipt.outcome).result
+        val cancelledEvidence = assertIs<AcpInvocationEvidenceSnapshot>(cancelledReceipt.providerEvidence)
 
         assertEquals(AgentStopReason.CANCELLED, cancelled.stopReason)
         assertTrue(cancelled.summary.orEmpty().contains("initial workspace snapshot"))
+        assertEquals(AcpExecutionLifecyclePhase.WORKSPACE_SNAPSHOT, cancelledEvidence.phaseReached)
+        assertEquals(AcpExecutionCleanupDisposition.NOT_REQUIRED, cancelledEvidence.cleanupDisposition)
+        assertNull(cancelledEvidence.diagnostics)
+        assertNull(cancelledEvidence.completeExecutionEvidence)
         assertEquals(null, cancelledHarness.latestDiagnostics())
 
         val launchCancellationObserved = java.util.concurrent.atomic.AtomicBoolean(false)
@@ -1136,12 +1213,18 @@ class AcpAgentHarnessTest {
             duringActualBoundaryLaunch
         }
         val launchCancelledHarness = harness("success")
-        val launchCancelled = launchCancelledHarness.execute(
-            fixture().request.withCancellation(launchCancellation),
+        val launchFixture = fixture()
+        val launchReceipt = launchCancelledHarness.executeReceipt(
+            launchFixture.request.withCancellation(launchCancellation),
         )
+        val launchCancelled = assertIs<AgentExecutionOutcome.Returned>(launchReceipt.outcome).result
+        val launchEvidence = assertIs<AcpInvocationEvidenceSnapshot>(launchReceipt.providerEvidence)
         assertTrue(launchCancellationObserved.get(), "fixture did not reach the real sandbox launch checkpoint")
         assertEquals(AgentStopReason.CANCELLED, launchCancelled.stopReason)
         assertTrue(launchCancelled.summary.orEmpty().contains("sandbox launch"))
+        assertEquals(AcpExecutionLifecyclePhase.SANDBOX_LAUNCH, launchEvidence.phaseReached)
+        assertEquals(AcpExecutionCleanupDisposition.UNVERIFIED, launchEvidence.cleanupDisposition)
+        assertNull(launchEvidence.completeExecutionEvidence)
         assertNull(launchCancelledHarness.latestDiagnostics())
         assertNull(launchCancelledHarness.latestSandboxEvidence())
 
@@ -1154,15 +1237,21 @@ class AcpAgentHarnessTest {
             duringEvidenceConstruction
         }
         val evidenceCancelledHarness = harness("success")
-        val evidenceCancelled = evidenceCancelledHarness.execute(
-            fixture().request.withCancellation(evidenceCancellation),
+        val evidenceFixture = fixture()
+        val evidenceReceipt = evidenceCancelledHarness.executeReceipt(
+            evidenceFixture.request.withCancellation(evidenceCancellation),
         )
+        val evidenceCancelled = assertIs<AgentExecutionOutcome.Returned>(evidenceReceipt.outcome).result
+        val invocation = assertIs<AcpInvocationEvidenceSnapshot>(evidenceReceipt.providerEvidence)
         assertTrue(
             evidenceCancellationObserved.get(),
             "fixture did not reach post-launch evidence construction",
         )
         assertEquals(AgentStopReason.CANCELLED, evidenceCancelled.stopReason)
-        val evidenceCancellationDiagnostics = assertNotNull(evidenceCancelledHarness.latestDiagnostics())
+        assertEquals(AcpExecutionLifecyclePhase.FINAL_WORKSPACE_SNAPSHOT, invocation.phaseReached)
+        assertEquals(AcpExecutionCleanupDisposition.VERIFIED, invocation.cleanupDisposition)
+        assertNull(invocation.completeExecutionEvidence)
+        val evidenceCancellationDiagnostics = assertNotNull(invocation.diagnostics)
         assertTrue(evidenceCancellationDiagnostics.remainingProcessIds.isEmpty())
         assertTrue(evidenceCancellationDiagnostics.sandboxCleanupVerified)
         assertProcessStopped(evidenceCancellationDiagnostics.pid)
@@ -1174,6 +1263,10 @@ class AcpAgentHarnessTest {
         }
         assertEquals(AgentFailureKind.TIMEOUT, timeout.failure.kind)
         assertTrue(timeout.message.orEmpty().contains("initial workspace snapshot"))
+        val timeoutEvidence = assertIs<AcpInvocationEvidenceSnapshot>(assertNotNull(timeout.receipt).providerEvidence)
+        assertEquals(AcpExecutionLifecyclePhase.WORKSPACE_SNAPSHOT, timeoutEvidence.phaseReached)
+        assertEquals(AcpExecutionCleanupDisposition.NOT_REQUIRED, timeoutEvidence.cleanupDisposition)
+        assertNull(timeoutEvidence.completeExecutionEvidence)
         assertEquals(null, timeoutHarness.latestDiagnostics())
 
     }
@@ -1481,6 +1574,32 @@ class AcpAgentHarnessTest {
             cancellation,
         )
 
+    private fun AgentExecutionRequest.withContextMarker(marker: String): AgentExecutionRequest =
+        AgentExecutionRequest(
+            objective,
+            workspaceRoots,
+            contextInputs + AgentContextInput("turn-marker", marker),
+            accessPolicy,
+            limits,
+            cancellation,
+        )
+
+    private fun expectedWirePromptSha256(request: AgentExecutionRequest): String = sha256(
+        buildString {
+            appendLine(request.objective)
+            if (request.contextInputs.isNotEmpty()) {
+                appendLine()
+                appendLine("Context inputs (immutable):")
+                request.contextInputs.forEach { context ->
+                    append("--- ").append(context.id).append(" [").append(context.mediaType).append(']')
+                    context.description?.let { append(" — ").append(it) }
+                    appendLine()
+                    appendLine(context.content)
+                }
+            }
+        }.toByteArray(),
+    )
+
     private fun harness(
         mode: String,
         sentinel: String = "literal-argv",
@@ -1515,6 +1634,16 @@ class AcpAgentHarnessTest {
                     ),
                 ),
                 terminalPolicy = terminalPolicy,
+            ),
+        ).bindFactoryProvenance(
+            AcpHarnessProvenance(
+                harness = "acp",
+                implementationId = "scripted-acp-v1",
+                agentExecutionContractVersion = decompengine.agent.AGENT_EXECUTION_CONTRACT_VERSION,
+                acpProtocolVersion = ACP_STABLE_PROTOCOL_VERSION,
+                acpSdkVersion = ACP_KOTLIN_SDK_VERSION,
+                configurationSha256 = "0".repeat(64),
+                deprecated = false,
             ),
         )
     }
@@ -1637,6 +1766,10 @@ class AcpAgentHarnessTest {
         .digest(Files.readAllBytes(path))
         .joinToString("") { "%02x".format(it) }
 
+    private fun sha256(bytes: ByteArray): String = MessageDigest.getInstance("SHA-256")
+        .digest(bytes)
+        .joinToString("") { "%02x".format(it) }
+
     private fun assertBoundedCleanProtocolFailure(
         fixture: Fixture,
         harness: AcpAgentHarness,
@@ -1683,6 +1816,9 @@ class AcpAgentHarnessTest {
         val failure = assertFailsWith<AgentExecutionException>(context) {
             harness.execute(request, events::add)
         }
+        val receipt = assertNotNull(failure.receipt, "$context receipt")
+        assertEquals(AgentExecutionRequestBinding.capture(request), receipt.requestBinding, context)
+        assertIs<AgentExecutionOutcome.Failed>(receipt.outcome, context)
         assertCleanTermination(
             harness = harness,
             context = context,
@@ -1702,7 +1838,13 @@ class AcpAgentHarnessTest {
         failure: AgentExecutionException? = null,
         events: Collection<AgentExecutionEvent> = emptyList(),
     ) {
-        val diagnostics = assertNotNull(harness.latestDiagnostics(), context)
+        val invocation = failure?.receipt?.providerEvidence as? AcpInvocationEvidenceSnapshot
+        if (failure != null) {
+            assertNotNull(invocation, "$context invocation evidence")
+            assertEquals(AcpExecutionCleanupDisposition.VERIFIED, invocation.cleanupDisposition, context)
+            assertNull(invocation.completeExecutionEvidence, "$context failed outcome archive evidence")
+        }
+        val diagnostics = assertNotNull(invocation?.diagnostics ?: harness.latestDiagnostics(), context)
         assertTrue(diagnostics.remainingProcessIds.isEmpty(), context)
         assertTrue(diagnostics.sandboxCleanupVerified, context)
         assertProcessStopped(diagnostics.pid)
@@ -1710,15 +1852,21 @@ class AcpAgentHarnessTest {
             assertEquals(FORBIDDEN_CANARY_CONTENT, canary.readText(), context)
         }
 
-        val evidence = assertNotNull(harness.latestSandboxEvidence(), "$context sandbox evidence")
+        val evidence = assertNotNull(
+            invocation?.sandboxEvidence ?: harness.latestSandboxEvidence(),
+            "$context sandbox evidence",
+        )
+        val filesystemEvidence = invocation?.filesystemAudit ?: harness.latestFilesystemAudit()
+        val permissionEvidence = invocation?.permissionAudit ?: harness.latestPermissionAudit()
+        val terminalEvidence = invocation?.terminalAudit ?: harness.latestTerminalAudit()
         val secretSurfaces = linkedMapOf<String, Any?>(
             "failure message" to failure?.failure?.message,
             "failure details" to failure?.failure?.details,
             "diagnostics" to diagnostics,
             "events" to events,
-            "filesystem audit" to harness.latestFilesystemAudit(),
-            "permission audit" to harness.latestPermissionAudit(),
-            "terminal audit" to harness.latestTerminalAudit(),
+            "filesystem audit" to filesystemEvidence,
+            "permission audit" to permissionEvidence,
+            "terminal audit" to terminalEvidence,
             "sandbox evidence" to listOf(
                 evidence.provider,
                 evidence.providerVersion,

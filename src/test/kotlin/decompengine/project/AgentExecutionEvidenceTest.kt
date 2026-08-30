@@ -24,6 +24,7 @@ import decompengine.acp.AcpTerminalAuditReason
 import decompengine.acp.AcpTerminalAuditRecord
 import decompengine.agent.AgentExecutionEvent
 import decompengine.agent.AgentExecutionRequest
+import decompengine.agent.AgentExecutionRequestBinding
 import decompengine.agent.AgentExecutionResult
 import decompengine.agent.AgentFileChange
 import decompengine.agent.AgentFileChangeEvent
@@ -115,6 +116,11 @@ class AgentExecutionEvidenceTest {
         assertEquals(4, evidence.getValue("events").jsonArray.size)
         val turn = evidence.getValue("turn").jsonObject
         assertEquals(digest("exact wire prompt bytes"), turn.getValue("wirePromptSha256").jsonPrimitive.content)
+        assertEquals(harness.requestBinding.requestSha256, turn.getValue("requestSha256").jsonPrimitive.content)
+        assertEquals(
+            harness.requestBinding.accessPolicySha256,
+            turn.getValue("accessPolicySha256").jsonPrimitive.content,
+        )
         listOf(
             "requestSha256",
             "wirePromptSha256",
@@ -160,6 +166,8 @@ class AgentExecutionEvidenceTest {
         private val toolTitle: String,
     ) : AgentHarness, AcpExecutionEvidenceSource {
         private var evidence: AcpExecutionEvidenceSnapshot? = null
+        lateinit var requestBinding: AgentExecutionRequestBinding
+            private set
         val factoryProvenance = AcpHarnessProvenance(
             harness = "acp",
             implementationId = IMPLEMENTATION_ID,
@@ -176,6 +184,7 @@ class AgentExecutionEvidenceTest {
             request: AgentExecutionRequest,
             onEvent: (AgentExecutionEvent) -> Unit,
         ): AgentExecutionResult {
+            requestBinding = AgentExecutionRequestBinding.capture(request)
             val target = request.accessPolicy.pathRules.single { rule ->
                 decompengine.agent.AgentOperation.WRITE_FILE in rule.operations
             }.path

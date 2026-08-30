@@ -369,6 +369,7 @@ class AgentFailure(
 class AgentExecutionException(
     val failure: AgentFailure,
     cause: Throwable? = null,
+    val receipt: AgentExecutionReceipt? = null,
 ) : RuntimeException(failure.message, cause)
 
 fun interface AgentHarness {
@@ -377,10 +378,28 @@ fun interface AgentHarness {
         onEvent: (AgentExecutionEvent) -> Unit,
     ): AgentExecutionResult
 
+    /**
+     * Executes one request and returns its terminal outcome together with evidence produced by the
+     * same invocation. Providers override this method when they can supply provider evidence.
+     *
+     * The default preserves the version-1 SAM surface for legacy harnesses. It deliberately wraps
+     * ordinary exceptions as evidence-free failures so production callers never need a racy
+     * post-execution lookup merely to retain a terminal outcome.
+     */
+    fun executeReceipt(
+        request: AgentExecutionRequest,
+        onEvent: (AgentExecutionEvent) -> Unit,
+    ): AgentExecutionReceipt = captureAgentExecutionReceipt(request) {
+        execute(request, onEvent)
+    }
+
     fun implementationIdentifier(): String? = null
 }
 
 fun AgentHarness.execute(request: AgentExecutionRequest): AgentExecutionResult = execute(request) { }
+
+fun AgentHarness.executeReceipt(request: AgentExecutionRequest): AgentExecutionReceipt =
+    executeReceipt(request) { }
 
 private fun String.isSha256(): Boolean = length == 64 && all { it in '0'..'9' || it in 'a'..'f' }
 
