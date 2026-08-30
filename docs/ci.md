@@ -14,6 +14,10 @@ That command runs:
 
 - `./gradlew --no-daemon test`
 
+The test task first builds and verifies the same static ACP gate helper shipped by `installDist`; security-boundary
+tests do not compile private helper copies. Distribution jobs should additionally run
+`./gradlew --no-daemon verifyAcpGateHelperDistribution`.
+
 Run the independent generated-C compatibility lane with LLVM/Clang:
 
 ```bash
@@ -63,6 +67,7 @@ Install these system tools before running the test suite:
 
 - JDK 21
 - `gcc` and `make`
+- static libc development objects for `/usr/bin/cc -static` (included by Ubuntu's `build-essential` dependency set)
 - LLVM/Clang 18 for `scripts/validate-clang.sh`
 - `bubblewrap`
 - `binutils` for `strings`

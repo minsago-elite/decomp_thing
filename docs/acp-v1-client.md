@@ -17,6 +17,37 @@ are draft, require an explicit SDK opt-in, and are not imported or negotiated he
 alongside the SDK to keep SDK logging silent in CLI and test hosts; subprocess stderr remains separately captured.
 JNA is independently pinned to `5.19.1` for the small Linux descriptor and transaction syscall boundary.
 
+## Production gate-helper artifact
+
+The static sandbox gate helper is a production native artifact, not a test fixture. `buildAcpGateHelper` invokes an
+explicit compiler executable (`/usr/bin/cc` by default, overrideable with
+`-PacpGateHelperCompiler=/absolute/path/to/cc`) using a fixed argument vector and static link. The build then checks
+that the result is a bounded little-endian ELF64 executable for the build host, contains neither `PT_INTERP` nor a
+`DT_NEEDED` entry, and exits with the fail-closed protocol status when invoked without its gate inputs.
+
+`installDist`, `distZip`, and `distTar` all include the verified files at:
+
+```text
+libexec/decomp-acp-gate-helper
+libexec/decomp-acp-gate-helper.sha256
+```
+
+The helper is installed mode `0755`; the sidecar authenticates its content bytes. Set the ACP configuration's
+`sandboxGateHelperExecutable` to the helper's final absolute installed path and copy the sidecar digest into
+`expectedSandboxGateHelperSha256`. During trusted provisioning, compute
+`expectedSandboxGateHelperManifestSha256` for that final installed inode with
+`calculateAcpRuntimeManifestSha256`; do not recompute either expected value during an agent launch. The manifest binds
+final ownership, mode, metadata, size, and (for a user-owned installation) content, so a manifest computed in the
+Gradle build directory is intentionally not presented as portable installation metadata.
+
+`./gradlew verifyAcpGateHelperDistribution` checks the local `installDist` layout. The JVM test task consumes this same
+Gradle-built helper; live ACP tests no longer compile a separate security-boundary executable ad hoc.
+
+The Docker image copies the verified distribution as root and checks mode, ownership, and the content sidecar before
+switching to the service user. Packaging does not weaken the runtime prerequisites: a container still needs supported
+user namespaces, bubblewrap, a user systemd manager and cgroup-v2 authority. If those authorities are unavailable, ACP
+preflight and launch fail closed; the image does not add `SYS_ADMIN`, privileged mode, or a fallback sandbox.
+
 The 0.30.1 SDK marks three optional v1 schema extensions used at the contract boundary as `UnstableApi`: additional
 session directories, prompt token usage, and message identifiers. Opt-in is deliberately scoped to the adapter code
 that reads those fields. They do not change version negotiation: they remain v1 fields, additional directories are

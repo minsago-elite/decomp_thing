@@ -51,6 +51,11 @@ RUN groupadd --gid "${APP_GID}" llm-bin-patch \
 
 COPY --from=build /workspace/build/install/llm_bin_patch /opt/llm_bin_patch
 
+RUN test ! -L /opt/llm_bin_patch/libexec/decomp-acp-gate-helper \
+    && test "$(stat -c '%a:%u:%g' /opt/llm_bin_patch/libexec/decomp-acp-gate-helper)" = "755:0:0" \
+    && cd /opt/llm_bin_patch/libexec \
+    && sha256sum --check --strict decomp-acp-gate-helper.sha256
+
 USER llm-bin-patch
 WORKDIR /work
 

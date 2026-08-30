@@ -1754,21 +1754,7 @@ class AcpAgentHarnessTest {
                 "Gradle must inject the ACP parent-secret canary into the test process"
             }
         }
-        val GATE_HELPER: Path by lazy {
-            val output = createTempDirectory("acp-static-gate-helper-")
-                .resolve("gate-helper")
-                .toAbsolutePath()
-                .normalize()
-            val source = Path.of("src/main/c/decomp_acp_gate_helper.c").toAbsolutePath().normalize()
-            val process = ProcessBuilder(
-                CC.toString(), "-std=c11", "-O2", "-static", source.toString(), "-o", output.toString(),
-            ).redirectErrorStream(true).start()
-            val diagnostics = process.inputStream.readNBytes(32 * 1024).toString(Charsets.UTF_8)
-            if (!process.waitFor(20, TimeUnit.SECONDS) || process.exitValue() != 0) {
-                throw IllegalStateException("static ACP gate helper unavailable: $diagnostics")
-            }
-            output
-        }
+        val GATE_HELPER: Path by lazy(::productionAcpGateHelper)
         val PYTHON_RUNTIME_MOUNTS: List<AcpSandboxReadOnlyMount> by lazy {
             val runtime = PYTHON_RUNTIME.getOrThrow()
             runtime.nativeRuntimeMounts + runtime.stdlibMounts(

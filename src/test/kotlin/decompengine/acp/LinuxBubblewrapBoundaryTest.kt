@@ -1036,14 +1036,7 @@ class LinuxBubblewrapBoundaryTest {
             Path.of("/run/user/${(Files.getAttribute(Path.of("/proc/self"), "unix:uid") as Number).toInt()}")
         }
         val SECURITY_TOOLS = listOf(BWRAP, PRLIMIT, SYSTEMD_RUN, SYSTEMCTL, BASH)
-        val GATE_HELPER_RESULT: Result<Path> by lazy {
-            runCatching {
-                compileStatic(
-                    Path.of("src/main/c/decomp_acp_gate_helper.c").toAbsolutePath().normalize(),
-                    "acp-static-gate-helper-",
-                )
-            }
-        }
+        val GATE_HELPER_RESULT: Result<Path> by lazy { runCatching(::productionAcpGateHelper) }
         val PROBE_RESULT: Result<Path> by lazy {
             runCatching {
                 val source = Path.of(

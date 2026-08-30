@@ -750,21 +750,7 @@ class AcpTerminalBrokerTest {
             Path.of("/run/user/${(Files.getAttribute(Path.of("/proc/self"), "unix:uid") as Number).toInt()}")
         }
         val SECURITY_TOOLS = listOf(BWRAP, PRLIMIT, SYSTEMD_RUN, SYSTEMCTL, BASH, CC)
-        val GATE_HELPER: Path by lazy {
-            val source = Path.of("src/main/c/decomp_acp_gate_helper.c").toAbsolutePath().normalize()
-            val output = createTempDirectory("acp-terminal-gate-helper-")
-                .resolve("gate-helper")
-                .toAbsolutePath()
-                .normalize()
-            val process = ProcessBuilder(
-                CC.toString(), "-std=c11", "-O2", "-static", source.toString(), "-o", output.toString(),
-            ).redirectErrorStream(true).start()
-            val diagnostics = process.inputStream.readNBytes(32 * 1024).toString(Charsets.UTF_8)
-            if (!process.waitFor(20, TimeUnit.SECONDS) || process.exitValue() != 0) {
-                throw IllegalStateException("static ACP gate helper unavailable: $diagnostics")
-            }
-            output
-        }
+        val GATE_HELPER: Path by lazy(::productionAcpGateHelper)
         val PROBE_DESTINATION: Path = Path.of("/decomp-acp-terminal-probe")
         val PROBE: Path by lazy {
             val compiler = Path.of("/usr/bin/cc")

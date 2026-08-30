@@ -49,6 +49,12 @@ Start the local workbench and open `http://127.0.0.1:8000`:
 build/install/llm_bin_patch/bin/llm_bin_patch web
 ```
 
+On supported Linux hosts, `installDist` also builds and verifies the production ACP sandbox gate helper at
+`build/install/llm_bin_patch/libexec/decomp-acp-gate-helper`, with its content digest beside it. A static libc-capable
+`/usr/bin/cc` is required; use `-PacpGateHelperCompiler=/absolute/path/to/cc` only when provisioning an explicit
+alternative compiler. ACP configuration must pin the final installed helper and its final runtime manifest as
+described in [docs/acp-v1-client.md](docs/acp-v1-client.md#production-gate-helper-artifact).
+
 The GUI provides persistent ELF uploads, recent-job navigation, metadata inspection, background automatic exploration, archival source-tree reconstruction, live status refresh, source browsing, coverage and confidence evidence, repair history, and verified archive downloads. Uploaded binaries are only executed after selecting **Start automatic exploration**, using the same mandatory sandbox as the CLI. Job data defaults to `.decomp_engine/jobs`; change it with `--data-dir`.
 
 For a non-Docker angr installation, set `ANGR_PYTHON` to the Python executable that can import angr before starting the GUI.
