@@ -573,6 +573,23 @@ class FullTreeFunctionObservationOperationCoordinatorTest {
                                     error("nested prepared-run borrow callback must not run")
                                 }
                             }
+                            val tree = BorrowedObservationRunTree.initialize(borrowed)
+                            assertEquals(expectedRunRoot, tree.path)
+                            assertEquals(listOf("runtime", "scratch", "tmp"), entryNames(expectedRunRoot))
+                            listOf("runtime", "scratch", "tmp").forEach { name ->
+                                assertEquals(
+                                    PosixFilePermissions.fromString("rwx------"),
+                                    Files.getPosixFilePermissions(
+                                        expectedRunRoot.resolve(name),
+                                        LinkOption.NOFOLLOW_LINKS,
+                                    ),
+                                )
+                            }
+                            tree.close()
+                            assertFailsWith<IllegalStateException> { tree.path }
+                            assertFailsWith<IllegalStateException> {
+                                tree.withPinnedDescriptor { error("closed tree descriptor callback must not run") }
+                            }
                             borrowed.withPinnedDescriptor { descriptor ->
                                 assertTrue(
                                     Files.isSameFile(
@@ -580,14 +597,35 @@ class FullTreeFunctionObservationOperationCoordinatorTest {
                                         LinuxFilesystemSyscalls.descriptorPath(descriptor),
                                     ),
                                 )
-                                assertTrue(
-                                    LinuxFilesystemSyscalls.directoryEntryNames(descriptor, 1).isEmpty(),
+                                assertEquals(
+                                    listOf("runtime", "scratch", "tmp"),
+                                    LinuxFilesystemSyscalls.directoryEntryNames(descriptor, 4).sorted(),
                                 )
                             }
                             "prepared-borrow"
                         },
                     )
                     assertFailsWith<IllegalStateException> { capturedBorrow.path }
+
+                    val initializedNames = entryNames(expectedRunRoot)
+                    val initializedModes = initializedNames.associateWith { name ->
+                        Files.getPosixFilePermissions(expectedRunRoot.resolve(name), LinkOption.NOFOLLOW_LINKS)
+                    }
+                    assertFailsWith<FullTreeFunctionObservationIsolationException> {
+                        run.withCurrentRunRootBeforeLaunch { borrowed ->
+                            BorrowedObservationRunTree.initialize(borrowed).close()
+                        }
+                    }
+                    assertEquals(initializedNames, entryNames(expectedRunRoot))
+                    assertEquals(
+                        initializedModes,
+                        initializedNames.associateWith { name ->
+                            Files.getPosixFilePermissions(
+                                expectedRunRoot.resolve(name),
+                                LinkOption.NOFOLLOW_LINKS,
+                            )
+                        },
+                    )
 
                     val callbackFailure = SimulatedPreparedRunBorrowFailure()
                     val retainedFailure = assertFailsWith<SimulatedPreparedRunBorrowFailure> {
@@ -623,7 +661,7 @@ class FullTreeFunctionObservationOperationCoordinatorTest {
                     }
                     assertEquals(mountNames, entryNames(mount))
                     assertEquals(leaseNames, entryNames(leaseRoot))
-                    assertTrue(entryNames(expectedRunRoot).isEmpty())
+                    assertEquals(initializedNames, entryNames(expectedRunRoot))
                     assertContentEquals(recordBytes, Files.readAllBytes(recordPath))
 
                     requireNotNull(authority.openExisting(binding)).use { journal ->
@@ -656,12 +694,15 @@ class FullTreeFunctionObservationOperationCoordinatorTest {
 
                     assertEquals(mountNames, entryNames(mount))
                     assertEquals(leaseNames, entryNames(leaseRoot))
-                    assertTrue(entryNames(expectedRunRoot).isEmpty())
+                    assertEquals(initializedNames, entryNames(expectedRunRoot))
                     assertContentEquals(recordBytes, Files.readAllBytes(recordPath))
                 }
             } finally {
                 runCatching { prepared?.close() }
                 runCatching { leased?.close() }
+                listOf("runtime", "scratch", "tmp").forEach { name ->
+                    runCatching { Files.deleteIfExists(expectedRunRoot.resolve(name)) }
+                }
                 removeActiveRunLease(leaseRoot, binding.operationId)
             }
         }

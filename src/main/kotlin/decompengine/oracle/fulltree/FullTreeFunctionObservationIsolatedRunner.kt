@@ -287,8 +287,10 @@ private class AuthenticatedObservationRuntime private constructor(
         addExact(total, guard.size, "authenticated class-path byte count")
     }
 
-    fun materializeClassPath(runTree: PrivateObservationRunTree): MaterializedObservationClassPath =
-        runTree.materializeClassPath(classPath)
+    fun materializeClassPath(runTree: ObservationRunTreeAccess): MaterializedObservationClassPath =
+        runTree.withPinnedDescriptor { descriptor ->
+            materializeObservationClassPath(runTree.path, descriptor, classPath)
+        }
 
     fun mounts(): List<FullTreeFunctionObservationRuntimeMount> = runtimeMounts.map { it.first }
 
@@ -1032,72 +1034,115 @@ private class ParentObservationInputGuards private constructor(
     }
 }
 
+/**
+ * Descriptor-backed access shared by owned fixture trees and lexically borrowed production trees.
+ * Destructive cleanup is deliberately absent: ownership is a property of the concrete type.
+ */
+internal sealed interface ObservationRunTreeAccess {
+    val path: Path
+
+    fun <T> withPinnedDescriptor(action: (LinuxDescriptor) -> T): T
+}
+
+private fun materializeObservationClassPath(
+    runPath: Path,
+    descriptor: LinuxDescriptor,
+    entries: List<Pair<FullTreeFunctionObservationClassPathEntry, StableControlFile>>,
+): MaterializedObservationClassPath {
+    val paths = mutableListOf<Path>()
+    val expected = mutableListOf<Pair<Long, String>>()
+    descriptor.whileOpen { fd ->
+        LinuxFilesystemSyscalls.openDirectoryAt(fd, RUNTIME_DIRECTORY)
+    }.use { runtime ->
+        entries.forEachIndexed { index, (entry, source) ->
+            val name = "classpath-$index.jar"
+            val target = runtime.whileOpen { fd ->
+                LinuxFilesystemSyscalls.createRegularFile(fd, name, OWNER_READ_WRITE_MODE)
+            }
+            try {
+                val digest = MessageDigest.getInstance("SHA-256")
+                FileChannel.open(
+                    LinuxFilesystemSyscalls.stableDescriptorPath(target.fd),
+                    StandardOpenOption.WRITE,
+                    StandardOpenOption.TRUNCATE_EXISTING,
+                ).use { output ->
+                    source.slice().use { input ->
+                        val bytes = ByteArray(COPY_BUFFER_BYTES)
+                        var total = 0L
+                        while (true) {
+                            val count = input.read(bytes)
+                            if (count < 0) break
+                            if (count == 0) continue
+                            digest.update(bytes, 0, count)
+                            var buffer = ByteBuffer.wrap(bytes, 0, count)
+                            while (buffer.hasRemaining()) output.write(buffer)
+                            total = addExact(total, count.toLong(), "materialized class-path bytes")
+                        }
+                        if (total != source.size) {
+                            isolationFail("authenticated class-path snapshot has the wrong byte count")
+                        }
+                    }
+                    output.force(true)
+                }
+                val actualDigest = digest.digest().hex()
+                if (actualDigest != entry.expectedSha256) {
+                    isolationFail("authenticated class-path snapshot has the wrong digest")
+                }
+                LinuxFilesystemSyscalls.chmod(target, OWNER_READ_ONLY_MODE)
+                LinuxFilesystemSyscalls.synchronize(target)
+                paths.add(runPath.resolve(RUNTIME_DIRECTORY).resolve(name))
+                expected += source.size to actualDigest
+            } finally {
+                target.close()
+            }
+        }
+        LinuxFilesystemSyscalls.synchronize(runtime)
+    }
+    return MaterializedObservationClassPath(paths, expected).also {
+        it.verify("immediately after snapshotting")
+    }
+}
+
+private fun initializeFreshObservationRunTree(descriptor: LinuxDescriptor) {
+    requirePrivateDirectory(descriptor, "isolated run tree")
+    if (LinuxFilesystemSyscalls.directoryEntryNames(descriptor, 1).isNotEmpty()) {
+        isolationFail("isolated run tree must be empty before initialization")
+    }
+    descriptor.whileOpen { fd ->
+        LinuxFilesystemSyscalls.createDirectory(fd, SCRATCH_DIRECTORY, OWNER_DIRECTORY_MODE)
+        LinuxFilesystemSyscalls.createDirectory(fd, TEMP_DIRECTORY, OWNER_DIRECTORY_MODE)
+        LinuxFilesystemSyscalls.createDirectory(fd, RUNTIME_DIRECTORY, OWNER_DIRECTORY_MODE)
+    }
+    listOf(
+        SCRATCH_DIRECTORY to "isolated SQLite scratch directory",
+        TEMP_DIRECTORY to "isolated JVM temporary directory",
+        RUNTIME_DIRECTORY to "isolated authenticated runtime directory",
+    ).forEach { (name, label) ->
+        descriptor.whileOpen { fd ->
+            LinuxFilesystemSyscalls.openDirectoryAt(fd, name)
+        }.use { directory ->
+            LinuxFilesystemSyscalls.chmod(directory, OWNER_DIRECTORY_MODE)
+            requirePrivateDirectory(directory, label)
+            LinuxFilesystemSyscalls.synchronize(directory)
+        }
+    }
+    LinuxFilesystemSyscalls.synchronize(descriptor)
+}
+
 /** Fresh descriptor-pinned disk tree; cleanup is bounded and rejects links or special files. */
 private class PrivateObservationRunTree private constructor(
-    val path: Path,
+    override val path: Path,
     private val parent: Path,
     private val parentIdentity: Any,
     private val parentDescriptor: LinuxDescriptor,
     private val name: String,
     val descriptor: LinuxDescriptor,
     private val cleanupLimits: AcpRuntimeClosureLimits,
-) : AutoCloseable {
+) : ObservationRunTreeAccess, AutoCloseable {
     private var removed = false
 
-    fun materializeClassPath(
-        entries: List<Pair<FullTreeFunctionObservationClassPathEntry, StableControlFile>>,
-    ): MaterializedObservationClassPath {
-        val paths = mutableListOf<Path>()
-        val expected = mutableListOf<Pair<Long, String>>()
-        LinuxFilesystemSyscalls.openDirectoryAt(descriptor.fd, RUNTIME_DIRECTORY).use { runtime ->
-            entries.forEachIndexed { index, (entry, source) ->
-                val name = "classpath-$index.jar"
-                val target = runtime.whileOpen { fd ->
-                    LinuxFilesystemSyscalls.createRegularFile(fd, name, OWNER_READ_WRITE_MODE)
-                }
-                try {
-                    val digest = MessageDigest.getInstance("SHA-256")
-                    FileChannel.open(
-                        LinuxFilesystemSyscalls.stableDescriptorPath(target.fd),
-                        StandardOpenOption.WRITE,
-                        StandardOpenOption.TRUNCATE_EXISTING,
-                    ).use { output ->
-                        source.slice().use { input ->
-                            val bytes = ByteArray(COPY_BUFFER_BYTES)
-                            var total = 0L
-                            while (true) {
-                                val count = input.read(bytes)
-                                if (count < 0) break
-                                if (count == 0) continue
-                                digest.update(bytes, 0, count)
-                                var buffer = ByteBuffer.wrap(bytes, 0, count)
-                                while (buffer.hasRemaining()) output.write(buffer)
-                                total = addExact(total, count.toLong(), "materialized class-path bytes")
-                            }
-                            if (total != source.size) {
-                                isolationFail("authenticated class-path snapshot has the wrong byte count")
-                            }
-                        }
-                        output.force(true)
-                    }
-                    val actualDigest = digest.digest().hex()
-                    if (actualDigest != entry.expectedSha256) {
-                        isolationFail("authenticated class-path snapshot has the wrong digest")
-                    }
-                    LinuxFilesystemSyscalls.chmod(target, OWNER_READ_ONLY_MODE)
-                    LinuxFilesystemSyscalls.synchronize(target)
-                    paths.add(path.resolve(RUNTIME_DIRECTORY).resolve(name))
-                    expected += source.size to actualDigest
-                } finally {
-                    target.close()
-                }
-            }
-            LinuxFilesystemSyscalls.synchronize(runtime)
-        }
-        return MaterializedObservationClassPath(paths, expected).also {
-            it.verify("immediately after snapshotting")
-        }
-    }
+    override fun <T> withPinnedDescriptor(action: (LinuxDescriptor) -> T): T =
+        descriptor.whileOpen { action(descriptor) }
 
     fun cleanAndRemove() {
         if (removed) return
@@ -1213,24 +1258,7 @@ private class PrivateObservationRunTree private constructor(
                         if (root.identity.mountId != parentDescriptor.identity.mountId) {
                             isolationFail("isolated run tree crossed its disk-backed scratch mount")
                         }
-                        root.whileOpen { fd ->
-                            LinuxFilesystemSyscalls.createDirectory(fd, SCRATCH_DIRECTORY, OWNER_DIRECTORY_MODE)
-                            LinuxFilesystemSyscalls.createDirectory(fd, TEMP_DIRECTORY, OWNER_DIRECTORY_MODE)
-                            LinuxFilesystemSyscalls.createDirectory(fd, RUNTIME_DIRECTORY, OWNER_DIRECTORY_MODE)
-                        }
-                        LinuxFilesystemSyscalls.openDirectoryAt(root.fd, SCRATCH_DIRECTORY).use {
-                            LinuxFilesystemSyscalls.chmod(it, OWNER_DIRECTORY_MODE)
-                            requirePrivateDirectory(it, "isolated SQLite scratch directory")
-                        }
-                        LinuxFilesystemSyscalls.openDirectoryAt(root.fd, TEMP_DIRECTORY).use {
-                            LinuxFilesystemSyscalls.chmod(it, OWNER_DIRECTORY_MODE)
-                            requirePrivateDirectory(it, "isolated JVM temporary directory")
-                        }
-                        LinuxFilesystemSyscalls.openDirectoryAt(root.fd, RUNTIME_DIRECTORY).use {
-                            LinuxFilesystemSyscalls.chmod(it, OWNER_DIRECTORY_MODE)
-                            requirePrivateDirectory(it, "isolated authenticated runtime directory")
-                        }
-                        LinuxFilesystemSyscalls.synchronize(root)
+                        initializeFreshObservationRunTree(root)
                         LinuxFilesystemSyscalls.synchronize(parentDescriptor)
                         return PrivateObservationRunTree(
                             parent.resolve(name),
@@ -1254,6 +1282,46 @@ private class PrivateObservationRunTree private constructor(
                 isolationFail("cannot allocate a unique isolated run directory")
             } catch (failure: Throwable) {
                 parentDescriptor.close()
+                throw failure
+            }
+        }
+    }
+}
+
+/**
+ * Non-owning adapter over a lease-issued lexical run-root borrow. Closing only invalidates this
+ * adapter; the lease retains the descriptor, tree, and all cleanup/recovery responsibility.
+ */
+internal class BorrowedObservationRunTree private constructor(
+    private val borrowed: FullTreeDiskScratchBorrowedRunRoot,
+) : ObservationRunTreeAccess, AutoCloseable {
+    private var closed = false
+
+    override val path: Path
+        @Synchronized get() {
+            check(!closed) { "borrowed observation run tree is closed" }
+            return borrowed.path
+        }
+
+    @Synchronized
+    override fun <T> withPinnedDescriptor(action: (LinuxDescriptor) -> T): T {
+        check(!closed) { "borrowed observation run tree is closed" }
+        return borrowed.withPinnedDescriptor(action)
+    }
+
+    @Synchronized
+    override fun close() {
+        closed = true
+    }
+
+    companion object {
+        internal fun initialize(borrowed: FullTreeDiskScratchBorrowedRunRoot): BorrowedObservationRunTree {
+            val tree = BorrowedObservationRunTree(borrowed)
+            try {
+                tree.withPinnedDescriptor(::initializeFreshObservationRunTree)
+                return tree
+            } catch (failure: Throwable) {
+                tree.close()
                 throw failure
             }
         }
