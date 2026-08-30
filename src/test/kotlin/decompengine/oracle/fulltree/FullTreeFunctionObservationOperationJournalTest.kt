@@ -1,5 +1,8 @@
 package decompengine.oracle.fulltree
 
+import decompengine.acp.LinuxFileIdentity
+import decompengine.acp.LinuxFileKey
+import decompengine.acp.LinuxFilesystemCapacity
 import decompengine.oracle.core.OracleArtifacts
 import decompengine.oracle.core.OracleJson
 import decompengine.oracle.core.DescriptorBoundAtomicStateFile
@@ -120,18 +123,21 @@ class FullTreeFunctionObservationOperationJournalTest {
     }
 
     @Test
-    fun `v2 journal rejects legacy v1 binding bytes without mutation`() = withJournalRoot { root ->
+    fun `v3 journal rejects legacy v2 binding bytes without mutation`() = withJournalRoot { root ->
         val binding = binding()
         val current = OracleJson.parse(binding.canonicalBytes()) as JsonObject
-        val legacyWithoutHash = current
-            .minus("bindingSha256")
-            .minus("diskAuthorityProvider")
-            .minus("isolationConfigurationSha256") +
-            mapOf(
-                "isolationSha256" to JsonPrimitive(binding.isolationConfigurationSha256),
-                "provider" to JsonPrimitive("kotlin-function-observation-operation-v1"),
-                "schemaVersion" to JsonPrimitive(1),
-            )
+        val currentRequest = OracleJson.parse(binding.canonicalRequestBytesForTest()) as JsonObject
+        val legacyRequest = currentRequest + mapOf(
+            "provider" to JsonPrimitive("kotlin-function-observation-request-v2"),
+            "schemaVersion" to JsonPrimitive(2),
+        )
+        val legacyWithoutHash = current.minus("bindingSha256") + mapOf(
+            "provider" to JsonPrimitive("kotlin-function-observation-operation-v2"),
+            "requestSha256" to JsonPrimitive(
+                OracleArtifacts.sha256(OracleJson.canonicalBytes(JsonObject(legacyRequest))),
+            ),
+            "schemaVersion" to JsonPrimitive(2),
+        )
         val legacy = OracleJson.canonicalBytes(
             JsonObject(
                 legacyWithoutHash +
@@ -168,11 +174,11 @@ class FullTreeFunctionObservationOperationJournalTest {
     fun `append only transition history is canonical monotonic and hash chained`() {
         val binding = binding()
         val preparing = FullTreeFunctionObservationOperationTransition.initial(binding)
-        val leased = FullTreeFunctionObservationOperationTransition.next(
+        val diskEvidence = diskEvidence(binding)
+        val leased = FullTreeFunctionObservationOperationTransition.leased(
             binding,
             preparing,
-            FullTreeFunctionObservationOperationPhase.LEASED,
-            diskEvidenceSha256 = "6".repeat(64),
+            diskEvidence,
         )
         val attached = FullTreeFunctionObservationOperationTransition.next(
             binding,
@@ -197,7 +203,7 @@ class FullTreeFunctionObservationOperationJournalTest {
             FullTreeFunctionObservationOperationPhase.COMPLETE,
         )
         val transitions = listOf(preparing, leased, attached, absent, published, complete)
-        val history = FullTreeFunctionObservationOperationHistory.validate(binding, transitions)
+        val history = FullTreeFunctionObservationOperationHistory.validate(binding, transitions, diskEvidence)
 
         assertEquals(FullTreeFunctionObservationOperationPhase.COMPLETE, history.latest?.phase)
         assertEquals(
@@ -233,20 +239,17 @@ class FullTreeFunctionObservationOperationJournalTest {
             )
         }
         assertFailsWith<FullTreeFunctionObservationOperationJournalException> {
-            FullTreeFunctionObservationOperationTransition.next(
+            FullTreeFunctionObservationOperationTransition.recoveredAbort(
                 binding,
                 complete,
-                FullTreeFunctionObservationOperationPhase.RECOVERED_ABORT,
-                outputSha256 = null,
-                outputBytes = null,
             )
         }
 
-        val alternateLeased = FullTreeFunctionObservationOperationTransition.next(
+        val alternateEvidence = diskEvidence(binding, leaseRecordSeed = "8")
+        val alternateLeased = FullTreeFunctionObservationOperationTransition.leased(
             binding,
             preparing,
-            FullTreeFunctionObservationOperationPhase.LEASED,
-            diskEvidenceSha256 = "8".repeat(64),
+            alternateEvidence,
         )
         val alternateAttached = FullTreeFunctionObservationOperationTransition.next(
             binding,
@@ -257,6 +260,7 @@ class FullTreeFunctionObservationOperationJournalTest {
             FullTreeFunctionObservationOperationHistory.validate(
                 binding,
                 listOf(preparing, leased, alternateAttached),
+                diskEvidence,
             )
         }
     }
@@ -265,11 +269,11 @@ class FullTreeFunctionObservationOperationJournalTest {
     fun `history rejects hash-valid disk output and abort evidence substitution`() {
         val binding = binding()
         val preparing = FullTreeFunctionObservationOperationTransition.initial(binding)
-        val leased = FullTreeFunctionObservationOperationTransition.next(
+        val diskEvidence = diskEvidence(binding)
+        val leased = FullTreeFunctionObservationOperationTransition.leased(
             binding,
             preparing,
-            FullTreeFunctionObservationOperationPhase.LEASED,
-            diskEvidenceSha256 = "6".repeat(64),
+            diskEvidence,
         )
         val attached = FullTreeFunctionObservationOperationTransition.next(
             binding,
@@ -288,28 +292,39 @@ class FullTreeFunctionObservationOperationJournalTest {
             absent,
             FullTreeFunctionObservationOperationPhase.PUBLISHED,
         )
-        val aborted = FullTreeFunctionObservationOperationTransition.next(
+        val aborted = FullTreeFunctionObservationOperationTransition.recoveredAbort(
             binding,
             leased,
-            FullTreeFunctionObservationOperationPhase.RECOVERED_ABORT,
-            outputSha256 = null,
-            outputBytes = null,
         )
 
-        val changedDisk = mutateTransition(attached, "diskEvidenceSha256", JsonPrimitive("8".repeat(64)))
+        val alternateEvidence = diskEvidence(binding, leaseRecordSeed = "8")
+        val changedDisk = mutateTransition(
+            attached,
+            "diskEvidenceSha256",
+            JsonPrimitive(alternateEvidence.evidenceSha256),
+        )
         assertFailsWith<FullTreeFunctionObservationOperationJournalException> {
-            FullTreeFunctionObservationOperationHistory.validate(binding, listOf(preparing, leased, changedDisk))
+            FullTreeFunctionObservationOperationHistory.validate(
+                binding,
+                listOf(preparing, leased, changedDisk),
+                diskEvidence,
+            )
         }
         val changedOutput = mutateTransition(published, "outputSha256", JsonPrimitive("9".repeat(64)))
         assertFailsWith<FullTreeFunctionObservationOperationJournalException> {
             FullTreeFunctionObservationOperationHistory.validate(
                 binding,
                 listOf(preparing, leased, attached, absent, changedOutput),
+                diskEvidence,
             )
         }
         val droppedLease = mutateTransition(aborted, "diskEvidenceSha256", JsonNull)
         assertFailsWith<FullTreeFunctionObservationOperationJournalException> {
-            FullTreeFunctionObservationOperationHistory.validate(binding, listOf(preparing, leased, droppedLease))
+            FullTreeFunctionObservationOperationHistory.validate(
+                binding,
+                listOf(preparing, leased, droppedLease),
+                diskEvidence,
+            )
         }
     }
 
@@ -317,26 +332,24 @@ class FullTreeFunctionObservationOperationJournalTest {
     fun `recovered abort is terminal and drops any unreleased output claim`() {
         val binding = binding()
         val preparing = FullTreeFunctionObservationOperationTransition.initial(binding)
-        val leased = FullTreeFunctionObservationOperationTransition.next(
+        val diskEvidence = diskEvidence(binding)
+        val leased = FullTreeFunctionObservationOperationTransition.leased(
             binding,
             preparing,
-            FullTreeFunctionObservationOperationPhase.LEASED,
-            diskEvidenceSha256 = "6".repeat(64),
+            diskEvidence,
         )
-        val aborted = FullTreeFunctionObservationOperationTransition.next(
+        val aborted = FullTreeFunctionObservationOperationTransition.recoveredAbort(
             binding,
             leased,
-            FullTreeFunctionObservationOperationPhase.RECOVERED_ABORT,
-            outputSha256 = null,
-            outputBytes = null,
         )
 
         val history = FullTreeFunctionObservationOperationHistory.validate(
             binding,
             listOf(preparing, leased, aborted),
+            diskEvidence,
         )
         assertEquals(FullTreeFunctionObservationOperationPhase.RECOVERED_ABORT, history.latest?.phase)
-        assertEquals("6".repeat(64), history.latest?.diskEvidenceSha256)
+        assertEquals(diskEvidence.evidenceSha256, history.latest?.diskEvidenceSha256)
         assertEquals(null, history.latest?.outputSha256)
         assertEquals(null, history.latest?.outputBytes)
     }
@@ -345,11 +358,16 @@ class FullTreeFunctionObservationOperationJournalTest {
     fun `locked append only journal persists and reloads exact history`() = withJournalRoot { root ->
         val binding = binding()
         val preparing = FullTreeFunctionObservationOperationTransition.initial(binding)
-        val leased = FullTreeFunctionObservationOperationTransition.next(
+        val diskEvidence = diskEvidence(binding)
+        val leased = FullTreeFunctionObservationOperationTransition.leased(
             binding,
             preparing,
-            FullTreeFunctionObservationOperationPhase.LEASED,
-            diskEvidenceSha256 = "6".repeat(64),
+            diskEvidence,
+        )
+        val attached = FullTreeFunctionObservationOperationTransition.next(
+            binding,
+            leased,
+            FullTreeFunctionObservationOperationPhase.UNIT_ATTACHED,
         )
 
         FullTreeFunctionObservationJournalAuthority.open(root).use { authority ->
@@ -365,11 +383,27 @@ class FullTreeFunctionObservationOperationJournalTest {
                 })
                 assertEquals(
                     listOf(preparing.transitionSha256, leased.transitionSha256),
-                    journal.append(leased).transitions.map { it.transitionSha256 },
+                    journal.recordLeased(diskEvidence).transitions.map { it.transitionSha256 },
                 )
                 assertEquals(
                     listOf(preparing.transitionSha256, leased.transitionSha256),
-                    journal.append(leased).transitions.map { it.transitionSha256 },
+                    journal.recordLeased(diskEvidence).transitions.map { it.transitionSha256 },
+                )
+                assertEquals(
+                    listOf(
+                        preparing.transitionSha256,
+                        leased.transitionSha256,
+                        attached.transitionSha256,
+                    ),
+                    journal.append(attached).transitions.map { it.transitionSha256 },
+                )
+                assertEquals(
+                    listOf(
+                        preparing.transitionSha256,
+                        leased.transitionSha256,
+                        attached.transitionSha256,
+                    ),
+                    journal.recordLeased(diskEvidence).transitions.map { it.transitionSha256 },
                 )
             }
         }
@@ -379,12 +413,281 @@ class FullTreeFunctionObservationOperationJournalTest {
                 val loaded = requireNotNull(reopened.loadOrNull())
                 assertContentEquals(binding.canonicalBytes(), loaded.binding.canonicalBytes())
                 assertEquals(
-                    listOf(preparing.transitionSha256, leased.transitionSha256),
+                    listOf(
+                        preparing.transitionSha256,
+                        leased.transitionSha256,
+                        attached.transitionSha256,
+                    ),
                     loaded.transitions.map { it.transitionSha256 },
+                )
+                assertContentEquals(
+                    diskEvidence.canonicalBytes(),
+                    requireNotNull(loaded.diskEvidence).canonicalBytes(),
+                )
+                assertEquals(
+                    loaded.transitions.map { it.transitionSha256 },
+                    reopened.recordLeased(diskEvidence).transitions.map { it.transitionSha256 },
                 )
             }
         }
     }
+
+    @Test
+    fun `leased recording persists exact evidence and rejects raw transition append`() =
+        withJournalRoot { root ->
+            val binding = binding()
+            val evidence = diskEvidence(binding)
+            val mismatchedEvidence = listOf(
+                mutateDiskEvidence(evidence, "operationId", JsonPrimitive("a".repeat(64))),
+                mutateDiskEvidence(evidence, "requestSha256", JsonPrimitive("a".repeat(64))),
+                mutateDiskEvidence(evidence, "shardId", JsonPrimitive("different-shard")),
+                mutateDiskEvidence(evidence, "scopeSha256", JsonPrimitive("b".repeat(64))),
+                mutateDiskEvidence(evidence, "requiredAvailableBytes", JsonPrimitive(512)),
+                mutateDiskEvidence(evidence, "maximumFilesystemBytes", JsonPrimitive(16384)),
+                mutateDiskEvidence(evidence, "requiredAvailableInodes", JsonPrimitive(5)),
+                mutateDiskEvidence(evidence, "maximumFilesystemInodes", JsonPrimitive(128)),
+            )
+            val preparing = FullTreeFunctionObservationOperationTransition.initial(binding)
+            val leased = FullTreeFunctionObservationOperationTransition.leased(
+                binding,
+                preparing,
+                evidence,
+            )
+            val directory = root.resolve(binding.journalDirectoryName)
+
+            FullTreeFunctionObservationJournalAuthority.open(root).use { authority ->
+                authority.createNew(binding).use { journal ->
+                    journal.initialize()
+                    val before = Files.list(directory).use { entries ->
+                        entries.map { it.fileName.toString() }.sorted().toList()
+                    }
+                    assertFailsWith<FullTreeFunctionObservationOperationJournalException> {
+                        journal.append(leased)
+                    }
+                    assertEquals(
+                        before,
+                        Files.list(directory).use { entries ->
+                            entries.map { it.fileName.toString() }.sorted().toList()
+                        },
+                    )
+                    assertFalse(Files.exists(directory.resolve("disk-evidence.json"), LinkOption.NOFOLLOW_LINKS))
+                }
+
+                mismatchedEvidence.forEach { wrongEvidence ->
+                    requireNotNull(authority.openExisting(binding)).use { journal ->
+                        assertFailsWith<FullTreeFunctionObservationOperationJournalException> {
+                            journal.recordLeased(wrongEvidence)
+                        }
+                        assertFalse(
+                            Files.exists(directory.resolve("disk-evidence.json"), LinkOption.NOFOLLOW_LINKS),
+                        )
+                    }
+                }
+
+                requireNotNull(authority.openExisting(binding)).use { journal ->
+                    val recorded = journal.recordLeased(evidence)
+                    assertEquals(FullTreeFunctionObservationOperationPhase.LEASED, recorded.latest?.phase)
+                    assertEquals(evidence.evidenceSha256, recorded.latest?.diskEvidenceSha256)
+                    assertContentEquals(
+                        evidence.canonicalBytes(),
+                        requireNotNull(recorded.diskEvidence).canonicalBytes(),
+                    )
+                    assertContentEquals(
+                        evidence.canonicalBytes(),
+                        Files.readAllBytes(directory.resolve("disk-evidence.json")),
+                    )
+                    assertEquals(
+                        PosixFilePermissions.fromString("r--------"),
+                        Files.getPosixFilePermissions(
+                            directory.resolve("disk-evidence.json"),
+                            LinkOption.NOFOLLOW_LINKS,
+                        ),
+                    )
+                    assertFailsWith<FullTreeFunctionObservationOperationJournalException> {
+                        journal.recordLeased(diskEvidence(binding, leaseRecordSeed = "8"))
+                    }
+                    assertContentEquals(
+                        evidence.canonicalBytes(),
+                        Files.readAllBytes(directory.resolve("disk-evidence.json")),
+                    )
+                }
+            }
+        }
+
+    @Test
+    fun `disk evidence publication crash states remain explicit and converge only on caller retry`() {
+        DescriptorBoundStateFaultPoint.entries.forEach { point ->
+            withJournalRoot { root ->
+                val binding = binding()
+                val evidence = diskEvidence(binding)
+                FullTreeFunctionObservationJournalAuthority.open(root).use { authority ->
+                    authority.createNew(binding).use { it.initialize() }
+                }
+                assertFailsWith<SimulatedProcessDeath> {
+                    FullTreeFunctionObservationJournalAuthority.open(root).use { authority ->
+                        requireNotNull(authority.openExisting(binding)).use { journal ->
+                            journal.recordLeased(
+                                evidence,
+                                evidenceFaultInjector = DescriptorBoundStateFaultInjector { observed ->
+                                    if (observed == point) throw SimulatedProcessDeath()
+                                },
+                            )
+                        }
+                    }
+                }
+
+                FullTreeFunctionObservationJournalAuthority.open(root).use { authority ->
+                    requireNotNull(authority.openExisting(binding)).use { journal ->
+                        val cold = journal.completeExactPendingPublication()
+                        val expectedKind = if (
+                            point == DescriptorBoundStateFaultPoint.AFTER_TEMPORARY_DIRECTORY_SYNC
+                        ) {
+                            FullTreeFunctionObservationColdCompletionKind.DISK_EVIDENCE
+                        } else {
+                            FullTreeFunctionObservationColdCompletionKind.NONE
+                        }
+                        assertEquals(expectedKind, cold.kind)
+                        val staged = cold.history ?: requireNotNull(journal.loadOrNull())
+                        assertEquals(
+                            FullTreeFunctionObservationOperationPhase.PREPARING,
+                            staged.latest?.phase,
+                        )
+                        val evidenceWasDurable =
+                            point != DescriptorBoundStateFaultPoint.AFTER_UNNAMED_FILE_SYNC
+                        assertEquals(evidenceWasDurable, staged.diskEvidence != null)
+                        if (evidenceWasDurable) {
+                            assertContentEquals(
+                                evidence.canonicalBytes(),
+                                requireNotNull(staged.diskEvidence).canonicalBytes(),
+                            )
+                        }
+
+                        val resumed = journal.recordLeased(evidence)
+                        assertEquals(FullTreeFunctionObservationOperationPhase.LEASED, resumed.latest?.phase)
+                        assertContentEquals(
+                            evidence.canonicalBytes(),
+                            requireNotNull(resumed.diskEvidence).canonicalBytes(),
+                        )
+                    }
+                }
+            }
+        }
+    }
+
+    @Test
+    fun `prepared disk evidence can be linked to recovered abort without becoming leased`() =
+        withJournalRoot { root ->
+            val binding = binding()
+            val evidence = diskEvidence(binding)
+            FullTreeFunctionObservationJournalAuthority.open(root).use { authority ->
+                authority.createNew(binding).use { it.initialize() }
+            }
+            assertFailsWith<SimulatedProcessDeath> {
+                FullTreeFunctionObservationJournalAuthority.open(root).use { authority ->
+                    requireNotNull(authority.openExisting(binding)).use { journal ->
+                        journal.recordLeased(
+                            evidence,
+                            evidenceFaultInjector = DescriptorBoundStateFaultInjector { point ->
+                                if (point == DescriptorBoundStateFaultPoint.AFTER_PUBLICATION_DIRECTORY_SYNC) {
+                                    throw SimulatedProcessDeath()
+                                }
+                            },
+                        )
+                    }
+                }
+            }
+
+            FullTreeFunctionObservationJournalAuthority.open(root).use { authority ->
+                requireNotNull(authority.openExisting(binding)).use { journal ->
+                    val staged = requireNotNull(journal.loadOrNull())
+                    assertEquals(FullTreeFunctionObservationOperationPhase.PREPARING, staged.latest?.phase)
+                    val aborted = FullTreeFunctionObservationOperationTransition.recoveredAbort(
+                        binding,
+                        checkNotNull(staged.latest),
+                        evidence,
+                    )
+                    val terminal = journal.append(aborted)
+                    assertEquals(
+                        FullTreeFunctionObservationOperationPhase.RECOVERED_ABORT,
+                        terminal.latest?.phase,
+                    )
+                    assertEquals(evidence.evidenceSha256, terminal.latest?.diskEvidenceSha256)
+                    assertTrue(terminal.transitions.none {
+                        it.phase == FullTreeFunctionObservationOperationPhase.LEASED
+                    })
+                    assertContentEquals(
+                        evidence.canonicalBytes(),
+                        requireNotNull(terminal.diskEvidence).canonicalBytes(),
+                    )
+                }
+            }
+        }
+
+    @Test
+    fun `leased history rejects missing substituted and colliding disk evidence without mutation`() =
+        withJournalRoot { root ->
+            val binding = binding()
+            val evidence = diskEvidence(binding)
+            val alternate = diskEvidence(binding, leaseRecordSeed = "8")
+            val directory = root.resolve(binding.journalDirectoryName)
+            val evidencePath = directory.resolve("disk-evidence.json")
+            val evidenceTemporary = directory.resolve(
+                DescriptorBoundAtomicStateFile.temporaryName("disk-evidence.json"),
+            )
+            FullTreeFunctionObservationJournalAuthority.open(root).use { authority ->
+                authority.createNew(binding).use { journal ->
+                    journal.initialize()
+                    journal.recordLeased(evidence)
+                }
+            }
+            val transitionPath = directory.resolve("transition-0001.json")
+            val transitionBytes = Files.readAllBytes(transitionPath)
+
+            Files.delete(evidencePath)
+            FullTreeFunctionObservationJournalAuthority.open(root).use { authority ->
+                requireNotNull(authority.openExisting(binding)).use { journal ->
+                    assertFailsWith<FullTreeFunctionObservationOperationJournalException> {
+                        journal.loadOrNull()
+                    }
+                }
+            }
+            assertContentEquals(transitionBytes, Files.readAllBytes(transitionPath))
+
+            writeImmutable(evidencePath, alternate.canonicalBytes())
+            FullTreeFunctionObservationJournalAuthority.open(root).use { authority ->
+                requireNotNull(authority.openExisting(binding)).use { journal ->
+                    assertFailsWith<FullTreeFunctionObservationOperationJournalException> {
+                        journal.loadOrNull()
+                    }
+                }
+            }
+            assertContentEquals(alternate.canonicalBytes(), Files.readAllBytes(evidencePath))
+            assertContentEquals(transitionBytes, Files.readAllBytes(transitionPath))
+
+            Files.delete(evidencePath)
+            writeImmutable(evidencePath, evidence.canonicalBytes())
+            writeImmutable(evidenceTemporary, evidence.canonicalBytes())
+            FullTreeFunctionObservationJournalAuthority.open(root).use { authority ->
+                requireNotNull(authority.openExisting(binding)).use { journal ->
+                    assertFailsWith<FullTreeFunctionObservationOperationJournalException> {
+                        journal.completeExactPendingPublication()
+                    }
+                }
+            }
+            assertContentEquals(evidence.canonicalBytes(), Files.readAllBytes(evidencePath))
+            assertContentEquals(evidence.canonicalBytes(), Files.readAllBytes(evidenceTemporary))
+            Files.delete(evidenceTemporary)
+
+            FullTreeFunctionObservationJournalAuthority.open(root).use { authority ->
+                requireNotNull(authority.openExisting(binding)).use { journal ->
+                    val loaded = requireNotNull(journal.loadOrNull())
+                    assertContentEquals(
+                        evidence.canonicalBytes(),
+                        requireNotNull(loaded.diskEvidence).canonicalBytes(),
+                    )
+                }
+            }
+        }
 
     @Test
     fun `journal initialization converges after every atomic crash point`() {
@@ -439,11 +742,11 @@ class FullTreeFunctionObservationOperationJournalTest {
             withJournalRoot { root ->
                 val binding = binding()
                 val preparing = FullTreeFunctionObservationOperationTransition.initial(binding)
-                val leased = FullTreeFunctionObservationOperationTransition.next(
+                val diskEvidence = diskEvidence(binding)
+                val leased = FullTreeFunctionObservationOperationTransition.leased(
                     binding,
                     preparing,
-                    FullTreeFunctionObservationOperationPhase.LEASED,
-                    diskEvidenceSha256 = "6".repeat(64),
+                    diskEvidence,
                 )
                 FullTreeFunctionObservationJournalAuthority.open(root).use { authority ->
                     authority.createNew(binding).use { it.initialize() }
@@ -451,9 +754,9 @@ class FullTreeFunctionObservationOperationJournalTest {
                 assertFailsWith<SimulatedProcessDeath> {
                     FullTreeFunctionObservationJournalAuthority.open(root).use { authority ->
                         requireNotNull(authority.openExisting(binding)).use { journal ->
-                            journal.append(
-                                leased,
-                                DescriptorBoundStateFaultInjector { observed ->
+                            journal.recordLeased(
+                                diskEvidence,
+                                transitionFaultInjector = DescriptorBoundStateFaultInjector { observed ->
                                     if (observed == point) throw SimulatedProcessDeath()
                                 },
                             )
@@ -477,6 +780,10 @@ class FullTreeFunctionObservationOperationJournalTest {
                             FullTreeFunctionObservationOperationPhase.LEASED,
                         )
                         assertEquals(expectedPhases, history?.transitions?.map { it.phase })
+                        assertContentEquals(
+                            diskEvidence.canonicalBytes(),
+                            requireNotNull(history?.diskEvidence).canonicalBytes(),
+                        )
                     }
                 }
             }
@@ -676,11 +983,11 @@ class FullTreeFunctionObservationOperationJournalTest {
                 authority.createNew(binding).use { journal -> journal.initialize() }
             }
             val preparing = FullTreeFunctionObservationOperationTransition.initial(binding)
-            val leased = FullTreeFunctionObservationOperationTransition.next(
+            val diskEvidence = diskEvidence(binding)
+            val leased = FullTreeFunctionObservationOperationTransition.leased(
                 binding,
                 preparing,
-                FullTreeFunctionObservationOperationPhase.LEASED,
-                diskEvidenceSha256 = "6".repeat(64),
+                diskEvidence,
             )
             val attached = FullTreeFunctionObservationOperationTransition.next(
                 binding,
@@ -702,9 +1009,15 @@ class FullTreeFunctionObservationOperationJournalTest {
             Files.delete(directory.resolve(DescriptorBoundAtomicStateFile.temporaryName(attached.fileName)))
 
             FullTreeFunctionObservationJournalAuthority.open(root).use { authority ->
-                requireNotNull(authority.openExisting(binding)).use { journal -> journal.append(leased) }
+                requireNotNull(authority.openExisting(binding)).use { journal ->
+                    journal.recordLeased(diskEvidence)
+                }
             }
-            val changedDisk = mutateTransition(attached, "diskEvidenceSha256", JsonPrimitive("8".repeat(64)))
+            val changedDisk = mutateTransition(
+                attached,
+                "diskEvidenceSha256",
+                JsonPrimitive(diskEvidence(binding, leaseRecordSeed = "8").evidenceSha256),
+            )
             val attachedTemporary = DescriptorBoundAtomicStateFile.temporaryName(attached.fileName)
             writeImmutable(directory.resolve(attachedTemporary), changedDisk.canonicalBytes())
             FullTreeFunctionObservationJournalAuthority.open(root).use { authority ->
@@ -718,12 +1031,9 @@ class FullTreeFunctionObservationOperationJournalTest {
             assertTrue(Files.exists(directory.resolve(attachedTemporary), LinkOption.NOFOLLOW_LINKS))
             Files.delete(directory.resolve(attachedTemporary))
 
-            val aborted = FullTreeFunctionObservationOperationTransition.next(
+            val aborted = FullTreeFunctionObservationOperationTransition.recoveredAbort(
                 binding,
                 leased,
-                FullTreeFunctionObservationOperationPhase.RECOVERED_ABORT,
-                outputSha256 = null,
-                outputBytes = null,
             )
             val droppedLease = mutateTransition(aborted, "diskEvidenceSha256", JsonNull)
             writeImmutable(directory.resolve(attachedTemporary), droppedLease.canonicalBytes())
@@ -761,23 +1071,20 @@ class FullTreeFunctionObservationOperationJournalTest {
         withJournalRoot { root ->
             val binding = binding()
             val preparing = FullTreeFunctionObservationOperationTransition.initial(binding)
-            val leased = FullTreeFunctionObservationOperationTransition.next(
+            val diskEvidence = diskEvidence(binding)
+            val leased = FullTreeFunctionObservationOperationTransition.leased(
                 binding,
                 preparing,
-                FullTreeFunctionObservationOperationPhase.LEASED,
-                diskEvidenceSha256 = "6".repeat(64),
+                diskEvidence,
             )
-            val aborted = FullTreeFunctionObservationOperationTransition.next(
+            val aborted = FullTreeFunctionObservationOperationTransition.recoveredAbort(
                 binding,
                 leased,
-                FullTreeFunctionObservationOperationPhase.RECOVERED_ABORT,
-                outputSha256 = null,
-                outputBytes = null,
             )
             FullTreeFunctionObservationJournalAuthority.open(root).use { authority ->
                 authority.createNew(binding).use { journal ->
                     journal.initialize()
-                    journal.append(leased)
+                    journal.recordLeased(diskEvidence)
                     assertFailsWith<SimulatedProcessDeath> {
                         journal.append(
                             aborted,
@@ -798,7 +1105,7 @@ class FullTreeFunctionObservationOperationJournalTest {
                         FullTreeFunctionObservationOperationPhase.RECOVERED_ABORT,
                         completion.history?.latest?.phase,
                     )
-                    assertEquals("6".repeat(64), completion.history?.latest?.diskEvidenceSha256)
+                    assertEquals(diskEvidence.evidenceSha256, completion.history?.latest?.diskEvidenceSha256)
                 }
             }
         }
@@ -821,6 +1128,48 @@ class FullTreeFunctionObservationOperationJournalTest {
             requiredAvailableInodes = 4,
             maximumFilesystemInodes = 64,
         ),
+    )
+
+    private fun diskEvidence(
+        binding: FullTreeFunctionObservationOperationBinding,
+        leaseRecordSeed: String = "e",
+    ): FullTreeDiskScratchEvidence = FullTreeDiskScratchEvidence.create(
+        operation = binding.diskOperation(),
+        policy = binding.diskPolicy(),
+        mountPathSha256 = "f".repeat(64),
+        mount = FullTreeDiskMount(
+            mountId = 42,
+            parentMountId = 36,
+            device = "7:1",
+            root = Path.of("/"),
+            mountPoint = Path.of("/var/lib/decomp-scratch"),
+            options = listOf("noatime", "nodev", "noexec", "nosuid", "rw"),
+            fileSystemType = "ext4",
+        ),
+        mountIdentity = diskIdentity(device = 7, inode = 2, mountId = 42),
+        capacity = LinuxFilesystemCapacity(
+            fragmentBytes = 4096,
+            totalBytes = 8192,
+            availableBytes = 4096,
+            totalInodes = 64,
+            availableInodes = 60,
+            maximumNameBytes = 255,
+            readOnly = false,
+        ),
+        leaseIdentity = diskIdentity(device = 7, inode = 12, mountId = 42),
+        leaseRecordSha256 = leaseRecordSeed.repeat(64),
+    )
+
+    private fun diskIdentity(device: Long, inode: Long, mountId: Long) = LinuxFileIdentity(
+        key = LinuxFileKey(device, inode),
+        mode = 0x41c0,
+        uid = 1000,
+        gid = 1000,
+        linkCount = 2,
+        mountId = mountId,
+        isRegularFile = false,
+        isDirectory = true,
+        isSymbolicLink = false,
     )
 
     private fun isolationConfiguration(seed: String): FullTreeFunctionObservationIsolationConfiguration {
@@ -876,6 +1225,23 @@ class FullTreeFunctionObservationOperationJournalTest {
         )
     }
 
+    private fun mutateDiskEvidence(
+        evidence: FullTreeDiskScratchEvidence,
+        field: String,
+        value: kotlinx.serialization.json.JsonElement,
+    ): FullTreeDiskScratchEvidence {
+        val root = OracleJson.parse(evidence.canonicalBytes()) as JsonObject
+        val changed = root + (field to value)
+        val evidenceSha256 = OracleArtifacts.sha256(
+            OracleJson.canonicalBytes(JsonObject(changed - "evidenceSha256")),
+        )
+        return FullTreeDiskScratchEvidence.parseCanonical(
+            OracleJson.canonicalBytes(
+                JsonObject(changed + ("evidenceSha256" to JsonPrimitive(evidenceSha256))),
+            ),
+        )
+    }
+
     private fun bindingTemporaryName(): String = DescriptorBoundAtomicStateFile.temporaryName("binding.json")
 
     private fun writeImmutable(path: Path, bytes: ByteArray) {
@@ -902,12 +1268,12 @@ class FullTreeFunctionObservationOperationJournalTest {
     private class SimulatedProcessDeath : Error()
 
     private companion object {
-        const val FROZEN_BINDING_SHA256 = "6300f8fab1437d65e5dbe8f4446c5b06ae4541c4239f67317de9fec3b5a3d004"
+        const val FROZEN_BINDING_SHA256 = "ced841b0a7a8ddbea1fb678ab48e70425acb871da075ae21da634fa4c9ed2cc1"
         const val FROZEN_BINDING_ARTIFACT_SHA256 =
-            "b077857d0ed082d04e1b657b0320554be85a6299df5f2da86e56370b35ce7a75"
+            "713e09ecec785a7fa010a1798686867a1e44e886edc93a8e49224cdc3076213b"
         const val FROZEN_INITIAL_TRANSITION_SHA256 =
-            "cabba2a2d307e94ace6f7470d7708a5e047582346286463de8607f719ad15de0"
+            "c579eb0db19cfc1b382bd894e843dc3ec5aa60d52dda461ab94774da6515f524"
         const val FROZEN_COMPLETE_TRANSITION_SHA256 =
-            "4c33ec3621fb4c178556ad8c0ec0eab7e062f448debd4dfbccb719e999d8da60"
+            "07e5d5c501241f13d565d3049f23e305742bc5f75d33ba8614982b96800d3a2f"
     }
 }

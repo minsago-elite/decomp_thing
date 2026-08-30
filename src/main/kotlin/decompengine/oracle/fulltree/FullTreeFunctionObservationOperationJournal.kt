@@ -26,9 +26,10 @@ internal class FullTreeFunctionObservationOperationJournalException(
 /**
  * Immutable request preimage and deterministic names shared by every operation-owned resource.
  *
- * Version 2 intentionally rejects version-1 journals: the request now commits to a Kotlin-derived
- * isolation-configuration identity and the exact fixed-disk authority provider. These commitments
- * still do not authorize a launch, recovery mutation, lease release, or output publication.
+ * Version 3 intentionally rejects earlier journals: the request commits to a Kotlin-derived
+ * isolation-configuration identity, the exact fixed-disk authority provider, and the journal
+ * protocol that persists exact canonical disk evidence before LEASED. These commitments still do
+ * not authorize a launch, recovery mutation, lease release, or output publication.
  */
 internal class FullTreeFunctionObservationOperationBinding private constructor(
     val schemaVersion: Int,
@@ -395,25 +396,72 @@ internal class FullTreeFunctionObservationOperationTransition private constructo
                 outputBytes = null,
             )
 
+        fun leased(
+            binding: FullTreeFunctionObservationOperationBinding,
+            previous: FullTreeFunctionObservationOperationTransition,
+            diskEvidence: FullTreeDiskScratchEvidence,
+        ): FullTreeFunctionObservationOperationTransition {
+            requireTransitionAllowed(previous.phase, FullTreeFunctionObservationOperationPhase.LEASED)
+            requireTransitionBinding(binding, previous)
+            requireDiskEvidenceBinding(binding, diskEvidence)
+            return create(
+                binding,
+                Math.addExact(previous.sequence, 1),
+                previous.transitionSha256,
+                FullTreeFunctionObservationOperationPhase.LEASED,
+                diskEvidence.evidenceSha256,
+                outputSha256 = null,
+                outputBytes = null,
+            ).also { requireEvidenceContinuity(previous, it) }
+        }
+
+        /** Builds only the journal link; it does not authorize or perform external recovery. */
+        fun recoveredAbort(
+            binding: FullTreeFunctionObservationOperationBinding,
+            previous: FullTreeFunctionObservationOperationTransition,
+            preparedDiskEvidence: FullTreeDiskScratchEvidence? = null,
+        ): FullTreeFunctionObservationOperationTransition {
+            requireTransitionAllowed(previous.phase, FullTreeFunctionObservationOperationPhase.RECOVERED_ABORT)
+            requireTransitionBinding(binding, previous)
+            preparedDiskEvidence?.let { requireDiskEvidenceBinding(binding, it) }
+            val diskEvidenceSha256 = previous.diskEvidenceSha256 ?: preparedDiskEvidence?.evidenceSha256
+            if (
+                previous.diskEvidenceSha256 != null && preparedDiskEvidence != null &&
+                previous.diskEvidenceSha256 != preparedDiskEvidence.evidenceSha256
+            ) journalFail("recovered-abort transition is paired with different disk evidence")
+            return create(
+                binding,
+                Math.addExact(previous.sequence, 1),
+                previous.transitionSha256,
+                FullTreeFunctionObservationOperationPhase.RECOVERED_ABORT,
+                diskEvidenceSha256,
+                outputSha256 = null,
+                outputBytes = null,
+            ).also { requireEvidenceContinuity(previous, it) }
+        }
+
         fun next(
             binding: FullTreeFunctionObservationOperationBinding,
             previous: FullTreeFunctionObservationOperationTransition,
             phase: FullTreeFunctionObservationOperationPhase,
-            diskEvidenceSha256: String? = previous.diskEvidenceSha256,
             outputSha256: String? = previous.outputSha256,
             outputBytes: Long? = previous.outputBytes,
         ): FullTreeFunctionObservationOperationTransition {
+            if (phase in setOf(
+                    FullTreeFunctionObservationOperationPhase.LEASED,
+                    FullTreeFunctionObservationOperationPhase.RECOVERED_ABORT,
+                )
+            ) {
+                journalFail("leased and recovered-abort transitions require their exact factories")
+            }
             requireTransitionAllowed(previous.phase, phase)
-            if (
-                previous.operationId != binding.operationId ||
-                previous.bindingSha256 != binding.bindingSha256
-            ) journalFail("operation transition is cross-paired with a different binding")
+            requireTransitionBinding(binding, previous)
             return create(
                 binding,
                 Math.addExact(previous.sequence, 1),
                 previous.transitionSha256,
                 phase,
-                diskEvidenceSha256,
+                previous.diskEvidenceSha256,
                 outputSha256,
                 outputBytes,
             ).also { requireEvidenceContinuity(previous, it) }
@@ -494,6 +542,7 @@ internal class FullTreeFunctionObservationOperationTransition private constructo
 internal class FullTreeFunctionObservationOperationHistory private constructor(
     val binding: FullTreeFunctionObservationOperationBinding,
     val transitions: List<FullTreeFunctionObservationOperationTransition>,
+    val diskEvidence: FullTreeDiskScratchEvidence?,
 ) {
     val latest: FullTreeFunctionObservationOperationTransition?
         get() = transitions.lastOrNull()
@@ -502,6 +551,7 @@ internal class FullTreeFunctionObservationOperationHistory private constructor(
         fun validate(
             binding: FullTreeFunctionObservationOperationBinding,
             transitions: List<FullTreeFunctionObservationOperationTransition>,
+            diskEvidence: FullTreeDiskScratchEvidence? = null,
         ): FullTreeFunctionObservationOperationHistory {
             if (transitions.size > MAXIMUM_OPERATION_TRANSITIONS + 1) {
                 journalFail("function-observation operation history exceeds its transition bound")
@@ -525,7 +575,8 @@ internal class FullTreeFunctionObservationOperationHistory private constructor(
                     requireEvidenceContinuity(previous, transition)
                 }
             }
-            return FullTreeFunctionObservationOperationHistory(binding, transitions.toList())
+            requirePersistedDiskEvidence(binding, transitions, diskEvidence)
+            return FullTreeFunctionObservationOperationHistory(binding, transitions.toList(), diskEvidence)
         }
     }
 }
@@ -763,6 +814,7 @@ internal class FullTreeFunctionObservationJournalAuthority private constructor(
 internal enum class FullTreeFunctionObservationColdCompletionKind {
     NONE,
     BINDING,
+    DISK_EVIDENCE,
     TRANSITION,
 }
 
@@ -776,7 +828,8 @@ internal data class FullTreeFunctionObservationColdCompletion(
  *
  * This type is intentionally not wired to the runner, cleanup, publication, or release evidence.
  * It records and recovers only immutable journal publications; it never treats the record chain as
- * authority to kill a unit, delete scratch, revoke output, or certify a release.
+ * authority to kill a unit, delete scratch, revoke output, or certify a release. Composition must
+ * acquire the journal root and operation journal before the disk-mount flock and release in reverse.
  */
 internal class FullTreeFunctionObservationOperationJournal internal constructor(
     private val expectedBinding: FullTreeFunctionObservationOperationBinding,
@@ -808,12 +861,79 @@ internal class FullTreeFunctionObservationOperationJournal internal constructor(
         loadRequired()
     }
 
+    /**
+     * Durably records exact canonical disk evidence before appending the LEASED link that names its
+     * self hash. A crash can therefore leave evidence prepared beside PREPARING, but can never leave
+     * a committed LEASED transition without its exact immutable evidence member. This method does
+     * not inspect or authorize a live lease; the coordinator must revalidate that separate authority
+     * before and after journal publication.
+     */
+    @Synchronized
+    fun recordLeased(
+        diskEvidence: FullTreeDiskScratchEvidence,
+        evidenceFaultInjector: DescriptorBoundStateFaultInjector? = null,
+        transitionFaultInjector: DescriptorBoundStateFaultInjector? = null,
+    ): FullTreeFunctionObservationOperationHistory = boundOperation {
+        val canonicalEvidence = parseJournalDiskEvidence(diskEvidence.canonicalBytes())
+        requireDiskEvidenceBinding(expectedBinding, canonicalEvidence)
+        val current = loadRequired(allowedAtomicTarget = DISK_EVIDENCE_FILE)
+        if (current.transitions.any { it.phase == FullTreeFunctionObservationOperationPhase.LEASED }) {
+            val persisted = current.diskEvidence
+                ?: journalFail("leased operation journal is missing exact disk evidence")
+            if (!persisted.canonicalBytes().contentEquals(canonicalEvidence.canonicalBytes())) {
+                journalFail("leased operation journal has different exact disk evidence")
+            }
+            DescriptorBoundAtomicStateFile.publishNoReplace(
+                directory,
+                DISK_EVIDENCE_FILE,
+                canonicalEvidence.canonicalBytes(),
+                MAXIMUM_OPERATION_RECORD_BYTES,
+                evidenceFaultInjector,
+            )
+            return@boundOperation loadRequired()
+        }
+        if (
+            current.transitions.size != 1 ||
+            current.latest?.phase != FullTreeFunctionObservationOperationPhase.PREPARING
+        ) journalFail("exact disk evidence can only be recorded from preparing")
+        current.diskEvidence?.let { prepared ->
+            if (!prepared.canonicalBytes().contentEquals(canonicalEvidence.canonicalBytes())) {
+                journalFail("preparing operation journal has different exact disk evidence")
+            }
+        }
+        DescriptorBoundAtomicStateFile.publishNoReplace(
+            directory,
+            DISK_EVIDENCE_FILE,
+            canonicalEvidence.canonicalBytes(),
+            MAXIMUM_OPERATION_RECORD_BYTES,
+            evidenceFaultInjector,
+        )
+        val prepared = loadRequired()
+        val transition = FullTreeFunctionObservationOperationTransition.leased(
+            expectedBinding,
+            checkNotNull(prepared.latest),
+            canonicalEvidence,
+        )
+        appendLoaded(prepared, transition, transitionFaultInjector)
+    }
+
     @Synchronized
     fun append(
         transition: FullTreeFunctionObservationOperationTransition,
         faultInjector: DescriptorBoundStateFaultInjector? = null,
     ): FullTreeFunctionObservationOperationHistory = boundOperation {
+        if (transition.phase == FullTreeFunctionObservationOperationPhase.LEASED) {
+            journalFail("leased transition must be recorded with exact disk evidence")
+        }
         val current = loadRequired(allowedAtomicTarget = transition.fileName)
+        appendLoaded(current, transition, faultInjector)
+    }
+
+    private fun appendLoaded(
+        current: FullTreeFunctionObservationOperationHistory,
+        transition: FullTreeFunctionObservationOperationTransition,
+        faultInjector: DescriptorBoundStateFaultInjector?,
+    ): FullTreeFunctionObservationOperationHistory {
         current.transitions.getOrNull(transition.sequence)?.let { existing ->
             if (!existing.canonicalBytes().contentEquals(transition.canonicalBytes())) {
                 journalFail("function-observation journal sequence already has different immutable bytes")
@@ -825,7 +945,7 @@ internal class FullTreeFunctionObservationOperationJournal internal constructor(
                 MAXIMUM_OPERATION_RECORD_BYTES,
                 faultInjector,
             )
-            return@boundOperation loadRequired()
+            return loadRequired()
         }
         if (transition.sequence != current.transitions.size) {
             journalFail("function-observation journal append sequence is not next")
@@ -833,6 +953,7 @@ internal class FullTreeFunctionObservationOperationJournal internal constructor(
         FullTreeFunctionObservationOperationHistory.validate(
             expectedBinding,
             current.transitions + transition,
+            current.diskEvidence,
         )
         DescriptorBoundAtomicStateFile.publishNoReplace(
             directory,
@@ -841,7 +962,7 @@ internal class FullTreeFunctionObservationOperationJournal internal constructor(
             MAXIMUM_OPERATION_RECORD_BYTES,
             faultInjector,
         )
-        loadRequired()
+        return loadRequired()
     }
 
     @Synchronized
@@ -873,6 +994,8 @@ internal class FullTreeFunctionObservationOperationJournal internal constructor(
         val targetName = when {
             atomicName == DescriptorBoundAtomicStateFile.temporaryName(OPERATION_BINDING_FILE) ->
                 OPERATION_BINDING_FILE
+            atomicName == DescriptorBoundAtomicStateFile.temporaryName(DISK_EVIDENCE_FILE) ->
+                DISK_EVIDENCE_FILE
             atomicName.matches(ATOMIC_TRANSITION_FILE_NAME) ->
                 atomicName.removePrefix(".").removeSuffix(".atomic")
             else -> journalFail("function-observation operation journal contains an unknown pending publication")
@@ -900,6 +1023,29 @@ internal class FullTreeFunctionObservationOperationJournal internal constructor(
                 FullTreeFunctionObservationColdCompletionKind.BINDING,
                 loadRequired(),
             )
+        } else if (targetName == DISK_EVIDENCE_FILE) {
+            val prefix = loadRequired(allowedAtomicTarget = targetName)
+            if (
+                prefix.transitions.size != 1 ||
+                prefix.latest?.phase != FullTreeFunctionObservationOperationPhase.PREPARING ||
+                prefix.diskEvidence != null
+            ) journalFail("pending disk evidence does not belong to one preparing operation")
+            inspectRequired(atomicName).use { pending ->
+                val evidence = parseJournalDiskEvidence(pending.bytes)
+                requireDiskEvidenceBinding(expectedBinding, evidence)
+                afterInspection?.invoke()
+                DescriptorBoundAtomicStateFile.completeExistingTemporaryNoReplace(
+                    directory,
+                    DISK_EVIDENCE_FILE,
+                    pending,
+                    MAXIMUM_OPERATION_RECORD_BYTES,
+                    faultInjector,
+                )
+            }
+            return@boundOperation FullTreeFunctionObservationColdCompletion(
+                FullTreeFunctionObservationColdCompletionKind.DISK_EVIDENCE,
+                loadRequired(),
+            )
         } else {
             val prefix = loadRequired(allowedAtomicTarget = targetName)
             inspectRequired(atomicName).use { pending ->
@@ -910,6 +1056,7 @@ internal class FullTreeFunctionObservationOperationJournal internal constructor(
                 FullTreeFunctionObservationOperationHistory.validate(
                     expectedBinding,
                     prefix.transitions + transition,
+                    prefix.diskEvidence,
                 )
                 afterInspection?.invoke()
                 DescriptorBoundAtomicStateFile.completeExistingTemporaryNoReplace(
@@ -938,7 +1085,8 @@ internal class FullTreeFunctionObservationOperationJournal internal constructor(
             journalFail("function-observation operation journal requires exact atomic-publication recovery")
         }
         if (names.any {
-                it != OPERATION_BINDING_FILE && !it.matches(TRANSITION_FILE_NAME) && it != allowedAtomicName
+                it != OPERATION_BINDING_FILE && it != DISK_EVIDENCE_FILE &&
+                    !it.matches(TRANSITION_FILE_NAME) && it != allowedAtomicName
             }
         ) {
             journalFail("function-observation operation journal contains an unowned entry")
@@ -950,6 +1098,18 @@ internal class FullTreeFunctionObservationOperationJournal internal constructor(
         ) ?: journalFail("function-observation operation journal is missing its binding")
         val actualBinding = FullTreeFunctionObservationOperationBinding.parseCanonical(bindingSnapshot.bytes)
         requireDirectoryBinding(actualBinding)
+        val diskEvidence = if (DISK_EVIDENCE_FILE in names) {
+            val snapshot = DescriptorBoundAtomicStateFile.readOrNull(
+                directory,
+                DISK_EVIDENCE_FILE,
+                MAXIMUM_OPERATION_RECORD_BYTES,
+            ) ?: journalFail("function-observation operation disk evidence disappeared")
+            parseJournalDiskEvidence(snapshot.bytes).also { evidence ->
+                requireDiskEvidenceBinding(expectedBinding, evidence)
+            }
+        } else {
+            null
+        }
         val transitions = names.filter(TRANSITION_FILE_NAME::matches).map { name ->
             val snapshot = DescriptorBoundAtomicStateFile.readOrNull(
                 directory,
@@ -962,7 +1122,11 @@ internal class FullTreeFunctionObservationOperationJournal internal constructor(
                 }
             }
         }
-        return FullTreeFunctionObservationOperationHistory.validate(expectedBinding, transitions)
+        return FullTreeFunctionObservationOperationHistory.validate(
+            expectedBinding,
+            transitions,
+            diskEvidence,
+        )
     }
 
     private fun loadRequired(
@@ -1090,6 +1254,63 @@ private fun sameDirectory(first: LinuxFileIdentity, second: LinuxFileIdentity): 
         !first.isRegularFile && !second.isRegularFile &&
         !first.isSymbolicLink && !second.isSymbolicLink
 
+private fun requireTransitionBinding(
+    binding: FullTreeFunctionObservationOperationBinding,
+    transition: FullTreeFunctionObservationOperationTransition,
+) {
+    if (
+        transition.operationId != binding.operationId ||
+        transition.bindingSha256 != binding.bindingSha256
+    ) journalFail("operation transition is cross-paired with a different binding")
+}
+
+private fun requireDiskEvidenceBinding(
+    binding: FullTreeFunctionObservationOperationBinding,
+    evidence: FullTreeDiskScratchEvidence,
+) {
+    if (
+        evidence.provider != binding.diskAuthorityProvider ||
+        evidence.operationId != binding.operationId || evidence.requestSha256 != binding.requestSha256 ||
+        evidence.shardId != binding.shardId || evidence.scopeSha256 != binding.scopeSha256 ||
+        evidence.requiredAvailableBytes != binding.requiredAvailableBytes ||
+        evidence.maximumFilesystemBytes != binding.maximumFilesystemBytes ||
+        evidence.requiredAvailableInodes != binding.requiredAvailableInodes ||
+        evidence.maximumFilesystemInodes != binding.maximumFilesystemInodes
+    ) journalFail("disk evidence is cross-paired with a different operation binding")
+}
+
+private fun requirePersistedDiskEvidence(
+    binding: FullTreeFunctionObservationOperationBinding,
+    transitions: List<FullTreeFunctionObservationOperationTransition>,
+    evidence: FullTreeDiskScratchEvidence?,
+) {
+    evidence?.let { requireDiskEvidenceBinding(binding, it) }
+    val diskLinks = transitions.filter { it.diskEvidenceSha256 != null }
+    if (evidence == null) {
+        if (diskLinks.isNotEmpty()) {
+            journalFail("function-observation operation history lacks its exact disk evidence")
+        }
+        return
+    }
+    if (transitions.isEmpty()) {
+        journalFail("exact disk evidence is not anchored by a preparing operation")
+    }
+    if (diskLinks.isEmpty()) {
+        if (transitions.last().phase != FullTreeFunctionObservationOperationPhase.PREPARING) {
+            journalFail("exact disk evidence is unlinked from a terminal operation state")
+        }
+        return
+    }
+    if (diskLinks.any { it.diskEvidenceSha256 != evidence.evidenceSha256 }) {
+        journalFail("function-observation operation history names different exact disk evidence")
+    }
+    if (diskLinks.first().phase !in setOf(
+            FullTreeFunctionObservationOperationPhase.LEASED,
+            FullTreeFunctionObservationOperationPhase.RECOVERED_ABORT,
+        )
+    ) journalFail("function-observation operation linked disk evidence in the wrong phase")
+}
+
 private fun requireEvidenceContinuity(
     previous: FullTreeFunctionObservationOperationTransition,
     next: FullTreeFunctionObservationOperationTransition,
@@ -1097,8 +1318,11 @@ private fun requireEvidenceContinuity(
     when (val previousDisk = previous.diskEvidenceSha256) {
         null -> if (
             next.diskEvidenceSha256 != null &&
-            next.phase != FullTreeFunctionObservationOperationPhase.LEASED
-        ) journalFail("function-observation operation introduced disk evidence outside leased")
+            next.phase !in setOf(
+                FullTreeFunctionObservationOperationPhase.LEASED,
+                FullTreeFunctionObservationOperationPhase.RECOVERED_ABORT,
+            )
+        ) journalFail("function-observation operation introduced disk evidence outside leased or recovered abort")
 
         else -> if (next.diskEvidenceSha256 != previousDisk) {
             journalFail("function-observation operation changed its disk evidence")
@@ -1197,23 +1421,29 @@ private inline fun <T> translateJournalFailures(label: String, action: () -> T):
     throw FullTreeFunctionObservationOperationJournalException("cannot $label: ${failure.message}", failure)
 }
 
+private fun parseJournalDiskEvidence(bytes: ByteArray): FullTreeDiskScratchEvidence =
+    translateJournalFailures("parse exact function-observation disk evidence") {
+        FullTreeDiskScratchEvidence.parseCanonical(bytes)
+    }
+
 private fun sha256(bytes: ByteArray): String = OracleArtifacts.sha256(bytes)
 
 private fun journalFail(message: String): Nothing =
     throw FullTreeFunctionObservationOperationJournalException(message)
 
-private const val OPERATION_BINDING_SCHEMA_VERSION = 2
-private const val OPERATION_REQUEST_SCHEMA_VERSION = 2
-private const val OPERATION_TRANSITION_SCHEMA_VERSION = 2
-private const val OPERATION_PROVIDER = "kotlin-function-observation-operation-v2"
-private const val OPERATION_REQUEST_PROVIDER = "kotlin-function-observation-request-v2"
+private const val OPERATION_BINDING_SCHEMA_VERSION = 3
+private const val OPERATION_REQUEST_SCHEMA_VERSION = 3
+private const val OPERATION_TRANSITION_SCHEMA_VERSION = 3
+private const val OPERATION_PROVIDER = "kotlin-function-observation-operation-v3"
+private const val OPERATION_REQUEST_PROVIDER = "kotlin-function-observation-request-v3"
 private const val MINIMUM_LEASE_INODES = 4L
 private const val OWNER_DIRECTORY_MODE = 0x1c0 // 0700
 private const val GROUP_OR_OTHER_WRITE_MODE = 0x12 // 0022
 private const val MAXIMUM_OPERATION_TRANSITIONS = 8
 private const val MAXIMUM_OPERATION_RECORD_BYTES = 64 * 1024
-private const val MAXIMUM_JOURNAL_ENTRIES = MAXIMUM_OPERATION_TRANSITIONS + 4
+private const val MAXIMUM_JOURNAL_ENTRIES = MAXIMUM_OPERATION_TRANSITIONS + 5
 private const val OPERATION_BINDING_FILE = "binding.json"
+private const val DISK_EVIDENCE_FILE = "disk-evidence.json"
 private val ZERO_SHA256 = "0".repeat(64)
 private val SHA256 = Regex("[0-9a-f]{64}")
 private val SHARD_IDENTIFIER = Regex("[a-z0-9]+(?:-[a-z0-9]+)*")
