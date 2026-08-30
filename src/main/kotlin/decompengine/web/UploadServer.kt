@@ -2,6 +2,8 @@ package decompengine.web
 
 import com.sun.net.httpserver.HttpExchange
 import com.sun.net.httpserver.HttpServer
+import decompengine.acp.AcpHarnessFactory
+import decompengine.acp.AcpHarnessProvenance
 import decompengine.exploration.AutomaticExplorer
 import decompengine.exploration.CandidateInput
 import decompengine.exploration.CandidateSource
@@ -15,10 +17,12 @@ import decompengine.project.BoundedLlmModuleReconstructor
 import decompengine.project.EvidenceModuleReconstructor
 import decompengine.project.GhidraHeadlessProgramModelAnalyzer
 import decompengine.project.ModuleReconstructor
-import decompengine.repair.HttpOpenAiCompatibleRepairClient
-import decompengine.repair.RepairClientAgentHarness
 import kotlinx.serialization.json.Json
 import kotlinx.serialization.json.JsonElement
+import kotlinx.serialization.json.JsonNull
+import kotlinx.serialization.json.JsonPrimitive
+import kotlinx.serialization.json.buildJsonObject
+import kotlinx.serialization.json.put
 import java.io.ByteArrayOutputStream
 import java.net.InetSocketAddress
 import java.net.URLDecoder
@@ -53,19 +57,85 @@ class SourceTreeJobReconstructor(
     private val environment: Map<String, String> = System.getenv(),
 ) : JobReconstructor {
     override fun reconstruct(job: Job, reportsDir: Path) {
-        val moduleReconstructor: ModuleReconstructor = if (listOf("BASE_URL", "API_KEY", "MODEL").all { !environment[it].isNullOrBlank() }) {
-            BoundedLlmModuleReconstructor(
-                RepairClientAgentHarness(HttpOpenAiCompatibleRepairClient.fromEnvironment(environment)),
-            )
-        } else {
-            EvidenceModuleReconstructor()
-        }
+        val strategy = selectWebReconstructionStrategy(environment)
+        java.nio.file.Files.createDirectories(reportsDir)
+        java.nio.file.Files.writeString(
+            reportsDir.resolve(WEB_RECONSTRUCTION_HARNESS_REPORT),
+            renderWebReconstructionHarnessSelection(strategy),
+        )
         ArchivalReconstructionService(
             GhidraHeadlessProgramModelAnalyzer.fromEnvironment(environment),
-            moduleReconstructor,
+            strategy.reconstructor,
         ).reconstruct(job.binaryPath, reportsDir)
     }
 }
+
+internal enum class WebReconstructionMode(val configurationValue: String) {
+    AGENT("agent"),
+    EVIDENCE_ONLY("evidence-only"),
+}
+
+internal data class WebReconstructionStrategy(
+    val mode: WebReconstructionMode,
+    val reconstructor: ModuleReconstructor,
+    val harnessProvenance: AcpHarnessProvenance?,
+)
+
+/** Resolves exactly one web reconstruction mode without credential-based fallbacks. */
+internal fun selectWebReconstructionStrategy(environment: Map<String, String>): WebReconstructionStrategy {
+    val configuredMode = environment[WEB_RECONSTRUCTION_MODE_ENVIRONMENT] ?: WebReconstructionMode.AGENT.configurationValue
+    return when (configuredMode) {
+        WebReconstructionMode.AGENT.configurationValue -> {
+            val selection = AcpHarnessFactory.fromEnvironment(environment)
+            WebReconstructionStrategy(
+                WebReconstructionMode.AGENT,
+                BoundedLlmModuleReconstructor(selection.createHarness()),
+                selection.provenance,
+            )
+        }
+        WebReconstructionMode.EVIDENCE_ONLY.configurationValue -> WebReconstructionStrategy(
+            WebReconstructionMode.EVIDENCE_ONLY,
+            EvidenceModuleReconstructor(),
+            null,
+        )
+        else -> throw IllegalArgumentException(
+            "$WEB_RECONSTRUCTION_MODE_ENVIRONMENT must be exactly " +
+                "${WebReconstructionMode.AGENT.configurationValue} or " +
+                WebReconstructionMode.EVIDENCE_ONLY.configurationValue,
+        )
+    }
+}
+
+/** Stable, non-secret selection metadata. This does not claim that an ACP session has run. */
+internal fun renderWebReconstructionHarnessSelection(strategy: WebReconstructionStrategy): String {
+    val selection = strategy.harnessProvenance?.let { provenance ->
+        buildJsonObject {
+            put("stableDescriptor", provenance.stableDescriptor)
+            put("harness", provenance.harness)
+            put("implementationId", provenance.implementationId)
+            put("agentExecutionContractVersion", provenance.agentExecutionContractVersion)
+            put(
+                "acpProtocolVersion",
+                provenance.acpProtocolVersion?.let(::JsonPrimitive) ?: JsonNull,
+            )
+            put("acpSdkVersion", provenance.acpSdkVersion?.let(::JsonPrimitive) ?: JsonNull)
+            put(
+                "configurationSha256",
+                provenance.configurationSha256?.let(::JsonPrimitive) ?: JsonNull,
+            )
+            put("deprecated", provenance.deprecated)
+        }
+    }
+    val report = buildJsonObject {
+        put("schemaVersion", 1)
+        put("mode", strategy.mode.configurationValue)
+        put("selection", selection ?: JsonNull)
+    }
+    return Json { prettyPrint = true }.encodeToString(JsonElement.serializer(), report) + "\n"
+}
+
+private const val WEB_RECONSTRUCTION_MODE_ENVIRONMENT = "WEB_RECONSTRUCTION_MODE"
+private const val WEB_RECONSTRUCTION_HARNESS_REPORT = "reconstruction_harness_selection.json"
 
 class UploadServer(
     host: String,
