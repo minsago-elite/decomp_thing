@@ -71,6 +71,10 @@ internal object FullTreeFunctionObservations {
         return Collections.unmodifiableList(buildShardInputs(controls))
     }
 
+    /** Encodes one already validated in-memory envelope under this contract's 64 MiB hard ceiling. */
+    fun canonicalEnvelopeBytes(document: JsonObject): ByteArray =
+        canonicalBytes(document, "function observation shard")
+
     /** Validates one immutable envelope against its schema and externally anchored control inputs. */
     fun validateEnvelope(
         documentValue: JsonObject,
