@@ -62,6 +62,7 @@ internal data class FullTreeFunctionObservationStreamResult(
     val nonEmittedDies: Long,
     val entities: Long,
     val scannedDies: Long,
+    val databaseHighWaterBytes: Long,
 )
 
 /** Common scanner boundary shared by the in-progress SQLite-backed producer path. */
@@ -186,7 +187,9 @@ private class FunctionObservationSqliteSink private constructor(
             }
             limits.checkpoint.checkpoint("before committing function-observation SQLite state")
             connection.commit()
-            workspace.checkDatabaseBound("before function-observation projection")
+            val committedDatabaseBytes =
+                workspace.checkDatabaseBound("before function-observation projection")
+            requireCommittedDatabaseLayout(committedDatabaseBytes)
             limits.checkpoint.checkpoint("before checking function-observation projection plans")
             assertIndexedProjectionPlans()
             limits.checkpoint.checkpoint("after checking function-observation projection plans")
@@ -217,6 +220,7 @@ private class FunctionObservationSqliteSink private constructor(
                 nonEmittedDies = nonEmittedDies,
                 entities = addCount(emitted, nonEmitted, "function-observation entity"),
                 scannedDies = scannedDies,
+                databaseHighWaterBytes = workspace.databaseHighWaterBytes(),
             )
         } catch (failure: Throwable) {
             state = SinkState.FAILED
@@ -552,6 +556,25 @@ private class FunctionObservationSqliteSink private constructor(
         }
     }
 
+    private fun requireCommittedDatabaseLayout(databaseBytes: Long) {
+        val pageSize = pragmaLong(connection, "page_size")
+        val pageCount = pragmaLong(connection, "page_count")
+        val allocatedBytes = try {
+            Math.multiplyExact(pageSize, pageCount)
+        } catch (failure: ArithmeticException) {
+            throw FullTreeFunctionObservationSqliteException(
+                "function-observation SQLite allocation overflows",
+                failure,
+            )
+        }
+        if (
+            pageSize != SQLITE_PAGE_BYTES.toLong() || pageCount <= 0L ||
+            allocatedBytes != databaseBytes || workspace.databaseHighWaterBytes() != databaseBytes
+        ) {
+            sqliteFail("function-observation SQLite allocation differs from its pinned file size")
+        }
+    }
+
     private inline fun mutate(operation: String, block: () -> Unit) {
         requireOpen()
         state = SinkState.MUTATING
@@ -640,6 +663,7 @@ private class FunctionObservationSqliteSink private constructor(
                 statement.execute("PRAGMA locking_mode=EXCLUSIVE")
                 statement.execute("PRAGMA foreign_keys=ON")
                 statement.execute("PRAGMA automatic_index=OFF")
+                statement.execute("PRAGMA auto_vacuum=NONE")
                 statement.execute("PRAGMA threads=1")
                 statement.execute("PRAGMA application_id=$SQLITE_APPLICATION_ID")
                 statement.execute("PRAGMA user_version=$SQLITE_SCHEMA_VERSION")
@@ -655,6 +679,7 @@ private class FunctionObservationSqliteSink private constructor(
                 pragmaLong(connection, "mmap_size") != 0L ||
                 pragmaLong(connection, "foreign_keys") != 1L ||
                 pragmaLong(connection, "automatic_index") != 0L ||
+                pragmaLong(connection, "auto_vacuum") != 0L ||
                 pragmaLong(connection, "application_id") != SQLITE_APPLICATION_ID.toLong() ||
                 pragmaLong(connection, "user_version") != SQLITE_SCHEMA_VERSION.toLong()
             ) {
@@ -1084,6 +1109,8 @@ private class FunctionObservationSqliteWorkspace private constructor(
     private val databaseIdentity: Any,
     private val maximumDatabaseBytes: Long,
 ) : AutoCloseable {
+    private var maximumObservedDatabaseBytes = 0L
+
     fun verifyDatabaseIdentity() {
         checkParentAndRootIdentity("after opening function-observation SQLite state")
         val attributes = Files.readAttributes(
@@ -1101,7 +1128,7 @@ private class FunctionObservationSqliteWorkspace private constructor(
         }
     }
 
-    fun checkDatabaseBound(checkpoint: String) {
+    fun checkDatabaseBound(checkpoint: String): Long {
         checkParentAndRootIdentity(checkpoint)
         val attributes = Files.readAttributes(
             database,
@@ -1116,7 +1143,16 @@ private class FunctionObservationSqliteWorkspace private constructor(
         ) {
             sqliteFail("function-observation SQLite database changed or exceeds its byte bound $checkpoint")
         }
+        maximumObservedDatabaseBytes = maxOf(maximumObservedDatabaseBytes, attributes.size())
         requireSoleDatabaseChild(checkpoint)
+        return attributes.size()
+    }
+
+    fun databaseHighWaterBytes(): Long {
+        if (maximumObservedDatabaseBytes <= 0L) {
+            sqliteFail("function-observation SQLite database high-water mark is unavailable")
+        }
+        return maximumObservedDatabaseBytes
     }
 
     override fun close() {

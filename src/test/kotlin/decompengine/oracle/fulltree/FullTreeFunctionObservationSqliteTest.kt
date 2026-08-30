@@ -351,6 +351,7 @@ class FullTreeFunctionObservationSqliteTest {
         assertContentEquals(expected, output.toByteArray())
         assertEquals(expected.size.toLong(), result.outputBytes)
         assertEquals(decompengine.oracle.core.OracleArtifacts.sha256(expected), result.outputSha256)
+        assertTrue(result.databaseHighWaterBytes in 1L..4L * 1024L * 1024L)
         return result
     }
 

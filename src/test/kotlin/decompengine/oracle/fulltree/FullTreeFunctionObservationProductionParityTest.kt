@@ -2,6 +2,7 @@ package decompengine.oracle.fulltree
 
 import java.nio.file.Files
 import java.nio.file.Path
+import java.nio.file.attribute.PosixFilePermissions
 import kotlin.test.Test
 import kotlin.test.assertEquals
 import kotlin.test.assertTrue
@@ -25,22 +26,24 @@ class FullTreeFunctionObservationProductionParityTest {
         val expected = functions.resolve("outputs/generated-tools-clang.json")
         assumeTrue(Files.isRegularFile(expected), "frozen v3 generated shard is unavailable")
         inControlTemporaryDirectory { scratch ->
-            val result = FullTreeFunctionObservationProducer.generateShard(
+            val output = scratch.resolve("generated-tools-clang.json")
+            val result = FullTreeFunctionObservationShardPublisher.generateAndPublish(
                 richArtifact = release.resolve("artifacts/clang-driver.full"),
                 inventoryPath = functions.resolve("control/inventory.json"),
                 scope = scope,
                 shardId = "generated-tools-clang",
                 scratchParent = scratch,
+                output = output,
             )
             assertEquals(3_090L, result.outputBytes)
             assertEquals(
                 "f53c3c5f06bb17aa4d9a86bfe9ed56d7733d1cc121452ac49863cd06b05c28d2",
                 result.outputSha256,
             )
-            assertTrue(
-                Files.readAllBytes(expected).contentEquals(
-                    FullTreeFunctionObservations.canonicalEnvelopeBytes(result.document),
-                ),
+            assertTrue(Files.readAllBytes(expected).contentEquals(Files.readAllBytes(output)))
+            assertEquals(
+                PosixFilePermissions.fromString("r--------"),
+                Files.getPosixFilePermissions(output),
             )
         }
     }

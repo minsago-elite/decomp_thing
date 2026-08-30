@@ -207,7 +207,10 @@ internal class StableControlFile private constructor(
     private val permissions: Set<PosixFilePermission>,
     private val channel: FileChannel,
 ) : AutoCloseable {
-    fun sha256(): String {
+    fun sha256(
+        checkpoint: (String) -> Unit = {},
+        label: String = "large control input",
+    ): String {
         val digest = MessageDigest.getInstance("SHA-256")
         val buffer = ByteBuffer.allocate(1024 * 1024)
         var offset = 0L
@@ -218,7 +221,9 @@ internal class StableControlFile private constructor(
             if (read <= 0) throw FullTreeControlException("large control input ended while hashing")
             digest.update(buffer.array(), 0, read)
             offset = Math.addExact(offset, read.toLong())
+            checkpoint("while hashing $label")
         }
+        checkpoint("after hashing $label")
         return digest.digest().hex()
     }
 

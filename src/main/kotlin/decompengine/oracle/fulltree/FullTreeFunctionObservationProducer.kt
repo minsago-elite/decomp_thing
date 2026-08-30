@@ -234,7 +234,7 @@ internal object FullTreeFunctionObservationProducer {
             controlLimits.maximumRichArtifactBytes,
             "rich artifact",
         ).use { artifact ->
-            val richArtifactSha256 = artifact.sha256()
+            val richArtifactSha256 = artifact.sha256(checkpoint, "rich artifact")
             if (richArtifactSha256 != scope.document.controlObject("oracle").controlString("richArtifactSha256")) {
                 throw FullTreeControlException("rich artifact does not match the full-tree scope")
             }
