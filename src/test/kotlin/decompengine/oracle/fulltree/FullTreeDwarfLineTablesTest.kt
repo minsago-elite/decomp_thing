@@ -29,6 +29,10 @@ class FullTreeDwarfLineTablesTest {
         )
         assertEquals("/root/b/header.hpp", table.resolveDeclarationPath(2, 2, "/unused"))
         assertEquals("/absolute/file.cpp", table.resolveDeclarationPath(3, 2, null))
+        assertEquals(
+            "/absolute/file.cpp",
+            table.resolveDeclarationPath(3, 2) { error("unused poison compilation directory") },
+        )
         assertNull(table.resolveDeclarationPath(4, 2, "/build"))
         assertEquals("//server/root/main.cpp", table.resolveDeclarationPath(1, 2, "//server/root"))
     }
@@ -76,6 +80,14 @@ class FullTreeDwarfLineTablesTest {
         assertEquals("/project/src/zero.cpp", table.resolveDeclarationPath(0, 5, "/unused"))
         assertEquals("relative/include/nested.hpp", table.resolveDeclarationPath(1, 5, "/unused"))
         assertEquals("/absolute/v5.cpp", table.resolveDeclarationPath(2, 5, null))
+        assertEquals(
+            "relative/include/nested.hpp",
+            table.resolveDeclarationPath(1, 5) { error("unused poison compilation directory") },
+        )
+        assertEquals(
+            "/absolute/v5.cpp",
+            table.resolveDeclarationPath(2, 5) { error("unused poison compilation directory") },
+        )
         assertNull(table.resolveDeclarationPath(3, 5, "/unused"))
     }
 

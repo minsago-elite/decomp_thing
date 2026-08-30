@@ -64,6 +64,13 @@ internal class FullTreeDwarfLineTable internal constructor(
         fileIndex: Long,
         compilationUnitVersion: Int,
         compilationDirectory: String?,
+    ): String? = resolveDeclarationPath(fileIndex, compilationUnitVersion) { compilationDirectory }
+
+    /** Resolves the CU directory only for the legacy relative-file, directory-index-zero case. */
+    fun resolveDeclarationPath(
+        fileIndex: Long,
+        compilationUnitVersion: Int,
+        compilationDirectory: () -> String?,
     ): String? {
         if (compilationUnitVersion !in 2..5 || fileIndex < 0L) return null
         val entryIndex = if (compilationUnitVersion >= 5) fileIndex else fileIndex - 1L
@@ -77,7 +84,7 @@ internal class FullTreeDwarfLineTable internal constructor(
             directories[index.toInt()]
         } else {
             when (val index = file.directoryIndex ?: return null) {
-                0L -> compilationDirectory?.also(::requireValidCallerPath) ?: return null
+                0L -> compilationDirectory()?.also(::requireValidCallerPath) ?: return null
                 else -> {
                     val adjusted = index - 1L
                     if (adjusted < 0L || adjusted >= directories.size.toLong()) return null
