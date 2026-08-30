@@ -15,8 +15,8 @@ import decompengine.project.ArchivalReconstructionService
 import decompengine.project.BoundedLlmModuleReconstructor
 import decompengine.project.EvidenceModuleReconstructor
 import decompengine.project.GhidraHeadlessProgramModelAnalyzer
+import decompengine.project.ModuleReconstructor
 import decompengine.repair.HttpOpenAiCompatibleRepairClient
-import decompengine.repair.RepairClientAgentHarness
 import decompengine.repair.RepairRuntimeConfiguration
 import decompengine.repair.SecureRepairRuntime
 import decompengine.validation.ProcessInput
@@ -65,7 +65,7 @@ private fun runReconstruct(args: List<String>) {
                 index += 2
             }
             "--harness" -> {
-                if (index + 1 >= args.size) reconstructUsageError("--harness requires direct or acp")
+                if (index + 1 >= args.size) reconstructUsageError("--harness requires acp or legacy-openai")
                 harnessOverride = args[index + 1]; index += 2
             }
             else -> {
@@ -75,37 +75,61 @@ private fun runReconstruct(args: List<String>) {
         }
     }
     if (binary == null || output == null) reconstructUsageError("reconstruct requires an input binary and output directory")
-    val harnessEnv = harnessOverride?.let { mapOf("ACP_HARNESS" to it) } ?: emptyMap()
-    val harnessSelection = try {
-        AcpHarnessFactory.fromEnvironment(System.getenv() + harnessEnv)
+    val strategy = try {
+        selectReconstructionStrategy(evidenceOnly, maximumContext, harnessOverride, System.getenv())
     } catch (e: IllegalArgumentException) {
         reconstructUsageError(e.message ?: "invalid harness configuration")
     }
-    if (harnessSelection.kind == AcpHarnessKind.ACP) {
-        println("harness: acp (${harnessSelection.configuration?.executable})")
-    } else {
-        println("harness: direct")
-    }
-    val hasApi = listOf("BASE_URL", "API_KEY", "MODEL").all { !System.getenv(it).isNullOrBlank() }
-    val reconstructor = if (!evidenceOnly && hasApi) {
-        BoundedLlmModuleReconstructor(
-            RepairClientAgentHarness(HttpOpenAiCompatibleRepairClient.fromEnvironment()),
-            maximumContext,
-        )
-    } else {
-        if (!evidenceOnly) println("LLM configuration is incomplete; generating an evidence-backed source tree with explicit stubs")
-        EvidenceModuleReconstructor()
-    }
-    val result = ArchivalReconstructionService(GhidraHeadlessProgramModelAnalyzer.fromEnvironment(), reconstructor)
+    println(
+        strategy.harnessProvenance?.let { "harness provenance: $it" }
+            ?: "harness: none (evidence-only)",
+    )
+    val result = ArchivalReconstructionService(GhidraHeadlessProgramModelAnalyzer.fromEnvironment(), strategy.reconstructor)
         .reconstruct(binary, output)
     println("source tree: ${result.projectDir}")
     println("archive: ${result.bundle.archivePath}")
     println("archive sha256: ${result.bundle.archiveSha256}")
 }
 
+internal data class ReconstructionStrategy(
+    val reconstructor: ModuleReconstructor,
+    val harnessProvenance: String?,
+)
+
+internal fun selectReconstructionStrategy(
+    evidenceOnly: Boolean,
+    maximumContext: Int,
+    harnessOverride: String?,
+    environment: Map<String, String>,
+): ReconstructionStrategy {
+    require(!evidenceOnly || harnessOverride == null) {
+        "--harness cannot be used with --evidence-only"
+    }
+    if (evidenceOnly) {
+        return ReconstructionStrategy(EvidenceModuleReconstructor(), null)
+    }
+
+    val effectiveEnvironment = if (harnessOverride == null) {
+        environment
+    } else {
+        object : Map<String, String> by environment {
+            override fun containsKey(key: String): Boolean =
+                key == "ACP_HARNESS" || environment.containsKey(key)
+
+            override fun get(key: String): String? =
+                if (key == "ACP_HARNESS") harnessOverride else environment[key]
+        }
+    }
+    val selection = AcpHarnessFactory.fromEnvironment(effectiveEnvironment)
+    return ReconstructionStrategy(
+        BoundedLlmModuleReconstructor(selection.createHarness(), maximumContext),
+        selection.provenance.stableDescriptor,
+    )
+}
+
 private fun reconstructUsageError(message: String): Nothing {
     System.err.println(message)
-    System.err.println("usage: llm_bin_patch reconstruct <binary> --output <directory> [--evidence-only] [--max-context-chars <count>] [--harness direct|acp]")
+    System.err.println("usage: llm_bin_patch reconstruct <binary> --output <directory> [--evidence-only] [--max-context-chars <count>] [--harness acp|legacy-openai]")
     kotlin.system.exitProcess(2)
 }
 
@@ -371,13 +395,13 @@ private fun printHelp() {
           llm_bin_patch runner [--control-dir <directory>] [--root <directory>]...
           llm_bin_patch repair <original-binary> <project-dir> [--reports <directory>] [--max-iterations <count>] [--explore] [--harness direct|acp]
           llm_bin_patch explore <binary> --reports <directory> [--arg <value>] [--stdin <value>]
-          llm_bin_patch reconstruct <binary> --output <directory> [--evidence-only] [--max-context-chars <count>] [--harness direct|acp]
+          llm_bin_patch reconstruct <binary> --output <directory> [--evidence-only] [--max-context-chars <count>] [--harness acp|legacy-openai]
           llm_bin_patch web [--host 127.0.0.1] [--port 8000] [--data-dir .decomp_engine/jobs]
 
-        Harness selection:
-          --harness direct  use the built-in OpenAI-compatible client (default)
-          --harness acp     use an external ACP agent via ACP_HARNESS=acp, ACP_AGENT_EXECUTABLE, ACP_AGENT_ARGS, ACP_PERMISSION_MODE, ACP_TIMEOUT_SECONDS
-          Doctor verifies the ACP executable resolves, starts, negotiates ACP v1, and shuts down cleanly.
+        Reconstruction harness selection:
+          --harness acp            use the ACP agent provisioned by ACP_CONFIG_FILE (default)
+          --harness legacy-openai  use the deprecated built-in OpenAI-compatible adapter
+          --evidence-only is agent-free and cannot be combined with --harness.
         """.trimIndent(),
     )
 }
