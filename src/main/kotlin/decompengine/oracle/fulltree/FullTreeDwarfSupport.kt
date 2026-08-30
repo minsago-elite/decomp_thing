@@ -33,7 +33,7 @@ internal class FullTreeDwarfParseBudget(private val limit: Long) {
  * The header deliberately contains no interpretation of individual DIEs. Callers create a cursor
  * with [dieCursor] and share the same [FullTreeDwarfParseBudget] across subsequent traversal.
  */
-internal data class FullTreeDwarfCompilationUnitHeader(
+internal class FullTreeDwarfCompilationUnitHeader(
     val offset: Long,
     val endOffset: Long,
     val version: Int,
@@ -42,9 +42,14 @@ internal data class FullTreeDwarfCompilationUnitHeader(
     val offsetSize: Int,
     val abbreviationOffset: Long,
     val firstDieOffset: Long,
+    private val originatingSection: FullTreeDwarfSection,
 ) {
-    fun dieCursor(info: FullTreeDwarfSection): FullTreeDwarfSectionCursor =
-        FullTreeDwarfSectionCursor(info, firstDieOffset, endOffset, "DWARF compilation unit")
+    fun dieCursor(info: FullTreeDwarfSection): FullTreeDwarfSectionCursor {
+        if (info !== originatingSection) {
+            throw FullTreeControlException("DWARF compilation-unit cursor uses a different .debug_info section")
+        }
+        return FullTreeDwarfSectionCursor(info, firstDieOffset, endOffset, "DWARF compilation unit")
+    }
 }
 
 /** Stateful, count-bounded compilation-unit header iterator over one `.debug_info` section. */
@@ -86,7 +91,7 @@ internal class FullTreeDwarfCompilationUnitHeaders(
             throw FullTreeControlException("DWARF compilation unit length exceeds .debug_info")
         }
         val unitEnd = Math.addExact(cursor.position, unitLength)
-        cursor.limit = unitEnd
+        cursor.narrowLimit(unitEnd)
         val version = cursor.readUnsigned(2).toInt()
         if (version !in 2..5) {
             throw FullTreeControlException("DWARF compilation unit version is unsupported: $version")
@@ -128,6 +133,7 @@ internal class FullTreeDwarfCompilationUnitHeaders(
             offsetSize = offsetSize,
             abbreviationOffset = abbreviationOffset,
             firstDieOffset = cursor.position,
+            originatingSection = info,
         )
     }
 }
@@ -175,22 +181,36 @@ internal class FullTreeDwarfAbbreviations(
     ): FullTreeDwarfAbbreviationDeclaration? {
         val cursor = FullTreeDwarfSectionCursor(section, offset, section.size, "DWARF abbreviation table")
         var declarations = 0
-        while (declarations++ < limits.maximumAbbreviationDeclarationsPerUnit) {
+        var requested: FullTreeDwarfAbbreviationDeclaration? = null
+        val codes = HashSet<Long>()
+        while (true) {
             parseBudget.consume("DWARF abbreviation declarations")
             val code = cursor.readUleb128()
             if (code == 0L) {
-                if (expectedCode != null) throw FullTreeControlException("$absentLabel is absent")
-                return null
+                if (expectedCode != null && requested == null) {
+                    throw FullTreeControlException("$absentLabel is absent")
+                }
+                return requested
+            }
+            if (declarations >= limits.maximumAbbreviationDeclarationsPerUnit) {
+                throw FullTreeControlException("DWARF abbreviation table exceeds its declaration bound")
+            }
+            declarations++
+            if (!codes.add(code)) {
+                throw FullTreeControlException("DWARF abbreviation table contains duplicate code $code")
             }
             val tag = cursor.readUleb128()
             val hasChildren = cursor.readUnsigned(1).toInt()
+            if (hasChildren !in 0..1) {
+                throw FullTreeControlException("DWARF abbreviation has an invalid children flag")
+            }
             val attributes = if (expectedCode == null || code == expectedCode) {
                 ArrayList<FullTreeDwarfAbbreviationAttribute>()
             } else {
                 null
             }
             var attributeCount = 0
-            while (attributeCount++ < limits.maximumAbbreviationAttributesPerUnit) {
+            while (true) {
                 parseBudget.consume("DWARF abbreviation attributes")
                 val name = cursor.readUleb128()
                 val form = cursor.readUleb128()
@@ -202,28 +222,32 @@ internal class FullTreeDwarfAbbreviations(
                             hasChildren = hasChildren,
                             attributes = Collections.unmodifiableList(attributes),
                         )
-                        if (code == expectedCode) return declaration
-                        visitor?.invoke(declaration)
+                        if (code == expectedCode) requested = declaration else visitor?.invoke(declaration)
                     }
                     break
                 }
                 if (name == 0L || form == 0L) {
                     throw FullTreeControlException("DWARF abbreviation attribute terminator is malformed")
                 }
+                if (attributeCount >= limits.maximumAbbreviationAttributesPerUnit) {
+                    throw FullTreeControlException("DWARF abbreviation exceeds its attribute bound")
+                }
+                attributeCount++
                 val implicit = if (form == FULL_TREE_DW_FORM_IMPLICIT_CONST) cursor.readSleb128() else null
                 attributes?.add(FullTreeDwarfAbbreviationAttribute(name, form, implicit))
             }
-            if (attributeCount > limits.maximumAbbreviationAttributesPerUnit) {
-                throw FullTreeControlException("DWARF abbreviation exceeds its attribute bound")
-            }
         }
-        throw FullTreeControlException("DWARF abbreviation table exceeds its declaration bound")
     }
 }
 
 internal sealed interface FullTreeDwarfFormValue
 internal data class FullTreeDwarfNumericValue(val value: Long) : FullTreeDwarfFormValue
-internal data class FullTreeDwarfInlineStringValue(val bytes: ByteArray) : FullTreeDwarfFormValue
+internal class FullTreeDwarfInlineStringValue(bytes: ByteArray) : FullTreeDwarfFormValue {
+    private val content = bytes.copyOf()
+
+    val bytes: ByteArray
+        get() = content.copyOf()
+}
 internal data class FullTreeDwarfSectionStringValue(
     val section: String,
     val offset: Long,
@@ -526,6 +550,7 @@ internal class FullTreeDwarfSections private constructor(
                 else -> FullTreeDwarfSection(
                     size = descriptor.size,
                     byteOrder = descriptor.byteOrder,
+                    label = logicalName,
                     readWindow = { offset, length ->
                         artifact.readExactly(
                             Math.addExact(descriptor.offset, offset),
@@ -650,6 +675,7 @@ internal class FullTreeDwarfSections private constructor(
                 return FullTreeDwarfSection(
                     size = expandedSize,
                     byteOrder = byteOrder,
+                    label = label,
                     readWindow = { offset, length ->
                         val bytes = ByteArray(length)
                         val destination = ByteBuffer.wrap(bytes)
@@ -681,19 +707,37 @@ internal class FullTreeDwarfSections private constructor(
 internal class FullTreeDwarfSection(
     val size: Long,
     val byteOrder: ByteOrder,
+    private val label: String,
     private val readWindow: (Long, Int) -> ByteArray,
     private val closeAction: () -> Unit = {},
 ) : AutoCloseable {
     private var cachedOffset = -1L
     private var cached = ByteArray(0)
 
+    init {
+        if (size <= 0L) throw FullTreeControlException("$label must not be empty")
+        if (label.isEmpty()) throw FullTreeControlException("DWARF section label must not be empty")
+    }
+
     fun byte(offset: Long): Int {
         if (offset < 0L || offset >= size) {
-            throw FullTreeControlException("DWARF read exceeds its section")
+            throw FullTreeControlException("$label read exceeds its section")
         }
-        if (offset < cachedOffset || offset >= cachedOffset + cached.size) {
+        val cachedIndex = if (cachedOffset < 0L) -1L else offset - cachedOffset
+        if (cachedIndex < 0L || cachedIndex >= cached.size.toLong()) {
+            val length = minOf(FULL_TREE_DWARF_WINDOW_BYTES.toLong(), size - offset).toInt()
+            val loaded = try {
+                readWindow(offset, length)
+            } catch (failure: FullTreeControlException) {
+                throw failure
+            } catch (failure: Exception) {
+                throw FullTreeControlException("$label backing read failed", failure)
+            }
+            if (loaded.size != length) {
+                throw FullTreeControlException("$label backing read returned a partial or oversized window")
+            }
             cachedOffset = offset
-            cached = readWindow(offset, minOf(FULL_TREE_DWARF_WINDOW_BYTES.toLong(), size - offset).toInt())
+            cached = loaded.copyOf()
         }
         return cached[(offset - cachedOffset).toInt()].toInt() and 0xff
     }
@@ -714,10 +758,28 @@ internal class FullTreeDwarfSection(
 /** Mutable cursor whose every read is constrained to a caller-selected subrange of one section. */
 internal class FullTreeDwarfSectionCursor(
     private val section: FullTreeDwarfSection,
-    var position: Long,
-    var limit: Long,
+    initialPosition: Long,
+    initialLimit: Long,
     private val label: String,
 ) {
+    var position: Long = initialPosition
+        private set
+    var limit: Long = initialLimit
+        private set
+
+    init {
+        if (initialPosition < 0L || initialLimit < initialPosition || initialLimit > section.size) {
+            throw FullTreeControlException("$label cursor range is outside its section")
+        }
+    }
+
+    fun narrowLimit(newLimit: Long) {
+        if (newLimit < position || newLimit > limit) {
+            throw FullTreeControlException("$label cursor limit may only be narrowed after its position")
+        }
+        limit = newLimit
+    }
+
     fun readUnsigned(width: Int): Long {
         if (width !in 1..8) throw FullTreeControlException("$label integer width is invalid")
         requireAvailable(width.toLong())
@@ -736,11 +798,11 @@ internal class FullTreeDwarfSectionCursor(
     fun readUleb128(): Long {
         var value = 0UL
         var shift = 0
-        repeat(10) {
+        repeat(10) { index ->
             requireAvailable(1L)
             val byte = section.byte(position++)
             val payload = (byte and 0x7f).toULong()
-            if (shift >= 64 && payload != 0UL) throw FullTreeControlException("$label ULEB128 overflows")
+            if (index == 9 && payload > 1UL) throw FullTreeControlException("$label ULEB128 overflows")
             if (shift < 64) value = value or (payload shl shift)
             if (byte and 0x80 == 0) {
                 if (value > Long.MAX_VALUE.toULong()) {
@@ -882,6 +944,7 @@ private object FullTreeDwarfElfSections {
         val nameSection = FullTreeDwarfSection(
             size = names.size,
             byteOrder = byteOrder,
+            label = "ELF section-name table",
             readWindow = { offset, length ->
                 file.readExactly(Math.addExact(names.offset, offset), length, "ELF section-name table")
             },
@@ -970,6 +1033,7 @@ internal class FullTreeDwarfScratch private constructor(
     private val identity: Any,
 ) : AutoCloseable {
     private val files = linkedMapOf<Path, Any>()
+    private var closed = false
 
     fun createFile(label: String): FileChannel {
         val path = Files.createTempFile(root, ".section-", ".bin")
@@ -1002,8 +1066,12 @@ internal class FullTreeDwarfScratch private constructor(
         }
     }
 
+    @Synchronized
     override fun close() {
-        if (!Files.exists(root, LinkOption.NOFOLLOW_LINKS)) return
+        if (closed) return
+        if (!Files.exists(root, LinkOption.NOFOLLOW_LINKS)) {
+            throw FullTreeControlException("DWARF scratch directory disappeared before close")
+        }
         val current = Files.readAttributes(root, BasicFileAttributes::class.java, LinkOption.NOFOLLOW_LINKS)
         if (!current.isDirectory || current.isSymbolicLink || current.fileKey() != identity) {
             throw FullTreeControlException("DWARF scratch directory changed identity")
@@ -1034,6 +1102,7 @@ internal class FullTreeDwarfScratch private constructor(
             if (failure == null) failure = cleanupFailure else failure!!.addSuppressed(cleanupFailure)
         }
         failure?.let { throw it }
+        closed = true
     }
 
     companion object {
