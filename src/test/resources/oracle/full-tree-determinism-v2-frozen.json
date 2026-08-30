@@ -1,0 +1,18 @@
+{
+  "contentContractSha256": "77d23d1fe3176f7decf426f09537ead98d65c9b7283f0832281171843444b733",
+  "differingShards": [],
+  "firstIndexSha256": "9784e592199e923ba238ba7eddc8a8059164b97c3d3afac4000131007df58ec4",
+  "firstRun": {
+    "maximumWorkers": 1,
+    "runSha256": "01f7d381e08676528d873ecf6be1e2a0aa2659ea4b2befa33625d01444d71d24"
+  },
+  "identical": true,
+  "reportSha256": "4fc4e09387b88b1035b066549645dd6792554769d5035923be2b52c573658251",
+  "schemaVersion": 2,
+  "secondIndexSha256": "232cc1cd9b47b931174cf84ebe8b5301c254c4898b0dc4a7e8e6346355ae55bd",
+  "secondRun": {
+    "maximumWorkers": 2,
+    "runSha256": "c03be117c0532c81c1b058c88e173cfb258757103fa6927db4032aeff7bd3c2e"
+  },
+  "shards": 2
+}

@@ -1,0 +1,11 @@
+{
+  "entities": [
+    {
+      "id": "omega-entity",
+      "value": 2
+    }
+  ],
+  "inputSha256": "2222222222222222222222222222222222222222222222222222222222222222",
+  "schemaVersion": 1,
+  "shardId": "omega"
+}

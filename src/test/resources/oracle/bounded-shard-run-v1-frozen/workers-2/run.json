@@ -1,0 +1,27 @@
+{
+  "bounds": {
+    "maximumResidentBytes": 1073741824,
+    "maximumShards": 2,
+    "maximumWorkers": 2,
+    "perShardBytes": 4096,
+    "perShardCpuSeconds": 10.0,
+    "perShardEntities": 8,
+    "perShardSeconds": 10.0,
+    "wholeRunBytes": 8192,
+    "wholeRunCpuSeconds": 30.0,
+    "wholeRunEntities": 16,
+    "wholeRunSeconds": 30.0
+  },
+  "id": "frozen-determinism",
+  "schemaVersion": 1,
+  "shards": [
+    {
+      "id": "alpha",
+      "inputSha256": "1111111111111111111111111111111111111111111111111111111111111111"
+    },
+    {
+      "id": "omega",
+      "inputSha256": "2222222222222222222222222222222222222222222222222222222222222222"
+    }
+  ]
+}

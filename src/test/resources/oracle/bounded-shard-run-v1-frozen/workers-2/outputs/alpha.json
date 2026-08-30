@@ -1,0 +1,11 @@
+{
+  "entities": [
+    {
+      "id": "alpha-entity",
+      "value": 1
+    }
+  ],
+  "inputSha256": "1111111111111111111111111111111111111111111111111111111111111111",
+  "schemaVersion": 1,
+  "shardId": "alpha"
+}

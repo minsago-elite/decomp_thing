@@ -1,0 +1,10 @@
+{
+  "entities": 1,
+  "inputSha256": "2222222222222222222222222222222222222222222222222222222222222222",
+  "outputBytes": 210,
+  "outputSha256": "11b828e10169186e82ef4b590bb15dd7b8362fd4c0a4f8974d5118f6273cd41b",
+  "runSha256": "c03be117c0532c81c1b058c88e173cfb258757103fa6927db4032aeff7bd3c2e",
+  "schemaVersion": 1,
+  "shardId": "omega",
+  "status": "complete"
+}
