@@ -101,6 +101,19 @@ class AgentExecutionEvidenceTest {
                 .getValue("negotiatedCapabilities").jsonObject.getValue("promptEmbeddedContext").jsonPrimitive.boolean,
         )
         assertEquals(4, evidence.getValue("events").jsonArray.size)
+        val turn = evidence.getValue("turn").jsonObject
+        listOf(
+            "requestSha256",
+            "wirePromptSha256",
+            "workspaceRootsSha256",
+            "contextInputsSha256",
+            "accessPolicySha256",
+        ).forEach { field ->
+            assertTrue(turn.getValue(field).jsonPrimitive.content.matches(Regex("[0-9a-f]{64}")), field)
+        }
+        val bounds = evidence.getValue("bounds").jsonObject
+        assertEquals("null", bounds.getValue("maximumInputTokens").toString())
+        assertEquals("null", bounds.getValue("maximumOutputTokens").toString())
         assertEquals(1, evidence.getValue("result").jsonObject.getValue("changes").jsonArray.size)
         assertEquals(1, evidence.getValue("policyAudits").jsonObject.getValue("filesystem").jsonArray.size)
         assertEquals(1, evidence.getValue("policyAudits").jsonObject.getValue("terminal").jsonArray.size)

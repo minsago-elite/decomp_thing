@@ -20,6 +20,10 @@ import decompengine.agent.AgentMessageEvent
 import decompengine.agent.AgentPermissionEvent
 import decompengine.agent.AgentPlanEvent
 import decompengine.agent.AgentToolEvent
+import java.nio.ByteBuffer
+import java.nio.CharBuffer
+import java.nio.charset.CharacterCodingException
+import java.nio.charset.CodingErrorAction
 import java.nio.charset.StandardCharsets
 import java.security.MessageDigest
 import java.util.Collections
@@ -117,6 +121,12 @@ internal class BoundedAcpExecutionArtifact private constructor(
         require(eventChanges == result.changes) {
             "ACP event evidence does not contain the complete execution change set"
         }
+        require(request.maximumInputTokens == null || result.usage?.inputTokens != null) {
+            "ACP execution evidence is missing input-token usage required by its ceiling"
+        }
+        require(request.maximumOutputTokens == null || result.usage?.outputTokens != null) {
+            "ACP execution evidence is missing output-token usage required by its ceiling"
+        }
     }
 
     fun toValidatedJson(binding: AcpExecutionOutcomeBinding): String {
@@ -152,9 +162,14 @@ internal class BoundedAcpExecutionArtifact private constructor(
             acp: AcpExecutionEvidenceSnapshot,
         ): BoundedAcpExecutionArtifact = BoundedAcpExecutionArtifact(
             ArchivedAgentRequest(
+                requestSha256 = digestAgentRequest(request),
                 objectiveSha256 = digest(request.objective),
                 objectiveUtf8Bytes = utf8Bytes(request.objective),
                 promptSha256 = promptSha256,
+                wirePromptSha256 = digest(renderAcpWirePrompt(request)),
+                workspaceRootsSha256 = digestWorkspaceRoots(request),
+                contextInputsSha256 = digestContextInputs(request),
+                accessPolicySha256 = digestAgentAccessPolicy(request),
                 workspaceRootIds = request.workspaceRoots.map { it.id },
                 contextInputIds = request.contextInputs.map { it.id },
                 filesystemEnabled = request.accessPolicy.allowedOperations.any { it.name.endsWith("FILE") },
@@ -164,6 +179,8 @@ internal class BoundedAcpExecutionArtifact private constructor(
                 maximumOutputBytes = request.limits.maxOutputBytes,
                 wallClockTimeoutMillis = request.limits.wallClockTimeout.toMillis(),
                 idleTimeoutMillis = request.limits.idleTimeout.toMillis(),
+                maximumInputTokens = request.limits.maxInputTokens,
+                maximumOutputTokens = request.limits.maxOutputTokens,
             ),
             result,
             events,
@@ -398,9 +415,14 @@ private data class ArchivedFileChangeEvent(
 }
 
 private data class ArchivedAgentRequest(
+    val requestSha256: String,
     val objectiveSha256: String,
     val objectiveUtf8Bytes: Int,
     val promptSha256: String,
+    val wirePromptSha256: String,
+    val workspaceRootsSha256: String,
+    val contextInputsSha256: String,
+    val accessPolicySha256: String,
     val workspaceRootIds: List<String>,
     val contextInputIds: List<String>,
     val filesystemEnabled: Boolean,
@@ -410,6 +432,8 @@ private data class ArchivedAgentRequest(
     val maximumOutputBytes: Long,
     val wallClockTimeoutMillis: Long,
     val idleTimeoutMillis: Long,
+    val maximumInputTokens: Long?,
+    val maximumOutputTokens: Long?,
 )
 
 private fun StringBuilder.appendFactoryProvenance(acp: AcpExecutionEvidenceSnapshot) {
@@ -462,9 +486,14 @@ private fun StringBuilder.appendSessionAndTurn(request: ArchivedAgentRequest, re
     append("\n  },")
     append("\n  \"turn\": {")
     append("\n    \"ordinal\": 1,")
+    append("\n    \"requestSha256\": \"").append(request.requestSha256).append("\",")
     append("\n    \"objectiveSha256\": \"").append(request.objectiveSha256).append("\",")
     append("\n    \"objectiveUtf8Bytes\": ").append(request.objectiveUtf8Bytes).append(',')
-    append("\n    \"promptSha256\": \"").append(request.promptSha256).append("\"")
+    append("\n    \"promptSha256\": \"").append(request.promptSha256).append("\",")
+    append("\n    \"wirePromptSha256\": \"").append(request.wirePromptSha256).append("\",")
+    append("\n    \"workspaceRootsSha256\": \"").append(request.workspaceRootsSha256).append("\",")
+    append("\n    \"contextInputsSha256\": \"").append(request.contextInputsSha256).append("\",")
+    append("\n    \"accessPolicySha256\": \"").append(request.accessPolicySha256).append("\"")
     append("\n  },")
 }
 
@@ -478,6 +507,8 @@ private fun StringBuilder.appendBounds(request: ArchivedAgentRequest, events: Li
     append("\n    \"maximumOutputBytes\": ").append(request.maximumOutputBytes).append(',')
     append("\n    \"wallClockTimeoutMillis\": ").append(request.wallClockTimeoutMillis).append(',')
     append("\n    \"idleTimeoutMillis\": ").append(request.idleTimeoutMillis).append(',')
+    append("\n    \"maximumInputTokens\": ").append(request.maximumInputTokens ?: "null").append(',')
+    append("\n    \"maximumOutputTokens\": ").append(request.maximumOutputTokens ?: "null").append(',')
     append("\n    \"workspaceRootIds\": ").appendJsonStrings(request.workspaceRootIds).append(',')
     append("\n    \"contextInputIds\": ").appendJsonStrings(request.contextInputIds).append(',')
     append("\n    \"filesystemCapabilityEnabled\": ").append(request.filesystemEnabled).append(',')
@@ -792,10 +823,114 @@ private fun digestCanonicalMap(values: Map<String, String>): String = digest(
 )
 
 private fun digest(value: String): String = MessageDigest.getInstance("SHA-256")
-    .digest(value.toByteArray(StandardCharsets.UTF_8))
+    .digest(strictUtf8(value))
     .joinToString("") { "%02x".format(it) }
 
-private fun utf8Bytes(value: String): Int = value.toByteArray(StandardCharsets.UTF_8).size
+private fun utf8Bytes(value: String): Int = strictUtf8(value).size
+
+private fun digestAgentRequest(request: AgentExecutionRequest): String = LengthDelimitedEvidenceDigest().apply {
+    field("contract", request.schemaVersion.toString())
+    field("objective", request.objective)
+    field("workspaceRootsSha256", digestWorkspaceRoots(request))
+    field("contextInputsSha256", digestContextInputs(request))
+    field("accessPolicySha256", digestAgentAccessPolicy(request))
+    field("wallClockTimeoutNanos", request.limits.wallClockTimeout.toNanos().toString())
+    field("idleTimeoutNanos", request.limits.idleTimeout.toNanos().toString())
+    field("maximumTurns", request.limits.maxTurns.toString())
+    field("maximumToolCalls", request.limits.maxToolCalls.toString())
+    field("maximumOutputBytes", request.limits.maxOutputBytes.toString())
+    field("maximumInputTokens", request.limits.maxInputTokens?.toString())
+    field("maximumOutputTokens", request.limits.maxOutputTokens?.toString())
+}.finish()
+
+private fun digestWorkspaceRoots(request: AgentExecutionRequest): String = LengthDelimitedEvidenceDigest().apply {
+    field("count", request.workspaceRoots.size.toString())
+    request.workspaceRoots.forEachIndexed { index, root ->
+        field("root[$index].id", root.id)
+        field("root[$index].path", root.path.toString())
+    }
+}.finish()
+
+private fun digestContextInputs(request: AgentExecutionRequest): String = LengthDelimitedEvidenceDigest().apply {
+    field("count", request.contextInputs.size.toString())
+    request.contextInputs.forEachIndexed { index, context ->
+        field("context[$index].id", context.id)
+        field("context[$index].mediaType", context.mediaType)
+        field("context[$index].description", context.description)
+        field("context[$index].content", context.content)
+    }
+}.finish()
+
+private fun digestAgentAccessPolicy(request: AgentExecutionRequest): String = LengthDelimitedEvidenceDigest().apply {
+    val operations = request.accessPolicy.allowedOperations.map { it.name }.sorted()
+    field("allowedOperationCount", operations.size.toString())
+    operations.forEachIndexed { index, operation -> field("allowedOperation[$index]", operation) }
+    val rules = request.accessPolicy.pathRules.sortedWith(
+        compareBy(
+            { it.path.rootId },
+            { it.path.relativePath },
+            { it.recursive },
+            { it.operations.map { operation -> operation.name }.sorted().joinToString(",") },
+        ),
+    )
+    field("pathRuleCount", rules.size.toString())
+    rules.forEachIndexed { index, rule ->
+        field("pathRule[$index].rootId", rule.path.rootId)
+        field("pathRule[$index].relativePath", rule.path.relativePath)
+        field("pathRule[$index].recursive", rule.recursive.toString())
+        val ruleOperations = rule.operations.map { it.name }.sorted()
+        field("pathRule[$index].operationCount", ruleOperations.size.toString())
+        ruleOperations.forEachIndexed { operationIndex, operation ->
+            field("pathRule[$index].operation[$operationIndex]", operation)
+        }
+    }
+}.finish()
+
+/** Exact ACP v1 text renderer mirrored here so its wire bytes are retained by digest. */
+private fun renderAcpWirePrompt(request: AgentExecutionRequest): String = buildString {
+    appendLine(request.objective)
+    if (request.contextInputs.isNotEmpty()) {
+        appendLine()
+        appendLine("Context inputs (immutable):")
+        request.contextInputs.forEach { context ->
+            append("--- ").append(context.id).append(" [").append(context.mediaType).append(']')
+            context.description?.let { append(" — ").append(it) }
+            appendLine()
+            appendLine(context.content)
+        }
+    }
+}
+
+private class LengthDelimitedEvidenceDigest {
+    private val digest = MessageDigest.getInstance("SHA-256")
+
+    fun field(name: String, value: String?) {
+        component(strictUtf8(name))
+        if (value == null) {
+            digest.update(0.toByte())
+        } else {
+            digest.update(1.toByte())
+            component(strictUtf8(value))
+        }
+    }
+
+    fun finish(): String = digest.digest().joinToString("") { "%02x".format(it) }
+
+    private fun component(bytes: ByteArray) {
+        digest.update(ByteBuffer.allocate(Long.SIZE_BYTES).putLong(bytes.size.toLong()).array())
+        digest.update(bytes)
+    }
+}
+
+private fun strictUtf8(value: String): ByteArray = try {
+    val encoded = StandardCharsets.UTF_8.newEncoder()
+        .onMalformedInput(CodingErrorAction.REPORT)
+        .onUnmappableCharacter(CodingErrorAction.REPORT)
+        .encode(CharBuffer.wrap(value))
+    ByteArray(encoded.remaining()).also(encoded::get)
+} catch (failure: CharacterCodingException) {
+    throw IllegalArgumentException("ACP execution evidence text is not valid Unicode", failure)
+}
 
 private fun String.wireName(): String = lowercase().replace('_', '-')
 
@@ -803,7 +938,9 @@ private fun String?.jsonNullable(): String = this?.jsonString() ?: "null"
 
 private fun String.jsonString(): String = buildString {
     append('"')
-    this@jsonString.forEach { character ->
+    var index = 0
+    while (index < this@jsonString.length) {
+        val character = this@jsonString[index]
         when (character) {
             '\\' -> append("\\\\")
             '"' -> append("\\\"")
@@ -812,8 +949,21 @@ private fun String.jsonString(): String = buildString {
             '\n' -> append("\\n")
             '\r' -> append("\\r")
             '\t' -> append("\\t")
-            else -> if (character.code < 0x20) append("\\u%04x".format(character.code)) else append(character)
+            else -> when {
+                character.code < 0x20 -> append("\\u%04x".format(character.code))
+                character.isHighSurrogate() -> {
+                    require(index + 1 < this@jsonString.length && this@jsonString[index + 1].isLowSurrogate()) {
+                        "ACP execution evidence text is not valid Unicode"
+                    }
+                    append(character).append(this@jsonString[++index])
+                }
+                character.isLowSurrogate() -> throw IllegalArgumentException(
+                    "ACP execution evidence text is not valid Unicode",
+                )
+                else -> append(character)
+            }
         }
+        index++
     }
     append('"')
 }
