@@ -355,6 +355,59 @@ class FullTreeFunctionObservationOperationJournalTest {
     }
 
     @Test
+    fun `exact disk evidence requires its typed introduction link`() {
+        val binding = binding()
+        val preparing = FullTreeFunctionObservationOperationTransition.initial(binding)
+        val evidence = diskEvidence(binding)
+        val staged = FullTreeFunctionObservationOperationHistory.validate(
+            binding,
+            listOf(preparing),
+            evidence,
+        )
+        listOf(
+            FullTreeFunctionObservationOperationPhase.LEASED,
+            FullTreeFunctionObservationOperationPhase.RECOVERED_ABORT,
+        ).forEach { phase ->
+            assertFailsWith<FullTreeFunctionObservationOperationJournalException> {
+                staged.requireDiskEvidenceIntroducedAt(phase)
+            }
+        }
+
+        val leased = FullTreeFunctionObservationOperationTransition.leased(binding, preparing, evidence)
+        val leasedHistory = FullTreeFunctionObservationOperationHistory.validate(
+            binding,
+            listOf(preparing, leased),
+            evidence,
+        )
+        assertTrue(
+            leasedHistory.requireDiskEvidenceIntroducedAt(
+                FullTreeFunctionObservationOperationPhase.LEASED,
+            ) === evidence,
+        )
+        assertFailsWith<FullTreeFunctionObservationOperationJournalException> {
+            leasedHistory.requireDiskEvidenceIntroducedAt(
+                FullTreeFunctionObservationOperationPhase.RECOVERED_ABORT,
+            )
+        }
+
+        val aborted = FullTreeFunctionObservationOperationTransition.recoveredAbort(
+            binding,
+            preparing,
+            evidence,
+        )
+        val abortedHistory = FullTreeFunctionObservationOperationHistory.validate(
+            binding,
+            listOf(preparing, aborted),
+            evidence,
+        )
+        assertTrue(
+            abortedHistory.requireDiskEvidenceIntroducedAt(
+                FullTreeFunctionObservationOperationPhase.RECOVERED_ABORT,
+            ) === evidence,
+        )
+    }
+
+    @Test
     fun `locked append only journal persists and reloads exact history`() = withJournalRoot { root ->
         val binding = binding()
         val preparing = FullTreeFunctionObservationOperationTransition.initial(binding)

@@ -547,6 +547,29 @@ internal class FullTreeFunctionObservationOperationHistory private constructor(
     val latest: FullTreeFunctionObservationOperationTransition?
         get() = transitions.lastOrNull()
 
+    /**
+     * Returns only evidence introduced by the requested typed journal link. A staged sidecar beside
+     * PREPARING is deliberately insufficient provenance.
+     */
+    fun requireDiskEvidenceIntroducedAt(
+        phase: FullTreeFunctionObservationOperationPhase,
+    ): FullTreeDiskScratchEvidence {
+        if (phase !in setOf(
+                FullTreeFunctionObservationOperationPhase.LEASED,
+                FullTreeFunctionObservationOperationPhase.RECOVERED_ABORT,
+            )
+        ) journalFail("function-observation disk evidence requires a typed introduction phase")
+        val evidence = diskEvidence
+            ?: journalFail("function-observation history has no exact disk evidence")
+        val introduction = transitions.firstOrNull { it.diskEvidenceSha256 != null }
+            ?: journalFail("function-observation disk evidence is still staged")
+        if (
+            introduction.phase != phase ||
+            introduction.diskEvidenceSha256 != evidence.evidenceSha256
+        ) journalFail("function-observation disk evidence has a different introduction phase")
+        return evidence
+    }
+
     internal companion object {
         fun validate(
             binding: FullTreeFunctionObservationOperationBinding,
