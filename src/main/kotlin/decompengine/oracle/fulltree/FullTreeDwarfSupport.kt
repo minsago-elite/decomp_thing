@@ -16,7 +16,10 @@ import java.util.Collections
 import java.util.zip.InflaterInputStream
 
 /** Aggregate, caller-shared budget for bounded DWARF traversal. */
-internal class FullTreeDwarfParseBudget(private val limit: Long) {
+internal class FullTreeDwarfParseBudget(
+    private val limit: Long,
+    private val checkpoint: (String) -> Unit = {},
+) {
     private var consumed = 0L
 
     init {
@@ -28,8 +31,13 @@ internal class FullTreeDwarfParseBudget(private val limit: Long) {
             throw FullTreeControlException("aggregate parse-step bound exceeded while reading $label")
         }
         consumed++
+        if (consumed == 1L || consumed % FULL_TREE_DWARF_CHECKPOINT_STEPS == 0L) {
+            checkpoint("while parsing DWARF $label")
+        }
     }
 }
+
+private const val FULL_TREE_DWARF_CHECKPOINT_STEPS = 65_536L
 
 /**
  * A decoded compilation-unit header and the bounded range containing its DIE stream.

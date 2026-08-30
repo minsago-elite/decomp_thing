@@ -170,8 +170,10 @@ internal object FullTreeFunctionObservationProducer {
         scope: AuthenticatedFullTreeScope,
         shardId: String,
         controlLimits: FullTreeControlLimits = FullTreeControlLimits(),
+        checkpoint: (String) -> Unit = {},
     ): FullTreeFunctionObservationAuthenticatedInputs {
         FullTreeScopeControl.validate(scope, controlLimits)
+        checkpoint("after authenticating function-observation scope")
         val (inventory, inventoryBytes) = readCanonicalControlObject(
             inventoryPath,
             controlLimits.maximumInventoryBytes,
@@ -179,6 +181,7 @@ internal object FullTreeFunctionObservationProducer {
             "full-tree-inventory",
         )
         FullTreeInventoryControl.validate(inventory, scope, controlLimits)
+        checkpoint("after authenticating function-observation inventory")
         val inventoryArtifactSha256 = OracleArtifacts.sha256(inventoryBytes)
         val shard = FullTreeFunctionObservations.shardInputs(
             inventory,
@@ -204,6 +207,7 @@ internal object FullTreeFunctionObservationProducer {
         controlLimits: FullTreeControlLimits,
         producerLimits: FullTreeFunctionObservationProducerLimits =
             FullTreeFunctionObservationProducerLimits(),
+        checkpoint: (String) -> Unit = {},
         recordScannedDies: (Long) -> Unit,
         accept: (FullTreeObservedSubprogram) -> Unit,
     ): FullTreeFunctionObservationArtifactScan {
@@ -239,12 +243,15 @@ internal object FullTreeFunctionObservationProducer {
                 scratchParent,
                 scope.document,
                 controlLimits,
+                checkpoint,
             )
+            checkpoint("after authenticating rich-artifact compilation units")
             authenticateInventoryAgainstArtifact(inputs.inventory, observedUnits, scope.document)
             val layout = FullTreeElfLayout.scanLayout(
                 artifact,
                 "rich artifact",
                 producerLimits.elfLayoutLimits,
+                checkpoint,
             )
             val executable = FullTreeElfExecutableMembership.fromSorted(layout.executableRanges)
 
@@ -263,6 +270,7 @@ internal object FullTreeFunctionObservationProducer {
                     scope = scope,
                     controlLimits = controlLimits,
                     producerLimits = producerLimits,
+                    checkpoint = checkpoint,
                     recordScannedDies = recordScannedDies,
                     accept = accept,
                 )
@@ -285,11 +293,12 @@ internal object FullTreeFunctionObservationProducer {
         scope: AuthenticatedFullTreeScope,
         controlLimits: FullTreeControlLimits,
         producerLimits: FullTreeFunctionObservationProducerLimits,
+        checkpoint: (String) -> Unit,
         recordScannedDies: (Long) -> Unit,
         accept: (FullTreeObservedSubprogram) -> Unit,
     ): FullTreeFunctionObservationTraversalCounts {
         val info = sections.required(".debug_info")
-        val parseBudget = FullTreeDwarfParseBudget(controlLimits.maximumDwarfParseSteps)
+        val parseBudget = FullTreeDwarfParseBudget(controlLimits.maximumDwarfParseSteps, checkpoint)
         val inventoryUnits = inventory.controlArray("units").controlObjects("inventory units")
         val headers = readAllHeaders(info, inventoryUnits.size, parseBudget)
         val headersByOffset = headers.associateBy { it.offset }

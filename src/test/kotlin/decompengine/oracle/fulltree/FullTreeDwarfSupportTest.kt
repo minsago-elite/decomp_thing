@@ -15,6 +15,21 @@ import kotlin.test.assertTrue
 
 class FullTreeDwarfSupportTest {
     @Test
+    fun `aggregate DWARF budget emits bounded cooperative checkpoints`() {
+        val checkpoints = arrayListOf<String>()
+        val budget = FullTreeDwarfParseBudget(65_536L, checkpoints::add)
+        repeat(65_536) { budget.consume("fixture") }
+        assertEquals(
+            listOf(
+                "while parsing DWARF fixture",
+                "while parsing DWARF fixture",
+            ),
+            checkpoints,
+        )
+        assertFailsWith<FullTreeControlException> { budget.consume("fixture") }
+    }
+
+    @Test
     fun `ULEB128 rejects tenth-byte overflow without rejecting maximum signed long`() {
         val overflow = ByteArray(10) { index -> if (index == 9) 0x02 else 0x80.toByte() }
         assertFailsWith<FullTreeControlException> {

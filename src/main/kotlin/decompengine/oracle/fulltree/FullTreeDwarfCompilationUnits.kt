@@ -19,6 +19,7 @@ internal object FullTreeDwarfCompilationUnits {
         scratchParent: Path,
         scope: kotlinx.serialization.json.JsonObject,
         limits: FullTreeControlLimits,
+        checkpoint: (String) -> Unit = {},
     ): List<FullTreeDwarfCompilationUnit> {
         val authenticatedLimit = scope.controlObject("bounds").controlObject("wholeRun")
             .controlLong("compilationUnits")
@@ -28,7 +29,7 @@ internal object FullTreeDwarfCompilationUnits {
             val abbrev = sections.required(".debug_abbrev")
             val result = arrayListOf<FullTreeDwarfCompilationUnit>()
             var metadataBytes = 0L
-            val parseBudget = FullTreeDwarfParseBudget(limits.maximumDwarfParseSteps)
+            val parseBudget = FullTreeDwarfParseBudget(limits.maximumDwarfParseSteps, checkpoint)
             val headers = FullTreeDwarfCompilationUnitHeaders(info, maximumUnits, parseBudget)
             while (headers.hasNext()) {
                 val header = headers.next()
