@@ -1,9 +1,9 @@
 package decompengine.mvp
 
-import decompengine.acp.AcpExecutionEvidenceSource
 import decompengine.agent.AgentAccessPolicy
 import decompengine.agent.AgentContextInput
 import decompengine.agent.AgentExecutionLimits
+import decompengine.agent.AgentExecutionOutcome
 import decompengine.agent.AgentExecutionRequest
 import decompengine.agent.AgentFileChangeKind
 import decompengine.agent.AgentHarness
@@ -11,9 +11,8 @@ import decompengine.agent.AgentOperation
 import decompengine.agent.AgentPathRule
 import decompengine.agent.AgentStopReason
 import decompengine.agent.AgentWorkspacePath
-import decompengine.project.AcpExecutionOutcomeBinding
 import decompengine.project.AcpExecutionOutcomeIssue
-import decompengine.project.BoundedAcpExecutionArtifact
+import decompengine.project.AcpExecutionReceiptDocument
 import decompengine.project.BoundedAgentExecutionEventRecorder
 import decompengine.project.sha256
 import decompengine.repair.CapturedRepairStagingAuthority
@@ -22,6 +21,7 @@ import decompengine.repair.RepairRequest
 import decompengine.repair.RepairResourceBudget
 import decompengine.repair.RepairResponse
 import decompengine.repair.SourcePatch
+import decompengine.repair.writeRepairEvidenceAtomically
 import decompengine.validation.ProcessInput
 import java.io.BufferedWriter
 import java.nio.ByteBuffer
@@ -44,6 +44,7 @@ import kotlin.io.path.writeText
 
 data class MvpPatchOptions(val inputElf: Path, val outputDir: Path, val assumeYes: Boolean = false)
 class MvpPatchException(message: String) : RuntimeException(message)
+enum class MvpPublicationMode { REQUIRE_ACP_RELEASE, TEST_ONLY_NON_RELEASE }
 
 class MvpPatchWorkflow(
     private val harness: AgentHarness,
@@ -56,6 +57,8 @@ class MvpPatchWorkflow(
     private val agentLimits: AgentExecutionLimits = AgentExecutionLimits(
         maxOutputBytes = resourceBudget.maximumResponseBytes,
     ),
+    private val publicationMode: MvpPublicationMode = MvpPublicationMode.REQUIRE_ACP_RELEASE,
+    private val persistAgentEvidence: (Path, String) -> Unit = ::writeRepairEvidenceAtomically,
 ) {
     fun run(options: MvpPatchOptions) {
         val input = options.inputElf.toAbsolutePath().normalize()
@@ -75,9 +78,9 @@ class MvpPatchWorkflow(
         val logger = StreamingLogger(logs.resolve("patch-${Instant.now().toEpochMilli()}.log"))
         val evidence = MvpRunEvidence(environment, harnessProvenance ?: fallbackHarnessIdentity())
         var phase = "inspect"
-        var reconstructionAgentEvidence: BoundedAcpExecutionArtifact? = null
+        var reconstructionAgentEvidence: AcpExecutionReceiptDocument? = null
         var reconstructionCandidate: ByteArray? = null
-        var patchAgentEvidence: BoundedAcpExecutionArtifact? = null
+        var patchAgentEvidence: AcpExecutionReceiptDocument? = null
         var patchCandidate: ByteArray? = null
         try {
             logger.use {
@@ -110,6 +113,7 @@ class MvpPatchWorkflow(
                     reconstructionRequest,
                     "decompiled.c",
                     evidenceDir.resolve(RECONSTRUCTION_AGENT_EVIDENCE),
+                    evidenceDir.resolve(RECONSTRUCTION_AGENT_ASSESSMENT),
                     "reconstruction-turn",
                 )
                 retainResponse(evidenceDir.resolve("reconstruction-response.md"), reconstruction.response, evidence)
@@ -150,7 +154,8 @@ class MvpPatchWorkflow(
                 evidence.check("CWE-787 reproduction", true, "out-of-bounds write retained at ${evidence.findingSourceLocation}; exit=${finding.exitCode}")
                 evidence.passPhase(phase, "CWE-787 sanitizer failure reproduced and mapped to reconstructed C")
                 retainAgentExecutionEvidence(
-                    evidenceDir.resolve(RECONSTRUCTION_AGENT_EVIDENCE),
+                    evidenceDir.resolve(RECONSTRUCTION_AGENT_ASSESSMENT),
+                    RECONSTRUCTION_AGENT_EVIDENCE,
                     "reconstruction-turn",
                     requireNotNull(reconstructionCandidate),
                     accepted = true,
@@ -173,6 +178,7 @@ class MvpPatchWorkflow(
                     patchRequest,
                     "patched.c",
                     evidenceDir.resolve(PATCH_AGENT_EVIDENCE),
+                    evidenceDir.resolve(PATCH_AGENT_ASSESSMENT),
                     "patch-turn",
                 )
                 retainResponse(evidenceDir.resolve("patch-response.md"), proposal.response, evidence)
@@ -216,18 +222,29 @@ class MvpPatchWorkflow(
                 evidence.check("binary hardening inspection", true, "ELF is PIE with GNU_RELRO and immediate binding")
                 verify(it, release, original, "release verification")
                 evidence.check("behavior validation", true, "exit code and stdout match the observed original default execution")
-                Files.copy(release, finalBinary, StandardCopyOption.REPLACE_EXISTING)
-                finalBinary.toFile().setExecutable(true, true)
                 evidence.passPhase(phase, "all sanitizer, hardening, security, and behavior checks passed")
                 retainAgentExecutionEvidence(
-                    evidenceDir.resolve(PATCH_AGENT_EVIDENCE),
+                    evidenceDir.resolve(PATCH_AGENT_ASSESSMENT),
+                    PATCH_AGENT_EVIDENCE,
                     "patch-turn",
                     requireNotNull(patchCandidate),
                     accepted = true,
                     execution = patchAgentEvidence,
                 )
-                writeMvpSummary(summaryDir.resolve("SUMMARY.md"), output, input, raw, reconstructed, proposedSource, finalBinary, "PASS", null, evidence)
-                it.info("completed: $finalBinary")
+                val result = if (requiresAcpReleaseEvidence()) {
+                    Files.copy(release, finalBinary, StandardCopyOption.REPLACE_EXISTING)
+                    finalBinary.toFile().setExecutable(true, true)
+                    it.info("completed: $finalBinary")
+                    "PASS"
+                } else {
+                    finalBinary.deleteIfExists()
+                    it.info("completed validation in explicit non-release compatibility mode")
+                    "NON_RELEASE"
+                }
+                writeMvpSummary(
+                    summaryDir.resolve("SUMMARY.md"), output, input, raw, reconstructed,
+                    proposedSource, finalBinary, result, null, evidence,
+                )
             }
         } catch (failure: Exception) {
             finalBinary.deleteIfExists()
@@ -235,7 +252,8 @@ class MvpPatchWorkflow(
             if (phase in setOf("reconstruct", "compile", "reproduce")) {
                 reconstructionCandidate?.let { candidate ->
                     retainAgentExecutionEvidence(
-                        evidenceDir.resolve(RECONSTRUCTION_AGENT_EVIDENCE),
+                        evidenceDir.resolve(RECONSTRUCTION_AGENT_ASSESSMENT),
+                        RECONSTRUCTION_AGENT_EVIDENCE,
                         "reconstruction-turn",
                         candidate,
                         accepted = false,
@@ -250,7 +268,8 @@ class MvpPatchWorkflow(
             if (phase in setOf("patch", "verify")) {
                 patchCandidate?.let { candidate ->
                     retainAgentExecutionEvidence(
-                        evidenceDir.resolve(PATCH_AGENT_EVIDENCE),
+                        evidenceDir.resolve(PATCH_AGENT_ASSESSMENT),
+                        PATCH_AGENT_EVIDENCE,
                         "patch-turn",
                         candidate,
                         accepted = false,
@@ -317,7 +336,8 @@ class MvpPatchWorkflow(
     private fun requestCapturedReplacement(
         request: RepairRequest,
         target: String,
-        rejectedEvidencePath: Path,
+        receiptPath: Path,
+        assessmentPath: Path,
         taskId: String,
     ): CapturedAgentReplacement {
         require(target in request.projectFiles) { "captured patch target is absent: $target" }
@@ -330,7 +350,7 @@ class MvpPatchWorkflow(
         requireRequestBudget(request.failureKind, objective, initialFiles)
         lateinit var agentRequest: AgentExecutionRequest
         val eventRecorder = BoundedAgentExecutionEventRecorder()
-        val staged = CapturedRepairStagingAuthority.execute(
+        val staged = CapturedRepairStagingAuthority.executeReceipt(
             harness = harness,
             initialFiles = initialFiles,
             writablePaths = setOf(target),
@@ -358,23 +378,35 @@ class MvpPatchWorkflow(
             },
             onEvent = eventRecorder::record,
         )
-        val result = staged.result
-        val executionEvidence = (harness as? AcpExecutionEvidenceSource)?.let { source ->
-            val snapshot = requireNotNull(source.latestAcpExecutionEvidence()) {
-                "ACP patch turn completed without a coherent execution-evidence snapshot"
-            }
-            BoundedAcpExecutionArtifact.capture(
-                request = agentRequest,
-                promptSha256 = sha256(request.prompt.toByteArray(StandardCharsets.UTF_8)),
-                result = result,
-                events = eventRecorder.snapshot(),
-                acp = snapshot,
-            )
+        val executionEvidence = AcpExecutionReceiptDocument.captureOrNull(
+            request = agentRequest,
+            promptSha256 = sha256(request.prompt.toByteArray(StandardCharsets.UTF_8)),
+            receipt = staged.receipt,
+            events = eventRecorder.receiptSnapshot(),
+            evidenceKind = "decomp-engine.mvp-patch-acp-execution-receipt",
+            taskIdentityField = "taskId",
+            taskId = taskId,
+        )
+        if (executionEvidence != null) {
+            // Persist the immutable invocation before inspecting its terminal result, staged files,
+            // or any workflow validation. A later assessment only binds this document's digest.
+            persistAgentEvidence(receiptPath, executionEvidence.json)
         }
         val observedTarget = staged.files[target] ?: initialFiles.getValue(target)
+        if (executionEvidence != null) {
+            retainAgentExecutionEvidence(
+                assessmentPath,
+                receiptPath.fileName.toString(),
+                taskId,
+                observedTarget,
+                accepted = null,
+                execution = executionEvidence,
+            )
+        }
         fun reject(code: String, message: String): Nothing {
             retainAgentExecutionEvidence(
-                rejectedEvidencePath,
+                assessmentPath,
+                receiptPath.fileName.toString(),
                 taskId,
                 observedTarget,
                 accepted = false,
@@ -383,11 +415,24 @@ class MvpPatchWorkflow(
             )
             throw MvpPatchException(message)
         }
+        val result = when (val outcome = staged.receipt.outcome) {
+            is AgentExecutionOutcome.Returned -> outcome.result
+            is AgentExecutionOutcome.Failed -> reject(
+                "agent-failure-${outcome.failure.kind.name.lowercase().replace('_', '-')}",
+                "patch agent failed before returning a captured replacement",
+            )
+        }
+        if (requiresAcpReleaseEvidence() && executionEvidence == null) {
+            reject("missing-acp-receipt", "ACP patch turn returned without invocation-bound evidence")
+        }
         if (result.stopReason != AgentStopReason.COMPLETED) {
             reject(
                 "agent-stop-${result.stopReason.name.lowercase().replace('_', '-')}",
                 "patch agent stopped without a completed captured replacement",
             )
+        }
+        if (executionEvidence != null && !executionEvidence.releaseComplete) {
+            reject("incomplete-acp-receipt", "ACP patch turn lacks release-complete invocation evidence")
         }
         if (result.changes.size != 1) {
             reject("invalid-change-count", "patch agent must report exactly one changed file")
@@ -429,29 +474,61 @@ class MvpPatchWorkflow(
 
     private fun retainAgentExecutionEvidence(
         path: Path,
+        receiptFileName: String,
         taskId: String,
         source: ByteArray,
-        accepted: Boolean,
-        execution: BoundedAcpExecutionArtifact?,
+        accepted: Boolean?,
+        execution: AcpExecutionReceiptDocument?,
         issue: AcpExecutionOutcomeIssue? = null,
     ) {
         if (execution == null) {
             path.deleteIfExists()
             return
         }
-        path.writeText(
-            execution.toValidatedJson(
-                AcpExecutionOutcomeBinding(
-                    evidenceKind = "decomp-engine.mvp-patch-acp-execution",
-                    taskIdentityField = "taskId",
-                    taskId = taskId,
-                    accepted = accepted,
-                    artifactDigestField = "sourceSha256",
-                    artifactSha256 = sha256(source),
-                    issues = listOfNotNull(issue),
-                ),
-            ),
-        )
+        require(receiptFileName.matches(Regex("[A-Za-z0-9_][A-Za-z0-9_.-]{0,127}"))) {
+            "MVP ACP receipt file name is invalid"
+        }
+        require(taskId.matches(Regex("[A-Za-z0-9_][A-Za-z0-9_.-]{0,127}"))) {
+            "MVP ACP task ID is invalid"
+        }
+        if (accepted == true) {
+            require(execution.releaseComplete && execution.terminalOutcome == "returned-completed") {
+                "incomplete ACP invocation cannot be accepted for MVP release"
+            }
+        }
+        val issueJson = issue?.let { item ->
+            val bytes = item.message.toByteArray(StandardCharsets.UTF_8)
+            "{\"code\":\"${item.code.mvpJsonEscape()}\",\"messageSha256\":\"${sha256(bytes)}\"," +
+                "\"messageUtf8Bytes\":${bytes.size}}"
+        }
+        val payload = buildString {
+            append("{\n  \"schemaVersion\": 1,")
+            append("\n  \"kind\": \"decomp-engine.mvp-acp-workflow-assessment\",")
+            append("\n  \"taskId\": \"").append(taskId.mvpJsonEscape()).append("\",")
+            append("\n  \"receiptPath\": \"evidence/")
+                .append(receiptFileName.mvpJsonEscape()).append("\",")
+            append("\n  \"receiptSha256\": \"").append(execution.sha256).append("\",")
+            append("\n  \"receiptSchemaVersion\": ").append(execution.schemaVersion).append(',')
+            append("\n  \"requestSha256\": \"").append(execution.requestSha256).append("\",")
+            append("\n  \"terminalOutcome\": \"").append(execution.terminalOutcome).append("\",")
+            append("\n  \"receiptReleaseComplete\": ").append(execution.releaseComplete).append(',')
+            append("\n  \"status\": \"").append(when (accepted) {
+                true -> "accepted"
+                false -> "rejected"
+                null -> "pending"
+            }).append("\",")
+            append("\n  \"sourceSha256\": \"").append(sha256(source)).append("\",")
+            append("\n  \"issues\": [")
+            issueJson?.let(::append)
+            append("]\n}\n")
+        }
+        persistAgentEvidence(path, payload)
+    }
+
+    private fun requiresAcpReleaseEvidence(): Boolean = when {
+        publicationMode == MvpPublicationMode.TEST_ONLY_NON_RELEASE -> false
+        harnessProvenance?.startsWith("agent-harness-v1:legacy-openai:") == true -> false
+        else -> true
     }
 
     private fun requireRequestBudget(
@@ -493,12 +570,29 @@ class MvpPatchWorkflow(
 private const val RECONSTRUCTION_TARGET_PLACEHOLDER =
     "/* Authorized ACP target: replace this complete file with reconstructed C11 source. */\n"
 internal const val RECONSTRUCTION_AGENT_EVIDENCE = "reconstruction-agent-execution.json"
+internal const val RECONSTRUCTION_AGENT_ASSESSMENT = "reconstruction-agent-execution-assessment.json"
 internal const val PATCH_AGENT_EVIDENCE = "patch-agent-execution.json"
+internal const val PATCH_AGENT_ASSESSMENT = "patch-agent-execution-assessment.json"
 
 private data class CapturedAgentReplacement(
     val response: RepairResponse,
-    val agentExecutionEvidence: BoundedAcpExecutionArtifact?,
+    val agentExecutionEvidence: AcpExecutionReceiptDocument?,
 )
+
+private fun String.mvpJsonEscape(): String = buildString {
+    this@mvpJsonEscape.forEach { character ->
+        when (character) {
+            '\\' -> append("\\\\")
+            '"' -> append("\\\"")
+            '\b' -> append("\\b")
+            '\u000c' -> append("\\f")
+            '\n' -> append("\\n")
+            '\r' -> append("\\r")
+            '\t' -> append("\\t")
+            else -> if (character.code < 0x20) append("\\u%04x".format(character.code)) else append(character)
+        }
+    }
+}
 
 private fun cleanOutputDirectory(output: Path, input: Path) {
     require(output.root == null || output != output.root) { "refusing to clean unsafe output directory: $output" }

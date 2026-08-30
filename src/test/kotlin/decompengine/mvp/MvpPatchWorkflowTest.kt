@@ -38,6 +38,7 @@ class MvpPatchWorkflowTest {
             approve = { true },
             decompiler = BinaryDecompiler { _, _, _, raw -> raw.writeText("int main(void) { /* ghidra */ }\n") },
             binaryExecution = testExecutionBoundary(),
+            publicationMode = MvpPublicationMode.TEST_ONLY_NON_RELEASE,
         ).run(MvpPatchOptions(input, output))
 
         assertEquals(2, client.requests.size)
@@ -47,9 +48,9 @@ class MvpPatchWorkflowTest {
         assertTrue(output.resolve("decompile/decompiled.c").readText().contains("badge[i]"))
         assertFalse(output.resolve("stale/nested/old.txt").exists())
         assertTrue(output.resolve("patched_c/patched.c").readText().contains("return 0;"))
-        assertTrue(output.resolve("patched_binary/patched_binary").exists())
+        assertFalse(output.resolve("patched_binary/patched_binary").exists())
         val summary = output.resolve("summary/SUMMARY.md").readText()
-        assertTrue(summary.contains("Result: PASS"))
+        assertTrue(summary.contains("Result: NON_RELEASE"))
         assertTrue(summary.contains("## CWE-787 Evidence and Source Mapping"))
         assertTrue(summary.contains("decompiled.c:"))
         assertTrue(summary.contains("## Approved Source Change"))
@@ -70,7 +71,7 @@ class MvpPatchWorkflowTest {
         assertTrue(output.resolve("evidence/patch-response.md").readText().contains("[REDACTED]"))
         assertTrue(Regex("`[0-9a-f]{64}`").containsMatchIn(summary))
 
-        val patched = ProcessBuilder(output.resolve("patched_binary/patched_binary").pathString).start()
+        val patched = ProcessBuilder(output.resolve(".work/patched_release").pathString).start()
         assertEquals(0, patched.waitFor())
         assertEquals("[03] Alexandria Stone\n", patched.inputStream.bufferedReader().readText())
     }
@@ -91,6 +92,7 @@ class MvpPatchWorkflowTest {
                 approve = { false },
                 decompiler = BinaryDecompiler { _, _, _, raw -> raw.writeText("decompiled c") },
                 binaryExecution = testExecutionBoundary(),
+                publicationMode = MvpPublicationMode.TEST_ONLY_NON_RELEASE,
             ).run(MvpPatchOptions(input, output))
         }
 
@@ -137,9 +139,37 @@ class MvpPatchWorkflowTest {
             approve = { error("--yes must bypass the interactive prompt") },
             decompiler = BinaryDecompiler { _, _, _, raw -> raw.writeText("decompiled c") },
             binaryExecution = testExecutionBoundary(),
+            publicationMode = MvpPublicationMode.TEST_ONLY_NON_RELEASE,
         ).run(MvpPatchOptions(input, output, assumeYes = true))
 
         assertTrue(output.resolve("summary/SUMMARY.md").readText().contains("approved by --yes automation"))
+    }
+
+    @Test
+    fun `explicit legacy provenance validates only as non release compatibility`() {
+        val tempDir = createTempDirectory("mvp-legacy-non-release-")
+        val input = compileC(tempDir, "original", originalSource())
+        val output = tempDir.resolve("output")
+        val client = QueueRepairClient(
+            RepairResponse("reconstruct vulnerable source", listOf(SourcePatch("decompiled.c", vulnerableSource()))),
+            RepairResponse("bounded compatibility patch", listOf(SourcePatch("patched.c", patchedSource()))),
+        )
+
+        MvpPatchWorkflow(
+            harness = RepairClientAgentHarness(client),
+            approve = { true },
+            decompiler = BinaryDecompiler { _, _, _, raw -> raw.writeText("int main(void) { /* ghidra */ }\n") },
+            binaryExecution = testExecutionBoundary(),
+            harnessProvenance = "agent-harness-v1:legacy-openai:contract-1:acp-none:sdk-none:" +
+                "implementation-legacy-openai-compatible:configuration-none:deprecated",
+        ).run(MvpPatchOptions(input, output))
+
+        assertFalse(output.resolve("patched_binary/patched_binary").exists())
+        val summary = output.resolve("summary/SUMMARY.md").readText()
+        assertTrue(summary.contains("Result: NON_RELEASE"))
+        assertTrue(summary.contains("legacy-openai"))
+        assertFalse(output.resolve("evidence/$RECONSTRUCTION_AGENT_EVIDENCE").exists())
+        assertFalse(output.resolve("evidence/$PATCH_AGENT_EVIDENCE").exists())
     }
 
     @Test
@@ -156,6 +186,7 @@ class MvpPatchWorkflowTest {
                 harness = RepairClientAgentHarness(client),
                 decompiler = BinaryDecompiler { _, _, _, raw -> raw.writeText("binary-derived ghidra context") },
                 binaryExecution = testExecutionBoundary(),
+                publicationMode = MvpPublicationMode.TEST_ONLY_NON_RELEASE,
             ).run(MvpPatchOptions(input, output, assumeYes = true))
         }
 

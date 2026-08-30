@@ -33,15 +33,46 @@ interface RepairStagingAuthority {
         requestFactory: (AgentWorkspaceRoot) -> AgentExecutionRequest,
         onEvent: (AgentExecutionEvent) -> Unit,
     ): RepairStagingExecution
+
+    /**
+     * Receipt-bearing execution for workflows that must persist the terminal invocation before
+     * interpreting its result. The default keeps third-party version-1 authorities source
+     * compatible, but cannot supply provider evidence; strict production authorities override it.
+     */
+    fun executeReceipt(
+        harness: AgentHarness,
+        initialFiles: Map<String, ByteArray>,
+        writablePaths: Set<String>,
+        budget: RepairResourceBudget,
+        requestFactory: (AgentWorkspaceRoot) -> AgentExecutionRequest,
+        onEvent: (AgentExecutionEvent) -> Unit,
+    ): RepairStagingExecution {
+        lateinit var request: AgentExecutionRequest
+        val execution = execute(
+            harness,
+            initialFiles,
+            writablePaths,
+            budget,
+            { root -> requestFactory(root).also { request = it } },
+            onEvent,
+        )
+        return RepairStagingExecution(
+            captureAgentExecutionReceipt(request) { execution.result },
+            execution.files,
+        )
+    }
 }
 
 enum class RepairStagingAssurance { STRICT_CAPTURED, TEST_ONLY_HOST_DIRECTORY }
 
 class RepairStagingExecution(
-    val result: AgentExecutionResult,
+    val receipt: AgentExecutionReceipt,
     files: Map<String, ByteArray?>,
 ) {
     private val frozenFiles = immutableCapturedFiles(files)
+
+    /** Compatibility projection; receipt-aware workflows persist [receipt] before calling this. */
+    val result: AgentExecutionResult get() = receipt.requireResult()
 
     /** Every read is detached so no caller-visible array is shared with captured staging state. */
     val files: Map<String, ByteArray?> get() = immutableCapturedFiles(frozenFiles)
@@ -166,6 +197,22 @@ object CapturedRepairStagingAuthority : RepairStagingAuthority {
         budget: RepairResourceBudget,
         requestFactory: (AgentWorkspaceRoot) -> AgentExecutionRequest,
         onEvent: (AgentExecutionEvent) -> Unit,
+    ): RepairStagingExecution = executeReceipt(
+        harness,
+        initialFiles,
+        writablePaths,
+        budget,
+        requestFactory,
+        onEvent,
+    ).also { it.receipt.requireResult() }
+
+    override fun executeReceipt(
+        harness: AgentHarness,
+        initialFiles: Map<String, ByteArray>,
+        writablePaths: Set<String>,
+        budget: RepairResourceBudget,
+        requestFactory: (AgentWorkspaceRoot) -> AgentExecutionRequest,
+        onEvent: (AgentExecutionEvent) -> Unit,
     ): RepairStagingExecution {
         val captured = harness as? CapturedRepairAgentHarness
             ?: throw IllegalArgumentException(
@@ -197,15 +244,15 @@ object CapturedRepairStagingAuthority : RepairStagingAuthority {
         // The ACP outer sandbox creates only an empty namespace anchor at this path. It is never a
         // host bind: captured adapters can mutate source state only through the bounded sink.
         val request = requestFactory(AgentWorkspaceRoot("project", ACP_CAPTURED_REPAIR_WORKSPACE))
-        val result = try {
-            captured.executeCaptured(request, harnessView, output, onEvent)
+        val receipt = try {
+            captured.executeCapturedReceipt(request, harnessView, output, onEvent)
         } catch (failure: Throwable) {
             output.finish()
             throw failure
         }
         val files = frozenInitial.mapValuesTo(TreeMap()) { (_, bytes) -> bytes.copyOf() as ByteArray? }
         output.finish().forEach { (path, bytes) -> files[path] = bytes }
-        return RepairStagingExecution(result, files)
+        return RepairStagingExecution(receipt, files)
     }
 }
 

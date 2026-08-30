@@ -90,9 +90,11 @@ internal fun writeMvpSummary(
         "Reconstruction request" to output.resolve("evidence/reconstruction-request.md"),
         "Reconstruction response" to output.resolve("evidence/reconstruction-response.md"),
         "Reconstruction agent execution" to output.resolve("evidence/$RECONSTRUCTION_AGENT_EVIDENCE"),
+        "Reconstruction agent assessment" to output.resolve("evidence/$RECONSTRUCTION_AGENT_ASSESSMENT"),
         "Patch request" to output.resolve("evidence/patch-request.md"),
         "Patch response" to output.resolve("evidence/patch-response.md"),
         "Patch agent execution" to output.resolve("evidence/$PATCH_AGENT_EVIDENCE"),
+        "Patch agent assessment" to output.resolve("evidence/$PATCH_AGENT_ASSESSMENT"),
     )
     val phaseRows = evidence.phases.values.joinToString("\n") {
         "| ${it.name.escapeTable()} | ${it.status} | ${evidence.redact(it.detail).escapeTable()} |"

@@ -359,19 +359,65 @@ internal data class RenderedAcpReceiptArtifact(
     val releaseComplete: Boolean,
 )
 
+/**
+ * A fully rendered, immutable schema-v2 invocation document suitable for immediate persistence.
+ * Workflow assessment is deliberately not part of this value: accepting or rejecting a candidate
+ * must never rewrite what the provider invocation actually returned.
+ */
+internal class AcpExecutionReceiptDocument private constructor(
+    val requestSha256: String,
+    val terminalOutcome: String,
+    val releaseComplete: Boolean,
+    val json: String,
+) {
+    val schemaVersion: Int = 2
+    val sha256: String = sha256(json.toByteArray(StandardCharsets.UTF_8))
+
+    companion object {
+        fun captureOrNull(
+            request: AgentExecutionRequest,
+            promptSha256: String,
+            receipt: AgentExecutionReceipt,
+            events: ArchivedAgentEventSnapshot,
+            evidenceKind: String,
+            taskIdentityField: String,
+            taskId: String,
+            maximumFullArtifactBytes: Int = MAXIMUM_ARCHIVED_EVIDENCE_BYTES,
+        ): AcpExecutionReceiptDocument? {
+            val artifact = BoundedAcpExecutionReceiptArtifact.captureOrNull(
+                request,
+                promptSha256,
+                receipt,
+                events,
+            ) ?: return null
+            val rendered = artifact.render(
+                evidenceKind,
+                taskIdentityField,
+                taskId,
+                maximumFullArtifactBytes,
+            )
+            return AcpExecutionReceiptDocument(
+                artifact.requestSha256,
+                artifact.terminalOutcome,
+                rendered.releaseComplete,
+                rendered.json,
+            )
+        }
+    }
+}
+
 /** Reconstruction-specific adapter for the immutable schema-v2 invocation artifact. */
 class ReconstructionAgentExecutionEvidence private constructor(
-    private val artifact: BoundedAcpExecutionReceiptArtifact,
     private val moduleId: String,
-    private val rendered: RenderedAcpReceiptArtifact,
+    private val document: AcpExecutionReceiptDocument,
 ) {
-    internal val requestSha256: String get() = artifact.requestSha256
-    internal val terminalOutcome: String get() = artifact.terminalOutcome
-    internal val releaseComplete: Boolean get() = rendered.releaseComplete
+    internal val requestSha256: String get() = document.requestSha256
+    internal val terminalOutcome: String get() = document.terminalOutcome
+    internal val releaseComplete: Boolean get() = document.releaseComplete
 
     internal fun toReceiptJson(moduleId: String): String {
         require(moduleId == this.moduleId) { "reconstruction receipt is bound to a different module" }
-        return rendered.json
+        return document.json
     }
 
     internal companion object {
@@ -382,21 +428,19 @@ class ReconstructionAgentExecutionEvidence private constructor(
             receipt: AgentExecutionReceipt,
             events: ArchivedAgentEventSnapshot,
             maximumFullArtifactBytes: Int = MAXIMUM_ARCHIVED_EVIDENCE_BYTES,
-        ): ReconstructionAgentExecutionEvidence? = BoundedAcpExecutionReceiptArtifact.captureOrNull(
-            request,
-            promptSha256,
-            receipt,
-            events,
-        )?.let { artifact ->
+        ): ReconstructionAgentExecutionEvidence? = AcpExecutionReceiptDocument.captureOrNull(
+            request = request,
+            promptSha256 = promptSha256,
+            receipt = receipt,
+            events = events,
+            evidenceKind = "decomp-engine.reconstruction-acp-execution-receipt",
+            taskIdentityField = "moduleId",
+            taskId = moduleId,
+            maximumFullArtifactBytes = maximumFullArtifactBytes,
+        )?.let { document ->
             ReconstructionAgentExecutionEvidence(
-                artifact,
                 moduleId,
-                artifact.render(
-                    evidenceKind = "decomp-engine.reconstruction-acp-execution-receipt",
-                    taskIdentityField = "moduleId",
-                    taskId = moduleId,
-                    maximumFullArtifactBytes = maximumFullArtifactBytes,
-                ),
+                document,
             )
         }
     }

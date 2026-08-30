@@ -8,7 +8,9 @@ import decompengine.mvp.BinaryIsolation
 import decompengine.mvp.MvpPatchOptions
 import decompengine.mvp.MvpPatchWorkflow
 import decompengine.mvp.PATCH_AGENT_EVIDENCE
+import decompengine.mvp.PATCH_AGENT_ASSESSMENT
 import decompengine.mvp.RECONSTRUCTION_AGENT_EVIDENCE
+import decompengine.mvp.RECONSTRUCTION_AGENT_ASSESSMENT
 import decompengine.project.sha256
 import java.nio.file.Files
 import java.nio.file.Path
@@ -73,13 +75,22 @@ class MvpPatchAcpIntegrationTest {
         val patch = executionEvidence(output, PATCH_AGENT_EVIDENCE)
         assertCapturedTurn(reconstruction, "reconstruction-turn", "decompiled.c")
         assertCapturedTurn(patch, "patch-turn", "patched.c")
+        val reconstructionAssessment = executionEvidence(output, RECONSTRUCTION_AGENT_ASSESSMENT)
+        val patchAssessment = executionEvidence(output, PATCH_AGENT_ASSESSMENT)
+        assertAcceptedAssessment(reconstructionAssessment, reconstruction, "reconstruction-turn")
+        assertAcceptedAssessment(patchAssessment, patch, "patch-turn")
         assertFalse(
-            reconstruction.getValue("validation").jsonObject.getValue("sourceSha256").jsonPrimitive.content ==
-                patch.getValue("validation").jsonObject.getValue("sourceSha256").jsonPrimitive.content,
+            reconstructionAssessment.getValue("sourceSha256").jsonPrimitive.content ==
+                patchAssessment.getValue("sourceSha256").jsonPrimitive.content,
         )
 
         val summary = output.resolve("summary/SUMMARY.md").readText()
-        listOf(RECONSTRUCTION_AGENT_EVIDENCE, PATCH_AGENT_EVIDENCE).forEach { name ->
+        listOf(
+            RECONSTRUCTION_AGENT_EVIDENCE,
+            RECONSTRUCTION_AGENT_ASSESSMENT,
+            PATCH_AGENT_EVIDENCE,
+            PATCH_AGENT_ASSESSMENT,
+        ).forEach { name ->
             val artifact = output.resolve("evidence/$name")
             assertTrue(artifact.exists())
             assertTrue(summary.contains("evidence/$name"))
@@ -110,38 +121,104 @@ class MvpPatchAcpIntegrationTest {
         }
 
         assertTrue(failure.message.orEmpty().contains("preserve observed behavior"))
-        val patch = executionEvidence(output, PATCH_AGENT_EVIDENCE)
-        val validation = patch.getValue("validation").jsonObject
-        assertFalse(validation.getValue("accepted").jsonPrimitive.content.toBoolean())
+        val receipt = executionEvidence(output, PATCH_AGENT_EVIDENCE)
+        val assessment = executionEvidence(output, PATCH_AGENT_ASSESSMENT)
+        assertEquals("rejected", assessment.getValue("status").jsonPrimitive.content)
+        assertEquals(sha256(output.resolve("evidence/$PATCH_AGENT_EVIDENCE").readBytes()),
+            assessment.getValue("receiptSha256").jsonPrimitive.content)
+        assertEquals(receipt.getValue("request").jsonObject.getValue("requestSha256").jsonPrimitive.content,
+            assessment.getValue("requestSha256").jsonPrimitive.content)
         assertEquals(
             "workflow-validation-rejected",
-            validation.getValue("issues").jsonArray.single().jsonObject.getValue("code").jsonPrimitive.content,
+            assessment.getValue("issues").jsonArray.single().jsonObject.getValue("code").jsonPrimitive.content,
         )
-        val artifact = output.resolve("evidence/$PATCH_AGENT_EVIDENCE")
+        val artifact = output.resolve("evidence/$PATCH_AGENT_ASSESSMENT")
         val summary = output.resolve("summary/SUMMARY.md").readText()
         assertTrue(summary.contains(sha256(artifact.readBytes())))
         assertFalse(output.resolve("patched_binary/patched_binary").exists())
     }
 
+    @Test
+    fun `ordinary refusal and process failure persist raw receipts before rejected assessment`() {
+        requireLiveSandboxHost()
+        listOf("stop-refusal", "crash-prompt").forEach { mode ->
+            val temporary = createTempDirectory("mvp-patch-acp-$mode-")
+            val config = writeProvisioning(temporary.resolve("acp.json"), mode = mode)
+            val environment = mapOf("ACP_CONFIG_FILE" to config.toString())
+            val strategy = selectPatchStrategy(null, environment)
+            val input = compileC(temporary, "original", originalSource())
+            val output = temporary.resolve("output")
+
+            assertFailsWith<decompengine.mvp.MvpPatchException>(mode) {
+                MvpPatchWorkflow(
+                    harness = strategy.harness,
+                    environment = environment,
+                    approve = { true },
+                    decompiler = BinaryDecompiler { _, _, _, raw -> raw.writeText("int main(void) { /* Ghidra */ }\n") },
+                    binaryExecution = testExecutionBoundary(),
+                    harnessProvenance = strategy.harnessProvenance,
+                ).run(MvpPatchOptions(input, output))
+            }
+
+            val receiptPath = output.resolve("evidence/$RECONSTRUCTION_AGENT_EVIDENCE")
+            val assessmentPath = output.resolve("evidence/$RECONSTRUCTION_AGENT_ASSESSMENT")
+            assertTrue(receiptPath.exists(), mode)
+            assertTrue(assessmentPath.exists(), mode)
+            val receipt = executionEvidence(output, RECONSTRUCTION_AGENT_EVIDENCE)
+            val assessment = executionEvidence(output, RECONSTRUCTION_AGENT_ASSESSMENT)
+            assertFalse(receipt.getValue("lifecycle").jsonObject
+                .getValue("releaseComplete").jsonPrimitive.content.toBoolean(), mode)
+            assertEquals("rejected", assessment.getValue("status").jsonPrimitive.content, mode)
+            assertEquals(sha256(receiptPath.readBytes()),
+                assessment.getValue("receiptSha256").jsonPrimitive.content, mode)
+            assertTrue(assessment.getValue("issues").jsonArray.isNotEmpty(), mode)
+            assertFalse(output.resolve("patched_binary/patched_binary").exists(), mode)
+        }
+    }
+
     private fun assertCapturedTurn(evidence: JsonObject, taskId: String, target: String) {
-        assertEquals("decomp-engine.mvp-patch-acp-execution", evidence.getValue("kind").jsonPrimitive.content)
+        assertEquals(2, evidence.getValue("schemaVersion").jsonPrimitive.content.toInt())
+        assertEquals("decomp-engine.mvp-patch-acp-execution-receipt", evidence.getValue("kind").jsonPrimitive.content)
         assertEquals(taskId, evidence.getValue("taskId").jsonPrimitive.content)
+        assertEquals("acp", evidence.getValue("provider").jsonObject.getValue("id").jsonPrimitive.content)
         assertEquals("acp", evidence.getValue("factoryProvenance").jsonObject.getValue("harness").jsonPrimitive.content)
+        assertTrue(evidence.getValue("lifecycle").jsonObject.getValue("releaseComplete").jsonPrimitive.content.toBoolean())
         assertTrue(evidence.getValue("sandbox").jsonObject.getValue("outerAgentContained").jsonPrimitive.content.toBoolean())
         assertTrue(evidence.getValue("sandbox").jsonObject.getValue("networkIsolated").jsonPrimitive.content.toBoolean())
-        val filesystem = evidence.getValue("policyAudits").jsonObject.getValue("filesystem").jsonArray
+        val filesystem = evidence.getValue("policyAudits").jsonObject.getValue("filesystem")
+            .jsonObject.getValue("records").jsonArray
         assertTrue(filesystem.any { record ->
             val item = record.jsonObject
-            item.getValue("method").jsonPrimitive.content == "fs/write_text_file" &&
-                item.getValue("policyPath").jsonObject.getValue("relativePath").jsonPrimitive.content == target
+            item.getValue("method").jsonObject.getValue("sha256").jsonPrimitive.content ==
+                sha256("fs/write_text_file".toByteArray()) &&
+                item.getValue("policyPath").jsonObject.getValue("relativePath").jsonObject
+                    .getValue("sha256").jsonPrimitive.content == sha256(target.toByteArray())
         })
-        assertTrue(evidence.getValue("policyAudits").jsonObject.getValue("terminal").jsonArray.isEmpty())
-        val changes = evidence.getValue("result").jsonObject.getValue("changes").jsonArray
-        assertEquals(listOf(target), changes.map { it.jsonObject.getValue("relativePath").jsonPrimitive.content })
+        assertTrue(evidence.getValue("policyAudits").jsonObject.getValue("terminal").jsonObject
+            .getValue("records").jsonArray.isEmpty())
+        val outcome = evidence.getValue("outcome").jsonObject
+        assertEquals("returned", outcome.getValue("type").jsonPrimitive.content)
+        val changes = outcome.getValue("result").jsonObject.getValue("changes").jsonObject
+            .getValue("records").jsonArray
+        assertEquals(
+            listOf(sha256(target.toByteArray())),
+            changes.map { it.jsonObject.getValue("relativePath").jsonObject.getValue("sha256").jsonPrimitive.content },
+        )
         assertTrue(
-            evidence.getValue("turn").jsonObject.getValue("accessPolicySha256").jsonPrimitive.content
+            evidence.getValue("request").jsonObject.getValue("accessPolicySha256").jsonPrimitive.content
                 .matches(Regex("[0-9a-f]{64}")),
         )
+        assertFalse(evidence.toString().contains("fs/write_text_file"))
+    }
+
+    private fun assertAcceptedAssessment(assessment: JsonObject, receipt: JsonObject, taskId: String) {
+        assertEquals("decomp-engine.mvp-acp-workflow-assessment", assessment.getValue("kind").jsonPrimitive.content)
+        assertEquals(taskId, assessment.getValue("taskId").jsonPrimitive.content)
+        assertEquals("accepted", assessment.getValue("status").jsonPrimitive.content)
+        assertTrue(assessment.getValue("receiptReleaseComplete").jsonPrimitive.content.toBoolean())
+        assertEquals(receipt.getValue("request").jsonObject.getValue("requestSha256").jsonPrimitive.content,
+            assessment.getValue("requestSha256").jsonPrimitive.content)
+        assertTrue(assessment.getValue("issues").jsonArray.isEmpty())
     }
 
     private fun executionEvidence(output: Path, name: String): JsonObject =

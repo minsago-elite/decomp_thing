@@ -642,6 +642,7 @@ class AcpAgentHarness(
         val changes = if (preflightWorkflow != null) {
             emptyList()
         } else if (capturedFilesystem != null) {
+            evidenceState.reach(AcpExecutionLifecyclePhase.FINAL_WORKSPACE_SNAPSHOT)
             capturedFilesystem.changes()
         } else {
             evidenceState.reach(AcpExecutionLifecyclePhase.FINAL_WORKSPACE_SNAPSHOT)
