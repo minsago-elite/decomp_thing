@@ -21,6 +21,7 @@ class DoctorTest {
         val doctor = Doctor(
             environment = mapOf(
                 "GHIDRA_HOME" to ghidra.toString(),
+                "ACP_HARNESS" to "legacy-openai",
                 "BASE_URL" to "https://models.example.test/v1",
                 "API_KEY" to "must-not-appear",
                 "MODEL" to "test-model",
@@ -76,7 +77,11 @@ class DoctorTest {
         ghidra.writeText("x")
         ghidra.toFile().setExecutable(true)
         val doctor = Doctor(
-            environment = mapOf("GHIDRA_HOME" to ghidra.parent.parent.toString(), "BASE_URL" to "not a URL"),
+            environment = mapOf(
+                "GHIDRA_HOME" to ghidra.parent.parent.toString(),
+                "ACP_HARNESS" to "legacy-openai",
+                "BASE_URL" to "not a URL",
+            ),
             commandProbe = CommandProbe { command, _ ->
                 if (command.first().contains("probe")) CommandProbeResult(0, "") else CommandProbeResult(0, "ok")
             },
@@ -89,5 +94,45 @@ class DoctorTest {
         assertTrue(report.checks.any { it.name == "LLM API key" && !it.passed })
         assertTrue(report.checks.any { it.name == "LLM model" && !it.passed })
         assertTrue(report.checks.any { it.name == "LLM connectivity" && !it.passed })
+    }
+
+    @Test
+    fun `default harness fails closed without ACP provisioning and does not request legacy credentials`() {
+        val temp = createTempDirectory("doctor-acp-default-")
+        val doctor = Doctor(
+            environment = emptyMap(),
+            commandProbe = CommandProbe { _, _ -> CommandProbeResult(0, "ok") },
+            connectivityProbe = ConnectivityProbe { _, _ -> error("ACP diagnostics must not probe a legacy API") },
+        )
+
+        val report = doctor.inspect(DoctorOptions(temp.resolve("output")))
+
+        assertFalse(report.passed)
+        assertTrue(
+            report.checks.any {
+                it.name == "ACP harness" &&
+                    !it.passed &&
+                    it.detail.contains("ACP_CONFIG_FILE is required")
+            },
+            report.checks.toString(),
+        )
+        assertFalse(report.checks.any { it.name.startsWith("LLM") })
+    }
+
+    @Test
+    fun `legacy API checks require explicit deprecated harness selection`() {
+        val temp = createTempDirectory("doctor-legacy-opt-in-")
+        val doctor = Doctor(
+            environment = mapOf("ACP_HARNESS" to "legacy-openai"),
+            commandProbe = CommandProbe { _, _ -> CommandProbeResult(0, "ok") },
+            connectivityProbe = ConnectivityProbe { _, _ -> error("invalid credentials must prevent connection") },
+        )
+
+        val report = doctor.inspect(DoctorOptions(temp.resolve("output")))
+
+        assertTrue(report.checks.any { it.name == "ACP harness" && it.passed && it.detail.contains("deprecated") })
+        assertTrue(report.checks.any { it.name == "LLM base URL" && !it.passed })
+        assertTrue(report.checks.any { it.name == "LLM API key" && !it.passed })
+        assertTrue(report.checks.any { it.name == "LLM model" && !it.passed })
     }
 }

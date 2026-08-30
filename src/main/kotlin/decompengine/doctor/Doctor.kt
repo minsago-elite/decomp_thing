@@ -1,5 +1,8 @@
 package decompengine.doctor
 
+import decompengine.acp.AcpHarnessFactory
+import decompengine.acp.AcpHarnessKind
+import decompengine.acp.AcpHarnessSelection
 import java.net.URI
 import java.net.http.HttpClient
 import java.net.http.HttpRequest
@@ -56,8 +59,11 @@ class Doctor(
         checks += sanitizerCheck()
         checks += bubblewrapCheck()
         checks += outputCheck(options.outputDir)
-        checks += acpHarnessCheck()
-        if (!options.toolsOnly) checks += llmChecks()
+        val harnessSelection = runCatching { AcpHarnessFactory.fromEnvironment(environment) }
+        checks += acpHarnessCheck(harnessSelection)
+        if (!options.toolsOnly && harnessSelection.getOrNull()?.kind == AcpHarnessKind.LEGACY_OPENAI) {
+            checks += llmChecks()
+        }
         return DoctorReport(checks)
     }
 
@@ -70,30 +76,42 @@ class Doctor(
             onFailure = { DoctorCheck(name, false, "$remediation ${it.message.orEmpty()}".trim()) },
         )
 
-    private fun acpHarnessCheck(): DoctorCheck {
-        val harness = environment["ACP_HARNESS"]?.trim()?.lowercase() ?: return DoctorCheck("ACP harness", true, "not configured (DIRECT); set ACP_HARNESS=acp to enable ACP agent harness")
-        if (harness != "acp") return DoctorCheck("ACP harness", true, "harness=$harness (DIRECT)")
-        val executableText = environment["ACP_AGENT_EXECUTABLE"]?.trim().orEmpty()
-        if (executableText.isBlank()) return DoctorCheck("ACP harness", false, "ACP_HARNESS=acp requires ACP_AGENT_EXECUTABLE to be an absolute path to the agent executable")
-        val executable = try { Path.of(executableText).toAbsolutePath().normalize() } catch (e: Exception) { return DoctorCheck("ACP harness", false, "ACP_AGENT_EXECUTABLE is not a valid path: ${e.message}") }
-        if (!Files.isRegularFile(executable) || !Files.isReadable(executable)) return DoctorCheck("ACP harness", false, "ACP agent executable not found or not readable at $executable")
-        if (!executable.isAbsolute) return DoctorCheck("ACP harness", false, "ACP_AGENT_EXECUTABLE must be absolute: $executable")
-        val argsText = environment["ACP_AGENT_ARGS"]?.trim().orEmpty()
-        if ('\u0000' in argsText) return DoctorCheck("ACP harness", false, "ACP_AGENT_ARGS must not contain NUL")
-        val permissionMode = environment["ACP_PERMISSION_MODE"]?.trim() ?: "default-deny"
-        if (permissionMode != "default-deny") return DoctorCheck("ACP harness", false, "ACP_PERMISSION_MODE must be default-deny, got $permissionMode")
-        val timeoutText = environment["ACP_TIMEOUT_SECONDS"]?.trim().orEmpty()
-        if (timeoutText.isNotBlank()) {
-            val seconds = timeoutText.toLongOrNull()
-            if (seconds == null || seconds !in 1..3600) return DoctorCheck("ACP harness", false, "ACP_TIMEOUT_SECONDS must be a number in 1..3600")
-        }
-        val probe = runCatching { commandProbe.run(listOf(executable.toString(), "--version"), null) }
-        val probeDetail = probe.fold(
-            onSuccess = { if (it.exitCode == 0) "executable resolves and --version succeeded" else "executable found at $executable (probe exit ${it.exitCode})" },
-            onFailure = { "executable found at $executable (probe failed: ${it.message})" },
-        )
-        return DoctorCheck("ACP harness", true, "acp configured: $executable ${argsText.take(80)}; $probeDetail; permission=$permissionMode; stdio JSON-RPC, no shell parsing, bounded env, timeouts=${timeoutText.ifBlank { "default" }}")
-    }
+    private fun acpHarnessCheck(selection: Result<AcpHarnessSelection>): DoctorCheck = selection.fold(
+        onSuccess = { resolved ->
+            when (resolved.kind) {
+                AcpHarnessKind.ACP -> {
+                    val configuration = requireNotNull(resolved.configuration)
+                    val executable = configuration.executable
+                    if (!Files.isRegularFile(executable) || !Files.isExecutable(executable)) {
+                        DoctorCheck(
+                            "ACP harness",
+                            false,
+                            "Provisioning was accepted, but the ACP agent is not an executable regular file at $executable.",
+                        )
+                    } else {
+                        DoctorCheck(
+                            "ACP harness",
+                            true,
+                            "Default ACP provisioning accepted: ${resolved.provenance.stableDescriptor}; " +
+                                "the authenticated sandbox and ACP v1 handshake are verified for every execution.",
+                        )
+                    }
+                }
+                AcpHarnessKind.LEGACY_OPENAI -> DoctorCheck(
+                    "ACP harness",
+                    true,
+                    "Explicit legacy-openai compatibility selected (deprecated); migrate to the default ACP harness.",
+                )
+            }
+        },
+        onFailure = { failure ->
+            DoctorCheck(
+                "ACP harness",
+                false,
+                "ACP is the default agent harness and its provisioning is invalid: ${failure.message.orEmpty()}",
+            )
+        },
+    )
 
     private fun ghidraCheck(): DoctorCheck {
         val home = environment["GHIDRA_HOME"]?.trim()?.takeIf(String::isNotEmpty)?.let(Path::of)
