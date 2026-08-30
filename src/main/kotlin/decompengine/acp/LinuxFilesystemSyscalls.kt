@@ -6,6 +6,7 @@ import com.sun.jna.Native
 import com.sun.jna.NativeLong
 import com.sun.jna.Platform
 import com.sun.jna.Pointer
+import com.sun.jna.Structure
 import java.io.ByteArrayOutputStream
 import java.io.IOException
 import java.io.OutputStream
@@ -109,6 +110,48 @@ internal object LinuxFilesystemSyscalls {
         0,
         "open workspace root",
     )
+
+    /** Reads hard filesystem byte/inode capacities through an already-pinned directory. */
+    fun filesystemCapacity(directory: LinuxDescriptor): LinuxFilesystemCapacity =
+        directory.whileOpen { descriptor ->
+            val before = identity(descriptor)
+            if (!before.isDirectory || before.isSymbolicLink) {
+                throw IOException("filesystem capacity requires an authenticated directory")
+            }
+            val statistics = LinuxStatVfs()
+            call("inspect filesystem capacity") { libc.fstatvfs(descriptor, statistics) }
+            statistics.read()
+            val fragmentBytes = statistics.fragmentBytes.toLong()
+            val blocks = statistics.blocks.toLong()
+            val availableBlocks = statistics.availableBlocks.toLong()
+            val totalInodes = statistics.totalInodes.toLong()
+            val availableInodes = statistics.availableInodes.toLong()
+            val maximumNameBytes = statistics.maximumNameBytes.toLong()
+            if (
+                fragmentBytes <= 0L || blocks <= 0L || availableBlocks !in 0L..blocks ||
+                totalInodes <= 0L || availableInodes !in 0L..totalInodes ||
+                maximumNameBytes <= 0L
+            ) throw IOException("filesystem returned unusable capacity counters")
+            val totalBytes = multiplyCapacity(fragmentBytes, blocks, "filesystem byte capacity")
+            val availableBytes = multiplyCapacity(
+                fragmentBytes,
+                availableBlocks,
+                "filesystem available-byte capacity",
+            )
+            val after = identity(descriptor)
+            if (before.key != after.key || before.mountId != after.mountId || !after.isDirectory) {
+                throw IOException("filesystem directory identity changed while capacity was inspected")
+            }
+            LinuxFilesystemCapacity(
+                fragmentBytes = fragmentBytes,
+                totalBytes = totalBytes,
+                availableBytes = availableBytes,
+                totalInodes = totalInodes,
+                availableInodes = availableInodes,
+                maximumNameBytes = maximumNameBytes,
+                readOnly = statistics.flags.toLong() and STATVFS_READ_ONLY != 0L,
+            )
+        }
 
     fun openDirectoryAt(parentFd: Int, name: String): LinuxDescriptor = openDescriptor(
         parentFd,
@@ -766,6 +809,12 @@ internal object LinuxFilesystemSyscalls {
     private fun syscallFailure(operation: String): LinuxSyscallException =
         LinuxSyscallException(operation, Native.getLastError())
 
+    private fun multiplyCapacity(left: Long, right: Long, label: String): Long = try {
+        Math.multiplyExact(left, right)
+    } catch (failure: ArithmeticException) {
+        throw IOException("$label exceeds the supported signed range", failure)
+    }
+
     private fun samePinnedObject(first: LinuxFileIdentity, second: LinuxFileIdentity): Boolean =
         first.key == second.key &&
             first.mountId == second.mountId &&
@@ -825,6 +874,39 @@ internal object LinuxFilesystemSyscalls {
         fun pidfd_send_signal(pidfd: Int, signal: Int, info: Pointer?, flags: Int): Int
         fun listxattr(path: String, list: Pointer?, size: NativeLong): NativeLong
         fun getxattr(path: String, name: String, value: Pointer?, size: NativeLong): NativeLong
+        fun fstatvfs(fd: Int, statistics: LinuxStatVfs): Int
+    }
+
+    /** Linux/glibc 64-bit `struct statvfs`; older spare[6] layouts have the same size/alignment. */
+    @Structure.FieldOrder(
+        "blockBytes",
+        "fragmentBytes",
+        "blocks",
+        "freeBlocks",
+        "availableBlocks",
+        "totalInodes",
+        "freeInodes",
+        "availableInodes",
+        "filesystemId",
+        "flags",
+        "maximumNameBytes",
+        "filesystemType",
+        "spare",
+    )
+    class LinuxStatVfs : Structure() {
+        @JvmField var blockBytes: NativeLong = NativeLong(0)
+        @JvmField var fragmentBytes: NativeLong = NativeLong(0)
+        @JvmField var blocks: NativeLong = NativeLong(0)
+        @JvmField var freeBlocks: NativeLong = NativeLong(0)
+        @JvmField var availableBlocks: NativeLong = NativeLong(0)
+        @JvmField var totalInodes: NativeLong = NativeLong(0)
+        @JvmField var freeInodes: NativeLong = NativeLong(0)
+        @JvmField var availableInodes: NativeLong = NativeLong(0)
+        @JvmField var filesystemId: NativeLong = NativeLong(0)
+        @JvmField var flags: NativeLong = NativeLong(0)
+        @JvmField var maximumNameBytes: NativeLong = NativeLong(0)
+        @JvmField var filesystemType: Int = 0
+        @JvmField var spare: IntArray = IntArray(5)
     }
 
     private const val AT_FDCWD = -100
@@ -852,9 +934,11 @@ internal object LinuxFilesystemSyscalls {
     internal const val ESRCH = 3
     private const val SIGTERM = 15
     private const val SIGKILL = 9
+    private const val STATVFS_READ_ONLY = 1L
     internal const val ENOENT = 2
     internal const val EEXIST = 17
     internal const val ENOTDIR = 20
+    internal const val ENOSPC = 28
     internal const val ELOOP = 40
     private const val BUFFER_BYTES = 16 * 1024
     private const val MAXIMUM_XATTR_NAME_BYTES = 1024L * 1024L
@@ -868,6 +952,16 @@ internal object LinuxFilesystemSyscalls {
 }
 
 internal data class LinuxFileKey(val device: Long, val inode: Long)
+
+internal data class LinuxFilesystemCapacity(
+    val fragmentBytes: Long,
+    val totalBytes: Long,
+    val availableBytes: Long,
+    val totalInodes: Long,
+    val availableInodes: Long,
+    val maximumNameBytes: Long,
+    val readOnly: Boolean,
+)
 
 internal data class LinuxFileIdentity(
     val key: LinuxFileKey,

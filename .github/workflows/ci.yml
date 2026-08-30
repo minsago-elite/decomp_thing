@@ -24,6 +24,7 @@ jobs:
             binutils \
             build-essential \
             dbus-user-session \
+            e2fsprogs \
             python3 \
             systemd \
             util-linux
@@ -31,8 +32,37 @@ jobs:
           bwrap --ro-bind /usr /usr --ro-bind /lib /lib --ro-bind /lib64 /lib64 /usr/bin/true
       - name: Prepare required live ACP sandbox host
         run: scripts/ci-prepare-acp-sandbox.sh
+      - name: Prepare bounded ext4 oracle scratch authority
+        run: bash scripts/ci-prepare-oracle-ext4-scratch.sh
       - name: Run JVM and Kotlin checks
+        env:
+          DECOMP_REQUIRE_ORACLE_EXT4_SCRATCH: "true"
         run: scripts/ci.sh
+      - name: Release bounded ext4 oracle scratch authority
+        if: always()
+        run: |
+          if [[ -n "${DECOMP_TEST_ORACLE_EXT4_SCRATCH:-}" ]]; then
+            sudo -n umount "$DECOMP_TEST_ORACLE_EXT4_SCRATCH"
+            if mountpoint --quiet "$DECOMP_TEST_ORACLE_EXT4_SCRATCH"; then
+              echo "bounded ext4 oracle scratch remained mounted" >&2
+              exit 1
+            fi
+            sudo -n rmdir "$DECOMP_TEST_ORACLE_EXT4_SCRATCH"
+            sudo -n rmdir "$(dirname "$DECOMP_TEST_ORACLE_EXT4_SCRATCH")"
+          fi
+          if [[ -n "${DECOMP_TEST_ORACLE_EXT4_IMAGE:-}" ]]; then
+            for attempt in {1..20}; do
+              if [[ -z "$(sudo -n losetup --associated "$DECOMP_TEST_ORACLE_EXT4_IMAGE")" ]]; then
+                break
+              fi
+              if ((attempt == 20)); then
+                echo "bounded ext4 oracle scratch retained a loop device" >&2
+                exit 1
+              fi
+              sleep 0.1
+            done
+            rm -f "$DECOMP_TEST_ORACLE_EXT4_IMAGE"
+          fi
       - uses: actions/upload-artifact@v7
         if: always()
         with:

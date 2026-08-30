@@ -16,6 +16,22 @@ import kotlin.test.assertTrue
 
 class LinuxFilesystemSyscallsTest {
     @Test
+    fun `filesystem capacity is read through the pinned directory descriptor`() {
+        withLinuxDirectory("linux-syscall-capacity-") { path, directory ->
+            val capacity = LinuxFilesystemSyscalls.filesystemCapacity(directory)
+            val store = Files.getFileStore(path)
+
+            assertEquals(store.totalSpace, capacity.totalBytes)
+            assertTrue(capacity.fragmentBytes > 0L)
+            assertTrue(capacity.availableBytes in 0L..capacity.totalBytes)
+            assertTrue(capacity.totalInodes > 0L)
+            assertTrue(capacity.availableInodes in 0L..capacity.totalInodes)
+            assertTrue(capacity.maximumNameBytes >= 255L)
+            assertFalse(capacity.readOnly)
+        }
+    }
+
+    @Test
     fun `regular files can be opened reopened and synchronized through descriptors`() {
         withLinuxDirectory("linux-syscall-regular-") { _, directory ->
             val content = "descriptor-owned-state".toByteArray()
