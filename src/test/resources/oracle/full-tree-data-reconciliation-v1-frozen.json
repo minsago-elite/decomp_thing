@@ -1,0 +1,102 @@
+{
+  "abiObjects": [
+    {
+      "aliasName": "-object",
+      "elfGlobalId": "global-rva-0x20",
+      "kind": "vtable",
+      "ownerMangledName": "Fixture",
+      "ownerShardIds": [
+        "elf-only"
+      ],
+      "resolvedSlots": 1,
+      "slots": 2
+    },
+    {
+      "aliasName": "😀-object",
+      "elfGlobalId": "global-rva-0x20",
+      "kind": "vtable",
+      "ownerMangledName": "Fixture",
+      "ownerShardIds": [
+        "elf-only"
+      ],
+      "resolvedSlots": 1,
+      "slots": 2
+    }
+  ],
+  "counts": {
+    "abiObjects": 2,
+    "abiResolvedSlots": 2,
+    "abiSlots": 4,
+    "dwarfGlobals": 4,
+    "dwarfOnlyScoredGlobals": 1,
+    "dwarfScoredGlobals": 3,
+    "dwarfTypes": 1,
+    "dwarfUnobservableGlobals": 1,
+    "elfGlobals": 3,
+    "elfOnlyGlobals": 1,
+    "matchedElfGlobals": 2,
+    "unexplainedEntities": 0
+  },
+  "dwarfOnlyScoredGlobals": [
+    {
+      "addressRva": "0x99",
+      "shardId": "shard-b",
+      "truthId": "global-33333333333333333333333333333333"
+    }
+  ],
+  "globals": [
+    {
+      "address": "0x10",
+      "addressKind": "image-rva",
+      "aliasNames": [
+        "image_a"
+      ],
+      "dwarfTruthIds": [
+        "global-11111111111111111111111111111111"
+      ],
+      "elfGlobalId": "global-rva-0x10",
+      "ownerShardIds": [
+        "shard-a"
+      ],
+      "reconciliation": "matched-by-rva"
+    },
+    {
+      "address": "0x20",
+      "addressKind": "image-rva",
+      "aliasNames": [
+        "-object",
+        "😀-object"
+      ],
+      "dwarfTruthIds": [],
+      "elfGlobalId": "global-rva-0x20",
+      "ownerShardIds": [
+        "elf-only"
+      ],
+      "reconciliation": "elf-only"
+    },
+    {
+      "address": "0x8",
+      "addressKind": "tls-offset",
+      "aliasNames": [
+        "_tls"
+      ],
+      "dwarfTruthIds": [
+        "global-22222222222222222222222222222222"
+      ],
+      "elfGlobalId": "global-tls-0x8",
+      "ownerShardIds": [
+        "shard-a"
+      ],
+      "reconciliation": "matched-tls-by-linkage-name"
+    }
+  ],
+  "oracle": {
+    "configurationSha256": "753a61d45f5af7be542102a0d06a55d237075673f822dcb1e8b3f011a4588815",
+    "dataTruthIndexSha256": "714ce2ecb009ded8d993610d625d361eb49ab34d3214c3a0c0158f9e7576fe78",
+    "elfDataIndexSha256": "1e5a170df0ccf390d123f2638c678e17655973837696067c32d424dfc7421623",
+    "inventoryIndexSha256": "9f77d14b6a10351e0d89f1f214d29dcbcf050e27c89ee78c442a5ddf7c6fd4a8",
+    "scopeSha256": "aeca7101bf0bdb485fc21e6257ca5c64f6321d8d1a316dbf008f7ccb96c30602"
+  },
+  "reportSha256": "5c6e42381fdc2977928ff534438455f19e19c385d21cae78c3c47f70968899e3",
+  "schemaVersion": 1
+}
