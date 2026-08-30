@@ -134,7 +134,7 @@ class FullTreeFunctionObservationProducerComposedTest {
         dieLimits = FullTreeDwarfDieLimits(
             maximumPhysicalRecords = 6,
             maximumNonNullRecords = 5,
-            maximumAttributes = 15,
+            maximumAttributes = 16,
             maximumTreeDepth = 1,
             maximumRetainedBytes = 64 * 1024,
         ),
@@ -370,6 +370,7 @@ private object ComposedFunctionObservationElf {
                     0x3bL to FULL_TREE_DW_FORM_DATA1,
                     0x39L to FULL_TREE_DW_FORM_DATA1,
                     0x3cL to FULL_TREE_DW_FORM_FLAG_PRESENT,
+                    0x1cL to FULL_TREE_DW_FORM_UDATA,
                 ),
             )
             abbreviation(
@@ -410,6 +411,10 @@ private object ComposedFunctionObservationElf {
         dies.write(uleb(2))
         dies.write(utf8z("chained_target"))
         dies.write(byteArrayOf(1, 37, 9))
+        dies.write(byteArrayOf(
+            0xff.toByte(), 0xff.toByte(), 0xff.toByte(), 0xff.toByte(), 0xff.toByte(),
+            0xff.toByte(), 0xff.toByte(), 0xff.toByte(), 0xff.toByte(), 0x01,
+        )) // DW_AT_const_value = ULong.MAX_VALUE
 
         val specificationDieOffset = 11 + dies.size()
         dies.write(uleb(3))

@@ -874,6 +874,7 @@ private fun functionAttributeContext(attribute: FullTreeDwarfAbbreviationAttribu
     when (attribute.name) {
         DW_AT_RANGES -> FullTreeDwarfFormContext.RANGE_LIST
         DW_AT_ENTRY_PC,
+        DW_AT_CONST_VALUE,
         DW_AT_DECL_FILE,
         DW_AT_DECL_LINE,
         DW_AT_DECL_COLUMN,
@@ -955,6 +956,7 @@ private const val DW_AT_NAME = 0x03L
 private const val DW_AT_STMT_LIST = 0x10L
 private const val DW_AT_LOW_PC = 0x11L
 private const val DW_AT_COMP_DIR = 0x1bL
+private const val DW_AT_CONST_VALUE = 0x1cL
 private const val DW_AT_INLINE = 0x20L
 private const val DW_AT_ABSTRACT_ORIGIN = 0x31L
 private const val DW_AT_DECL_COLUMN = 0x39L

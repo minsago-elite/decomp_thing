@@ -179,16 +179,26 @@ internal object FullTreeDwarfDies {
                 }
                 sharedParseBudget.consume("DWARF DIE attributes")
                 val context = contextForAttribute(attribute)
-                val value = FullTreeDwarfForms.read(
-                    cursor = cursor,
-                    form = attribute.form,
-                    implicitConstant = attribute.implicitConstant,
-                    version = header.version,
-                    addressSize = header.addressSize,
-                    offsetSize = header.offsetSize,
-                    limits = controlLimits,
-                    context = context,
-                )
+                val attributeOffset = cursor.position
+                val value = try {
+                    FullTreeDwarfForms.read(
+                        cursor = cursor,
+                        form = attribute.form,
+                        implicitConstant = attribute.implicitConstant,
+                        version = header.version,
+                        addressSize = header.addressSize,
+                        offsetSize = header.offsetSize,
+                        limits = controlLimits,
+                        context = context,
+                    )
+                } catch (failure: FullTreeControlException) {
+                    throw FullTreeControlException(
+                        "DWARF DIE 0x${recordOffset.toString(16)} attribute " +
+                            "0x${attribute.name.toString(16)} form 0x${attribute.form.toString(16)} " +
+                            "at 0x${attributeOffset.toString(16)} cannot be decoded: ${failure.message}",
+                        failure,
+                    )
+                }
                 decodedAttributes = addCount(decodedAttributes, 1L, "DWARF decoded-attribute count")
                 retained.charge(
                     addCount(
