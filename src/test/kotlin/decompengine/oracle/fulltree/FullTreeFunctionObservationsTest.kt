@@ -453,14 +453,30 @@ class FullTreeFunctionObservationsTest {
         validate(coalescedDocument, fixture, input)
 
         val frozen = FullTreeFunctionObservationAccumulator(input)
-        repeat(3) { frozen.recordScannedDie() }
+        frozen.recordScannedDies(3L)
         frozen.accept(observation)
-        frozen.finish(
+        val frozenDocument = frozen.finish(
             fixture.inventory.string("indexSha256"),
             fixture.scope.objectValue("oracle").string("richArtifactSha256"),
             fixture.scopeSha256,
         )
+        assertEquals(
+            3L,
+            (frozenDocument.objectValue("counts")["scannedDies"] as JsonPrimitive).content.toLong(),
+        )
         assertFailsWithMessage("already frozen") { frozen.recordScannedDie() }
+
+        val invalidIncrement = FullTreeFunctionObservationAccumulator(input)
+        assertFailsWithMessage("increment is invalid") { invalidIncrement.recordScannedDies(0L) }
+
+        val scannedBound = FullTreeFunctionObservationAccumulator(
+            input,
+            FullTreeFunctionObservationAccumulatorLimits(
+                maximumScannedDies = 2L,
+                maximumSubprograms = 2L,
+            ),
+        )
+        assertFailsWithMessage("exceeds its DIE bound") { scannedBound.recordScannedDies(3L) }
     }
 
     private fun assertFailsWithMessage(fragment: String, block: () -> Unit) {

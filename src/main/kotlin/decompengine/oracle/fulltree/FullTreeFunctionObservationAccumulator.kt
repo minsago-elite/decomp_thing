@@ -89,8 +89,16 @@ internal class FullTreeFunctionObservationAccumulator(
 
     /** Records every physical DIE record, including abbreviation-code-zero null records. */
     fun recordScannedDie() {
+        recordScannedDies(1L)
+    }
+
+    /** Charges an already bounded, independently counted physical DIE stream in one step. */
+    fun recordScannedDies(count: Long) {
         requireMutable()
-        scannedDies = increment(scannedDies, "scanned DIE")
+        if (count <= 0L) {
+            accumulatorFail("function-observation scanned-DIE increment is invalid")
+        }
+        scannedDies = add(scannedDies, count, "scanned DIE")
         if (scannedDies > limits.maximumScannedDies) {
             accumulatorFail("function-observation scan exceeds its DIE bound")
         }
