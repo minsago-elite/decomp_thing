@@ -468,7 +468,9 @@ internal class FullTreeDiskScratchEvidence private constructor(
  *
  * This type proves only aggregate scratch capacity and identity. It cannot by itself authorize a
  * release: stable operation recovery, worker/cgroup evidence, and whole-run accounting remain
- * separate mandatory authorities.
+ * separate mandatory authorities. Closing or abandoning the handle preserves every filesystem
+ * member for cold recovery; requireCleanAndRelease is this published handle's only destructive
+ * release operation.
  */
 internal class FullTreeDiskScratchLease internal constructor(
     val scratchParent: Path,
@@ -547,6 +549,7 @@ internal class FullTreeDiskScratchLease internal constructor(
         }
     }
 
+    /** Destructive release; the coordinator must independently prove every release precondition. */
     @Synchronized
     fun requireCleanAndRelease() {
         check(!closed) { "disk-scratch lease is closed" }
@@ -584,18 +587,18 @@ internal class FullTreeDiskScratchLease internal constructor(
         } catch (releaseFailure: Throwable) {
             failure = releaseFailure
         } finally {
-            closed = true
-            runCatching { leaseDescriptor.close() }.exceptionOrNull()?.let { closeFailure ->
-                if (failure == null) failure = closeFailure else failure.addSuppressed(closeFailure)
-            }
-            runCatching { LinuxFilesystemSyscalls.unlock(mountDescriptor) }.exceptionOrNull()?.let { unlockFailure ->
-                if (failure == null) failure = unlockFailure else failure.addSuppressed(unlockFailure)
-            }
-            runCatching { mountDescriptor.close() }.exceptionOrNull()?.let { closeFailure ->
-                if (failure == null) failure = closeFailure else failure.addSuppressed(closeFailure)
-            }
+            failure = closeDescriptors(failure)
         }
         failure?.let { throw it }
+    }
+
+    /**
+     * Closes pinned descriptors and releases the cooperative flock without changing lease residue.
+     * This operation is idempotent and is the safe exceptional-unwinding path.
+     */
+    @Synchronized
+    fun abandonForRecovery() {
+        closeDescriptors(priorFailure = null)?.let { throw it }
     }
 
     private fun requireLeaseRecord() {
@@ -617,9 +620,23 @@ internal class FullTreeDiskScratchLease internal constructor(
         }
     }
 
-    override fun close() {
-        if (!closed) requireCleanAndRelease()
+    private fun closeDescriptors(priorFailure: Throwable?): Throwable? {
+        if (closed) return priorFailure
+        closed = true
+        var failure = priorFailure
+        runCatching { leaseDescriptor.close() }.exceptionOrNull()?.let { closeFailure ->
+            if (failure == null) failure = closeFailure else failure.addSuppressed(closeFailure)
+        }
+        runCatching { LinuxFilesystemSyscalls.unlock(mountDescriptor) }.exceptionOrNull()?.let { unlockFailure ->
+            if (failure == null) failure = unlockFailure else failure.addSuppressed(unlockFailure)
+        }
+        runCatching { mountDescriptor.close() }.exceptionOrNull()?.let { closeFailure ->
+            if (failure == null) failure = closeFailure else failure.addSuppressed(closeFailure)
+        }
+        return failure
     }
+
+    override fun close() = abandonForRecovery()
 }
 
 internal enum class FullTreeDiskScratchColdPopulation {

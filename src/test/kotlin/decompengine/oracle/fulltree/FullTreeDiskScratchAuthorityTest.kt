@@ -281,6 +281,7 @@ class FullTreeDiskScratchAuthorityTest {
         val operation = operation()
         val lease = FullTreeDiskScratchAuthority.acquireDedicatedFilesystem(mount, operation, policy)
         var active: Path? = null
+        var released = false
         try {
             lease.requireCurrent(FullTreeDiskScratchStage.AUTHORIZED)
             assertFailsWith<FullTreeDiskScratchException> {
@@ -320,11 +321,112 @@ class FullTreeDiskScratchAuthorityTest {
             lease.requireCurrent(FullTreeDiskScratchStage.BEFORE_PUBLICATION)
             lease.requireCurrent(FullTreeDiskScratchStage.AFTER_PUBLICATION)
             lease.requireCleanAndRelease()
+            released = true
             assertTrue(Files.list(mount).use { it.findAny().isEmpty })
         } finally {
             active?.let(Files::deleteIfExists)
+            if (!released) runCatching { lease.requireCleanAndRelease() }
             runCatching { lease.close() }
         }
+    }
+
+    @Test
+    fun `closing a live ext4 lease preserves exact residue for cold recovery`() {
+        val configured = System.getenv("DECOMP_TEST_ORACLE_EXT4_SCRATCH")
+        assumeTrue(
+            !configured.isNullOrBlank(),
+            "set DECOMP_TEST_ORACLE_EXT4_SCRATCH for live lease abandonment coverage",
+        )
+        val mount = Path.of(configured).toAbsolutePath().normalize()
+        val policy = FullTreeDiskScratchPolicy(
+            requiredAvailableBytes = 1,
+            maximumFilesystemBytes = EXPECTED_MAXIMUM_FILESYSTEM_BYTES,
+            requiredAvailableInodes = 4,
+            maximumFilesystemInodes = EXPECTED_MAXIMUM_FILESYSTEM_INODES,
+        )
+
+        listOf(false, true).forEach { activeRun ->
+            val operation = operation(if (activeRun) "5" else "4")
+            val leaseRoot = mount.resolve(".decomp-oracle-lease-${operation.operationId}")
+            val recordPath = leaseRoot.resolve("lease.json")
+            val runPath = leaseRoot.resolve(runDirectoryName(operation.operationId))
+            var lease: FullTreeDiskScratchLease? = null
+            try {
+                assertTrue(Files.list(mount).use { it.findAny().isEmpty })
+                val acquired = FullTreeDiskScratchAuthority.acquireDedicatedFilesystem(
+                    mount,
+                    operation,
+                    policy,
+                )
+                lease = acquired
+                if (activeRun) {
+                    Files.createDirectory(runPath)
+                    Files.setPosixFilePermissions(runPath, PosixFilePermissions.fromString("rwx------"))
+                    acquired.requireCurrent(FullTreeDiskScratchStage.BEFORE_LAUNCH)
+                } else {
+                    acquired.requireCurrent(FullTreeDiskScratchStage.AUTHORIZED)
+                }
+                val expectedEvidence = acquired.evidence
+                val recordBytes = Files.readAllBytes(recordPath)
+                val expectedRecord = FullTreeDiskScratchLeaseRecord.parseCanonical(recordBytes)
+                val mountNames = entryNames(mount)
+                val leaseNames = entryNames(leaseRoot)
+
+                assertFailsWith<FullTreeDiskScratchException> {
+                    FullTreeDiskScratchAuthority.openExistingReadOnly(mount, operation, policy)
+                }
+                if (activeRun) {
+                    acquired.close()
+                    acquired.close()
+                    acquired.abandonForRecovery()
+                } else {
+                    assertFailsWith<SimulatedLeaseUseFailure> {
+                        acquired.use { throw SimulatedLeaseUseFailure() }
+                    }
+                    acquired.abandonForRecovery()
+                    acquired.abandonForRecovery()
+                    acquired.close()
+                }
+
+                assertFailsWith<IllegalStateException> {
+                    acquired.requireCurrent(FullTreeDiskScratchStage.AUTHORIZED)
+                }
+                assertFailsWith<IllegalStateException> {
+                    acquired.requireCleanAndRelease()
+                }
+                assertEquals(mountNames, entryNames(mount))
+                assertEquals(leaseNames, entryNames(leaseRoot))
+                assertEquals(recordBytes.toList(), Files.readAllBytes(recordPath).toList())
+                assertEquals(
+                    expectedEvidence.canonicalBytes().toList(),
+                    acquired.evidence.canonicalBytes().toList(),
+                )
+
+                FullTreeDiskScratchAuthority.openExistingReadOnly(mount, operation, policy).use { cold ->
+                    val snapshot = cold.requireCurrent(expectedEvidence)
+                    val expectedPopulation = if (activeRun) {
+                        FullTreeDiskScratchColdPopulation.ACTIVE_OPERATION_RUN
+                    } else {
+                        FullTreeDiskScratchColdPopulation.RECORD_ONLY
+                    }
+                    assertEquals(expectedEvidence.leaseRecordSha256, snapshot.leaseRecordSha256)
+                    assertEquals(expectedRecord.recordSha256, snapshot.recordSelfSha256)
+                    assertEquals(expectedPopulation, snapshot.population)
+                    assertEquals(expectedPopulation, cold.requireCurrent(expectedEvidence).population)
+                }
+
+                assertEquals(mountNames, entryNames(mount))
+                assertEquals(leaseNames, entryNames(leaseRoot))
+                assertEquals(recordBytes.toList(), Files.readAllBytes(recordPath).toList())
+                FullTreeDiskScratchAuthority.openExistingReadOnly(mount, operation, policy).close()
+            } finally {
+                runCatching { lease?.abandonForRecovery() }
+                Files.deleteIfExists(runPath)
+                Files.deleteIfExists(recordPath)
+                Files.deleteIfExists(leaseRoot)
+            }
+        }
+        assertTrue(Files.list(mount).use { it.findAny().isEmpty })
     }
 
     @Test
@@ -587,6 +689,8 @@ class FullTreeDiskScratchAuthorityTest {
     private fun sha256(bytes: ByteArray): String =
         java.security.MessageDigest.getInstance("SHA-256").digest(bytes)
             .joinToString("") { byte -> "%02x".format(byte) }
+
+    private class SimulatedLeaseUseFailure : RuntimeException()
 
     private fun leaseRecord(): FullTreeDiskScratchLeaseRecord = FullTreeDiskScratchLeaseRecord.create(
         operation = operation(),
