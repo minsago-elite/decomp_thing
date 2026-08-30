@@ -59,6 +59,37 @@ class OracleArtifactsTest {
     }
 
     @Test
+    fun `bounded reads reject artifact modes writable by untrusted principals`() {
+        val directory = createTempDirectory("oracle-untrusted-file-").toAbsolutePath().normalize()
+        val target = directory.resolve("artifact.json")
+        target.writeBytes("{}\n".toByteArray())
+
+        Files.setPosixFilePermissions(target, PosixFilePermissions.fromString("r--------"))
+        assertContentEquals("{}\n".toByteArray(), OracleArtifacts.read(target).bytes)
+
+        listOf("rw-rw----", "rw-----w-").forEach { mode ->
+            Files.setPosixFilePermissions(target, PosixFilePermissions.fromString(mode))
+            assertFailsWith<OracleArtifactException>("mode $mode was accepted") {
+                OracleArtifacts.read(target)
+            }
+        }
+    }
+
+    @Test
+    fun `bounded reads reject permissions changed after the file is opened`() {
+        val directory = createTempDirectory("oracle-file-mode-race-").toAbsolutePath().normalize()
+        val target = directory.resolve("artifact.json")
+        target.writeBytes("{}\n".toByteArray())
+        Files.setPosixFilePermissions(target, PosixFilePermissions.fromString("rw-------"))
+
+        assertFailsWith<OracleArtifactException> {
+            OracleArtifacts.read(target, OracleArtifactLimits()) {
+                Files.setPosixFilePermissions(target, PosixFilePermissions.fromString("r--------"))
+            }
+        }
+    }
+
+    @Test
     fun `publication rejects unsafe targets parents and oversized payloads without mutation`() {
         val directory = createTempDirectory("oracle-publish-reject-").toAbsolutePath().normalize()
         val targetDirectory = directory.resolve("not-a-file").createDirectory()

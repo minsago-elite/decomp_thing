@@ -42,9 +42,10 @@ class OracleArtifactSnapshot internal constructor(content: ByteArray) {
 /**
  * Bounded reads and durable same-directory publication for canonical oracle artifacts.
  *
- * The immediate parent must not be writable by group or other principals. Java NIO does not expose
- * descriptor-relative stat/rename operations, so cooperating code running as the directory owner is
- * part of the trusted process boundary and must not concurrently replace artifact pathnames.
+ * The artifact and its immediate parent must not be writable by group or other principals. Java NIO
+ * does not expose descriptor-relative stat/rename operations or the identity of an open channel, so
+ * both the regular-file owner and directory owner are cooperating members of the trusted process
+ * boundary. They must not mutate file contents or replace pathnames during an operation.
  */
 object OracleArtifacts {
     fun sha256(bytes: ByteArray): String =
@@ -52,16 +53,26 @@ object OracleArtifacts {
             (byte.toInt() and 0xff).toString(16).padStart(2, '0')
         }
 
-    fun read(path: Path, limits: OracleArtifactLimits = OracleArtifactLimits()): OracleArtifactSnapshot {
+    fun read(path: Path, limits: OracleArtifactLimits = OracleArtifactLimits()): OracleArtifactSnapshot =
+        read(path, limits) {}
+
+    /** Deterministic fault-injection seam; post-open validation remains mandatory after [afterOpen]. */
+    internal fun read(
+        path: Path,
+        limits: OracleArtifactLimits,
+        afterOpen: () -> Unit,
+    ): OracleArtifactSnapshot {
         val target = validatedAbsolutePath(path)
         validateParentDirectory(target.parent)
         requireTrustedDirectory(target.parent)
         val before = readRegularFileAttributes(target)
+        val beforePermissions = readTrustedArtifactPermissions(target)
         val expectedSize = checkedSize(before.size(), limits)
         val bytes = ByteArray(expectedSize)
 
         try {
             FileChannel.open(target, StandardOpenOption.READ, LinkOption.NOFOLLOW_LINKS).use { channel ->
+                afterOpen()
                 val destination = ByteBuffer.wrap(bytes)
                 while (destination.hasRemaining()) {
                     if (channel.read(destination) < 0) {
@@ -79,8 +90,12 @@ object OracleArtifacts {
         }
 
         val after = readRegularFileAttributes(target)
+        val afterPermissions = readTrustedArtifactPermissions(target)
         if (!sameFileVersion(before, after)) {
             throw OracleArtifactException("artifact identity or metadata changed during the bounded read")
+        }
+        if (beforePermissions != afterPermissions) {
+            throw OracleArtifactException("artifact permissions changed during the bounded read")
         }
         return OracleArtifactSnapshot(bytes)
     }
@@ -244,6 +259,23 @@ object OracleArtifacts {
         if (PosixFilePermission.GROUP_WRITE in permissions || PosixFilePermission.OTHERS_WRITE in permissions) {
             throw OracleArtifactException("artifact parent may not be writable by group or other principals")
         }
+    }
+
+    private fun readTrustedArtifactPermissions(target: Path): Set<PosixFilePermission> {
+        val view = Files.getFileAttributeView(
+            target,
+            PosixFileAttributeView::class.java,
+            LinkOption.NOFOLLOW_LINKS,
+        ) ?: throw OracleArtifactException("private artifact handling requires POSIX file permissions")
+        val permissions = try {
+            view.readAttributes().permissions()
+        } catch (failure: Exception) {
+            throw OracleArtifactException("artifact permissions could not be verified", failure)
+        }
+        if (PosixFilePermission.GROUP_WRITE in permissions || PosixFilePermission.OTHERS_WRITE in permissions) {
+            throw OracleArtifactException("artifact may not be writable by group or other principals")
+        }
+        return HashSet(permissions)
     }
 
     private fun ensureTemporaryIdentity(path: Path, expectedIdentity: Any) {
