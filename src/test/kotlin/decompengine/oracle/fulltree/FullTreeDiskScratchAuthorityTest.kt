@@ -360,6 +360,347 @@ class FullTreeDiskScratchAuthorityTest {
     }
 
     @Test
+    fun `release quarantine cutoffs preserve safe same-kernel ordering`() {
+        val configured = System.getenv("DECOMP_TEST_ORACLE_EXT4_SCRATCH")
+        assumeTrue(
+            !configured.isNullOrBlank(),
+            "set DECOMP_TEST_ORACLE_EXT4_SCRATCH for same-kernel release ordering coverage",
+        )
+        val mount = Path.of(configured).toAbsolutePath().normalize()
+        val policy = FullTreeDiskScratchPolicy(
+            requiredAvailableBytes = 1,
+            maximumFilesystemBytes = EXPECTED_MAXIMUM_FILESYSTEM_BYTES,
+            requiredAvailableInodes = 4,
+            maximumFilesystemInodes = EXPECTED_MAXIMUM_FILESYSTEM_INODES,
+        )
+        val releasePoints = listOf(
+            FullTreeDiskScratchQuarantineFaultPoint.RELEASE_AFTER_QUARANTINE_RENAME,
+            FullTreeDiskScratchQuarantineFaultPoint.RELEASE_AFTER_QUARANTINE_PARENT_SYNC,
+            FullTreeDiskScratchQuarantineFaultPoint.RELEASE_AFTER_RECORD_UNLINK,
+        )
+
+        releasePoints.forEachIndexed { index, cutoff ->
+            val operation = operation(('a'.code + index).toChar().toString())
+            val leaseRoot = mount.resolve(leaseDirectoryName(operation.operationId))
+            val quarantineRoot = mount.resolve(
+                leaseReleaseQuarantineDirectoryName(operation.operationId),
+            )
+            var lease: FullTreeDiskScratchLease? = null
+            try {
+                assertTrue(entryNames(mount).isEmpty())
+                val acquired = FullTreeDiskScratchAuthority.acquireDedicatedFilesystem(
+                    mount,
+                    operation,
+                    policy,
+                )
+                lease = acquired
+                assertSameKernelPublishedLeaseState(mount, leaseRoot, quarantineRoot)
+                val exactRecord = Files.readAllBytes(leaseRoot.resolve("lease.json"))
+                val observed = mutableListOf<FullTreeDiskScratchQuarantineFaultPoint>()
+
+                val failure = assertFailsWith<SimulatedQuarantineOrderingFailure> {
+                    acquired.requireCleanAndRelease(
+                        FullTreeDiskScratchQuarantineFaultInjector { point ->
+                            observed += point
+                            val retainedRecord = when (point) {
+                                FullTreeDiskScratchQuarantineFaultPoint
+                                    .RELEASE_AFTER_QUARANTINE_RENAME,
+                                FullTreeDiskScratchQuarantineFaultPoint
+                                    .RELEASE_AFTER_QUARANTINE_PARENT_SYNC,
+                                -> exactRecord
+
+                                FullTreeDiskScratchQuarantineFaultPoint.RELEASE_AFTER_RECORD_UNLINK -> null
+                                else -> throw AssertionError("unexpected release quarantine point $point")
+                            }
+                            assertSameKernelQuarantineState(
+                                mount = mount,
+                                sourceRoot = leaseRoot,
+                                quarantineRoot = quarantineRoot,
+                                exactRecord = retainedRecord,
+                            )
+                            if (point == cutoff) {
+                                throw SimulatedQuarantineOrderingFailure(point)
+                            }
+                        },
+                    )
+                }
+
+                assertEquals(cutoff, failure.point)
+                assertEquals(releasePoints.take(index + 1), observed)
+                assertSameKernelQuarantineState(
+                    mount = mount,
+                    sourceRoot = leaseRoot,
+                    quarantineRoot = quarantineRoot,
+                    exactRecord = if (
+                        cutoff == FullTreeDiskScratchQuarantineFaultPoint.RELEASE_AFTER_RECORD_UNLINK
+                    ) {
+                        null
+                    } else {
+                        exactRecord
+                    },
+                )
+
+                // The injector exposes ordered same-kernel states; it does not simulate power loss.
+                removeExpectedQuarantineForTest(mount, leaseRoot, quarantineRoot)
+                assertTrue(entryNames(mount).isEmpty())
+            } finally {
+                runCatching { lease?.close() }
+                removeKnownLeaseResidueForTest(leaseRoot, quarantineRoot)
+            }
+        }
+        assertTrue(entryNames(mount).isEmpty())
+    }
+
+    @Test
+    fun `failed acquisition quarantine cutoffs preserve safe same-kernel ordering`() {
+        val configured = System.getenv("DECOMP_TEST_ORACLE_EXT4_SCRATCH")
+        assumeTrue(
+            !configured.isNullOrBlank(),
+            "set DECOMP_TEST_ORACLE_EXT4_SCRATCH for same-kernel failed-acquisition ordering coverage",
+        )
+        val mount = Path.of(configured).toAbsolutePath().normalize()
+        val policy = FullTreeDiskScratchPolicy(
+            requiredAvailableBytes = 1,
+            maximumFilesystemBytes = EXPECTED_MAXIMUM_FILESYSTEM_BYTES,
+            requiredAvailableInodes = 4,
+            maximumFilesystemInodes = EXPECTED_MAXIMUM_FILESYSTEM_INODES,
+        )
+        val acquisitionPoint =
+            FullTreeDiskScratchQuarantineFaultPoint.ACQUISITION_AFTER_LEASE_PARENT_SYNC
+        val cleanupPoints = listOf(
+            FullTreeDiskScratchQuarantineFaultPoint.FAILED_ACQUISITION_AFTER_QUARANTINE_RENAME,
+            FullTreeDiskScratchQuarantineFaultPoint.FAILED_ACQUISITION_AFTER_QUARANTINE_PARENT_SYNC,
+            FullTreeDiskScratchQuarantineFaultPoint.FAILED_ACQUISITION_AFTER_RECORD_UNLINK,
+        )
+
+        cleanupPoints.forEachIndexed { index, cutoff ->
+            val operation = operation(('d'.code + index).toChar().toString())
+            val leaseRoot = mount.resolve(leaseDirectoryName(operation.operationId))
+            val quarantineRoot = mount.resolve(
+                leaseFailureQuarantineDirectoryName(operation.operationId),
+            )
+            var exactRecord: ByteArray? = null
+            val observed = mutableListOf<FullTreeDiskScratchQuarantineFaultPoint>()
+            try {
+                assertTrue(entryNames(mount).isEmpty())
+                val wrapped = assertFailsWith<FullTreeDiskScratchException> {
+                    FullTreeDiskScratchAuthority.acquireDedicatedFilesystem(
+                        mount,
+                        operation,
+                        policy,
+                        FullTreeDiskScratchQuarantineFaultInjector { point ->
+                            observed += point
+                            when (point) {
+                                acquisitionPoint -> {
+                                    assertSameKernelPublishedLeaseState(
+                                        mount,
+                                        leaseRoot,
+                                        quarantineRoot,
+                                    )
+                                    exactRecord = Files.readAllBytes(leaseRoot.resolve("lease.json"))
+                                    throw SimulatedQuarantineOrderingFailure(point)
+                                }
+
+                                in cleanupPoints -> {
+                                    val publishedRecord = checkNotNull(exactRecord)
+                                    assertSameKernelQuarantineState(
+                                        mount = mount,
+                                        sourceRoot = leaseRoot,
+                                        quarantineRoot = quarantineRoot,
+                                        exactRecord = if (
+                                            point == FullTreeDiskScratchQuarantineFaultPoint
+                                                .FAILED_ACQUISITION_AFTER_RECORD_UNLINK
+                                        ) {
+                                            null
+                                        } else {
+                                            publishedRecord
+                                        },
+                                    )
+                                    if (point == cutoff) {
+                                        throw SimulatedQuarantineOrderingFailure(point)
+                                    }
+                                }
+
+                                else -> throw AssertionError("unexpected failed-acquisition point $point")
+                            }
+                        },
+                    )
+                }
+                val primary = wrapped.cause as SimulatedQuarantineOrderingFailure
+
+                assertEquals(acquisitionPoint, primary.point)
+                assertEquals(listOf(acquisitionPoint) + cleanupPoints.take(index + 1), observed)
+                assertEquals(
+                    listOf(cutoff),
+                    primary.suppressed.filterIsInstance<SimulatedQuarantineOrderingFailure>()
+                        .map(SimulatedQuarantineOrderingFailure::point),
+                )
+                val publishedRecord = checkNotNull(exactRecord)
+                assertSameKernelQuarantineState(
+                    mount = mount,
+                    sourceRoot = leaseRoot,
+                    quarantineRoot = quarantineRoot,
+                    exactRecord = if (
+                        cutoff == FullTreeDiskScratchQuarantineFaultPoint
+                            .FAILED_ACQUISITION_AFTER_RECORD_UNLINK
+                    ) {
+                        null
+                    } else {
+                        publishedRecord
+                    },
+                )
+
+                // Teardown removes only the exact record-only or empty quarantine proven above.
+                removeExpectedQuarantineForTest(mount, leaseRoot, quarantineRoot)
+                assertTrue(entryNames(mount).isEmpty())
+            } finally {
+                removeKnownLeaseResidueForTest(leaseRoot, quarantineRoot)
+            }
+        }
+
+        run {
+            val operation = operation("9")
+            val leaseRoot = mount.resolve(leaseDirectoryName(operation.operationId))
+            val quarantineRoot = mount.resolve(
+                leaseFailureQuarantineDirectoryName(operation.operationId),
+            )
+            val singletonFailure = SimulatedQuarantineOrderingFailure(acquisitionPoint)
+            var exactRecord: ByteArray? = null
+            val observed = mutableListOf<FullTreeDiskScratchQuarantineFaultPoint>()
+            try {
+                assertTrue(entryNames(mount).isEmpty())
+                val wrapped = assertFailsWith<FullTreeDiskScratchException> {
+                    FullTreeDiskScratchAuthority.acquireDedicatedFilesystem(
+                        mount,
+                        operation,
+                        policy,
+                        FullTreeDiskScratchQuarantineFaultInjector { point ->
+                            observed += point
+                            when (point) {
+                                acquisitionPoint -> {
+                                    assertSameKernelPublishedLeaseState(
+                                        mount,
+                                        leaseRoot,
+                                        quarantineRoot,
+                                    )
+                                    exactRecord = Files.readAllBytes(leaseRoot.resolve("lease.json"))
+                                    throw singletonFailure
+                                }
+
+                                cleanupPoints.first() -> {
+                                    assertSameKernelQuarantineState(
+                                        mount = mount,
+                                        sourceRoot = leaseRoot,
+                                        quarantineRoot = quarantineRoot,
+                                        exactRecord = checkNotNull(exactRecord),
+                                    )
+                                    throw singletonFailure
+                                }
+
+                                else -> throw AssertionError("unexpected reused-failure point $point")
+                            }
+                        },
+                    )
+                }
+
+                assertTrue(
+                    wrapped.cause === singletonFailure,
+                    "failed acquisition replaced the original reused failure",
+                )
+                assertTrue(
+                    singletonFailure.suppressed.isEmpty(),
+                    "the reused failure must never be suppressed onto itself",
+                )
+                assertEquals(listOf(acquisitionPoint, cleanupPoints.first()), observed)
+                assertSameKernelQuarantineState(
+                    mount = mount,
+                    sourceRoot = leaseRoot,
+                    quarantineRoot = quarantineRoot,
+                    exactRecord = checkNotNull(exactRecord),
+                )
+
+                LinuxFilesystemSyscalls.openRoot(mount).use { contender ->
+                    val relocked = LinuxFilesystemSyscalls.tryExclusiveLock(contender)
+                    try {
+                        assertTrue(
+                            relocked,
+                            "failed-acquisition unwinding retained its pinned mount flock",
+                        )
+                    } finally {
+                        if (relocked) LinuxFilesystemSyscalls.unlock(contender)
+                    }
+                }
+
+                removeExpectedQuarantineForTest(mount, leaseRoot, quarantineRoot)
+                assertTrue(entryNames(mount).isEmpty())
+            } finally {
+                removeKnownLeaseResidueForTest(leaseRoot, quarantineRoot)
+            }
+        }
+
+        val operation = operation("0")
+        val leaseRoot = mount.resolve(leaseDirectoryName(operation.operationId))
+        val quarantineRoot = mount.resolve(
+            leaseFailureQuarantineDirectoryName(operation.operationId),
+        )
+        var exactRecord: ByteArray? = null
+        val observed = mutableListOf<FullTreeDiskScratchQuarantineFaultPoint>()
+        try {
+            assertTrue(entryNames(mount).isEmpty())
+            val wrapped = assertFailsWith<FullTreeDiskScratchException> {
+                FullTreeDiskScratchAuthority.acquireDedicatedFilesystem(
+                    mount,
+                    operation,
+                    policy,
+                    FullTreeDiskScratchQuarantineFaultInjector { point ->
+                        observed += point
+                        when (point) {
+                            acquisitionPoint -> {
+                                assertSameKernelPublishedLeaseState(
+                                    mount,
+                                    leaseRoot,
+                                    quarantineRoot,
+                                )
+                                exactRecord = Files.readAllBytes(leaseRoot.resolve("lease.json"))
+                                throw SimulatedQuarantineOrderingFailure(point)
+                            }
+
+                            in cleanupPoints -> {
+                                val publishedRecord = checkNotNull(exactRecord)
+                                assertSameKernelQuarantineState(
+                                    mount = mount,
+                                    sourceRoot = leaseRoot,
+                                    quarantineRoot = quarantineRoot,
+                                    exactRecord = if (
+                                        point == FullTreeDiskScratchQuarantineFaultPoint
+                                            .FAILED_ACQUISITION_AFTER_RECORD_UNLINK
+                                    ) {
+                                        null
+                                    } else {
+                                        publishedRecord
+                                    },
+                                )
+                            }
+
+                            else -> throw AssertionError("unexpected failed-acquisition point $point")
+                        }
+                    },
+                )
+            }
+            val primary = wrapped.cause as SimulatedQuarantineOrderingFailure
+
+            assertEquals(acquisitionPoint, primary.point)
+            assertTrue(primary.suppressed.isEmpty())
+            assertEquals(listOf(acquisitionPoint) + cleanupPoints, observed)
+            assertTrue(!Files.exists(leaseRoot, LinkOption.NOFOLLOW_LINKS))
+            assertTrue(!Files.exists(quarantineRoot, LinkOption.NOFOLLOW_LINKS))
+            assertTrue(entryNames(mount).isEmpty())
+        } finally {
+            removeKnownLeaseResidueForTest(leaseRoot, quarantineRoot)
+        }
+    }
+
+    @Test
     fun `closing a live ext4 lease preserves exact residue for cold recovery`() {
         val configured = System.getenv("DECOMP_TEST_ORACLE_EXT4_SCRATCH")
         assumeTrue(
@@ -790,6 +1131,64 @@ class FullTreeDiskScratchAuthorityTest {
         entries.map { it.fileName.toString() }.sorted().toList()
     }
 
+    private fun assertSameKernelPublishedLeaseState(
+        mount: Path,
+        leaseRoot: Path,
+        quarantineRoot: Path,
+    ) {
+        assertEquals(listOf(leaseRoot.fileName.toString()), entryNames(mount))
+        assertTrue(Files.isDirectory(leaseRoot, LinkOption.NOFOLLOW_LINKS))
+        assertEquals(listOf("lease.json"), entryNames(leaseRoot))
+        assertTrue(Files.isRegularFile(leaseRoot.resolve("lease.json"), LinkOption.NOFOLLOW_LINKS))
+        assertTrue(!Files.exists(quarantineRoot, LinkOption.NOFOLLOW_LINKS))
+    }
+
+    private fun assertSameKernelQuarantineState(
+        mount: Path,
+        sourceRoot: Path,
+        quarantineRoot: Path,
+        exactRecord: ByteArray?,
+    ) {
+        assertTrue(!Files.exists(sourceRoot, LinkOption.NOFOLLOW_LINKS))
+        assertEquals(listOf(quarantineRoot.fileName.toString()), entryNames(mount))
+        assertTrue(Files.isDirectory(quarantineRoot, LinkOption.NOFOLLOW_LINKS))
+        val recordPath = quarantineRoot.resolve("lease.json")
+        if (exactRecord == null) {
+            assertTrue(entryNames(quarantineRoot).isEmpty())
+            assertTrue(!Files.exists(recordPath, LinkOption.NOFOLLOW_LINKS))
+        } else {
+            assertEquals(listOf("lease.json"), entryNames(quarantineRoot))
+            assertTrue(Files.isRegularFile(recordPath, LinkOption.NOFOLLOW_LINKS))
+            assertEquals(exactRecord.toList(), Files.readAllBytes(recordPath).toList())
+        }
+    }
+
+    private fun removeExpectedQuarantineForTest(
+        mount: Path,
+        sourceRoot: Path,
+        quarantineRoot: Path,
+    ) {
+        assertTrue(!Files.exists(sourceRoot, LinkOption.NOFOLLOW_LINKS))
+        assertEquals(listOf(quarantineRoot.fileName.toString()), entryNames(mount))
+        val names = entryNames(quarantineRoot)
+        assertTrue(names.isEmpty() || names == listOf("lease.json"))
+        Files.deleteIfExists(quarantineRoot.resolve("lease.json"))
+        Files.delete(quarantineRoot)
+        assertTrue(entryNames(mount).isEmpty())
+    }
+
+    private fun removeKnownLeaseResidueForTest(
+        sourceRoot: Path,
+        quarantineRoot: Path,
+    ) {
+        listOf(quarantineRoot, sourceRoot).forEach { root ->
+            runCatching {
+                Files.deleteIfExists(root.resolve("lease.json"))
+                Files.deleteIfExists(root)
+            }
+        }
+    }
+
     private fun identity(device: Long, inode: Long, mountId: Long) = LinuxFileIdentity(
         key = LinuxFileKey(device, inode),
         mode = 0x41c0,
@@ -809,6 +1208,10 @@ class FullTreeDiskScratchAuthorityTest {
     private class SimulatedLeaseUseFailure : RuntimeException()
 
     private class SimulatedRunRootPublicationFailure : RuntimeException()
+
+    private class SimulatedQuarantineOrderingFailure(
+        val point: FullTreeDiskScratchQuarantineFaultPoint,
+    ) : RuntimeException()
 
     private fun leaseRecord(): FullTreeDiskScratchLeaseRecord = FullTreeDiskScratchLeaseRecord.create(
         operation = operation(),

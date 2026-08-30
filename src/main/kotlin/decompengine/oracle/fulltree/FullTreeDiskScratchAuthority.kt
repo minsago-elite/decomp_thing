@@ -77,6 +77,20 @@ internal fun interface FullTreeDiskScratchRunRootFaultInjector {
     fun after(point: FullTreeDiskScratchRunRootFaultPoint)
 }
 
+internal enum class FullTreeDiskScratchQuarantineFaultPoint {
+    RELEASE_AFTER_QUARANTINE_RENAME,
+    RELEASE_AFTER_QUARANTINE_PARENT_SYNC,
+    RELEASE_AFTER_RECORD_UNLINK,
+    ACQUISITION_AFTER_LEASE_PARENT_SYNC,
+    FAILED_ACQUISITION_AFTER_QUARANTINE_RENAME,
+    FAILED_ACQUISITION_AFTER_QUARANTINE_PARENT_SYNC,
+    FAILED_ACQUISITION_AFTER_RECORD_UNLINK,
+}
+
+internal fun interface FullTreeDiskScratchQuarantineFaultInjector {
+    fun after(point: FullTreeDiskScratchQuarantineFaultPoint)
+}
+
 private object FullTreeDiskScratchRunRootConstructionPermit
 
 /**
@@ -677,39 +691,39 @@ internal class FullTreeDiskScratchLease internal constructor(
 
     /** Destructive release; the coordinator must independently prove every release precondition. */
     @Synchronized
-    fun requireCleanAndRelease() {
+    fun requireCleanAndRelease(
+        faultInjector: FullTreeDiskScratchQuarantineFaultInjector? = null,
+    ) {
         check(!closed) { "disk-scratch lease is closed" }
         var failure: Throwable? = null
         try {
             requireCurrent(FullTreeDiskScratchStage.RELEASE)
-            val quarantine = ".decomp-oracle-lease-release-${evidence.operationId}"
-            mountDescriptor.whileOpen { mountFd ->
-                LinuxFilesystemSyscalls.renameNoReplace(mountFd, leaseName, quarantine)
-                LinuxFilesystemSyscalls.openDirectoryAt(mountFd, quarantine).use { selected ->
-                    if (!sameDirectory(LinuxFilesystemSyscalls.identity(leaseDescriptor.fd), selected.identity)) {
-                        scratchFail("disk-scratch release selected a replacement lease root")
-                    }
-                }
-                LinuxFilesystemSyscalls.unlink(leaseDescriptor.fd, LEASE_RECORD_FILE)
-                LinuxFilesystemSyscalls.synchronize(leaseDescriptor)
-                if (LinuxFilesystemSyscalls.directoryEntryNames(leaseDescriptor, 1).isNotEmpty()) {
-                    scratchFail("disk-scratch lease root is not empty at release")
-                }
-                LinuxFilesystemSyscalls.removeDirectory(mountFd, quarantine)
-                LinuxFilesystemSyscalls.synchronize(mountDescriptor)
-                LinuxFilesystemSyscalls.openPathAtOrNull(mountFd, leaseName)?.use {
-                    scratchFail("disk-scratch lease root remains after release")
-                }
-                LinuxFilesystemSyscalls.openPathAtOrNull(mountFd, quarantine)?.use {
-                    scratchFail("disk-scratch lease quarantine remains after release")
-                }
-            }
-            if (LinuxFilesystemSyscalls.identity(leaseDescriptor.fd).linkCount != 0) {
-                scratchFail("disk-scratch lease descriptor remains linked after release")
-            }
-            if (LinuxFilesystemSyscalls.directoryEntryNames(mountDescriptor, 1).isNotEmpty()) {
-                scratchFail("dedicated disk-scratch filesystem is not empty after release")
-            }
+            // Persist record-only membership before moving the lease into its one-way quarantine.
+            LinuxFilesystemSyscalls.synchronize(leaseDescriptor)
+            requireCurrent(FullTreeDiskScratchStage.RELEASE)
+            quarantineAndRemoveLeaseRoot(
+                mountDescriptor = mountDescriptor,
+                leaseDescriptor = leaseDescriptor,
+                sourceName = leaseName,
+                quarantineName = leaseReleaseQuarantineDirectoryName(evidence.operationId),
+                requireRecord = true,
+                label = "disk-scratch release",
+                afterRename = {
+                    faultInjector?.after(
+                        FullTreeDiskScratchQuarantineFaultPoint.RELEASE_AFTER_QUARANTINE_RENAME,
+                    )
+                },
+                afterParentSync = {
+                    faultInjector?.after(
+                        FullTreeDiskScratchQuarantineFaultPoint.RELEASE_AFTER_QUARANTINE_PARENT_SYNC,
+                    )
+                },
+                afterRecordUnlink = {
+                    faultInjector?.after(
+                        FullTreeDiskScratchQuarantineFaultPoint.RELEASE_AFTER_RECORD_UNLINK,
+                    )
+                },
+            )
         } catch (releaseFailure: Throwable) {
             failure = releaseFailure
         } finally {
@@ -1065,6 +1079,7 @@ internal object FullTreeDiskScratchAuthority {
         provisionedMount: Path,
         operation: FullTreeDiskScratchOperation,
         policy: FullTreeDiskScratchPolicy,
+        faultInjector: FullTreeDiskScratchQuarantineFaultInjector? = null,
     ): FullTreeDiskScratchLease = translateScratchFailures {
         val mountPath = provisionedMount.toAbsolutePath().normalize()
         if (!mountPath.isAbsolute || mountPath.parent == null || mountPath.toRealPath() != mountPath) {
@@ -1125,6 +1140,9 @@ internal object FullTreeDiskScratchAuthority {
             }
             LinuxFilesystemSyscalls.synchronize(created)
             LinuxFilesystemSyscalls.synchronize(mountDescriptor)
+            faultInjector?.after(
+                FullTreeDiskScratchQuarantineFaultPoint.ACQUISITION_AFTER_LEASE_PARENT_SYNC,
+            )
             val recordSha256 = OracleArtifacts.sha256(recordBytes)
             val evidence = FullTreeDiskScratchEvidence.create(
                 operation,
@@ -1157,35 +1175,35 @@ internal object FullTreeDiskScratchAuthority {
             val createdName = leaseName
             if (created != null && createdName != null) {
                 runCatching {
-                    val quarantine = ".decomp-oracle-lease-failed-${operation.operationId}"
-                    mountDescriptor.whileOpen { mountFd ->
-                        LinuxFilesystemSyscalls.renameNoReplace(mountFd, createdName, quarantine)
-                        LinuxFilesystemSyscalls.openDirectoryAt(mountFd, quarantine).use { selected ->
-                            if (!sameDirectory(LinuxFilesystemSyscalls.identity(created.fd), selected.identity)) {
-                                scratchFail("failed disk-scratch cleanup selected a replacement lease root")
-                            }
-                            LinuxFilesystemSyscalls.openPathAtOrNull(mountFd, createdName)?.use {
-                                scratchFail("failed disk-scratch lease name reappeared during cleanup")
-                            }
-                            LinuxFilesystemSyscalls.unlinkIfPresent(created.fd, LEASE_RECORD_FILE)
-                            LinuxFilesystemSyscalls.synchronize(created)
-                            if (LinuxFilesystemSyscalls.directoryEntryNames(created, 1).isNotEmpty()) {
-                                scratchFail("failed disk-scratch lease root is not empty")
-                            }
-                            LinuxFilesystemSyscalls.removeDirectory(mountFd, quarantine)
-                            if (LinuxFilesystemSyscalls.identity(created.fd).linkCount != 0) {
-                                scratchFail("failed disk-scratch lease descriptor remains linked")
-                            }
-                        }
-                        LinuxFilesystemSyscalls.synchronize(mountDescriptor)
-                        LinuxFilesystemSyscalls.openPathAtOrNull(mountFd, createdName)?.use {
-                            scratchFail("failed disk-scratch lease name remains after cleanup")
-                        }
-                        LinuxFilesystemSyscalls.openPathAtOrNull(mountFd, quarantine)?.use {
-                            scratchFail("failed disk-scratch quarantine remains after cleanup")
-                        }
-                    }
-                }.exceptionOrNull()?.let(failure::addSuppressed)
+                    quarantineAndRemoveLeaseRoot(
+                        mountDescriptor = mountDescriptor,
+                        leaseDescriptor = created,
+                        sourceName = createdName,
+                        quarantineName = leaseFailureQuarantineDirectoryName(operation.operationId),
+                        requireRecord = false,
+                        label = "failed disk-scratch acquisition cleanup",
+                        afterRename = {
+                            faultInjector?.after(
+                                FullTreeDiskScratchQuarantineFaultPoint
+                                    .FAILED_ACQUISITION_AFTER_QUARANTINE_RENAME,
+                            )
+                        },
+                        afterParentSync = {
+                            faultInjector?.after(
+                                FullTreeDiskScratchQuarantineFaultPoint
+                                    .FAILED_ACQUISITION_AFTER_QUARANTINE_PARENT_SYNC,
+                            )
+                        },
+                        afterRecordUnlink = {
+                            faultInjector?.after(
+                                FullTreeDiskScratchQuarantineFaultPoint
+                                    .FAILED_ACQUISITION_AFTER_RECORD_UNLINK,
+                            )
+                        },
+                    )
+                }.exceptionOrNull()?.let { cleanupFailure ->
+                    if (cleanupFailure !== failure) failure.addSuppressed(cleanupFailure)
+                }
                 runCatching { created.close() }.exceptionOrNull()?.let(failure::addSuppressed)
             }
             if (locked) {
@@ -1195,6 +1213,83 @@ internal object FullTreeDiskScratchAuthority {
             runCatching { mountDescriptor.close() }.exceptionOrNull()?.let(failure::addSuppressed)
             throw failure
         }
+    }
+}
+
+/**
+ * One-way lease quarantine transaction shared by release and failed acquisition cleanup. A
+ * successful parent sync must precede deletion of the only acquisition record. Quarantine residue
+ * still requires a separate recovery authority; this helper does not make release resumable.
+ */
+private fun quarantineAndRemoveLeaseRoot(
+    mountDescriptor: LinuxDescriptor,
+    leaseDescriptor: LinuxDescriptor,
+    sourceName: String,
+    quarantineName: String,
+    requireRecord: Boolean,
+    label: String,
+    afterRename: () -> Unit,
+    afterParentSync: () -> Unit,
+    afterRecordUnlink: () -> Unit,
+) {
+    mountDescriptor.whileOpen { mountFd ->
+        fun requireSourceSelection() {
+            LinuxFilesystemSyscalls.openDirectoryAt(mountFd, sourceName).use { selected ->
+                if (!sameDirectory(LinuxFilesystemSyscalls.identity(leaseDescriptor.fd), selected.identity)) {
+                    scratchFail("$label selected a replacement source root")
+                }
+            }
+            LinuxFilesystemSyscalls.openPathAtOrNull(mountFd, quarantineName)?.use {
+                scratchFail("$label quarantine name already exists")
+            }
+        }
+
+        fun requireQuarantineSelection() {
+            LinuxFilesystemSyscalls.openDirectoryAt(mountFd, quarantineName).use { selected ->
+                if (!sameDirectory(LinuxFilesystemSyscalls.identity(leaseDescriptor.fd), selected.identity)) {
+                    scratchFail("$label selected a replacement quarantine root")
+                }
+            }
+            LinuxFilesystemSyscalls.openPathAtOrNull(mountFd, sourceName)?.use {
+                scratchFail("$label source name reappeared")
+            }
+        }
+
+        requireSourceSelection()
+        LinuxFilesystemSyscalls.renameNoReplace(mountFd, sourceName, quarantineName)
+        requireQuarantineSelection()
+        afterRename()
+
+        // Anchor L -> Q before lease.json can be removed. Failure here leaves the record untouched.
+        LinuxFilesystemSyscalls.synchronize(mountDescriptor)
+        afterParentSync()
+        requireQuarantineSelection()
+
+        if (requireRecord) {
+            LinuxFilesystemSyscalls.unlink(leaseDescriptor.fd, LEASE_RECORD_FILE)
+        } else {
+            LinuxFilesystemSyscalls.unlinkIfPresent(leaseDescriptor.fd, LEASE_RECORD_FILE)
+        }
+        afterRecordUnlink()
+        LinuxFilesystemSyscalls.synchronize(leaseDescriptor)
+        if (LinuxFilesystemSyscalls.directoryEntryNames(leaseDescriptor, 1).isNotEmpty()) {
+            scratchFail("$label quarantine root is not empty")
+        }
+        requireQuarantineSelection()
+        LinuxFilesystemSyscalls.removeDirectory(mountFd, quarantineName)
+        LinuxFilesystemSyscalls.synchronize(mountDescriptor)
+        LinuxFilesystemSyscalls.openPathAtOrNull(mountFd, sourceName)?.use {
+            scratchFail("$label source name remains after cleanup")
+        }
+        LinuxFilesystemSyscalls.openPathAtOrNull(mountFd, quarantineName)?.use {
+            scratchFail("$label quarantine name remains after cleanup")
+        }
+    }
+    if (LinuxFilesystemSyscalls.identity(leaseDescriptor.fd).linkCount != 0) {
+        scratchFail("$label descriptor remains linked")
+    }
+    if (LinuxFilesystemSyscalls.directoryEntryNames(mountDescriptor, 1).isNotEmpty()) {
+        scratchFail("$label did not empty the dedicated filesystem")
     }
 }
 
