@@ -415,6 +415,29 @@ internal class FullTreeFunctionObservationOperationTransition private constructo
             ).also { requireEvidenceContinuity(previous, it) }
         }
 
+        /**
+         * Builds canonical UNIT_ATTACHED bytes for validation and recovery. Construction is never
+         * attachment authority, and the generic journal API deliberately refuses to publish these
+         * bytes. A future live-unit coordinator must supply a non-forgeable proof to its dedicated
+         * recorder before this phase can be authored by production Kotlin.
+         */
+        fun unitAttached(
+            binding: FullTreeFunctionObservationOperationBinding,
+            previous: FullTreeFunctionObservationOperationTransition,
+        ): FullTreeFunctionObservationOperationTransition {
+            requireTransitionAllowed(previous.phase, FullTreeFunctionObservationOperationPhase.UNIT_ATTACHED)
+            requireTransitionBinding(binding, previous)
+            return create(
+                binding,
+                Math.addExact(previous.sequence, 1),
+                previous.transitionSha256,
+                FullTreeFunctionObservationOperationPhase.UNIT_ATTACHED,
+                previous.diskEvidenceSha256,
+                outputSha256 = null,
+                outputBytes = null,
+            ).also { requireEvidenceContinuity(previous, it) }
+        }
+
         /** Builds only the journal link; it does not authorize or perform external recovery. */
         fun recoveredAbort(
             binding: FullTreeFunctionObservationOperationBinding,
@@ -449,10 +472,11 @@ internal class FullTreeFunctionObservationOperationTransition private constructo
         ): FullTreeFunctionObservationOperationTransition {
             if (phase in setOf(
                     FullTreeFunctionObservationOperationPhase.LEASED,
+                    FullTreeFunctionObservationOperationPhase.UNIT_ATTACHED,
                     FullTreeFunctionObservationOperationPhase.RECOVERED_ABORT,
                 )
             ) {
-                journalFail("leased and recovered-abort transitions require their exact factories")
+                journalFail("leased, unit-attached, and recovered-abort transitions require their exact factories")
             }
             requireTransitionAllowed(previous.phase, phase)
             requireTransitionBinding(binding, previous)
@@ -945,8 +969,12 @@ internal class FullTreeFunctionObservationOperationJournal internal constructor(
         transition: FullTreeFunctionObservationOperationTransition,
         faultInjector: DescriptorBoundStateFaultInjector? = null,
     ): FullTreeFunctionObservationOperationHistory = boundOperation {
-        if (transition.phase == FullTreeFunctionObservationOperationPhase.LEASED) {
-            journalFail("leased transition must be recorded with exact disk evidence")
+        if (transition.phase in setOf(
+                FullTreeFunctionObservationOperationPhase.LEASED,
+                FullTreeFunctionObservationOperationPhase.UNIT_ATTACHED,
+            )
+        ) {
+            journalFail("leased and unit-attached transitions cannot use generic journal append")
         }
         val current = loadRequired(allowedAtomicTarget = transition.fileName)
         appendLoaded(current, transition, faultInjector)

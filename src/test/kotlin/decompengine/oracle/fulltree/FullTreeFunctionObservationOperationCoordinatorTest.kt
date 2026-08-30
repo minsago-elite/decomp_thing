@@ -416,18 +416,18 @@ class FullTreeFunctionObservationOperationCoordinatorTest {
                     leased.close()
                     live = null
 
-                    requireNotNull(authority.openExisting(binding)).use { journal ->
-                        val history = requireNotNull(journal.loadOrNull())
-                        journal.append(
-                            FullTreeFunctionObservationOperationTransition.next(
-                                binding,
-                                checkNotNull(history.latest),
-                                FullTreeFunctionObservationOperationPhase.UNIT_ATTACHED,
-                            ),
-                        )
-                    }
-
                     val journalDirectory = root.resolve(binding.journalDirectoryName)
+                    val history = requireNotNull(authority.openExisting(binding)).use { journal ->
+                        requireNotNull(journal.loadOrNull())
+                    }
+                    val legacyAttached = FullTreeFunctionObservationOperationTransition.unitAttached(
+                        binding,
+                        checkNotNull(history.latest),
+                    )
+                    writeImmutable(
+                        journalDirectory.resolve(legacyAttached.fileName),
+                        legacyAttached.canonicalBytes(),
+                    )
                     val before = immutableFileSnapshot(journalDirectory)
                     val mountNames = entryNames(mount)
                     val leaseNames = entryNames(leaseRoot)
@@ -972,6 +972,11 @@ class FullTreeFunctionObservationOperationCoordinatorTest {
                 path.fileName.toString() to Files.readAllBytes(path).toList()
             }
         }
+
+    private fun writeImmutable(path: Path, bytes: ByteArray) {
+        Files.write(path, bytes)
+        Files.setPosixFilePermissions(path, PosixFilePermissions.fromString("r--------"))
+    }
 
     private inline fun withJournalRoot(action: (Path) -> Unit) {
         val container = createTempDirectory("function-operation-coordinator-")

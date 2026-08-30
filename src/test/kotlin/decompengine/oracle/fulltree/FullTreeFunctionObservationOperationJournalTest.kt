@@ -180,10 +180,9 @@ class FullTreeFunctionObservationOperationJournalTest {
             preparing,
             diskEvidence,
         )
-        val attached = FullTreeFunctionObservationOperationTransition.next(
+        val attached = FullTreeFunctionObservationOperationTransition.unitAttached(
             binding,
             leased,
-            FullTreeFunctionObservationOperationPhase.UNIT_ATTACHED,
         )
         val absent = FullTreeFunctionObservationOperationTransition.next(
             binding,
@@ -239,6 +238,13 @@ class FullTreeFunctionObservationOperationJournalTest {
             )
         }
         assertFailsWith<FullTreeFunctionObservationOperationJournalException> {
+            FullTreeFunctionObservationOperationTransition.next(
+                binding,
+                leased,
+                FullTreeFunctionObservationOperationPhase.UNIT_ATTACHED,
+            )
+        }
+        assertFailsWith<FullTreeFunctionObservationOperationJournalException> {
             FullTreeFunctionObservationOperationTransition.recoveredAbort(
                 binding,
                 complete,
@@ -251,10 +257,9 @@ class FullTreeFunctionObservationOperationJournalTest {
             preparing,
             alternateEvidence,
         )
-        val alternateAttached = FullTreeFunctionObservationOperationTransition.next(
+        val alternateAttached = FullTreeFunctionObservationOperationTransition.unitAttached(
             binding,
             alternateLeased,
-            FullTreeFunctionObservationOperationPhase.UNIT_ATTACHED,
         )
         assertFailsWith<FullTreeFunctionObservationOperationJournalException> {
             FullTreeFunctionObservationOperationHistory.validate(
@@ -275,10 +280,9 @@ class FullTreeFunctionObservationOperationJournalTest {
             preparing,
             diskEvidence,
         )
-        val attached = FullTreeFunctionObservationOperationTransition.next(
+        val attached = FullTreeFunctionObservationOperationTransition.unitAttached(
             binding,
             leased,
-            FullTreeFunctionObservationOperationPhase.UNIT_ATTACHED,
         )
         val absent = FullTreeFunctionObservationOperationTransition.next(
             binding,
@@ -417,10 +421,9 @@ class FullTreeFunctionObservationOperationJournalTest {
             preparing,
             diskEvidence,
         )
-        val attached = FullTreeFunctionObservationOperationTransition.next(
+        val aborted = FullTreeFunctionObservationOperationTransition.recoveredAbort(
             binding,
             leased,
-            FullTreeFunctionObservationOperationPhase.UNIT_ATTACHED,
         )
 
         FullTreeFunctionObservationJournalAuthority.open(root).use { authority ->
@@ -446,15 +449,15 @@ class FullTreeFunctionObservationOperationJournalTest {
                     listOf(
                         preparing.transitionSha256,
                         leased.transitionSha256,
-                        attached.transitionSha256,
+                        aborted.transitionSha256,
                     ),
-                    journal.append(attached).transitions.map { it.transitionSha256 },
+                    journal.append(aborted).transitions.map { it.transitionSha256 },
                 )
                 assertEquals(
                     listOf(
                         preparing.transitionSha256,
                         leased.transitionSha256,
-                        attached.transitionSha256,
+                        aborted.transitionSha256,
                     ),
                     journal.recordLeased(diskEvidence).transitions.map { it.transitionSha256 },
                 )
@@ -469,7 +472,7 @@ class FullTreeFunctionObservationOperationJournalTest {
                     listOf(
                         preparing.transitionSha256,
                         leased.transitionSha256,
-                        attached.transitionSha256,
+                        aborted.transitionSha256,
                     ),
                     loaded.transitions.map { it.transitionSha256 },
                 )
@@ -564,6 +567,30 @@ class FullTreeFunctionObservationOperationJournalTest {
                         Files.readAllBytes(directory.resolve("disk-evidence.json")),
                     )
                 }
+            }
+        }
+
+    @Test
+    fun `unit attachment has canonical bytes but no generic journal publication authority`() =
+        withJournalRoot { root ->
+            val binding = binding()
+            val evidence = diskEvidence(binding)
+            val preparing = FullTreeFunctionObservationOperationTransition.initial(binding)
+            val leased = FullTreeFunctionObservationOperationTransition.leased(binding, preparing, evidence)
+            val attached = FullTreeFunctionObservationOperationTransition.unitAttached(binding, leased)
+            val directory = root.resolve(binding.journalDirectoryName)
+
+            FullTreeFunctionObservationJournalAuthority.open(root).use { authority ->
+                authority.createNew(binding).use { journal ->
+                    journal.initialize()
+                    journal.recordLeased(evidence)
+                    val before = journalSnapshot(directory)
+                    assertFailsWith<FullTreeFunctionObservationOperationJournalException> {
+                        journal.append(attached)
+                    }
+                    assertEquals(before, journalSnapshot(directory))
+                }
+                assertFalse(Files.exists(directory.resolve(attached.fileName), LinkOption.NOFOLLOW_LINKS))
             }
         }
 
@@ -1042,10 +1069,9 @@ class FullTreeFunctionObservationOperationJournalTest {
                 preparing,
                 diskEvidence,
             )
-            val attached = FullTreeFunctionObservationOperationTransition.next(
+            val attached = FullTreeFunctionObservationOperationTransition.unitAttached(
                 binding,
                 leased,
-                FullTreeFunctionObservationOperationPhase.UNIT_ATTACHED,
             )
 
             writeImmutable(
@@ -1301,6 +1327,13 @@ class FullTreeFunctionObservationOperationJournalTest {
         Files.write(path, bytes)
         Files.setPosixFilePermissions(path, PosixFilePermissions.fromString("r--------"))
     }
+
+    private fun journalSnapshot(directory: Path): Map<String, List<Byte>> =
+        Files.list(directory).use { entries ->
+            entries.map { path -> path.fileName.toString() to Files.readAllBytes(path).toList() }
+                .toList()
+                .toMap()
+        }
 
     private inline fun withJournalRoot(action: (Path) -> Unit) {
         val container = createTempDirectory("function-operation-journal-").toAbsolutePath().normalize()
