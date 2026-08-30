@@ -263,12 +263,17 @@ private class ElfReader(
         var totalSymbols = 0L
         val tableCounts = HashMap<Int, Long>()
         symbolTables.forEach { (index, section) ->
+            step("symbol tables")
             val minimumSymbolEntry = if (elfClass == ELFCLASS64) ELF64_SYMBOL_BYTES else ELF32_SYMBOL_BYTES
             if (section.flags and SHF_COMPRESSED != 0UL) fail("symbol table ${section.name} is compressed")
             if (section.entrySize < minimumSymbolEntry.toULong() || section.size % section.entrySize != 0UL) {
                 fail("symbol table ${section.name} has an invalid entry size")
             }
             val count = longValue(section.size / section.entrySize, "symbol count")
+            if (count < 1L) fail("symbol table ${section.name} has no STN_UNDEF entry")
+            if (window.bytes(section.offset, minimumSymbolEntry).any { it != 0.toByte() }) {
+                fail("symbol table ${section.name} has a nonzero STN_UNDEF entry")
+            }
             totalSymbols = checkedAdd(totalSymbols, count, "aggregate symbol count")
             if (totalSymbols > limits.maximumSymbols) fail("ELF exceeds the ${limits.maximumSymbols}-symbol bound")
             tableCounts[index] = count

@@ -129,6 +129,36 @@ class FullTreeElfLayoutTest {
         }
 
     @Test
+    fun `scanner requires the all-zero STN_UNDEF symbol-table entry`() =
+        inControlTemporaryDirectory { directory ->
+            val empty = FullTreeElfTestBytes.build(
+                TestElfVariant(true, true, extendedNumbering = false, shndx = false),
+                listOf(TestElfSymbol("defined", 0x100UL)),
+            ).also { bytes ->
+                FullTreeElfTestBytes.put64(
+                    bytes,
+                    FullTreeElfTestBytes.sectionFieldOffset(bytes, 2, 20, 32),
+                    0UL,
+                    littleEndian = true,
+                )
+            }
+            assertScanRejected(writeElf(directory.resolve("empty-symbol-table.elf"), empty))
+
+            val nonzero = FullTreeElfTestBytes.build(
+                TestElfVariant(false, false, extendedNumbering = false, shndx = false),
+                listOf(TestElfSymbol("defined", 0x100UL)),
+            ).also { bytes ->
+                FullTreeElfTestBytes.put32(
+                    bytes,
+                    FullTreeElfTestBytes.symbolTableOffset(bytes),
+                    1,
+                    littleEndian = false,
+                )
+            }
+            assertScanRejected(writeElf(directory.resolve("nonzero-symbol-zero.elf"), nonzero))
+        }
+
+    @Test
     fun `scanner rejects malformed extended symbol-index companions`() =
         inControlTemporaryDirectory { directory ->
             val missing = FullTreeElfTestBytes.build(
@@ -661,6 +691,13 @@ internal object FullTreeElfTestBytes {
         } else {
             read32(bytes, 28, littleEndian).toInt()
         }
+    }
+
+    fun symbolTableOffset(bytes: ByteArray): Int {
+        val littleEndian = bytes[5].toInt() == 1
+        val is64 = bytes[4].toInt() == 2
+        val field = sectionFieldOffset(bytes, 2, 16, 24)
+        return if (is64) read64(bytes, field, littleEndian).toInt() else read32(bytes, field, littleEndian).toInt()
     }
 
     fun duplicateShndxSection(bytes: ByteArray) {
