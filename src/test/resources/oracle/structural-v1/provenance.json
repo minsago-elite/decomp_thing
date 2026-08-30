@@ -1,0 +1,71 @@
+{
+  "artifactKind": "non-authoritative-differential-fixture",
+  "contracts": [
+    {
+      "bytes": 19006,
+      "name": "boundary-score.json",
+      "schema": "function-recovery-score",
+      "sha256": "b05d85d9f21e704c2581b84ded3ea5442eb4695ed75e74d25778e417a5a8d593"
+    },
+    {
+      "bytes": 54758,
+      "name": "expected-score.json",
+      "schema": "structural-score",
+      "sha256": "2dbff117253ba927a84df1e428f62d97b1f0efde049d4e6b78dc050dc5456ce6"
+    },
+    {
+      "bytes": 4008,
+      "name": "function-oracle.json",
+      "schema": "function-recovery-oracle",
+      "sha256": "3239d0747456fb92edb48c322464cd76573236b107454d84b10553da23299f93"
+    },
+    {
+      "bytes": 1976,
+      "name": "identity-map.json",
+      "schema": "structural-identity-map",
+      "sha256": "836f2f29dc233c29a9da8356c7f4f8d51d0d7c80ce8c338963568f2b7ec93ae9"
+    },
+    {
+      "bytes": 13381,
+      "name": "recovered.json",
+      "schema": "recovered-structure",
+      "sha256": "ea0cbf88f2212a271e966e348be00ac943aa0c375ffe631d32fdf44b87996a65"
+    },
+    {
+      "bytes": 12123,
+      "name": "structural-oracle.json",
+      "schema": "structural-oracle",
+      "sha256": "9a479186e5d0595a0820e399e2d789f2a108497f0089f4b64e8247e3fbfa129d"
+    },
+    {
+      "bytes": 901,
+      "name": "target-abi.json",
+      "schema": "target-abi",
+      "sha256": "d251d5e6a0edc17655c355fb8fd757d557f064a6e67095ad53c8ca1e7569a343"
+    }
+  ],
+  "derivation": {
+    "boundaryScore": "load_function_oracle + load_program_model for rich/stripped + score_function_recovery + report_json_bytes",
+    "expectedScore": "the checked structural fixture loaders + score_fixture_structural_recovery + canonical_report_bytes",
+    "functionModelInputs": [
+      {
+        "bytes": 1805,
+        "path": "tests/oracle/fixtures/function_recovery/rich-model.json",
+        "sha256": "b15e5576ae86b07dbe561c40acfd57c6717ff66e77010e543de758f29e7138d5"
+      },
+      {
+        "bytes": 1822,
+        "path": "tests/oracle/fixtures/function_recovery/stripped-model.json",
+        "sha256": "1b0e9f293e1948f926e021e9ec5dd8e1c37a89a7225561ac345701de622e6e7c"
+      }
+    ],
+    "implementation": "oracle/function_recovery.py and oracle/structural_recovery.py",
+    "implementationCommit": "ba00345b61af06fa5c87079efc072774f64c25e6"
+  },
+  "runtimePolicy": {
+    "authoritative": false,
+    "pythonInvocationAllowedByKotlinTests": false,
+    "pythonInvocationAllowedByProduction": false
+  },
+  "schemaVersion": 1
+}

@@ -1,0 +1,1993 @@
+{
+  "aggregate": {
+    "claimPrecision": {
+      "denominator": 26,
+      "numerator": 18,
+      "value": 0.692308
+    },
+    "credit": {
+      "denominator": 24,
+      "numerator": 18,
+      "value": 0.75
+    },
+    "observableOracleCount": 23,
+    "oracleDenominator": 24,
+    "outcomes": {
+      "abi-equivalent": 4,
+      "contradicted": 2,
+      "exact": 14,
+      "fabricated": 3,
+      "oracle-unobservable": 1,
+      "recovered-unknown": 3
+    },
+    "recoveredDenominator": 26,
+    "unobservableOracleCount": 1
+  },
+  "boundaryMapping": {
+    "projectionAdapter": {
+      "id": "function-recovery-score-elf",
+      "objectFormat": "ELF",
+      "version": "1"
+    },
+    "scoreSha256": "b05d85d9f21e704c2581b84ded3ea5442eb4695ed75e74d25778e417a5a8d593",
+    "selectedFunctionCount": 4,
+    "twin": "rich"
+  },
+  "dimensions": [
+    {
+      "claimPrecision": {
+        "denominator": 5,
+        "numerator": 2,
+        "value": 0.4
+      },
+      "credit": {
+        "denominator": 5,
+        "numerator": 2,
+        "value": 0.4
+      },
+      "dimension": "function.prototype",
+      "observableOracleCount": 4,
+      "oracleDenominator": 5,
+      "outcomes": {
+        "abi-equivalent": 0,
+        "contradicted": 0,
+        "exact": 2,
+        "fabricated": 1,
+        "oracle-unobservable": 1,
+        "recovered-unknown": 2
+      },
+      "recoveredDenominator": 5,
+      "unobservableOracleCount": 1
+    },
+    {
+      "claimPrecision": {
+        "denominator": 1,
+        "numerator": 1,
+        "value": 1.0
+      },
+      "credit": {
+        "denominator": 1,
+        "numerator": 1,
+        "value": 1.0
+      },
+      "dimension": "function.calling-convention",
+      "observableOracleCount": 1,
+      "oracleDenominator": 1,
+      "outcomes": {
+        "abi-equivalent": 1,
+        "contradicted": 0,
+        "exact": 0,
+        "fabricated": 0,
+        "oracle-unobservable": 0,
+        "recovered-unknown": 0
+      },
+      "recoveredDenominator": 1,
+      "unobservableOracleCount": 0
+    },
+    {
+      "claimPrecision": {
+        "denominator": 1,
+        "numerator": 1,
+        "value": 1.0
+      },
+      "credit": {
+        "denominator": 1,
+        "numerator": 1,
+        "value": 1.0
+      },
+      "dimension": "function.variadic",
+      "observableOracleCount": 1,
+      "oracleDenominator": 1,
+      "outcomes": {
+        "abi-equivalent": 0,
+        "contradicted": 0,
+        "exact": 1,
+        "fabricated": 0,
+        "oracle-unobservable": 0,
+        "recovered-unknown": 0
+      },
+      "recoveredDenominator": 1,
+      "unobservableOracleCount": 0
+    },
+    {
+      "claimPrecision": {
+        "denominator": 1,
+        "numerator": 1,
+        "value": 1.0
+      },
+      "credit": {
+        "denominator": 1,
+        "numerator": 1,
+        "value": 1.0
+      },
+      "dimension": "function.parameter-abi-class",
+      "observableOracleCount": 1,
+      "oracleDenominator": 1,
+      "outcomes": {
+        "abi-equivalent": 1,
+        "contradicted": 0,
+        "exact": 0,
+        "fabricated": 0,
+        "oracle-unobservable": 0,
+        "recovered-unknown": 0
+      },
+      "recoveredDenominator": 1,
+      "unobservableOracleCount": 0
+    },
+    {
+      "claimPrecision": {
+        "denominator": 1,
+        "numerator": 1,
+        "value": 1.0
+      },
+      "credit": {
+        "denominator": 1,
+        "numerator": 1,
+        "value": 1.0
+      },
+      "dimension": "function.return-abi-class",
+      "observableOracleCount": 1,
+      "oracleDenominator": 1,
+      "outcomes": {
+        "abi-equivalent": 0,
+        "contradicted": 0,
+        "exact": 1,
+        "fabricated": 0,
+        "oracle-unobservable": 0,
+        "recovered-unknown": 0
+      },
+      "recoveredDenominator": 1,
+      "unobservableOracleCount": 0
+    },
+    {
+      "claimPrecision": {
+        "denominator": 1,
+        "numerator": 1,
+        "value": 1.0
+      },
+      "credit": {
+        "denominator": 1,
+        "numerator": 1,
+        "value": 1.0
+      },
+      "dimension": "call.internal",
+      "observableOracleCount": 1,
+      "oracleDenominator": 1,
+      "outcomes": {
+        "abi-equivalent": 0,
+        "contradicted": 0,
+        "exact": 1,
+        "fabricated": 0,
+        "oracle-unobservable": 0,
+        "recovered-unknown": 0
+      },
+      "recoveredDenominator": 1,
+      "unobservableOracleCount": 0
+    },
+    {
+      "claimPrecision": {
+        "denominator": 1,
+        "numerator": 1,
+        "value": 1.0
+      },
+      "credit": {
+        "denominator": 1,
+        "numerator": 1,
+        "value": 1.0
+      },
+      "dimension": "call.external",
+      "observableOracleCount": 1,
+      "oracleDenominator": 1,
+      "outcomes": {
+        "abi-equivalent": 0,
+        "contradicted": 0,
+        "exact": 1,
+        "fabricated": 0,
+        "oracle-unobservable": 0,
+        "recovered-unknown": 0
+      },
+      "recoveredDenominator": 1,
+      "unobservableOracleCount": 0
+    },
+    {
+      "claimPrecision": {
+        "denominator": 1,
+        "numerator": 0,
+        "value": 0.0
+      },
+      "credit": {
+        "denominator": 1,
+        "numerator": 0,
+        "value": 0.0
+      },
+      "dimension": "call.indirect",
+      "observableOracleCount": 1,
+      "oracleDenominator": 1,
+      "outcomes": {
+        "abi-equivalent": 0,
+        "contradicted": 1,
+        "exact": 0,
+        "fabricated": 0,
+        "oracle-unobservable": 0,
+        "recovered-unknown": 0
+      },
+      "recoveredDenominator": 1,
+      "unobservableOracleCount": 0
+    },
+    {
+      "claimPrecision": {
+        "denominator": 1,
+        "numerator": 1,
+        "value": 1.0
+      },
+      "credit": {
+        "denominator": 1,
+        "numerator": 1,
+        "value": 1.0
+      },
+      "dimension": "global.reference",
+      "observableOracleCount": 1,
+      "oracleDenominator": 1,
+      "outcomes": {
+        "abi-equivalent": 0,
+        "contradicted": 0,
+        "exact": 1,
+        "fabricated": 0,
+        "oracle-unobservable": 0,
+        "recovered-unknown": 0
+      },
+      "recoveredDenominator": 1,
+      "unobservableOracleCount": 0
+    },
+    {
+      "claimPrecision": {
+        "denominator": 2,
+        "numerator": 1,
+        "value": 0.5
+      },
+      "credit": {
+        "denominator": 1,
+        "numerator": 1,
+        "value": 1.0
+      },
+      "dimension": "global.storage",
+      "observableOracleCount": 1,
+      "oracleDenominator": 1,
+      "outcomes": {
+        "abi-equivalent": 0,
+        "contradicted": 0,
+        "exact": 1,
+        "fabricated": 1,
+        "oracle-unobservable": 0,
+        "recovered-unknown": 0
+      },
+      "recoveredDenominator": 2,
+      "unobservableOracleCount": 0
+    },
+    {
+      "claimPrecision": {
+        "denominator": 1,
+        "numerator": 0,
+        "value": 0.0
+      },
+      "credit": {
+        "denominator": 1,
+        "numerator": 0,
+        "value": 0.0
+      },
+      "dimension": "global.linkage",
+      "observableOracleCount": 1,
+      "oracleDenominator": 1,
+      "outcomes": {
+        "abi-equivalent": 0,
+        "contradicted": 1,
+        "exact": 0,
+        "fabricated": 0,
+        "oracle-unobservable": 0,
+        "recovered-unknown": 0
+      },
+      "recoveredDenominator": 1,
+      "unobservableOracleCount": 0
+    },
+    {
+      "claimPrecision": {
+        "denominator": 1,
+        "numerator": 1,
+        "value": 1.0
+      },
+      "credit": {
+        "denominator": 1,
+        "numerator": 1,
+        "value": 1.0
+      },
+      "dimension": "global.type",
+      "observableOracleCount": 1,
+      "oracleDenominator": 1,
+      "outcomes": {
+        "abi-equivalent": 0,
+        "contradicted": 0,
+        "exact": 1,
+        "fabricated": 0,
+        "oracle-unobservable": 0,
+        "recovered-unknown": 0
+      },
+      "recoveredDenominator": 1,
+      "unobservableOracleCount": 0
+    },
+    {
+      "claimPrecision": {
+        "denominator": 1,
+        "numerator": 1,
+        "value": 1.0
+      },
+      "credit": {
+        "denominator": 1,
+        "numerator": 1,
+        "value": 1.0
+      },
+      "dimension": "type.aggregate.kind",
+      "observableOracleCount": 1,
+      "oracleDenominator": 1,
+      "outcomes": {
+        "abi-equivalent": 0,
+        "contradicted": 0,
+        "exact": 1,
+        "fabricated": 0,
+        "oracle-unobservable": 0,
+        "recovered-unknown": 0
+      },
+      "recoveredDenominator": 1,
+      "unobservableOracleCount": 0
+    },
+    {
+      "claimPrecision": {
+        "denominator": 1,
+        "numerator": 1,
+        "value": 1.0
+      },
+      "credit": {
+        "denominator": 1,
+        "numerator": 1,
+        "value": 1.0
+      },
+      "dimension": "type.aggregate.size-bits",
+      "observableOracleCount": 1,
+      "oracleDenominator": 1,
+      "outcomes": {
+        "abi-equivalent": 0,
+        "contradicted": 0,
+        "exact": 1,
+        "fabricated": 0,
+        "oracle-unobservable": 0,
+        "recovered-unknown": 0
+      },
+      "recoveredDenominator": 1,
+      "unobservableOracleCount": 0
+    },
+    {
+      "claimPrecision": {
+        "denominator": 1,
+        "numerator": 0,
+        "value": 0.0
+      },
+      "credit": {
+        "denominator": 1,
+        "numerator": 0,
+        "value": 0.0
+      },
+      "dimension": "type.aggregate.alignment-bits",
+      "observableOracleCount": 1,
+      "oracleDenominator": 1,
+      "outcomes": {
+        "abi-equivalent": 0,
+        "contradicted": 0,
+        "exact": 0,
+        "fabricated": 0,
+        "oracle-unobservable": 0,
+        "recovered-unknown": 1
+      },
+      "recoveredDenominator": 1,
+      "unobservableOracleCount": 0
+    },
+    {
+      "claimPrecision": {
+        "denominator": 2,
+        "numerator": 1,
+        "value": 0.5
+      },
+      "credit": {
+        "denominator": 1,
+        "numerator": 1,
+        "value": 1.0
+      },
+      "dimension": "type.aggregate.member-offset-bits",
+      "observableOracleCount": 1,
+      "oracleDenominator": 1,
+      "outcomes": {
+        "abi-equivalent": 0,
+        "contradicted": 0,
+        "exact": 1,
+        "fabricated": 1,
+        "oracle-unobservable": 0,
+        "recovered-unknown": 0
+      },
+      "recoveredDenominator": 2,
+      "unobservableOracleCount": 0
+    },
+    {
+      "claimPrecision": {
+        "denominator": 1,
+        "numerator": 1,
+        "value": 1.0
+      },
+      "credit": {
+        "denominator": 1,
+        "numerator": 1,
+        "value": 1.0
+      },
+      "dimension": "type.aggregate.member-type",
+      "observableOracleCount": 1,
+      "oracleDenominator": 1,
+      "outcomes": {
+        "abi-equivalent": 0,
+        "contradicted": 0,
+        "exact": 1,
+        "fabricated": 0,
+        "oracle-unobservable": 0,
+        "recovered-unknown": 0
+      },
+      "recoveredDenominator": 1,
+      "unobservableOracleCount": 0
+    },
+    {
+      "claimPrecision": {
+        "denominator": 1,
+        "numerator": 1,
+        "value": 1.0
+      },
+      "credit": {
+        "denominator": 1,
+        "numerator": 1,
+        "value": 1.0
+      },
+      "dimension": "type.enum.underlying-abi-class",
+      "observableOracleCount": 1,
+      "oracleDenominator": 1,
+      "outcomes": {
+        "abi-equivalent": 1,
+        "contradicted": 0,
+        "exact": 0,
+        "fabricated": 0,
+        "oracle-unobservable": 0,
+        "recovered-unknown": 0
+      },
+      "recoveredDenominator": 1,
+      "unobservableOracleCount": 0
+    },
+    {
+      "claimPrecision": {
+        "denominator": 1,
+        "numerator": 1,
+        "value": 1.0
+      },
+      "credit": {
+        "denominator": 1,
+        "numerator": 1,
+        "value": 1.0
+      },
+      "dimension": "type.enum.enumerator-value",
+      "observableOracleCount": 1,
+      "oracleDenominator": 1,
+      "outcomes": {
+        "abi-equivalent": 0,
+        "contradicted": 0,
+        "exact": 1,
+        "fabricated": 0,
+        "oracle-unobservable": 0,
+        "recovered-unknown": 0
+      },
+      "recoveredDenominator": 1,
+      "unobservableOracleCount": 0
+    },
+    {
+      "claimPrecision": {
+        "denominator": 1,
+        "numerator": 1,
+        "value": 1.0
+      },
+      "credit": {
+        "denominator": 1,
+        "numerator": 1,
+        "value": 1.0
+      },
+      "dimension": "type.typedef.target",
+      "observableOracleCount": 1,
+      "oracleDenominator": 1,
+      "outcomes": {
+        "abi-equivalent": 1,
+        "contradicted": 0,
+        "exact": 0,
+        "fabricated": 0,
+        "oracle-unobservable": 0,
+        "recovered-unknown": 0
+      },
+      "recoveredDenominator": 1,
+      "unobservableOracleCount": 0
+    }
+  ],
+  "entities": [
+    {
+      "facts": [
+        {
+          "dimension": "function.prototype",
+          "normalizedRecoveredValue": null,
+          "oracleEvidence": [],
+          "oracleFactId": null,
+          "oracleValue": null,
+          "outcome": "fabricated",
+          "recoveredEvidence": [
+            {
+              "kind": "export",
+              "locator": "function:fn_0000000000400080;prototype"
+            }
+          ],
+          "recoveredFactId": "claim-extra-function-prototype",
+          "recoveredValue": {
+            "abi": null,
+            "source": "prototype:u64-from-void"
+          },
+          "referenceMappingVerified": null,
+          "slot": "prototype"
+        }
+      ],
+      "kind": "function",
+      "metric": {
+        "claimPrecision": {
+          "denominator": 1,
+          "numerator": 0,
+          "value": 0.0
+        },
+        "credit": {
+          "denominator": 0,
+          "numerator": 0,
+          "value": null
+        },
+        "observableOracleCount": 0,
+        "oracleDenominator": 0,
+        "outcomes": {
+          "abi-equivalent": 0,
+          "contradicted": 0,
+          "exact": 0,
+          "fabricated": 1,
+          "oracle-unobservable": 0,
+          "recovered-unknown": 0
+        },
+        "recoveredDenominator": 1,
+        "unobservableOracleCount": 0
+      },
+      "oracleId": null,
+      "recoveredId": "fn_0000000000400080"
+    },
+    {
+      "facts": [
+        {
+          "dimension": "call.external",
+          "normalizedRecoveredValue": {
+            "abi": null,
+            "source": "external:runtime.write"
+          },
+          "oracleEvidence": [
+            {
+              "kind": "relocation",
+              "locator": "rva:0x118"
+            }
+          ],
+          "oracleFactId": "truth-call-external",
+          "oracleValue": {
+            "abi": null,
+            "source": "external:runtime.write"
+          },
+          "outcome": "exact",
+          "recoveredEvidence": [
+            {
+              "kind": "relocation",
+              "locator": "rva:0x118;resolved-import"
+            }
+          ],
+          "recoveredFactId": "claim-call-external",
+          "recoveredValue": {
+            "abi": null,
+            "source": "external:runtime.write"
+          },
+          "referenceMappingVerified": null,
+          "slot": "call:0x118:external"
+        },
+        {
+          "dimension": "call.indirect",
+          "normalizedRecoveredValue": {
+            "abi": null,
+            "source": "signature:void-to-integer"
+          },
+          "oracleEvidence": [
+            {
+              "kind": "instruction",
+              "locator": "rva:0x120"
+            }
+          ],
+          "oracleFactId": "truth-call-indirect",
+          "oracleValue": {
+            "abi": null,
+            "source": "signature:integer-to-integer"
+          },
+          "outcome": "contradicted",
+          "recoveredEvidence": [
+            {
+              "kind": "instruction",
+              "locator": "rva:0x120;decoded-indirect"
+            }
+          ],
+          "recoveredFactId": "claim-call-indirect",
+          "recoveredValue": {
+            "abi": null,
+            "source": "signature:void-to-integer"
+          },
+          "referenceMappingVerified": null,
+          "slot": "call:0x120:indirect"
+        },
+        {
+          "dimension": "call.internal",
+          "normalizedRecoveredValue": {
+            "abi": null,
+            "source": "function:die-cu0-20-beta"
+          },
+          "oracleEvidence": [
+            {
+              "kind": "instruction",
+              "locator": "rva:0x110"
+            }
+          ],
+          "oracleFactId": "truth-call-internal",
+          "oracleValue": {
+            "abi": null,
+            "source": "function:die-cu0-20-beta"
+          },
+          "outcome": "exact",
+          "recoveredEvidence": [
+            {
+              "kind": "instruction",
+              "locator": "rva:0x110;decoded-call"
+            }
+          ],
+          "recoveredFactId": "claim-call-internal",
+          "recoveredValue": {
+            "abi": null,
+            "source": "function:fn_0000000000400022"
+          },
+          "referenceMappingVerified": true,
+          "slot": "call:0x110:internal"
+        },
+        {
+          "dimension": "function.calling-convention",
+          "normalizedRecoveredValue": {
+            "abi": {
+              "alignmentBits": null,
+              "callingConvention": "sysv-amd64",
+              "classes": [],
+              "sizeBits": null,
+              "variadic": null
+            },
+            "source": "convention:__cdecl"
+          },
+          "oracleEvidence": [
+            {
+              "kind": "target-rule",
+              "locator": "default-convention:unit:0;entry:0x10"
+            }
+          ],
+          "oracleFactId": "truth-interface-convention",
+          "oracleValue": {
+            "abi": {
+              "alignmentBits": null,
+              "callingConvention": "sysv-amd64",
+              "classes": [],
+              "sizeBits": null,
+              "variadic": null
+            },
+            "source": "convention:sysv"
+          },
+          "outcome": "abi-equivalent",
+          "recoveredEvidence": [
+            {
+              "kind": "export",
+              "locator": "function:fn_0000000000400010;calling-convention"
+            }
+          ],
+          "recoveredFactId": "claim-interface-convention",
+          "recoveredValue": {
+            "abi": {
+              "alignmentBits": null,
+              "callingConvention": "sysv-amd64",
+              "classes": [],
+              "sizeBits": null,
+              "variadic": null
+            },
+            "source": "convention:__cdecl"
+          },
+          "referenceMappingVerified": null,
+          "slot": "calling-convention"
+        },
+        {
+          "dimension": "function.parameter-abi-class",
+          "normalizedRecoveredValue": {
+            "abi": {
+              "alignmentBits": 32,
+              "callingConvention": null,
+              "classes": [
+                "INTEGER"
+              ],
+              "sizeBits": 32,
+              "variadic": null
+            },
+            "source": "type-token:int32"
+          },
+          "oracleEvidence": [
+            {
+              "kind": "debug-info",
+              "locator": "unit:0;entry:0x11"
+            }
+          ],
+          "oracleFactId": "truth-interface-parameter-0",
+          "oracleValue": {
+            "abi": {
+              "alignmentBits": 32,
+              "callingConvention": null,
+              "classes": [
+                "INTEGER"
+              ],
+              "sizeBits": 32,
+              "variadic": null
+            },
+            "source": "type-token:signed-i32"
+          },
+          "outcome": "abi-equivalent",
+          "recoveredEvidence": [
+            {
+              "kind": "export",
+              "locator": "function:fn_0000000000400010;parameter:0"
+            }
+          ],
+          "recoveredFactId": "claim-interface-parameter-0",
+          "recoveredValue": {
+            "abi": {
+              "alignmentBits": 32,
+              "callingConvention": null,
+              "classes": [
+                "INTEGER"
+              ],
+              "sizeBits": 32,
+              "variadic": null
+            },
+            "source": "type-token:int32"
+          },
+          "referenceMappingVerified": null,
+          "slot": "parameter:0"
+        },
+        {
+          "dimension": "function.prototype",
+          "normalizedRecoveredValue": {
+            "abi": null,
+            "source": "prototype:signed-i32-from-signed-i32"
+          },
+          "oracleEvidence": [
+            {
+              "kind": "debug-info",
+              "locator": "unit:0;entry:0x10;attribute:type"
+            }
+          ],
+          "oracleFactId": "truth-interface-prototype",
+          "oracleValue": {
+            "abi": null,
+            "source": "prototype:signed-i32-from-signed-i32"
+          },
+          "outcome": "exact",
+          "recoveredEvidence": [
+            {
+              "kind": "export",
+              "locator": "function:fn_0000000000400010;prototype"
+            }
+          ],
+          "recoveredFactId": "claim-interface-prototype",
+          "recoveredValue": {
+            "abi": null,
+            "source": "prototype:signed-i32-from-signed-i32"
+          },
+          "referenceMappingVerified": null,
+          "slot": "prototype"
+        },
+        {
+          "dimension": "function.return-abi-class",
+          "normalizedRecoveredValue": {
+            "abi": {
+              "alignmentBits": 32,
+              "callingConvention": null,
+              "classes": [
+                "INTEGER"
+              ],
+              "sizeBits": 32,
+              "variadic": null
+            },
+            "source": "type-token:signed-i32"
+          },
+          "oracleEvidence": [
+            {
+              "kind": "debug-info",
+              "locator": "unit:0;entry:0x10;return"
+            }
+          ],
+          "oracleFactId": "truth-interface-return",
+          "oracleValue": {
+            "abi": {
+              "alignmentBits": 32,
+              "callingConvention": null,
+              "classes": [
+                "INTEGER"
+              ],
+              "sizeBits": 32,
+              "variadic": null
+            },
+            "source": "type-token:signed-i32"
+          },
+          "outcome": "exact",
+          "recoveredEvidence": [
+            {
+              "kind": "export",
+              "locator": "function:fn_0000000000400010;return"
+            }
+          ],
+          "recoveredFactId": "claim-interface-return",
+          "recoveredValue": {
+            "abi": {
+              "alignmentBits": 32,
+              "callingConvention": null,
+              "classes": [
+                "INTEGER"
+              ],
+              "sizeBits": 32,
+              "variadic": null
+            },
+            "source": "type-token:signed-i32"
+          },
+          "referenceMappingVerified": null,
+          "slot": "return"
+        },
+        {
+          "dimension": "function.variadic",
+          "normalizedRecoveredValue": {
+            "abi": {
+              "alignmentBits": null,
+              "callingConvention": null,
+              "classes": [],
+              "sizeBits": null,
+              "variadic": false
+            },
+            "source": false
+          },
+          "oracleEvidence": [
+            {
+              "kind": "debug-info",
+              "locator": "unit:0;entry:0x10;children"
+            }
+          ],
+          "oracleFactId": "truth-interface-variadic",
+          "oracleValue": {
+            "abi": {
+              "alignmentBits": null,
+              "callingConvention": null,
+              "classes": [],
+              "sizeBits": null,
+              "variadic": false
+            },
+            "source": false
+          },
+          "outcome": "exact",
+          "recoveredEvidence": [
+            {
+              "kind": "export",
+              "locator": "function:fn_0000000000400010;variadic"
+            }
+          ],
+          "recoveredFactId": "claim-interface-variadic",
+          "recoveredValue": {
+            "abi": {
+              "alignmentBits": null,
+              "callingConvention": null,
+              "classes": [],
+              "sizeBits": null,
+              "variadic": false
+            },
+            "source": false
+          },
+          "referenceMappingVerified": null,
+          "slot": "variadic"
+        },
+        {
+          "dimension": "global.reference",
+          "normalizedRecoveredValue": {
+            "abi": null,
+            "source": "global:global.counter"
+          },
+          "oracleEvidence": [
+            {
+              "kind": "relocation",
+              "locator": "rva:0x128"
+            }
+          ],
+          "oracleFactId": "truth-global-reference",
+          "oracleValue": {
+            "abi": null,
+            "source": "global:global.counter"
+          },
+          "outcome": "exact",
+          "recoveredEvidence": [
+            {
+              "kind": "relocation",
+              "locator": "rva:0x128;resolved-storage"
+            }
+          ],
+          "recoveredFactId": "claim-global-reference",
+          "recoveredValue": {
+            "abi": null,
+            "source": "global:recovered.global.900"
+          },
+          "referenceMappingVerified": true,
+          "slot": "global-ref:0x128"
+        }
+      ],
+      "kind": "function",
+      "metric": {
+        "claimPrecision": {
+          "denominator": 9,
+          "numerator": 8,
+          "value": 0.888889
+        },
+        "credit": {
+          "denominator": 9,
+          "numerator": 8,
+          "value": 0.888889
+        },
+        "observableOracleCount": 9,
+        "oracleDenominator": 9,
+        "outcomes": {
+          "abi-equivalent": 2,
+          "contradicted": 1,
+          "exact": 6,
+          "fabricated": 0,
+          "oracle-unobservable": 0,
+          "recovered-unknown": 0
+        },
+        "recoveredDenominator": 9,
+        "unobservableOracleCount": 0
+      },
+      "oracleId": "die-cu0-10-alpha",
+      "recoveredId": "fn_0000000000400010"
+    },
+    {
+      "facts": [
+        {
+          "dimension": "function.prototype",
+          "normalizedRecoveredValue": null,
+          "oracleEvidence": [
+            {
+              "kind": "oracle-limit",
+              "locator": "entry:0x20;declaration-not-emitted"
+            }
+          ],
+          "oracleFactId": "truth-unobservable-prototype",
+          "oracleValue": null,
+          "outcome": "oracle-unobservable",
+          "recoveredEvidence": [
+            {
+              "kind": "export",
+              "locator": "function:fn_0000000000400022;prototype"
+            }
+          ],
+          "recoveredFactId": "claim-unobservable-prototype",
+          "recoveredValue": {
+            "abi": null,
+            "source": "prototype:u64-from-void"
+          },
+          "referenceMappingVerified": null,
+          "slot": "prototype"
+        }
+      ],
+      "kind": "function",
+      "metric": {
+        "claimPrecision": {
+          "denominator": 1,
+          "numerator": 0,
+          "value": 0.0
+        },
+        "credit": {
+          "denominator": 1,
+          "numerator": 0,
+          "value": 0.0
+        },
+        "observableOracleCount": 0,
+        "oracleDenominator": 1,
+        "outcomes": {
+          "abi-equivalent": 0,
+          "contradicted": 0,
+          "exact": 0,
+          "fabricated": 0,
+          "oracle-unobservable": 1,
+          "recovered-unknown": 0
+        },
+        "recoveredDenominator": 1,
+        "unobservableOracleCount": 1
+      },
+      "oracleId": "die-cu0-20-beta",
+      "recoveredId": "fn_0000000000400022"
+    },
+    {
+      "facts": [
+        {
+          "dimension": "function.prototype",
+          "normalizedRecoveredValue": null,
+          "oracleEvidence": [
+            {
+              "kind": "debug-info",
+              "locator": "unit:0;entry:0x30;attribute:type"
+            }
+          ],
+          "oracleFactId": "truth-gamma-prototype",
+          "oracleValue": {
+            "abi": null,
+            "source": "prototype:void-from-void"
+          },
+          "outcome": "recovered-unknown",
+          "recoveredEvidence": [],
+          "recoveredFactId": null,
+          "recoveredValue": null,
+          "referenceMappingVerified": null,
+          "slot": "prototype"
+        }
+      ],
+      "kind": "function",
+      "metric": {
+        "claimPrecision": {
+          "denominator": 0,
+          "numerator": 0,
+          "value": null
+        },
+        "credit": {
+          "denominator": 1,
+          "numerator": 0,
+          "value": 0.0
+        },
+        "observableOracleCount": 1,
+        "oracleDenominator": 1,
+        "outcomes": {
+          "abi-equivalent": 0,
+          "contradicted": 0,
+          "exact": 0,
+          "fabricated": 0,
+          "oracle-unobservable": 0,
+          "recovered-unknown": 1
+        },
+        "recoveredDenominator": 0,
+        "unobservableOracleCount": 0
+      },
+      "oracleId": "die-cu0-30-gamma",
+      "recoveredId": null
+    },
+    {
+      "facts": [
+        {
+          "dimension": "function.prototype",
+          "normalizedRecoveredValue": null,
+          "oracleEvidence": [
+            {
+              "kind": "debug-info",
+              "locator": "unit:0;entry:0x40;attribute:type"
+            }
+          ],
+          "oracleFactId": "truth-missing-prototype",
+          "oracleValue": {
+            "abi": null,
+            "source": "prototype:void-from-void"
+          },
+          "outcome": "recovered-unknown",
+          "recoveredEvidence": [
+            {
+              "kind": "export",
+              "locator": "function:fn_0000000000400040;prototype-unavailable"
+            }
+          ],
+          "recoveredFactId": "claim-unknown-prototype",
+          "recoveredValue": null,
+          "referenceMappingVerified": null,
+          "slot": "prototype"
+        }
+      ],
+      "kind": "function",
+      "metric": {
+        "claimPrecision": {
+          "denominator": 1,
+          "numerator": 0,
+          "value": 0.0
+        },
+        "credit": {
+          "denominator": 1,
+          "numerator": 0,
+          "value": 0.0
+        },
+        "observableOracleCount": 1,
+        "oracleDenominator": 1,
+        "outcomes": {
+          "abi-equivalent": 0,
+          "contradicted": 0,
+          "exact": 0,
+          "fabricated": 0,
+          "oracle-unobservable": 0,
+          "recovered-unknown": 1
+        },
+        "recoveredDenominator": 1,
+        "unobservableOracleCount": 0
+      },
+      "oracleId": "die-cu0-40-delta",
+      "recoveredId": "fn_0000000000400040"
+    },
+    {
+      "facts": [
+        {
+          "dimension": "function.prototype",
+          "normalizedRecoveredValue": {
+            "abi": null,
+            "source": "prototype:void-from-void"
+          },
+          "oracleEvidence": [
+            {
+              "kind": "debug-info",
+              "locator": "unit:0;entry:0x50;attribute:type"
+            }
+          ],
+          "oracleFactId": "truth-epsilon-prototype",
+          "oracleValue": {
+            "abi": null,
+            "source": "prototype:void-from-void"
+          },
+          "outcome": "exact",
+          "recoveredEvidence": [
+            {
+              "kind": "export",
+              "locator": "function:fn_0000000000400050;prototype"
+            }
+          ],
+          "recoveredFactId": "claim-epsilon-prototype",
+          "recoveredValue": {
+            "abi": null,
+            "source": "prototype:void-from-void"
+          },
+          "referenceMappingVerified": null,
+          "slot": "prototype"
+        }
+      ],
+      "kind": "function",
+      "metric": {
+        "claimPrecision": {
+          "denominator": 1,
+          "numerator": 1,
+          "value": 1.0
+        },
+        "credit": {
+          "denominator": 1,
+          "numerator": 1,
+          "value": 1.0
+        },
+        "observableOracleCount": 1,
+        "oracleDenominator": 1,
+        "outcomes": {
+          "abi-equivalent": 0,
+          "contradicted": 0,
+          "exact": 1,
+          "fabricated": 0,
+          "oracle-unobservable": 0,
+          "recovered-unknown": 0
+        },
+        "recoveredDenominator": 1,
+        "unobservableOracleCount": 0
+      },
+      "oracleId": "die-cu0-50-epsilon",
+      "recoveredId": "fn_0000000000400050"
+    },
+    {
+      "facts": [
+        {
+          "dimension": "global.storage",
+          "normalizedRecoveredValue": null,
+          "oracleEvidence": [],
+          "oracleFactId": null,
+          "oracleValue": null,
+          "outcome": "fabricated",
+          "recoveredEvidence": [
+            {
+              "kind": "export",
+              "locator": "global:recovered.global.extra;storage"
+            }
+          ],
+          "recoveredFactId": "claim-fabricated-storage",
+          "recoveredValue": {
+            "abi": null,
+            "source": "static-rva:0x980"
+          },
+          "referenceMappingVerified": null,
+          "slot": "storage"
+        }
+      ],
+      "kind": "global",
+      "metric": {
+        "claimPrecision": {
+          "denominator": 1,
+          "numerator": 0,
+          "value": 0.0
+        },
+        "credit": {
+          "denominator": 0,
+          "numerator": 0,
+          "value": null
+        },
+        "observableOracleCount": 0,
+        "oracleDenominator": 0,
+        "outcomes": {
+          "abi-equivalent": 0,
+          "contradicted": 0,
+          "exact": 0,
+          "fabricated": 1,
+          "oracle-unobservable": 0,
+          "recovered-unknown": 0
+        },
+        "recoveredDenominator": 1,
+        "unobservableOracleCount": 0
+      },
+      "oracleId": null,
+      "recoveredId": "recovered.global.extra"
+    },
+    {
+      "facts": [
+        {
+          "dimension": "global.linkage",
+          "normalizedRecoveredValue": {
+            "abi": null,
+            "source": "external"
+          },
+          "oracleEvidence": [
+            {
+              "kind": "symbol-table",
+              "locator": "binding:local;rva:0x900"
+            }
+          ],
+          "oracleFactId": "truth-global-linkage",
+          "oracleValue": {
+            "abi": null,
+            "source": "internal"
+          },
+          "outcome": "contradicted",
+          "recoveredEvidence": [
+            {
+              "kind": "export",
+              "locator": "global:recovered.global.900;linkage"
+            }
+          ],
+          "recoveredFactId": "claim-global-linkage",
+          "recoveredValue": {
+            "abi": null,
+            "source": "external"
+          },
+          "referenceMappingVerified": null,
+          "slot": "linkage"
+        },
+        {
+          "dimension": "global.storage",
+          "normalizedRecoveredValue": {
+            "abi": null,
+            "source": "static-rva:0x900"
+          },
+          "oracleEvidence": [
+            {
+              "kind": "symbol-table",
+              "locator": "object:rva:0x900"
+            }
+          ],
+          "oracleFactId": "truth-global-storage",
+          "oracleValue": {
+            "abi": null,
+            "source": "static-rva:0x900"
+          },
+          "outcome": "exact",
+          "recoveredEvidence": [
+            {
+              "kind": "export",
+              "locator": "global:recovered.global.900;storage"
+            }
+          ],
+          "recoveredFactId": "claim-global-storage",
+          "recoveredValue": {
+            "abi": null,
+            "source": "static-rva:0x900"
+          },
+          "referenceMappingVerified": null,
+          "slot": "storage"
+        },
+        {
+          "dimension": "global.type",
+          "normalizedRecoveredValue": {
+            "abi": {
+              "alignmentBits": 32,
+              "callingConvention": null,
+              "classes": [
+                "INTEGER"
+              ],
+              "sizeBits": 32,
+              "variadic": null
+            },
+            "source": "type-entity:type.s32"
+          },
+          "oracleEvidence": [
+            {
+              "kind": "debug-info",
+              "locator": "unit:0;entry:0x80;type"
+            }
+          ],
+          "oracleFactId": "truth-global-type",
+          "oracleValue": {
+            "abi": {
+              "alignmentBits": 32,
+              "callingConvention": null,
+              "classes": [
+                "INTEGER"
+              ],
+              "sizeBits": 32,
+              "variadic": null
+            },
+            "source": "type-entity:type.s32"
+          },
+          "outcome": "exact",
+          "recoveredEvidence": [
+            {
+              "kind": "export",
+              "locator": "global:recovered.global.900;type"
+            }
+          ],
+          "recoveredFactId": "claim-global-type",
+          "recoveredValue": {
+            "abi": {
+              "alignmentBits": 32,
+              "callingConvention": null,
+              "classes": [
+                "INTEGER"
+              ],
+              "sizeBits": 32,
+              "variadic": null
+            },
+            "source": "type-entity:recovered.type.i32"
+          },
+          "referenceMappingVerified": true,
+          "slot": "type"
+        }
+      ],
+      "kind": "global",
+      "metric": {
+        "claimPrecision": {
+          "denominator": 3,
+          "numerator": 2,
+          "value": 0.666667
+        },
+        "credit": {
+          "denominator": 3,
+          "numerator": 2,
+          "value": 0.666667
+        },
+        "observableOracleCount": 3,
+        "oracleDenominator": 3,
+        "outcomes": {
+          "abi-equivalent": 0,
+          "contradicted": 1,
+          "exact": 2,
+          "fabricated": 0,
+          "oracle-unobservable": 0,
+          "recovered-unknown": 0
+        },
+        "recoveredDenominator": 3,
+        "unobservableOracleCount": 0
+      },
+      "oracleId": "global.counter",
+      "recoveredId": "recovered.global.900"
+    },
+    {
+      "facts": [
+        {
+          "dimension": "type.enum.enumerator-value",
+          "normalizedRecoveredValue": {
+            "abi": null,
+            "source": 7
+          },
+          "oracleEvidence": [
+            {
+              "kind": "debug-info",
+              "locator": "unit:0;entry:0xb1;constant"
+            }
+          ],
+          "oracleFactId": "truth-mode-enumerator-ready",
+          "oracleValue": {
+            "abi": null,
+            "source": 7
+          },
+          "outcome": "exact",
+          "recoveredEvidence": [
+            {
+              "kind": "export",
+              "locator": "type-index:12;enumerator:READY"
+            }
+          ],
+          "recoveredFactId": "claim-mode-enumerator-ready",
+          "recoveredValue": {
+            "abi": null,
+            "source": 7
+          },
+          "referenceMappingVerified": null,
+          "slot": "enumerator:READY"
+        },
+        {
+          "dimension": "type.enum.underlying-abi-class",
+          "normalizedRecoveredValue": {
+            "abi": {
+              "alignmentBits": 32,
+              "callingConvention": null,
+              "classes": [
+                "INTEGER"
+              ],
+              "sizeBits": 32,
+              "variadic": null
+            },
+            "source": "type-token:uint32"
+          },
+          "oracleEvidence": [
+            {
+              "kind": "debug-info",
+              "locator": "unit:0;entry:0xb0;underlying"
+            }
+          ],
+          "oracleFactId": "truth-mode-underlying",
+          "oracleValue": {
+            "abi": {
+              "alignmentBits": 32,
+              "callingConvention": null,
+              "classes": [
+                "INTEGER"
+              ],
+              "sizeBits": 32,
+              "variadic": null
+            },
+            "source": "type-token:unsigned-i32"
+          },
+          "outcome": "abi-equivalent",
+          "recoveredEvidence": [
+            {
+              "kind": "export",
+              "locator": "type-index:12;underlying"
+            }
+          ],
+          "recoveredFactId": "claim-mode-underlying",
+          "recoveredValue": {
+            "abi": {
+              "alignmentBits": 32,
+              "callingConvention": null,
+              "classes": [
+                "INTEGER"
+              ],
+              "sizeBits": 32,
+              "variadic": null
+            },
+            "source": "type-token:uint32"
+          },
+          "referenceMappingVerified": null,
+          "slot": "enum-underlying"
+        }
+      ],
+      "kind": "type",
+      "metric": {
+        "claimPrecision": {
+          "denominator": 2,
+          "numerator": 2,
+          "value": 1.0
+        },
+        "credit": {
+          "denominator": 2,
+          "numerator": 2,
+          "value": 1.0
+        },
+        "observableOracleCount": 2,
+        "oracleDenominator": 2,
+        "outcomes": {
+          "abi-equivalent": 1,
+          "contradicted": 0,
+          "exact": 1,
+          "fabricated": 0,
+          "oracle-unobservable": 0,
+          "recovered-unknown": 0
+        },
+        "recoveredDenominator": 2,
+        "unobservableOracleCount": 0
+      },
+      "oracleId": "type.mode",
+      "recoveredId": "recovered.type.mode"
+    },
+    {
+      "facts": [
+        {
+          "dimension": "type.aggregate.alignment-bits",
+          "normalizedRecoveredValue": null,
+          "oracleEvidence": [
+            {
+              "kind": "target-rule",
+              "locator": "unit:0;entry:0xa0;alignment"
+            }
+          ],
+          "oracleFactId": "truth-packet-alignment",
+          "oracleValue": {
+            "abi": {
+              "alignmentBits": 64,
+              "callingConvention": null,
+              "classes": [],
+              "sizeBits": null,
+              "variadic": null
+            },
+            "source": 64
+          },
+          "outcome": "recovered-unknown",
+          "recoveredEvidence": [
+            {
+              "kind": "export",
+              "locator": "type-index:11;alignment-unavailable"
+            }
+          ],
+          "recoveredFactId": "claim-packet-alignment-unknown",
+          "recoveredValue": null,
+          "referenceMappingVerified": null,
+          "slot": "aggregate-alignment"
+        },
+        {
+          "dimension": "type.aggregate.kind",
+          "normalizedRecoveredValue": {
+            "abi": null,
+            "source": "record"
+          },
+          "oracleEvidence": [
+            {
+              "kind": "debug-info",
+              "locator": "unit:0;entry:0xa0;tag"
+            }
+          ],
+          "oracleFactId": "truth-packet-kind",
+          "oracleValue": {
+            "abi": null,
+            "source": "record"
+          },
+          "outcome": "exact",
+          "recoveredEvidence": [
+            {
+              "kind": "export",
+              "locator": "type-index:11;kind"
+            }
+          ],
+          "recoveredFactId": "claim-packet-kind",
+          "recoveredValue": {
+            "abi": null,
+            "source": "record"
+          },
+          "referenceMappingVerified": null,
+          "slot": "aggregate-kind"
+        },
+        {
+          "dimension": "type.aggregate.member-offset-bits",
+          "normalizedRecoveredValue": {
+            "abi": null,
+            "source": 0
+          },
+          "oracleEvidence": [
+            {
+              "kind": "debug-info",
+              "locator": "unit:0;entry:0xa1;location"
+            }
+          ],
+          "oracleFactId": "truth-packet-member-offset",
+          "oracleValue": {
+            "abi": null,
+            "source": 0
+          },
+          "outcome": "exact",
+          "recoveredEvidence": [
+            {
+              "kind": "export",
+              "locator": "type-index:11;member:0;offset"
+            }
+          ],
+          "recoveredFactId": "claim-packet-member-offset",
+          "recoveredValue": {
+            "abi": null,
+            "source": 0
+          },
+          "referenceMappingVerified": null,
+          "slot": "member:0:offset"
+        },
+        {
+          "dimension": "type.aggregate.member-offset-bits",
+          "normalizedRecoveredValue": null,
+          "oracleEvidence": [],
+          "oracleFactId": null,
+          "oracleValue": null,
+          "outcome": "fabricated",
+          "recoveredEvidence": [
+            {
+              "kind": "export",
+              "locator": "type-index:11;member:1;offset"
+            }
+          ],
+          "recoveredFactId": "claim-packet-extra-member-offset",
+          "recoveredValue": {
+            "abi": null,
+            "source": 64
+          },
+          "referenceMappingVerified": null,
+          "slot": "member:1:offset"
+        },
+        {
+          "dimension": "type.aggregate.member-type",
+          "normalizedRecoveredValue": {
+            "abi": {
+              "alignmentBits": 32,
+              "callingConvention": null,
+              "classes": [
+                "INTEGER"
+              ],
+              "sizeBits": 32,
+              "variadic": null
+            },
+            "source": "type-entity:type.s32"
+          },
+          "oracleEvidence": [
+            {
+              "kind": "debug-info",
+              "locator": "unit:0;entry:0xa1;type"
+            }
+          ],
+          "oracleFactId": "truth-packet-member-type",
+          "oracleValue": {
+            "abi": {
+              "alignmentBits": 32,
+              "callingConvention": null,
+              "classes": [
+                "INTEGER"
+              ],
+              "sizeBits": 32,
+              "variadic": null
+            },
+            "source": "type-entity:type.s32"
+          },
+          "outcome": "exact",
+          "recoveredEvidence": [
+            {
+              "kind": "export",
+              "locator": "type-index:11;member:0;type"
+            }
+          ],
+          "recoveredFactId": "claim-packet-member-type",
+          "recoveredValue": {
+            "abi": {
+              "alignmentBits": 32,
+              "callingConvention": null,
+              "classes": [
+                "INTEGER"
+              ],
+              "sizeBits": 32,
+              "variadic": null
+            },
+            "source": "type-entity:recovered.type.i32"
+          },
+          "referenceMappingVerified": true,
+          "slot": "member:0:type"
+        },
+        {
+          "dimension": "type.aggregate.size-bits",
+          "normalizedRecoveredValue": {
+            "abi": {
+              "alignmentBits": null,
+              "callingConvention": null,
+              "classes": [],
+              "sizeBits": 128,
+              "variadic": null
+            },
+            "source": 128
+          },
+          "oracleEvidence": [
+            {
+              "kind": "debug-info",
+              "locator": "unit:0;entry:0xa0;byte-size"
+            }
+          ],
+          "oracleFactId": "truth-packet-size",
+          "oracleValue": {
+            "abi": {
+              "alignmentBits": null,
+              "callingConvention": null,
+              "classes": [],
+              "sizeBits": 128,
+              "variadic": null
+            },
+            "source": 128
+          },
+          "outcome": "exact",
+          "recoveredEvidence": [
+            {
+              "kind": "export",
+              "locator": "type-index:11;size"
+            }
+          ],
+          "recoveredFactId": "claim-packet-size",
+          "recoveredValue": {
+            "abi": {
+              "alignmentBits": null,
+              "callingConvention": null,
+              "classes": [],
+              "sizeBits": 128,
+              "variadic": null
+            },
+            "source": 128
+          },
+          "referenceMappingVerified": null,
+          "slot": "aggregate-size"
+        }
+      ],
+      "kind": "type",
+      "metric": {
+        "claimPrecision": {
+          "denominator": 6,
+          "numerator": 4,
+          "value": 0.666667
+        },
+        "credit": {
+          "denominator": 5,
+          "numerator": 4,
+          "value": 0.8
+        },
+        "observableOracleCount": 5,
+        "oracleDenominator": 5,
+        "outcomes": {
+          "abi-equivalent": 0,
+          "contradicted": 0,
+          "exact": 4,
+          "fabricated": 1,
+          "oracle-unobservable": 0,
+          "recovered-unknown": 1
+        },
+        "recoveredDenominator": 6,
+        "unobservableOracleCount": 0
+      },
+      "oracleId": "type.packet",
+      "recoveredId": "recovered.type.packet"
+    },
+    {
+      "facts": [
+        {
+          "dimension": "type.typedef.target",
+          "normalizedRecoveredValue": {
+            "abi": {
+              "alignmentBits": 32,
+              "callingConvention": null,
+              "classes": [
+                "INTEGER"
+              ],
+              "sizeBits": 32,
+              "variadic": null
+            },
+            "source": "type-token:int32"
+          },
+          "oracleEvidence": [
+            {
+              "kind": "debug-info",
+              "locator": "unit:0;entry:0x81"
+            }
+          ],
+          "oracleFactId": "truth-s32-typedef",
+          "oracleValue": {
+            "abi": {
+              "alignmentBits": 32,
+              "callingConvention": null,
+              "classes": [
+                "INTEGER"
+              ],
+              "sizeBits": 32,
+              "variadic": null
+            },
+            "source": "type-token:signed-i32"
+          },
+          "outcome": "abi-equivalent",
+          "recoveredEvidence": [
+            {
+              "kind": "export",
+              "locator": "type-index:10;target"
+            }
+          ],
+          "recoveredFactId": "claim-s32-typedef",
+          "recoveredValue": {
+            "abi": {
+              "alignmentBits": 32,
+              "callingConvention": null,
+              "classes": [
+                "INTEGER"
+              ],
+              "sizeBits": 32,
+              "variadic": null
+            },
+            "source": "type-token:int32"
+          },
+          "referenceMappingVerified": null,
+          "slot": "typedef-target"
+        }
+      ],
+      "kind": "type",
+      "metric": {
+        "claimPrecision": {
+          "denominator": 1,
+          "numerator": 1,
+          "value": 1.0
+        },
+        "credit": {
+          "denominator": 1,
+          "numerator": 1,
+          "value": 1.0
+        },
+        "observableOracleCount": 1,
+        "oracleDenominator": 1,
+        "outcomes": {
+          "abi-equivalent": 1,
+          "contradicted": 0,
+          "exact": 0,
+          "fabricated": 0,
+          "oracle-unobservable": 0,
+          "recovered-unknown": 0
+        },
+        "recoveredDenominator": 1,
+        "unobservableOracleCount": 0
+      },
+      "oracleId": "type.s32",
+      "recoveredId": "recovered.type.i32"
+    }
+  ],
+  "identityMapping": {
+    "id": "neutral-structural-fixture-map-v1",
+    "mappingCount": 4,
+    "productionVerified": false,
+    "sha256": "836f2f29dc233c29a9da8356c7f4f8d51d0d7c80ce8c338963568f2b7ec93ae9",
+    "verification": "fixture-payload-digest-only"
+  },
+  "model": {
+    "id": "neutral-recovered-structure-v1",
+    "payloadSha256": "ec4c53ce604f551e2a7505716c5ea80e529d0b63148ea93826b6f9647dcc57b5",
+    "provenance": {
+      "boundaryScore": {
+        "projectionAdapter": {
+          "id": "function-recovery-score-elf",
+          "version": "1"
+        },
+        "sha256": "b05d85d9f21e704c2581b84ded3ea5442eb4695ed75e74d25778e417a5a8d593",
+        "twin": "rich"
+      },
+      "exporter": {
+        "configurationSha256": "dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd",
+        "executableSha256": "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+        "id": "fixture-structure-exporter",
+        "version": "1"
+      },
+      "identityMap": {
+        "sha256": "836f2f29dc233c29a9da8356c7f4f8d51d0d7c80ce8c338963568f2b7ec93ae9"
+      },
+      "inputBinary": {
+        "sha256": "1111111111111111111111111111111111111111111111111111111111111111",
+        "sizeBytes": 4096
+      },
+      "loader": {
+        "configurationSha256": "ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff",
+        "executableSha256": "eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee",
+        "id": "fixture-binary-loader",
+        "imageBase": "0x400000",
+        "version": "1"
+      },
+      "normalizationProfile": {
+        "configurationSha256": "4385f86a45a39e55a8f9f072e5563720f4775edbb53d8d4c290f9f232982ae80",
+        "id": "structural-source-normalization",
+        "version": "1"
+      },
+      "targetAbi": {
+        "id": "sysv-amd64-elf-v1",
+        "sha256": "d251d5e6a0edc17655c355fb8fd757d557f064a6e67095ad53c8ca1e7569a343"
+      }
+    },
+    "scope": "fixture",
+    "sha256": "ea0cbf88f2212a271e966e348be00ac943aa0c375ffe631d32fdf44b87996a65",
+    "verification": {
+      "adapterReplayVerified": false,
+      "identityMapPayloadDigestVerified": true,
+      "payloadDigestVerified": true,
+      "productionVerified": false,
+      "status": "fixture-digest-only"
+    }
+  },
+  "normalizationProfile": {
+    "configurationSha256": "4385f86a45a39e55a8f9f072e5563720f4775edbb53d8d4c290f9f232982ae80",
+    "id": "structural-source-normalization",
+    "version": "1"
+  },
+  "oracle": {
+    "artifactManifestSha256": null,
+    "boundaryOracleId": "fixture-function-recovery-v1",
+    "id": "neutral-structural-fixture-v1",
+    "scope": "fixture",
+    "sha256": "9a479186e5d0595a0820e399e2d789f2a108497f0089f4b64e8247e3fbfa129d"
+  },
+  "policy": {
+    "abiEquivalence": "exact requires identical source and ABI projections; ABI-equivalent requires different source projections and identical non-null projections validated by the selected target descriptor",
+    "identitySelection": "function and internal-call endpoint identities come only from the selected function-boundary report; global and type identities come only from the separately reviewed identity map; facts align by canonical dimension and slot",
+    "limits": {
+      "maxEntities": 50000,
+      "maxEvidencePerFact": 32,
+      "maxFacts": 500000,
+      "maxFactsPerEntity": 20000,
+      "maxJsonInputBytes": 67108864,
+      "maxJsonNumberCharacters": 128,
+      "maxMappings": 100000,
+      "maxProjectedReportBytes": 100663296,
+      "maxReportBytes": 134217728,
+      "maxReportEntries": 600000,
+      "maxTextCharacters": 16384,
+      "maxTotalEntities": 50000,
+      "maxTotalEvidence": 2000000,
+      "maxTotalFacts": 600000,
+      "maxTotalInputBytes": 201326592
+    },
+    "outcomeLattice": [
+      "exact",
+      "abi-equivalent",
+      "recovered-unknown",
+      "oracle-unobservable",
+      "contradicted",
+      "fabricated"
+    ],
+    "sourceNormalization": "language-neutral tagged source projections interpreted only under the exact normalization-profile ID, version, and configuration digest; adapter-local declarations and display names are forbidden"
+  },
+  "schemaVersion": 1,
+  "targetAbi": {
+    "id": "sysv-amd64-elf-v1",
+    "sha256": "d251d5e6a0edc17655c355fb8fd757d557f064a6e67095ad53c8ca1e7569a343"
+  }
+}

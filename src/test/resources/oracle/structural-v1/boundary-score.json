@@ -1,0 +1,655 @@
+{
+  "oracle": {
+    "artifactManifestSha256": null,
+    "excludedFunctions": [
+      {
+        "aliases": [
+          {
+            "availability": {
+              "rich": "not-observable",
+              "stripped": "not-observable"
+            },
+            "evidence": [
+              {
+                "kind": "elf-symbol",
+                "locator": ".symtab[15]"
+              }
+            ],
+            "name": "alpha.cold"
+          }
+        ],
+        "kind": "compiler-generated",
+        "oracleId": "symbol-60-clone",
+        "reason": "compiler-generated cold partition, not a source function",
+        "rva": "0x60"
+      },
+      {
+        "aliases": [
+          {
+            "availability": {
+              "rich": "not-observable",
+              "stripped": "not-observable"
+            },
+            "evidence": [
+              {
+                "kind": "dwarf-subprogram",
+                "locator": ".debug_info:cu=0x0,die=0x70,DW_AT_inline=3"
+              }
+            ],
+            "name": "inline_helper"
+          }
+        ],
+        "kind": "inlined",
+        "oracleId": "die-cu0-70-inline-helper",
+        "reason": "DWARF declares an inline-only entity without an emitted function start",
+        "rva": null
+      }
+    ],
+    "exclusions": {
+      "compiler-generated": 1,
+      "inlined": 1
+    },
+    "functionRecordCount": 7,
+    "id": "fixture-function-recovery-v1",
+    "scope": "fixture",
+    "scoredFunctionCount": 5,
+    "source": "dwarf-and-symbols",
+    "verification": {
+      "artifactManifestVerified": false,
+      "productionVerified": false,
+      "programModelProvenance": "fixture-inputs",
+      "status": "fixture-non-production"
+    }
+  },
+  "policy": {
+    "addressNormalization": "rva = model address - explicit program-model image base; oracle RVA = ELF virtual address - recorded ELF image base (manifest-validated for production)",
+    "exclusionHandling": "inlined records are never scored; exact starts of explicitly compiler-generated records are ignored",
+    "limits": {
+      "maxAliasesPerFunction": 256,
+      "maxAmbiguityEdges": 100000,
+      "maxArtifactBytes": 536870912,
+      "maxEvidencePerAlias": 256,
+      "maxFunctionRecords": 20000,
+      "maxJsonInputBytes": 536870912,
+      "maxManifestBytes": 67108864,
+      "maxMatchingCells": 20000000,
+      "maxModelGlobalsOrTypes": 1000000,
+      "maxModelReferencesPerFunction": 100000,
+      "maxReportBytes": 67108864,
+      "maxSupportingInputBytes": 67108864,
+      "maxTextCharacters": 16777216
+    },
+    "nameComparison": "exact UTF-8 match against any oracle alias",
+    "nearMissBytes": 4,
+    "nearMissMatching": "exact addresses first; then on sorted RVAs maximize order-preserving one-to-one cardinality, minimize total absolute distance, and apply the recorded stable tie break"
+  },
+  "schemaVersion": 1,
+  "twins": {
+    "rich": {
+      "artifact": {
+        "elfImageBase": "0x400000",
+        "elfType": "ET_EXEC",
+        "executableRvaRanges": [
+          {
+            "endExclusive": "0x1000",
+            "start": "0x0"
+          }
+        ],
+        "inputSha256": "1111111111111111111111111111111111111111111111111111111111111111",
+        "modelImageBase": "0x400000",
+        "modelImageBaseEvidence": "explicit-scorer-input",
+        "modelImageBaseValidation": "fixture-explicit-input"
+      },
+      "boundaries": {
+        "exactAddressRate": {
+          "denominator": 5,
+          "numerator": 3,
+          "value": 0.6
+        },
+        "exactMatches": 3,
+        "f1": {
+          "denominator": 10,
+          "numerator": 8,
+          "value": 0.8
+        },
+        "falseNegatives": 1,
+        "falsePositives": 1,
+        "ignoredExcludedCount": 1,
+        "nearMissDistanceBytes": 2,
+        "nearMissRate": {
+          "denominator": 5,
+          "numerator": 1,
+          "value": 0.2
+        },
+        "nearMisses": 1,
+        "precision": {
+          "denominator": 5,
+          "numerator": 4,
+          "value": 0.8
+        },
+        "rawRecoveredCount": 6,
+        "recall": {
+          "denominator": 5,
+          "numerator": 4,
+          "value": 0.8
+        },
+        "referenceCount": 5,
+        "scoredRecoveredCount": 5,
+        "truePositives": 4
+      },
+      "exactMatches": [
+        {
+          "deltaBytes": 0,
+          "matchKind": "exact",
+          "matchedAlias": "alpha",
+          "matchedAliasAvailability": "surviving",
+          "nameCategoryResults": {
+            "removed": "not-applicable",
+            "surviving": "exact"
+          },
+          "nameResult": "exact",
+          "oracleAliases": [
+            {
+              "availability": "surviving",
+              "evidence": [
+                {
+                  "kind": "dwarf-subprogram",
+                  "locator": ".debug_info:cu=0x0,die=0x10"
+                },
+                {
+                  "kind": "elf-symbol",
+                  "locator": ".symtab[10]"
+                }
+              ],
+              "name": "alpha"
+            }
+          ],
+          "oracleId": "die-cu0-10-alpha",
+          "oracleRva": "0x10",
+          "recoveredId": "fn_0000000000400010",
+          "recoveredName": "alpha",
+          "recoveredRva": "0x10",
+          "recoveredStatus": "recovered"
+        },
+        {
+          "deltaBytes": 0,
+          "matchKind": "exact",
+          "matchedAlias": null,
+          "matchedAliasAvailability": null,
+          "nameCategoryResults": {
+            "removed": "not-applicable",
+            "surviving": "incorrect"
+          },
+          "nameResult": "incorrect",
+          "oracleAliases": [
+            {
+              "availability": "surviving",
+              "evidence": [
+                {
+                  "kind": "dwarf-subprogram",
+                  "locator": ".debug_info:cu=0x0,die=0x40"
+                },
+                {
+                  "kind": "elf-symbol",
+                  "locator": ".symtab[13]"
+                }
+              ],
+              "name": "delta"
+            }
+          ],
+          "oracleId": "die-cu0-40-delta",
+          "oracleRva": "0x40",
+          "recoveredId": "fn_0000000000400040",
+          "recoveredName": "FUN_400040",
+          "recoveredRva": "0x40",
+          "recoveredStatus": "recovered"
+        },
+        {
+          "deltaBytes": 0,
+          "matchKind": "exact",
+          "matchedAlias": null,
+          "matchedAliasAvailability": null,
+          "nameCategoryResults": {
+            "removed": "not-applicable",
+            "surviving": "incorrect"
+          },
+          "nameResult": "incorrect",
+          "oracleAliases": [
+            {
+              "availability": "surviving",
+              "evidence": [
+                {
+                  "kind": "dwarf-subprogram",
+                  "locator": ".debug_info:cu=0x0,die=0x50"
+                }
+              ],
+              "name": "epsilon"
+            }
+          ],
+          "oracleId": "die-cu0-50-epsilon",
+          "oracleRva": "0x50",
+          "recoveredId": "fn_0000000000400050",
+          "recoveredName": "FUN_400050",
+          "recoveredRva": "0x50",
+          "recoveredStatus": "recovered"
+        }
+      ],
+      "falseNegatives": [
+        {
+          "oracleAliases": [
+            {
+              "availability": "surviving",
+              "evidence": [
+                {
+                  "kind": "dwarf-subprogram",
+                  "locator": ".debug_info:cu=0x0,die=0x30"
+                },
+                {
+                  "kind": "elf-symbol",
+                  "locator": ".symtab[12]"
+                }
+              ],
+              "name": "gamma"
+            }
+          ],
+          "oracleId": "die-cu0-30-gamma",
+          "oracleRva": "0x30"
+        }
+      ],
+      "falsePositives": [
+        {
+          "recoveredId": "fn_0000000000400080",
+          "recoveredName": "false_positive",
+          "recoveredRva": "0x80",
+          "recoveredStatus": "synthetic"
+        }
+      ],
+      "ignoredExcludedRecoveries": [
+        {
+          "exclusionKind": "compiler-generated",
+          "exclusionReason": "compiler-generated cold partition, not a source function",
+          "oracleId": "symbol-60-clone",
+          "recoveredId": "fn_0000000000400060",
+          "recoveredName": "alpha.cold",
+          "recoveredRva": "0x60",
+          "recoveredStatus": "recovered"
+        }
+      ],
+      "nameRecovery": {
+        "notObservableCount": 0,
+        "overall": {
+          "accuracy": {
+            "denominator": 5,
+            "numerator": 2,
+            "value": 0.4
+          },
+          "exact": 2,
+          "incorrect": 2,
+          "missingBoundary": 1,
+          "referenceCount": 5
+        },
+        "removed": {
+          "accuracy": {
+            "denominator": 0,
+            "numerator": 0,
+            "value": null
+          },
+          "exact": 0,
+          "incorrect": 0,
+          "missingBoundary": 0,
+          "referenceCount": 0
+        },
+        "surviving": {
+          "accuracy": {
+            "denominator": 5,
+            "numerator": 2,
+            "value": 0.4
+          },
+          "exact": 2,
+          "incorrect": 2,
+          "missingBoundary": 1,
+          "referenceCount": 5
+        }
+      },
+      "nearMatchAssignment": {
+        "alternativeOptimalEdges": [],
+        "hasAlternativeOptimalMatching": false,
+        "nameIndependent": true,
+        "objective": {
+          "maximumCardinality": 1,
+          "minimumTotalDistanceBytes": 2
+        },
+        "optimalCandidateEdgeCount": 1,
+        "stableTieBreak": "lexicographically lowest (oracle RVA, recovered RVA) edge sequence"
+      },
+      "nearMisses": [
+        {
+          "deltaBytes": 2,
+          "matchKind": "near",
+          "matchedAlias": "beta",
+          "matchedAliasAvailability": "surviving",
+          "nameCategoryResults": {
+            "removed": "not-applicable",
+            "surviving": "exact"
+          },
+          "nameResult": "exact",
+          "oracleAliases": [
+            {
+              "availability": "surviving",
+              "evidence": [
+                {
+                  "kind": "dwarf-subprogram",
+                  "locator": ".debug_info:cu=0x0,die=0x20"
+                },
+                {
+                  "kind": "elf-symbol",
+                  "locator": ".dynsym[2]"
+                }
+              ],
+              "name": "beta"
+            },
+            {
+              "availability": "surviving",
+              "evidence": [
+                {
+                  "kind": "elf-symbol",
+                  "locator": ".symtab[11]"
+                }
+              ],
+              "name": "beta_alias"
+            }
+          ],
+          "oracleId": "die-cu0-20-beta",
+          "oracleRva": "0x20",
+          "recoveredId": "fn_0000000000400022",
+          "recoveredName": "beta",
+          "recoveredRva": "0x22",
+          "recoveredStatus": "partial"
+        }
+      ]
+    },
+    "stripped": {
+      "artifact": {
+        "elfImageBase": "0x400000",
+        "elfType": "ET_EXEC",
+        "executableRvaRanges": [
+          {
+            "endExclusive": "0x1000",
+            "start": "0x0"
+          }
+        ],
+        "inputSha256": "2222222222222222222222222222222222222222222222222222222222222222",
+        "modelImageBase": "0x500000",
+        "modelImageBaseEvidence": "explicit-scorer-input",
+        "modelImageBaseValidation": "fixture-explicit-input"
+      },
+      "boundaries": {
+        "exactAddressRate": {
+          "denominator": 5,
+          "numerator": 3,
+          "value": 0.6
+        },
+        "exactMatches": 3,
+        "f1": {
+          "denominator": 10,
+          "numerator": 8,
+          "value": 0.8
+        },
+        "falseNegatives": 1,
+        "falsePositives": 1,
+        "ignoredExcludedCount": 1,
+        "nearMissDistanceBytes": 3,
+        "nearMissRate": {
+          "denominator": 5,
+          "numerator": 1,
+          "value": 0.2
+        },
+        "nearMisses": 1,
+        "precision": {
+          "denominator": 5,
+          "numerator": 4,
+          "value": 0.8
+        },
+        "rawRecoveredCount": 6,
+        "recall": {
+          "denominator": 5,
+          "numerator": 4,
+          "value": 0.8
+        },
+        "referenceCount": 5,
+        "scoredRecoveredCount": 5,
+        "truePositives": 4
+      },
+      "exactMatches": [
+        {
+          "deltaBytes": 0,
+          "matchKind": "exact",
+          "matchedAlias": "alpha",
+          "matchedAliasAvailability": "removed",
+          "nameCategoryResults": {
+            "removed": "exact",
+            "surviving": "not-applicable"
+          },
+          "nameResult": "exact",
+          "oracleAliases": [
+            {
+              "availability": "removed",
+              "evidence": [
+                {
+                  "kind": "dwarf-subprogram",
+                  "locator": ".debug_info:cu=0x0,die=0x10"
+                },
+                {
+                  "kind": "elf-symbol",
+                  "locator": ".symtab[10]"
+                }
+              ],
+              "name": "alpha"
+            }
+          ],
+          "oracleId": "die-cu0-10-alpha",
+          "oracleRva": "0x10",
+          "recoveredId": "fn_0000000000500010",
+          "recoveredName": "alpha",
+          "recoveredRva": "0x10",
+          "recoveredStatus": "partial"
+        },
+        {
+          "deltaBytes": 0,
+          "matchKind": "exact",
+          "matchedAlias": null,
+          "matchedAliasAvailability": null,
+          "nameCategoryResults": {
+            "removed": "incorrect",
+            "surviving": "incorrect"
+          },
+          "nameResult": "incorrect",
+          "oracleAliases": [
+            {
+              "availability": "surviving",
+              "evidence": [
+                {
+                  "kind": "dwarf-subprogram",
+                  "locator": ".debug_info:cu=0x0,die=0x20"
+                },
+                {
+                  "kind": "elf-symbol",
+                  "locator": ".dynsym[2]"
+                }
+              ],
+              "name": "beta"
+            },
+            {
+              "availability": "removed",
+              "evidence": [
+                {
+                  "kind": "elf-symbol",
+                  "locator": ".symtab[11]"
+                }
+              ],
+              "name": "beta_alias"
+            }
+          ],
+          "oracleId": "die-cu0-20-beta",
+          "oracleRva": "0x20",
+          "recoveredId": "fn_0000000000500020",
+          "recoveredName": "FUN_500020",
+          "recoveredRva": "0x20",
+          "recoveredStatus": "recovered"
+        },
+        {
+          "deltaBytes": 0,
+          "matchKind": "exact",
+          "matchedAlias": null,
+          "matchedAliasAvailability": null,
+          "nameCategoryResults": {
+            "removed": "incorrect",
+            "surviving": "not-applicable"
+          },
+          "nameResult": "incorrect",
+          "oracleAliases": [
+            {
+              "availability": "removed",
+              "evidence": [
+                {
+                  "kind": "dwarf-subprogram",
+                  "locator": ".debug_info:cu=0x0,die=0x50"
+                }
+              ],
+              "name": "epsilon"
+            }
+          ],
+          "oracleId": "die-cu0-50-epsilon",
+          "oracleRva": "0x50",
+          "recoveredId": "fn_0000000000500050",
+          "recoveredName": "FUN_500050",
+          "recoveredRva": "0x50",
+          "recoveredStatus": "recovered"
+        }
+      ],
+      "falseNegatives": [
+        {
+          "oracleAliases": [
+            {
+              "availability": "removed",
+              "evidence": [
+                {
+                  "kind": "dwarf-subprogram",
+                  "locator": ".debug_info:cu=0x0,die=0x40"
+                },
+                {
+                  "kind": "elf-symbol",
+                  "locator": ".symtab[13]"
+                }
+              ],
+              "name": "delta"
+            }
+          ],
+          "oracleId": "die-cu0-40-delta",
+          "oracleRva": "0x40"
+        }
+      ],
+      "falsePositives": [
+        {
+          "recoveredId": "fn_0000000000500090",
+          "recoveredName": "false_positive",
+          "recoveredRva": "0x90",
+          "recoveredStatus": "synthetic"
+        }
+      ],
+      "ignoredExcludedRecoveries": [
+        {
+          "exclusionKind": "compiler-generated",
+          "exclusionReason": "compiler-generated cold partition, not a source function",
+          "oracleId": "symbol-60-clone",
+          "recoveredId": "fn_0000000000500060",
+          "recoveredName": "FUN_500060",
+          "recoveredRva": "0x60",
+          "recoveredStatus": "recovered"
+        }
+      ],
+      "nameRecovery": {
+        "notObservableCount": 0,
+        "overall": {
+          "accuracy": {
+            "denominator": 5,
+            "numerator": 2,
+            "value": 0.4
+          },
+          "exact": 2,
+          "incorrect": 2,
+          "missingBoundary": 1,
+          "referenceCount": 5
+        },
+        "removed": {
+          "accuracy": {
+            "denominator": 5,
+            "numerator": 2,
+            "value": 0.4
+          },
+          "exact": 2,
+          "incorrect": 2,
+          "missingBoundary": 1,
+          "referenceCount": 5
+        },
+        "surviving": {
+          "accuracy": {
+            "denominator": 1,
+            "numerator": 0,
+            "value": 0.0
+          },
+          "exact": 0,
+          "incorrect": 1,
+          "missingBoundary": 0,
+          "referenceCount": 1
+        }
+      },
+      "nearMatchAssignment": {
+        "alternativeOptimalEdges": [],
+        "hasAlternativeOptimalMatching": false,
+        "nameIndependent": true,
+        "objective": {
+          "maximumCardinality": 1,
+          "minimumTotalDistanceBytes": 3
+        },
+        "optimalCandidateEdgeCount": 1,
+        "stableTieBreak": "lexicographically lowest (oracle RVA, recovered RVA) edge sequence"
+      },
+      "nearMisses": [
+        {
+          "deltaBytes": -3,
+          "matchKind": "near",
+          "matchedAlias": "gamma",
+          "matchedAliasAvailability": "removed",
+          "nameCategoryResults": {
+            "removed": "exact",
+            "surviving": "not-applicable"
+          },
+          "nameResult": "exact",
+          "oracleAliases": [
+            {
+              "availability": "removed",
+              "evidence": [
+                {
+                  "kind": "dwarf-subprogram",
+                  "locator": ".debug_info:cu=0x0,die=0x30"
+                },
+                {
+                  "kind": "elf-symbol",
+                  "locator": ".symtab[12]"
+                }
+              ],
+              "name": "gamma"
+            }
+          ],
+          "oracleId": "die-cu0-30-gamma",
+          "oracleRva": "0x30",
+          "recoveredId": "fn_000000000050002d",
+          "recoveredName": "gamma",
+          "recoveredRva": "0x2d",
+          "recoveredStatus": "partial"
+        }
+      ]
+    }
+  }
+}

@@ -1,0 +1,143 @@
+{
+  "schemaVersion": 1,
+  "scope": "fixture",
+  "oracle": {
+    "id": "fixture-function-recovery-v1",
+    "source": "dwarf-and-symbols",
+    "artifactManifestSha256": null
+  },
+  "artifacts": {
+    "rich": {
+      "inputSha256": "1111111111111111111111111111111111111111111111111111111111111111",
+      "elfType": "ET_EXEC",
+      "elfImageBase": "0x400000",
+      "executableRvaRanges": [{"start": "0x0", "endExclusive": "0x1000"}]
+    },
+    "stripped": {
+      "inputSha256": "2222222222222222222222222222222222222222222222222222222222222222",
+      "elfType": "ET_EXEC",
+      "elfImageBase": "0x400000",
+      "executableRvaRanges": [{"start": "0x0", "endExclusive": "0x1000"}]
+    }
+  },
+  "scoringPolicy": {
+    "nearMissBytes": 4
+  },
+  "functions": [
+    {
+      "id": "die-cu0-10-alpha",
+      "rva": "0x10",
+      "aliases": [
+        {
+          "name": "alpha",
+          "evidence": [
+            {"kind": "dwarf-subprogram", "locator": ".debug_info:cu=0x0,die=0x10"},
+            {"kind": "elf-symbol", "locator": ".symtab[10]"}
+          ],
+          "availability": {"rich": "surviving", "stripped": "removed"}
+        }
+      ],
+      "exclusion": null
+    },
+    {
+      "id": "die-cu0-20-beta",
+      "rva": "0x20",
+      "aliases": [
+        {
+          "name": "beta",
+          "evidence": [
+            {"kind": "dwarf-subprogram", "locator": ".debug_info:cu=0x0,die=0x20"},
+            {"kind": "elf-symbol", "locator": ".dynsym[2]"}
+          ],
+          "availability": {"rich": "surviving", "stripped": "surviving"}
+        },
+        {
+          "name": "beta_alias",
+          "evidence": [
+            {"kind": "elf-symbol", "locator": ".symtab[11]"}
+          ],
+          "availability": {"rich": "surviving", "stripped": "removed"}
+        }
+      ],
+      "exclusion": null
+    },
+    {
+      "id": "die-cu0-30-gamma",
+      "rva": "0x30",
+      "aliases": [
+        {
+          "name": "gamma",
+          "evidence": [
+            {"kind": "dwarf-subprogram", "locator": ".debug_info:cu=0x0,die=0x30"},
+            {"kind": "elf-symbol", "locator": ".symtab[12]"}
+          ],
+          "availability": {"rich": "surviving", "stripped": "removed"}
+        }
+      ],
+      "exclusion": null
+    },
+    {
+      "id": "die-cu0-40-delta",
+      "rva": "0x40",
+      "aliases": [
+        {
+          "name": "delta",
+          "evidence": [
+            {"kind": "dwarf-subprogram", "locator": ".debug_info:cu=0x0,die=0x40"},
+            {"kind": "elf-symbol", "locator": ".symtab[13]"}
+          ],
+          "availability": {"rich": "surviving", "stripped": "removed"}
+        }
+      ],
+      "exclusion": null
+    },
+    {
+      "id": "die-cu0-50-epsilon",
+      "rva": "0x50",
+      "aliases": [
+        {
+          "name": "epsilon",
+          "evidence": [
+            {"kind": "dwarf-subprogram", "locator": ".debug_info:cu=0x0,die=0x50"}
+          ],
+          "availability": {"rich": "surviving", "stripped": "removed"}
+        }
+      ],
+      "exclusion": null
+    },
+    {
+      "id": "symbol-60-clone",
+      "rva": "0x60",
+      "aliases": [
+        {
+          "name": "alpha.cold",
+          "evidence": [
+            {"kind": "elf-symbol", "locator": ".symtab[15]"}
+          ],
+          "availability": {"rich": "not-observable", "stripped": "not-observable"}
+        }
+      ],
+      "exclusion": {
+        "kind": "compiler-generated",
+        "reason": "compiler-generated cold partition, not a source function"
+      }
+    },
+    {
+      "id": "die-cu0-70-inline-helper",
+      "rva": null,
+      "aliases": [
+        {
+          "name": "inline_helper",
+          "evidence": [
+            {"kind": "dwarf-subprogram", "locator": ".debug_info:cu=0x0,die=0x70,DW_AT_inline=3"}
+          ],
+          "availability": {"rich": "not-observable", "stripped": "not-observable"}
+        }
+      ],
+      "exclusion": {
+        "kind": "inlined",
+        "reason": "DWARF declares an inline-only entity without an emitted function start"
+      }
+    }
+  ]
+}
