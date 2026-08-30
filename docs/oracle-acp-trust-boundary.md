@@ -1,11 +1,13 @@
 # Oracle and ACP trust boundary
 
-This project has two deliberately separate execution boundaries:
+The target production architecture has two deliberately separate execution boundaries:
 
 1. Kotlin/JVM code generates, validates, reconciles, scores, and publishes authenticated oracle evidence.
 2. ACP v1 agents consume selected evidence and edit candidate reconstruction workspaces under bounded authority.
 
 An ACP agent is never an oracle authority. Agent output is a candidate until deterministic host validation accepts it.
+The Kotlin oracle migration tracked by issue #136 is not complete, so the repository's remaining Python oracle
+entrypoints are migration/compatibility implementations and cannot authorize a new Kotlin-only release.
 
 ## Authoritative data flow
 
@@ -59,10 +61,16 @@ Accepted model-driven artifacts bind at least:
 
 ## Kotlin oracle contract
 
-Production oracle commands do not import, launch, or require Python. JSON remains the versioned interchange format,
-but canonical bytes, schema validation, sharding, hashing, atomic publication, and release decisions are implemented in
-Kotlin/JVM. Large evidence is processed with bounded streaming and authenticated scratch storage rather than complete
-in-memory materialization.
+A release that claims Kotlin oracle authority must not import, launch, or require Python. JSON remains the versioned
+interchange format, while canonical bytes, schema validation, sharding, hashing, atomic publication, and release
+decisions move to Kotlin/JVM. Large evidence is processed with bounded streaming and authenticated scratch storage
+rather than complete in-memory materialization.
+
+That migration is currently partial. Scope and inventory controls, full-tree data truth/reconciliation/baselines,
+bounded completed-run verification, and GCC planning have Kotlin/JVM paths. Function/call truth, production structural
+adapter replay, some ELF/DWARF observation generation, and full-tree release orchestration still have Python
+entrypoints. Those entrypoints may preserve historical production evidence and differential parity, but they do not
+satisfy the Kotlin-only authority requirement for the next release.
 
 During migration, existing Python outputs may be retained as explicitly non-authoritative differential fixtures. They
 cannot enter a new release as truth or validation evidence. A stage becomes authoritative only after frozen-fixture
