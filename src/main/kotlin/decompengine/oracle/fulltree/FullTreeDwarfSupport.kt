@@ -19,11 +19,15 @@ import java.util.zip.InflaterInputStream
 internal class FullTreeDwarfParseBudget(private val limit: Long) {
     private var consumed = 0L
 
+    init {
+        require(limit in 1L..1_000_000_000L)
+    }
+
     fun consume(label: String) {
-        consumed++
-        if (consumed > limit) {
+        if (consumed >= limit) {
             throw FullTreeControlException("aggregate parse-step bound exceeded while reading $label")
         }
+        consumed++
     }
 }
 
@@ -45,10 +49,40 @@ internal class FullTreeDwarfCompilationUnitHeader(
     private val originatingSection: FullTreeDwarfSection,
 ) {
     fun dieCursor(info: FullTreeDwarfSection): FullTreeDwarfSectionCursor {
-        if (info !== originatingSection) {
-            throw FullTreeControlException("DWARF compilation-unit cursor uses a different .debug_info section")
-        }
+        requireOriginatingInfo(info, "cursor")
         return FullTreeDwarfSectionCursor(info, firstDieOffset, endOffset, "DWARF compilation unit")
+    }
+
+    /** Resolves a reference while retaining this header's authenticated `.debug_info` identity. */
+    fun resolveReference(info: FullTreeDwarfSection, reference: FullTreeDwarfReferenceValue): Long {
+        requireOriginatingInfo(info, "reference")
+        if (reference.resolvedForm !in FULL_TREE_DWARF_REFERENCE_FORMS) {
+            throw FullTreeControlException("DWARF DIE reference has an inconsistent resolved form")
+        }
+        val raw = fullTreeDwarfBoundedLong(reference.rawValue, "DWARF DIE reference")
+        return when (reference.scope) {
+            FullTreeDwarfReferenceScope.COMPILATION_UNIT -> {
+                val resolved = fullTreeDwarfAdd(offset, raw, "DWARF compilation-unit reference")
+                if (resolved !in firstDieOffset until endOffset) {
+                    throw FullTreeControlException("DWARF compilation-unit reference exceeds its DIE stream")
+                }
+                resolved
+            }
+            FullTreeDwarfReferenceScope.DEBUG_INFO -> {
+                if (raw !in 0L until info.size) {
+                    throw FullTreeControlException("DWARF global reference exceeds .debug_info")
+                }
+                raw
+            }
+        }
+    }
+
+    private fun requireOriginatingInfo(info: FullTreeDwarfSection, operation: String) {
+        if (info !== originatingSection) {
+            throw FullTreeControlException(
+                "DWARF compilation-unit $operation uses a different .debug_info section",
+            )
+        }
     }
 }
 
@@ -256,6 +290,86 @@ internal data class FullTreeDwarfIndexedStringValue(val index: Long) : FullTreeD
 internal data object FullTreeDwarfUnsupportedExternalStringValue : FullTreeDwarfFormValue
 internal data object FullTreeDwarfIgnoredValue : FullTreeDwarfFormValue
 
+/** Attribute-class context needed for forms whose interpretation is not intrinsic to the form. */
+internal enum class FullTreeDwarfFormContext {
+    GENERAL,
+    CONSTANT,
+    RANGE_LIST,
+}
+
+/** Lossless unsigned form metadata retained for later function-observation readers. */
+internal sealed interface FullTreeDwarfUnsignedFormValue : FullTreeDwarfFormValue {
+    val resolvedForm: Long
+    val rawValue: ULong
+    val indirectDepth: Int
+}
+
+internal sealed interface FullTreeDwarfConstantValue : FullTreeDwarfFormValue {
+    val resolvedForm: Long
+    val indirectDepth: Int
+}
+
+internal data class FullTreeDwarfUnsignedConstantValue(
+    override val resolvedForm: Long,
+    override val rawValue: ULong,
+    override val indirectDepth: Int,
+) : FullTreeDwarfUnsignedFormValue, FullTreeDwarfConstantValue
+
+internal data class FullTreeDwarfSignedConstantValue(
+    override val resolvedForm: Long,
+    val rawValue: Long,
+    override val indirectDepth: Int,
+) : FullTreeDwarfConstantValue
+
+internal data class FullTreeDwarfAddressValue(
+    override val resolvedForm: Long,
+    override val rawValue: ULong,
+    override val indirectDepth: Int,
+) : FullTreeDwarfUnsignedFormValue
+
+internal data class FullTreeDwarfAddressIndexValue(
+    override val resolvedForm: Long,
+    override val rawValue: ULong,
+    override val indirectDepth: Int,
+) : FullTreeDwarfUnsignedFormValue
+
+internal enum class FullTreeDwarfReferenceScope {
+    COMPILATION_UNIT,
+    DEBUG_INFO,
+}
+
+internal data class FullTreeDwarfReferenceValue(
+    override val resolvedForm: Long,
+    override val rawValue: ULong,
+    override val indirectDepth: Int,
+) : FullTreeDwarfUnsignedFormValue {
+    val scope: FullTreeDwarfReferenceScope
+        get() = if (resolvedForm == FULL_TREE_DW_FORM_REF_ADDR) {
+            FullTreeDwarfReferenceScope.DEBUG_INFO
+        } else {
+            FullTreeDwarfReferenceScope.COMPILATION_UNIT
+        }
+}
+
+/** Retains a reference operand whose supplementary/signature target cannot be resolved locally. */
+internal data class FullTreeDwarfUnsupportedReferenceValue(
+    override val resolvedForm: Long,
+    override val rawValue: ULong,
+    override val indirectDepth: Int,
+) : FullTreeDwarfUnsignedFormValue
+
+internal data class FullTreeDwarfRangeSectionOffsetValue(
+    override val resolvedForm: Long,
+    override val rawValue: ULong,
+    override val indirectDepth: Int,
+) : FullTreeDwarfUnsignedFormValue
+
+internal data class FullTreeDwarfRangeListIndexValue(
+    override val resolvedForm: Long,
+    override val rawValue: ULong,
+    override val indirectDepth: Int,
+) : FullTreeDwarfUnsignedFormValue
+
 /** Stateless bounded decoding for the forms already shared by inventory and later DIE readers. */
 internal object FullTreeDwarfForms {
     fun read(
@@ -267,10 +381,15 @@ internal object FullTreeDwarfForms {
         offsetSize: Int,
         limits: FullTreeControlLimits,
         indirectDepth: Int = 0,
+        context: FullTreeDwarfFormContext = FullTreeDwarfFormContext.GENERAL,
     ): FullTreeDwarfFormValue {
         if (indirectDepth > 4) throw FullTreeControlException("DWARF indirect form nesting is excessive")
         return when (form) {
-            FULL_TREE_DW_FORM_ADDR -> cursor.skip(addressSize.toLong()).let { FullTreeDwarfIgnoredValue }
+            FULL_TREE_DW_FORM_ADDR -> FullTreeDwarfAddressValue(
+                resolvedForm = form,
+                rawValue = cursor.readAddress(addressSize),
+                indirectDepth = indirectDepth,
+            )
             FULL_TREE_DW_FORM_BLOCK2 -> cursor.readUnsigned(2).let { length ->
                 cursor.skipBounded(length, limits.maximumDwarfAttributeBytes)
                 FullTreeDwarfIgnoredValue
@@ -279,9 +398,9 @@ internal object FullTreeDwarfForms {
                 cursor.skipBounded(length, limits.maximumDwarfAttributeBytes)
                 FullTreeDwarfIgnoredValue
             }
-            FULL_TREE_DW_FORM_DATA2 -> FullTreeDwarfNumericValue(cursor.readUnsigned(2))
-            FULL_TREE_DW_FORM_DATA4 -> FullTreeDwarfNumericValue(cursor.readUnsigned(4))
-            FULL_TREE_DW_FORM_DATA8 -> FullTreeDwarfNumericValue(cursor.readUnsigned(8))
+            FULL_TREE_DW_FORM_DATA2 -> readUnsignedConstant(cursor, form, 2, indirectDepth, context)
+            FULL_TREE_DW_FORM_DATA4 -> readUnsignedConstant(cursor, form, 4, indirectDepth, context)
+            FULL_TREE_DW_FORM_DATA8 -> readUnsignedConstant(cursor, form, 8, indirectDepth, context)
             FULL_TREE_DW_FORM_STRING -> FullTreeDwarfInlineStringValue(
                 cursor.readNullTerminated(limits.maximumDwarfAttributeBytes),
             )
@@ -293,26 +412,81 @@ internal object FullTreeDwarfForms {
                 cursor.skipBounded(length, limits.maximumDwarfAttributeBytes)
                 FullTreeDwarfIgnoredValue
             }
-            FULL_TREE_DW_FORM_DATA1 -> FullTreeDwarfNumericValue(cursor.readUnsigned(1))
+            FULL_TREE_DW_FORM_DATA1 -> readUnsignedConstant(cursor, form, 1, indirectDepth, context)
             FULL_TREE_DW_FORM_FLAG -> FullTreeDwarfNumericValue(cursor.readUnsigned(1))
-            FULL_TREE_DW_FORM_SDATA -> FullTreeDwarfNumericValue(cursor.readSleb128())
+            FULL_TREE_DW_FORM_SDATA -> cursor.readSleb128().let { raw ->
+                if (context == FullTreeDwarfFormContext.CONSTANT) {
+                    FullTreeDwarfSignedConstantValue(form, raw, indirectDepth)
+                } else {
+                    FullTreeDwarfNumericValue(raw)
+                }
+            }
             FULL_TREE_DW_FORM_STRP -> FullTreeDwarfSectionStringValue(
                 ".debug_str",
                 cursor.readUnsigned(offsetSize),
             )
-            FULL_TREE_DW_FORM_UDATA -> FullTreeDwarfNumericValue(cursor.readUleb128())
-            FULL_TREE_DW_FORM_REF_ADDR -> cursor.skip(
-                if (version <= 2) addressSize.toLong() else offsetSize.toLong(),
-            ).let { FullTreeDwarfIgnoredValue }
-            FULL_TREE_DW_FORM_REF1 -> cursor.skip(1L).let { FullTreeDwarfIgnoredValue }
-            FULL_TREE_DW_FORM_REF2 -> cursor.skip(2L).let { FullTreeDwarfIgnoredValue }
-            FULL_TREE_DW_FORM_REF4, FULL_TREE_DW_FORM_REF_SUP4 ->
-                cursor.skip(4L).let { FullTreeDwarfIgnoredValue }
-            FULL_TREE_DW_FORM_REF8, FULL_TREE_DW_FORM_REF_SIG8, FULL_TREE_DW_FORM_REF_SUP8 ->
-                cursor.skip(8L).let { FullTreeDwarfIgnoredValue }
-            FULL_TREE_DW_FORM_REF_UDATA, FULL_TREE_DW_FORM_ADDRX, FULL_TREE_DW_FORM_LOCLISTX,
-            FULL_TREE_DW_FORM_RNGLISTX, FULL_TREE_DW_FORM_GNU_ADDR_INDEX ->
+            FULL_TREE_DW_FORM_UDATA -> if (context == FullTreeDwarfFormContext.CONSTANT) {
+                FullTreeDwarfUnsignedConstantValue(form, cursor.readUleb128Bits(), indirectDepth)
+            } else {
+                FullTreeDwarfNumericValue(cursor.readUleb128())
+            }
+            FULL_TREE_DW_FORM_REF_ADDR -> FullTreeDwarfReferenceValue(
+                resolvedForm = form,
+                rawValue = if (version <= 2) {
+                    cursor.readAddress(addressSize)
+                } else {
+                    cursor.readUnsignedBits(offsetSize)
+                },
+                indirectDepth = indirectDepth,
+            )
+            FULL_TREE_DW_FORM_REF1 -> FullTreeDwarfReferenceValue(
+                resolvedForm = form,
+                rawValue = cursor.readUnsignedBits(1),
+                indirectDepth = indirectDepth,
+            )
+            FULL_TREE_DW_FORM_REF2 -> FullTreeDwarfReferenceValue(
+                resolvedForm = form,
+                rawValue = cursor.readUnsignedBits(2),
+                indirectDepth = indirectDepth,
+            )
+            FULL_TREE_DW_FORM_REF4 -> FullTreeDwarfReferenceValue(
+                resolvedForm = form,
+                rawValue = cursor.readUnsignedBits(4),
+                indirectDepth = indirectDepth,
+            )
+            FULL_TREE_DW_FORM_REF8 -> FullTreeDwarfReferenceValue(
+                resolvedForm = form,
+                rawValue = cursor.readUnsignedBits(8),
+                indirectDepth = indirectDepth,
+            )
+            FULL_TREE_DW_FORM_REF_UDATA -> FullTreeDwarfReferenceValue(
+                resolvedForm = form,
+                rawValue = cursor.readUleb128Bits(),
+                indirectDepth = indirectDepth,
+            )
+            FULL_TREE_DW_FORM_ADDRX -> FullTreeDwarfAddressIndexValue(
+                resolvedForm = form,
+                rawValue = cursor.readUleb128Bits(),
+                indirectDepth = indirectDepth,
+            )
+            FULL_TREE_DW_FORM_RNGLISTX -> FullTreeDwarfRangeListIndexValue(
+                resolvedForm = form,
+                rawValue = cursor.readUleb128Bits(),
+                indirectDepth = indirectDepth,
+            )
+            FULL_TREE_DW_FORM_LOCLISTX, FULL_TREE_DW_FORM_GNU_ADDR_INDEX ->
                 cursor.readUleb128().let { FullTreeDwarfIgnoredValue }
+            FULL_TREE_DW_FORM_REF_SUP4 -> FullTreeDwarfUnsupportedReferenceValue(
+                resolvedForm = form,
+                rawValue = cursor.readUnsignedBits(4),
+                indirectDepth = indirectDepth,
+            )
+            FULL_TREE_DW_FORM_REF_SIG8, FULL_TREE_DW_FORM_REF_SUP8 ->
+                FullTreeDwarfUnsupportedReferenceValue(
+                    resolvedForm = form,
+                    rawValue = cursor.readUnsignedBits(8),
+                    indirectDepth = indirectDepth,
+                )
             FULL_TREE_DW_FORM_INDIRECT -> read(
                 cursor,
                 cursor.readUleb128(),
@@ -322,8 +496,18 @@ internal object FullTreeDwarfForms {
                 offsetSize,
                 limits,
                 indirectDepth + 1,
+                context,
             )
-            FULL_TREE_DW_FORM_SEC_OFFSET -> FullTreeDwarfNumericValue(cursor.readUnsigned(offsetSize))
+            FULL_TREE_DW_FORM_SEC_OFFSET -> if (context == FullTreeDwarfFormContext.RANGE_LIST) {
+                FullTreeDwarfRangeSectionOffsetValue(
+                    resolvedForm = form,
+                    rawValue = cursor.readUnsignedBits(offsetSize),
+                    indirectDepth = indirectDepth,
+                )
+            } else {
+                // Frozen inventory behavior: bases and statement-list offsets remain numeric.
+                FullTreeDwarfNumericValue(cursor.readUnsigned(offsetSize))
+            }
             FULL_TREE_DW_FORM_EXPRLOC -> cursor.readUleb128().let { length ->
                 cursor.skipBounded(length, limits.maximumDwarfAttributeBytes)
                 FullTreeDwarfIgnoredValue
@@ -333,27 +517,69 @@ internal object FullTreeDwarfForms {
                 FullTreeDwarfIndexedStringValue(cursor.readUleb128())
             FULL_TREE_DW_FORM_STRP_SUP, FULL_TREE_DW_FORM_GNU_STRP_ALT ->
                 FullTreeDwarfUnsupportedExternalStringValue.also { cursor.skip(offsetSize.toLong()) }
-            FULL_TREE_DW_FORM_DATA16 -> cursor.skip(16L).let { FullTreeDwarfIgnoredValue }
+            FULL_TREE_DW_FORM_DATA16 -> if (context == FullTreeDwarfFormContext.CONSTANT) {
+                FullTreeDwarfUnsignedConstantValue(form, cursor.readData16(), indirectDepth)
+            } else {
+                cursor.skip(16L).let { FullTreeDwarfIgnoredValue }
+            }
             FULL_TREE_DW_FORM_LINE_STRP -> FullTreeDwarfSectionStringValue(
                 ".debug_line_str",
                 cursor.readUnsigned(offsetSize),
             )
-            FULL_TREE_DW_FORM_IMPLICIT_CONST -> FullTreeDwarfNumericValue(
-                implicitConstant ?: throw FullTreeControlException("DWARF implicit constant is absent"),
-            )
+            FULL_TREE_DW_FORM_IMPLICIT_CONST -> {
+                val raw = implicitConstant
+                    ?: throw FullTreeControlException("DWARF implicit constant is absent")
+                if (context == FullTreeDwarfFormContext.CONSTANT) {
+                    FullTreeDwarfSignedConstantValue(form, raw, indirectDepth)
+                } else {
+                    FullTreeDwarfNumericValue(raw)
+                }
+            }
             FULL_TREE_DW_FORM_STRX1 -> FullTreeDwarfIndexedStringValue(cursor.readUnsigned(1))
             FULL_TREE_DW_FORM_STRX2 -> FullTreeDwarfIndexedStringValue(cursor.readUnsigned(2))
             FULL_TREE_DW_FORM_STRX3 -> FullTreeDwarfIndexedStringValue(cursor.readUnsigned(3))
             FULL_TREE_DW_FORM_STRX4 -> FullTreeDwarfIndexedStringValue(cursor.readUnsigned(4))
-            FULL_TREE_DW_FORM_ADDRX1 -> cursor.skip(1L).let { FullTreeDwarfIgnoredValue }
-            FULL_TREE_DW_FORM_ADDRX2 -> cursor.skip(2L).let { FullTreeDwarfIgnoredValue }
-            FULL_TREE_DW_FORM_ADDRX3 -> cursor.skip(3L).let { FullTreeDwarfIgnoredValue }
-            FULL_TREE_DW_FORM_ADDRX4 -> cursor.skip(4L).let { FullTreeDwarfIgnoredValue }
-            FULL_TREE_DW_FORM_GNU_REF_ALT -> cursor.skip(offsetSize.toLong()).let { FullTreeDwarfIgnoredValue }
+            FULL_TREE_DW_FORM_ADDRX1 -> FullTreeDwarfAddressIndexValue(
+                resolvedForm = form,
+                rawValue = cursor.readUnsignedBits(1),
+                indirectDepth = indirectDepth,
+            )
+            FULL_TREE_DW_FORM_ADDRX2 -> FullTreeDwarfAddressIndexValue(
+                resolvedForm = form,
+                rawValue = cursor.readUnsignedBits(2),
+                indirectDepth = indirectDepth,
+            )
+            FULL_TREE_DW_FORM_ADDRX3 -> FullTreeDwarfAddressIndexValue(
+                resolvedForm = form,
+                rawValue = cursor.readUnsignedBits(3),
+                indirectDepth = indirectDepth,
+            )
+            FULL_TREE_DW_FORM_ADDRX4 -> FullTreeDwarfAddressIndexValue(
+                resolvedForm = form,
+                rawValue = cursor.readUnsignedBits(4),
+                indirectDepth = indirectDepth,
+            )
+            FULL_TREE_DW_FORM_GNU_REF_ALT -> FullTreeDwarfUnsupportedReferenceValue(
+                resolvedForm = form,
+                rawValue = cursor.readUnsignedBits(offsetSize),
+                indirectDepth = indirectDepth,
+            )
             else -> throw FullTreeControlException(
                 "DWARF attribute uses unsupported form 0x${form.toString(16)}",
             )
         }
+    }
+
+    private fun readUnsignedConstant(
+        cursor: FullTreeDwarfSectionCursor,
+        form: Long,
+        width: Int,
+        indirectDepth: Int,
+        context: FullTreeDwarfFormContext,
+    ): FullTreeDwarfFormValue = if (context == FullTreeDwarfFormContext.CONSTANT) {
+        FullTreeDwarfUnsignedConstantValue(form, cursor.readUnsignedBits(width), indirectDepth)
+    } else {
+        FullTreeDwarfNumericValue(cursor.readUnsigned(width))
     }
 
     fun decodeString(
@@ -363,7 +589,11 @@ internal object FullTreeDwarfForms {
         offsetSize: Int,
         limits: FullTreeControlLimits,
         label: String,
+        maximumCharacters: Int = 4096,
     ): String {
+        if (maximumCharacters !in 1..FULL_TREE_MAXIMUM_DWARF_STRING_CHARACTERS) {
+            throw FullTreeControlException("$label character bound is invalid")
+        }
         val bytes = when (value) {
             is FullTreeDwarfInlineStringValue -> value.bytes
             is FullTreeDwarfSectionStringValue -> sections.required(value.section).readNullTerminated(
@@ -398,11 +628,354 @@ internal object FullTreeDwarfForms {
         } catch (failure: Exception) {
             throw FullTreeControlException("$label is not UTF-8", failure)
         }
-        if (decoded.isEmpty() || '\u0000' in decoded || decoded.codePointCount(0, decoded.length) > 4096) {
-            throw FullTreeControlException("$label is empty, contains NUL, or exceeds 4096 characters")
+        if (
+            decoded.isEmpty() || '\u0000' in decoded ||
+            decoded.codePointCount(0, decoded.length) > maximumCharacters
+        ) {
+            throw FullTreeControlException(
+                "$label is empty, contains NUL, or exceeds $maximumCharacters characters",
+            )
         }
         return decoded
     }
+}
+
+/** Resolves one CU's address indexes inside its bounded DWARF v5 `.debug_addr` contribution. */
+internal class FullTreeDwarfAddressResolver(
+    private val section: FullTreeDwarfSection,
+    addressBase: Long,
+    version: Int,
+    offsetSize: Int,
+    private val addressSize: Int,
+) {
+    private val entriesOffset: Long
+    private val endOffset: Long
+    private val entryCount: Long
+
+    init {
+        if (version != 5) throw FullTreeControlException("DWARF indexed addresses require version 5")
+        if (offsetSize !in setOf(4, 8)) {
+            throw FullTreeControlException("DWARF address table offset size is invalid")
+        }
+        if (addressSize !in 1..16) {
+            throw FullTreeControlException("DWARF address table address size is invalid")
+        }
+        val headerBytes = if (offsetSize == 4) 8L else 16L
+        if (addressBase < headerBytes) {
+            throw FullTreeControlException("DW_AT_addr_base does not follow a complete .debug_addr header")
+        }
+        val contribution = fullTreeDwarfContribution(
+            section,
+            addressBase - headerBytes,
+            ".debug_addr contribution",
+        )
+        if (contribution.offsetSize != offsetSize) {
+            throw FullTreeControlException("DW_AT_addr_base uses a different DWARF format")
+        }
+        val cursor = FullTreeDwarfSectionCursor(
+            section,
+            contribution.bodyOffset,
+            contribution.endOffset,
+            ".debug_addr contribution",
+        )
+        if (cursor.readUnsigned(2) != 5L) {
+            throw FullTreeControlException(".debug_addr contribution version is unsupported")
+        }
+        if (cursor.readUnsigned(1).toInt() != addressSize) {
+            throw FullTreeControlException(".debug_addr contribution address size differs from its unit")
+        }
+        if (cursor.readUnsigned(1) != 0L) {
+            throw FullTreeControlException("segmented .debug_addr contributions are unsupported")
+        }
+        if (cursor.position != addressBase) {
+            throw FullTreeControlException("DW_AT_addr_base does not point to the first address entry")
+        }
+        val entryBytes = contribution.endOffset - cursor.position
+        if (entryBytes % addressSize.toLong() != 0L) {
+            throw FullTreeControlException(".debug_addr contribution has a partial address entry")
+        }
+        entriesOffset = cursor.position
+        endOffset = contribution.endOffset
+        entryCount = entryBytes / addressSize.toLong()
+    }
+
+    fun resolve(value: FullTreeDwarfAddressIndexValue): ULong {
+        if (value.resolvedForm !in FULL_TREE_DWARF_ADDRESS_INDEX_FORMS) {
+            throw FullTreeControlException("DWARF address index has an inconsistent resolved form")
+        }
+        if (value.rawValue >= entryCount.toULong()) {
+            throw FullTreeControlException("DWARF address index exceeds its .debug_addr contribution")
+        }
+        val index = value.rawValue.toLong()
+        val entryOffset = fullTreeDwarfAdd(
+            entriesOffset,
+            fullTreeDwarfMultiply(index, addressSize.toLong(), "DWARF address index"),
+            "DWARF address index",
+        )
+        if (entryOffset < entriesOffset || entryOffset > endOffset - addressSize.toLong()) {
+            throw FullTreeControlException("DWARF address index exceeds its .debug_addr contribution")
+        }
+        return section.readAddress(entryOffset, addressSize)
+    }
+}
+
+internal enum class FullTreeDwarfRangeListEncoding {
+    DEBUG_RANGES,
+    DEBUG_RNGLISTS,
+}
+
+/** An immutable, section-bound range-list cursor seed for a later DIE scanner. */
+internal class FullTreeDwarfRangeListInput internal constructor(
+    private val section: FullTreeDwarfSection,
+    val encoding: FullTreeDwarfRangeListEncoding,
+    val offset: Long,
+    val endOffset: Long,
+    val dwarfVersion: Int,
+    val addressSize: Int,
+    val offsetSize: Int,
+) {
+    fun cursor(): FullTreeDwarfSectionCursor = FullTreeDwarfSectionCursor(
+        section,
+        offset,
+        endOffset,
+        when (encoding) {
+            FullTreeDwarfRangeListEncoding.DEBUG_RANGES -> ".debug_ranges list"
+            FullTreeDwarfRangeListEncoding.DEBUG_RNGLISTS -> ".debug_rnglists list"
+        },
+    )
+}
+
+/** Resolves range-list forms without parsing or interpreting any range-list entry. */
+internal class FullTreeDwarfRangeListResolver(
+    private val version: Int,
+    private val addressSize: Int,
+    private val offsetSize: Int,
+    private val debugRanges: FullTreeDwarfSection?,
+    private val debugRnglists: FullTreeDwarfSection?,
+    private val rnglistsBase: Long?,
+    private val parseBudget: FullTreeDwarfParseBudget,
+) {
+    init {
+        if (version !in 2..5) throw FullTreeControlException("DWARF range-list version is unsupported")
+        if (addressSize !in 1..16) throw FullTreeControlException("DWARF range-list address size is invalid")
+        if (offsetSize !in setOf(4, 8)) throw FullTreeControlException("DWARF range-list offset size is invalid")
+        if (rnglistsBase != null && rnglistsBase < 0L) {
+            throw FullTreeControlException("DW_AT_rnglists_base is negative")
+        }
+    }
+
+    fun resolve(value: FullTreeDwarfFormValue): FullTreeDwarfRangeListInput = when (value) {
+        is FullTreeDwarfRangeSectionOffsetValue -> resolveSectionOffset(value)
+        is FullTreeDwarfRangeListIndexValue -> resolveIndex(value)
+        else -> throw FullTreeControlException("DWARF ranges attribute does not contain a range-list form")
+    }
+
+    private fun resolveSectionOffset(value: FullTreeDwarfRangeSectionOffsetValue): FullTreeDwarfRangeListInput {
+        if (value.resolvedForm != FULL_TREE_DW_FORM_SEC_OFFSET) {
+            throw FullTreeControlException("DWARF range section offset has an inconsistent resolved form")
+        }
+        val offset = fullTreeDwarfBoundedLong(value.rawValue, "DWARF range section offset")
+        if (version < 5) {
+            val section = debugRanges
+                ?: throw FullTreeControlException("DWARF ranges attribute requires .debug_ranges")
+            if (offset !in 0L until section.size) {
+                throw FullTreeControlException("DWARF range section offset exceeds .debug_ranges")
+            }
+            return FullTreeDwarfRangeListInput(
+                section = section,
+                encoding = FullTreeDwarfRangeListEncoding.DEBUG_RANGES,
+                offset = offset,
+                endOffset = section.size,
+                dwarfVersion = version,
+                addressSize = addressSize,
+                offsetSize = offsetSize,
+            )
+        }
+
+        val section = debugRnglists
+            ?: throw FullTreeControlException("DWARF ranges attribute requires .debug_rnglists")
+        val contribution = findRnglistsContribution(section, offset)
+        return FullTreeDwarfRangeListInput(
+            section = section,
+            encoding = FullTreeDwarfRangeListEncoding.DEBUG_RNGLISTS,
+            offset = offset,
+            endOffset = contribution.endOffset,
+            dwarfVersion = version,
+            addressSize = addressSize,
+            offsetSize = offsetSize,
+        )
+    }
+
+    private fun resolveIndex(value: FullTreeDwarfRangeListIndexValue): FullTreeDwarfRangeListInput {
+        if (value.resolvedForm != FULL_TREE_DW_FORM_RNGLISTX) {
+            throw FullTreeControlException("DWARF range-list index has an inconsistent resolved form")
+        }
+        if (version != 5) {
+            throw FullTreeControlException("DW_FORM_rnglistx requires DWARF version 5")
+        }
+        val section = debugRnglists
+            ?: throw FullTreeControlException("DW_FORM_rnglistx requires .debug_rnglists")
+        val base = rnglistsBase
+            ?: throw FullTreeControlException("DW_FORM_rnglistx requires DW_AT_rnglists_base")
+        val headerBytes = if (offsetSize == 4) 12L else 20L
+        if (base < headerBytes) {
+            throw FullTreeControlException("DW_AT_rnglists_base does not follow a complete contribution header")
+        }
+        parseBudget.consume(".debug_rnglists contributions")
+        val contribution = fullTreeDwarfRnglistsContribution(section, base - headerBytes)
+        validateRnglistsContribution(contribution)
+        if (contribution.entriesOffset != base) {
+            throw FullTreeControlException("DW_AT_rnglists_base does not point to the offset table")
+        }
+        if (value.rawValue >= contribution.entryCount.toULong()) {
+            throw FullTreeControlException("DWARF range-list index exceeds its offset table")
+        }
+        val index = value.rawValue.toLong()
+        val entryOffset = fullTreeDwarfAdd(
+            base,
+            fullTreeDwarfMultiply(index, offsetSize.toLong(), "DWARF range-list index"),
+            "DWARF range-list index",
+        )
+        val relative = section.readUnsigned(entryOffset, offsetSize)
+        val resolved = fullTreeDwarfAdd(base, relative, "DWARF range-list offset")
+        if (resolved !in contribution.listsOffset until contribution.endOffset) {
+            throw FullTreeControlException("DWARF range-list index resolves outside its contribution")
+        }
+        return FullTreeDwarfRangeListInput(
+            section = section,
+            encoding = FullTreeDwarfRangeListEncoding.DEBUG_RNGLISTS,
+            offset = resolved,
+            endOffset = contribution.endOffset,
+            dwarfVersion = version,
+            addressSize = addressSize,
+            offsetSize = offsetSize,
+        )
+    }
+
+    private fun findRnglistsContribution(
+        section: FullTreeDwarfSection,
+        targetOffset: Long,
+    ): FullTreeDwarfRnglistsContribution {
+        if (targetOffset !in 0L until section.size) {
+            throw FullTreeControlException("DWARF range section offset exceeds .debug_rnglists")
+        }
+        var contributionOffset = 0L
+        while (contributionOffset < section.size) {
+            parseBudget.consume(".debug_rnglists contributions")
+            val contribution = fullTreeDwarfRnglistsContribution(section, contributionOffset)
+            if (targetOffset < contribution.endOffset) {
+                validateRnglistsContribution(contribution)
+                if (targetOffset < contribution.listsOffset) {
+                    throw FullTreeControlException("DWARF range section offset points into a contribution header")
+                }
+                return contribution
+            }
+            contributionOffset = contribution.endOffset
+        }
+        throw FullTreeControlException("DWARF range section offset exceeds .debug_rnglists")
+    }
+
+    private fun validateRnglistsContribution(contribution: FullTreeDwarfRnglistsContribution) {
+        if (contribution.offsetSize != offsetSize) {
+            throw FullTreeControlException(".debug_rnglists contribution uses a different DWARF format")
+        }
+        if (contribution.addressSize != addressSize) {
+            throw FullTreeControlException(".debug_rnglists contribution address size differs from its unit")
+        }
+        if (contribution.segmentSelectorSize != 0) {
+            throw FullTreeControlException("segmented .debug_rnglists contributions are unsupported")
+        }
+    }
+}
+
+private data class FullTreeDwarfContribution(
+    val offsetSize: Int,
+    val bodyOffset: Long,
+    val endOffset: Long,
+)
+
+private data class FullTreeDwarfRnglistsContribution(
+    val offsetSize: Int,
+    val addressSize: Int,
+    val segmentSelectorSize: Int,
+    val entryCount: Long,
+    val entriesOffset: Long,
+    val listsOffset: Long,
+    val endOffset: Long,
+)
+
+private fun fullTreeDwarfContribution(
+    section: FullTreeDwarfSection,
+    offset: Long,
+    label: String,
+): FullTreeDwarfContribution {
+    val initialLength = section.readUnsigned(offset, 4)
+    val offsetSize: Int
+    val bodyOffset: Long
+    val unitLength: Long
+    when {
+        initialLength == FULL_TREE_DWARF_64_MARKER -> {
+            offsetSize = 8
+            bodyOffset = fullTreeDwarfAdd(offset, 12L, label)
+            unitLength = section.readUnsigned(fullTreeDwarfAdd(offset, 4L, label), 8)
+        }
+        initialLength in FULL_TREE_DWARF_RESERVED_LENGTH_MIN..FULL_TREE_DWARF_RESERVED_LENGTH_MAX ->
+            throw FullTreeControlException("$label uses a reserved length")
+        else -> {
+            offsetSize = 4
+            bodyOffset = fullTreeDwarfAdd(offset, 4L, label)
+            unitLength = initialLength
+        }
+    }
+    if (unitLength <= 0L || bodyOffset < 0L || bodyOffset > section.size - unitLength) {
+        throw FullTreeControlException("$label length exceeds its section")
+    }
+    return FullTreeDwarfContribution(
+        offsetSize = offsetSize,
+        bodyOffset = bodyOffset,
+        endOffset = fullTreeDwarfAdd(bodyOffset, unitLength, label),
+    )
+}
+
+private fun fullTreeDwarfRnglistsContribution(
+    section: FullTreeDwarfSection,
+    offset: Long,
+): FullTreeDwarfRnglistsContribution {
+    val contribution = fullTreeDwarfContribution(section, offset, ".debug_rnglists contribution")
+    val cursor = FullTreeDwarfSectionCursor(
+        section,
+        contribution.bodyOffset,
+        contribution.endOffset,
+        ".debug_rnglists contribution",
+    )
+    if (cursor.readUnsigned(2) != 5L) {
+        throw FullTreeControlException(".debug_rnglists contribution version is unsupported")
+    }
+    val addressSize = cursor.readUnsigned(1).toInt()
+    if (addressSize !in 1..16) {
+        throw FullTreeControlException(".debug_rnglists contribution address size is invalid")
+    }
+    val segmentSelectorSize = cursor.readUnsigned(1).toInt()
+    val entryCount = cursor.readUnsigned(4)
+    val entryBytes = fullTreeDwarfMultiply(
+        entryCount,
+        contribution.offsetSize.toLong(),
+        ".debug_rnglists offset table",
+    )
+    if (entryBytes > contribution.endOffset - cursor.position) {
+        throw FullTreeControlException(".debug_rnglists offset table exceeds its contribution")
+    }
+    val entriesOffset = cursor.position
+    cursor.skip(entryBytes)
+    return FullTreeDwarfRnglistsContribution(
+        offsetSize = contribution.offsetSize,
+        addressSize = addressSize,
+        segmentSelectorSize = segmentSelectorSize,
+        entryCount = entryCount,
+        entriesOffset = entriesOffset,
+        listsOffset = cursor.position,
+        endOffset = contribution.endOffset,
+    )
 }
 
 /** Open, bounded logical DWARF sections. Compressed sections live until this owner is closed. */
@@ -441,6 +1014,16 @@ internal class FullTreeDwarfSections private constructor(
                 ".debug_str",
                 ".debug_line_str",
                 ".debug_str_offsets",
+            ),
+        )
+
+        /** Inventory sections plus the address/range inputs used by function observations. */
+        val FUNCTION_OBSERVATION_SECTION_NAMES: List<String> = Collections.unmodifiableList(
+            COMPILATION_UNIT_SECTION_NAMES + listOf(
+                ".debug_line",
+                ".debug_addr",
+                ".debug_ranges",
+                ".debug_rnglists",
             ),
         )
 
@@ -747,6 +1330,11 @@ internal class FullTreeDwarfSection(
         return cursor.readUnsigned(width)
     }
 
+    fun readAddress(offset: Long, width: Int): ULong {
+        val cursor = FullTreeDwarfSectionCursor(this, offset, size, "DWARF address section offset")
+        return cursor.readAddress(width)
+    }
+
     fun readNullTerminated(offset: Long, maximumBytes: Int): ByteArray {
         val cursor = FullTreeDwarfSectionCursor(this, offset, size, "DWARF string section")
         return cursor.readNullTerminated(maximumBytes)
@@ -781,6 +1369,15 @@ internal class FullTreeDwarfSectionCursor(
     }
 
     fun readUnsigned(width: Int): Long {
+        val value = readUnsignedBits(width)
+        if (value > Long.MAX_VALUE.toULong()) {
+            throw FullTreeControlException("$label unsigned integer exceeds the supported range")
+        }
+        return value.toLong()
+    }
+
+    /** Reads an unsigned fixed-width operand without losing the high bit of a 64-bit value. */
+    fun readUnsignedBits(width: Int): ULong {
         if (width !in 1..8) throw FullTreeControlException("$label integer width is invalid")
         requireAvailable(width.toLong())
         var value = 0UL
@@ -789,13 +1386,46 @@ internal class FullTreeDwarfSectionCursor(
             value = value or (section.byte(position + index).toULong() shl (significantIndex * 8))
         }
         position += width.toLong()
+        return value
+    }
+
+    /** Reads the CU address width, rejecting values that cannot be represented as a JVM ULong. */
+    fun readAddress(width: Int): ULong {
+        if (width !in 1..16) throw FullTreeControlException("$label address width is invalid")
+        return readWideUnsigned(width, "address")
+    }
+
+    /** Reads DW_FORM_data16 through the CU byte order, rejecting a nonzero high half. */
+    fun readData16(): ULong = readWideUnsigned(16, "DW_FORM_data16")
+
+    private fun readWideUnsigned(width: Int, description: String): ULong {
+        requireAvailable(width.toLong())
+        var value = 0UL
+        repeat(width) { index ->
+            val significantIndex = if (section.byteOrder == ByteOrder.LITTLE_ENDIAN) index else width - index - 1
+            val byte = section.byte(position + index)
+            if (significantIndex >= 8) {
+                if (byte != 0) {
+                    throw FullTreeControlException("$label $description exceeds the supported range")
+                }
+            } else {
+                value = value or (byte.toULong() shl (significantIndex * 8))
+            }
+        }
+        position += width.toLong()
+        return value
+    }
+
+    fun readUleb128(): Long {
+        val value = readUleb128Bits()
         if (value > Long.MAX_VALUE.toULong()) {
-            throw FullTreeControlException("$label unsigned integer exceeds the supported range")
+            throw FullTreeControlException("$label ULEB128 exceeds the supported range")
         }
         return value.toLong()
     }
 
-    fun readUleb128(): Long {
+    /** Reads the complete unsigned 64-bit ULEB128 domain for typed unsigned operands. */
+    fun readUleb128Bits(): ULong {
         var value = 0UL
         var shift = 0
         repeat(10) { index ->
@@ -805,10 +1435,7 @@ internal class FullTreeDwarfSectionCursor(
             if (index == 9 && payload > 1UL) throw FullTreeControlException("$label ULEB128 overflows")
             if (shift < 64) value = value or (payload shl shift)
             if (byte and 0x80 == 0) {
-                if (value > Long.MAX_VALUE.toULong()) {
-                    throw FullTreeControlException("$label ULEB128 exceeds the supported range")
-                }
-                return value.toLong()
+                return value
             }
             shift += 7
         }
@@ -1135,6 +1762,25 @@ private fun fullTreeDwarfUnsignedLong(value: Long, label: String): Long {
     return value
 }
 
+private fun fullTreeDwarfBoundedLong(value: ULong, label: String): Long {
+    if (value > Long.MAX_VALUE.toULong()) {
+        throw FullTreeControlException("$label exceeds the supported range")
+    }
+    return value.toLong()
+}
+
+private fun fullTreeDwarfAdd(left: Long, right: Long, label: String): Long = try {
+    Math.addExact(left, right)
+} catch (failure: ArithmeticException) {
+    throw FullTreeControlException("$label overflows", failure)
+}
+
+private fun fullTreeDwarfMultiply(left: Long, right: Long, label: String): Long = try {
+    Math.multiplyExact(left, right)
+} catch (failure: ArithmeticException) {
+    throw FullTreeControlException("$label overflows", failure)
+}
+
 private const val FULL_TREE_ELF_CLASS_32 = 1
 private const val FULL_TREE_ELF_CLASS_64 = 2
 private const val FULL_TREE_SHT_NOBITS = 8L
@@ -1143,6 +1789,7 @@ private const val FULL_TREE_ELFCOMPRESS_ZLIB = 1L
 private const val FULL_TREE_SHN_XINDEX = 0xffff
 private const val FULL_TREE_MAXIMUM_ELF_SECTIONS = 1_000_000
 private const val FULL_TREE_MAXIMUM_ELF_SECTION_NAME_BYTES = 4096
+private const val FULL_TREE_MAXIMUM_DWARF_STRING_CHARACTERS = 16_384
 private const val FULL_TREE_DWARF_WINDOW_BYTES = 64 * 1024
 private const val FULL_TREE_GNU_ZLIB_HEADER_BYTES = 12L
 private const val FULL_TREE_UINT32_MASK = 0xffff_ffffL
@@ -1204,3 +1851,20 @@ internal const val FULL_TREE_DW_FORM_GNU_ADDR_INDEX = 0x1f01L
 internal const val FULL_TREE_DW_FORM_GNU_STR_INDEX = 0x1f02L
 internal const val FULL_TREE_DW_FORM_GNU_REF_ALT = 0x1f20L
 internal const val FULL_TREE_DW_FORM_GNU_STRP_ALT = 0x1f21L
+
+private val FULL_TREE_DWARF_ADDRESS_INDEX_FORMS = setOf(
+    FULL_TREE_DW_FORM_ADDRX,
+    FULL_TREE_DW_FORM_ADDRX1,
+    FULL_TREE_DW_FORM_ADDRX2,
+    FULL_TREE_DW_FORM_ADDRX3,
+    FULL_TREE_DW_FORM_ADDRX4,
+)
+
+private val FULL_TREE_DWARF_REFERENCE_FORMS = setOf(
+    FULL_TREE_DW_FORM_REF_ADDR,
+    FULL_TREE_DW_FORM_REF1,
+    FULL_TREE_DW_FORM_REF2,
+    FULL_TREE_DW_FORM_REF4,
+    FULL_TREE_DW_FORM_REF8,
+    FULL_TREE_DW_FORM_REF_UDATA,
+)
