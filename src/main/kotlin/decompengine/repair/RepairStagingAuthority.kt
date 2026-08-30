@@ -1,6 +1,7 @@
 package decompengine.repair
 
 import decompengine.acp.LinuxDescriptor
+import decompengine.acp.ACP_CAPTURED_REPAIR_WORKSPACE
 import decompengine.agent.AgentExecutionEvent
 import decompengine.agent.AgentExecutionRequest
 import decompengine.agent.AgentExecutionResult
@@ -61,6 +62,9 @@ class BoundedRepairOutput internal constructor(
     internal val resourceBudget: RepairResourceBudget,
 ) {
     private val replacements = TreeMap<String, ByteArray?>()
+    private val currentFiles = TreeMap<String, ByteArray>().apply {
+        initialFiles.forEach { (path, bytes) -> put(path, bytes.copyOf()) }
+    }
     private var replacementBytes = 0L
     private var workspaceBytes = initialFiles.values.fold(0L) { total, bytes ->
         Math.addExact(total, bytes.size.toLong())
@@ -71,19 +75,31 @@ class BoundedRepairOutput internal constructor(
     fun replace(relativePath: String, bytes: ByteArray) {
         check(!closed) { "captured repair output is closed" }
         require(relativePath in writablePaths) { "captured repair output is unauthorized: $relativePath" }
-        require(relativePath !in replacements) { "captured repair output changes a path more than once: $relativePath" }
-        require(bytes.size.toLong() <= resourceBudget.maximumSourceFileBytes) {
-            "captured repair output $relativePath exceeds the source-file byte budget"
-        }
-        require(replacements.size < resourceBudget.maximumPatchFiles) { "captured repair output exceeds the patch-file budget" }
-        replacementBytes = Math.addExact(replacementBytes, bytes.size.toLong())
-        if (replacementBytes > resourceBudget.maximumPatchBytes) {
+        if (bytes.size.toLong() > resourceBudget.maximumSourceFileBytes) {
             throw RepairBudgetExceededException(
-                "captured repair output contains $replacementBytes bytes; limit=${resourceBudget.maximumPatchBytes}",
+                "captured repair output $relativePath exceeds the source-file byte budget",
+            )
+        }
+        val wasChanged = relativePath in replacements
+        val previousReplacementBytes = replacements[relativePath]?.size?.toLong() ?: 0L
+        val remainsChanged = !bytes.contentEquals(initialFiles.getValue(relativePath))
+        val projectedPatchFiles = replacements.size - (if (wasChanged) 1 else 0) +
+            (if (remainsChanged) 1 else 0)
+        if (projectedPatchFiles > resourceBudget.maximumPatchFiles) {
+            throw RepairBudgetExceededException("captured repair output exceeds the patch-file budget")
+        }
+        val projectedReplacementBytes = Math.addExact(
+            Math.subtractExact(replacementBytes, previousReplacementBytes),
+            if (remainsChanged) bytes.size.toLong() else 0L,
+        )
+        if (projectedReplacementBytes > resourceBudget.maximumPatchBytes) {
+            throw RepairBudgetExceededException(
+                "captured repair output contains $projectedReplacementBytes bytes; " +
+                    "limit=${resourceBudget.maximumPatchBytes}",
             )
         }
         val projected = Math.addExact(
-            Math.subtractExact(workspaceBytes, initialFiles.getValue(relativePath).size.toLong()),
+            Math.subtractExact(workspaceBytes, currentFiles[relativePath]?.size?.toLong() ?: 0L),
             bytes.size.toLong(),
         )
         if (projected > resourceBudget.maximumStagingBytes) {
@@ -91,17 +107,28 @@ class BoundedRepairOutput internal constructor(
                 "captured repair workspace contains $projected bytes; limit=${resourceBudget.maximumStagingBytes}",
             )
         }
+        replacementBytes = projectedReplacementBytes
         workspaceBytes = projected
-        replacements[relativePath] = bytes.copyOf()
+        currentFiles[relativePath] = bytes.copyOf()
+        if (remainsChanged) replacements[relativePath] = bytes.copyOf() else replacements.remove(relativePath)
     }
 
     @Synchronized
     fun delete(relativePath: String) {
         check(!closed) { "captured repair output is closed" }
         require(relativePath in writablePaths) { "captured repair deletion is unauthorized: $relativePath" }
-        require(relativePath !in replacements) { "captured repair output changes a path more than once: $relativePath" }
-        require(replacements.size < resourceBudget.maximumPatchFiles) { "captured repair output exceeds the patch-file budget" }
-        workspaceBytes = Math.subtractExact(workspaceBytes, initialFiles.getValue(relativePath).size.toLong())
+        val current = currentFiles[relativePath] ?: return
+        val wasChanged = relativePath in replacements
+        val projectedPatchFiles = replacements.size - (if (wasChanged) 1 else 0) + 1
+        if (projectedPatchFiles > resourceBudget.maximumPatchFiles) {
+            throw RepairBudgetExceededException("captured repair output exceeds the patch-file budget")
+        }
+        replacementBytes = Math.subtractExact(
+            replacementBytes,
+            replacements[relativePath]?.size?.toLong() ?: 0L,
+        )
+        workspaceBytes = Math.subtractExact(workspaceBytes, current.size.toLong())
+        currentFiles.remove(relativePath)
         replacements[relativePath] = null
     }
 
@@ -157,7 +184,7 @@ object CapturedRepairStagingAuthority : RepairStagingAuthority {
         val output = BoundedRepairOutput(frozenInitial, frozenWritable, budget)
         // This deliberately uncreatable procfs path satisfies the transport's lexical root contract
         // without creating a writable host workspace.
-        val request = requestFactory(AgentWorkspaceRoot("project", VIRTUAL_WORKSPACE))
+        val request = requestFactory(AgentWorkspaceRoot("project", ACP_CAPTURED_REPAIR_WORKSPACE))
         val result = try {
             captured.executeCaptured(request, harnessView, output, onEvent)
         } catch (failure: Throwable) {
@@ -168,8 +195,6 @@ object CapturedRepairStagingAuthority : RepairStagingAuthority {
         output.finish().forEach { (path, bytes) -> files[path] = bytes }
         return RepairStagingExecution(result, files)
     }
-
-    private val VIRTUAL_WORKSPACE: Path = Path.of("/proc/self/fd/-1/decomp-repair-captured-workspace")
 }
 
 private fun normalizedCapturedPath(value: String): String {

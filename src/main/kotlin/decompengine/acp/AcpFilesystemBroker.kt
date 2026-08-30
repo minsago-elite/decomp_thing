@@ -142,6 +142,24 @@ internal fun interface AcpFilesystemRaceHook {
     fun run(stage: AcpFilesystemRaceStage, requestedPath: Path)
 }
 
+/** Session-owned implementation of the ACP v1 client filesystem callbacks. */
+internal interface AcpFilesystemSession : AutoCloseable {
+    val capability: FileSystemCapability?
+
+    suspend fun readTextFile(
+        sessionId: String,
+        requestedPath: String,
+        line: UInt?,
+        limit: UInt?,
+    ): ReadTextFileResponse
+
+    suspend fun writeTextFile(
+        sessionId: String,
+        requestedPath: String,
+        content: String,
+    ): WriteTextFileResponse
+}
+
 /**
  * Session-scoped filesystem authority for ACP callbacks.
  *
@@ -157,17 +175,17 @@ internal class AcpFilesystemBroker private constructor(
     private val readEnabled: Boolean,
     private val writeEnabled: Boolean,
     private val raceHook: AcpFilesystemRaceHook?,
-) : AutoCloseable {
+) : AcpFilesystemSession {
     private val lock = Any()
 
     /** Frozen for the lifetime of this broker/session from the request's immutable policy snapshot. */
-    val capability: FileSystemCapability? = if (readEnabled || writeEnabled) {
+    override val capability: FileSystemCapability? = if (readEnabled || writeEnabled) {
         FileSystemCapability(readTextFile = readEnabled, writeTextFile = writeEnabled)
     } else {
         null
     }
 
-    suspend fun readTextFile(
+    override suspend fun readTextFile(
         sessionId: String,
         requestedPath: String,
         line: UInt?,
@@ -239,7 +257,7 @@ internal class AcpFilesystemBroker private constructor(
         }
     }
 
-    suspend fun writeTextFile(
+    override suspend fun writeTextFile(
         sessionId: String,
         requestedPath: String,
         content: String,
