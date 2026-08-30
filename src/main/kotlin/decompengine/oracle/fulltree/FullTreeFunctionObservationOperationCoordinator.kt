@@ -216,6 +216,7 @@ internal class FullTreeFunctionObservationPreparedRun private constructor(
     private val lease: FullTreeDiskScratchLease,
 ) : AutoCloseable {
     private var closed = false
+    private var runRootBorrowActive = false
 
     init {
         if (
@@ -247,9 +248,55 @@ internal class FullTreeFunctionObservationPreparedRun private constructor(
         )
     }
 
+    /**
+     * Retains the journal lock, mount flock, opaque run-root token, and this handle's monitor while
+     * granting one revocable descriptor-backed run-root borrow. Both authorities are revalidated
+     * around the callback; callback failure remains primary and never closes either authority.
+     */
+    @Synchronized
+    fun <T> withCurrentRunRootBeforeLaunch(
+        action: (FullTreeDiskScratchBorrowedRunRoot) -> T,
+    ): T {
+        check(!closed) { "function-observation prepared run is closed" }
+        if (runRootBorrowActive) {
+            coordinationFail("function-observation prepared run root is already borrowed")
+        }
+        runRootBorrowActive = true
+        try {
+            requireCurrentBeforeLaunch()
+            return try {
+                lease.withCurrentOperationRunRootBeforeLaunch(runRoot) { borrowed ->
+                    requireCurrentHistory(leasedHistory, diskEvidence, journal)
+                    try {
+                        action(borrowed).also {
+                            requireCurrentHistory(leasedHistory, diskEvidence, journal)
+                        }
+                    } catch (failure: Throwable) {
+                        runCatching {
+                            requireCurrentHistory(leasedHistory, diskEvidence, journal)
+                        }.exceptionOrNull()?.let { validationFailure ->
+                            if (validationFailure !== failure) failure.addSuppressed(validationFailure)
+                        }
+                        throw failure
+                    }
+                }.also { requireCurrentBeforeLaunch() }
+            } catch (failure: Throwable) {
+                runCatching { requireCurrentBeforeLaunch() }.exceptionOrNull()?.let { validationFailure ->
+                    if (validationFailure !== failure) failure.addSuppressed(validationFailure)
+                }
+                throw failure
+            }
+        } finally {
+            runRootBorrowActive = false
+        }
+    }
+
     @Synchronized
     override fun close() {
         if (closed) return
+        if (runRootBorrowActive) {
+            coordinationFail("function-observation prepared run cannot close while its root is borrowed")
+        }
         closed = true
         closeOperationResources(lease, journal)?.let { throw it }
     }

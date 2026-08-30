@@ -1,5 +1,6 @@
 package decompengine.oracle.fulltree
 
+import decompengine.acp.LinuxFilesystemSyscalls
 import decompengine.oracle.core.DescriptorBoundAtomicStateFile
 import decompengine.oracle.core.DescriptorBoundStateFaultInjector
 import decompengine.oracle.core.DescriptorBoundStateFaultPoint
@@ -558,6 +559,43 @@ class FullTreeFunctionObservationOperationCoordinatorTest {
                     leased = null
 
                     run.requireCurrentBeforeLaunch()
+                    lateinit var capturedBorrow: FullTreeDiskScratchBorrowedRunRoot
+                    assertEquals(
+                        "prepared-borrow",
+                        run.withCurrentRunRootBeforeLaunch { borrowed ->
+                            capturedBorrow = borrowed
+                            assertEquals(expectedRunRoot, borrowed.path)
+                            assertFailsWith<FullTreeFunctionObservationOperationCoordinationException> {
+                                run.close()
+                            }
+                            assertFailsWith<FullTreeFunctionObservationOperationCoordinationException> {
+                                run.withCurrentRunRootBeforeLaunch {
+                                    error("nested prepared-run borrow callback must not run")
+                                }
+                            }
+                            borrowed.withPinnedDescriptor { descriptor ->
+                                assertTrue(
+                                    Files.isSameFile(
+                                        expectedRunRoot,
+                                        LinuxFilesystemSyscalls.descriptorPath(descriptor),
+                                    ),
+                                )
+                                assertTrue(
+                                    LinuxFilesystemSyscalls.directoryEntryNames(descriptor, 1).isEmpty(),
+                                )
+                            }
+                            "prepared-borrow"
+                        },
+                    )
+                    assertFailsWith<IllegalStateException> { capturedBorrow.path }
+
+                    val callbackFailure = SimulatedPreparedRunBorrowFailure()
+                    val retainedFailure = assertFailsWith<SimulatedPreparedRunBorrowFailure> {
+                        run.withCurrentRunRootBeforeLaunch { throw callbackFailure }
+                    }
+                    assertSame(callbackFailure, retainedFailure)
+                    assertTrue(retainedFailure.suppressed.isEmpty())
+                    run.requireCurrentBeforeLaunch()
                     assertFailsWith<FullTreeFunctionObservationOperationJournalException> {
                         FullTreeFunctionObservationJournalAuthority.open(root)
                     }
@@ -996,6 +1034,8 @@ class FullTreeFunctionObservationOperationCoordinatorTest {
     }
 
     private class SimulatedCoordinatorProcessDeath : RuntimeException()
+
+    private class SimulatedPreparedRunBorrowFailure : RuntimeException()
 
     private companion object {
         const val EXPECTED_MAXIMUM_FILESYSTEM_BYTES = 64L * 1024 * 1024
