@@ -2,6 +2,8 @@ package decompengine.project
 
 import decompengine.acp.ACP_CLIENT_IMPLEMENTATION_NAME
 import decompengine.acp.ACP_CLIENT_IMPLEMENTATION_VERSION
+import decompengine.acp.ACP_KOTLIN_SDK_VERSION
+import decompengine.acp.ACP_STABLE_PROTOCOL_VERSION
 import decompengine.acp.AcpCgroupControllerEvidence
 import decompengine.acp.AcpExecutionEvidenceSnapshot
 import decompengine.acp.AcpFilesystemAuditRecord
@@ -14,18 +16,23 @@ import decompengine.acp.AcpSandboxMountEvidence
 import decompengine.acp.AcpSandboxResourceLimits
 import decompengine.acp.AcpTerminalAuditRecord
 import decompengine.agent.AgentExecutionEvent
+import decompengine.agent.AGENT_EXECUTION_CONTRACT_VERSION
 import decompengine.agent.AgentExecutionOutcome
 import decompengine.agent.AgentExecutionRequest
 import decompengine.agent.AgentExecutionRequestBinding
 import decompengine.agent.AgentExecutionReceipt
 import decompengine.agent.AgentExecutionResult
+import decompengine.agent.AgentFailureKind
 import decompengine.agent.AgentFileChange
 import decompengine.agent.AgentFileChangeEvent
 import decompengine.agent.AgentMessageEvent
+import decompengine.agent.AgentStopReason
 import decompengine.agent.AgentPermissionEvent
 import decompengine.agent.AgentPlanEvent
 import decompengine.agent.AgentToolEvent
 import decompengine.agent.receiptCommitmentBytes
+import decompengine.oracle.core.OracleJson
+import decompengine.oracle.core.StrictJsonLimits
 import java.math.BigInteger
 import java.nio.ByteBuffer
 import java.nio.CharBuffer
@@ -34,6 +41,14 @@ import java.nio.charset.CodingErrorAction
 import java.nio.charset.StandardCharsets
 import java.security.MessageDigest
 import java.util.Collections
+import kotlinx.serialization.json.JsonNull
+import kotlinx.serialization.json.JsonObject
+import kotlinx.serialization.json.booleanOrNull
+import kotlinx.serialization.json.contentOrNull
+import kotlinx.serialization.json.intOrNull
+import kotlinx.serialization.json.jsonObject
+import kotlinx.serialization.json.jsonPrimitive
+import kotlinx.serialization.json.longOrNull
 
 /** Caller-owned validation binding appended only after the generated artifact is inspected. */
 internal class AcpExecutionOutcomeBinding(
@@ -213,6 +228,10 @@ internal class BoundedAcpExecutionReceiptArtifact private constructor(
         is AgentExecutionOutcome.Returned -> "returned-${outcome.result.stopReason.name.wireName()}"
         is AgentExecutionOutcome.Failed -> "failed-${outcome.failure.kind.name.wireName()}"
     }
+    val resultChangesSha256: String = when (outcome) {
+        is AgentExecutionOutcome.Returned -> agentFileChangeSetSha256(outcome.result.changes)
+        is AgentExecutionOutcome.Failed -> agentFileChangeSetSha256(emptyList())
+    }
     val releaseComplete: Boolean = (outcome as? AgentExecutionOutcome.Returned)?.result?.let { result ->
         val factory = acp.factoryProvenance ?: return@let false
         val negotiated = acp.negotiatedAgent ?: return@let false
@@ -366,6 +385,7 @@ internal data class RenderedAcpReceiptArtifact(
  */
 internal class AcpExecutionReceiptDocument private constructor(
     val requestSha256: String,
+    val resultChangesSha256: String,
     val terminalOutcome: String,
     val releaseComplete: Boolean,
     val json: String,
@@ -398,10 +418,193 @@ internal class AcpExecutionReceiptDocument private constructor(
             )
             return AcpExecutionReceiptDocument(
                 artifact.requestSha256,
+                artifact.resultChangesSha256,
                 artifact.terminalOutcome,
                 rendered.releaseComplete,
                 rendered.json,
             )
+        }
+    }
+}
+
+internal data class VerifiedAcpExecutionReceiptDocument(
+    val requestSha256: String,
+    val promptSha256: String,
+    val resultChangesSha256: String,
+    val terminalOutcome: String,
+    val releaseComplete: Boolean,
+)
+
+/**
+ * Strict, bounded verifier for the workflow-independent receipt binding. This deliberately does
+ * not reinterpret caller-specific changes; it establishes the immutable task/request/outcome and
+ * ACP lifecycle identity that a workflow assessment must compare with its own candidate state.
+ */
+internal fun verifyAcpExecutionReceiptDocument(
+    bytes: ByteArray,
+    evidenceKind: String,
+    taskIdentityField: String,
+    taskId: String,
+): VerifiedAcpExecutionReceiptDocument {
+    require(bytes.size <= MAXIMUM_ARCHIVED_EVIDENCE_BYTES) { "ACP receipt exceeds its artifact cap" }
+    val root = OracleJson.parse(bytes, ACP_RECEIPT_BINDING_JSON_LIMITS).jsonObject
+    val expectedRootFields = ACP_RECEIPT_BINDING_ROOT_FIELDS + taskIdentityField
+    require(root.keys == expectedRootFields) { "ACP receipt has missing, extra, or duplicate binding fields" }
+    require(root.receiptInt("schemaVersion") == 2) { "ACP receipt schema is unsupported" }
+    require(root.receiptString("kind") == evidenceKind) { "ACP receipt kind is cross-paired" }
+    require(root.receiptString(taskIdentityField) == taskId) { "ACP receipt task identity is cross-paired" }
+
+    val request = root.receiptObject("request")
+    require(request.keys == ACP_RECEIPT_BINDING_REQUEST_FIELDS) {
+        "ACP receipt request has missing, extra, or duplicate fields"
+    }
+    val requestSha256 = request.receiptString("requestSha256")
+    require(requestSha256.isSha256()) { "ACP receipt request digest is invalid" }
+    val promptSha256 = request.receiptString("promptSha256")
+    require(promptSha256.isSha256()) { "ACP receipt workflow prompt digest is invalid" }
+
+    val provider = root.receiptObject("provider")
+    require(provider.keys == setOf("id", "evidenceSchemaVersion") &&
+        provider.receiptString("id") == "acp" && provider.receiptInt("evidenceSchemaVersion") == 2
+    ) { "receipt is not invocation-bound ACP-v2 evidence" }
+
+    val lifecycle = root.receiptObject("lifecycle")
+    require(lifecycle.keys == ACP_RECEIPT_BINDING_LIFECYCLE_FIELDS) {
+        "ACP receipt lifecycle has missing, extra, or duplicate fields"
+    }
+    val releaseComplete = lifecycle.receiptBoolean("releaseComplete")
+    val outcome = root.receiptObject("outcome")
+    require(outcome.keys == setOf("type", "result", "failure")) {
+        "ACP receipt outcome has missing, extra, or duplicate fields"
+    }
+    var resultChangesSha256 = agentFileChangeSetSha256(emptyList())
+    val terminalOutcome = when (outcome.receiptString("type")) {
+        "returned" -> {
+            require(outcome.getValue("failure") is JsonNull) { "returned ACP receipt also contains a failure" }
+            val result = outcome.receiptObject("result")
+            require(result.keys == setOf("stopReason", "summary", "changes", "usage")) {
+                "ACP receipt result has missing, extra, or duplicate fields"
+            }
+            val stop = result.receiptString("stopReason")
+            require(stop in ACP_RECEIPT_STOP_REASONS) { "ACP receipt stop reason is invalid" }
+            val changes = result.receiptObject("changes")
+            require(changes.keys == ACP_RECEIPT_BINDING_CHANGE_SET_FIELDS) {
+                "ACP receipt result change set has missing, extra, or duplicate fields"
+            }
+            resultChangesSha256 = changes.receiptString("aggregateSha256")
+            require(resultChangesSha256.isSha256()) { "ACP receipt result change digest is invalid" }
+            "returned-$stop"
+        }
+        "failed" -> {
+            require(outcome.getValue("result") is JsonNull) { "failed ACP receipt also contains a result" }
+            val failure = outcome.receiptObject("failure")
+            require(failure.keys == setOf("kind", "message", "retryable", "detailsSha256", "detailCount")) {
+                "ACP receipt failure has missing, extra, or duplicate fields"
+            }
+            val kind = failure.receiptString("kind")
+            require(kind in ACP_RECEIPT_FAILURE_KINDS) { "ACP receipt failure kind is invalid" }
+            "failed-$kind"
+        }
+        else -> throw IllegalArgumentException("ACP receipt outcome type is invalid")
+    }
+    if (releaseComplete) {
+        require(terminalOutcome == "returned-completed" &&
+            lifecycle.receiptString("phaseReached") == "final-workspace-snapshot" &&
+            lifecycle.receiptString("cleanupDisposition") == "verified" &&
+            lifecycle.receiptBoolean("filesystemAuditComplete") &&
+            lifecycle.receiptBoolean("terminalAuditComplete") &&
+            lifecycle.receiptBoolean("permissionAuditComplete")
+        ) { "ACP receipt release marker disagrees with its terminal lifecycle" }
+        val factory = root.receiptObject("factoryProvenance")
+        require(factory.keys == ACP_RECEIPT_BINDING_FACTORY_FIELDS) {
+            "ACP factory provenance has missing, extra, or duplicate fields"
+        }
+        val implementationId = factory.receiptString("implementationId")
+        val configurationSha256 = factory.receiptString("configurationSha256")
+        require(factory.receiptString("harness") == "acp" && !factory.receiptBoolean("deprecated") &&
+            implementationId.matches(ACP_RECEIPT_PROVENANCE_ID) && configurationSha256.isSha256() &&
+            factory.receiptInt("agentExecutionContractVersion") == AGENT_EXECUTION_CONTRACT_VERSION
+        ) {
+            "release-complete receipt lacks supported ACP factory provenance"
+        }
+        val expectedDescriptor = listOf(
+            "agent-harness-v1",
+            "acp",
+            "contract-$AGENT_EXECUTION_CONTRACT_VERSION",
+            "acp-$ACP_STABLE_PROTOCOL_VERSION",
+            "sdk-$ACP_KOTLIN_SDK_VERSION",
+            "implementation-$implementationId",
+            "configuration-$configurationSha256",
+            "supported",
+        ).joinToString(":")
+        require(factory.receiptString("descriptor") == expectedDescriptor) {
+            "ACP factory descriptor is internally inconsistent"
+        }
+        val protocol = root.receiptObject("protocol")
+        require(protocol.keys == ACP_RECEIPT_BINDING_PROTOCOL_FIELDS &&
+            protocol.receiptString("name") == "acp" &&
+            protocol.receiptInt("version") == ACP_STABLE_PROTOCOL_VERSION &&
+            protocol.receiptString("sdkVersion") == ACP_KOTLIN_SDK_VERSION &&
+            root.getValue("agent") !is JsonNull && root.getValue("session") !is JsonNull &&
+            root.getValue("process") !is JsonNull && root.getValue("sandbox") !is JsonNull
+        ) { "release-complete ACP receipt lacks provider/session evidence" }
+        val client = protocol.receiptObject("clientImplementation")
+        require(client.keys == setOf("name", "version") &&
+            client.receiptString("name") == ACP_CLIENT_IMPLEMENTATION_NAME &&
+            client.receiptString("version") == ACP_CLIENT_IMPLEMENTATION_VERSION
+        ) { "ACP receipt client implementation provenance is unsupported" }
+        require(root.receiptObject("agent").receiptString("configuredImplementationId") == implementationId) {
+            "ACP configured implementation differs from factory provenance"
+        }
+        val session = root.receiptObject("session")
+        require(session.keys == setOf("harnessId", "sessionId", "resumeReference")) {
+            "ACP receipt session has missing, extra, or duplicate fields"
+        }
+        session.receiptTextCommitment("harnessId", expected = implementationId, requireNonEmpty = true)
+        session.receiptTextCommitment("sessionId", requireNonEmpty = true)
+        ReconstructionAcpEvidenceArchiveVerifier.verifyReleaseCompleteReceipt(root)
+    }
+    return VerifiedAcpExecutionReceiptDocument(
+        requestSha256,
+        promptSha256,
+        resultChangesSha256,
+        terminalOutcome,
+        releaseComplete,
+    )
+}
+
+private fun JsonObject.receiptString(field: String): String =
+    get(field)?.jsonPrimitive?.contentOrNull ?: error("ACP receipt is missing $field")
+
+private fun JsonObject.receiptInt(field: String): Int =
+    get(field)?.jsonPrimitive?.intOrNull ?: error("ACP receipt is missing $field")
+
+private fun JsonObject.receiptBoolean(field: String): Boolean =
+    get(field)?.jsonPrimitive?.booleanOrNull ?: error("ACP receipt is missing $field")
+
+private fun JsonObject.receiptObject(field: String): JsonObject =
+    get(field)?.takeUnless { it is JsonNull }?.jsonObject ?: error("ACP receipt is missing $field")
+
+private fun JsonObject.receiptTextCommitment(
+    field: String,
+    expected: String? = null,
+    requireNonEmpty: Boolean = false,
+) {
+    val commitment = receiptObject(field)
+    require(commitment.keys == setOf("sha256", "encodedBytes", "encoding")) {
+        "ACP receipt text commitment has missing, extra, or duplicate fields: $field"
+    }
+    val digest = commitment.receiptString("sha256")
+    val bytes = commitment["encodedBytes"]?.jsonPrimitive?.longOrNull
+        ?: error("ACP receipt text commitment is missing encodedBytes: $field")
+    require(digest.isSha256() && bytes >= 0 && commitment.receiptString("encoding") == "utf-8") {
+        "ACP receipt text commitment is invalid: $field"
+    }
+    require(!requireNonEmpty || bytes > 0) { "ACP receipt text commitment is empty: $field" }
+    expected?.let { value ->
+        val encoded = value.toByteArray(StandardCharsets.UTF_8)
+        require(digest == sha256(encoded) && bytes == encoded.size.toLong()) {
+            "ACP receipt text commitment differs from expected identity: $field"
         }
     }
 }
@@ -1158,6 +1361,9 @@ private data class ArchivedAgentChangeSnapshot(
         }
     }
 }
+
+internal fun agentFileChangeSetSha256(changes: Collection<AgentFileChange>): String =
+    ArchivedAgentChangeSnapshot.capture(changes).aggregateSha256
 
 private fun StringBuilder.appendReceiptFileChange(change: AgentFileChange): StringBuilder {
     append("{\"rootId\":")
@@ -1973,6 +2179,42 @@ private fun String.jsonString(): String = buildString {
 }
 
 private fun String.isSha256(): Boolean = length == 64 && all { it in '0'..'9' || it in 'a'..'f' }
+
+private val ACP_RECEIPT_BINDING_ROOT_FIELDS = setOf(
+    "schemaVersion", "kind", "request", "provider", "lifecycle", "factoryProvenance",
+    "protocol", "agent", "session", "events", "outcome", "policyAudits", "process", "sandbox",
+)
+private val ACP_RECEIPT_BINDING_REQUEST_FIELDS = setOf(
+    "contractVersion", "requestSha256", "accessPolicySha256", "objective", "promptSha256",
+    "wirePromptSha256", "workspaceRootIds", "contextInputIds", "filesystemCapabilityEnabled",
+    "terminalCapabilityEnabled", "maximumTurns", "maximumToolCalls", "maximumOutputBytes",
+    "wallClockTimeoutNanos", "idleTimeoutNanos", "maximumInputTokens", "maximumOutputTokens",
+)
+private val ACP_RECEIPT_BINDING_LIFECYCLE_FIELDS = setOf(
+    "phaseReached", "cleanupDisposition", "filesystemAuditComplete", "terminalAuditComplete",
+    "permissionAuditComplete", "releaseComplete",
+)
+private val ACP_RECEIPT_BINDING_CHANGE_SET_FIELDS = setOf(
+    "observedCount", "retainedCount", "complete", "aggregateSha256", "records",
+)
+private val ACP_RECEIPT_BINDING_FACTORY_FIELDS = setOf(
+    "descriptor", "harness", "implementationId", "agentExecutionContractVersion",
+    "configurationSha256", "deprecated",
+)
+private val ACP_RECEIPT_BINDING_PROTOCOL_FIELDS = setOf(
+    "name", "version", "sdkVersion", "clientImplementation",
+)
+private val ACP_RECEIPT_PROVENANCE_ID = Regex("[A-Za-z0-9_][A-Za-z0-9_.-]{0,127}")
+private val ACP_RECEIPT_STOP_REASONS = AgentStopReason.entries.mapTo(linkedSetOf()) { it.name.wireName() }
+private val ACP_RECEIPT_FAILURE_KINDS = AgentFailureKind.entries.mapTo(linkedSetOf()) { it.name.wireName() }
+private val ACP_RECEIPT_BINDING_JSON_LIMITS = StrictJsonLimits(
+    maximumInputBytes = MAXIMUM_ARCHIVED_EVIDENCE_BYTES,
+    maximumCanonicalBytes = MAXIMUM_ARCHIVED_EVIDENCE_BYTES,
+    maximumDepth = 64,
+    maximumNodes = 1_000_000,
+    maximumStringBytes = 16 * 1024 * 1024,
+    maximumTotalStringBytes = MAXIMUM_ARCHIVED_EVIDENCE_BYTES,
+)
 
 private const val MAXIMUM_ARCHIVED_AGENT_EVENTS = 8_192
 private const val MAXIMUM_ARCHIVED_RESULT_CHANGES = 8_192

@@ -35,6 +35,11 @@ internal class RepairStateStore private constructor(
 
     fun blobExists(name: String): Boolean = exists(blobs, name)
 
+    fun revisionFileExists(name: String): Boolean {
+        requireRevisionFileName(name)
+        return exists(revisions, name)
+    }
+
     fun rootFileExists(name: String): Boolean = exists(projectRoot, name)
 
     fun readGraph(maximumBytes: Long): ByteArray =
@@ -46,12 +51,43 @@ internal class RepairStateStore private constructor(
     fun readBlob(name: String, maximumBytes: Long): StableRegularFile =
         readRequiredStable(blobs, blobsPath, name, maximumBytes, "repair revision blob")
 
+    fun readRevisionFile(name: String, maximumBytes: Long): StableRegularFile {
+        requireRevisionFileName(name)
+        return readRequiredStable(revisions, revisionsPath, name, maximumBytes, "repair revision evidence")
+    }
+
     fun writeGraph(bytes: ByteArray) = writeAtomically(revisions, GRAPH_NAME, bytes, "revision-state")
 
     fun writeBinding(bytes: ByteArray) =
         writeAtomically(revisions, RECOVERY_BINDING_NAME, bytes, "recovery-binding")
 
     fun writeBlob(name: String, bytes: ByteArray) = writeAtomically(blobs, name, bytes, "revision-blob")
+
+    /**
+     * Publishes content-addressed invocation evidence once. A repeated publication is accepted
+     * only when the descriptor-pinned existing bytes are identical; an existing different file is
+     * never exchanged or overwritten.
+     */
+    fun writeImmutableRevisionFile(name: String, bytes: ByteArray, maximumBytes: Long) {
+        requireRevisionFileName(name)
+        require(bytes.size.toLong() <= maximumBytes) {
+            "repair revision evidence exceeds its $maximumBytes-byte limit"
+        }
+        if (exists(revisions, name)) {
+            val existing = readRequiredStable(
+                revisions,
+                revisionsPath,
+                name,
+                maximumBytes,
+                "immutable repair revision evidence",
+            )
+            require(existing.bytes.contentEquals(bytes)) {
+                "immutable repair revision evidence already exists with different content: $name"
+            }
+            return
+        }
+        writeAtomically(revisions, name, bytes, "revision-invocation-evidence", requireAbsent = true)
+    }
 
     fun writeReport(name: String, bytes: ByteArray) = writeAtomically(reports, name, bytes, "repair-report")
 
@@ -60,6 +96,13 @@ internal class RepairStateStore private constructor(
     fun blobNames(maximumEntries: Int): List<String> {
         checkOpen()
         return LinuxFilesystemSyscalls.directoryEntryNames(blobs, maximumEntries).sorted()
+    }
+
+    fun receiptFileNames(maximumEntries: Int): List<String> {
+        checkOpen()
+        return LinuxFilesystemSyscalls.directoryEntryNames(revisions, maximumEntries)
+            .filter(REVISION_EVIDENCE_NAME::matches)
+            .sorted()
     }
 
     fun cleanupUnboundBlobs(maximumEntries: Int, maximumBlobBytes: Long) {
@@ -158,6 +201,7 @@ internal class RepairStateStore private constructor(
         name: String,
         bytes: ByteArray,
         scope: String,
+        requireAbsent: Boolean = false,
     ) {
         checkOpen()
         val temporaryName = atomicTemporaryName(name)
@@ -171,6 +215,9 @@ internal class RepairStateStore private constructor(
             target = LinuxFilesystemSyscalls.openRegularFileAtOrNull(parent.fd, name)
             val targetIdentity = target?.identity
             targetIdentity?.let { requireManagedRegularFile(it, parent.identity, "repair evidence target") }
+            require(!requireAbsent || targetIdentity == null) {
+                "immutable repair evidence target already exists: $name"
+            }
             cleanupAtomicTemporary(parent, name)
             prepared = LinuxFilesystemSyscalls.createTemporaryAt(parent.fd)
             LinuxFilesystemSyscalls.write(prepared, bytes) { }
@@ -292,6 +339,10 @@ internal class RepairStateStore private constructor(
     }
 
     private fun checkOpen() = check(!closed) { "repair state store is closed" }
+
+    private fun requireRevisionFileName(name: String) {
+        require(name.matches(REVISION_EVIDENCE_NAME)) { "repair revision evidence name is invalid" }
+    }
 
     companion object {
         fun open(
@@ -437,6 +488,7 @@ private const val REVISIONS_NAME = "repair-revisions"
 private const val BLOBS_NAME = "blobs"
 private const val GRAPH_NAME = "graph.json"
 private const val RECOVERY_BINDING_NAME = "recovery-binding.json"
+private val REVISION_EVIDENCE_NAME = Regex("revision_[A-Za-z0-9_]+\\.acp-receipt\\.json")
 private const val OWNER_ALL = 0x1c0 // 0700
 private const val OWNER_READ_WRITE = 0x180 // 0600
 private const val GROUP_OR_OTHER_WRITE = 0x12 // 0022

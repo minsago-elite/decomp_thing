@@ -6,6 +6,7 @@ import decompengine.agent.AgentContextInput
 import decompengine.agent.AgentExecutionEvent
 import decompengine.agent.AgentExecutionException
 import decompengine.agent.AgentExecutionLimits
+import decompengine.agent.AgentExecutionOutcome
 import decompengine.agent.AgentExecutionRequest
 import decompengine.agent.AgentExecutionResult
 import decompengine.agent.AgentFileChangeKind
@@ -17,11 +18,14 @@ import decompengine.agent.AgentFailure
 import decompengine.agent.AgentFailureKind
 import decompengine.agent.AgentWorkspacePath
 import decompengine.agent.AgentWorkspaceRoot
+import decompengine.agent.receiptCommitmentBytes
 import decompengine.validation.BehaviorCaseResult
 import decompengine.validation.BehaviorComparator
 import decompengine.validation.BehaviorComparisonReport
 import decompengine.validation.ProcessInput
 import decompengine.project.sha256
+import decompengine.project.AcpExecutionReceiptDocument
+import decompengine.project.BoundedAgentExecutionEventRecorder
 import kotlinx.serialization.json.Json
 import kotlinx.serialization.json.JsonArray
 import kotlinx.serialization.json.JsonObject
@@ -614,7 +618,7 @@ object StructuredDiffBuilder {
     }
 }
 
-data class RepairIteration(
+data class RepairIteration @JvmOverloads constructor(
     val index: Int,
     val failureKind: String,
     val prompt: String,
@@ -624,7 +628,17 @@ data class RepairIteration(
     val before: RepairEvidence? = null,
     val after: RepairEvidence? = null,
     val succeeded: Boolean = false,
-)
+    val agentInvocation: RepairAgentInvocationBinding? = null,
+    val publicationMode: RepairPublicationMode = RepairPublicationMode.TEST_ONLY_NON_RELEASE,
+) {
+    val releaseComplete: Boolean get() =
+        publicationMode == RepairPublicationMode.ACP_RELEASE &&
+            agentInvocation?.let { invocation ->
+                invocation.assessmentStatus == RepairAgentAssessmentStatus.ACCEPTED &&
+                    invocation.receiptReleaseComplete &&
+                    invocation.terminalOutcome == "returned-completed"
+            } == true
+}
 
 data class RepairEvidence(
     val kind: String,
@@ -647,6 +661,8 @@ internal fun RepairIteration.deepFrozenCopy(): RepairIteration = RepairIteration
     before = before?.copy(),
     after = after?.copy(),
     succeeded = succeeded,
+    agentInvocation = agentInvocation?.copy(),
+    publicationMode = publicationMode,
 )
 
 private fun ProcessInput.detachedCopy(): ProcessInput = ProcessInput(
@@ -664,6 +680,7 @@ class RepairHistory(
     private val path = path.toAbsolutePath().normalize()
     private val iterations = mutableListOf<RepairIteration>()
     private val regressionInputs = mutableListOf<ProcessInput>()
+    private var schemaVersion = 2
 
     init {
         require(maximumBytes in 1..MAXIMUM_REPAIR_PROJECTION_BYTES) { "repair history byte limit is invalid" }
@@ -693,6 +710,9 @@ class RepairHistory(
 
     @Synchronized
     fun append(iteration: RepairIteration) {
+        require(schemaVersion == 2) {
+            "legacy repair history is non-release and cannot append a new repair iteration"
+        }
         iterations += iteration.deepFrozenCopy()
         persist()
     }
@@ -720,7 +740,9 @@ class RepairHistory(
         require(frozenInputs.map { it.id } == frozenInputs.map { it.id }.distinct().sorted()) {
             "authoritative retained regression inputs must have unique sorted IDs"
         }
-        if (iterations == frozenIterations && regressionInputs == frozenInputs) return false
+        val schemaChanged = schemaVersion != 2
+        schemaVersion = 2
+        if (iterations == frozenIterations && regressionInputs == frozenInputs) return schemaChanged
         iterations.clear()
         iterations += frozenIterations
         regressionInputs.clear()
@@ -736,7 +758,12 @@ class RepairHistory(
         Collections.unmodifiableList(ArrayList(regressionInputs.map(ProcessInput::detachedCopy)))
 
     @Synchronized
-    fun toJson(): String = renderRepairHistoryProjection(iterations, regressionInputs, maximumBytes)
+    fun toJson(): String = renderRepairHistoryProjection(
+        iterations,
+        regressionInputs,
+        maximumBytes,
+        schemaVersion,
+    )
 
     private fun persist() {
         path.parent.createDirectories()
@@ -750,9 +777,11 @@ class RepairHistory(
     private fun load(payload: String) {
         val root = runCatching { Json.parseToJsonElement(payload).jsonObject }
             .getOrElse { error("invalid repair history at ${path.pathString}: ${it.message}") }
+        schemaVersion = root["schemaVersion"]?.jsonPrimitive?.intOrNull ?: 1
+        require(schemaVersion in 1..2) { "unsupported repair history schema" }
         root["regressionInputs"]?.jsonArray?.map(::parseProcessInput)?.map(ProcessInput::detachedCopy)
             ?.let(regressionInputs::addAll)
-        root["iterations"]?.jsonArray?.map(::parseIteration)?.map(RepairIteration::deepFrozenCopy)
+        root["iterations"]?.jsonArray?.map { parseIteration(it, schemaVersion) }?.map(RepairIteration::deepFrozenCopy)
             ?.let(iterations::addAll)
     }
 }
@@ -761,8 +790,10 @@ internal fun renderRepairHistoryProjection(
     authoritative: List<RepairIteration>,
     authoritativeRegressionInputs: List<ProcessInput>,
     maximumBytes: Long,
+    schemaVersion: Int = 2,
 ): String {
     require(maximumBytes in 1..MAXIMUM_REPAIR_PROJECTION_BYTES) { "repair history byte limit is invalid" }
+    require(schemaVersion in 1..2) { "repair history schema is unsupported" }
     val iterations = authoritative.map(RepairIteration::deepFrozenCopy)
     val regressionInputs = authoritativeRegressionInputs.map(ProcessInput::detachedCopy)
     require(iterations.map { it.index } == iterations.map { it.index }.distinct().sorted()) {
@@ -795,6 +826,13 @@ internal fun renderRepairHistoryProjection(
             addText(evidence.summary)
             addText(evidence.artifactPath)
         }
+        iteration.agentInvocation?.let { invocation ->
+            addText(invocation.receiptPath)
+            addText(invocation.receiptSha256)
+            addText(invocation.requestSha256)
+            addText(invocation.resultChangesSha256)
+            addText(invocation.terminalOutcome)
+        }
         iteration.patches.forEach { patch ->
             addText(patch.relativePath)
             projected = Math.addExact(
@@ -809,16 +847,15 @@ internal fun renderRepairHistoryProjection(
     if (projected > maximumBytes) {
         throw RepairBudgetExceededException("repair history exceeds its $maximumBytes-byte limit")
     }
-    val payload = """
-        {
-          "regressionInputs": [
-        ${regressionInputs.joinToString(",\n") { it.toJson().prependIndent("    ") }}
-          ],
-          "iterations": [
-        ${iterations.joinToString(",\n") { it.toJson().prependIndent("    ") }}
-          ]
-        }
-    """.trimIndent() + "\n"
+    val payload = buildString {
+        append("{\n")
+        if (schemaVersion >= 2) append("  \"schemaVersion\": 2,\n")
+        append("  \"regressionInputs\": [\n")
+        append(regressionInputs.joinToString(",\n") { it.toJson().prependIndent("    ") })
+        append("\n  ],\n  \"iterations\": [\n")
+        append(iterations.joinToString(",\n") { it.toJson(schemaVersion).prependIndent("    ") })
+        append("\n  ]\n}\n")
+    }
     if (payload.toByteArray(Charsets.UTF_8).size.toLong() > maximumBytes) {
         throw RepairBudgetExceededException("repair history exceeds its $maximumBytes-byte limit")
     }
@@ -1151,7 +1188,7 @@ class TraceGuidedRepairLoop private constructor(
         fun abortAndClose(original: Exception, evidenceKind: String) {
             if (!finalized) {
                 runCatching {
-                    reject(RepairEvidence(evidenceKind, original.message.orEmpty()))
+                    reject(RepairEvidence(evidenceKind, "repair attempt rejected before workflow acceptance"))
                 }.onFailure(original::addSuppressed)
             }
             runCatching(::close).onFailure(original::addSuppressed)
@@ -1182,6 +1219,7 @@ class TraceGuidedRepairLoop private constructor(
 
     private fun executeRepair(projectDir: Path, repair: RepairTask): ExecutedRepair {
         val base = projectDir.toAbsolutePath().normalize()
+        val invocationPrompt = portableRepairRequestText(base, repair.prompt)
         val regressionBytes = repair.regressionInputs.fold(0L) { total, input ->
             val inputBytes = input.id.toByteArray().size.toLong() + input.stdin.size +
                 input.args.sumOf { it.toByteArray().size.toLong() }
@@ -1196,7 +1234,7 @@ class TraceGuidedRepairLoop private constructor(
             "${input.id}: args=${input.args} stdinHex=${input.stdin.toHex()}"
         }.ifEmpty { "<none>" }
         val indexedContext = repair.context.toContextJson()
-        val requestBytes = repair.context.totalBytes + repair.prompt.toByteArray().size +
+        val requestBytes = repair.context.totalBytes + invocationPrompt.toByteArray().size +
             regressionContext.toByteArray().size + indexedContext.toByteArray().size + 512L
         if (requestBytes > resourceBudget.maximumRequestBytes) {
             throw RepairBudgetExceededException(
@@ -1219,11 +1257,16 @@ class TraceGuidedRepairLoop private constructor(
                 RevisionRepairMetadata(
                     iterationIndex = repair.iterationIndex,
                     failureKind = repair.failureKind,
-                    prompt = repair.prompt,
+                    prompt = invocationPrompt,
                     summary = null,
                     retainedRegressionIds = repair.regressionInputs.map { it.id },
                     before = repair.before,
                     regressionCorpusSha256 = repair.regressionCorpusSha256,
+                    publicationMode = if (allowTestOnlyValidation) {
+                        RepairPublicationMode.TEST_ONLY_NON_RELEASE
+                    } else {
+                        RepairPublicationMode.ACP_RELEASE
+                    },
                 ),
             )
         } catch (failure: Throwable) {
@@ -1231,8 +1274,10 @@ class TraceGuidedRepairLoop private constructor(
             throw failure
         }
         val stagedBefore = baseContent
+        lateinit var agentRequest: AgentExecutionRequest
+        val eventRecorder = BoundedAgentExecutionEventRecorder()
         val stagedExecution = try {
-            stagingAuthority.execute(
+            stagingAuthority.executeReceipt(
                 harness = harness,
                 initialFiles = stagedBefore,
                 writablePaths = writable,
@@ -1251,7 +1296,7 @@ class TraceGuidedRepairLoop private constructor(
                             Repair the ${repair.failureKind} failure in the authorized project workspace.
                             Edit only the allowed project files in place and preserve all retained regression behavior.
 
-                            ${repair.prompt}
+                            $invocationPrompt
                         """.trimIndent(),
                         workspaceRoots = listOf(root),
                         contextInputs = listOf(
@@ -1262,9 +1307,12 @@ class TraceGuidedRepairLoop private constructor(
                         accessPolicy = AgentAccessPolicy(rules),
                         limits = limits,
                         cancellation = cancellation,
-                    )
+                    ).also { agentRequest = it }
                 },
-                onEvent = onAgentEvent,
+                onEvent = { event ->
+                    eventRecorder.record(event)
+                    onAgentEvent(event)
+                },
             )
         } catch (failure: Throwable) {
             if (failure is Exception) {
@@ -1274,15 +1322,56 @@ class TraceGuidedRepairLoop private constructor(
             }
             throw failure
         }
-        val result = stagedExecution.result
+        val executionEvidence = AcpExecutionReceiptDocument.captureOrNull(
+            request = agentRequest,
+            promptSha256 = sha256(receiptCommitmentBytes(invocationPrompt)),
+            receipt = stagedExecution.receipt,
+            events = eventRecorder.receiptSnapshot(),
+            evidenceKind = TRACE_REPAIR_ACP_RECEIPT_KIND,
+            taskIdentityField = TRACE_REPAIR_ACP_TASK_FIELD,
+            taskId = attempt.id,
+        )
+        if (executionEvidence == null && !allowTestOnlyValidation) {
+            val failure = IllegalStateException(
+                "repair agent invocation lacks schema-v2 ACP provider evidence",
+            )
+            abortPendingGraph(graph, attempt, failure, "missing-acp-receipt")
+            throw failure
+        }
         try {
-            graph.annotateAttempt(attempt, result.summary ?: "agent repair attempt")
+            // This is the first operation after capture: raw invocation evidence and then a
+            // separate pending assessment are durable before outcome/files are inspected.
+            executionEvidence?.let { graph.persistAndBindAgentInvocation(attempt, it) }
+        } catch (failure: RepairAgentEvidencePersistenceException) {
+            runCatching(graph::close).onFailure(failure::addSuppressed)
+            throw failure
+        }
+        try {
+            val result = when (val outcome = stagedExecution.receipt.outcome) {
+                is AgentExecutionOutcome.Returned -> outcome.result
+                is AgentExecutionOutcome.Failed -> throw (
+                    stagedExecution.receipt.failureCause ?: AgentExecutionException(
+                        outcome.failure,
+                        receipt = stagedExecution.receipt,
+                    )
+                )
+            }
             require(result.stopReason == AgentStopReason.COMPLETED) {
-                "repair agent stopped with ${result.stopReason.name.lowercase()}: ${result.summary.orEmpty()}"
+                "repair agent stopped with ${result.stopReason.name.lowercase()}"
+            }
+            if (executionEvidence != null) {
+                require(executionEvidence.releaseComplete) {
+                    "repair agent returned without release-complete ACP invocation evidence"
+                }
             }
             require(result.changes.isNotEmpty()) { "repair agent completed without changing a source file" }
             require(result.changes.map { it.path.relativePath }.distinct().size == result.changes.size) {
                 "repair agent reported a source path more than once"
+            }
+            require(result.changes.map { it.path.relativePath } ==
+                result.changes.map { it.path.relativePath }.sorted()
+            ) {
+                "repair agent changes must use canonical path order"
             }
             val declared = result.changes.associateBy { change ->
                 require(change.path.rootId == "project" && change.path.relativePath in writable) {
@@ -1311,7 +1400,7 @@ class TraceGuidedRepairLoop private constructor(
                 require(change.beforeSha256 == sha256(beforeContent) && change.afterSha256 == sha256(afterContent)) {
                     "repair agent digests do not match workspace file: $relative"
                 }
-                require(change.sizeBytes == null || change.sizeBytes == afterContent.size.toLong()) {
+                require(change.sizeBytes == afterContent.size.toLong()) {
                     "repair agent size does not match workspace file: $relative"
                 }
                 AppliedPatch(relative, sha256(beforeContent), sha256(afterContent), beforeContent, afterContent)
@@ -1322,7 +1411,17 @@ class TraceGuidedRepairLoop private constructor(
             return ExecutedRepair(result, applied, patches, graph, attempt, history)
         } catch (failure: Throwable) {
             if (failure is Exception) {
-                abortPendingGraph(graph, attempt, failure, "candidate-error")
+                val evidenceKind = when (val terminal = stagedExecution.receipt.outcome) {
+                    is AgentExecutionOutcome.Failed ->
+                        "agent-failure-${terminal.failure.kind.name.lowercase().replace('_', '-')}"
+                    is AgentExecutionOutcome.Returned -> when {
+                        terminal.result.stopReason != AgentStopReason.COMPLETED ->
+                            "agent-stop-${terminal.result.stopReason.name.lowercase().replace('_', '-')}"
+                        executionEvidence?.releaseComplete == false -> "incomplete-acp-receipt"
+                        else -> "candidate-error"
+                    }
+                }
+                abortPendingGraph(graph, attempt, failure, evidenceKind)
             } else {
                 runCatching(graph::close).onFailure(failure::addSuppressed)
             }
@@ -1337,9 +1436,19 @@ class TraceGuidedRepairLoop private constructor(
         evidenceKind: String,
     ) {
         runCatching {
-            graph.reject(attempt, RepairEvidence(evidenceKind, original.message.orEmpty()))
+            graph.reject(attempt, RepairEvidence(evidenceKind, "repair attempt rejected before workflow acceptance"))
         }.onFailure(original::addSuppressed)
         runCatching(graph::close).onFailure(original::addSuppressed)
+    }
+
+    private fun portableRepairRequestText(projectRoot: Path, value: String): String {
+        val replacement = "\${PROJECT_ROOT}"
+        val variants = buildSet {
+            add(projectRoot.pathString)
+            add(projectRoot.pathString.replace('/', '\\'))
+            runCatching { add(projectRoot.toUri().toString().removeSuffix("/")) }
+        }.filter(String::isNotEmpty).sortedByDescending(String::length)
+        return variants.fold(value) { normalized, root -> normalized.replace(root, replacement) }
     }
 
     private fun assess(
@@ -1539,21 +1648,34 @@ private fun StreamDiff.toJson(): String = """
 }
 """.trimIndent()
 
-private fun RepairIteration.toJson(): String = """
-{
-  "index": $index,
-  "failureKind": "${failureKind.escapeJson()}",
-  "prompt": "${prompt.escapeJson()}",
-  "summary": "${summary.escapeJson()}",
-  "succeeded": $succeeded,
-  "retainedRegressionIds": [${retainedRegressionIds.joinToString(", ") { "\"${it.escapeJson()}\"" }}],
-  "before": ${before?.toJson() ?: "null"},
-  "after": ${after?.toJson() ?: "null"},
-  "patches": [
-${patches.joinToString(",\n") { it.toJson().prependIndent("    ") }}
-  ]
+private fun RepairIteration.toJson(schemaVersion: Int): String = buildString {
+    append("{\n  \"index\": ").append(index).append(',')
+    append("\n  \"failureKind\": \"").append(failureKind.escapeJson()).append("\",")
+    append("\n  \"prompt\": \"").append(prompt.escapeJson()).append("\",")
+    append("\n  \"summary\": \"").append(summary.escapeJson()).append("\",")
+    append("\n  \"succeeded\": ").append(succeeded).append(',')
+    append("\n  \"retainedRegressionIds\": [")
+    append(retainedRegressionIds.joinToString(", ") { "\"${it.escapeJson()}\"" }).append("],")
+    append("\n  \"before\": ").append(before?.toJson() ?: "null").append(',')
+    append("\n  \"after\": ").append(after?.toJson() ?: "null").append(',')
+    if (schemaVersion >= 2) {
+        append("\n  \"agentInvocation\": ")
+            .append(agentInvocation?.toHistoryJson() ?: "null").append(',')
+        append("\n  \"publicationMode\": \"")
+            .append(publicationMode.name.lowercase()).append("\",")
+    }
+    append("\n  \"patches\": [")
+    append(patches.joinToString(",") { "\n" + it.toJson().prependIndent("    ") })
+    append("\n  ]\n}")
 }
-""".trimIndent()
+
+private fun RepairAgentInvocationBinding.toHistoryJson(): String =
+    "{\"receiptPath\":\"${receiptPath.escapeJson()}\",\"receiptSha256\":\"$receiptSha256\"," +
+        "\"receiptSchemaVersion\":$receiptSchemaVersion,\"requestSha256\":\"$requestSha256\"," +
+        "\"resultChangesSha256\":\"$resultChangesSha256\"," +
+        "\"terminalOutcome\":\"${terminalOutcome.escapeJson()}\"," +
+        "\"receiptReleaseComplete\":$receiptReleaseComplete," +
+        "\"assessmentStatus\":\"${assessmentStatus.name.lowercase()}\"}"
 
 private fun RepairEvidence.toJson(): String = """
 {
@@ -1587,7 +1709,7 @@ private fun parseProcessInput(element: kotlinx.serialization.json.JsonElement): 
     )
 }
 
-private fun parseIteration(element: kotlinx.serialization.json.JsonElement): RepairIteration {
+private fun parseIteration(element: kotlinx.serialization.json.JsonElement, schemaVersion: Int): RepairIteration {
     val value = element.jsonObject
     return RepairIteration(
         index = value["index"]?.jsonPrimitive?.intOrNull ?: error("repair history iteration is missing index"),
@@ -1605,6 +1727,36 @@ private fun parseIteration(element: kotlinx.serialization.json.JsonElement): Rep
         before = value["before"]?.let(::parseEvidence),
         after = value["after"]?.let(::parseEvidence),
         succeeded = value["succeeded"]?.jsonPrimitive?.contentOrNull?.toBooleanStrictOrNull() ?: false,
+        agentInvocation = if (schemaVersion >= 2) {
+            value["agentInvocation"]?.takeUnless { it.toString() == "null" }?.let(::parseHistoryAgentInvocation)
+        } else {
+            null
+        },
+        publicationMode = if (schemaVersion >= 2) {
+            RepairPublicationMode.valueOf(value.requiredString("publicationMode").uppercase())
+        } else {
+            RepairPublicationMode.TEST_ONLY_NON_RELEASE
+        },
+    )
+}
+
+private fun parseHistoryAgentInvocation(
+    element: kotlinx.serialization.json.JsonElement,
+): RepairAgentInvocationBinding {
+    val value = element.jsonObject
+    return RepairAgentInvocationBinding(
+        receiptPath = value.requiredString("receiptPath"),
+        receiptSha256 = value.requiredString("receiptSha256"),
+        receiptSchemaVersion = value["receiptSchemaVersion"]?.jsonPrimitive?.intOrNull
+            ?: error("repair history invocation is missing receiptSchemaVersion"),
+        requestSha256 = value.requiredString("requestSha256"),
+        resultChangesSha256 = value.requiredString("resultChangesSha256"),
+        terminalOutcome = value.requiredString("terminalOutcome"),
+        receiptReleaseComplete = value["receiptReleaseComplete"]?.jsonPrimitive?.contentOrNull
+            ?.toBooleanStrictOrNull() ?: error("repair history invocation is missing receiptReleaseComplete"),
+        assessmentStatus = RepairAgentAssessmentStatus.valueOf(
+            value.requiredString("assessmentStatus").uppercase(),
+        ),
     )
 }
 

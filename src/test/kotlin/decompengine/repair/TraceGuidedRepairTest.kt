@@ -7,8 +7,12 @@ import decompengine.agent.AgentCancellationSource
 import decompengine.agent.AgentExecutionException
 import decompengine.agent.AgentExecutionEvent
 import decompengine.agent.AgentExecutionLimits
+import decompengine.agent.AgentExecutionOutcome
+import decompengine.agent.AgentExecutionReceipt
 import decompengine.agent.AgentExecutionRequest
+import decompengine.agent.AgentExecutionRequestBinding
 import decompengine.agent.AgentExecutionResult
+import decompengine.agent.AgentFailure
 import decompengine.agent.AgentFailureKind
 import decompengine.agent.AgentFileChange
 import decompengine.agent.AgentFileChangeKind
@@ -17,6 +21,10 @@ import decompengine.agent.AgentOperation
 import decompengine.agent.AgentPathRule
 import decompengine.agent.AgentStopReason
 import decompengine.agent.AgentWorkspacePath
+import decompengine.acp.AcpExecutionCleanupDisposition
+import decompengine.acp.AcpExecutionEvidenceCompleteness
+import decompengine.acp.AcpExecutionLifecyclePhase
+import decompengine.acp.AcpInvocationEvidenceSnapshot
 import decompengine.project.MakeProjectBuilder
 import decompengine.project.RecoveredFunction
 import decompengine.project.RecoveredProgramModel
@@ -55,10 +63,88 @@ import kotlin.test.Test
 import kotlin.test.assertContentEquals
 import kotlin.test.assertEquals
 import kotlin.test.assertFailsWith
+import kotlin.test.assertFalse
 import kotlin.test.assertNotNull
 import kotlin.test.assertTrue
 
 class TraceGuidedRepairTest {
+    @Test
+    fun `ordinary ACP terminal outcomes persist immutable receipts before rejected repair history`() {
+        val cases = listOf(
+            "returned-refused" to AgentExecutionOutcome.Returned(
+                AgentExecutionResult(AgentStopReason.REFUSED, "peer secret refusal"),
+            ),
+            "returned-cancelled" to AgentExecutionOutcome.Returned(
+                AgentExecutionResult(AgentStopReason.CANCELLED, "peer secret cancellation"),
+            ),
+            "returned-limit-exhausted" to AgentExecutionOutcome.Returned(
+                AgentExecutionResult(AgentStopReason.LIMIT_EXHAUSTED, "peer secret limit"),
+            ),
+            "failed-protocol" to AgentExecutionOutcome.Failed(
+                AgentFailure(AgentFailureKind.PROTOCOL, "peer secret protocol failure"),
+            ),
+        )
+        cases.forEach { (expectedTerminal, outcome) ->
+            val project = createProject(
+                createTempDirectory("trace-acp-${expectedTerminal.replace('-', '_')}-").resolve("project"),
+                reconstructedSource = "int decomp_engine_main(void) {\n",
+            )
+            val history = RepairHistory(project.resolve("reports/repair_history.json"))
+
+            assertFailsWith<Exception>(expectedTerminal) {
+                generatedCRepairLoop(partialAcpOutcomeHarness(outcome), history).repairCompileError(
+                    project,
+                    collectCompileFailure(project),
+                    emptyList(),
+                )
+            }
+
+            ModuleRevisionGraph.open(project, GeneratedCRepairIndexProfile).use { graph ->
+                val node = graph.snapshot.nodes.last()
+                val binding = requireNotNull(node.repairMetadata?.agentInvocation)
+                assertEquals(ModuleRevisionStatus.REJECTED, node.status, expectedTerminal)
+                assertEquals(RepairAgentAssessmentStatus.REJECTED, binding.assessmentStatus, expectedTerminal)
+                assertEquals(expectedTerminal, binding.terminalOutcome, expectedTerminal)
+                assertFalse(binding.receiptReleaseComplete, expectedTerminal)
+                val raw = project.resolve(binding.receiptPath)
+                assertTrue(raw.exists(), expectedTerminal)
+                assertEquals(binding.receiptSha256, sha256(raw.readBytes()), expectedTerminal)
+                assertFalse(raw.readText().contains("peer secret"), expectedTerminal)
+            }
+            assertFalse(
+                project.resolve("reports/repair-revisions/graph.json").readText().contains("peer secret"),
+                expectedTerminal,
+            )
+        }
+    }
+
+    @Test
+    fun `legacy repair history is exact non-release compatibility until explicit reconciliation`() {
+        val historyPath = createTempDirectory("legacy-repair-history-").resolve("repair_history.json")
+        val legacy = """
+            {
+              "regressionInputs": [
+
+              ],
+              "iterations": [
+
+              ]
+            }
+        """.trimIndent() + "\n"
+        historyPath.writeText(legacy)
+        val history = RepairHistory(historyPath)
+
+        assertEquals(legacy, history.toJson())
+        assertFailsWith<IllegalArgumentException> {
+            history.append(
+                RepairIteration(1, "compile", "prompt", "summary", emptyList(), emptyList()),
+            )
+        }
+
+        history.reconcile(emptyList())
+        assertTrue(historyPath.readText().startsWith("{\n  \"schemaVersion\": 2,"))
+    }
+
     @Test
     fun `failed validation cases produce structured diffs`() {
         val result = BehaviorCaseResult(
@@ -138,7 +224,9 @@ class TraceGuidedRepairTest {
         assertEquals("compile", iteration.failureKind)
         assertEquals(listOf("hello_default"), iteration.retainedRegressionIds)
         assertTrue(build.projectDir.resolve("build/reconstructed").exists())
-        assertTrue(history.all().single().summary.contains("brace"))
+        assertFalse(history.all().single().summary.contains("close missing brace"))
+        assertEquals(RepairPublicationMode.TEST_ONLY_NON_RELEASE, history.all().single().publicationMode)
+        assertFalse(history.all().single().releaseComplete)
         assertTrue(projectDir.resolve("reports/repair_history.json").readText().contains("hello_default"))
         val request = assertNotNull(captured)
         assertTrue(request.objective.contains("stderr:"))
@@ -1327,6 +1415,7 @@ class TraceGuidedRepairTest {
                 listOf("default"),
                 RepairEvidence("behavior", "candidate requested"),
                 corpus.sha256,
+                publicationMode = RepairPublicationMode.TEST_ONLY_NON_RELEASE,
             ),
         )
         graph.annotateAttempt(attempt, "append a harmless comment")
@@ -1429,6 +1518,45 @@ class TraceGuidedRepairTest {
             return response
         }
     }
+
+    private fun partialAcpOutcomeHarness(outcome: AgentExecutionOutcome): CapturedRepairAgentHarness =
+        object : CapturedRepairAgentHarness {
+            override fun execute(
+                request: AgentExecutionRequest,
+                onEvent: (AgentExecutionEvent) -> Unit,
+            ): AgentExecutionResult = error("receipt-aware repair must not discard the invocation receipt")
+
+            override fun executeCaptured(
+                request: AgentExecutionRequest,
+                initialFiles: Map<String, ByteArray>,
+                output: BoundedRepairOutput,
+                onEvent: (AgentExecutionEvent) -> Unit,
+            ): AgentExecutionResult = error("receipt-aware repair must not discard the invocation receipt")
+
+            override fun executeCapturedReceipt(
+                request: AgentExecutionRequest,
+                initialFiles: Map<String, ByteArray>,
+                output: BoundedRepairOutput,
+                onEvent: (AgentExecutionEvent) -> Unit,
+            ): AgentExecutionReceipt = AgentExecutionReceipt(
+                AgentExecutionRequestBinding.capture(request),
+                outcome,
+                AcpInvocationEvidenceSnapshot(
+                    factoryProvenance = null,
+                    phaseReached = AcpExecutionLifecyclePhase.REQUEST_BOUND,
+                    cleanupDisposition = AcpExecutionCleanupDisposition.NOT_REQUIRED,
+                    negotiatedAgent = null,
+                    wirePromptSha256 = null,
+                    diagnostics = null,
+                    filesystemAudit = emptyList(),
+                    terminalAudit = emptyList(),
+                    permissionAudit = emptyList(),
+                    sandboxEvidence = null,
+                    completeness = AcpExecutionEvidenceCompleteness(true, true, true),
+                    completeExecutionEvidence = null,
+                ),
+            )
+        }
 
     private fun capturedReplacingHarness(replacement: ByteArray): CapturedRepairAgentHarness = object : CapturedRepairAgentHarness {
         override fun execute(

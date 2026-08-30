@@ -1,6 +1,40 @@
 package decompengine.repair
 
 import decompengine.acp.LinuxFilesystemSyscalls
+import decompengine.acp.AcpExecutionCleanupDisposition
+import decompengine.acp.AcpExecutionEvidenceCompleteness
+import decompengine.acp.AcpExecutionEvidenceSnapshot
+import decompengine.acp.AcpExecutionLifecyclePhase
+import decompengine.acp.AcpHarnessProvenance
+import decompengine.acp.AcpInvocationEvidenceSnapshot
+import decompengine.acp.AcpNegotiatedAgentEvidence
+import decompengine.acp.AcpNegotiatedCapabilitiesEvidence
+import decompengine.acp.AcpProcessDiagnostics
+import decompengine.acp.AcpProducedOutputEvidence
+import decompengine.acp.AcpRuntimeClosureLimits
+import decompengine.acp.AcpSandboxEvidence
+import decompengine.acp.AcpSandboxResourceLimits
+import decompengine.acp.ACP_KOTLIN_SDK_VERSION
+import decompengine.acp.ACP_STABLE_PROTOCOL_VERSION
+import decompengine.agent.AgentAccessPolicy
+import decompengine.agent.AgentExecutionOutcome
+import decompengine.agent.AgentExecutionReceipt
+import decompengine.agent.AgentExecutionRequest
+import decompengine.agent.AgentExecutionRequestBinding
+import decompengine.agent.AgentExecutionResult
+import decompengine.agent.AgentFailure
+import decompengine.agent.AgentFailureKind
+import decompengine.agent.AgentFileChange
+import decompengine.agent.AgentFileChangeEvent
+import decompengine.agent.AgentFileChangeKind
+import decompengine.agent.AgentOperation
+import decompengine.agent.AgentPathRule
+import decompengine.agent.AgentSessionReference
+import decompengine.agent.AgentStopReason
+import decompengine.agent.AgentWorkspacePath
+import decompengine.agent.AgentWorkspaceRoot
+import decompengine.project.AcpExecutionReceiptDocument
+import decompengine.project.BoundedAgentExecutionEventRecorder
 import decompengine.project.RecoveredFunction
 import decompengine.project.RecoveredProgramModel
 import decompengine.project.SourceTreeGenerator
@@ -36,6 +70,283 @@ import kotlin.test.assertFalse
 import kotlin.test.assertTrue
 
 class ModuleRevisionGraphTest {
+    @Test
+    fun `repair graph persists failed ACP receipt before rejection and detects later tampering`() {
+        val project = generatedProject()
+        val graph = ModuleRevisionGraph.open(project, GeneratedCRepairIndexProfile)
+        val corpus = graph.retainedRegressionCorpus()
+        val attempt = graph.beginAttempt(
+            listOf("src/modules/alpha.c"),
+            RevisionRepairMetadata(
+                1,
+                "compile",
+                "bounded failure",
+                null,
+                emptyList(),
+                null,
+                corpus.sha256,
+            ),
+        )
+        val document = failedAcpReceiptDocument(project, attempt)
+
+        val pending = graph.persistAndBindAgentInvocation(attempt, document)
+        assertEquals(RepairAgentAssessmentStatus.PENDING, pending.assessmentStatus)
+        assertFalse(pending.receiptReleaseComplete)
+        val receiptPath = project.resolve(pending.receiptPath)
+        assertTrue(receiptPath.exists())
+        assertFalse(receiptPath.readText().contains("peer-controlled failure text"))
+        val acceptanceFailure = assertFailsWith<IllegalArgumentException> {
+            graph.accept(attempt, RepairEvidence("valid", "must not accept failed invocation"))
+        }
+        assertTrue(acceptanceFailure.message.orEmpty().contains("incomplete ACP"))
+        val rejected = graph.reject(attempt, RepairEvidence("agent-failure-protocol", "provider invocation failed"))
+        assertEquals(
+            RepairAgentAssessmentStatus.REJECTED,
+            rejected.repairMetadata?.agentInvocation?.assessmentStatus,
+        )
+        graph.close()
+
+        receiptPath.writeText(receiptPath.readText().replaceFirst("\"schemaVersion\": 2", "\"schemaVersion\": 1"))
+        val failure = assertFailsWith<IllegalArgumentException> {
+            ModuleRevisionGraph.open(project, GeneratedCRepairIndexProfile)
+        }
+        assertTrue(failure.message.orEmpty().contains("digest"))
+    }
+
+    @Test
+    fun `accepted agent repair is bound to one release-complete ACP receipt`() {
+        val project = generatedProject()
+        val relative = "src/modules/alpha.c"
+        val target = project.resolve(relative)
+        val before = target.readBytes()
+        val after = before + "\n/* receipt-bound candidate */\n".toByteArray()
+        val graph = ModuleRevisionGraph.open(project, GeneratedCRepairIndexProfile)
+        val corpus = graph.retainedRegressionCorpus()
+        val attempt = graph.beginAttempt(
+            listOf(relative),
+            RevisionRepairMetadata(
+                1,
+                "compile",
+                "bounded failure",
+                null,
+                emptyList(),
+                null,
+                corpus.sha256,
+            ),
+        )
+
+        val document = completeAcpReceiptDocument(project, attempt, relative, before, after)
+        assertTrue(document.releaseComplete)
+        graph.persistAndBindAgentInvocation(attempt, document)
+        graph.installCandidate(attempt, mapOf(relative to after))
+        val accepted = graph.accept(attempt, RepairEvidence("valid", "candidate passed validation"))
+
+        val binding = requireNotNull(accepted.repairMetadata?.agentInvocation)
+        assertEquals(RepairAgentAssessmentStatus.ACCEPTED, binding.assessmentStatus)
+        assertEquals("returned-completed", binding.terminalOutcome)
+        assertTrue(binding.receiptReleaseComplete)
+        assertEquals(document.requestSha256, binding.requestSha256)
+        assertEquals(document.resultChangesSha256, binding.resultChangesSha256)
+        assertEquals(document.sha256, binding.receiptSha256)
+        graph.close()
+
+        ModuleRevisionGraph.open(project, GeneratedCRepairIndexProfile).use { reopened ->
+            val iteration = reopened.derivedRepairIterations().single()
+            assertTrue(iteration.releaseComplete)
+            assertEquals(RepairPublicationMode.ACP_RELEASE, iteration.publicationMode)
+            assertEquals(binding, iteration.agentInvocation)
+        }
+        val graphPath = project.resolve("reports/repair-revisions/graph.json")
+        graphPath.writeText(
+            graphPath.readText().replaceFirst(
+                "\"requestSha256\":\"${binding.requestSha256}\"",
+                "\"requestSha256\":\"${"9".repeat(64)}\"",
+            ),
+        )
+        val crossPair = assertFailsWith<IllegalArgumentException> {
+            ModuleRevisionGraph.open(project, GeneratedCRepairIndexProfile)
+        }
+        assertTrue(crossPair.message.orEmpty().contains("cross-paired"))
+    }
+
+    @Test
+    fun `repair candidate cannot differ from the exact ACP result change set`() {
+        val project = generatedProject()
+        val relative = "src/modules/alpha.c"
+        val target = project.resolve(relative)
+        val before = target.readBytes()
+        val declaredAfter = before + "\n/* agent-declared candidate */\n".toByteArray()
+        val installedAfter = before + "\n/* cross-paired candidate */\n".toByteArray()
+        val graph = ModuleRevisionGraph.open(project, GeneratedCRepairIndexProfile)
+        val corpus = graph.retainedRegressionCorpus()
+        val attempt = graph.beginAttempt(
+            listOf(relative),
+            RevisionRepairMetadata(
+                1,
+                "compile",
+                "bounded failure",
+                null,
+                emptyList(),
+                null,
+                corpus.sha256,
+            ),
+        )
+        graph.persistAndBindAgentInvocation(
+            attempt,
+            completeAcpReceiptDocument(project, attempt, relative, before, declaredAfter),
+        )
+
+        val failure = assertFailsWith<IllegalArgumentException> {
+            graph.installCandidate(attempt, mapOf(relative to installedAfter))
+        }
+
+        assertTrue(
+            failure.message.orEmpty().contains("differ from the bound ACP result"),
+            failure.message.orEmpty(),
+        )
+        assertContentEquals(before, target.readBytes())
+        graph.reject(attempt, RepairEvidence("candidate-error", "cross-paired change rejected"))
+        graph.close()
+    }
+
+    @Test
+    fun `forged release marker cannot hide incomplete ACP process evidence`() {
+        val project = generatedProject()
+        val relative = "src/modules/alpha.c"
+        val target = project.resolve(relative)
+        val before = target.readBytes()
+        val after = before + "\n/* forged-release regression */\n".toByteArray()
+        val graph = ModuleRevisionGraph.open(project, GeneratedCRepairIndexProfile)
+        val corpus = graph.retainedRegressionCorpus()
+        val attempt = graph.beginAttempt(
+            listOf(relative),
+            RevisionRepairMetadata(
+                1,
+                "compile",
+                "bounded failure",
+                null,
+                emptyList(),
+                null,
+                corpus.sha256,
+            ),
+        )
+        val document = completeAcpReceiptDocument(project, attempt, relative, before, after)
+        graph.persistAndBindAgentInvocation(attempt, document)
+        graph.installCandidate(attempt, mapOf(relative to after))
+        val accepted = graph.accept(attempt, RepairEvidence("valid", "candidate passed validation"))
+        val binding = requireNotNull(accepted.repairMetadata?.agentInvocation)
+        graph.close()
+
+        val receiptPath = project.resolve(binding.receiptPath)
+        val tampered = receiptPath.readText().replaceFirst(
+            "\"networkIsolated\":true",
+            "\"networkIsolated\":false",
+        )
+        receiptPath.writeText(tampered)
+        val tamperedSha256 = sha256(tampered.toByteArray())
+        val graphPath = project.resolve("reports/repair-revisions/graph.json")
+        graphPath.writeText(
+            graphPath.readText().replaceFirst(binding.receiptSha256, tamperedSha256),
+        )
+
+        val failure = assertFailsWith<IllegalArgumentException> {
+            ModuleRevisionGraph.open(project, GeneratedCRepairIndexProfile)
+        }
+        assertTrue(failure.message.orEmpty().contains("network isolation"))
+    }
+
+    @Test
+    fun `pending assessment failure preserves raw ACP receipt without fallback finalization`() {
+        val project = generatedProject()
+        var armed = false
+        val graph = ModuleRevisionGraph.openForTesting(
+            project,
+            GeneratedCRepairIndexProfile,
+            faultInjector = ModuleRevisionFaultInjector { point ->
+                if (armed && point is ModuleRevisionFaultPoint.AfterStatePublicationExchange &&
+                    point.scope == "revision-state" && point.name == "graph.json"
+                ) {
+                    throw IllegalStateException("injected pending-assessment persistence failure")
+                }
+            },
+        )
+        val corpus = graph.retainedRegressionCorpus()
+        val attempt = graph.beginAttempt(
+            listOf("src/modules/alpha.c"),
+            RevisionRepairMetadata(
+                1,
+                "compile",
+                "bounded failure",
+                null,
+                emptyList(),
+                null,
+                corpus.sha256,
+            ),
+        )
+        armed = true
+
+        val failure = assertFailsWith<RepairAgentEvidencePersistenceException> {
+            graph.persistAndBindAgentInvocation(attempt, failedAcpReceiptDocument(project, attempt))
+        }
+
+        assertTrue(failure.message.orEmpty().contains("preserved"))
+        assertEquals(attempt.id, graph.snapshot.pendingAttemptId)
+        val receiptPath = project.resolve("reports/repair-revisions/${attempt.id}.acp-receipt.json")
+        assertTrue(receiptPath.exists())
+        graph.close()
+        ModuleRevisionGraph.open(project, GeneratedCRepairIndexProfile).use { reopened ->
+            val recovered = reopened.snapshot.nodes.last()
+            assertEquals(ModuleRevisionStatus.REJECTED, recovered.status)
+            assertTrue(recovered.recoveredAfterCrash)
+            assertEquals(
+                RepairAgentAssessmentStatus.REJECTED,
+                recovered.repairMetadata?.agentInvocation?.assessmentStatus,
+            )
+        }
+        assertTrue(receiptPath.exists())
+    }
+
+    @Test
+    fun `raw receipt persistence failure cannot be converted into a repair rejection`() {
+        val project = generatedProject()
+        var armed = false
+        val graph = ModuleRevisionGraph.openForTesting(
+            project,
+            GeneratedCRepairIndexProfile,
+            faultInjector = ModuleRevisionFaultInjector { point ->
+                if (armed && point is ModuleRevisionFaultPoint.AfterStatePublicationExchange &&
+                    point.scope == "revision-invocation-evidence"
+                ) {
+                    throw IllegalStateException("injected raw-receipt persistence failure")
+                }
+            },
+        )
+        val corpus = graph.retainedRegressionCorpus()
+        val attempt = graph.beginAttempt(
+            listOf("src/modules/alpha.c"),
+            RevisionRepairMetadata(
+                1,
+                "compile",
+                "bounded failure",
+                null,
+                emptyList(),
+                null,
+                corpus.sha256,
+            ),
+        )
+        armed = true
+
+        val failure = assertFailsWith<RepairAgentEvidencePersistenceException> {
+            graph.persistAndBindAgentInvocation(attempt, failedAcpReceiptDocument(project, attempt))
+        }
+
+        assertTrue(failure.message.orEmpty().contains("before assessment"))
+        assertEquals(attempt.id, graph.snapshot.pendingAttemptId)
+        assertEquals(1, graph.snapshot.nodes.size)
+        assertFalse(project.resolve("reports/repair-revisions/${attempt.id}.acp-receipt.json").exists())
+        graph.close()
+    }
+
     @Test
     fun `multi-module diagnostics select only dependency-indexed context`() {
         val project = generatedProject()
@@ -1259,8 +1570,8 @@ class ModuleRevisionGraphTest {
     @Test
     fun `duplicate unknown and noncanonical graph encodings fail closed without source mutation`() {
         listOf<(String) -> String>(
-            { canonical -> canonical.replaceFirst("\"schemaVersion\": 1,", "\"schemaVersion\": 1,\n  \"schemaVersion\": 1,") },
-            { canonical -> canonical.replaceFirst("\"schemaVersion\": 1,", "\"schemaVersion\": 1,\n  \"unexpected\": true,") },
+            { canonical -> canonical.replaceFirst("\"schemaVersion\": 2,", "\"schemaVersion\": 2,\n  \"schemaVersion\": 2,") },
+            { canonical -> canonical.replaceFirst("\"schemaVersion\": 2,", "\"schemaVersion\": 2,\n  \"unexpected\": true,") },
             { canonical -> " \n$canonical" },
         ).forEach { tamper ->
             val project = generatedProject()
@@ -1276,6 +1587,50 @@ class ModuleRevisionGraphTest {
 
             assertContentEquals(before, target.readBytes())
         }
+    }
+
+    @Test
+    fun `legacy schema graph remains readable but cannot begin an agent repair`() {
+        val project = generatedProject()
+        ModuleRevisionGraph.open(project, GeneratedCRepairIndexProfile).use { }
+        val graphPath = project.resolve("reports/repair-revisions/graph.json")
+        graphPath.writeText(
+            graphPath.readText().replaceFirst("\"schemaVersion\": 2,", "\"schemaVersion\": 1,"),
+        )
+
+        ModuleRevisionGraph.open(project, GeneratedCRepairIndexProfile).use { graph ->
+            assertEquals(1, graph.snapshot.schemaVersion)
+            val corpus = graph.retainedRegressionCorpus()
+            val failure = assertFailsWith<IllegalArgumentException> {
+                graph.beginAttempt(
+                    listOf("src/modules/alpha.c"),
+                    RevisionRepairMetadata(
+                        1,
+                        "compile",
+                        "legacy compatibility must not create a release record",
+                        null,
+                        emptyList(),
+                        null,
+                        corpus.sha256,
+                    ),
+                )
+            }
+            assertTrue(failure.message.orEmpty().contains("non-release"))
+        }
+    }
+
+    @Test
+    fun `unbound extra ACP receipt cannot enter repair history`() {
+        val project = generatedProject()
+        ModuleRevisionGraph.open(project, GeneratedCRepairIndexProfile).use { }
+        project.resolve("reports/repair-revisions/revision_stale.acp-receipt.json")
+            .writeText("{}\n")
+
+        val failure = assertFailsWith<IllegalArgumentException> {
+            ModuleRevisionGraph.open(project, GeneratedCRepairIndexProfile)
+        }
+
+        assertTrue(failure.message.orEmpty().contains("extra, or stale"))
     }
 
     @Test
@@ -1837,7 +2192,7 @@ class ModuleRevisionGraphTest {
     }
 
     @Test
-    fun `accepted repair remains source-manifest and archive compatible after a strict build`() {
+    fun `accepted non-ACP repair updates the manifest but cannot reuse a stale reconstruction checkpoint`() {
         val project = generatedProject()
         val betaPath = project.resolve("src/modules/beta.c")
         val repaired = betaPath.readText() + "\n/* accepted repair revision */\n"
@@ -1849,10 +2204,11 @@ class ModuleRevisionGraphTest {
 
         MakeProjectBuilder.build(project)
         val archive = project.parent.resolve("repaired-project.zip")
-        val bundle = ArchivalPackager.create(project, archive)
+        val failure = assertFailsWith<IllegalArgumentException> {
+            ArchivalPackager.create(project, archive)
+        }
 
-        assertTrue("reports/repair-revisions/graph.json" in bundle.payloadFiles)
-        assertTrue(bundle.payloadFiles.any { it.startsWith("reports/repair-revisions/blobs/") })
+        assertTrue(failure.message.orEmpty().contains("checkpoint provenance"))
         assertTrue(project.resolve("source_tree_manifest.json").readText().contains(sha256(repaired.toByteArray())))
     }
 
@@ -2158,6 +2514,7 @@ class ModuleRevisionGraphTest {
                         emptyList(),
                         null,
                         corpus.sha256,
+                        publicationMode = RepairPublicationMode.TEST_ONLY_NON_RELEASE,
                     ),
                 )
                 graph.installCandidate(
@@ -2821,6 +3178,179 @@ class ModuleRevisionGraphTest {
                 "{\"id\":\"fn_provider\",\"name\":\"provider_run\",\"address\":\"0x2\",\"prototype\":\"int provider_run(void)\",\"status\":\"recovered\",\"calls\":[],\"referencedGlobals\":[],\"strings\":[],\"decompiledC\":null}],\"globals\":$globals,\"types\":[]}",
         )
         return project
+    }
+
+    private fun failedAcpReceiptDocument(
+        project: Path,
+        attempt: ModuleRevisionAttempt,
+    ): AcpExecutionReceiptDocument {
+        val request = AgentExecutionRequest(
+            objective = "repair one module",
+            workspaceRoots = listOf(AgentWorkspaceRoot("project", project)),
+            accessPolicy = AgentAccessPolicy(emptyList()),
+        )
+        val receipt = AgentExecutionReceipt(
+            requestBinding = AgentExecutionRequestBinding.capture(request),
+            outcome = AgentExecutionOutcome.Failed(
+                AgentFailure(AgentFailureKind.PROTOCOL, "peer-controlled failure text"),
+            ),
+            providerEvidence = AcpInvocationEvidenceSnapshot(
+                factoryProvenance = null,
+                phaseReached = AcpExecutionLifecyclePhase.REQUEST_BOUND,
+                cleanupDisposition = AcpExecutionCleanupDisposition.NOT_REQUIRED,
+                negotiatedAgent = null,
+                wirePromptSha256 = null,
+                diagnostics = null,
+                filesystemAudit = emptyList(),
+                terminalAudit = emptyList(),
+                permissionAudit = emptyList(),
+                sandboxEvidence = null,
+                completeness = AcpExecutionEvidenceCompleteness(true, true, true),
+                completeExecutionEvidence = null,
+            ),
+        )
+        return requireNotNull(
+            AcpExecutionReceiptDocument.captureOrNull(
+                request,
+                sha256("bounded failure".toByteArray()),
+                receipt,
+                BoundedAgentExecutionEventRecorder().receiptSnapshot(),
+                "decomp-engine.trace-repair-acp-execution-receipt",
+                "attemptId",
+                attempt.id,
+            ),
+        )
+    }
+
+    private fun completeAcpReceiptDocument(
+        project: Path,
+        attempt: ModuleRevisionAttempt,
+        relativePath: String,
+        before: ByteArray,
+        after: ByteArray,
+    ): AcpExecutionReceiptDocument {
+        val workspacePath = AgentWorkspacePath("project", relativePath)
+        val request = AgentExecutionRequest(
+            objective = "repair one module",
+            workspaceRoots = listOf(AgentWorkspaceRoot("project", project)),
+            accessPolicy = AgentAccessPolicy(
+                listOf(AgentPathRule(workspacePath, setOf(AgentOperation.READ_FILE, AgentOperation.WRITE_FILE))),
+            ),
+        )
+        val change = AgentFileChange(
+            workspacePath,
+            AgentFileChangeKind.MODIFIED,
+            sha256(before),
+            sha256(after),
+            after.size.toLong(),
+        )
+        val implementationId = "repair-test-acp"
+        val factory = AcpHarnessProvenance(
+            harness = "acp",
+            implementationId = implementationId,
+            agentExecutionContractVersion = 1,
+            acpProtocolVersion = ACP_STABLE_PROTOCOL_VERSION,
+            acpSdkVersion = ACP_KOTLIN_SDK_VERSION,
+            configurationSha256 = "a".repeat(64),
+            deprecated = false,
+        )
+        val negotiated = AcpNegotiatedAgentEvidence(
+            ACP_STABLE_PROTOCOL_VERSION,
+            "repair test agent",
+            "1",
+            null,
+            AcpNegotiatedCapabilitiesEvidence(false, false, false, false, false, false, false),
+        )
+        val diagnostics = AcpProcessDiagnostics(
+            pid = 123,
+            exitCode = 0,
+            stderr = "",
+            stderrTruncated = false,
+            producedOutputBytes = 0,
+            producedOutputLimitBytes = 1_024,
+            outputLimitExceeded = false,
+            forcedTermination = false,
+            rootTerminationRequested = false,
+            remainingProcessIds = emptyList(),
+            containment = "linux-bubblewrap",
+            networkIsolated = true,
+            sandboxCleanupVerified = true,
+        )
+        val sandbox = AcpSandboxEvidence(
+            provider = "sandbox-evidence-v1",
+            providerVersion = "1",
+            providerExecutableSha256 = "b".repeat(64),
+            providerExecutableMode = 365,
+            resourceLimiterSha256 = "c".repeat(64),
+            scopeSupervisorSha256 = "d".repeat(64),
+            scopeInspectorSha256 = "e".repeat(64),
+            environmentFdOpenerSha256 = "f".repeat(64),
+            securityExecutables = emptyList(),
+            outerAgentLimits = AcpSandboxResourceLimits(),
+            runtimeClosureLimits = AcpRuntimeClosureLimits(),
+            cgroupV2PidsLimited = true,
+            cgroupV2MemoryLimited = true,
+            cgroupV2CpuLimited = true,
+            networkIsolated = true,
+            outerAgentContained = true,
+            nestedUserNamespacesDisabled = true,
+            newSession = true,
+            dieWithParent = true,
+            policySha256 = "1".repeat(64),
+            terminalLimits = null,
+            launches = emptyList(),
+            authorities = emptyList(),
+            terminalAudit = emptyList(),
+            outerProcessOutput = AcpProducedOutputEvidence(1_024, 0, false),
+        )
+        val complete = AcpExecutionEvidenceSnapshot(
+            factory,
+            negotiated,
+            "2".repeat(64),
+            diagnostics,
+            emptyList(),
+            emptyList(),
+            emptyList(),
+            sandbox,
+        )
+        val result = AgentExecutionResult(
+            AgentStopReason.COMPLETED,
+            "peer completion summary",
+            listOf(change),
+            AgentSessionReference(implementationId, "repair-session"),
+        )
+        val recorder = BoundedAgentExecutionEventRecorder().also {
+            it.record(AgentFileChangeEvent(0, change))
+        }
+        val receipt = AgentExecutionReceipt(
+            AgentExecutionRequestBinding.capture(request),
+            AgentExecutionOutcome.Returned(result),
+            AcpInvocationEvidenceSnapshot(
+                factory,
+                AcpExecutionLifecyclePhase.FINAL_WORKSPACE_SNAPSHOT,
+                AcpExecutionCleanupDisposition.VERIFIED,
+                negotiated,
+                complete.wirePromptSha256,
+                diagnostics,
+                emptyList(),
+                emptyList(),
+                emptyList(),
+                sandbox,
+                AcpExecutionEvidenceCompleteness(true, true, true),
+                complete,
+            ),
+        )
+        return requireNotNull(
+            AcpExecutionReceiptDocument.captureOrNull(
+                request,
+                sha256("bounded failure".toByteArray()),
+                receipt,
+                recorder.receiptSnapshot(),
+                "decomp-engine.trace-repair-acp-execution-receipt",
+                "attemptId",
+                attempt.id,
+            ),
+        )
     }
 
     private class SimulatedRepairCrash : Error("simulated repair process crash")

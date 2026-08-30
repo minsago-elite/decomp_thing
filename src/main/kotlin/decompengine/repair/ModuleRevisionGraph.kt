@@ -6,7 +6,14 @@ import decompengine.acp.LinuxDescriptor
 import decompengine.acp.LinuxFilesystemSyscalls
 import decompengine.acp.LinuxResourceLimitException
 import decompengine.acp.permissions
+import decompengine.project.AcpExecutionReceiptDocument
+import decompengine.project.agentFileChangeSetSha256
+import decompengine.project.verifyAcpExecutionReceiptDocument
 import decompengine.project.sha256
+import decompengine.agent.receiptCommitmentBytes
+import decompengine.agent.AgentFileChange
+import decompengine.agent.AgentFileChangeKind
+import decompengine.agent.AgentWorkspacePath
 import decompengine.validation.ProcessInput
 import kotlinx.serialization.json.Json
 import kotlinx.serialization.json.JsonElement
@@ -47,8 +54,14 @@ import kotlin.io.path.readText
 import kotlin.math.min
 
 internal const val MAXIMUM_REPAIR_PROJECTION_BYTES: Long = 64L * 1024 * 1024
+internal const val MAXIMUM_REPAIR_ACP_RECEIPT_BYTES: Long = 64L * 1024 * 1024
+private const val MAXIMUM_REPAIR_STATE_NON_RECEIPT_ENTRIES = 16
 private val REPAIR_BLOB_DIGEST = Regex("[0-9a-f]{64}")
 private val BLOB_ATOMIC_TEMPORARY = Regex("\\.([0-9a-f]{64})\\.repair-atomic\\.tmp")
+private val REPAIR_RECEIPT_PATH =
+    Regex("reports/repair-revisions/revision_[A-Za-z0-9_]+\\.acp-receipt\\.json")
+internal const val TRACE_REPAIR_ACP_RECEIPT_KIND = "decomp-engine.trace-repair-acp-execution-receipt"
+internal const val TRACE_REPAIR_ACP_TASK_FIELD = "attemptId"
 
 /**
  * Hard limits for one repair index, context window, patch attempt, and durable revision graph.
@@ -1251,6 +1264,7 @@ data class ModuleRevisionGraphSnapshot(
     val pendingAttemptId: String?,
     val storedBlobBytes: Long,
     val regressionCorpusSha256: String,
+    val schemaVersion: Int = 2,
 )
 
 class RetainedRegressionCorpus(inputs: Collection<ProcessInput>, val sha256: String) {
@@ -1293,6 +1307,8 @@ data class RevisionRepairMetadata(
     val retainedRegressionIds: List<String>,
     val before: RepairEvidence?,
     val regressionCorpusSha256: String? = null,
+    val agentInvocation: RepairAgentInvocationBinding? = null,
+    val publicationMode: RepairPublicationMode = RepairPublicationMode.ACP_RELEASE,
 ) {
     init {
         require(iterationIndex > 0)
@@ -1301,6 +1317,47 @@ data class RevisionRepairMetadata(
         require(regressionCorpusSha256 == null || regressionCorpusSha256.matches(Regex("[0-9a-f]{64}")))
     }
 }
+
+enum class RepairPublicationMode { ACP_RELEASE, TEST_ONLY_NON_RELEASE }
+
+enum class RepairAgentAssessmentStatus { PENDING, ACCEPTED, REJECTED }
+
+/**
+ * Content-addressed link from a repair assessment to its immutable schema-v2 ACP invocation.
+ * The raw provider evidence remains a separate artifact and is never rewritten as workflow state
+ * advances from pending to accepted or rejected.
+ */
+data class RepairAgentInvocationBinding(
+    val receiptPath: String,
+    val receiptSha256: String,
+    val receiptSchemaVersion: Int,
+    val requestSha256: String,
+    val resultChangesSha256: String,
+    val terminalOutcome: String,
+    val receiptReleaseComplete: Boolean,
+    val assessmentStatus: RepairAgentAssessmentStatus,
+) {
+    init {
+        require(receiptPath.matches(REPAIR_RECEIPT_PATH)) { "repair ACP receipt path is invalid" }
+        require(receiptSha256.matches(REPAIR_BLOB_DIGEST)) { "repair ACP receipt digest is invalid" }
+        require(receiptSchemaVersion == 2) { "repair ACP receipt schema is unsupported" }
+        require(requestSha256.matches(REPAIR_BLOB_DIGEST)) { "repair ACP request digest is invalid" }
+        require(resultChangesSha256.matches(REPAIR_BLOB_DIGEST)) {
+            "repair ACP result-change digest is invalid"
+        }
+        require(terminalOutcome.matches(Regex("(?:returned|failed)-[a-z0-9-]+"))) {
+            "repair ACP terminal outcome is invalid"
+        }
+        if (assessmentStatus == RepairAgentAssessmentStatus.ACCEPTED) {
+            require(receiptReleaseComplete && terminalOutcome == "returned-completed") {
+                "only a release-complete returned ACP invocation may be accepted"
+            }
+        }
+    }
+}
+
+class RepairAgentEvidencePersistenceException(message: String, cause: Throwable? = null) :
+    IllegalStateException(message, cause)
 
 private data class PendingAttempt(
     val id: String,
@@ -1354,6 +1411,7 @@ private data class RevisionGraphState(
     val nodes: List<ModuleRevisionNode>,
     val pending: PendingAttempt?,
     val storedBlobBytes: Long,
+    val schemaVersion: Int = 2,
 )
 
 private fun RevisionRepairMetadata.deepFrozenCopy(): RevisionRepairMetadata = copy(
@@ -1652,6 +1710,7 @@ internal class ModuleRevisionGraph private constructor(
                 state.pending?.id,
                 state.storedBlobBytes,
                 state.regressionCorpusSha256,
+                state.schemaVersion,
             )
         }
 
@@ -1763,6 +1822,12 @@ internal class ModuleRevisionGraph private constructor(
         require(allowed.all { it in indexedEditablePaths }) { "repair attempt authorizes a non-editable source path" }
         val frozenMetadata = repairMetadata?.deepFrozenCopy()
         frozenMetadata?.let { metadata ->
+            require(state.schemaVersion == 2) {
+                "legacy repair revision graphs are non-release and cannot begin a new agent repair"
+            }
+            require(receiptCommitmentBytes(metadata.prompt).size.toLong() <= state.budget.maximumRequestBytes) {
+                "repair prompt exceeds the request-byte budget"
+            }
             val expectedIteration = Math.addExact(
                 state.nodes.mapNotNull { it.repairMetadata?.iterationIndex }.maxOrNull() ?: 0,
                 1,
@@ -1831,7 +1896,7 @@ internal class ModuleRevisionGraph private constructor(
         val portableMetadata = frozenMetadata?.let { metadata ->
             metadata.copy(
                 failureKind = portableEvidenceText(metadata.failureKind),
-                prompt = portableEvidenceText(metadata.prompt),
+                prompt = repairPromptCommitment(portableEvidenceText(metadata.prompt)),
                 summary = metadata.summary?.let(::portableEvidenceText),
                 retainedRegressionIds = immutableList(metadata.retainedRegressionIds.map(::portableEvidenceText)),
                 before = metadata.before?.let { before ->
@@ -1873,6 +1938,80 @@ internal class ModuleRevisionGraph private constructor(
         )
         requireRecoverablePendingState(annotatedState)
         persist(annotatedState)
+    }
+
+    /**
+     * Durably publishes the immutable invocation before the graph assessment refers to it. If the
+     * second (graph) publication fails, the raw receipt intentionally remains available for audit;
+     * callers must propagate [RepairAgentEvidencePersistenceException] without fallback/retry.
+     */
+    @Synchronized
+    internal fun persistAndBindAgentInvocation(
+        attempt: ModuleRevisionAttempt,
+        document: AcpExecutionReceiptDocument,
+    ): RepairAgentInvocationBinding = graphOperation {
+        require(state.schemaVersion == 2) {
+            "legacy repair revision graphs are read-only and cannot record ACP invocations"
+        }
+        val pending = requirePending(attempt)
+        val metadata = requireNotNull(pending.repairMetadata) { "repair attempt has no iteration metadata" }
+        require(metadata.agentInvocation == null) { "repair attempt already has invocation evidence" }
+        val fileName = "${pending.id}.acp-receipt.json"
+        val receiptPath = "reports/repair-revisions/$fileName"
+        val bytes = document.json.toByteArray(Charsets.UTF_8)
+        require(bytes.size.toLong() <= MAXIMUM_REPAIR_ACP_RECEIPT_BYTES) {
+            "repair ACP receipt exceeds its $MAXIMUM_REPAIR_ACP_RECEIPT_BYTES-byte limit"
+        }
+        require(sha256(bytes) == document.sha256) { "repair ACP receipt changed after rendering" }
+        val verifiedDocument = verifyAcpExecutionReceiptDocument(
+            bytes,
+            TRACE_REPAIR_ACP_RECEIPT_KIND,
+            TRACE_REPAIR_ACP_TASK_FIELD,
+            pending.id,
+        )
+        require(verifiedDocument.requestSha256 == document.requestSha256 &&
+            verifiedDocument.promptSha256 == metadata.prompt &&
+            verifiedDocument.resultChangesSha256 == document.resultChangesSha256 &&
+            verifiedDocument.terminalOutcome == document.terminalOutcome &&
+            verifiedDocument.releaseComplete == document.releaseComplete
+        ) { "repair ACP receipt descriptor disagrees with its rendered document" }
+        try {
+            stateStore.writeImmutableRevisionFile(fileName, bytes, MAXIMUM_REPAIR_ACP_RECEIPT_BYTES)
+            val observed = stateStore.readRevisionFile(fileName, MAXIMUM_REPAIR_ACP_RECEIPT_BYTES)
+            require(observed.sha256 == document.sha256 && observed.bytes.contentEquals(bytes)) {
+                "published repair ACP receipt differs from the invocation document"
+            }
+        } catch (failure: Exception) {
+            throw RepairAgentEvidencePersistenceException(
+                "repair ACP invocation evidence could not be persisted before assessment",
+                failure,
+            )
+        }
+        val binding = RepairAgentInvocationBinding(
+            receiptPath = receiptPath,
+            receiptSha256 = document.sha256,
+            receiptSchemaVersion = document.schemaVersion,
+            requestSha256 = document.requestSha256,
+            resultChangesSha256 = document.resultChangesSha256,
+            terminalOutcome = document.terminalOutcome,
+            receiptReleaseComplete = document.releaseComplete,
+            assessmentStatus = RepairAgentAssessmentStatus.PENDING,
+        )
+        val boundState = state.copy(
+            pending = pending.copy(
+                repairMetadata = metadata.copy(agentInvocation = binding),
+            ),
+        )
+        try {
+            requireRecoverablePendingState(boundState)
+            persist(boundState)
+        } catch (failure: Exception) {
+            throw RepairAgentEvidencePersistenceException(
+                "repair ACP invocation receipt was preserved but its pending assessment could not be persisted",
+                failure,
+            )
+        }
+        binding.copy()
     }
 
     @Synchronized
@@ -1972,6 +2111,24 @@ internal class ModuleRevisionGraph private constructor(
     @Synchronized
     fun accept(attempt: ModuleRevisionAttempt, evidence: RepairEvidence?): ModuleRevisionNode = graphOperation {
         val pending = requirePending(attempt)
+        pending.repairMetadata?.takeIf { it.publicationMode == RepairPublicationMode.ACP_RELEASE }?.let { metadata ->
+            val invocation = requireNotNull(metadata.agentInvocation) {
+                "agent-driven repair cannot be accepted without invocation-bound ACP evidence"
+            }
+            require(invocation.assessmentStatus == RepairAgentAssessmentStatus.PENDING &&
+                invocation.receiptReleaseComplete && invocation.terminalOutcome == "returned-completed"
+            ) { "agent-driven repair cannot be accepted with incomplete ACP invocation evidence" }
+            require(invocation.resultChangesSha256 == pendingAgentChangeSetSha256(pending)) {
+                "agent-driven repair candidate differs from its ACP result change set"
+            }
+            validateAgentInvocationBinding(
+                invocation,
+                pending.id,
+                metadata.prompt,
+                RepairAgentAssessmentStatus.PENDING,
+                verifyReceiptContents = true,
+            )
+        }
         val candidate = requireNotNull(pending.candidateSourceRevisionSha256) { "repair candidate has not been installed" }
         fun requireAcceptingIndex() {
             val acceptingIndex = SecureRepairRuntime.loadIndex(graphAuthority, projectRoot, index.profile, state.budget)
@@ -2078,6 +2235,8 @@ internal class ModuleRevisionGraph private constructor(
                     RepairEvidence(kind, node.evidenceSummary.orEmpty(), node.evidenceArtifact)
                 },
                 succeeded = node.status == ModuleRevisionStatus.ACCEPTED && node.evidenceKind == "valid",
+                agentInvocation = metadata.agentInvocation?.copy(),
+                publicationMode = metadata.publicationMode,
             )
         }.also { iterations ->
             require(iterations.map { it.index } == iterations.map { it.index }.distinct().sorted()) {
@@ -2287,6 +2446,7 @@ internal class ModuleRevisionGraph private constructor(
     }
 
     private fun validateLoadedState(verifyBlobContents: Boolean = true) {
+        require(state.schemaVersion in 1..2) { "unsupported repair revision graph schema" }
         require(state.budget == index.budget) { "revision graph resource budget differs from the requested budget" }
         require(state.profileId == index.profileId && state.profileSha256 == index.profileSha256) {
             "revision graph repair index profile does not match current project evidence"
@@ -2346,6 +2506,40 @@ internal class ModuleRevisionGraph private constructor(
             }
             validateEvidence(node.evidenceKind?.let { RepairEvidence(it, node.evidenceSummary.orEmpty(), node.evidenceArtifact) })
             validateRepairMetadata(node.repairMetadata)
+            node.repairMetadata?.let { metadata ->
+                if (state.schemaVersion == 1) {
+                    require(metadata.agentInvocation == null) {
+                        "legacy repair graph contains schema-v2 ACP invocation evidence"
+                    }
+                } else {
+                    val expectedAssessment = when (node.status) {
+                        ModuleRevisionStatus.ACCEPTED -> RepairAgentAssessmentStatus.ACCEPTED
+                        ModuleRevisionStatus.REJECTED -> RepairAgentAssessmentStatus.REJECTED
+                        ModuleRevisionStatus.ROOT -> error("repair graph root cannot contain iteration metadata")
+                    }
+                    if (node.status == ModuleRevisionStatus.ACCEPTED &&
+                        metadata.publicationMode == RepairPublicationMode.ACP_RELEASE
+                    ) {
+                        requireNotNull(metadata.agentInvocation) {
+                            "accepted agent-driven repair lacks invocation-bound ACP evidence: ${node.id}"
+                        }
+                    }
+                    metadata.agentInvocation?.let { invocation ->
+                        validateAgentInvocationBinding(
+                            invocation,
+                            node.id,
+                            metadata.prompt,
+                            expectedAssessment,
+                            verifyBlobContents,
+                        )
+                        if (node.status == ModuleRevisionStatus.ACCEPTED) {
+                            require(invocation.resultChangesSha256 == agentChangeSetSha256(node.changes)) {
+                                "accepted repair changes differ from the bound ACP result: ${node.id}"
+                            }
+                        }
+                    }
+                }
+            }
             node.repairMetadata?.let { metadata ->
                 require(metadata.iterationIndex == previousRepairIteration + 1) {
                     "repair graph iteration indexes are not contiguous"
@@ -2441,6 +2635,28 @@ internal class ModuleRevisionGraph private constructor(
             }
             validateRepairMetadata(pending.repairMetadata)
             pending.repairMetadata?.let { metadata ->
+                if (state.schemaVersion == 1) {
+                    require(metadata.agentInvocation == null) {
+                        "legacy pending repair contains schema-v2 ACP invocation evidence"
+                    }
+                } else {
+                    metadata.agentInvocation?.let { invocation ->
+                        validateAgentInvocationBinding(
+                            invocation,
+                            pending.id,
+                            metadata.prompt,
+                            RepairAgentAssessmentStatus.PENDING,
+                            verifyBlobContents,
+                        )
+                        if (pending.candidateSourceRevisionSha256 != null) {
+                            require(invocation.resultChangesSha256 == agentChangeSetSha256(pending.candidateChanges)) {
+                                "pending repair changes differ from the bound ACP result: ${pending.id}"
+                            }
+                        }
+                    }
+                }
+            }
+            pending.repairMetadata?.let { metadata ->
                 require(metadata.iterationIndex == previousRepairIteration + 1) {
                     "pending repair iteration index is not contiguous"
                 }
@@ -2448,6 +2664,31 @@ internal class ModuleRevisionGraph private constructor(
         }
         if (state.pending == null) {
             require(state.nextOrdinal == previousOrdinal + 1) { "revision graph next ordinal is not contiguous" }
+        }
+        val expectedReceipts = buildSet {
+            state.nodes.mapNotNull { it.repairMetadata?.agentInvocation }.forEach { binding ->
+                add(binding.receiptPath.substringAfterLast('/'))
+            }
+            state.pending?.let { pending ->
+                pending.repairMetadata?.agentInvocation?.let { binding ->
+                    add(binding.receiptPath.substringAfterLast('/'))
+                } ?: run {
+                    val recoveryName = "${pending.id}.acp-receipt.json"
+                    if (stateStore.revisionFileExists(recoveryName)) add(recoveryName)
+                }
+            }
+        }.sorted()
+        // Invocation artifacts live beside the graph rather than in the content-blob directory.
+        // Bound that traversal by the maximum number of attempts plus the small fixed set of
+        // graph/binding/temporary entries; a deliberately tiny blob-entry budget must not make a
+        // valid graph impossible to reopen.
+        val receiptDirectoryLimit = Math.addExact(
+            state.budget.maximumRevisionNodes,
+            MAXIMUM_REPAIR_STATE_NON_RECEIPT_ENTRIES,
+        )
+        val observedReceipts = stateStore.receiptFileNames(receiptDirectoryLimit)
+        require(observedReceipts == expectedReceipts) {
+            "repair revision state contains missing, extra, or stale ACP invocation receipts"
         }
         val bytes = referencedBlobBytes(state.nodes, state.pending, verifyContents = verifyBlobContents)
         require(bytes == state.storedBlobBytes) { "revision graph stored-blob accounting does not match its content" }
@@ -2469,6 +2710,52 @@ internal class ModuleRevisionGraph private constructor(
             "repair metadata retained regression digest does not match its input IDs"
         }
         validateEvidence(metadata.before)
+        if (metadata.publicationMode == RepairPublicationMode.TEST_ONLY_NON_RELEASE) {
+            require(metadata.agentInvocation == null ||
+                metadata.agentInvocation.assessmentStatus != RepairAgentAssessmentStatus.ACCEPTED ||
+                metadata.agentInvocation.receiptReleaseComplete
+            ) { "test-only repair cannot mark incomplete ACP evidence accepted" }
+        }
+    }
+
+    private fun validateAgentInvocationBinding(
+        binding: RepairAgentInvocationBinding,
+        attemptId: String,
+        expectedPromptSha256: String,
+        expectedAssessment: RepairAgentAssessmentStatus,
+        verifyReceiptContents: Boolean,
+    ) {
+        require(state.schemaVersion == 2) { "legacy repair graphs cannot contain ACP receipt bindings" }
+        val expectedName = "$attemptId.acp-receipt.json"
+        require(binding.receiptPath == "reports/repair-revisions/$expectedName") {
+            "repair ACP receipt path is cross-paired with a different attempt: $attemptId"
+        }
+        require(binding.assessmentStatus == expectedAssessment) {
+            "repair ACP assessment status disagrees with graph state: $attemptId"
+        }
+        if (expectedAssessment == RepairAgentAssessmentStatus.ACCEPTED) {
+            require(binding.receiptReleaseComplete && binding.terminalOutcome == "returned-completed") {
+                "accepted repair lacks release-complete ACP evidence: $attemptId"
+            }
+        }
+        if (verifyReceiptContents) {
+            val receipt = stateStore.readRevisionFile(expectedName, MAXIMUM_REPAIR_ACP_RECEIPT_BYTES)
+            require(receipt.sha256 == binding.receiptSha256) {
+                "repair ACP receipt digest differs from graph binding: $attemptId"
+            }
+            val verified = verifyAcpExecutionReceiptDocument(
+                receipt.bytes,
+                TRACE_REPAIR_ACP_RECEIPT_KIND,
+                TRACE_REPAIR_ACP_TASK_FIELD,
+                attemptId,
+            )
+            require(verified.requestSha256 == binding.requestSha256 &&
+                verified.promptSha256 == expectedPromptSha256 &&
+                verified.resultChangesSha256 == binding.resultChangesSha256 &&
+                verified.terminalOutcome == binding.terminalOutcome &&
+                verified.releaseComplete == binding.receiptReleaseComplete
+            ) { "repair ACP receipt content is cross-paired with its graph binding: $attemptId" }
+        }
     }
 
     private fun validateEvidence(evidence: RepairEvidence?) {
@@ -2500,22 +2787,51 @@ internal class ModuleRevisionGraph private constructor(
 
     private fun recoverPendingAttempt() {
         val pending = state.pending ?: return
+        val recoverablePending = recoverPersistedInvocationBinding(pending)
         val node = finalizeNode(
-            pending,
+            recoverablePending,
             ModuleRevisionStatus.REJECTED,
             RepairEvidence("crash-recovery", "restored pending repair preimages after restart"),
             recovered = true,
         )
         val recoveredState = state.copy(nodes = state.nodes + node, pending = null)
         val preparedRecovery = requireCommitReadyState(recoveredState)
-        if (pending.candidateSourceRevisionSha256 == null) {
-            require(revisionSha256(index.sourceSnapshot()) == pending.parentSourceRevisionSha256) {
+        if (recoverablePending.candidateSourceRevisionSha256 == null) {
+            require(revisionSha256(index.sourceSnapshot()) == recoverablePending.parentSourceRevisionSha256) {
                 "source tree changed while a pre-candidate repair attempt was pending"
             }
         } else {
-            restorePreimages(pending)
+            restorePreimages(recoverablePending)
         }
         persist(preparedRecovery)
+    }
+
+    private fun recoverPersistedInvocationBinding(pending: PendingAttempt): PendingAttempt {
+        if (state.schemaVersion != 2 || pending.repairMetadata?.agentInvocation != null) return pending
+        val metadata = pending.repairMetadata ?: return pending
+        val fileName = "${pending.id}.acp-receipt.json"
+        if (!stateStore.revisionFileExists(fileName)) return pending
+        val receipt = stateStore.readRevisionFile(fileName, MAXIMUM_REPAIR_ACP_RECEIPT_BYTES)
+        val verified = verifyAcpExecutionReceiptDocument(
+            receipt.bytes,
+            TRACE_REPAIR_ACP_RECEIPT_KIND,
+            TRACE_REPAIR_ACP_TASK_FIELD,
+            pending.id,
+        )
+        require(verified.promptSha256 == metadata.prompt) {
+            "recovered repair ACP receipt is cross-paired with a different workflow prompt"
+        }
+        val binding = RepairAgentInvocationBinding(
+            receiptPath = "reports/repair-revisions/$fileName",
+            receiptSha256 = receipt.sha256,
+            receiptSchemaVersion = 2,
+            requestSha256 = verified.requestSha256,
+            resultChangesSha256 = verified.resultChangesSha256,
+            terminalOutcome = verified.terminalOutcome,
+            receiptReleaseComplete = verified.releaseComplete,
+            assessmentStatus = RepairAgentAssessmentStatus.PENDING,
+        )
+        return pending.copy(repairMetadata = metadata.copy(agentInvocation = binding))
     }
 
     private fun finalizeNode(
@@ -2526,6 +2842,25 @@ internal class ModuleRevisionGraph private constructor(
     ): ModuleRevisionNode {
         require(state.nodes.size < state.budget.maximumRevisionNodes) { "revision graph reached its node budget" }
         val paths = pending.candidateChanges.map { it.path }
+        val assessment = when (status) {
+            ModuleRevisionStatus.ACCEPTED -> RepairAgentAssessmentStatus.ACCEPTED
+            ModuleRevisionStatus.REJECTED -> RepairAgentAssessmentStatus.REJECTED
+            ModuleRevisionStatus.ROOT -> error("pending repair cannot finalize as a root node")
+        }
+        val finalizedMetadata = pending.repairMetadata?.let { metadata ->
+            val invocation = metadata.agentInvocation
+            if (status == ModuleRevisionStatus.ACCEPTED &&
+                metadata.publicationMode == RepairPublicationMode.ACP_RELEASE
+            ) {
+                requireNotNull(invocation) {
+                    "agent-driven repair cannot be accepted without invocation-bound ACP evidence"
+                }
+                require(invocation.receiptReleaseComplete && invocation.terminalOutcome == "returned-completed") {
+                    "agent-driven repair cannot be accepted with incomplete ACP invocation evidence"
+                }
+            }
+            metadata.copy(agentInvocation = invocation?.copy(assessmentStatus = assessment))
+        }
         return ModuleRevisionNode(
             id = pending.id,
             parentId = pending.parentId,
@@ -2539,7 +2874,7 @@ internal class ModuleRevisionGraph private constructor(
             evidenceArtifact = evidence?.artifactPath?.let(::portableEvidencePath),
             recoveredAfterCrash = recovered,
             evidenceSummary = evidence?.summary?.let(::portableEvidenceText),
-            repairMetadata = pending.repairMetadata,
+            repairMetadata = finalizedMetadata,
         )
     }
 
@@ -2811,6 +3146,20 @@ internal class ModuleRevisionGraph private constructor(
         return pending
     }
 
+    private fun pendingAgentChangeSetSha256(pending: PendingAttempt): String =
+        agentChangeSetSha256(pending.candidateChanges)
+
+    private fun agentChangeSetSha256(changes: List<RevisionFileDelta>): String =
+        agentFileChangeSetSha256(changes.map { change ->
+            AgentFileChange(
+                AgentWorkspacePath("project", change.path),
+                AgentFileChangeKind.MODIFIED,
+                change.beforeSha256,
+                change.afterSha256,
+                change.afterBytes,
+            )
+        })
+
     private fun requireCurrentHead(): List<IndexedSource> {
         val expected = state.nodes.single { it.id == state.headId }.sourceRevisionSha256
         val snapshot = index.sourceSnapshot()
@@ -2845,6 +3194,11 @@ internal class ModuleRevisionGraph private constructor(
             runCatching { add(projectRoot.toUri().toString().removeSuffix("/")) }
         }.filter { it.isNotEmpty() }.sortedByDescending { it.length }
         return variants.fold(value) { normalized, root -> normalized.replace(root, replacement) }
+    }
+
+    private fun repairPromptCommitment(value: String): String {
+        val bytes = receiptCommitmentBytes(value)
+        return sha256(bytes)
     }
 
     private data class PreparedRevisionGraphState(
@@ -4008,7 +4362,7 @@ private fun synchronizeRepairDirectory(parentFd: Int) {
 }
 
 private fun renderGraph(state: RevisionGraphState): String = buildString {
-    append("{\n  \"schemaVersion\": 1,")
+    append("{\n  \"schemaVersion\": ").append(state.schemaVersion).append(',')
     append("\n  \"budget\": ").append(state.budget.toJson()).append(',')
     append("\n  \"profileId\": \"").append(state.profileId.jsonEscape()).append("\",")
     append("\n  \"profileSha256\": \"").append(state.profileSha256).append("\",")
@@ -4020,8 +4374,9 @@ private fun renderGraph(state: RevisionGraphState): String = buildString {
     append("\n  \"nextOrdinal\": ").append(state.nextOrdinal).append(',')
     append("\n  \"storedBlobBytes\": ").append(state.storedBlobBytes).append(',')
     append("\n  \"nodes\": [")
-    append(state.nodes.joinToString(",") { "\n" + it.toJson().prependIndent("    ") })
-    append("\n  ],\n  \"pending\": ").append(state.pending?.toJson() ?: "null").append("\n}\n")
+    append(state.nodes.joinToString(",") { "\n" + it.toJson(state.schemaVersion).prependIndent("    ") })
+    append("\n  ],\n  \"pending\": ")
+        .append(state.pending?.toJson(state.schemaVersion) ?: "null").append("\n}\n")
 }
 
 private fun RepairResourceBudget.toJson(): String =
@@ -4051,7 +4406,7 @@ private fun RepairResourceBudget.toJson(): String =
         "\"maximumGraphBytes\":$maximumGraphBytes," +
         "\"maximumStoredBlobBytes\":$maximumStoredBlobBytes}"
 
-private fun ModuleRevisionNode.toJson(): String = buildString {
+private fun ModuleRevisionNode.toJson(schemaVersion: Int): String = buildString {
     append("{\n  \"id\": \"").append(id.jsonEscape()).append("\",")
     append("\n  \"parentId\": ").append(parentId?.let { "\"${it.jsonEscape()}\"" } ?: "null").append(',')
     append("\n  \"ordinal\": ").append(ordinal).append(',')
@@ -4062,7 +4417,8 @@ private fun ModuleRevisionNode.toJson(): String = buildString {
     append("\n  \"evidenceKind\": ").append(evidenceKind?.let { "\"${it.jsonEscape()}\"" } ?: "null").append(',')
     append("\n  \"evidenceArtifact\": ").append(evidenceArtifact?.let { "\"${it.jsonEscape()}\"" } ?: "null").append(',')
     append("\n  \"evidenceSummary\": ").append(evidenceSummary?.let { "\"${it.jsonEscape()}\"" } ?: "null").append(',')
-    append("\n  \"repairMetadata\": ").append(repairMetadata?.toJson() ?: "null").append(',')
+    append("\n  \"repairMetadata\": ")
+        .append(repairMetadata?.toJson(schemaVersion) ?: "null").append(',')
     append("\n  \"recoveredAfterCrash\": ").append(recoveredAfterCrash).append(',')
     append("\n  \"changes\": [")
     append(changes.joinToString(",") { "\n" + it.toJson().prependIndent("    ") })
@@ -4077,7 +4433,7 @@ private fun RevisionFileDelta.toJson(): String =
         (beforeBlobSha256?.let { "\"$it\"" } ?: "null") +
         ",\"afterBlobSha256\":\"$afterBlobSha256\",\"afterBytes\":$afterBytes}"
 
-private fun PendingAttempt.toJson(): String = buildString {
+private fun PendingAttempt.toJson(schemaVersion: Int): String = buildString {
     append("{\"id\":\"").append(id.jsonEscape()).append("\",\"parentId\":\"").append(parentId.jsonEscape())
     append("\",\"ordinal\":").append(ordinal).append(",\"allowedPaths\":").append(allowedPaths.jsonArray())
     append(",\"parentSourceRevisionSha256\":\"").append(parentSourceRevisionSha256).append("\",")
@@ -4085,10 +4441,10 @@ private fun PendingAttempt.toJson(): String = buildString {
         .append(candidateSourceRevisionSha256?.let { "\"$it\"" } ?: "null").append(',')
     append("\"preimages\":[").append(preimages.joinToString(",") { it.toJson() }).append("],")
     append("\"candidateChanges\":[").append(candidateChanges.joinToString(",") { it.toJson() }).append("],")
-    append("\"repairMetadata\":").append(repairMetadata?.toJson() ?: "null").append('}')
+    append("\"repairMetadata\":").append(repairMetadata?.toJson(schemaVersion) ?: "null").append('}')
 }
 
-private fun RevisionRepairMetadata.toJson(): String = buildString {
+private fun RevisionRepairMetadata.toJson(schemaVersion: Int): String = buildString {
     append("{\"iterationIndex\":").append(iterationIndex)
     append(",\"failureKind\":\"").append(failureKind.jsonEscape()).append('"')
     append(",\"prompt\":\"").append(prompt.jsonEscape()).append('"')
@@ -4096,8 +4452,21 @@ private fun RevisionRepairMetadata.toJson(): String = buildString {
     append(",\"retainedRegressionIds\":").append(retainedRegressionIds.jsonArray())
     append(",\"before\":").append(before?.toGraphJson() ?: "null")
     append(",\"regressionCorpusSha256\":")
-        .append(regressionCorpusSha256?.let { "\"${it.jsonEscape()}\"" } ?: "null").append('}')
+        .append(regressionCorpusSha256?.let { "\"${it.jsonEscape()}\"" } ?: "null")
+    if (schemaVersion >= 2) {
+        append(",\"agentInvocation\":").append(agentInvocation?.toGraphJson() ?: "null")
+        append(",\"publicationMode\":\"").append(publicationMode.name.lowercase()).append('"')
+    }
+    append('}')
 }
+
+private fun RepairAgentInvocationBinding.toGraphJson(): String =
+    "{\"receiptPath\":\"${receiptPath.jsonEscape()}\",\"receiptSha256\":\"$receiptSha256\"," +
+        "\"receiptSchemaVersion\":$receiptSchemaVersion,\"requestSha256\":\"$requestSha256\"," +
+        "\"resultChangesSha256\":\"$resultChangesSha256\"," +
+        "\"terminalOutcome\":\"${terminalOutcome.jsonEscape()}\"," +
+        "\"receiptReleaseComplete\":$receiptReleaseComplete," +
+        "\"assessmentStatus\":\"${assessmentStatus.name.lowercase()}\"}"
 
 private fun List<ProcessInput>.toGraphJson(): String = joinToString(prefix = "[", postfix = "]") { input ->
     "{\"id\":\"${input.id.jsonEscape()}\",\"args\":${input.args.jsonArray()}," +
@@ -4118,7 +4487,9 @@ private fun parseCanonicalGraph(payload: ByteArray, label: String): RevisionGrap
 
 private fun parseGraph(payload: String): RevisionGraphState {
     val root = Json.parseToJsonElement(payload).jsonObject
-    require(root["schemaVersion"]?.jsonPrimitive?.intOrNull == 1) { "unsupported repair revision graph schema" }
+    val schemaVersion = root["schemaVersion"]?.jsonPrimitive?.intOrNull
+        ?: error("repair revision graph is missing schemaVersion")
+    require(schemaVersion in 1..2) { "unsupported repair revision graph schema" }
     val budget = root.getValue("budget").jsonObject.let { value ->
         RepairResourceBudget(
             maximumIndexedModules = value.requiredInt("maximumIndexedModules"),
@@ -4156,7 +4527,7 @@ private fun parseGraph(payload: String): RevisionGraphState {
             maximumStoredBlobBytes = value.requiredLong("maximumStoredBlobBytes"),
         )
     }
-    val nodes = root.getValue("nodes").jsonArray.map(::parseNode)
+    val nodes = root.getValue("nodes").jsonArray.map { parseNode(it, schemaVersion) }
     val pendingElement = root["pending"]
     return RevisionGraphState(
         budget,
@@ -4169,12 +4540,13 @@ private fun parseGraph(payload: String): RevisionGraphState {
         root.requiredString("headId"),
         root.requiredInt("nextOrdinal"),
         nodes,
-        pendingElement?.takeUnless { it is JsonNull }?.let(::parsePending),
+        pendingElement?.takeUnless { it is JsonNull }?.let { parsePending(it, schemaVersion) },
         root.requiredLong("storedBlobBytes"),
+        schemaVersion,
     )
 }
 
-private fun parseNode(element: JsonElement): ModuleRevisionNode {
+private fun parseNode(element: JsonElement, schemaVersion: Int): ModuleRevisionNode {
     val value = element.jsonObject
     return ModuleRevisionNode(
         value.requiredString("id"),
@@ -4189,11 +4561,11 @@ private fun parseNode(element: JsonElement): ModuleRevisionNode {
         value.optionalString("evidenceArtifact"),
         value.getValue("recoveredAfterCrash").jsonPrimitive.content.toBooleanStrict(),
         value.optionalString("evidenceSummary"),
-        value["repairMetadata"]?.takeUnless { it is JsonNull }?.let(::parseRepairMetadata),
+        value["repairMetadata"]?.takeUnless { it is JsonNull }?.let { parseRepairMetadata(it, schemaVersion) },
     )
 }
 
-private fun parsePending(element: JsonElement): PendingAttempt {
+private fun parsePending(element: JsonElement, schemaVersion: Int): PendingAttempt {
     val value = element.jsonObject
     return PendingAttempt(
         value.requiredString("id"),
@@ -4204,11 +4576,11 @@ private fun parsePending(element: JsonElement): PendingAttempt {
         value.getValue("preimages").jsonArray.map(::parseDelta),
         value.optionalString("candidateSourceRevisionSha256"),
         value.getValue("candidateChanges").jsonArray.map(::parseDelta),
-        value["repairMetadata"]?.takeUnless { it is JsonNull }?.let(::parseRepairMetadata),
+        value["repairMetadata"]?.takeUnless { it is JsonNull }?.let { parseRepairMetadata(it, schemaVersion) },
     )
 }
 
-private fun parseRepairMetadata(element: JsonElement): RevisionRepairMetadata {
+private fun parseRepairMetadata(element: JsonElement, schemaVersion: Int): RevisionRepairMetadata {
     val value = element.jsonObject
     return RevisionRepairMetadata(
         iterationIndex = value.requiredInt("iterationIndex"),
@@ -4218,6 +4590,32 @@ private fun parseRepairMetadata(element: JsonElement): RevisionRepairMetadata {
         retainedRegressionIds = value.stringList("retainedRegressionIds"),
         before = value["before"]?.takeUnless { it is JsonNull }?.let(::parseGraphEvidence),
         regressionCorpusSha256 = value.optionalString("regressionCorpusSha256"),
+        agentInvocation = if (schemaVersion >= 2) {
+            value["agentInvocation"]?.takeUnless { it is JsonNull }?.let(::parseAgentInvocationBinding)
+        } else {
+            null
+        },
+        publicationMode = if (schemaVersion >= 2) {
+            RepairPublicationMode.valueOf(value.requiredString("publicationMode").uppercase())
+        } else {
+            RepairPublicationMode.TEST_ONLY_NON_RELEASE
+        },
+    )
+}
+
+private fun parseAgentInvocationBinding(element: JsonElement): RepairAgentInvocationBinding {
+    val value = element.jsonObject
+    return RepairAgentInvocationBinding(
+        receiptPath = value.requiredString("receiptPath"),
+        receiptSha256 = value.requiredString("receiptSha256"),
+        receiptSchemaVersion = value.requiredInt("receiptSchemaVersion"),
+        requestSha256 = value.requiredString("requestSha256"),
+        resultChangesSha256 = value.requiredString("resultChangesSha256"),
+        terminalOutcome = value.requiredString("terminalOutcome"),
+        receiptReleaseComplete = value.getValue("receiptReleaseComplete").jsonPrimitive.content.toBooleanStrict(),
+        assessmentStatus = RepairAgentAssessmentStatus.valueOf(
+            value.requiredString("assessmentStatus").uppercase(),
+        ),
     )
 }
 
