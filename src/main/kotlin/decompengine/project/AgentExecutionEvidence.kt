@@ -24,11 +24,74 @@ import java.nio.charset.StandardCharsets
 import java.security.MessageDigest
 import java.util.Collections
 
+/** Caller-owned validation binding appended only after the generated artifact is inspected. */
+internal class AcpExecutionOutcomeBinding(
+    val evidenceKind: String,
+    val taskIdentityField: String,
+    val taskId: String,
+    val accepted: Boolean,
+    val artifactDigestField: String,
+    val artifactSha256: String,
+    issues: Collection<AcpExecutionOutcomeIssue> = emptyList(),
+) {
+    val issues: List<AcpExecutionOutcomeIssue> =
+        Collections.unmodifiableList(ArrayList(issues.sortedWith(compareBy(
+            AcpExecutionOutcomeIssue::code,
+            AcpExecutionOutcomeIssue::message,
+        ))))
+
+    init {
+        require(evidenceKind.matches(Regex("[a-z0-9][a-z0-9.-]{0,127}"))) {
+            "ACP execution evidence kind is invalid"
+        }
+        require(taskIdentityField.matches(Regex("[A-Za-z][A-Za-z0-9]{0,63}"))) {
+            "ACP execution task identity field is invalid"
+        }
+        require(taskId.matches(Regex("[A-Za-z0-9_][A-Za-z0-9_.-]{0,127}"))) {
+            "ACP execution task identity is invalid"
+        }
+        require(artifactDigestField.matches(Regex("[A-Za-z][A-Za-z0-9]{0,63}"))) {
+            "ACP execution artifact digest field is invalid"
+        }
+        require(artifactSha256.isSha256()) { "ACP execution artifact digest is invalid" }
+        require(this.issues.size <= MAXIMUM_ARCHIVED_OUTCOME_ISSUES) {
+            "ACP execution outcome exceeds the issue-count limit"
+        }
+    }
+}
+
+internal class AcpExecutionOutcomeIssue(
+    val code: String,
+    val message: String,
+    entityIds: Collection<String> = emptyList(),
+) {
+    val entityIds: List<String> = Collections.unmodifiableList(ArrayList(entityIds.sorted()))
+
+    init {
+        require(code.matches(Regex("[A-Za-z0-9_][A-Za-z0-9_.-]{0,127}"))) {
+            "ACP execution outcome issue code is invalid"
+        }
+        require(message.isNotBlank()) { "ACP execution outcome issue message must not be blank" }
+        require(utf8Bytes(message) <= MAXIMUM_ARCHIVED_OUTCOME_MESSAGE_BYTES) {
+            "ACP execution outcome issue message exceeds the byte limit"
+        }
+        require(this.entityIds.size <= MAXIMUM_ARCHIVED_OUTCOME_ENTITY_IDS) {
+            "ACP execution outcome issue exceeds the entity-count limit"
+        }
+        require(this.entityIds == this.entityIds.distinct()) {
+            "ACP execution outcome entity IDs must be unique"
+        }
+        require(this.entityIds.all { it.matches(Regex("[A-Za-z0-9_][A-Za-z0-9_.-]{0,127}")) }) {
+            "ACP execution outcome entity ID is invalid"
+        }
+    }
+}
+
 /**
- * Immutable, metadata-only ACP evidence retained by a reconstructed module until source validation
- * can be bound to the same turn. Peer-authored text and opaque IDs are represented by digests.
+ * Immutable, workflow-neutral ACP evidence retained until a caller binds deterministic validation
+ * to the same generated artifact. Peer-authored text and opaque IDs are represented by digests.
  */
-class ReconstructionAgentExecutionEvidence private constructor(
+internal class BoundedAcpExecutionArtifact private constructor(
     private val request: ArchivedAgentRequest,
     private val result: AgentExecutionResult,
     events: Collection<ArchivedAgentEvent>,
@@ -56,20 +119,12 @@ class ReconstructionAgentExecutionEvidence private constructor(
         }
     }
 
-    internal fun toValidatedJson(
-        moduleId: String,
-        sourceSha256: String,
-        accepted: Boolean,
-        issues: Collection<ModuleReconstructionIssue>,
-    ): String {
-        require(moduleId.matches(Regex("[A-Za-z0-9_][A-Za-z0-9_.-]{0,127}"))) {
-            "execution evidence module ID is invalid"
-        }
-        require(sourceSha256.isSha256()) { "execution evidence source digest is invalid" }
+    fun toValidatedJson(binding: AcpExecutionOutcomeBinding): String {
         val text = buildString {
             append("{\n  \"schemaVersion\": 1,")
-            append("\n  \"kind\": \"decomp-engine.reconstruction-acp-execution\",")
-            append("\n  \"moduleId\": ").append(moduleId.jsonString()).append(',')
+            append("\n  \"kind\": ").append(binding.evidenceKind.jsonString()).append(',')
+            append("\n  ").append(binding.taskIdentityField.jsonString())
+                .append(": ").append(binding.taskId.jsonString()).append(',')
             appendFactoryProvenance(acp)
             appendProtocolAndAgent(acp)
             appendSessionAndTurn(request, result)
@@ -79,7 +134,7 @@ class ReconstructionAgentExecutionEvidence private constructor(
             appendPolicyAudits(acp)
             appendProcessDiagnostics(acp)
             appendSandboxEvidence(acp.sandboxEvidence)
-            appendValidation(sourceSha256, accepted, issues)
+            appendValidation(binding)
             append("\n}\n")
         }
         require(text.toByteArray(StandardCharsets.UTF_8).size <= MAXIMUM_ARCHIVED_EVIDENCE_BYTES) {
@@ -88,14 +143,14 @@ class ReconstructionAgentExecutionEvidence private constructor(
         return text
     }
 
-    internal companion object {
+    companion object {
         fun capture(
             request: AgentExecutionRequest,
             promptSha256: String,
             result: AgentExecutionResult,
             events: Collection<ArchivedAgentEvent>,
             acp: AcpExecutionEvidenceSnapshot,
-        ): ReconstructionAgentExecutionEvidence = ReconstructionAgentExecutionEvidence(
+        ): BoundedAcpExecutionArtifact = BoundedAcpExecutionArtifact(
             ArchivedAgentRequest(
                 objectiveSha256 = digest(request.objective),
                 objectiveUtf8Bytes = utf8Bytes(request.objective),
@@ -113,6 +168,42 @@ class ReconstructionAgentExecutionEvidence private constructor(
             result,
             events,
             acp,
+        )
+    }
+}
+
+/** Reconstruction-specific adapter preserving the versioned module evidence JSON contract. */
+class ReconstructionAgentExecutionEvidence private constructor(
+    private val artifact: BoundedAcpExecutionArtifact,
+) {
+    internal fun toValidatedJson(
+        moduleId: String,
+        sourceSha256: String,
+        accepted: Boolean,
+        issues: Collection<ModuleReconstructionIssue>,
+    ): String = artifact.toValidatedJson(
+        AcpExecutionOutcomeBinding(
+            evidenceKind = "decomp-engine.reconstruction-acp-execution",
+            taskIdentityField = "moduleId",
+            taskId = moduleId,
+            accepted = accepted,
+            artifactDigestField = "sourceSha256",
+            artifactSha256 = sourceSha256,
+            issues = issues.map { issue ->
+                AcpExecutionOutcomeIssue(issue.code, issue.message, issue.entityIds)
+            },
+        ),
+    )
+
+    internal companion object {
+        fun capture(
+            request: AgentExecutionRequest,
+            promptSha256: String,
+            result: AgentExecutionResult,
+            events: Collection<ArchivedAgentEvent>,
+            acp: AcpExecutionEvidenceSnapshot,
+        ): ReconstructionAgentExecutionEvidence = ReconstructionAgentExecutionEvidence(
+            BoundedAcpExecutionArtifact.capture(request, promptSha256, result, events, acp),
         )
     }
 }
@@ -659,17 +750,13 @@ private fun StringBuilder.appendMount(mount: AcpSandboxMountEvidence): StringBui
     return this
 }
 
-private fun StringBuilder.appendValidation(
-    sourceSha256: String,
-    accepted: Boolean,
-    issues: Collection<ModuleReconstructionIssue>,
-) {
+private fun StringBuilder.appendValidation(binding: AcpExecutionOutcomeBinding) {
     append("\n  \"validation\": {")
-    append("\n    \"accepted\": ").append(accepted).append(',')
-    append("\n    \"sourceSha256\": \"").append(sourceSha256).append("\",")
+    append("\n    \"accepted\": ").append(binding.accepted).append(',')
+    append("\n    ").append(binding.artifactDigestField.jsonString())
+        .append(": \"").append(binding.artifactSha256).append("\",")
     append("\n    \"issues\": [")
-    issues.sortedWith(compareBy(ModuleReconstructionIssue::code, ModuleReconstructionIssue::message)).forEachIndexed {
-            index, issue ->
+    binding.issues.forEachIndexed { index, issue ->
         if (index > 0) append(',')
         append("{\"code\":").append(issue.code.jsonString())
         append(",\"messageSha256\":\"").append(digest(issue.message)).append('"')
@@ -737,3 +824,6 @@ private const val MAXIMUM_ARCHIVED_AGENT_EVENTS = 8_192
 private const val MAXIMUM_ARCHIVED_EVENT_COMPONENTS = 32_768
 private const val MAXIMUM_ARCHIVED_EVENT_PEER_BYTES = 16L * 1024 * 1024
 private const val MAXIMUM_ARCHIVED_EVIDENCE_BYTES = 64 * 1024 * 1024
+private const val MAXIMUM_ARCHIVED_OUTCOME_ISSUES = 4_096
+private const val MAXIMUM_ARCHIVED_OUTCOME_MESSAGE_BYTES = 64 * 1024
+private const val MAXIMUM_ARCHIVED_OUTCOME_ENTITY_IDS = 32_768
