@@ -5,15 +5,22 @@ import decompengine.acp.LinuxFileKey
 import decompengine.acp.LinuxFilesystemCapacity
 import decompengine.acp.LinuxFilesystemSyscalls
 import decompengine.acp.LinuxSyscallException
+import decompengine.oracle.core.OracleJson
 import java.nio.file.Files
 import java.nio.file.LinkOption
 import java.nio.file.Path
+import java.nio.file.attribute.FileTime
 import java.nio.file.attribute.PosixFilePermissions
+import java.time.Instant
+import java.util.concurrent.TimeUnit
 import kotlin.io.path.createTempDirectory
 import kotlin.test.Test
 import kotlin.test.assertEquals
 import kotlin.test.assertFailsWith
 import kotlin.test.assertTrue
+import kotlinx.serialization.json.JsonArray
+import kotlinx.serialization.json.JsonObject
+import kotlinx.serialization.json.JsonPrimitive
 import org.junit.jupiter.api.Assumptions.assumeTrue
 
 class FullTreeDiskScratchAuthorityTest {
@@ -22,7 +29,7 @@ class FullTreeDiskScratchAuthorityTest {
         val mounts = parseFullTreeDiskMountTable(
             """
             36 25 0:31 / / rw,relatime - xfs /dev/root rw
-            42 36 7:1 / /var/lib/decomp\040scratch rw,nosuid,nodev,noexec,relatime - ext4 /dev/loop0 rw
+            42 36 7:1 / /var/lib/decomp\040scratch rw,nosuid,nodev,noexec,noatime - ext4 /dev/loop0 rw
             43 42 0:44 / /var/lib/decomp\040scratch/nested rw,nosuid,nodev,noexec - tmpfs tmpfs rw,size=4096k
             """.trimIndent() + "\n",
         )
@@ -33,7 +40,7 @@ class FullTreeDiskScratchAuthorityTest {
         assertEquals("7:1", mounts[1].device)
         assertEquals(Path.of("/"), mounts[1].root)
         assertEquals(Path.of("/var/lib/decomp scratch"), mounts[1].mountPoint)
-        assertEquals(listOf("nodev", "noexec", "nosuid", "relatime", "rw"), mounts[1].options)
+        assertEquals(listOf("noatime", "nodev", "noexec", "nosuid", "rw"), mounts[1].options)
         assertEquals("ext4", mounts[1].fileSystemType)
 
         assertFailsWith<FullTreeDiskScratchException> {
@@ -72,7 +79,7 @@ class FullTreeDiskScratchAuthorityTest {
                 device = "7:1",
                 root = Path.of("/"),
                 mountPoint = Path.of("/var/lib/decomp-scratch"),
-                options = listOf("nodev", "noexec", "nosuid", "relatime", "rw"),
+                options = listOf("noatime", "nodev", "noexec", "nosuid", "rw"),
                 fileSystemType = "ext4",
             ),
             mountIdentity = identity(device = 7, inode = 2, mountId = 42),
@@ -97,11 +104,88 @@ class FullTreeDiskScratchAuthorityTest {
     }
 
     @Test
+    fun `lease record is strict canonical self hashed and frozen`() {
+        val record = leaseRecord()
+
+        assertEquals(record.recordSha256, sha256(record.canonicalBytesWithoutSelfHashForTest()))
+        assertEquals(FROZEN_LEASE_RECORD_SHA256, record.recordSha256)
+        assertEquals(FROZEN_LEASE_RECORD_ARTIFACT_SHA256, sha256(record.canonicalBytes()))
+        assertEquals(
+            record.canonicalBytes().toList(),
+            FullTreeDiskScratchLeaseRecord.parseCanonical(record.canonicalBytes()).canonicalBytes().toList(),
+        )
+        assertFailsWith<FullTreeDiskScratchException> {
+            FullTreeDiskScratchLeaseRecord.parseCanonical(record.canonicalBytes() + '\n'.code.toByte())
+        }
+
+        val root = OracleJson.parse(record.canonicalBytes()) as JsonObject
+        assertFailsWith<FullTreeDiskScratchException> {
+            FullTreeDiskScratchLeaseRecord.parseCanonical(
+                OracleJson.canonicalBytes(JsonObject(root + ("unknown" to JsonPrimitive(true)))),
+            )
+        }
+        assertFailsWith<FullTreeDiskScratchException> {
+            FullTreeDiskScratchLeaseRecord.parseCanonical(
+                mutateRecord(record, "schemaVersion", JsonPrimitive("1")),
+            )
+        }
+        assertFailsWith<FullTreeDiskScratchException> {
+            FullTreeDiskScratchLeaseRecord.parseCanonical(
+                mutateRecord(record, "provider", JsonPrimitive("ordinary-directory-v1")),
+            )
+        }
+        assertFailsWith<FullTreeDiskScratchException> {
+            FullTreeDiskScratchLeaseRecord.parseCanonical(
+                mutateRecord(
+                    record,
+                    "mountFlags",
+                    JsonArray(listOf("rw", "nodev", "noexec", "nosuid", "noatime").map(::JsonPrimitive)),
+                ),
+            )
+        }
+        assertFailsWith<FullTreeDiskScratchException> {
+            FullTreeDiskScratchLeaseRecord.parseCanonical(
+                mutateRecord(
+                    record,
+                    "mountFlags",
+                    JsonArray(listOf("nodev", "noexec", "nosuid", "rw").map(::JsonPrimitive)),
+                ),
+            )
+        }
+        assertFailsWith<FullTreeDiskScratchException> {
+            FullTreeDiskScratchLeaseRecord.parseCanonical(
+                mutateRecord(
+                    record,
+                    "mountFlags",
+                    JsonArray(
+                        listOf("noatime", "noatime", "nodev", "noexec", "nosuid", "rw")
+                            .map(::JsonPrimitive),
+                    ),
+                ),
+            )
+        }
+        assertFailsWith<FullTreeDiskScratchException> {
+            FullTreeDiskScratchLeaseRecord.parseCanonical(
+                OracleJson.canonicalBytes(
+                    JsonObject(root + ("recordSha256" to JsonPrimitive("0".repeat(64)))),
+                ),
+            )
+        }
+    }
+
+    @Test
     fun `ordinary workspace directories cannot be promoted to disk quota authority`() {
         val directory = createTempDirectory("ordinary-oracle-scratch-").toAbsolutePath().normalize()
         try {
             assertFailsWith<FullTreeDiskScratchException> {
                 FullTreeDiskScratchAuthority.acquireDedicatedFilesystem(
+                    directory,
+                    operation(),
+                    FullTreeDiskScratchPolicy(1, Long.MAX_VALUE, 4, Long.MAX_VALUE),
+                )
+            }
+            assertFailsWith<FullTreeDiskScratchException> {
+                FullTreeDiskScratchAuthority.openExistingReadOnly(
                     directory,
                     operation(),
                     FullTreeDiskScratchPolicy(1, Long.MAX_VALUE, 4, Long.MAX_VALUE),
@@ -122,7 +206,7 @@ class FullTreeDiskScratchAuthorityTest {
         assumeTrue(
             !configured.isNullOrBlank(),
             "set DECOMP_TEST_ORACLE_EXT4_SCRATCH to an empty user-owned 0700 ext4 mount with " +
-                "rw,nodev,nosuid,noexec",
+                "rw,nodev,nosuid,noexec,noatime",
         )
         val mount = Path.of(configured).toAbsolutePath().normalize()
         val capacity = LinuxFilesystemSyscalls.openRoot(mount).use {
@@ -185,12 +269,182 @@ class FullTreeDiskScratchAuthorityTest {
         }
     }
 
+    @Test
+    fun `crashed ext4 lease can be cold opened without mutation or release`() {
+        val configured = System.getenv("DECOMP_TEST_ORACLE_EXT4_SCRATCH")
+        assumeTrue(
+            !configured.isNullOrBlank(),
+            "set DECOMP_TEST_ORACLE_EXT4_SCRATCH for cold lease integration coverage",
+        )
+        val mount = Path.of(configured).toAbsolutePath().normalize()
+        val capacity = LinuxFilesystemSyscalls.openRoot(mount).use {
+            LinuxFilesystemSyscalls.filesystemCapacity(it)
+        }
+        val policy = FullTreeDiskScratchPolicy(
+            requiredAvailableBytes = 1,
+            maximumFilesystemBytes = EXPECTED_MAXIMUM_FILESYSTEM_BYTES,
+            requiredAvailableInodes = 4,
+            maximumFilesystemInodes = EXPECTED_MAXIMUM_FILESYSTEM_INODES,
+        )
+
+        listOf(false, true).forEachIndexed { index, activeRun ->
+            val operation = operation(if (activeRun) "8" else "7")
+            val leaseRoot = mount.resolve(".decomp-oracle-lease-${operation.operationId}")
+            val recordPath = leaseRoot.resolve("lease.json")
+            val runPath = leaseRoot.resolve(runDirectoryName(operation.operationId))
+            try {
+                assertTrue(Files.list(mount).use { it.findAny().isEmpty })
+                val expectedRecordArtifactSha256 = leaveCrashedLease(
+                    mount,
+                    operation,
+                    activeRun,
+                )
+                val recordBytes = Files.readAllBytes(recordPath)
+                val mountNames = entryNames(mount)
+                val leaseNames = entryNames(leaseRoot)
+                val observedPaths = buildList {
+                    add(mount)
+                    add(leaseRoot)
+                    add(recordPath)
+                    if (activeRun) add(runPath)
+                }
+                observedPaths.forEach { observed ->
+                    Files.setAttribute(
+                        observed,
+                        "basic:lastAccessTime",
+                        SENTINEL_ACCESS_TIME,
+                        LinkOption.NOFOLLOW_LINKS,
+                    )
+                }
+
+                assertEquals(expectedRecordArtifactSha256, sha256(recordBytes))
+                listOf(
+                    operation.copy(requestSha256 = "a".repeat(64)),
+                    operation.copy(shardId = "different-shard"),
+                    operation.copy(scopeSha256 = "b".repeat(64)),
+                ).forEach { mismatchedOperation ->
+                    assertFailsWith<FullTreeDiskScratchException> {
+                        FullTreeDiskScratchAuthority.openExistingReadOnly(
+                            mount,
+                            mismatchedOperation,
+                            policy,
+                        )
+                    }
+                    FullTreeDiskScratchAuthority.openExistingReadOnly(mount, operation, policy).close()
+                }
+                assertFailsWith<FullTreeDiskScratchException> {
+                    FullTreeDiskScratchAuthority.openExistingReadOnly(
+                        mount,
+                        operation(if (activeRun) "a" else "b"),
+                        policy,
+                    )
+                }
+                assertEquals(mountNames, entryNames(mount))
+                assertEquals(leaseNames, entryNames(leaseRoot))
+
+                FullTreeDiskScratchAuthority.openExistingReadOnly(mount, operation, policy).use { cold ->
+                    val first = cold.requireCurrent()
+                    val second = cold.requireCurrent()
+                    val expectedPopulation = if (activeRun) {
+                        FullTreeDiskScratchColdPopulation.ACTIVE_OPERATION_RUN
+                    } else {
+                        FullTreeDiskScratchColdPopulation.RECORD_ONLY
+                    }
+                    assertEquals(expectedRecordArtifactSha256, first.leaseRecordSha256)
+                    assertEquals(
+                        FullTreeDiskScratchLeaseRecord.parseCanonical(recordBytes).recordSha256,
+                        first.recordSelfSha256,
+                    )
+                    assertEquals(expectedPopulation, first.population)
+                    assertEquals(expectedPopulation, second.population)
+                    assertFailsWith<FullTreeDiskScratchException> {
+                        FullTreeDiskScratchAuthority.openExistingReadOnly(mount, operation, policy)
+                    }
+                    assertFailsWith<FullTreeDiskScratchException> {
+                        FullTreeDiskScratchAuthority.acquireDedicatedFilesystem(
+                            mount,
+                            operation(if (index == 0) "c" else "d"),
+                            policy,
+                        )
+                    }
+                }
+
+                assertEquals(mountNames, entryNames(mount))
+                assertEquals(leaseNames, entryNames(leaseRoot))
+                observedPaths.forEach { observed ->
+                    assertEquals(
+                        SENTINEL_ACCESS_TIME,
+                        Files.getAttribute(observed, "basic:lastAccessTime", LinkOption.NOFOLLOW_LINKS),
+                        "cold inspection changed the access time of $observed",
+                    )
+                }
+                assertEquals(recordBytes.toList(), Files.readAllBytes(recordPath).toList())
+                FullTreeDiskScratchAuthority.openExistingReadOnly(mount, operation, policy).close()
+                assertFailsWith<FullTreeDiskScratchException> {
+                    FullTreeDiskScratchAuthority.openExistingReadOnly(
+                        mount,
+                        operation,
+                        policy.copy(requiredAvailableBytes = 2),
+                    )
+                }
+                FullTreeDiskScratchAuthority.openExistingReadOnly(mount, operation, policy).close()
+                assertFailsWith<FullTreeDiskScratchException> {
+                    FullTreeDiskScratchAuthority.acquireDedicatedFilesystem(
+                        mount,
+                        operation(if (index == 0) "e" else "f"),
+                        policy,
+                    )
+                }
+                assertEquals(mountNames, entryNames(mount))
+                assertEquals(leaseNames, entryNames(leaseRoot))
+            } finally {
+                Files.deleteIfExists(runPath)
+                Files.deleteIfExists(recordPath)
+                Files.deleteIfExists(leaseRoot)
+            }
+        }
+        assertTrue(Files.list(mount).use { it.findAny().isEmpty })
+    }
+
     private fun operation(seed: String = "1") = FullTreeDiskScratchOperation(
         operationId = seed.repeat(64),
         requestSha256 = "2".repeat(64),
         shardId = "clang-lib-driver",
         scopeSha256 = "3".repeat(64),
     )
+
+    private fun leaveCrashedLease(
+        mount: Path,
+        operation: FullTreeDiskScratchOperation,
+        activeRun: Boolean,
+    ): String {
+        val java = Path.of(System.getProperty("java.home"), "bin", "java")
+        val process = ProcessBuilder(
+            java.toString(),
+            "-classpath",
+            System.getProperty("java.class.path"),
+            FullTreeDiskScratchCrashProbe::class.java.name,
+            mount.toString(),
+            operation.operationId,
+            EXPECTED_MAXIMUM_FILESYSTEM_BYTES.toString(),
+            EXPECTED_MAXIMUM_FILESYSTEM_INODES.toString(),
+            activeRun.toString(),
+        ).redirectErrorStream(true).start()
+        val exited = process.waitFor(30, TimeUnit.SECONDS)
+        if (!exited) {
+            process.destroyForcibly()
+            process.waitFor(5, TimeUnit.SECONDS)
+        }
+        assertTrue(exited, "crash-lease child process did not exit")
+        val output = process.inputStream.readNBytes(64 * 1024 + 1).decodeToString().trim()
+        assertEquals(0, process.exitValue(), output)
+        assertTrue(output.matches(Regex("READY:[0-9a-f]{64}")), output)
+        return output.removePrefix("READY:")
+    }
+
+    private fun entryNames(directory: Path): List<String> = Files.list(directory).use { entries ->
+        entries.map { it.fileName.toString() }.sorted().toList()
+    }
 
     private fun identity(device: Long, inode: Long, mountId: Long) = LinuxFileIdentity(
         key = LinuxFileKey(device, inode),
@@ -207,6 +461,50 @@ class FullTreeDiskScratchAuthorityTest {
     private fun sha256(bytes: ByteArray): String =
         java.security.MessageDigest.getInstance("SHA-256").digest(bytes)
             .joinToString("") { byte -> "%02x".format(byte) }
+
+    private fun leaseRecord(): FullTreeDiskScratchLeaseRecord = FullTreeDiskScratchLeaseRecord.create(
+        operation = operation(),
+        policy = FullTreeDiskScratchPolicy(
+            requiredAvailableBytes = 1024,
+            maximumFilesystemBytes = 8192,
+            requiredAvailableInodes = 4,
+            maximumFilesystemInodes = 64,
+        ),
+        mountPath = Path.of("/var/lib/decomp-scratch"),
+        mount = FullTreeDiskMount(
+            mountId = 42,
+            parentMountId = 36,
+            device = "7:1",
+            root = Path.of("/"),
+            mountPoint = Path.of("/var/lib/decomp-scratch"),
+            options = listOf("noatime", "nodev", "noexec", "nosuid", "rw"),
+            fileSystemType = "ext4",
+        ),
+        mountIdentity = identity(device = 7, inode = 2, mountId = 42),
+        capacity = LinuxFilesystemCapacity(
+            fragmentBytes = 4096,
+            totalBytes = 8192,
+            availableBytes = 4096,
+            totalInodes = 64,
+            availableInodes = 60,
+            maximumNameBytes = 255,
+            readOnly = false,
+        ),
+        leaseIdentity = identity(device = 7, inode = 12, mountId = 42),
+    )
+
+    private fun mutateRecord(
+        record: FullTreeDiskScratchLeaseRecord,
+        field: String,
+        value: kotlinx.serialization.json.JsonElement,
+    ): ByteArray {
+        val root = OracleJson.parse(record.canonicalBytes()) as JsonObject
+        val changed = root + (field to value)
+        val selfHash = sha256(OracleJson.canonicalBytes(JsonObject(changed - "recordSha256")))
+        return OracleJson.canonicalBytes(
+            JsonObject(changed + ("recordSha256" to JsonPrimitive(selfHash))),
+        )
+    }
 
     private fun requireByteExhaustion(run: Path, totalBytes: Long) {
         assumeTrue(totalBytes <= 128L * 1024 * 1024, "integration scratch is too large for exhaustion coverage")
@@ -275,8 +573,13 @@ class FullTreeDiskScratchAuthorityTest {
         const val BYTE_EXHAUSTION_TOLERANCE_BYTES = 4L * 1024 * 1024
         const val OWNER_FILE_MODE = 0x180 // 0600
         const val BYTE_EXHAUSTION_FILE = "byte-exhaustion"
-        const val FROZEN_EVIDENCE_SHA256 = "5785e1afe93bda94698b7a6b888954388e39c3d40b10fc85c7e508f73b4205e9"
+        val SENTINEL_ACCESS_TIME: FileTime = FileTime.from(Instant.parse("2000-01-01T00:00:00Z"))
+        const val FROZEN_EVIDENCE_SHA256 = "b9d2cce2265e1b35b2905baddd4d6b0fd4cd12bcbc3faab81490aad122faf2ec"
         const val FROZEN_EVIDENCE_ARTIFACT_SHA256 =
-            "601758c6ebfd9eebec6ee46c73f8f215e09fea36ae53bb37bb68d4ba62b7d880"
+            "6f5799528a592a414fed2a5ee3ff0546d855a5096ac20dd0d12cf617a486243b"
+        const val FROZEN_LEASE_RECORD_SHA256 =
+            "9042ba47bacb9797df67400b884abc1dd71e78f589c39eb315b9d20c1dfc738d"
+        const val FROZEN_LEASE_RECORD_ARTIFACT_SHA256 =
+            "9922c89acc2a99b29e14f17501519d3138de425701c98a97c55d392672978f72"
     }
 }

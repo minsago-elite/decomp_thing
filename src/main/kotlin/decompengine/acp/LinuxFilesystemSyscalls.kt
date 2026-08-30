@@ -222,6 +222,13 @@ internal object LinuxFilesystemSyscalls {
         "open authorized filesystem entry for reading",
     )
 
+    /** Reopens an owned authenticated regular file without changing its access timestamp. */
+    fun openReadableWithoutAtimeFrom(authorized: LinuxDescriptor): LinuxDescriptor = reopenRegularFile(
+        authorized,
+        O_RDONLY or O_NONBLOCK or O_NOATIME or O_CLOEXEC,
+        "open authorized filesystem entry for metadata-neutral reading",
+    )
+
     /** Reopens an authenticated regular file for writes without resolving its mutable name again. */
     fun reopenWritable(authorized: LinuxDescriptor): LinuxDescriptor = reopenRegularFile(
         authorized,
@@ -916,6 +923,7 @@ internal object LinuxFilesystemSyscalls {
     private const val O_CREAT = 0x40
     private const val O_EXCL = 0x80
     private const val O_NONBLOCK = 0x800
+    private const val O_NOATIME = 0x40000
     private const val O_DIRECTORY = 0x10000
     private const val O_NOFOLLOW = 0x20000
     private const val O_CLOEXEC = 0x80000

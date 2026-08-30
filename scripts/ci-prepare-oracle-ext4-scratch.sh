@@ -51,7 +51,7 @@ sudo -n mkdir "$mount_parent"
 sudo -n chown 0:0 "$mount_parent"
 sudo -n chmod 0755 "$mount_parent"
 sudo -n mkdir "$mount_path"
-sudo -n mount -o loop,rw,nodev,nosuid,noexec "$image" "$mount_path"
+sudo -n mount -o loop,rw,nodev,nosuid,noexec,noatime "$image" "$mount_path"
 sudo -n chown "$user_id:$group_id" "$mount_path"
 sudo -n chmod 0700 "$mount_path"
 if [[ -d "$mount_path/lost+found" ]]; then

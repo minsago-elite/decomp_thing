@@ -7,6 +7,7 @@ import decompengine.acp.LinuxFilesystemSyscalls
 import decompengine.acp.permissions
 import decompengine.oracle.core.OracleArtifacts
 import decompengine.oracle.core.OracleJson
+import decompengine.oracle.core.StrictJsonLimits
 import java.io.IOException
 import java.nio.file.Files
 import java.nio.file.LinkOption
@@ -59,6 +60,187 @@ internal enum class FullTreeDiskScratchStage {
     BEFORE_PUBLICATION,
     AFTER_PUBLICATION,
     RELEASE,
+}
+
+/** Canonical historical acquisition record; this artifact is not current or release authority. */
+internal class FullTreeDiskScratchLeaseRecord private constructor(
+    val schemaVersion: Int,
+    val provider: String,
+    val operationId: String,
+    val requestSha256: String,
+    val shardId: String,
+    val scopeSha256: String,
+    val mountPathSha256: String,
+    val mountId: Long,
+    val device: Long,
+    val rootInode: Long,
+    val filesystemDevice: String,
+    val filesystemType: String,
+    val totalBytes: Long,
+    val totalInodes: Long,
+    val requiredAvailableBytes: Long,
+    val maximumFilesystemBytes: Long,
+    val requiredAvailableInodes: Long,
+    val maximumFilesystemInodes: Long,
+    mountFlags: List<String>,
+    val leaseRootDevice: Long,
+    val leaseRootInode: Long,
+    val recordSha256: String,
+) {
+    val mountFlags: List<String> = java.util.List.copyOf(mountFlags)
+
+    init {
+        if (
+            schemaVersion != DISK_SCRATCH_LEASE_SCHEMA_VERSION ||
+            provider != FULL_TREE_DISK_SCRATCH_PROVIDER ||
+            !operationId.matches(SHA256) || !requestSha256.matches(SHA256) ||
+            !shardId.matches(SHARD_IDENTIFIER) || !scopeSha256.matches(SHA256) ||
+            !mountPathSha256.matches(SHA256) || mountId <= 0L || device < 0L || rootInode <= 0L ||
+            !filesystemDevice.matches(FILESYSTEM_DEVICE) || filesystemType != REQUIRED_FILESYSTEM_TYPE ||
+            totalBytes <= 0L || totalInodes <= 0L || requiredAvailableBytes <= 0L ||
+            maximumFilesystemBytes < requiredAvailableBytes || requiredAvailableInodes < MINIMUM_LEASE_INODES ||
+            maximumFilesystemInodes < requiredAvailableInodes || totalBytes > maximumFilesystemBytes ||
+            totalInodes > maximumFilesystemInodes || totalBytes < requiredAvailableBytes ||
+            totalInodes < requiredAvailableInodes || mountFlags != mountFlags.distinct().sorted() ||
+            mountFlags.any { !it.matches(MOUNT_OPTION) } ||
+            !REQUIRED_MOUNT_FLAGS.all(mountFlags::contains) || leaseRootDevice < 0L || leaseRootInode <= 0L ||
+            !recordSha256.matches(SHA256)
+        ) scratchFail("disk-scratch lease record has invalid fields")
+        if (recordSha256 != ZERO_SHA256 && recordSha256 != sha256(canonicalBytes(includeSelfHash = false))) {
+            scratchFail("disk-scratch lease record self hash is invalid")
+        }
+    }
+
+    fun canonicalBytes(): ByteArray = canonicalBytes(includeSelfHash = true)
+
+    internal fun canonicalBytesWithoutSelfHashForTest(): ByteArray = canonicalBytes(includeSelfHash = false)
+
+    private fun canonicalBytes(includeSelfHash: Boolean): ByteArray = OracleJson.canonicalBytes(
+        JsonObject(
+            buildMap {
+                put("device", JsonPrimitive(device))
+                put("filesystemDevice", JsonPrimitive(filesystemDevice))
+                put("filesystemType", JsonPrimitive(filesystemType))
+                put("leaseRootDevice", JsonPrimitive(leaseRootDevice))
+                put("leaseRootInode", JsonPrimitive(leaseRootInode))
+                put("maximumFilesystemBytes", JsonPrimitive(maximumFilesystemBytes))
+                put("maximumFilesystemInodes", JsonPrimitive(maximumFilesystemInodes))
+                put("mountFlags", JsonArray(mountFlags.map(::JsonPrimitive)))
+                put("mountId", JsonPrimitive(mountId))
+                put("mountPathSha256", JsonPrimitive(mountPathSha256))
+                put("operationId", JsonPrimitive(operationId))
+                put("provider", JsonPrimitive(provider))
+                if (includeSelfHash) put("recordSha256", JsonPrimitive(recordSha256))
+                put("requestSha256", JsonPrimitive(requestSha256))
+                put("requiredAvailableBytes", JsonPrimitive(requiredAvailableBytes))
+                put("requiredAvailableInodes", JsonPrimitive(requiredAvailableInodes))
+                put("rootInode", JsonPrimitive(rootInode))
+                put("schemaVersion", JsonPrimitive(schemaVersion))
+                put("scopeSha256", JsonPrimitive(scopeSha256))
+                put("shardId", JsonPrimitive(shardId))
+                put("totalBytes", JsonPrimitive(totalBytes))
+                put("totalInodes", JsonPrimitive(totalInodes))
+            },
+        ),
+        DISK_SCRATCH_RECORD_JSON_LIMITS,
+    )
+
+    internal companion object {
+        fun create(
+            operation: FullTreeDiskScratchOperation,
+            policy: FullTreeDiskScratchPolicy,
+            mountPath: Path,
+            mount: FullTreeDiskMount,
+            mountIdentity: LinuxFileIdentity,
+            capacity: LinuxFilesystemCapacity,
+            leaseIdentity: LinuxFileIdentity,
+        ): FullTreeDiskScratchLeaseRecord {
+            if (!mountPath.isAbsolute || mountPath.normalize() != mountPath) {
+                scratchFail("disk-scratch lease record mount path must be absolute and normalized")
+            }
+            val arguments = RecordArguments(
+                operation,
+                policy,
+                mountPath,
+                mount,
+                mountIdentity,
+                capacity,
+                leaseIdentity,
+            )
+            val provisional = arguments.record(ZERO_SHA256)
+            return arguments.record(sha256(provisional.canonicalBytes(includeSelfHash = false)))
+        }
+
+        fun parseCanonical(bytes: ByteArray): FullTreeDiskScratchLeaseRecord =
+            translateScratchFailures {
+                val root = OracleJson.parseCanonical(bytes, DISK_SCRATCH_RECORD_JSON_LIMITS) as? JsonObject
+                    ?: scratchFail("disk-scratch lease record must be an object")
+                root.requireExactRecordKeys()
+                FullTreeDiskScratchLeaseRecord(
+                    schemaVersion = root.recordInt("schemaVersion"),
+                    provider = root.recordString("provider"),
+                    operationId = root.recordString("operationId"),
+                    requestSha256 = root.recordString("requestSha256"),
+                    shardId = root.recordString("shardId"),
+                    scopeSha256 = root.recordString("scopeSha256"),
+                    mountPathSha256 = root.recordString("mountPathSha256"),
+                    mountId = root.recordLong("mountId"),
+                    device = root.recordLong("device"),
+                    rootInode = root.recordLong("rootInode"),
+                    filesystemDevice = root.recordString("filesystemDevice"),
+                    filesystemType = root.recordString("filesystemType"),
+                    totalBytes = root.recordLong("totalBytes"),
+                    totalInodes = root.recordLong("totalInodes"),
+                    requiredAvailableBytes = root.recordLong("requiredAvailableBytes"),
+                    maximumFilesystemBytes = root.recordLong("maximumFilesystemBytes"),
+                    requiredAvailableInodes = root.recordLong("requiredAvailableInodes"),
+                    maximumFilesystemInodes = root.recordLong("maximumFilesystemInodes"),
+                    mountFlags = root.recordStringArray("mountFlags"),
+                    leaseRootDevice = root.recordLong("leaseRootDevice"),
+                    leaseRootInode = root.recordLong("leaseRootInode"),
+                    recordSha256 = root.recordString("recordSha256"),
+                ).also { record ->
+                    if (record.recordSha256 == ZERO_SHA256) {
+                        scratchFail("disk-scratch lease record cannot retain its provisional hash")
+                    }
+                }
+            }
+    }
+
+    private data class RecordArguments(
+        val operation: FullTreeDiskScratchOperation,
+        val policy: FullTreeDiskScratchPolicy,
+        val mountPath: Path,
+        val mount: FullTreeDiskMount,
+        val mountIdentity: LinuxFileIdentity,
+        val capacity: LinuxFilesystemCapacity,
+        val leaseIdentity: LinuxFileIdentity,
+    ) {
+        fun record(selfHash: String) = FullTreeDiskScratchLeaseRecord(
+            schemaVersion = DISK_SCRATCH_LEASE_SCHEMA_VERSION,
+            provider = FULL_TREE_DISK_SCRATCH_PROVIDER,
+            operationId = operation.operationId,
+            requestSha256 = operation.requestSha256,
+            shardId = operation.shardId,
+            scopeSha256 = operation.scopeSha256,
+            mountPathSha256 = sha256(mountPath.toString()),
+            mountId = mountIdentity.mountId,
+            device = mountIdentity.key.device,
+            rootInode = mountIdentity.key.inode,
+            filesystemDevice = mount.device,
+            filesystemType = mount.fileSystemType,
+            totalBytes = capacity.totalBytes,
+            totalInodes = capacity.totalInodes,
+            requiredAvailableBytes = policy.requiredAvailableBytes,
+            maximumFilesystemBytes = policy.maximumFilesystemBytes,
+            requiredAvailableInodes = policy.requiredAvailableInodes,
+            maximumFilesystemInodes = policy.maximumFilesystemInodes,
+            mountFlags = mount.options.sorted(),
+            leaseRootDevice = leaseIdentity.key.device,
+            leaseRootInode = leaseIdentity.key.inode,
+            recordSha256 = selfHash,
+        )
+    }
 }
 
 /** Canonical, self-hashed evidence for one hard aggregate disk/inode lease. */
@@ -391,7 +573,261 @@ internal class FullTreeDiskScratchLease internal constructor(
     }
 }
 
+internal enum class FullTreeDiskScratchColdPopulation {
+    RECORD_ONLY,
+    ACTIVE_OPERATION_RUN,
+}
+
+internal data class FullTreeDiskScratchColdSnapshot(
+    val leaseRecordSha256: String,
+    val recordSelfSha256: String,
+    val population: FullTreeDiskScratchColdPopulation,
+)
+
+/**
+ * Lock-retaining, observation-only handle for one exact residual lease.
+ *
+ * This handle never creates, repairs, synchronizes, renames, quarantines, unlinks, cleans, or
+ * releases anything. Closing it only closes pinned descriptors and releases the mount flock. A
+ * returned snapshot is neither durable evidence nor mutation/release authority. The flock is a
+ * coordinator primitive for cooperating processes running as the mount owner; it is not a security
+ * boundary against an unrelated same-UID process. A later recovery authority must independently
+ * reconcile exact evidence before any mutation.
+ */
+internal class FullTreeDiskScratchColdLease internal constructor(
+    private val scratchParent: Path,
+    private val operation: FullTreeDiskScratchOperation,
+    private val policy: FullTreeDiskScratchPolicy,
+    private val mountPath: Path,
+    private val mountDescriptor: LinuxDescriptor,
+    private val leaseName: String,
+    private val leaseDescriptor: LinuxDescriptor,
+    private val recordDescriptor: LinuxDescriptor,
+    private val recordBytes: ByteArray,
+    private val record: FullTreeDiskScratchLeaseRecord,
+    private val authorizedMount: FullTreeDiskMount,
+    private val authorizedCapacity: LinuxFilesystemCapacity,
+) : AutoCloseable {
+    private var closed = false
+
+    @Synchronized
+    fun requireCurrent(): FullTreeDiskScratchColdSnapshot {
+        check(!closed) { "disk-scratch cold lease is closed" }
+        requireTrustedMountAncestors(mountPath)
+        val authorized = requireMountCurrent(
+            mountPath,
+            mountDescriptor,
+            policy,
+            authorizedMount,
+            authorizedCapacity,
+            requireInitialAvailability = false,
+        )
+        requireSameDirectory(mountPath, mountDescriptor, "cold disk-scratch mount root")
+        requireExactMountMembership(mountDescriptor, leaseName)
+        mountDescriptor.whileOpen { mountFd ->
+            LinuxFilesystemSyscalls.openDirectoryAt(mountFd, leaseName).use { selected ->
+                val current = LinuxFilesystemSyscalls.identity(leaseDescriptor.fd)
+                if (!sameDirectory(current, selected.identity)) {
+                    scratchFail("cold disk-scratch lease root changed")
+                }
+            }
+        }
+        requireSameDirectory(scratchParent, leaseDescriptor, "cold disk-scratch lease root")
+        val leaseIdentity = LinuxFilesystemSyscalls.identity(leaseDescriptor.fd)
+        requireManagedLeaseDirectory(leaseIdentity, mountDescriptor.identity, "cold disk-scratch lease root")
+        requirePinnedLeaseRecord(
+            recordDescriptor,
+            recordBytes,
+            leaseDescriptor,
+            mountDescriptor.identity,
+        )
+        requireLeaseRecordMatches(
+            record,
+            operation,
+            policy,
+            mountPath,
+            authorized.mount,
+            LinuxFilesystemSyscalls.identity(mountDescriptor.fd),
+            authorized.capacity,
+            leaseIdentity,
+        )
+        val population = requireColdPopulation(
+            leaseDescriptor,
+            mountDescriptor.identity,
+            runDirectoryName(operation.operationId),
+        )
+        // Re-select and reauthenticate every object after content and population inspection.
+        val finalAuthorized = requireMountCurrent(
+            mountPath,
+            mountDescriptor,
+            policy,
+            authorizedMount,
+            authorizedCapacity,
+            requireInitialAvailability = false,
+        )
+        requireSameDirectory(mountPath, mountDescriptor, "cold disk-scratch mount root")
+        requireExactMountMembership(mountDescriptor, leaseName)
+        mountDescriptor.whileOpen { mountFd ->
+            LinuxFilesystemSyscalls.openDirectoryAt(mountFd, leaseName).use { selected ->
+                if (!sameDirectory(
+                        LinuxFilesystemSyscalls.identity(leaseDescriptor.fd),
+                        LinuxFilesystemSyscalls.identity(selected.fd),
+                    )
+                ) scratchFail("cold disk-scratch lease root changed after inspection")
+            }
+        }
+        requirePinnedLeaseRecord(
+            recordDescriptor,
+            recordBytes,
+            leaseDescriptor,
+            mountDescriptor.identity,
+        )
+        requireLeaseRecordMatches(
+            record,
+            operation,
+            policy,
+            mountPath,
+            finalAuthorized.mount,
+            LinuxFilesystemSyscalls.identity(mountDescriptor.fd),
+            finalAuthorized.capacity,
+            LinuxFilesystemSyscalls.identity(leaseDescriptor.fd),
+        )
+        val finalPopulation = requireColdPopulation(
+            leaseDescriptor,
+            mountDescriptor.identity,
+            runDirectoryName(operation.operationId),
+        )
+        val firstRunIdentity = population.second
+        val finalRunIdentity = finalPopulation.second
+        if (
+            finalPopulation.first != population.first ||
+            (firstRunIdentity == null) != (finalRunIdentity == null) ||
+            firstRunIdentity != null && !sameDirectory(firstRunIdentity, checkNotNull(finalRunIdentity))
+        ) scratchFail("cold disk-scratch lease population changed before its snapshot")
+        return FullTreeDiskScratchColdSnapshot(
+            leaseRecordSha256 = sha256(recordBytes),
+            recordSelfSha256 = record.recordSha256,
+            population = finalPopulation.first,
+        )
+    }
+
+    @Synchronized
+    override fun close() {
+        if (closed) return
+        closed = true
+        var failure: Throwable? = null
+        runCatching { recordDescriptor.close() }.exceptionOrNull()?.let { failure = it }
+        runCatching { leaseDescriptor.close() }.exceptionOrNull()?.let { closeFailure ->
+            if (failure == null) failure = closeFailure else failure.addSuppressed(closeFailure)
+        }
+        runCatching { LinuxFilesystemSyscalls.unlock(mountDescriptor) }.exceptionOrNull()?.let { unlockFailure ->
+            if (failure == null) failure = unlockFailure else failure.addSuppressed(unlockFailure)
+        }
+        runCatching { mountDescriptor.close() }.exceptionOrNull()?.let { closeFailure ->
+            if (failure == null) failure = closeFailure else failure.addSuppressed(closeFailure)
+        }
+        failure?.let { throw it }
+    }
+}
+
 internal object FullTreeDiskScratchAuthority {
+    fun openExistingReadOnly(
+        provisionedMount: Path,
+        operation: FullTreeDiskScratchOperation,
+        policy: FullTreeDiskScratchPolicy,
+    ): FullTreeDiskScratchColdLease = translateScratchFailures {
+        val mountPath = provisionedMount.toAbsolutePath().normalize()
+        if (!mountPath.isAbsolute || mountPath.parent == null || mountPath.toRealPath() != mountPath) {
+            scratchFail("cold disk-scratch mount must be a canonical absolute non-root path")
+        }
+        requireTrustedMountAncestors(mountPath)
+        LinuxFilesystemSyscalls.requireSupported(mountPath)
+        val mountDescriptor = LinuxFilesystemSyscalls.openRoot(mountPath)
+        var locked = false
+        var leaseDescriptor: LinuxDescriptor? = null
+        var recordDescriptor: LinuxDescriptor? = null
+        try {
+            requireSameDirectory(mountPath, mountDescriptor, "cold disk-scratch mount root")
+            if (!LinuxFilesystemSyscalls.tryExclusiveLock(mountDescriptor)) {
+                scratchFail("dedicated disk-scratch filesystem is already leased")
+            }
+            locked = true
+            val authorized = requireMountCurrent(
+                mountPath,
+                mountDescriptor,
+                policy,
+                expectedMount = null,
+                expectedCapacity = null,
+                requireInitialAvailability = false,
+            )
+            val expectedLeaseName = ".decomp-oracle-lease-${operation.operationId}"
+            requireExactMountMembership(mountDescriptor, expectedLeaseName)
+            val lease = LinuxFilesystemSyscalls.openDirectoryAt(mountDescriptor.fd, expectedLeaseName)
+            leaseDescriptor = lease
+            val leaseIdentity = LinuxFilesystemSyscalls.identity(lease.fd)
+            requireManagedLeaseDirectory(
+                leaseIdentity,
+                mountDescriptor.identity,
+                "cold disk-scratch lease root",
+            )
+            requireSameDirectory(
+                mountPath.resolve(expectedLeaseName),
+                lease,
+                "cold disk-scratch lease root",
+            )
+            val record = LinuxFilesystemSyscalls.openRegularFileAtOrNull(lease.fd, LEASE_RECORD_FILE)
+                ?: scratchFail("cold disk-scratch lease record is absent")
+            recordDescriptor = record
+            requireLeaseRecordIdentity(record, mountDescriptor.identity)
+            val recordBytes = LinuxFilesystemSyscalls.openReadableWithoutAtimeFrom(record).use { readable ->
+                LinuxFilesystemSyscalls.read(readable, MAXIMUM_LEASE_RECORD_BYTES) {}
+            }
+            val parsed = FullTreeDiskScratchLeaseRecord.parseCanonical(recordBytes)
+            requireLeaseRecordMatches(
+                parsed,
+                operation,
+                policy,
+                mountPath,
+                authorized.mount,
+                LinuxFilesystemSyscalls.identity(mountDescriptor.fd),
+                authorized.capacity,
+                leaseIdentity,
+            )
+            val cold = FullTreeDiskScratchColdLease(
+                scratchParent = mountPath.resolve(expectedLeaseName),
+                operation = operation,
+                policy = policy,
+                mountPath = mountPath,
+                mountDescriptor = mountDescriptor,
+                leaseName = expectedLeaseName,
+                leaseDescriptor = lease,
+                recordDescriptor = record,
+                recordBytes = recordBytes,
+                record = parsed,
+                authorizedMount = authorized.mount,
+                authorizedCapacity = authorized.capacity,
+            )
+            cold.requireCurrent()
+            recordDescriptor = null
+            leaseDescriptor = null
+            locked = false
+            cold
+        } catch (failure: Throwable) {
+            recordDescriptor?.let { opened ->
+                runCatching { opened.close() }.exceptionOrNull()?.let(failure::addSuppressed)
+            }
+            leaseDescriptor?.let { opened ->
+                runCatching { opened.close() }.exceptionOrNull()?.let(failure::addSuppressed)
+            }
+            if (locked) {
+                runCatching { LinuxFilesystemSyscalls.unlock(mountDescriptor) }
+                    .exceptionOrNull()?.let(failure::addSuppressed)
+            }
+            runCatching { mountDescriptor.close() }.exceptionOrNull()?.let(failure::addSuppressed)
+            throw failure
+        }
+    }
+
     fun acquireDedicatedFilesystem(
         provisionedMount: Path,
         operation: FullTreeDiskScratchOperation,
@@ -626,10 +1062,129 @@ private fun requireSameDirectory(path: Path, descriptor: LinuxDescriptor, label:
     ) scratchFail("$label changed")
 }
 
+private fun requireExactMountMembership(mount: LinuxDescriptor, leaseName: String) {
+    val names = LinuxFilesystemSyscalls.directoryEntryNames(mount, 2).sorted()
+    if (names != listOf(leaseName)) {
+        scratchFail("cold disk-scratch mount does not contain exactly its operation lease")
+    }
+}
+
+private fun requireManagedLeaseDirectory(
+    identity: LinuxFileIdentity,
+    mountIdentity: LinuxFileIdentity,
+    label: String,
+) {
+    if (
+        !identity.isDirectory || identity.isSymbolicLink || identity.mountId != mountIdentity.mountId ||
+        identity.key.device != mountIdentity.key.device || identity.uid != mountIdentity.uid ||
+        identity.mode.permissions != OWNER_DIRECTORY_MODE
+    ) scratchFail("$label identity, ownership, or mode is invalid")
+}
+
+private fun requireLeaseRecordIdentity(record: LinuxDescriptor, mountIdentity: LinuxFileIdentity) {
+    val current = LinuxFilesystemSyscalls.identity(record.fd)
+    if (
+        !sameRegularFile(current, record.identity) || current.mountId != mountIdentity.mountId ||
+        current.key.device != mountIdentity.key.device || current.uid != mountIdentity.uid ||
+        current.mode.permissions != OWNER_READ_ONLY_MODE || current.linkCount != 1
+    ) scratchFail("cold disk-scratch lease record identity or mode changed")
+}
+
+private fun requirePinnedLeaseRecord(
+    record: LinuxDescriptor,
+    expectedBytes: ByteArray,
+    lease: LinuxDescriptor,
+    mountIdentity: LinuxFileIdentity,
+) {
+    requireLeaseRecordIdentity(record, mountIdentity)
+    LinuxFilesystemSyscalls.openRegularFileAtOrNull(lease.fd, LEASE_RECORD_FILE).use { named ->
+        if (named == null || !sameRegularFile(LinuxFilesystemSyscalls.identity(record.fd), named.identity)) {
+            scratchFail("cold disk-scratch lease record name changed")
+        }
+    }
+    val actual = LinuxFilesystemSyscalls.openReadableWithoutAtimeFrom(record).use { readable ->
+        LinuxFilesystemSyscalls.read(readable, MAXIMUM_LEASE_RECORD_BYTES) {}
+    }
+    if (!MessageDigest.isEqual(actual, expectedBytes)) {
+        scratchFail("cold disk-scratch lease record bytes changed")
+    }
+    requireLeaseRecordIdentity(record, mountIdentity)
+    LinuxFilesystemSyscalls.openRegularFileAtOrNull(lease.fd, LEASE_RECORD_FILE).use { named ->
+        if (named == null || !sameRegularFile(LinuxFilesystemSyscalls.identity(record.fd), named.identity)) {
+            scratchFail("cold disk-scratch lease record name changed after reading")
+        }
+    }
+}
+
+private fun requireLeaseRecordMatches(
+    record: FullTreeDiskScratchLeaseRecord,
+    operation: FullTreeDiskScratchOperation,
+    policy: FullTreeDiskScratchPolicy,
+    mountPath: Path,
+    mount: FullTreeDiskMount,
+    mountIdentity: LinuxFileIdentity,
+    capacity: LinuxFilesystemCapacity,
+    leaseIdentity: LinuxFileIdentity,
+) {
+    if (
+        record.operationId != operation.operationId || record.requestSha256 != operation.requestSha256 ||
+        record.shardId != operation.shardId || record.scopeSha256 != operation.scopeSha256 ||
+        record.requiredAvailableBytes != policy.requiredAvailableBytes ||
+        record.maximumFilesystemBytes != policy.maximumFilesystemBytes ||
+        record.requiredAvailableInodes != policy.requiredAvailableInodes ||
+        record.maximumFilesystemInodes != policy.maximumFilesystemInodes ||
+        record.mountPathSha256 != sha256(mountPath.toString()) || record.mountId != mountIdentity.mountId ||
+        record.mountId != mount.mountId || record.device != mountIdentity.key.device ||
+        record.rootInode != mountIdentity.key.inode || record.filesystemDevice != mount.device ||
+        record.filesystemType != mount.fileSystemType || record.mountFlags != mount.options.sorted() ||
+        record.totalBytes != capacity.totalBytes || record.totalInodes != capacity.totalInodes ||
+        record.leaseRootDevice != leaseIdentity.key.device || record.leaseRootInode != leaseIdentity.key.inode
+    ) scratchFail("cold disk-scratch lease record differs from its expected operation or live filesystem")
+}
+
+private fun requireColdPopulation(
+    lease: LinuxDescriptor,
+    mountIdentity: LinuxFileIdentity,
+    expectedRunName: String,
+): Pair<FullTreeDiskScratchColdPopulation, LinuxFileIdentity?> {
+    val names = LinuxFilesystemSyscalls.directoryEntryNames(
+        lease,
+        MAXIMUM_LEASE_ROOT_ENTRIES + 1,
+    ).sorted()
+    if (names == listOf(LEASE_RECORD_FILE)) {
+        return FullTreeDiskScratchColdPopulation.RECORD_ONLY to null
+    }
+    if (names != listOf(LEASE_RECORD_FILE, expectedRunName).sorted()) {
+        scratchFail("cold disk-scratch lease root contains unowned residue")
+    }
+    val runIdentity = LinuxFilesystemSyscalls.openDirectoryAt(lease.fd, expectedRunName).use { run ->
+        val identity = LinuxFilesystemSyscalls.identity(run.fd)
+        requireManagedLeaseDirectory(identity, mountIdentity, "cold disk-scratch active run root")
+        identity
+    }
+    val after = LinuxFilesystemSyscalls.directoryEntryNames(
+        lease,
+        MAXIMUM_LEASE_ROOT_ENTRIES + 1,
+    ).sorted()
+    if (after != names) scratchFail("cold disk-scratch lease population changed during inspection")
+    LinuxFilesystemSyscalls.openDirectoryAt(lease.fd, expectedRunName).use { selected ->
+        if (!sameDirectory(runIdentity, LinuxFilesystemSyscalls.identity(selected.fd))) {
+            scratchFail("cold disk-scratch active run root changed during inspection")
+        }
+    }
+    return FullTreeDiskScratchColdPopulation.ACTIVE_OPERATION_RUN to runIdentity
+}
+
 private fun sameDirectory(first: LinuxFileIdentity, second: LinuxFileIdentity): Boolean =
     first.key == second.key && first.mountId == second.mountId &&
         first.uid == second.uid && first.gid == second.gid &&
         first.isDirectory && second.isDirectory && !first.isSymbolicLink && !second.isSymbolicLink
+
+private fun sameRegularFile(first: LinuxFileIdentity, second: LinuxFileIdentity): Boolean =
+    first.key == second.key && first.mountId == second.mountId &&
+        first.uid == second.uid && first.gid == second.gid &&
+        first.isRegularFile && second.isRegularFile &&
+        !first.isDirectory && !second.isDirectory && !first.isSymbolicLink && !second.isSymbolicLink
 
 private fun leaseRecordBytes(
     operation: FullTreeDiskScratchOperation,
@@ -640,33 +1195,15 @@ private fun leaseRecordBytes(
     capacity: LinuxFilesystemCapacity,
     leaseIdentity: LinuxFileIdentity,
 ): ByteArray {
-    val withoutHash = JsonObject(
-        mapOf(
-            "device" to JsonPrimitive(mountIdentity.key.device),
-            "filesystemDevice" to JsonPrimitive(mount.device),
-            "filesystemType" to JsonPrimitive(mount.fileSystemType),
-            "leaseRootDevice" to JsonPrimitive(leaseIdentity.key.device),
-            "leaseRootInode" to JsonPrimitive(leaseIdentity.key.inode),
-            "maximumFilesystemBytes" to JsonPrimitive(policy.maximumFilesystemBytes),
-            "maximumFilesystemInodes" to JsonPrimitive(policy.maximumFilesystemInodes),
-            "mountFlags" to JsonArray(mount.options.sorted().map(::JsonPrimitive)),
-            "mountId" to JsonPrimitive(mountIdentity.mountId),
-            "mountPathSha256" to JsonPrimitive(sha256(mountPath.toString())),
-            "operationId" to JsonPrimitive(operation.operationId),
-            "provider" to JsonPrimitive(FULL_TREE_DISK_SCRATCH_PROVIDER),
-            "requestSha256" to JsonPrimitive(operation.requestSha256),
-            "requiredAvailableBytes" to JsonPrimitive(policy.requiredAvailableBytes),
-            "requiredAvailableInodes" to JsonPrimitive(policy.requiredAvailableInodes),
-            "rootInode" to JsonPrimitive(mountIdentity.key.inode),
-            "schemaVersion" to JsonPrimitive(DISK_SCRATCH_LEASE_SCHEMA_VERSION),
-            "scopeSha256" to JsonPrimitive(operation.scopeSha256),
-            "shardId" to JsonPrimitive(operation.shardId),
-            "totalBytes" to JsonPrimitive(capacity.totalBytes),
-            "totalInodes" to JsonPrimitive(capacity.totalInodes),
-        ),
-    )
-    val recordSha256 = OracleArtifacts.sha256(OracleJson.canonicalBytes(withoutHash))
-    val bytes = OracleJson.canonicalBytes(JsonObject(withoutHash + ("recordSha256" to JsonPrimitive(recordSha256))))
+    val bytes = FullTreeDiskScratchLeaseRecord.create(
+        operation,
+        policy,
+        mountPath,
+        mount,
+        mountIdentity,
+        capacity,
+        leaseIdentity,
+    ).canonicalBytes()
     if (bytes.size > MAXIMUM_LEASE_RECORD_BYTES) scratchFail("disk-scratch lease record exceeds its byte bound")
     return bytes
 }
@@ -772,6 +1309,48 @@ private inline fun <T> translateScratchFailures(action: () -> T): T = try {
     throw FullTreeDiskScratchException("disk-scratch authority failed: ${failure.message}", failure)
 }
 
+private fun JsonObject.requireExactRecordKeys() {
+    if (keys != DISK_SCRATCH_LEASE_RECORD_FIELDS) {
+        scratchFail("disk-scratch lease record has missing or unknown fields")
+    }
+}
+
+private fun JsonObject.recordString(name: String): String {
+    val primitive = this[name] as? JsonPrimitive
+        ?: scratchFail("disk-scratch lease record field $name must be a string")
+    if (!primitive.isString) scratchFail("disk-scratch lease record field $name must be a string")
+    return primitive.content
+}
+
+private fun JsonObject.recordLong(name: String): Long {
+    val primitive = this[name] as? JsonPrimitive
+        ?: scratchFail("disk-scratch lease record field $name must be an integer")
+    if (primitive.isString) scratchFail("disk-scratch lease record field $name must be an integer")
+    return primitive.content.toLongOrNull()
+        ?: scratchFail("disk-scratch lease record field $name must be an integer")
+}
+
+private fun JsonObject.recordInt(name: String): Int {
+    val value = recordLong(name)
+    if (value !in Int.MIN_VALUE..Int.MAX_VALUE) {
+        scratchFail("disk-scratch lease record field $name is outside the integer range")
+    }
+    return value.toInt()
+}
+
+private fun JsonObject.recordStringArray(name: String): List<String> {
+    val array = this[name] as? JsonArray
+        ?: scratchFail("disk-scratch lease record field $name must be an array")
+    return array.map { value ->
+        val primitive = value as? JsonPrimitive
+            ?: scratchFail("disk-scratch lease record field $name must contain strings")
+        if (!primitive.isString) scratchFail("disk-scratch lease record field $name must contain strings")
+        primitive.content
+    }
+}
+
+private fun sha256(bytes: ByteArray): String = OracleArtifacts.sha256(bytes)
+
 private fun sha256(value: String): String = OracleArtifacts.sha256(value.toByteArray(Charsets.UTF_8))
 
 private fun scratchFail(message: String): Nothing = throw FullTreeDiskScratchException(message)
@@ -791,10 +1370,43 @@ private const val MAXIMUM_MOUNTINFO_RECORDS = 100_000
 private const val MAXIMUM_MOUNTINFO_LINE_CHARS = 64 * 1024
 private const val MAXIMUM_MOUNTINFO_CHARS = 16 * 1024 * 1024
 private const val LEASE_RECORD_FILE = "lease.json"
-private val REQUIRED_MOUNT_FLAGS = listOf("rw", "nodev", "noexec", "nosuid")
+private val REQUIRED_MOUNT_FLAGS = listOf("rw", "nodev", "noexec", "nosuid", "noatime")
 private val SHA256 = Regex("[0-9a-f]{64}")
 private val ZERO_SHA256 = "0".repeat(64)
 private val SHARD_IDENTIFIER = Regex("[a-z0-9]+(?:-[a-z0-9]+)*")
 private val FILESYSTEM_DEVICE = Regex("[0-9]+:[0-9]+")
 private val FILESYSTEM_TYPE = Regex("[A-Za-z0-9._+-]+")
 private val MOUNT_OPTION = Regex("[A-Za-z0-9._=+-]+")
+private val DISK_SCRATCH_RECORD_JSON_LIMITS = StrictJsonLimits(
+    maximumInputBytes = MAXIMUM_LEASE_RECORD_BYTES,
+    maximumCanonicalBytes = MAXIMUM_LEASE_RECORD_BYTES,
+    maximumDepth = 4,
+    maximumNodes = 64,
+    maximumStringBytes = 4096,
+    maximumTotalStringBytes = 32 * 1024,
+    maximumNumberCharacters = 32,
+)
+private val DISK_SCRATCH_LEASE_RECORD_FIELDS = setOf(
+    "device",
+    "filesystemDevice",
+    "filesystemType",
+    "leaseRootDevice",
+    "leaseRootInode",
+    "maximumFilesystemBytes",
+    "maximumFilesystemInodes",
+    "mountFlags",
+    "mountId",
+    "mountPathSha256",
+    "operationId",
+    "provider",
+    "recordSha256",
+    "requestSha256",
+    "requiredAvailableBytes",
+    "requiredAvailableInodes",
+    "rootInode",
+    "schemaVersion",
+    "scopeSha256",
+    "shardId",
+    "totalBytes",
+    "totalInodes",
+)
