@@ -1,5 +1,6 @@
 package decompengine.project
 
+import decompengine.acp.AcpExecutionEvidenceSource
 import decompengine.agent.AgentAccessPolicy
 import decompengine.agent.AgentContextInput
 import decompengine.agent.AgentExecutionRequest
@@ -10,7 +11,6 @@ import decompengine.agent.AgentPathRule
 import decompengine.agent.AgentStopReason
 import decompengine.agent.AgentWorkspacePath
 import decompengine.agent.AgentWorkspaceRoot
-import decompengine.agent.execute
 import kotlinx.serialization.json.Json
 import kotlinx.serialization.json.JsonNull
 import kotlinx.serialization.json.boolean
@@ -53,6 +53,7 @@ data class ReconstructedModule(
     val promptBudgetCharacters: Int? = null,
     val issues: List<ModuleReconstructionIssue> = emptyList(),
     val retryable: Boolean = true,
+    val agentExecutionEvidence: ReconstructionAgentExecutionEvidence? = null,
 )
 
 data class ModuleReconstructionIssue(
@@ -229,22 +230,27 @@ class BoundedLlmModuleReconstructor(
         val sourcePath = targetPath.resolve(listOf(root))
         val before = sourcePath.takeIf { it.exists() }?.readBytes()
         try {
-            val execution = harness.execute(
-                AgentExecutionRequest(
-                    objective = objective,
-                    workspaceRoots = listOf(root),
-                    contextInputs = listOf(
-                        AgentContextInput("recovered-module-evidence", evidence),
-                        AgentContextInput("observed-behavior", observed),
-                    ),
-                    accessPolicy = AgentAccessPolicy(
-                        readRules + AgentPathRule(
-                            targetPath,
-                            setOf(AgentOperation.READ_FILE, AgentOperation.WRITE_FILE, AgentOperation.CREATE_FILE),
-                        ),
+            val agentRequest = AgentExecutionRequest(
+                objective = objective,
+                workspaceRoots = listOf(root),
+                contextInputs = listOf(
+                    AgentContextInput("recovered-module-evidence", evidence),
+                    AgentContextInput("observed-behavior", observed),
+                ),
+                accessPolicy = AgentAccessPolicy(
+                    readRules + AgentPathRule(
+                        targetPath,
+                        setOf(AgentOperation.READ_FILE, AgentOperation.WRITE_FILE, AgentOperation.CREATE_FILE),
                     ),
                 ),
             )
+            val eventRecorder = BoundedAgentExecutionEventRecorder()
+            val execution = harness.execute(agentRequest, eventRecorder::record)
+            val acpExecutionEvidence = (harness as? AcpExecutionEvidenceSource)?.let { source ->
+                requireNotNull(source.latestAcpExecutionEvidence()) {
+                    "ACP reconstruction completed without a coherent execution-evidence snapshot"
+                }
+            }
             if (execution.stopReason in setOf(AgentStopReason.CANCELLED, AgentStopReason.LIMIT_EXHAUSTED)) {
                 throw ModuleReconstructionInterruptedException(
                     request.module.id,
@@ -270,12 +276,22 @@ class BoundedLlmModuleReconstructor(
             require(change.afterSha256 == sha256(sourceBytes) && (change.sizeBytes == null || change.sizeBytes == sourceBytes.size.toLong())) {
                 "module reconstruction result does not match $target"
             }
+            val promptSha256 = sha256(promptEvidence.toByteArray())
             return ReconstructedModule(
-                source,
-                "agent:${harness.implementationIdentifier() ?: "unspecified"}",
-                sha256(promptEvidence.toByteArray()),
+                source = source,
+                generator = "agent:${harness.implementationIdentifier() ?: "unspecified"}",
+                promptSha256 = promptSha256,
                 promptCharacters = contextSize,
                 promptBudgetCharacters = maximumContextCharacters,
+                agentExecutionEvidence = acpExecutionEvidence?.let { acp ->
+                    ReconstructionAgentExecutionEvidence.capture(
+                        request = agentRequest,
+                        promptSha256 = promptSha256,
+                        result = execution,
+                        events = eventRecorder.snapshot(),
+                        acp = acp,
+                    )
+                },
             )
         } catch (failure: Exception) {
             if (before == null) sourcePath.deleteIfExists() else sourcePath.writeBytes(before)
@@ -456,6 +472,12 @@ object SourceTreeGenerator {
             )
             val sourcePath = projectDir.resolve(module.sourcePath)
             val checkpointPath = projectDir.resolve(profile.layout.declaration("module-evidence").materialize(mapOf("module" to module.id)))
+            val executionEvidenceDeclaration = runCatching {
+                profile.layout.declaration("module-agent-execution-evidence")
+            }.getOrNull()
+            val configuredExecutionEvidencePath = executionEvidenceDeclaration
+                ?.materialize(mapOf("module" to module.id))
+            val configuredExecutionEvidenceFile = configuredExecutionEvidencePath?.let(projectDir::resolve)
             val attemptPath = projectDir.resolve("reports/modules/${module.id}.attempt.json")
             val request = ModuleReconstructionRequest(
                 module,
@@ -473,6 +495,7 @@ object SourceTreeGenerator {
                 checkpoint.fingerprint == fingerprint &&
                     sourcePath.exists() &&
                     sha256(sourcePath.readBytes()) == checkpoint.sourceSha256 &&
+                    checkpoint.hasCurrentExecutionEvidence(projectDir) &&
                     (checkpoint.accepted || (!checkpoint.retryable && checkpoint.reconstructorIdentity == cacheIdentity))
             }
             val checkpoint = cached ?: run {
@@ -495,10 +518,26 @@ object SourceTreeGenerator {
                 val normalizedSource = attempted.source.trimEnd() + "\n"
                 val issues = assessReconstruction(module, model, attempted, normalizedSource)
                 val accepted = issues.isEmpty()
+                val normalizedSourceSha256 = sha256(normalizedSource.toByteArray())
                 writeAtomically(sourcePath, normalizedSource)
+                val executionEvidence = attempted.agentExecutionEvidence?.let { evidence ->
+                    val evidencePath = requireNotNull(configuredExecutionEvidencePath) {
+                        "reconstruction profile does not declare module-agent-execution-evidence"
+                    }
+                    val evidenceFile = requireNotNull(configuredExecutionEvidenceFile)
+                    val evidenceText = evidence.toValidatedJson(
+                        moduleId = module.id,
+                        sourceSha256 = normalizedSourceSha256,
+                        accepted = accepted,
+                        issues = issues,
+                    )
+                    writeAtomically(evidenceFile, evidenceText)
+                    evidencePath to sha256(evidenceText.toByteArray())
+                }
+                if (executionEvidence == null) configuredExecutionEvidenceFile?.deleteIfExists()
                 ModuleCheckpoint(
                     fingerprint = fingerprint,
-                    sourceSha256 = sha256(normalizedSource.toByteArray()),
+                    sourceSha256 = normalizedSourceSha256,
                     generator = attempted.generator,
                     reconstructorIdentity = cacheIdentity,
                     promptSha256 = attempted.promptSha256,
@@ -508,8 +547,15 @@ object SourceTreeGenerator {
                     retryable = attempted.retryable,
                     issues = issues,
                     entityIds = module.functionIds + module.globalIds,
+                    executionEvidencePath = executionEvidence?.first,
+                    executionEvidenceSha256 = executionEvidence?.second,
                 ).also { writeAtomically(checkpointPath, it.toJson()) }
             }
+            require(
+                checkpoint.executionEvidencePath == null ||
+                    checkpoint.executionEvidencePath == configuredExecutionEvidencePath
+            ) { "module checkpoint execution evidence path differs from the reconstruction profile" }
+            if (checkpoint.executionEvidencePath == null) configuredExecutionEvidenceFile?.deleteIfExists()
             attemptPath.deleteIfExists()
             val normalizedSource = sourcePath.readText()
             val moduleEntityIds = module.functionIds + module.globalIds
@@ -526,6 +572,16 @@ object SourceTreeGenerator {
             val checkpointText = checkpointPath.readText()
             val checkpointEvidencePath = profile.layout.declaration("module-evidence").materialize(mapOf("module" to module.id))
             generated += evidence(profile, checkpointEvidencePath, checkpointText, "planner", moduleEntityIds)
+            checkpoint.executionEvidencePath?.let { evidencePath ->
+                val evidenceText = projectDir.resolve(evidencePath).readText()
+                generated += evidence(
+                    profile,
+                    evidencePath,
+                    evidenceText,
+                    "acp-execution-evidence:v1",
+                    moduleEntityIds,
+                )
+            }
             onModuleProgress(index + 1, plan.modules.size, module.id)
         }
 
@@ -715,9 +771,27 @@ object SourceTreeGenerator {
         val retryable: Boolean,
         val issues: List<ModuleReconstructionIssue>,
         val entityIds: List<String>,
+        val executionEvidencePath: String? = null,
+        val executionEvidenceSha256: String? = null,
     ) {
+        init {
+            require((executionEvidencePath == null) == (executionEvidenceSha256 == null)) {
+                "module checkpoint execution evidence path and digest must be present together"
+            }
+            executionEvidencePath?.let { requireNormalizedProjectPath(it, "module execution evidence path") }
+            require(executionEvidenceSha256 == null || executionEvidenceSha256.matches(Regex("[0-9a-f]{64}"))) {
+                "module checkpoint execution evidence digest is invalid"
+            }
+        }
+
+        fun hasCurrentExecutionEvidence(projectDir: Path): Boolean {
+            val evidencePath = executionEvidencePath ?: return true
+            val evidenceFile = projectDir.resolve(evidencePath)
+            return evidenceFile.exists() && sha256(evidenceFile.readBytes()) == executionEvidenceSha256
+        }
+
         fun toJson(): String = buildString {
-            append("{\n  \"schemaVersion\": 2,")
+            append("{\n  \"schemaVersion\": 3,")
             append("\n  \"fingerprint\": \"").append(fingerprint).append("\",")
             append("\n  \"sourceSha256\": \"").append(sourceSha256).append("\",")
             append("\n  \"generator\": \"").append(generator.jsonEscape()).append("\",")
@@ -725,6 +799,10 @@ object SourceTreeGenerator {
             append("\n  \"promptSha256\": \"").append(promptSha256).append("\",")
             append("\n  \"promptCharacters\": ").append(promptCharacters ?: "null").append(',')
             append("\n  \"promptBudgetCharacters\": ").append(promptBudgetCharacters ?: "null").append(',')
+            append("\n  \"executionEvidencePath\": ")
+            append(executionEvidencePath?.let { "\"${it.jsonEscape()}\"" } ?: "null").append(',')
+            append("\n  \"executionEvidenceSha256\": ")
+            append(executionEvidenceSha256?.let { "\"$it\"" } ?: "null").append(',')
             append("\n  \"accepted\": ").append(accepted).append(',')
             append("\n  \"retryable\": ").append(retryable).append(',')
             append("\n  \"entityStatuses\": [")
@@ -748,7 +826,11 @@ object SourceTreeGenerator {
         if (!path.exists()) return null
         return runCatching {
             val root = Json.parseToJsonElement(path.readText()).jsonObject
-            if (root["schemaVersion"]?.jsonPrimitive?.intOrNull != 2) return null
+            val schemaVersion = root["schemaVersion"]?.jsonPrimitive?.intOrNull
+            if (schemaVersion !in setOf(2, 3)) return null
+            fun optionalString(name: String): String? = root[name]?.let { value ->
+                if (value is JsonNull) null else value.jsonPrimitive.content
+            }
             ModuleCheckpoint(
                 fingerprint = root.getValue("fingerprint").jsonPrimitive.content,
                 sourceSha256 = root.getValue("sourceSha256").jsonPrimitive.content,
@@ -770,6 +852,8 @@ object SourceTreeGenerator {
                 entityIds = root.getValue("entityStatuses").jsonArray.map {
                     it.jsonObject.getValue("id").jsonPrimitive.content
                 },
+                executionEvidencePath = if (schemaVersion == 3) optionalString("executionEvidencePath") else null,
+                executionEvidenceSha256 = if (schemaVersion == 3) optionalString("executionEvidenceSha256") else null,
             )
         }.getOrNull()
     }

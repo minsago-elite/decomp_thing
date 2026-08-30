@@ -107,13 +107,16 @@ import kotlinx.serialization.json.JsonPrimitive
  */
 class AcpAgentHarness(
     private val configuration: AcpProcessConfiguration,
-) : AgentHarness {
+) : AgentHarness, AcpExecutionEvidenceSource {
+    private val factoryProvenance = AtomicReference<AcpHarnessProvenance?>()
     private val unresolvedCleanupFailure = AtomicReference<AgentExecutionException?>()
     private val diagnostics = AtomicReference<AcpProcessDiagnostics?>()
     private val filesystemAudit = AtomicReference<List<AcpFilesystemAuditRecord>>(emptyList())
     private val terminalAudit = AtomicReference<List<AcpTerminalAuditRecord>>(emptyList())
     private val permissionAudit = AtomicReference<List<AcpPermissionAuditRecord>>(emptyList())
     private val sandboxEvidence = AtomicReference<AcpSandboxEvidence?>()
+    private val negotiatedAgentEvidence = AtomicReference<AcpNegotiatedAgentEvidence?>()
+    private val executionEvidence = AtomicReference<AcpExecutionEvidenceSnapshot?>()
 
     override fun implementationIdentifier(): String = configuration.implementationId
 
@@ -130,6 +133,19 @@ class AcpAgentHarness(
 
     fun latestSandboxEvidence(): AcpSandboxEvidence? = sandboxEvidence.get()
 
+    override fun latestAcpExecutionEvidence(): AcpExecutionEvidenceSnapshot? = executionEvidence.get()
+
+    /** Package-owned one-time binding; preserves the single public constructor security surface. */
+    internal fun bindFactoryProvenance(provenance: AcpHarnessProvenance): AcpAgentHarness {
+        require(provenance.harness == "acp" && provenance.implementationId == configuration.implementationId) {
+            "ACP factory provenance does not identify this process configuration"
+        }
+        require(factoryProvenance.compareAndSet(null, provenance)) {
+            "ACP factory provenance is already bound"
+        }
+        return this
+    }
+
     @OptIn(UnstableApi::class)
     override fun execute(
         request: AgentExecutionRequest,
@@ -141,6 +157,8 @@ class AcpAgentHarness(
         terminalAudit.set(emptyList())
         permissionAudit.set(emptyList())
         sandboxEvidence.set(null)
+        negotiatedAgentEvidence.set(null)
+        executionEvidence.set(null)
         validateRequest(request)
         if (request.cancellation.isCancellationRequested()) {
             return AgentExecutionResult(AgentStopReason.CANCELLED, "cancelled before the ACP process started")
@@ -509,13 +527,33 @@ class AcpAgentHarness(
         } ?: AgentUsage(toolCalls = translator.toolCallCount(), wallClock = elapsed)
         val limited = tokenLimitExceeded(request, usage)
 
-        return AgentExecutionResult(
+        val result = AgentExecutionResult(
             stopReason = if (limited) AgentStopReason.LIMIT_EXHAUSTED else stopReason,
             summary = translator.summary().ifBlank { finished.summary },
             changes = changes,
             session = translator.sessionReference(),
             usage = usage,
         )
+        factoryProvenance.get()?.let { provenance ->
+            executionEvidence.set(
+                AcpExecutionEvidenceSnapshot(
+                    factoryProvenance = provenance,
+                    negotiatedAgent = requireNotNull(negotiatedAgentEvidence.get()) {
+                        "successful ACP turn is missing initialize evidence"
+                    },
+                    diagnostics = requireNotNull(completedDiagnostics) {
+                        "successful ACP turn is missing process diagnostics"
+                    },
+                    filesystemAudit = filesystemAudit.get(),
+                    terminalAudit = terminalAudit.get(),
+                    permissionAudit = permissionAudit.get(),
+                    sandboxEvidence = requireNotNull(sandboxEvidence.get()) {
+                        "successful ACP turn is missing sandbox evidence"
+                    },
+                ),
+            )
+        }
+        return result
     }
 
     @OptIn(UnstableApi::class)
@@ -587,7 +625,10 @@ class AcpAgentHarness(
                         fs = filesystem.capability,
                         terminal = terminal.capability,
                     ),
-                    implementation = Implementation("decomp_engine", "0.1.0"),
+                    implementation = Implementation(
+                        ACP_CLIENT_IMPLEMENTATION_NAME,
+                        ACP_CLIENT_IMPLEMENTATION_VERSION,
+                    ),
                     supportedProtocolVersions = setOf(ACP_STABLE_PROTOCOL_VERSION),
                 ),
             )
@@ -598,6 +639,26 @@ class AcpAgentHarness(
             )
         }
         validateCapabilities(agentInfo.capabilities, request)
+        val agentImplementation = agentInfo.implementation
+            ?: throw AcpProtocolFailure("ACP agent did not identify its implementation during initialize")
+        negotiatedAgentEvidence.set(
+            AcpNegotiatedAgentEvidence(
+                protocolVersion = agentInfo.protocolVersion,
+                implementationName = agentImplementation.name,
+                implementationVersion = agentImplementation.version,
+                implementationTitle = agentImplementation.title,
+                capabilities = AcpNegotiatedCapabilitiesEvidence(
+                    loadSession = agentInfo.capabilities.loadSession,
+                    promptImage = agentInfo.capabilities.promptCapabilities.image,
+                    promptAudio = agentInfo.capabilities.promptCapabilities.audio,
+                    promptEmbeddedContext = agentInfo.capabilities.promptCapabilities.embeddedContext,
+                    mcpHttp = agentInfo.capabilities.mcpCapabilities.http,
+                    mcpSse = agentInfo.capabilities.mcpCapabilities.sse,
+                    sessionAdditionalDirectories =
+                        agentInfo.capabilities.sessionCapabilities.additionalDirectories != null,
+                ),
+            ),
+        )
 
         val primaryRoot = request.workspaceRoots.first()
         val additionalRoots = request.workspaceRoots.drop(1).map { it.path.toString() }

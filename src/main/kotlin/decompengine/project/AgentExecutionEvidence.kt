@@ -1,0 +1,739 @@
+package decompengine.project
+
+import decompengine.acp.ACP_CLIENT_IMPLEMENTATION_NAME
+import decompengine.acp.ACP_CLIENT_IMPLEMENTATION_VERSION
+import decompengine.acp.AcpCgroupControllerEvidence
+import decompengine.acp.AcpExecutionEvidenceSnapshot
+import decompengine.acp.AcpFilesystemAuditRecord
+import decompengine.acp.AcpPermissionAuditRecord
+import decompengine.acp.AcpSandboxEvidence
+import decompengine.acp.AcpSandboxLaunchEvidence
+import decompengine.acp.AcpSandboxMountEvidence
+import decompengine.acp.AcpSandboxResourceLimits
+import decompengine.acp.AcpTerminalAuditRecord
+import decompengine.agent.AgentExecutionEvent
+import decompengine.agent.AgentExecutionRequest
+import decompengine.agent.AgentExecutionResult
+import decompengine.agent.AgentFileChange
+import decompengine.agent.AgentFileChangeEvent
+import decompengine.agent.AgentMessageEvent
+import decompengine.agent.AgentPermissionEvent
+import decompengine.agent.AgentPlanEvent
+import decompengine.agent.AgentToolEvent
+import java.nio.charset.StandardCharsets
+import java.security.MessageDigest
+import java.util.Collections
+
+/**
+ * Immutable, metadata-only ACP evidence retained by a reconstructed module until source validation
+ * can be bound to the same turn. Peer-authored text and opaque IDs are represented by digests.
+ */
+class ReconstructionAgentExecutionEvidence private constructor(
+    private val request: ArchivedAgentRequest,
+    private val result: AgentExecutionResult,
+    events: Collection<ArchivedAgentEvent>,
+    private val acp: AcpExecutionEvidenceSnapshot,
+) {
+    private val events: List<ArchivedAgentEvent> =
+        Collections.unmodifiableList(ArrayList(events.sortedBy(ArchivedAgentEvent::sequence)))
+
+    init {
+        require(this.events.size <= MAXIMUM_ARCHIVED_AGENT_EVENTS) {
+            "ACP event evidence exceeds the $MAXIMUM_ARCHIVED_AGENT_EVENTS-record limit"
+        }
+        require(this.events.map(ArchivedAgentEvent::sequence) == this.events.indices.map(Int::toLong)) {
+            "ACP event evidence is missing or reorders an event sequence"
+        }
+        val session = requireNotNull(result.session) {
+            "successful ACP reconstruction is missing its session reference"
+        }
+        require(session.harnessId == acp.factoryProvenance.implementationId) {
+            "ACP session and factory implementation identities differ"
+        }
+        val eventChanges = this.events.filterIsInstance<ArchivedFileChangeEvent>().map { it.change }
+        require(eventChanges == result.changes) {
+            "ACP event evidence does not contain the complete execution change set"
+        }
+    }
+
+    internal fun toValidatedJson(
+        moduleId: String,
+        sourceSha256: String,
+        accepted: Boolean,
+        issues: Collection<ModuleReconstructionIssue>,
+    ): String {
+        require(moduleId.matches(Regex("[A-Za-z0-9_][A-Za-z0-9_.-]{0,127}"))) {
+            "execution evidence module ID is invalid"
+        }
+        require(sourceSha256.isSha256()) { "execution evidence source digest is invalid" }
+        val text = buildString {
+            append("{\n  \"schemaVersion\": 1,")
+            append("\n  \"kind\": \"decomp-engine.reconstruction-acp-execution\",")
+            append("\n  \"moduleId\": ").append(moduleId.jsonString()).append(',')
+            appendFactoryProvenance(acp)
+            appendProtocolAndAgent(acp)
+            appendSessionAndTurn(request, result)
+            appendBounds(request, events)
+            appendEvents(events)
+            appendResult(result)
+            appendPolicyAudits(acp)
+            appendProcessDiagnostics(acp)
+            appendSandboxEvidence(acp.sandboxEvidence)
+            appendValidation(sourceSha256, accepted, issues)
+            append("\n}\n")
+        }
+        require(text.toByteArray(StandardCharsets.UTF_8).size <= MAXIMUM_ARCHIVED_EVIDENCE_BYTES) {
+            "ACP execution evidence exceeds the $MAXIMUM_ARCHIVED_EVIDENCE_BYTES-byte artifact limit"
+        }
+        return text
+    }
+
+    internal companion object {
+        fun capture(
+            request: AgentExecutionRequest,
+            promptSha256: String,
+            result: AgentExecutionResult,
+            events: Collection<ArchivedAgentEvent>,
+            acp: AcpExecutionEvidenceSnapshot,
+        ): ReconstructionAgentExecutionEvidence = ReconstructionAgentExecutionEvidence(
+            ArchivedAgentRequest(
+                objectiveSha256 = digest(request.objective),
+                objectiveUtf8Bytes = utf8Bytes(request.objective),
+                promptSha256 = promptSha256,
+                workspaceRootIds = request.workspaceRoots.map { it.id },
+                contextInputIds = request.contextInputs.map { it.id },
+                filesystemEnabled = request.accessPolicy.allowedOperations.any { it.name.endsWith("FILE") },
+                terminalEnabled = request.accessPolicy.allowedOperations.any { it.name == "EXECUTE_COMMAND" },
+                maximumTurns = request.limits.maxTurns,
+                maximumToolCalls = request.limits.maxToolCalls,
+                maximumOutputBytes = request.limits.maxOutputBytes,
+                wallClockTimeoutMillis = request.limits.wallClockTimeout.toMillis(),
+                idleTimeoutMillis = request.limits.idleTimeout.toMillis(),
+            ),
+            result,
+            events,
+            acp,
+        )
+    }
+}
+
+/** Captures every public execution event without retaining peer-authored text. */
+internal class BoundedAgentExecutionEventRecorder(
+    private val maximumEvents: Int = MAXIMUM_ARCHIVED_AGENT_EVENTS,
+    private val maximumComponents: Int = MAXIMUM_ARCHIVED_EVENT_COMPONENTS,
+    private val maximumPeerBytes: Long = MAXIMUM_ARCHIVED_EVENT_PEER_BYTES,
+) {
+    private val events = mutableListOf<ArchivedAgentEvent>()
+    private var components = 0
+    private var peerBytes = 0L
+
+    init {
+        require(maximumEvents > 0 && maximumComponents > 0 && maximumPeerBytes > 0) {
+            "agent event evidence bounds must be positive"
+        }
+    }
+
+    @Synchronized
+    fun record(event: AgentExecutionEvent) {
+        require(events.size < maximumEvents) {
+            "agent event evidence exceeds the $maximumEvents-record limit"
+        }
+        val archived = when (event) {
+            is AgentMessageEvent -> {
+                consume(1, event.messageId, event.textDelta)
+                ArchivedMessageEvent(
+                    event.sequence,
+                    event.role.name.wireName(),
+                    digest(event.messageId),
+                    digest(event.textDelta),
+                    utf8Bytes(event.textDelta),
+                    event.completed,
+                )
+            }
+            is AgentPlanEvent -> {
+                consume(event.entries.size, *event.entries.flatMap { listOf(it.id, it.description) }.toTypedArray())
+                ArchivedPlanEvent(
+                    event.sequence,
+                    event.entries.map { entry ->
+                        ArchivedPlanEntry(
+                            digest(entry.id),
+                            digest(entry.description),
+                            utf8Bytes(entry.description),
+                            entry.status.name.wireName(),
+                        )
+                    },
+                )
+            }
+            is AgentToolEvent -> {
+                consume(1 + event.details.size, event.toolCallId, event.title, *event.details.flatMap {
+                    listOf(it.key, it.value)
+                }.toTypedArray())
+                ArchivedToolEvent(
+                    event.sequence,
+                    digest(event.toolCallId),
+                    digest(event.title),
+                    event.status.name.wireName(),
+                    digestCanonicalMap(event.details),
+                    event.details.size,
+                )
+            }
+            is AgentPermissionEvent -> {
+                consume(1, event.requestId, event.selectedOptionId.orEmpty(), event.reason.orEmpty())
+                ArchivedPermissionEvent(
+                    event.sequence,
+                    digest(event.requestId),
+                    event.decision.name.wireName(),
+                    event.selectedOptionId?.let(::digest),
+                    event.reason?.let(::digest),
+                )
+            }
+            is AgentFileChangeEvent -> {
+                consume(1, event.change.path.rootId, event.change.path.relativePath)
+                ArchivedFileChangeEvent(event.sequence, event.change)
+            }
+        }
+        require(events.lastOrNull()?.sequence?.let { event.sequence > it } != false) {
+            "agent execution event sequences must be strictly increasing"
+        }
+        events += archived
+    }
+
+    @Synchronized
+    fun snapshot(): List<ArchivedAgentEvent> = Collections.unmodifiableList(ArrayList(events))
+
+    private fun consume(componentCount: Int, vararg values: String) {
+        components = Math.addExact(components, componentCount)
+        require(components <= maximumComponents) {
+            "agent event evidence exceeds the $maximumComponents-component limit"
+        }
+        values.forEach { value ->
+            peerBytes = Math.addExact(peerBytes, utf8Bytes(value).toLong())
+            require(peerBytes <= maximumPeerBytes) {
+                "agent event evidence exceeds the $maximumPeerBytes-byte peer-input limit"
+            }
+        }
+    }
+}
+
+internal sealed interface ArchivedAgentEvent {
+    val sequence: Long
+    fun appendJson(output: StringBuilder)
+}
+
+private data class ArchivedMessageEvent(
+    override val sequence: Long,
+    val role: String,
+    val messageIdSha256: String,
+    val textSha256: String,
+    val textUtf8Bytes: Int,
+    val completed: Boolean,
+) : ArchivedAgentEvent {
+    override fun appendJson(output: StringBuilder) {
+        output.append("{\"sequence\":").append(sequence)
+        output.append(",\"type\":\"message\",\"role\":").append(role.jsonString())
+        output.append(",\"messageIdSha256\":\"").append(messageIdSha256).append('"')
+        output.append(",\"textSha256\":\"").append(textSha256).append('"')
+        output.append(",\"textUtf8Bytes\":").append(textUtf8Bytes)
+        output.append(",\"completed\":").append(completed).append('}')
+    }
+}
+
+private data class ArchivedPlanEntry(
+    val idSha256: String,
+    val descriptionSha256: String,
+    val descriptionUtf8Bytes: Int,
+    val status: String,
+)
+
+private data class ArchivedPlanEvent(
+    override val sequence: Long,
+    val entries: List<ArchivedPlanEntry>,
+) : ArchivedAgentEvent {
+    override fun appendJson(output: StringBuilder) {
+        output.append("{\"sequence\":").append(sequence).append(",\"type\":\"plan\",\"entries\":[")
+        entries.forEachIndexed { index, entry ->
+            if (index > 0) output.append(',')
+            output.append("{\"idSha256\":\"").append(entry.idSha256)
+            output.append("\",\"descriptionSha256\":\"").append(entry.descriptionSha256)
+            output.append("\",\"descriptionUtf8Bytes\":").append(entry.descriptionUtf8Bytes)
+            output.append(",\"status\":").append(entry.status.jsonString()).append('}')
+        }
+        output.append("]}")
+    }
+}
+
+private data class ArchivedToolEvent(
+    override val sequence: Long,
+    val toolCallIdSha256: String,
+    val titleSha256: String,
+    val status: String,
+    val detailsSha256: String,
+    val detailCount: Int,
+) : ArchivedAgentEvent {
+    override fun appendJson(output: StringBuilder) {
+        output.append("{\"sequence\":").append(sequence).append(",\"type\":\"tool\"")
+        output.append(",\"toolCallIdSha256\":\"").append(toolCallIdSha256)
+        output.append("\",\"titleSha256\":\"").append(titleSha256)
+        output.append("\",\"status\":").append(status.jsonString())
+        output.append(",\"detailsSha256\":\"").append(detailsSha256)
+        output.append("\",\"detailCount\":").append(detailCount).append('}')
+    }
+}
+
+private data class ArchivedPermissionEvent(
+    override val sequence: Long,
+    val requestIdSha256: String,
+    val decision: String,
+    val selectedOptionIdSha256: String?,
+    val reasonSha256: String?,
+) : ArchivedAgentEvent {
+    override fun appendJson(output: StringBuilder) {
+        output.append("{\"sequence\":").append(sequence).append(",\"type\":\"permission\"")
+        output.append(",\"requestIdSha256\":\"").append(requestIdSha256)
+        output.append("\",\"decision\":").append(decision.jsonString())
+        output.append(",\"selectedOptionIdSha256\":").append(selectedOptionIdSha256.jsonNullable())
+        output.append(",\"reasonSha256\":").append(reasonSha256.jsonNullable()).append('}')
+    }
+}
+
+private data class ArchivedFileChangeEvent(
+    override val sequence: Long,
+    val change: AgentFileChange,
+) : ArchivedAgentEvent {
+    override fun appendJson(output: StringBuilder) {
+        output.append("{\"sequence\":").append(sequence).append(",\"type\":\"file-change\",\"change\":")
+        output.appendFileChange(change).append('}')
+    }
+}
+
+private data class ArchivedAgentRequest(
+    val objectiveSha256: String,
+    val objectiveUtf8Bytes: Int,
+    val promptSha256: String,
+    val workspaceRootIds: List<String>,
+    val contextInputIds: List<String>,
+    val filesystemEnabled: Boolean,
+    val terminalEnabled: Boolean,
+    val maximumTurns: Int,
+    val maximumToolCalls: Int,
+    val maximumOutputBytes: Long,
+    val wallClockTimeoutMillis: Long,
+    val idleTimeoutMillis: Long,
+)
+
+private fun StringBuilder.appendFactoryProvenance(acp: AcpExecutionEvidenceSnapshot) {
+    val provenance = acp.factoryProvenance
+    append("\n  \"factoryProvenance\": {")
+    append("\n    \"descriptor\": ").append(provenance.stableDescriptor.jsonString()).append(',')
+    append("\n    \"harness\": ").append(provenance.harness.jsonString()).append(',')
+    append("\n    \"implementationId\": ").append(provenance.implementationId.jsonString()).append(',')
+    append("\n    \"agentExecutionContractVersion\": ").append(provenance.agentExecutionContractVersion).append(',')
+    append("\n    \"configurationSha256\": ").append(provenance.configurationSha256.jsonNullable()).append(',')
+    append("\n    \"deprecated\": ").append(provenance.deprecated)
+    append("\n  },")
+}
+
+private fun StringBuilder.appendProtocolAndAgent(acp: AcpExecutionEvidenceSnapshot) {
+    val agent = acp.negotiatedAgent
+    val capabilities = agent.capabilities
+    append("\n  \"protocol\": {")
+    append("\n    \"name\": \"acp\",")
+    append("\n    \"version\": ").append(agent.protocolVersion).append(',')
+    append("\n    \"sdkVersion\": ").append(acp.factoryProvenance.acpSdkVersion.jsonNullable()).append(',')
+    append("\n    \"clientImplementation\": {\"name\":")
+        .append(ACP_CLIENT_IMPLEMENTATION_NAME.jsonString())
+        .append(",\"version\":").append(ACP_CLIENT_IMPLEMENTATION_VERSION.jsonString()).append("}")
+    append("\n  },")
+    append("\n  \"agent\": {")
+    append("\n    \"configuredImplementationId\": ")
+        .append(acp.factoryProvenance.implementationId.jsonString()).append(',')
+    append("\n    \"negotiatedImplementation\": {")
+    append("\"name\":").append(agent.implementationName.jsonString()).append(',')
+    append("\"version\":").append(agent.implementationVersion.jsonString()).append(',')
+    append("\"title\":").append(agent.implementationTitle.jsonNullable()).append("},")
+    append("\n    \"negotiatedCapabilities\": {")
+    append("\"loadSession\":").append(capabilities.loadSession).append(',')
+    append("\"promptImage\":").append(capabilities.promptImage).append(',')
+    append("\"promptAudio\":").append(capabilities.promptAudio).append(',')
+    append("\"promptEmbeddedContext\":").append(capabilities.promptEmbeddedContext).append(',')
+    append("\"mcpHttp\":").append(capabilities.mcpHttp).append(',')
+    append("\"mcpSse\":").append(capabilities.mcpSse).append(',')
+    append("\"sessionAdditionalDirectories\":").append(capabilities.sessionAdditionalDirectories).append("}")
+    append("\n  },")
+}
+
+private fun StringBuilder.appendSessionAndTurn(request: ArchivedAgentRequest, result: AgentExecutionResult) {
+    val session = requireNotNull(result.session)
+    append("\n  \"session\": {")
+    append("\n    \"harnessId\": ").append(session.harnessId.jsonString()).append(',')
+    append("\n    \"sessionIdSha256\": \"").append(digest(session.sessionId)).append("\",")
+    append("\n    \"resumeReferenceSha256\": ").append(session.resumeReference?.let(::digest).jsonNullable())
+    append("\n  },")
+    append("\n  \"turn\": {")
+    append("\n    \"ordinal\": 1,")
+    append("\n    \"objectiveSha256\": \"").append(request.objectiveSha256).append("\",")
+    append("\n    \"objectiveUtf8Bytes\": ").append(request.objectiveUtf8Bytes).append(',')
+    append("\n    \"promptSha256\": \"").append(request.promptSha256).append("\"")
+    append("\n  },")
+}
+
+private fun StringBuilder.appendBounds(request: ArchivedAgentRequest, events: List<ArchivedAgentEvent>) {
+    append("\n  \"bounds\": {")
+    append("\n    \"maximumArchivedBytes\": ").append(MAXIMUM_ARCHIVED_EVIDENCE_BYTES).append(',')
+    append("\n    \"maximumArchivedEvents\": ").append(MAXIMUM_ARCHIVED_AGENT_EVENTS).append(',')
+    append("\n    \"archivedEventCount\": ").append(events.size).append(',')
+    append("\n    \"maximumTurns\": ").append(request.maximumTurns).append(',')
+    append("\n    \"maximumToolCalls\": ").append(request.maximumToolCalls).append(',')
+    append("\n    \"maximumOutputBytes\": ").append(request.maximumOutputBytes).append(',')
+    append("\n    \"wallClockTimeoutMillis\": ").append(request.wallClockTimeoutMillis).append(',')
+    append("\n    \"idleTimeoutMillis\": ").append(request.idleTimeoutMillis).append(',')
+    append("\n    \"workspaceRootIds\": ").appendJsonStrings(request.workspaceRootIds).append(',')
+    append("\n    \"contextInputIds\": ").appendJsonStrings(request.contextInputIds).append(',')
+    append("\n    \"filesystemCapabilityEnabled\": ").append(request.filesystemEnabled).append(',')
+    append("\n    \"terminalCapabilityEnabled\": ").append(request.terminalEnabled)
+    append("\n  },")
+}
+
+private fun StringBuilder.appendEvents(events: List<ArchivedAgentEvent>) {
+    append("\n  \"events\": [")
+    events.forEachIndexed { index, event ->
+        if (index > 0) append(',')
+        append("\n    ")
+        event.appendJson(this)
+    }
+    append("\n  ],")
+}
+
+private fun StringBuilder.appendResult(result: AgentExecutionResult) {
+    append("\n  \"result\": {")
+    append("\n    \"stopReason\": ").append(result.stopReason.name.wireName().jsonString()).append(',')
+    append("\n    \"summarySha256\": ").append(result.summary?.let(::digest).jsonNullable()).append(',')
+    append("\n    \"summaryUtf8Bytes\": ").append(result.summary?.let(::utf8Bytes) ?: "null").append(',')
+    append("\n    \"changes\": [")
+    result.changes.forEachIndexed { index, change ->
+        if (index > 0) append(',')
+        append("\n      ").appendFileChange(change)
+    }
+    append("\n    ],")
+    append("\n    \"usage\": ")
+    val usage = result.usage
+    if (usage == null) append("null") else {
+        append('{')
+        append("\"inputTokens\":").append(usage.inputTokens ?: "null").append(',')
+        append("\"outputTokens\":").append(usage.outputTokens ?: "null").append(',')
+        append("\"cachedInputTokens\":").append(usage.cachedInputTokens ?: "null").append(',')
+        append("\"toolCalls\":").append(usage.toolCalls ?: "null").append(',')
+        append("\"wallClockMillis\":").append(usage.wallClock?.toMillis() ?: "null").append('}')
+    }
+    append("\n  },")
+}
+
+private fun StringBuilder.appendPolicyAudits(acp: AcpExecutionEvidenceSnapshot) {
+    append("\n  \"policyAudits\": {")
+    append("\n    \"filesystem\": [")
+    acp.filesystemAudit.forEachIndexed { index, record ->
+        if (index > 0) append(',')
+        append("\n      ").appendFilesystemAudit(record)
+    }
+    append("\n    ],")
+    append("\n    \"terminal\": [")
+    acp.terminalAudit.forEachIndexed { index, record ->
+        if (index > 0) append(',')
+        append("\n      ").appendTerminalAudit(record)
+    }
+    append("\n    ],")
+    append("\n    \"permission\": [")
+    acp.permissionAudit.forEachIndexed { index, record ->
+        if (index > 0) append(',')
+        append("\n      ").appendPermissionAudit(record)
+    }
+    append("\n    ]")
+    append("\n  },")
+}
+
+private fun StringBuilder.appendFilesystemAudit(record: AcpFilesystemAuditRecord): StringBuilder {
+    append("{\"sequence\":").append(record.sequence)
+    append(",\"sessionIdSha256\":\"").append(digest(record.sessionId)).append('"')
+    append(",\"method\":").append(record.method.jsonString())
+    append(",\"requestedPathSha256\":\"").append(record.requestedPathSha256).append('"')
+    append(",\"policyPath\":")
+    val path = record.policyPath
+    if (path == null) append("null") else {
+        append("{\"rootId\":").append(path.rootId.jsonString())
+        append(",\"relativePath\":").append(path.relativePath.jsonString()).append('}')
+    }
+    append(",\"outcome\":").append(record.outcome.name.wireName().jsonString())
+    append(",\"reason\":").append(record.reason.name.wireName().jsonString()).append('}')
+    return this
+}
+
+private fun StringBuilder.appendTerminalAudit(record: AcpTerminalAuditRecord): StringBuilder {
+    append("{\"sequence\":").append(record.sequence)
+    append(",\"sessionIdSha256\":\"").append(digest(record.sessionId)).append('"')
+    append(",\"method\":").append(record.method.jsonString())
+    append(",\"requestSha256\":\"").append(record.requestSha256).append('"')
+    append(",\"terminalIdSha256\":").append(record.terminalIdSha256.jsonNullable())
+    append(",\"toolCallIdSha256\":").append(record.toolCallIdSha256.jsonNullable())
+    append(",\"outcome\":").append(record.outcome.name.wireName().jsonString())
+    append(",\"reason\":").append(record.reason.name.wireName().jsonString())
+    append(",\"networkIsolated\":").append(record.networkIsolated)
+    append(",\"retainedOutputBytes\":").append(record.retainedOutputBytes ?: "null")
+    append(",\"producedOutputBytes\":").append(record.producedOutputBytes ?: "null")
+    append(",\"outputTruncated\":").append(record.outputTruncated ?: "null").append('}')
+    return this
+}
+
+private fun StringBuilder.appendPermissionAudit(record: AcpPermissionAuditRecord): StringBuilder {
+    append("{\"sequence\":").append(record.sequence)
+    append(",\"sessionIdSha256\":\"").append(digest(record.sessionId)).append('"')
+    append(",\"toolCallIdSha256\":\"").append(record.toolCallIdSha256).append('"')
+    append(",\"offeredOptionCount\":").append(record.offeredOptionCount)
+    append(",\"selectedOptionIdSha256\":").append(record.selectedOptionIdSha256.jsonNullable())
+    append(",\"selectedKind\":").append(record.selectedKind?.name?.wireName().jsonNullable())
+    append(",\"outcome\":").append(record.outcome.name.wireName().jsonString())
+    append(",\"reason\":").append(record.reason.name.wireName().jsonString())
+    append(",\"authorityExpanded\":").append(record.authorityExpanded).append('}')
+    return this
+}
+
+private fun StringBuilder.appendProcessDiagnostics(acp: AcpExecutionEvidenceSnapshot) {
+    val process = acp.diagnostics
+    append("\n  \"process\": {")
+    append("\n    \"exitCode\": ").append(process.exitCode ?: "null").append(',')
+    append("\n    \"stderrSha256\": \"").append(digest(process.stderr)).append("\",")
+    append("\n    \"stderrUtf8Bytes\": ").append(utf8Bytes(process.stderr)).append(',')
+    append("\n    \"stderrTruncated\": ").append(process.stderrTruncated).append(',')
+    append("\n    \"producedOutputBytes\": ").append(process.producedOutputBytes).append(',')
+    append("\n    \"producedOutputLimitBytes\": ").append(process.producedOutputLimitBytes).append(',')
+    append("\n    \"outputLimitExceeded\": ").append(process.outputLimitExceeded).append(',')
+    append("\n    \"forcedTermination\": ").append(process.forcedTermination).append(',')
+    append("\n    \"rootTerminationRequested\": ").append(process.rootTerminationRequested).append(',')
+    append("\n    \"remainingProcessCount\": ").append(process.remainingProcessIds.size).append(',')
+    append("\n    \"containment\": ").append(process.containment.jsonString()).append(',')
+    append("\n    \"networkIsolated\": ").append(process.networkIsolated).append(',')
+    append("\n    \"sandboxCleanupVerified\": ").append(process.sandboxCleanupVerified)
+    append("\n  },")
+}
+
+private fun StringBuilder.appendSandboxEvidence(sandbox: AcpSandboxEvidence) {
+    append("\n  \"sandbox\": {")
+    append("\n    \"evidenceSha256\": \"").append(sandbox.evidenceSha256).append("\",")
+    append("\n    \"provider\": ").append(sandbox.provider.jsonString()).append(',')
+    append("\n    \"providerVersion\": ").append(sandbox.providerVersion.jsonString()).append(',')
+    append("\n    \"providerExecutableSha256\": \"").append(sandbox.providerExecutableSha256).append("\",")
+    append("\n    \"providerExecutableMode\": ").append(sandbox.providerExecutableMode).append(',')
+    append("\n    \"resourceLimiterSha256\": \"").append(sandbox.resourceLimiterSha256).append("\",")
+    append("\n    \"scopeSupervisorSha256\": \"").append(sandbox.scopeSupervisorSha256).append("\",")
+    append("\n    \"scopeInspectorSha256\": \"").append(sandbox.scopeInspectorSha256).append("\",")
+    append("\n    \"environmentFdOpenerSha256\": \"").append(sandbox.environmentFdOpenerSha256).append("\",")
+    append("\n    \"policySha256\": ").append(sandbox.policySha256.jsonNullable()).append(',')
+    append("\n    \"networkIsolated\": ").append(sandbox.networkIsolated).append(',')
+    append("\n    \"outerAgentContained\": ").append(sandbox.outerAgentContained).append(',')
+    append("\n    \"nestedUserNamespacesDisabled\": ").append(sandbox.nestedUserNamespacesDisabled).append(',')
+    append("\n    \"newSession\": ").append(sandbox.newSession).append(',')
+    append("\n    \"dieWithParent\": ").append(sandbox.dieWithParent).append(',')
+    append("\n    \"cgroupV2PidsLimited\": ").append(sandbox.cgroupV2PidsLimited).append(',')
+    append("\n    \"cgroupV2MemoryLimited\": ").append(sandbox.cgroupV2MemoryLimited).append(',')
+    append("\n    \"cgroupV2CpuLimited\": ").append(sandbox.cgroupV2CpuLimited).append(',')
+    append("\n    \"outerAgentLimits\": ").appendResourceLimits(sandbox.outerAgentLimits).append(',')
+    append("\n    \"runtimeClosureLimits\": {")
+    append("\"maximumEntries\":").append(sandbox.runtimeClosureLimits.maximumEntries).append(',')
+    append("\"maximumUserOwnedFileBytes\":").append(sandbox.runtimeClosureLimits.maximumUserOwnedFileBytes).append(',')
+    append("\"maximumDepth\":").append(sandbox.runtimeClosureLimits.maximumDepth).append("},")
+    append("\n    \"securityExecutables\": [")
+    sandbox.securityExecutables.forEachIndexed { index, executable ->
+        if (index > 0) append(',')
+        append("{\"role\":").append(executable.role.jsonString())
+        append(",\"canonicalPathSha256\":\"").append(executable.canonicalPathSha256)
+        append("\",\"contentSha256\":\"").append(executable.contentSha256)
+        append("\",\"mode\":").append(executable.mode)
+        append(",\"metadataSha256\":\"").append(executable.metadataSha256).append("\"}")
+    }
+    append("],")
+    append("\n    \"authorities\": [")
+    sandbox.authorities.forEachIndexed { index, authority ->
+        if (index > 0) append(',')
+        append("{\"rootId\":").append(authority.rootId.jsonString())
+        append(",\"rootPathSha256\":\"").append(authority.rootPathSha256)
+        append("\",\"mode\":").append(authority.mode.name.wireName().jsonString())
+        append(",\"quota\":")
+        val quota = authority.quota
+        if (quota == null) append("null") else {
+            append("{\"provider\":").append(quota.provider.jsonString())
+            append(",\"mountId\":").append(quota.mountId)
+            append(",\"maximumBytes\":").append(quota.maximumBytes)
+            append(",\"maximumEntries\":").append(quota.maximumEntries)
+            append(",\"mountPathSha256\":\"").append(quota.mountPathSha256).append("\"}")
+        }
+        append('}')
+    }
+    append("],")
+    append("\n    \"launches\": [")
+    sandbox.launches.forEachIndexed { index, launch ->
+        if (index > 0) append(',')
+        appendSandboxLaunch(launch)
+    }
+    append("],")
+    append("\n    \"outerProcessOutput\": ")
+    val output = sandbox.outerProcessOutput
+    if (output == null) append("null") else {
+        append("{\"maximumBytes\":").append(output.maximumBytes)
+        append(",\"observedBytes\":").append(output.observedBytes)
+        append(",\"limitExceeded\":").append(output.limitExceeded).append('}')
+    }
+    append("\n  },")
+}
+
+private fun StringBuilder.appendSandboxLaunch(launch: AcpSandboxLaunchEvidence) {
+    append("{\"purpose\":").append(launch.purpose.name.wireName().jsonString())
+    append(",\"resourceLimits\":").appendResourceLimits(launch.resourceLimits)
+    append(",\"controllers\":").appendControllers(launch.controllers)
+    append(",\"commandSha256\":\"").append(launch.commandSha256).append('"')
+    append(",\"startGate\":{")
+    append("\"descriptor\":").append(launch.startGate.descriptor)
+    append(",\"waiterExecutableSha256\":\"").append(launch.startGate.waiterExecutableSha256)
+    append("\",\"helperProtocolSha256\":\"").append(launch.startGate.helperProtocolSha256)
+    append("\",\"positiveByteRequired\":").append(launch.startGate.positiveByteRequired).append('}')
+    append(",\"environment\":{")
+    append("\"sandboxPathSha256\":\"").append(launch.environment.sandboxPathSha256)
+    append("\",\"bindingNamesSha256\":\"").append(launch.environment.bindingNamesSha256)
+    append("\",\"bindingCount\":").append(launch.environment.bindingCount)
+    append(",\"encodedBytes\":").append(launch.environment.encodedBytes)
+    append(",\"device\":").append(launch.environment.device)
+    append(",\"inode\":").append(launch.environment.inode)
+    append(",\"mountId\":").append(launch.environment.mountId)
+    append(",\"mode\":").append(launch.environment.mode)
+    append(",\"linkCount\":").append(launch.environment.linkCount).append('}')
+    append(",\"effectiveRlimits\":{")
+    val limits = launch.effectiveRlimits
+    append("\"processesSoft\":").append(limits.processesSoft).append(',')
+    append("\"processesHard\":").append(limits.processesHard).append(',')
+    append("\"openFilesSoft\":").append(limits.openFilesSoft).append(',')
+    append("\"openFilesHard\":").append(limits.openFilesHard).append(',')
+    append("\"fileBytesSoft\":").append(limits.fileBytesSoft).append(',')
+    append("\"fileBytesHard\":").append(limits.fileBytesHard).append(',')
+    append("\"coreBytesSoft\":").append(limits.coreBytesSoft).append(',')
+    append("\"coreBytesHard\":").append(limits.coreBytesHard).append(',')
+    append("\"addressSpaceSoft\":").append(limits.addressSpaceSoft).append(',')
+    append("\"addressSpaceHard\":").append(limits.addressSpaceHard).append(',')
+    append("\"cpuSecondsSoft\":").append(limits.cpuSecondsSoft).append(',')
+    append("\"cpuSecondsHard\":").append(limits.cpuSecondsHard).append('}')
+    append(",\"executableMount\":").appendMount(launch.executableMount)
+    append(",\"runtimeMounts\":[")
+    launch.runtimeMounts.forEachIndexed { index, mount ->
+        if (index > 0) append(',')
+        appendMount(mount)
+    }
+    append("]}")
+}
+
+private fun StringBuilder.appendResourceLimits(limits: AcpSandboxResourceLimits): StringBuilder {
+    append("{\"maximumProcesses\":").append(limits.maximumProcesses)
+    append(",\"maximumOpenFiles\":").append(limits.maximumOpenFiles)
+    append(",\"maximumFileBytes\":").append(limits.maximumFileBytes)
+    append(",\"maximumAddressSpaceBytes\":").append(limits.maximumAddressSpaceBytes)
+    append(",\"maximumCpuSeconds\":").append(limits.maximumCpuSeconds).append('}')
+    return this
+}
+
+private fun StringBuilder.appendControllers(controllers: AcpCgroupControllerEvidence): StringBuilder {
+    append("{\"pidsMax\":").append(controllers.pidsMax)
+    append(",\"memoryMaxBytes\":").append(controllers.memoryMaxBytes)
+    append(",\"memorySwapMaxBytes\":").append(controllers.memorySwapMaxBytes)
+    append(",\"cpuQuotaMicros\":").append(controllers.cpuQuotaMicros)
+    append(",\"cpuPeriodMicros\":").append(controllers.cpuPeriodMicros)
+    append(",\"memoryOomGroup\":").append(controllers.memoryOomGroup)
+    append(",\"runtimeMaxMicros\":").append(controllers.runtimeMaxMicros)
+    append(",\"timeoutStopMicros\":").append(controllers.timeoutStopMicros).append('}')
+    return this
+}
+
+private fun StringBuilder.appendMount(mount: AcpSandboxMountEvidence): StringBuilder {
+    append("{\"sourcePathSha256\":\"").append(mount.sourcePathSha256)
+    append("\",\"destinationPathSha256\":\"").append(mount.destinationPathSha256)
+    append("\",\"manifestSha256\":\"").append(mount.manifestSha256)
+    append("\",\"device\":").append(mount.device)
+    append(",\"inode\":").append(mount.inode)
+    append(",\"mode\":").append(mount.mode)
+    append(",\"directory\":").append(mount.directory).append('}')
+    return this
+}
+
+private fun StringBuilder.appendValidation(
+    sourceSha256: String,
+    accepted: Boolean,
+    issues: Collection<ModuleReconstructionIssue>,
+) {
+    append("\n  \"validation\": {")
+    append("\n    \"accepted\": ").append(accepted).append(',')
+    append("\n    \"sourceSha256\": \"").append(sourceSha256).append("\",")
+    append("\n    \"issues\": [")
+    issues.sortedWith(compareBy(ModuleReconstructionIssue::code, ModuleReconstructionIssue::message)).forEachIndexed {
+            index, issue ->
+        if (index > 0) append(',')
+        append("{\"code\":").append(issue.code.jsonString())
+        append(",\"messageSha256\":\"").append(digest(issue.message)).append('"')
+        append(",\"messageUtf8Bytes\":").append(utf8Bytes(issue.message))
+        append(",\"entityIds\":").appendJsonStrings(issue.entityIds.sorted()).append('}')
+    }
+    append("\n    ]")
+    append("\n  }")
+}
+
+private fun StringBuilder.appendFileChange(change: AgentFileChange): StringBuilder {
+    append("{\"rootId\":").append(change.path.rootId.jsonString())
+    append(",\"relativePath\":").append(change.path.relativePath.jsonString())
+    append(",\"kind\":").append(change.kind.name.wireName().jsonString())
+    append(",\"beforeSha256\":").append(change.beforeSha256.jsonNullable())
+    append(",\"afterSha256\":").append(change.afterSha256.jsonNullable())
+    append(",\"sizeBytes\":").append(change.sizeBytes ?: "null").append('}')
+    return this
+}
+
+private fun StringBuilder.appendJsonStrings(values: Collection<String>): StringBuilder {
+    append('[')
+    values.forEachIndexed { index, value ->
+        if (index > 0) append(',')
+        append(value.jsonString())
+    }
+    append(']')
+    return this
+}
+
+private fun digestCanonicalMap(values: Map<String, String>): String = digest(
+    values.toSortedMap().entries.joinToString("\u0000") { (key, value) -> "$key\u0000$value" },
+)
+
+private fun digest(value: String): String = MessageDigest.getInstance("SHA-256")
+    .digest(value.toByteArray(StandardCharsets.UTF_8))
+    .joinToString("") { "%02x".format(it) }
+
+private fun utf8Bytes(value: String): Int = value.toByteArray(StandardCharsets.UTF_8).size
+
+private fun String.wireName(): String = lowercase().replace('_', '-')
+
+private fun String?.jsonNullable(): String = this?.jsonString() ?: "null"
+
+private fun String.jsonString(): String = buildString {
+    append('"')
+    this@jsonString.forEach { character ->
+        when (character) {
+            '\\' -> append("\\\\")
+            '"' -> append("\\\"")
+            '\b' -> append("\\b")
+            '\u000c' -> append("\\f")
+            '\n' -> append("\\n")
+            '\r' -> append("\\r")
+            '\t' -> append("\\t")
+            else -> if (character.code < 0x20) append("\\u%04x".format(character.code)) else append(character)
+        }
+    }
+    append('"')
+}
+
+private fun String.isSha256(): Boolean = length == 64 && all { it in '0'..'9' || it in 'a'..'f' }
+
+private const val MAXIMUM_ARCHIVED_AGENT_EVENTS = 8_192
+private const val MAXIMUM_ARCHIVED_EVENT_COMPONENTS = 32_768
+private const val MAXIMUM_ARCHIVED_EVENT_PEER_BYTES = 16L * 1024 * 1024
+private const val MAXIMUM_ARCHIVED_EVIDENCE_BYTES = 64 * 1024 * 1024

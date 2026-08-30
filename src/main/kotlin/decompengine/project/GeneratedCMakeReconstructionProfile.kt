@@ -53,6 +53,11 @@ object GeneratedCMakeReconstructionProfile {
                     ProjectFileRole.EDITABLE,
                 ),
                 textFile("module-evidence", "reports/modules/{module}.json", ProjectFileRole.EVIDENCE),
+                textFile(
+                    "module-agent-execution-evidence",
+                    "reports/agent-executions/{module}.json",
+                    ProjectFileRole.EVIDENCE,
+                ),
                 textFile("program-model-evidence", "reports/program_model.json", ProjectFileRole.EVIDENCE),
                 textFile("module-plan-evidence", "reports/module_plan.json", ProjectFileRole.EVIDENCE),
                 textFile("confidence-evidence", "reports/confidence.json", ProjectFileRole.EVIDENCE),

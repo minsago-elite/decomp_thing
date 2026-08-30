@@ -7,6 +7,10 @@ import java.util.Collections
 /** The exact Maven Central release used for stable ACP v1 bindings and JSON-RPC plumbing. */
 const val ACP_KOTLIN_SDK_VERSION: String = "0.30.1"
 
+/** Client identity sent during initialize and retained verbatim in archival execution evidence. */
+const val ACP_CLIENT_IMPLEMENTATION_NAME: String = "decomp_engine"
+const val ACP_CLIENT_IMPLEMENTATION_VERSION: String = "0.1.0"
+
 /** ACP v2 is a draft and is deliberately not included in this client's supported-version set. */
 const val ACP_STABLE_PROTOCOL_VERSION: Int = 1
 

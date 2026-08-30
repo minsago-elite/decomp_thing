@@ -132,7 +132,7 @@ object AcpHarnessFactory {
             deprecated = false,
         )
         return AcpHarnessSelection(AcpHarnessKind.ACP, configuration, provenance) {
-            AcpAgentHarness(configuration)
+            AcpAgentHarness(configuration).bindFactoryProvenance(provenance)
         }
     }
 
