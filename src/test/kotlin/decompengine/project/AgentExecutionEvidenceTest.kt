@@ -53,9 +53,18 @@ import kotlinx.serialization.json.jsonPrimitive
 import kotlin.test.Test
 import kotlin.test.assertEquals
 import kotlin.test.assertFalse
+import kotlin.test.assertNotEquals
 import kotlin.test.assertTrue
 
 class AgentExecutionEvidenceTest {
+    @Test
+    fun `tool detail commitments cannot move delimiters between keys and values`() {
+        assertNotEquals(
+            digestCanonicalEvidenceMap(mapOf("a" to "b\u0000c")),
+            digestCanonicalEvidenceMap(mapOf("a\u0000b" to "c")),
+        )
+    }
+
     @Test
     fun `ACP reconstruction archives bounded execution and validation evidence`() {
         val temp = createTempDirectory("acp-execution-evidence-")
@@ -91,17 +100,17 @@ class AgentExecutionEvidenceTest {
         assertEquals(1, evidence.getValue("schemaVersion").jsonPrimitive.int)
         assertEquals("acp", evidence.getValue("factoryProvenance").jsonObject.getValue("harness").jsonPrimitive.content)
         assertEquals(ACP_STABLE_PROTOCOL_VERSION, evidence.getValue("protocol").jsonObject.getValue("version").jsonPrimitive.int)
-        assertEquals(
-            "fake-acp-agent",
-            evidence.getValue("agent").jsonObject
-                .getValue("negotiatedImplementation").jsonObject.getValue("name").jsonPrimitive.content,
-        )
+        val negotiatedImplementation = evidence.getValue("agent").jsonObject
+            .getValue("negotiatedImplementation").jsonObject
+        assertEquals(digest("fake-acp-agent"), negotiatedImplementation.getValue("nameSha256").jsonPrimitive.content)
+        assertEquals(14, negotiatedImplementation.getValue("nameUtf8Bytes").jsonPrimitive.int)
         assertTrue(
             evidence.getValue("agent").jsonObject
                 .getValue("negotiatedCapabilities").jsonObject.getValue("promptEmbeddedContext").jsonPrimitive.boolean,
         )
         assertEquals(4, evidence.getValue("events").jsonArray.size)
         val turn = evidence.getValue("turn").jsonObject
+        assertEquals(digest("exact wire prompt bytes"), turn.getValue("wirePromptSha256").jsonPrimitive.content)
         listOf(
             "requestSha256",
             "wirePromptSha256",
@@ -234,6 +243,7 @@ class AgentExecutionEvidenceTest {
                         sessionAdditionalDirectories = false,
                     ),
                 ),
+                wirePromptSha256 = digest("exact wire prompt bytes"),
                 diagnostics = AcpProcessDiagnostics(
                     pid = 123,
                     exitCode = 0,

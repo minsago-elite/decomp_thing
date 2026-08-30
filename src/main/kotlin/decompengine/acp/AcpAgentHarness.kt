@@ -576,6 +576,9 @@ class AcpAgentHarness(
                     negotiatedAgent = requireNotNull(negotiatedAgentEvidence.get()) {
                         "successful ACP turn is missing initialize evidence"
                     },
+                    wirePromptSha256 = sha256(
+                        renderPrompt(request).toByteArray(StandardCharsets.UTF_8),
+                    ),
                     diagnostics = requireNotNull(completedDiagnostics) {
                         "successful ACP turn is missing process diagnostics"
                     },

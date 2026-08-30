@@ -166,7 +166,7 @@ internal class BoundedAcpExecutionArtifact private constructor(
                 objectiveSha256 = digest(request.objective),
                 objectiveUtf8Bytes = utf8Bytes(request.objective),
                 promptSha256 = promptSha256,
-                wirePromptSha256 = digest(renderAcpWirePrompt(request)),
+                wirePromptSha256 = acp.wirePromptSha256,
                 workspaceRootsSha256 = digestWorkspaceRoots(request),
                 contextInputsSha256 = digestContextInputs(request),
                 accessPolicySha256 = digestAgentAccessPolicy(request),
@@ -281,7 +281,7 @@ internal class BoundedAgentExecutionEventRecorder(
                     digest(event.toolCallId),
                     digest(event.title),
                     event.status.name.wireName(),
-                    digestCanonicalMap(event.details),
+                    digestCanonicalEvidenceMap(event.details),
                     event.details.size,
                 )
             }
@@ -463,9 +463,12 @@ private fun StringBuilder.appendProtocolAndAgent(acp: AcpExecutionEvidenceSnapsh
     append("\n    \"configuredImplementationId\": ")
         .append(acp.factoryProvenance.implementationId.jsonString()).append(',')
     append("\n    \"negotiatedImplementation\": {")
-    append("\"name\":").append(agent.implementationName.jsonString()).append(',')
-    append("\"version\":").append(agent.implementationVersion.jsonString()).append(',')
-    append("\"title\":").append(agent.implementationTitle.jsonNullable()).append("},")
+    append("\"nameSha256\":\"").append(digest(agent.implementationName)).append("\",")
+    append("\"nameUtf8Bytes\":").append(utf8Bytes(agent.implementationName)).append(',')
+    append("\"versionSha256\":\"").append(digest(agent.implementationVersion)).append("\",")
+    append("\"versionUtf8Bytes\":").append(utf8Bytes(agent.implementationVersion)).append(',')
+    append("\"titleSha256\":").append(agent.implementationTitle?.let(::digest).jsonNullable()).append(',')
+    append("\"titleUtf8Bytes\":").append(agent.implementationTitle?.let(::utf8Bytes) ?: "null").append("},")
     append("\n    \"negotiatedCapabilities\": {")
     append("\"loadSession\":").append(capabilities.loadSession).append(',')
     append("\"promptImage\":").append(capabilities.promptImage).append(',')
@@ -818,9 +821,13 @@ private fun StringBuilder.appendJsonStrings(values: Collection<String>): StringB
     return this
 }
 
-private fun digestCanonicalMap(values: Map<String, String>): String = digest(
-    values.toSortedMap().entries.joinToString("\u0000") { (key, value) -> "$key\u0000$value" },
-)
+internal fun digestCanonicalEvidenceMap(values: Map<String, String>): String = LengthDelimitedEvidenceDigest().apply {
+    field("count", values.size.toString())
+    values.toSortedMap().entries.forEachIndexed { index, (key, value) ->
+        field("entry[$index].key", key)
+        field("entry[$index].value", value)
+    }
+}.finish()
 
 private fun digest(value: String): String = MessageDigest.getInstance("SHA-256")
     .digest(strictUtf8(value))
@@ -885,21 +892,6 @@ private fun digestAgentAccessPolicy(request: AgentExecutionRequest): String = Le
         }
     }
 }.finish()
-
-/** Exact ACP v1 text renderer mirrored here so its wire bytes are retained by digest. */
-private fun renderAcpWirePrompt(request: AgentExecutionRequest): String = buildString {
-    appendLine(request.objective)
-    if (request.contextInputs.isNotEmpty()) {
-        appendLine()
-        appendLine("Context inputs (immutable):")
-        request.contextInputs.forEach { context ->
-            append("--- ").append(context.id).append(" [").append(context.mediaType).append(']')
-            context.description?.let { append(" — ").append(it) }
-            appendLine()
-            appendLine(context.content)
-        }
-    }
-}
 
 private class LengthDelimitedEvidenceDigest {
     private val digest = MessageDigest.getInstance("SHA-256")

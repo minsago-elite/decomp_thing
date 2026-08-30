@@ -47,6 +47,8 @@ data class AcpNegotiatedAgentEvidence(
 class AcpExecutionEvidenceSnapshot(
     val factoryProvenance: AcpHarnessProvenance,
     val negotiatedAgent: AcpNegotiatedAgentEvidence,
+    /** Digest of the exact UTF-8 prompt bytes passed to the ACP SDK for this turn. */
+    val wirePromptSha256: String,
     val diagnostics: AcpProcessDiagnostics,
     filesystemAudit: Collection<AcpFilesystemAuditRecord>,
     terminalAudit: Collection<AcpTerminalAuditRecord>,
@@ -66,6 +68,9 @@ class AcpExecutionEvidenceSnapshot(
         }
         require(factoryProvenance.implementationId.isNotBlank()) {
             "ACP execution evidence is missing its configured implementation identity"
+        }
+        require(wirePromptSha256.isLowercaseSha256()) {
+            "ACP execution evidence is missing the exact wire-prompt digest"
         }
         require(diagnostics.remainingProcessIds.isEmpty() && diagnostics.sandboxCleanupVerified) {
             "successful ACP execution evidence requires proven process and sandbox cleanup"
@@ -96,6 +101,9 @@ private fun requireBoundedPeerIdentity(label: String, value: String, required: B
 
 private fun <T> immutableEvidenceList(values: Collection<T>): List<T> =
     Collections.unmodifiableList(ArrayList(values))
+
+private fun String.isLowercaseSha256(): Boolean =
+    length == 64 && all { character -> character in '0'..'9' || character in 'a'..'f' }
 
 private const val MAXIMUM_NEGOTIATED_IDENTITY_BYTES = 4 * 1024
 private const val MAXIMUM_ARCHIVED_POLICY_AUDIT_RECORDS = 4_096
