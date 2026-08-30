@@ -264,7 +264,7 @@ internal class FullTreeDiskScratchEvidence private constructor(
     val initialAvailableInodes: Long,
     val ownerUid: Int,
     val mode: Int,
-    val mountFlags: List<String>,
+    mountFlags: List<String>,
     val requiredAvailableBytes: Long,
     val maximumFilesystemBytes: Long,
     val requiredAvailableInodes: Long,
@@ -274,6 +274,8 @@ internal class FullTreeDiskScratchEvidence private constructor(
     val leaseRecordSha256: String,
     val evidenceSha256: String,
 ) {
+    val mountFlags: List<String> = java.util.List.copyOf(mountFlags)
+
     init {
         require(schemaVersion == DISK_SCRATCH_EVIDENCE_SCHEMA_VERSION)
         require(provider == FULL_TREE_DISK_SCRATCH_PROVIDER)
@@ -290,6 +292,7 @@ internal class FullTreeDiskScratchEvidence private constructor(
         require(totalInodes > 0L && initialAvailableInodes in 0L..totalInodes)
         require(ownerUid >= 0 && mode == OWNER_DIRECTORY_MODE)
         require(mountFlags == mountFlags.distinct().sorted())
+        require(mountFlags.none { !it.matches(MOUNT_OPTION) })
         require(REQUIRED_MOUNT_FLAGS.all(mountFlags::contains))
         require(requiredAvailableBytes > 0L && maximumFilesystemBytes >= requiredAvailableBytes)
         require(requiredAvailableInodes >= MINIMUM_LEASE_INODES)
@@ -308,41 +311,46 @@ internal class FullTreeDiskScratchEvidence private constructor(
 
     fun canonicalBytes(): ByteArray = canonicalBytes(includeSelfHash = true)
 
+    internal fun canonicalJson(): JsonObject = canonicalJson(includeSelfHash = true)
+
     internal fun canonicalBytesWithoutSelfHashForTest(): ByteArray = canonicalBytes(includeSelfHash = false)
 
     private fun canonicalBytes(includeSelfHash: Boolean): ByteArray = OracleJson.canonicalBytes(
-        JsonObject(
-            buildMap {
-                put("device", JsonPrimitive(device))
-                if (includeSelfHash) put("evidenceSha256", JsonPrimitive(evidenceSha256))
-                put("filesystemDevice", JsonPrimitive(filesystemDevice))
-                put("filesystemType", JsonPrimitive(filesystemType))
-                put("fragmentBytes", JsonPrimitive(fragmentBytes))
-                put("initialAvailableBytes", JsonPrimitive(initialAvailableBytes))
-                put("initialAvailableInodes", JsonPrimitive(initialAvailableInodes))
-                put("leaseRecordSha256", JsonPrimitive(leaseRecordSha256))
-                put("leaseRootDevice", JsonPrimitive(leaseRootDevice))
-                put("leaseRootInode", JsonPrimitive(leaseRootInode))
-                put("maximumFilesystemBytes", JsonPrimitive(maximumFilesystemBytes))
-                put("maximumFilesystemInodes", JsonPrimitive(maximumFilesystemInodes))
-                put("mode", JsonPrimitive(mode))
-                put("mountFlags", JsonArray(mountFlags.map(::JsonPrimitive)))
-                put("mountId", JsonPrimitive(mountId))
-                put("mountPathSha256", JsonPrimitive(mountPathSha256))
-                put("operationId", JsonPrimitive(operationId))
-                put("ownerUid", JsonPrimitive(ownerUid))
-                put("provider", JsonPrimitive(provider))
-                put("requestSha256", JsonPrimitive(requestSha256))
-                put("requiredAvailableBytes", JsonPrimitive(requiredAvailableBytes))
-                put("requiredAvailableInodes", JsonPrimitive(requiredAvailableInodes))
-                put("rootInode", JsonPrimitive(rootInode))
-                put("schemaVersion", JsonPrimitive(schemaVersion))
-                put("scopeSha256", JsonPrimitive(scopeSha256))
-                put("shardId", JsonPrimitive(shardId))
-                put("totalBytes", JsonPrimitive(totalBytes))
-                put("totalInodes", JsonPrimitive(totalInodes))
-            },
-        ),
+        canonicalJson(includeSelfHash),
+        DISK_SCRATCH_EVIDENCE_JSON_LIMITS,
+    )
+
+    private fun canonicalJson(includeSelfHash: Boolean): JsonObject = JsonObject(
+        buildMap {
+            put("device", JsonPrimitive(device))
+            if (includeSelfHash) put("evidenceSha256", JsonPrimitive(evidenceSha256))
+            put("filesystemDevice", JsonPrimitive(filesystemDevice))
+            put("filesystemType", JsonPrimitive(filesystemType))
+            put("fragmentBytes", JsonPrimitive(fragmentBytes))
+            put("initialAvailableBytes", JsonPrimitive(initialAvailableBytes))
+            put("initialAvailableInodes", JsonPrimitive(initialAvailableInodes))
+            put("leaseRecordSha256", JsonPrimitive(leaseRecordSha256))
+            put("leaseRootDevice", JsonPrimitive(leaseRootDevice))
+            put("leaseRootInode", JsonPrimitive(leaseRootInode))
+            put("maximumFilesystemBytes", JsonPrimitive(maximumFilesystemBytes))
+            put("maximumFilesystemInodes", JsonPrimitive(maximumFilesystemInodes))
+            put("mode", JsonPrimitive(mode))
+            put("mountFlags", JsonArray(mountFlags.map(::JsonPrimitive)))
+            put("mountId", JsonPrimitive(mountId))
+            put("mountPathSha256", JsonPrimitive(mountPathSha256))
+            put("operationId", JsonPrimitive(operationId))
+            put("ownerUid", JsonPrimitive(ownerUid))
+            put("provider", JsonPrimitive(provider))
+            put("requestSha256", JsonPrimitive(requestSha256))
+            put("requiredAvailableBytes", JsonPrimitive(requiredAvailableBytes))
+            put("requiredAvailableInodes", JsonPrimitive(requiredAvailableInodes))
+            put("rootInode", JsonPrimitive(rootInode))
+            put("schemaVersion", JsonPrimitive(schemaVersion))
+            put("scopeSha256", JsonPrimitive(scopeSha256))
+            put("shardId", JsonPrimitive(shardId))
+            put("totalBytes", JsonPrimitive(totalBytes))
+            put("totalInodes", JsonPrimitive(totalInodes))
+        },
     )
 
     internal companion object {
@@ -369,6 +377,47 @@ internal class FullTreeDiskScratchEvidence private constructor(
             val provisional = arguments.evidence(ZERO_SHA256)
             return arguments.evidence(OracleArtifacts.sha256(provisional.canonicalBytes(includeSelfHash = false)))
         }
+
+        fun parseCanonical(bytes: ByteArray): FullTreeDiskScratchEvidence =
+            translateScratchFailures {
+                val root = OracleJson.parseCanonical(bytes, DISK_SCRATCH_EVIDENCE_JSON_LIMITS) as? JsonObject
+                    ?: scratchFail("disk-scratch evidence must be an object")
+                root.requireExactEvidenceKeys()
+                FullTreeDiskScratchEvidence(
+                    schemaVersion = root.evidenceInt("schemaVersion"),
+                    provider = root.evidenceString("provider"),
+                    operationId = root.evidenceString("operationId"),
+                    requestSha256 = root.evidenceString("requestSha256"),
+                    shardId = root.evidenceString("shardId"),
+                    scopeSha256 = root.evidenceString("scopeSha256"),
+                    mountPathSha256 = root.evidenceString("mountPathSha256"),
+                    mountId = root.evidenceLong("mountId"),
+                    device = root.evidenceLong("device"),
+                    rootInode = root.evidenceLong("rootInode"),
+                    filesystemDevice = root.evidenceString("filesystemDevice"),
+                    filesystemType = root.evidenceString("filesystemType"),
+                    fragmentBytes = root.evidenceLong("fragmentBytes"),
+                    totalBytes = root.evidenceLong("totalBytes"),
+                    initialAvailableBytes = root.evidenceLong("initialAvailableBytes"),
+                    totalInodes = root.evidenceLong("totalInodes"),
+                    initialAvailableInodes = root.evidenceLong("initialAvailableInodes"),
+                    ownerUid = root.evidenceInt("ownerUid"),
+                    mode = root.evidenceInt("mode"),
+                    mountFlags = root.evidenceStringArray("mountFlags"),
+                    requiredAvailableBytes = root.evidenceLong("requiredAvailableBytes"),
+                    maximumFilesystemBytes = root.evidenceLong("maximumFilesystemBytes"),
+                    requiredAvailableInodes = root.evidenceLong("requiredAvailableInodes"),
+                    maximumFilesystemInodes = root.evidenceLong("maximumFilesystemInodes"),
+                    leaseRootDevice = root.evidenceLong("leaseRootDevice"),
+                    leaseRootInode = root.evidenceLong("leaseRootInode"),
+                    leaseRecordSha256 = root.evidenceString("leaseRecordSha256"),
+                    evidenceSha256 = root.evidenceString("evidenceSha256"),
+                ).also { evidence ->
+                    if (evidence.evidenceSha256 == ZERO_SHA256) {
+                        scratchFail("disk-scratch evidence cannot retain its provisional hash")
+                    }
+                }
+            }
     }
 
     private data class EvidenceArguments(
@@ -1315,6 +1364,46 @@ private fun JsonObject.requireExactRecordKeys() {
     }
 }
 
+private fun JsonObject.requireExactEvidenceKeys() {
+    if (keys != DISK_SCRATCH_EVIDENCE_FIELDS) {
+        scratchFail("disk-scratch evidence has missing or unknown fields")
+    }
+}
+
+private fun JsonObject.evidenceString(name: String): String {
+    val primitive = this[name] as? JsonPrimitive
+        ?: scratchFail("disk-scratch evidence field $name must be a string")
+    if (!primitive.isString) scratchFail("disk-scratch evidence field $name must be a string")
+    return primitive.content
+}
+
+private fun JsonObject.evidenceLong(name: String): Long {
+    val primitive = this[name] as? JsonPrimitive
+        ?: scratchFail("disk-scratch evidence field $name must be an integer")
+    if (primitive.isString) scratchFail("disk-scratch evidence field $name must be an integer")
+    return primitive.content.toLongOrNull()
+        ?: scratchFail("disk-scratch evidence field $name must be an integer")
+}
+
+private fun JsonObject.evidenceInt(name: String): Int {
+    val value = evidenceLong(name)
+    if (value !in Int.MIN_VALUE..Int.MAX_VALUE) {
+        scratchFail("disk-scratch evidence field $name is outside the integer range")
+    }
+    return value.toInt()
+}
+
+private fun JsonObject.evidenceStringArray(name: String): List<String> {
+    val array = this[name] as? JsonArray
+        ?: scratchFail("disk-scratch evidence field $name must be an array")
+    return array.map { value ->
+        val primitive = value as? JsonPrimitive
+            ?: scratchFail("disk-scratch evidence field $name must contain strings")
+        if (!primitive.isString) scratchFail("disk-scratch evidence field $name must contain strings")
+        primitive.content
+    }
+}
+
 private fun JsonObject.recordString(name: String): String {
     val primitive = this[name] as? JsonPrimitive
         ?: scratchFail("disk-scratch lease record field $name must be a string")
@@ -1385,6 +1474,45 @@ private val DISK_SCRATCH_RECORD_JSON_LIMITS = StrictJsonLimits(
     maximumStringBytes = 4096,
     maximumTotalStringBytes = 32 * 1024,
     maximumNumberCharacters = 32,
+)
+private val DISK_SCRATCH_EVIDENCE_JSON_LIMITS = StrictJsonLimits(
+    maximumInputBytes = MAXIMUM_LEASE_RECORD_BYTES,
+    maximumCanonicalBytes = MAXIMUM_LEASE_RECORD_BYTES,
+    maximumDepth = 4,
+    maximumNodes = 64,
+    maximumStringBytes = 4096,
+    maximumTotalStringBytes = 32 * 1024,
+    maximumNumberCharacters = 32,
+)
+private val DISK_SCRATCH_EVIDENCE_FIELDS = setOf(
+    "device",
+    "evidenceSha256",
+    "filesystemDevice",
+    "filesystemType",
+    "fragmentBytes",
+    "initialAvailableBytes",
+    "initialAvailableInodes",
+    "leaseRecordSha256",
+    "leaseRootDevice",
+    "leaseRootInode",
+    "maximumFilesystemBytes",
+    "maximumFilesystemInodes",
+    "mode",
+    "mountFlags",
+    "mountId",
+    "mountPathSha256",
+    "operationId",
+    "ownerUid",
+    "provider",
+    "requestSha256",
+    "requiredAvailableBytes",
+    "requiredAvailableInodes",
+    "rootInode",
+    "schemaVersion",
+    "scopeSha256",
+    "shardId",
+    "totalBytes",
+    "totalInodes",
 )
 private val DISK_SCRATCH_LEASE_RECORD_FIELDS = setOf(
     "device",

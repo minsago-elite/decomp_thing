@@ -101,6 +101,46 @@ class FullTreeDiskScratchAuthorityTest {
         assertEquals(evidence.evidenceSha256, sha256(evidence.canonicalBytesWithoutSelfHashForTest()))
         assertEquals(FROZEN_EVIDENCE_SHA256, evidence.evidenceSha256)
         assertEquals(FROZEN_EVIDENCE_ARTIFACT_SHA256, sha256(evidence.canonicalBytes()))
+        assertEquals(
+            evidence.canonicalBytes().toList(),
+            FullTreeDiskScratchEvidence.parseCanonical(evidence.canonicalBytes()).canonicalBytes().toList(),
+        )
+        assertFailsWith<FullTreeDiskScratchException> {
+            FullTreeDiskScratchEvidence.parseCanonical(evidence.canonicalBytes() + '\n'.code.toByte())
+        }
+
+        val root = OracleJson.parse(evidence.canonicalBytes()) as JsonObject
+        assertFailsWith<FullTreeDiskScratchException> {
+            FullTreeDiskScratchEvidence.parseCanonical(
+                OracleJson.canonicalBytes(JsonObject(root + ("unknown" to JsonPrimitive(true)))),
+            )
+        }
+        assertFailsWith<FullTreeDiskScratchException> {
+            FullTreeDiskScratchEvidence.parseCanonical(
+                mutateEvidence(evidence, "schemaVersion", JsonPrimitive("1")),
+            )
+        }
+        assertFailsWith<FullTreeDiskScratchException> {
+            FullTreeDiskScratchEvidence.parseCanonical(
+                mutateEvidence(evidence, "provider", JsonPrimitive("ordinary-directory-v1")),
+            )
+        }
+        assertFailsWith<FullTreeDiskScratchException> {
+            FullTreeDiskScratchEvidence.parseCanonical(
+                mutateEvidence(
+                    evidence,
+                    "mountFlags",
+                    JsonArray(listOf("nodev", "noexec", "nosuid", "rw").map(::JsonPrimitive)),
+                ),
+            )
+        }
+        assertFailsWith<FullTreeDiskScratchException> {
+            FullTreeDiskScratchEvidence.parseCanonical(
+                OracleJson.canonicalBytes(
+                    JsonObject(root + ("evidenceSha256" to JsonPrimitive("0".repeat(64)))),
+                ),
+            )
+        }
     }
 
     @Test
@@ -503,6 +543,19 @@ class FullTreeDiskScratchAuthorityTest {
         val selfHash = sha256(OracleJson.canonicalBytes(JsonObject(changed - "recordSha256")))
         return OracleJson.canonicalBytes(
             JsonObject(changed + ("recordSha256" to JsonPrimitive(selfHash))),
+        )
+    }
+
+    private fun mutateEvidence(
+        evidence: FullTreeDiskScratchEvidence,
+        field: String,
+        value: kotlinx.serialization.json.JsonElement,
+    ): ByteArray {
+        val root = OracleJson.parse(evidence.canonicalBytes()) as JsonObject
+        val changed = root + (field to value)
+        val selfHash = sha256(OracleJson.canonicalBytes(JsonObject(changed - "evidenceSha256")))
+        return OracleJson.canonicalBytes(
+            JsonObject(changed + ("evidenceSha256" to JsonPrimitive(selfHash))),
         )
     }
 
