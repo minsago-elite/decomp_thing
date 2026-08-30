@@ -1,0 +1,330 @@
+package decompengine.project
+
+import decompengine.acp.ACP_KOTLIN_SDK_VERSION
+import decompengine.acp.ACP_STABLE_PROTOCOL_VERSION
+import decompengine.acp.AcpExecutionEvidenceSnapshot
+import decompengine.acp.AcpExecutionEvidenceSource
+import decompengine.acp.AcpHarnessProvenance
+import decompengine.acp.AcpNegotiatedAgentEvidence
+import decompengine.acp.AcpNegotiatedCapabilitiesEvidence
+import decompengine.acp.AcpProcessDiagnostics
+import decompengine.acp.AcpProducedOutputEvidence
+import decompengine.acp.AcpRuntimeClosureLimits
+import decompengine.acp.AcpSandboxEvidence
+import decompengine.acp.AcpSandboxResourceLimits
+import decompengine.agent.AgentExecutionEvent
+import decompengine.agent.AgentExecutionRequest
+import decompengine.agent.AgentExecutionResult
+import decompengine.agent.AgentFileChange
+import decompengine.agent.AgentFileChangeEvent
+import decompengine.agent.AgentFileChangeKind
+import decompengine.agent.AgentHarness
+import decompengine.agent.AgentSessionReference
+import decompengine.agent.AgentStopReason
+import decompengine.agent.AgentUsage
+import java.nio.file.Files
+import java.nio.file.Path
+import java.nio.file.StandardCopyOption
+import java.security.MessageDigest
+import java.time.Duration
+import kotlin.io.path.createDirectories
+import kotlin.io.path.createTempDirectory
+import kotlin.io.path.deleteExisting
+import kotlin.io.path.readBytes
+import kotlin.io.path.readText
+import kotlin.io.path.relativeTo
+import kotlin.io.path.writeText
+import kotlin.test.Test
+import kotlin.test.assertFailsWith
+import kotlin.test.assertTrue
+
+class ReconstructionAcpEvidenceArchiveVerifierTest {
+    @Test
+    fun `archive gate rejects closed-schema and semantic ACP evidence tampering`() {
+        val temp = createTempDirectory("acp-archive-tampering-")
+        val baseline = createAgentProject(temp.resolve("baseline"), accepted = true)
+        val sourceSha256 = sha256(baseline.resolve(SOURCE_PATH).readBytes())
+        val mutations = linkedMapOf<String, (String) -> String>(
+            "duplicate-field" to { text ->
+                text.replaceFirst(
+                    "  \"kind\": \"$EVIDENCE_KIND\",",
+                    "  \"kind\": \"$EVIDENCE_KIND\",\n  \"kind\": \"$EVIDENCE_KIND\",",
+                )
+            },
+            "unknown-field" to { text ->
+                text.replaceFirst("  \"kind\":", "  \"unknown\": true,\n  \"kind\":")
+            },
+            "unknown-nested-field" to { text ->
+                text.replaceFirst(
+                    "    \"maximumArchivedBytes\":",
+                    "    \"unknownBound\": true,\n    \"maximumArchivedBytes\":",
+                )
+            },
+            "wrong-schema" to { text -> text.replaceFirst("\"schemaVersion\": 1", "\"schemaVersion\": 2") },
+            "wrong-kind" to { text -> text.replaceFirst(EVIDENCE_KIND, "decomp-engine.patch-acp-execution") },
+            "wrong-module" to { text -> text.replaceFirst("\"moduleId\": \"parse\"", "\"moduleId\": \"other\"") },
+            "non-completed" to { text -> text.replaceFirst("\"stopReason\": \"completed\"", "\"stopReason\": \"refused\"") },
+            "deprecated-factory" to { text -> text.replaceFirst("\"deprecated\": false", "\"deprecated\": true") },
+            "validation-source" to { text ->
+                text.replaceFirst("\"sourceSha256\": \"$sourceSha256\"", "\"sourceSha256\": \"${"0".repeat(64)}\"")
+            },
+            "validation-acceptance" to { text -> text.replaceFirst("\"accepted\": true", "\"accepted\": false") },
+            "token-bound" to { text -> text.replaceFirst("\"maximumInputTokens\": null", "\"maximumInputTokens\": 5") },
+        )
+
+        mutations.forEach { (name, mutation) ->
+            val project = temp.resolve(name)
+            copyTree(baseline, project)
+            rewriteEvidenceAndBindings(project, mutation)
+
+            val failure = assertFailsWith<Exception>(name) {
+                ArchivalPackager.create(project, temp.resolve("$name.zip"))
+            }
+            assertTrue(failure.message.orEmpty().isNotBlank(), name)
+        }
+    }
+
+    @Test
+    fun `archive gate rejects checkpoint path and digest ambiguity`() {
+        val temp = createTempDirectory("acp-archive-checkpoint-")
+        val baseline = createAgentProject(temp.resolve("baseline"), accepted = true)
+
+        listOf("path", "digest").forEach { mutation ->
+            val project = temp.resolve(mutation)
+            copyTree(baseline, project)
+            rewriteCheckpointAndManifest(project) { checkpoint ->
+                when (mutation) {
+                    "path" -> checkpoint.replace(
+                        "\"executionEvidencePath\": \"$EVIDENCE_PATH\"",
+                        "\"executionEvidencePath\": \"reports/agent-executions/stale.json\"",
+                    )
+                    else -> checkpoint.replace(
+                        Regex("\"executionEvidenceSha256\": \"[0-9a-f]{64}\""),
+                        "\"executionEvidenceSha256\": \"${"0".repeat(64)}\"",
+                    )
+                }
+            }
+
+            assertFailsWith<Exception>(mutation) {
+                ArchivalPackager.create(project, temp.resolve("checkpoint-$mutation.zip"))
+            }
+        }
+    }
+
+    @Test
+    fun `archive gate rejects missing and extra ACP evidence artifacts`() {
+        val temp = createTempDirectory("acp-archive-cardinality-")
+        val baseline = createAgentProject(temp.resolve("baseline"), accepted = true)
+
+        val missing = temp.resolve("missing")
+        copyTree(baseline, missing)
+        missing.resolve(EVIDENCE_PATH).deleteExisting()
+        assertFailsWith<Exception> {
+            ArchivalPackager.create(missing, temp.resolve("missing.zip"))
+        }
+
+        val extra = temp.resolve("extra")
+        copyTree(baseline, extra)
+        extra.resolve("reports/agent-executions/stale.json").writeText("{}\n")
+        val extraFailure = assertFailsWith<Exception> {
+            ArchivalPackager.create(extra, temp.resolve("extra.zip"))
+        }
+        assertTrue(extraFailure.message.orEmpty().contains("extra") || extraFailure.message.orEmpty().contains("stale"))
+    }
+
+    @Test
+    fun `archive gate rejects an agent-generated unresolved module`() {
+        val temp = createTempDirectory("acp-archive-unresolved-")
+        val project = createAgentProject(temp.resolve("project"), accepted = false)
+
+        val failure = assertFailsWith<Exception> {
+            ArchivalPackager.create(project, temp.resolve("unresolved.zip"))
+        }
+
+        assertTrue(failure.message.orEmpty().contains("not accepted") || failure.message.orEmpty().contains("unresolved"))
+    }
+
+    private fun createAgentProject(project: Path, accepted: Boolean): Path {
+        SourceTreeGenerator.generate(
+            RecoveredProgramModel(
+                inputSha256 = "a".repeat(64),
+                functions = listOf(
+                    RecoveredFunction(
+                        "fn_0000000000401000",
+                        "parse_input",
+                        0x401000UL,
+                        "int parse_input(void)",
+                    ),
+                ),
+            ),
+            project,
+            reconstructor = BoundedLlmModuleReconstructor(ArchiveEvidenceHarness(accepted)),
+        )
+        MakeProjectBuilder.build(project)
+        return project
+    }
+
+    private fun rewriteEvidenceAndBindings(project: Path, transform: (String) -> String) {
+        val evidence = project.resolve(EVIDENCE_PATH)
+        val oldEvidenceSha256 = sha256(evidence.readBytes())
+        val transformed = transform(evidence.readText())
+        require(transformed != evidence.readText()) { "test mutation did not change ACP evidence" }
+        evidence.writeText(transformed)
+        val newEvidenceSha256 = sha256(evidence.readBytes())
+
+        val checkpoint = project.resolve(CHECKPOINT_PATH)
+        val oldCheckpointSha256 = sha256(checkpoint.readBytes())
+        checkpoint.writeText(checkpoint.readText().replace(oldEvidenceSha256, newEvidenceSha256))
+        val newCheckpointSha256 = sha256(checkpoint.readBytes())
+
+        val manifest = project.resolve("source_tree_manifest.json")
+        manifest.writeText(
+            manifest.readText()
+                .replace(oldEvidenceSha256, newEvidenceSha256)
+                .replace(oldCheckpointSha256, newCheckpointSha256),
+        )
+    }
+
+    private fun rewriteCheckpointAndManifest(project: Path, transform: (String) -> String) {
+        val checkpoint = project.resolve(CHECKPOINT_PATH)
+        val oldSha256 = sha256(checkpoint.readBytes())
+        val transformed = transform(checkpoint.readText())
+        require(transformed != checkpoint.readText()) { "test mutation did not change checkpoint" }
+        checkpoint.writeText(transformed)
+        val newSha256 = sha256(checkpoint.readBytes())
+        val manifest = project.resolve("source_tree_manifest.json")
+        manifest.writeText(manifest.readText().replace(oldSha256, newSha256))
+    }
+
+    private fun copyTree(source: Path, destination: Path) {
+        Files.walk(source).use { paths ->
+            paths.forEach { path ->
+                val target = destination.resolve(path.relativeTo(source).toString())
+                if (Files.isDirectory(path)) {
+                    target.createDirectories()
+                } else {
+                    target.parent.createDirectories()
+                    Files.copy(path, target, StandardCopyOption.COPY_ATTRIBUTES)
+                }
+            }
+        }
+    }
+
+    private class ArchiveEvidenceHarness(private val accepted: Boolean) : AgentHarness, AcpExecutionEvidenceSource {
+        private var evidence: AcpExecutionEvidenceSnapshot? = null
+
+        override fun implementationIdentifier(): String = IMPLEMENTATION_ID
+
+        override fun execute(
+            request: AgentExecutionRequest,
+            onEvent: (AgentExecutionEvent) -> Unit,
+        ): AgentExecutionResult {
+            val target = request.accessPolicy.pathRules.single { rule ->
+                decompengine.agent.AgentOperation.WRITE_FILE in rule.operations
+            }.path
+            val returnValue = if (accepted) 17 else 0
+            val source = """
+                #include "modules/parse.h"
+                /* fn_0000000000401000 */
+                int parse_input(void) { return $returnValue; }
+            """.trimIndent() + "\n"
+            target.resolve(request.workspaceRoots).writeText(source)
+            val bytes = source.toByteArray()
+            val change = AgentFileChange(
+                target,
+                AgentFileChangeKind.CREATED,
+                beforeSha256 = null,
+                afterSha256 = sha256(bytes),
+                sizeBytes = bytes.size.toLong(),
+            )
+            onEvent(AgentFileChangeEvent(0, change))
+            evidence = snapshot()
+            return AgentExecutionResult(
+                AgentStopReason.COMPLETED,
+                "complete",
+                listOf(change),
+                AgentSessionReference(IMPLEMENTATION_ID, "session"),
+                AgentUsage(10, 20, 3, 0, Duration.ofMillis(100)),
+            )
+        }
+
+        override fun latestAcpExecutionEvidence(): AcpExecutionEvidenceSnapshot? = evidence
+
+        private fun snapshot(): AcpExecutionEvidenceSnapshot = AcpExecutionEvidenceSnapshot(
+            factoryProvenance = AcpHarnessProvenance(
+                harness = "acp",
+                implementationId = IMPLEMENTATION_ID,
+                agentExecutionContractVersion = 1,
+                acpProtocolVersion = ACP_STABLE_PROTOCOL_VERSION,
+                acpSdkVersion = ACP_KOTLIN_SDK_VERSION,
+                configurationSha256 = "b".repeat(64),
+                deprecated = false,
+            ),
+            negotiatedAgent = AcpNegotiatedAgentEvidence(
+                ACP_STABLE_PROTOCOL_VERSION,
+                "archive-test-agent",
+                "1",
+                null,
+                AcpNegotiatedCapabilitiesEvidence(false, false, false, false, false, false, false),
+            ),
+            wirePromptSha256 = "c".repeat(64),
+            diagnostics = AcpProcessDiagnostics(
+                pid = 123,
+                exitCode = 0,
+                stderr = "",
+                stderrTruncated = false,
+                producedOutputBytes = 0,
+                producedOutputLimitBytes = 1_024,
+                outputLimitExceeded = false,
+                forcedTermination = false,
+                rootTerminationRequested = false,
+                remainingProcessIds = emptyList(),
+                containment = "linux-bubblewrap",
+                networkIsolated = true,
+                sandboxCleanupVerified = true,
+            ),
+            filesystemAudit = emptyList(),
+            terminalAudit = emptyList(),
+            permissionAudit = emptyList(),
+            sandboxEvidence = AcpSandboxEvidence(
+                provider = "sandbox-evidence-v1",
+                providerVersion = "1",
+                providerExecutableSha256 = "d".repeat(64),
+                providerExecutableMode = 365,
+                resourceLimiterSha256 = "e".repeat(64),
+                scopeSupervisorSha256 = "f".repeat(64),
+                scopeInspectorSha256 = "1".repeat(64),
+                environmentFdOpenerSha256 = "2".repeat(64),
+                securityExecutables = emptyList(),
+                outerAgentLimits = AcpSandboxResourceLimits(),
+                runtimeClosureLimits = AcpRuntimeClosureLimits(),
+                cgroupV2PidsLimited = true,
+                cgroupV2MemoryLimited = true,
+                cgroupV2CpuLimited = true,
+                networkIsolated = true,
+                outerAgentContained = true,
+                nestedUserNamespacesDisabled = true,
+                newSession = true,
+                dieWithParent = true,
+                policySha256 = "3".repeat(64),
+                terminalLimits = null,
+                launches = emptyList(),
+                authorities = emptyList(),
+                terminalAudit = emptyList(),
+                outerProcessOutput = AcpProducedOutputEvidence(1_024, 0, false),
+            ),
+        )
+    }
+
+    private companion object {
+        const val IMPLEMENTATION_ID = "archive-test-acp"
+        const val SOURCE_PATH = "src/modules/parse.c"
+        const val CHECKPOINT_PATH = "reports/modules/parse.json"
+        const val EVIDENCE_PATH = "reports/agent-executions/parse.json"
+        const val EVIDENCE_KIND = "decomp-engine.reconstruction-acp-execution"
+
+        fun sha256(bytes: ByteArray): String = MessageDigest.getInstance("SHA-256")
+            .digest(bytes)
+            .joinToString("") { "%02x".format(it) }
+    }
+}
