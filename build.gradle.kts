@@ -215,6 +215,7 @@ dependencies {
     implementation("io.github.optimumcode:json-schema-validator:0.5.5")
     implementation("net.java.dev.jna:jna:5.19.1")
     implementation("org.xerial:sqlite-jdbc:3.53.2.1")
+    implementation("org.tukaani:xz:1.12")
     runtimeOnly("org.slf4j:slf4j-nop:2.0.16")
     implementation("org.jetbrains.kotlinx:kotlinx-serialization-json:1.9.0")
     testImplementation(kotlin("test"))

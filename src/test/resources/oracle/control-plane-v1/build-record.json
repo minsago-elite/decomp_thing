@@ -1,0 +1,157 @@
+{
+  "buildSystem": "cmake-ninja",
+  "commands": {
+    "compile": [
+      "cmake",
+      "--build",
+      "/oracle/build",
+      "--target",
+      "clang",
+      "--",
+      "-j4"
+    ],
+    "configure": [
+      "cmake",
+      "-G",
+      "Ninja",
+      "-S",
+      "/oracle/llvm-project-22.1.6.src/llvm",
+      "-B",
+      "/oracle/build",
+      "-DCMAKE_BUILD_TYPE=RelWithDebInfo",
+      "-DLLVM_ENABLE_PROJECTS=clang",
+      "-DLLVM_TARGETS_TO_BUILD=X86",
+      "-DLLVM_INCLUDE_TESTS=OFF",
+      "-DCLANG_INCLUDE_TESTS=OFF",
+      "-DLLVM_INCLUDE_BENCHMARKS=OFF",
+      "-DLLVM_INCLUDE_EXAMPLES=OFF",
+      "-DLLVM_BUILD_EXAMPLES=OFF",
+      "-DLLVM_ENABLE_BINDINGS=OFF",
+      "-DLLVM_ENABLE_TERMINFO=OFF",
+      "-DLLVM_ENABLE_LIBXML2=OFF",
+      "-DLLVM_ENABLE_ZSTD=OFF",
+      "-DLLVM_ENABLE_CURL=OFF",
+      "-DLLVM_ENABLE_HTTPLIB=OFF",
+      "-DLLVM_ENABLE_LIBEDIT=OFF",
+      "-DLLVM_ENABLE_ASSERTIONS=OFF",
+      "-DLLVM_ENABLE_RTTI=OFF",
+      "-DCMAKE_C_COMPILER=/usr/lib/llvm-22/bin/clang",
+      "-DCMAKE_CXX_COMPILER=/usr/lib/llvm-22/bin/clang++",
+      "-DCMAKE_AR=/usr/lib/llvm-22/bin/llvm-ar",
+      "-DCMAKE_RANLIB=/usr/lib/llvm-22/bin/llvm-ranlib",
+      "-DCMAKE_EXE_LINKER_FLAGS=-fuse-ld=lld -Wl,--build-id=sha1 -Wl,--compress-debug-sections=zlib",
+      "-DCMAKE_SHARED_LINKER_FLAGS=-fuse-ld=lld -Wl,--build-id=sha1 -Wl,--compress-debug-sections=zlib",
+      "-DCMAKE_C_FLAGS_RELWITHDEBINFO=-Oz -g2 -DNDEBUG -ffile-prefix-map=/oracle=/usr/src/llvm-oracle",
+      "-DCMAKE_CXX_FLAGS_RELWITHDEBINFO=-Oz -g2 -DNDEBUG -ffile-prefix-map=/oracle=/usr/src/llvm-oracle"
+    ],
+    "install": [
+      "install",
+      "-D",
+      "-m",
+      "0755",
+      "/oracle/build/bin/clang-22",
+      "/oracle/install/bin/clang-22"
+    ],
+    "stageFull": [
+      "install",
+      "-m",
+      "0755",
+      "/oracle/install/bin/clang-22",
+      "{full}"
+    ],
+    "strip": [
+      "/usr/lib/llvm-22/bin/llvm-objcopy",
+      "--strip-all",
+      "{full}",
+      "{stripped}"
+    ]
+  },
+  "directories": {
+    "build": "/oracle/build",
+    "install": "/oracle/install",
+    "source": "/oracle/llvm-project-22.1.6.src"
+  },
+  "environment": {
+    "container": {
+      "digest": "sha256:73285d9a2dad159a7171fe4bbcac7d97d285402955d8c6fb8b44b101cf2df550",
+      "image": "decomp-llvm-oracle-toolchain:22.1.6",
+      "platform": "linux/amd64"
+    },
+    "variables": {
+      "LC_ALL": "C",
+      "PATH": "/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin",
+      "SOURCE_DATE_EPOCH": "1779182222",
+      "TZ": "UTC"
+    }
+  },
+  "oracle": {
+    "id": "clang-driver-22.1.6",
+    "sourceLockSha256": "b5444e7bad42c731fffa5606008b22df972ce780d129e9f8f131b2b4873fef9b",
+    "sourceRevision": "fc4aad7b5db3fff421df9a9637605b9ca5667881",
+    "version": "22.1.6"
+  },
+  "outputs": {
+    "full": "artifacts/clang-driver.full",
+    "stripped": "artifacts/clang-driver.stripped"
+  },
+  "schemaVersion": 2,
+  "tools": [
+    {
+      "executableBytes": 248040,
+      "executableSha256": "5965527e09fe2b3787772aa4f711d6a36b393e7f2fcaa744a7a96c5a4ddf59cb",
+      "path": "/usr/bin/ninja",
+      "role": "buildGenerator",
+      "versionCommand": [
+        "/usr/bin/ninja",
+        "--version"
+      ],
+      "versionOutput": "1.11.1\n"
+    },
+    {
+      "executableBytes": 11796472,
+      "executableSha256": "1c5227af4edd22d8d689def545e18ee458260c0fd579eba2187967f38817e638",
+      "path": "/usr/bin/cmake",
+      "role": "buildSystem",
+      "versionCommand": [
+        "/usr/bin/cmake",
+        "--version"
+      ],
+      "versionOutput": "cmake version 3.28.3\n\nCMake suite maintained and supported by Kitware (kitware.com/cmake).\n"
+    },
+    {
+      "executableBytes": 138184,
+      "executableSha256": "9dff149140cff7484c1efd85a5cfe0e3f046edcf71c63b42b5501c4a2ee462ae",
+      "path": "/usr/lib/llvm-22/bin/clang",
+      "role": "compiler",
+      "versionCommand": [
+        "/usr/lib/llvm-22/bin/clang",
+        "--version"
+      ],
+      "versionOutput": "Ubuntu clang version 22.1.8 (++20260714014902+ca7933e47d3a-1~exp1~20260714135019.80)\nTarget: x86_64-pc-linux-gnu\nThread model: posix\nInstalledDir: /usr/lib/llvm-22/bin\n"
+    },
+    {
+      "executableBytes": 6059960,
+      "executableSha256": "057e42c6104e20a7358a51fb9abb456d74ba37997331d99183e877539da95982",
+      "path": "/usr/lib/llvm-22/bin/lld",
+      "role": "linker",
+      "versionCommand": [
+        "/usr/lib/llvm-22/bin/lld",
+        "-flavor",
+        "gnu",
+        "--version"
+      ],
+      "versionOutput": "Ubuntu LLD 22.1.8 (compatible with GNU linkers)\n"
+    },
+    {
+      "executableBytes": 198968,
+      "executableSha256": "8c91beba2ce83e194efe4ef0054146a5cf7c0cb6309af35fe9eeaa4e84f76114",
+      "path": "/usr/lib/llvm-22/bin/llvm-objcopy",
+      "role": "stripper",
+      "versionCommand": [
+        "/usr/lib/llvm-22/bin/llvm-objcopy",
+        "--version"
+      ],
+      "versionOutput": "llvm-objcopy, compatible with GNU objcopy\nUbuntu LLVM version 22.1.8\n  Optimized build.\n"
+    }
+  ]
+}

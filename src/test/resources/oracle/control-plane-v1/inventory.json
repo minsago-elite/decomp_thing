@@ -1,0 +1,57 @@
+{
+  "counts": {
+    "compilationUnits": 2,
+    "generatedUnits": 1,
+    "handwrittenUnits": 1,
+    "shards": 2
+  },
+  "indexSha256": "e8a49cd70bdcccfeb1d2267da4d1131b3967520620f23f2ed23608942dcbe13e",
+  "oracle": {
+    "artifactManifestSha256": "4466d1a9fcb7629ba2600007954b776a1fa6ba95dd4e1e9cd6434389b945148d",
+    "id": "clang-llvm-full-tree-22.1.6",
+    "richArtifactSha256": "28105cb58b619f88d8718e8cf30c0c3471b7f0c8825e95e171eebc940954b859",
+    "scopeSha256": "80aff055ad48ffdbe11b57efe24fafb859c9a466b258398cf33253bbeba176ba",
+    "sourceLockSha256": "b5444e7bad42c731fffa5606008b22df972ce780d129e9f8f131b2b4873fef9b"
+  },
+  "schemaVersion": 1,
+  "shards": [
+    {
+      "id": "clang-lib-driver",
+      "unitIds": [
+        "cu-f18ff488b29044c4cc641b83652c3f8f"
+      ]
+    },
+    {
+      "id": "generated-tools-clang",
+      "unitIds": [
+        "cu-52db46961f4d6b928aa25c36872c8137"
+      ]
+    }
+  ],
+  "units": [
+    {
+      "addressSize": 8,
+      "dwarfOffset": "0x69",
+      "dwarfVersion": 5,
+      "id": "cu-52db46961f4d6b928aa25c36872c8137",
+      "language": 33,
+      "producerSha256": "47eda19a1ab4150e49bf3b75de27baeb7149a4d588fadb35a57121d1822f95c9",
+      "rawPathSha256": "7de30f1422d31b7cb88df7ce0e5d932ef18ea33510741aca1cf6425e4e8b832d",
+      "shardId": "generated-tools-clang",
+      "sourceKind": "generated",
+      "sourcePath": "generated/tools/clang/lib/Basic/Generated.cpp"
+    },
+    {
+      "addressSize": 8,
+      "dwarfOffset": "0x0",
+      "dwarfVersion": 5,
+      "id": "cu-f18ff488b29044c4cc641b83652c3f8f",
+      "language": 33,
+      "producerSha256": "47eda19a1ab4150e49bf3b75de27baeb7149a4d588fadb35a57121d1822f95c9",
+      "rawPathSha256": "9cbb89e101f61b7ae02d2146b2423069edc6db21c0ae8203f2240462eb2a98e7",
+      "shardId": "clang-lib-driver",
+      "sourceKind": "handwritten",
+      "sourcePath": "source/clang/lib/Driver/main.cpp"
+    }
+  ]
+}

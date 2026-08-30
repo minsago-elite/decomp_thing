@@ -1,0 +1,72 @@
+{
+  "oracle": {
+    "id": "clang-driver-22.1.6",
+    "project": "LLVM Project",
+    "purpose": "Authoritative source input for the source-aligned Clang driver oracle pair",
+    "version": "22.1.6"
+  },
+  "redistribution": {
+    "licenseFiles": [
+      {
+        "bytes": 15141,
+        "description": "Apache License 2.0 with LLVM Exceptions and bundled third-party notices",
+        "path": "LICENSE.TXT",
+        "sha256": "8d85c1057d742e597985c7d4e6320b015a9139385cff4cbae06ffc0ebe89afee"
+      },
+      {
+        "bytes": 15140,
+        "description": "Clang copy of the Apache License 2.0 with LLVM Exceptions and notices",
+        "path": "clang/LICENSE.TXT",
+        "sha256": "ebcd9bbf783a73d05c53ba4d586b8d5813dcdf3bbec50265860ccc885e606f47"
+      }
+    ],
+    "summary": "LLVM and Clang are redistributed under Apache License 2.0 with LLVM Exceptions; retain applicable notices and bundled third-party terms."
+  },
+  "revision": {
+    "archiveMarkers": {
+      "version": {
+        "bytes": 325,
+        "path": "cmake/Modules/LLVMVersion.cmake",
+        "sha256": "d4d0c96de203f7994decedf4d2024b1cf84abb0d140f7568d5324516e84af8ae",
+        "text": "# The LLVM Version number information\n\nif(NOT DEFINED LLVM_VERSION_MAJOR)\n  set(LLVM_VERSION_MAJOR 22)\nendif()\nif(NOT DEFINED LLVM_VERSION_MINOR)\n  set(LLVM_VERSION_MINOR 1)\nendif()\nif(NOT DEFINED LLVM_VERSION_PATCH)\n  set(LLVM_VERSION_PATCH 6)\nendif()\nif(NOT DEFINED LLVM_VERSION_SUFFIX)\n  set(LLVM_VERSION_SUFFIX)\nendif()\n\n"
+      }
+    },
+    "commit": "fc4aad7b5db3fff421df9a9637605b9ca5667881",
+    "repositoryUrl": "https://github.com/llvm/llvm-project.git",
+    "tag": "llvmorg-22.1.6",
+    "tagEvidence": {
+      "payloadBytes": 153,
+      "payloadFile": "tag/llvmorg-22.1.6.payload",
+      "payloadSha256": "e1975f318e84f5073a49b767a461d978e45f088b77758e36e6acf660c33b26ae",
+      "signatureBytes": 260,
+      "signatureFile": "tag/llvmorg-22.1.6.sig",
+      "signatureSha256": "6b6c2f17edcf8929dea1303e7a65a6d05074b6439cfe33b74ed8eea603cf75dc"
+    },
+    "tagObject": "e1e54c548235b71134d53ec5e4d93873db5c70ef"
+  },
+  "schemaVersion": 1,
+  "signing": {
+    "authorityUrl": "https://releases.llvm.org/release-keys.asc",
+    "keyFile": "keys/douglas-yung-llvm-release.asc",
+    "keyRetrievalUrl": "https://releases.llvm.org/release-keys.asc",
+    "keySha256": "d3e02c6fbcc641935ebd8b5a0d623563f90fef1a51c161917d7d5ed921e36288",
+    "primaryFingerprint": "FFB3368980F3E6BB5737145A316C56D064CACBA5",
+    "signingFingerprint": "FFB3368980F3E6BB5737145A316C56D064CACBA5"
+  },
+  "source": {
+    "archive": {
+      "bytes": 420,
+      "fileName": "llvm-project-22.1.6.src.tar.xz",
+      "sha256": "bcc95924348d9400fdf48aec2d4d9ec44d42e7d59f56c35313a1c9caf7ed8768",
+      "url": "https://example.invalid/llvm-project-22.1.6.src.tar.xz"
+    },
+    "archiveRoot": "llvm-project-22.1.6.src",
+    "detachedSignature": {
+      "bytes": 119,
+      "fileName": "llvm-project-22.1.6.src.tar.xz.sig",
+      "sha256": "cb605632f17606799b8a3b76781e80ceeae5e2c7e7823823eff688557ce53a68",
+      "url": "https://github.com/llvm/llvm-project/releases/download/llvmorg-22.1.6/llvm-project-22.1.6.src.tar.xz.sig"
+    },
+    "releasePageUrl": "https://github.com/llvm/llvm-project/releases/tag/llvmorg-22.1.6"
+  }
+}
