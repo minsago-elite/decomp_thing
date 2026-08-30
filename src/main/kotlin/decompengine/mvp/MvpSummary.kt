@@ -20,7 +20,10 @@ internal data class VerificationEvidence(
     val detail: String,
 )
 
-internal class MvpRunEvidence(private val environment: Map<String, String>) {
+internal class MvpRunEvidence(
+    private val environment: Map<String, String>,
+    val harnessProvenance: String,
+) {
     val phases = linkedMapOf<String, PhaseEvidence>()
     val verification = mutableListOf<VerificationEvidence>()
     var findingPath: Path? = null
@@ -86,8 +89,10 @@ internal fun writeMvpSummary(
         "Sanitizer finding" to evidence.findingPath,
         "Reconstruction request" to output.resolve("evidence/reconstruction-request.md"),
         "Reconstruction response" to output.resolve("evidence/reconstruction-response.md"),
+        "Reconstruction agent execution" to output.resolve("evidence/$RECONSTRUCTION_AGENT_EVIDENCE"),
         "Patch request" to output.resolve("evidence/patch-request.md"),
         "Patch response" to output.resolve("evidence/patch-response.md"),
+        "Patch agent execution" to output.resolve("evidence/$PATCH_AGENT_EVIDENCE"),
     )
     val phaseRows = evidence.phases.values.joinToString("\n") {
         "| ${it.name.escapeTable()} | ${it.status} | ${evidence.redact(it.detail).escapeTable()} |"
@@ -119,6 +124,7 @@ internal fun writeMvpSummary(
         - Failure phase and reason: $normalizedFailure
         - Approval decision: ${evidence.redact(evidence.approvalDecision)}
         - Execution isolation: ${evidence.redact(evidence.isolation)}
+        - Agent harness: `${evidence.redact(evidence.harnessProvenance)}`
         - Verified final binary: `${if (binary.exists() && result == "PASS") binary.relativeOrAbsolute(output) else "not published"}`
 
         ## Executed Phases

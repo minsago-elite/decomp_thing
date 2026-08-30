@@ -1,6 +1,7 @@
 package decompengine.mvp
 
 import decompengine.repair.RepairClient
+import decompengine.repair.RepairClientAgentHarness
 import decompengine.repair.RepairClientInvocation
 import decompengine.repair.RepairRequest
 import decompengine.repair.RepairResponse
@@ -32,7 +33,7 @@ class MvpPatchWorkflowTest {
         )
 
         MvpPatchWorkflow(
-            client = client,
+            harness = RepairClientAgentHarness(client),
             environment = mapOf("API_KEY" to "top-secret-value"),
             approve = { true },
             decompiler = BinaryDecompiler { _, _, _, raw -> raw.writeText("int main(void) { /* ghidra */ }\n") },
@@ -40,8 +41,9 @@ class MvpPatchWorkflowTest {
         ).run(MvpPatchOptions(input, output))
 
         assertEquals(2, client.requests.size)
-        assertTrue(client.requests.first().projectFiles.keys.single().endsWith("ghidra_decompiled.c"))
-        assertTrue(client.requests.first().projectFiles.values.single().contains("ghidra"))
+        assertEquals(setOf("decompiled.c", "ghidra_decompiled.c"), client.requests.first().projectFiles.keys)
+        assertTrue(client.requests.first().projectFiles.getValue("ghidra_decompiled.c").contains("ghidra"))
+        assertEquals(setOf("decompile/decompiled.c", "patched.c"), client.requests.last().projectFiles.keys)
         assertTrue(output.resolve("decompile/decompiled.c").readText().contains("badge[i]"))
         assertFalse(output.resolve("stale/nested/old.txt").exists())
         assertTrue(output.resolve("patched_c/patched.c").readText().contains("return 0;"))
@@ -55,6 +57,7 @@ class MvpPatchWorkflowTest {
         assertFalse(summary.contains("top-secret-value"))
         assertTrue(summary.contains("[REDACTED]"))
         assertTrue(summary.contains("approved interactively"))
+        assertTrue(summary.contains("Agent harness: `agent-harness-unprovisioned`"))
         assertTrue(summary.contains("| verify | PASS |"))
         assertTrue(summary.contains("binary hardening inspection | PASS"))
         assertTrue(summary.contains("behavior validation | PASS"))
@@ -84,7 +87,7 @@ class MvpPatchWorkflowTest {
 
         val failure = assertFailsWith<MvpPatchException> {
             MvpPatchWorkflow(
-                client = client,
+                harness = RepairClientAgentHarness(client),
                 approve = { false },
                 decompiler = BinaryDecompiler { _, _, _, raw -> raw.writeText("decompiled c") },
                 binaryExecution = testExecutionBoundary(),
@@ -109,7 +112,7 @@ class MvpPatchWorkflowTest {
 
         val failure = assertFailsWith<MvpPatchException> {
             MvpPatchWorkflow(
-                client = QueueRepairClient(),
+                harness = RepairClientAgentHarness(QueueRepairClient()),
                 decompiler = BinaryDecompiler { _, _, _, _ -> error("must not run") },
                 binaryExecution = testExecutionBoundary(),
             ).run(MvpPatchOptions(input, output, assumeYes = true))
@@ -130,7 +133,7 @@ class MvpPatchWorkflowTest {
         )
 
         MvpPatchWorkflow(
-            client = client,
+            harness = RepairClientAgentHarness(client),
             approve = { error("--yes must bypass the interactive prompt") },
             decompiler = BinaryDecompiler { _, _, _, raw -> raw.writeText("decompiled c") },
             binaryExecution = testExecutionBoundary(),
@@ -150,7 +153,7 @@ class MvpPatchWorkflowTest {
 
         val failure = assertFailsWith<MvpPatchException> {
             MvpPatchWorkflow(
-                client = client,
+                harness = RepairClientAgentHarness(client),
                 decompiler = BinaryDecompiler { _, _, _, raw -> raw.writeText("binary-derived ghidra context") },
                 binaryExecution = testExecutionBoundary(),
             ).run(MvpPatchOptions(input, output, assumeYes = true))
