@@ -2,6 +2,7 @@ package decompengine.oracle.core
 
 import io.github.optimumcode.json.schema.JsonSchema
 import io.github.optimumcode.json.schema.ValidationError
+import java.security.MessageDigest
 import java.util.Collections
 import java.util.concurrent.ConcurrentHashMap
 import kotlinx.serialization.json.JsonElement
@@ -25,6 +26,17 @@ object OracleSchemas {
         get() = SUPPORTED_NAMES
 
     fun identity(name: String): OracleSchemaIdentity = loaded(name).identity
+
+    /** Hashes canonical policy bytes followed by the exact bundled schema bytes. */
+    fun configurationSha256(name: String, policy: JsonElement): String {
+        val loaded = loaded(name)
+        val digest = MessageDigest.getInstance("SHA-256")
+        digest.update(OracleJson.canonicalBytes(policy))
+        digest.update(loaded.bytes)
+        return digest.digest().joinToString("") { byte ->
+            (byte.toInt() and 0xff).toString(16).padStart(2, '0')
+        }
+    }
 
     fun validate(name: String, document: JsonElement) {
         val loaded = loaded(name)
@@ -92,6 +104,7 @@ object OracleSchemas {
         return LoadedSchema(
             OracleSchemaIdentity(name, OracleArtifacts.sha256(bytes)),
             schema,
+            bytes.copyOf(),
         )
     }
 
@@ -111,7 +124,11 @@ object OracleSchemas {
     private data class LoadedSchema(
         val identity: OracleSchemaIdentity,
         val schema: JsonSchema,
-    )
+        private val storedBytes: ByteArray,
+    ) {
+        val bytes: ByteArray
+            get() = storedBytes.copyOf()
+    }
 
     private class TooManySchemaErrors : RuntimeException()
 

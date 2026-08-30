@@ -5,6 +5,7 @@ import kotlin.test.assertEquals
 import kotlin.test.assertFailsWith
 import kotlin.test.assertTrue
 import kotlinx.serialization.json.JsonObject
+import kotlinx.serialization.json.JsonPrimitive
 
 class OracleSchemasTest {
     @Test
@@ -71,6 +72,36 @@ class OracleSchemasTest {
             assertEquals(name, identity.name)
             assertTrue(identity.sha256.matches(Regex("[0-9a-f]{64}")), name)
         }
+    }
+
+    @Test
+    fun `configuration digest binds canonical policy and exact schema bytes`() {
+        assertEquals(
+            "90dd097ba542bc5297b37277125ce01e73355fe0e4cea3117b3240315fff5a5b",
+            OracleSchemas.configurationSha256(
+                "full-tree-data-truth",
+                JsonObject(
+                    linkedMapOf(
+                        "id" to JsonPrimitive("full-tree-data-truth"),
+                        "version" to JsonPrimitive(16),
+                        "typeIdentity" to JsonPrimitive(
+                            "tag-qualified-lexical-context-name-or-anonymous-declaration-with-observation-owned-lambda-and-lossy-local-contexts",
+                        ),
+                        "globalIdentity" to JsonPrimitive(
+                            "rva-or-source-aligned-name-declaration-or-producer-observation",
+                        ),
+                        "owner" to JsonPrimitive("lowest-unit-id"),
+                        "typeReferences" to JsonPrimitive(
+                            "exact-dwarf-offset-chain-with-conditional-bounded-authenticated-candidate-commitments-and-no-ambiguous-target-substitution",
+                        ),
+                        "truthSharding" to JsonPrimitive(
+                            "inventory-owner-with-deterministic-two-thirds-byte-budget-entity-partitions",
+                        ),
+                        "maximumDatabaseBytes" to JsonPrimitive(8L * 1024 * 1024 * 1024),
+                    ),
+                ),
+            ),
+        )
     }
 
     @Test
