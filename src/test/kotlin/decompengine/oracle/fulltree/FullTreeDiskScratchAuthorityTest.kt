@@ -317,6 +317,46 @@ class FullTreeDiskScratchAuthorityTest {
                 FullTreeDiskScratchStage.BEFORE_LAUNCH,
             )
             lease.requireCurrent(FullTreeDiskScratchStage.BEFORE_LAUNCH)
+            lateinit var capturedBorrow: FullTreeDiskScratchBorrowedRunRoot
+            assertEquals(
+                "borrowed-result",
+                lease.withCurrentOperationRunRootBeforeLaunch(preparedRun) { borrowed ->
+                    capturedBorrow = borrowed
+                    assertEquals(run, borrowed.path)
+                    assertFailsWith<FullTreeDiskScratchException> { lease.close() }
+                    assertFailsWith<FullTreeDiskScratchException> { lease.requireCleanAndRelease() }
+                    assertFailsWith<FullTreeDiskScratchException> {
+                        lease.withCurrentOperationRunRootBeforeLaunch(preparedRun) {
+                            error("nested borrow callback must not run")
+                        }
+                    }
+                    borrowed.withPinnedDescriptor { descriptor ->
+                        assertTrue(Files.isSameFile(run, LinuxFilesystemSyscalls.descriptorPath(descriptor)))
+                        val identity = LinuxFilesystemSyscalls.identity(descriptor.fd)
+                        assertTrue(identity.isDirectory)
+                        assertEquals(0x1c0, identity.mode and 0xfff)
+                        assertTrue(LinuxFilesystemSyscalls.directoryEntryNames(descriptor, 1).isEmpty())
+                    }
+                    "borrowed-result"
+                },
+            )
+            assertFailsWith<IllegalStateException> { capturedBorrow.path }
+            assertFailsWith<IllegalStateException> {
+                capturedBorrow.withPinnedDescriptor { error("revoked callback must not run") }
+            }
+
+            val callbackFailure = SimulatedRunRootBorrowFailure()
+            val retainedFailure = assertFailsWith<SimulatedRunRootBorrowFailure> {
+                lease.withCurrentOperationRunRootBeforeLaunch(preparedRun) {
+                    throw callbackFailure
+                }
+            }
+            assertTrue(retainedFailure === callbackFailure)
+            assertTrue(retainedFailure.suppressed.isEmpty())
+            lease.requireCurrentOperationRunRoot(
+                preparedRun,
+                FullTreeDiskScratchStage.BEFORE_LAUNCH,
+            )
             assertFailsWith<FullTreeDiskScratchException> {
                 lease.createEmptyOperationRunRoot()
             }
@@ -324,14 +364,21 @@ class FullTreeDiskScratchAuthorityTest {
             val replacement = mount.resolve(
                 ".function-observation-run-replacement-${operation.operationId}",
             )
-            Files.move(run, replacement)
-            displaced = replacement
-            Files.createDirectory(run)
-            Files.setPosixFilePermissions(run, PosixFilePermissions.fromString("rwx------"))
+            lateinit var changedBorrow: FullTreeDiskScratchBorrowedRunRoot
             val replacementFailure = assertFailsWith<FullTreeDiskScratchException> {
+                lease.withCurrentOperationRunRootBeforeLaunch(preparedRun) { borrowed ->
+                    changedBorrow = borrowed
+                    Files.move(run, replacement)
+                    displaced = replacement
+                    Files.createDirectory(run)
+                    Files.setPosixFilePermissions(run, PosixFilePermissions.fromString("rwx------"))
+                }
+            }
+            assertTrue(replacementFailure.message.orEmpty().contains("borrowed disk-scratch operation run root"))
+            assertFailsWith<IllegalStateException> { changedBorrow.path }
+            assertFailsWith<FullTreeDiskScratchException> {
                 lease.requireCurrent(FullTreeDiskScratchStage.BEFORE_LAUNCH)
             }
-            assertTrue(replacementFailure.message.orEmpty().contains("pinned descriptor"))
             Files.delete(run)
             Files.move(replacement, run)
             displaced = null
@@ -1208,6 +1255,8 @@ class FullTreeDiskScratchAuthorityTest {
     private class SimulatedLeaseUseFailure : RuntimeException()
 
     private class SimulatedRunRootPublicationFailure : RuntimeException()
+
+    private class SimulatedRunRootBorrowFailure : RuntimeException()
 
     private class SimulatedQuarantineOrderingFailure(
         val point: FullTreeDiskScratchQuarantineFaultPoint,

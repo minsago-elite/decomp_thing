@@ -108,6 +108,75 @@ internal class FullTreeDiskScratchRunRoot private constructor() {
     }
 }
 
+private object FullTreeDiskScratchBorrowedRunRootConstructionPermit
+
+/**
+ * Revocable lexical access to a duplicate descriptor for one lease-owned deterministic run root.
+ * The path is only a command-construction locator; every filesystem-authorizing operation must use
+ * [withPinnedDescriptor]. Capturing this object or its descriptor past the issuing callback grants
+ * no continuing authority because the lease revokes it and closes the duplicate before returning.
+ */
+internal class FullTreeDiskScratchBorrowedRunRoot private constructor(
+    private val descriptor: LinuxDescriptor,
+    private val authorizedPath: Path,
+) {
+    private var live = true
+
+    val path: Path
+        @Synchronized get() {
+            check(live) { "borrowed disk-scratch run root is revoked" }
+            requireDescriptorCurrent()
+            return authorizedPath
+        }
+
+    @Synchronized
+    fun <T> withPinnedDescriptor(action: (LinuxDescriptor) -> T): T {
+        check(live) { "borrowed disk-scratch run root is revoked" }
+        requireDescriptorCurrent()
+        return try {
+            action(descriptor).also { requireDescriptorCurrent() }
+        } catch (failure: Throwable) {
+            runCatching { requireDescriptorCurrent() }.exceptionOrNull()?.let { validationFailure ->
+                if (validationFailure !== failure) failure.addSuppressed(validationFailure)
+            }
+            throw failure
+        }
+    }
+
+    private fun requireDescriptorCurrent() {
+        val current = descriptor.whileOpen(LinuxFilesystemSyscalls::identity)
+        if (!sameDirectory(current, descriptor.identity) || current.mode.permissions != OWNER_DIRECTORY_MODE) {
+            scratchFail("borrowed disk-scratch run-root descriptor changed")
+        }
+    }
+
+    @Synchronized
+    private fun revoke(constructionPermit: Any) {
+        check(constructionPermit === FullTreeDiskScratchBorrowedRunRootConstructionPermit) {
+            "borrowed disk-scratch run roots can only be revoked by the disk authority"
+        }
+        live = false
+    }
+
+    companion object {
+        internal fun create(
+            descriptor: LinuxDescriptor,
+            authorizedPath: Path,
+            constructionPermit: Any,
+        ): FullTreeDiskScratchBorrowedRunRoot {
+            check(constructionPermit === FullTreeDiskScratchBorrowedRunRootConstructionPermit) {
+                "borrowed disk-scratch run roots can only be issued by the disk authority"
+            }
+            return FullTreeDiskScratchBorrowedRunRoot(descriptor, authorizedPath)
+        }
+
+        internal fun revoke(
+            borrowed: FullTreeDiskScratchBorrowedRunRoot,
+            constructionPermit: Any,
+        ) = borrowed.revoke(constructionPermit)
+    }
+}
+
 /** Canonical historical acquisition record; this artifact is not current or release authority. */
 internal class FullTreeDiskScratchLeaseRecord private constructor(
     val schemaVersion: Int,
@@ -533,6 +602,7 @@ internal class FullTreeDiskScratchLease internal constructor(
     private var closed = false
     private var operationRunDescriptor: LinuxDescriptor? = null
     private var operationRunRoot: FullTreeDiskScratchRunRoot? = null
+    private var operationRunBorrowActive = false
 
     @Synchronized
     fun requireCurrent(stage: FullTreeDiskScratchStage) {
@@ -689,12 +759,124 @@ internal class FullTreeDiskScratchLease internal constructor(
         }
     }
 
+    /**
+     * Grants callback-scoped access to an independently opened descriptor for the exact pinned run
+     * root while retaining the lease monitor and mount flock. The duplicate is selected from the
+     * pinned descriptor, then authenticated against both that descriptor and its deterministic name
+     * before and after the callback. No run member is created, removed, renamed, or synchronized by
+     * this method, and callback failure never releases the lease or removes its residue.
+     */
+    @Synchronized
+    fun <T> withCurrentOperationRunRootBeforeLaunch(
+        expected: FullTreeDiskScratchRunRoot,
+        action: (FullTreeDiskScratchBorrowedRunRoot) -> T,
+    ): T {
+        check(!closed) { "disk-scratch lease is closed" }
+        if (operationRunBorrowActive) {
+            scratchFail("disk-scratch operation run root is already borrowed")
+        }
+        requireCurrentOperationRunRoot(expected, FullTreeDiskScratchStage.BEFORE_LAUNCH)
+        val pinned = operationRunDescriptor
+            ?: scratchFail("disk-scratch operation run-root descriptor is absent")
+        val path = scratchParent.resolve(runDirectoryName(evidence.operationId))
+        val duplicate = pinned.whileOpen { pinnedFd ->
+            LinuxFilesystemSyscalls.openDirectoryAt(pinnedFd, ".")
+        }
+        val borrowed = try {
+            requireBorrowedOperationRunRoot(expected, duplicate, path)
+            FullTreeDiskScratchBorrowedRunRoot.create(
+                duplicate,
+                path,
+                FullTreeDiskScratchBorrowedRunRootConstructionPermit,
+            )
+        } catch (failure: Throwable) {
+            duplicate.close()
+            throw failure
+        }
+        operationRunBorrowActive = true
+
+        var result: Any? = null
+        var failure: Throwable? = null
+        try {
+            result = action(borrowed)
+        } catch (actionFailure: Throwable) {
+            failure = actionFailure
+        }
+        runCatching {
+            FullTreeDiskScratchBorrowedRunRoot.revoke(
+                borrowed,
+                FullTreeDiskScratchBorrowedRunRootConstructionPermit,
+            )
+        }.exceptionOrNull()?.let { revokeFailure ->
+            val prior = failure
+            if (prior == null) failure = revokeFailure else if (revokeFailure !== prior) {
+                prior.addSuppressed(revokeFailure)
+            }
+        }
+        runCatching {
+            requireBorrowedOperationRunRoot(expected, duplicate, path)
+        }.exceptionOrNull()?.let { validationFailure ->
+            val prior = failure
+            if (prior == null) failure = validationFailure else if (validationFailure !== prior) {
+                prior.addSuppressed(validationFailure)
+            }
+        }
+        duplicate.close()
+        operationRunBorrowActive = false
+        failure?.let { throw it }
+        @Suppress("UNCHECKED_CAST")
+        return result as T
+    }
+
+    private fun requireBorrowedOperationRunRoot(
+        expected: FullTreeDiskScratchRunRoot,
+        duplicate: LinuxDescriptor,
+        path: Path,
+    ) {
+        if (operationRunRoot !== expected) {
+            scratchFail("borrowed disk-scratch run-root token is not owned by this live lease")
+        }
+        val pinned = operationRunDescriptor
+            ?: scratchFail("borrowed disk-scratch operation run-root descriptor is absent")
+        val pinnedIdentity = pinned.whileOpen(LinuxFilesystemSyscalls::identity)
+        val duplicateIdentity = duplicate.whileOpen(LinuxFilesystemSyscalls::identity)
+        if (
+            !sameDirectory(pinnedIdentity, pinned.identity) ||
+            !sameDirectory(duplicateIdentity, duplicate.identity) ||
+            !sameDirectory(pinnedIdentity, duplicateIdentity) ||
+            duplicateIdentity.mode.permissions != OWNER_DIRECTORY_MODE
+        ) scratchFail("borrowed disk-scratch run root differs from its pinned descriptor")
+        requireManagedLeaseDirectory(
+            duplicateIdentity,
+            mountDescriptor.identity,
+            "borrowed disk-scratch operation run root",
+        )
+        requireSameDirectory(path, duplicate, "borrowed disk-scratch operation run root")
+        LinuxFilesystemSyscalls.openDirectoryAt(
+            leaseDescriptor.fd,
+            runDirectoryName(evidence.operationId),
+        ).use { selected ->
+            if (!sameDirectory(duplicateIdentity, selected.identity)) {
+                scratchFail("borrowed disk-scratch operation run root changed by name")
+            }
+        }
+        requireCurrentOperationRunRoot(expected, FullTreeDiskScratchStage.BEFORE_LAUNCH)
+        val finalDuplicateIdentity = duplicate.whileOpen(LinuxFilesystemSyscalls::identity)
+        if (!sameDirectory(duplicateIdentity, finalDuplicateIdentity)) {
+            scratchFail("borrowed disk-scratch operation run-root descriptor changed during validation")
+        }
+        requireSameDirectory(path, duplicate, "borrowed disk-scratch operation run root")
+    }
+
     /** Destructive release; the coordinator must independently prove every release precondition. */
     @Synchronized
     fun requireCleanAndRelease(
         faultInjector: FullTreeDiskScratchQuarantineFaultInjector? = null,
     ) {
         check(!closed) { "disk-scratch lease is closed" }
+        if (operationRunBorrowActive) {
+            scratchFail("disk-scratch lease cannot be released while its run root is borrowed")
+        }
         var failure: Throwable? = null
         try {
             requireCurrent(FullTreeDiskScratchStage.RELEASE)
@@ -738,6 +920,9 @@ internal class FullTreeDiskScratchLease internal constructor(
      */
     @Synchronized
     fun abandonForRecovery() {
+        if (operationRunBorrowActive) {
+            scratchFail("disk-scratch lease cannot close while its run root is borrowed")
+        }
         closeDescriptors(priorFailure = null)?.let { throw it }
     }
 
