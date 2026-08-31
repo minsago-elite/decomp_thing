@@ -608,6 +608,11 @@ internal class FullTreeFunctionObservationPreparedIsolationAuthority private con
 
 private object COLD_LEASED_OPERATION_CONSTRUCTION_PERMIT
 
+internal enum class FullTreeFunctionObservationColdTransferFaultPoint {
+    BEFORE_FINAL_SYSTEMD_SWEEP,
+    AFTER_FINAL_SYSTEMD_SWEEP,
+}
+
 /**
  * Lock-retaining observation of one exact, fully published LEASED history and its residual disk
  * population. The captured population is historical inspection data, not launch or mutation
@@ -653,6 +658,94 @@ internal class FullTreeFunctionObservationColdLeasedOperation private constructo
         )
     }
 
+    /**
+     * Transfers the same journal and disk locks into an observation-only exact-unit-absent state.
+     *
+     * The ordering is H/D/H/D, systemd, H/D/H/D, systemd. The unit name is derived only from the
+     * durable binding, and the complete isolation-configuration digest must match that binding.
+     * Any failure leaves this source live. Success appends nothing and grants no launch, recovery,
+     * adoption, publication, cleanup, or release authority.
+     */
+    @Synchronized
+    fun transferToDeterministicUnitAbsent(
+        configuration: FullTreeFunctionObservationIsolationConfiguration,
+    ): FullTreeFunctionObservationColdLeasedUnitAbsent =
+        transferToDeterministicUnitAbsent(configuration, null)
+
+    /** Internally interpreted fail-only seam; it cannot issue or retain an authority. */
+    @Synchronized
+    internal fun transferToDeterministicUnitAbsentForTesting(
+        configuration: FullTreeFunctionObservationIsolationConfiguration,
+        faultPoint: FullTreeFunctionObservationColdTransferFaultPoint,
+    ): Nothing {
+        transferToDeterministicUnitAbsent(configuration, faultPoint)
+        error("cold LEASED fail-only transfer issued an authority")
+    }
+
+    private fun transferToDeterministicUnitAbsent(
+        configuration: FullTreeFunctionObservationIsolationConfiguration,
+        faultPoint: FullTreeFunctionObservationColdTransferFaultPoint?,
+    ): FullTreeFunctionObservationColdLeasedUnitAbsent {
+        check(!closed) { "function-observation cold LEASED operation is closed" }
+        val binding = leasedHistory.binding
+        if (configuration.canonicalSha256 != binding.isolationConfigurationSha256) {
+            coordinationFail("cold LEASED systemd configuration differs from its operation binding")
+        }
+        requireCurrentColdLeasedOperation(
+            expectedHistory = leasedHistory,
+            expectedEvidence = diskEvidence,
+            expectedSnapshot = initialSnapshot,
+            journal = journal,
+            coldLease = coldLease,
+        )
+        val observer = FullTreeFunctionObservationColdUnitAbsenceObserver.open(binding, configuration)
+        observer.requireAbsent()
+        requireCurrentColdLeasedOperation(
+            expectedHistory = leasedHistory,
+            expectedEvidence = diskEvidence,
+            expectedSnapshot = initialSnapshot,
+            journal = journal,
+            coldLease = coldLease,
+        )
+        injectColdTransferFaultIfReached(
+            faultPoint,
+            FullTreeFunctionObservationColdTransferFaultPoint.BEFORE_FINAL_SYSTEMD_SWEEP,
+        )
+        observer.requireAbsent()
+        injectColdTransferFaultIfReached(
+            faultPoint,
+            FullTreeFunctionObservationColdTransferFaultPoint.AFTER_FINAL_SYSTEMD_SWEEP,
+        )
+        if (faultPoint != null) coordinationFail("cold LEASED fail-only transfer missed its fault point")
+        val transferred = FullTreeFunctionObservationColdLeasedUnitAbsent.create(
+            leasedHistory = leasedHistory,
+            diskEvidence = diskEvidence,
+            initialSnapshot = initialSnapshot,
+            journal = journal,
+            coldLease = coldLease,
+            observer = observer,
+            constructionPermit = COLD_LEASED_UNIT_ABSENT_CONSTRUCTION_PERMIT,
+        )
+        closed = true
+        return transferred
+    }
+
+    private fun injectColdTransferFaultIfReached(
+        requested: FullTreeFunctionObservationColdTransferFaultPoint?,
+        reached: FullTreeFunctionObservationColdTransferFaultPoint,
+    ) {
+        when (requested) {
+            null -> Unit
+            FullTreeFunctionObservationColdTransferFaultPoint.BEFORE_FINAL_SYSTEMD_SWEEP -> {
+                if (reached == requested) coordinationFail("injected failure before the final cold systemd sweep")
+            }
+
+            FullTreeFunctionObservationColdTransferFaultPoint.AFTER_FINAL_SYSTEMD_SWEEP -> {
+                if (reached == requested) coordinationFail("injected failure after the final cold systemd sweep")
+            }
+        }
+    }
+
     @Synchronized
     override fun close() {
         if (closed) return
@@ -679,6 +772,94 @@ internal class FullTreeFunctionObservationColdLeasedOperation private constructo
                 initialSnapshot,
                 journal,
                 coldLease,
+            )
+        }
+    }
+}
+
+private object COLD_LEASED_UNIT_ABSENT_CONSTRUCTION_PERMIT
+
+/**
+ * Lock-retaining, revalidatable observation that the deterministic unit name was absent.
+ *
+ * This state is a bounded point-in-time observation, not a reservation or same-UID exclusion.
+ * A later unit remains foreign. Closing releases only the cold disk lease and journal descriptors;
+ * it never queries, stops, kills, cancels, resets, adopts, or otherwise touches systemd state.
+ */
+internal class FullTreeFunctionObservationColdLeasedUnitAbsent private constructor(
+    val leasedHistory: FullTreeFunctionObservationOperationHistory,
+    val diskEvidence: FullTreeDiskScratchEvidence,
+    val observedPopulation: FullTreeDiskScratchColdPopulation,
+    val unitName: String,
+    private val initialSnapshot: FullTreeDiskScratchColdSnapshot,
+    private val journal: FullTreeFunctionObservationOperationJournal,
+    private val coldLease: FullTreeDiskScratchColdLease,
+    private val observer: FullTreeFunctionObservationColdUnitAbsenceObserver,
+) : AutoCloseable {
+    private var closed = false
+
+    init {
+        val acceptedEvidence = requireExactlyLeasedHistory(leasedHistory)
+        if (
+            acceptedEvidence !== diskEvidence ||
+            observedPopulation != initialSnapshot.population ||
+            unitName != leasedHistory.binding.unitName ||
+            observer.unitName != unitName ||
+            observer.isolationConfigurationSha256 != leasedHistory.binding.isolationConfigurationSha256
+        ) coordinationFail("cold deterministic-unit absence owner retained different authority")
+    }
+
+    /** Repeats H/D/H/D -> systemd -> H/D/H/D -> systemd without mutation. */
+    @Synchronized
+    fun requireCurrentUnitAbsentReadOnly() {
+        check(!closed) { "function-observation cold unit-absent operation is closed" }
+        requireCurrentColdLeasedOperation(
+            expectedHistory = leasedHistory,
+            expectedEvidence = diskEvidence,
+            expectedSnapshot = initialSnapshot,
+            journal = journal,
+            coldLease = coldLease,
+        )
+        observer.requireAbsent()
+        requireCurrentColdLeasedOperation(
+            expectedHistory = leasedHistory,
+            expectedEvidence = diskEvidence,
+            expectedSnapshot = initialSnapshot,
+            journal = journal,
+            coldLease = coldLease,
+        )
+        observer.requireAbsent()
+    }
+
+    @Synchronized
+    override fun close() {
+        if (closed) return
+        closed = true
+        closeColdOperationResources(coldLease, journal)?.let { throw it }
+    }
+
+    companion object {
+        internal fun create(
+            leasedHistory: FullTreeFunctionObservationOperationHistory,
+            diskEvidence: FullTreeDiskScratchEvidence,
+            initialSnapshot: FullTreeDiskScratchColdSnapshot,
+            journal: FullTreeFunctionObservationOperationJournal,
+            coldLease: FullTreeDiskScratchColdLease,
+            observer: FullTreeFunctionObservationColdUnitAbsenceObserver,
+            constructionPermit: Any,
+        ): FullTreeFunctionObservationColdLeasedUnitAbsent {
+            check(constructionPermit === COLD_LEASED_UNIT_ABSENT_CONSTRUCTION_PERMIT) {
+                "cold unit-absent capabilities can only be issued by a cold LEASED transfer"
+            }
+            return FullTreeFunctionObservationColdLeasedUnitAbsent(
+                leasedHistory,
+                diskEvidence,
+                initialSnapshot.population,
+                leasedHistory.binding.unitName,
+                initialSnapshot,
+                journal,
+                coldLease,
+                observer,
             )
         }
     }

@@ -47,7 +47,7 @@ internal fun interface FullTreeFunctionObservationLaunchFaultInjector {
     fun at(point: FullTreeFunctionObservationLaunchFaultPoint, unitName: String)
 }
 
-/** Observes only pinned systemctl control calls; it does not observe launch or process signals. */
+/** Observes only pinned systemctl invocations; it does not observe launch or process signals. */
 internal fun interface FullTreeFunctionObservationSystemctlCommandObserver {
     fun beforeCommand(unitName: String, arguments: List<String>)
 }
@@ -2809,6 +2809,142 @@ private class TrustedObservationBoundary(
     }
 }
 
+/**
+ * Query-only, point-in-time observation of one binding-derived systemd name.
+ *
+ * The inventory commands do not request or load the named unit. Empty manager and job inventories
+ * are observed around the bounded global cgroup scan. This is neither a name reservation nor an
+ * exclusion claim: another same-UID process can create the name immediately after any observation.
+ * Until OS-principal separation lands, endpoint pinning also assumes cooperative same-UID peers.
+ */
+internal class FullTreeFunctionObservationColdUnitAbsenceObserver private constructor(
+    private val inspector: PinnedSecurityExecutable,
+    private val bus: PinnedSystemdBusEndpoint,
+    val unitName: String,
+    val isolationConfigurationSha256: String,
+    private val commandObserver: FullTreeFunctionObservationSystemctlCommandObserver?,
+) {
+    init {
+        if (!unitName.matches(PRODUCTION_OBSERVATION_UNIT_NAME)) {
+            isolationFail("cold systemd observation unit name is not canonical")
+        }
+        requireUnchanged()
+    }
+
+    fun requireAbsent() {
+        requireUnchanged()
+        requireUnfilteredUnitInventory()
+        requireEnumerationEmpty(COLD_SYSTEMD_LIST_UNITS_ARGUMENTS + listOf("--", unitName), "unit inventory")
+        requireEnumerationEmpty(COLD_SYSTEMD_LIST_JOBS_ARGUMENTS + listOf("--", unitName), "job inventory")
+        requireUnchanged()
+        if (findObservationCgroupsForUnit(unitName).isNotEmpty()) {
+            isolationFail("cold systemd observation found an exact-name cgroup")
+        }
+        requireUnchanged()
+        requireEnumerationEmpty(COLD_SYSTEMD_LIST_JOBS_ARGUMENTS + listOf("--", unitName), "job inventory")
+        requireEnumerationEmpty(COLD_SYSTEMD_LIST_UNITS_ARGUMENTS + listOf("--", unitName), "unit inventory")
+        requireUnfilteredUnitInventory()
+        requireUnchanged()
+    }
+
+    private fun requireUnfilteredUnitInventory() {
+        inspector.requireUnchanged()
+        bus.requireUnchanged()
+        commandObserver?.beforeCommand(
+            unitName,
+            java.util.List.copyOf(COLD_SYSTEMD_MANAGER_FEATURES_ARGUMENTS),
+        )
+        val result = runTrustedCommand(
+            listOf(inspector.path.toString(), "--user") + COLD_SYSTEMD_MANAGER_FEATURES_ARGUMENTS,
+            bus.controlEnvironment,
+            SYSTEMD_CONTROL_TIMEOUT,
+            "cold systemd manager features",
+        )
+        if (result.exitCode != 0) isolationFail("cold systemd manager features failed safely")
+        requireColdSystemdManagerFeaturesUnfiltered(result.output)
+        inspector.requireUnchanged()
+        bus.requireUnchanged()
+    }
+
+    private fun requireEnumerationEmpty(arguments: List<String>, label: String) {
+        inspector.requireUnchanged()
+        bus.requireUnchanged()
+        commandObserver?.beforeCommand(unitName, java.util.List.copyOf(arguments))
+        val result = runTrustedCommand(
+            listOf(inspector.path.toString(), "--user") + arguments,
+            bus.controlEnvironment,
+            SYSTEMD_CONTROL_TIMEOUT,
+            "cold systemd $label",
+        )
+        if (result.exitCode != 0) isolationFail("cold systemd $label failed safely")
+        requireColdSystemdEnumerationEmpty(result.output, label)
+        inspector.requireUnchanged()
+        bus.requireUnchanged()
+    }
+
+    private fun requireUnchanged() {
+        inspector.requireUnchanged()
+        bus.requireUnchanged()
+    }
+
+    companion object {
+        fun open(
+            binding: FullTreeFunctionObservationOperationBinding,
+            configuration: FullTreeFunctionObservationIsolationConfiguration,
+        ): FullTreeFunctionObservationColdUnitAbsenceObserver = create(binding, configuration, null)
+
+        internal fun openWithTestObserver(
+            binding: FullTreeFunctionObservationOperationBinding,
+            configuration: FullTreeFunctionObservationIsolationConfiguration,
+            commandObserver: FullTreeFunctionObservationSystemctlCommandObserver,
+        ): FullTreeFunctionObservationColdUnitAbsenceObserver =
+            create(binding, configuration, commandObserver)
+
+        private fun create(
+            binding: FullTreeFunctionObservationOperationBinding,
+            configuration: FullTreeFunctionObservationIsolationConfiguration,
+            commandObserver: FullTreeFunctionObservationSystemctlCommandObserver?,
+        ): FullTreeFunctionObservationColdUnitAbsenceObserver {
+            if (configuration.canonicalSha256 != binding.isolationConfigurationSha256) {
+                isolationFail("cold systemd observation configuration differs from its operation binding")
+            }
+            val inspector = PinnedSecurityExecutable.pin(
+                configuration.scopeInspectorExecutable,
+                "cold systemd scope inspector",
+                configuration.expectedScopeInspectorSha256,
+            )
+            val bus = PinnedSystemdBusEndpoint.pin(configuration.systemdUserRuntimeDirectory)
+            return FullTreeFunctionObservationColdUnitAbsenceObserver(
+                inspector,
+                bus,
+                binding.unitName,
+                configuration.canonicalSha256,
+                commandObserver,
+            )
+        }
+    }
+}
+
+internal fun requireColdSystemdEnumerationEmpty(output: String, label: String) {
+    if (output.isNotEmpty()) isolationFail("cold systemd $label was not empty")
+}
+
+/** ListUnitsByPatterns silently filters SELinux-denied units, so such builds are inadmissible. */
+internal fun requireColdSystemdManagerFeaturesUnfiltered(output: String) {
+    if (!output.endsWith('\n')) isolationFail("cold systemd manager features were malformed")
+    val line = output.dropLast(1)
+    if (line.isEmpty() || line.any { it == '\r' || it == '\n' }) {
+        isolationFail("cold systemd manager features were malformed")
+    }
+    val features = line.split(' ')
+    if (
+        features.any { !it.matches(SYSTEMD_BUILD_FEATURE) } ||
+        features.toSet().size != features.size ||
+        "-SELINUX" !in features ||
+        "+SELINUX" in features
+    ) isolationFail("cold systemd unit inventory could be access-filtered")
+}
+
 private class ObservationSystemdController(
     private val inspector: PinnedSecurityExecutable,
     private val bus: PinnedSystemdBusEndpoint,
@@ -4239,7 +4375,7 @@ private fun syntheticDestinationParents(destinations: Collection<Path>): List<Pa
     return parents.sortedWith(compareBy<Path>({ it.nameCount }, { it.toString() }))
 }
 
-/** Bounded absence proof for attachment failures before systemd reports ControlGroup. */
+/** Bounded global exact-name cgroup observation for cold absence and attachment-failure cleanup. */
 internal fun findObservationCgroupsForUnit(unitName: String): List<Path> {
     if (
         !unitName.matches(PRODUCTION_OBSERVATION_UNIT_NAME) &&
@@ -4247,37 +4383,102 @@ internal fun findObservationCgroupsForUnit(unitName: String): List<Path> {
     ) {
         isolationFail("isolated scope name is unsafe for cgroup absence verification")
     }
-    val matches = mutableListOf<Path>()
-    val pending = ArrayDeque<Pair<Path, Int>>()
-    pending += CGROUP_ROOT to 0
-    var entries = 0
-    while (pending.isNotEmpty()) {
-        val (directory, depth) = pending.removeFirst()
-        Files.newDirectoryStream(directory).use { children ->
-            children.forEach { child ->
-                entries = Math.addExact(entries, 1)
-                if (entries > MAXIMUM_CGROUP_SEARCH_ENTRIES) {
-                    isolationFail("isolated cgroup cleanup search exceeds its entry bound")
-                }
-                if (!Files.isDirectory(child, LinkOption.NOFOLLOW_LINKS)) return@forEach
-                val normalized = child.toAbsolutePath().normalize()
-                if (!normalized.startsWith(CGROUP_ROOT)) {
-                    isolationFail("isolated cgroup cleanup search escaped cgroup v2")
-                }
-                if (normalized.fileName?.toString() == unitName) matches.add(normalized)
-                if (depth >= MAXIMUM_CGROUP_SEARCH_DEPTH) {
-                    Files.newDirectoryStream(normalized).use { descendants ->
-                        if (descendants.any { Files.isDirectory(it, LinkOption.NOFOLLOW_LINKS) }) {
-                            isolationFail("isolated cgroup cleanup search exceeds its depth bound")
-                        }
+    return LinuxFilesystemSyscalls.openRoot(CGROUP_ROOT).use { pinnedRoot ->
+        val rootBefore = LinuxFilesystemSyscalls.identity(pinnedRoot.fd)
+        if (!sameDirectory(rootBefore, pinnedRoot.identity)) {
+            isolationFail("cgroup v2 root changed before exact-name search")
+        }
+        requireAuthenticatedCgroupV2Mount(rootBefore)
+        val controllers = LinuxFilesystemSyscalls.openRegularFileAtOrNull(
+            pinnedRoot.fd,
+            "cgroup.controllers",
+        ) ?: isolationFail("exact-name cgroup search requires a cgroup v2 root")
+        controllers.use { marker ->
+            val identity = LinuxFilesystemSyscalls.identity(marker.fd)
+            if (!identity.isRegularFile || identity.isDirectory || identity.isSymbolicLink) {
+                isolationFail("cgroup v2 controller marker is not a regular file")
+            }
+        }
+        val matches = mutableListOf<Path>()
+        val pending = ArrayDeque<Pair<Path, Int>>()
+        pending += CGROUP_ROOT to 0
+        var entries = 0
+        while (pending.isNotEmpty()) {
+            val (directory, depth) = pending.removeFirst()
+            Files.newDirectoryStream(directory).use { children ->
+                children.forEach { child ->
+                    entries = Math.addExact(entries, 1)
+                    if (entries > MAXIMUM_CGROUP_SEARCH_ENTRIES) {
+                        isolationFail("isolated cgroup cleanup search exceeds its entry bound")
                     }
-                } else {
-                    pending += normalized to depth + 1
+                    val attributes = Files.readAttributes(
+                        child,
+                        java.nio.file.attribute.BasicFileAttributes::class.java,
+                        LinkOption.NOFOLLOW_LINKS,
+                    )
+                    if (!attributes.isDirectory || attributes.isSymbolicLink) return@forEach
+                    val normalized = child.toAbsolutePath().normalize()
+                    if (!normalized.startsWith(CGROUP_ROOT)) {
+                        isolationFail("isolated cgroup cleanup search escaped cgroup v2")
+                    }
+                    if (normalized.fileName?.toString() == unitName) matches.add(normalized)
+                    if (depth >= MAXIMUM_CGROUP_SEARCH_DEPTH) {
+                        Files.newDirectoryStream(normalized).use { descendants ->
+                            descendants.forEach { descendant ->
+                                entries = Math.addExact(entries, 1)
+                                if (entries > MAXIMUM_CGROUP_SEARCH_ENTRIES) {
+                                    isolationFail("isolated cgroup cleanup search exceeds its entry bound")
+                                }
+                                val descendantAttributes = Files.readAttributes(
+                                    descendant,
+                                    java.nio.file.attribute.BasicFileAttributes::class.java,
+                                    LinkOption.NOFOLLOW_LINKS,
+                                )
+                                if (descendantAttributes.isDirectory && !descendantAttributes.isSymbolicLink) {
+                                    isolationFail("isolated cgroup cleanup search exceeds its depth bound")
+                                }
+                            }
+                        }
+                    } else {
+                        pending += normalized to depth + 1
+                    }
                 }
             }
         }
+        val rootAfter = LinuxFilesystemSyscalls.identity(pinnedRoot.fd)
+        if (!sameDirectory(rootBefore, rootAfter)) {
+            isolationFail("cgroup v2 root changed during exact-name search")
+        }
+        requireAuthenticatedCgroupV2Mount(rootAfter)
+        LinuxFilesystemSyscalls.openRoot(CGROUP_ROOT).use { selected ->
+            if (!sameDirectory(rootAfter, selected.identity)) {
+                isolationFail("cgroup v2 root name changed after exact-name search")
+            }
+        }
+        matches
     }
-    return matches
+}
+
+private fun requireAuthenticatedCgroupV2Mount(identity: LinuxFileIdentity) {
+    val mounts = try {
+        parseFullTreeDiskMountTable(readBoundedText(Path.of("/proc/self/mountinfo"), PROC_MOUNTINFO_BYTES))
+    } catch (failure: Throwable) {
+        throw FullTreeFunctionObservationIsolationException(
+            "cannot authenticate the cgroup v2 mount table",
+            failure,
+        )
+    }
+    val selected = mounts.singleOrNull { it.mountId == identity.mountId }
+        ?: isolationFail("cgroup v2 mount identity is absent or ambiguous")
+    if (
+        selected.root != Path.of("/") ||
+        selected.mountPoint != CGROUP_ROOT ||
+        selected.fileSystemType != "cgroup2" ||
+        Files.getFileStore(CGROUP_ROOT).type() != "cgroup2"
+    ) isolationFail("exact-name cgroup search requires the global cgroup v2 mount")
+    if (mounts.any { it.mountId != selected.mountId && it.mountPoint.startsWith(CGROUP_ROOT) }) {
+        isolationFail("exact-name cgroup search rejects nested mounts")
+    }
 }
 
 private fun parseSystemdMicros(raw: String?): Long? {
@@ -4436,6 +4637,7 @@ private const val MAXIMUM_TRUSTED_OUTPUT_BYTES = 64 * 1024
 private const val MAXIMUM_PROC_CGROUP_BYTES = 1024 * 1024
 private const val MAXIMUM_PROC_STATUS_BYTES = 1024 * 1024
 private const val MAXIMUM_PROC_ENVIRONMENT_BYTES = 1024 * 1024
+private const val PROC_MOUNTINFO_BYTES = 8 * 1024 * 1024
 private const val CGROUP_TEXT_BYTES = 64 * 1024
 private const val CGROUP_PROCS_BYTES = 1024 * 1024
 private const val BOOT_PROCESS_COUNT = 4
@@ -4485,6 +4687,7 @@ private val WORKER_FAILURE_CLEANUP_LIMITS = AcpRuntimeClosureLimits(
 private val CGROUP_ROOT = Path.of("/sys/fs/cgroup")
 private val SECURE_RANDOM = SecureRandom()
 private val SHA256 = Regex("[0-9a-f]{64}")
+private val SYSTEMD_BUILD_FEATURE = Regex("[+-][A-Z0-9_]+")
 private val PROTOCOL_NONCE = Regex("[0-9a-f]{64}")
 private val SHARD_IDENTIFIER = Regex("[a-z0-9]+(?:-[a-z0-9]+)*")
 private val PRODUCTION_OBSERVATION_UNIT_NAME =
@@ -4520,6 +4723,28 @@ private val REQUIRED_SYSTEMD_RUN_OPTIONS = listOf(
     "--property",
     "--unit",
     "--expand-environment",
+)
+private val COLD_SYSTEMD_MANAGER_FEATURES_ARGUMENTS = listOf(
+    "--no-pager",
+    "--property=Features",
+    "--value",
+    "show",
+)
+private val COLD_SYSTEMD_LIST_UNITS_ARGUMENTS = listOf(
+    "--no-pager",
+    "--no-legend",
+    "--plain",
+    "--full",
+    "--all",
+    "list-units",
+)
+private val COLD_SYSTEMD_LIST_JOBS_ARGUMENTS = listOf(
+    "--no-pager",
+    "--no-legend",
+    "--plain",
+    "--full",
+    "--all",
+    "list-jobs",
 )
 private val REQUIRED_SYSTEMCTL_COMMANDS = listOf("freeze", "thaw", "kill")
 private val SYSTEMD_PROPERTIES = setOf(
