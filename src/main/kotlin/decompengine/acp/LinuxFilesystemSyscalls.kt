@@ -88,6 +88,29 @@ internal object LinuxFilesystemSyscalls {
     /** Tests the exact pidfd-pinned process without signaling a later process that reused its PID. */
     fun processExists(handle: LinuxProcessDescriptor): Boolean = signalProcess(handle, 0)
 
+    /** Tests pidfd readiness without reaping or consulting a reusable numeric PID. */
+    fun processExited(handle: LinuxProcessDescriptor): Boolean = handle.signalWhileOpen { descriptor ->
+        val pollDescriptor = Memory(POLLFD_BYTES.toLong())
+        pollDescriptor.setInt(0, descriptor)
+        pollDescriptor.setShort(Int.SIZE_BYTES.toLong(), POLLIN.toShort())
+        pollDescriptor.setShort((Int.SIZE_BYTES + Short.SIZE_BYTES).toLong(), 0)
+        while (true) {
+            val result = libc.poll(pollDescriptor, NativeLong(1), 0)
+            if (result >= 0) {
+                val events = pollDescriptor.getShort(
+                    (Int.SIZE_BYTES + Short.SIZE_BYTES).toLong(),
+                ).toInt() and 0xffff
+                if (events and POLLNVAL != 0) {
+                    throw IOException("Linux pidfd readiness probe observed an invalid descriptor")
+                }
+                return@signalWhileOpen result > 0 && events and (POLLIN or POLLHUP or POLLERR) != 0
+            }
+            if (Native.getLastError() != EINTR) throw syscallFailure("inspect sandbox process exit")
+        }
+        @Suppress("UNREACHABLE_CODE")
+        false
+    }
+
     /** Signals the pinned process, never a later process reusing its numeric PID. */
     private fun signalProcess(handle: LinuxProcessDescriptor, signal: Int): Boolean =
         handle.signalWhileOpen { descriptor ->
@@ -882,6 +905,7 @@ internal object LinuxFilesystemSyscalls {
         fun mkdirat(directoryFd: Int, path: String, mode: Int): Int
         fun pidfd_open(pid: Int, flags: Int): Int
         fun pidfd_send_signal(pidfd: Int, signal: Int, info: Pointer?, flags: Int): Int
+        fun poll(descriptors: Pointer, count: NativeLong, timeoutMilliseconds: Int): Int
         fun listxattr(path: String, list: Pointer?, size: NativeLong): NativeLong
         fun getxattr(path: String, name: String, value: Pointer?, size: NativeLong): NativeLong
         fun fstatvfs(fd: Int, statistics: LinuxStatVfs): Int
@@ -945,6 +969,11 @@ internal object LinuxFilesystemSyscalls {
     internal const val ESRCH = 3
     private const val SIGTERM = 15
     private const val SIGKILL = 9
+    private const val POLLIN = 0x001
+    private const val POLLERR = 0x008
+    private const val POLLHUP = 0x010
+    private const val POLLNVAL = 0x020
+    private const val POLLFD_BYTES = 8
     private const val STATVFS_READ_ONLY = 1L
     internal const val ENOENT = 2
     internal const val EEXIST = 17
