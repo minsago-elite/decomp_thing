@@ -117,6 +117,25 @@ release_root="$(mktemp -d)"
   --args="$release_root"
 ```
 
+Stable recipe verification also runs in Kotlin/JVM. It strictly binds the checked reproduction lock to the exact
+Dockerfile and historical build record, verifies every `FROM` reference plus platform and `SOURCE_DATE_EPOCH`, and
+requires exactly one fresh linux/amd64 Docker-inspect identity. The fresh image digest is format- and platform-checked
+but is not incorrectly equated with the metadata-derived historical origin digest. Save the inspect response in a
+private trusted directory and run:
+
+```sh
+inspect_root="$(mktemp -d)"
+docker image inspect decomp-llvm-oracle-toolchain:22.1.6 \
+  > "$inspect_root/inspect.json"
+./gradlew --no-daemon verifyLlvmToolchainReproduction \
+  --args="--lock oracle/llvm/22.1.6/toolchain-reproduction.json --build-record oracle/llvm/22.1.6/build-record.json --inspect-json $inspect_root/inspect.json"
+```
+
+This gate authenticates stable recipe provenance only. Exact live tool bytes and version output remain the separate
+in-container build-record gate below, which is still Python migration compatibility. The retained
+`scripts/verify-toolchain-reproduction.py` command is also legacy compatibility only; its underlying Python module
+remains a transitive helper of that unmigrated live build-record gate until the latter has Kotlin parity.
+
 Full-tree scope, DWARF inventory, and source-inventory authority run through Kotlin/JVM. Invoke the stable Gradle
 entrypoints, then compare their exact canonical bytes with the reviewed artifacts:
 

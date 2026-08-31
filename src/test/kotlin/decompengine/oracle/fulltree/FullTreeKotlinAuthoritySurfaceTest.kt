@@ -33,7 +33,6 @@ class FullTreeKotlinAuthoritySurfaceTest {
         listOf(
             "python3 scripts/verify-llvm-oracle-source.py",
             "python3 scripts/fetch-llvm-oracle-source.py",
-            "python3 scripts/verify-toolchain-reproduction.py",
             "scripts/verify-llvm-oracle-build-record.py",
             "python3 scripts/verify-llvm-oracle-artifacts.py",
             "python3 scripts/generate-llvm-function-recovery-oracle.py",

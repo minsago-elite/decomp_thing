@@ -58,6 +58,12 @@ registerOracleJavaExecTask(
     entryPoint = "decompengine.oracle.provenance.LlvmReleaseArtifactFetcherCli",
 )
 
+registerOracleJavaExecTask(
+    taskName = "verifyLlvmToolchainReproduction",
+    taskDescription = "Verifies the stable LLVM toolchain recipe and rebuilt image identity in Kotlin/JVM",
+    entryPoint = "decompengine.oracle.provenance.LlvmToolchainReproductionVerifierCli",
+)
+
 val acpGateHelperSource = layout.projectDirectory.file("src/main/c/decomp_acp_gate_helper.c")
 val acpGateHelperBinary = layout.buildDirectory.file("native/acp/decomp-acp-gate-helper")
 val acpGateHelperChecksum = layout.buildDirectory.file("native/acp/decomp-acp-gate-helper.sha256")

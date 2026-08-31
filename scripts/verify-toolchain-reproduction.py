@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Verify a rebuilt oracle toolchain image's stable recipe identity."""
+"""Legacy Python compatibility verifier; not Kotlin/JVM oracle or release authority."""
 
 from __future__ import annotations
 

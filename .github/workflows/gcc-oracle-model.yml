@@ -179,8 +179,9 @@ jobs:
         run: |
           oracle_tests=()
           for path in tests/oracle/test_*.py; do
-            # Retained for local legacy-compatibility runs; Kotlin/JVM owns this required gate.
-            if [[ "$path" == "tests/oracle/test_release_artifacts.py" ]]; then
+            # Retained for local legacy-compatibility runs; Kotlin/JVM owns these required gates.
+            if [[ "$path" == "tests/oracle/test_release_artifacts.py" ||
+                  "$path" == "tests/oracle/test_stable_toolchain_reproduction.py" ]]; then
               continue
             fi
             module="${path%.py}"

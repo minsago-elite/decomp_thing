@@ -1,4 +1,6 @@
-"""Stable provenance checks for oracle toolchain container rebuilds.
+"""Legacy Python compatibility verifier retained by the unmigrated live build-record gate.
+
+It is not independent Kotlin/JVM recipe or release authority.
 
 Docker image IDs include layer and configuration metadata.  Rebuilding an
 otherwise identical recipe against a package repository can therefore produce
