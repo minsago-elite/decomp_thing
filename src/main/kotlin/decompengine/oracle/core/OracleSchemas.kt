@@ -172,6 +172,7 @@ object OracleSchemas {
         "full-tree-release-assets",
         "full-tree-release-evidence",
         "full-tree-scope",
+        "full-tree-source-header-dependencies",
         "full-tree-source-inventory",
         "function-recovery-oracle",
         "function-recovery-score",

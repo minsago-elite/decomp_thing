@@ -1,0 +1,291 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://github.com/minsago-elite/decomp_thing/oracle/full-tree-source-header-dependencies.schema.json",
+  "title": "Non-authoritative full-tree source and header dependency planning evidence",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schemaVersion", "authority", "oracle", "bounds", "archive", "resolutionPolicy", "counts", "commitments", "modules", "sourceOnly", "dependencyFiles", "sharedHeaders", "moduleGraph", "reportSha256"],
+  "properties": {
+    "schemaVersion": {"const": 1},
+    "authority": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["status", "purpose", "releaseEligible", "cleanCompilationProven"],
+      "properties": {
+        "status": {"const": "planning-only-non-authoritative"},
+        "purpose": {"const": "source-header-dependency-planning-evidence"},
+        "releaseEligible": {"const": false},
+        "cleanCompilationProven": {"const": false}
+      }
+    },
+    "oracle": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["id", "scopeSha256", "sourceLockSha256", "artifactManifestSha256", "buildRecordSha256", "inventoryArtifactSha256", "inventoryIndexSha256", "sourceInventoryArtifactSha256", "sourceInventoryReportSha256", "planningInventoryArtifactSha256", "planningInventoryReportSha256", "planningInventoryConfigurationSha256", "sourceArchiveSha256", "configurationSha256"],
+      "properties": {
+        "id": {"type": "string", "minLength": 1, "maxLength": 256},
+        "scopeSha256": {"$ref": "#/$defs/sha256"},
+        "sourceLockSha256": {"$ref": "#/$defs/sha256"},
+        "artifactManifestSha256": {"$ref": "#/$defs/sha256"},
+        "buildRecordSha256": {"$ref": "#/$defs/sha256"},
+        "inventoryArtifactSha256": {"$ref": "#/$defs/sha256"},
+        "inventoryIndexSha256": {"$ref": "#/$defs/sha256"},
+        "sourceInventoryArtifactSha256": {"$ref": "#/$defs/sha256"},
+        "sourceInventoryReportSha256": {"$ref": "#/$defs/sha256"},
+        "planningInventoryArtifactSha256": {"$ref": "#/$defs/sha256"},
+        "planningInventoryReportSha256": {"$ref": "#/$defs/sha256"},
+        "planningInventoryConfigurationSha256": {"$ref": "#/$defs/sha256"},
+        "sourceArchiveSha256": {"$ref": "#/$defs/sha256"},
+        "configurationSha256": {"$ref": "#/$defs/sha256"}
+      }
+    },
+    "bounds": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["maximumIndexedRegularFiles", "maximumParsedFiles", "maximumParsedBytes", "maximumParsedFileBytes", "maximumLogicalLineBytes", "maximumDirectives", "maximumCandidatesPerDirective", "maximumOutputRecords", "maximumWorkUnits", "maximumSerializedBytes"],
+      "properties": {
+        "maximumIndexedRegularFiles": {"const": 200000},
+        "maximumParsedFiles": {"const": 100000},
+        "maximumParsedBytes": {"const": 1073741824},
+        "maximumParsedFileBytes": {"const": 16777216},
+        "maximumLogicalLineBytes": {"const": 262144},
+        "maximumDirectives": {"const": 1000000},
+        "maximumCandidatesPerDirective": {"const": 64},
+        "maximumOutputRecords": {"const": 100000},
+        "maximumWorkUnits": {"const": 2000000},
+        "maximumSerializedBytes": {"const": 67108864}
+      }
+    },
+    "archive": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["root", "commit", "compressedBytes", "expandedBytes", "memberCount", "regularFileCount", "sha256", "relevantRegularPathCommitmentSha256"],
+      "properties": {
+        "root": {"type": "string", "pattern": "^[A-Za-z0-9][A-Za-z0-9._-]*$", "maxLength": 255},
+        "commit": {"type": "string", "pattern": "^[0-9a-f]{40}$"},
+        "compressedBytes": {"type": "integer", "minimum": 1, "maximum": 536870912},
+        "expandedBytes": {"type": "integer", "minimum": 1, "maximum": 8589934592},
+        "memberCount": {"type": "integer", "minimum": 1, "maximum": 200000},
+        "regularFileCount": {"type": "integer", "minimum": 1, "maximum": 200000},
+        "sha256": {"$ref": "#/$defs/sha256"},
+        "relevantRegularPathCommitmentSha256": {"$ref": "#/$defs/sha256"}
+      }
+    },
+    "resolutionPolicy": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["localReference", "nonLocalLiterals", "conditionalIncludes", "transitiveResolution", "headerOwnership", "sourceOnlyOwnership"],
+      "properties": {
+        "localReference": {"const": "unconditional-literal-quoted-relative-to-including-directory-authenticated-regular-file"},
+        "nonLocalLiterals": {"const": "archive-candidates-only-without-compiler-search-order"},
+        "conditionalIncludes": {"const": "recorded-as-non-edge-without-expression-evaluation"},
+        "transitiveResolution": {"const": "not-performed"},
+        "headerOwnership": {"const": "unassigned"},
+        "sourceOnlyOwnership": {"const": "forbidden"}
+      }
+    },
+    "counts": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["sourceModules", "handwrittenSourceModulesParsed", "generatedSourceModulesUnavailable", "sourceOnlyUnits", "indexedRelevantRegularFiles", "parsedFiles", "parsedBytes", "dependencyFilesWithFacts", "directives", "resolvedLocalDirectives", "resolvedLocalFileEdges", "uniqueArchiveCandidateDirectives", "uniqueArchiveCandidateFileReferences", "ambiguousArchiveCandidateDirectives", "unresolvedArchiveDirectives", "conditionalDirectives", "macroDirectives", "nonstandardDirectives", "malformedDirectives", "sharedHeaders", "workUnits"],
+      "properties": {
+        "sourceModules": {"type": "integer", "minimum": 1, "maximum": 1000000},
+        "handwrittenSourceModulesParsed": {"type": "integer", "minimum": 0, "maximum": 1000000},
+        "generatedSourceModulesUnavailable": {"type": "integer", "minimum": 0, "maximum": 1000000},
+        "sourceOnlyUnits": {"type": "integer", "minimum": 0, "maximum": 200000},
+        "indexedRelevantRegularFiles": {"type": "integer", "minimum": 1, "maximum": 200000},
+        "parsedFiles": {"type": "integer", "minimum": 1, "maximum": 100000},
+        "parsedBytes": {"type": "integer", "minimum": 0, "maximum": 1073741824},
+        "dependencyFilesWithFacts": {"type": "integer", "minimum": 0, "maximum": 100000},
+        "directives": {"type": "integer", "minimum": 0, "maximum": 1000000},
+        "resolvedLocalDirectives": {"type": "integer", "minimum": 0, "maximum": 1000000},
+        "resolvedLocalFileEdges": {"type": "integer", "minimum": 0, "maximum": 1000000},
+        "uniqueArchiveCandidateDirectives": {"type": "integer", "minimum": 0, "maximum": 1000000},
+        "uniqueArchiveCandidateFileReferences": {"type": "integer", "minimum": 0, "maximum": 1000000},
+        "ambiguousArchiveCandidateDirectives": {"type": "integer", "minimum": 0, "maximum": 1000000},
+        "unresolvedArchiveDirectives": {"type": "integer", "minimum": 0, "maximum": 1000000},
+        "conditionalDirectives": {"type": "integer", "minimum": 0, "maximum": 1000000},
+        "macroDirectives": {"type": "integer", "minimum": 0, "maximum": 1000000},
+        "nonstandardDirectives": {"type": "integer", "minimum": 0, "maximum": 1000000},
+        "malformedDirectives": {"type": "integer", "minimum": 0, "maximum": 1000000},
+        "sharedHeaders": {"type": "integer", "minimum": 0, "maximum": 100000},
+        "workUnits": {"type": "integer", "minimum": 1, "maximum": 2000000}
+      }
+    },
+    "commitments": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["allDirectivesSha256", "allParsedFileFactsSha256"],
+      "properties": {
+        "allDirectivesSha256": {"$ref": "#/$defs/sha256"},
+        "allParsedFileFactsSha256": {"$ref": "#/$defs/sha256"}
+      }
+    },
+    "modules": {
+      "type": "array",
+      "minItems": 1,
+      "maxItems": 1000000,
+      "items": {"$ref": "#/$defs/module"}
+    },
+    "sourceOnly": {
+      "type": "array",
+      "maxItems": 200000,
+      "items": {"$ref": "#/$defs/sourceOnly"}
+    },
+    "dependencyFiles": {
+      "type": "array",
+      "maxItems": 100000,
+      "items": {"$ref": "#/$defs/dependencyFile"}
+    },
+    "sharedHeaders": {
+      "type": "array",
+      "maxItems": 100000,
+      "items": {"$ref": "#/$defs/sharedHeader"}
+    },
+    "moduleGraph": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["status", "edgePopulationKnown", "cleanCompilationProven"],
+      "properties": {
+        "status": {"const": "withheld-until-authenticated-compiler-resolution-and-header-ownership"},
+        "edgePopulationKnown": {"const": false},
+        "cleanCompilationProven": {"const": false}
+      }
+    },
+    "reportSha256": {"$ref": "#/$defs/sha256"}
+  },
+  "$defs": {
+    "sha256": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
+    "unitId": {"type": "string", "pattern": "^cu-[0-9a-f]{32}$"},
+    "shardId": {"type": "string", "pattern": "^[a-z0-9]+(?:-[a-z0-9]+)*$", "maxLength": 128},
+    "sourcePath": {"type": "string", "pattern": "^source/[^\\u0000]+$", "maxLength": 4096},
+    "anySourcePath": {"type": "string", "pattern": "^(source|generated)/[^\\u0000]+$", "maxLength": 4096},
+    "generatedPath": {"type": "string", "pattern": "^generated/[^\\u0000]+$", "maxLength": 4096},
+    "dependencyCounts": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["total", "resolvedLocal", "uniqueArchiveCandidate", "ambiguousArchiveCandidate", "unresolvedArchive", "conditional", "macro", "nonstandard", "malformed"],
+      "properties": {
+        "total": {"type": "integer", "minimum": 0, "maximum": 1000000},
+        "resolvedLocal": {"type": "integer", "minimum": 0, "maximum": 1000000},
+        "uniqueArchiveCandidate": {"type": "integer", "minimum": 0, "maximum": 1000000},
+        "ambiguousArchiveCandidate": {"type": "integer", "minimum": 0, "maximum": 1000000},
+        "unresolvedArchive": {"type": "integer", "minimum": 0, "maximum": 1000000},
+        "conditional": {"type": "integer", "minimum": 0, "maximum": 1000000},
+        "macro": {"type": "integer", "minimum": 0, "maximum": 1000000},
+        "nonstandard": {"type": "integer", "minimum": 0, "maximum": 1000000},
+        "malformed": {"type": "integer", "minimum": 0, "maximum": 1000000}
+      }
+    },
+    "dependencyFacts": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["conditionalStructure", "counts", "resolvedLocalFiles", "uniqueArchiveCandidateFiles", "commitments"],
+      "properties": {
+        "conditionalStructure": {"enum": ["balanced", "unbalanced-all-directives-withheld"]},
+        "counts": {"$ref": "#/$defs/dependencyCounts"},
+        "resolvedLocalFiles": {
+          "type": "array",
+          "maxItems": 100000,
+          "uniqueItems": true,
+          "items": {"$ref": "#/$defs/sourcePath"}
+        },
+        "uniqueArchiveCandidateFiles": {
+          "type": "array",
+          "maxItems": 100000,
+          "uniqueItems": true,
+          "items": {"$ref": "#/$defs/sourcePath"}
+        },
+        "commitments": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["allDirectivesSha256", "resolvedLocalDirectivesSha256", "archiveCandidateDirectivesSha256", "nonEdgeDirectivesSha256"],
+          "properties": {
+            "allDirectivesSha256": {"$ref": "#/$defs/sha256"},
+            "resolvedLocalDirectivesSha256": {"$ref": "#/$defs/sha256"},
+            "archiveCandidateDirectivesSha256": {"$ref": "#/$defs/sha256"},
+            "nonEdgeDirectivesSha256": {"$ref": "#/$defs/sha256"}
+          }
+        }
+      }
+    },
+    "module": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["moduleId", "ownerUnitId", "shardId", "sourceKind", "sourcePath", "sourceStatus", "dependencyFacts"],
+      "oneOf": [
+        {
+          "properties": {
+            "sourceKind": {"const": "handwritten"},
+            "sourcePath": {"$ref": "#/$defs/sourcePath"},
+            "sourceStatus": {"const": "authenticated-archive-parsed"},
+            "dependencyFacts": {"$ref": "#/$defs/dependencyFacts"}
+          }
+        },
+        {
+          "properties": {
+            "sourceKind": {"const": "generated"},
+            "sourcePath": {"$ref": "#/$defs/generatedPath"},
+            "sourceStatus": {"const": "unavailable-generated-source"},
+            "dependencyFacts": {"type": "null"}
+          }
+        }
+      ],
+      "properties": {
+        "moduleId": {"$ref": "#/$defs/unitId"},
+        "ownerUnitId": {"$ref": "#/$defs/unitId"},
+        "shardId": {"$ref": "#/$defs/shardId"},
+        "sourceKind": {"enum": ["generated", "handwritten"]},
+        "sourcePath": {"$ref": "#/$defs/anySourcePath"},
+        "sourceStatus": {"enum": ["authenticated-archive-parsed", "unavailable-generated-source"]},
+        "dependencyFacts": {"oneOf": [{"$ref": "#/$defs/dependencyFacts"}, {"type": "null"}]}
+      }
+    },
+    "sourceOnly": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["sourcePath", "shardId", "reasonCode", "ownershipStatus", "sourceStatus", "dependencyFacts"],
+      "properties": {
+        "sourcePath": {"$ref": "#/$defs/sourcePath"},
+        "shardId": {"$ref": "#/$defs/shardId"},
+        "reasonCode": {"type": "string", "minLength": 1, "maxLength": 256},
+        "ownershipStatus": {"const": "excluded-non-owning"},
+        "sourceStatus": {"const": "authenticated-archive-parsed"},
+        "dependencyFacts": {"$ref": "#/$defs/dependencyFacts"}
+      }
+    },
+    "dependencyFile": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["sourcePath", "ownershipStatus", "dependencyFacts"],
+      "properties": {
+        "sourcePath": {"$ref": "#/$defs/sourcePath"},
+        "ownershipStatus": {"const": "unassigned-header-planning-evidence"},
+        "dependencyFacts": {"$ref": "#/$defs/dependencyFacts"}
+      }
+    },
+    "sharedHeader": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["sourcePath", "ownershipStatus", "consumerBasis", "directModuleIds", "directSourceOnlyPaths"],
+      "properties": {
+        "sourcePath": {"$ref": "#/$defs/sourcePath"},
+        "ownershipStatus": {"const": "unassigned-header-planning-evidence"},
+        "consumerBasis": {"const": "direct-translation-unit-resolved-local-reference-only"},
+        "directModuleIds": {
+          "type": "array",
+          "minItems": 2,
+          "maxItems": 1000000,
+          "uniqueItems": true,
+          "items": {"$ref": "#/$defs/unitId"}
+        },
+        "directSourceOnlyPaths": {
+          "type": "array",
+          "maxItems": 200000,
+          "uniqueItems": true,
+          "items": {"$ref": "#/$defs/sourcePath"}
+        }
+      }
+    }
+  }
+}

@@ -78,6 +78,67 @@ class BoundedTarXzArchiveTest {
     }
 
     @Test
+    fun `regular payload visitor streams only selected entries and terminates each payload`() {
+        val archive = compress(validTar())
+        val chunks = linkedMapOf<String, ByteArrayOutputStream>()
+        val endings = linkedMapOf<String, Int>()
+        val visitor = object : BoundedTarXzRegularFileVisitor {
+            override fun wants(entry: BoundedTarEntry): Boolean =
+                entry.relativePath == "target" || entry.relativePath == "dir/marker.txt"
+
+            override fun onChunk(
+                entry: BoundedTarEntry,
+                bytes: ByteArray,
+                length: Int,
+                endOfEntry: Boolean,
+            ) {
+                chunks.getOrPut(entry.path, ::ByteArrayOutputStream).write(bytes, 0, length)
+                if (endOfEntry) endings[entry.path] = endings.getOrDefault(entry.path, 0) + 1
+            }
+        }
+
+        BoundedTarXzArchive.scan(
+            source = ByteArrayTarXzSource(archive),
+            expectedRoot = ROOT,
+            expectedCommit = COMMIT,
+            regularFileVisitor = visitor,
+        )
+
+        assertContentEquals(TARGET_BYTES, chunks.getValue(TARGET_PATH).toByteArray())
+        assertContentEquals(MARKER_BYTES, chunks.getValue(MARKER_PATH).toByteArray())
+        assertEquals(mapOf(TARGET_PATH to 1, MARKER_PATH to 1), endings)
+    }
+
+    @Test
+    fun `visitor mutation cannot corrupt a selected snapshot or its digest`() {
+        val archive = compress(validTar())
+        val visitor = object : BoundedTarXzRegularFileVisitor {
+            override fun wants(entry: BoundedTarEntry): Boolean = entry.path == MARKER_PATH
+
+            override fun onChunk(
+                entry: BoundedTarEntry,
+                bytes: ByteArray,
+                length: Int,
+                endOfEntry: Boolean,
+            ) {
+                if (length != 0) bytes[0] = (bytes[0].toInt() xor 0x7f).toByte()
+            }
+        }
+
+        val summary = BoundedTarXzArchive.scan(
+            source = ByteArrayTarXzSource(archive),
+            expectedRoot = ROOT,
+            expectedCommit = COMMIT,
+            selectedRegularPaths = setOf(MARKER_PATH),
+            regularFileVisitor = visitor,
+        )
+
+        val selected = summary.selected.getValue(MARKER_PATH)
+        assertContentEquals(MARKER_BYTES, selected.bytes)
+        assertEquals(sha256(MARKER_BYTES), selected.sha256)
+    }
+
+    @Test
     fun `XZ stream check trailing and decoder bounds fail closed`() {
         val tar = validTar()
         val valid = compress(tar)

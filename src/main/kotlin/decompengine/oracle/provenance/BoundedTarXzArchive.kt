@@ -76,6 +76,17 @@ internal data class BoundedTarXzSummary(
     val selected: Map<String, SelectedTarEntry>,
 )
 
+/** Synchronous bounded access to regular-file payloads selected while the strict archive is scanned. */
+internal interface BoundedTarXzRegularFileVisitor {
+    fun wants(entry: BoundedTarEntry): Boolean
+
+    /**
+     * [bytes] remains owned by the scanner and may be reused after this call. Consumers must not
+     * mutate it and must copy only the [length] bytes they retain.
+     */
+    fun onChunk(entry: BoundedTarEntry, bytes: ByteArray, length: Int, endOfEntry: Boolean)
+}
+
 /** Strict, bounded reader for the reviewed LLVM release's single-stream USTAR profile. */
 internal object BoundedTarXzArchive {
     fun scan(
@@ -84,6 +95,7 @@ internal object BoundedTarXzArchive {
         expectedCommit: String,
         limits: BoundedTarXzLimits = BoundedTarXzLimits(),
         selectedRegularPaths: Set<String> = emptySet(),
+        regularFileVisitor: BoundedTarXzRegularFileVisitor? = null,
         onEntry: (BoundedTarEntry) -> Unit = {},
     ): BoundedTarXzSummary {
         requireCanonicalRoot(expectedRoot, limits)
@@ -120,6 +132,7 @@ internal object BoundedTarXzArchive {
                 limits,
                 selectedRegularPaths,
                 onEntry,
+                regularFileVisitor,
             )
         } catch (failure: BoundedTarXzException) {
             throw failure
@@ -141,6 +154,7 @@ internal object BoundedTarXzArchive {
         limits: BoundedTarXzLimits,
         selectedRegularPaths: Set<String>,
         onEntry: (BoundedTarEntry) -> Unit,
+        regularFileVisitor: BoundedTarXzRegularFileVisitor?,
     ): BoundedTarXzSummary {
         val expectedPax = "52 comment=$expectedCommit\n".toByteArray(StandardCharsets.US_ASCII)
         check(expectedPax.size == 52)
@@ -274,6 +288,7 @@ internal object BoundedTarXzArchive {
             when (kind) {
                 BoundedTarEntryKind.REGULAR -> {
                     regularFiles++
+                    val visitor = regularFileVisitor?.takeIf { it.wants(entry) }
                     if (canonical.path in selectedRegularPaths) {
                         selectedBytes = addBounded(
                             selectedBytes,
@@ -287,6 +302,13 @@ internal object BoundedTarXzArchive {
                             bytes,
                             MessageDigest.getInstance("SHA-256").digest(bytes).hex(),
                         )
+                        // Keep the selected snapshot and its recorded digest isolated from a
+                        // hostile callback even though callbacks are contractually read-only.
+                        visitor?.onChunk(entry, bytes.copyOf(), bytes.size, true)
+                    } else if (visitor != null) {
+                        input.visitPayload(size) { bytes, length, endOfEntry ->
+                            visitor.onChunk(entry, bytes, length, endOfEntry)
+                        }
                     } else {
                         input.skipPayload(size)
                     }
@@ -662,6 +684,22 @@ private class ExpandedArchiveInputStream(
             val read = read(buffer, 0, minOf(buffer.size.toLong(), remaining).toInt())
             if (read < 0) archiveFail("source archive member is truncated")
             remaining -= read.toLong()
+        }
+    }
+
+    fun visitPayload(size: Long, visitor: (ByteArray, Int, Boolean) -> Unit) {
+        if (size < 0L) archiveFail("source archive member size is negative")
+        val buffer = ByteArray(64 * 1024)
+        if (size == 0L) {
+            visitor(buffer, 0, true)
+            return
+        }
+        var remaining = size
+        while (remaining > 0L) {
+            val read = read(buffer, 0, minOf(buffer.size.toLong(), remaining).toInt())
+            if (read < 0) archiveFail("source archive member is truncated")
+            remaining -= read.toLong()
+            visitor(buffer, read, remaining == 0L)
         }
     }
 

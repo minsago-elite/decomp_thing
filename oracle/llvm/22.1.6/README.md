@@ -205,6 +205,16 @@ explicitly non-authoritative and planning-only: it rejects the later live
 `nonEmitted` format, does not infer headers or dependencies, does not emit a build
 graph, and cannot authorize reconstruction or release.
 
+The bounded Kotlin/JVM
+[`source/header dependency projection`](../../../docs/full-tree-source-header-dependency-planning.md)
+adds archive-authenticated direct lexical include evidence without treating archive
+candidates as compiler-resolved edges. It preserves all source-only units as
+non-owners, leaves headers unassigned, marks the generated driver source unavailable,
+and explicitly withholds the module graph. The opt-in parity test reads the locked
+upstream archive directly. This remains planning-only: compiler search order,
+generated overlays, transitive header ownership, clean compilation, and release
+authority are not proven.
+
 With the exact Docker executor profile available as `DOCKER` and
 `DOCKER_HOST`, live replay is:
 
