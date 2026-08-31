@@ -53,6 +53,12 @@ registerOracleJavaExecTask(
 )
 
 registerOracleJavaExecTask(
+    taskName = "generateFullTreePlanningInventory",
+    taskDescription = "Generates the authenticated LLVM source-module planning inventory with Kotlin/JVM authority",
+    entryPoint = "decompengine.oracle.fulltree.FullTreePlanningInventoryGeneratorCli",
+)
+
+registerOracleJavaExecTask(
     taskName = "fetchLlvmReleaseArtifacts",
     taskDescription = "Fetches and authenticates the hash-locked LLVM oracle release artifacts in Kotlin/JVM",
     entryPoint = "decompengine.oracle.provenance.LlvmReleaseArtifactFetcherCli",

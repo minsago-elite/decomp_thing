@@ -81,6 +81,10 @@ jobs:
             --args="--archive $RUNNER_TEMP/llvm-source/llvm-project-22.1.6.src.tar.xz --inventory $RUNNER_TEMP/full-tree-inventory.json --output $RUNNER_TEMP/full-tree-source-inventory.json --workers 1"
           cmp "$RUNNER_TEMP/full-tree-source-inventory.json" \
             oracle/llvm/22.1.6/full-tree-source-inventory.json
+          ./gradlew --no-daemon generateFullTreePlanningInventory \
+            --args="--inventory $RUNNER_TEMP/full-tree-inventory.json --source-inventory $RUNNER_TEMP/full-tree-source-inventory.json --output $RUNNER_TEMP/full-tree-planning-inventory.json"
+          cmp "$RUNNER_TEMP/full-tree-planning-inventory.json" \
+            oracle/llvm/22.1.6/full-tree-planning-inventory.json
       - name: Regenerate deterministic Clang function oracle
         run: |
           python3 scripts/generate-llvm-function-recovery-oracle.py \

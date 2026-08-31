@@ -65,6 +65,31 @@ object FullTreeSourceInventoryGeneratorCli {
     }
 }
 
+/** Kotlin/JVM source-boundary planning authority; it deliberately emits no entity or header claims. */
+object FullTreePlanningInventoryGeneratorCli {
+    @JvmStatic
+    fun main(arguments: Array<String>) = controlCli("full-tree planning inventory generation") {
+        val options = ControlArguments.parse(arguments)
+        val result = FullTreePlanningInventoryControl.generateAndPublish(
+            scopePath = options.path("scope", DEFAULT_PROFILE.resolve("full-tree-scope.json")),
+            sourceLockPath = options.path("source-lock", DEFAULT_PROFILE.resolve("source-lock.json")),
+            artifactManifestPath = options.path("manifest", DEFAULT_PROFILE.resolve("oracle-manifest.json")),
+            buildRecordPath = options.path("build-record", DEFAULT_PROFILE.resolve("build-record.json")),
+            inventoryPath = options.path("inventory", DEFAULT_PROFILE.resolve("full-tree-inventory.json")),
+            sourceInventoryPath = options.path(
+                "source-inventory",
+                DEFAULT_PROFILE.resolve("full-tree-source-inventory.json"),
+            ),
+            output = options.requiredPath("output"),
+        )
+        options.requireConsumed()
+        println(
+            "wrote ${result.registry.sourceModules.size} source modules and " +
+                "${result.registry.sourceOnlyUnits.size} source-only exclusions",
+        )
+    }
+}
+
 private inline fun controlCli(label: String, action: () -> Unit) {
     try {
         action()

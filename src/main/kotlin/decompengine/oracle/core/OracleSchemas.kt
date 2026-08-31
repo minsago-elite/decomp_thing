@@ -167,6 +167,7 @@ object OracleSchemas {
         "full-tree-function-truth-index",
         "full-tree-inventory",
         "full-tree-materialization-determinism",
+        "full-tree-planning-inventory",
         "full-tree-release-assets",
         "full-tree-release-evidence",
         "full-tree-scope",

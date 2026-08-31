@@ -17,6 +17,8 @@ class FullTreeKotlinAuthoritySurfaceTest {
             "generateFullTreeInventory" to "decompengine.oracle.fulltree.FullTreeInventoryGeneratorCli",
             "generateFullTreeSourceInventory" to
                 "decompengine.oracle.fulltree.FullTreeSourceInventoryGeneratorCli",
+            "generateFullTreePlanningInventory" to
+                "decompengine.oracle.fulltree.FullTreePlanningInventoryGeneratorCli",
         ).forEach { (task, entryPoint) ->
             assertTrue(build.contains("taskName = \"$task\""))
             assertTrue(build.contains("entryPoint = \"$entryPoint\""))
@@ -25,9 +27,12 @@ class FullTreeKotlinAuthoritySurfaceTest {
 
         assertTrue(workflow.contains("full-tree-source-inventory.json"))
         assertTrue(workflow.contains("oracle/llvm/22.1.6/full-tree-source-inventory.json"))
+        assertTrue(workflow.contains("full-tree-planning-inventory.json"))
+        assertTrue(workflow.contains("oracle/llvm/22.1.6/full-tree-planning-inventory.json"))
         assertFalse(workflow.contains("python3 scripts/verify-llvm-full-tree-scope.py"))
         assertFalse(workflow.contains("python3 scripts/generate-llvm-full-tree-inventory.py"))
         assertFalse(workflow.contains("python3 scripts/generate-llvm-full-tree-source-inventory.py"))
+        assertFalse(workflow.contains("python3 scripts/generate-llvm-full-tree-planning-inventory.py"))
         assertTrue(workflow.contains("./gradlew --no-daemon fetchLlvmSourceArchive"))
         assertFalse(workflow.contains("python3 scripts/verify-llvm-oracle-source.py"))
         assertFalse(workflow.contains("python3 scripts/fetch-llvm-oracle-source.py"))
