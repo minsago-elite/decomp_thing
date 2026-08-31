@@ -59,6 +59,12 @@ registerOracleJavaExecTask(
 )
 
 registerOracleJavaExecTask(
+    taskName = "fetchLlvmSourceArchive",
+    taskDescription = "Fetches and authenticates the locked LLVM source archive in Kotlin/JVM",
+    entryPoint = "decompengine.oracle.provenance.LlvmSourceArchiveFetcherCli",
+)
+
+registerOracleJavaExecTask(
     taskName = "verifyLlvmToolchainReproduction",
     taskDescription = "Verifies the stable LLVM toolchain recipe and rebuilt image identity in Kotlin/JVM",
     entryPoint = "decompengine.oracle.provenance.LlvmToolchainReproductionVerifierCli",

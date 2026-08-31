@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Fetch and authenticate the exact LLVM source release used by the oracle."""
+"""Legacy Python compatibility fetcher; not Kotlin/JVM oracle or release authority."""
 
 from __future__ import annotations
 
@@ -66,7 +66,7 @@ def fetch_artifact(destination: Path, specification: dict[str, object], label: s
 
 
 def main() -> int:
-    parser = argparse.ArgumentParser(description="Fetch and verify the pinned LLVM source release.")
+    parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("destination", type=Path)
     parser.add_argument("--lock", type=Path, default=DEFAULT_LOCK)
     arguments = parser.parse_args()

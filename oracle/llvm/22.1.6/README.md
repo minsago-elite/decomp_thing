@@ -96,15 +96,19 @@ build/target exclusion reasons, the generated driver CU is separate, and
 
 ## Verify
 
-Source fetching and OpenPGP provenance verification do not yet have Kotlin replacements. Install the exact Python
-dependencies and use the source migration-compatibility commands to populate that locked input. These commands
-preserve historical regression coverage but cannot certify a new Kotlin-only release:
+Source-lock, local key/tag evidence, bounded HTTPS acquisition, detached OpenPGP verification, and strict TAR/XZ
+archive authentication now run in Kotlin/JVM. The fetcher requires explicit lock and output paths, publishes private
+read-only cache files without replacement, and applies the same descriptor-bound verification to fresh and cached
+bytes:
 
 ```sh
-python3 -m pip install -r requirements/oracle-generation.txt
-python3 scripts/verify-llvm-oracle-source.py --metadata-only
-python3 scripts/fetch-llvm-oracle-source.py /tmp/llvm-oracle-source
+source_root="$(mktemp -d)"
+./gradlew --no-daemon fetchLlvmSourceArchive \
+  --args="--lock oracle/llvm/22.1.6/source-lock.json --output $source_root"
 ```
+
+The retained `scripts/verify-llvm-oracle-source.py` and `scripts/fetch-llvm-oracle-source.py` entrypoints are legacy
+Python compatibility only; they are not Kotlin/JVM oracle or release authority.
 
 Release-asset lock, manifest, repository/tag/URL, byte-length, SHA-256, HTTPS, and no-replace publication authority now
 run in Kotlin/JVM. The fetcher accepts an existing authenticated root or creates exactly one child beneath an existing
@@ -197,17 +201,18 @@ cmp /tmp/llvm-behavior-evidence.json \
 ## Rebuild
 
 The manual `LLVM oracle clean rebuild` workflow remains the canonical compatibility reproduction of the historical
-pair; its Python fetch, tool-capture, and artifact-verification steps cannot authorize a new Kotlin-only release. It
-constructs the pinned toolchain image, fetches and authenticates
+pair. Source acquisition is descriptor-bound Kotlin/JVM authority; its Python tool-capture and artifact-verification
+steps remain compatibility gaps and cannot authorize a new Kotlin-only release. It constructs the pinned toolchain
+image, fetches and authenticates
 the upstream archive, disables network access for compilation, executes every
 command recorded in `build-record.json`, and uploads the full/stripped pair,
 tool records, and image digest for review. A rebuilt pair is not accepted
 until it matches the separately released pair byte-for-byte and every
 verification command above passes.
 
-The required `LLVM oracle model` workflow runs the migrated scope and inventory stages in Kotlin/JVM, while retaining
-the explicitly non-authoritative Python compatibility gates for stages that do not yet have Kotlin replacements. On
-every push and pull request it rejects recipe,
+The required `LLVM oracle model` workflow runs source acquisition, scope, and inventory stages in Kotlin/JVM, while
+retaining the explicitly non-authoritative Python compatibility gates for stages that do not yet have Kotlin
+replacements. On every push and pull request it rejects recipe,
 base-image, build-record, platform, tool-byte, or tool-version drift without
 requiring a fresh image's metadata-derived ID to equal the originating ID.
 

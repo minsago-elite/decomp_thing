@@ -191,9 +191,14 @@ class LlvmReleaseArtifactsTest {
 
         assertTrue(build.contains("taskName = \"fetchLlvmReleaseArtifacts\""))
         assertTrue(build.contains("decompengine.oracle.provenance.LlvmReleaseArtifactFetcherCli"))
+        assertTrue(build.contains("taskName = \"fetchLlvmSourceArchive\""))
+        assertTrue(build.contains("decompengine.oracle.provenance.LlvmSourceArchiveFetcherCli"))
         listOf(model, rebuild).forEach { workflow ->
             assertTrue(workflow.contains("./gradlew --no-daemon fetchLlvmReleaseArtifacts"))
+            assertTrue(workflow.contains("./gradlew --no-daemon fetchLlvmSourceArchive"))
             assertFalse(workflow.contains("python3 scripts/fetch-llvm-oracle-artifacts.py"))
+            assertFalse(workflow.contains("python3 scripts/verify-llvm-oracle-source.py"))
+            assertFalse(workflow.contains("python3 scripts/fetch-llvm-oracle-source.py"))
         }
         assertFalse(model.contains("tests.oracle.test_release_artifacts"))
         assertFalse(gcc.contains("unittest discover -s tests/oracle"))
@@ -203,17 +208,21 @@ class LlvmReleaseArtifactsTest {
         assertTrue(gcc.contains("oracle_tests+=(\"\${module//\\//.}\")"))
         assertTrue(gcc.contains("python3 -m unittest \"\${oracle_tests[@]}\" -v"))
 
-        // These adjacent authorities are deliberately not claimed by this checkpoint.
-        listOf(
-            "python3 scripts/verify-llvm-oracle-source.py",
-            "python3 scripts/fetch-llvm-oracle-source.py",
-            "python3 scripts/verify-llvm-oracle-artifacts.py",
-            "tests.oracle.test_llvm_source_lock",
-        ).forEach { retained -> assertTrue(model.contains(retained), retained) }
-        assertTrue(rebuild.contains("python3 scripts/fetch-llvm-oracle-source.py"))
+        assertFalse(model.contains("tests.oracle.test_llvm_source_lock"))
+        assertTrue(model.contains("actions/setup-python@v7"))
+        assertTrue(model.contains("python3 -m pip install -r requirements/oracle-generation.txt"))
+        assertTrue(model.contains("python3 scripts/verify-llvm-oracle-artifacts.py"))
         assertTrue(rebuild.contains("python3 scripts/verify-llvm-oracle-artifacts.py"))
+        assertTrue(rebuild.contains("chmod 0444 \"\$RUNNER_TEMP/source-cache/llvm-project-22.1.6.src.tar.xz\""))
+        assertTrue(rebuild.contains("chmod 0555 \"\$RUNNER_TEMP/source-cache\""))
+        assertTrue(rebuild.contains("--cap-drop ALL"))
 
         listOf("scripts/fetch-llvm-oracle-artifacts.py", "oracle/release_artifacts.py").forEach { path ->
+            val source = Path.of(path).readText()
+            assertTrue(source.contains("Legacy Python compatibility"))
+            assertTrue(source.contains("not Kotlin/JVM oracle or release authority"))
+        }
+        listOf("scripts/fetch-llvm-oracle-source.py", "scripts/verify-llvm-oracle-source.py").forEach { path ->
             val source = Path.of(path).readText()
             assertTrue(source.contains("Legacy Python compatibility"))
             assertTrue(source.contains("not Kotlin/JVM oracle or release authority"))

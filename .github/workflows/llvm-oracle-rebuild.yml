@@ -31,7 +31,13 @@ jobs:
             | tee "$RUNNER_TEMP/image-digest.txt"
       - name: Fetch and authenticate LLVM 22.1.6
         run: |
-          python3 scripts/fetch-llvm-oracle-source.py "$RUNNER_TEMP/source-cache"
+          ./gradlew --no-daemon fetchLlvmSourceArchive \
+            --args="--lock oracle/llvm/22.1.6/source-lock.json --output $RUNNER_TEMP/source-cache"
+          # The authenticated cache is private by default. This build container runs as
+          # root with DAC_OVERRIDE dropped, so expose only the immutable archive and
+          # directory traversal needed by its read-only bind mount.
+          chmod 0444 "$RUNNER_TEMP/source-cache/llvm-project-22.1.6.src.tar.xz"
+          chmod 0555 "$RUNNER_TEMP/source-cache"
           ./gradlew --no-daemon fetchLlvmReleaseArtifacts \
             --args="$RUNNER_TEMP/reference-oracle"
       - name: Build the monolithic Clang oracle pair

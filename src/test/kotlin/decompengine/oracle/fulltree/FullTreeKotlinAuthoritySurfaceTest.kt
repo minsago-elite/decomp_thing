@@ -28,11 +28,13 @@ class FullTreeKotlinAuthoritySurfaceTest {
         assertFalse(workflow.contains("python3 scripts/verify-llvm-full-tree-scope.py"))
         assertFalse(workflow.contains("python3 scripts/generate-llvm-full-tree-inventory.py"))
         assertFalse(workflow.contains("python3 scripts/generate-llvm-full-tree-source-inventory.py"))
+        assertTrue(workflow.contains("./gradlew --no-daemon fetchLlvmSourceArchive"))
+        assertFalse(workflow.contains("python3 scripts/verify-llvm-oracle-source.py"))
+        assertFalse(workflow.contains("python3 scripts/fetch-llvm-oracle-source.py"))
+        assertFalse(workflow.contains("tests.oracle.test_llvm_source_lock"))
 
         // Unmigrated regression gates stay active until equivalent Kotlin authorities exist.
         listOf(
-            "python3 scripts/verify-llvm-oracle-source.py",
-            "python3 scripts/fetch-llvm-oracle-source.py",
             "scripts/verify-llvm-oracle-build-record.py",
             "python3 scripts/verify-llvm-oracle-artifacts.py",
             "python3 scripts/generate-llvm-function-recovery-oracle.py",

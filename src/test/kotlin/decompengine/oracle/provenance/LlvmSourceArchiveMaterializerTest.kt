@@ -21,6 +21,77 @@ import org.junit.jupiter.api.Assumptions.assumeTrue
 
 class LlvmSourceArchiveMaterializerTest {
     @Test
+    fun `CLI requires exact explicit options and reports failures without materializing`() {
+        val invalidArguments = listOf(
+            emptyArray<String>(),
+            arrayOf("--lock", "lock.json"),
+            arrayOf("--output", "output"),
+            arrayOf("--lock"),
+            arrayOf("--lock", "", "--output", "output"),
+            arrayOf("--lock", "one", "--lock", "two", "--output", "output"),
+            arrayOf("--lock", "lock", "--output", "one", "--output", "two"),
+            arrayOf("--lock", "lock", "--output", "output", "positional"),
+            arrayOf("--unknown", "value", "--lock", "lock", "--output", "output"),
+        )
+        invalidArguments.forEach { arguments ->
+            var invoked = false
+            val stdout = mutableListOf<String>()
+            val stderr = mutableListOf<String>()
+            val status = LlvmSourceArchiveFetcherCli.run(
+                arguments,
+                materialize = { _, _ ->
+                    invoked = true
+                    error("invalid CLI arguments must not materialize")
+                },
+                stdout = stdout::add,
+                stderr = stderr::add,
+            )
+            assertEquals(1, status, arguments.contentToString())
+            assertFalse(invoked, arguments.contentToString())
+            assertTrue(stdout.isEmpty(), arguments.contentToString())
+            assertEquals(1, stderr.size, arguments.contentToString())
+            assertTrue(stderr.single().startsWith("LLVM source archive fetch failed: "))
+        }
+
+        val stderr = mutableListOf<String>()
+        val status = LlvmSourceArchiveFetcherCli.run(
+            arrayOf("--lock", "lock", "--output", "output"),
+            materialize = { _, _ -> throw InjectedSourceFailure() },
+            stdout = { error("failed materialization must not write standard output") },
+            stderr = stderr::add,
+        )
+        assertEquals(1, status)
+        assertEquals(listOf("LLVM source archive fetch failed: injected source failure"), stderr)
+    }
+
+    @Test
+    fun `CLI forwards explicit paths and emits stable authenticated output`() = withFixture { fixture ->
+        val output = fixture.root.resolve("cli-output")
+        val stdout = mutableListOf<String>()
+        val stderr = mutableListOf<String>()
+        var result: AuthenticatedLlvmSourceArchive? = null
+
+        val status = LlvmSourceArchiveFetcherCli.run(
+            arrayOf("--lock", fixture.lockPath.toString(), "--output", output.toString()),
+            materialize = { lock, selectedOutput ->
+                assertEquals(fixture.lockPath, lock)
+                assertEquals(output, selectedOutput)
+                fixture.materializer(SourcePairTransport(fixture.signatureBytes, fixture.archiveBytes))
+                    .materialize(lock, selectedOutput)
+                    .also { result = it }
+            },
+            stdout = stdout::add,
+            stderr = stderr::add,
+        )
+
+        assertEquals(0, status)
+        assertTrue(stderr.isEmpty())
+        assertEquals(LlvmSourceArchiveFetcherCli.successMessages(requireNotNull(result)), stdout)
+        assertTrue(Files.isRegularFile(requireNotNull(result).archive.path))
+        assertTrue(Files.isRegularFile(requireNotNull(result).detachedSignature.path))
+    }
+
+    @Test
     fun `fresh and cached archives receive identical signature and archive phases`() = withFixture { fixture ->
         val output = privateDirectory(fixture.root.resolve("output"))
         var signatures = 0
@@ -203,7 +274,7 @@ class LlvmSourceArchiveMaterializerTest {
     }
 
     @Test
-    fun `optional frozen archive and signature pass the production authorities from a local cache`() {
+    fun `optional CLI verifies the frozen archive and signature from a fresh local cache without network`() {
         val configuredArchive = System.getenv("DECOMP_LLVM_SOURCE_ARCHIVE")
             ?.takeIf(String::isNotBlank)
             ?.let(Path::of)
@@ -229,13 +300,23 @@ class LlvmSourceArchiveMaterializerTest {
                 Files.setPosixFilePermissions(it, PosixFilePermissions.fromString("r--------"))
             }
 
-            val result = LlvmSourceArchiveMaterializer(
-                downloader = BoundedHttpsDownloader(SourcePairTransport()),
-            ).materialize(CHECKED_LOCK, output)
+            val stdout = mutableListOf<String>()
+            val stderr = mutableListOf<String>()
+            val status = LlvmSourceArchiveFetcherCli.run(
+                arrayOf("--lock", CHECKED_LOCK.toString(), "--output", output.toString()),
+                stdout = stdout::add,
+                stderr = stderr::add,
+            )
 
-            assertEquals(184_819, result.archiveSummary.memberCount)
-            assertEquals(3, result.archiveSummary.selected.size)
-            assertEquals(locked.archive.sha256, result.signatureVerification.sha256)
+            assertEquals(0, status)
+            assertTrue(stderr.isEmpty())
+            assertEquals(3, stdout.size)
+            assertTrue(stdout[0].contains("167043464 bytes, sha256 ${locked.archive.sha256}"))
+            assertTrue(stdout[1].contains("119 bytes, sha256 ${locked.detachedSignature.sha256}"))
+            assertEquals(
+                "verified LLVM source archive structure: 184819 members, commit-PAX and 3 locked markers",
+                stdout[2],
+            )
         } finally {
             deleteTree(root)
         }
@@ -357,7 +438,7 @@ private class SourcePairTransport(vararg bodies: ByteArray) : HttpsExchangeTrans
     }
 }
 
-private class InjectedSourceFailure : RuntimeException()
+private class InjectedSourceFailure : RuntimeException("injected source failure")
 
 private val CHECKED_PROFILE = Path.of("oracle/llvm/22.1.6")
 private val CHECKED_LOCK = CHECKED_PROFILE.resolve("source-lock.json")

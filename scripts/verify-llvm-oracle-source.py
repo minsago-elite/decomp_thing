@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Validate the LLVM oracle source lock and optional downloaded release."""
+"""Legacy Python compatibility verifier; not Kotlin/JVM oracle or release authority."""
 
 from __future__ import annotations
 
@@ -22,7 +22,7 @@ DEFAULT_LOCK = REPOSITORY_ROOT / "oracle/llvm/22.1.6/source-lock.json"
 
 
 def main() -> int:
-    parser = argparse.ArgumentParser(description="Strictly verify pinned LLVM source provenance.")
+    parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--lock", type=Path, default=DEFAULT_LOCK)
     parser.add_argument("--metadata-only", action="store_true")
     parser.add_argument("--archive", type=Path)

@@ -173,10 +173,13 @@ class LlvmToolchainReproductionTest {
         assertTrue(legacyModule.contains("retained by the unmigrated live build-record gate"))
         assertTrue(legacyModule.contains("not independent Kotlin/JVM recipe or release authority"))
 
-        // These adjacent authorities are intentionally unchanged by this slice.
+        assertTrue(llvm.contains("./gradlew --no-daemon fetchLlvmSourceArchive"))
+        assertFalse(llvm.contains("python3 scripts/verify-llvm-oracle-source.py"))
+        assertFalse(llvm.contains("python3 scripts/fetch-llvm-oracle-source.py"))
+        assertFalse(llvm.contains("tests.oracle.test_llvm_source_lock"))
+
+        // These adjacent authorities remain intentionally unchanged by the source cutover.
         listOf(
-            "python3 scripts/verify-llvm-oracle-source.py",
-            "python3 scripts/fetch-llvm-oracle-source.py",
             "scripts/verify-llvm-oracle-build-record.py",
             "python3 scripts/verify-llvm-oracle-artifacts.py",
             "python3 scripts/generate-llvm-function-recovery-oracle.py",

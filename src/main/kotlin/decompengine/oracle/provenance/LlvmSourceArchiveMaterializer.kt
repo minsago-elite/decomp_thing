@@ -15,6 +15,7 @@ import java.nio.file.Path
 import java.nio.file.StandardOpenOption
 import java.security.MessageDigest
 import java.time.Duration
+import kotlin.system.exitProcess
 
 internal data class AuthenticatedLlvmSourceArchive(
     val archive: AuthenticatedDownloadedArtifact,
@@ -205,6 +206,69 @@ internal class LlvmSourceArchiveMaterializer(
         const val USER_AGENT = "decomp-thing-llvm-source/1"
         val DOWNLOAD_TIMEOUT: Duration = Duration.ofSeconds(300)
         val ALLOWED_RELEASE_HOSTS = setOf("github.com", "release-assets.githubusercontent.com")
+    }
+}
+
+/** Stable JVM entry point replacing the Python LLVM source fetch and verification authority. */
+object LlvmSourceArchiveFetcherCli {
+    @JvmStatic
+    fun main(arguments: Array<String>) {
+        val status = run(arguments)
+        if (status != 0) exitProcess(status)
+    }
+
+    internal fun run(
+        arguments: Array<String>,
+        materialize: (Path, Path) -> AuthenticatedLlvmSourceArchive = { lock, output ->
+            LlvmSourceArchiveMaterializer().materialize(lock, output)
+        },
+        stdout: (String) -> Unit = ::println,
+        stderr: (String) -> Unit = System.err::println,
+    ): Int = try {
+        val options = LlvmSourceArchiveArguments.parse(arguments)
+        val result = materialize(options.lock, options.output)
+        successMessages(result).forEach(stdout)
+        0
+    } catch (failure: Exception) {
+        stderr("LLVM source archive fetch failed: ${failure.message}")
+        1
+    }
+
+    internal fun successMessages(result: AuthenticatedLlvmSourceArchive): List<String> = listOf(
+        "verified LLVM source archive: ${result.archive.path} " +
+            "(${result.archive.bytes} bytes, sha256 ${result.archive.sha256})",
+        "verified LLVM source archive signature: ${result.detachedSignature.path} " +
+            "(${result.detachedSignature.bytes} bytes, sha256 ${result.detachedSignature.sha256})",
+        "verified LLVM source archive structure: ${result.archiveSummary.memberCount} members, " +
+            "commit-PAX and ${result.archiveSummary.selected.size} locked markers",
+    )
+}
+
+internal data class LlvmSourceArchiveArguments(val lock: Path, val output: Path) {
+    companion object {
+        fun parse(arguments: Array<String>): LlvmSourceArchiveArguments {
+            var lock: Path? = null
+            var output: Path? = null
+            var index = 0
+            while (index < arguments.size) {
+                val option = arguments[index]
+                if (option !in setOf("--lock", "--output")) provenanceFail("unknown option $option")
+                index++
+                if (index >= arguments.size) provenanceFail("$option requires a path")
+                val rawValue = arguments[index]
+                if (rawValue.isEmpty()) provenanceFail("$option requires a non-empty path")
+                val value = Path.of(rawValue)
+                when (option) {
+                    "--lock" -> if (lock == null) lock = value else provenanceFail("--lock was repeated")
+                    "--output" -> if (output == null) output = value else provenanceFail("--output was repeated")
+                }
+                index++
+            }
+            return LlvmSourceArchiveArguments(
+                lock ?: provenanceFail("--lock is required"),
+                output ?: provenanceFail("--output is required"),
+            )
+        }
     }
 }
 

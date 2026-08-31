@@ -75,14 +75,15 @@ satisfy the Kotlin-only authority requirement for the next release.
 The required LLVM push/pull-request lane runs full-tree scope verification plus DWARF and source-inventory
 regeneration through stable Kotlin/JVM Gradle entrypoints. The similarly named Python wrappers are retained only for
 legacy migration compatibility, are not invoked by that lane, and cannot authorize or enter a Kotlin-only release.
-That lane and the manual clean-rebuild workflow also fetch the hash-locked LLVM release artifacts through bounded
-Kotlin/JVM HTTPS and descriptor-bound no-replace publication. The Python release-asset materializer is retained only
-for legacy compatibility. The required LLVM lane also authenticates the stable toolchain recipe, Dockerfile, historical
-build-record binding, and fresh linux/amd64 image identity through Kotlin/JVM; the fresh image digest is deliberately not
-equated with the historical artifact-producing image digest. Other Python workflow gates remain in place until
-source/OpenPGP provenance, live build-record and ELF-twin verification, function-oracle, behavior, and release-stage
-semantics have complete Kotlin replacements; keeping those regression checks does not promote their outputs to new
-release authority.
+That lane and the manual clean-rebuild workflow authenticate the LLVM source lock, local OpenPGP key/tag evidence,
+detached archive signature, strict TAR/XZ profile, and locked source markers through one descriptor-bound Kotlin/JVM
+materializer. They also fetch the hash-locked LLVM release artifacts through bounded Kotlin/JVM HTTPS and
+descriptor-bound no-replace publication. The Python source and release-asset materializers are retained only for
+legacy compatibility. The required LLVM lane also authenticates the stable toolchain recipe, Dockerfile, historical
+build-record binding, and fresh linux/amd64 image identity through Kotlin/JVM; the fresh image digest is deliberately
+not equated with the historical artifact-producing image digest. Other Python workflow gates remain in place until
+live build-record and ELF-twin verification, function-oracle, behavior, and release-stage semantics have complete
+Kotlin replacements; keeping those regression checks does not promote their outputs to new release authority.
 
 During migration, existing Python outputs may be retained as explicitly non-authoritative differential fixtures. They
 cannot enter a new release as truth or validation evidence. A stage becomes authoritative only after frozen-fixture
