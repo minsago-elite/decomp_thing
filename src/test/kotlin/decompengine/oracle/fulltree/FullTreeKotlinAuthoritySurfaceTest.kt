@@ -21,6 +21,8 @@ class FullTreeKotlinAuthoritySurfaceTest {
                 "decompengine.oracle.fulltree.FullTreePlanningInventoryGeneratorCli",
             "verifyLlvmOracleArtifacts" to
                 "decompengine.oracle.provenance.LlvmArtifactManifestVerifierCli",
+            "generateLlvmFunctionRecoveryOracle" to
+                "decompengine.oracle.provenance.LlvmFunctionOracleGeneratorCli",
         ).forEach { (task, entryPoint) ->
             assertTrue(build.contains("taskName = \"$task\""))
             assertTrue(build.contains("entryPoint = \"$entryPoint\""))
@@ -39,12 +41,12 @@ class FullTreeKotlinAuthoritySurfaceTest {
         assertFalse(workflow.contains("python3 scripts/verify-llvm-oracle-source.py"))
         assertFalse(workflow.contains("python3 scripts/fetch-llvm-oracle-source.py"))
         assertFalse(workflow.contains("python3 scripts/verify-llvm-oracle-artifacts.py"))
+        assertFalse(workflow.contains("python3 scripts/generate-llvm-function-recovery-oracle.py"))
         assertFalse(workflow.contains("tests.oracle.test_llvm_source_lock"))
 
         // Unmigrated regression gates stay active until equivalent Kotlin authorities exist.
         listOf(
             "scripts/verify-llvm-oracle-build-record.py",
-            "python3 scripts/generate-llvm-function-recovery-oracle.py",
             "python3 scripts/check-behavior-corpus-evidence.py",
             "python3 -m unittest",
         ).forEach { retainedGate -> assertTrue(workflow.contains(retainedGate)) }

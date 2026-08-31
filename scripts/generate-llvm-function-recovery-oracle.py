@@ -1,5 +1,11 @@
 #!/usr/bin/env python3
-"""Generate the Clang benchmark's source-bound function-recovery oracle."""
+"""Legacy non-authoritative Python compatibility generator for LLVM function facts.
+
+The required LLVM workflow uses the Kotlin/JVM
+``generateLlvmFunctionRecoveryOracle`` authority. This retained differential and
+unit-test surface cannot generate, validate, certify, or enter evidence for a
+new Kotlin-only release.
+"""
 
 from __future__ import annotations
 

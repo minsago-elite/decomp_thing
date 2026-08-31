@@ -1,4 +1,9 @@
-"""LLVM/Clang adapter for generic function-oracle generation."""
+"""Legacy non-authoritative LLVM adapter for Python differential compatibility.
+
+Kotlin/JVM owns production LLVM function-oracle generation. These Python
+exports remain only for differential and unit fixtures and cannot certify or
+enter evidence for a new Kotlin-only release.
+"""
 
 from typing import Any
 

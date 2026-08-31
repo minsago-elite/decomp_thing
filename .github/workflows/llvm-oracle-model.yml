@@ -82,17 +82,12 @@ jobs:
             --args="--inventory $RUNNER_TEMP/full-tree-inventory.json --source-inventory $RUNNER_TEMP/full-tree-source-inventory.json --output $RUNNER_TEMP/full-tree-planning-inventory.json"
           cmp "$RUNNER_TEMP/full-tree-planning-inventory.json" \
             oracle/llvm/22.1.6/full-tree-planning-inventory.json
-      - name: Regenerate deterministic Clang function oracle
+      - name: Regenerate deterministic Clang function oracle in Kotlin
         run: |
-          python3 scripts/generate-llvm-function-recovery-oracle.py \
-            --manifest oracle/llvm/22.1.6/oracle-manifest.json \
-            --exclusions oracle/llvm/22.1.6/function-recovery-exclusions.json \
-            --rich-artifact \
-              "$LLVM_ORACLE_ARTIFACT_ROOT/artifacts/clang-driver.full" \
-            --stripped-artifact \
-              "$LLVM_ORACLE_ARTIFACT_ROOT/artifacts/clang-driver.stripped" \
-            --output "$RUNNER_TEMP/function-recovery-oracle.json"
-          cmp "$RUNNER_TEMP/function-recovery-oracle.json" \
+          install -d -m 0700 "$RUNNER_TEMP/llvm-function-oracle"
+          ./gradlew --no-daemon generateLlvmFunctionRecoveryOracle \
+            --args="--manifest oracle/llvm/22.1.6/oracle-manifest.json --exclusions oracle/llvm/22.1.6/function-recovery-exclusions.json --artifact-root $LLVM_ORACLE_ARTIFACT_ROOT --output $RUNNER_TEMP/llvm-function-oracle/function-recovery-oracle.json"
+          cmp "$RUNNER_TEMP/llvm-function-oracle/function-recovery-oracle.json" \
             oracle/llvm/22.1.6/function-recovery-oracle.json
       - name: Authenticate checked Clang behavior reference evidence in Kotlin
         run: ./gradlew --no-daemon verifyLlvmBehaviorReferenceEvidence
@@ -101,7 +96,7 @@ jobs:
           python3 scripts/check-behavior-corpus-evidence.py \
             --corpus oracle/llvm/22.1.6/behavior-corpus.json \
             --evidence oracle/llvm/22.1.6/behavior-corpus-evidence.json
-      - name: Run LLVM and shared oracle regression tests
+      - name: Run non-authoritative Python compatibility regressions
         run: |
           python3 -m unittest \
             tests.oracle.test_capture_oracle_tools \

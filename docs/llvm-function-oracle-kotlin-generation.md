@@ -1,9 +1,9 @@
 # Kotlin LLVM function-oracle generation
 
 `LlvmFunctionOracleGenerator` is the Kotlin/JVM authority that composes the historical LLVM
-function-recovery oracle v1 document from raw artifacts. This checkpoint supplies the generator;
-workflow and CLI cutover are deliberately separate so CI does not claim Kotlin authority before
-the checked production pair has passed review.
+function-recovery oracle v1 document from raw artifacts. The narrow
+`generateLlvmFunctionRecoveryOracle` Gradle/CLI entry point now owns regeneration in the required
+LLVM workflow; its output must compare byte-for-byte with the checked document.
 
 ## Authority boundary
 
@@ -19,6 +19,22 @@ open through the bounded scan, the exclusion profile remains open through compos
 them are checked again before publication. Manifest verification is repeated at that terminal
 boundary. Parsed JSON, precomputed facts, selectors, limits, authority tokens, and ACP messages are
 not accepted by the production entry point.
+
+The CLI preserves that boundary and accepts exactly `--manifest`, `--exclusions`,
+`--artifact-root`, and `--output`. The output parent must already exist with mode `0700`, and the
+output itself must be absent:
+
+```sh
+install -d -m 0700 /tmp/llvm-function-oracle
+./gradlew --no-daemon generateLlvmFunctionRecoveryOracle \
+  --args="--manifest oracle/llvm/22.1.6/oracle-manifest.json --exclusions oracle/llvm/22.1.6/function-recovery-exclusions.json --artifact-root /absolute/release/root --output /tmp/llvm-function-oracle/function-recovery-oracle.json"
+cmp /tmp/llvm-function-oracle/function-recovery-oracle.json \
+  oracle/llvm/22.1.6/function-recovery-oracle.json
+```
+
+The Python generator and adapter remain only as visibly non-authoritative differential/unit
+compatibility. Their output is not consumed by the required generation step and cannot enter a
+new Kotlin-only release.
 
 The historical Clang profile is closed implementation policy:
 

@@ -1,7 +1,10 @@
-"""Deterministic, program-agnostic normalization of ELF function twins.
+"""Legacy non-authoritative Python compatibility for ELF function normalization.
 
-This module extracts facts; it does not decide that a name, compiler suffix, or
-benchmark identity is special.  Emitted DWARF subprogram starts and defined
+Kotlin/JVM owns production LLVM function-oracle generation. This module remains
+for differential and unit compatibility and cannot certify or enter evidence
+for a new Kotlin-only release. It extracts facts; it does not decide that a
+name, compiler suffix, or benchmark identity is special. Emitted DWARF
+subprogram starts and defined
 ``STT_FUNC`` symbols are reconciled by RVA.  A caller may supply an explicit,
 reviewed RVA-to-reason map for emitted entities that should be excluded from
 source-function scoring.  Inline-only DWARF entities are structural exclusions

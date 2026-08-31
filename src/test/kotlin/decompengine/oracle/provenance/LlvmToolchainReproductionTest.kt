@@ -180,12 +180,13 @@ class LlvmToolchainReproductionTest {
         assertFalse(llvm.contains("python3 scripts/verify-llvm-oracle-artifacts.py"))
         assertFalse(llvm.contains("tests.oracle.test_llvm_source_lock"))
 
-        // These adjacent authorities remain intentionally unchanged by the source cutover.
+        // These adjacent compatibility gates remain intentionally unchanged by the source cutover.
         listOf(
             "scripts/verify-llvm-oracle-build-record.py",
-            "python3 scripts/generate-llvm-function-recovery-oracle.py",
             "python3 scripts/check-behavior-corpus-evidence.py",
         ).forEach { retained -> assertTrue(llvm.contains(retained), retained) }
+        assertTrue(llvm.contains("./gradlew --no-daemon generateLlvmFunctionRecoveryOracle"))
+        assertFalse(llvm.contains("python3 scripts/generate-llvm-function-recovery-oracle.py"))
     }
 
     private fun withFixture(action: (MutableToolchainFixture) -> Unit) {

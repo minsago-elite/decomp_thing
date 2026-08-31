@@ -89,6 +89,12 @@ registerOracleJavaExecTask(
 )
 
 registerOracleJavaExecTask(
+    taskName = "generateLlvmFunctionRecoveryOracle",
+    taskDescription = "Generates the authenticated LLVM function-recovery oracle with Kotlin/JVM authority",
+    entryPoint = "decompengine.oracle.provenance.LlvmFunctionOracleGeneratorCli",
+)
+
+registerOracleJavaExecTask(
     taskName = "verifyLlvmBehaviorReferenceEvidence",
     taskDescription = "Authenticates checked LLVM behavior and diagnostic reference evidence in Kotlin/JVM",
     entryPoint = "decompengine.oracle.behavior.LlvmBehaviorReferenceEvidenceCli",
