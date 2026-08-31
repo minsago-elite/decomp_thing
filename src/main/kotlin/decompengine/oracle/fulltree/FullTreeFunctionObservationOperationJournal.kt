@@ -372,9 +372,10 @@ internal class FullTreeFunctionObservationAttachmentProcessIdentity(
 /**
  * Canonical historical assertion describing one claimed live BOOT attachment observation.
  *
- * The receipt serializes facts that a cold coordinator can later match while opening fresh pidfds;
- * its reconstructible values and hashes authenticate neither their origin nor their observation.
- * It does not serialize a pidfd, prove current liveness, or authorize adoption or mutation.
+ * The receipt serializes facts that a cold coordinator can later match while opening fresh pidfds
+ * and the exact residual run root; its reconstructible values and hashes authenticate neither their
+ * origin nor their observation. It does not serialize a descriptor, prove current liveness, or
+ * authorize adoption or mutation.
  */
 internal class FullTreeFunctionObservationUnitAttachmentReceipt private constructor(
     val schemaVersion: Int,
@@ -392,6 +393,9 @@ internal class FullTreeFunctionObservationUnitAttachmentReceipt private construc
     val cgroupDevice: Long,
     val cgroupInode: Long,
     val cgroupMountId: Long,
+    val runRootDevice: Long,
+    val runRootInode: Long,
+    val runRootMountId: Long,
     processes: List<FullTreeFunctionObservationAttachmentProcessIdentity>,
     val receiptSha256: String,
 ) {
@@ -409,6 +413,7 @@ internal class FullTreeFunctionObservationUnitAttachmentReceipt private construc
             !bootId.matches(SYSTEMD_ID128) || bootId in RESERVED_ID128S ||
             !invocationId.matches(SYSTEMD_ID128) || invocationId in RESERVED_ID128S ||
             cgroupDevice <= 0L || cgroupInode <= 0L || cgroupMountId <= 0L ||
+            runRootDevice <= 0L || runRootInode <= 0L || runRootMountId <= 0L ||
             !receiptSha256.matches(SHA256)
         ) journalFail("function-observation unit-attachment receipt has invalid identities")
         requireCanonicalControlGroup(controlGroup, unitName)
@@ -441,6 +446,9 @@ internal class FullTreeFunctionObservationUnitAttachmentReceipt private construc
                 put("provider", JsonPrimitive(provider))
                 if (includeSelfHash) put("receiptSha256", JsonPrimitive(receiptSha256))
                 put("requestSha256", JsonPrimitive(requestSha256))
+                put("runRootDevice", JsonPrimitive(runRootDevice))
+                put("runRootInode", JsonPrimitive(runRootInode))
+                put("runRootMountId", JsonPrimitive(runRootMountId))
                 put("schemaVersion", JsonPrimitive(schemaVersion))
                 put("unitName", JsonPrimitive(unitName))
             },
@@ -458,6 +466,9 @@ internal class FullTreeFunctionObservationUnitAttachmentReceipt private construc
             cgroupDevice: Long,
             cgroupInode: Long,
             cgroupMountId: Long,
+            runRootDevice: Long,
+            runRootInode: Long,
+            runRootMountId: Long,
             processes: List<FullTreeFunctionObservationAttachmentProcessIdentity>,
         ): FullTreeFunctionObservationUnitAttachmentReceipt {
             if (
@@ -477,6 +488,9 @@ internal class FullTreeFunctionObservationUnitAttachmentReceipt private construc
                 cgroupDevice,
                 cgroupInode,
                 cgroupMountId,
+                runRootDevice,
+                runRootInode,
+                runRootMountId,
                 processes,
             )
             val provisional = arguments.receipt(ZERO_SHA256)
@@ -507,6 +521,9 @@ internal class FullTreeFunctionObservationUnitAttachmentReceipt private construc
                     cgroupDevice = root.journalLong("cgroupDevice"),
                     cgroupInode = root.journalLong("cgroupInode"),
                     cgroupMountId = root.journalLong("cgroupMountId"),
+                    runRootDevice = root.journalLong("runRootDevice"),
+                    runRootInode = root.journalLong("runRootInode"),
+                    runRootMountId = root.journalLong("runRootMountId"),
                     processes = root.journalArray("processes").map { value ->
                         FullTreeFunctionObservationAttachmentProcessIdentity.parse(
                             value as? JsonObject
@@ -532,6 +549,9 @@ internal class FullTreeFunctionObservationUnitAttachmentReceipt private construc
         val cgroupDevice: Long,
         val cgroupInode: Long,
         val cgroupMountId: Long,
+        val runRootDevice: Long,
+        val runRootInode: Long,
+        val runRootMountId: Long,
         val processes: List<FullTreeFunctionObservationAttachmentProcessIdentity>,
     ) {
         fun receipt(selfHash: String) = FullTreeFunctionObservationUnitAttachmentReceipt(
@@ -550,6 +570,9 @@ internal class FullTreeFunctionObservationUnitAttachmentReceipt private construc
             cgroupDevice = cgroupDevice,
             cgroupInode = cgroupInode,
             cgroupMountId = cgroupMountId,
+            runRootDevice = runRootDevice,
+            runRootInode = runRootInode,
+            runRootMountId = runRootMountId,
             processes = processes,
             receiptSha256 = selfHash,
         )
@@ -2062,9 +2085,9 @@ private const val OPERATION_REQUEST_SCHEMA_VERSION = 4
 private const val OPERATION_TRANSITION_SCHEMA_VERSION = 4
 private const val OPERATION_PROVIDER = "kotlin-function-observation-operation-v4"
 private const val OPERATION_REQUEST_PROVIDER = "kotlin-function-observation-request-v4"
-private const val UNIT_ATTACHMENT_RECEIPT_SCHEMA_VERSION = 1
+private const val UNIT_ATTACHMENT_RECEIPT_SCHEMA_VERSION = 2
 private const val UNIT_ATTACHMENT_RECEIPT_PROVIDER =
-    "kotlin-function-observation-unit-attachment-v1"
+    "kotlin-function-observation-unit-attachment-v2"
 private const val MINIMUM_LEASE_INODES = 4L
 private const val OWNER_DIRECTORY_MODE = 0x1c0 // 0700
 private const val GROUP_OR_OTHER_WRITE_MODE = 0x12 // 0022
@@ -2158,6 +2181,9 @@ private val UNIT_ATTACHMENT_RECEIPT_FIELDS = setOf(
     "provider",
     "receiptSha256",
     "requestSha256",
+    "runRootDevice",
+    "runRootInode",
+    "runRootMountId",
     "schemaVersion",
     "unitName",
 )

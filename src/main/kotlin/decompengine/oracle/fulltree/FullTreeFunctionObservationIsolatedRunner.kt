@@ -324,6 +324,21 @@ private class AuthenticatedObservationRuntime private constructor(
             materializeObservationClassPath(runTree.path, descriptor, classPath)
         }
 
+    /** Reauthenticates, but never rewrites, the class-path snapshot in a cold BOOT run tree. */
+    fun authenticateExistingClassPathAtBoot(
+        runTree: ObservationRunTreeAccess,
+    ): MaterializedObservationClassPath {
+        verify("before cold materialized class-path authentication")
+        val paths = classPath.indices.map { index ->
+            runTree.path.resolve(RUNTIME_DIRECTORY).resolve("classpath-$index.jar")
+        }
+        val expected = classPath.map { (entry, guard) -> guard.size to entry.expectedSha256 }
+        return MaterializedObservationClassPath(paths, expected).also { materialized ->
+            materialized.authenticatePreparedLayout(runTree, listOf(BOOT_FILE))
+            materialized.verify("after cold materialized class-path authentication")
+        }
+    }
+
     fun mounts(): List<FullTreeFunctionObservationRuntimeMount> = runtimeMounts.map { it.first }
 
     fun verify(label: String) {
@@ -425,7 +440,10 @@ private class MaterializedObservationClassPath(
     }
 
     @Synchronized
-    fun authenticatePreparedLayout(runTree: ObservationRunTreeAccess) {
+    fun authenticatePreparedLayout(
+        runTree: ObservationRunTreeAccess,
+        rootFiles: List<String> = emptyList(),
+    ) {
         check(preparedLayout == null) { "prepared class-path layout was already authenticated" }
         preparedLayout = runTree.withPinnedDescriptor { root ->
             authenticatePreparedObservationRunLayout(
@@ -433,7 +451,7 @@ private class MaterializedObservationClassPath(
                 root,
                 paths,
                 expected,
-                rootFiles = emptyList(),
+                rootFiles = rootFiles,
                 retained = null,
             )
         }
@@ -722,6 +740,23 @@ internal object FullTreeFunctionObservationIsolatedOperationRunner {
     fun recordUnitAttached(
         bootedIsolation: FullTreeFunctionObservationBootedIsolation,
     ): FullTreeFunctionObservationUnitAttachedBootIsolation = bootedIsolation.recordUnitAttached()
+
+    fun recoverUnitAttachedAtBootReadOnly(
+        coldAttached: FullTreeFunctionObservationColdUnitAttachedOperation,
+        richArtifact: Path,
+        inventoryPath: Path,
+        scopeFiles: FullTreeFunctionObservationScopeFiles,
+        output: Path,
+        configuration: FullTreeFunctionObservationIsolationConfiguration,
+    ): FullTreeFunctionObservationRecoveredUnitAttachedBootObservation =
+        FullTreeFunctionObservationRecoveredUnitAttachedBootObservation.recover(
+            coldAttached,
+            richArtifact,
+            inventoryPath,
+            scopeFiles,
+            output,
+            configuration,
+        )
 
     internal fun launchToBootWithTestHooks(
         preparedIsolation: FullTreeFunctionObservationPreparedIsolation,
@@ -1211,7 +1246,15 @@ internal class FullTreeFunctionObservationBootedIsolation : AutoCloseable {
             val binding = prepared.leasedHistory.binding
             val leasedTransition = prepared.leasedHistory.latest
                 ?: isolationFail("function-observation BOOT isolation lacks its LEASED transition")
-            val receipt = ownership.unit.captureUnitAttachmentReceipt(binding, leasedTransition)
+            val receipt = prepared.withCurrentRunRootAfterScopeAttachment { borrowed ->
+                borrowed.withPinnedDescriptor { descriptor ->
+                    ownership.unit.captureUnitAttachmentReceipt(
+                        binding,
+                        leasedTransition,
+                        descriptor.whileOpen(LinuxFilesystemSyscalls::identity),
+                    )
+                }
+            }
             ownership.unit.requireCurrentUnitAttachmentReceipt(receipt)
             val attached = try {
                 prepared.transferToUnitAttachedIsolationAuthority(
@@ -1387,6 +1430,52 @@ internal class FullTreeFunctionObservationUnitAttachedBootIsolation : AutoClosea
         }
     }
 
+    /** Immutable history only; callers must still reobserve every live receipt field. */
+    @Synchronized
+    internal fun historicalAttachmentReceiptForRecovery():
+        FullTreeFunctionObservationUnitAttachmentReceipt {
+        check(!closed) { "UNIT_ATTACHED BOOT isolation is closed" }
+        if (operationActive) {
+            isolationFail("UNIT_ATTACHED BOOT isolation operation is already active")
+        }
+        return ownership.unitAttachedAuthority?.unitAttachmentReceipt
+            ?: isolationFail("UNIT_ATTACHED BOOT isolation lost its attached receipt")
+    }
+
+    /**
+     * Deliberately releases only this JVM's descriptors and H/D locks so another Kotlin
+     * coordinator can reopen the exact UNIT_ATTACHED residue. The worker remains blocked at BOOT;
+     * this method never signals it or issues a mutating systemd command.
+     */
+    @Synchronized
+    internal fun abandonForColdRecoveryReadOnly() {
+        check(!closed) { "UNIT_ATTACHED BOOT isolation is closed" }
+        if (operationActive) {
+            isolationFail("UNIT_ATTACHED BOOT isolation operation is already active")
+        }
+        requireCurrentAtBoot()
+        operationActive = true
+        var failure: Throwable? = null
+        fun record(next: Throwable) {
+            val primary = failure
+            if (primary == null) failure = next else if (next !== primary) primary.addSuppressed(next)
+        }
+        try {
+            val authority = ownership.unitAttachedAuthority
+                ?: isolationFail("UNIT_ATTACHED BOOT isolation lost its attached authority")
+            closed = true
+            runCatching { ownership.boundary.abandonObservationForColdRecovery(ownership.unit) }
+                .exceptionOrNull()?.let(::record)
+            runCatching { ownership.inputGuards.close() }.exceptionOrNull()?.let(::record)
+            runCatching { ownership.runtime.close() }.exceptionOrNull()?.let(::record)
+            runCatching { authority.abandonForColdRecovery() }.exceptionOrNull()?.let(::record)
+            ownership.unitAttachedAuthority = null
+            failure?.let { throw it }
+        } finally {
+            operationActive = false
+        }
+    }
+
     @Synchronized
     override fun close() {
         if (closed) return
@@ -1418,6 +1507,293 @@ private fun createUnitAttachedBootIsolation(
         ownership,
         UNIT_ATTACHED_BOOT_ISOLATION_CONSTRUCTION_PERMIT,
     )
+
+/**
+ * Query/open-only recovery view of one same-boot, receipt-matched scope still blocked at BOOT.
+ *
+ * This is intentionally distinct from the fresh UNIT_ATTACHED owner: its disk handle is cold and
+ * observation-only by trusted Kotlin composition, and close drops descriptors without signaling a
+ * PID or issuing a systemd command. It grants no START, cleanup, recovered-abort, truth,
+ * publication, release, or same-UID-writer-exclusion authority and never crosses into ACP.
+ */
+internal class FullTreeFunctionObservationRecoveredUnitAttachedBootObservation private constructor(
+    private val paths: IsolatedObservationPaths,
+    private val runDirectory: Path,
+    private val configuration: FullTreeFunctionObservationIsolationConfiguration,
+    private val authenticatedScope: AuthenticatedFullTreeScope,
+    private val authenticatedInputs: FullTreeFunctionObservationAuthenticatedInputs,
+    private val resources: IsolatedObservationResources,
+    private val runtime: AuthenticatedObservationRuntime,
+    private val inputGuards: ParentObservationInputGuards,
+    private val materializedClassPath: MaterializedObservationClassPath,
+    private val authority: FullTreeFunctionObservationColdUnitAttachedBootAuthority,
+    private val boundary: TrustedObservationBoundary,
+    private val unit: ManagedObservationUnit,
+) : AutoCloseable {
+    val operationId: String = authority.attachedHistory.binding.operationId
+    val shardId: String = authority.attachedHistory.binding.shardId
+    val unitName: String = authority.attachedHistory.binding.unitName
+    val receiptSha256: String = authority.unitAttachmentReceipt.receiptSha256
+    private val bindingSha256: String = authority.attachedHistory.binding.bindingSha256
+    private var closed = false
+    private var operationActive = false
+
+    init {
+        requireCurrentAtBoot()
+    }
+
+    /** Repeats H/D, boot, input/runtime/layout, unit/cgroup, and pidfd receipt matching. */
+    @Synchronized
+    fun requireCurrentAtBoot() {
+        check(!closed) { "recovered UNIT_ATTACHED BOOT observation is closed" }
+        if (operationActive) {
+            isolationFail("recovered UNIT_ATTACHED BOOT observation is already active")
+        }
+        operationActive = true
+        try {
+            val binding = authority.attachedHistory.binding
+            val receipt = authority.unitAttachmentReceipt
+            if (
+                binding.operationId != operationId || binding.shardId != shardId ||
+                binding.unitName != unitName || binding.bindingSha256 != bindingSha256 ||
+                receipt.receiptSha256 != receiptSha256 ||
+                configuration.canonicalSha256 != binding.isolationConfigurationSha256
+            ) isolationFail("recovered UNIT_ATTACHED BOOT identity changed")
+            authority.requireCurrentReadOnly()
+            if (readFullTreeFunctionObservationKernelBootId() != receipt.bootId) {
+                isolationFail("recovered UNIT_ATTACHED receipt belongs to a previous kernel boot")
+            }
+            FullTreeScopeControl.validate(authenticatedScope)
+            requireFullTreeObservationDiskClosureCompatibility(binding, resources.cleanupLimits)
+            requirePreparedIsolationBinding(
+                binding,
+                paths,
+                runDirectory,
+                configuration,
+                authenticatedScope,
+                inputGuards,
+                authenticatedInputs,
+            )
+            runtime.verify("while cold-adopted worker is at BOOT")
+            inputGuards.verifyCurrent("while cold-adopted worker is at BOOT")
+            boundary.verifyLiveOperation()
+            authority.withCurrentRunRootAtBoot { borrowed ->
+                if (borrowed.path != runDirectory) {
+                    isolationFail("recovered UNIT_ATTACHED BOOT run-root locator changed")
+                }
+                BorrowedObservationRunTree.access(borrowed).use { runTree ->
+                    requireObservationBootLayout(materializedClassPath, runTree, binding.bindingSha256)
+                    unit.awaitBoot(binding.bindingSha256, runTree)
+                    unit.verifyLiveContainment(resources)
+                    unit.requireCurrentUnitAttachmentReceipt(receipt)
+                    requireObservationBootLayout(materializedClassPath, runTree, binding.bindingSha256)
+                }
+            }
+            requirePreparedIsolationOutputAbsent(paths.output)
+            boundary.verifyLiveOperation()
+            runtime.verify("after cold-adopted BOOT revalidation")
+            inputGuards.verifyCurrent("after cold-adopted BOOT revalidation")
+            if (readFullTreeFunctionObservationKernelBootId() != receipt.bootId) {
+                isolationFail("kernel boot identity changed during recovered BOOT observation")
+            }
+            authority.requireCurrentReadOnly()
+        } finally {
+            operationActive = false
+        }
+    }
+
+    /** Descriptor-only close; the observed systemd unit and receipt PIDs are never mutated. */
+    @Synchronized
+    override fun close() {
+        if (closed) return
+        if (operationActive) {
+            isolationFail("recovered UNIT_ATTACHED BOOT observation cannot close while active")
+        }
+        closed = true
+        closeRecoveredUnitAttachedBootResources(
+            unit,
+            boundary,
+            inputGuards,
+            runtime,
+            authority,
+            priorFailure = null,
+        )?.let { throw it }
+    }
+
+    companion object {
+        internal fun recover(
+            coldAttached: FullTreeFunctionObservationColdUnitAttachedOperation,
+            richArtifact: Path,
+            inventoryPath: Path,
+            scopeFiles: FullTreeFunctionObservationScopeFiles,
+            output: Path,
+            configuration: FullTreeFunctionObservationIsolationConfiguration,
+        ): FullTreeFunctionObservationRecoveredUnitAttachedBootObservation = translateIsolationFailures(
+            label = "cold UNIT_ATTACHED BOOT recovery",
+        ) {
+            var runtime: AuthenticatedObservationRuntime? = null
+            var guards: ParentObservationInputGuards? = null
+            var boundary: TrustedObservationBoundary? = null
+            var unit: ManagedObservationUnit? = null
+            var bootAuthority: FullTreeFunctionObservationColdUnitAttachedBootAuthority? = null
+            try {
+                coldAttached.requireCurrentReadOnly()
+                val binding = coldAttached.attachedHistory.binding
+                val receipt = coldAttached.unitAttachmentReceipt
+                if (readFullTreeFunctionObservationKernelBootId() != receipt.bootId) {
+                    isolationFail("cold UNIT_ATTACHED receipt belongs to a previous kernel boot")
+                }
+                val runDirectory = coldAttached.withCurrentRunRootAtBoot { borrowed -> borrowed.path }
+                val runParent = runDirectory.parent
+                    ?: isolationFail("cold UNIT_ATTACHED run root has no lease parent")
+                val paths = IsolatedObservationPaths.normalize(
+                    richArtifact,
+                    inventoryPath,
+                    scopeFiles,
+                    runParent,
+                    output,
+                )
+                requirePreparedIsolationPathTopology(binding, paths, runDirectory)
+
+                val authenticated = FullTreeScopeControl.load(
+                    paths.scopeFiles.scope,
+                    paths.scopeFiles.sourceLock,
+                    paths.scopeFiles.artifactManifest,
+                )
+                FullTreeScopeControl.validate(authenticated)
+                val openedRuntime = AuthenticatedObservationRuntime.open(configuration)
+                runtime = openedRuntime
+                val resources = IsolatedObservationResources.derive(authenticated, openedRuntime.classPathBytes)
+                requireFullTreeObservationDiskClosureCompatibility(binding, resources.cleanupLimits)
+                val openedGuards = ParentObservationInputGuards.open(paths, authenticated)
+                guards = openedGuards
+                val inputs = FullTreeFunctionObservationProducer.authenticateShardInputs(
+                    inventoryPath = paths.inventory,
+                    scope = authenticated,
+                    shardId = binding.shardId,
+                )
+                requirePreparedIsolationBinding(
+                    binding,
+                    paths,
+                    runDirectory,
+                    configuration,
+                    authenticated,
+                    openedGuards,
+                    inputs,
+                )
+                openedRuntime.verify("before recovered BOOT run-tree authentication")
+                openedGuards.verifyCurrent("before recovered BOOT run-tree authentication")
+                requirePreparedIsolationOutputAbsent(paths.output)
+
+                var recoveredClassPath: MaterializedObservationClassPath? = null
+                coldAttached.withCurrentRunRootAtBoot { borrowed ->
+                    if (borrowed.path != runDirectory) {
+                        isolationFail("cold UNIT_ATTACHED run-root locator changed")
+                    }
+                    BorrowedObservationRunTree.access(borrowed).use { runTree ->
+                        val materialized = openedRuntime.authenticateExistingClassPathAtBoot(runTree)
+                        recoveredClassPath = materialized
+                        requireObservationBootLayout(materialized, runTree, binding.bindingSha256)
+                        openedRuntime.verify("at cold UNIT_ATTACHED BOOT adoption")
+                        openedGuards.verifyCurrent("at cold UNIT_ATTACHED BOOT adoption")
+                        requirePreparedIsolationOutputAbsent(paths.output)
+                        if (readFullTreeFunctionObservationKernelBootId() != receipt.bootId) {
+                            isolationFail("kernel boot identity changed before cold unit adoption")
+                        }
+                        val openedBoundary = TrustedObservationBoundary(
+                            configuration,
+                            openedRuntime,
+                            materialized,
+                        )
+                        boundary = openedBoundary
+                        val adopted = openedBoundary.adoptUnitAttached(
+                            binding,
+                            receipt,
+                            runDirectory,
+                            resources,
+                        )
+                        unit = adopted
+                        adopted.awaitBoot(binding.bindingSha256, runTree)
+                        adopted.verifyLiveContainment(resources)
+                        adopted.requireCurrentUnitAttachmentReceipt(receipt)
+                        requireObservationBootLayout(materialized, runTree, binding.bindingSha256)
+                    }
+                }
+                val materialized = recoveredClassPath
+                    ?: isolationFail("cold UNIT_ATTACHED class-path observation was not retained")
+                requirePreparedIsolationOutputAbsent(paths.output)
+                boundary?.verifyLiveOperation()
+                    ?: isolationFail("cold UNIT_ATTACHED boundary observation was not retained")
+                unit?.requireCurrentUnitAttachmentReceipt(receipt)
+                    ?: isolationFail("cold UNIT_ATTACHED unit observation was not retained")
+                coldAttached.requireCurrentReadOnly()
+
+                val transferred = coldAttached.transferToBootAuthority()
+                bootAuthority = transferred
+                val result = FullTreeFunctionObservationRecoveredUnitAttachedBootObservation(
+                    paths,
+                    runDirectory,
+                    configuration,
+                    authenticated,
+                    inputs,
+                    resources,
+                    openedRuntime,
+                    openedGuards,
+                    materialized,
+                    transferred,
+                    checkNotNull(boundary),
+                    checkNotNull(unit),
+                )
+                runtime = null
+                guards = null
+                boundary = null
+                unit = null
+                bootAuthority = null
+                result
+            } catch (failure: Throwable) {
+                closeRecoveredUnitAttachedBootResources(
+                    unit,
+                    boundary,
+                    guards,
+                    runtime,
+                    bootAuthority,
+                    priorFailure = failure,
+                )
+                throw failure
+            }
+        }
+    }
+}
+
+private fun closeRecoveredUnitAttachedBootResources(
+    unit: ManagedObservationUnit?,
+    boundary: TrustedObservationBoundary?,
+    inputGuards: ParentObservationInputGuards?,
+    runtime: AuthenticatedObservationRuntime?,
+    authority: FullTreeFunctionObservationColdUnitAttachedBootAuthority?,
+    priorFailure: Throwable?,
+): Throwable? {
+    var failure = priorFailure
+    fun record(closeFailure: Throwable) {
+        val primary = failure
+        if (primary == null) failure = closeFailure else if (closeFailure !== primary) {
+            primary.addSuppressed(closeFailure)
+        }
+    }
+    unit?.let { observed ->
+        val abandoned = boundary?.let { owner ->
+            runCatching { owner.abandonColdAdoption(observed) }.exceptionOrNull()
+        }
+        abandoned?.let(::record)
+        if (!observed.cleaned) {
+            runCatching { observed.abandonWithoutMutation() }.exceptionOrNull()?.let(::record)
+        }
+    }
+    inputGuards?.let { opened -> runCatching { opened.close() }.exceptionOrNull()?.let(::record) }
+    runtime?.let { opened -> runCatching { opened.close() }.exceptionOrNull()?.let(::record) }
+    authority?.let { opened -> runCatching { opened.close() }.exceptionOrNull()?.let(::record) }
+    return failure
+}
 
 private fun createBootedObservationIsolation(
     paths: IsolatedObservationPaths,
@@ -2737,6 +3113,83 @@ private class TrustedObservationBoundary(
         return launchValidated(unitName, request, resources, immediatelyBeforeStart)
     }
 
+    /**
+     * Reconstitutes only descriptor-backed ownership of an exact durable BOOT attachment during a
+     * deliberate coordinator handoff. Production bubblewrap uses --die-with-parent, so an actual
+     * coordinator-process death is expected to converge to absent recovery rather than this path.
+     * Unlike a launch failure, an adoption mismatch never falls through the deterministic unit-name
+     * cleanup path: no name mutation is safe until the receipt has matched the live invocation,
+     * cgroup, and all four process identities.
+     */
+    fun adoptUnitAttached(
+        binding: FullTreeFunctionObservationOperationBinding,
+        receipt: FullTreeFunctionObservationUnitAttachmentReceipt,
+        runDirectory: Path,
+        resources: IsolatedObservationResources,
+    ): ManagedObservationUnit {
+        check(active == null && pendingLaunch == null && retainedUnitName == null) {
+            "one isolation boundary may own only one worker"
+        }
+        if (
+            binding.unitName != receipt.unitName || binding.operationId != receipt.operationId ||
+            binding.requestSha256 != receipt.requestSha256 ||
+            binding.bindingSha256 != receipt.bindingSha256 ||
+            binding.isolationConfigurationSha256 != receipt.isolationConfigurationSha256 ||
+            configuration.canonicalSha256 != binding.isolationConfigurationSha256
+        ) isolationFail("cold unit-attachment receipt differs from its operation binding")
+        if (readFullTreeFunctionObservationKernelBootId() != receipt.bootId) {
+            isolationFail("cold unit-attachment receipt belongs to a previous kernel boot")
+        }
+        val outerPid = receipt.processes.singleOrNull {
+            it.role == FullTreeFunctionObservationAttachmentProcessRole.OUTER_BUBBLEWRAP
+        }?.hostPid ?: isolationFail("cold unit-attachment receipt lacks one outer bubblewrap")
+        var processHandle: decompengine.acp.LinuxProcessDescriptor? = null
+        var managed: ManagedObservationUnit? = null
+        try {
+            requireUnchanged()
+            authenticatedRuntime.verify("before cold unit-attachment adoption")
+            materializedClassPath.verify("before cold unit-attachment adoption")
+            val controller = ObservationSystemdController(
+                inspector,
+                bus,
+                binding.unitName,
+                testHooks?.systemctlCommandObserver,
+            )
+            val openedHandle = LinuxFilesystemSyscalls.openProcessHandle(outerPid)
+            processHandle = openedHandle
+            val adopted = ManagedObservationUnit(
+                controller,
+                runDirectory,
+                binding.bindingSha256,
+                bubblewrap,
+                java,
+                resources,
+                process = null,
+                processHandle = openedHandle,
+                systemdUserRuntimeDirectory = configuration.systemdUserRuntimeDirectory,
+            )
+            managed = adopted
+            processHandle = null
+            adopted.adoptUnitAttachment(receipt)
+            requireUnchanged()
+            authenticatedRuntime.verify("after cold unit-attachment adoption")
+            materializedClassPath.verify("after cold unit-attachment adoption")
+            adopted.requireCurrentUnitAttachmentReceipt(receipt)
+            retainUnitName(binding.unitName)
+            active = adopted
+            managed = null
+            return adopted
+        } catch (failure: Throwable) {
+            managed?.let { unit ->
+                runCatching { unit.abandonWithoutMutation() }.exceptionOrNull()?.let(failure::addSuppressed)
+            }
+            processHandle?.let { handle ->
+                runCatching { handle.close() }.exceptionOrNull()?.let(failure::addSuppressed)
+            }
+            throw failure
+        }
+    }
+
     private fun launchValidated(
         unitName: String,
         request: IsolatedWorkerRequest,
@@ -3072,6 +3525,28 @@ private class TrustedObservationBoundary(
         close()
     }
 
+    /** Drops query/open-only cold adoption descriptors without touching the live unit or its PIDs. */
+    fun abandonColdAdoption(unit: ManagedObservationUnit) {
+        if (active !== unit || !unit.isColdAdopted || retainedUnitName != unit.unitName) {
+            isolationFail("cold unit-attachment adoption ownership changed")
+        }
+        abandonObservationWithoutMutation(unit)
+    }
+
+    /** Releases this process's observation descriptors for a deliberate cold-coordinator handoff. */
+    fun abandonObservationForColdRecovery(unit: ManagedObservationUnit) {
+        if (active !== unit || retainedUnitName != unit.unitName) {
+            isolationFail("live unit-attachment observation ownership changed")
+        }
+        abandonObservationWithoutMutation(unit)
+    }
+
+    private fun abandonObservationWithoutMutation(unit: ManagedObservationUnit) {
+        unit.abandonWithoutMutation()
+        active = null
+        retainedUnitName = null
+    }
+
     override fun close() {
         val unit = active
         if (unit != null && !unit.cleaned) {
@@ -3338,7 +3813,8 @@ private class ObservationSystemdController(
 
     fun killStopAndRequireAbsent(
         knownCgroup: Path,
-        process: Process,
+        processHandle: decompengine.acp.LinuxProcessDescriptor,
+        awaitLocalProcess: () -> Unit,
         observeTarget: () -> ObservationUnitMutationTargetState,
         killPinnedProcesses: () -> Unit,
     ) {
@@ -3372,7 +3848,7 @@ private class ObservationSystemdController(
                 throw guardedFailure
             }
             pidfdFailure?.let { last = it }
-            runCatching { process.waitFor(SYSTEMD_POLL_MILLIS, TimeUnit.MILLISECONDS) }
+            runCatching(awaitLocalProcess).exceptionOrNull()?.let { last = it }
             val absence = runCatching { show()["LoadState"] == "not-found" }
             absence.exceptionOrNull()?.let { last = it }
             absence.getOrNull()?.let { absent ->
@@ -3385,7 +3861,10 @@ private class ObservationSystemdController(
                         addAll(findObservationCgroupsForUnit(unitName))
                     }
                     val cgroupAbsent = candidates.none { Files.exists(it, LinkOption.NOFOLLOW_LINKS) }
-                    if (absent && cgroupAbsent && !process.isAlive) return
+                    if (
+                        absent && cgroupAbsent &&
+                        !LinuxFilesystemSyscalls.processExists(processHandle)
+                    ) return
                 }.exceptionOrNull()?.let { failure ->
                     last = failure
                 }
@@ -3545,6 +4024,11 @@ internal fun normalizeFullTreeFunctionObservationKernelBootId(value: String): St
     return normalized
 }
 
+private fun readFullTreeFunctionObservationKernelBootId(): String =
+    normalizeFullTreeFunctionObservationKernelBootId(
+        readBoundedText(KERNEL_BOOT_ID_PATH, MAXIMUM_KERNEL_BOOT_ID_BYTES),
+    )
+
 /**
  * Extracts Linux /proc PID stat field 22 without treating ')' or whitespace in comm as fields.
  * Only the suffix after the final kernel-added ") " delimiter participates in field indexing.
@@ -3607,16 +4091,18 @@ private class ManagedObservationUnit(
     private val bubblewrap: PinnedSecurityExecutable,
     private val java: PinnedSecurityExecutable,
     private val resources: IsolatedObservationResources,
-    private val process: Process,
+    private val process: Process?,
     private val processHandle: decompengine.acp.LinuxProcessDescriptor,
     private val systemdUserRuntimeDirectory: Path,
 ) : AutoCloseable {
     val unitName: String
         get() = controller.unitName
+    val isColdAdopted: Boolean
+        get() = process == null
     private var cgroupPath: Path? = null
     private var cgroupDescriptor: LinuxDescriptor? = null
     private var invocationId: String? = null
-    private val mainPid: Long = process.pid()
+    private val mainPid: Long = process?.pid() ?: processHandle.pid
     private var keeperPids: Set<Long>? = null
     private var bootProcessHandles: Map<Long, decompengine.acp.LinuxProcessDescriptor>? = null
     private var frozen = false
@@ -3624,13 +4110,15 @@ private class ManagedObservationUnit(
         private set
 
     fun awaitScopeAttached() {
+        val launchedProcess = process
+            ?: isolationFail("a cold-adopted isolated scope cannot await a fresh attachment")
         check(cgroupPath == null && cgroupDescriptor == null && invocationId == null) {
             "isolated scope attachment was already established"
         }
         val deadline = deadlineAfter(SYSTEMD_LAUNCH_TIMEOUT, "isolated local scope attachment")
         var last: Throwable? = null
         while (System.nanoTime() < deadline) {
-            if (!process.isAlive) isolationFail("isolated local scope process exited before attachment")
+            if (!launchedProcess.isAlive) isolationFail("isolated local scope process exited before attachment")
             try {
                 val before = controller.show()
                 requireLiveProperties(before, resources, allowActivating = true)
@@ -3670,6 +4158,66 @@ private class ManagedObservationUnit(
             "isolated local scope could not be attached and verified",
             last,
         )
+    }
+
+    /**
+     * Re-pins one exact durable BOOT receipt during a deliberate coordinator handoff. This method
+     * observes and retains only the receipt-matched invocation; a mismatch closes the newly opened
+     * pidfd and cgroup descriptors without issuing any mutating systemd command or process signal.
+     */
+    fun adoptUnitAttachment(expected: FullTreeFunctionObservationUnitAttachmentReceipt) {
+        if (process != null) isolationFail("a freshly launched scope cannot be cold-adopted")
+        check(cgroupPath == null && cgroupDescriptor == null && invocationId == null) {
+            "isolated scope attachment was already established"
+        }
+        val outer = expected.processes.singleOrNull {
+            it.role == FullTreeFunctionObservationAttachmentProcessRole.OUTER_BUBBLEWRAP
+        } ?: isolationFail("cold unit-attachment receipt lacks one outer bubblewrap")
+        if (expected.unitName != unitName || outer.hostPid != mainPid) {
+            isolationFail("cold unit-attachment receipt names a different scope leader")
+        }
+        var pinnedCgroup: LinuxDescriptor? = null
+        try {
+            val before = controller.show()
+            requireLiveProperties(before, resources)
+            val observedInvocation = requireInvocationId(before)
+            val observedControlGroup = before["ControlGroup"].orEmpty()
+            if (
+                observedInvocation != expected.invocationId ||
+                observedControlGroup != expected.controlGroup
+            ) isolationFail("cold systemd invocation differs from its durable attachment receipt")
+            val cgroup = requireCgroupPath(observedControlGroup)
+            requireLocalLeader(cgroup)
+            requireActualControllers(cgroup, resources)
+            val pinned = pinCgroupDescriptor(cgroup)
+            pinnedCgroup = pinned
+            val pinnedIdentity = requirePinnedCgroupSelection(cgroup, pinned)
+            if (
+                pinnedIdentity.key.device != expected.cgroupDevice ||
+                pinnedIdentity.key.inode != expected.cgroupInode ||
+                pinnedIdentity.mountId != expected.cgroupMountId
+            ) isolationFail("cold cgroup identity differs from its durable attachment receipt")
+            invocationId = observedInvocation
+            cgroupPath = cgroup
+            cgroupDescriptor = pinned
+            pinnedCgroup = null
+            requireCurrentUnitAttachmentReceipt(expected)
+        } catch (failure: Throwable) {
+            pinnedCgroup?.let { runCatching { it.close() }.exceptionOrNull()?.let(failure::addSuppressed) }
+            runCatching { abandonWithoutMutation() }.exceptionOrNull()?.let(failure::addSuppressed)
+            throw failure
+        }
+    }
+
+    /** Descriptor-only unwind for a failed cold observation; never mutates the unit or its PIDs. */
+    fun abandonWithoutMutation() {
+        if (cleaned) return
+        bootProcessHandles?.values?.forEach { it.close() }
+        bootProcessHandles = null
+        cgroupDescriptor?.close()
+        cgroupDescriptor = null
+        processHandle.close()
+        cleaned = true
     }
 
     fun awaitBoot(
@@ -3720,6 +4268,7 @@ private class ManagedObservationUnit(
     internal fun captureUnitAttachmentReceipt(
         binding: FullTreeFunctionObservationOperationBinding,
         leasedTransition: FullTreeFunctionObservationOperationTransition,
+        runRootIdentity: LinuxFileIdentity,
     ): FullTreeFunctionObservationUnitAttachmentReceipt {
         if (binding.unitName != unitName) {
             isolationFail("unit-attachment binding names a different systemd scope")
@@ -3734,6 +4283,9 @@ private class ManagedObservationUnit(
             cgroupDevice = snapshot.cgroupIdentity.key.device,
             cgroupInode = snapshot.cgroupIdentity.key.inode,
             cgroupMountId = snapshot.cgroupIdentity.mountId,
+            runRootDevice = runRootIdentity.key.device,
+            runRootInode = runRootIdentity.key.inode,
+            runRootMountId = runRootIdentity.mountId,
             processes = snapshot.population.processes.map(ObservationAttachmentProcess::receiptIdentity),
         )
     }
@@ -3999,10 +4551,7 @@ private class ManagedObservationUnit(
         return current
     }
 
-    private fun readNormalizedKernelBootId(): String =
-        normalizeFullTreeFunctionObservationKernelBootId(
-            readBoundedText(KERNEL_BOOT_ID_PATH, MAXIMUM_KERNEL_BOOT_ID_BYTES),
-        )
+    private fun readNormalizedKernelBootId(): String = readFullTreeFunctionObservationKernelBootId()
 
     private fun requireActualControllers(cgroup: Path, expected: IsolatedObservationResources) {
         val pidsMax = readRequiredLong(cgroup.resolve("pids.max"), "isolated pids.max")
@@ -4195,13 +4744,13 @@ private class ManagedObservationUnit(
         pidfdFailure?.let { throw it }
         val deadline = deadlineAfter(WORKER_EXIT_TIMEOUT, "isolated frozen-keeper cgroup drain")
         while (System.nanoTime() < deadline) {
-            process.waitFor(SYSTEMD_POLL_MILLIS, TimeUnit.MILLISECONDS)
+            process?.waitFor(SYSTEMD_POLL_MILLIS, TimeUnit.MILLISECONDS)
             val absent = controller.show()["LoadState"] == "not-found"
-            if (!process.isAlive && absent && !Files.exists(cgroup, LinkOption.NOFOLLOW_LINKS)) break
+            if (!leaderIsAlive() && absent && !Files.exists(cgroup, LinkOption.NOFOLLOW_LINKS)) break
             Thread.sleep(SYSTEMD_POLL_MILLIS)
         }
         if (
-            process.isAlive || process.exitValue() != LOCAL_SIGKILL_EXIT ||
+            leaderIsAlive() || process?.let { it.exitValue() != LOCAL_SIGKILL_EXIT } == true ||
             controller.show()["LoadState"] != "not-found" ||
             Files.exists(cgroup, LinkOption.NOFOLLOW_LINKS)
         ) isolationFail("isolated frozen keeper did not reach exact local SIGKILL and scope absence")
@@ -4288,7 +4837,7 @@ private class ManagedObservationUnit(
     }
 
     private fun requireLocalLeader(cgroup: Path) {
-        if (!process.isAlive) isolationFail("isolated pidfd-pinned scope leader exited unexpectedly")
+        if (!leaderIsAlive()) isolationFail("isolated pidfd-pinned scope leader exited unexpectedly")
         val procCgroup = readBoundedText(Path.of("/proc/$mainPid/cgroup"), MAXIMUM_PROC_CGROUP_BYTES)
             .lineSequence().singleOrNull { it.startsWith("0::") }
             ?.removePrefix("0::")
@@ -4389,7 +4938,10 @@ private class ManagedObservationUnit(
         val cgroup = cgroupPath ?: isolationFail("isolated cgroup was not retained for cleanup")
         controller.killStopAndRequireAbsent(
             knownCgroup = cgroup,
-            process = process,
+            processHandle = processHandle,
+            awaitLocalProcess = {
+                process?.waitFor(SYSTEMD_POLL_MILLIS, TimeUnit.MILLISECONDS)
+            },
             observeTarget = ::observeUnitMutationTarget,
             killPinnedProcesses = ::killRetainedProcessHandles,
         )
@@ -4468,11 +5020,11 @@ private class ManagedObservationUnit(
     private fun requireUnitStillRunning(properties: Map<String, String>, label: String) {
         if (
             properties["LoadState"] != "loaded" || properties["ActiveState"] != "active" ||
-            properties["SubState"] != "running" || !process.isAlive
+            properties["SubState"] != "running" || !leaderIsAlive()
         ) isolationFail(
             "isolated worker systemd scope stopped $label " +
                 "(load=${properties["LoadState"]}, active=${properties["ActiveState"]}, " +
-                "sub=${properties["SubState"]}, localAlive=${process.isAlive})",
+                "sub=${properties["SubState"]}, localAlive=${leaderIsAlive()})",
         )
     }
 
@@ -4481,7 +5033,7 @@ private class ManagedObservationUnit(
         expected: IsolatedObservationResources,
         allowActivating: Boolean = false,
     ) {
-        val stateOkay = properties["LoadState"] == "loaded" && process.isAlive &&
+        val stateOkay = properties["LoadState"] == "loaded" && leaderIsAlive() &&
             if (allowActivating) properties["ActiveState"] in setOf("active", "activating")
             else properties["ActiveState"] == "active" && properties["SubState"] == "running"
         if (!stateOkay) isolationFail("isolated systemd scope is not live during containment verification")
@@ -4546,6 +5098,8 @@ private class ManagedObservationUnit(
         if (cgroupDescriptor != null) requirePinnedCgroupSelection(path)
         return path
     }
+
+    private fun leaderIsAlive(): Boolean = LinuxFilesystemSyscalls.processExists(processHandle)
 }
 
 private class PinnedObservationCandidate private constructor(

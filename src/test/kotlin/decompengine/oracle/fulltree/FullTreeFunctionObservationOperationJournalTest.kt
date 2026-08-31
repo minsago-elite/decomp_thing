@@ -145,6 +145,9 @@ class FullTreeFunctionObservationOperationJournalTest {
             FullTreeFunctionObservationUnitAttachmentReceipt.parseCanonical(receipt.canonicalBytes())
                 .canonicalBytes(),
         )
+        assertEquals(7L, receipt.runRootDevice)
+        assertEquals(601L, receipt.runRootInode)
+        assertEquals(42L, receipt.runRootMountId)
         assertEquals(FullTreeFunctionObservationAttachmentProcessRole.entries, receipt.processes.map { it.role })
 
         assertFailsWith<FullTreeFunctionObservationOperationJournalException> {
@@ -166,6 +169,25 @@ class FullTreeFunctionObservationOperationJournalTest {
         )
         assertFailsWith<FullTreeFunctionObservationOperationJournalException> {
             FullTreeFunctionObservationUnitAttachmentReceipt.parseCanonical(mutatedSelfHash)
+        }
+        listOf("runRootDevice", "runRootInode", "runRootMountId").forEach { field ->
+            assertFailsWith<FullTreeFunctionObservationOperationJournalException>(field) {
+                mutateReceipt(receipt, field, JsonPrimitive(0))
+            }
+        }
+        val legacyV1 = root - setOf("runRootDevice", "runRootInode", "runRootMountId") + mapOf(
+            "provider" to JsonPrimitive("kotlin-function-observation-unit-attachment-v1"),
+            "schemaVersion" to JsonPrimitive(1),
+        )
+        val legacyV1Hash = OracleArtifacts.sha256(
+            OracleJson.canonicalBytes(JsonObject(legacyV1 - "receiptSha256")),
+        )
+        assertFailsWith<FullTreeFunctionObservationOperationJournalException> {
+            FullTreeFunctionObservationUnitAttachmentReceipt.parseCanonical(
+                OracleJson.canonicalBytes(
+                    JsonObject(legacyV1 + ("receiptSha256" to JsonPrimitive(legacyV1Hash))),
+                ),
+            )
         }
         val reversedProcesses = JsonArray((root.getValue("processes") as JsonArray).reversed())
         assertFailsWith<FullTreeFunctionObservationOperationJournalException> {
@@ -1544,6 +1566,9 @@ class FullTreeFunctionObservationOperationJournalTest {
             cgroupDevice = 300L + identitySeed,
             cgroupInode = 400L + identitySeed,
             cgroupMountId = 500L + identitySeed,
+            runRootDevice = 7L,
+            runRootInode = 600L + identitySeed,
+            runRootMountId = 42L,
             processes = listOf(
                 attachmentProcess(
                     FullTreeFunctionObservationAttachmentProcessRole.OUTER_BUBBLEWRAP,
@@ -1750,10 +1775,10 @@ class FullTreeFunctionObservationOperationJournalTest {
         const val FROZEN_INITIAL_TRANSITION_SHA256 =
             "6601a75e6391b3c2d97b93f727a5e1d703deb85e5a95515d838d423271a697b0"
         const val FROZEN_ATTACHMENT_RECEIPT_SHA256 =
-            "e35801e232c4fa16a86e0642035a1f6ca10ae79b94a1ee7892f63e692db487c4"
+            "23aef86939d14d747da6183ba489b2defb559b9cd77c82d09b90aafe44bcaac8"
         const val FROZEN_ATTACHMENT_RECEIPT_ARTIFACT_SHA256 =
-            "82ee6b22114061c8840b05d873fa6ece803eb19053620620482aafc5b8560097"
+            "23373f1215136db083e8a842084041e8c769b66809f3931a0fe7bdd313a1a2fb"
         const val FROZEN_COMPLETE_TRANSITION_SHA256 =
-            "7e3cb5c019da3f71adb95885a463e7f74c90082ee4ffeb3621e0688a49ba2f57"
+            "ac7dafda128411368bdf280a9cafc5c51f252354051b95d432a5db5bd93aff16"
     }
 }

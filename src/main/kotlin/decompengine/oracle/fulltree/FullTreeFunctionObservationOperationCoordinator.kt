@@ -1,5 +1,7 @@
 package decompengine.oracle.fulltree
 
+import decompengine.acp.LinuxFileIdentity
+import decompengine.acp.LinuxFilesystemSyscalls
 import decompengine.oracle.core.DescriptorBoundStateFaultInjector
 import java.nio.file.Path
 import java.security.MessageDigest
@@ -110,6 +112,75 @@ internal object FullTreeFunctionObservationOperationCoordinator {
                 journal = ownedJournal,
                 coldLease = ownedColdLease,
                 constructionPermit = COLD_LEASED_OPERATION_CONSTRUCTION_PERMIT,
+            )
+            journal = null
+            coldLease = null
+            return opened
+        } catch (failure: Throwable) {
+            coldLease?.let { opened ->
+                runCatching { opened.close() }.exceptionOrNull()?.let(failure::addSuppressed)
+            }
+            journal?.let { opened ->
+                runCatching { opened.close() }.exceptionOrNull()?.let(failure::addSuppressed)
+            }
+            throw failure
+        }
+    }
+
+    /**
+     * Reopens one fully published UNIT_ATTACHED operation for historical inspection only.
+     *
+     * The operation journal is selected and locked before the disk mount flock is attempted. Only
+     * the exact PREPARING -> LEASED -> UNIT_ATTACHED history and its parsed immutable evidence are
+     * accepted, and the residual lease must still contain the active operation run. The run itself
+     * is exposed only through a revocable descriptor-relative observation callback to trusted
+     * Kotlin composition. The descriptor is not kernel-enforced read-only and must never cross an
+     * ACP or other untrusted callback. The handle grants no systemd, recovery, publication,
+     * cleanup, or release capability.
+     */
+    fun openExistingUnitAttachedReadOnly(
+        authority: FullTreeFunctionObservationJournalAuthority,
+        binding: FullTreeFunctionObservationOperationBinding,
+        provisionedMount: Path,
+    ): FullTreeFunctionObservationColdUnitAttachedOperation {
+        var journal: FullTreeFunctionObservationOperationJournal? = null
+        var coldLease: FullTreeDiskScratchColdLease? = null
+        try {
+            val ownedJournal = authority.openExisting(binding)
+                ?: coordinationFail("function-observation UNIT_ATTACHED operation journal is absent")
+            journal = ownedJournal
+            val attachedHistory = ownedJournal.loadOrNull()
+                ?: coordinationFail("function-observation UNIT_ATTACHED operation journal is empty")
+            val diskEvidence = attachedHistory.requireDiskEvidenceIntroducedAt(
+                FullTreeFunctionObservationOperationPhase.LEASED,
+            )
+            val attachmentReceipt = attachedHistory.requireUnitAttachmentReceiptIntroducedAt(
+                FullTreeFunctionObservationOperationPhase.UNIT_ATTACHED,
+            )
+            requireExactlyAttachedHistory(attachedHistory, diskEvidence, attachmentReceipt)
+
+            val ownedColdLease = FullTreeDiskScratchAuthority.openExistingReadOnly(
+                provisionedMount,
+                binding.diskOperation(),
+                binding.diskPolicy(),
+            )
+            coldLease = ownedColdLease
+            val snapshot = requireCurrentColdUnitAttachedOperation(
+                expectedHistory = attachedHistory,
+                expectedEvidence = diskEvidence,
+                expectedReceipt = attachmentReceipt,
+                expectedSnapshot = null,
+                journal = ownedJournal,
+                coldLease = ownedColdLease,
+            )
+            val opened = FullTreeFunctionObservationColdUnitAttachedOperation.create(
+                attachedHistory = attachedHistory,
+                diskEvidence = diskEvidence,
+                unitAttachmentReceipt = attachmentReceipt,
+                initialSnapshot = snapshot,
+                journal = ownedJournal,
+                coldLease = ownedColdLease,
+                constructionPermit = COLD_UNIT_ATTACHED_OPERATION_CONSTRUCTION_PERMIT,
             )
             journal = null
             coldLease = null
@@ -519,6 +590,7 @@ internal class FullTreeFunctionObservationPreparedIsolationAuthority private con
                 lease,
                 FullTreeDiskScratchStage.AFTER_SCOPE_ATTACHMENT,
             )
+            requireCurrentReceiptRunRoot(receipt, runRoot, lease)
             val attachedHistory = journal.recordUnitAttached(
                 receipt,
                 receiptFaultInjector,
@@ -540,6 +612,7 @@ internal class FullTreeFunctionObservationPreparedIsolationAuthority private con
                 lease,
                 FullTreeDiskScratchStage.AFTER_SCOPE_ATTACHMENT,
             )
+            requireCurrentReceiptRunRoot(receipt, runRoot, lease)
             requireLiveReceipt()
             requireCurrentPreparedRun(
                 attachedHistory,
@@ -549,6 +622,7 @@ internal class FullTreeFunctionObservationPreparedIsolationAuthority private con
                 lease,
                 FullTreeDiskScratchStage.AFTER_SCOPE_ATTACHMENT,
             )
+            requireCurrentReceiptRunRoot(receipt, runRoot, lease)
             val transferred = FullTreeFunctionObservationUnitAttachedIsolationAuthority.create(
                 attachedHistory,
                 diskEvidence,
@@ -773,6 +847,7 @@ internal class FullTreeFunctionObservationUnitAttachedIsolationAuthority private
             lease,
             FullTreeDiskScratchStage.AFTER_SCOPE_ATTACHMENT,
         )
+        requireCurrentReceiptRunRoot(unitAttachmentReceipt, runRoot, lease)
     }
 
     @Synchronized
@@ -789,6 +864,7 @@ internal class FullTreeFunctionObservationUnitAttachedIsolationAuthority private
             lease,
             FullTreeDiskScratchStage.AFTER_SCOPE_ATTACHMENT,
         )
+        requireCurrentReceiptRunRoot(unitAttachmentReceipt, runRoot, lease)
     }
 
     @Synchronized
@@ -882,6 +958,30 @@ internal class FullTreeFunctionObservationUnitAttachedIsolationAuthority private
         closeFailure?.let { throw it }
     }
 
+    /**
+     * Descriptor-only handoff into cold reconciliation while the exact receipt-matched scope may
+     * remain live. This performs no cgroup/unit/process mutation and grants no replacement
+     * authority; it only revalidates the still-UNIT_ATTACHED H/D state and releases disk before
+     * journal so a new coordinator can reopen it read-only.
+     */
+    @Synchronized
+    internal fun abandonForColdRecovery() {
+        check(!closed) { "function-observation attached isolation is closed" }
+        if (runRootBorrowActive) {
+            coordinationFail("function-observation attached isolation cannot hand off while borrowed")
+        }
+        val validationFailure = runCatching { requireCurrentAtBoot() }.exceptionOrNull()
+        closed = true
+        val closeFailure = closeOperationResources(lease, journal)
+        if (validationFailure != null) {
+            if (closeFailure != null && closeFailure !== validationFailure) {
+                validationFailure.addSuppressed(closeFailure)
+            }
+            throw validationFailure
+        }
+        closeFailure?.let { throw it }
+    }
+
     @Synchronized
     override fun close() {
         if (closed) return
@@ -920,6 +1020,294 @@ internal class FullTreeFunctionObservationUnitAttachedIsolationAuthority private
 }
 
 private object COLD_LEASED_OPERATION_CONSTRUCTION_PERMIT
+private object COLD_UNIT_ATTACHED_OPERATION_CONSTRUCTION_PERMIT
+private object COLD_UNIT_ATTACHED_BOOT_AUTHORITY_CONSTRUCTION_PERMIT
+
+/**
+ * Lock-retaining read-only view of one exact, fully published UNIT_ATTACHED history and its
+ * residual active-run population.
+ *
+ * The attachment receipt is historical journal evidence, not proof that any named systemd unit,
+ * cgroup, or process is still live or still belongs to this operation. Its only run-tree access is
+ * one revocable descriptor-relative observation callback for trusted Kotlin composition. The
+ * descriptor is not kernel-enforced read-only and never crosses into ACP or another untrusted
+ * callback. This type deliberately has no systemd adoption or mutation, recovery, publication,
+ * cleanup, or release API. Closing releases only the cold disk lease and then the journal lock.
+ */
+internal class FullTreeFunctionObservationColdUnitAttachedOperation private constructor(
+    val attachedHistory: FullTreeFunctionObservationOperationHistory,
+    val diskEvidence: FullTreeDiskScratchEvidence,
+    val unitAttachmentReceipt: FullTreeFunctionObservationUnitAttachmentReceipt,
+    val observedPopulation: FullTreeDiskScratchColdPopulation,
+    private val initialSnapshot: FullTreeDiskScratchColdSnapshot,
+    private val journal: FullTreeFunctionObservationOperationJournal,
+    private val coldLease: FullTreeDiskScratchColdLease,
+) : AutoCloseable {
+    private var closed = false
+    private var runRootBorrowActive = false
+
+    init {
+        requireExactlyAttachedHistory(attachedHistory, diskEvidence, unitAttachmentReceipt)
+        if (
+            attachedHistory.diskEvidence !== diskEvidence ||
+            attachedHistory.unitAttachmentReceipt !== unitAttachmentReceipt ||
+            observedPopulation != FullTreeDiskScratchColdPopulation.ACTIVE_OPERATION_RUN ||
+            observedPopulation != initialSnapshot.population
+        ) coordinationFail("cold UNIT_ATTACHED operation did not retain its exact initial observation")
+        requireCurrentColdUnitAttachedOperation(
+            expectedHistory = attachedHistory,
+            expectedEvidence = diskEvidence,
+            expectedReceipt = unitAttachmentReceipt,
+            expectedSnapshot = initialSnapshot,
+            journal = journal,
+            coldLease = coldLease,
+        )
+    }
+
+    /** Repeats exact H/D/H/D reconciliation without traversing or changing the active run. */
+    @Synchronized
+    fun requireCurrentReadOnly() {
+        check(!closed) { "function-observation cold UNIT_ATTACHED operation is closed" }
+        requireCurrentColdUnitAttachedOperation(
+            expectedHistory = attachedHistory,
+            expectedEvidence = diskEvidence,
+            expectedReceipt = unitAttachmentReceipt,
+            expectedSnapshot = initialSnapshot,
+            journal = journal,
+            coldLease = coldLease,
+        )
+    }
+
+    /**
+     * Grants trusted Kotlin composition one revocable descriptor-relative observation borrow of
+     * the historical active run while journal and disk evidence are reconciled around the callback.
+     * The descriptor is not kernel-enforced read-only and must not cross into ACP or untrusted code.
+     * Callback failure remains primary; failed post-callback reconciliation is suppressed.
+     */
+    @Synchronized
+    fun <T> withCurrentRunRootAtBoot(
+        action: (FullTreeDiskScratchBorrowedRunRoot) -> T,
+    ): T {
+        check(!closed) { "function-observation cold UNIT_ATTACHED operation is closed" }
+        if (runRootBorrowActive) {
+            coordinationFail("function-observation cold UNIT_ATTACHED run root is already borrowed")
+        }
+        runRootBorrowActive = true
+        try {
+            requireCurrentReadOnly()
+            return try {
+                coldLease.withCurrentOperationRunRoot(diskEvidence) { borrowed ->
+                    requireCurrentHistory(attachedHistory, diskEvidence, journal)
+                    try {
+                        action(borrowed).also {
+                            requireCurrentHistory(attachedHistory, diskEvidence, journal)
+                        }
+                    } catch (failure: Throwable) {
+                        runCatching {
+                            requireCurrentHistory(attachedHistory, diskEvidence, journal)
+                        }.exceptionOrNull()?.let { validationFailure ->
+                            if (validationFailure !== failure) failure.addSuppressed(validationFailure)
+                        }
+                        throw failure
+                    }
+                }.also { requireCurrentReadOnly() }
+            } catch (failure: Throwable) {
+                runCatching { requireCurrentReadOnly() }.exceptionOrNull()?.let { validationFailure ->
+                    if (validationFailure !== failure) failure.addSuppressed(validationFailure)
+                }
+                throw failure
+            }
+        } finally {
+            runRootBorrowActive = false
+        }
+    }
+
+    /**
+     * Linearly transfers the same read-only journal and disk locks into the recovered BOOT owner.
+     * The source becomes inert only after the successor has constructed and independently repeated
+     * exact reconciliation. No descriptor is duplicated or closed and no external state is read.
+     */
+    @Synchronized
+    fun transferToBootAuthority(): FullTreeFunctionObservationColdUnitAttachedBootAuthority {
+        check(!closed) { "function-observation cold UNIT_ATTACHED operation is closed" }
+        if (runRootBorrowActive) {
+            coordinationFail("function-observation cold UNIT_ATTACHED operation cannot transfer while borrowed")
+        }
+        requireCurrentReadOnly()
+        val transferred = FullTreeFunctionObservationColdUnitAttachedBootAuthority.create(
+            attachedHistory = attachedHistory,
+            diskEvidence = diskEvidence,
+            unitAttachmentReceipt = unitAttachmentReceipt,
+            initialSnapshot = initialSnapshot,
+            journal = journal,
+            coldLease = coldLease,
+            constructionPermit = COLD_UNIT_ATTACHED_BOOT_AUTHORITY_CONSTRUCTION_PERMIT,
+        )
+        closed = true
+        return transferred
+    }
+
+    @Synchronized
+    override fun close() {
+        if (closed) return
+        if (runRootBorrowActive) {
+            coordinationFail("function-observation cold UNIT_ATTACHED operation cannot close while borrowed")
+        }
+        closed = true
+        closeColdOperationResources(coldLease, journal)?.let { throw it }
+    }
+
+    companion object {
+        internal fun create(
+            attachedHistory: FullTreeFunctionObservationOperationHistory,
+            diskEvidence: FullTreeDiskScratchEvidence,
+            unitAttachmentReceipt: FullTreeFunctionObservationUnitAttachmentReceipt,
+            initialSnapshot: FullTreeDiskScratchColdSnapshot,
+            journal: FullTreeFunctionObservationOperationJournal,
+            coldLease: FullTreeDiskScratchColdLease,
+            constructionPermit: Any,
+        ): FullTreeFunctionObservationColdUnitAttachedOperation {
+            check(constructionPermit === COLD_UNIT_ATTACHED_OPERATION_CONSTRUCTION_PERMIT) {
+                "cold UNIT_ATTACHED capabilities can only be issued by the operation coordinator"
+            }
+            return FullTreeFunctionObservationColdUnitAttachedOperation(
+                attachedHistory,
+                diskEvidence,
+                unitAttachmentReceipt,
+                initialSnapshot.population,
+                initialSnapshot,
+                journal,
+                coldLease,
+            )
+        }
+    }
+}
+
+/**
+ * Linear recovered-BOOT owner of one exact UNIT_ATTACHED journal lock and cold disk lease.
+ *
+ * The durable receipt remains historical evidence rather than a live-unit claim. This authority
+ * can only revalidate the exact history/population and grant trusted Kotlin composition a revocable
+ * descriptor-relative observation borrow of the active run. The descriptor is not kernel-enforced
+ * read-only and never crosses into ACP or another untrusted callback. This authority cannot inspect
+ * or mutate systemd, recover, publish, clean, or release.
+ */
+internal class FullTreeFunctionObservationColdUnitAttachedBootAuthority private constructor(
+    val attachedHistory: FullTreeFunctionObservationOperationHistory,
+    val diskEvidence: FullTreeDiskScratchEvidence,
+    val unitAttachmentReceipt: FullTreeFunctionObservationUnitAttachmentReceipt,
+    val observedPopulation: FullTreeDiskScratchColdPopulation,
+    private val initialSnapshot: FullTreeDiskScratchColdSnapshot,
+    private val journal: FullTreeFunctionObservationOperationJournal,
+    private val coldLease: FullTreeDiskScratchColdLease,
+) : AutoCloseable {
+    private var closed = false
+    private var runRootBorrowActive = false
+
+    init {
+        requireExactlyAttachedHistory(attachedHistory, diskEvidence, unitAttachmentReceipt)
+        if (
+            attachedHistory.diskEvidence !== diskEvidence ||
+            attachedHistory.unitAttachmentReceipt !== unitAttachmentReceipt ||
+            observedPopulation != FullTreeDiskScratchColdPopulation.ACTIVE_OPERATION_RUN ||
+            observedPopulation != initialSnapshot.population
+        ) coordinationFail("cold UNIT_ATTACHED BOOT authority retained a different observation")
+        requireCurrentColdUnitAttachedOperation(
+            expectedHistory = attachedHistory,
+            expectedEvidence = diskEvidence,
+            expectedReceipt = unitAttachmentReceipt,
+            expectedSnapshot = initialSnapshot,
+            journal = journal,
+            coldLease = coldLease,
+        )
+    }
+
+    @Synchronized
+    fun requireCurrentReadOnly() {
+        check(!closed) { "function-observation cold UNIT_ATTACHED BOOT authority is closed" }
+        requireCurrentColdUnitAttachedOperation(
+            expectedHistory = attachedHistory,
+            expectedEvidence = diskEvidence,
+            expectedReceipt = unitAttachmentReceipt,
+            expectedSnapshot = initialSnapshot,
+            journal = journal,
+            coldLease = coldLease,
+        )
+    }
+
+    @Synchronized
+    fun <T> withCurrentRunRootAtBoot(
+        action: (FullTreeDiskScratchBorrowedRunRoot) -> T,
+    ): T {
+        check(!closed) { "function-observation cold UNIT_ATTACHED BOOT authority is closed" }
+        if (runRootBorrowActive) {
+            coordinationFail("function-observation cold UNIT_ATTACHED BOOT run root is already borrowed")
+        }
+        runRootBorrowActive = true
+        try {
+            requireCurrentReadOnly()
+            return try {
+                coldLease.withCurrentOperationRunRoot(diskEvidence) { borrowed ->
+                    requireCurrentHistory(attachedHistory, diskEvidence, journal)
+                    try {
+                        action(borrowed).also {
+                            requireCurrentHistory(attachedHistory, diskEvidence, journal)
+                        }
+                    } catch (failure: Throwable) {
+                        runCatching {
+                            requireCurrentHistory(attachedHistory, diskEvidence, journal)
+                        }.exceptionOrNull()?.let { validationFailure ->
+                            if (validationFailure !== failure) failure.addSuppressed(validationFailure)
+                        }
+                        throw failure
+                    }
+                }.also { requireCurrentReadOnly() }
+            } catch (failure: Throwable) {
+                runCatching { requireCurrentReadOnly() }.exceptionOrNull()?.let { validationFailure ->
+                    if (validationFailure !== failure) failure.addSuppressed(validationFailure)
+                }
+                throw failure
+            }
+        } finally {
+            runRootBorrowActive = false
+        }
+    }
+
+    @Synchronized
+    override fun close() {
+        if (closed) return
+        if (runRootBorrowActive) {
+            coordinationFail("function-observation cold UNIT_ATTACHED BOOT authority cannot close while borrowed")
+        }
+        closed = true
+        closeColdOperationResources(coldLease, journal)?.let { throw it }
+    }
+
+    companion object {
+        internal fun create(
+            attachedHistory: FullTreeFunctionObservationOperationHistory,
+            diskEvidence: FullTreeDiskScratchEvidence,
+            unitAttachmentReceipt: FullTreeFunctionObservationUnitAttachmentReceipt,
+            initialSnapshot: FullTreeDiskScratchColdSnapshot,
+            journal: FullTreeFunctionObservationOperationJournal,
+            coldLease: FullTreeDiskScratchColdLease,
+            constructionPermit: Any,
+        ): FullTreeFunctionObservationColdUnitAttachedBootAuthority {
+            check(constructionPermit === COLD_UNIT_ATTACHED_BOOT_AUTHORITY_CONSTRUCTION_PERMIT) {
+                "cold UNIT_ATTACHED BOOT authorities can only follow a linear cold transfer"
+            }
+            return FullTreeFunctionObservationColdUnitAttachedBootAuthority(
+                attachedHistory,
+                diskEvidence,
+                unitAttachmentReceipt,
+                initialSnapshot.population,
+                initialSnapshot,
+                journal,
+                coldLease,
+            )
+        }
+    }
+}
 
 internal enum class FullTreeFunctionObservationColdTransferFaultPoint {
     BEFORE_FINAL_SYSTEMD_SWEEP,
@@ -1236,6 +1624,58 @@ private fun requireCurrentColdLeasedOperation(
         coordinationFail("cold LEASED disk population changed during exact reconciliation")
     }
     return second
+}
+
+private fun requireCurrentColdUnitAttachedOperation(
+    expectedHistory: FullTreeFunctionObservationOperationHistory,
+    expectedEvidence: FullTreeDiskScratchEvidence,
+    expectedReceipt: FullTreeFunctionObservationUnitAttachmentReceipt,
+    expectedSnapshot: FullTreeDiskScratchColdSnapshot?,
+    journal: FullTreeFunctionObservationOperationJournal,
+    coldLease: FullTreeDiskScratchColdLease,
+): FullTreeDiskScratchColdSnapshot {
+    requireCurrentHistory(expectedHistory, expectedEvidence, journal)
+    val first = coldLease.requireCurrent(expectedEvidence)
+    if (first.population != FullTreeDiskScratchColdPopulation.ACTIVE_OPERATION_RUN) {
+        coordinationFail("cold UNIT_ATTACHED composition requires the exact active operation run")
+    }
+    requireReceiptRunRootIdentity(expectedReceipt, first.runRootIdentity)
+    requireCurrentHistory(expectedHistory, expectedEvidence, journal)
+    val second = coldLease.requireCurrent(expectedEvidence)
+    requireReceiptRunRootIdentity(expectedReceipt, second.runRootIdentity)
+    if (
+        second.population != FullTreeDiskScratchColdPopulation.ACTIVE_OPERATION_RUN ||
+        first != second ||
+        expectedSnapshot != null && second != expectedSnapshot
+    ) coordinationFail("cold UNIT_ATTACHED disk population changed during exact reconciliation")
+    return second
+}
+
+private fun requireCurrentReceiptRunRoot(
+    receipt: FullTreeFunctionObservationUnitAttachmentReceipt,
+    runRoot: FullTreeDiskScratchRunRoot,
+    lease: FullTreeDiskScratchLease,
+) {
+    lease.withCurrentOperationRunRootAfterScopeAttachment(runRoot) { borrowed ->
+        borrowed.withPinnedDescriptor { descriptor ->
+            requireReceiptRunRootIdentity(
+                receipt,
+                descriptor.whileOpen(LinuxFilesystemSyscalls::identity),
+            )
+        }
+    }
+}
+
+private fun requireReceiptRunRootIdentity(
+    receipt: FullTreeFunctionObservationUnitAttachmentReceipt,
+    identity: LinuxFileIdentity?,
+) {
+    if (
+        identity == null || !identity.isDirectory || identity.isSymbolicLink ||
+        receipt.runRootDevice != identity.key.device ||
+        receipt.runRootInode != identity.key.inode ||
+        receipt.runRootMountId != identity.mountId
+    ) coordinationFail("UNIT_ATTACHED run root differs from its durable receipt")
 }
 
 private fun requireCurrentHistory(

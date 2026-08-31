@@ -1037,7 +1037,16 @@ internal data class FullTreeDiskScratchColdSnapshot(
     /** Self hash of the lease record preimage, excluding its recordSha256 field. */
     val recordSelfSha256: String,
     val population: FullTreeDiskScratchColdPopulation,
-)
+    /** Exact active-run identity; null only for a record-only residual lease. */
+    val runRootIdentity: LinuxFileIdentity?,
+) {
+    init {
+        if (
+            (population == FullTreeDiskScratchColdPopulation.ACTIVE_OPERATION_RUN) !=
+            (runRootIdentity != null)
+        ) scratchFail("cold disk-scratch snapshot has inconsistent active-run identity")
+    }
+}
 
 /**
  * Lock-retaining, observation-only handle for one exact residual lease.
@@ -1082,6 +1091,112 @@ internal class FullTreeDiskScratchColdLease internal constructor(
     fun requireCurrent(
         expectedEvidence: FullTreeDiskScratchEvidence,
     ): FullTreeDiskScratchColdSnapshot = requireCurrentInternal(expectedEvidence)
+
+    /**
+     * Grants trusted internal Kotlin a revocable descriptor-relative inspection borrow of the exact
+     * residual active run. The directory descriptor is not an OS-enforced read-only capability, so
+     * this method must never cross into ACP or untrusted code. The cold lease itself exposes no
+     * create, rename, unlink, cleanup, release, or synchronization operation, and repeats the full
+     * lease/evidence/population snapshot after the callback before its result can escape.
+     */
+    @Synchronized
+    fun <T> withCurrentOperationRunRoot(
+        expectedEvidence: FullTreeDiskScratchEvidence,
+        action: (FullTreeDiskScratchBorrowedRunRoot) -> T,
+    ): T {
+        check(!closed) { "disk-scratch cold lease is closed" }
+        val before = requireCurrentInternal(expectedEvidence)
+        if (before.population != FullTreeDiskScratchColdPopulation.ACTIVE_OPERATION_RUN) {
+            scratchFail("cold disk-scratch lease lacks its active operation run")
+        }
+        val runName = runDirectoryName(operation.operationId)
+        val runPath = scratchParent.resolve(runName)
+        val opened = leaseDescriptor.whileOpen { leaseFd ->
+            LinuxFilesystemSyscalls.openDirectoryAt(leaseFd, runName)
+        }
+        val openedIdentity = try {
+            requireColdBorrowedRunRoot(opened, runPath, runName)
+        } catch (failure: Throwable) {
+            opened.close()
+            throw failure
+        }
+        if (openedIdentity != before.runRootIdentity) {
+            opened.close()
+            scratchFail("cold disk-scratch active run differs from its retained snapshot")
+        }
+        val borrowed = try {
+            FullTreeDiskScratchBorrowedRunRoot.create(
+                opened,
+                runPath,
+                FullTreeDiskScratchBorrowedRunRootConstructionPermit,
+            )
+        } catch (failure: Throwable) {
+            opened.close()
+            throw failure
+        }
+        var result: Any? = null
+        var failure: Throwable? = null
+        try {
+            result = action(borrowed)
+        } catch (actionFailure: Throwable) {
+            failure = actionFailure
+        }
+        runCatching {
+            FullTreeDiskScratchBorrowedRunRoot.revoke(
+                borrowed,
+                FullTreeDiskScratchBorrowedRunRootConstructionPermit,
+            )
+        }.exceptionOrNull()?.let { revokeFailure ->
+            val prior = failure
+            if (prior == null) failure = revokeFailure else if (revokeFailure !== prior) {
+                prior.addSuppressed(revokeFailure)
+            }
+        }
+        runCatching {
+            if (requireColdBorrowedRunRoot(opened, runPath, runName) != openedIdentity) {
+                scratchFail("cold disk-scratch active run changed during its borrow")
+            }
+            val after = requireCurrentInternal(expectedEvidence)
+            if (after != before) {
+                scratchFail("cold disk-scratch lease changed during active-run inspection")
+            }
+        }.exceptionOrNull()?.let { validationFailure ->
+            val prior = failure
+            if (prior == null) failure = validationFailure else if (validationFailure !== prior) {
+                prior.addSuppressed(validationFailure)
+            }
+        }
+        runCatching { opened.close() }.exceptionOrNull()?.let { closeFailure ->
+            val prior = failure
+            if (prior == null) failure = closeFailure else if (closeFailure !== prior) {
+                prior.addSuppressed(closeFailure)
+            }
+        }
+        failure?.let { throw it }
+        @Suppress("UNCHECKED_CAST")
+        return result as T
+    }
+
+    private fun requireColdBorrowedRunRoot(
+        descriptor: LinuxDescriptor,
+        path: Path,
+        name: String,
+    ): LinuxFileIdentity {
+        val identity = descriptor.whileOpen(LinuxFilesystemSyscalls::identity)
+        if (!sameDirectory(identity, descriptor.identity) || identity.mode.permissions != OWNER_DIRECTORY_MODE) {
+            scratchFail("cold disk-scratch active-run descriptor changed")
+        }
+        requireManagedLeaseDirectory(identity, mountDescriptor.identity, "cold disk-scratch active run root")
+        requireSameDirectory(path, descriptor, "cold disk-scratch active run root")
+        leaseDescriptor.whileOpen { leaseFd ->
+            LinuxFilesystemSyscalls.openDirectoryAt(leaseFd, name).use { selected ->
+                if (!sameDirectory(identity, selected.identity)) {
+                    scratchFail("cold disk-scratch active run changed by name")
+                }
+            }
+        }
+        return identity
+    }
 
     private fun requireCurrentInternal(
         expectedEvidence: FullTreeDiskScratchEvidence?,
@@ -1196,6 +1311,7 @@ internal class FullTreeDiskScratchColdLease internal constructor(
             leaseRecordSha256 = sha256(recordBytes),
             recordSelfSha256 = record.recordSha256,
             population = finalPopulation.first,
+            runRootIdentity = finalRunIdentity,
         )
     }
 

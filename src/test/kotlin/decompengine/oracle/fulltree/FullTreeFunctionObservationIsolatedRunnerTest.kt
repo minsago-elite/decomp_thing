@@ -845,6 +845,130 @@ class FullTreeFunctionObservationIsolatedFixtureRunnerTest {
         }
 
     @Test
+    fun `cold UNIT_ATTACHED recovery re-pins BOOT without mutating the live scope`() =
+        inControlTemporaryDirectory { root ->
+            val mount = provisionedOracleExt4Mount()
+            val configuration = availableConfiguration(root.resolve("authenticated-runtime"))
+            if (System.getenv("DECOMP_REQUIRE_ORACLE_EXT4_SCRATCH") == "true") {
+                assertTrue(configuration != null, "required CI authenticated recovery boundary is unavailable")
+            }
+            assumeTrue(configuration != null, "authenticated recovery boundary is unavailable")
+            checkNotNull(configuration)
+            val fixture = createFullTreeControlFixture(root.resolve("fixture"))
+
+            withPreparedProductionIsolation(
+                root.resolve("cold-unit-attached"),
+                mount,
+                configuration,
+                fixture,
+                "a",
+                allowedRootProtocolFiles = setOf("worker.boot"),
+            ) { context ->
+                var attached: FullTreeFunctionObservationUnitAttachedBootIsolation? = null
+                var booted: FullTreeFunctionObservationBootedIsolation? = null
+                var cold: FullTreeFunctionObservationColdUnitAttachedOperation? = null
+                var recovered: FullTreeFunctionObservationRecoveredUnitAttachedBootObservation? = null
+                var receipt: FullTreeFunctionObservationUnitAttachmentReceipt? = null
+                var bodyFailure: Throwable? = null
+                try {
+                    val atBoot = FullTreeFunctionObservationIsolatedOperationRunner.launchToBoot(context.ready)
+                    booted = atBoot
+                    val durable = FullTreeFunctionObservationIsolatedOperationRunner.recordUnitAttached(atBoot)
+                    attached = durable
+                    booted = null
+                    val historical = durable.historicalAttachmentReceiptForRecovery()
+                    receipt = historical
+                    durable.abandonForColdRecoveryReadOnly()
+                    assertFailsWith<IllegalStateException> { durable.requireCurrentAtBoot() }
+                    attached = null
+
+                    val opened = FullTreeFunctionObservationOperationCoordinator.openExistingUnitAttachedReadOnly(
+                        context.authority,
+                        context.binding,
+                        context.mount,
+                    )
+                    cold = opened
+                    assertFailsWith<FullTreeFunctionObservationIsolationException> {
+                        FullTreeFunctionObservationIsolatedOperationRunner
+                            .recoverUnitAttachedAtBootReadOnly(
+                                opened,
+                                fixture.richArtifact,
+                                fixture.inventory,
+                                FullTreeFunctionObservationScopeFiles(
+                                    fixture.scope,
+                                    fixture.sourceLock,
+                                    fixture.manifest,
+                                ),
+                                root.resolve("wrong-recovered-output.json"),
+                                configuration,
+                            )
+                    }
+                    opened.requireCurrentReadOnly()
+                    requireReceiptMatchedUnitLive(configuration, historical)
+                    val observed = FullTreeFunctionObservationIsolatedOperationRunner
+                        .recoverUnitAttachedAtBootReadOnly(
+                            opened,
+                            fixture.richArtifact,
+                            fixture.inventory,
+                            FullTreeFunctionObservationScopeFiles(
+                                fixture.scope,
+                                fixture.sourceLock,
+                                fixture.manifest,
+                            ),
+                            context.output,
+                            configuration,
+                        )
+                    recovered = observed
+                    assertFailsWith<IllegalStateException> { opened.requireCurrentReadOnly() }
+                    cold = null
+
+                    assertEquals(context.binding.operationId, observed.operationId)
+                    assertEquals(context.binding.shardId, observed.shardId)
+                    assertEquals(context.binding.unitName, observed.unitName)
+                    assertEquals(historical.receiptSha256, observed.receiptSha256)
+                    observed.requireCurrentAtBoot()
+                    assertOperationLocksRetained(context)
+                    assertTrue(Files.notExists(context.output, LinkOption.NOFOLLOW_LINKS))
+                    listOf("parent.start", "worker.ready", "candidate.json").forEach { name ->
+                        assertTrue(Files.notExists(context.runRoot.resolve(name), LinkOption.NOFOLLOW_LINKS))
+                    }
+
+                    observed.close()
+                    recovered = null
+                    assertFailsWith<IllegalStateException> { observed.requireCurrentAtBoot() }
+                    requireReceiptMatchedUnitLive(configuration, historical)
+                    FullTreeFunctionObservationOperationCoordinator.openExistingUnitAttachedReadOnly(
+                        context.authority,
+                        context.binding,
+                        context.mount,
+                    ).use { reopened ->
+                        assertEquals(historical.receiptSha256, reopened.unitAttachmentReceipt.receiptSha256)
+                        reopened.requireCurrentReadOnly()
+                    }
+                } catch (failure: Throwable) {
+                    bodyFailure = failure
+                    throw failure
+                } finally {
+                    var cleanupFailure: Throwable? = null
+                    fun cleanup(action: () -> Unit) {
+                        runCatching(action).exceptionOrNull()?.let { failure ->
+                            val primary = bodyFailure ?: cleanupFailure
+                            if (primary == null) cleanupFailure = failure else if (failure !== primary) {
+                                primary.addSuppressed(failure)
+                            }
+                        }
+                    }
+                    cleanup { recovered?.close() }
+                    cleanup { cold?.close() }
+                    cleanup { attached?.close() }
+                    cleanup { booted?.close() }
+                    cleanup { receipt?.let { cleanupReceiptMatchedUnitForTest(configuration, it) } }
+                    if (bodyFailure == null) cleanupFailure?.let { throw it }
+                }
+            }
+        }
+
+    @Test
     fun `cold leased transfer observes only deterministic unit absence and never owns later units`() =
         inControlTemporaryDirectory { root ->
             val mount = provisionedOracleExt4Mount()
@@ -2171,6 +2295,162 @@ class FullTreeFunctionObservationIsolatedFixtureRunnerTest {
             Files.readString(occupied.snapshot.cgroupPath.resolve("cgroup.freeze")).trim(),
             "collision scope was frozen",
         )
+    }
+
+    private fun requireReceiptMatchedUnitLive(
+        configuration: FullTreeFunctionObservationIsolationConfiguration,
+        receipt: FullTreeFunctionObservationUnitAttachmentReceipt,
+    ) {
+        assertEquals(
+            receipt.bootId,
+            normalizeFullTreeFunctionObservationKernelBootId(
+                Files.readString(Path.of("/proc/sys/kernel/random/boot_id")),
+            ),
+            "receipt belongs to a different kernel boot",
+        )
+        val properties = readTestObservationUnitProperties(configuration, receipt.unitName)
+        assertEquals("loaded", properties["LoadState"])
+        assertEquals("active", properties["ActiveState"])
+        assertEquals("running", properties["SubState"])
+        assertEquals(receipt.invocationId, properties["InvocationID"])
+        assertEquals(receipt.controlGroup, properties["ControlGroup"])
+        val cgroup = testCgroupPath(receipt.unitName, receipt.controlGroup)
+        LinuxFilesystemSyscalls.openRoot(cgroup).use { descriptor ->
+            val identity = LinuxFilesystemSyscalls.identity(descriptor.fd)
+            assertEquals(receipt.cgroupDevice, identity.key.device)
+            assertEquals(receipt.cgroupInode, identity.key.inode)
+            assertEquals(receipt.cgroupMountId, identity.mountId)
+        }
+        assertEquals(receipt.processes.map { it.hostPid }.toSet(), readTestCgroupProcesses(cgroup))
+        val byRole = receipt.processes.associateBy { it.role }
+        receipt.processes.forEach { expected ->
+            LinuxFilesystemSyscalls.openProcessHandle(expected.hostPid).use { handle ->
+                assertTrue(LinuxFilesystemSyscalls.processExists(handle), "receipt pidfd is not live")
+            }
+            assertEquals(
+                expected.startTimeTicks,
+                parseFullTreeFunctionObservationProcessStartTimeTicks(
+                    expected.hostPid,
+                    Files.readString(Path.of("/proc/${expected.hostPid}/stat")),
+                ),
+            )
+            LinuxFilesystemSyscalls.openProcessExecutable(expected.hostPid).use { executable ->
+                val identity = LinuxFilesystemSyscalls.identity(executable.fd)
+                assertEquals(expected.executableDevice, identity.key.device)
+                assertEquals(expected.executableInode, identity.key.inode)
+                assertEquals(expected.executableMountId, identity.mountId)
+            }
+            val status = Files.readString(Path.of("/proc/${expected.hostPid}/status"))
+            val namespacePids = status.lineSequence().single { it.startsWith("NSpid:") }
+                .removePrefix("NSpid:").trim().split(Regex("[ \\t]+"))
+                .filter(String::isNotEmpty).map(String::toLong)
+            assertEquals(expected.namespacePids, namespacePids)
+            expected.parentRole?.let { parentRole ->
+                val parentPid = status.lineSequence().single { it.startsWith("PPid:") }
+                    .removePrefix("PPid:").trim().toLong()
+                assertEquals(byRole.getValue(parentRole).hostPid, parentPid)
+            }
+        }
+    }
+
+    private fun cleanupReceiptMatchedUnitForTest(
+        configuration: FullTreeFunctionObservationIsolationConfiguration,
+        receipt: FullTreeFunctionObservationUnitAttachmentReceipt,
+    ) {
+        if (
+            normalizeFullTreeFunctionObservationKernelBootId(
+                Files.readString(Path.of("/proc/sys/kernel/random/boot_id")),
+            ) != receipt.bootId
+        ) error("refusing to clean a receipt from a different kernel boot")
+        val handles = mutableListOf<LinuxProcessDescriptor>()
+        try {
+            val initiallyLoaded = readTestObservationUnitProperties(configuration, receipt.unitName)
+                .getValue("LoadState") != "not-found"
+            if (initiallyLoaded) {
+                requireReceiptMutationTargetSameOrAbsent(configuration, receipt)
+                receipt.processes.forEach { expected ->
+                    val handle = runCatching {
+                        LinuxFilesystemSyscalls.openProcessHandle(expected.hostPid)
+                    }.getOrNull() ?: return@forEach
+                    var retained = false
+                    try {
+                        if (!LinuxFilesystemSyscalls.processExists(handle)) return@forEach
+                        val validation = runCatching {
+                            check(
+                                parseFullTreeFunctionObservationProcessStartTimeTicks(
+                                    expected.hostPid,
+                                    Files.readString(Path.of("/proc/${expected.hostPid}/stat")),
+                                ) == expected.startTimeTicks
+                            ) { "refusing to signal a reused receipt PID" }
+                            LinuxFilesystemSyscalls.openProcessExecutable(expected.hostPid).use { executable ->
+                                val identity = LinuxFilesystemSyscalls.identity(executable.fd)
+                                check(
+                                    identity.key.device == expected.executableDevice &&
+                                        identity.key.inode == expected.executableInode &&
+                                        identity.mountId == expected.executableMountId
+                                ) { "refusing to signal a replacement receipt executable" }
+                            }
+                        }
+                        validation.exceptionOrNull()?.let { failure ->
+                            if (LinuxFilesystemSyscalls.processExists(handle)) throw failure
+                            return@forEach
+                        }
+                        handles += handle
+                        retained = true
+                    } finally {
+                        if (!retained) handle.close()
+                    }
+                }
+                requireReceiptMutationTargetSameOrAbsent(configuration, receipt)
+            }
+            val deadline = System.nanoTime() + TimeUnit.SECONDS.toNanos(10)
+            while (System.nanoTime() < deadline) {
+                runGuardedObservationSystemdCleanupFallback(
+                    unitName = receipt.unitName,
+                    beforeCommand = {
+                        requireReceiptMutationTargetSameOrAbsent(configuration, receipt)
+                    },
+                    command = { arguments, allowedExitCodes ->
+                        runTestSystemctl(configuration, arguments, allowedExitCodes)
+                    },
+                )
+                handles.forEach { handle -> LinuxFilesystemSyscalls.killProcess(handle) }
+                val unitAbsent = readTestObservationUnitProperties(configuration, receipt.unitName)
+                    .getValue("LoadState") == "not-found"
+                val cgroupAbsent = findObservationCgroupsForUnit(receipt.unitName).isEmpty()
+                val pidsAbsent = handles.none(LinuxFilesystemSyscalls::processExists)
+                if (unitAbsent && cgroupAbsent && pidsAbsent) return
+                Thread.sleep(25)
+            }
+            error("receipt-matched test scope did not become absent")
+        } finally {
+            handles.forEach { it.close() }
+        }
+    }
+
+    private fun requireReceiptMutationTargetSameOrAbsent(
+        configuration: FullTreeFunctionObservationIsolationConfiguration,
+        receipt: FullTreeFunctionObservationUnitAttachmentReceipt,
+    ): Boolean {
+        val properties = readTestObservationUnitProperties(configuration, receipt.unitName)
+        if (properties["LoadState"] == "not-found") return false
+        check(properties["Id"] == receipt.unitName) { "refusing to clean a replacement unit name" }
+        check(properties["InvocationID"] == receipt.invocationId) {
+            "refusing to clean a replacement systemd invocation"
+        }
+        val controlGroup = properties["ControlGroup"].orEmpty()
+        if (controlGroup.isEmpty()) return true
+        check(controlGroup == receipt.controlGroup) { "refusing to clean a replacement cgroup path" }
+        val cgroup = testCgroupPath(receipt.unitName, controlGroup)
+        LinuxFilesystemSyscalls.openRoot(cgroup).use { descriptor ->
+            val identity = LinuxFilesystemSyscalls.identity(descriptor.fd)
+            check(
+                identity.key.device == receipt.cgroupDevice &&
+                    identity.key.inode == receipt.cgroupInode &&
+                    identity.mountId == receipt.cgroupMountId
+            ) { "refusing to clean a replacement cgroup identity" }
+        }
+        return true
     }
 
     private fun readTestObservationUnitSnapshot(
