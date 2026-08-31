@@ -137,6 +137,30 @@ requires no credential and the preflight never sends `session/new` or `session/p
 available to the launched agent during initialize; do not claim that a third-party agent will ignore it. A missing
 capability, incompatible ACP version, agent crash, stale process, or cleanup failure makes the preflight fail.
 
+### Required credential-free third-party checkpoint
+
+Pull-request CI also runs [`scripts/ci-qualify-goose-acp.sh`](../scripts/ci-qualify-goose-acp.sh). It downloads the
+independently implemented Block Goose `1.46.0` Linux x86-64 release, requires the pinned archive SHA-256
+`a1cf4856a765d07d6b95689a53c7bca21fcc6e6d65c0dfd064fc704052b85a7b`, and provisions an exact host-specific
+read-only ELF dependency closure. The agent receives no inherited environment, credential, network, workspace, or
+model prompt. The same production `AcpHarnessFactory` and `AcpAgentHarness` used by workflows must negotiate stable
+ACP v1 with peer identity `goose`/`1.46.0`, advertise its capabilities, and prove cgroup, process-tree, output, and
+sandbox cleanup. A skip is not accepted in this lane.
+
+Each CI attempt uploads its results directory under the `acp-goose-compatibility-evidence` artifact. A successful run
+contains the strict private provisioning document, target metadata, their digest list, and a structured receipt. A
+preflight failure retains its structured failure receipt when that stage was reached; an earlier provisioning failure
+may retain only the metadata produced before it failed. Receipts include the client/SDK/protocol, archive and
+executable bindings, negotiated identity and capabilities when available, elapsed time, containment/tool hashes,
+resource limits, output accounting, and cleanup result. They explicitly record that no session or prompt was created.
+
+This is the first external-agent interoperability checkpoint, not the complete compatibility matrix from issue #67.
+It proves initialize and clean shutdown only. Session creation, prompt streaming, editing, permission handling,
+cancellation, reconstruction/repair smokes, and a second independent agent remain required before B1/B2 can close.
+The scripted Python fake agent remains a hostile wire/containment fixture and is not counted as an independent agent.
+ACP receives authenticated oracle artifacts read-only; this checkpoint gives it no authority to generate, validate,
+score, or certify oracle truth.
+
 The Compose `acp-host` profile is only a host-prerequisite qualification surface. It deliberately uses host PID and
 cgroup namespaces plus read-only binds of `/sys/fs/cgroup` and the dedicated UID's user bus so the existing production
 scope inspection can run. It also declares `userns_mode: host`: Docker UID remapping is deliberately disabled for the

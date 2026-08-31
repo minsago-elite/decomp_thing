@@ -169,4 +169,47 @@ class AcpOperatorSurfaceContractTest {
         assertFalse(manifestScript.contains("python"))
         assertFalse(manifestHelper.contains("python"))
     }
+
+    @Test
+    fun `CI requires a pinned credential-free independent ACP initialize receipt`() {
+        val workflow = Path.of(".github/workflows/ci.yml").readText()
+        val script = Path.of("scripts/ci-qualify-goose-acp.sh").readText()
+        val provisioner = Path.of("scripts/support/AcpCompatibilityProvisioner.java").readText()
+        val preflight = Path.of("scripts/support/AcpCompatibilityPreflight.java").readText()
+        val guide = Path.of("docs/acp-v1-client.md").readText()
+
+        assertTrue(workflow.contains("Qualify pinned credential-free third-party ACP initialize"))
+        assertTrue(workflow.contains("scripts/ci-qualify-goose-acp.sh"))
+        assertTrue(workflow.contains("acp-goose-compatibility-evidence"))
+        assertTrue(workflow.contains("path: build/acp-compatibility/results"))
+
+        assertTrue(script.contains("GOOSE_VERSION=\"1.46.0\""))
+        assertTrue(script.contains("a1cf4856a765d07d6b95689a53c7bca21fcc6e6d65c0dfd064fc704052b85a7b"))
+        assertTrue(script.contains("https://github.com/block/goose/releases/download/"))
+        assertTrue(script.contains("AcpCompatibilityProvisioner"))
+        assertTrue(script.contains("AcpCompatibilityPreflight"))
+        assertTrue(script.contains("--proto '=https'"))
+        assertFalse(script.contains("@latest"))
+        assertFalse(script.contains("npx"))
+        assertFalse(script.contains("API_KEY"))
+        assertFalse(script.contains("TOKEN"))
+        assertFalse(script.lowercase().contains("python"))
+
+        assertTrue(provisioner.contains("new ProcessBuilder(\"/usr/bin/ldd\""))
+        assertTrue(provisioner.contains("processBuilder.environment().clear()"))
+        assertTrue(provisioner.contains("\"inheritParentEnvironment\", false"))
+        assertTrue(provisioner.contains("\"maximumProcesses\", 32"))
+        assertFalse(provisioner.contains("LD_LIBRARY_PATH"))
+        assertTrue(preflight.contains("harness.preflight(AcpPreflightWorkflow.ALL)"))
+        assertTrue(preflight.contains("\"sessionCreated\", false"))
+        assertTrue(preflight.contains("\"modelPromptSent\", false"))
+        assertTrue(preflight.contains("\"credentialsForwarded\", false"))
+        assertTrue(preflight.contains("\"outerNetworkEnabled\", false"))
+        assertTrue(preflight.contains("com.agentclientprotocol:acp:0.30.1"))
+
+        assertTrue(guide.contains("Block Goose `1.46.0`"))
+        assertTrue(guide.contains("A skip is not accepted in this lane"))
+        assertTrue(guide.contains("not the complete compatibility matrix from issue #67"))
+        assertTrue(guide.contains("gives it no authority to generate, validate"))
+    }
 }

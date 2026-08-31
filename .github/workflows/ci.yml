@@ -25,6 +25,9 @@ jobs:
             build-essential \
             dbus-user-session \
             e2fsprogs \
+            bzip2 \
+            ca-certificates \
+            curl \
             python3 \
             systemd \
             util-linux
@@ -38,6 +41,8 @@ jobs:
         env:
           DECOMP_REQUIRE_ORACLE_EXT4_SCRATCH: "true"
         run: scripts/ci.sh
+      - name: Qualify pinned credential-free third-party ACP initialize
+        run: scripts/ci-qualify-goose-acp.sh
       - name: Release bounded ext4 oracle scratch authority
         if: always()
         run: |
@@ -70,6 +75,11 @@ jobs:
           path: |
             build/reports/tests/test
             build/test-results/test
+      - uses: actions/upload-artifact@v7
+        if: always()
+        with:
+          name: acp-goose-compatibility-evidence
+          path: build/acp-compatibility/results
 
   archival-ghidra:
     runs-on: ubuntu-24.04
