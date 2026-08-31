@@ -98,6 +98,13 @@ cannot enter a new release as truth or validation evidence. A stage becomes auth
 parity, fail-closed mutation coverage, worker-count determinism, repeated byte-identical output, and a Kotlin-only
 production run all pass.
 
+For A15 candidate behavior, Kotlin now has a descriptor-bound
+[pre-START admission](llvm-candidate-execution-prestart.md) which authenticates an opaque candidate and the exact
+input-only command, corpus, runtime-policy, and budget commitments, publishes a mode-0400 non-release receipt, and
+refuses to launch. Runtime identity and containment remain explicitly unobserved, and exit, timeout, resource, stream,
+and artifact outcomes remain null. The existing caller-observation comparison is still non-authoritative; neither
+checkpoint substitutes for the pending authenticated generic runner or grants ACP oracle/scoring authority.
+
 ## Release invariant
 
 A release fails closed if either boundary is ambiguous: missing Kotlin oracle provenance, writable oracle inputs,

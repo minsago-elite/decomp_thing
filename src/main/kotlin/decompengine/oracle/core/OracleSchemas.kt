@@ -182,6 +182,7 @@ object OracleSchemas {
         "gcc/source-lock",
         "gcc/toolchain-reproduction",
         "llvm/source-lock",
+        "llvm-behavior-candidate-execution-admission",
         "llvm-behavior-candidate-observations",
         "llvm-behavior-case-ownership",
         "llvm-behavior-comparison-assessment",

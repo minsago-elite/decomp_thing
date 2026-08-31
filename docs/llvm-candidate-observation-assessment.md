@@ -114,7 +114,10 @@ contains the complete sorted mismatch ledger. The API defensively copies canonic
 an immutable ledger. Its operator summary begins with `NON-AUTHORITATIVE` and repeats
 `releaseEligible=false`.
 
-The output is intentionally not published by this component and is not wired into release CI. A
-future authoritative A15 path still needs a Kotlin-owned sandbox runner, authenticated candidate-run
-provenance, deterministic repeated replay, persistent mismatch rationale, hosted clean
+The output is intentionally not published by this component and is not wired into release CI. The
+separate [candidate execution pre-START admission](llvm-candidate-execution-prestart.md) now
+authenticates and immutably publishes the raw candidate, input-only command/corpus commitments,
+runtime declaration, and limits declaration, but deliberately refuses to start a process. A future
+authoritative A15 path still needs a Kotlin-owned generic sandbox runner, authenticated candidate-run
+and ACP/build provenance, deterministic repeated replay, persistent mismatch rationale, hosted clean
 reconstruction, scoring, and a separate fail-closed release decision.

@@ -1,0 +1,204 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://github.com/minsago-elite/decomp_thing/oracle/llvm-behavior-candidate-execution-admission.schema.json",
+  "title": "LLVM candidate execution pre-START admission",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schemaVersion",
+    "kind",
+    "authority",
+    "candidate",
+    "corpus",
+    "command",
+    "runtime",
+    "limits",
+    "execution",
+    "oracleExpectationsExposed",
+    "referenceAuthentication",
+    "executionClaimed",
+    "scoringAuthority",
+    "releaseEligible",
+    "publication"
+  ],
+  "properties": {
+    "schemaVersion": {"const": 1},
+    "kind": {"const": "llvm-behavior-candidate-execution-admission"},
+    "authority": {"const": "kotlin-host-pre-start-binding-v1"},
+    "candidate": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["bytes", "sha256"],
+      "properties": {
+        "bytes": {"type": "integer", "minimum": 1, "maximum": 134217728},
+        "sha256": {"$ref": "#/$defs/sha256"}
+      }
+    },
+    "corpus": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["id", "sha256", "inputProjectionSha256", "caseCount"],
+      "properties": {
+        "id": {"const": "clang-22-1-6-driver-behavior"},
+        "sha256": {"$ref": "#/$defs/sha256"},
+        "inputProjectionSha256": {"$ref": "#/$defs/sha256"},
+        "caseCount": {"const": 48}
+      }
+    },
+    "command": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["executableMountPath", "environmentMode", "caseBindings"],
+      "properties": {
+        "executableMountPath": {"const": "/candidate/clang"},
+        "environmentMode": {"const": "clear-inherited"},
+        "caseBindings": {
+          "type": "array",
+          "minItems": 48,
+          "maxItems": 48,
+          "items": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": ["caseId", "commandSha256", "inputsSha256", "declaredArtifactsSha256"],
+            "properties": {
+              "caseId": {"type": "string", "pattern": "^[a-z][a-z0-9]*(?:-[a-z0-9]+)*$", "maxLength": 128},
+              "commandSha256": {"$ref": "#/$defs/sha256"},
+              "inputsSha256": {"$ref": "#/$defs/sha256"},
+              "declaredArtifactsSha256": {"$ref": "#/$defs/sha256"}
+            }
+          }
+        }
+      }
+    },
+    "runtime": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "backend",
+        "resourcePolicyVersion",
+        "imageDigest",
+        "platform",
+        "containment",
+        "controlClientBytes",
+        "controlClientSha256",
+        "controlClientVersionSha256",
+        "engineProfileSha256",
+        "sandboxSha256",
+        "liveRuntimeIdentityVerified",
+        "liveContainmentVerified"
+      ],
+      "properties": {
+        "backend": {"const": "oci-container-v1"},
+        "resourcePolicyVersion": {"const": 1},
+        "imageDigest": {"type": "string", "pattern": "^sha256:[0-9a-f]{64}$"},
+        "platform": {"type": "string", "pattern": "^[a-z0-9]+/[a-z0-9_]+$", "maxLength": 64},
+        "containment": {"const": "network-none-readonly-root-cap-drop-all-no-new-privileges-pid-ipc-private-cgroup-bounds"},
+        "controlClientBytes": {"type": "integer", "minimum": 1, "maximum": 134217728},
+        "controlClientSha256": {"$ref": "#/$defs/sha256"},
+        "controlClientVersionSha256": {"$ref": "#/$defs/sha256"},
+        "engineProfileSha256": {"$ref": "#/$defs/sha256"},
+        "sandboxSha256": {"$ref": "#/$defs/sha256"},
+        "liveRuntimeIdentityVerified": {"const": false},
+        "liveContainmentVerified": {"const": false}
+      }
+    },
+    "limits": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "timeoutMilliseconds",
+        "stdoutBytes",
+        "stderrBytes",
+        "artifactBytes",
+        "memoryBytes",
+        "fileBytes",
+        "openFiles",
+        "processes",
+        "cpuSeconds",
+        "workspaceBytes",
+        "workspaceEntries",
+        "policySha256"
+      ],
+      "properties": {
+        "timeoutMilliseconds": {"const": 10000},
+        "stdoutBytes": {"const": 1048576},
+        "stderrBytes": {"const": 1048576},
+        "artifactBytes": {"const": 16777216},
+        "memoryBytes": {"const": 1073741824},
+        "fileBytes": {"const": 16777216},
+        "openFiles": {"const": 128},
+        "processes": {"const": 128},
+        "cpuSeconds": {"const": 10},
+        "workspaceBytes": {"const": 33554432},
+        "workspaceEntries": {"const": 1024},
+        "policySha256": {"$ref": "#/$defs/sha256"}
+      }
+    },
+    "execution": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "phase",
+        "reason",
+        "startAuthorized",
+        "candidateExecuted",
+        "caseResults",
+        "exitCode",
+        "signal",
+        "timedOut",
+        "resourceExhausted",
+        "capturedStdoutBytes",
+        "capturedStderrBytes",
+        "capturedArtifactBytes",
+        "candidateOutputsSha256"
+      ],
+      "properties": {
+        "phase": {"const": "pre-start"},
+        "reason": {"const": "authenticated-generic-kotlin-runner-unavailable"},
+        "startAuthorized": {"const": false},
+        "candidateExecuted": {"const": false},
+        "caseResults": {"type": "null"},
+        "exitCode": {"type": "null"},
+        "signal": {"type": "null"},
+        "timedOut": {"type": "null"},
+        "resourceExhausted": {"type": "null"},
+        "capturedStdoutBytes": {"type": "null"},
+        "capturedStderrBytes": {"type": "null"},
+        "capturedArtifactBytes": {"type": "null"},
+        "candidateOutputsSha256": {"type": "null"}
+      }
+    },
+    "oracleExpectationsExposed": {"const": false},
+    "referenceAuthentication": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "referenceReportSha256",
+        "diagnosticMatrixSha256",
+        "diagnosticMatrixSelfSha256",
+        "artifactManifestSha256"
+      ],
+      "properties": {
+        "referenceReportSha256": {"$ref": "#/$defs/sha256"},
+        "diagnosticMatrixSha256": {"$ref": "#/$defs/sha256"},
+        "diagnosticMatrixSelfSha256": {"$ref": "#/$defs/sha256"},
+        "artifactManifestSha256": {"$ref": "#/$defs/sha256"}
+      }
+    },
+    "executionClaimed": {"const": false},
+    "scoringAuthority": {"const": false},
+    "releaseEligible": {"const": false},
+    "publication": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["mechanism", "mode"],
+      "properties": {
+        "mechanism": {"const": "descriptor-bound-no-replace-0400-v1"},
+        "mode": {"const": "0o400"}
+      }
+    }
+  },
+  "$defs": {
+    "sha256": {"type": "string", "pattern": "^[0-9a-f]{64}$"}
+  }
+}
