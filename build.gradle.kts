@@ -255,6 +255,11 @@ dependencies {
     implementation("com.fasterxml.jackson.core:jackson-core:2.21.5")
     implementation("io.github.optimumcode:json-schema-validator:0.5.5")
     implementation("net.java.dev.jna:jna:5.19.1")
+    implementation("org.bouncycastle:bcpg-jdk18on:1.85")
+    implementation("org.bouncycastle:bcutil-jdk18on:1.85")
+    implementation("org.bouncycastle:bcprov-jdk18on") {
+        version { strictly("1.85.2") }
+    }
     implementation("org.xerial:sqlite-jdbc:3.53.2.1")
     implementation("org.tukaani:xz:1.12")
     runtimeOnly("org.slf4j:slf4j-nop:2.0.16")
