@@ -20,7 +20,7 @@ jobs:
           python-version: "3.12"
           cache: pip
           cache-dependency-path: requirements/oracle-generation.txt
-      - name: Install pinned oracle dependencies
+      - name: Install non-authoritative Python compatibility dependencies
         run: python3 -m pip install -r requirements/oracle-generation.txt
       - name: Verify authenticated LLVM source
         run: |
@@ -34,6 +34,7 @@ jobs:
             >> "$GITHUB_ENV"
       - name: Reproduce and verify the recorded LLVM toolchain image
         run: |
+          ./gradlew --no-daemon installDist
           docker buildx build \
             --no-cache \
             --platform linux/amd64 \
@@ -49,6 +50,9 @@ jobs:
             > "$RUNNER_TEMP/llvm-toolchain-verification/inspect.json")
           ./gradlew --no-daemon verifyLlvmToolchainReproduction \
             --args="--lock oracle/llvm/22.1.6/toolchain-reproduction.json --build-record oracle/llvm/22.1.6/build-record.json --inspect-json $RUNNER_TEMP/llvm-toolchain-verification/inspect.json"
+          llvm_java_home="${JAVA_HOME:?setup-java did not set JAVA_HOME}"
+          test -x "$llvm_java_home/bin/java"
+          recorded_origin="sha256:73285d9a2dad159a7171fe4bbcac7d97d285402955d8c6fb8b44b101cf2df550"
           docker run --rm \
             --platform linux/amd64 \
             --network none \
@@ -56,15 +60,20 @@ jobs:
             --cap-drop ALL \
             --security-opt no-new-privileges \
             --tmpfs /tmp:rw,nosuid,nodev,noexec \
+            --tmpfs /decomp-jna:rw,nosuid,nodev,size=16777216 \
             --mount "type=bind,src=$GITHUB_WORKSPACE,dst=/repository,readonly" \
+            --mount "type=bind,src=$GITHUB_WORKSPACE/build/install/llm_bin_patch,dst=/decomp-app,readonly" \
+            --mount "type=bind,src=$llvm_java_home,dst=/decomp-jdk,readonly" \
             --workdir /repository \
-            --entrypoint /usr/bin/python3 \
+            --entrypoint /decomp-jdk/bin/java \
             "$observed" \
-            scripts/verify-llvm-oracle-build-record.py \
+            -Djna.nosys=true \
+            -Djna.tmpdir=/decomp-jna \
+            -cp '/decomp-app/lib/*' \
+            decompengine.oracle.provenance.LlvmBuildEnvironmentVerifierCli \
               --source-lock oracle/llvm/22.1.6/source-lock.json \
               --build-record oracle/llvm/22.1.6/build-record.json \
-              --reproduction-lock oracle/llvm/22.1.6/toolchain-reproduction.json \
-              --container-digest "$observed"
+              --recorded-origin-digest "$recorded_origin"
       - name: Verify checked Clang ELF twins
         run: ./gradlew --no-daemon verifyLlvmOracleArtifacts
       - name: Reconcile the complete Clang/LLVM compilation-unit and source inventories in Kotlin

@@ -1,5 +1,9 @@
 #!/usr/bin/env python3
-"""Verify an LLVM oracle build record inside its pinned container."""
+"""Legacy non-authoritative Python compatibility build-record verifier.
+
+Required LLVM workflows use the descriptor-pinned Kotlin/JVM verifier. This wrapper cannot
+validate, score, or certify a Kotlin-only oracle release.
+"""
 
 from __future__ import annotations
 

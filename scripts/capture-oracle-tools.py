@@ -1,5 +1,9 @@
 #!/usr/bin/env python3
-"""Emit deterministic build-record tool entries for named role/path pairs."""
+"""Legacy non-authoritative Python compatibility tool-record capture.
+
+Required LLVM workflows use the descriptor-pinned Kotlin/JVM build-record verifier. Output from
+this helper cannot enter or certify a Kotlin-only oracle release.
+"""
 
 from __future__ import annotations
 

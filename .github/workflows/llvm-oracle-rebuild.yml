@@ -42,6 +42,9 @@ jobs:
             --args="$RUNNER_TEMP/reference-oracle"
       - name: Build the monolithic Clang oracle pair
         run: |
+          ./gradlew --no-daemon installDist
+          llvm_java_home="${JAVA_HOME:?setup-java did not set JAVA_HOME}"
+          test -x "$llvm_java_home/bin/java"
           # The container intentionally drops every capability, including the
           # root-only DAC override. Make only these fresh, job-scoped mounts
           # writable before entering that sandbox.
@@ -49,9 +52,14 @@ jobs:
           docker run --rm \
             --platform linux/amd64 \
             --network none \
+            --read-only \
             --cap-drop ALL \
             --security-opt no-new-privileges \
+            --tmpfs /tmp:rw,nosuid,nodev,noexec \
+            --tmpfs /decomp-jna:rw,nosuid,nodev,size=16777216 \
             --mount "type=bind,src=$GITHUB_WORKSPACE,dst=/repository,readonly" \
+            --mount "type=bind,src=$GITHUB_WORKSPACE/build/install/llm_bin_patch,dst=/decomp-app,readonly" \
+            --mount "type=bind,src=$llvm_java_home,dst=/decomp-jdk,readonly" \
             --mount "type=bind,src=$RUNNER_TEMP/source-cache,dst=/source-cache,readonly" \
             --mount "type=bind,src=$RUNNER_TEMP/oracle-work,dst=/oracle" \
             --mount "type=bind,src=$RUNNER_TEMP/oracle-output,dst=/output" \
@@ -60,14 +68,16 @@ jobs:
             --env SOURCE_DATE_EPOCH=1779182222 \
             decomp-llvm-oracle-toolchain:22.1.6 \
             bash -euxo pipefail -c '
-              python3 /repository/scripts/capture-oracle-tools.py \
-                --tool buildGenerator /usr/bin/ninja \
-                --tool buildSystem /usr/bin/cmake \
-                --tool compiler /usr/lib/llvm-22/bin/clang \
-                --tool linker /usr/lib/llvm-22/bin/lld \
-                --tool stripper /usr/lib/llvm-22/bin/llvm-objcopy \
-                --version-command linker "[\"/usr/lib/llvm-22/bin/lld\", \"-flavor\", \"gnu\", \"--version\"]" \
-                > /output/tool-records.json
+              /decomp-jdk/bin/java \
+                -Djna.nosys=true \
+                -Djna.tmpdir=/decomp-jna \
+                -cp "/decomp-app/lib/*" \
+                decompengine.oracle.provenance.LlvmBuildEnvironmentVerifierCli \
+                --source-lock /repository/oracle/llvm/22.1.6/source-lock.json \
+                --build-record /repository/oracle/llvm/22.1.6/build-record.json \
+                --recorded-origin-digest \
+                  sha256:73285d9a2dad159a7171fe4bbcac7d97d285402955d8c6fb8b44b101cf2df550 \
+                > /output/build-record-verification.txt
               tar --extract --xz --file /source-cache/llvm-project-22.1.6.src.tar.xz --directory /oracle
               cmake -G Ninja \
                 -S /oracle/llvm-project-22.1.6.src/llvm \

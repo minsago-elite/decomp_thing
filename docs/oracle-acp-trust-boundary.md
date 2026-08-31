@@ -89,8 +89,10 @@ manifest, source/local evidence, build-record semantics, full and stripped ELF b
 the fixed no-argument Kotlin/JVM `verifyLlvmOracleArtifacts` gate. Descriptor and terminal checks detect every
 substitution or mutation visible at their checkpoints, but do not claim exclusion of a cooperating same-UID/root
 writer that transiently mutates and perfectly restores bytes. Other Python workflow gates remain in place until live
-build-record workflow cutover, behavior execution, and release-stage semantics have complete Kotlin replacements;
-keeping those regression checks does not promote their outputs to new release authority. Retained Python LLVM
+behavior execution and release-stage semantics have complete Kotlin replacements; both required LLVM workflows now
+run the descriptor-pinned Kotlin/JVM build-record verifier inside the authenticated rebuild image, and the clean
+rebuild no longer invokes the Python tool recorder. Remaining Python compatibility regressions stay explicitly
+non-authoritative; keeping those regression checks does not promote their outputs to new release authority. Retained Python LLVM
 manifest/function generators are explicitly differential migration compatibility and cannot certify a release.
 
 During migration, existing Python outputs may be retained as explicitly non-authoritative differential fixtures. They

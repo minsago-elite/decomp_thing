@@ -151,6 +151,7 @@ class LlvmToolchainReproductionTest {
         val build = Path.of("build.gradle.kts").readText()
         val gcc = Path.of(".github/workflows/gcc-oracle-model.yml").readText()
         val llvm = Path.of(".github/workflows/llvm-oracle-model.yml").readText()
+        val llvmRebuild = Path.of(".github/workflows/llvm-oracle-rebuild.yml").readText()
 
         assertTrue(build.contains("taskName = \"verifyLlvmToolchainReproduction\""))
         assertTrue(build.contains("decompengine.oracle.provenance.LlvmToolchainReproductionVerifierCli"))
@@ -170,8 +171,8 @@ class LlvmToolchainReproductionTest {
 
         val legacyModule = Path.of("oracle/toolchain_reproduction.py").readText()
         assertTrue(legacyModule.contains("Legacy Python compatibility"))
-        assertTrue(legacyModule.contains("retained by the unmigrated live build-record gate"))
-        assertTrue(legacyModule.contains("not independent Kotlin/JVM recipe or release authority"))
+        assertTrue(legacyModule.contains("differential regression coverage"))
+        assertTrue(legacyModule.contains("not independent Kotlin/JVM recipe, build-record, or release authority"))
 
         assertTrue(llvm.contains("./gradlew --no-daemon fetchLlvmSourceArchive"))
         assertFalse(llvm.contains("python3 scripts/verify-llvm-oracle-source.py"))
@@ -180,11 +181,13 @@ class LlvmToolchainReproductionTest {
         assertFalse(llvm.contains("python3 scripts/verify-llvm-oracle-artifacts.py"))
         assertFalse(llvm.contains("tests.oracle.test_llvm_source_lock"))
 
-        // These adjacent compatibility gates remain intentionally unchanged by the source cutover.
-        listOf(
-            "scripts/verify-llvm-oracle-build-record.py",
-            "python3 scripts/check-behavior-corpus-evidence.py",
-        ).forEach { retained -> assertTrue(llvm.contains(retained), retained) }
+        assertTrue(llvm.contains("decompengine.oracle.provenance.LlvmBuildEnvironmentVerifierCli"))
+        assertTrue(llvm.contains(CHECKED_RECORDED_ORIGIN_DIGEST))
+        assertFalse(llvm.contains("scripts/verify-llvm-oracle-build-record.py"))
+        assertTrue(llvm.contains("python3 scripts/check-behavior-corpus-evidence.py"))
+        assertTrue(llvmRebuild.contains("decompengine.oracle.provenance.LlvmBuildEnvironmentVerifierCli"))
+        assertTrue(llvmRebuild.contains(CHECKED_RECORDED_ORIGIN_DIGEST))
+        assertFalse(llvmRebuild.contains("scripts/capture-oracle-tools.py"))
         assertTrue(llvm.contains("./gradlew --no-daemon generateLlvmFunctionRecoveryOracle"))
         assertFalse(llvm.contains("python3 scripts/generate-llvm-function-recovery-oracle.py"))
     }
@@ -198,6 +201,9 @@ class LlvmToolchainReproductionTest {
         }
     }
 }
+
+private const val CHECKED_RECORDED_ORIGIN_DIGEST =
+    "sha256:73285d9a2dad159a7171fe4bbcac7d97d285402955d8c6fb8b44b101cf2df550"
 
 private class MutableToolchainFixture(val root: Path) {
     val lockPath: Path = root.resolve("toolchain-reproduction.json")

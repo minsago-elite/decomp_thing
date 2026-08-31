@@ -1,6 +1,7 @@
-"""Legacy Python compatibility verifier retained by the unmigrated live build-record gate.
+"""Legacy Python compatibility verifier retained only for differential regression coverage.
 
-It is not independent Kotlin/JVM recipe or release authority.
+The required LLVM workflows use the Kotlin/JVM recipe and live build-record verifiers. This
+module is not independent Kotlin/JVM recipe, build-record, or release authority.
 
 Docker image IDs include layer and configuration metadata.  Rebuilding an
 otherwise identical recipe against a package repository can therefore produce

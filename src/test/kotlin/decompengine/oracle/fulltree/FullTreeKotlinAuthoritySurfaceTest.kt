@@ -44,12 +44,36 @@ class FullTreeKotlinAuthoritySurfaceTest {
         assertFalse(workflow.contains("python3 scripts/generate-llvm-function-recovery-oracle.py"))
         assertFalse(workflow.contains("tests.oracle.test_llvm_source_lock"))
 
-        // Unmigrated regression gates stay active until equivalent Kotlin authorities exist.
+        assertTrue(workflow.contains("decompengine.oracle.provenance.LlvmBuildEnvironmentVerifierCli"))
+        assertTrue(workflow.contains("--entrypoint /decomp-jdk/bin/java"))
+        assertTrue(workflow.contains("-Djna.nosys=true"))
+        assertTrue(workflow.contains("-Djna.tmpdir=/decomp-jna"))
+        assertTrue(workflow.contains("/decomp-app/lib/*"))
+        assertFalse(workflow.contains("scripts/verify-llvm-oracle-build-record.py"))
+
+        // Unmigrated compatibility regressions stay active until equivalent Kotlin authorities exist.
         listOf(
-            "scripts/verify-llvm-oracle-build-record.py",
             "python3 scripts/check-behavior-corpus-evidence.py",
             "python3 -m unittest",
         ).forEach { retainedGate -> assertTrue(workflow.contains(retainedGate)) }
+    }
+
+    @Test
+    fun `LLVM clean rebuild verifies build tools through Kotlin inside the authenticated image`() {
+        val workflow = Path.of(".github/workflows/llvm-oracle-rebuild.yml").readText()
+
+        assertTrue(workflow.contains("./gradlew --no-daemon installDist"))
+        assertTrue(workflow.contains("decompengine.oracle.provenance.LlvmBuildEnvironmentVerifierCli"))
+        assertTrue(workflow.contains("/decomp-jdk/bin/java"))
+        assertTrue(workflow.contains("-Djna.nosys=true"))
+        assertTrue(workflow.contains("-Djna.tmpdir=/decomp-jna"))
+        assertTrue(workflow.contains("-cp \"/decomp-app/lib/*\""))
+        assertTrue(workflow.contains("build-record-verification.txt"))
+        assertTrue(workflow.contains("--read-only"))
+        assertTrue(workflow.contains("--tmpfs /tmp:rw,nosuid,nodev,noexec"))
+        assertTrue(workflow.contains("--tmpfs /decomp-jna:rw,nosuid,nodev,size=16777216"))
+        assertFalse(workflow.contains("scripts/capture-oracle-tools.py"))
+        assertFalse(workflow.contains("tool-records.json"))
     }
 
     @Test
@@ -76,5 +100,15 @@ class FullTreeKotlinAuthoritySurfaceTest {
         assertTrue(manifestGenerator.contains("Legacy non-authoritative Python compatibility"))
         assertTrue(manifestGenerator.contains("cannot validate, certify"))
         assertTrue(manifestGenerator.contains("non-authoritative LLVM oracle manifest candidate"))
+
+        listOf(
+            "scripts/verify-llvm-oracle-build-record.py",
+            "scripts/capture-oracle-tools.py",
+        ).forEach { path ->
+            val wrapper = Path.of(path).readText()
+            assertTrue(wrapper.contains("Legacy non-authoritative Python compatibility"), path)
+            assertTrue(wrapper.contains("Kotlin/JVM"), path)
+            assertTrue(wrapper.contains("cannot"), path)
+        }
     }
 }
