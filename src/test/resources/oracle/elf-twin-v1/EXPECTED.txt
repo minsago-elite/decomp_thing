@@ -1,0 +1,14 @@
+ELF twin v1 frozen fixture
+
+The Base64 payloads are immutable test inputs. Tests decode them directly and do not invoke
+Python, a compiler, strip, readelf, or any other host inspection tool.
+
+full bytes: 16592
+full SHA-256: 28105cb58b619f88d8718e8cf30c0c3471b7f0c8825e95e171eebc940954b859
+stripped bytes: 14320
+stripped SHA-256: 252d14c411b629fb9d4d7ca4334382ac771b28b5e5868e22c5f654a5980e6c77
+GNU Build ID: 01736da25e781713aa42bddf9af30c9f0a2e007d
+programHeadersSha256: b355b6bb3e011fb505b68f70b35ad85cd0588491b6ca9111a37456910d631e3a
+allocatedSectionsSha256: c286ebb12b3dff7cd296d4648a105677417a501aa01f1916adcd0003dac14042
+executableLoad bytes: 341
+executableLoad SHA-256: 495a7021699aeaea47feb63932d5bc974c55575745498c138e479b5467b9839e
