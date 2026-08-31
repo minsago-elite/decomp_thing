@@ -178,7 +178,7 @@ class AcpDoctorPreflightTest {
             ),
         )
         val document = buildJsonObject {
-            put("schemaVersion", 1)
+            put("schemaVersion", 2)
             put("implementationId", "doctor-scripted-acp-v1")
             putJsonObject("agent") {
                 put("executable", runtime.executable.toString())
@@ -221,6 +221,9 @@ class AcpDoctorPreflightTest {
                 }
                 put("permissionMode", "default-deny")
                 put("expectedExecutableManifestSha256", calculateAcpRuntimeManifestSha256(runtime.executable))
+            }
+            putJsonObject("session") {
+                putJsonArray("configOptions") { }
             }
             putJsonObject("sandbox") {
                 put("bubblewrapExecutable", BWRAP.toString())

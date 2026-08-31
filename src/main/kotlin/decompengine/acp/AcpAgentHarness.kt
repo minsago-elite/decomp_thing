@@ -9,6 +9,7 @@ import com.agentclientprotocol.common.ClientSessionOperations
 import com.agentclientprotocol.common.Event
 import com.agentclientprotocol.common.SessionCreationParameters
 import com.agentclientprotocol.model.AgentCapabilities
+import com.agentclientprotocol.model.AcpCreatedSessionResponse
 import com.agentclientprotocol.model.ClientCapabilities
 import com.agentclientprotocol.model.ContentBlock
 import com.agentclientprotocol.model.CreateTerminalResponse
@@ -18,6 +19,7 @@ import com.agentclientprotocol.model.Implementation
 import com.agentclientprotocol.model.KillTerminalCommandResponse
 import com.agentclientprotocol.model.PermissionOption
 import com.agentclientprotocol.model.PermissionOptionKind
+import com.agentclientprotocol.model.ModelId
 import com.agentclientprotocol.model.PlanEntryStatus
 import com.agentclientprotocol.model.PromptResponse
 import com.agentclientprotocol.model.RequestPermissionOutcome
@@ -25,6 +27,11 @@ import com.agentclientprotocol.model.RequestPermissionResponse
 import com.agentclientprotocol.model.ReadTextFileResponse
 import com.agentclientprotocol.model.ReleaseTerminalResponse
 import com.agentclientprotocol.model.SessionUpdate
+import com.agentclientprotocol.model.SessionConfigId
+import com.agentclientprotocol.model.SessionConfigOption
+import com.agentclientprotocol.model.SessionConfigOptionValue
+import com.agentclientprotocol.model.SessionConfigSelectOptions
+import com.agentclientprotocol.model.SessionModeId
 import com.agentclientprotocol.model.StopReason
 import com.agentclientprotocol.model.ToolCallStatus
 import com.agentclientprotocol.model.TerminalOutputResponse
@@ -839,6 +846,8 @@ class AcpAgentHarness(
 
         val primaryRoot = request.workspaceRoots.first()
         val additionalRoots = request.workspaceRoots.drop(1).map { it.path.toString() }
+        val sessionAdvertisement = AtomicReference<AcpSessionAdvertisement?>()
+        val sessionWorkAuthorized = AtomicBoolean(false)
         val session = awaitPhase(
             phase = "session/new",
             phaseDeadline = MonotonicDeadline(configuration.timeouts.request),
@@ -853,19 +862,29 @@ class AcpAgentHarness(
                     mcpServers = emptyList(),
                     additionalDirectories = additionalRoots.ifEmpty { null },
                 ),
-            ) { sessionId, _ ->
+            ) { sessionId, createdResponse ->
                 // The SDK resolves params.sessionId before dispatching client operations. Bind
                 // the raw transport guard here so a forged session cannot be rejected inside
                 // the SDK without also becoming a fatal protocol outcome for this execution.
                 running.bindSession(sessionId.value)
                 translator.recordSession(sessionId.value)
                 terminal.bindSession(sessionId.value)
+                val capturedAdvertisement = captureSessionAdvertisement(createdResponse)
+                require(sessionAdvertisement.compareAndSet(null, capturedAdvertisement)) {
+                    "ACP SDK created client operations more than once for session/new"
+                }
+                // The response proves that the agent-side session exists. Validate here, before
+                // returning client operations to the SDK, so pipelined callbacks cannot perform
+                // workspace or terminal work while an invalid preference is being rejected.
+                evidenceState.reach(AcpExecutionLifecyclePhase.SESSION_CREATED)
+                validateSessionPreferences(configuration.sessionPreferences, capturedAdvertisement)
                 PolicyClientOperations(
                     translator,
                     filesystem,
                     terminal,
                     permission,
                     sessionId.value,
+                    sessionWorkAuthorized,
                 )
             }
         }
@@ -873,6 +892,21 @@ class AcpAgentHarness(
         translator.recordSession(session.sessionId.value)
         terminal.bindSession(session.sessionId.value)
         evidenceState.reach(AcpExecutionLifecyclePhase.SESSION_CREATED)
+        configureSessionFromAdvertisement(
+            session = session,
+            advertisement = sessionAdvertisement.get()
+                ?: throw AcpProtocolFailure("ACP SDK omitted the exact session/new advertisement"),
+            running = running,
+            wallDeadline = wallDeadline,
+            cancellation = request.cancellation,
+            operationScope = protocolScope,
+        )
+        if (request.cancellation.isCancellationRequested()) {
+            throw RequestedAcpCancellation("session/configure")
+        }
+        require(sessionWorkAuthorized.compareAndSet(false, true)) {
+            "ACP session work authority was already enabled"
+        }
         val outcome = runPrompt(
             request,
             session,
@@ -890,6 +924,254 @@ class AcpAgentHarness(
         permissionAuditRecorder.failure()?.let { throw it }
         if (!outcome.hostCancellation) terminal.finishSession(session.sessionId.value)
         return outcome
+    }
+
+    @OptIn(UnstableApi::class)
+    private suspend fun configureSessionFromAdvertisement(
+        session: ClientSession,
+        advertisement: AcpSessionAdvertisement,
+        running: RunningAcpProcess,
+        wallDeadline: MonotonicDeadline,
+        cancellation: AgentCancellation,
+        operationScope: CoroutineScope,
+    ) {
+        val preferences = configuration.sessionPreferences
+        if (preferences.isEmpty) return
+
+        // Repeat against the immutable exact-response copy immediately before the first setter.
+        // This does not consult SDK state changed by queued updates or earlier setter responses.
+        validateSessionPreferences(preferences, advertisement)
+        val configurationDeadline = MonotonicDeadline(configuration.timeouts.request)
+
+        preferences.modelId?.let { modelId ->
+            awaitSessionPreferenceSetter(
+                phase = "session/set-model",
+                kind = "model",
+                index = null,
+                phaseDeadline = configurationDeadline,
+                wallDeadline = wallDeadline,
+                running = running,
+                cancellation = cancellation,
+                operationScope = operationScope,
+            ) {
+                session.setModel(ModelId(modelId))
+            }
+            // ACP v1's SetSessionModelResponse is intentionally empty and SDK 0.30.1 does not
+            // update currentModel after this RPC. A successful decoded response is therefore the
+            // only protocol postcondition available; authorization still came exclusively from
+            // the immutable session/new advertisement validated above.
+        }
+        preferences.modeId?.let { modeId ->
+            awaitSessionPreferenceSetter(
+                phase = "session/set-mode",
+                kind = "mode",
+                index = null,
+                phaseDeadline = configurationDeadline,
+                wallDeadline = wallDeadline,
+                running = running,
+                cancellation = cancellation,
+                operationScope = operationScope,
+            ) {
+                session.setMode(SessionModeId(modeId))
+            }
+            // SetSessionModeResponse is also empty. currentMode changes only when the peer sends
+            // an asynchronous CurrentModeUpdate, so an immediate StateFlow equality check would
+            // race valid agents and cannot strengthen this setter's postcondition.
+        }
+        preferences.configOptions.forEachIndexed { index, preference ->
+            val wireValue = when (val configured = preference.value) {
+                is AcpSessionConfigValue.Select -> SessionConfigOptionValue.StringValue(configured.valueId)
+                is AcpSessionConfigValue.BooleanValue -> SessionConfigOptionValue.BoolValue(configured.value)
+            }
+            val response = awaitSessionPreferenceSetter(
+                phase = "session/set-config-option",
+                kind = "configOption",
+                index = index,
+                phaseDeadline = configurationDeadline,
+                wallDeadline = wallDeadline,
+                running = running,
+                cancellation = cancellation,
+                operationScope = operationScope,
+            ) {
+                session.setConfigOption(SessionConfigId(preference.id), wireValue)
+            }
+            // Unlike model/mode, this response carries the resulting typed option set and the SDK
+            // synchronously installs that list in configOptions before returning. Because each
+            // response replaces the full list, re-check the complete configured prefix so a later
+            // setter cannot silently revert an earlier one. Neither copy becomes new authority.
+            val configuredPrefix = preferences.configOptions.subList(0, index + 1)
+            validateAppliedSessionConfigPreferences(response.configOptions, configuredPrefix)
+            validateAppliedSessionConfigPreferences(session.configOptions.value, configuredPrefix)
+        }
+    }
+
+    @OptIn(UnstableApi::class)
+    private fun validateAppliedSessionConfigPreferences(
+        options: List<SessionConfigOption>,
+        configuredPrefix: List<AcpSessionConfigPreference>,
+    ) {
+        configuredPrefix.forEachIndexed { index, preference ->
+            val matches = options.filter { it.id.value == preference.id }
+            if (matches.size != 1) throw safeSessionPreferenceSetterFailure("configOption", index)
+            val applied = matches.single()
+            val consistent = when (val requested = preference.value) {
+                is AcpSessionConfigValue.Select ->
+                    applied is SessionConfigOption.Select && applied.currentValue.value == requested.valueId
+                is AcpSessionConfigValue.BooleanValue ->
+                    applied is SessionConfigOption.BooleanOption && applied.currentValue == requested.value
+            }
+            if (!consistent) throw safeSessionPreferenceSetterFailure("configOption", index)
+        }
+    }
+
+    private suspend fun <T> awaitSessionPreferenceSetter(
+        phase: String,
+        kind: String,
+        index: Int?,
+        phaseDeadline: MonotonicDeadline,
+        wallDeadline: MonotonicDeadline,
+        running: RunningAcpProcess,
+        cancellation: AgentCancellation,
+        operationScope: CoroutineScope,
+        operation: suspend () -> T,
+    ): T = try {
+        awaitPhase(
+            phase = phase,
+            phaseDeadline = phaseDeadline,
+            wallDeadline = wallDeadline,
+            running = running,
+            cancellation = cancellation,
+            operationScope = operationScope,
+            operation = operation,
+        )
+    } catch (failure: JsonRpcException) {
+        throw AgentExecutionException(
+            AgentFailure(
+                AgentFailureKind.PROTOCOL,
+                "ACP session preference setter was rejected",
+                details = buildMap {
+                    put("preference", kind)
+                    index?.let { put("preferenceIndex", it.toString()) }
+                    put("rpcCode", failure.code.toString())
+                },
+            ),
+        )
+    } catch (_: AcpExpectedError) {
+        throw safeSessionPreferenceSetterFailure(kind, index)
+    } catch (_: SerializationException) {
+        throw safeSessionPreferenceSetterFailure(kind, index)
+    }
+
+    private fun safeSessionPreferenceSetterFailure(
+        kind: String,
+        index: Int?,
+    ): AgentExecutionException = AgentExecutionException(
+        AgentFailure(
+            AgentFailureKind.PROTOCOL,
+            "ACP session preference setter returned an invalid response",
+            details = buildMap {
+                put("preference", kind)
+                index?.let { put("preferenceIndex", it.toString()) }
+            },
+        ),
+    )
+
+    @OptIn(UnstableApi::class)
+    private fun captureSessionAdvertisement(response: AcpCreatedSessionResponse): AcpSessionAdvertisement =
+        AcpSessionAdvertisement(
+            modelIds = response.models?.availableModels?.map { it.modelId.value },
+            modeIds = response.modes?.availableModes?.map { it.id.value },
+            configOptions = response.configOptions?.map { option ->
+                when (option) {
+                    is SessionConfigOption.Select -> AcpAdvertisedSessionConfigOption(
+                        id = option.id.value,
+                        kind = AcpAdvertisedSessionConfigKind.SELECT,
+                        selectValueIds = when (val values = option.options) {
+                            is SessionConfigSelectOptions.Flat -> values.options.map { it.value.value }
+                            is SessionConfigSelectOptions.Grouped -> values.groups.flatMap { group ->
+                                group.options.map { it.value.value }
+                            }
+                        },
+                    )
+                    is SessionConfigOption.BooleanOption -> AcpAdvertisedSessionConfigOption(
+                        id = option.id.value,
+                        kind = AcpAdvertisedSessionConfigKind.BOOLEAN,
+                        selectValueIds = emptyList(),
+                    )
+                }
+            },
+        )
+
+    private fun validateSessionPreferences(
+        preferences: AcpSessionPreferences,
+        advertisement: AcpSessionAdvertisement,
+    ) {
+        preferences.modelId?.let { configured ->
+            validateAdvertisedIdentifier("model", configured, advertisement.modelIds)
+        }
+        preferences.modeId?.let { configured ->
+            validateAdvertisedIdentifier("mode", configured, advertisement.modeIds)
+        }
+        if (preferences.configOptions.isEmpty()) return
+        val advertisedOptions = advertisement.configOptions
+            ?: rejectSessionPreference("configOption", null, "capabilityAbsent")
+        preferences.configOptions.forEachIndexed { index, configured ->
+            val matches = advertisedOptions.filter { it.id == configured.id }
+            when (matches.size) {
+                0 -> rejectSessionPreference("configOption", index, "idNotAdvertised")
+                1 -> Unit
+                else -> throw AcpProtocolFailure(
+                    "ACP session/new ambiguously advertised a configured config option",
+                )
+            }
+            val advertised = matches.single()
+            when (val value = configured.value) {
+                is AcpSessionConfigValue.Select -> {
+                    if (advertised.kind != AcpAdvertisedSessionConfigKind.SELECT) {
+                        rejectSessionPreference("configOption", index, "typeNotAdvertised")
+                    }
+                    when (advertised.selectValueIds.count { it == value.valueId }) {
+                        0 -> rejectSessionPreference("configOption", index, "valueNotAdvertised")
+                        1 -> Unit
+                        else -> throw AcpProtocolFailure(
+                            "ACP session/new ambiguously advertised a configured select value",
+                        )
+                    }
+                }
+                is AcpSessionConfigValue.BooleanValue -> if (
+                    advertised.kind != AcpAdvertisedSessionConfigKind.BOOLEAN
+                ) {
+                    rejectSessionPreference("configOption", index, "typeNotAdvertised")
+                }
+            }
+        }
+    }
+
+    private fun validateAdvertisedIdentifier(
+        kind: String,
+        configured: String,
+        advertised: List<String>?,
+    ) {
+        val values = advertised ?: rejectSessionPreference(kind, null, "capabilityAbsent")
+        when (values.count { it == configured }) {
+            0 -> rejectSessionPreference(kind, null, "idNotAdvertised")
+            1 -> Unit
+            else -> throw AcpProtocolFailure("ACP session/new ambiguously advertised a configured $kind")
+        }
+    }
+
+    private fun rejectSessionPreference(kind: String, index: Int?, reason: String): Nothing {
+        throw AgentExecutionException(
+            AgentFailure(
+                AgentFailureKind.CONFIGURATION,
+                "ACP configured session preference was not advertised by the exact session/new response",
+                details = buildMap {
+                    put("preference", kind)
+                    index?.let { put("preferenceIndex", it.toString()) }
+                    put("reason", reason)
+                },
+            ),
+        )
     }
 
     @OptIn(UnstableApi::class)
@@ -2332,19 +2614,26 @@ private class PolicyClientOperations(
     private val terminal: AcpTerminalBroker,
     private val permission: AcpPermissionBroker,
     private val sessionId: String,
+    private val workAuthorized: AtomicBoolean,
 ) : ClientSessionOperations {
     override suspend fun fsReadTextFile(
         path: String,
         line: UInt?,
         limit: UInt?,
         _meta: JsonElement?,
-    ): ReadTextFileResponse = filesystem.readTextFile(sessionId, path, line, limit)
+    ): ReadTextFileResponse {
+        requireWorkAuthorized()
+        return filesystem.readTextFile(sessionId, path, line, limit)
+    }
 
     override suspend fun fsWriteTextFile(
         path: String,
         content: String,
         _meta: JsonElement?,
-    ): WriteTextFileResponse = filesystem.writeTextFile(sessionId, path, content)
+    ): WriteTextFileResponse {
+        requireWorkAuthorized()
+        return filesystem.writeTextFile(sessionId, path, content)
+    }
 
     override suspend fun terminalCreate(
         command: String,
@@ -2353,33 +2642,49 @@ private class PolicyClientOperations(
         env: List<EnvVariable>,
         outputByteLimit: ULong?,
         _meta: JsonElement?,
-    ): CreateTerminalResponse = terminal.create(sessionId, command, args, cwd, env, outputByteLimit)
+    ): CreateTerminalResponse {
+        requireWorkAuthorized()
+        return terminal.create(sessionId, command, args, cwd, env, outputByteLimit)
+    }
 
     override suspend fun terminalOutput(
         terminalId: String,
         _meta: JsonElement?,
-    ): TerminalOutputResponse = terminal.output(sessionId, terminalId)
+    ): TerminalOutputResponse {
+        requireWorkAuthorized()
+        return terminal.output(sessionId, terminalId)
+    }
 
     override suspend fun terminalWaitForExit(
         terminalId: String,
         _meta: JsonElement?,
-    ): WaitForTerminalExitResponse = terminal.waitForExit(sessionId, terminalId)
+    ): WaitForTerminalExitResponse {
+        requireWorkAuthorized()
+        return terminal.waitForExit(sessionId, terminalId)
+    }
 
     override suspend fun terminalKill(
         terminalId: String,
         _meta: JsonElement?,
-    ): KillTerminalCommandResponse = terminal.kill(sessionId, terminalId)
+    ): KillTerminalCommandResponse {
+        requireWorkAuthorized()
+        return terminal.kill(sessionId, terminalId)
+    }
 
     override suspend fun terminalRelease(
         terminalId: String,
         _meta: JsonElement?,
-    ): ReleaseTerminalResponse = terminal.release(sessionId, terminalId)
+    ): ReleaseTerminalResponse {
+        requireWorkAuthorized()
+        return terminal.release(sessionId, terminalId)
+    }
 
     override suspend fun requestPermissions(
         toolCall: SessionUpdate.ToolCallUpdate,
         permissions: List<PermissionOption>,
         _meta: JsonElement?,
     ): RequestPermissionResponse {
+        requireWorkAuthorized()
         // Permission callbacks carry a real ToolCallUpdate. Validate and account it before the
         // terminal broker may bind or release any terminal authority.
         translator.onUpdate(toolCall)
@@ -2390,8 +2695,26 @@ private class PolicyClientOperations(
     }
 
     override suspend fun notify(notification: SessionUpdate, _meta: JsonElement?) {
+        if (!workAuthorized.get()) {
+            when (notification) {
+                is SessionUpdate.AvailableCommandsUpdate,
+                is SessionUpdate.ConfigOptionUpdate,
+                is SessionUpdate.CurrentModeUpdate,
+                is SessionUpdate.SessionInfoUpdate,
+                -> return
+                else -> requireWorkAuthorized()
+            }
+        }
         terminal.observeToolCall(sessionId, notification)
         translator.onUpdate(notification)
+    }
+
+    private fun requireWorkAuthorized() {
+        if (!workAuthorized.get()) {
+            throw AcpProtocolFailure(
+                "ACP agent requested client work before session preferences were applied",
+            )
+        }
     }
 }
 
@@ -2512,6 +2835,21 @@ private data class PromptOutcome(
     val response: PromptResponse?,
     val summary: String? = null,
     val hostCancellation: Boolean = false,
+)
+
+/** Immutable copy made synchronously inside the SDK's session/new operations factory. */
+private data class AcpSessionAdvertisement(
+    val modelIds: List<String>?,
+    val modeIds: List<String>?,
+    val configOptions: List<AcpAdvertisedSessionConfigOption>?,
+)
+
+private enum class AcpAdvertisedSessionConfigKind { SELECT, BOOLEAN }
+
+private data class AcpAdvertisedSessionConfigOption(
+    val id: String,
+    val kind: AcpAdvertisedSessionConfigKind,
+    val selectValueIds: List<String>,
 )
 
 private data class Awaited<T>(val value: T)

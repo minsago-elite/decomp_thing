@@ -59,8 +59,11 @@ internal object AcpHarnessProvisioning {
         hostEnvironment: Map<String, String>,
     ): AcpProcessConfiguration {
         val root = document.requireObject("ACP configuration")
+        val schemaVersion = root.requiredInt("schemaVersion", 1..Int.MAX_VALUE, "ACP configuration")
+        require(schemaVersion == CONFIG_SCHEMA_VERSION) {
+            "unsupported ACP configuration schemaVersion $schemaVersion; migrate to schemaVersion 2"
+        }
         root.requireExactKeys(ROOT_KEYS, "ACP configuration")
-        require(root.requiredInt("schemaVersion", 1..1, "ACP configuration") == CONFIG_SCHEMA_VERSION)
         val implementationId = root.requiredString("implementationId", MAXIMUM_IDENTIFIER_BYTES, "ACP configuration")
         require(implementationId.matches(Regex("[A-Za-z0-9_][A-Za-z0-9_.-]{0,127}"))) {
             "ACP implementationId must use portable identifier syntax"
@@ -96,6 +99,7 @@ internal object AcpHarnessProvisioning {
         filesystemLimits.requireExactKeys(FILESYSTEM_LIMIT_KEYS, "ACP filesystem limits")
 
         val sandbox = parseSandbox(root.requiredObject("sandbox", "ACP configuration"), executable)
+        val sessionPreferences = parseSessionPreferences(root.requiredObject("session", "ACP configuration"))
         return AcpProcessConfiguration(
             executable = executable,
             arguments = arguments,
@@ -136,10 +140,62 @@ internal object AcpHarnessProvisioning {
             // provisioned statically. Workflow wiring must derive it from the exact request.
             terminalPolicy = null,
             permissionDecider = AcpNonInteractivePermissionDecider.DEFAULT_DENY,
+            sessionPreferences = sessionPreferences,
             expectedExecutableManifestSha256 = agent.requiredSha256(
                 "expectedExecutableManifestSha256",
                 "ACP agent configuration",
             ),
+        )
+    }
+
+    private fun parseSessionPreferences(value: ProvisioningJsonObject): AcpSessionPreferences {
+        value.requireAllowedKeys(
+            allowed = SESSION_KEYS,
+            required = SESSION_REQUIRED_KEYS,
+            label = "ACP session configuration",
+        )
+        val options = value.requiredArray(
+            "configOptions",
+            MAXIMUM_CONFIGURED_ACP_SESSION_OPTIONS,
+            "ACP session configuration",
+        ).mapIndexed { index, raw ->
+            val option = raw.requireObject("ACP session config option $index")
+            option.requireExactKeys(SESSION_CONFIG_OPTION_KEYS, "ACP session config option $index")
+            val id = option.requiredString(
+                "id",
+                MAXIMUM_ACP_SESSION_PREFERENCE_ID_BYTES,
+                "ACP session config option $index",
+            )
+            val type = option.requiredString("type", 16, "ACP session config option $index")
+            val configuredValue = when (type) {
+                "select" -> AcpSessionConfigValue.Select(
+                    option.requiredString(
+                        "value",
+                        MAXIMUM_ACP_SESSION_PREFERENCE_ID_BYTES,
+                        "ACP session config option $index",
+                    ),
+                )
+                "boolean" -> AcpSessionConfigValue.BooleanValue(
+                    option.requiredBoolean("value", "ACP session config option $index"),
+                )
+                else -> throw IllegalArgumentException(
+                    "ACP session config option $index has an unsupported type",
+                )
+            }
+            AcpSessionConfigPreference(id, configuredValue)
+        }
+        return AcpSessionPreferences(
+            modelId = value.optionalNullableString(
+                "modelId",
+                MAXIMUM_ACP_SESSION_PREFERENCE_ID_BYTES,
+                "ACP session configuration",
+            ),
+            modeId = value.optionalNullableString(
+                "modeId",
+                MAXIMUM_ACP_SESSION_PREFERENCE_ID_BYTES,
+                "ACP session configuration",
+            ),
+            configOptions = options,
         )
     }
 
@@ -638,6 +694,17 @@ private fun ProvisioningJsonObject.requireExactKeys(expected: Set<String>, label
     require(unknown.isEmpty()) { "$label contains an unknown field" }
 }
 
+private fun ProvisioningJsonObject.requireAllowedKeys(
+    allowed: Set<String>,
+    required: Set<String>,
+    label: String,
+) {
+    val missing = required - values.keys
+    require(missing.isEmpty()) { "$label is missing required field ${missing.sorted().first()}" }
+    val unknown = values.keys - allowed
+    require(unknown.isEmpty()) { "$label contains an unknown field" }
+}
+
 private fun ProvisioningJsonObject.requiredValue(name: String, label: String): ProvisioningJsonValue =
     values[name] ?: throw IllegalArgumentException("$label is missing required field $name")
 
@@ -662,6 +729,15 @@ private fun ProvisioningJsonObject.requiredString(
     maximumBytes: Int,
     label: String,
 ): String = requiredValue(name, label).requireString("$label.$name", maximumBytes)
+
+private fun ProvisioningJsonObject.optionalNullableString(
+    name: String,
+    maximumBytes: Int,
+    label: String,
+): String? = when (val value = values[name]) {
+    null, ProvisioningJsonNull -> null
+    else -> value.requireString("$label.$name", maximumBytes)
+}
 
 private fun ProvisioningJsonObject.requiredBoolean(name: String, label: String): Boolean =
     (requiredValue(name, label) as? ProvisioningJsonBoolean)?.value
@@ -756,7 +832,7 @@ private fun sha256(bytes: ByteArray): String = MessageDigest.getInstance("SHA-25
     .digest(bytes)
     .joinToString("") { "%02x".format(it) }
 
-private const val CONFIG_SCHEMA_VERSION = 1
+private const val CONFIG_SCHEMA_VERSION = 2
 private const val MAXIMUM_ACP_CONFIG_BYTES = 4 * 1024 * 1024
 private const val MAXIMUM_CONFIG_JSON_DEPTH = 16
 private const val MAXIMUM_CONFIG_JSON_NODES = 16_384
@@ -778,7 +854,10 @@ private const val MAXIMUM_TIMEOUT_MILLIS = 60L * 60 * 1000
 
 private val JSON_WHITESPACE = setOf(' ', '\t', '\r', '\n')
 private const val NON_OWNER_PERMISSION_MASK = 0x3f // 0077
-private val ROOT_KEYS = setOf("schemaVersion", "implementationId", "agent", "sandbox")
+private val ROOT_KEYS = setOf("schemaVersion", "implementationId", "agent", "session", "sandbox")
+private val SESSION_KEYS = setOf("modelId", "modeId", "configOptions")
+private val SESSION_REQUIRED_KEYS = setOf("configOptions")
+private val SESSION_CONFIG_OPTION_KEYS = setOf("id", "type", "value")
 private val AGENT_KEYS = setOf(
     "executable",
     "arguments",

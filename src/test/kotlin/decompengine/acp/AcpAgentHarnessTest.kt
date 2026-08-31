@@ -132,7 +132,7 @@ class AcpAgentHarnessTest {
                 }
             }
         }
-        assertEquals(55, acpTestMethods.size, acpTestMethods.joinToString { it.name })
+        assertEquals(58, acpTestMethods.size, acpTestMethods.joinToString { it.name })
         assertTrue(
             acpTestMethods.all { it.returnType == Void.TYPE },
             acpTestMethods.filter { it.returnType != Void.TYPE }.joinToString {
@@ -198,6 +198,277 @@ class AcpAgentHarnessTest {
         assertEquals("updated artifact\n", fixture.source.readText())
         assertEquals(FORBIDDEN_CANARY_CONTENT, fixture.forbiddenCanary.readText())
         assertCleanTermination(harness)
+    }
+
+    @Test
+    fun `configured session preferences use advertised setters in deterministic order while defaults send none`() {
+        val configuredFixture = fixture(genericContract = true)
+        val configuredHarness = harness(
+            mode = "session-preferences",
+            sentinel = "preferences-success",
+            sessionPreferences = AcpSessionPreferences(
+                modelId = "model-safe",
+                modeId = "mode-safe",
+                configOptions = listOf(
+                    AcpSessionConfigPreference("reasoning", AcpSessionConfigValue.Select("high")),
+                    AcpSessionConfigPreference("telemetry", AcpSessionConfigValue.BooleanValue(false)),
+                ),
+            ),
+        )
+
+        val configuredResult = configuredHarness.execute(configuredFixture.request)
+
+        assertEquals(AgentStopReason.COMPLETED, configuredResult.stopReason)
+        assertEquals("updated artifact\n", configuredFixture.source.readText())
+        assertCleanTermination(configuredHarness, "configured session preferences", configuredFixture)
+
+        val defaultFixture = fixture(genericContract = true)
+        val defaultHarness = harness(
+            mode = "session-preferences",
+            sentinel = "preferences-default",
+        )
+
+        val defaultResult = defaultHarness.execute(defaultFixture.request)
+
+        assertEquals(AgentStopReason.COMPLETED, defaultResult.stopReason)
+        assertEquals("updated artifact\n", defaultFixture.source.readText())
+        assertCleanTermination(defaultHarness, "default session preferences", defaultFixture)
+    }
+
+    @Test
+    fun `unknown absent and mistyped session preferences fail before every setter prompt and workspace operation`() {
+        data class RejectedPreference(
+            val label: String,
+            val mode: String,
+            val preferences: AcpSessionPreferences,
+            val secretCanary: String,
+        )
+
+        val cases = listOf(
+            RejectedPreference(
+                "unknown model",
+                "session-preferences",
+                AcpSessionPreferences(modelId = "model-secret-canary"),
+                "model-secret-canary",
+            ),
+            RejectedPreference(
+                "unknown mode",
+                "session-preferences",
+                AcpSessionPreferences(modeId = "mode-secret-canary"),
+                "mode-secret-canary",
+            ),
+            RejectedPreference(
+                "unknown option",
+                "session-preferences",
+                AcpSessionPreferences(configOptions = listOf(
+                    AcpSessionConfigPreference(
+                        "option-secret-canary",
+                        AcpSessionConfigValue.BooleanValue(false),
+                    ),
+                )),
+                "option-secret-canary",
+            ),
+            RejectedPreference(
+                "unknown select value",
+                "session-preferences",
+                AcpSessionPreferences(configOptions = listOf(
+                    AcpSessionConfigPreference(
+                        "reasoning",
+                        AcpSessionConfigValue.Select("value-secret-canary"),
+                    ),
+                )),
+                "value-secret-canary",
+            ),
+            RejectedPreference(
+                "mismatched option type",
+                "session-preferences",
+                AcpSessionPreferences(configOptions = listOf(
+                    AcpSessionConfigPreference("reasoning", AcpSessionConfigValue.BooleanValue(false)),
+                )),
+                "not-present",
+            ),
+            RejectedPreference(
+                "pipelined update cannot expand session new authority",
+                "session-preferences-pipelined-update",
+                AcpSessionPreferences(configOptions = listOf(
+                    AcpSessionConfigPreference("late-option", AcpSessionConfigValue.BooleanValue(false)),
+                )),
+                "late-option",
+            ),
+            RejectedPreference(
+                "pipelined work cannot run while invalid preferences are rejected",
+                "session-preferences-pipelined-work",
+                AcpSessionPreferences(modelId = "model-secret-canary"),
+                "model-secret-canary",
+            ),
+            RejectedPreference(
+                "absent model capability",
+                "session-preferences-no-models",
+                AcpSessionPreferences(modelId = "model-safe"),
+                "not-present",
+            ),
+            RejectedPreference(
+                "absent mode capability",
+                "session-preferences-no-modes",
+                AcpSessionPreferences(modeId = "mode-safe"),
+                "not-present",
+            ),
+            RejectedPreference(
+                "absent config capability",
+                "session-preferences-no-config-options",
+                AcpSessionPreferences(configOptions = listOf(
+                    AcpSessionConfigPreference("telemetry", AcpSessionConfigValue.BooleanValue(false)),
+                )),
+                "not-present",
+            ),
+        )
+
+        cases.forEach { case ->
+            val fixture = fixture(genericContract = true)
+            val harness = harness(
+                mode = case.mode,
+                sentinel = "preferences-reject",
+                sessionPreferences = case.preferences,
+            )
+            val events = mutableListOf<AgentExecutionEvent>()
+
+            val failure = assertFailsWith<AgentExecutionException>(case.label) {
+                harness.execute(fixture.request, events::add)
+            }
+
+            assertEquals(AgentFailureKind.CONFIGURATION, failure.failure.kind, case.label)
+            assertEquals("original artifact\n", fixture.source.readText(), case.label)
+            assertTrue(events.isEmpty(), case.label)
+            val invocation = assertIs<AcpInvocationEvidenceSnapshot>(failure.receipt?.providerEvidence)
+            assertEquals(AcpExecutionLifecyclePhase.SESSION_CREATED, invocation.phaseReached, case.label)
+            assertNull(invocation.wirePromptSha256, case.label)
+            assertFalse(failure.stackTraceToString().contains(case.secretCanary), case.label)
+            assertFalse(invocation.toString().contains(case.secretCanary), case.label)
+            assertCleanTermination(
+                harness = harness,
+                context = case.label,
+                fixture = fixture,
+                failure = failure,
+                events = events,
+            )
+        }
+
+        // Cancel from the setter wait itself instead of using a timing delay that could fire
+        // during sandbox startup on a contended host. The hanging wire peer proves teardown does
+        // not depend on a setter response.
+        val cancellationFixture = fixture(genericContract = true)
+        val setterWaitObserved = AtomicBoolean(false)
+        val setterCancellation = AgentCancellation {
+            val insideSetterWait = Thread.currentThread().stackTrace.any { frame ->
+                frame.className == AcpAgentHarness::class.java.name &&
+                    frame.methodName.startsWith("awaitSessionPreferenceSetter")
+            }
+            if (insideSetterWait) setterWaitObserved.set(true)
+            insideSetterWait
+        }
+        val cancellationHarness = harness(
+            mode = "session-preferences-setter-timeout",
+            sentinel = "preference-setter-cancel",
+            sessionPreferences = AcpSessionPreferences(modelId = "model-safe"),
+            timeouts = timeouts(request = 3_000),
+        )
+        val cancellationEvents = mutableListOf<AgentExecutionEvent>()
+
+        val cancellationReceipt = cancellationHarness.executeReceipt(
+            cancellationFixture.request.withCancellation(setterCancellation),
+            cancellationEvents::add,
+        )
+        val cancelled = assertIs<AgentExecutionOutcome.Returned>(cancellationReceipt.outcome).result
+
+        assertTrue(setterWaitObserved.get())
+        assertEquals(AgentStopReason.CANCELLED, cancelled.stopReason)
+        assertEquals("fixture-session", cancelled.session?.sessionId)
+        assertEquals("original artifact\n", cancellationFixture.source.readText())
+        assertTrue(cancellationEvents.isEmpty())
+        val cancellationEvidence = assertIs<AcpInvocationEvidenceSnapshot>(cancellationReceipt.providerEvidence)
+        assertNull(cancellationEvidence.wirePromptSha256)
+        assertCleanTermination(
+            harness = cancellationHarness,
+            context = "setter cancellation",
+            fixture = cancellationFixture,
+            events = cancellationEvents,
+        )
+    }
+
+    @Test
+    fun `session preference setter errors and timeouts are bounded redacted and cleaned before prompt`() {
+        data class SetterFailureCase(
+            val label: String,
+            val mode: String,
+            val expectedKind: AgentFailureKind,
+            val timeouts: AcpLifecycleTimeouts,
+            val preferences: AcpSessionPreferences,
+        )
+        val cases = listOf(
+            SetterFailureCase(
+                "setter error",
+                "session-preferences-setter-error",
+                AgentFailureKind.PROTOCOL,
+                timeouts(),
+                AcpSessionPreferences(modelId = "model-safe"),
+            ),
+            SetterFailureCase(
+                "setter timeout",
+                "session-preferences-setter-timeout",
+                AgentFailureKind.TIMEOUT,
+                timeouts(request = 200),
+                AcpSessionPreferences(modelId = "model-safe"),
+            ),
+            SetterFailureCase(
+                "config setter inconsistent postcondition",
+                "session-preferences-config-inconsistent",
+                AgentFailureKind.PROTOCOL,
+                timeouts(),
+                AcpSessionPreferences(configOptions = listOf(
+                    AcpSessionConfigPreference("reasoning", AcpSessionConfigValue.Select("high")),
+                )),
+            ),
+            SetterFailureCase(
+                "later config setter cannot revert an earlier configured option",
+                "session-preferences-config-reverts-earlier",
+                AgentFailureKind.PROTOCOL,
+                timeouts(),
+                AcpSessionPreferences(configOptions = listOf(
+                    AcpSessionConfigPreference("reasoning", AcpSessionConfigValue.Select("high")),
+                    AcpSessionConfigPreference("telemetry", AcpSessionConfigValue.BooleanValue(false)),
+                )),
+            ),
+        )
+
+        cases.forEach { case ->
+            val fixture = fixture(genericContract = true)
+            val harness = harness(
+                mode = case.mode,
+                sentinel = "preference-setter",
+                sessionPreferences = case.preferences,
+                timeouts = case.timeouts,
+            )
+            val events = mutableListOf<AgentExecutionEvent>()
+
+            val failure = assertFailsWith<AgentExecutionException>(case.label) {
+                harness.execute(fixture.request, events::add)
+            }
+
+            assertEquals(case.expectedKind, failure.failure.kind, case.label)
+            assertEquals("original artifact\n", fixture.source.readText(), case.label)
+            assertTrue(events.isEmpty(), case.label)
+            assertFalse(failure.stackTraceToString().contains("setter-secret-canary"), case.label)
+            val invocation = assertIs<AcpInvocationEvidenceSnapshot>(failure.receipt?.providerEvidence)
+            assertEquals(AcpExecutionLifecyclePhase.SESSION_CREATED, invocation.phaseReached, case.label)
+            assertNull(invocation.wirePromptSha256, case.label)
+            assertCleanTermination(
+                harness = harness,
+                context = case.label,
+                fixture = fixture,
+                failure = failure,
+                events = events,
+            )
+        }
     }
 
     @Test
@@ -1609,6 +1880,7 @@ class AcpAgentHarnessTest {
         maximumFrameBytes: Int = 64 * 1024,
         maximumProtocolFrames: Int = DEFAULT_MAXIMUM_ACP_PROTOCOL_FRAMES,
         terminalPolicy: AcpTerminalExecutionPolicy? = null,
+        sessionPreferences: AcpSessionPreferences = AcpSessionPreferences(),
     ): AcpAgentHarness {
         requireLiveSandboxHost()
         val script = Path.of(requireNotNull(javaClass.getResource("/acp/fake_acp_v1_agent.py")).toURI())
@@ -1634,6 +1906,7 @@ class AcpAgentHarnessTest {
                     ),
                 ),
                 terminalPolicy = terminalPolicy,
+                sessionPreferences = sessionPreferences,
             ),
         ).bindFactoryProvenance(
             AcpHarnessProvenance(

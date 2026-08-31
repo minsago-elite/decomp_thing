@@ -10,6 +10,7 @@ import kotlin.test.Test
 import kotlin.test.assertEquals
 import kotlin.test.assertFalse
 import kotlin.test.assertNotNull
+import kotlin.test.assertNull
 import kotlin.test.assertTrue
 
 class AcpOperatorSurfaceContractTest {
@@ -36,6 +37,9 @@ class AcpOperatorSurfaceContractTest {
         assertEquals(1_048_576, configuration.maximumFrameBytes)
         assertEquals(1_024, configuration.maximumProtocolFrames)
         assertEquals(8_388_608, configuration.filesystemLimits.maximumWriteBytes)
+        assertNull(configuration.sessionPreferences.modelId)
+        assertNull(configuration.sessionPreferences.modeId)
+        assertTrue(configuration.sessionPreferences.configOptions.isEmpty())
         assertEquals(16, sandbox.agentResourceLimits.maximumProcesses)
         assertEquals(536_870_912L, sandbox.agentResourceLimits.maximumAddressSpaceBytes)
         assertEquals(10_000, sandbox.runtimeClosureLimits.maximumEntries)
@@ -45,6 +49,10 @@ class AcpOperatorSurfaceContractTest {
         assertTrue(sandbox.launcherRuntimeMounts.isEmpty())
         assertEquals(Path.of("/opt/decomp-acp-agent/runtime"), sandbox.agentRuntimeMounts.single().source)
         assertTrue(template.contains("\"environment\": []"))
+        assertTrue(template.contains("\"schemaVersion\": 2"))
+        assertTrue(template.contains("\"modelId\": null"))
+        assertTrue(template.contains("\"modeId\": null"))
+        assertTrue(template.contains("\"configOptions\": []"))
         assertFalse(template.contains("BASE_URL"))
         assertFalse(template.contains("API_KEY"))
         assertFalse(template.contains("MODEL"))
@@ -226,6 +234,9 @@ class AcpOperatorSurfaceContractTest {
         assertTrue(provisioner.contains("requireBoundedArguments(arguments, 4)"))
         assertTrue(provisioner.contains("\"arguments\", agentArguments"))
         assertTrue(provisioner.contains("\"inheritParentEnvironment\", false"))
+        assertTrue(provisioner.contains("\"schemaVersion\", 2"))
+        assertTrue(provisioner.contains("\"session\", object("))
+        assertTrue(provisioner.contains("\"configOptions\", List.of()"))
         assertTrue(provisioner.contains("\"maximumProcesses\", 32"))
         assertFalse(provisioner.contains("LD_LIBRARY_PATH"))
         assertTrue(preflight.contains("harness.preflight(AcpPreflightWorkflow.ALL)"))

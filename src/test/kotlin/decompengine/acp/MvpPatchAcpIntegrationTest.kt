@@ -238,7 +238,7 @@ class MvpPatchAcpIntegrationTest {
             AcpSandboxReadOnlyMount(script, AGENT_SCRIPT_DESTINATION),
         )
         val document = buildJsonObject {
-            put("schemaVersion", 1)
+            put("schemaVersion", 2)
             put("implementationId", "mvp-scripted-acp-v1")
             putJsonObject("agent") {
                 put("executable", runtime.executable.toString())
@@ -269,6 +269,9 @@ class MvpPatchAcpIntegrationTest {
                 }
                 put("permissionMode", "default-deny")
                 put("expectedExecutableManifestSha256", calculateAcpRuntimeManifestSha256(runtime.executable))
+            }
+            putJsonObject("session") {
+                putJsonArray("configOptions") { }
             }
             putJsonObject("sandbox") {
                 put("bubblewrapExecutable", BWRAP.toString())

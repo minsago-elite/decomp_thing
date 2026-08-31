@@ -62,6 +62,60 @@ data class AcpLifecycleTimeouts(
 }
 
 /**
+ * An operator-selected value for one ACP session config option.
+ *
+ * Select values are opaque ACP value identifiers. Boolean values remain booleans all the way to
+ * the SDK boundary; neither form is translated into an agent command-line or environment value.
+ */
+sealed interface AcpSessionConfigValue {
+    data class Select(val valueId: String) : AcpSessionConfigValue {
+        init {
+            requireBoundedSessionPreferenceIdentifier("ACP session select value", valueId)
+        }
+    }
+
+    data class BooleanValue(val value: Boolean) : AcpSessionConfigValue
+}
+
+data class AcpSessionConfigPreference(
+    val id: String,
+    val value: AcpSessionConfigValue,
+) {
+    init {
+        requireBoundedSessionPreferenceIdentifier("ACP session config option id", id)
+    }
+}
+
+/**
+ * Optional session state requested after the exact `session/new` response is received.
+ *
+ * The ordered option list is copied defensively. The harness validates the complete preference
+ * set against that response before invoking any ACP setter or dispatching a prompt.
+ */
+class AcpSessionPreferences(
+    val modelId: String? = null,
+    val modeId: String? = null,
+    configOptions: Collection<AcpSessionConfigPreference> = emptyList(),
+) {
+    val configOptions: List<AcpSessionConfigPreference> = Collections.unmodifiableList(ArrayList(configOptions))
+
+    init {
+        modelId?.let { requireBoundedSessionPreferenceIdentifier("ACP session model id", it) }
+        modeId?.let { requireBoundedSessionPreferenceIdentifier("ACP session mode id", it) }
+        require(this.configOptions.size <= MAXIMUM_CONFIGURED_ACP_SESSION_OPTIONS) {
+            "ACP session config options exceed the authenticated count limit"
+        }
+        val ids = HashSet<String>()
+        this.configOptions.forEachIndexed { index, preference ->
+            require(ids.add(preference.id)) { "ACP session config option id is duplicated at index $index" }
+        }
+    }
+
+    internal val isEmpty: Boolean
+        get() = modelId == null && modeId == null && configOptions.isEmpty()
+}
+
+/**
  * Subprocess settings for one ACP execution.
  *
  * [executable] is required to be an absolute normalized path. [arguments] are passed directly to
@@ -84,6 +138,7 @@ class AcpProcessConfiguration(
     val sandboxBoundary: AcpLinuxSandboxConfiguration? = null,
     val terminalPolicy: AcpTerminalExecutionPolicy? = null,
     val permissionDecider: AcpPermissionDecider = AcpNonInteractivePermissionDecider.DEFAULT_DENY,
+    val sessionPreferences: AcpSessionPreferences = AcpSessionPreferences(),
     /** Required when [executable] is not recursively root-owned and immutable. */
     val expectedExecutableManifestSha256: String? = null,
 ) {
@@ -130,6 +185,35 @@ class AcpProcessConfiguration(
     internal fun command(): List<String> = listOf(executable.toString()) + arguments
 
     internal fun environmentValues(): Map<String, String> = environment.mapValues { (_, binding) -> binding.value }
+}
+
+internal const val MAXIMUM_CONFIGURED_ACP_SESSION_OPTIONS: Int = 64
+internal const val MAXIMUM_ACP_SESSION_PREFERENCE_ID_BYTES: Int = 256
+
+private fun requireBoundedSessionPreferenceIdentifier(label: String, value: String) {
+    require(value.isNotEmpty()) { "$label must not be empty" }
+    require(value.none(Character::isISOControl)) {
+        "$label must not contain control characters"
+    }
+    require(utf8Length(value) <= MAXIMUM_ACP_SESSION_PREFERENCE_ID_BYTES) {
+        "$label exceeds the authenticated byte limit"
+    }
+    var index = 0
+    while (index < value.length) {
+        val character = value[index]
+        when {
+            Character.isHighSurrogate(character) -> {
+                require(index + 1 < value.length && Character.isLowSurrogate(value[index + 1])) {
+                    "$label must contain well-formed Unicode"
+                }
+                index++
+            }
+            Character.isLowSurrogate(character) -> throw IllegalArgumentException(
+                "$label must contain well-formed Unicode",
+            )
+        }
+        index++
+    }
 }
 
 data class AcpProcessDiagnostics(

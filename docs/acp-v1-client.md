@@ -54,6 +54,35 @@ preflight and launch fail closed; the image does not add `SYS_ADMIN`, privileged
 intentionally not runnable as checked in: every all-zero digest is a fail-closed placeholder, the user-systemd runtime
 path is UID-specific, and the example agent path does not exist until it is provisioned. Copy it to a private regular
 file owned by the dedicated service UID with mode `0600`; `ACP_CONFIG_FILE` must be its absolute normalized path.
+The provisioning document is schema version 2. Schema-version-1 documents are rejected rather than silently assigned
+agent defaults; migrate them by adding the required `session` object and changing `schemaVersion` to `2`.
+
+The checked template leaves `modelId` and `modeId` explicitly `null` and uses an empty ordered `configOptions` array,
+so the agent's advertised defaults remain in effect. Either nullable field may instead be omitted. A selected value
+uses only the ACP session APIs, for example:
+
+```json
+"session": {
+  "modelId": "agent-advertised-model-id",
+  "modeId": "agent-advertised-mode-id",
+  "configOptions": [
+    {"id": "reasoning", "type": "select", "value": "high"},
+    {"id": "telemetry", "type": "boolean", "value": false}
+  ]
+}
+```
+
+After `session/new`, the harness snapshots that exact response before queued updates can alter SDK state. It validates
+the entire configured set against the advertised models, modes, config-option types, and select values before invoking
+any setter. It then applies model, mode, and the option array in that deterministic order with the shared request,
+cancellation, wall-clock, and cleanup bounds. An absent capability, unknown ID/value, type mismatch, rejected setter,
+or timeout fails after session creation but before `session/prompt` or workspace work. No model, mode, or option is
+translated into argv, environment, or provider-specific flags. Diagnostics identify only the preference category and
+array index, never configured values or peer error text; do not use these fields to carry credentials. Preference IDs
+and select-value IDs are non-empty, bounded, well-formed Unicode strings without control characters. Model and mode
+setter responses carry no selected-state field in ACP v1; for config options, the returned typed current value and the
+SDK state installed from it must both preserve the complete configured prefix before the next setter or prompt is
+allowed.
 
 Provision the components in this order:
 

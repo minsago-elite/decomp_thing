@@ -64,7 +64,7 @@ public final class AcpCompatibilityProvisioner {
         var mounts = discoverRuntimeMounts(agent);
 
         var root = object(
-            "schemaVersion", 1,
+            "schemaVersion", 2,
             "implementationId", implementationId,
             "agent", object(
                 "executable", agent.toString(),
@@ -95,6 +95,11 @@ public final class AcpCompatibilityProvisioner {
                 ),
                 "permissionMode", "default-deny",
                 "expectedExecutableManifestSha256", runtimeManifest(agent)
+            ),
+            "session", object(
+                "modelId", null,
+                "modeId", null,
+                "configOptions", List.of()
             ),
             "sandbox", object(
                 "bubblewrapExecutable", "/usr/bin/bwrap",

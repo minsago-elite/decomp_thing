@@ -46,6 +46,16 @@ GENERIC_CONTRACT_MODES = {
     "update-then-hang",
     "wait-for-cancel",
     "wrong-jsonrpc-prompt",
+    "session-preferences",
+    "session-preferences-no-models",
+    "session-preferences-no-modes",
+    "session-preferences-no-config-options",
+    "session-preferences-setter-error",
+    "session-preferences-setter-timeout",
+    "session-preferences-config-inconsistent",
+    "session-preferences-config-reverts-earlier",
+    "session-preferences-pipelined-update",
+    "session-preferences-pipelined-work",
 }
 MVP_VULNERABLE_SOURCE = """#include <stdio.h>
 int main(void) {
@@ -137,6 +147,27 @@ def write_workspace_file(path, content, request_id):
 
 def join_path(root, relative):
     return root.rstrip("/") + "/" + relative.lstrip("/")
+
+
+def advertised_session_config(reasoning="low", telemetry=True):
+    return [
+        {
+            "type": "select",
+            "id": "reasoning",
+            "name": "Reasoning",
+            "currentValue": reasoning,
+            "options": [
+                {"value": "low", "name": "Low"},
+                {"value": "high", "name": "High"},
+            ],
+        },
+        {
+            "type": "boolean",
+            "id": "telemetry",
+            "name": "Telemetry",
+            "currentValue": telemetry,
+        },
+    ]
 
 
 sys.stderr.write("fixture-stderr:" + SENTINEL + "\n")
@@ -269,7 +300,138 @@ if MODE == "auth-required":
 if MODE == "no-session-response":
     time.sleep(30)
     raise SystemExit(0)
-respond(session_new, {"sessionId": "fixture-session"})
+session_result = {"sessionId": "fixture-session"}
+if MODE.startswith("session-preferences"):
+    if MODE != "session-preferences-no-models":
+        session_result["models"] = {
+            "currentModelId": "model-default",
+            "availableModels": [
+                {"modelId": "model-default", "name": "Default"},
+                {"modelId": "model-safe", "name": "Safe"},
+            ],
+        }
+    if MODE != "session-preferences-no-modes":
+        session_result["modes"] = {
+            "currentModeId": "mode-default",
+            "availableModes": [
+                {"id": "mode-default", "name": "Default"},
+                {"id": "mode-safe", "name": "Safe"},
+            ],
+        }
+    if MODE != "session-preferences-no-config-options":
+        session_result["configOptions"] = advertised_session_config()
+respond(session_new, session_result)
+if MODE == "session-preferences-pipelined-update":
+    update({
+        "sessionUpdate": "config_option_update",
+        "configOptions": advertised_session_config() + [{
+            "type": "boolean",
+            "id": "late-option",
+            "name": "Late option",
+            "currentValue": False,
+        }],
+    })
+if MODE == "session-preferences-pipelined-work":
+    send({
+        "jsonrpc": "2.0",
+        "id": 116,
+        "method": "fs/write_text_file",
+        "params": {
+            "sessionId": "fixture-session",
+            "path": cwd.rstrip("/") + "/contract/artifact.txt",
+            "content": "pipelined work must not run\n",
+        },
+    })
+
+if MODE.startswith("session-preferences") and SENTINEL == "preferences-reject":
+    # Unsupported configured preferences must fail from the exact response before any setter,
+    # prompt, filesystem callback, or other work is dispatched.
+    unexpected = read_message()
+    if unexpected is not None:
+        sys.stderr.write("unexpected ACP work after rejected session preference\n")
+        sys.stderr.flush()
+        raise SystemExit(151)
+    raise SystemExit(0)
+
+if MODE == "session-preferences-setter-error":
+    setter = read_message()
+    if setter is None or setter.get("method") != "session/set_model":
+        raise SystemExit(152)
+    respond(setter, error={"code": -32603, "message": "setter-secret-canary"})
+    unexpected = read_message()
+    if unexpected is not None:
+        raise SystemExit(153)
+    raise SystemExit(0)
+
+if MODE == "session-preferences-setter-timeout":
+    setter = read_message()
+    if setter is None or setter.get("method") != "session/set_model":
+        raise SystemExit(154)
+    time.sleep(30)
+    raise SystemExit(0)
+
+if MODE == "session-preferences-config-inconsistent":
+    setter = read_message()
+    if setter is None or setter.get("method") != "session/set_config_option":
+        raise SystemExit(159)
+    respond(setter, {"configOptions": advertised_session_config("low", True)})
+    unexpected = read_message()
+    if unexpected is not None:
+        raise SystemExit(160)
+    raise SystemExit(0)
+
+if MODE == "session-preferences-config-reverts-earlier":
+    first = read_message()
+    if first is None or first.get("method") != "session/set_config_option":
+        raise SystemExit(161)
+    if first.get("params", {}).get("configId") != "reasoning":
+        raise SystemExit(162)
+    respond(first, {"configOptions": advertised_session_config("high", True)})
+    second = read_message()
+    if second is None or second.get("method") != "session/set_config_option":
+        raise SystemExit(163)
+    if second.get("params", {}).get("configId") != "telemetry":
+        raise SystemExit(164)
+    # The second option is correct, but this full replacement maliciously reverts the first.
+    respond(second, {"configOptions": advertised_session_config("low", False)})
+    unexpected = read_message()
+    if unexpected is not None:
+        raise SystemExit(165)
+    raise SystemExit(0)
+
+if MODE == "session-preferences" and SENTINEL == "preferences-success":
+    expected_setters = [
+        ("session/set_model", {
+            "sessionId": "fixture-session",
+            "modelId": "model-safe",
+        }),
+        ("session/set_mode", {
+            "sessionId": "fixture-session",
+            "modeId": "mode-safe",
+        }),
+        ("session/set_config_option", {
+            "sessionId": "fixture-session",
+            "configId": "reasoning",
+            "value": "high",
+        }),
+        ("session/set_config_option", {
+            "sessionId": "fixture-session",
+            "configId": "telemetry",
+            "type": "boolean",
+            "value": False,
+        }),
+    ]
+    for expected_method, expected_params in expected_setters:
+        setter = read_message()
+        if setter is None or setter.get("method") != expected_method:
+            raise SystemExit(155)
+        if setter.get("params") != expected_params:
+            raise SystemExit(156)
+        if expected_method == "session/set_config_option":
+            telemetry_value = setter.get("params", {}).get("configId") == "reasoning"
+            respond(setter, {"configOptions": advertised_session_config("high", telemetry_value)})
+        else:
+            respond(setter, {})
 if MODE == "terminal-cross-session-hang":
     # Deliberately pipeline the forged callback directly behind session/new. The host must bind
     # from the raw response before its transport can enqueue or dispatch this adjacent frame.

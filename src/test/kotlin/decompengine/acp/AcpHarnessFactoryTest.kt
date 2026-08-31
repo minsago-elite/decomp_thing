@@ -51,6 +51,9 @@ class AcpHarnessFactoryTest {
         assertEquals(1_024, provisioned.maximumProtocolFrames)
         assertEquals(262_144, provisioned.maximumStderrBytes)
         assertEquals(8 * 1024 * 1024, provisioned.filesystemLimits.maximumReadBytes)
+        assertNull(provisioned.sessionPreferences.modelId)
+        assertNull(provisioned.sessionPreferences.modeId)
+        assertTrue(provisioned.sessionPreferences.configOptions.isEmpty())
         val sandbox = assertNotNull(provisioned.sandboxBoundary)
         assertEquals(Path.of("/usr/bin/bwrap"), sandbox.bubblewrapExecutable)
         assertEquals(Path.of("/tmp"), sandbox.agentWorkingDirectory)
@@ -182,12 +185,12 @@ class AcpHarnessFactoryTest {
     fun `strict document rejects duplicate unknown missing and trailing fields`() {
         val mutations = listOf(
             validConfig().replace(
-                "\"schemaVersion\": 1,",
-                "\"schemaVersion\": 1,\n  \"schemaVersion\": 1,",
+                "\"schemaVersion\": 2,",
+                "\"schemaVersion\": 2,\n  \"schemaVersion\": 2,",
             ) to "duplicate JSON key",
             validConfig().replace(
-                "\"schemaVersion\": 1,",
-                "\"schemaVersion\": 1,\n  \"unknown\": true,",
+                "\"schemaVersion\": 2,",
+                "\"schemaVersion\": 2,\n  \"unknown\": true,",
             ) to "unknown field",
             validConfig().replace("  \"implementationId\": \"fixture-acp\",\n", "") to "missing required field",
             validConfig() + " false" to "trailing JSON data",
@@ -199,6 +202,91 @@ class AcpHarnessFactoryTest {
             }
             assertTrue(failure.message.orEmpty().contains(expected), failure.message)
         }
+    }
+
+    @Test
+    fun `schema v2 binds nullable or omitted model and mode plus ordered typed config options`() {
+        val configured = select(writeConfig(validConfig(session = """
+            {
+              "modelId": "model-safe",
+              "modeId": "mode-safe",
+              "configOptions": [
+                {"id":"reasoning","type":"select","value":"high"},
+                {"id":"telemetry","type":"boolean","value":false}
+              ]
+            }
+        """.trimIndent()))).configuration!!.sessionPreferences
+
+        assertEquals("model-safe", configured.modelId)
+        assertEquals("mode-safe", configured.modeId)
+        assertEquals(
+            listOf(
+                AcpSessionConfigPreference("reasoning", AcpSessionConfigValue.Select("high")),
+                AcpSessionConfigPreference("telemetry", AcpSessionConfigValue.BooleanValue(false)),
+            ),
+            configured.configOptions,
+        )
+
+        val explicitNull = select(writeConfig(validConfig(session = """
+            {"modelId":null,"modeId":null,"configOptions":[]}
+        """.trimIndent()))).configuration!!.sessionPreferences
+        assertNull(explicitNull.modelId)
+        assertNull(explicitNull.modeId)
+        assertTrue(explicitNull.configOptions.isEmpty())
+    }
+
+    @Test
+    fun `schema v1 and ambiguous or unbounded session preferences fail closed`() {
+        val legacy = assertFailsWith<IllegalArgumentException> {
+            select(writeConfig(validConfig().replace("\"schemaVersion\": 2", "\"schemaVersion\": 1")))
+        }
+        assertTrue(legacy.message.orEmpty().contains("migrate to schemaVersion 2"), legacy.message)
+
+        val invalidSessions = listOf(
+            """{"configOptions":[{"id":"reasoning","type":"select","value":"high"},{"id":"reasoning","type":"select","value":"low"}]}""" to "duplicated",
+            """{"configOptions":[{"id":"reasoning","type":"boolean","value":"false"}]}""" to "JSON boolean",
+            """{"configOptions":[{"id":"reasoning","type":"opaque","value":"high"}]}""" to "unsupported type",
+            """{"configOptions":[],"unknown":true}""" to "unknown field",
+        )
+        invalidSessions.forEach { (session, expected) ->
+            val failure = assertFailsWith<IllegalArgumentException>(expected) {
+                select(writeConfig(validConfig(session = session)))
+            }
+            assertTrue(failure.message.orEmpty().contains(expected), failure.message)
+        }
+
+        val overBound = (0..MAXIMUM_CONFIGURED_ACP_SESSION_OPTIONS).joinToString(",") { index ->
+            """{"id":"option-$index","type":"boolean","value":false}"""
+        }
+        val bounded = assertFailsWith<IllegalArgumentException> {
+            select(writeConfig(validConfig(session = """{"configOptions":[$overBound]}""")))
+        }
+        assertTrue(bounded.message.orEmpty().contains("entry limit"), bounded.message)
+
+        listOf(
+            { AcpSessionPreferences(modelId = "model\u0000id") },
+            { AcpSessionPreferences(modeId = "mode\nid") },
+            {
+                AcpSessionPreferences(configOptions = listOf(
+                    AcpSessionConfigPreference("option\u007fid", AcpSessionConfigValue.BooleanValue(false)),
+                ))
+            },
+            {
+                AcpSessionPreferences(configOptions = listOf(
+                    AcpSessionConfigPreference("reasoning", AcpSessionConfigValue.Select("high\u0085value")),
+                ))
+            },
+        ).forEach { constructor ->
+            val control = assertFailsWith<IllegalArgumentException> { constructor() }
+            assertTrue(control.message.orEmpty().contains("control characters"), control.message)
+        }
+
+        val escapedControl = assertFailsWith<IllegalArgumentException> {
+            select(writeConfig(validConfig(session =
+                "{\"modelId\":\"model-\\u0000id\",\"configOptions\":[]}",
+            )))
+        }
+        assertTrue(escapedControl.message.orEmpty().contains("control characters"), escapedControl.message)
     }
 
     @Test
@@ -392,9 +480,10 @@ class AcpHarnessFactoryTest {
             """{"source":"/usr/lib/liblauncher.so","destination":"/runtime/launcher/liblauncher.so","expectedManifestSha256":"${"2".repeat(64)}"}""",
         agentMountEntries: String =
             """{"source":"/opt/decomp/acp-runtime","destination":"/runtime/agent","expectedManifestSha256":"${"3".repeat(64)}"}""",
+        session: String = """{"configOptions":[]}""",
     ): String = """
         {
-          "schemaVersion": 1,
+          "schemaVersion": 2,
           "implementationId": "$implementationId",
           "agent": {
             "executable": "/opt/decomp/acp-agent",
@@ -421,6 +510,7 @@ class AcpHarnessFactoryTest {
             "permissionMode": "default-deny",
             "expectedExecutableManifestSha256": "${"1".repeat(64)}"
           },
+          "session": $session,
           "sandbox": {
             "bubblewrapExecutable": "/usr/bin/bwrap",
             "resourceLimiterExecutable": "/usr/bin/prlimit",
