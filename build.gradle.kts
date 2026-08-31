@@ -82,6 +82,12 @@ registerOracleJavaExecTask(
     entryPoint = "decompengine.oracle.provenance.LlvmBuildEnvironmentVerifierCli",
 )
 
+registerOracleJavaExecTask(
+    taskName = "verifyLlvmBehaviorReferenceEvidence",
+    taskDescription = "Authenticates checked LLVM behavior and diagnostic reference evidence in Kotlin/JVM",
+    entryPoint = "decompengine.oracle.behavior.LlvmBehaviorReferenceEvidenceCli",
+)
+
 val acpGateHelperSource = layout.projectDirectory.file("src/main/c/decomp_acp_gate_helper.c")
 val acpGateHelperBinary = layout.buildDirectory.file("native/acp/decomp-acp-gate-helper")
 val acpGateHelperChecksum = layout.buildDirectory.file("native/acp/decomp-acp-gate-helper.sha256")

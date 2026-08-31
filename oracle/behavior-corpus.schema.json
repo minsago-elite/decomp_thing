@@ -23,8 +23,9 @@
     "path": {"type": "string", "minLength": 1, "maxLength": 4096},
     "executable": {
       "type": "object", "additionalProperties": false,
+      "$comment": "Schema-v1 correction: the reviewed production executable is 84561368 bytes, so the stale 64 MiB maximum was aligned with the implementation's existing 128 MiB executable bound.",
       "required": ["bytes", "sha256"],
-      "properties": {"bytes": {"type": "integer", "minimum": 1, "maximum": 67108864}, "sha256": {"$ref": "#/$defs/sha256"}}
+      "properties": {"bytes": {"type": "integer", "minimum": 1, "maximum": 134217728}, "sha256": {"$ref": "#/$defs/sha256"}}
     },
     "sandbox": {
       "type": "object", "additionalProperties": false,
@@ -45,9 +46,10 @@
         "targetUser": {"type": "string", "pattern": "^[1-9][0-9]*:[1-9][0-9]*$", "maxLength": 32},
         "controlClient": {
           "type": "object", "additionalProperties": false,
+          "$comment": "Uses the same bounded-executable policy as the opaque target: 1 through 128 MiB.",
           "required": ["bytes", "sha256", "version"],
           "properties": {
-            "bytes": {"type": "integer", "minimum": 1, "maximum": 67108864},
+            "bytes": {"type": "integer", "minimum": 1, "maximum": 134217728},
             "sha256": {"$ref": "#/$defs/sha256"},
             "version": {"type": "string", "minLength": 1, "maxLength": 512}
           }

@@ -97,7 +97,9 @@ jobs:
             --output "$RUNNER_TEMP/function-recovery-oracle.json"
           cmp "$RUNNER_TEMP/function-recovery-oracle.json" \
             oracle/llvm/22.1.6/function-recovery-oracle.json
-      - name: Verify checked Clang behavior evidence offline
+      - name: Authenticate checked Clang behavior reference evidence in Kotlin
+        run: ./gradlew --no-daemon verifyLlvmBehaviorReferenceEvidence
+      - name: Cross-check checked Clang behavior evidence with the legacy compatibility validator
         run: |
           python3 scripts/check-behavior-corpus-evidence.py \
             --corpus oracle/llvm/22.1.6/behavior-corpus.json \

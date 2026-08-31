@@ -17,6 +17,14 @@ unknown fields, duplicate object keys, noncanonical paths, malformed hashes or
 base64, duplicate IDs, unsorted sets, unbounded collections, and inconsistent
 byte/hash/content triples.
 
+Schema v1 admits the opaque target and authenticated control-client executable
+identities from 1 through 134,217,728 bytes. This is a migration-tested
+correction of the stale 64 MiB schema ceiling: the already-reviewed LLVM 22.1.6
+stripped Clang artifact recorded by the checked v1 corpus and report is
+84,561,368 bytes. The schema correction changes neither those artifact bytes
+nor their digests, and regression tests accept both exact boundaries while
+rejecting zero and 128 MiB plus one byte for both executable identities.
+
 Checked corpus files use sorted, two-space-indented JSON and exactly one final
 newline. A semantically equivalent file with different whitespace or key order
 is rejected, so the report's corpus SHA-256 identifies one exact reviewed
@@ -260,6 +268,17 @@ python3 scripts/check-behavior-corpus-evidence.py \
 
 This offline check authenticates the corpus/evidence relationship; it does not
 claim to reproduce execution on the recorded kernel and OCI executor.
+
+For the checked LLVM 22.1.6 profile, the required Kotlin/JVM admission gate also
+authenticates the exact corpus and report bytes, the Clang diagnostic matrix,
+and the stripped-artifact identity in the release manifest:
+
+```bash
+./gradlew verifyLlvmBehaviorReferenceEvidence
+```
+
+The Python command above remains a migration compatibility cross-check. It is
+not the authority for this checked LLVM reference-evidence admission.
 
 Run the generic adversarial tests with:
 

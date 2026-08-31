@@ -120,6 +120,15 @@ The output includes `source-tree/` for normal editing, `source-tree.zip` for arc
 
 ## Development
 
+The required LLVM push/pull-request lane admits the checked Clang behavior
+corpus, its complete 48-case report, and the 16-case diagnostic ownership
+matrix through the Kotlin/JVM `verifyLlvmBehaviorReferenceEvidence` gate. That
+gate also binds the behavior executable to the manifest's stripped artifact;
+it exposes only authenticated immutable reference identities. It does not run
+Clang, replay the historical sandbox, compare a reconstruction, score behavior,
+or authorize a release. The retained Python offline checker is a compatibility
+cross-check and is not authority for this admission.
+
 Initialize the pinned vulnerability fixture after cloning:
 
 ```bash
