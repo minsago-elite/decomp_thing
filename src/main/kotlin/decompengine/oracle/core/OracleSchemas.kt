@@ -187,6 +187,7 @@ object OracleSchemas {
         "llvm-behavior-candidate-observations",
         "llvm-behavior-case-ownership",
         "llvm-behavior-comparison-assessment",
+        "llvm-behavior-runtime-preflight",
         "oracle-manifest",
         "recovered-structure",
         "release-artifacts",

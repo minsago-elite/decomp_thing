@@ -65,10 +65,13 @@ executable; adding that lineage is required before release admission.
 ## Runtime, limits, and outcome semantics
 
 The runtime section commits the reviewed backend, immutable image digest, platform, containment
-policy, control-client identity, engine profile, and sandbox digest. These are authenticated
-declarations only. Both `liveRuntimeIdentityVerified` and `liveContainmentVerified` are fixed to
-`false`; no Docker engine, OCI runtime, cgroup, namespace, image, or control-client process was
-observed.
+policy, control-client identity, engine profile, and sandbox digest. Within this receipt these are
+authenticated declarations only. Both `liveRuntimeIdentityVerified` and
+`liveContainmentVerified` are fixed to `false`; no Docker engine, OCI runtime, cgroup, namespace,
+image, or control-client process was observed during candidate admission. The later, separate
+[`LlvmBehaviorRuntimePreflightPublisher`](llvm-runtime-preflight.md) can now verify the declared
+engine/image identity and containment capabilities without changing this receipt or authorizing
+candidate `START`.
 
 The limits section copies and hashes the fixed timeout, stdout, stderr, artifact, memory, file,
 open-file, process, CPU, workspace-byte, and workspace-entry ceilings. Binding a ceiling is not
@@ -96,9 +99,10 @@ an execution claim.
 
 A real candidate execution checkpoint still needs a program-neutral version of the authenticated
 OCI/cgroup state machine: private staging of the input-only projection, an immutable candidate
-snapshot, live control-client/image/engine verification, exact argv and environment launch,
-enforced time/memory/PID/file/workspace/output limits, bounded binary stdout/stderr and artifact
-collection, signal/exit/OOM/timeout semantics, cleanup proof, and immutable candidate observations.
+snapshot, exact argv and environment launch, enforced time/memory/PID/file/workspace/output limits,
+bounded binary stdout/stderr and artifact collection, signal/exit/OOM/timeout semantics, cleanup
+proof, and immutable candidate observations. Live control-client/image/engine capability preflight
+now exists, but it does not prove per-container containment and cannot substitute for that runner.
 After that, Kotlin still must own deterministic repeat replay, comparison/scoring, persistent
 mismatch rationale, hosted clean-build and ACP provenance lineage, and the fail-closed release gate.
 The pre-START receipt is not wired into CI or a release workflow.
