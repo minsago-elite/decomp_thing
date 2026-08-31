@@ -96,13 +96,36 @@ build/target exclusion reasons, the generated driver CU is separate, and
 
 ## Verify
 
-Install the exact Python generation dependencies, then run:
+Source/artifact fetching and provenance verification do not yet have Kotlin replacements. Install their exact Python
+dependencies and use the migration-compatibility commands to populate the locked inputs. These commands preserve
+historical regression coverage but cannot certify a new Kotlin-only release:
 
 ```sh
 python3 -m pip install -r requirements/oracle-generation.txt
 python3 scripts/verify-llvm-oracle-source.py --metadata-only
 python3 scripts/fetch-llvm-oracle-source.py /tmp/llvm-oracle-source
 python3 scripts/fetch-llvm-oracle-artifacts.py /tmp/llvm-oracle-release
+```
+
+Full-tree scope, DWARF inventory, and source-inventory authority run through Kotlin/JVM. Invoke the stable Gradle
+entrypoints, then compare their exact canonical bytes with the reviewed artifacts:
+
+```sh
+./gradlew --no-daemon verifyFullTreeScope
+./gradlew --no-daemon generateFullTreeInventory \
+  --args="--rich-artifact /tmp/llvm-oracle-release/artifacts/clang-driver.full --output /tmp/full-tree-inventory.json --workers 1"
+cmp /tmp/full-tree-inventory.json \
+  oracle/llvm/22.1.6/full-tree-inventory.json
+./gradlew --no-daemon generateFullTreeSourceInventory \
+  --args="--archive /tmp/llvm-oracle-source/llvm-project-22.1.6.src.tar.xz --inventory /tmp/full-tree-inventory.json --output /tmp/full-tree-source-inventory.json --workers 1"
+cmp /tmp/full-tree-source-inventory.json \
+  oracle/llvm/22.1.6/full-tree-source-inventory.json
+```
+
+Manifest, function-oracle, and behavior commands also remain Python migration-compatibility gates. They cannot
+generate, validate, or certify a new Kotlin-only release:
+
+```sh
 python3 scripts/verify-llvm-oracle-artifacts.py \
   oracle/llvm/22.1.6/oracle-manifest.json \
   --artifact-root /tmp/llvm-oracle-release
@@ -144,16 +167,18 @@ cmp /tmp/llvm-behavior-evidence.json \
 
 ## Rebuild
 
-The manual `LLVM oracle clean rebuild` workflow is the canonical clean-room
-rebuild. It constructs the pinned toolchain image, fetches and authenticates
+The manual `LLVM oracle clean rebuild` workflow remains the canonical compatibility reproduction of the historical
+pair; its Python fetch, tool-capture, and artifact-verification steps cannot authorize a new Kotlin-only release. It
+constructs the pinned toolchain image, fetches and authenticates
 the upstream archive, disables network access for compilation, executes every
 command recorded in `build-record.json`, and uploads the full/stripped pair,
 tool records, and image digest for review. A rebuilt pair is not accepted
 until it matches the separately released pair byte-for-byte and every
 verification command above passes.
 
-The required `LLVM oracle model` workflow separately rebuilds and verifies the
-stable toolchain recipe on every push and pull request. It rejects recipe,
+The required `LLVM oracle model` workflow runs the migrated scope and inventory stages in Kotlin/JVM, while retaining
+the explicitly non-authoritative Python compatibility gates for stages that do not yet have Kotlin replacements. On
+every push and pull request it rejects recipe,
 base-image, build-record, platform, tool-byte, or tool-version drift without
 requiring a fresh image's metadata-derived ID to equal the originating ID.
 

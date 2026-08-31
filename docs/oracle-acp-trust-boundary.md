@@ -72,6 +72,13 @@ adapter replay, some ELF/DWARF observation generation, and full-tree release orc
 entrypoints. Those entrypoints may preserve historical production evidence and differential parity, but they do not
 satisfy the Kotlin-only authority requirement for the next release.
 
+The required LLVM push/pull-request lane runs full-tree scope verification plus DWARF and source-inventory
+regeneration through stable Kotlin/JVM Gradle entrypoints. The similarly named Python wrappers are retained only for
+legacy migration compatibility, are not invoked by that lane, and cannot authorize or enter a Kotlin-only release.
+Other Python workflow gates remain in place until their source/artifact provenance, function-oracle, behavior, and
+release-stage semantics have complete Kotlin replacements; keeping those regression checks does not promote their
+outputs to new release authority.
+
 During migration, existing Python outputs may be retained as explicitly non-authoritative differential fixtures. They
 cannot enter a new release as truth or validation evidence. A stage becomes authoritative only after frozen-fixture
 parity, fail-closed mutation coverage, worker-count determinism, repeated byte-identical output, and a Kotlin-only

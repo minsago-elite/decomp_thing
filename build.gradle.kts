@@ -23,6 +23,35 @@ application {
     applicationName = "llm_bin_patch"
 }
 
+fun registerOracleJavaExecTask(
+    taskName: String,
+    taskDescription: String,
+    entryPoint: String,
+) = tasks.register<JavaExec>(taskName) {
+    group = "oracle"
+    description = taskDescription
+    classpath = sourceSets["main"].runtimeClasspath
+    mainClass.set(entryPoint)
+}
+
+registerOracleJavaExecTask(
+    taskName = "verifyFullTreeScope",
+    taskDescription = "Verifies the authenticated LLVM full-tree scope with Kotlin/JVM authority",
+    entryPoint = "decompengine.oracle.fulltree.FullTreeScopeVerifierCli",
+)
+
+registerOracleJavaExecTask(
+    taskName = "generateFullTreeInventory",
+    taskDescription = "Generates the authenticated LLVM full-tree inventory with Kotlin/JVM authority",
+    entryPoint = "decompengine.oracle.fulltree.FullTreeInventoryGeneratorCli",
+)
+
+registerOracleJavaExecTask(
+    taskName = "generateFullTreeSourceInventory",
+    taskDescription = "Generates the authenticated LLVM source inventory with Kotlin/JVM authority",
+    entryPoint = "decompengine.oracle.fulltree.FullTreeSourceInventoryGeneratorCli",
+)
+
 val acpGateHelperSource = layout.projectDirectory.file("src/main/c/decomp_acp_gate_helper.c")
 val acpGateHelperBinary = layout.buildDirectory.file("native/acp/decomp-acp-gate-helper")
 val acpGateHelperChecksum = layout.buildDirectory.file("native/acp/decomp-acp-gate-helper.sha256")

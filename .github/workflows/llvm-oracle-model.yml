@@ -10,6 +10,11 @@ jobs:
     timeout-minutes: 45
     steps:
       - uses: actions/checkout@v7
+      - uses: actions/setup-java@v6
+        with:
+          distribution: temurin
+          java-version: "21"
+          cache: gradle
       - uses: actions/setup-python@v7
         with:
           python-version: "3.12"
@@ -64,15 +69,17 @@ jobs:
           python3 scripts/verify-llvm-oracle-artifacts.py \
             oracle/llvm/22.1.6/oracle-manifest.json \
             --artifact-root "$LLVM_ORACLE_ARTIFACT_ROOT"
-      - name: Reconcile the complete Clang/LLVM compilation-unit inventory
+      - name: Reconcile the complete Clang/LLVM compilation-unit and source inventories in Kotlin
         run: |
-          python3 scripts/verify-llvm-full-tree-scope.py
-          python3 scripts/generate-llvm-full-tree-inventory.py \
-            --rich-artifact \
-              "$LLVM_ORACLE_ARTIFACT_ROOT/artifacts/clang-driver.full" \
-            --output "$RUNNER_TEMP/full-tree-inventory.json"
+          ./gradlew --no-daemon verifyFullTreeScope
+          ./gradlew --no-daemon generateFullTreeInventory \
+            --args="--rich-artifact $LLVM_ORACLE_ARTIFACT_ROOT/artifacts/clang-driver.full --output $RUNNER_TEMP/full-tree-inventory.json --workers 1"
           cmp "$RUNNER_TEMP/full-tree-inventory.json" \
             oracle/llvm/22.1.6/full-tree-inventory.json
+          ./gradlew --no-daemon generateFullTreeSourceInventory \
+            --args="--archive $RUNNER_TEMP/llvm-source/llvm-project-22.1.6.src.tar.xz --inventory $RUNNER_TEMP/full-tree-inventory.json --output $RUNNER_TEMP/full-tree-source-inventory.json --workers 1"
+          cmp "$RUNNER_TEMP/full-tree-source-inventory.json" \
+            oracle/llvm/22.1.6/full-tree-source-inventory.json
       - name: Regenerate deterministic Clang function oracle
         run: |
           python3 scripts/generate-llvm-function-recovery-oracle.py \

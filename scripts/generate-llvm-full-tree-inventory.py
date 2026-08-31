@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Generate the authenticated Clang/LLVM full-tree compilation-unit inventory."""
+"""Legacy Python compatibility generator; not Kotlin/JVM oracle or release authority."""
 
 from __future__ import annotations
 

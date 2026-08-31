@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Verify the authenticated LLVM full-tree scope and shard policy."""
+"""Legacy Python compatibility verifier; not Kotlin/JVM oracle or release authority."""
 
 from __future__ import annotations
 

@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Reconcile the locked LLVM source archive with full-tree DWARF units."""
+"""Legacy Python compatibility generator; not Kotlin/JVM oracle or release authority."""
 
 from __future__ import annotations
 
