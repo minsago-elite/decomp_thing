@@ -57,6 +57,50 @@ class GhidraProgramModelExporterTest {
         assertTrue(exporter.contains("MAXIMUM_PLANNING_BATCHES = 256"))
         assertTrue(exporter.contains("MAXIMUM_PROGRAM_MODEL_BYTES = 512L * 1024 * 1024"))
         assertTrue(exporter.contains("BoundedOutput"))
+        assertTrue(exporter.contains("ExporterSemanticFingerprintV1"))
+        assertTrue(exporter.contains("MAXIMUM_CANONICAL_BYTES = 1024L * 1024 * 1024"))
+        assertTrue(exporter.contains("semanticStateBinding"))
+        assertTrue(exporter.contains("batchCommitmentSha256"))
+        assertTrue(exporter.contains("planning-exporter-visible-program"))
+        assertTrue(exporter.contains("legacy export state schema 1 has no whole-program semantic binding"))
+        assertTrue(exporter.contains("exportFunction(function, null, null, null, evidence, false)"))
+        assertTrue(exporter.contains("Set<String> ownedGlobalIds = new TreeSet<>()"))
+        assertTrue(exporter.contains("Set<String> ownedTypeIds = new TreeSet<>()"))
+        assertTrue(exporter.contains("new PlanningBatchEvidence(ownedGlobalIds, ownedTypeIds)"))
+        assertTrue(exporter.contains("ownedGlobalIds.add(global.getKey())"))
+        assertTrue(exporter.contains("ownedTypeIds.add(type.getKey())"))
+        assertTrue(exporter.contains("fingerprint.observeGlobal(global.getKey(), global.getValue())"))
+        assertTrue(exporter.contains("fingerprint.observeType(type.getKey(), type.getValue())"))
+        assertTrue(exporter.contains("fingerprint.observeFailure(id, failure)"))
+        assertTrue(exporter.contains("expectedPlanningBatch(planningSemanticState, start, end)"))
+        assertTrue(exporter.contains("requirePlanningBatchMatchesSemanticState(expectedBatch, validation)"))
+        assertTrue(
+            Regex("requirePlanningBatchMatchesSemanticState\\(expectedBatch, validation\\)")
+                .findAll(exporter).count() >= 3,
+        )
+        val generatedCommitment = exporter.lastIndexOf("ExporterSemanticFingerprintV1.commitBatch(\n                        start")
+        val firstFragmentWrite = exporter.lastIndexOf("writePlanningAtomic(functionFragmentPath, functionFragmentText)")
+        assertTrue(generatedCommitment >= 0 && generatedCommitment < firstFragmentWrite)
+        val planningBranch = exporter.substring(exporter.indexOf("discardPlanningPendingFiles(planningBatchesDirectory, total)"))
+        val reuseValidation = planningBranch.indexOf("PlanningBatchValidation validation = validatePlanningBatchPair(")
+        val reuseCommitment = planningBranch.indexOf(
+            "requirePlanningBatchMatchesSemanticState(expectedBatch, validation)",
+            reuseValidation,
+        )
+        val reuseCount = planningBranch.indexOf("completed = end", reuseCommitment)
+        assertTrue(reuseValidation >= 0 && reuseValidation < reuseCommitment && reuseCommitment < reuseCount)
+        val durableValidation = planningBranch.lastIndexOf("validation = validatePlanningBatchPair(")
+        val durableCommitment = planningBranch.indexOf(
+            "requirePlanningBatchMatchesSemanticState(expectedBatch, validation)",
+            durableValidation,
+        )
+        val durableOwnership = planningBranch.indexOf("ownedGlobalIds.add(id)", durableCommitment)
+        assertTrue(durableValidation >= 0 && durableValidation < durableCommitment && durableCommitment < durableOwnership)
+        val semanticPreflight = exporter.lastIndexOf("computePlanningSemanticState(functions)")
+        val stateAcceptance = exporter.lastIndexOf("ExporterSemanticFingerprintV1.requireReusableState(existing, state)")
+        val batchReuse = exporter.lastIndexOf("discardPlanningPendingFiles(planningBatchesDirectory, total)")
+        assertTrue(semanticPreflight >= 0 && semanticPreflight < stateAcceptance)
+        assertTrue(stateAcceptance < batchReuse)
     }
 
     @Test

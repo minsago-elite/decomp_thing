@@ -145,7 +145,10 @@ build/install/llm_bin_patch/bin/llm_bin_patch gcc-engine-plan cc1 \
 The A10 planning profile exports identities, prototypes, calls, strings,
 globals, and types but intentionally leaves decompiled C bodies to the later
 reconstruction phase. Repeat with `lto1` and its stripped twin. Interrupted exports resume only
-when the input and exact exporter identity still match. The Kotlin/JVM gate
+when the input, exact exporter identity, and schema-versioned whole-program planning-semantic fingerprint still match.
+The fingerprint is recomputed across completed and future batches before any checkpoint is reused; legacy unbound
+state must restart in a fresh output directory. Exact per-batch function/global/type/failure commitments also bind
+every reused or newly generated fragment to that preflight before checkpoint authority. The Kotlin/JVM gate
 refuses changed plan bytes, enforces the shared 30-minute/16-GiB ceiling,
 proves exact function/global/type ownership, and publishes self-hashed
 planning evidence. This phase is agent-free; later ACP implementation and

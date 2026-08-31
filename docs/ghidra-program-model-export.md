@@ -11,6 +11,18 @@ address order by streaming function fragments and a bounded merge of globally or
 fragment's byte count and SHA-256 is rechecked while it is copied, so a post-checkpoint substitution cannot reach the
 published model. The Ghidra script never retains all decompiled C bodies in memory.
 
+Planning-state schema 2 also binds a schema-1 whole-program semantic fingerprint before any batch can be reused. The
+preflight runs the exact read-only planning traversal over every function, including functions in completed, current,
+and future batches. It streams strictly address-ordered function records and retains the deterministic first-owner
+record for each referenced global and type, plus one record for each function failure. Later references to an already
+owned identity are excluded exactly as they are from durable planning batches; contradictory records presented within
+the fingerprint boundary are rejected as ambiguous. Function names and prototypes, calls, strings,
+referenced-global sets, global names/types/initializers, and exported type declarations therefore all participate in
+the binding. The same pass commits the exact bounded function/global/type/failure fragment bytes for every production
+batch. A completed checkpoint must match its freshly recomputed batch commitment before it counts as reused; a new
+batch must match before checkpoint publication and again after durable readback. Semantic drift between preflight and
+the export traversal therefore cannot be published under the preflight state identity.
+
 `analysis/reports/program_model.json.progress.json` reports the current phase, completed and total function counts,
 recovered, partial, and failed counts, the number of checkpoints reused by this invocation, and the current function. A failed or
 timed-out function becomes a normal model record with `status: failed`; its bounded diagnostic is retained separately
@@ -24,7 +36,8 @@ specification. Accepted function records or a contiguous prefix of authenticated
 before a planning checkpoint can leave fragments or deterministic `.pending` files only for the first incomplete
 batch; those incomplete artifacts are regenerated, while missing, extra, reordered, stale, cross-inventory, or
 cross-mode checkpoints are rejected. A mismatched binary or exporter is rejected instead of mixing evidence; start a
-new output directory when intentionally changing either.
+new output directory when intentionally changing either. Legacy schema-1 state has no whole-program semantic binding
+and is deliberately not migrated into reusable schema-2 state.
 
 The reference GCC-driver budget is one 10-minute invocation and 4 GiB peak RSS. The Kotlin process adapter enforces the
 10-minute wall-clock ceiling and leaves completed records resumable on timeout. A benchmark profile supplies the exact
@@ -37,7 +50,9 @@ Each full function decompilation has a 60-second timeout, and full export is del
 live C body memory is bounded by the largest individual function rather than the complete program. Planning batches
 contain no decompiled C: fragments are bounded to 64 MiB, evidence records to 1 MiB, and fan-in to 256 batches
 (131,072 functions). Assembly precomputes the exact model size and enforces the same 512 MiB limit through a counting
-output stream before atomic publication.
+output stream before atomic publication. Semantic preflight canonical bytes are capped at 1 GiB, with unique retained
+global/type/failure evidence capped at 512 MiB. The preflight repeats planning-visible analysis traversal but performs
+no decompilation and writes no export state before the complete binding is available.
 
 The JVM consumer reads the completed model through a stable regular-file snapshot capped at 512 MiB, then requires the
 exact canonical UTF-8 fields, entity order, set order, whitespace, and bytes before planning. A merely parseable JSON

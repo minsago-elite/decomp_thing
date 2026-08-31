@@ -44,6 +44,373 @@ import ghidra.program.model.listing.Parameter;
 import ghidra.program.model.symbol.Reference;
 import ghidra.program.model.symbol.Symbol;
 
+// SEMANTIC_FINGERPRINT_TEST_BEGIN
+final class ExporterSemanticFingerprintV1 {
+    static final int SCHEMA_VERSION = 1;
+    static final long MAXIMUM_CANONICAL_BYTES = 1024L * 1024 * 1024;
+    static final int MAXIMUM_FUNCTION_RECORD_BYTES = 64 * 1024 * 1024;
+    static final int MAXIMUM_EVIDENCE_RECORD_BYTES = 1024 * 1024;
+    static final long MAXIMUM_UNIQUE_EVIDENCE_BYTES = 512L * 1024 * 1024;
+    static final int MAXIMUM_BATCH_COMMITMENTS = 256;
+    static final int MAXIMUM_BATCH_FUNCTIONS = 512;
+    static final long MAXIMUM_BATCH_FRAGMENT_BYTES = 64L * 1024 * 1024;
+    static final byte FUNCTION_RECORD = 1;
+    static final byte GLOBAL_RECORD = 2;
+    static final byte TYPE_RECORD = 3;
+    static final byte FAILURE_RECORD = 4;
+    static final byte TERMINAL_RECORD = 5;
+    private static final byte[] DOMAIN =
+        "decomp-thing/program-semantic-fingerprint/v1\n".getBytes(StandardCharsets.US_ASCII);
+    private static final byte[] BATCH_DOMAIN =
+        "decomp-thing/planning-batch-commitments/v1\n".getBytes(StandardCharsets.US_ASCII);
+
+    static final class Binding {
+        final long canonicalBytes;
+        final int functionCount;
+        final String sha256;
+
+        Binding(long canonicalBytes, int functionCount, String sha256) {
+            this.canonicalBytes = canonicalBytes;
+            this.functionCount = functionCount;
+            this.sha256 = sha256;
+        }
+    }
+
+    static final class FragmentCommitment {
+        final long bytes;
+        final String sha256;
+
+        FragmentCommitment(long bytes, String sha256) {
+            if (bytes < 0 || bytes > MAXIMUM_BATCH_FRAGMENT_BYTES) {
+                throw new IllegalStateException("planning semantic fragment exceeds its byte bound");
+            }
+            if (sha256 == null || !sha256.matches("[0-9a-f]{64}")) {
+                throw new IllegalStateException("planning semantic fragment has an invalid SHA-256 value");
+            }
+            this.bytes = bytes;
+            this.sha256 = sha256;
+        }
+    }
+
+    static final class BatchCommitment {
+        final int startIndex;
+        final int endExclusive;
+        final FragmentCommitment functions;
+        final FragmentCommitment globals;
+        final FragmentCommitment types;
+        final FragmentCommitment failures;
+
+        BatchCommitment(
+            int startIndex,
+            int endExclusive,
+            FragmentCommitment functions,
+            FragmentCommitment globals,
+            FragmentCommitment types,
+            FragmentCommitment failures
+        ) {
+            if (
+                startIndex < 0 || endExclusive <= startIndex ||
+                endExclusive - (long) startIndex > MAXIMUM_BATCH_FUNCTIONS
+            ) {
+                throw new IllegalStateException("planning semantic batch has invalid inventory bounds");
+            }
+            if (functions == null || globals == null || types == null || failures == null) {
+                throw new IllegalStateException("planning semantic batch has a missing fragment commitment");
+            }
+            this.startIndex = startIndex;
+            this.endExclusive = endExclusive;
+            this.functions = functions;
+            this.globals = globals;
+            this.types = types;
+            this.failures = failures;
+        }
+    }
+
+    static BatchCommitment commitBatch(
+        int startIndex,
+        int endExclusive,
+        String functions,
+        String globals,
+        String types,
+        String failures
+    ) throws Exception {
+        return new BatchCommitment(
+            startIndex,
+            endExclusive,
+            commitFragment(functions),
+            commitFragment(globals),
+            commitFragment(types),
+            commitFragment(failures)
+        );
+    }
+
+    static BatchCommitment bindAuthenticatedBatch(
+        int startIndex,
+        int endExclusive,
+        long functionBytes,
+        String functionSha256,
+        long globalBytes,
+        String globalSha256,
+        long typeBytes,
+        String typeSha256,
+        long failureBytes,
+        String failureSha256
+    ) {
+        return new BatchCommitment(
+            startIndex,
+            endExclusive,
+            new FragmentCommitment(functionBytes, functionSha256),
+            new FragmentCommitment(globalBytes, globalSha256),
+            new FragmentCommitment(typeBytes, typeSha256),
+            new FragmentCommitment(failureBytes, failureSha256)
+        );
+    }
+
+    static String batchCommitmentSha256(java.util.List<BatchCommitment> batches) throws Exception {
+        if (batches == null) throw new IllegalStateException("planning semantic batch commitments are null");
+        if (batches.size() > MAXIMUM_BATCH_COMMITMENTS) {
+            throw new IllegalStateException("planning semantic batch count exceeds its bound");
+        }
+        MessageDigest commitmentDigest = MessageDigest.getInstance("SHA-256");
+        commitmentDigest.update(BATCH_DOMAIN);
+        int nextStart = 0;
+        for (BatchCommitment batch : batches) {
+            if (batch.startIndex != nextStart) {
+                throw new IllegalStateException("planning semantic batches are not a contiguous inventory prefix");
+            }
+            updateLong(commitmentDigest, batch.startIndex);
+            updateLong(commitmentDigest, batch.endExclusive);
+            updateFragment(commitmentDigest, batch.functions);
+            updateFragment(commitmentDigest, batch.globals);
+            updateFragment(commitmentDigest, batch.types);
+            updateFragment(commitmentDigest, batch.failures);
+            nextStart = batch.endExclusive;
+        }
+        return hexDigest(commitmentDigest.digest());
+    }
+
+    static void requireBatchCommitment(BatchCommitment expected, BatchCommitment actual) {
+        if (
+            expected.startIndex != actual.startIndex || expected.endExclusive != actual.endExclusive ||
+            !sameFragment(expected.functions, actual.functions) ||
+            !sameFragment(expected.globals, actual.globals) ||
+            !sameFragment(expected.types, actual.types) ||
+            !sameFragment(expected.failures, actual.failures)
+        ) {
+            throw new IllegalStateException(
+                "planning batch differs from the authenticated semantic preflight: " +
+                    expected.startIndex + "-" + expected.endExclusive
+            );
+        }
+    }
+
+    private static FragmentCommitment commitFragment(String fragment) throws Exception {
+        if (fragment == null) throw new IllegalStateException("planning semantic fragment is null");
+        byte[] bytes = fragment.getBytes(StandardCharsets.UTF_8);
+        if (bytes.length > MAXIMUM_BATCH_FRAGMENT_BYTES) {
+            throw new IllegalStateException("planning semantic fragment exceeds its byte bound");
+        }
+        return new FragmentCommitment(
+            bytes.length,
+            hexDigest(MessageDigest.getInstance("SHA-256").digest(bytes))
+        );
+    }
+
+    private static boolean sameFragment(FragmentCommitment expected, FragmentCommitment actual) {
+        return expected.bytes == actual.bytes && expected.sha256.equals(actual.sha256);
+    }
+
+    private static void updateFragment(MessageDigest target, FragmentCommitment fragment) {
+        updateLong(target, fragment.bytes);
+        target.update(fragment.sha256.getBytes(StandardCharsets.US_ASCII));
+    }
+
+    private static void updateLong(MessageDigest target, long value) {
+        for (int shift = 56; shift >= 0; shift -= 8) target.update((byte) (value >>> shift));
+    }
+
+    private final MessageDigest digest;
+    private final long maximumCanonicalBytes;
+    private long canonicalBytes;
+    private int functionCount;
+    private String previousFunctionId;
+    private String currentFunctionId;
+    private final Map<String, String> globals = new TreeMap<>();
+    private final Map<String, String> types = new TreeMap<>();
+    private final Map<String, String> failures = new TreeMap<>();
+    private long uniqueEvidenceBytes;
+    private boolean finished;
+
+    ExporterSemanticFingerprintV1() throws Exception {
+        this(MAXIMUM_CANONICAL_BYTES);
+    }
+
+    ExporterSemanticFingerprintV1(long maximumCanonicalBytes) throws Exception {
+        if (maximumCanonicalBytes < DOMAIN.length || maximumCanonicalBytes > MAXIMUM_CANONICAL_BYTES) {
+            throw new IllegalArgumentException("invalid semantic-fingerprint byte bound");
+        }
+        this.maximumCanonicalBytes = maximumCanonicalBytes;
+        this.digest = MessageDigest.getInstance("SHA-256");
+        updateRaw(DOMAIN);
+    }
+
+    void beginFunction(String id, String record) {
+        requireOpen();
+        requireId(id, "fn_[0-9a-f]{16}", "function");
+        if (previousFunctionId != null && previousFunctionId.compareTo(id) >= 0) {
+            throw new IllegalStateException("semantic-fingerprint functions are not in strict address order: " + id);
+        }
+        appendFrame(FUNCTION_RECORD, id, record, MAXIMUM_FUNCTION_RECORD_BYTES);
+        previousFunctionId = id;
+        currentFunctionId = id;
+        functionCount++;
+    }
+
+    void observeGlobal(String id, String record) {
+        requireCurrentFunction();
+        requireId(id, "global_[0-9a-f]{16}", "global");
+        retainUniqueEvidence(globals, id, record, "global");
+    }
+
+    void observeType(String id, String record) {
+        requireCurrentFunction();
+        requireId(id, "type_[0-9a-f]{64}", "type");
+        retainUniqueEvidence(types, id, record, "type");
+    }
+
+    void observeFailure(String id, String record) {
+        requireCurrentFunction();
+        if (!currentFunctionId.equals(id)) {
+            throw new IllegalStateException("semantic-fingerprint failure is cross-paired");
+        }
+        retainUniqueEvidence(failures, id, record, "failure");
+    }
+
+    Binding finish(int expectedFunctionCount) {
+        requireOpen();
+        if (expectedFunctionCount != functionCount) {
+            throw new IllegalStateException("semantic-fingerprint function count differs from its inventory");
+        }
+        for (Map.Entry<String, String> failure : failures.entrySet()) {
+            appendFrame(FAILURE_RECORD, failure.getKey(), failure.getValue(), MAXIMUM_EVIDENCE_RECORD_BYTES);
+        }
+        for (Map.Entry<String, String> global : globals.entrySet()) {
+            appendFrame(GLOBAL_RECORD, global.getKey(), global.getValue(), MAXIMUM_EVIDENCE_RECORD_BYTES);
+        }
+        for (Map.Entry<String, String> type : types.entrySet()) {
+            appendFrame(TYPE_RECORD, type.getKey(), type.getValue(), MAXIMUM_EVIDENCE_RECORD_BYTES);
+        }
+        appendFrame(TERMINAL_RECORD, "functions", Integer.toString(functionCount), 32);
+        finished = true;
+        return new Binding(canonicalBytes, functionCount, hexDigest(digest.digest()));
+    }
+
+    static void requireReusableState(String existing, String expected) {
+        if (existing.equals(expected)) return;
+        if (existing.startsWith("{\"schemaVersion\":1,")) {
+            throw new IllegalStateException(
+                "legacy export state schema 1 has no whole-program semantic binding and cannot be resumed"
+            );
+        }
+        throw new IllegalStateException("export checkpoint identity or whole-program semantic state differs");
+    }
+
+    private void requireOpen() {
+        if (finished) throw new IllegalStateException("semantic fingerprint is already final");
+    }
+
+    private void requireCurrentFunction() {
+        requireOpen();
+        if (currentFunctionId == null) {
+            throw new IllegalStateException("semantic-fingerprint evidence precedes its function");
+        }
+    }
+
+    private static void requireId(String id, String pattern, String kind) {
+        if (id == null || !id.matches(pattern)) {
+            throw new IllegalStateException("invalid semantic-fingerprint " + kind + " identity");
+        }
+    }
+
+    private void retainUniqueEvidence(Map<String, String> records, String id, String record, String kind) {
+        if (record == null) throw new IllegalStateException("semantic-fingerprint record is null");
+        String existing = records.get(id);
+        if (existing != null) {
+            if (!existing.equals(record)) {
+                throw new IllegalStateException("semantic-fingerprint " + kind + " identity has conflicting records: " + id);
+            }
+            return;
+        }
+        byte[] idBytes = id.getBytes(StandardCharsets.UTF_8);
+        byte[] recordBytes = record.getBytes(StandardCharsets.UTF_8);
+        if (recordBytes.length > MAXIMUM_EVIDENCE_RECORD_BYTES) {
+            throw new IllegalStateException("semantic-fingerprint record exceeds its category byte bound: " + id);
+        }
+        long additionalBytes;
+        try {
+            additionalBytes = Math.addExact(17L, Math.addExact(idBytes.length, recordBytes.length));
+            uniqueEvidenceBytes = Math.addExact(uniqueEvidenceBytes, additionalBytes);
+        } catch (ArithmeticException overflow) {
+            throw new IllegalStateException("semantic-fingerprint unique evidence byte count overflows", overflow);
+        }
+        if (uniqueEvidenceBytes > MAXIMUM_UNIQUE_EVIDENCE_BYTES) {
+            throw new IllegalStateException("semantic fingerprint exceeds its unique-evidence byte bound");
+        }
+        records.put(id, record);
+    }
+
+    private void appendFrame(byte tag, String id, String record, int maximumRecordBytes) {
+        if (record == null) throw new IllegalStateException("semantic-fingerprint record is null");
+        byte[] idBytes = id.getBytes(StandardCharsets.UTF_8);
+        byte[] recordBytes = record.getBytes(StandardCharsets.UTF_8);
+        if (recordBytes.length > maximumRecordBytes) {
+            throw new IllegalStateException("semantic-fingerprint record exceeds its category byte bound: " + id);
+        }
+        long frameBytes;
+        try {
+            frameBytes = Math.addExact(17L, Math.addExact(idBytes.length, recordBytes.length));
+        } catch (ArithmeticException overflow) {
+            throw new IllegalStateException("semantic-fingerprint frame byte count overflows", overflow);
+        }
+        requireCapacity(frameBytes);
+        digest.update(tag);
+        updateLong(idBytes.length);
+        digest.update(idBytes);
+        updateLong(recordBytes.length);
+        digest.update(recordBytes);
+        canonicalBytes += frameBytes;
+    }
+
+    private void updateRaw(byte[] content) {
+        requireCapacity(content.length);
+        digest.update(content);
+        canonicalBytes += content.length;
+    }
+
+    private void requireCapacity(long additionalBytes) {
+        long next;
+        try {
+            next = Math.addExact(canonicalBytes, additionalBytes);
+        } catch (ArithmeticException overflow) {
+            throw new IllegalStateException("semantic-fingerprint canonical byte count overflows", overflow);
+        }
+        if (next > maximumCanonicalBytes) {
+            throw new IllegalStateException("semantic fingerprint exceeds its canonical byte bound");
+        }
+    }
+
+    private void updateLong(long value) {
+        for (int shift = 56; shift >= 0; shift -= 8) digest.update((byte) (value >>> shift));
+    }
+
+    private static String hexDigest(byte[] digest) {
+        StringBuilder result = new StringBuilder();
+        for (byte value : digest) result.append(String.format("%02x", value & 0xff));
+        return result.toString();
+    }
+}
+// SEMANTIC_FINGERPRINT_TEST_END
+
 public class ExportProgramModel extends GhidraScript {
     private static final int EXPORTER_VERSION = 9;
     private static final int DECOMPILE_TIMEOUT_SECONDS = 60;
@@ -54,6 +421,7 @@ public class ExportProgramModel extends GhidraScript {
     private static final int MAXIMUM_PLANNING_EVIDENCE_RECORD_BYTES = 1024 * 1024;
     private static final int MAXIMUM_PLANNING_BATCHES = 256;
     private static final long MAXIMUM_PROGRAM_MODEL_BYTES = 512L * 1024 * 1024;
+    private static final int MAXIMUM_EXPORT_STATE_BYTES = 64 * 1024;
 
     private static final class PlanningIntegrityException extends RuntimeException {
         PlanningIntegrityException(String message) {
@@ -144,6 +512,22 @@ public class ExportProgramModel extends GhidraScript {
             this.globals = globals;
             this.types = types;
             this.failures = failures;
+        }
+    }
+
+    private static final class PlanningSemanticState {
+        final ExporterSemanticFingerprintV1.Binding binding;
+        final List<ExporterSemanticFingerprintV1.BatchCommitment> batches;
+        final String batchCommitmentSha256;
+
+        PlanningSemanticState(
+            ExporterSemanticFingerprintV1.Binding binding,
+            List<ExporterSemanticFingerprintV1.BatchCommitment> batches,
+            String batchCommitmentSha256
+        ) {
+            this.binding = binding;
+            this.batches = new ArrayList<>(batches);
+            this.batchCommitmentSha256 = batchCommitmentSha256;
         }
     }
 
@@ -602,6 +986,74 @@ public class ExportProgramModel extends GhidraScript {
         return new FunctionExport(output.toString(), status, failure);
     }
 
+    private PlanningSemanticState computePlanningSemanticState(List<Function> functions) throws Exception {
+        ExporterSemanticFingerprintV1 fingerprint = new ExporterSemanticFingerprintV1();
+        Set<String> ownedGlobalIds = new TreeSet<>();
+        Set<String> ownedTypeIds = new TreeSet<>();
+        List<ExporterSemanticFingerprintV1.BatchCommitment> batches = new ArrayList<>();
+        for (int start = 0; start < functions.size(); start += PLANNING_BATCH_FUNCTIONS) {
+            int end = Math.min(start + PLANNING_BATCH_FUNCTIONS, functions.size());
+            PlanningBatchEvidence evidence = new PlanningBatchEvidence(ownedGlobalIds, ownedTypeIds);
+            StringBuilder functionFragment = new StringBuilder();
+            long functionFragmentBytes = 0;
+            for (int index = start; index < end; index++) {
+                if (monitor.isCancelled()) {
+                    throw new InterruptedException("program semantic fingerprint was cancelled");
+                }
+                // A non-null planning collector keeps this preflight read-only. One collector per
+                // production-sized batch mirrors exact first-owner behavior: a type record's
+                // sourceAddress may legitimately differ at later references to its stable identity.
+                Function function = functions.get(index);
+                FunctionExport exported = exportFunction(function, null, null, null, evidence, false);
+                String id = functionId(function);
+                fingerprint.beginFunction(id, exported.record);
+                functionFragmentBytes = appendBoundedPlanningRecord(
+                    functionFragment,
+                    functionFragmentBytes,
+                    exported.record
+                );
+                if (exported.failure != null) {
+                    String failure = renderFunctionFailure(id, exported);
+                    evidence.retainFailure(id, failure);
+                    fingerprint.observeFailure(id, failure);
+                }
+            }
+            for (Map.Entry<String, String> global : evidence.globals.entrySet()) {
+                fingerprint.observeGlobal(global.getKey(), global.getValue());
+                if (!ownedGlobalIds.add(global.getKey())) {
+                    throw new PlanningIntegrityException(
+                        "semantic preflight assigned global evidence to more than one batch: " + global.getKey()
+                    );
+                }
+            }
+            for (Map.Entry<String, String> type : evidence.types.entrySet()) {
+                fingerprint.observeType(type.getKey(), type.getValue());
+                if (!ownedTypeIds.add(type.getKey())) {
+                    throw new PlanningIntegrityException(
+                        "semantic preflight assigned type evidence to more than one batch: " + type.getKey()
+                    );
+                }
+            }
+            String globalFragment = renderPlanningEvidenceFragment(evidence.globals);
+            String typeFragment = renderPlanningEvidenceFragment(evidence.types);
+            String failureFragment = renderPlanningEvidenceFragment(evidence.failures);
+            batches.add(ExporterSemanticFingerprintV1.commitBatch(
+                start,
+                end,
+                functionFragment.toString(),
+                globalFragment,
+                typeFragment,
+                failureFragment
+            ));
+        }
+        ExporterSemanticFingerprintV1.Binding binding = fingerprint.finish(functions.size());
+        return new PlanningSemanticState(
+            binding,
+            batches,
+            ExporterSemanticFingerprintV1.batchCommitmentSha256(batches)
+        );
+    }
+
     private static String renderGlobal(GlobalEvidence global) {
         return "    {\n" +
             "      \"id\": " + json(global.id) + ",\n" +
@@ -1007,6 +1459,46 @@ public class ExportProgramModel extends GhidraScript {
         return validation;
     }
 
+    private static ExporterSemanticFingerprintV1.BatchCommitment expectedPlanningBatch(
+        PlanningSemanticState semanticState,
+        int startIndex,
+        int endExclusive
+    ) {
+        if (semanticState == null || startIndex % PLANNING_BATCH_FUNCTIONS != 0) {
+            throw new PlanningIntegrityException("planning batch has no authenticated semantic preflight");
+        }
+        int batchIndex = startIndex / PLANNING_BATCH_FUNCTIONS;
+        if (batchIndex < 0 || batchIndex >= semanticState.batches.size()) {
+            throw new PlanningIntegrityException("planning batch is outside the authenticated semantic preflight");
+        }
+        ExporterSemanticFingerprintV1.BatchCommitment expected = semanticState.batches.get(batchIndex);
+        if (expected.startIndex != startIndex || expected.endExclusive != endExclusive) {
+            throw new PlanningIntegrityException("planning batch bounds differ from the authenticated semantic preflight");
+        }
+        return expected;
+    }
+
+    private static void requirePlanningBatchMatchesSemanticState(
+        ExporterSemanticFingerprintV1.BatchCommitment expected,
+        PlanningBatchValidation actual
+    ) {
+        ExporterSemanticFingerprintV1.requireBatchCommitment(
+            expected,
+            ExporterSemanticFingerprintV1.bindAuthenticatedBatch(
+                expected.startIndex,
+                expected.endExclusive,
+                actual.functions.fragmentBytes,
+                actual.functions.fragmentSha256,
+                actual.globals.fragmentBytes,
+                actual.globals.fragmentSha256,
+                actual.types.fragmentBytes,
+                actual.types.fragmentSha256,
+                actual.failures.fragmentBytes,
+                actual.failures.fragmentSha256
+            )
+        );
+    }
+
     private static String[] planningBatchArtifactSuffixes() {
         return new String[] {
             ".functions.fragment",
@@ -1269,28 +1761,81 @@ public class ExportProgramModel extends GhidraScript {
         Path typesDirectory = stateDirectory.resolve("types");
         Path failuresDirectory = stateDirectory.resolve("failures");
         Path progressPath = outputPath.resolveSibling(outputPath.getFileName() + ".progress.json");
-        Files.createDirectories(functionsDirectory);
-        Files.createDirectories(planningBatchesDirectory);
-        Files.createDirectories(globalsDirectory);
-        Files.createDirectories(typesDirectory);
-        Files.createDirectories(failuresDirectory);
 
         Path executablePath = Paths.get(currentProgram.getExecutablePath());
         String inputSha256 = sha256(executablePath);
-        String state = "{\"schemaVersion\":1,\"exporterVersion\":" + EXPORTER_VERSION +
+        List<Function> functions = new ArrayList<>();
+        List<String> functionIds = new ArrayList<>();
+        String previousFunctionId = null;
+        FunctionIterator inventory = currentProgram.getFunctionManager().getFunctions(true);
+        while (inventory.hasNext()) {
+            Function function = inventory.next();
+            if (function.isExternal() || function.isThunk()) continue;
+            String id = functionId(function);
+            if (previousFunctionId != null && previousFunctionId.compareTo(id) >= 0) {
+                throw new PlanningIntegrityException("program function inventory is not in strict address order: " + id);
+            }
+            functions.add(function);
+            functionIds.add(id);
+            previousFunctionId = id;
+        }
+        int total = functions.size();
+        long planningBatchCount = (total + (long) PLANNING_BATCH_FUNCTIONS - 1L) / PLANNING_BATCH_FUNCTIONS;
+        if (!includeDecompiledC && planningBatchCount > MAXIMUM_PLANNING_BATCHES) {
+            throw new PlanningIntegrityException("program inventory exceeds the planning batch-count bound");
+        }
+
+        PlanningSemanticState planningSemanticState =
+            includeDecompiledC ? null : computePlanningSemanticState(functions);
+        if (
+            planningSemanticState != null &&
+            planningSemanticState.batches.size() != planningBatchCount
+        ) {
+            throw new PlanningIntegrityException("semantic preflight batch count differs from its inventory");
+        }
+        ExporterSemanticFingerprintV1.Binding semanticBinding =
+            planningSemanticState == null ? null : planningSemanticState.binding;
+        String semanticState = planningSemanticState == null ? "null" :
+            "{\"schemaVersion\":" + ExporterSemanticFingerprintV1.SCHEMA_VERSION +
+                ",\"scope\":\"planning-exporter-visible-program\"" +
+                ",\"functionCount\":" + semanticBinding.functionCount +
+                ",\"planningBatchCount\":" + planningSemanticState.batches.size() +
+                ",\"canonicalBytes\":" + semanticBinding.canonicalBytes +
+                ",\"sha256\":" + json(semanticBinding.sha256) +
+                ",\"batchCommitmentSha256\":" + json(planningSemanticState.batchCommitmentSha256) + "}";
+        String state = "{\"schemaVersion\":2,\"exporterVersion\":" + EXPORTER_VERSION +
             ",\"exporterSha256\":" + json(exporterSha256) +
             ",\"analysisToolSha256\":" + json(analysisToolSha256) +
             ",\"recoveryMode\":" + json(recoveryMode) +
             ",\"inputSha256\":" + json(inputSha256) +
             ",\"language\":" + json(currentProgram.getLanguageID().toString()) +
-            ",\"compilerSpec\":" + json(currentProgram.getCompilerSpec().getCompilerSpecID().toString()) + "}\n";
+            ",\"compilerSpec\":" + json(currentProgram.getCompilerSpec().getCompilerSpecID().toString()) +
+            ",\"semanticStateBinding\":" + semanticState + "}\n";
         Path statePath = stateDirectory.resolve("state.json");
+
+        // No output-state mutation occurs until the complete planning semantic boundary has been
+        // traversed and bounded above. Every resume therefore recomputes future-batch semantics
+        // before this exact state comparison can authorize any checkpoint reuse.
+        Files.createDirectories(functionsDirectory);
+        Files.createDirectories(planningBatchesDirectory);
+        Files.createDirectories(globalsDirectory);
+        Files.createDirectories(typesDirectory);
+        Files.createDirectories(failuresDirectory);
         if (!includeDecompiledC) Files.deleteIfExists(stateDirectory.resolve(".state.json.pending"));
         if (Files.isRegularFile(statePath)) {
-            String existing = new String(Files.readAllBytes(statePath), StandardCharsets.UTF_8);
-            if (!existing.equals(state)) {
-                throw new IllegalStateException("export checkpoint identity differs from the current binary or exporter");
+            long existingBytes = Files.size(statePath);
+            if (existingBytes <= 0 || existingBytes > MAXIMUM_EXPORT_STATE_BYTES) {
+                throw new IllegalStateException("export checkpoint state has an invalid byte length");
             }
+            byte[] existingContent = Files.readAllBytes(statePath);
+            String existing = new String(existingContent, StandardCharsets.UTF_8);
+            if (
+                existingContent.length != existingBytes ||
+                !java.util.Arrays.equals(existingContent, existing.getBytes(StandardCharsets.UTF_8))
+            ) {
+                throw new IllegalStateException("export checkpoint state is not stable UTF-8");
+            }
+            ExporterSemanticFingerprintV1.requireReusableState(existing, state);
         } else {
             if (
                 directoryHasEntries(functionsDirectory) || directoryHasEntries(planningBatchesDirectory) ||
@@ -1300,21 +1845,6 @@ public class ExportProgramModel extends GhidraScript {
                 throw new IllegalStateException("export checkpoints exist without an export identity");
             }
             if (includeDecompiledC) writeAtomic(statePath, state); else writePlanningAtomic(statePath, state);
-        }
-
-        List<Function> functions = new ArrayList<>();
-        List<String> functionIds = new ArrayList<>();
-        FunctionIterator inventory = currentProgram.getFunctionManager().getFunctions(true);
-        while (inventory.hasNext()) {
-            Function function = inventory.next();
-            if (function.isExternal() || function.isThunk()) continue;
-            functions.add(function);
-            functionIds.add(functionId(function));
-        }
-        int total = functions.size();
-        long planningBatchCount = (total + (long) PLANNING_BATCH_FUNCTIONS - 1L) / PLANNING_BATCH_FUNCTIONS;
-        if (!includeDecompiledC && planningBatchCount > MAXIMUM_PLANNING_BATCHES) {
-            throw new PlanningIntegrityException("program inventory exceeds the planning batch-count bound");
         }
         String stateSha256 = sha256(state.getBytes(StandardCharsets.UTF_8));
         String inventorySha256 = sha256((String.join("\n", functionIds) + "\n").getBytes(StandardCharsets.UTF_8));
@@ -1412,6 +1942,8 @@ public class ExportProgramModel extends GhidraScript {
             boolean incompleteSeen = false;
             for (int start = 0; start < total; start += PLANNING_BATCH_FUNCTIONS) {
                 int end = Math.min(start + PLANNING_BATCH_FUNCTIONS, total);
+                ExporterSemanticFingerprintV1.BatchCommitment expectedBatch =
+                    expectedPlanningBatch(planningSemanticState, start, end);
                 String baseName = planningBatchBaseName(start, end);
                 Path functionFragmentPath = planningBatchesDirectory.resolve(baseName + ".functions.fragment");
                 Path globalFragmentPath = planningBatchesDirectory.resolve(baseName + ".globals.fragment");
@@ -1445,6 +1977,7 @@ public class ExportProgramModel extends GhidraScript {
                         stateSha256,
                         inventorySha256
                     );
+                    requirePlanningBatchMatchesSemanticState(expectedBatch, validation);
                     for (String id : validation.globals.ids) {
                         if (!ownedGlobalIds.add(id)) {
                             throw new IllegalStateException("global evidence is owned by more than one planning batch: " + id);
@@ -1498,6 +2031,8 @@ public class ExportProgramModel extends GhidraScript {
 
             for (int start = completed; start < total; start += PLANNING_BATCH_FUNCTIONS) {
                 int end = Math.min(start + PLANNING_BATCH_FUNCTIONS, total);
+                ExporterSemanticFingerprintV1.BatchCommitment expectedBatch =
+                    expectedPlanningBatch(planningSemanticState, start, end);
                 List<String> batchFunctionIds = functionIds.subList(start, end);
                 StringBuilder functionFragment = new StringBuilder();
                 long functionFragmentBytes = 0;
@@ -1537,7 +2072,19 @@ public class ExportProgramModel extends GhidraScript {
                 Path typeFragmentPath = planningBatchesDirectory.resolve(baseName + ".types.fragment");
                 Path failureFragmentPath = planningBatchesDirectory.resolve(baseName + ".failures.fragment");
                 Path checkpointPath = planningBatchesDirectory.resolve(baseName + ".checkpoint");
-                writePlanningAtomic(functionFragmentPath, functionFragment.toString());
+                String functionFragmentText = functionFragment.toString();
+                ExporterSemanticFingerprintV1.requireBatchCommitment(
+                    expectedBatch,
+                    ExporterSemanticFingerprintV1.commitBatch(
+                        start,
+                        end,
+                        functionFragmentText,
+                        globalFragment,
+                        typeFragment,
+                        failureFragment
+                    )
+                );
+                writePlanningAtomic(functionFragmentPath, functionFragmentText);
                 writePlanningAtomic(globalFragmentPath, globalFragment);
                 writePlanningAtomic(typeFragmentPath, typeFragment);
                 writePlanningAtomic(failureFragmentPath, failureFragment);
@@ -1548,6 +2095,7 @@ public class ExportProgramModel extends GhidraScript {
                     failureFragmentPath,
                     batchFunctionIds
                 );
+                requirePlanningBatchMatchesSemanticState(expectedBatch, validation);
                 if (
                     validation.functions.recovered != batchRecovered || validation.functions.partial != batchPartial ||
                     validation.functions.failed != batchFailed ||
@@ -1569,7 +2117,7 @@ public class ExportProgramModel extends GhidraScript {
                     throw new IllegalStateException("planning batch checkpoint exceeds its byte bound: " + baseName);
                 }
                 writePlanningAtomic(checkpointPath, checkpoint);
-                validatePlanningBatchPair(
+                validation = validatePlanningBatchPair(
                     functionFragmentPath,
                     globalFragmentPath,
                     typeFragmentPath,
@@ -1581,6 +2129,7 @@ public class ExportProgramModel extends GhidraScript {
                     stateSha256,
                     inventorySha256
                 );
+                requirePlanningBatchMatchesSemanticState(expectedBatch, validation);
                 for (String id : validation.globals.ids) {
                     if (!ownedGlobalIds.add(id)) {
                         throw new IllegalStateException("global evidence is owned by more than one planning batch: " + id);
