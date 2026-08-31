@@ -3585,6 +3585,122 @@ private class TrustedObservationBoundary(
 }
 
 /**
+ * One stable low-level name/cgroup observation, never recovery or mutation authority.
+ *
+ * EXACT_CGROUP_CANDIDATE matches only the non-loading unit inventory and exact cgroup receipt
+ * identity. It deliberately does not query a unit object by name: such a query can load a unit
+ * that disappeared after inventory enumeration. It therefore does not match InvocationID or any
+ * other unit property, match receipt PIDs, prove a BOOT protocol stage, reconcile journal/disk
+ * state, or reserve the deterministic name.
+ */
+internal enum class FullTreeFunctionObservationColdUnitAttachmentObservationOutcome {
+    ABSENT,
+    EXACT_CGROUP_CANDIDATE,
+    FOREIGN_REPLACEMENT,
+    INCONSISTENT_OR_EXITING,
+    CHANGED,
+}
+
+internal data class FullTreeFunctionObservationColdSystemdUnitInventoryEntry(
+    val unitName: String,
+    val loadState: String,
+    val activeState: String,
+    val subState: String,
+    val description: String,
+)
+
+internal data class FullTreeFunctionObservationColdSystemdJobInventoryEntry(
+    val jobId: Long,
+    val unitName: String,
+    val jobType: String,
+    val jobState: String,
+)
+
+internal data class FullTreeFunctionObservationColdCgroupIdentity(
+    val path: Path,
+    val device: Long,
+    val inode: Long,
+    val mountId: Long,
+)
+
+internal data class FullTreeFunctionObservationColdUnitReceiptIdentity(
+    val unitName: String,
+    val controlGroup: String,
+    val cgroupDevice: Long,
+    val cgroupInode: Long,
+    val cgroupMountId: Long,
+) {
+    internal companion object {
+        fun from(
+            receipt: FullTreeFunctionObservationUnitAttachmentReceipt,
+        ): FullTreeFunctionObservationColdUnitReceiptIdentity =
+            FullTreeFunctionObservationColdUnitReceiptIdentity(
+                unitName = receipt.unitName,
+                controlGroup = receipt.controlGroup,
+                cgroupDevice = receipt.cgroupDevice,
+                cgroupInode = receipt.cgroupInode,
+                cgroupMountId = receipt.cgroupMountId,
+            )
+    }
+}
+
+internal data class FullTreeFunctionObservationColdUnitSnapshot(
+    val managerFeatures: Set<String>,
+    val unit: FullTreeFunctionObservationColdSystemdUnitInventoryEntry?,
+    val job: FullTreeFunctionObservationColdSystemdJobInventoryEntry?,
+    val cgroups: List<FullTreeFunctionObservationColdCgroupIdentity>,
+    val stable: Boolean = true,
+)
+
+private data class FullTreeFunctionObservationColdCgroupInventory(
+    val cgroups: List<FullTreeFunctionObservationColdCgroupIdentity>,
+    val stable: Boolean,
+)
+
+internal fun classifyFullTreeFunctionObservationColdUnitSnapshots(
+    expected: FullTreeFunctionObservationColdUnitReceiptIdentity,
+    before: FullTreeFunctionObservationColdUnitSnapshot,
+    after: FullTreeFunctionObservationColdUnitSnapshot,
+): FullTreeFunctionObservationColdUnitAttachmentObservationOutcome {
+    if (!before.stable || !after.stable || before != after) {
+        return FullTreeFunctionObservationColdUnitAttachmentObservationOutcome.CHANGED
+    }
+    if (before.unit == null && before.job == null && before.cgroups.isEmpty()) {
+        return FullTreeFunctionObservationColdUnitAttachmentObservationOutcome.ABSENT
+    }
+
+    val expectedCgroup = CGROUP_ROOT.resolve(expected.controlGroup.removePrefix("/")).normalize()
+    val cgroupReplacement = before.cgroups.any { observed ->
+        observed.path != expectedCgroup ||
+            observed.device != expected.cgroupDevice ||
+            observed.inode != expected.cgroupInode ||
+            observed.mountId != expected.cgroupMountId
+    }
+    if (cgroupReplacement) {
+        return FullTreeFunctionObservationColdUnitAttachmentObservationOutcome.FOREIGN_REPLACEMENT
+    }
+
+    val exactCgroup = before.cgroups.singleOrNull()?.let { observed ->
+        observed.path == expectedCgroup &&
+            observed.device == expected.cgroupDevice &&
+            observed.inode == expected.cgroupInode &&
+            observed.mountId == expected.cgroupMountId
+    } == true
+    val unit = before.unit
+    val exactCgroupCandidate =
+        unit != null &&
+            unit.unitName == expected.unitName &&
+            unit.loadState == "loaded" &&
+            unit.activeState == "active" &&
+            unit.subState == "running" && before.job == null && exactCgroup
+    return if (exactCgroupCandidate) {
+        FullTreeFunctionObservationColdUnitAttachmentObservationOutcome.EXACT_CGROUP_CANDIDATE
+    } else {
+        FullTreeFunctionObservationColdUnitAttachmentObservationOutcome.INCONSISTENT_OR_EXITING
+    }
+}
+
+/**
  * Query-only, point-in-time observation of one binding-derived systemd name.
  *
  * The inventory commands do not request or load the named unit. Empty manager and job inventories
@@ -3595,10 +3711,12 @@ private class TrustedObservationBoundary(
 internal class FullTreeFunctionObservationColdUnitAbsenceObserver private constructor(
     private val inspector: PinnedSecurityExecutable,
     private val bus: PinnedSystemdBusEndpoint,
-    val unitName: String,
+    private val binding: FullTreeFunctionObservationOperationBinding,
     val isolationConfigurationSha256: String,
     private val commandObserver: FullTreeFunctionObservationSystemctlCommandObserver?,
 ) {
+    val unitName: String = binding.unitName
+
     init {
         if (!unitName.matches(PRODUCTION_OBSERVATION_UNIT_NAME)) {
             isolationFail("cold systemd observation unit name is not canonical")
@@ -3620,6 +3738,140 @@ internal class FullTreeFunctionObservationColdUnitAbsenceObserver private constr
         requireEnumerationEmpty(COLD_SYSTEMD_LIST_UNITS_ARGUMENTS + listOf("--", unitName), "unit inventory")
         requireUnfilteredUnitInventory()
         requireUnchanged()
+    }
+
+    /**
+     * Repeated query-only observation of the exact durable receipt name.
+     *
+     * This method issues no unit-object lookup by name. It opens no receipt PID and retains no
+     * cgroup descriptor; InvocationID matching and exact process adoption remain later steps. Its
+     * caller must separately bracket this observation with boot and journal/disk reconciliation.
+     */
+    fun observeUnitAttachment(
+        receipt: FullTreeFunctionObservationUnitAttachmentReceipt,
+    ): FullTreeFunctionObservationColdUnitAttachmentObservationOutcome {
+        requireReceiptBinding(receipt)
+        requireUnchanged()
+        val featuresBefore = observeUnfilteredUnitInventory()
+        val unitBefore = observeUnitInventory()
+        val jobBefore = observeJobInventory()
+        val cgroupsBefore = observeCgroups()
+        val cgroupsAfter = observeCgroups()
+        val jobAfter = observeJobInventory()
+        val unitAfter = observeUnitInventory()
+        val featuresAfter = observeUnfilteredUnitInventory()
+        requireUnchanged()
+
+        return classifyFullTreeFunctionObservationColdUnitSnapshots(
+            expected = FullTreeFunctionObservationColdUnitReceiptIdentity.from(receipt),
+            before = FullTreeFunctionObservationColdUnitSnapshot(
+                managerFeatures = featuresBefore,
+                unit = unitBefore,
+                job = jobBefore,
+                cgroups = cgroupsBefore.cgroups,
+                stable = cgroupsBefore.stable,
+            ),
+            after = FullTreeFunctionObservationColdUnitSnapshot(
+                managerFeatures = featuresAfter,
+                unit = unitAfter,
+                job = jobAfter,
+                cgroups = cgroupsAfter.cgroups,
+                stable = cgroupsAfter.stable,
+            ),
+        )
+    }
+
+    private fun requireReceiptBinding(
+        receipt: FullTreeFunctionObservationUnitAttachmentReceipt,
+    ) {
+        if (
+            receipt.operationId != binding.operationId ||
+            receipt.requestSha256 != binding.requestSha256 ||
+            receipt.bindingSha256 != binding.bindingSha256 ||
+            receipt.isolationConfigurationSha256 != binding.isolationConfigurationSha256 ||
+            receipt.unitName != binding.unitName
+        ) isolationFail("cold systemd observation receipt differs from its operation binding")
+    }
+
+    private fun observeUnfilteredUnitInventory(): Set<String> {
+        val output = runReadOnlySystemctl(
+            COLD_SYSTEMD_MANAGER_FEATURES_ARGUMENTS,
+            "manager features",
+        )
+        requireColdSystemdManagerFeaturesUnfiltered(output)
+        return output.dropLast(1).split(' ').toSortedSet()
+    }
+
+    private fun observeUnitInventory(): FullTreeFunctionObservationColdSystemdUnitInventoryEntry? =
+        parseColdSystemdUnitInventory(
+            runReadOnlySystemctl(
+                COLD_SYSTEMD_LIST_UNITS_ARGUMENTS + listOf("--", unitName),
+                "unit inventory",
+            ),
+            unitName,
+        )
+
+    private fun observeJobInventory(): FullTreeFunctionObservationColdSystemdJobInventoryEntry? =
+        parseColdSystemdJobInventory(
+            runReadOnlySystemctl(
+                COLD_SYSTEMD_LIST_JOBS_ARGUMENTS + listOf("--", unitName),
+                "job inventory",
+            ),
+            unitName,
+        )
+
+    private fun observeCgroups(): FullTreeFunctionObservationColdCgroupInventory {
+        val paths = try {
+            findObservationCgroupsForUnit(unitName)
+        } catch (_: java.nio.file.NoSuchFileException) {
+            return FullTreeFunctionObservationColdCgroupInventory(emptyList(), stable = false)
+        }
+        var stable = true
+        val cgroups = paths.sortedBy(Path::toString).mapNotNull { path ->
+            val selected = LinuxFilesystemSyscalls.openAbsolutePathOrNull(path)
+            if (selected == null) {
+                stable = false
+                return@mapNotNull null
+            }
+            selected.use { descriptor ->
+                val identity = LinuxFilesystemSyscalls.identity(descriptor.fd)
+                if (
+                    !identity.isDirectory || identity.isSymbolicLink ||
+                    !sameDirectory(identity, descriptor.identity) ||
+                    identity.key.device <= 0L || identity.key.inode <= 0L || identity.mountId <= 0L
+                ) {
+                    stable = false
+                    return@use null
+                }
+                requireAuthenticatedCgroupV2Mount(identity)
+                FullTreeFunctionObservationColdCgroupIdentity(
+                    path = path,
+                    device = identity.key.device,
+                    inode = identity.key.inode,
+                    mountId = identity.mountId,
+                )
+            }
+        }
+        return FullTreeFunctionObservationColdCgroupInventory(cgroups, stable)
+    }
+
+    private fun runReadOnlySystemctl(
+        arguments: List<String>,
+        label: String,
+    ): String {
+        inspector.requireUnchanged()
+        bus.requireUnchanged()
+        commandObserver?.beforeCommand(unitName, java.util.List.copyOf(arguments))
+        val result = runTrustedCommand(
+            listOf(inspector.path.toString(), "--user") + arguments,
+            bus.controlEnvironment,
+            SYSTEMD_CONTROL_TIMEOUT,
+            "cold systemd $label",
+        )
+        if (result.exitCode != 0) isolationFail("cold systemd $label failed safely")
+        inspector.requireUnchanged()
+        bus.requireUnchanged()
+        return result.output
     }
 
     private fun requireUnfilteredUnitInventory() {
@@ -3692,7 +3944,7 @@ internal class FullTreeFunctionObservationColdUnitAbsenceObserver private constr
             return FullTreeFunctionObservationColdUnitAbsenceObserver(
                 inspector,
                 bus,
-                binding.unitName,
+                binding,
                 configuration.canonicalSha256,
                 commandObserver,
             )
@@ -3702,6 +3954,58 @@ internal class FullTreeFunctionObservationColdUnitAbsenceObserver private constr
 
 internal fun requireColdSystemdEnumerationEmpty(output: String, label: String) {
     if (output.isNotEmpty()) isolationFail("cold systemd $label was not empty")
+}
+
+internal fun parseColdSystemdUnitInventory(
+    output: String,
+    expectedUnitName: String,
+): FullTreeFunctionObservationColdSystemdUnitInventoryEntry? {
+    if (!expectedUnitName.matches(PRODUCTION_OBSERVATION_UNIT_NAME)) {
+        isolationFail("cold systemd unit inventory name is not canonical")
+    }
+    val fields = parseColdSystemdInventoryFields(output, "unit inventory") ?: return null
+    if (fields.size < 5 || fields.first() != expectedUnitName) {
+        isolationFail("cold systemd unit inventory was malformed")
+    }
+    return FullTreeFunctionObservationColdSystemdUnitInventoryEntry(
+        unitName = fields[0],
+        loadState = fields[1],
+        activeState = fields[2],
+        subState = fields[3],
+        description = fields.drop(4).joinToString(" "),
+    )
+}
+
+internal fun parseColdSystemdJobInventory(
+    output: String,
+    expectedUnitName: String,
+): FullTreeFunctionObservationColdSystemdJobInventoryEntry? {
+    if (!expectedUnitName.matches(PRODUCTION_OBSERVATION_UNIT_NAME)) {
+        isolationFail("cold systemd job inventory name is not canonical")
+    }
+    val fields = parseColdSystemdInventoryFields(output, "job inventory") ?: return null
+    val jobId = fields.firstOrNull()?.toLongOrNull()
+    if (fields.size != 4 || jobId == null || jobId <= 0L || fields[1] != expectedUnitName) {
+        isolationFail("cold systemd job inventory was malformed")
+    }
+    return FullTreeFunctionObservationColdSystemdJobInventoryEntry(
+        jobId = jobId,
+        unitName = fields[1],
+        jobType = fields[2],
+        jobState = fields[3],
+    )
+}
+
+private fun parseColdSystemdInventoryFields(output: String, label: String): List<String>? {
+    if (output.isEmpty()) return null
+    if (!output.endsWith('\n') || output.any { it == '\r' || it == '\u0000' }) {
+        isolationFail("cold systemd $label was malformed")
+    }
+    val line = output.dropLast(1)
+    if (line.isBlank() || line.contains('\n')) {
+        isolationFail("cold systemd $label was malformed")
+    }
+    return line.trim().split(Regex("[ \\t]+"))
 }
 
 /** ListUnitsByPatterns silently filters SELinux-denied units, so such builds are inadmissible. */

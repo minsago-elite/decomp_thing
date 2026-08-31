@@ -232,6 +232,127 @@ class FullTreeFunctionObservationIsolatedFixtureRunnerTest {
     }
 
     @Test
+    fun `cold systemd inventory parsers accept one exact normalized entry and reject ambiguity`() {
+        val unitName = "decomp-oracle-function-${"a".repeat(64)}.scope"
+        assertEquals(null, parseColdSystemdUnitInventory("", unitName))
+        assertEquals(null, parseColdSystemdJobInventory("", unitName))
+        assertEquals(
+            FullTreeFunctionObservationColdSystemdUnitInventoryEntry(
+                unitName,
+                "loaded",
+                "active",
+                "running",
+                "bounded worker scope",
+            ),
+            parseColdSystemdUnitInventory(
+                "$unitName loaded active running bounded   worker scope\n",
+                unitName,
+            ),
+        )
+        assertEquals(
+            FullTreeFunctionObservationColdSystemdJobInventoryEntry(
+                17L,
+                unitName,
+                "start",
+                "running",
+            ),
+            parseColdSystemdJobInventory("  17\t$unitName start running\n", unitName),
+        )
+        listOf(
+            "$unitName loaded active running missing-newline",
+            "$unitName loaded active running first\n$unitName loaded active running second\n",
+            "other.scope loaded active running wrong-name\n",
+        ).forEach { malformed ->
+            assertFailsWith<FullTreeFunctionObservationIsolationException> {
+                parseColdSystemdUnitInventory(malformed, unitName)
+            }
+        }
+        listOf(
+            "0 $unitName start waiting\n",
+            "17 other.scope start waiting\n",
+            "17 $unitName start waiting extra\n",
+        ).forEach { malformed ->
+            assertFailsWith<FullTreeFunctionObservationIsolationException> {
+                parseColdSystemdJobInventory(malformed, unitName)
+            }
+        }
+    }
+
+    @Test
+    fun `cold unit snapshot reduction exposes only stable normalized attachment outcomes`() {
+        val unitName = "decomp-oracle-function-${"b".repeat(64)}.scope"
+        val controlGroup = "/user.slice/app.slice/$unitName"
+        val expected = FullTreeFunctionObservationColdUnitReceiptIdentity(
+            unitName,
+            controlGroup,
+            cgroupDevice = 11L,
+            cgroupInode = 12L,
+            cgroupMountId = 13L,
+        )
+        val cgroup = FullTreeFunctionObservationColdCgroupIdentity(
+            Path.of("/sys/fs/cgroup").resolve(controlGroup.removePrefix("/")),
+            device = 11L,
+            inode = 12L,
+            mountId = 13L,
+        )
+        val unit = FullTreeFunctionObservationColdSystemdUnitInventoryEntry(
+            unitName,
+            "loaded",
+            "active",
+            "running",
+            "bounded worker scope",
+        )
+        val candidate = FullTreeFunctionObservationColdUnitSnapshot(
+            managerFeatures = setOf("+PAM", "-SELINUX"),
+            unit = unit,
+            job = null,
+            cgroups = listOf(cgroup),
+        )
+        fun outcome(
+            before: FullTreeFunctionObservationColdUnitSnapshot,
+            after: FullTreeFunctionObservationColdUnitSnapshot = before,
+        ) = classifyFullTreeFunctionObservationColdUnitSnapshots(expected, before, after)
+
+        assertEquals(
+            FullTreeFunctionObservationColdUnitAttachmentObservationOutcome.EXACT_CGROUP_CANDIDATE,
+            outcome(candidate),
+        )
+        val absent = candidate.copy(unit = null, cgroups = emptyList())
+        assertEquals(
+            FullTreeFunctionObservationColdUnitAttachmentObservationOutcome.ABSENT,
+            outcome(absent),
+        )
+        assertEquals(
+            FullTreeFunctionObservationColdUnitAttachmentObservationOutcome.FOREIGN_REPLACEMENT,
+            outcome(candidate.copy(cgroups = listOf(cgroup.copy(inode = 99L)))),
+        )
+        assertEquals(
+            FullTreeFunctionObservationColdUnitAttachmentObservationOutcome.INCONSISTENT_OR_EXITING,
+            outcome(
+                candidate.copy(
+                    unit = unit.copy(activeState = "deactivating", subState = "stop-sigterm"),
+                ),
+            ),
+        )
+        assertEquals(
+            FullTreeFunctionObservationColdUnitAttachmentObservationOutcome.INCONSISTENT_OR_EXITING,
+            outcome(candidate.copy(unit = null)),
+        )
+        assertEquals(
+            FullTreeFunctionObservationColdUnitAttachmentObservationOutcome.CHANGED,
+            outcome(candidate, absent),
+        )
+        assertEquals(
+            FullTreeFunctionObservationColdUnitAttachmentObservationOutcome.CHANGED,
+            outcome(candidate.copy(stable = false)),
+        )
+        assertEquals(
+            FullTreeFunctionObservationColdUnitAttachmentObservationOutcome.CHANGED,
+            outcome(candidate, candidate.copy(managerFeatures = setOf("+PAM", "+SECCOMP", "-SELINUX"))),
+        )
+    }
+
+    @Test
     fun `cleanup fallback always thaws and retries kill before stop and reset`() {
         val calls = mutableListOf<Pair<List<String>, Set<Int>>>()
 
@@ -854,6 +975,12 @@ class FullTreeFunctionObservationIsolatedFixtureRunnerTest {
             }
             assumeTrue(configuration != null, "authenticated recovery boundary is unavailable")
             checkNotNull(configuration)
+            val sleep = Path.of("/usr/bin/sleep").realExecutableOrNull()
+            if (System.getenv("DECOMP_REQUIRE_ORACLE_EXT4_SCRATCH") == "true") {
+                assertTrue(sleep != null, "required CI collision helper /usr/bin/sleep is unavailable")
+            }
+            assumeTrue(sleep != null, "an executable /usr/bin/sleep is required for recovery collision coverage")
+            checkNotNull(sleep)
             val fixture = createFullTreeControlFixture(root.resolve("fixture"))
 
             withPreparedProductionIsolation(
@@ -869,6 +996,7 @@ class FullTreeFunctionObservationIsolatedFixtureRunnerTest {
                 var cold: FullTreeFunctionObservationColdUnitAttachedOperation? = null
                 var recovered: FullTreeFunctionObservationRecoveredUnitAttachedBootObservation? = null
                 var receipt: FullTreeFunctionObservationUnitAttachmentReceipt? = null
+                var foreignOccupant: OccupiedObservationUnit? = null
                 var bodyFailure: Throwable? = null
                 try {
                     val atBoot = FullTreeFunctionObservationIsolatedOperationRunner.launchToBoot(context.ready)
@@ -881,6 +1009,32 @@ class FullTreeFunctionObservationIsolatedFixtureRunnerTest {
                     durable.abandonForColdRecoveryReadOnly()
                     assertFailsWith<IllegalStateException> { durable.requireCurrentAtBoot() }
                     attached = null
+
+                    val liveObservationCommands = mutableListOf<List<String>>()
+                    val liveObserver = FullTreeFunctionObservationColdUnitAbsenceObserver.openWithTestObserver(
+                        context.binding,
+                        configuration,
+                        FullTreeFunctionObservationSystemctlCommandObserver { unitName, arguments ->
+                            if (unitName == context.binding.unitName) liveObservationCommands += arguments
+                        },
+                    )
+                    assertEquals(
+                        FullTreeFunctionObservationColdUnitAttachmentObservationOutcome.EXACT_CGROUP_CANDIDATE,
+                        liveObserver.observeUnitAttachment(historical),
+                    )
+                    assertEquals(
+                        0,
+                        liveObservationCommands.count { arguments ->
+                            arguments.getOrNull(0) == "show" &&
+                                arguments.getOrNull(1) == context.binding.unitName
+                        },
+                    )
+                    assertTrue(
+                        liveObservationCommands.none { arguments ->
+                            arguments.firstOrNull() in setOf("freeze", "thaw", "kill", "stop", "reset-failed")
+                        },
+                    )
+                    requireReceiptMatchedUnitLive(configuration, historical)
 
                     val opened = FullTreeFunctionObservationOperationCoordinator.openExistingUnitAttachedReadOnly(
                         context.authority,
@@ -937,6 +1091,9 @@ class FullTreeFunctionObservationIsolatedFixtureRunnerTest {
                     recovered = null
                     assertFailsWith<IllegalStateException> { observed.requireCurrentAtBoot() }
                     requireReceiptMatchedUnitLive(configuration, historical)
+                    cleanupReceiptMatchedUnitForTest(configuration, historical)
+                    receipt = null
+                    assertObservationUnitAndCgroupAbsent(configuration, historical.unitName)
                     FullTreeFunctionObservationOperationCoordinator.openExistingUnitAttachedReadOnly(
                         context.authority,
                         context.binding,
@@ -944,6 +1101,49 @@ class FullTreeFunctionObservationIsolatedFixtureRunnerTest {
                     ).use { reopened ->
                         assertEquals(historical.receiptSha256, reopened.unitAttachmentReceipt.receiptSha256)
                         reopened.requireCurrentReadOnly()
+                        val absentObservationCommands = mutableListOf<List<String>>()
+                        val absentObserver =
+                            FullTreeFunctionObservationColdUnitAbsenceObserver.openWithTestObserver(
+                                context.binding,
+                                configuration,
+                                FullTreeFunctionObservationSystemctlCommandObserver { unitName, arguments ->
+                                    if (unitName == context.binding.unitName) {
+                                        absentObservationCommands += arguments
+                                    }
+                                },
+                            )
+                        assertEquals(
+                            FullTreeFunctionObservationColdUnitAttachmentObservationOutcome.ABSENT,
+                            absentObserver.observeUnitAttachment(historical),
+                        )
+                        assertTrue(
+                            absentObservationCommands.none { arguments ->
+                                arguments.getOrNull(0) == "show" &&
+                                    arguments.getOrNull(1) == context.binding.unitName
+                            },
+                            "empty unit inventories must not request a named systemd show: " +
+                                absentObservationCommands,
+                        )
+                        assertTrue(
+                            absentObservationCommands.none { arguments ->
+                                arguments.firstOrNull() in
+                                    setOf("freeze", "thaw", "kill", "stop", "reset-failed")
+                            },
+                        )
+
+                        val occupied = startOccupiedObservationUnit(
+                            configuration,
+                            context.binding.unitName,
+                            sleep,
+                        )
+                        foreignOccupant = occupied
+                        assertEquals(
+                            FullTreeFunctionObservationColdUnitAttachmentObservationOutcome.FOREIGN_REPLACEMENT,
+                            absentObserver.observeUnitAttachment(historical),
+                        )
+                        assertOccupiedObservationUnitUnchanged(configuration, occupied)
+                        stopOccupiedObservationUnit(configuration, occupied)
+                        foreignOccupant = null
                     }
                 } catch (failure: Throwable) {
                     bodyFailure = failure
@@ -962,6 +1162,7 @@ class FullTreeFunctionObservationIsolatedFixtureRunnerTest {
                     cleanup { cold?.close() }
                     cleanup { attached?.close() }
                     cleanup { booted?.close() }
+                    cleanup { foreignOccupant?.let { stopOccupiedObservationUnit(configuration, it) } }
                     cleanup { receipt?.let { cleanupReceiptMatchedUnitForTest(configuration, it) } }
                     if (bodyFailure == null) cleanupFailure?.let { throw it }
                 }
