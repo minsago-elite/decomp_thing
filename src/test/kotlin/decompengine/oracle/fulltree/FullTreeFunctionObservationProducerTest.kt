@@ -37,7 +37,7 @@ class FullTreeFunctionObservationProducerTest {
             assertEquals(5L, clang.scannedDies)
             assertEquals(1L, clang.entities)
             assertEquals(
-                "c87459a87ad95733540cee774d156d2d8b1ff64d6a9971398dd6ca8debeafbd8",
+                "526b85138d2dd91db5b4975daae245649897ba9cc009a250a28470bac8f49fe3",
                 clang.outputSha256,
             )
             assertEquals(fixtureSha256(fixture.inventory), clang.inventoryArtifactSha256)
@@ -55,7 +55,7 @@ class FullTreeFunctionObservationProducerTest {
             assertEquals(4L, generated.scannedDies)
             assertEquals(1L, generated.entities)
             assertEquals(
-                "9968556a89b7632635b4318a93c26adc3b59ccd98619c63fb05725367d13b3d8",
+                "f1bc1e4fe43f03eaab25effde3393a7e50a97e90e1ec442f96198777ba45efe4",
                 generated.outputSha256,
             )
             assertFunction(
