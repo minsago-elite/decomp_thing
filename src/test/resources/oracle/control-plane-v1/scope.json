@@ -18,10 +18,10 @@
     }
   },
   "oracle": {
-    "artifactManifestSha256": "4466d1a9fcb7629ba2600007954b776a1fa6ba95dd4e1e9cd6434389b945148d",
+    "artifactManifestSha256": "6bd78d1a4fa0613f37581262bbea15c14e7d86ccf415d1ac383fcf542e39a1f1",
     "id": "clang-llvm-full-tree-22.1.6",
     "richArtifactSha256": "28105cb58b619f88d8718e8cf30c0c3471b7f0c8825e95e171eebc940954b859",
-    "sourceLockSha256": "b5444e7bad42c731fffa5606008b22df972ce780d129e9f8f131b2b4873fef9b",
+    "sourceLockSha256": "0478d3a9279d67489e441d8b154857aa95f45425843d84ed1af3ca89d06e8381",
     "strippedArtifactSha256": "65e57857bfaf9f98a552f2fd371938e11175158bc4c11c849bd6ecbfef30c006"
   },
   "pathPolicy": {

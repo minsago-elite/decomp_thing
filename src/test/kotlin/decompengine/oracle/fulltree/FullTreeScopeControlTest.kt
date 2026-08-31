@@ -42,7 +42,7 @@ class FullTreeScopeControlTest {
         }
 
     @Test
-    fun `scope rejects stale bindings noncanonical JSON duplicate keys and configured limits`() =
+    fun `scope rejects stale bindings noncanonical JSON duplicate keys and configured limits`(): Unit =
         inControlTemporaryDirectory { directory ->
             val stale = createFullTreeControlFixture(directory.resolve("stale"))
             val scope = parseControlObject(stale.scope)
@@ -89,7 +89,7 @@ class FullTreeScopeControlTest {
         }
 
     @Test
-    fun `scope input symlinks and untrusted write modes fail closed`() =
+    fun `scope input symlinks and untrusted write modes fail closed`(): Unit =
         inControlTemporaryDirectory { directory ->
             val linked = createFullTreeControlFixture(directory.resolve("linked"))
             val real = linked.root.resolve("scope-real.json")
@@ -155,8 +155,8 @@ class FullTreeScopeControlTest {
         }
 
     private companion object {
-        const val FROZEN_SCOPE_SHA256 = "80aff055ad48ffdbe11b57efe24fafb859c9a466b258398cf33253bbeba176ba"
-        const val FROZEN_SOURCE_LOCK_SHA256 = "b5444e7bad42c731fffa5606008b22df972ce780d129e9f8f131b2b4873fef9b"
-        const val FROZEN_MANIFEST_SHA256 = "4466d1a9fcb7629ba2600007954b776a1fa6ba95dd4e1e9cd6434389b945148d"
+        const val FROZEN_SCOPE_SHA256 = "9f097308c076fbbc8822169db6088ecfa94e2a95449eb2434a39a60a3db6973e"
+        const val FROZEN_SOURCE_LOCK_SHA256 = "0478d3a9279d67489e441d8b154857aa95f45425843d84ed1af3ca89d06e8381"
+        const val FROZEN_MANIFEST_SHA256 = "6bd78d1a4fa0613f37581262bbea15c14e7d86ccf415d1ac383fcf542e39a1f1"
     }
 }

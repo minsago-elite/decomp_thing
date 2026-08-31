@@ -55,9 +55,9 @@
   },
   "source": {
     "archive": {
-      "bytes": 420,
+      "bytes": 640,
       "fileName": "llvm-project-22.1.6.src.tar.xz",
-      "sha256": "bcc95924348d9400fdf48aec2d4d9ec44d42e7d59f56c35313a1c9caf7ed8768",
+      "sha256": "0caa68b1a7612f1766de5bd66f73bc89c33e8b384953904434c8bded2f6ce419",
       "url": "https://example.invalid/llvm-project-22.1.6.src.tar.xz"
     },
     "archiveRoot": "llvm-project-22.1.6.src",

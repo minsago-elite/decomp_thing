@@ -28,15 +28,15 @@
     }
   ],
   "oracle": {
-    "buildRecordSha256": "aef540be98f2a6d7f46b1c4dec463ee3f01e99b2097d1497de2104327295a357",
+    "buildRecordSha256": "db5f41d44a15d91cf0f0d79a926ce28f1e79cbaf4157471e40c933be2f5e0a35",
     "configurationSha256": "88b4745bb5dc3136f35c9a3ed0456cbd9292c12e5b89e7ae48476d97b5b4692d",
     "inventoryIndexSha256": "e8a49cd70bdcccfeb1d2267da4d1131b3967520620f23f2ed23608942dcbe13e",
-    "scopeSha256": "80aff055ad48ffdbe11b57efe24fafb859c9a466b258398cf33253bbeba176ba",
-    "sourceArchiveBytes": 420,
-    "sourceArchiveSha256": "bcc95924348d9400fdf48aec2d4d9ec44d42e7d59f56c35313a1c9caf7ed8768",
-    "sourceLockSha256": "b5444e7bad42c731fffa5606008b22df972ce780d129e9f8f131b2b4873fef9b"
+    "scopeSha256": "9f097308c076fbbc8822169db6088ecfa94e2a95449eb2434a39a60a3db6973e",
+    "sourceArchiveBytes": 640,
+    "sourceArchiveSha256": "0caa68b1a7612f1766de5bd66f73bc89c33e8b384953904434c8bded2f6ce419",
+    "sourceLockSha256": "0478d3a9279d67489e441d8b154857aa95f45425843d84ed1af3ca89d06e8381"
   },
-  "reportSha256": "d0c6c59f7b2ef9059f04ee352934b4c362e2d855c8e47186af37c37aa8926982",
+  "reportSha256": "af2cb5e6ce26e028a07784f0bace089123749612c8690c3dee3659fcbc44d2aa",
   "schemaVersion": 1,
   "sourceUnits": [
     {

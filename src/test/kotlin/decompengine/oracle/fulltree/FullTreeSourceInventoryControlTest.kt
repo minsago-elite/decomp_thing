@@ -186,7 +186,7 @@ class FullTreeSourceInventoryControlTest {
         }
 
     @Test
-    fun `streamed source archive rejects parent traversal before indexing`() =
+    fun `streamed source archive rejects parent traversal before indexing`(): Unit =
         inControlTemporaryDirectory { directory ->
             val fixture = createFullTreeControlFixture(directory.resolve("fixture"))
             val archivePath = directory.resolve("unsafe-source.tar.xz")
@@ -234,9 +234,9 @@ class FullTreeSourceInventoryControlTest {
          */
         const val FROZEN_CONFIGURATION_SHA256 =
             "88b4745bb5dc3136f35c9a3ed0456cbd9292c12e5b89e7ae48476d97b5b4692d"
-        const val FROZEN_REPORT_SHA256 = "d0c6c59f7b2ef9059f04ee352934b4c362e2d855c8e47186af37c37aa8926982"
-        const val FROZEN_ARCHIVE_SHA256 = "bcc95924348d9400fdf48aec2d4d9ec44d42e7d59f56c35313a1c9caf7ed8768"
+        const val FROZEN_REPORT_SHA256 = "af2cb5e6ce26e028a07784f0bace089123749612c8690c3dee3659fcbc44d2aa"
+        const val FROZEN_ARCHIVE_SHA256 = "0caa68b1a7612f1766de5bd66f73bc89c33e8b384953904434c8bded2f6ce419"
         const val FROZEN_REPORT_ARTIFACT_SHA256 =
-            "3285431b4ecfa07324737f806c40c8cd38a1c85665ce194e112efb364a203483"
+            "a79a1791dcf0e8e4a5a5cc590881614d546e78f025d857619af895f580e55b21"
     }
 }

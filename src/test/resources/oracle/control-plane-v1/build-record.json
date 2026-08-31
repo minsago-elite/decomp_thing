@@ -86,7 +86,7 @@
   },
   "oracle": {
     "id": "clang-driver-22.1.6",
-    "sourceLockSha256": "b5444e7bad42c731fffa5606008b22df972ce780d129e9f8f131b2b4873fef9b",
+    "sourceLockSha256": "0478d3a9279d67489e441d8b154857aa95f45425843d84ed1af3ca89d06e8381",
     "sourceRevision": "fc4aad7b5db3fff421df9a9637605b9ca5667881",
     "version": "22.1.6"
   },

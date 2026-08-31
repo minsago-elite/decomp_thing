@@ -178,7 +178,7 @@ class FullTreeInventoryControlTest {
         }
 
     @Test
-    fun `inventory ordering follows Unicode code points rather than UTF-16 units`() =
+    fun `inventory ordering follows Unicode code points rather than UTF-16 units`(): Unit =
         inControlTemporaryDirectory { directory ->
             val fixture = createFullTreeControlFixture(directory.resolve("unicode"))
             val scope = fixture.authenticatedScope()
@@ -259,6 +259,6 @@ class FullTreeInventoryControlTest {
         const val FROZEN_INVENTORY_INDEX_SHA256 =
             "e8a49cd70bdcccfeb1d2267da4d1131b3967520620f23f2ed23608942dcbe13e"
         const val FROZEN_INVENTORY_ARTIFACT_SHA256 =
-            "c47b4d68323b43873004e7a13705ab1854bce90e80efaa61a961859ade5ec963"
+            "dac7198c2a5d4395bcc9cd46f8c72dbc9ab07178f8740dd9133ed1d44624b7bc"
     }
 }

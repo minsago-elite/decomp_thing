@@ -44,8 +44,12 @@ data class FullTreeControlLimits(
     val maximumExpandedArchiveBytes: Long = 8L * 1024L * 1024L * 1024L,
     val maximumArchiveMembers: Int = 200_000,
     val maximumArchiveMetadataBytes: Int = 1024 * 1024,
-    val maximumArchivePathBytes: Int = 16 * 1024,
+    val maximumArchiveEntryBytes: Long = 512L * 1024L * 1024L,
+    val maximumArchivePathBytes: Int = 4096,
+    val maximumArchiveComponentBytes: Int = 255,
+    val maximumArchiveLinkBytes: Int = 255,
     val maximumArchiveIndexBytes: Long = 64L * 1024L * 1024L,
+    val maximumArchiveSelectedBytes: Int = 1024 * 1024,
     val maximumXzDecoderMemoryKiB: Int = 256 * 1024,
     val maximumDwarfSectionBytes: Long = 4L * 1024L * 1024L * 1024L,
     val maximumDwarfScratchBytes: Long = 8L * 1024L * 1024L * 1024L,
@@ -66,12 +70,16 @@ data class FullTreeControlLimits(
         require(maximumSourceInventoryBytes in 1..64 * 1024 * 1024)
         require(maximumRichArtifactBytes in 1L..1024L * 1024L * 1024L)
         require(maximumSourceArchiveBytes in 1L..512L * 1024L * 1024L)
-        require(maximumExpandedArchiveBytes in 1L..16L * 1024L * 1024L * 1024L)
-        require(maximumArchiveMembers in 1..1_000_000)
-        require(maximumArchiveMetadataBytes in 1..16 * 1024 * 1024)
-        require(maximumArchivePathBytes in 1..1024 * 1024)
-        require(maximumArchiveIndexBytes in 1L..1024L * 1024L * 1024L)
-        require(maximumXzDecoderMemoryKiB in 1..1024 * 1024)
+        require(maximumExpandedArchiveBytes in 1L..8L * 1024L * 1024L * 1024L)
+        require(maximumArchiveMembers in 1..200_000)
+        require(maximumArchiveMetadataBytes in 1..1024 * 1024)
+        require(maximumArchiveEntryBytes in 1L..512L * 1024L * 1024L)
+        require(maximumArchivePathBytes in 1..4096)
+        require(maximumArchiveComponentBytes in 1..255)
+        require(maximumArchiveLinkBytes in 1..255)
+        require(maximumArchiveIndexBytes in 1L..64L * 1024L * 1024L)
+        require(maximumArchiveSelectedBytes in 0..1024 * 1024)
+        require(maximumXzDecoderMemoryKiB in 1..256 * 1024)
         require(maximumDwarfSectionBytes in 1L..8L * 1024L * 1024L * 1024L)
         require(maximumDwarfScratchBytes in 1L..16L * 1024L * 1024L * 1024L)
         require(maximumDwarfMetadataBytes in 1L..1024L * 1024L * 1024L)
@@ -207,6 +215,21 @@ internal class StableControlFile private constructor(
     private val permissions: Set<PosixFilePermission>,
     private val channel: FileChannel,
 ) : AutoCloseable {
+    fun readAt(position: Long, destination: ByteArray, offset: Int, length: Int): Int {
+        if (offset < 0 || length < 0 || offset > destination.size - length) {
+            throw IndexOutOfBoundsException()
+        }
+        if (position < 0L || position > size) {
+            throw FullTreeControlException("large control input read position exceeds its authenticated file")
+        }
+        if (length == 0) return 0
+        if (position == size) return -1
+        val requested = minOf(length.toLong(), size - position).toInt()
+        val read = channel.read(ByteBuffer.wrap(destination, offset, requested), position)
+        if (read <= 0) throw FullTreeControlException("large control input ended during positional reading")
+        return read
+    }
+
     fun sha256(
         checkpoint: (String) -> Unit = {},
         label: String = "large control input",
