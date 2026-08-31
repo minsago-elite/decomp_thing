@@ -421,13 +421,20 @@ class FullTreeFunctionObservationOperationCoordinatorTest {
                     val history = requireNotNull(authority.openExisting(binding)).use { journal ->
                         requireNotNull(journal.loadOrNull())
                     }
-                    val legacyAttached = FullTreeFunctionObservationOperationTransition.unitAttached(
+                    val leasedTransition = checkNotNull(history.latest)
+                    val receipt = attachmentReceipt(binding, leasedTransition)
+                    val attached = FullTreeFunctionObservationOperationTransition.unitAttached(
                         binding,
-                        checkNotNull(history.latest),
+                        leasedTransition,
+                        receipt,
                     )
                     writeImmutable(
-                        journalDirectory.resolve(legacyAttached.fileName),
-                        legacyAttached.canonicalBytes(),
+                        journalDirectory.resolve(UNIT_ATTACHMENT_RECEIPT_FILE),
+                        receipt.canonicalBytes(),
+                    )
+                    writeImmutable(
+                        journalDirectory.resolve(attached.fileName),
+                        attached.canonicalBytes(),
                     )
                     val before = immutableFileSnapshot(journalDirectory)
                     val mountNames = entryNames(mount)
@@ -1075,6 +1082,78 @@ class FullTreeFunctionObservationOperationCoordinatorTest {
             ),
         )
 
+    private fun attachmentReceipt(
+        binding: FullTreeFunctionObservationOperationBinding,
+        leased: FullTreeFunctionObservationOperationTransition,
+    ): FullTreeFunctionObservationUnitAttachmentReceipt {
+        fun process(
+            role: FullTreeFunctionObservationAttachmentProcessRole,
+            hostPid: Long,
+            parentRole: FullTreeFunctionObservationAttachmentProcessRole?,
+            namespacePids: List<Long>,
+            executableDevice: Long,
+            executableInode: Long,
+            executableMountId: Long,
+        ) = FullTreeFunctionObservationAttachmentProcessIdentity(
+            role = role,
+            hostPid = hostPid,
+            startTimeTicks = hostPid * 100L,
+            parentRole = parentRole,
+            namespacePids = namespacePids,
+            executableDevice = executableDevice,
+            executableInode = executableInode,
+            executableMountId = executableMountId,
+        )
+        return FullTreeFunctionObservationUnitAttachmentReceipt.create(
+            binding = binding,
+            leasedTransition = leased,
+            bootId = "1".padStart(32, '0'),
+            invocationId = "2".padStart(32, '0'),
+            controlGroup = "/user.slice/user-1000.slice/user@1000.service/app.slice/${binding.unitName}",
+            cgroupDevice = 301,
+            cgroupInode = 401,
+            cgroupMountId = 501,
+            processes = listOf(
+                process(
+                    FullTreeFunctionObservationAttachmentProcessRole.OUTER_BUBBLEWRAP,
+                    1010,
+                    null,
+                    listOf(1010),
+                    101,
+                    111,
+                    121,
+                ),
+                process(
+                    FullTreeFunctionObservationAttachmentProcessRole.NAMESPACE_INIT_BUBBLEWRAP,
+                    1011,
+                    FullTreeFunctionObservationAttachmentProcessRole.OUTER_BUBBLEWRAP,
+                    listOf(1011, 1),
+                    101,
+                    111,
+                    121,
+                ),
+                process(
+                    FullTreeFunctionObservationAttachmentProcessRole.SUPERVISOR_JVM,
+                    1012,
+                    FullTreeFunctionObservationAttachmentProcessRole.NAMESPACE_INIT_BUBBLEWRAP,
+                    listOf(1012, 2),
+                    201,
+                    211,
+                    221,
+                ),
+                process(
+                    FullTreeFunctionObservationAttachmentProcessRole.WORKER_JVM,
+                    1013,
+                    FullTreeFunctionObservationAttachmentProcessRole.SUPERVISOR_JVM,
+                    listOf(1013, 3),
+                    201,
+                    211,
+                    221,
+                ),
+            ),
+        )
+    }
+
     private fun isolationConfiguration(): FullTreeFunctionObservationIsolationConfiguration {
         val javaRuntime = Path.of("/provisioned/java")
         val tool = Path.of("/provisioned/tools")
@@ -1177,5 +1256,6 @@ class FullTreeFunctionObservationOperationCoordinatorTest {
         const val EXPECTED_MAXIMUM_FILESYSTEM_INODES = 4096L
         const val LEASE_RECORD_FILE = "lease.json"
         const val DISK_EVIDENCE_FILE = "disk-evidence.json"
+        const val UNIT_ATTACHMENT_RECEIPT_FILE = "unit-attachment.json"
     }
 }

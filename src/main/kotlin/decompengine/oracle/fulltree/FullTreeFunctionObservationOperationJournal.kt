@@ -14,6 +14,7 @@ import decompengine.oracle.core.StrictJsonLimits
 import java.nio.file.Files
 import java.nio.file.LinkOption
 import java.nio.file.Path
+import kotlinx.serialization.json.JsonArray
 import kotlinx.serialization.json.JsonNull
 import kotlinx.serialization.json.JsonObject
 import kotlinx.serialization.json.JsonPrimitive
@@ -26,10 +27,11 @@ internal class FullTreeFunctionObservationOperationJournalException(
 /**
  * Immutable request preimage and deterministic names shared by every operation-owned resource.
  *
- * Version 3 intentionally rejects earlier journals: the request commits to a Kotlin-derived
+ * Version 4 intentionally rejects earlier journals: the request commits to a Kotlin-derived
  * isolation-configuration identity, the exact fixed-disk authority provider, and the journal
- * protocol that persists exact canonical disk evidence before LEASED. These commitments still do
- * not authorize a launch, recovery mutation, lease release, or output publication.
+ * protocol that persists exact canonical disk evidence before LEASED and an exact attachment
+ * receipt before UNIT_ATTACHED. These commitments still do not authorize a launch, recovery
+ * mutation, lease release, or output publication.
  */
 internal class FullTreeFunctionObservationOperationBinding private constructor(
     val schemaVersion: Int,
@@ -287,6 +289,273 @@ internal class FullTreeFunctionObservationOperationBinding private constructor(
     }
 }
 
+internal enum class FullTreeFunctionObservationAttachmentProcessRole(val wireName: String) {
+    OUTER_BUBBLEWRAP("outer-bubblewrap"),
+    NAMESPACE_INIT_BUBBLEWRAP("namespace-init-bubblewrap"),
+    SUPERVISOR_JVM("supervisor-jvm"),
+    WORKER_JVM("worker-jvm"),
+    ;
+
+    companion object {
+        fun fromWireName(value: String): FullTreeFunctionObservationAttachmentProcessRole =
+            entries.singleOrNull { it.wireName == value }
+                ?: journalFail("function-observation attachment process role is invalid")
+    }
+}
+
+/** Canonical claimed identity facts for one BOOT process; raw values are not a live proof. */
+internal class FullTreeFunctionObservationAttachmentProcessIdentity(
+    val role: FullTreeFunctionObservationAttachmentProcessRole,
+    val hostPid: Long,
+    val startTimeTicks: Long,
+    val parentRole: FullTreeFunctionObservationAttachmentProcessRole?,
+    namespacePids: List<Long>,
+    val executableDevice: Long,
+    val executableInode: Long,
+    val executableMountId: Long,
+) {
+    val namespacePids: List<Long> = java.util.List.copyOf(namespacePids)
+
+    init {
+        if (
+            hostPid !in 1L..Int.MAX_VALUE || startTimeTicks <= 0L ||
+            executableDevice <= 0L || executableInode <= 0L || executableMountId <= 0L ||
+            this.namespacePids.isEmpty() || this.namespacePids.size > 2 ||
+            this.namespacePids.first() != hostPid ||
+            this.namespacePids.any { it !in 1L..Int.MAX_VALUE }
+        ) journalFail("function-observation attachment process identity is invalid")
+    }
+
+    internal fun canonicalValue(): JsonObject = JsonObject(
+        mapOf(
+            "executableDevice" to JsonPrimitive(executableDevice),
+            "executableInode" to JsonPrimitive(executableInode),
+            "executableMountId" to JsonPrimitive(executableMountId),
+            "hostPid" to JsonPrimitive(hostPid),
+            "namespacePids" to JsonArray(namespacePids.map(::JsonPrimitive)),
+            "parentRole" to (parentRole?.wireName?.let(::JsonPrimitive) ?: JsonNull),
+            "role" to JsonPrimitive(role.wireName),
+            "startTimeTicks" to JsonPrimitive(startTimeTicks),
+        ),
+    )
+
+    internal companion object {
+        fun parse(value: JsonObject): FullTreeFunctionObservationAttachmentProcessIdentity {
+            value.requireExactKeys(
+                UNIT_ATTACHMENT_PROCESS_FIELDS,
+                "function-observation attachment process identity",
+            )
+            return FullTreeFunctionObservationAttachmentProcessIdentity(
+                role = FullTreeFunctionObservationAttachmentProcessRole.fromWireName(
+                    value.journalString("role"),
+                ),
+                hostPid = value.journalLong("hostPid"),
+                startTimeTicks = value.journalLong("startTimeTicks"),
+                parentRole = value.journalOptionalString("parentRole")?.let(
+                    FullTreeFunctionObservationAttachmentProcessRole::fromWireName,
+                ),
+                namespacePids = value.journalArray("namespacePids").map { element ->
+                    val primitive = element as? JsonPrimitive
+                        ?: journalFail("attachment namespace PID must be an integer")
+                    if (primitive.isString) journalFail("attachment namespace PID must be an integer")
+                    primitive.content.toLongOrNull()
+                        ?: journalFail("attachment namespace PID must be an integer")
+                },
+                executableDevice = value.journalLong("executableDevice"),
+                executableInode = value.journalLong("executableInode"),
+                executableMountId = value.journalLong("executableMountId"),
+            )
+        }
+    }
+}
+
+/**
+ * Canonical historical assertion describing one claimed live BOOT attachment observation.
+ *
+ * The receipt serializes facts that a cold coordinator can later match while opening fresh pidfds;
+ * its reconstructible values and hashes authenticate neither their origin nor their observation.
+ * It does not serialize a pidfd, prove current liveness, or authorize adoption or mutation.
+ */
+internal class FullTreeFunctionObservationUnitAttachmentReceipt private constructor(
+    val schemaVersion: Int,
+    val provider: String,
+    val operationId: String,
+    val requestSha256: String,
+    val bindingSha256: String,
+    val leasedTransitionSha256: String,
+    val diskEvidenceSha256: String,
+    val isolationConfigurationSha256: String,
+    val unitName: String,
+    val bootId: String,
+    val invocationId: String,
+    val controlGroup: String,
+    val cgroupDevice: Long,
+    val cgroupInode: Long,
+    val cgroupMountId: Long,
+    processes: List<FullTreeFunctionObservationAttachmentProcessIdentity>,
+    val receiptSha256: String,
+) {
+    val processes: List<FullTreeFunctionObservationAttachmentProcessIdentity> =
+        java.util.List.copyOf(processes)
+
+    init {
+        if (
+            schemaVersion != UNIT_ATTACHMENT_RECEIPT_SCHEMA_VERSION ||
+            provider != UNIT_ATTACHMENT_RECEIPT_PROVIDER ||
+            !operationId.matches(SHA256) || !requestSha256.matches(SHA256) ||
+            !bindingSha256.matches(SHA256) || !leasedTransitionSha256.matches(SHA256) ||
+            !diskEvidenceSha256.matches(SHA256) || !isolationConfigurationSha256.matches(SHA256) ||
+            !unitName.matches(PRODUCTION_OPERATION_UNIT_NAME) ||
+            !bootId.matches(SYSTEMD_ID128) || bootId in RESERVED_ID128S ||
+            !invocationId.matches(SYSTEMD_ID128) || invocationId in RESERVED_ID128S ||
+            cgroupDevice <= 0L || cgroupInode <= 0L || cgroupMountId <= 0L ||
+            !receiptSha256.matches(SHA256)
+        ) journalFail("function-observation unit-attachment receipt has invalid identities")
+        requireCanonicalControlGroup(controlGroup, unitName)
+        requireCanonicalAttachmentProcesses(this.processes)
+        if (
+            receiptSha256 != ZERO_SHA256 &&
+            receiptSha256 != sha256(canonicalBytes(includeSelfHash = false))
+        ) journalFail("function-observation unit-attachment receipt self hash is invalid")
+    }
+
+    fun canonicalBytes(): ByteArray = canonicalBytes(includeSelfHash = true)
+
+    internal fun canonicalBytesWithoutSelfHashForTest(): ByteArray = canonicalBytes(includeSelfHash = false)
+
+    private fun canonicalBytes(includeSelfHash: Boolean): ByteArray = OracleJson.canonicalBytes(
+        JsonObject(
+            buildMap {
+                put("bindingSha256", JsonPrimitive(bindingSha256))
+                put("bootId", JsonPrimitive(bootId))
+                put("cgroupDevice", JsonPrimitive(cgroupDevice))
+                put("cgroupInode", JsonPrimitive(cgroupInode))
+                put("cgroupMountId", JsonPrimitive(cgroupMountId))
+                put("controlGroup", JsonPrimitive(controlGroup))
+                put("diskEvidenceSha256", JsonPrimitive(diskEvidenceSha256))
+                put("invocationId", JsonPrimitive(invocationId))
+                put("isolationConfigurationSha256", JsonPrimitive(isolationConfigurationSha256))
+                put("leasedTransitionSha256", JsonPrimitive(leasedTransitionSha256))
+                put("operationId", JsonPrimitive(operationId))
+                put("processes", JsonArray(processes.map { it.canonicalValue() }))
+                put("provider", JsonPrimitive(provider))
+                if (includeSelfHash) put("receiptSha256", JsonPrimitive(receiptSha256))
+                put("requestSha256", JsonPrimitive(requestSha256))
+                put("schemaVersion", JsonPrimitive(schemaVersion))
+                put("unitName", JsonPrimitive(unitName))
+            },
+        ),
+        UNIT_ATTACHMENT_JSON_LIMITS,
+    )
+
+    internal companion object {
+        fun create(
+            binding: FullTreeFunctionObservationOperationBinding,
+            leasedTransition: FullTreeFunctionObservationOperationTransition,
+            bootId: String,
+            invocationId: String,
+            controlGroup: String,
+            cgroupDevice: Long,
+            cgroupInode: Long,
+            cgroupMountId: Long,
+            processes: List<FullTreeFunctionObservationAttachmentProcessIdentity>,
+        ): FullTreeFunctionObservationUnitAttachmentReceipt {
+            if (
+                leasedTransition.phase != FullTreeFunctionObservationOperationPhase.LEASED ||
+                leasedTransition.operationId != binding.operationId ||
+                leasedTransition.bindingSha256 != binding.bindingSha256
+            ) journalFail("unit-attachment receipt requires the exact leased transition")
+            val diskEvidenceSha256 = leasedTransition.diskEvidenceSha256
+                ?: journalFail("unit-attachment receipt requires leased disk evidence")
+            val arguments = UnitAttachmentReceiptArguments(
+                binding,
+                leasedTransition.transitionSha256,
+                diskEvidenceSha256,
+                bootId,
+                invocationId,
+                controlGroup,
+                cgroupDevice,
+                cgroupInode,
+                cgroupMountId,
+                processes,
+            )
+            val provisional = arguments.receipt(ZERO_SHA256)
+            return arguments.receipt(sha256(provisional.canonicalBytes(includeSelfHash = false)))
+        }
+
+        fun parseCanonical(bytes: ByteArray): FullTreeFunctionObservationUnitAttachmentReceipt =
+            translateJournalFailures("parse function-observation unit-attachment receipt") {
+                val root = OracleJson.parseCanonical(bytes, UNIT_ATTACHMENT_JSON_LIMITS) as? JsonObject
+                    ?: journalFail("function-observation unit-attachment receipt must be an object")
+                root.requireExactKeys(
+                    UNIT_ATTACHMENT_RECEIPT_FIELDS,
+                    "function-observation unit-attachment receipt",
+                )
+                FullTreeFunctionObservationUnitAttachmentReceipt(
+                    schemaVersion = root.journalInt("schemaVersion"),
+                    provider = root.journalString("provider"),
+                    operationId = root.journalString("operationId"),
+                    requestSha256 = root.journalString("requestSha256"),
+                    bindingSha256 = root.journalString("bindingSha256"),
+                    leasedTransitionSha256 = root.journalString("leasedTransitionSha256"),
+                    diskEvidenceSha256 = root.journalString("diskEvidenceSha256"),
+                    isolationConfigurationSha256 = root.journalString("isolationConfigurationSha256"),
+                    unitName = root.journalString("unitName"),
+                    bootId = root.journalString("bootId"),
+                    invocationId = root.journalString("invocationId"),
+                    controlGroup = root.journalString("controlGroup"),
+                    cgroupDevice = root.journalLong("cgroupDevice"),
+                    cgroupInode = root.journalLong("cgroupInode"),
+                    cgroupMountId = root.journalLong("cgroupMountId"),
+                    processes = root.journalArray("processes").map { value ->
+                        FullTreeFunctionObservationAttachmentProcessIdentity.parse(
+                            value as? JsonObject
+                                ?: journalFail("attachment process identity must be an object"),
+                        )
+                    },
+                    receiptSha256 = root.journalString("receiptSha256"),
+                ).also { receipt ->
+                    if (receipt.receiptSha256 == ZERO_SHA256) {
+                        journalFail("function-observation unit-attachment receipt cannot retain its provisional hash")
+                    }
+                }
+            }
+    }
+
+    private data class UnitAttachmentReceiptArguments(
+        val binding: FullTreeFunctionObservationOperationBinding,
+        val leasedTransitionSha256: String,
+        val diskEvidenceSha256: String,
+        val bootId: String,
+        val invocationId: String,
+        val controlGroup: String,
+        val cgroupDevice: Long,
+        val cgroupInode: Long,
+        val cgroupMountId: Long,
+        val processes: List<FullTreeFunctionObservationAttachmentProcessIdentity>,
+    ) {
+        fun receipt(selfHash: String) = FullTreeFunctionObservationUnitAttachmentReceipt(
+            schemaVersion = UNIT_ATTACHMENT_RECEIPT_SCHEMA_VERSION,
+            provider = UNIT_ATTACHMENT_RECEIPT_PROVIDER,
+            operationId = binding.operationId,
+            requestSha256 = binding.requestSha256,
+            bindingSha256 = binding.bindingSha256,
+            leasedTransitionSha256 = leasedTransitionSha256,
+            diskEvidenceSha256 = diskEvidenceSha256,
+            isolationConfigurationSha256 = binding.isolationConfigurationSha256,
+            unitName = binding.unitName,
+            bootId = bootId,
+            invocationId = invocationId,
+            controlGroup = controlGroup,
+            cgroupDevice = cgroupDevice,
+            cgroupInode = cgroupInode,
+            cgroupMountId = cgroupMountId,
+            processes = processes,
+            receiptSha256 = selfHash,
+        )
+    }
+}
+
 internal enum class FullTreeFunctionObservationOperationPhase(val wireName: String) {
     PREPARING("preparing"),
     LEASED("leased"),
@@ -317,6 +586,7 @@ internal class FullTreeFunctionObservationOperationTransition private constructo
     val previousTransitionSha256: String,
     val phase: FullTreeFunctionObservationOperationPhase,
     val diskEvidenceSha256: String?,
+    val unitAttachmentReceiptSha256: String?,
     val outputSha256: String?,
     val outputBytes: Long?,
     val transitionSha256: String,
@@ -326,30 +596,43 @@ internal class FullTreeFunctionObservationOperationTransition private constructo
             schemaVersion != OPERATION_TRANSITION_SCHEMA_VERSION || provider != OPERATION_PROVIDER ||
             !operationId.matches(SHA256) || !bindingSha256.matches(SHA256) ||
             sequence !in 0..MAXIMUM_OPERATION_TRANSITIONS || !previousTransitionSha256.matches(SHA256) ||
-            diskEvidenceSha256?.matches(SHA256) == false || outputSha256?.matches(SHA256) == false ||
+            diskEvidenceSha256?.matches(SHA256) == false ||
+            unitAttachmentReceiptSha256?.matches(SHA256) == false ||
+            outputSha256?.matches(SHA256) == false ||
             outputBytes != null && outputBytes <= 0L || !transitionSha256.matches(SHA256)
         ) journalFail("function-observation operation transition has invalid fields")
         when (phase) {
             FullTreeFunctionObservationOperationPhase.PREPARING -> if (
                 sequence != 0 || previousTransitionSha256 != ZERO_SHA256 ||
-                diskEvidenceSha256 != null || outputSha256 != null || outputBytes != null
+                diskEvidenceSha256 != null || unitAttachmentReceiptSha256 != null ||
+                outputSha256 != null || outputBytes != null
             ) journalFail("preparing transition has invalid state")
 
-            FullTreeFunctionObservationOperationPhase.LEASED,
-            FullTreeFunctionObservationOperationPhase.UNIT_ATTACHED,
-            -> if (diskEvidenceSha256 == null || outputSha256 != null || outputBytes != null) {
+            FullTreeFunctionObservationOperationPhase.LEASED -> if (
+                diskEvidenceSha256 == null || unitAttachmentReceiptSha256 != null ||
+                outputSha256 != null || outputBytes != null
+            ) {
                 journalFail("leased operation transition has invalid evidence")
             }
+
+            FullTreeFunctionObservationOperationPhase.UNIT_ATTACHED -> if (
+                diskEvidenceSha256 == null || unitAttachmentReceiptSha256 == null ||
+                outputSha256 != null || outputBytes != null
+            ) journalFail("unit-attached operation transition lacks exact evidence")
 
             FullTreeFunctionObservationOperationPhase.CGROUP_ABSENT,
             FullTreeFunctionObservationOperationPhase.PUBLISHED,
             FullTreeFunctionObservationOperationPhase.COMPLETE,
-            -> if (diskEvidenceSha256 == null || outputSha256 == null || outputBytes == null) {
+            -> if (
+                diskEvidenceSha256 == null || unitAttachmentReceiptSha256 == null ||
+                outputSha256 == null || outputBytes == null
+            ) {
                 journalFail("post-worker operation transition lacks exact evidence")
             }
 
             FullTreeFunctionObservationOperationPhase.RECOVERED_ABORT -> if (
-                outputSha256 != null || outputBytes != null
+                outputSha256 != null || outputBytes != null ||
+                unitAttachmentReceiptSha256 != null && diskEvidenceSha256 == null
             ) journalFail("recovered-abort transition must not retain released output evidence")
         }
         if (
@@ -379,6 +662,10 @@ internal class FullTreeFunctionObservationOperationTransition private constructo
                 put("schemaVersion", JsonPrimitive(schemaVersion))
                 put("sequence", JsonPrimitive(sequence))
                 if (includeSelfHash) put("transitionSha256", JsonPrimitive(transitionSha256))
+                put(
+                    "unitAttachmentReceiptSha256",
+                    unitAttachmentReceiptSha256?.let(::JsonPrimitive) ?: JsonNull,
+                )
             },
         ),
         OPERATION_JSON_LIMITS,
@@ -392,6 +679,7 @@ internal class FullTreeFunctionObservationOperationTransition private constructo
                 previousTransitionSha256 = ZERO_SHA256,
                 phase = FullTreeFunctionObservationOperationPhase.PREPARING,
                 diskEvidenceSha256 = null,
+                unitAttachmentReceiptSha256 = null,
                 outputSha256 = null,
                 outputBytes = null,
             )
@@ -410,29 +698,33 @@ internal class FullTreeFunctionObservationOperationTransition private constructo
                 previous.transitionSha256,
                 FullTreeFunctionObservationOperationPhase.LEASED,
                 diskEvidence.evidenceSha256,
+                unitAttachmentReceiptSha256 = null,
                 outputSha256 = null,
                 outputBytes = null,
             ).also { requireEvidenceContinuity(previous, it) }
         }
 
         /**
-         * Builds canonical UNIT_ATTACHED bytes for validation and recovery. Construction is never
-         * attachment authority, and the generic journal API deliberately refuses to publish these
-         * bytes. A future live-unit coordinator must supply a non-forgeable proof to its dedicated
-         * recorder before this phase can be authored by production Kotlin.
+         * Builds canonical UNIT_ATTACHED bytes for validation and recovery. Construction and the
+         * raw receipt are serialization primitives, never attachment authority. The generic journal
+         * API deliberately refuses these bytes; production composition must hide the dedicated
+         * recorder behind an opaque, repeatedly validated live-attachment typestate.
          */
         fun unitAttached(
             binding: FullTreeFunctionObservationOperationBinding,
             previous: FullTreeFunctionObservationOperationTransition,
+            receipt: FullTreeFunctionObservationUnitAttachmentReceipt,
         ): FullTreeFunctionObservationOperationTransition {
             requireTransitionAllowed(previous.phase, FullTreeFunctionObservationOperationPhase.UNIT_ATTACHED)
             requireTransitionBinding(binding, previous)
+            requireUnitAttachmentReceiptBinding(binding, previous, receipt)
             return create(
                 binding,
                 Math.addExact(previous.sequence, 1),
                 previous.transitionSha256,
                 FullTreeFunctionObservationOperationPhase.UNIT_ATTACHED,
                 previous.diskEvidenceSha256,
+                receipt.receiptSha256,
                 outputSha256 = null,
                 outputBytes = null,
             ).also { requireEvidenceContinuity(previous, it) }
@@ -443,11 +735,20 @@ internal class FullTreeFunctionObservationOperationTransition private constructo
             binding: FullTreeFunctionObservationOperationBinding,
             previous: FullTreeFunctionObservationOperationTransition,
             preparedDiskEvidence: FullTreeDiskScratchEvidence? = null,
+            preparedUnitAttachmentReceipt: FullTreeFunctionObservationUnitAttachmentReceipt? = null,
         ): FullTreeFunctionObservationOperationTransition {
             requireTransitionAllowed(previous.phase, FullTreeFunctionObservationOperationPhase.RECOVERED_ABORT)
             requireTransitionBinding(binding, previous)
             preparedDiskEvidence?.let { requireDiskEvidenceBinding(binding, it) }
+            preparedUnitAttachmentReceipt?.let { receipt ->
+                if (previous.phase != FullTreeFunctionObservationOperationPhase.LEASED) {
+                    journalFail("prepared unit-attachment receipt requires a leased abort prefix")
+                }
+                requireUnitAttachmentReceiptBinding(binding, previous, receipt)
+            }
             val diskEvidenceSha256 = previous.diskEvidenceSha256 ?: preparedDiskEvidence?.evidenceSha256
+            val unitAttachmentReceiptSha256 =
+                previous.unitAttachmentReceiptSha256 ?: preparedUnitAttachmentReceipt?.receiptSha256
             if (
                 previous.diskEvidenceSha256 != null && preparedDiskEvidence != null &&
                 previous.diskEvidenceSha256 != preparedDiskEvidence.evidenceSha256
@@ -458,6 +759,7 @@ internal class FullTreeFunctionObservationOperationTransition private constructo
                 previous.transitionSha256,
                 FullTreeFunctionObservationOperationPhase.RECOVERED_ABORT,
                 diskEvidenceSha256,
+                unitAttachmentReceiptSha256,
                 outputSha256 = null,
                 outputBytes = null,
             ).also { requireEvidenceContinuity(previous, it) }
@@ -486,6 +788,7 @@ internal class FullTreeFunctionObservationOperationTransition private constructo
                 previous.transitionSha256,
                 phase,
                 previous.diskEvidenceSha256,
+                previous.unitAttachmentReceiptSha256,
                 outputSha256,
                 outputBytes,
             ).also { requireEvidenceContinuity(previous, it) }
@@ -505,6 +808,8 @@ internal class FullTreeFunctionObservationOperationTransition private constructo
                     previousTransitionSha256 = root.journalString("previousTransitionSha256"),
                     phase = FullTreeFunctionObservationOperationPhase.fromWireName(root.journalString("phase")),
                     diskEvidenceSha256 = root.journalOptionalString("diskEvidenceSha256"),
+                    unitAttachmentReceiptSha256 =
+                        root.journalOptionalString("unitAttachmentReceiptSha256"),
                     outputSha256 = root.journalOptionalString("outputSha256"),
                     outputBytes = root.journalOptionalLong("outputBytes"),
                     transitionSha256 = root.journalString("transitionSha256"),
@@ -521,6 +826,7 @@ internal class FullTreeFunctionObservationOperationTransition private constructo
             previousTransitionSha256: String,
             phase: FullTreeFunctionObservationOperationPhase,
             diskEvidenceSha256: String?,
+            unitAttachmentReceiptSha256: String?,
             outputSha256: String?,
             outputBytes: Long?,
         ): FullTreeFunctionObservationOperationTransition {
@@ -530,6 +836,7 @@ internal class FullTreeFunctionObservationOperationTransition private constructo
                 previousTransitionSha256,
                 phase,
                 diskEvidenceSha256,
+                unitAttachmentReceiptSha256,
                 outputSha256,
                 outputBytes,
             )
@@ -544,6 +851,7 @@ internal class FullTreeFunctionObservationOperationTransition private constructo
         val previousTransitionSha256: String,
         val phase: FullTreeFunctionObservationOperationPhase,
         val diskEvidenceSha256: String?,
+        val unitAttachmentReceiptSha256: String?,
         val outputSha256: String?,
         val outputBytes: Long?,
     ) {
@@ -556,6 +864,7 @@ internal class FullTreeFunctionObservationOperationTransition private constructo
             previousTransitionSha256 = previousTransitionSha256,
             phase = phase,
             diskEvidenceSha256 = diskEvidenceSha256,
+            unitAttachmentReceiptSha256 = unitAttachmentReceiptSha256,
             outputSha256 = outputSha256,
             outputBytes = outputBytes,
             transitionSha256 = selfHash,
@@ -567,6 +876,7 @@ internal class FullTreeFunctionObservationOperationHistory private constructor(
     val binding: FullTreeFunctionObservationOperationBinding,
     val transitions: List<FullTreeFunctionObservationOperationTransition>,
     val diskEvidence: FullTreeDiskScratchEvidence?,
+    val unitAttachmentReceipt: FullTreeFunctionObservationUnitAttachmentReceipt?,
 ) {
     val latest: FullTreeFunctionObservationOperationTransition?
         get() = transitions.lastOrNull()
@@ -594,11 +904,32 @@ internal class FullTreeFunctionObservationOperationHistory private constructor(
         return evidence
     }
 
+    /** Returns only a receipt introduced by an exact typed link; staged bytes are insufficient. */
+    fun requireUnitAttachmentReceiptIntroducedAt(
+        phase: FullTreeFunctionObservationOperationPhase,
+    ): FullTreeFunctionObservationUnitAttachmentReceipt {
+        if (phase !in setOf(
+                FullTreeFunctionObservationOperationPhase.UNIT_ATTACHED,
+                FullTreeFunctionObservationOperationPhase.RECOVERED_ABORT,
+            )
+        ) journalFail("function-observation attachment receipt requires a typed introduction phase")
+        val receipt = unitAttachmentReceipt
+            ?: journalFail("function-observation history has no exact unit-attachment receipt")
+        val introduction = transitions.firstOrNull { it.unitAttachmentReceiptSha256 != null }
+            ?: journalFail("function-observation unit-attachment receipt is still staged")
+        if (
+            introduction.phase != phase ||
+            introduction.unitAttachmentReceiptSha256 != receipt.receiptSha256
+        ) journalFail("function-observation attachment receipt has a different introduction phase")
+        return receipt
+    }
+
     internal companion object {
         fun validate(
             binding: FullTreeFunctionObservationOperationBinding,
             transitions: List<FullTreeFunctionObservationOperationTransition>,
             diskEvidence: FullTreeDiskScratchEvidence? = null,
+            unitAttachmentReceipt: FullTreeFunctionObservationUnitAttachmentReceipt? = null,
         ): FullTreeFunctionObservationOperationHistory {
             if (transitions.size > MAXIMUM_OPERATION_TRANSITIONS + 1) {
                 journalFail("function-observation operation history exceeds its transition bound")
@@ -623,7 +954,13 @@ internal class FullTreeFunctionObservationOperationHistory private constructor(
                 }
             }
             requirePersistedDiskEvidence(binding, transitions, diskEvidence)
-            return FullTreeFunctionObservationOperationHistory(binding, transitions.toList(), diskEvidence)
+            requirePersistedUnitAttachmentReceipt(binding, transitions, unitAttachmentReceipt)
+            return FullTreeFunctionObservationOperationHistory(
+                binding,
+                transitions.toList(),
+                diskEvidence,
+                unitAttachmentReceipt,
+            )
         }
     }
 }
@@ -862,6 +1199,7 @@ internal enum class FullTreeFunctionObservationColdCompletionKind {
     NONE,
     BINDING,
     DISK_EVIDENCE,
+    UNIT_ATTACHMENT_RECEIPT,
     TRANSITION,
 }
 
@@ -964,6 +1302,69 @@ internal class FullTreeFunctionObservationOperationJournal internal constructor(
         appendLoaded(prepared, transition, transitionFaultInjector)
     }
 
+    /**
+     * Durably records a canonical attachment assertion before appending UNIT_ATTACHED.
+     *
+     * This raw journal layer validates bytes and ordering only. Its reconstructible arguments are
+     * forgeable assertions: it does not inspect systemd, a cgroup, or pidfds and is not a production
+     * authority boundary. Production composition must retain and revalidate a separately opaque
+     * live proof before and after this transaction. A crash may leave the exact receipt staged
+     * beside LEASED, but can never leave UNIT_ATTACHED without the immutable sidecar named by that
+     * transition.
+     */
+    @Synchronized
+    fun recordUnitAttached(
+        receipt: FullTreeFunctionObservationUnitAttachmentReceipt,
+        receiptFaultInjector: DescriptorBoundStateFaultInjector? = null,
+        transitionFaultInjector: DescriptorBoundStateFaultInjector? = null,
+    ): FullTreeFunctionObservationOperationHistory = boundOperation {
+        val canonicalReceipt = parseJournalUnitAttachmentReceipt(receipt.canonicalBytes())
+        val current = loadRequired(allowedAtomicTarget = UNIT_ATTACHMENT_RECEIPT_FILE)
+        current.transitions.firstOrNull {
+            it.phase == FullTreeFunctionObservationOperationPhase.UNIT_ATTACHED
+        }?.let { attached ->
+            val persisted = current.unitAttachmentReceipt
+                ?: journalFail("unit-attached operation journal is missing its exact receipt")
+            if (
+                attached.unitAttachmentReceiptSha256 != canonicalReceipt.receiptSha256 ||
+                !persisted.canonicalBytes().contentEquals(canonicalReceipt.canonicalBytes())
+            ) journalFail("unit-attached operation journal has a different exact receipt")
+            DescriptorBoundAtomicStateFile.publishNoReplace(
+                directory,
+                UNIT_ATTACHMENT_RECEIPT_FILE,
+                canonicalReceipt.canonicalBytes(),
+                MAXIMUM_OPERATION_RECORD_BYTES,
+                receiptFaultInjector,
+            )
+            return@boundOperation loadRequired()
+        }
+        if (
+            current.transitions.size != 2 ||
+            current.latest?.phase != FullTreeFunctionObservationOperationPhase.LEASED
+        ) journalFail("exact unit-attachment receipt can only be recorded from leased")
+        val leased = checkNotNull(current.latest)
+        requireUnitAttachmentReceiptBinding(expectedBinding, leased, canonicalReceipt)
+        current.unitAttachmentReceipt?.let { prepared ->
+            if (!prepared.canonicalBytes().contentEquals(canonicalReceipt.canonicalBytes())) {
+                journalFail("leased operation journal has a different staged attachment receipt")
+            }
+        }
+        DescriptorBoundAtomicStateFile.publishNoReplace(
+            directory,
+            UNIT_ATTACHMENT_RECEIPT_FILE,
+            canonicalReceipt.canonicalBytes(),
+            MAXIMUM_OPERATION_RECORD_BYTES,
+            receiptFaultInjector,
+        )
+        val prepared = loadRequired()
+        val transition = FullTreeFunctionObservationOperationTransition.unitAttached(
+            expectedBinding,
+            checkNotNull(prepared.latest),
+            canonicalReceipt,
+        )
+        appendLoaded(prepared, transition, transitionFaultInjector)
+    }
+
     @Synchronized
     fun append(
         transition: FullTreeFunctionObservationOperationTransition,
@@ -1005,6 +1406,7 @@ internal class FullTreeFunctionObservationOperationJournal internal constructor(
             expectedBinding,
             current.transitions + transition,
             current.diskEvidence,
+            current.unitAttachmentReceipt,
         )
         DescriptorBoundAtomicStateFile.publishNoReplace(
             directory,
@@ -1047,6 +1449,8 @@ internal class FullTreeFunctionObservationOperationJournal internal constructor(
                 OPERATION_BINDING_FILE
             atomicName == DescriptorBoundAtomicStateFile.temporaryName(DISK_EVIDENCE_FILE) ->
                 DISK_EVIDENCE_FILE
+            atomicName == DescriptorBoundAtomicStateFile.temporaryName(UNIT_ATTACHMENT_RECEIPT_FILE) ->
+                UNIT_ATTACHMENT_RECEIPT_FILE
             atomicName.matches(ATOMIC_TRANSITION_FILE_NAME) ->
                 atomicName.removePrefix(".").removeSuffix(".atomic")
             else -> journalFail("function-observation operation journal contains an unknown pending publication")
@@ -1097,6 +1501,30 @@ internal class FullTreeFunctionObservationOperationJournal internal constructor(
                 FullTreeFunctionObservationColdCompletionKind.DISK_EVIDENCE,
                 loadRequired(),
             )
+        } else if (targetName == UNIT_ATTACHMENT_RECEIPT_FILE) {
+            val prefix = loadRequired(allowedAtomicTarget = targetName)
+            if (
+                prefix.transitions.size != 2 ||
+                prefix.latest?.phase != FullTreeFunctionObservationOperationPhase.LEASED ||
+                prefix.unitAttachmentReceipt != null
+            ) journalFail("pending unit-attachment receipt does not belong to one leased operation")
+            val leased = checkNotNull(prefix.latest)
+            inspectRequired(atomicName).use { pending ->
+                val receipt = parseJournalUnitAttachmentReceipt(pending.bytes)
+                requireUnitAttachmentReceiptBinding(expectedBinding, leased, receipt)
+                afterInspection?.invoke()
+                DescriptorBoundAtomicStateFile.completeExistingTemporaryNoReplace(
+                    directory,
+                    UNIT_ATTACHMENT_RECEIPT_FILE,
+                    pending,
+                    MAXIMUM_OPERATION_RECORD_BYTES,
+                    faultInjector,
+                )
+            }
+            return@boundOperation FullTreeFunctionObservationColdCompletion(
+                FullTreeFunctionObservationColdCompletionKind.UNIT_ATTACHMENT_RECEIPT,
+                loadRequired(),
+            )
         } else {
             val prefix = loadRequired(allowedAtomicTarget = targetName)
             inspectRequired(atomicName).use { pending ->
@@ -1108,6 +1536,7 @@ internal class FullTreeFunctionObservationOperationJournal internal constructor(
                     expectedBinding,
                     prefix.transitions + transition,
                     prefix.diskEvidence,
+                    prefix.unitAttachmentReceipt,
                 )
                 afterInspection?.invoke()
                 DescriptorBoundAtomicStateFile.completeExistingTemporaryNoReplace(
@@ -1137,6 +1566,7 @@ internal class FullTreeFunctionObservationOperationJournal internal constructor(
         }
         if (names.any {
                 it != OPERATION_BINDING_FILE && it != DISK_EVIDENCE_FILE &&
+                    it != UNIT_ATTACHMENT_RECEIPT_FILE &&
                     !it.matches(TRANSITION_FILE_NAME) && it != allowedAtomicName
             }
         ) {
@@ -1161,6 +1591,16 @@ internal class FullTreeFunctionObservationOperationJournal internal constructor(
         } else {
             null
         }
+        val unitAttachmentReceipt = if (UNIT_ATTACHMENT_RECEIPT_FILE in names) {
+            val snapshot = DescriptorBoundAtomicStateFile.readOrNull(
+                directory,
+                UNIT_ATTACHMENT_RECEIPT_FILE,
+                MAXIMUM_OPERATION_RECORD_BYTES,
+            ) ?: journalFail("function-observation unit-attachment receipt disappeared")
+            parseJournalUnitAttachmentReceipt(snapshot.bytes)
+        } else {
+            null
+        }
         val transitions = names.filter(TRANSITION_FILE_NAME::matches).map { name ->
             val snapshot = DescriptorBoundAtomicStateFile.readOrNull(
                 directory,
@@ -1177,6 +1617,7 @@ internal class FullTreeFunctionObservationOperationJournal internal constructor(
             expectedBinding,
             transitions,
             diskEvidence,
+            unitAttachmentReceipt,
         )
     }
 
@@ -1330,6 +1771,26 @@ private fun requireDiskEvidenceBinding(
     ) journalFail("disk evidence is cross-paired with a different operation binding")
 }
 
+private fun requireUnitAttachmentReceiptBinding(
+    binding: FullTreeFunctionObservationOperationBinding,
+    leasedTransition: FullTreeFunctionObservationOperationTransition,
+    receipt: FullTreeFunctionObservationUnitAttachmentReceipt,
+) {
+    if (
+        leasedTransition.phase != FullTreeFunctionObservationOperationPhase.LEASED ||
+        leasedTransition.operationId != binding.operationId ||
+        leasedTransition.bindingSha256 != binding.bindingSha256 ||
+        leasedTransition.diskEvidenceSha256 == null ||
+        receipt.operationId != binding.operationId ||
+        receipt.requestSha256 != binding.requestSha256 ||
+        receipt.bindingSha256 != binding.bindingSha256 ||
+        receipt.leasedTransitionSha256 != leasedTransition.transitionSha256 ||
+        receipt.diskEvidenceSha256 != leasedTransition.diskEvidenceSha256 ||
+        receipt.isolationConfigurationSha256 != binding.isolationConfigurationSha256 ||
+        receipt.unitName != binding.unitName
+    ) journalFail("unit-attachment receipt is cross-paired with a different leased operation")
+}
+
 private fun requirePersistedDiskEvidence(
     binding: FullTreeFunctionObservationOperationBinding,
     transitions: List<FullTreeFunctionObservationOperationTransition>,
@@ -1362,6 +1823,37 @@ private fun requirePersistedDiskEvidence(
     ) journalFail("function-observation operation linked disk evidence in the wrong phase")
 }
 
+private fun requirePersistedUnitAttachmentReceipt(
+    binding: FullTreeFunctionObservationOperationBinding,
+    transitions: List<FullTreeFunctionObservationOperationTransition>,
+    receipt: FullTreeFunctionObservationUnitAttachmentReceipt?,
+) {
+    val receiptLinks = transitions.filter { it.unitAttachmentReceiptSha256 != null }
+    if (receipt == null) {
+        if (receiptLinks.isNotEmpty()) {
+            journalFail("function-observation operation history lacks its exact attachment receipt")
+        }
+        return
+    }
+    val leased = transitions.singleOrNull { it.phase == FullTreeFunctionObservationOperationPhase.LEASED }
+        ?: journalFail("unit-attachment receipt is not anchored by one leased operation")
+    requireUnitAttachmentReceiptBinding(binding, leased, receipt)
+    if (receiptLinks.isEmpty()) {
+        if (transitions.lastOrNull()?.phase != FullTreeFunctionObservationOperationPhase.LEASED) {
+            journalFail("exact unit-attachment receipt is unlinked from a leased operation")
+        }
+        return
+    }
+    if (receiptLinks.any { it.unitAttachmentReceiptSha256 != receipt.receiptSha256 }) {
+        journalFail("function-observation operation history names different attachment receipts")
+    }
+    if (receiptLinks.first().phase !in setOf(
+            FullTreeFunctionObservationOperationPhase.UNIT_ATTACHED,
+            FullTreeFunctionObservationOperationPhase.RECOVERED_ABORT,
+        )
+    ) journalFail("function-observation operation linked its attachment receipt in the wrong phase")
+}
+
 private fun requireEvidenceContinuity(
     previous: FullTreeFunctionObservationOperationTransition,
     next: FullTreeFunctionObservationOperationTransition,
@@ -1377,6 +1869,21 @@ private fun requireEvidenceContinuity(
 
         else -> if (next.diskEvidenceSha256 != previousDisk) {
             journalFail("function-observation operation changed its disk evidence")
+        }
+    }
+    when (val previousReceipt = previous.unitAttachmentReceiptSha256) {
+        null -> if (
+            next.unitAttachmentReceiptSha256 != null &&
+            next.phase !in setOf(
+                FullTreeFunctionObservationOperationPhase.UNIT_ATTACHED,
+                FullTreeFunctionObservationOperationPhase.RECOVERED_ABORT,
+            )
+        ) journalFail(
+            "function-observation operation introduced attachment evidence outside unit-attached or recovered abort",
+        )
+
+        else -> if (next.unitAttachmentReceiptSha256 != previousReceipt) {
+            journalFail("function-observation operation changed its attachment receipt")
         }
     }
     if (next.phase == FullTreeFunctionObservationOperationPhase.RECOVERED_ABORT) {
@@ -1421,9 +1928,67 @@ private fun requireTransitionAllowed(
     if (next != FullTreeFunctionObservationOperationPhase.RECOVERED_ABORT && next !in expected) {
         journalFail("function-observation operation transition is not monotonic")
     }
-    if (next == FullTreeFunctionObservationOperationPhase.RECOVERED_ABORT && previous.terminal) {
-        journalFail("terminal function-observation operation cannot be aborted again")
+    if (
+        next == FullTreeFunctionObservationOperationPhase.RECOVERED_ABORT &&
+        previous in setOf(
+            FullTreeFunctionObservationOperationPhase.PUBLISHED,
+            FullTreeFunctionObservationOperationPhase.COMPLETE,
+            FullTreeFunctionObservationOperationPhase.RECOVERED_ABORT,
+        )
+    ) {
+        journalFail("published or terminal function-observation operation cannot be aborted")
     }
+}
+
+private fun requireCanonicalControlGroup(controlGroup: String, unitName: String) {
+    if (
+        controlGroup.isEmpty() || controlGroup.length > MAXIMUM_CONTROL_GROUP_CHARS ||
+        controlGroup.any { it.code !in 0x20..0x7e }
+    ) {
+        journalFail("function-observation attachment control group is invalid")
+    }
+    val path = try {
+        Path.of(controlGroup)
+    } catch (_: java.nio.file.InvalidPathException) {
+        journalFail("function-observation attachment control group is invalid")
+    }
+    if (
+        !path.isAbsolute || path.normalize() != path || path == Path.of("/") ||
+        path.fileName?.toString() != unitName || path.toString() != controlGroup
+    ) journalFail("function-observation attachment control group is not canonical")
+}
+
+private fun requireCanonicalAttachmentProcesses(
+    processes: List<FullTreeFunctionObservationAttachmentProcessIdentity>,
+) {
+    if (processes.map { it.role } != FullTreeFunctionObservationAttachmentProcessRole.entries.toList()) {
+        journalFail("function-observation attachment process roles are not canonical")
+    }
+    if (processes.map { it.hostPid }.toSet().size != processes.size) {
+        journalFail("function-observation attachment process PIDs are not unique")
+    }
+    val byRole = processes.associateBy { it.role }
+    val outer = byRole.getValue(FullTreeFunctionObservationAttachmentProcessRole.OUTER_BUBBLEWRAP)
+    val init = byRole.getValue(FullTreeFunctionObservationAttachmentProcessRole.NAMESPACE_INIT_BUBBLEWRAP)
+    val supervisor = byRole.getValue(FullTreeFunctionObservationAttachmentProcessRole.SUPERVISOR_JVM)
+    val worker = byRole.getValue(FullTreeFunctionObservationAttachmentProcessRole.WORKER_JVM)
+    if (
+        outer.parentRole != null || outer.namespacePids != listOf(outer.hostPid) ||
+        init.parentRole != outer.role || init.namespacePids != listOf(init.hostPid, 1L) ||
+        supervisor.parentRole != init.role || supervisor.namespacePids.size != 2 ||
+        worker.parentRole != supervisor.role || worker.namespacePids.size != 2 ||
+        supervisor.namespacePids[1] <= 1L || worker.namespacePids[1] <= 1L ||
+        supervisor.namespacePids[1] == worker.namespacePids[1]
+    ) journalFail("function-observation attachment process topology is invalid")
+    fun executable(identity: FullTreeFunctionObservationAttachmentProcessIdentity): List<Long> = listOf(
+        identity.executableDevice,
+        identity.executableInode,
+        identity.executableMountId,
+    )
+    if (
+        executable(outer) != executable(init) || executable(supervisor) != executable(worker) ||
+        executable(outer) == executable(supervisor)
+    ) journalFail("function-observation attachment executable roles are invalid")
 }
 
 private fun JsonObject.requireExactKeys(expected: Set<String>, label: String) {
@@ -1443,6 +2008,9 @@ private fun JsonObject.journalOptionalString(name: String): String? {
     if (!primitive.isString) journalFail("operation field $name must be a string or null")
     return primitive.content
 }
+
+private fun JsonObject.journalArray(name: String): JsonArray =
+    this[name] as? JsonArray ?: journalFail("operation field $name must be an array")
 
 private fun JsonObject.journalLong(name: String): Long {
     val value = this[name] as? JsonPrimitive ?: journalFail("operation field $name must be an integer")
@@ -1477,27 +2045,42 @@ private fun parseJournalDiskEvidence(bytes: ByteArray): FullTreeDiskScratchEvide
         FullTreeDiskScratchEvidence.parseCanonical(bytes)
     }
 
+private fun parseJournalUnitAttachmentReceipt(
+    bytes: ByteArray,
+): FullTreeFunctionObservationUnitAttachmentReceipt =
+    translateJournalFailures("parse exact function-observation unit-attachment receipt") {
+        FullTreeFunctionObservationUnitAttachmentReceipt.parseCanonical(bytes)
+    }
+
 private fun sha256(bytes: ByteArray): String = OracleArtifacts.sha256(bytes)
 
 private fun journalFail(message: String): Nothing =
     throw FullTreeFunctionObservationOperationJournalException(message)
 
-private const val OPERATION_BINDING_SCHEMA_VERSION = 3
-private const val OPERATION_REQUEST_SCHEMA_VERSION = 3
-private const val OPERATION_TRANSITION_SCHEMA_VERSION = 3
-private const val OPERATION_PROVIDER = "kotlin-function-observation-operation-v3"
-private const val OPERATION_REQUEST_PROVIDER = "kotlin-function-observation-request-v3"
+private const val OPERATION_BINDING_SCHEMA_VERSION = 4
+private const val OPERATION_REQUEST_SCHEMA_VERSION = 4
+private const val OPERATION_TRANSITION_SCHEMA_VERSION = 4
+private const val OPERATION_PROVIDER = "kotlin-function-observation-operation-v4"
+private const val OPERATION_REQUEST_PROVIDER = "kotlin-function-observation-request-v4"
+private const val UNIT_ATTACHMENT_RECEIPT_SCHEMA_VERSION = 1
+private const val UNIT_ATTACHMENT_RECEIPT_PROVIDER =
+    "kotlin-function-observation-unit-attachment-v1"
 private const val MINIMUM_LEASE_INODES = 4L
 private const val OWNER_DIRECTORY_MODE = 0x1c0 // 0700
 private const val GROUP_OR_OTHER_WRITE_MODE = 0x12 // 0022
 private const val MAXIMUM_OPERATION_TRANSITIONS = 8
 private const val MAXIMUM_OPERATION_RECORD_BYTES = 64 * 1024
-private const val MAXIMUM_JOURNAL_ENTRIES = MAXIMUM_OPERATION_TRANSITIONS + 5
+private const val MAXIMUM_JOURNAL_ENTRIES = MAXIMUM_OPERATION_TRANSITIONS + 6
+private const val MAXIMUM_CONTROL_GROUP_CHARS = 4096
 private const val OPERATION_BINDING_FILE = "binding.json"
 private const val DISK_EVIDENCE_FILE = "disk-evidence.json"
+private const val UNIT_ATTACHMENT_RECEIPT_FILE = "unit-attachment.json"
 private val ZERO_SHA256 = "0".repeat(64)
 private val SHA256 = Regex("[0-9a-f]{64}")
+private val SYSTEMD_ID128 = Regex("[0-9a-f]{32}")
+private val RESERVED_ID128S = setOf("0".repeat(32), "f".repeat(32))
 private val SHARD_IDENTIFIER = Regex("[a-z0-9]+(?:-[a-z0-9]+)*")
+private val PRODUCTION_OPERATION_UNIT_NAME = Regex("decomp-oracle-function-[0-9a-f]{64}\\.scope")
 private val TRANSITION_FILE_NAME = Regex("transition-[0-9]{4}\\.json")
 private val ATOMIC_TRANSITION_FILE_NAME = Regex("\\.transition-[0-9]{4}\\.json\\.atomic")
 private val OPERATION_JSON_LIMITS = StrictJsonLimits(
@@ -1507,6 +2090,15 @@ private val OPERATION_JSON_LIMITS = StrictJsonLimits(
     maximumNodes = 64,
     maximumStringBytes = 1024,
     maximumTotalStringBytes = 16 * 1024,
+    maximumNumberCharacters = 32,
+)
+private val UNIT_ATTACHMENT_JSON_LIMITS = StrictJsonLimits(
+    maximumInputBytes = MAXIMUM_OPERATION_RECORD_BYTES,
+    maximumCanonicalBytes = MAXIMUM_OPERATION_RECORD_BYTES,
+    maximumDepth = 6,
+    maximumNodes = 128,
+    maximumStringBytes = MAXIMUM_CONTROL_GROUP_CHARS,
+    maximumTotalStringBytes = 32 * 1024,
     maximumNumberCharacters = 32,
 )
 private val OPERATION_BINDING_FIELDS = setOf(
@@ -1548,4 +2140,34 @@ private val OPERATION_TRANSITION_FIELDS = setOf(
     "schemaVersion",
     "sequence",
     "transitionSha256",
+    "unitAttachmentReceiptSha256",
+)
+private val UNIT_ATTACHMENT_RECEIPT_FIELDS = setOf(
+    "bindingSha256",
+    "bootId",
+    "cgroupDevice",
+    "cgroupInode",
+    "cgroupMountId",
+    "controlGroup",
+    "diskEvidenceSha256",
+    "invocationId",
+    "isolationConfigurationSha256",
+    "leasedTransitionSha256",
+    "operationId",
+    "processes",
+    "provider",
+    "receiptSha256",
+    "requestSha256",
+    "schemaVersion",
+    "unitName",
+)
+private val UNIT_ATTACHMENT_PROCESS_FIELDS = setOf(
+    "executableDevice",
+    "executableInode",
+    "executableMountId",
+    "hostPid",
+    "namespacePids",
+    "parentRole",
+    "role",
+    "startTimeTicks",
 )
