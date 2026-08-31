@@ -1,5 +1,7 @@
 package decompengine.oracle.fulltree
 
+import decompengine.acp.AcpRuntimeClosureLimits
+import decompengine.acp.LinuxFilesystemSyscalls
 import decompengine.oracle.core.OracleArtifacts
 import decompengine.oracle.core.OracleJson
 import java.io.File
@@ -226,6 +228,196 @@ class FullTreeFunctionObservationIsolatedFixtureRunnerTest {
     }
 
     @Test
+    fun `prepared disk policy upper caps must fit the physical isolation closure`() {
+        val configuration = syntheticConfiguration(
+            mounts = listOf(
+                FullTreeFunctionObservationRuntimeMount(
+                    Path.of("/provisioned/libraries"),
+                    Path.of("/runtime/libraries"),
+                    "2".repeat(64),
+                ),
+            ),
+            classPath = listOf(
+                FullTreeFunctionObservationClassPathEntry(
+                    Path.of("/provisioned/application/worker.jar"),
+                    "3".repeat(64),
+                ),
+            ),
+        )
+        val limits = AcpRuntimeClosureLimits(
+            maximumEntries = 4,
+            maximumUserOwnedFileBytes = 1024,
+            maximumDepth = 1,
+        )
+        fun binding(maximumBytes: Long, maximumInodes: Long) =
+            FullTreeFunctionObservationOperationBinding.create(
+                operationId = "a".repeat(64),
+                shardId = "clang-lib-driver",
+                shardInputSha256 = "b".repeat(64),
+                scopeSha256 = "c".repeat(64),
+                inventoryArtifactSha256 = "d".repeat(64),
+                richArtifactSha256 = "e".repeat(64),
+                isolationConfiguration = configuration,
+                output = Path.of("/var/lib/decomp-oracle/output/clang-lib-driver.json"),
+                diskPolicy = FullTreeDiskScratchPolicy(
+                    requiredAvailableBytes = 1,
+                    maximumFilesystemBytes = maximumBytes,
+                    requiredAvailableInodes = 4,
+                    maximumFilesystemInodes = maximumInodes,
+                ),
+            )
+
+        requireFullTreeObservationDiskClosureCompatibility(binding(1024, 4), limits)
+        assertFailsWith<FullTreeFunctionObservationIsolationException> {
+            requireFullTreeObservationDiskClosureCompatibility(binding(1025, 4), limits)
+        }
+        assertFailsWith<FullTreeFunctionObservationIsolationException> {
+            requireFullTreeObservationDiskClosureCompatibility(binding(1024, 5), limits)
+        }
+    }
+
+    @Test
+    fun `production preparation transfers one leased run and authenticates its exact ext4 layout`() =
+        inControlTemporaryDirectory { root ->
+            val mount = provisionedOracleExt4Mount()
+            assertTrue(entryNames(mount).isEmpty(), "provisioned ext4 slot is not empty")
+            val configuration = availableConfiguration(
+                root.resolve("authenticated-runtime"),
+                launchBoundaryRequired = false,
+            )
+            if (System.getenv("DECOMP_REQUIRE_ORACLE_EXT4_SCRATCH") == "true") {
+                assertTrue(configuration != null, "required CI authenticated JVM runtime is unavailable")
+            }
+            assumeTrue(configuration != null, "authenticated JVM runtime is unavailable")
+            checkNotNull(configuration)
+
+            val fixture = createFullTreeControlFixture(root.resolve("fixture"))
+            val authenticatedScope = fixture.authenticatedScope()
+            val inputs = FullTreeFunctionObservationProducer.authenticateShardInputs(
+                fixture.inventory,
+                authenticatedScope,
+                "clang-lib-driver",
+            )
+            val output = privateDirectory(root.resolve("output")).resolve("clang-lib-driver.json")
+            val journalRoot = privateDirectory(root.resolve("journal"))
+            val capacity = LinuxFilesystemSyscalls.openRoot(mount).use { descriptor ->
+                LinuxFilesystemSyscalls.filesystemCapacity(descriptor)
+            }
+            val binding = FullTreeFunctionObservationOperationBinding.create(
+                operationId = "f".repeat(64),
+                shardId = inputs.shard.identifier,
+                shardInputSha256 = inputs.shard.inputSha256,
+                scopeSha256 = authenticatedScope.sha256,
+                inventoryArtifactSha256 = inputs.inventoryArtifactSha256,
+                richArtifactSha256 = fixtureSha256(fixture.richArtifact),
+                isolationConfiguration = configuration,
+                output = output,
+                diskPolicy = FullTreeDiskScratchPolicy(
+                    requiredAvailableBytes = 1,
+                    maximumFilesystemBytes = capacity.totalBytes,
+                    requiredAvailableInodes = 4,
+                    maximumFilesystemInodes = capacity.totalInodes,
+                ),
+            )
+            val leaseRoot = mount.resolve(binding.leaseDirectoryName)
+            val runRoot = leaseRoot.resolve(binding.runDirectoryName)
+            var leased: FullTreeFunctionObservationLeasedOperation? = null
+            var prepared: FullTreeFunctionObservationPreparedRun? = null
+            var isolation: FullTreeFunctionObservationPreparedIsolation? = null
+            try {
+                FullTreeFunctionObservationJournalAuthority.open(journalRoot).use { authority ->
+                    val acquired = FullTreeFunctionObservationOperationCoordinator.prepareNew(
+                        authority,
+                        binding,
+                        mount,
+                    )
+                    leased = acquired
+                    val run = acquired.prepareRunRoot()
+                    prepared = run
+                    assertFailsWith<IllegalStateException> { acquired.requireCurrentAuthorized() }
+                    acquired.close()
+                    leased = null
+
+                    val ready = FullTreeFunctionObservationIsolatedOperationRunner.prepareBeforeLaunch(
+                        preparedRun = run,
+                        richArtifact = fixture.richArtifact,
+                        inventoryPath = fixture.inventory,
+                        scopeFiles = FullTreeFunctionObservationScopeFiles(
+                            fixture.scope,
+                            fixture.sourceLock,
+                            fixture.manifest,
+                        ),
+                        output = output,
+                        configuration = configuration,
+                    )
+                    isolation = ready
+                    assertFailsWith<IllegalStateException> { run.requireCurrentBeforeLaunch() }
+                    run.close()
+                    prepared = null
+
+                    assertEquals(binding.operationId, ready.operationId)
+                    assertEquals(binding.shardId, ready.shardId)
+                    ready.requireCurrentBeforeLaunch()
+                    assertEquals(listOf("runtime", "scratch", "tmp"), entryNames(runRoot))
+                    listOf(runRoot, runRoot.resolve("runtime"), runRoot.resolve("scratch"), runRoot.resolve("tmp"))
+                        .forEach { directory ->
+                            assertEquals(
+                                PosixFilePermissions.fromString("rwx------"),
+                                Files.getPosixFilePermissions(directory, LinkOption.NOFOLLOW_LINKS),
+                            )
+                        }
+                    assertTrue(entryNames(runRoot.resolve("scratch")).isEmpty())
+                    assertTrue(entryNames(runRoot.resolve("tmp")).isEmpty())
+                    val classPathNames = configuration.workerClassPath.indices
+                        .map { index -> "classpath-$index.jar" }
+                        .sorted()
+                    assertEquals(classPathNames, entryNames(runRoot.resolve("runtime")))
+                    configuration.workerClassPath.forEachIndexed { index, source ->
+                        val snapshot = runRoot.resolve("runtime/classpath-$index.jar")
+                        assertEquals(source.expectedSha256, sha256(snapshot))
+                        assertEquals(
+                            PosixFilePermissions.fromString("r--------"),
+                            Files.getPosixFilePermissions(snapshot, LinkOption.NOFOLLOW_LINKS),
+                        )
+                    }
+
+                    val recordBytes = Files.readAllBytes(leaseRoot.resolve(TEST_LEASE_RECORD_FILE))
+                    val changed = runRoot.resolve("runtime/${classPathNames.first()}")
+                    Files.setPosixFilePermissions(changed, PosixFilePermissions.fromString("rw-------"))
+                    assertFailsWith<FullTreeFunctionObservationIsolationException> {
+                        ready.requireCurrentBeforeLaunch()
+                    }
+                    ready.close()
+                    isolation = null
+                    ready.close()
+
+                    assertContentEquals(recordBytes, Files.readAllBytes(leaseRoot.resolve(TEST_LEASE_RECORD_FILE)))
+                    FullTreeFunctionObservationOperationCoordinator.openExistingLeasedReadOnly(
+                        authority,
+                        binding,
+                        mount,
+                    ).use { cold ->
+                        assertEquals(
+                            FullTreeDiskScratchColdPopulation.ACTIVE_OPERATION_RUN,
+                            cold.observedPopulation,
+                        )
+                        cold.requireCurrentReadOnly()
+                    }
+                }
+            } finally {
+                runCatching { isolation?.close() }
+                runCatching { prepared?.close() }
+                runCatching { leased?.close() }
+                removePreparedIsolationLease(
+                    leaseRoot,
+                    binding.runDirectoryName,
+                    configuration.workerClassPath.size,
+                )
+            }
+            assertTrue(entryNames(mount).isEmpty())
+        }
+
+    @Test
     fun `fixture boundary rejects inherited socket and session-runtime descriptors`() {
         val runtime = Path.of("/run/user/1000")
 
@@ -390,32 +582,51 @@ class FullTreeFunctionObservationIsolatedFixtureRunnerTest {
             assertTrue(Files.list(scratch).use { it.findAny().isEmpty })
         }
 
-    private fun availableConfiguration(runtimeParent: Path): FullTreeFunctionObservationIsolationConfiguration? {
+    private fun availableConfiguration(
+        runtimeParent: Path,
+        launchBoundaryRequired: Boolean = true,
+    ): FullTreeFunctionObservationIsolationConfiguration? {
         val uid = (Files.getAttribute(Path.of("/proc/self"), "unix:uid") as Number).toInt()
-        val runtime = Path.of("/run/user/$uid")
         val java = Path.of(System.getProperty("java.home"), "bin", "java").realExecutableOrNull() ?: return null
         val javaRuntime = Path.of(System.getProperty("java.home")).toRealPath()
-        val bubblewrap = Path.of("/usr/bin/bwrap").realExecutableOrNull() ?: return null
-        val prlimit = Path.of("/usr/bin/prlimit").realExecutableOrNull() ?: return null
-        val systemdRun = Path.of("/usr/bin/systemd-run").realExecutableOrNull() ?: return null
-        val systemctl = Path.of("/usr/bin/systemctl").realExecutableOrNull() ?: return null
-        if (!Files.isDirectory(runtime, LinkOption.NOFOLLOW_LINKS) || !Files.exists(runtime.resolve("bus"))) return null
-        val probe = ProcessBuilder(systemctl.toString(), "--user", "show", "--property=Version", "--value")
-            .redirectErrorStream(true)
-            .also { builder ->
-                builder.environment().clear()
-                builder.environment()["XDG_RUNTIME_DIR"] = runtime.toString()
-                builder.environment()["DBUS_SESSION_BUS_ADDRESS"] =
-                    "unix:path=${runtime.resolve("bus")}"
+        val unusedLaunchBoundary = runtimeParent.parent.resolve("unused-launch-boundary")
+        val runtime: Path
+        val bubblewrap: Path
+        val prlimit: Path
+        val systemdRun: Path
+        val systemctl: Path
+        if (launchBoundaryRequired) {
+            runtime = Path.of("/run/user/$uid")
+            bubblewrap = Path.of("/usr/bin/bwrap").realExecutableOrNull() ?: return null
+            prlimit = Path.of("/usr/bin/prlimit").realExecutableOrNull() ?: return null
+            systemdRun = Path.of("/usr/bin/systemd-run").realExecutableOrNull() ?: return null
+            systemctl = Path.of("/usr/bin/systemctl").realExecutableOrNull() ?: return null
+            if (!Files.isDirectory(runtime, LinkOption.NOFOLLOW_LINKS) || !Files.exists(runtime.resolve("bus"))) {
+                return null
             }
-            .start()
-        val exited = probe.waitFor(3, TimeUnit.SECONDS)
-        if (!exited) {
-            probe.destroyForcibly()
-            probe.waitFor(1, TimeUnit.SECONDS)
-            return null
+            val probe = ProcessBuilder(systemctl.toString(), "--user", "show", "--property=Version", "--value")
+                .redirectErrorStream(true)
+                .also { builder ->
+                    builder.environment().clear()
+                    builder.environment()["XDG_RUNTIME_DIR"] = runtime.toString()
+                    builder.environment()["DBUS_SESSION_BUS_ADDRESS"] =
+                        "unix:path=${runtime.resolve("bus")}"
+                }
+                .start()
+            val exited = probe.waitFor(3, TimeUnit.SECONDS)
+            if (!exited) {
+                probe.destroyForcibly()
+                probe.waitFor(1, TimeUnit.SECONDS)
+                return null
+            }
+            if (probe.exitValue() != 0 || probe.inputStream.readNBytes(1025).size > 1024) return null
+        } else {
+            runtime = unusedLaunchBoundary.resolve("session-runtime")
+            bubblewrap = unusedLaunchBoundary.resolve("bwrap")
+            prlimit = unusedLaunchBoundary.resolve("prlimit")
+            systemdRun = unusedLaunchBoundary.resolve("systemd-run")
+            systemctl = unusedLaunchBoundary.resolve("systemctl")
         }
-        if (probe.exitValue() != 0 || probe.inputStream.readNBytes(1025).size > 1024) return null
         Files.createDirectories(runtimeParent)
         val classPath = System.getProperty("java.class.path")
             .split(File.pathSeparator)
@@ -456,10 +667,10 @@ class FullTreeFunctionObservationIsolatedFixtureRunnerTest {
             systemdUserRuntimeDirectory = runtime,
             workerClassPath = classPath,
             expectedJavaSha256 = sha256(java),
-            expectedBubblewrapSha256 = sha256(bubblewrap),
-            expectedResourceLimiterSha256 = sha256(prlimit),
-            expectedScopeSupervisorSha256 = sha256(systemdRun),
-            expectedScopeInspectorSha256 = sha256(systemctl),
+            expectedBubblewrapSha256 = if (launchBoundaryRequired) sha256(bubblewrap) else ZERO_SHA256,
+            expectedResourceLimiterSha256 = if (launchBoundaryRequired) sha256(prlimit) else ZERO_SHA256,
+            expectedScopeSupervisorSha256 = if (launchBoundaryRequired) sha256(systemdRun) else ZERO_SHA256,
+            expectedScopeInspectorSha256 = if (launchBoundaryRequired) sha256(systemctl) else ZERO_SHA256,
         )
     }
 
@@ -540,6 +751,42 @@ class FullTreeFunctionObservationIsolatedFixtureRunnerTest {
         return path
     }
 
+    private fun provisionedOracleExt4Mount(): Path {
+        val configured = System.getenv("DECOMP_TEST_ORACLE_EXT4_SCRATCH")
+        if (System.getenv("DECOMP_REQUIRE_ORACLE_EXT4_SCRATCH") == "true") {
+            assertTrue(!configured.isNullOrBlank(), "required CI ext4 scratch slot was not provisioned")
+        }
+        assumeTrue(
+            !configured.isNullOrBlank(),
+            "set DECOMP_TEST_ORACLE_EXT4_SCRATCH to an empty user-owned 0700 ext4 mount with " +
+                "rw,nodev,nosuid,noexec,noatime",
+        )
+        return Path.of(requireNotNull(configured)).toAbsolutePath().normalize()
+    }
+
+    private fun removePreparedIsolationLease(
+        leaseRoot: Path,
+        runDirectoryName: String,
+        classPathEntries: Int,
+    ) {
+        val runRoot = leaseRoot.resolve(runDirectoryName)
+        val runtime = runRoot.resolve("runtime")
+        repeat(classPathEntries) { index ->
+            Files.deleteIfExists(runtime.resolve("classpath-$index.jar"))
+        }
+        Files.deleteIfExists(runtime)
+        Files.deleteIfExists(runRoot.resolve("scratch"))
+        Files.deleteIfExists(runRoot.resolve("tmp"))
+        Files.deleteIfExists(runRoot)
+        Files.deleteIfExists(leaseRoot.resolve(TEST_LEASE_RECORD_FILE))
+        Files.deleteIfExists(leaseRoot)
+    }
+
+    private fun entryNames(directory: Path): List<String> =
+        Files.list(directory).use { entries ->
+            entries.map { it.fileName.toString() }.sorted().toList()
+        }
+
     private inline fun <T> withDiskScratch(action: (Path) -> T): T {
         val parent = Path.of(System.getProperty("user.dir"), "build", "tmp").toAbsolutePath().normalize()
         Files.createDirectories(parent)
@@ -567,5 +814,6 @@ class FullTreeFunctionObservationIsolatedFixtureRunnerTest {
             "0000000000000000000000000000000000000000000000000000000000000000"
         const val FROZEN_ISOLATION_CONFIGURATION_SHA256 =
             "996c3815ddd9f6330fbf9f404353a2f28fa81ba47d58a3eff4ff57e83cd71e95"
+        const val TEST_LEASE_RECORD_FILE = "lease.json"
     }
 }

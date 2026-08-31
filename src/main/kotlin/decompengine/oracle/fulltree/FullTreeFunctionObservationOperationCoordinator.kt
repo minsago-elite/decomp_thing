@@ -226,26 +226,14 @@ internal class FullTreeFunctionObservationPreparedRun private constructor(
         leasedHistory.requireDiskEvidenceIntroducedAt(
             FullTreeFunctionObservationOperationPhase.LEASED,
         )
-        lease.requireCurrentOperationRunRoot(
-            runRoot,
-            FullTreeDiskScratchStage.BEFORE_LAUNCH,
-        )
+        requireCurrentPreparedRun(leasedHistory, diskEvidence, runRoot, journal, lease)
     }
 
     /** Revalidates the unchanged LEASED journal and exact active run before any worker launch. */
     @Synchronized
     fun requireCurrentBeforeLaunch() {
         check(!closed) { "function-observation prepared run is closed" }
-        requireCurrentHistory(leasedHistory, diskEvidence, journal)
-        lease.requireCurrentOperationRunRoot(
-            runRoot,
-            FullTreeDiskScratchStage.BEFORE_LAUNCH,
-        )
-        requireCurrentHistory(leasedHistory, diskEvidence, journal)
-        lease.requireCurrentOperationRunRoot(
-            runRoot,
-            FullTreeDiskScratchStage.BEFORE_LAUNCH,
-        )
+        requireCurrentPreparedRun(leasedHistory, diskEvidence, runRoot, journal, lease)
     }
 
     /**
@@ -291,6 +279,33 @@ internal class FullTreeFunctionObservationPreparedRun private constructor(
         }
     }
 
+    /**
+     * Moves the still-LEASED journal, lease, and opaque run root into the isolation-preparation
+     * owner before the isolation layer establishes an exact interior-layout claim. The old handle
+     * becomes inert only after the replacement has independently revalidated every authority; no
+     * descriptor, lock, or filesystem member is closed or changed by the transfer itself. This
+     * low-level transfer proves no prior-content history for the otherwise opaque run root.
+     */
+    @Synchronized
+    internal fun transferToPreparedIsolationAuthority():
+        FullTreeFunctionObservationPreparedIsolationAuthority {
+        check(!closed) { "function-observation prepared run is closed" }
+        if (runRootBorrowActive) {
+            coordinationFail("function-observation prepared run cannot transfer while its root is borrowed")
+        }
+        requireCurrentBeforeLaunch()
+        val transferred = FullTreeFunctionObservationPreparedIsolationAuthority.create(
+            leasedHistory = leasedHistory,
+            diskEvidence = diskEvidence,
+            runRoot = runRoot,
+            journal = journal,
+            lease = lease,
+            constructionPermit = PREPARED_ISOLATION_AUTHORITY_CONSTRUCTION_PERMIT,
+        )
+        closed = true
+        return transferred
+    }
+
     @Synchronized
     override fun close() {
         if (closed) return
@@ -314,6 +329,113 @@ internal class FullTreeFunctionObservationPreparedRun private constructor(
                 "prepared-run capabilities can only be issued by the operation coordinator"
             }
             return FullTreeFunctionObservationPreparedRun(
+                leasedHistory,
+                diskEvidence,
+                runRoot,
+                journal,
+                lease,
+            )
+        }
+    }
+}
+
+private object PREPARED_ISOLATION_AUTHORITY_CONSTRUCTION_PERMIT
+
+/**
+ * Content-opaque lock-retaining owner used while the isolation layer authenticates and materializes
+ * the deterministic run tree. Only the outer typed isolation handle proves interior layout. This
+ * history is still LEASED: no worker or unit claim exists, and failed preparation preserves residue.
+ */
+internal class FullTreeFunctionObservationPreparedIsolationAuthority private constructor(
+    val leasedHistory: FullTreeFunctionObservationOperationHistory,
+    val diskEvidence: FullTreeDiskScratchEvidence,
+    private val runRoot: FullTreeDiskScratchRunRoot,
+    private val journal: FullTreeFunctionObservationOperationJournal,
+    private val lease: FullTreeDiskScratchLease,
+) : AutoCloseable {
+    private var closed = false
+    private var runRootBorrowActive = false
+
+    init {
+        if (
+            leasedHistory.latest?.phase != FullTreeFunctionObservationOperationPhase.LEASED ||
+            leasedHistory.diskEvidence !== diskEvidence
+        ) coordinationFail("prepared isolation is not bound to one fresh leased operation")
+        leasedHistory.requireDiskEvidenceIntroducedAt(
+            FullTreeFunctionObservationOperationPhase.LEASED,
+        )
+        requireCurrentPreparedRun(leasedHistory, diskEvidence, runRoot, journal, lease)
+    }
+
+    /** Revalidates the unchanged LEASED journal and exact opaque active run before launch. */
+    @Synchronized
+    fun requireCurrentBeforeLaunch() {
+        check(!closed) { "function-observation prepared isolation is closed" }
+        requireCurrentPreparedRun(leasedHistory, diskEvidence, runRoot, journal, lease)
+    }
+
+    /** Grants one revocable pinned borrow while retaining the transferred lock hierarchy. */
+    @Synchronized
+    fun <T> withCurrentRunRootBeforeLaunch(
+        action: (FullTreeDiskScratchBorrowedRunRoot) -> T,
+    ): T {
+        check(!closed) { "function-observation prepared isolation is closed" }
+        if (runRootBorrowActive) {
+            coordinationFail("function-observation prepared isolation run root is already borrowed")
+        }
+        runRootBorrowActive = true
+        try {
+            requireCurrentBeforeLaunch()
+            return try {
+                lease.withCurrentOperationRunRootBeforeLaunch(runRoot) { borrowed ->
+                    requireCurrentHistory(leasedHistory, diskEvidence, journal)
+                    try {
+                        action(borrowed).also {
+                            requireCurrentHistory(leasedHistory, diskEvidence, journal)
+                        }
+                    } catch (failure: Throwable) {
+                        runCatching {
+                            requireCurrentHistory(leasedHistory, diskEvidence, journal)
+                        }.exceptionOrNull()?.let { validationFailure ->
+                            if (validationFailure !== failure) failure.addSuppressed(validationFailure)
+                        }
+                        throw failure
+                    }
+                }.also { requireCurrentBeforeLaunch() }
+            } catch (failure: Throwable) {
+                runCatching { requireCurrentBeforeLaunch() }.exceptionOrNull()?.let { validationFailure ->
+                    if (validationFailure !== failure) failure.addSuppressed(validationFailure)
+                }
+                throw failure
+            }
+        } finally {
+            runRootBorrowActive = false
+        }
+    }
+
+    @Synchronized
+    override fun close() {
+        if (closed) return
+        if (runRootBorrowActive) {
+            coordinationFail("function-observation prepared isolation cannot close while its root is borrowed")
+        }
+        closed = true
+        closeOperationResources(lease, journal)?.let { throw it }
+    }
+
+    companion object {
+        internal fun create(
+            leasedHistory: FullTreeFunctionObservationOperationHistory,
+            diskEvidence: FullTreeDiskScratchEvidence,
+            runRoot: FullTreeDiskScratchRunRoot,
+            journal: FullTreeFunctionObservationOperationJournal,
+            lease: FullTreeDiskScratchLease,
+            constructionPermit: Any,
+        ): FullTreeFunctionObservationPreparedIsolationAuthority {
+            check(constructionPermit === PREPARED_ISOLATION_AUTHORITY_CONSTRUCTION_PERMIT) {
+                "prepared-isolation authorities can only be issued by a prepared run"
+            }
+            return FullTreeFunctionObservationPreparedIsolationAuthority(
                 leasedHistory,
                 diskEvidence,
                 runRoot,
@@ -451,6 +573,19 @@ private fun requireCurrentHistory(
     requireExactHistory(expectedHistory, current)
 }
 
+private fun requireCurrentPreparedRun(
+    expectedHistory: FullTreeFunctionObservationOperationHistory,
+    expectedEvidence: FullTreeDiskScratchEvidence,
+    runRoot: FullTreeDiskScratchRunRoot,
+    journal: FullTreeFunctionObservationOperationJournal,
+    lease: FullTreeDiskScratchLease,
+) {
+    requireCurrentHistory(expectedHistory, expectedEvidence, journal)
+    lease.requireCurrentOperationRunRoot(runRoot, FullTreeDiskScratchStage.BEFORE_LAUNCH)
+    requireCurrentHistory(expectedHistory, expectedEvidence, journal)
+    lease.requireCurrentOperationRunRoot(runRoot, FullTreeDiskScratchStage.BEFORE_LAUNCH)
+}
+
 private fun closeOperationResources(
     lease: FullTreeDiskScratchLease,
     journal: FullTreeFunctionObservationOperationJournal,
@@ -458,7 +593,9 @@ private fun closeOperationResources(
     var failure: Throwable? = null
     runCatching { lease.abandonForRecovery() }.exceptionOrNull()?.let { failure = it }
     runCatching { journal.close() }.exceptionOrNull()?.let { closeFailure ->
-        if (failure == null) failure = closeFailure else failure.addSuppressed(closeFailure)
+        if (failure == null) failure = closeFailure else if (closeFailure !== failure) {
+            failure.addSuppressed(closeFailure)
+        }
     }
     return failure
 }
@@ -470,7 +607,9 @@ private fun closeColdOperationResources(
     var failure: Throwable? = null
     runCatching { coldLease.close() }.exceptionOrNull()?.let { failure = it }
     runCatching { journal.close() }.exceptionOrNull()?.let { closeFailure ->
-        if (failure == null) failure = closeFailure else failure.addSuppressed(closeFailure)
+        if (failure == null) failure = closeFailure else if (closeFailure !== failure) {
+            failure.addSuppressed(closeFailure)
+        }
     }
     return failure
 }

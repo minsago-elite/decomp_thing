@@ -312,7 +312,9 @@ private class AuthenticatedObservationRuntime private constructor(
         var failure: Throwable? = null
         classPath.asReversed().forEach { (_, guard) ->
             runCatching { guard.close() }.exceptionOrNull()?.let { closeFailure ->
-                if (failure == null) failure = closeFailure else failure.addSuppressed(closeFailure)
+                if (failure == null) failure = closeFailure else if (closeFailure !== failure) {
+                    failure.addSuppressed(closeFailure)
+                }
             }
         }
         failure?.let { throw it }
@@ -363,11 +365,20 @@ private class AuthenticatedObservationRuntime private constructor(
     }
 }
 
+private data class PreparedObservationRunLayout(
+    val root: LinuxFileIdentity,
+    val scratch: LinuxFileIdentity,
+    val temporary: LinuxFileIdentity,
+    val runtime: LinuxFileIdentity,
+    val classPath: List<LinuxFileIdentity>,
+)
+
 private class MaterializedObservationClassPath(
     val paths: List<Path>,
     private val expected: List<Pair<Long, String>>,
 ) {
     val encoded: String = validatedClassPath(paths)
+    private var preparedLayout: PreparedObservationRunLayout? = null
 
     fun verify(label: String) {
         paths.zip(expected).forEachIndexed { index, (path, sizeAndDigest) ->
@@ -380,6 +391,232 @@ private class MaterializedObservationClassPath(
             }
         }
     }
+
+    @Synchronized
+    fun authenticatePreparedLayout(runTree: ObservationRunTreeAccess) {
+        check(preparedLayout == null) { "prepared class-path layout was already authenticated" }
+        preparedLayout = runTree.withPinnedDescriptor { root ->
+            authenticatePreparedObservationRunLayout(
+                runTree.path,
+                root,
+                paths,
+                expected,
+                retained = null,
+            )
+        }
+    }
+
+    @Synchronized
+    fun requirePreparedLayout(runTree: ObservationRunTreeAccess) {
+        val retained = preparedLayout
+            ?: isolationFail("prepared class-path layout has no authenticated inode snapshot")
+        val current = runTree.withPinnedDescriptor { root ->
+            authenticatePreparedObservationRunLayout(
+                runTree.path,
+                root,
+                paths,
+                expected,
+                retained,
+            )
+        }
+        if (current != retained) {
+            isolationFail("prepared class-path inode layout changed")
+        }
+    }
+}
+
+/**
+ * Authenticates one point-in-time ext4 production layout through pinned descriptors and records
+ * inode identities for comparison by later point-in-time validation. Logical size and content are
+ * rechecked separately because LinuxFileIdentity intentionally contains neither size nor
+ * timestamps. This does not by itself exclude a cooperating same-UID writer; the launch phase must
+ * revalidate inside the final borrow and keep the scratch authority unreachable by ACP.
+ */
+private fun authenticatePreparedObservationRunLayout(
+    runPath: Path,
+    root: LinuxDescriptor,
+    classPathPaths: List<Path>,
+    classPathExpected: List<Pair<Long, String>>,
+    retained: PreparedObservationRunLayout?,
+): PreparedObservationRunLayout {
+    if (!runPath.isAbsolute || runPath.normalize() != runPath || runPath.parent == null) {
+        isolationFail("prepared function-observation run path is not canonical")
+    }
+    if (classPathPaths.size != classPathExpected.size) {
+        isolationFail("prepared function-observation class-path identity count differs")
+    }
+    val classPathNames = classPathExpected.indices.map { index -> "classpath-$index.jar" }
+    val expectedPaths = classPathNames.map { name ->
+        runPath.resolve(RUNTIME_DIRECTORY).resolve(name)
+    }
+    if (classPathPaths != expectedPaths) {
+        isolationFail("prepared function-observation class path is not in exact numeric order")
+    }
+    root.whileOpen { fd ->
+        if (!Files.isSameFile(runPath, LinuxFilesystemSyscalls.stableDescriptorPath(fd))) {
+            isolationFail("prepared function-observation run path differs from its pinned root")
+        }
+    }
+    val rootBefore = LinuxFilesystemSyscalls.identity(root.fd)
+    requirePreparedRootIdentity(rootBefore)
+    if (!sameDirectory(rootBefore, root.identity)) {
+        isolationFail("prepared function-observation root differs from its borrowed descriptor")
+    }
+    retained?.let { expected ->
+        if (rootBefore != expected.root) {
+            isolationFail("prepared function-observation root identity changed")
+        }
+    }
+    requireExactPreparedNames(
+        root,
+        listOf(RUNTIME_DIRECTORY, SCRATCH_DIRECTORY, TEMP_DIRECTORY),
+        "run root",
+    )
+
+    val scratch = root.whileOpen { fd ->
+        LinuxFilesystemSyscalls.openDirectoryAt(fd, SCRATCH_DIRECTORY)
+    }
+    scratch.use { scratchDirectory ->
+        val temporary = root.whileOpen { fd ->
+            LinuxFilesystemSyscalls.openDirectoryAt(fd, TEMP_DIRECTORY)
+        }
+        temporary.use { temporaryDirectory ->
+            val runtime = root.whileOpen { fd ->
+                LinuxFilesystemSyscalls.openDirectoryAt(fd, RUNTIME_DIRECTORY)
+            }
+            runtime.use { runtimeDirectory ->
+                val scratchIdentity = LinuxFilesystemSyscalls.identity(scratchDirectory.fd)
+                val temporaryIdentity = LinuxFilesystemSyscalls.identity(temporaryDirectory.fd)
+                val runtimeIdentity = LinuxFilesystemSyscalls.identity(runtimeDirectory.fd)
+                requirePreparedChildDirectory(scratchIdentity, rootBefore, "scratch")
+                requirePreparedChildDirectory(temporaryIdentity, rootBefore, "temporary")
+                requirePreparedChildDirectory(runtimeIdentity, rootBefore, "runtime")
+                retained?.let { expected ->
+                    if (
+                        scratchIdentity != expected.scratch ||
+                        temporaryIdentity != expected.temporary ||
+                        runtimeIdentity != expected.runtime
+                    ) isolationFail("prepared function-observation directory identity changed")
+                }
+                requireExactPreparedNames(scratchDirectory, emptyList(), "scratch directory")
+                requireExactPreparedNames(temporaryDirectory, emptyList(), "temporary directory")
+                requireExactPreparedNames(runtimeDirectory, classPathNames, "runtime directory")
+
+                val classPathIdentities = classPathNames.mapIndexed { index, name ->
+                    val selected = LinuxFilesystemSyscalls.openRegularFileAtOrNull(runtimeDirectory.fd, name)
+                        ?: isolationFail("prepared class-path entry is absent: $name")
+                    selected.use { classPathEntry ->
+                        val before = LinuxFilesystemSyscalls.identity(classPathEntry.fd)
+                        requirePreparedClassPathIdentity(before, rootBefore, name)
+                        retained?.let { expected ->
+                            if (before != expected.classPath[index]) {
+                                isolationFail("prepared class-path inode changed: $name")
+                            }
+                        }
+                        val (expectedBytes, expectedSha256) = classPathExpected[index]
+                        if (digestDescriptor(classPathEntry, expectedBytes) != expectedSha256) {
+                            isolationFail("prepared class-path bytes changed: $name")
+                        }
+                        val after = LinuxFilesystemSyscalls.identity(classPathEntry.fd)
+                        if (after != before) {
+                            isolationFail("prepared class-path identity changed while hashing: $name")
+                        }
+                        before
+                    }
+                }
+
+                requireExactPreparedNames(runtimeDirectory, classPathNames, "runtime directory after hashing")
+                classPathNames.forEachIndexed { index, name ->
+                    val selected = LinuxFilesystemSyscalls.openRegularFileAtOrNull(runtimeDirectory.fd, name)
+                        ?: isolationFail("prepared class-path entry disappeared: $name")
+                    selected.use { classPathEntry ->
+                        if (LinuxFilesystemSyscalls.identity(classPathEntry.fd) != classPathIdentities[index]) {
+                            isolationFail("prepared class-path name selected a replacement inode: $name")
+                        }
+                    }
+                }
+                requireExactPreparedNames(scratchDirectory, emptyList(), "scratch directory after hashing")
+                requireExactPreparedNames(temporaryDirectory, emptyList(), "temporary directory after hashing")
+                if (
+                    LinuxFilesystemSyscalls.identity(scratchDirectory.fd) != scratchIdentity ||
+                    LinuxFilesystemSyscalls.identity(temporaryDirectory.fd) != temporaryIdentity ||
+                    LinuxFilesystemSyscalls.identity(runtimeDirectory.fd) != runtimeIdentity
+                ) isolationFail("prepared function-observation directory changed during validation")
+                listOf(
+                    SCRATCH_DIRECTORY to scratchIdentity,
+                    TEMP_DIRECTORY to temporaryIdentity,
+                    RUNTIME_DIRECTORY to runtimeIdentity,
+                ).forEach { (name, expectedIdentity) ->
+                    val selected = root.whileOpen { fd -> LinuxFilesystemSyscalls.openDirectoryAt(fd, name) }
+                    selected.use { directory ->
+                        if (LinuxFilesystemSyscalls.identity(directory.fd) != expectedIdentity) {
+                            isolationFail("prepared function-observation name selected a replacement directory")
+                        }
+                    }
+                }
+                requireExactPreparedNames(
+                    root,
+                    listOf(RUNTIME_DIRECTORY, SCRATCH_DIRECTORY, TEMP_DIRECTORY),
+                    "run root after validation",
+                )
+                val rootAfter = LinuxFilesystemSyscalls.identity(root.fd)
+                if (rootAfter != rootBefore) {
+                    isolationFail("prepared function-observation root changed during validation")
+                }
+                return PreparedObservationRunLayout(
+                    rootBefore,
+                    scratchIdentity,
+                    temporaryIdentity,
+                    runtimeIdentity,
+                    classPathIdentities.toList(),
+                )
+            }
+        }
+    }
+}
+
+private fun requireExactPreparedNames(
+    directory: LinuxDescriptor,
+    expected: List<String>,
+    label: String,
+) {
+    val actual = LinuxFilesystemSyscalls.directoryEntryNames(directory, expected.size + 1).sorted()
+    if (actual != expected.sorted()) {
+        isolationFail("prepared function-observation $label has unexpected membership")
+    }
+}
+
+private fun requirePreparedRootIdentity(identity: LinuxFileIdentity) {
+    if (
+        !identity.isDirectory || identity.isRegularFile || identity.isSymbolicLink ||
+        identity.mode.permissions != OWNER_DIRECTORY_MODE || identity.linkCount != PREPARED_ROOT_LINK_COUNT
+    ) isolationFail("prepared function-observation root is not the exact private ext4 layout")
+}
+
+private fun requirePreparedChildDirectory(
+    identity: LinuxFileIdentity,
+    root: LinuxFileIdentity,
+    label: String,
+) {
+    if (
+        !identity.isDirectory || identity.isRegularFile || identity.isSymbolicLink ||
+        identity.mode.permissions != OWNER_DIRECTORY_MODE || identity.linkCount != PREPARED_CHILD_LINK_COUNT ||
+        identity.uid != root.uid || identity.gid != root.gid || identity.mountId != root.mountId ||
+        identity.key.device != root.key.device
+    ) isolationFail("prepared function-observation $label directory is outside the exact private layout")
+}
+
+private fun requirePreparedClassPathIdentity(
+    identity: LinuxFileIdentity,
+    root: LinuxFileIdentity,
+    name: String,
+) {
+    if (
+        !identity.isRegularFile || identity.isDirectory || identity.isSymbolicLink ||
+        identity.mode.permissions != OWNER_READ_ONLY_MODE || identity.linkCount != 1 ||
+        identity.uid != root.uid || identity.gid != root.gid || identity.mountId != root.mountId ||
+        identity.key.device != root.key.device
+    ) isolationFail("prepared class-path entry is outside the exact private layout: $name")
 }
 
 internal data class FullTreeFunctionObservationCgroupReceipt(
@@ -395,6 +632,229 @@ internal data class FullTreeFunctionObservationIsolatedFixturePublication(
     val fixtureShard: FullTreeFunctionObservationPublishedShard,
     val cgroup: FullTreeFunctionObservationCgroupReceipt,
 )
+
+/**
+ * Production pre-launch composition for one durable LEASED operation.
+ *
+ * This stage authenticates the journal-bound inputs and runtime, transfers the linear journal/disk
+ * authority before this layer's first run-tree mutation, initializes the deterministic pinned run
+ * root from an exact-empty descriptor view, and snapshots the worker class path. It does not pin the
+ * launch executables, contact systemd, launch a process, append UNIT_ATTACHED, publish output, clean
+ * residue, or authorize lease release. The supplied prepared handle is consumed on success and on
+ * every failure; failures preserve residue.
+ */
+internal object FullTreeFunctionObservationIsolatedOperationRunner {
+    fun prepareBeforeLaunch(
+        preparedRun: FullTreeFunctionObservationPreparedRun,
+        richArtifact: Path,
+        inventoryPath: Path,
+        scopeFiles: FullTreeFunctionObservationScopeFiles,
+        output: Path,
+        configuration: FullTreeFunctionObservationIsolationConfiguration,
+    ): FullTreeFunctionObservationPreparedIsolation =
+        FullTreeFunctionObservationPreparedIsolation.prepareBeforeLaunch(
+            preparedRun,
+            richArtifact,
+            inventoryPath,
+            scopeFiles,
+            output,
+            configuration,
+        )
+}
+
+/**
+ * Typed LEASED state whose deterministic run layout and class path passed exact point-in-time
+ * validation, but which carries no worker/cgroup or same-UID-writer-exclusion claim. Closing
+ * preserves all run, lease, and journal residue.
+ */
+internal class FullTreeFunctionObservationPreparedIsolation private constructor(
+    private val paths: IsolatedObservationPaths,
+    private val runDirectory: Path,
+    private val configuration: FullTreeFunctionObservationIsolationConfiguration,
+    private val authenticatedScope: AuthenticatedFullTreeScope,
+    private val authenticatedInputs: FullTreeFunctionObservationAuthenticatedInputs,
+    private val resources: IsolatedObservationResources,
+    private val runtime: AuthenticatedObservationRuntime,
+    private val inputGuards: ParentObservationInputGuards,
+    private val materializedClassPath: MaterializedObservationClassPath,
+    private val authority: FullTreeFunctionObservationPreparedIsolationAuthority,
+) : AutoCloseable {
+    val operationId: String = authority.leasedHistory.binding.operationId
+    val shardId: String = authority.leasedHistory.binding.shardId
+    private var closed = false
+    private var operationActive = false
+
+    init {
+        requireCurrentBeforeLaunch()
+    }
+
+    /** Reauthenticates H, D, input/class-path bytes, runtime closure metadata, and the run layout. */
+    @Synchronized
+    fun requireCurrentBeforeLaunch() {
+        check(!closed) { "function-observation prepared isolation is closed" }
+        if (operationActive) {
+            isolationFail("function-observation prepared isolation operation is already active")
+        }
+        operationActive = true
+        try {
+            val binding = authority.leasedHistory.binding
+            FullTreeScopeControl.validate(authenticatedScope)
+            requireFullTreeObservationDiskClosureCompatibility(binding, resources.cleanupLimits)
+            requirePreparedIsolationBinding(
+                binding,
+                paths,
+                runDirectory,
+                configuration,
+                authenticatedScope,
+                inputGuards,
+                authenticatedInputs,
+            )
+            runtime.verify("while prepared before launch")
+            inputGuards.verifyCurrent("while prepared before launch")
+            authority.withCurrentRunRootBeforeLaunch { borrowed ->
+                if (borrowed.path != runDirectory) {
+                    isolationFail("prepared function-observation run-root locator changed")
+                }
+                BorrowedObservationRunTree.access(borrowed).use { runTree ->
+                    materializedClassPath.requirePreparedLayout(runTree)
+                }
+            }
+            requirePreparedIsolationOutputAbsent(paths.output)
+            runtime.verify("after prepared run-tree revalidation")
+            inputGuards.verifyCurrent("after prepared run-tree revalidation")
+            authority.requireCurrentBeforeLaunch()
+        } finally {
+            operationActive = false
+        }
+    }
+
+    @Synchronized
+    override fun close() {
+        if (closed) return
+        if (operationActive) {
+            isolationFail("function-observation prepared isolation cannot close during an active operation")
+        }
+        closed = true
+        closePreparedIsolationResources(
+            inputGuards = inputGuards,
+            runtime = runtime,
+            authority = authority,
+            untransferred = null,
+            priorFailure = null,
+        )?.let { throw it }
+    }
+
+    companion object {
+        internal fun prepareBeforeLaunch(
+            preparedRun: FullTreeFunctionObservationPreparedRun,
+            richArtifact: Path,
+            inventoryPath: Path,
+            scopeFiles: FullTreeFunctionObservationScopeFiles,
+            output: Path,
+            configuration: FullTreeFunctionObservationIsolationConfiguration,
+        ): FullTreeFunctionObservationPreparedIsolation = translateIsolationFailures(
+            label = "pre-launch preparation",
+        ) {
+            var runtime: AuthenticatedObservationRuntime? = null
+            var guards: ParentObservationInputGuards? = null
+            var authority: FullTreeFunctionObservationPreparedIsolationAuthority? = null
+            try {
+                preparedRun.requireCurrentBeforeLaunch()
+                val binding = preparedRun.leasedHistory.binding
+                val runDirectory = preparedRun.withCurrentRunRootBeforeLaunch { borrowed -> borrowed.path }
+                val runParent = runDirectory.parent
+                    ?: isolationFail("prepared function-observation run root has no lease parent")
+                val paths = IsolatedObservationPaths.normalize(
+                    richArtifact,
+                    inventoryPath,
+                    scopeFiles,
+                    runParent,
+                    output,
+                )
+                requirePreparedIsolationPathTopology(binding, paths, runDirectory)
+
+                val authenticated = FullTreeScopeControl.load(
+                    paths.scopeFiles.scope,
+                    paths.scopeFiles.sourceLock,
+                    paths.scopeFiles.artifactManifest,
+                )
+                FullTreeScopeControl.validate(authenticated)
+                val openedRuntime = AuthenticatedObservationRuntime.open(configuration)
+                runtime = openedRuntime
+                val resources = IsolatedObservationResources.derive(
+                    authenticated,
+                    openedRuntime.classPathBytes,
+                )
+                requireFullTreeObservationDiskClosureCompatibility(binding, resources.cleanupLimits)
+                val openedGuards = ParentObservationInputGuards.open(paths, authenticated)
+                guards = openedGuards
+                val inputs = FullTreeFunctionObservationProducer.authenticateShardInputs(
+                    inventoryPath = paths.inventory,
+                    scope = authenticated,
+                    shardId = binding.shardId,
+                )
+                requirePreparedIsolationBinding(
+                    binding,
+                    paths,
+                    runDirectory,
+                    configuration,
+                    authenticated,
+                    openedGuards,
+                    inputs,
+                )
+                openedGuards.verifyCurrent("immediately before run-tree initialization")
+                openedRuntime.verify("immediately before prepared run-tree initialization")
+                preparedRun.requireCurrentBeforeLaunch()
+
+                val transferred = preparedRun.transferToPreparedIsolationAuthority()
+                authority = transferred
+                val materializedClassPath = transferred.withCurrentRunRootBeforeLaunch { borrowed ->
+                    if (borrowed.path != runDirectory) {
+                        isolationFail("prepared function-observation run-root locator changed")
+                    }
+                    requirePreparedIsolationPathTopology(binding, paths, runDirectory)
+                    openedGuards.verifyCurrent("at run-tree initialization")
+                    openedRuntime.verify("at prepared run-tree initialization")
+                    BorrowedObservationRunTree.initialize(borrowed).use { runTree ->
+                        val classPath = openedRuntime.materializeClassPath(runTree)
+                        classPath.authenticatePreparedLayout(runTree)
+                        openedRuntime.verify("after prepared class-path snapshotting")
+                        openedGuards.verifyCurrent("after prepared class-path snapshotting")
+                        requirePreparedIsolationOutputAbsent(paths.output)
+                        classPath
+                    }
+                }
+                transferred.requireCurrentBeforeLaunch()
+
+                val result = FullTreeFunctionObservationPreparedIsolation(
+                    paths,
+                    runDirectory,
+                    configuration,
+                    authenticated,
+                    inputs,
+                    resources,
+                    openedRuntime,
+                    openedGuards,
+                    materializedClassPath,
+                    transferred,
+                )
+                runtime = null
+                guards = null
+                authority = null
+                result
+            } catch (failure: Throwable) {
+                closePreparedIsolationResources(
+                    inputGuards = guards,
+                    runtime = runtime,
+                    authority = authority,
+                    untransferred = if (authority == null) preparedRun else null,
+                    priorFailure = failure,
+                )
+                throw failure
+            }
+        }
+    }
+}
 
 /**
  * Parent-owned, non-authoritative containment fixture for one function-observation shard.
@@ -736,6 +1196,166 @@ private data class IsolatedObservationPaths(
     }
 }
 
+private fun requirePreparedIsolationBinding(
+    binding: FullTreeFunctionObservationOperationBinding,
+    paths: IsolatedObservationPaths,
+    runDirectory: Path,
+    configuration: FullTreeFunctionObservationIsolationConfiguration,
+    authenticated: AuthenticatedFullTreeScope,
+    guards: ParentObservationInputGuards,
+    inputs: FullTreeFunctionObservationAuthenticatedInputs,
+) {
+    FullTreeScopeControl.validate(authenticated)
+    requirePreparedIsolationPathTopology(binding, paths, runDirectory)
+    if (configuration.canonicalSha256 != binding.isolationConfigurationSha256) {
+        isolationFail("prepared isolation configuration differs from its operation binding")
+    }
+    if (authenticated.sha256 != binding.scopeSha256) {
+        isolationFail("prepared isolation scope differs from its operation binding")
+    }
+    if (
+        guards.inventorySha256 != binding.inventoryArtifactSha256 ||
+        guards.richSha256 != binding.richArtifactSha256
+    ) isolationFail("prepared isolation artifacts differ from their operation binding")
+    if (
+        inputs.inventoryArtifactSha256 != guards.inventorySha256 ||
+        inputs.inventoryArtifactSha256 != binding.inventoryArtifactSha256 ||
+        inputs.shard.identifier != binding.shardId ||
+        inputs.shard.inputSha256 != binding.shardInputSha256
+    ) isolationFail("prepared isolation shard input differs from its operation binding")
+    val outputPathSha256 = OracleArtifacts.sha256(paths.output.toString().toByteArray(Charsets.UTF_8))
+    if (outputPathSha256 != binding.outputPathSha256) {
+        isolationFail("prepared isolation output path differs from its operation binding")
+    }
+    requirePreparedIsolationOutputAbsent(paths.output)
+}
+
+private fun requirePreparedIsolationPathTopology(
+    binding: FullTreeFunctionObservationOperationBinding,
+    paths: IsolatedObservationPaths,
+    runDirectory: Path,
+) {
+    if (
+        !runDirectory.isAbsolute || runDirectory.normalize() != runDirectory ||
+        runDirectory.fileName?.toString() != binding.runDirectoryName ||
+        runDirectory.parent?.fileName?.toString() != binding.leaseDirectoryName ||
+        paths.scratchParent != runDirectory.parent
+    ) isolationFail("prepared isolation run path differs from its deterministic operation names")
+    val inputs = listOf(
+        paths.richArtifact,
+        paths.inventory,
+        paths.scopeFiles.scope,
+        paths.scopeFiles.sourceLock,
+        paths.scopeFiles.artifactManifest,
+    )
+    requireDistinctControlOutput(
+        paths.output,
+        "rich artifact" to paths.richArtifact,
+        "inventory" to paths.inventory,
+        "scope" to paths.scopeFiles.scope,
+        "source lock" to paths.scopeFiles.sourceLock,
+        "artifact manifest" to paths.scopeFiles.artifactManifest,
+    )
+    val leaseRoot = runDirectory.parent
+        ?: isolationFail("prepared isolation run path has no lease root")
+    val outputParent = paths.output.parent
+        ?: isolationFail("prepared isolation output path has no parent")
+    val (canonicalOutputParent, _) = requireStableDirectory(
+        outputParent,
+        "prepared function-observation output parent",
+    )
+    val canonicalLeaseRoot = try {
+        leaseRoot.toRealPath()
+    } catch (failure: Exception) {
+        throw FullTreeFunctionObservationIsolationException(
+            "prepared isolation lease root is unavailable",
+            failure,
+        )
+    }
+    if (
+        canonicalOutputParent != outputParent || canonicalLeaseRoot != leaseRoot ||
+        inputs.any { pathsOverlap(it, runDirectory) } ||
+        pathsOverlap(canonicalOutputParent, canonicalLeaseRoot)
+    ) {
+        isolationFail("prepared isolation input or output overlaps its private disk authority")
+    }
+}
+
+private fun requirePreparedIsolationOutputAbsent(output: Path) {
+    val parent = output.parent
+        ?: isolationFail("prepared function-observation publication target has no parent")
+    val name = output.fileName?.toString()
+        ?: isolationFail("prepared function-observation publication target has no name")
+    val (canonicalParent, parentKeyBefore) = requireStableDirectory(
+        parent,
+        "prepared function-observation output parent",
+    )
+    if (canonicalParent != parent) {
+        isolationFail("prepared function-observation output parent is not canonical")
+    }
+    LinuxFilesystemSyscalls.openRoot(canonicalParent).use { descriptor ->
+        descriptor.whileOpen { fd ->
+            if (!Files.isSameFile(canonicalParent, LinuxFilesystemSyscalls.stableDescriptorPath(fd))) {
+                isolationFail("prepared function-observation output parent changed during absence proof")
+            }
+            val before = LinuxFilesystemSyscalls.identity(fd)
+            LinuxFilesystemSyscalls.openPathAtOrNull(fd, name)?.use {
+                isolationFail("prepared function-observation publication target already exists")
+            }
+            val after = LinuxFilesystemSyscalls.identity(fd)
+            if (after != before) {
+                isolationFail("prepared function-observation output parent changed during absence proof")
+            }
+        }
+    }
+    val (parentAfter, parentKeyAfter) = requireStableDirectory(
+        parent,
+        "prepared function-observation output parent after absence proof",
+    )
+    if (parentAfter != canonicalParent || parentKeyAfter != parentKeyBefore) {
+        isolationFail("prepared function-observation output parent changed during absence proof")
+    }
+}
+
+/**
+ * Proves only that the committed hard physical/inode aggregate caps fit the isolation closure
+ * ceilings. Sparse logical size and excessive depth remain fail-closed recovery/reset concerns and
+ * require separate whole-run accounting before release certification.
+ */
+internal fun requireFullTreeObservationDiskClosureCompatibility(
+    binding: FullTreeFunctionObservationOperationBinding,
+    limits: AcpRuntimeClosureLimits,
+) {
+    if (
+        binding.maximumFilesystemBytes > limits.maximumUserOwnedFileBytes ||
+        binding.maximumFilesystemInodes > limits.maximumEntries.toLong()
+    ) isolationFail("prepared disk authority exceeds the bounded isolation closure")
+}
+
+private fun closePreparedIsolationResources(
+    inputGuards: ParentObservationInputGuards?,
+    runtime: AuthenticatedObservationRuntime?,
+    authority: FullTreeFunctionObservationPreparedIsolationAuthority?,
+    untransferred: FullTreeFunctionObservationPreparedRun?,
+    priorFailure: Throwable?,
+): Throwable? {
+    var failure = priorFailure
+    fun record(closeFailure: Throwable) {
+        val primary = failure
+        if (primary == null) failure = closeFailure else if (closeFailure !== primary) {
+            primary.addSuppressed(closeFailure)
+        }
+    }
+    if (authority != null && untransferred != null) {
+        record(IllegalStateException("prepared isolation retained two linear operation wrappers"))
+    }
+    inputGuards?.let { guards -> runCatching { guards.close() }.exceptionOrNull()?.let(::record) }
+    runtime?.let { opened -> runCatching { opened.close() }.exceptionOrNull()?.let(::record) }
+    authority?.let { owner -> runCatching { owner.close() }.exceptionOrNull()?.let(::record) }
+    untransferred?.let { owner -> runCatching { owner.close() }.exceptionOrNull()?.let(::record) }
+    return failure
+}
+
 private data class IsolatedObservationResources(
     val maximumResidentBytes: Long,
     val maximumAddressSpaceBytes: Long,
@@ -934,20 +1554,24 @@ private class ParentObservationInputGuards private constructor(
     val inventorySha256: String,
     val richSha256: String,
 ) : AutoCloseable {
-    fun verifyDigests(receipt: FullTreeFunctionObservationPublishedShard) {
+    fun verifyCurrent(label: String) {
         if (
-            scope.sha256(label = "isolated scope before publication") != initialScopeSha256 ||
-            sourceLock.sha256(label = "isolated source lock before publication") != initialSourceLockSha256 ||
-            manifest.sha256(label = "isolated manifest before publication") != initialManifestSha256 ||
-            inventory.sha256(label = "isolated inventory before publication") != inventorySha256 ||
-            rich.sha256(label = "isolated rich artifact before publication") != richSha256
-        ) isolationFail("authenticated isolated inputs changed before parent publication")
+            scope.sha256(label = "isolated scope $label") != initialScopeSha256 ||
+            sourceLock.sha256(label = "isolated source lock $label") != initialSourceLockSha256 ||
+            manifest.sha256(label = "isolated manifest $label") != initialManifestSha256 ||
+            inventory.sha256(label = "isolated inventory $label") != inventorySha256 ||
+            rich.sha256(label = "isolated rich artifact $label") != richSha256
+        ) isolationFail("authenticated isolated inputs changed $label")
+        verifyMetadata()
+    }
+
+    fun verifyDigests(receipt: FullTreeFunctionObservationPublishedShard) {
+        verifyCurrent("before parent publication")
         if (
             receipt.scopeSha256 != initialScopeSha256 ||
             receipt.inventoryArtifactSha256 != inventorySha256 ||
             receipt.richArtifactSha256 != richSha256
         ) isolationFail("isolated worker receipt is not bound to the parent's pinned inputs")
-        verifyMetadata()
     }
 
     fun verifyMetadata() {
@@ -964,7 +1588,9 @@ private class ParentObservationInputGuards private constructor(
             try {
                 guard.close()
             } catch (closeFailure: Throwable) {
-                if (failure == null) failure = closeFailure else failure.addSuppressed(closeFailure)
+                if (failure == null) failure = closeFailure else if (closeFailure !== failure) {
+                    failure.addSuppressed(closeFailure)
+                }
             }
         }
         failure?.let { throw it }
@@ -1319,6 +1945,19 @@ internal class BorrowedObservationRunTree private constructor(
             val tree = BorrowedObservationRunTree(borrowed)
             try {
                 tree.withPinnedDescriptor(::initializeFreshObservationRunTree)
+                return tree
+            } catch (failure: Throwable) {
+                tree.close()
+                throw failure
+            }
+        }
+
+        internal fun access(borrowed: FullTreeDiskScratchBorrowedRunRoot): BorrowedObservationRunTree {
+            val tree = BorrowedObservationRunTree(borrowed)
+            try {
+                tree.withPinnedDescriptor { descriptor ->
+                    requirePrivateDirectory(descriptor, "borrowed observation run tree")
+                }
                 return tree
             } catch (failure: Throwable) {
                 tree.close()
@@ -3071,13 +3710,16 @@ private fun multiplyExact(left: Long, right: Long, label: String): Long = try {
 
 private fun randomHex(bytes: Int): String = ByteArray(bytes).also(SECURE_RANDOM::nextBytes).hex()
 
-private inline fun <T> translateIsolationFailures(action: () -> T): T = try {
+private inline fun <T> translateIsolationFailures(
+    label: String = "publication",
+    action: () -> T,
+): T = try {
     action()
 } catch (failure: FullTreeFunctionObservationIsolationException) {
     throw failure
 } catch (failure: Throwable) {
     throw FullTreeFunctionObservationIsolationException(
-        "isolated function-observation publication failed: ${failure.message}",
+        "isolated function-observation $label failed: ${failure.message}",
         failure,
     )
 }
@@ -3125,6 +3767,8 @@ private const val MAXIMUM_FAILURE_CLASS_CHARS = 256
 private const val COPY_BUFFER_BYTES = 1024 * 1024
 private const val MAXIMUM_PRIVATE_ENTRIES = 100_000
 private const val MAXIMUM_PRIVATE_DEPTH = 64
+private const val PREPARED_ROOT_LINK_COUNT = 5
+private const val PREPARED_CHILD_LINK_COUNT = 2
 private const val PROTOCOL_CLEANUP_ALLOWANCE_BYTES = 64L * 1024L * 1024L
 private const val SQLITE_EXPANSION = 4L
 private const val MINIMUM_WORKER_MEMORY_BYTES = 256L * 1024L * 1024L

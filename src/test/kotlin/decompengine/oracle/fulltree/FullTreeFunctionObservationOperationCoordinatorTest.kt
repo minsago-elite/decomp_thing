@@ -522,6 +522,7 @@ class FullTreeFunctionObservationOperationCoordinatorTest {
             val expectedRunRoot = leaseRoot.resolve(runDirectoryName(binding.operationId))
             var leased: FullTreeFunctionObservationLeasedOperation? = null
             var prepared: FullTreeFunctionObservationPreparedRun? = null
+            var isolationAuthority: FullTreeFunctionObservationPreparedIsolationAuthority? = null
             try {
                 FullTreeFunctionObservationJournalAuthority.open(root).use { authority ->
                     val operation = FullTreeFunctionObservationOperationCoordinator.prepareNew(
@@ -634,6 +635,28 @@ class FullTreeFunctionObservationOperationCoordinatorTest {
                     assertSame(callbackFailure, retainedFailure)
                     assertTrue(retainedFailure.suppressed.isEmpty())
                     run.requireCurrentBeforeLaunch()
+
+                    val transferred = run.transferToPreparedIsolationAuthority()
+                    isolationAuthority = transferred
+                    assertSame(run.leasedHistory, transferred.leasedHistory)
+                    assertSame(run.diskEvidence, transferred.diskEvidence)
+                    assertFailsWith<IllegalStateException> { run.requireCurrentBeforeLaunch() }
+                    assertFailsWith<IllegalStateException> {
+                        run.withCurrentRunRootBeforeLaunch {
+                            error("transferred prepared-run callback must not run")
+                        }
+                    }
+                    run.close()
+                    prepared = null
+                    transferred.requireCurrentBeforeLaunch()
+                    transferred.withCurrentRunRootBeforeLaunch { borrowed ->
+                        borrowed.withPinnedDescriptor { descriptor ->
+                            assertEquals(
+                                initializedNames,
+                                LinuxFilesystemSyscalls.directoryEntryNames(descriptor, 4).sorted(),
+                            )
+                        }
+                    }
                     assertFailsWith<FullTreeFunctionObservationOperationJournalException> {
                         FullTreeFunctionObservationJournalAuthority.open(root)
                     }
@@ -652,9 +675,9 @@ class FullTreeFunctionObservationOperationCoordinatorTest {
                     val evidenceBytes = run.diskEvidence.canonicalBytes()
                     val mountNames = entryNames(mount)
                     val leaseNames = entryNames(leaseRoot)
-                    run.close()
-                    prepared = null
-                    run.close()
+                    transferred.close()
+                    isolationAuthority = null
+                    transferred.close()
 
                     assertFailsWith<IllegalStateException> {
                         run.requireCurrentBeforeLaunch()
@@ -698,6 +721,7 @@ class FullTreeFunctionObservationOperationCoordinatorTest {
                     assertContentEquals(recordBytes, Files.readAllBytes(recordPath))
                 }
             } finally {
+                runCatching { isolationAuthority?.close() }
                 runCatching { prepared?.close() }
                 runCatching { leased?.close() }
                 listOf("runtime", "scratch", "tmp").forEach { name ->
