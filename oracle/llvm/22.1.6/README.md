@@ -172,7 +172,7 @@ it does not run the recorded build tools or authenticate a fresh container image
 compatibility only.
 
 Manifest generation, function-oracle generation, and behavior execution remain Python migration-compatibility
-commands. They cannot generate or certify a new Kotlin-only release:
+commands. They cannot generate or certify a new Kotlin-only release. Their historical compatibility invocation is:
 
 ```sh
 cp -a oracle/llvm/22.1.6 /tmp/llvm-oracle-manifest
@@ -195,6 +195,15 @@ python3 scripts/check-behavior-corpus-evidence.py \
   --corpus oracle/llvm/22.1.6/behavior-corpus.json \
   --evidence oracle/llvm/22.1.6/behavior-corpus-evidence.json
 ```
+
+The Kotlin/JVM historical implementation-ownership projection is documented in
+[`docs/full-tree-implementation-ownership-planning.md`](../../../docs/full-tree-implementation-ownership-planning.md).
+It maps a caller-supplied, internally consistent A13-v2 `inline-only-v1` function
+population to authenticated planning modules without invoking Python. The opt-in
+parity test separately pins the exact frozen historical pair. The projection is
+explicitly non-authoritative and planning-only: it rejects the later live
+`nonEmitted` format, does not infer headers or dependencies, does not emit a build
+graph, and cannot authorize reconstruction or release.
 
 With the exact Docker executor profile available as `DOCKER` and
 `DOCKER_HOST`, live replay is:
