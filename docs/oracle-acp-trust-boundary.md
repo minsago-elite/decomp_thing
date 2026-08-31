@@ -66,9 +66,10 @@ interchange format, while canonical bytes, schema validation, sharding, hashing,
 decisions move to Kotlin/JVM. Large evidence is processed with bounded streaming and authenticated scratch storage
 rather than complete in-memory materialization.
 
-That migration is currently partial. Scope and inventory controls, full-tree data truth/reconciliation/baselines,
-bounded completed-run verification, and GCC planning have Kotlin/JVM paths. Function/call truth, production structural
-adapter replay, some ELF/DWARF observation generation, and full-tree release orchestration still have Python
+That migration is currently partial. Source and release acquisition, LLVM artifact-manifest/ELF-twin verification,
+scope and inventory controls, full-tree data truth/reconciliation/baselines, bounded completed-run verification, and
+GCC planning have Kotlin/JVM paths. Function/call truth, production structural adapter replay, some ELF/DWARF
+observation generation, and full-tree release orchestration still have Python
 entrypoints. Those entrypoints may preserve historical production evidence and differential parity, but they do not
 satisfy the Kotlin-only authority requirement for the next release.
 
@@ -81,9 +82,14 @@ materializer. They also fetch the hash-locked LLVM release artifacts through bou
 descriptor-bound no-replace publication. The Python source and release-asset materializers are retained only for
 legacy compatibility. The required LLVM lane also authenticates the stable toolchain recipe, Dockerfile, historical
 build-record binding, and fresh linux/amd64 image identity through Kotlin/JVM; the fresh image digest is deliberately
-not equated with the historical artifact-producing image digest. Other Python workflow gates remain in place until
-live build-record and ELF-twin verification, function-oracle, behavior, and release-stage semantics have complete
-Kotlin replacements; keeping those regression checks does not promote their outputs to new release authority.
+not equated with the historical artifact-producing image digest. Both required LLVM lanes now verify the exact
+manifest, source/local evidence, build-record semantics, full and stripped ELF bytes, and derived equivalence through
+the fixed no-argument Kotlin/JVM `verifyLlvmOracleArtifacts` gate. Descriptor and terminal checks detect every
+substitution or mutation visible at their checkpoints, but do not claim exclusion of a cooperating same-UID/root
+writer that transiently mutates and perfectly restores bytes. Other Python workflow gates remain in place until live
+build-record workflow cutover, function-oracle, behavior execution, and release-stage semantics have complete Kotlin
+replacements; keeping those regression checks does not promote their outputs to new release authority. The retained
+Python LLVM manifest verifier is explicitly differential migration compatibility and cannot certify a release.
 
 During migration, existing Python outputs may be retained as explicitly non-authoritative differential fixtures. They
 cannot enter a new release as truth or validation evidence. A stage becomes authoritative only after frozen-fixture

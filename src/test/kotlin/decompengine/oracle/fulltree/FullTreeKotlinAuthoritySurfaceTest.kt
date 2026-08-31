@@ -19,6 +19,8 @@ class FullTreeKotlinAuthoritySurfaceTest {
                 "decompengine.oracle.fulltree.FullTreeSourceInventoryGeneratorCli",
             "generateFullTreePlanningInventory" to
                 "decompengine.oracle.fulltree.FullTreePlanningInventoryGeneratorCli",
+            "verifyLlvmOracleArtifacts" to
+                "decompengine.oracle.provenance.LlvmArtifactManifestVerifierCli",
         ).forEach { (task, entryPoint) ->
             assertTrue(build.contains("taskName = \"$task\""))
             assertTrue(build.contains("entryPoint = \"$entryPoint\""))
@@ -36,12 +38,12 @@ class FullTreeKotlinAuthoritySurfaceTest {
         assertTrue(workflow.contains("./gradlew --no-daemon fetchLlvmSourceArchive"))
         assertFalse(workflow.contains("python3 scripts/verify-llvm-oracle-source.py"))
         assertFalse(workflow.contains("python3 scripts/fetch-llvm-oracle-source.py"))
+        assertFalse(workflow.contains("python3 scripts/verify-llvm-oracle-artifacts.py"))
         assertFalse(workflow.contains("tests.oracle.test_llvm_source_lock"))
 
         // Unmigrated regression gates stay active until equivalent Kotlin authorities exist.
         listOf(
             "scripts/verify-llvm-oracle-build-record.py",
-            "python3 scripts/verify-llvm-oracle-artifacts.py",
             "python3 scripts/generate-llvm-function-recovery-oracle.py",
             "python3 scripts/check-behavior-corpus-evidence.py",
             "python3 -m unittest",
@@ -63,5 +65,14 @@ class FullTreeKotlinAuthoritySurfaceTest {
         val guide = Path.of("docs/oracle-acp-trust-boundary.md").readText()
         assertTrue(guide.contains("stable Kotlin/JVM Gradle entrypoints"))
         assertTrue(guide.contains("cannot authorize or enter a Kotlin-only release"))
+
+        val manifestWrapper = Path.of("scripts/verify-llvm-oracle-artifacts.py").readText()
+        assertTrue(manifestWrapper.contains("Legacy non-authoritative Python compatibility"))
+        assertTrue(manifestWrapper.contains("cannot validate or certify a new Kotlin-only release"))
+
+        val manifestGenerator = Path.of("scripts/create-llvm-oracle-manifest.py").readText()
+        assertTrue(manifestGenerator.contains("Legacy non-authoritative Python compatibility"))
+        assertTrue(manifestGenerator.contains("cannot validate, certify"))
+        assertTrue(manifestGenerator.contains("non-authoritative LLVM oracle manifest candidate"))
     }
 }

@@ -120,6 +120,22 @@ The output includes `source-tree/` for normal editing, `source-tree.zip` for arc
 
 ## Development
 
+The required LLVM lanes validate the checked source/build/artifact manifest and
+recompute both complete ELF files plus their exact twin-equivalence commitments
+through the Kotlin/JVM `verifyLlvmOracleArtifacts` gate. The fixed command takes
+no arguments and reads only an absolute `LLVM_ORACLE_ARTIFACT_ROOT` containing
+the authenticated release layout:
+
+```bash
+LLVM_ORACLE_ARTIFACT_ROOT=/absolute/path/to/llvm-oracle-release \
+  ./gradlew --no-daemon verifyLlvmOracleArtifacts
+```
+
+This gate authenticates one manifest boundary; it does not build LLVM, validate
+a fresh container identity, generate downstream truth, score a reconstruction,
+or authorize a Kotlin-only release by itself. The retained Python LLVM manifest
+verifier is non-authoritative migration compatibility.
+
 The required LLVM push/pull-request lane admits the checked Clang behavior
 corpus, its complete 48-case report, and the 16-case diagnostic ownership
 matrix through the Kotlin/JVM `verifyLlvmBehaviorReferenceEvidence` gate. That

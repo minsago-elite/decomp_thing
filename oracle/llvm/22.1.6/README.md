@@ -155,13 +155,26 @@ cmp /tmp/full-tree-source-inventory.json \
   oracle/llvm/22.1.6/full-tree-source-inventory.json
 ```
 
-Manifest, function-oracle, and behavior commands also remain Python migration-compatibility gates. They cannot
-generate, validate, or certify a new Kotlin-only release:
+Artifact-manifest validation is now Kotlin/JVM authority. The fixed production command accepts no arguments; it reads
+the absolute authenticated release root from `LLVM_ORACLE_ARTIFACT_ROOT`, independently verifies the source lock and
+local OpenPGP evidence, parses the exact build record, recomputes both complete ELF files and every v1 equivalence
+field, and terminally reauthenticates the retained descriptors:
 
 ```sh
-python3 scripts/verify-llvm-oracle-artifacts.py \
-  oracle/llvm/22.1.6/oracle-manifest.json \
-  --artifact-root /tmp/llvm-oracle-release
+LLVM_ORACLE_ARTIFACT_ROOT=/tmp/llvm-oracle-release \
+  ./gradlew --no-daemon verifyLlvmOracleArtifacts
+```
+
+The manifest gate detects path replacement and all byte changes observable at its phase and terminal checks. It does
+not claim to exclude a cooperating same-UID/root writer that can transiently mutate and perfectly restore bytes, and
+it does not run the recorded build tools or authenticate a fresh container image. The retained
+`scripts/verify-llvm-oracle-artifacts.py` and `oracle.llvm.verify_oracle_artifacts` surfaces are non-authoritative Python
+compatibility only.
+
+Manifest generation, function-oracle generation, and behavior execution remain Python migration-compatibility
+commands. They cannot generate or certify a new Kotlin-only release:
+
+```sh
 cp -a oracle/llvm/22.1.6 /tmp/llvm-oracle-manifest
 python3 scripts/create-llvm-oracle-manifest.py \
   --source-lock /tmp/llvm-oracle-manifest/source-lock.json \
@@ -201,8 +214,8 @@ cmp /tmp/llvm-behavior-evidence.json \
 ## Rebuild
 
 The manual `LLVM oracle clean rebuild` workflow remains the canonical compatibility reproduction of the historical
-pair. Source acquisition is descriptor-bound Kotlin/JVM authority; its Python tool-capture and artifact-verification
-steps remain compatibility gaps and cannot authorize a new Kotlin-only release. It constructs the pinned toolchain
+pair. Source acquisition and terminal artifact-manifest verification are descriptor-bound Kotlin/JVM authority; its
+Python tool-capture step remains a compatibility gap and cannot authorize a new Kotlin-only release. It constructs the pinned toolchain
 image, fetches and authenticates
 the upstream archive, disables network access for compilation, executes every
 command recorded in `build-record.json`, and uploads the full/stripped pair,
@@ -210,8 +223,8 @@ tool records, and image digest for review. A rebuilt pair is not accepted
 until it matches the separately released pair byte-for-byte and every
 verification command above passes.
 
-The required `LLVM oracle model` workflow runs source acquisition, scope, and inventory stages in Kotlin/JVM, while
-retaining the explicitly non-authoritative Python compatibility gates for stages that do not yet have Kotlin
+The required `LLVM oracle model` workflow runs source acquisition, artifact-manifest verification, scope, and
+inventory stages in Kotlin/JVM, while retaining the explicitly non-authoritative Python compatibility gates for stages that do not yet have Kotlin
 replacements. On every push and pull request it rejects recipe,
 base-image, build-record, platform, tool-byte, or tool-version drift without
 requiring a fresh image's metadata-derived ID to equal the originating ID.

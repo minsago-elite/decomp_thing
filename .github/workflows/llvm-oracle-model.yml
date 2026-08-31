@@ -66,10 +66,7 @@ jobs:
               --reproduction-lock oracle/llvm/22.1.6/toolchain-reproduction.json \
               --container-digest "$observed"
       - name: Verify checked Clang ELF twins
-        run: |
-          python3 scripts/verify-llvm-oracle-artifacts.py \
-            oracle/llvm/22.1.6/oracle-manifest.json \
-            --artifact-root "$LLVM_ORACLE_ARTIFACT_ROOT"
+        run: ./gradlew --no-daemon verifyLlvmOracleArtifacts
       - name: Reconcile the complete Clang/LLVM compilation-unit and source inventories in Kotlin
         run: |
           ./gradlew --no-daemon verifyFullTreeScope

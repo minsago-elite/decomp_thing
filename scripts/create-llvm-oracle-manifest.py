@@ -1,5 +1,9 @@
 #!/usr/bin/env python3
-"""Create an LLVM oracle manifest after verifying a full/stripped ELF pair."""
+"""Legacy non-authoritative Python compatibility generator for an LLVM ELF manifest.
+
+The generated document is migration/test material only.  It cannot validate, certify,
+or enter a new Kotlin-only release; the Kotlin/JVM verifier is the release authority.
+"""
 
 from __future__ import annotations
 
@@ -17,7 +21,7 @@ from oracle.source_lock import VerificationError  # noqa: E402
 
 def main() -> int:
     parser = argparse.ArgumentParser(
-        description="Derive a strict manifest for a DWARF-rich Clang driver and stripped twin."
+        description=__doc__
     )
     parser.add_argument("--source-lock", required=True, type=Path)
     parser.add_argument("--build-record", required=True, type=Path)
@@ -38,7 +42,7 @@ def main() -> int:
     except VerificationError as error:
         print(f"manifest creation failed: {error}", file=sys.stderr)
         return 1
-    print(f"wrote verified LLVM oracle manifest: {arguments.output.resolve()}")
+    print(f"wrote non-authoritative LLVM oracle manifest candidate: {arguments.output.resolve()}")
     print(f"  full SHA-256:     {manifest['artifacts']['full']['sha256']}")
     print(f"  stripped SHA-256: {manifest['artifacts']['stripped']['sha256']}")
     print(f"  GNU Build ID:     {manifest['equivalence']['buildId']}")

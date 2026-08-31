@@ -83,6 +83,12 @@ registerOracleJavaExecTask(
 )
 
 registerOracleJavaExecTask(
+    taskName = "verifyLlvmOracleArtifacts",
+    taskDescription = "Verifies the checked LLVM ELF artifact manifest with Kotlin/JVM authority",
+    entryPoint = "decompengine.oracle.provenance.LlvmArtifactManifestVerifierCli",
+)
+
+registerOracleJavaExecTask(
     taskName = "verifyLlvmBehaviorReferenceEvidence",
     taskDescription = "Authenticates checked LLVM behavior and diagnostic reference evidence in Kotlin/JVM",
     entryPoint = "decompengine.oracle.behavior.LlvmBehaviorReferenceEvidenceCli",

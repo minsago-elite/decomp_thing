@@ -1,5 +1,9 @@
 #!/usr/bin/env python3
-"""Verify the checked LLVM source-aligned ELF oracle manifest and artifacts."""
+"""Legacy non-authoritative Python compatibility check for the LLVM ELF manifest.
+
+The required LLVM workflows use the Kotlin/JVM ``verifyLlvmOracleArtifacts``
+authority.  This retained migration surface cannot validate or certify a new Kotlin-only release.
+"""
 
 from __future__ import annotations
 
