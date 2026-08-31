@@ -158,6 +158,11 @@ class FullTreeFunctionObservationIsolatedFixtureRunnerTest {
             syntheticConfiguration(
                 configuration.systemLibraryMounts,
                 configuration.workerClassPath,
+                systemdBusControllerExecutable = Path.of("/provisioned/tools/busctl-alt"),
+            ),
+            syntheticConfiguration(
+                configuration.systemLibraryMounts,
+                configuration.workerClassPath,
                 systemdUserRuntimeDirectory = Path.of("/run/user/1001"),
             ),
             syntheticConfiguration(
@@ -179,6 +184,11 @@ class FullTreeFunctionObservationIsolatedFixtureRunnerTest {
                 configuration.systemLibraryMounts,
                 configuration.workerClassPath,
                 expectedScopeInspectorSha256 = "a".repeat(64),
+            ),
+            syntheticConfiguration(
+                configuration.systemLibraryMounts,
+                configuration.workerClassPath,
+                expectedSystemdBusControllerSha256 = "b".repeat(64),
             ),
         )
         changedConfigurations.forEach { changed ->
@@ -279,11 +289,85 @@ class FullTreeFunctionObservationIsolatedFixtureRunnerTest {
     }
 
     @Test
+    fun `cold busctl parsers accept exact bounded values and reject ambiguous shapes`() {
+        val invocationId = "1".repeat(32)
+        val invocationPath = systemdInvocationObjectPath(invocationId)
+        assertEquals(
+            "/org/freedesktop/systemd1/unit/_3${invocationId}",
+            invocationPath,
+        )
+        assertEquals(
+            "/org/freedesktop/systemd1/unit/${"a".repeat(32)}",
+            systemdInvocationObjectPath("a".repeat(32)),
+        )
+        assertEquals(
+            invocationPath,
+            parseColdSystemdBusctlObjectPath(
+                "{\"type\":\"o\",\"data\":[\"$invocationPath\"]}\n",
+                "test object path",
+            ),
+        )
+        assertEquals(
+            "worker.scope",
+            parseColdSystemdBusctlStringProperty(
+                "{\"type\":\"s\",\"data\":\"worker.scope\"}\n",
+                "test string",
+            ),
+        )
+        assertTrue(
+            parseColdSystemdBusctlBooleanProperty(
+                "{\"type\":\"b\",\"data\":true}\n",
+                "test boolean",
+            ),
+        )
+        assertEquals(
+            invocationId,
+            parseColdSystemdBusctlId128Property(
+                "{\"type\":\"ay\",\"data\":[${List(16) { 17 }.joinToString(",")}]}\n",
+                "test invocation ID",
+            ),
+        )
+
+        listOf(
+            "Call failed: Unit worker.scope not loaded.\n",
+            "{\"type\":\"o\",\"data\":[\"$invocationPath\"]}",
+            "{\"type\":\"o\",\"data\":[\"$invocationPath\"],\"extra\":true}\n",
+            "{\"type\":\"o\",\"type\":\"o\",\"data\":[\"$invocationPath\"]}\n",
+            "{\"type\":\"o\",\"data\":\"$invocationPath\"}\n",
+            "{\"type\":\"o\",\"data\":[\"/org/freedesktop/systemd1/unit/bad-path\"]}\n",
+        ).forEach { malformed ->
+            assertFailsWith<FullTreeFunctionObservationIsolationException> {
+                parseColdSystemdBusctlObjectPath(malformed, "test object path")
+            }
+        }
+        assertFailsWith<FullTreeFunctionObservationIsolationException> {
+            parseColdSystemdBusctlBooleanProperty(
+                "{\"type\":\"b\",\"data\":\"true\"}\n",
+                "test boolean",
+            )
+        }
+        listOf(
+            List(15) { 17 },
+            List(15) { 17 } + 256,
+            List(16) { 0 },
+        ).forEach { bytes ->
+            assertFailsWith<FullTreeFunctionObservationIsolationException> {
+                parseColdSystemdBusctlId128Property(
+                    "{\"type\":\"ay\",\"data\":[${bytes.joinToString(",")}]}\n",
+                    "test invocation ID",
+                )
+            }
+        }
+    }
+
+    @Test
     fun `cold unit snapshot reduction exposes only stable normalized attachment outcomes`() {
         val unitName = "decomp-oracle-function-${"b".repeat(64)}.scope"
+        val invocationId = "1".repeat(32)
         val controlGroup = "/user.slice/app.slice/$unitName"
         val expected = FullTreeFunctionObservationColdUnitReceiptIdentity(
             unitName,
+            invocationId,
             controlGroup,
             cgroupDevice = 11L,
             cgroupInode = 12L,
@@ -302,11 +386,20 @@ class FullTreeFunctionObservationIsolatedFixtureRunnerTest {
             "running",
             "bounded worker scope",
         )
+        val identity = FullTreeFunctionObservationColdSystemdIdentity(
+            nameObjectPath = "/org/freedesktop/systemd1/unit/test_2escope",
+            invocationObjectPath = systemdInvocationObjectPath(invocationId),
+            unitName = unitName,
+            invocationId = invocationId,
+            transient = true,
+            controlGroup = controlGroup,
+        )
         val candidate = FullTreeFunctionObservationColdUnitSnapshot(
             managerFeatures = setOf("+PAM", "-SELINUX"),
             unit = unit,
             job = null,
             cgroups = listOf(cgroup),
+            systemdIdentity = identity,
         )
         fun outcome(
             before: FullTreeFunctionObservationColdUnitSnapshot,
@@ -314,10 +407,10 @@ class FullTreeFunctionObservationIsolatedFixtureRunnerTest {
         ) = classifyFullTreeFunctionObservationColdUnitSnapshots(expected, before, after)
 
         assertEquals(
-            FullTreeFunctionObservationColdUnitAttachmentObservationOutcome.EXACT_CGROUP_CANDIDATE,
+            FullTreeFunctionObservationColdUnitAttachmentObservationOutcome.SYSTEMD_IDENTITY_CANDIDATE,
             outcome(candidate),
         )
-        val absent = candidate.copy(unit = null, cgroups = emptyList())
+        val absent = candidate.copy(unit = null, cgroups = emptyList(), systemdIdentity = null)
         assertEquals(
             FullTreeFunctionObservationColdUnitAttachmentObservationOutcome.ABSENT,
             outcome(absent),
@@ -337,6 +430,16 @@ class FullTreeFunctionObservationIsolatedFixtureRunnerTest {
         assertEquals(
             FullTreeFunctionObservationColdUnitAttachmentObservationOutcome.INCONSISTENT_OR_EXITING,
             outcome(candidate.copy(unit = null)),
+        )
+        assertEquals(
+            FullTreeFunctionObservationColdUnitAttachmentObservationOutcome.INCONSISTENT_OR_EXITING,
+            outcome(candidate.copy(systemdIdentity = identity.copy(invocationId = "2".repeat(32)))),
+        )
+        val expiredOrFailedIdentityLookup = candidate.copy(systemdIdentity = null, stable = false)
+        assertEquals(
+            FullTreeFunctionObservationColdUnitAttachmentObservationOutcome.CHANGED,
+            outcome(expiredOrFailedIdentityLookup),
+            "an expired invocation or any nonzero busctl identity call stays conservative",
         )
         assertEquals(
             FullTreeFunctionObservationColdUnitAttachmentObservationOutcome.CHANGED,
@@ -1011,16 +1114,56 @@ class FullTreeFunctionObservationIsolatedFixtureRunnerTest {
                     attached = null
 
                     val liveObservationCommands = mutableListOf<List<String>>()
+                    val liveBusctlCommands = mutableListOf<List<String>>()
                     val liveObserver = FullTreeFunctionObservationColdUnitAbsenceObserver.openWithTestObserver(
                         context.binding,
                         configuration,
                         FullTreeFunctionObservationSystemctlCommandObserver { unitName, arguments ->
                             if (unitName == context.binding.unitName) liveObservationCommands += arguments
                         },
+                        FullTreeFunctionObservationBusctlCommandObserver { unitName, arguments ->
+                            if (unitName == context.binding.unitName) liveBusctlCommands += arguments
+                        },
                     )
                     assertEquals(
-                        FullTreeFunctionObservationColdUnitAttachmentObservationOutcome.EXACT_CGROUP_CANDIDATE,
+                        FullTreeFunctionObservationColdUnitAttachmentObservationOutcome.SYSTEMD_IDENTITY_CANDIDATE,
                         liveObserver.observeUnitAttachment(historical),
+                    )
+                    val hardenedBusctlPrefix = listOf(
+                        "--user",
+                        "--no-pager",
+                        "--json=short",
+                        "--auto-start=no",
+                        "--allow-interactive-authorization=no",
+                        "--timeout=2",
+                    )
+                    assertEquals(14, liveBusctlCommands.size)
+                    assertTrue(liveBusctlCommands.all { it.take(hardenedBusctlPrefix.size) == hardenedBusctlPrefix })
+                    assertEquals(
+                        2,
+                        liveBusctlCommands.count { arguments ->
+                            arguments.getOrNull(6) == "call" && arguments.getOrNull(10) == "GetUnit"
+                        },
+                    )
+                    assertEquals(
+                        2,
+                        liveBusctlCommands.count { arguments ->
+                            arguments.getOrNull(6) == "call" &&
+                                arguments.getOrNull(10) == "GetUnitByControlGroup"
+                        },
+                    )
+                    assertEquals(
+                        2,
+                        liveBusctlCommands.count { arguments ->
+                            arguments.getOrNull(6) == "call" &&
+                                arguments.getOrNull(10) == "GetUnitByInvocationID"
+                        },
+                    )
+                    val expectedInvocationPath = systemdInvocationObjectPath(historical.invocationId)
+                    assertTrue(
+                        liveBusctlCommands.filter { it.getOrNull(6) == "get-property" }
+                            .all { arguments -> arguments.getOrNull(8) == expectedInvocationPath },
+                        "unit properties must use only the invocation-bound object path",
                     )
                     assertEquals(
                         0,
@@ -1102,6 +1245,7 @@ class FullTreeFunctionObservationIsolatedFixtureRunnerTest {
                         assertEquals(historical.receiptSha256, reopened.unitAttachmentReceipt.receiptSha256)
                         reopened.requireCurrentReadOnly()
                         val absentObservationCommands = mutableListOf<List<String>>()
+                        val absentBusctlCommands = mutableListOf<List<String>>()
                         val absentObserver =
                             FullTreeFunctionObservationColdUnitAbsenceObserver.openWithTestObserver(
                                 context.binding,
@@ -1109,6 +1253,11 @@ class FullTreeFunctionObservationIsolatedFixtureRunnerTest {
                                 FullTreeFunctionObservationSystemctlCommandObserver { unitName, arguments ->
                                     if (unitName == context.binding.unitName) {
                                         absentObservationCommands += arguments
+                                    }
+                                },
+                                FullTreeFunctionObservationBusctlCommandObserver { unitName, arguments ->
+                                    if (unitName == context.binding.unitName) {
+                                        absentBusctlCommands += arguments
                                     }
                                 },
                             )
@@ -1130,6 +1279,7 @@ class FullTreeFunctionObservationIsolatedFixtureRunnerTest {
                                     setOf("freeze", "thaw", "kill", "stop", "reset-failed")
                             },
                         )
+                        assertTrue(absentBusctlCommands.isEmpty(), "absent units must not issue identity lookups")
 
                         val occupied = startOccupiedObservationUnit(
                             configuration,
@@ -1140,6 +1290,10 @@ class FullTreeFunctionObservationIsolatedFixtureRunnerTest {
                         assertEquals(
                             FullTreeFunctionObservationColdUnitAttachmentObservationOutcome.FOREIGN_REPLACEMENT,
                             absentObserver.observeUnitAttachment(historical),
+                        )
+                        assertTrue(
+                            absentBusctlCommands.isEmpty(),
+                            "foreign cgroup identities must be classified before identity lookups",
                         )
                         assertOccupiedObservationUnitUnchanged(configuration, occupied)
                         stopOccupiedObservationUnit(configuration, occupied)
@@ -1678,6 +1832,7 @@ class FullTreeFunctionObservationIsolatedFixtureRunnerTest {
                 resourceLimiterExecutable = absent,
                 scopeSupervisorExecutable = absent,
                 scopeInspectorExecutable = absent,
+                systemdBusControllerExecutable = absent,
                 systemdUserRuntimeDirectory = Path.of("/run/user/1000"),
                 workerClassPath = listOf(
                     FullTreeFunctionObservationClassPathEntry(absent, ZERO_SHA256),
@@ -1687,6 +1842,7 @@ class FullTreeFunctionObservationIsolatedFixtureRunnerTest {
                 expectedResourceLimiterSha256 = ZERO_SHA256,
                 expectedScopeSupervisorSha256 = ZERO_SHA256,
                 expectedScopeInspectorSha256 = ZERO_SHA256,
+                expectedSystemdBusControllerSha256 = ZERO_SHA256,
             )
         }
     }
@@ -1771,6 +1927,7 @@ class FullTreeFunctionObservationIsolatedFixtureRunnerTest {
                 resourceLimiterExecutable = unavailable,
                 scopeSupervisorExecutable = unavailable,
                 scopeInspectorExecutable = unavailable,
+                systemdBusControllerExecutable = unavailable,
                 systemdUserRuntimeDirectory = Path.of("/definitely-absent/runtime"),
                 workerClassPath = listOf(
                     FullTreeFunctionObservationClassPathEntry(unavailable, ZERO_SHA256),
@@ -1780,6 +1937,7 @@ class FullTreeFunctionObservationIsolatedFixtureRunnerTest {
                 expectedResourceLimiterSha256 = ZERO_SHA256,
                 expectedScopeSupervisorSha256 = ZERO_SHA256,
                 expectedScopeInspectorSha256 = ZERO_SHA256,
+                expectedSystemdBusControllerSha256 = ZERO_SHA256,
             )
 
             val failure = assertFailsWith<FullTreeFunctionObservationIsolationException> {
@@ -1860,6 +2018,7 @@ class FullTreeFunctionObservationIsolatedFixtureRunnerTest {
             resourceLimiterExecutable = configuration.resourceLimiterExecutable,
             scopeSupervisorExecutable = configuration.scopeSupervisorExecutable,
             scopeInspectorExecutable = unavailableScopeInspector ?: configuration.scopeInspectorExecutable,
+            systemdBusControllerExecutable = configuration.systemdBusControllerExecutable,
             systemdUserRuntimeDirectory = configuration.systemdUserRuntimeDirectory,
             workerClassPath = configuration.workerClassPath,
             expectedJavaSha256 = if (configuration.expectedJavaSha256 == ZERO_SHA256) {
@@ -1875,6 +2034,7 @@ class FullTreeFunctionObservationIsolatedFixtureRunnerTest {
             } else {
                 ZERO_SHA256
             },
+            expectedSystemdBusControllerSha256 = configuration.expectedSystemdBusControllerSha256,
         )
 
     private fun assertColdOperationLocksRetained(
@@ -2861,12 +3021,14 @@ class FullTreeFunctionObservationIsolatedFixtureRunnerTest {
         val prlimit: Path
         val systemdRun: Path
         val systemctl: Path
+        val busctl: Path
         if (launchBoundaryRequired) {
             runtime = Path.of("/run/user/$uid")
             bubblewrap = Path.of("/usr/bin/bwrap").realExecutableOrNull() ?: return null
             prlimit = Path.of("/usr/bin/prlimit").realExecutableOrNull() ?: return null
             systemdRun = Path.of("/usr/bin/systemd-run").realExecutableOrNull() ?: return null
             systemctl = Path.of("/usr/bin/systemctl").realExecutableOrNull() ?: return null
+            busctl = Path.of("/usr/bin/busctl").realExecutableOrNull() ?: return null
             if (!Files.isDirectory(runtime, LinkOption.NOFOLLOW_LINKS) || !Files.exists(runtime.resolve("bus"))) {
                 return null
             }
@@ -2892,6 +3054,7 @@ class FullTreeFunctionObservationIsolatedFixtureRunnerTest {
             prlimit = unusedLaunchBoundary.resolve("prlimit")
             systemdRun = unusedLaunchBoundary.resolve("systemd-run")
             systemctl = unusedLaunchBoundary.resolve("systemctl")
+            busctl = unusedLaunchBoundary.resolve("busctl")
         }
         Files.createDirectories(runtimeParent)
         val classPath = System.getProperty("java.class.path")
@@ -2930,6 +3093,7 @@ class FullTreeFunctionObservationIsolatedFixtureRunnerTest {
             resourceLimiterExecutable = prlimit,
             scopeSupervisorExecutable = systemdRun,
             scopeInspectorExecutable = systemctl,
+            systemdBusControllerExecutable = busctl,
             systemdUserRuntimeDirectory = runtime,
             workerClassPath = classPath,
             expectedJavaSha256 = sha256(java),
@@ -2937,6 +3101,7 @@ class FullTreeFunctionObservationIsolatedFixtureRunnerTest {
             expectedResourceLimiterSha256 = if (launchBoundaryRequired) sha256(prlimit) else ZERO_SHA256,
             expectedScopeSupervisorSha256 = if (launchBoundaryRequired) sha256(systemdRun) else ZERO_SHA256,
             expectedScopeInspectorSha256 = if (launchBoundaryRequired) sha256(systemctl) else ZERO_SHA256,
+            expectedSystemdBusControllerSha256 = if (launchBoundaryRequired) sha256(busctl) else ZERO_SHA256,
         )
     }
 
@@ -2954,11 +3119,13 @@ class FullTreeFunctionObservationIsolatedFixtureRunnerTest {
         resourceLimiterExecutable: Path = Path.of("/provisioned/tools/prlimit"),
         scopeSupervisorExecutable: Path = Path.of("/provisioned/tools/systemd-run"),
         scopeInspectorExecutable: Path = Path.of("/provisioned/tools/systemctl"),
+        systemdBusControllerExecutable: Path = Path.of("/provisioned/tools/busctl"),
         systemdUserRuntimeDirectory: Path = Path.of("/run/user/1000"),
         expectedBubblewrapSha256: String = "6".repeat(64),
         expectedResourceLimiterSha256: String = "7".repeat(64),
         expectedScopeSupervisorSha256: String = "8".repeat(64),
         expectedScopeInspectorSha256: String = "9".repeat(64),
+        expectedSystemdBusControllerSha256: String = "a".repeat(64),
     ): FullTreeFunctionObservationIsolationConfiguration {
         return FullTreeFunctionObservationIsolationConfiguration(
             javaExecutable = javaExecutable,
@@ -2968,6 +3135,7 @@ class FullTreeFunctionObservationIsolatedFixtureRunnerTest {
             resourceLimiterExecutable = resourceLimiterExecutable,
             scopeSupervisorExecutable = scopeSupervisorExecutable,
             scopeInspectorExecutable = scopeInspectorExecutable,
+            systemdBusControllerExecutable = systemdBusControllerExecutable,
             systemdUserRuntimeDirectory = systemdUserRuntimeDirectory,
             workerClassPath = classPath,
             expectedJavaSha256 = expectedJavaSha256,
@@ -2975,6 +3143,7 @@ class FullTreeFunctionObservationIsolatedFixtureRunnerTest {
             expectedResourceLimiterSha256 = expectedResourceLimiterSha256,
             expectedScopeSupervisorSha256 = expectedScopeSupervisorSha256,
             expectedScopeInspectorSha256 = expectedScopeInspectorSha256,
+            expectedSystemdBusControllerSha256 = expectedSystemdBusControllerSha256,
         )
     }
 
@@ -3118,7 +3287,7 @@ class FullTreeFunctionObservationIsolatedFixtureRunnerTest {
         const val ZERO_SHA256 =
             "0000000000000000000000000000000000000000000000000000000000000000"
         const val FROZEN_ISOLATION_CONFIGURATION_SHA256 =
-            "996c3815ddd9f6330fbf9f404353a2f28fa81ba47d58a3eff4ff57e83cd71e95"
+            "107fe58551ea95533bada45432758c1882ba3876c5681a1c43282c10433138d3"
         const val TEST_LEASE_RECORD_FILE = "lease.json"
     }
 }

@@ -1662,6 +1662,7 @@ class FullTreeFunctionObservationOperationJournalTest {
             resourceLimiterExecutable = tool.resolve("prlimit"),
             scopeSupervisorExecutable = tool.resolve("systemd-run"),
             scopeInspectorExecutable = tool.resolve("systemctl"),
+            systemdBusControllerExecutable = tool.resolve("busctl"),
             systemdUserRuntimeDirectory = Path.of("/run/user/1000"),
             workerClassPath = listOf(
                 FullTreeFunctionObservationClassPathEntry(
@@ -1674,6 +1675,7 @@ class FullTreeFunctionObservationOperationJournalTest {
             expectedResourceLimiterSha256 = "b".repeat(64),
             expectedScopeSupervisorSha256 = "c".repeat(64),
             expectedScopeInspectorSha256 = "d".repeat(64),
+            expectedSystemdBusControllerSha256 = "e".repeat(64),
         )
     }
 
@@ -1769,16 +1771,16 @@ class FullTreeFunctionObservationOperationJournalTest {
     private class SimulatedProcessDeath : Error()
 
     private companion object {
-        const val FROZEN_BINDING_SHA256 = "f31c14d42bc65baf60d3fd5545b968cf9009e7775ecbcfcf0fcbb79c984aa624"
+        const val FROZEN_BINDING_SHA256 = "0554300db9114b165715c5ed05492b1b73f18d437aaae1c89fa7d459bc458d85"
         const val FROZEN_BINDING_ARTIFACT_SHA256 =
-            "66326322c329b9dd5736214c638130533a74803f4763f0b5599b4e7bf7c6f0df"
+            "4b64aa0871ea9d146b46682bdcdff613afb5b7874f82f4a7b133f9d72a4b230d"
         const val FROZEN_INITIAL_TRANSITION_SHA256 =
-            "6601a75e6391b3c2d97b93f727a5e1d703deb85e5a95515d838d423271a697b0"
+            "065a9d5f56530ccafa1e31a5598d05ec5f9d03f7bc2998666ba4b031761e3f81"
         const val FROZEN_ATTACHMENT_RECEIPT_SHA256 =
-            "23aef86939d14d747da6183ba489b2defb559b9cd77c82d09b90aafe44bcaac8"
+            "4c21a50f1d2a45a514891d2673fc4b93e450a391817dcbf295b2d276f37e685f"
         const val FROZEN_ATTACHMENT_RECEIPT_ARTIFACT_SHA256 =
-            "23373f1215136db083e8a842084041e8c769b66809f3931a0fe7bdd313a1a2fb"
+            "7ab146720bacd979d5fc91d6af8535b83c061880a73b90987aeb941f4afeb5d0"
         const val FROZEN_COMPLETE_TRANSITION_SHA256 =
-            "ac7dafda128411368bdf280a9cafc5c51f252354051b95d432a5db5bd93aff16"
+            "c27471d6fa2c6a29f264c06b703d14e43f893f44735d8c053dcd5725a51a19ad"
     }
 }

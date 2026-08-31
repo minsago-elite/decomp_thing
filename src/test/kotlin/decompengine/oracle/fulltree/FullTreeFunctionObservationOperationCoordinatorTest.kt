@@ -2123,6 +2123,7 @@ class FullTreeFunctionObservationOperationCoordinatorTest {
             resourceLimiterExecutable = tool.resolve("prlimit"),
             scopeSupervisorExecutable = tool.resolve("systemd-run"),
             scopeInspectorExecutable = tool.resolve("systemctl"),
+            systemdBusControllerExecutable = tool.resolve("busctl"),
             systemdUserRuntimeDirectory = Path.of("/run/user/1000"),
             workerClassPath = listOf(
                 FullTreeFunctionObservationClassPathEntry(
@@ -2135,6 +2136,7 @@ class FullTreeFunctionObservationOperationCoordinatorTest {
             expectedResourceLimiterSha256 = "d".repeat(64),
             expectedScopeSupervisorSha256 = "e".repeat(64),
             expectedScopeInspectorSha256 = "f".repeat(64),
+            expectedSystemdBusControllerSha256 = "1".repeat(64),
         )
     }
 

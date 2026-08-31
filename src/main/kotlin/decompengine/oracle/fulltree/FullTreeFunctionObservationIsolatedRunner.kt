@@ -26,6 +26,7 @@ import java.util.concurrent.TimeUnit
 import java.util.concurrent.atomic.AtomicReference
 import kotlin.system.exitProcess
 import kotlinx.serialization.json.JsonArray
+import kotlinx.serialization.json.JsonElement
 import kotlinx.serialization.json.JsonObject
 import kotlinx.serialization.json.JsonPrimitive
 
@@ -50,6 +51,11 @@ internal fun interface FullTreeFunctionObservationLaunchFaultInjector {
 
 /** Observes only pinned systemctl invocations; it does not observe launch or process signals. */
 internal fun interface FullTreeFunctionObservationSystemctlCommandObserver {
+    fun beforeCommand(unitName: String, arguments: List<String>)
+}
+
+/** Observes only pinned busctl invocations; it does not observe launch or process signals. */
+internal fun interface FullTreeFunctionObservationBusctlCommandObserver {
     fun beforeCommand(unitName: String, arguments: List<String>)
 }
 
@@ -117,6 +123,7 @@ internal class FullTreeFunctionObservationIsolationConfiguration(
     val resourceLimiterExecutable: Path,
     val scopeSupervisorExecutable: Path,
     val scopeInspectorExecutable: Path,
+    val systemdBusControllerExecutable: Path,
     val systemdUserRuntimeDirectory: Path,
     workerClassPath: List<FullTreeFunctionObservationClassPathEntry>,
     val expectedJavaSha256: String,
@@ -124,6 +131,7 @@ internal class FullTreeFunctionObservationIsolationConfiguration(
     val expectedResourceLimiterSha256: String,
     val expectedScopeSupervisorSha256: String,
     val expectedScopeInspectorSha256: String,
+    val expectedSystemdBusControllerSha256: String,
 ) {
     val systemLibraryMounts: List<FullTreeFunctionObservationRuntimeMount> =
         java.util.List.copyOf(systemLibraryMounts)
@@ -142,6 +150,7 @@ internal class FullTreeFunctionObservationIsolationConfiguration(
             resourceLimiterExecutable,
             scopeSupervisorExecutable,
             scopeInspectorExecutable,
+            systemdBusControllerExecutable,
             systemdUserRuntimeDirectory,
         ).forEach { path ->
             require(path.isAbsolute && path.normalize() == path) {
@@ -169,6 +178,7 @@ internal class FullTreeFunctionObservationIsolationConfiguration(
             expectedResourceLimiterSha256,
             expectedScopeSupervisorSha256,
             expectedScopeInspectorSha256,
+            expectedSystemdBusControllerSha256,
         ).forEach { digest -> require(digest.matches(SHA256)) }
     }
 
@@ -183,6 +193,8 @@ internal class FullTreeFunctionObservationIsolationConfiguration(
                 "expectedResourceLimiterSha256" to JsonPrimitive(expectedResourceLimiterSha256),
                 "expectedScopeInspectorSha256" to JsonPrimitive(expectedScopeInspectorSha256),
                 "expectedScopeSupervisorSha256" to JsonPrimitive(expectedScopeSupervisorSha256),
+                "expectedSystemdBusControllerSha256" to
+                    JsonPrimitive(expectedSystemdBusControllerSha256),
                 "javaExecutable" to JsonPrimitive(javaExecutable.toString()),
                 "javaRuntime" to javaRuntime.canonicalIdentity(),
                 "producerConfigurationSha256" to
@@ -197,6 +209,8 @@ internal class FullTreeFunctionObservationIsolationConfiguration(
                 "supervisorProtocolVersion" to JsonPrimitive(SUPERVISOR_PROTOCOL_VERSION),
                 "systemLibraryMounts" to JsonArray(systemLibraryMounts.map { it.canonicalIdentity() }),
                 "systemdUserRuntimeDirectory" to JsonPrimitive(systemdUserRuntimeDirectory.toString()),
+                "systemdBusControllerExecutable" to
+                    JsonPrimitive(systemdBusControllerExecutable.toString()),
                 "workerClassPath" to JsonArray(
                     workerClassPath.map { entry ->
                         JsonObject(
@@ -3587,15 +3601,15 @@ private class TrustedObservationBoundary(
 /**
  * One stable low-level name/cgroup observation, never recovery or mutation authority.
  *
- * EXACT_CGROUP_CANDIDATE matches only the non-loading unit inventory and exact cgroup receipt
- * identity. It deliberately does not query a unit object by name: such a query can load a unit
- * that disappeared after inventory enumeration. It therefore does not match InvocationID or any
- * other unit property, match receipt PIDs, prove a BOOT protocol stage, reconcile journal/disk
- * state, or reserve the deterministic name.
+ * SYSTEMD_IDENTITY_CANDIDATE matches the non-loading unit inventory, exact cgroup receipt identity,
+ * and properties read only through systemd's lifetime-bound invocation-ID object path. Returned
+ * name-addressed object paths are compared but never dereferenced. This still does not match
+ * receipt PIDs, prove a BOOT protocol stage, reconcile journal/disk state, authorize mutation, or
+ * reserve the deterministic name.
  */
 internal enum class FullTreeFunctionObservationColdUnitAttachmentObservationOutcome {
     ABSENT,
-    EXACT_CGROUP_CANDIDATE,
+    SYSTEMD_IDENTITY_CANDIDATE,
     FOREIGN_REPLACEMENT,
     INCONSISTENT_OR_EXITING,
     CHANGED,
@@ -3625,6 +3639,7 @@ internal data class FullTreeFunctionObservationColdCgroupIdentity(
 
 internal data class FullTreeFunctionObservationColdUnitReceiptIdentity(
     val unitName: String,
+    val invocationId: String,
     val controlGroup: String,
     val cgroupDevice: Long,
     val cgroupInode: Long,
@@ -3636,6 +3651,7 @@ internal data class FullTreeFunctionObservationColdUnitReceiptIdentity(
         ): FullTreeFunctionObservationColdUnitReceiptIdentity =
             FullTreeFunctionObservationColdUnitReceiptIdentity(
                 unitName = receipt.unitName,
+                invocationId = receipt.invocationId,
                 controlGroup = receipt.controlGroup,
                 cgroupDevice = receipt.cgroupDevice,
                 cgroupInode = receipt.cgroupInode,
@@ -3644,16 +3660,31 @@ internal data class FullTreeFunctionObservationColdUnitReceiptIdentity(
     }
 }
 
+internal data class FullTreeFunctionObservationColdSystemdIdentity(
+    val nameObjectPath: String,
+    val invocationObjectPath: String,
+    val unitName: String,
+    val invocationId: String,
+    val transient: Boolean,
+    val controlGroup: String,
+)
+
 internal data class FullTreeFunctionObservationColdUnitSnapshot(
     val managerFeatures: Set<String>,
     val unit: FullTreeFunctionObservationColdSystemdUnitInventoryEntry?,
     val job: FullTreeFunctionObservationColdSystemdJobInventoryEntry?,
     val cgroups: List<FullTreeFunctionObservationColdCgroupIdentity>,
+    val systemdIdentity: FullTreeFunctionObservationColdSystemdIdentity? = null,
     val stable: Boolean = true,
 )
 
 private data class FullTreeFunctionObservationColdCgroupInventory(
     val cgroups: List<FullTreeFunctionObservationColdCgroupIdentity>,
+    val stable: Boolean,
+)
+
+private data class FullTreeFunctionObservationColdSystemdIdentityObservation(
+    val identity: FullTreeFunctionObservationColdSystemdIdentity?,
     val stable: Boolean,
 )
 
@@ -3665,7 +3696,10 @@ internal fun classifyFullTreeFunctionObservationColdUnitSnapshots(
     if (!before.stable || !after.stable || before != after) {
         return FullTreeFunctionObservationColdUnitAttachmentObservationOutcome.CHANGED
     }
-    if (before.unit == null && before.job == null && before.cgroups.isEmpty()) {
+    if (
+        before.unit == null && before.job == null && before.cgroups.isEmpty() &&
+        before.systemdIdentity == null
+    ) {
         return FullTreeFunctionObservationColdUnitAttachmentObservationOutcome.ABSENT
     }
 
@@ -3687,14 +3721,22 @@ internal fun classifyFullTreeFunctionObservationColdUnitSnapshots(
             observed.mountId == expected.cgroupMountId
     } == true
     val unit = before.unit
-    val exactCgroupCandidate =
+    val identity = before.systemdIdentity
+    val systemdIdentityCandidate =
         unit != null &&
             unit.unitName == expected.unitName &&
             unit.loadState == "loaded" &&
             unit.activeState == "active" &&
-            unit.subState == "running" && before.job == null && exactCgroup
-    return if (exactCgroupCandidate) {
-        FullTreeFunctionObservationColdUnitAttachmentObservationOutcome.EXACT_CGROUP_CANDIDATE
+            unit.subState == "running" && before.job == null && exactCgroup && identity != null &&
+            identity.unitName == expected.unitName &&
+            identity.invocationId == expected.invocationId &&
+            identity.transient &&
+            identity.controlGroup == expected.controlGroup &&
+            identity.nameObjectPath.matches(SYSTEMD_UNIT_OBJECT_PATH) &&
+            identity.nameObjectPath != identity.invocationObjectPath &&
+            identity.invocationObjectPath == systemdInvocationObjectPath(expected.invocationId)
+    return if (systemdIdentityCandidate) {
+        FullTreeFunctionObservationColdUnitAttachmentObservationOutcome.SYSTEMD_IDENTITY_CANDIDATE
     } else {
         FullTreeFunctionObservationColdUnitAttachmentObservationOutcome.INCONSISTENT_OR_EXITING
     }
@@ -3710,10 +3752,12 @@ internal fun classifyFullTreeFunctionObservationColdUnitSnapshots(
  */
 internal class FullTreeFunctionObservationColdUnitAbsenceObserver private constructor(
     private val inspector: PinnedSecurityExecutable,
+    private val busController: PinnedSecurityExecutable,
     private val bus: PinnedSystemdBusEndpoint,
     private val binding: FullTreeFunctionObservationOperationBinding,
     val isolationConfigurationSha256: String,
     private val commandObserver: FullTreeFunctionObservationSystemctlCommandObserver?,
+    private val busctlCommandObserver: FullTreeFunctionObservationBusctlCommandObserver?,
 ) {
     val unitName: String = binding.unitName
 
@@ -3743,9 +3787,11 @@ internal class FullTreeFunctionObservationColdUnitAbsenceObserver private constr
     /**
      * Repeated query-only observation of the exact durable receipt name.
      *
-     * This method issues no unit-object lookup by name. It opens no receipt PID and retains no
-     * cgroup descriptor; InvocationID matching and exact process adoption remain later steps. Its
-     * caller must separately bracket this observation with boot and journal/disk reconciliation.
+     * Name and control-group Manager lookups are non-loading and their returned paths are never
+     * dereferenced. Properties are read only through the expected invocation-ID path, whose
+     * lifetime is bound by systemd to that invocation. This method opens no receipt PID and retains
+     * no cgroup descriptor; exact process adoption remains a later step. Its caller must separately
+     * bracket this observation with boot and journal/disk reconciliation.
      */
     fun observeUnitAttachment(
         receipt: FullTreeFunctionObservationUnitAttachmentReceipt,
@@ -3756,6 +3802,18 @@ internal class FullTreeFunctionObservationColdUnitAbsenceObserver private constr
         val unitBefore = observeUnitInventory()
         val jobBefore = observeJobInventory()
         val cgroupsBefore = observeCgroups()
+        val shouldObserveIdentity =
+            isSystemdIdentityCandidateWithoutIdentity(receipt, unitBefore, jobBefore, cgroupsBefore)
+        val identityBefore = if (shouldObserveIdentity) {
+            observeSystemdIdentity(receipt)
+        } else {
+            FullTreeFunctionObservationColdSystemdIdentityObservation(null, stable = true)
+        }
+        val identityAfter = if (shouldObserveIdentity) {
+            observeSystemdIdentity(receipt)
+        } else {
+            FullTreeFunctionObservationColdSystemdIdentityObservation(null, stable = true)
+        }
         val cgroupsAfter = observeCgroups()
         val jobAfter = observeJobInventory()
         val unitAfter = observeUnitInventory()
@@ -3769,14 +3827,16 @@ internal class FullTreeFunctionObservationColdUnitAbsenceObserver private constr
                 unit = unitBefore,
                 job = jobBefore,
                 cgroups = cgroupsBefore.cgroups,
-                stable = cgroupsBefore.stable,
+                systemdIdentity = identityBefore.identity,
+                stable = cgroupsBefore.stable && identityBefore.stable,
             ),
             after = FullTreeFunctionObservationColdUnitSnapshot(
                 managerFeatures = featuresAfter,
                 unit = unitAfter,
                 job = jobAfter,
                 cgroups = cgroupsAfter.cgroups,
-                stable = cgroupsAfter.stable,
+                systemdIdentity = identityAfter.identity,
+                stable = cgroupsAfter.stable && identityAfter.stable,
             ),
         )
     }
@@ -3819,6 +3879,105 @@ internal class FullTreeFunctionObservationColdUnitAbsenceObserver private constr
             ),
             unitName,
         )
+
+    private fun isSystemdIdentityCandidateWithoutIdentity(
+        receipt: FullTreeFunctionObservationUnitAttachmentReceipt,
+        unit: FullTreeFunctionObservationColdSystemdUnitInventoryEntry?,
+        job: FullTreeFunctionObservationColdSystemdJobInventoryEntry?,
+        cgroups: FullTreeFunctionObservationColdCgroupInventory,
+    ): Boolean {
+        if (
+            unit == null || unit.unitName != receipt.unitName || unit.loadState != "loaded" ||
+            unit.activeState != "active" || unit.subState != "running" || job != null || !cgroups.stable
+        ) return false
+        val expectedPath = CGROUP_ROOT.resolve(receipt.controlGroup.removePrefix("/")).normalize()
+        return cgroups.cgroups.singleOrNull()?.let { observed ->
+            observed.path == expectedPath &&
+                observed.device == receipt.cgroupDevice &&
+                observed.inode == receipt.cgroupInode &&
+                observed.mountId == receipt.cgroupMountId
+        } == true
+    }
+
+    private fun observeSystemdIdentity(
+        receipt: FullTreeFunctionObservationUnitAttachmentReceipt,
+    ): FullTreeFunctionObservationColdSystemdIdentityObservation {
+        fun successful(arguments: List<String>, label: String): String? {
+            val result = runReadOnlyBusctl(arguments, label)
+            // The trusted command boundary merges stdout and stderr. Never expose that merged
+            // text to a JSON parser unless busctl reported success.
+            return if (result.exitCode == 0) result.output else null
+        }
+
+        val namePath = successful(
+            COLD_SYSTEMD_BUSCTL_MANAGER_CALL + listOf("GetUnit", "s", receipt.unitName),
+            "unit name lookup",
+        )?.let { parseColdSystemdBusctlObjectPath(it, "unit name lookup") }
+            ?: return FullTreeFunctionObservationColdSystemdIdentityObservation(null, stable = false)
+        val cgroupPath = successful(
+            COLD_SYSTEMD_BUSCTL_MANAGER_CALL +
+                listOf("GetUnitByControlGroup", "s", receipt.controlGroup),
+            "unit control-group lookup",
+        )?.let { parseColdSystemdBusctlObjectPath(it, "unit control-group lookup") }
+            ?: return FullTreeFunctionObservationColdSystemdIdentityObservation(null, stable = false)
+        if (namePath != cgroupPath) {
+            return FullTreeFunctionObservationColdSystemdIdentityObservation(null, stable = false)
+        }
+
+        val invocationArguments = buildList {
+            addAll(COLD_SYSTEMD_BUSCTL_MANAGER_CALL)
+            add("GetUnitByInvocationID")
+            add("ay")
+            add("16")
+            addAll(systemdId128BusctlBytes(receipt.invocationId))
+        }
+        val invocationPath = successful(invocationArguments, "unit invocation lookup")
+            ?.let { parseColdSystemdBusctlObjectPath(it, "unit invocation lookup") }
+            ?: return FullTreeFunctionObservationColdSystemdIdentityObservation(null, stable = false)
+        if (invocationPath != systemdInvocationObjectPath(receipt.invocationId)) {
+            isolationFail("cold systemd unit invocation lookup returned an unbound object path")
+        }
+
+        // Dereference only the canonical invocation-addressed path reconstructed above. Its
+        // decoded component is exactly 32 hexadecimal digits and therefore cannot be a valid
+        // systemd unit name (it has no unit-type suffix), so an expired invocation cannot make
+        // systemd's object-path resolver fall back to loading a name-addressed unit.
+
+        fun property(interfaceName: String, propertyName: String): String? = successful(
+            listOf(
+                "get-property",
+                SYSTEMD_BUS_SERVICE,
+                invocationPath,
+                interfaceName,
+                propertyName,
+            ),
+            "unit invocation $propertyName property",
+        )
+
+        val observedUnitName = property(SYSTEMD_UNIT_INTERFACE, "Id")
+            ?.let { parseColdSystemdBusctlStringProperty(it, "unit invocation Id property") }
+            ?: return FullTreeFunctionObservationColdSystemdIdentityObservation(null, stable = false)
+        val observedInvocationId = property(SYSTEMD_UNIT_INTERFACE, "InvocationID")
+            ?.let { parseColdSystemdBusctlId128Property(it, "unit invocation InvocationID property") }
+            ?: return FullTreeFunctionObservationColdSystemdIdentityObservation(null, stable = false)
+        val transient = property(SYSTEMD_UNIT_INTERFACE, "Transient")
+            ?.let { parseColdSystemdBusctlBooleanProperty(it, "unit invocation Transient property") }
+            ?: return FullTreeFunctionObservationColdSystemdIdentityObservation(null, stable = false)
+        val controlGroup = property(SYSTEMD_SCOPE_INTERFACE, "ControlGroup")
+            ?.let { parseColdSystemdBusctlStringProperty(it, "unit invocation ControlGroup property") }
+            ?: return FullTreeFunctionObservationColdSystemdIdentityObservation(null, stable = false)
+        return FullTreeFunctionObservationColdSystemdIdentityObservation(
+            FullTreeFunctionObservationColdSystemdIdentity(
+                nameObjectPath = namePath,
+                invocationObjectPath = invocationPath,
+                unitName = observedUnitName,
+                invocationId = observedInvocationId,
+                transient = transient,
+                controlGroup = controlGroup,
+            ),
+            stable = true,
+        )
+    }
 
     private fun observeCgroups(): FullTreeFunctionObservationColdCgroupInventory {
         val paths = try {
@@ -3874,6 +4033,24 @@ internal class FullTreeFunctionObservationColdUnitAbsenceObserver private constr
         return result.output
     }
 
+    private fun runReadOnlyBusctl(arguments: List<String>, label: String): TrustedCommandResult {
+        inspector.requireUnchanged()
+        busController.requireUnchanged()
+        bus.requireUnchanged()
+        val hardenedArguments = COLD_SYSTEMD_BUSCTL_OPTIONS + arguments
+        busctlCommandObserver?.beforeCommand(unitName, java.util.List.copyOf(hardenedArguments))
+        val result = runTrustedCommand(
+            listOf(busController.path.toString()) + hardenedArguments,
+            bus.controlEnvironment,
+            SYSTEMD_CONTROL_TIMEOUT,
+            "cold systemd $label",
+        )
+        inspector.requireUnchanged()
+        busController.requireUnchanged()
+        bus.requireUnchanged()
+        return result
+    }
+
     private fun requireUnfilteredUnitInventory() {
         inspector.requireUnchanged()
         bus.requireUnchanged()
@@ -3911,6 +4088,7 @@ internal class FullTreeFunctionObservationColdUnitAbsenceObserver private constr
 
     private fun requireUnchanged() {
         inspector.requireUnchanged()
+        busController.requireUnchanged()
         bus.requireUnchanged()
     }
 
@@ -3924,13 +4102,15 @@ internal class FullTreeFunctionObservationColdUnitAbsenceObserver private constr
             binding: FullTreeFunctionObservationOperationBinding,
             configuration: FullTreeFunctionObservationIsolationConfiguration,
             commandObserver: FullTreeFunctionObservationSystemctlCommandObserver,
+            busctlCommandObserver: FullTreeFunctionObservationBusctlCommandObserver? = null,
         ): FullTreeFunctionObservationColdUnitAbsenceObserver =
-            create(binding, configuration, commandObserver)
+            create(binding, configuration, commandObserver, busctlCommandObserver)
 
         private fun create(
             binding: FullTreeFunctionObservationOperationBinding,
             configuration: FullTreeFunctionObservationIsolationConfiguration,
             commandObserver: FullTreeFunctionObservationSystemctlCommandObserver?,
+            busctlCommandObserver: FullTreeFunctionObservationBusctlCommandObserver? = null,
         ): FullTreeFunctionObservationColdUnitAbsenceObserver {
             if (configuration.canonicalSha256 != binding.isolationConfigurationSha256) {
                 isolationFail("cold systemd observation configuration differs from its operation binding")
@@ -3940,13 +4120,20 @@ internal class FullTreeFunctionObservationColdUnitAbsenceObserver private constr
                 "cold systemd scope inspector",
                 configuration.expectedScopeInspectorSha256,
             )
+            val busController = PinnedSecurityExecutable.pin(
+                configuration.systemdBusControllerExecutable,
+                "cold systemd bus controller",
+                configuration.expectedSystemdBusControllerSha256,
+            )
             val bus = PinnedSystemdBusEndpoint.pin(configuration.systemdUserRuntimeDirectory)
             return FullTreeFunctionObservationColdUnitAbsenceObserver(
                 inspector,
+                busController,
                 bus,
                 binding,
                 configuration.canonicalSha256,
                 commandObserver,
+                busctlCommandObserver,
             )
         }
     }
@@ -4006,6 +4193,87 @@ private fun parseColdSystemdInventoryFields(output: String, label: String): List
         isolationFail("cold systemd $label was malformed")
     }
     return line.trim().split(Regex("[ \\t]+"))
+}
+
+internal fun parseColdSystemdBusctlObjectPath(output: String, label: String): String {
+    val (type, data) = parseColdSystemdBusctlEnvelope(output, label)
+    val values = data as? JsonArray
+    val path = values?.singleOrNull() as? JsonPrimitive
+    if (
+        type != "o" || path == null || !path.isString ||
+        !path.content.matches(SYSTEMD_UNIT_OBJECT_PATH)
+    ) isolationFail("cold systemd $label was malformed")
+    return path.content
+}
+
+internal fun parseColdSystemdBusctlStringProperty(output: String, label: String): String {
+    val (type, data) = parseColdSystemdBusctlEnvelope(output, label)
+    val value = data as? JsonPrimitive
+    if (type != "s" || value == null || !value.isString) {
+        isolationFail("cold systemd $label was malformed")
+    }
+    return value.content
+}
+
+internal fun parseColdSystemdBusctlBooleanProperty(output: String, label: String): Boolean {
+    val (type, data) = parseColdSystemdBusctlEnvelope(output, label)
+    val value = data as? JsonPrimitive
+    if (type != "b" || value == null || value.isString || value.content !in setOf("true", "false")) {
+        isolationFail("cold systemd $label was malformed")
+    }
+    return value.content == "true"
+}
+
+internal fun parseColdSystemdBusctlId128Property(output: String, label: String): String {
+    val (type, data) = parseColdSystemdBusctlEnvelope(output, label)
+    val values = data as? JsonArray
+    if (type != "ay" || values?.size != 16) isolationFail("cold systemd $label was malformed")
+    val invocationId = values.joinToString("") { element ->
+        val value = element as? JsonPrimitive
+        val byte = value?.takeUnless(JsonPrimitive::isString)?.content?.toIntOrNull()
+        if (byte == null || byte !in 0..255) isolationFail("cold systemd $label was malformed")
+        byte.toString(16).padStart(2, '0')
+    }
+    if (invocationId in RESERVED_SYSTEMD_ID128S) {
+        isolationFail("cold systemd $label contained a reserved invocation ID")
+    }
+    return invocationId
+}
+
+internal fun systemdInvocationObjectPath(invocationId: String): String {
+    if (!invocationId.matches(SYSTEMD_ID128) || invocationId in RESERVED_SYSTEMD_ID128S) {
+        isolationFail("cold systemd invocation ID is not canonical")
+    }
+    val label = if (invocationId.first().isDigit()) {
+        "_3${invocationId.first()}${invocationId.drop(1)}"
+    } else {
+        invocationId
+    }
+    return "$SYSTEMD_UNIT_OBJECT_PATH_PREFIX$label"
+}
+
+private fun systemdId128BusctlBytes(invocationId: String): List<String> {
+    systemdInvocationObjectPath(invocationId)
+    return invocationId.chunked(2).map { byte -> byte.toInt(16).toString() }
+}
+
+private fun parseColdSystemdBusctlEnvelope(output: String, label: String): Pair<String, JsonElement> {
+    if (
+        !output.endsWith('\n') || output.dropLast(1).contains('\n') ||
+        output.any { it == '\r' || it == '\u0000' }
+    ) isolationFail("cold systemd $label was malformed")
+    val root = try {
+        OracleJson.parse(output.toByteArray(Charsets.UTF_8), COLD_SYSTEMD_BUSCTL_JSON_LIMITS)
+    } catch (failure: Exception) {
+        throw FullTreeFunctionObservationIsolationException("cold systemd $label was malformed", failure)
+    }
+    val envelope = root as? JsonObject
+    if (envelope == null || envelope.keys != setOf("type", "data")) {
+        isolationFail("cold systemd $label was malformed")
+    }
+    val type = envelope["type"] as? JsonPrimitive
+    if (type == null || !type.isString) isolationFail("cold systemd $label was malformed")
+    return type.content to envelope.getValue("data")
 }
 
 /** ListUnitsByPatterns silently filters SELinux-denied units, so such builds are inadmissible. */
@@ -6221,9 +6489,9 @@ private inline fun <T> translateIsolationFailures(
 private fun isolationFail(message: String): Nothing =
     throw FullTreeFunctionObservationIsolationException(message)
 
-private const val ISOLATION_CONFIGURATION_SCHEMA_VERSION = 1
+private const val ISOLATION_CONFIGURATION_SCHEMA_VERSION = 2
 private const val ISOLATION_CONFIGURATION_PROVIDER =
-    "kotlin-full-tree-function-observation-isolation-configuration-v1"
+    "kotlin-full-tree-function-observation-isolation-configuration-v2"
 private const val WORKER_PROTOCOL_VERSION = "1"
 private const val WORKER_ARGUMENTS = 9
 private const val SUPERVISOR_PROTOCOL_VERSION = "1"
@@ -6306,6 +6574,15 @@ private val ISOLATION_CONFIGURATION_JSON_LIMITS = StrictJsonLimits(
     maximumTotalStringBytes = 1024 * 1024,
     maximumNumberCharacters = 32,
 )
+private val COLD_SYSTEMD_BUSCTL_JSON_LIMITS = StrictJsonLimits(
+    maximumInputBytes = 4096,
+    maximumCanonicalBytes = 4096,
+    maximumDepth = 4,
+    maximumNodes = 64,
+    maximumStringBytes = 1024,
+    maximumTotalStringBytes = 2048,
+    maximumNumberCharacters = 3,
+)
 private const val PROTOCOL_POLL_MILLIS = 20L
 private const val SYSTEMD_POLL_MILLIS = 20L
 private const val TRUSTED_PROCESS_POLL_MILLIS = 20L
@@ -6346,6 +6623,13 @@ private val KERNEL_BOOT_UUID =
 private val RESERVED_SYSTEMD_ID128S = setOf("0".repeat(32), "f".repeat(32))
 private val PROC_STAT_INTEGER = Regex("-?[0-9]+")
 private val SYSTEMD_BUILD_FEATURE = Regex("[+-][A-Z0-9_]+")
+private const val SYSTEMD_BUS_SERVICE = "org.freedesktop.systemd1"
+private const val SYSTEMD_MANAGER_OBJECT_PATH = "/org/freedesktop/systemd1"
+private const val SYSTEMD_MANAGER_INTERFACE = "org.freedesktop.systemd1.Manager"
+private const val SYSTEMD_UNIT_INTERFACE = "org.freedesktop.systemd1.Unit"
+private const val SYSTEMD_SCOPE_INTERFACE = "org.freedesktop.systemd1.Scope"
+private const val SYSTEMD_UNIT_OBJECT_PATH_PREFIX = "/org/freedesktop/systemd1/unit/"
+private val SYSTEMD_UNIT_OBJECT_PATH = Regex("/org/freedesktop/systemd1/unit/[A-Za-z0-9_]+")
 private val PROTOCOL_NONCE = Regex("[0-9a-f]{64}")
 private val SHARD_IDENTIFIER = Regex("[a-z0-9]+(?:-[a-z0-9]+)*")
 private val PRODUCTION_OBSERVATION_UNIT_NAME =
@@ -6403,6 +6687,20 @@ private val COLD_SYSTEMD_LIST_JOBS_ARGUMENTS = listOf(
     "--full",
     "--all",
     "list-jobs",
+)
+private val COLD_SYSTEMD_BUSCTL_OPTIONS = listOf(
+    "--user",
+    "--no-pager",
+    "--json=short",
+    "--auto-start=no",
+    "--allow-interactive-authorization=no",
+    "--timeout=2",
+)
+private val COLD_SYSTEMD_BUSCTL_MANAGER_CALL = listOf(
+    "call",
+    SYSTEMD_BUS_SERVICE,
+    SYSTEMD_MANAGER_OBJECT_PATH,
+    SYSTEMD_MANAGER_INTERFACE,
 )
 private val REQUIRED_SYSTEMCTL_COMMANDS = listOf("freeze", "thaw", "kill")
 private val OBSERVATION_SYSTEMD_CLEANUP_EXIT_CODES = setOf(0, 1, 4, 5)
