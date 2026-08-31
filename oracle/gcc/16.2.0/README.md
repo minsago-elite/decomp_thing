@@ -149,10 +149,15 @@ when the input, exact exporter identity, and schema-versioned whole-program plan
 The fingerprint is recomputed across completed and future batches before any checkpoint is reused; legacy unbound
 state must restart in a fresh output directory. Exact per-batch function/global/type/failure commitments also bind
 every reused or newly generated fragment to that preflight before checkpoint authority. The Kotlin/JVM gate
-refuses changed plan bytes, enforces the shared 30-minute/16-GiB ceiling,
-proves exact function/global/type ownership, and publishes self-hashed
-planning evidence. This phase is agent-free; later ACP implementation and
-repair sessions can read the evidence but cannot replace or certify it.
+refuses changed plan bytes and checks exact function/global/type ownership. Its current wall/RSS observation and
+caller-supplied analyzer are diagnostic rather than host-owned cgroup authority. It therefore writes only the
+self-hashed schema-2 `compiler_engine_plan_assessment.json`, fixed to
+`authority=non-authoritative-caller-supplied-analyzer-v1`, `complete=false`, and `releaseEligible=false`.
+The incompatible schema-1 `complete=true` format cannot enter release; its legacy filename in an output directory
+causes the diagnostic to fail before analysis so the two generations cannot coexist. The separate Kotlin
+[pre-START containment contract](../../../docs/gcc-compiler-engine-containment.md) fixes the future controller's
+identity and cleanup requirements but still grants no START. Later ACP implementation and repair sessions remain
+read-only consumers; they cannot author, replace, validate, score, or certify oracle truth.
 
 ## Driver behavior benchmark
 

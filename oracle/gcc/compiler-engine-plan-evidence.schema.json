@@ -1,13 +1,16 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "$id": "https://github.com/minsago-elite/decomp_thing/oracle/gcc/compiler-engine-plan-evidence.schema.json",
-  "title": "Authenticated GCC compiler-engine export and ownership-plan evidence",
+  "title": "Non-authoritative GCC compiler-engine export and ownership-plan assessment",
+  "description": "Schema 2 is a diagnostic-only replacement for the incompatible schema-1 complete evidence document; schema 1 is not release input.",
   "type": "object",
   "additionalProperties": false,
-  "required": ["schemaVersion", "complete", "benchmark", "implementation", "engine", "budgets", "results", "reportSha256"],
+  "required": ["schemaVersion", "authority", "complete", "releaseEligible", "benchmark", "implementation", "engine", "budgets", "results", "reportSha256"],
   "properties": {
-    "schemaVersion": {"const": 1},
-    "complete": {"const": true},
+    "schemaVersion": {"const": 2},
+    "authority": {"const": "non-authoritative-caller-supplied-analyzer-v1"},
+    "complete": {"const": false},
+    "releaseEligible": {"const": false},
     "benchmark": {
       "type": "object",
       "additionalProperties": false,

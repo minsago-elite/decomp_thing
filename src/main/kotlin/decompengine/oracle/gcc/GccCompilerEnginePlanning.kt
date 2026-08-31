@@ -26,30 +26,53 @@ import kotlinx.serialization.json.JsonObject
 import kotlinx.serialization.json.JsonNull
 import kotlinx.serialization.json.JsonPrimitive
 
-class GccCompilerEnginePlanningException(message: String, cause: Throwable? = null) :
+internal class GccCompilerEnginePlanningException(message: String, cause: Throwable? = null) :
     IllegalStateException(message, cause)
 
-data class GccCompilerEnginePlanningResult(
+internal data class GccCompilerEnginePlanningResult(
     val engineId: String,
     val programModelPath: Path,
     val programModelSha256: String,
     val modulePlanPath: Path,
     val modulePlanSha256: String,
-    val evidencePath: Path,
-    val evidenceSha256: String,
+    val assessmentPath: Path,
+    val assessmentSha256: String,
     val wallClockMillis: Long,
     val maximumResidentBytesObserved: Long,
 )
 
-/** Agent-free authenticated export and exact-ownership planning for the A10 scale benchmark. */
-class GccCompilerEnginePlanningService(private val analyzer: ProgramModelAnalyzer) {
+/**
+ * Diagnostic export and exact-ownership planning for the A10 scale benchmark.
+ *
+ * The analyzer remains caller supplied and resource sampling remains limited to JVM descendants.
+ * Consequently this service is deliberately internal and can emit only a non-release assessment;
+ * it is not the host-owned cgroup controller required for benchmark evidence.
+ */
+internal fun interface GccCompilerEnginePlanningDiagnostic {
     fun plan(
+        suite: GccCompilerEngineSuite,
+        engineId: String,
+        strippedArtifactPath: Path,
+        outputDirectory: Path,
+    ): GccCompilerEnginePlanningResult
+}
+
+internal object GccCompilerEnginePlanningService {
+    fun diagnostic(analyzer: ProgramModelAnalyzer): GccCompilerEnginePlanningDiagnostic =
+        GccCompilerEnginePlanningDiagnosticImpl(analyzer)
+}
+
+private class GccCompilerEnginePlanningDiagnosticImpl(
+    private val analyzer: ProgramModelAnalyzer,
+) : GccCompilerEnginePlanningDiagnostic {
+    override fun plan(
         suite: GccCompilerEngineSuite,
         engineId: String,
         strippedArtifactPath: Path,
         outputDirectory: Path,
     ): GccCompilerEnginePlanningResult {
         val output = prepareOutputDirectory(outputDirectory)
+        rejectLegacyCompletionEvidence(output)
         val engine = suite.engine(engineId)
         val started = System.nanoTime()
         val monitor = ProcessTreeResourceMonitor(
@@ -122,8 +145,9 @@ class GccCompilerEnginePlanningService(private val analyzer: ProgramModelAnalyze
             monitor.close()
             requireWithinBudgets(started, suite, monitor, "completed export and ownership planning")
             val elapsedMillis = elapsedMillis(started)
-            val evidencePath = output.resolve("planning/compiler_engine_plan_evidence.json")
-            val evidence = renderEvidence(
+            val assessmentPath = output.resolve("planning/compiler_engine_plan_assessment.json")
+            rejectLegacyCompletionEvidence(output)
+            val assessment = renderAssessment(
                 suite = suite,
                 engine = engine,
                 reconstructionProfileSha256 = profile.sha256,
@@ -136,9 +160,16 @@ class GccCompilerEnginePlanningService(private val analyzer: ProgramModelAnalyze
                 maximumResidentBytesObserved = monitor.peakResidentBytes,
             )
             val published = try {
-                OracleArtifacts.publishAtomically(evidencePath, evidence, OracleArtifactLimits(MAXIMUM_EVIDENCE_BYTES))
+                OracleArtifacts.publishAtomically(
+                    assessmentPath,
+                    assessment,
+                    OracleArtifactLimits(MAXIMUM_ASSESSMENT_BYTES),
+                )
             } catch (failure: Exception) {
-                throw GccCompilerEnginePlanningException("cannot publish compiler-engine planning evidence", failure)
+                throw GccCompilerEnginePlanningException(
+                    "cannot publish non-authoritative compiler-engine planning assessment",
+                    failure,
+                )
             }
             return GccCompilerEnginePlanningResult(
                 engineId = engineId,
@@ -146,8 +177,8 @@ class GccCompilerEnginePlanningService(private val analyzer: ProgramModelAnalyze
                 programModelSha256 = programModel.sha256,
                 modulePlanPath = planArtifact.path,
                 modulePlanSha256 = planArtifact.sha256,
-                evidencePath = evidencePath,
-                evidenceSha256 = published.sha256,
+                assessmentPath = assessmentPath,
+                assessmentSha256 = published.sha256,
                 wallClockMillis = elapsedMillis,
                 maximumResidentBytesObserved = monitor.peakResidentBytes,
             )
@@ -207,7 +238,7 @@ class GccCompilerEnginePlanningService(private val analyzer: ProgramModelAnalyze
             throw GccCompilerEnginePlanningException("cannot read completed Ghidra export progress", failure)
         }
         val root = try {
-            OracleJson.parse(bytes, evidenceJsonLimits(MAXIMUM_PROGRESS_BYTES)) as? JsonObject
+            OracleJson.parse(bytes, planningJsonLimits(MAXIMUM_PROGRESS_BYTES)) as? JsonObject
                 ?: throw GccCompilerEnginePlanningException("Ghidra export progress root is not an object")
         } catch (failure: GccCompilerEnginePlanningException) {
             throw failure
@@ -245,7 +276,7 @@ class GccCompilerEnginePlanningService(private val analyzer: ProgramModelAnalyze
         return progress
     }
 
-    private fun renderEvidence(
+    private fun renderAssessment(
         suite: GccCompilerEngineSuite,
         engine: GccCompilerEngine,
         reconstructionProfileSha256: String,
@@ -258,8 +289,10 @@ class GccCompilerEnginePlanningService(private val analyzer: ProgramModelAnalyze
         maximumResidentBytesObserved: Long,
     ): ByteArray {
         val fields = linkedMapOf<String, kotlinx.serialization.json.JsonElement>(
-            "schemaVersion" to JsonPrimitive(1),
-            "complete" to JsonPrimitive(true),
+            "schemaVersion" to JsonPrimitive(2),
+            "authority" to JsonPrimitive(NON_AUTHORITATIVE_PLANNING_ASSESSMENT),
+            "complete" to JsonPrimitive(false),
+            "releaseEligible" to JsonPrimitive(false),
             "benchmark" to JsonObject(
                 mapOf(
                     "id" to JsonPrimitive(suite.id),
@@ -331,10 +364,12 @@ class GccCompilerEnginePlanningService(private val analyzer: ProgramModelAnalyze
             ),
         )
         val unsigned = JsonObject(fields)
-        val reportSha256 = OracleArtifacts.sha256(OracleJson.canonicalBytes(unsigned, evidenceJsonLimits(MAXIMUM_EVIDENCE_BYTES)))
+        val reportSha256 = OracleArtifacts.sha256(
+            OracleJson.canonicalBytes(unsigned, planningJsonLimits(MAXIMUM_ASSESSMENT_BYTES)),
+        )
         val document = JsonObject(fields + ("reportSha256" to JsonPrimitive(reportSha256)))
         OracleSchemas.validate("gcc/compiler-engine-plan-evidence", document)
-        return OracleJson.canonicalBytes(document, evidenceJsonLimits(MAXIMUM_EVIDENCE_BYTES))
+        return OracleJson.canonicalBytes(document, planningJsonLimits(MAXIMUM_ASSESSMENT_BYTES))
     }
 
     private fun prepareOutputDirectory(path: Path): Path {
@@ -342,6 +377,15 @@ class GccCompilerEnginePlanningService(private val analyzer: ProgramModelAnalyze
         output.createDirectories()
         stableDirectory(output, "compiler-engine output directory")
         return output
+    }
+
+    private fun rejectLegacyCompletionEvidence(output: Path) {
+        val legacy = output.resolve("planning/compiler_engine_plan_evidence.json")
+        if (Files.exists(legacy, LinkOption.NOFOLLOW_LINKS)) {
+            throw GccCompilerEnginePlanningException(
+                "legacy schema-1 compiler-engine completion evidence must not coexist with a diagnostic assessment",
+            )
+        }
     }
 
     private fun publishDeterministic(path: Path, bytes: ByteArray, label: String) {
@@ -371,11 +415,11 @@ class GccCompilerEnginePlanningService(private val analyzer: ProgramModelAnalyze
     )
 
     private companion object {
-        const val MAXIMUM_PROGRESS_BYTES = 1024 * 1024
-        const val MAXIMUM_EVIDENCE_BYTES = 4 * 1024 * 1024
-        const val MAXIMUM_MODULE_PLAN_BYTES = 512 * 1024 * 1024
-        const val MAXIMUM_PROGRAM_MODEL_BYTES = 512L * 1024 * 1024
-        val EXPORT_PROGRESS_KEYS = setOf(
+        private const val MAXIMUM_PROGRESS_BYTES = 1024 * 1024
+        private const val MAXIMUM_ASSESSMENT_BYTES = 4 * 1024 * 1024
+        private const val MAXIMUM_MODULE_PLAN_BYTES = 512 * 1024 * 1024
+        private const val MAXIMUM_PROGRAM_MODEL_BYTES = 512L * 1024 * 1024
+        private val EXPORT_PROGRESS_KEYS = setOf(
             "schemaVersion",
             "phase",
             "completed",
@@ -386,9 +430,14 @@ class GccCompilerEnginePlanningService(private val analyzer: ProgramModelAnalyze
             "reused",
             "currentFunction",
         )
-        val EXPORT_RECOVERY_STATUSES = setOf(RecoveryStatus.RECOVERED, RecoveryStatus.PARTIAL, RecoveryStatus.FAILED)
+        private val EXPORT_RECOVERY_STATUSES =
+            setOf(RecoveryStatus.RECOVERED, RecoveryStatus.PARTIAL, RecoveryStatus.FAILED)
+
     }
 }
+
+private const val NON_AUTHORITATIVE_PLANNING_ASSESSMENT =
+    "non-authoritative-caller-supplied-analyzer-v1"
 
 private data class StableArtifact(val path: Path, val bytes: Long, val sha256: String) {
     fun json(relativePath: String) = JsonObject(
@@ -532,7 +581,7 @@ private fun JsonObject.longField(name: String): Long {
     return value
 }
 
-private fun evidenceJsonLimits(maximumBytes: Int) = StrictJsonLimits(
+private fun planningJsonLimits(maximumBytes: Int) = StrictJsonLimits(
     maximumInputBytes = maximumBytes,
     maximumCanonicalBytes = maximumBytes,
     maximumDepth = 64,

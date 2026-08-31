@@ -98,14 +98,14 @@ private fun runGccEnginePlan(args: List<String>) {
         authenticatedGhidra.archiveSha256,
         GhidraProgramModelRecoveryMode.fromWireName(suite.analysis.exporterMode),
     )
-    val result = GccCompilerEnginePlanningService(analyzer).plan(suite, engineId, binary, output)
+    val result = GccCompilerEnginePlanningService.diagnostic(analyzer).plan(suite, engineId, binary, output)
     println("engine: ${result.engineId}")
     println("program model: ${result.programModelPath}")
     println("program model sha256: ${result.programModelSha256}")
     println("module plan: ${result.modulePlanPath}")
     println("module plan sha256: ${result.modulePlanSha256}")
-    println("evidence: ${result.evidencePath}")
-    println("evidence sha256: ${result.evidenceSha256}")
+    println("non-authoritative assessment: ${result.assessmentPath}")
+    println("assessment sha256: ${result.assessmentSha256}")
     println("wall clock milliseconds: ${result.wallClockMillis}")
     println("maximum resident bytes observed: ${result.maximumResidentBytesObserved}")
 }
@@ -545,7 +545,8 @@ private fun printHelp() {
           Doctor performs an initialize-only ACP v1 preflight for all workflows by default.
           Doctor's --tools-only mode is agent-free and cannot be combined with agent selectors.
           Reconstruction's --evidence-only mode is agent-free and cannot be combined with --harness.
-          gcc-engine-plan is deterministic, agent-free Kotlin/JVM oracle work; ACP never receives oracle write authority.
+          gcc-engine-plan emits only a schema-v2 non-authoritative Kotlin/JVM diagnostic; it is not oracle or release evidence.
+          ACP remains read-only and never receives oracle write, validation, scoring, or certification authority.
         """.trimIndent(),
     )
 }

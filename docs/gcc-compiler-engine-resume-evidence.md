@@ -70,7 +70,9 @@ There is no accepted interruption or resume-evidence schema in this checkpoint, 
 assessment does not prove that any process ran, was interrupted, terminated, resumed from disk, or
 used a fresh analysis state. The validator cannot publish `complete: true` evidence. No production
 request, launcher, process-controller, cgroup, Ghidra runner, path reader, descriptor pin, or publisher
-API is present; the future cgroup-backed design will define that surface.
+API is present. The separate [pre-START containment contract](gcc-compiler-engine-containment.md)
+now fixes the identities and lifecycle facts that a future host controller must establish, but its
+caller-supplied receipts are explicitly non-authoritative and it exposes no START transition.
 
 Three host authorities remain required before real interruption acceptance work:
 

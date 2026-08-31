@@ -47,14 +47,26 @@ class GccCompilerEnginePlanningTest {
             model
         }
         val output = temporary.resolve("output")
-        val service = GccCompilerEnginePlanningService(analyzer)
+        val service = GccCompilerEnginePlanningService.diagnostic(analyzer)
 
         val first = service.plan(suite, "cc1", input, output)
         val firstPlan = first.modulePlanPath.readBytes()
         val firstModel = first.programModelPath.readBytes()
-        val firstEvidence = readEvidence(first.evidencePath)
+        val firstEvidence = readAssessment(first.assessmentPath)
 
-        assertEquals(true, firstEvidence.getValue("complete").jsonPrimitive.content.toBooleanStrict())
+        assertEquals(false, firstEvidence.getValue("complete").jsonPrimitive.content.toBooleanStrict())
+        assertEquals(false, firstEvidence.getValue("releaseEligible").jsonPrimitive.content.toBooleanStrict())
+        assertEquals(
+            "non-authoritative-caller-supplied-analyzer-v1",
+            firstEvidence.getValue("authority").jsonPrimitive.content,
+        )
+        assertEquals(2, firstEvidence.getValue("schemaVersion").jsonPrimitive.content.toInt())
+        assertFailsWith<IllegalArgumentException> {
+            OracleSchemas.validate(
+                "gcc/compiler-engine-plan-evidence",
+                JsonObject(firstEvidence + ("schemaVersion" to kotlinx.serialization.json.JsonPrimitive(1))),
+            )
+        }
         assertEquals(2, firstEvidence.getValue("results").jsonObject.getValue("ownership").jsonObject
             .getValue("functions").jsonPrimitive.content.toInt())
         assertEquals(1, firstEvidence.getValue("results").jsonObject.getValue("ownership").jsonObject
@@ -64,7 +76,7 @@ class GccCompilerEnginePlanningTest {
         assertTrue(first.wallClockMillis <= suite.budgets.exportWallClockMillis)
 
         val second = service.plan(suite, "cc1", input, output)
-        val secondEvidence = readEvidence(second.evidencePath)
+        val secondEvidence = readAssessment(second.assessmentPath)
         assertTrue(firstPlan.contentEquals(second.modulePlanPath.readBytes()))
         assertTrue(firstModel.contentEquals(second.programModelPath.readBytes()))
         assertEquals(first.modulePlanSha256, second.modulePlanSha256)
@@ -86,7 +98,7 @@ class GccCompilerEnginePlanningTest {
         val input = temporary.resolve("cc1.stripped")
         input.writeBytes("replaced".toByteArray())
         var invoked = false
-        val service = GccCompilerEnginePlanningService(ProgramModelAnalyzer { _, _ ->
+        val service = GccCompilerEnginePlanningService.diagnostic(ProgramModelAnalyzer { _, _ ->
             invoked = true
             model(OracleArtifacts.sha256(expected))
         })
@@ -97,7 +109,31 @@ class GccCompilerEnginePlanningTest {
         }
 
         assertFalse(invoked)
-        assertFalse(output.resolve("planning/compiler_engine_plan_evidence.json").exists())
+        assertFalse(output.resolve("planning/compiler_engine_plan_assessment.json").exists())
+    }
+
+    @Test
+    fun `legacy schema one completion evidence blocks diagnostic analysis`() {
+        val temporary = createTempDirectory("gcc-engine-plan-legacy-").toAbsolutePath().normalize()
+        val inputBytes = "authenticated compiler engine".toByteArray()
+        val input = temporary.resolve("cc1.stripped")
+        input.writeBytes(inputBytes)
+        val output = temporary.resolve("output")
+        output.resolve("planning").createDirectories()
+        output.resolve("planning/compiler_engine_plan_evidence.json").writeText(
+            "{\"schemaVersion\":1,\"complete\":true}\n",
+        )
+        var invoked = false
+        val service = GccCompilerEnginePlanningService.diagnostic(ProgramModelAnalyzer { _, _ ->
+            invoked = true
+            model(OracleArtifacts.sha256(inputBytes))
+        })
+
+        assertFailsWith<GccCompilerEnginePlanningException> {
+            service.plan(suite(inputBytes), "cc1", input, output)
+        }
+        assertFalse(invoked)
+        assertFalse(output.resolve("planning/compiler_engine_plan_assessment.json").exists())
     }
 
     @Test
@@ -107,7 +143,7 @@ class GccCompilerEnginePlanningTest {
         val input = temporary.resolve("cc1.stripped")
         input.writeBytes(inputBytes)
         val parsed = model(OracleArtifacts.sha256(inputBytes))
-        val service = GccCompilerEnginePlanningService(ProgramModelAnalyzer { _, work ->
+        val service = GccCompilerEnginePlanningService.diagnostic(ProgramModelAnalyzer { _, work ->
             val reports = work.resolve("reports").createDirectories()
             reports.resolve("program_model.json").writeText(
                 parsed.copy(functions = parsed.functions.map { it.copy(name = "substituted_${it.name}") }).toJson(),
@@ -122,7 +158,7 @@ class GccCompilerEnginePlanningTest {
         assertFailsWith<GccCompilerEnginePlanningException> {
             service.plan(suite(inputBytes), "cc1", input, temporary.resolve("output"))
         }
-        assertFalse(temporary.resolve("output/planning/compiler_engine_plan_evidence.json").exists())
+        assertFalse(temporary.resolve("output/planning/compiler_engine_plan_assessment.json").exists())
     }
 
     @Test
@@ -133,7 +169,7 @@ class GccCompilerEnginePlanningTest {
         input.writeBytes(inputBytes)
         val model = model(OracleArtifacts.sha256(inputBytes))
 
-        fun service(progress: String) = GccCompilerEnginePlanningService(ProgramModelAnalyzer { _, work ->
+        fun service(progress: String) = GccCompilerEnginePlanningService.diagnostic(ProgramModelAnalyzer { _, work ->
             val reports = work.resolve("reports").createDirectories()
             reports.resolve("program_model.json").writeText(model.toJson())
             reports.resolve("program_model.json.progress.json").writeText(progress)
@@ -162,7 +198,7 @@ class GccCompilerEnginePlanningTest {
         val inputBytes = "authenticated compiler engine".toByteArray()
         val input = temporary.resolve("cc1.stripped")
         input.writeBytes(inputBytes)
-        val service = GccCompilerEnginePlanningService(ProgramModelAnalyzer { _, _ ->
+        val service = GccCompilerEnginePlanningService.diagnostic(ProgramModelAnalyzer { _, _ ->
             Thread.sleep(75)
             model(OracleArtifacts.sha256(inputBytes))
         })
@@ -172,7 +208,7 @@ class GccCompilerEnginePlanningTest {
         }
     }
 
-    private fun readEvidence(path: Path): JsonObject {
+    private fun readAssessment(path: Path): JsonObject {
         val document = OracleJson.parseCanonical(path.readBytes()) as JsonObject
         OracleSchemas.validate("gcc/compiler-engine-plan-evidence", document)
         val reportSha256 = document.getValue("reportSha256").jsonPrimitive.content

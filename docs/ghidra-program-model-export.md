@@ -62,7 +62,7 @@ To test crash recovery, terminate the reconstruction container during the decomp
 volume, and rerun the identical command. The `reused` progress count must be nonzero, the completed total must be
 monotonic, and the final model must be byte-identical to an uninterrupted export of the same binary.
 
-The A10 production entry point is deliberately agent-free and JVM-owned. Its planning-mode exporter recovers bounded
+The A10 diagnostic entry point is deliberately agent-free and JVM-owned. Its planning-mode exporter recovers bounded
 function identities, prototypes, call edges, strings, globals, and types without paying the separate cost of producing
 full decompiled C bodies; those bodies belong to the later reconstruction phase:
 
@@ -76,6 +76,11 @@ llm_bin_patch gcc-engine-plan cc1 /path/to/gcc-cc1.stripped \
 
 The command authenticates the profile and all of its source/build/toolchain and ELF-manifest bindings, authenticates
 the exact stripped binary and Ghidra archive, proves every installed Ghidra file byte and tree member against that
-archive, runs the bundled exporter, assigns functions, globals, and types exactly
-once with the deterministic planner, and publishes self-hashed `compiler_engine_plan_evidence.json`. ACP receives this
-evidence read-only only in later implementation or repair phases; an agent cannot author or certify it.
+archive, runs the bundled exporter, and assigns functions, globals, and types exactly once with the deterministic
+planner. It writes a self-hashed `compiler_engine_plan_assessment.json` whose schema version is 2 and whose fixed
+fields are `authority=non-authoritative-caller-supplied-analyzer-v1`, `complete=false`, and
+`releaseEligible=false`. The former schema-1 `complete=true` document is incompatible and cannot be treated as this
+assessment or enter release. An output directory retaining the legacy
+`planning/compiler_engine_plan_evidence.json` fails before analysis instead of mixing old completion evidence with
+the schema-2 diagnostic. Descendant-JVM sampling is not cgroup resource evidence. ACP may later consume a
+separately authenticated plan read-only, but cannot author, validate, score, or certify it.
