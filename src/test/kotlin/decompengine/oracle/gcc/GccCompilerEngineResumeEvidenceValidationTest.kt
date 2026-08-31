@@ -97,6 +97,8 @@ class GccCompilerEngineResumeEvidenceValidationTest {
             GccExporterStateAssessment::class.java,
             GccExportProgressAssessment::class.java,
             GccCompletedRunAssessment::class.java,
+            GccInterruptedPrefixAssessment::class.java,
+            GccResumeEquivalenceAssessment::class.java,
         )
         assessmentClasses.forEach { type ->
             assertFalse(type.declaredMethods.any { it.name == "copy" || it.name.startsWith("component") })
@@ -121,6 +123,151 @@ class GccCompilerEngineResumeEvidenceValidationTest {
         assertFalse(bytecode.contains("GccPlanningBatchSummary"))
         assertFalse(bytecode.contains("validateAssembledModel"))
         assertFalse(bytecode.lineSequence().any { line -> line.contains(" copy(") })
+    }
+
+    @Test
+    fun `interrupted 513-function prefix and resumed fresh outputs compare only as raw bytes`() {
+        val fixture = transitionFixture(twoBatchFixture())
+        val prefix = assessInterrupted(fixture.interrupted)
+        assertEquals("non-authoritative-byte-assessment", prefix.authority)
+        assertEquals(513L, prefix.functionCount)
+        assertEquals(512L, prefix.completed)
+        assertEquals(1L, prefix.observedBatchCount)
+        assertEquals(fixture.interrupted.inventorySha256, prefix.declaredInventorySha256)
+        assertEquals(512L, prefix.partial)
+        assertEquals(0L, prefix.failed)
+        assertEquals(0L, prefix.reused)
+
+        val result = assessTransition(fixture)
+        assertEquals("non-authoritative-byte-assessment", result.authority)
+        assertEquals(sha(fixture.interrupted.state), result.stateSha256)
+        assertEquals(512L, result.interruptedCompleted)
+        assertEquals(513L, result.functionCount)
+        assertEquals(2L, result.planningBatchCount)
+        assertEquals(fixture.resumed.model.size, result.programModelBytes)
+        assertEquals(sha(fixture.resumed.model), result.programModelSha256)
+        assertEquals(fixture.resumedPlan.size, result.modulePlanBytes)
+        assertEquals(sha(fixture.resumedPlan), result.modulePlanSha256)
+    }
+
+    @Test
+    fun `interrupted prefixes reject missing reordered substituted and internally drifting bytes`() {
+        val transition = transitionFixture(twoBatchFixture())
+        assertFailsWith<GccCompilerEngineResumeEvidenceException> {
+            assessInterrupted(transition.interrupted.copy(batches = emptyList()))
+        }
+
+        val threeBatch = transitionFixture(threeBatchFixture(), interruptedBatchCount = 2)
+        assertFailsWith<GccCompilerEngineResumeEvidenceException> {
+            assessInterrupted(threeBatch.interrupted.copy(batches = threeBatch.interrupted.batches.reversed()))
+        }
+        assertFailsWith<GccCompilerEngineResumeEvidenceException> {
+            assessInterrupted(
+                transition.interrupted.copy(
+                    batches = listOf(transition.resumed.batches[1]),
+                ),
+            )
+        }
+
+        val countDrift = transition.interrupted.copy(
+            progress = progress(
+                phase = "planning",
+                total = 513,
+                completed = 512,
+                partial = 511,
+                failed = 1,
+            ),
+        )
+        assertFailsWith<GccCompilerEngineResumeEvidenceException> { assessInterrupted(countDrift) }
+        val statusDrift = transition.interrupted.batches.single().functions.decodeToString()
+            .replaceFirst("\"status\": \"partial\"", "\"status\": \"failed\"")
+            .toByteArray()
+        assertFailsWith<GccCompilerEngineResumeEvidenceException> {
+            assessInterrupted(
+                transition.interrupted.copy(
+                    batches = listOf(transition.interrupted.batches.single().withFunctions(statusDrift)),
+                ),
+            )
+        }
+        assertFailsWith<GccCompilerEngineResumeEvidenceException> {
+            assessInterrupted(
+                transition.interrupted.copy(
+                    state = transition.interrupted.state.decodeToString().replace(SHA_B, SHA_F).toByteArray(),
+                ),
+            )
+        }
+        assertFailsWith<GccCompilerEngineResumeEvidenceException> {
+            assessInterrupted(
+                transition.interrupted.copy(
+                    progress = progress(
+                        phase = "planning",
+                        total = 513,
+                        completed = 512,
+                        partial = 512,
+                        failed = 0,
+                        reused = 512,
+                    ),
+                ),
+            )
+        }
+        assertFailsWith<GccCompilerEngineResumeEvidenceException> {
+            assessInterrupted(threeBatchPrefixWithDuplicateFirstOwner())
+        }
+    }
+
+    @Test
+    fun `resume equivalence rejects frozen-prefix inventory reuse and final-output drift`() {
+        val fixture = transitionFixture(twoBatchFixture())
+        val inventoryDrift = fixture.interrupted.batches.single().checkpoint.decodeToString()
+            .replace("inventorySha256=${fixture.interrupted.inventorySha256}", "inventorySha256=$SHA_F")
+            .toByteArray()
+        val substitutedPrefix = fixture.copy(
+            interrupted = fixture.interrupted.copy(
+                batches = listOf(fixture.interrupted.batches.single().withCheckpoint(inventoryDrift)),
+            ),
+        )
+        assertEquals(SHA_F, assessInterrupted(substitutedPrefix.interrupted).declaredInventorySha256)
+        assertTransitionRejected(substitutedPrefix)
+
+        assertTransitionRejected(
+            fixture.copy(
+                resumed = fixture.resumed.copy(
+                    progress = progress(
+                        total = 513,
+                        completed = 513,
+                        partial = 513,
+                        failed = 0,
+                        reused = 0,
+                    ),
+                ),
+            ),
+        )
+        assertTransitionRejected(
+            fixture.copy(
+                fresh = fixture.fresh.copy(
+                    progress = progress(
+                        total = 513,
+                        completed = 513,
+                        partial = 513,
+                        failed = 0,
+                        reused = 512,
+                    ),
+                ),
+            ),
+        )
+        assertTransitionRejected(
+            fixture.copy(
+                fresh = fixture.fresh.copy(model = fixture.fresh.model.copyOf(fixture.fresh.model.size - 1)),
+            ),
+        )
+        assertTransitionRejected(fixture.copy(freshPlan = "different-plan\n".toByteArray()))
+        assertTransitionRejected(
+            fixture.copy(
+                fresh = fixture.fresh.copy(
+                    state = fixture.fresh.state.decodeToString().replace(SHA_B, SHA_F).toByteArray(),
+                ),
+            ),
+        )
     }
 
     @Test
@@ -264,6 +411,77 @@ class GccCompilerEngineResumeEvidenceValidationTest {
     }
 
     @Test
+    fun `transition capture snapshots every array and enforces hostile-list and aggregate bounds`() {
+        val fixture = transitionFixture(twoBatchFixture())
+        val expectedState = sha(fixture.interrupted.state)
+        val expectedModel = sha(fixture.resumed.model)
+        val expectedPlan = sha(fixture.resumedPlan)
+        val result = assessTransition(fixture)
+
+        mutableArrays(fixture).forEach { it.fill(0) }
+        assertEquals(expectedState, result.stateSha256)
+        assertEquals(expectedModel, result.programModelSha256)
+        assertEquals(expectedPlan, result.modulePlanSha256)
+
+        val bounded = transitionFixture(twoBatchFixture())
+        val retained = transitionCaptureBytes(bounded)
+        assessTransition(
+            bounded,
+            GccResumeByteValidationLimits(transitionAggregateBytes = retained),
+        )
+        assertFailsWith<GccCompilerEngineResumeEvidenceException> {
+            assessTransition(
+                bounded,
+                GccResumeByteValidationLimits(transitionAggregateBytes = retained - 1L),
+            )
+        }
+        assessTransition(
+            bounded,
+            GccResumeByteValidationLimits(modulePlanBytes = bounded.resumedPlan.size),
+        )
+        assertByteBoundFailure("resumed module plan") {
+            assessTransition(
+                bounded,
+                GccResumeByteValidationLimits(modulePlanBytes = bounded.resumedPlan.size - 1),
+            )
+        }
+
+        val rawBatch = bounded.interrupted.batches.single()
+        var hasNextCalls = 0
+        var nextCalls = 0
+        val unboundedIterator = object : AbstractList<GccPlanningBatchBytes>() {
+            override val size: Int = 1
+            override fun get(index: Int): GccPlanningBatchBytes = rawBatch
+            override fun iterator(): Iterator<GccPlanningBatchBytes> = object : Iterator<GccPlanningBatchBytes> {
+                override fun hasNext(): Boolean {
+                    hasNextCalls++
+                    return true
+                }
+
+                override fun next(): GccPlanningBatchBytes {
+                    nextCalls++
+                    return rawBatch
+                }
+            }
+        }
+        assertFailsWith<GccCompilerEngineResumeEvidenceException> {
+            assessTransition(bounded.copy(interrupted = bounded.interrupted.copy(batches = unboundedIterator)))
+        }
+        assertEquals(257, hasNextCalls)
+        assertEquals(256, nextCalls)
+
+        val declaredCountDrift = object : AbstractList<GccPlanningBatchBytes>() {
+            override val size: Int = bounded.resumed.batches.size
+            override fun get(index: Int): GccPlanningBatchBytes = bounded.resumed.batches[index]
+            override fun iterator(): Iterator<GccPlanningBatchBytes> =
+                (bounded.resumed.batches + bounded.resumed.batches.last()).iterator()
+        }
+        assertFailsWith<GccCompilerEngineResumeEvidenceException> {
+            assessTransition(bounded.copy(resumed = bounded.resumed.copy(batches = declaredCountDrift)))
+        }
+    }
+
+    @Test
     fun `pre-decode and final framing limits remain fail closed`() {
         val invalidUtf8 = byteArrayOf(0x80.toByte(), 0x80.toByte())
         assertByteBoundFailure("exporter state") {
@@ -334,6 +552,40 @@ class GccCompilerEngineResumeEvidenceValidationTest {
         limits,
     )
 
+    private fun assessInterrupted(
+        fixture: RunFixture,
+        limits: GccResumeByteValidationLimits = GccResumeByteValidationLimits(),
+    ): GccInterruptedPrefixAssessment = GccCompilerEngineResumeByteValidator.assessInterruptedPrefix(
+        fixture.state,
+        fixture.progress,
+        fixture.batches,
+        limits,
+    )
+
+    private fun assessTransition(
+        fixture: TransitionFixture,
+        limits: GccResumeByteValidationLimits = GccResumeByteValidationLimits(),
+    ): GccResumeEquivalenceAssessment = GccCompilerEngineResumeByteValidator.assessResumeEquivalence(
+        fixture.interrupted.state,
+        fixture.interrupted.progress,
+        fixture.interrupted.batches,
+        fixture.resumed.state,
+        fixture.resumed.progress,
+        fixture.resumed.batches,
+        fixture.resumed.model,
+        fixture.resumedPlan,
+        fixture.fresh.state,
+        fixture.fresh.progress,
+        fixture.fresh.batches,
+        fixture.fresh.model,
+        fixture.freshPlan,
+        limits,
+    )
+
+    private fun assertTransitionRejected(fixture: TransitionFixture) {
+        assertFailsWith<GccCompilerEngineResumeEvidenceException> { assessTransition(fixture) }
+    }
+
     private fun assertRejected(fixture: RunFixture) {
         assertFailsWith<GccCompilerEngineResumeEvidenceException> { assess(fixture) }
     }
@@ -387,6 +639,84 @@ class GccCompilerEngineResumeEvidenceValidationTest {
                 ),
             ),
         )
+    }
+
+    private fun threeBatchFixture(duplicateFirstOwner: Boolean = false): RunFixture {
+        val sharedGlobal = record(globalId(1), globalRecord(globalId(1), "shared"))
+        val specs = (0 until 1025).chunked(512).mapIndexed { batchIndex, indices ->
+            BatchSpec(
+                functions = indices.map { index -> function(functionId(index), "function_$index", "partial") },
+                globals = if (duplicateFirstOwner && batchIndex < 2) listOf(sharedGlobal) else emptyList(),
+            )
+        }
+        return buildFixture(specs)
+    }
+
+    private fun threeBatchPrefixWithDuplicateFirstOwner(): RunFixture =
+        transitionFixture(threeBatchFixture(duplicateFirstOwner = true), interruptedBatchCount = 2).interrupted
+
+    private fun transitionFixture(
+        completed: RunFixture,
+        interruptedBatchCount: Int = completed.batches.size - 1,
+    ): TransitionFixture {
+        require(interruptedBatchCount in 1 until completed.batches.size)
+        val interruptedFunctions = completed.specs.take(interruptedBatchCount).flatMap { it.functions }
+        val allFunctions = completed.specs.flatMap { it.functions }
+        val interruptedCompleted = interruptedFunctions.size.toLong()
+        val interrupted = completed.copy(
+            progress = progress(
+                phase = "planning",
+                total = allFunctions.size.toLong(),
+                completed = interruptedCompleted,
+                partial = interruptedFunctions.count { it.status == "partial" }.toLong(),
+                failed = interruptedFunctions.count { it.status == "failed" }.toLong(),
+            ),
+            batches = completed.batches.take(interruptedBatchCount),
+        )
+        val resumed = completed.copy(
+            progress = progress(
+                total = allFunctions.size.toLong(),
+                completed = allFunctions.size.toLong(),
+                partial = allFunctions.count { it.status == "partial" }.toLong(),
+                failed = allFunctions.count { it.status == "failed" }.toLong(),
+                reused = interruptedCompleted,
+            ),
+        )
+        val fresh = buildFixture(completed.specs)
+        val modulePlan = "{\"schemaVersion\":1,\"modules\":[]}\n".toByteArray()
+        return TransitionFixture(interrupted, resumed, fresh, modulePlan, modulePlan.copyOf())
+    }
+
+    private fun transitionCaptureBytes(fixture: TransitionFixture): Long =
+        planningLegBytes(fixture.interrupted, includeModel = false) +
+            planningLegBytes(fixture.resumed, includeModel = true) + fixture.resumedPlan.size +
+            planningLegBytes(fixture.fresh, includeModel = true) + fixture.freshPlan.size
+
+    private fun planningLegBytes(fixture: RunFixture, includeModel: Boolean): Long =
+        fixture.state.size.toLong() + fixture.progress.size +
+            fixture.batches.sumOf { batch ->
+                batch.checkpoint.size.toLong() + batch.functions.size + batch.globals.size +
+                    batch.types.size + batch.failures.size
+            } + if (includeModel) fixture.model.size else 0
+
+    private fun mutableArrays(fixture: TransitionFixture): List<ByteArray> = buildList {
+        fun addRun(run: RunFixture, includeModel: Boolean) {
+            add(run.state)
+            add(run.progress)
+            run.batches.forEach { batch ->
+                add(batch.checkpoint)
+                add(batch.functions)
+                add(batch.globals)
+                add(batch.types)
+                add(batch.failures)
+            }
+            if (includeModel) add(run.model)
+        }
+        addRun(fixture.interrupted, includeModel = false)
+        addRun(fixture.resumed, includeModel = true)
+        add(fixture.resumedPlan)
+        addRun(fixture.fresh, includeModel = true)
+        add(fixture.freshPlan)
     }
 
     private fun buildFixture(
@@ -659,6 +989,17 @@ class GccCompilerEngineResumeEvidenceValidationTest {
         val semantic: Semantic,
         val batchCommitmentSha256: String,
     )
+
+    private data class TransitionFixture(
+        val interrupted: RunFixture,
+        val resumed: RunFixture,
+        val fresh: RunFixture,
+        val resumedPlan: ByteArray,
+        val freshPlan: ByteArray,
+    )
+
+    private fun GccPlanningBatchBytes.withCheckpoint(replacement: ByteArray) =
+        GccPlanningBatchBytes(replacement, functions, globals, types, failures)
 
     private fun GccPlanningBatchBytes.withFunctions(replacement: ByteArray) =
         GccPlanningBatchBytes(checkpoint, replacement, globals, types, failures)

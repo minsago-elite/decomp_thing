@@ -52,6 +52,8 @@ internal data class GccResumeByteValidationLimits(
     val planningFragmentBytes: Int = MAXIMUM_PLANNING_BATCH_FRAGMENT_BYTES,
     val aggregateFragmentBytes: Long = MAXIMUM_RETAINED_FRAGMENT_BYTES,
     val assembledModelBytes: Int = MAXIMUM_PROGRAM_MODEL_BYTES,
+    val modulePlanBytes: Int = MAXIMUM_MODULE_PLAN_BYTES,
+    val transitionAggregateBytes: Long = MAXIMUM_TRANSITION_CAPTURE_BYTES,
 ) {
     init {
         require(exporterStateBytes in 1..MAXIMUM_EXPORT_STATE_BYTES)
@@ -60,6 +62,8 @@ internal data class GccResumeByteValidationLimits(
         require(planningFragmentBytes in 1..MAXIMUM_PLANNING_BATCH_FRAGMENT_BYTES)
         require(aggregateFragmentBytes in 1..MAXIMUM_RETAINED_FRAGMENT_BYTES)
         require(assembledModelBytes in 1..MAXIMUM_PROGRAM_MODEL_BYTES)
+        require(modulePlanBytes in 1..MAXIMUM_MODULE_PLAN_BYTES)
+        require(transitionAggregateBytes in 1..MAXIMUM_TRANSITION_CAPTURE_BYTES)
     }
 }
 
@@ -78,6 +82,20 @@ private class CapturedRun(
     val programModel: ByteArray,
 )
 
+private class CapturedInterruptedPrefix(
+    val state: ByteArray,
+    val progress: ByteArray,
+    val batches: List<CapturedPlanningBatch>,
+)
+
+private class CaptureBudget(private val maximumBytes: Long) {
+    private var retainedBytes = 0L
+
+    fun charge(bytes: Int, label: String) {
+        retainedBytes = addExactBounded(retainedBytes, bytes.toLong(), maximumBytes, label)
+    }
+}
+
 private data class BoundRecord(val id: String, val bytes: ByteArray)
 private data class SemanticBinding(val canonicalBytes: Long, val sha256: String)
 
@@ -91,39 +109,51 @@ private fun snapshotBounded(
     return raw.copyOf()
 }
 
-private fun captureRun(
-    rawState: ByteArray,
-    rawProgress: ByteArray,
+private fun snapshotBounded(
+    raw: ByteArray,
+    maximumBytes: Int,
+    allowEmpty: Boolean,
+    label: String,
+    captureBudget: CaptureBudget?,
+): ByteArray {
+    requireBoundedBytes(raw, maximumBytes, allowEmpty, label)
+    captureBudget?.charge(raw.size, "transition capture bytes")
+    return raw.copyOf()
+}
+
+private fun capturePlanningBatches(
     rawBatches: List<GccPlanningBatchBytes>,
-    rawProgramModel: ByteArray,
     limits: GccResumeByteValidationLimits,
-): CapturedRun {
+    leg: String,
+    captureBudget: CaptureBudget?,
+): List<CapturedPlanningBatch> {
     val declaredBatchCount = try {
         rawBatches.size
     } catch (failure: RuntimeException) {
-        throw GccCompilerEngineResumeEvidenceException("raw planning batch count cannot be read", failure)
+        throw GccCompilerEngineResumeEvidenceException("$leg raw planning batch count cannot be read", failure)
     }
     if (declaredBatchCount !in 1..MAXIMUM_PLANNING_BATCHES.toInt()) {
-        resumeValidationFailure("completed run has an invalid raw batch count")
+        resumeValidationFailure("$leg has an invalid raw planning batch count")
     }
     val stableBatches = ArrayList<GccPlanningBatchBytes>(declaredBatchCount)
     try {
         val iterator = rawBatches.iterator()
         while (iterator.hasNext()) {
             if (stableBatches.size >= MAXIMUM_PLANNING_BATCHES) {
-                resumeValidationFailure("raw planning batch iterator exceeds its hard count bound")
+                resumeValidationFailure("$leg raw planning batch iterator exceeds its hard count bound")
             }
             val next: GccPlanningBatchBytes? = iterator.next()
-            stableBatches += next ?: resumeValidationFailure("raw planning batch iterator contains null")
+            stableBatches += next ?: resumeValidationFailure("$leg raw planning batch iterator contains null")
         }
     } catch (failure: GccCompilerEngineResumeEvidenceException) {
         throw failure
     } catch (failure: RuntimeException) {
-        throw GccCompilerEngineResumeEvidenceException("raw planning batch list changed during capture", failure)
+        throw GccCompilerEngineResumeEvidenceException("$leg raw planning batch list changed during capture", failure)
     }
     if (stableBatches.size != declaredBatchCount) {
-        resumeValidationFailure("raw planning batch declared and observed counts differ")
+        resumeValidationFailure("$leg raw planning batch declared and observed counts differ")
     }
+
     var retainedBytes = 0L
     val batches = ArrayList<CapturedPlanningBatch>(stableBatches.size)
     stableBatches.forEach { raw ->
@@ -133,25 +163,68 @@ private fun captureRun(
                 retainedBytes,
                 bytes.size.toLong(),
                 limits.aggregateFragmentBytes,
-                "captured completed-run planning bytes",
+                "$leg retained planning bytes",
             )
+            captureBudget?.charge(bytes.size, "transition capture bytes")
             return bytes.copyOf()
         }
         batches += CapturedPlanningBatch(
-            checkpoint = captureArtifact(raw.checkpoint, limits.checkpointBytes, false, "planning checkpoint"),
-            functions = captureArtifact(raw.functions, limits.planningFragmentBytes, false, "function fragment"),
-            globals = captureArtifact(raw.globals, limits.planningFragmentBytes, true, "global fragment"),
-            types = captureArtifact(raw.types, limits.planningFragmentBytes, true, "type fragment"),
-            failures = captureArtifact(raw.failures, limits.planningFragmentBytes, true, "failure fragment"),
+            checkpoint = captureArtifact(raw.checkpoint, limits.checkpointBytes, false, "$leg planning checkpoint"),
+            functions = captureArtifact(raw.functions, limits.planningFragmentBytes, false, "$leg function fragment"),
+            globals = captureArtifact(raw.globals, limits.planningFragmentBytes, true, "$leg global fragment"),
+            types = captureArtifact(raw.types, limits.planningFragmentBytes, true, "$leg type fragment"),
+            failures = captureArtifact(raw.failures, limits.planningFragmentBytes, true, "$leg failure fragment"),
         )
     }
+    return immutableList(batches)
+}
+
+private fun captureRun(
+    rawState: ByteArray,
+    rawProgress: ByteArray,
+    rawBatches: List<GccPlanningBatchBytes>,
+    rawProgramModel: ByteArray,
+    limits: GccResumeByteValidationLimits,
+    leg: String = "completed run",
+    captureBudget: CaptureBudget? = null,
+): CapturedRun {
     return CapturedRun(
-        state = snapshotBounded(rawState, limits.exporterStateBytes, false, "exporter state"),
-        progress = snapshotBounded(rawProgress, limits.progressBytes, false, "export progress"),
-        batches = immutableList(batches),
-        programModel = snapshotBounded(rawProgramModel, limits.assembledModelBytes, false, "completed program model"),
+        state = snapshotBounded(rawState, limits.exporterStateBytes, false, "$leg exporter state", captureBudget),
+        progress = snapshotBounded(rawProgress, limits.progressBytes, false, "$leg export progress", captureBudget),
+        batches = capturePlanningBatches(rawBatches, limits, leg, captureBudget),
+        programModel = snapshotBounded(
+            rawProgramModel,
+            limits.assembledModelBytes,
+            false,
+            "$leg program model",
+            captureBudget,
+        ),
     )
 }
+
+private fun captureInterruptedPrefix(
+    rawState: ByteArray,
+    rawProgress: ByteArray,
+    rawBatches: List<GccPlanningBatchBytes>,
+    limits: GccResumeByteValidationLimits,
+    captureBudget: CaptureBudget? = null,
+): CapturedInterruptedPrefix = CapturedInterruptedPrefix(
+    state = snapshotBounded(
+        rawState,
+        limits.exporterStateBytes,
+        false,
+        "interrupted exporter state",
+        captureBudget,
+    ),
+    progress = snapshotBounded(
+        rawProgress,
+        limits.progressBytes,
+        false,
+        "interrupted export progress",
+        captureBudget,
+    ),
+    batches = capturePlanningBatches(rawBatches, limits, "interrupted prefix", captureBudget),
+)
 
 private fun parseExporterState(bytes: ByteArray, limits: GccResumeByteValidationLimits): ParsedExporterState {
     requireBoundedBytes(bytes, limits.exporterStateBytes, allowEmpty = false, "exporter state")
@@ -644,6 +717,267 @@ internal class GccCompletedRunAssessment internal constructor(
     val reused: Long,
 )
 
+/** Diagnostic only; this does not prove that a process was stopped at this prefix. */
+internal class GccInterruptedPrefixAssessment internal constructor(
+    val authority: String,
+    val stateSha256: String,
+    val progressSha256: String,
+    val functionCount: Long,
+    val completed: Long,
+    val observedBatchCount: Long,
+    val declaredInventorySha256: String,
+    val partial: Long,
+    val failed: Long,
+    val reused: Long,
+)
+
+/** Diagnostic only; byte equivalence is not process, interruption, or publication evidence. */
+internal class GccResumeEquivalenceAssessment internal constructor(
+    val authority: String,
+    val stateSha256: String,
+    val interruptedProgressSha256: String,
+    val resumedProgressSha256: String,
+    val freshProgressSha256: String,
+    val interruptedCompleted: Long,
+    val functionCount: Long,
+    val planningBatchCount: Long,
+    val programModelBytes: Int,
+    val programModelSha256: String,
+    val modulePlanBytes: Int,
+    val modulePlanSha256: String,
+)
+
+private class ValidatedInterruptedPrefix(
+    val state: ParsedExporterState,
+    val progress: ParsedExportProgress,
+    val assessment: GccInterruptedPrefixAssessment,
+)
+
+private class ValidatedCompletedRun(
+    val state: ParsedExporterState,
+    val progress: ParsedExportProgress,
+    val assessment: GccCompletedRunAssessment,
+)
+
+private fun validateInterruptedPrefix(
+    run: CapturedInterruptedPrefix,
+    limits: GccResumeByteValidationLimits,
+): ValidatedInterruptedPrefix {
+    val state = parseExporterState(run.state, limits)
+    val progress = parseExportProgress(state, run.progress, limits)
+    if (progress.phase != "planning" || progress.completed < PLANNING_BATCH_FUNCTIONS ||
+        progress.completed >= progress.total || progress.reused != 0L
+    ) {
+        resumeValidationFailure(
+            "interrupted prefix must be an incomplete planning leg with at least one full checkpoint and no reuse",
+        )
+    }
+    val observedBatchCount = progress.completed / PLANNING_BATCH_FUNCTIONS
+    if (run.batches.size.toLong() != observedBatchCount || observedBatchCount >= state.planningBatchCount) {
+        resumeValidationFailure("interrupted prefix batch count differs from its completed position")
+    }
+
+    val globals = TreeMap<String, BoundRecord>()
+    val types = TreeMap<String, BoundRecord>()
+    val failures = TreeMap<String, BoundRecord>()
+    var nextStart = 0L
+    var partial = 0L
+    var failed = 0L
+    var inventorySha256: String? = null
+    var previousFunctionId: String? = null
+    val batches = ArrayList<ParsedPlanningBatch>(run.batches.size)
+    run.batches.forEach { captured ->
+        val batch = parsePlanningBatch(state, captured, limits)
+        if (batch.startIndex != nextStart || batch.endExclusive - batch.startIndex != PLANNING_BATCH_FUNCTIONS) {
+            resumeValidationFailure("interrupted planning batches are not an exact contiguous full-checkpoint prefix")
+        }
+        nextStart = batch.endExclusive
+        if (inventorySha256 != null && inventorySha256 != batch.inventorySha256) {
+            resumeValidationFailure("interrupted planning batches disagree on their inventory binding")
+        }
+        inventorySha256 = batch.inventorySha256
+        batch.functionIds.forEach { id ->
+            if (previousFunctionId != null && previousFunctionId!! >= id) {
+                resumeValidationFailure("interrupted-prefix functions are not in strict inventory order")
+            }
+            previousFunctionId = id
+        }
+        retainFirstOwner(globals, batch.globalIds, batch.globals.records, "interrupted global")
+        retainFirstOwner(types, batch.typeIds, batch.types.records, "interrupted type")
+        retainFirstOwner(failures, batch.failureIds, batch.failures.records, "interrupted failure")
+        partial = exactAdd("interrupted-prefix partial count", partial, batch.partial)
+        failed = exactAdd("interrupted-prefix failed count", failed, batch.failed)
+        batches += batch
+    }
+    if (nextStart != progress.completed ||
+        progress.partial != partial || progress.failed != failed ||
+        exactAdd("interrupted-prefix progress counts", partial, failed) != progress.completed
+    ) {
+        resumeValidationFailure("interrupted progress differs from the exact observed planning prefix")
+    }
+    val declaredInventory = inventorySha256
+        ?: resumeValidationFailure("interrupted prefix has no inventory binding")
+    requireArtifact(run.state, ParsedArtifact(state.artifactBytes, state.artifactSha256), "interrupted exporter state")
+    requireArtifact(
+        run.progress,
+        ParsedArtifact(progress.artifactBytes, progress.artifactSha256),
+        "interrupted export progress",
+    )
+    run.batches.zip(batches).forEach { (raw, parsed) ->
+        requireArtifact(raw.checkpoint, parsed.checkpoint, "interrupted planning checkpoint")
+        requireArtifact(
+            raw.functions,
+            ParsedArtifact(parsed.functions.bytes, parsed.functions.sha256),
+            "interrupted function fragment",
+        )
+        requireArtifact(
+            raw.globals,
+            ParsedArtifact(parsed.globals.bytes, parsed.globals.sha256),
+            "interrupted global fragment",
+        )
+        requireArtifact(
+            raw.types,
+            ParsedArtifact(parsed.types.bytes, parsed.types.sha256),
+            "interrupted type fragment",
+        )
+        requireArtifact(
+            raw.failures,
+            ParsedArtifact(parsed.failures.bytes, parsed.failures.sha256),
+            "interrupted failure fragment",
+        )
+    }
+    return ValidatedInterruptedPrefix(
+        state,
+        progress,
+        GccInterruptedPrefixAssessment(
+            authority = NON_AUTHORITATIVE_ASSESSMENT,
+            stateSha256 = state.artifactSha256,
+            progressSha256 = progress.artifactSha256,
+            functionCount = state.functionCount,
+            completed = progress.completed,
+            observedBatchCount = observedBatchCount,
+            declaredInventorySha256 = declaredInventory,
+            partial = partial,
+            failed = failed,
+            reused = progress.reused,
+        ),
+    )
+}
+
+private fun validateCompletedRun(
+    run: CapturedRun,
+    limits: GccResumeByteValidationLimits,
+): ValidatedCompletedRun {
+    val state = parseExporterState(run.state, limits)
+    val progress = parseExportProgress(state, run.progress, limits)
+    if (progress.phase != "complete") resumeValidationFailure("completed run progress is not terminal")
+    if (run.batches.size.toLong() != state.planningBatchCount) {
+        resumeValidationFailure("completed run batch count differs from exporter state")
+    }
+
+    val batches = ArrayList<ParsedPlanningBatch>(run.batches.size)
+    val functions = ArrayList<BoundRecord>()
+    val globals = TreeMap<String, BoundRecord>()
+    val types = TreeMap<String, BoundRecord>()
+    val failures = TreeMap<String, BoundRecord>()
+    var nextStart = 0L
+    var partial = 0L
+    var failed = 0L
+    var inventorySha256: String? = null
+    var previousFunctionId: String? = null
+    run.batches.forEach { captured ->
+        val batch = parsePlanningBatch(state, captured, limits)
+        if (batch.startIndex != nextStart) resumeValidationFailure("planning batches are not a contiguous ordered run")
+        nextStart = batch.endExclusive
+        if (inventorySha256 != null && inventorySha256 != batch.inventorySha256) {
+            resumeValidationFailure("planning batches disagree on their inventory binding")
+        }
+        inventorySha256 = batch.inventorySha256
+        batch.functionIds.zip(batch.functions.records).forEach { (id, record) ->
+            if (previousFunctionId != null && previousFunctionId!! >= id) {
+                resumeValidationFailure("completed-run functions are not in strict inventory order")
+            }
+            functions += BoundRecord(id, record)
+            previousFunctionId = id
+        }
+        retainFirstOwner(globals, batch.globalIds, batch.globals.records, "global")
+        retainFirstOwner(types, batch.typeIds, batch.types.records, "type")
+        retainFirstOwner(failures, batch.failureIds, batch.failures.records, "failure")
+        partial = exactAdd("completed-run partial count", partial, batch.partial)
+        failed = exactAdd("completed-run failed count", failed, batch.failed)
+        batches += batch
+    }
+    if (nextStart != state.functionCount || functions.size.toLong() != state.functionCount) {
+        resumeValidationFailure("planning batches do not cover the complete function inventory")
+    }
+    val recomputedInventory = inventorySha256(functions.map { it.id })
+    if (inventorySha256 != recomputedInventory) resumeValidationFailure("planning inventory digest is not reproducible")
+    val recomputedCommitment = batchCommitmentSha256(batches, run.batches)
+    if (recomputedCommitment != state.batchCommitmentSha256) {
+        resumeValidationFailure("planning batch commitment is not reproducible")
+    }
+    val semantic = semanticFingerprint(functions, failures, globals, types)
+    if (semantic.canonicalBytes != state.canonicalBytes || semantic.sha256 != state.semanticSha256) {
+        resumeValidationFailure("planning semantic fingerprint is not reproducible")
+    }
+    if (progress.completed != state.functionCount || progress.partial != partial || progress.failed != failed) {
+        resumeValidationFailure("terminal progress differs from the validated planning batches")
+    }
+
+    reauthenticateRun(run, state, progress, batches)
+    verifyAssembledModel(
+        run.programModel,
+        state.inputSha256,
+        functions,
+        globals.values.toList(),
+        types.values.toList(),
+        limits,
+    )
+    return ValidatedCompletedRun(
+        state,
+        progress,
+        GccCompletedRunAssessment(
+            authority = NON_AUTHORITATIVE_ASSESSMENT,
+            stateSha256 = state.artifactSha256,
+            progressSha256 = progress.artifactSha256,
+            programModelBytes = run.programModel.size,
+            programModelSha256 = OracleArtifacts.sha256(run.programModel),
+            functionCount = state.functionCount,
+            planningBatchCount = state.planningBatchCount,
+            inventorySha256 = recomputedInventory,
+            semanticCanonicalBytes = semantic.canonicalBytes,
+            semanticSha256 = semantic.sha256,
+            batchCommitmentSha256 = recomputedCommitment,
+            partial = partial,
+            failed = failed,
+            reused = progress.reused,
+        ),
+    )
+}
+
+private fun requireExactArtifactBytes(left: ByteArray, right: ByteArray, label: String) {
+    if (left.size != right.size || !MessageDigest.isEqual(left, right)) {
+        resumeValidationFailure("$label bytes differ")
+    }
+}
+
+private fun requireFrozenPrefix(
+    interrupted: CapturedInterruptedPrefix,
+    resumed: CapturedRun,
+) {
+    if (interrupted.batches.size >= resumed.batches.size) {
+        resumeValidationFailure("interrupted batches are not a strict prefix of the resumed run")
+    }
+    interrupted.batches.forEachIndexed { index, frozen ->
+        val resumedBatch = resumed.batches[index]
+        requireExactArtifactBytes(frozen.checkpoint, resumedBatch.checkpoint, "frozen prefix checkpoint $index")
+        requireExactArtifactBytes(frozen.functions, resumedBatch.functions, "frozen prefix function fragment $index")
+        requireExactArtifactBytes(frozen.globals, resumedBatch.globals, "frozen prefix global fragment $index")
+        requireExactArtifactBytes(frozen.types, resumedBatch.types, "frozen prefix type fragment $index")
+        requireExactArtifactBytes(frozen.failures, resumedBatch.failures, "frozen prefix failure fragment $index")
+    }
+}
+
 /**
  * Pure hostile-byte validation used by the future controller. Methods accept already captured
  * bytes; they do not read paths, mutate a workspace, launch a process, or publish evidence.
@@ -674,81 +1008,107 @@ internal object GccCompilerEngineResumeByteValidator {
         rawBatches: List<GccPlanningBatchBytes>,
         rawProgramModel: ByteArray,
         limits: GccResumeByteValidationLimits = GccResumeByteValidationLimits(),
-    ): GccCompletedRunAssessment {
-        val run = captureRun(rawState, rawProgress, rawBatches, rawProgramModel, limits)
-        val state = parseExporterState(run.state, limits)
-        val progress = parseExportProgress(state, run.progress, limits)
-        if (progress.phase != "complete") resumeValidationFailure("completed run progress is not terminal")
-        if (run.batches.size.toLong() != state.planningBatchCount) {
-            resumeValidationFailure("completed run batch count differs from exporter state")
-        }
+    ): GccCompletedRunAssessment = validateCompletedRun(
+        captureRun(rawState, rawProgress, rawBatches, rawProgramModel, limits),
+        limits,
+    ).assessment
 
-        val batches = ArrayList<ParsedPlanningBatch>(run.batches.size)
-        val functions = ArrayList<BoundRecord>()
-        val globals = TreeMap<String, BoundRecord>()
-        val types = TreeMap<String, BoundRecord>()
-        val failures = TreeMap<String, BoundRecord>()
-        var nextStart = 0L
-        var partial = 0L
-        var failed = 0L
-        var inventorySha256: String? = null
-        var previousFunctionId: String? = null
-        run.batches.forEach { captured ->
-            val batch = parsePlanningBatch(state, captured, limits)
-            if (batch.startIndex != nextStart) resumeValidationFailure("planning batches are not a contiguous ordered run")
-            nextStart = batch.endExclusive
-            if (inventorySha256 != null && inventorySha256 != batch.inventorySha256) {
-                resumeValidationFailure("planning batches disagree on their inventory binding")
-            }
-            inventorySha256 = batch.inventorySha256
-            batch.functionIds.zip(batch.functions.records).forEach { (id, record) ->
-                if (previousFunctionId != null && previousFunctionId!! >= id) {
-                    resumeValidationFailure("completed-run functions are not in strict inventory order")
-                }
-                functions += BoundRecord(id, record)
-                previousFunctionId = id
-            }
-            retainFirstOwner(globals, batch.globalIds, batch.globals.records, "global")
-            retainFirstOwner(types, batch.typeIds, batch.types.records, "type")
-            retainFirstOwner(failures, batch.failureIds, batch.failures.records, "failure")
-            partial = exactAdd("completed-run partial count", partial, batch.partial)
-            failed = exactAdd("completed-run failed count", failed, batch.failed)
-            batches += batch
-        }
-        if (nextStart != state.functionCount || functions.size.toLong() != state.functionCount) {
-            resumeValidationFailure("planning batches do not cover the complete function inventory")
-        }
-        val recomputedInventory = inventorySha256(functions.map { it.id })
-        if (inventorySha256 != recomputedInventory) resumeValidationFailure("planning inventory digest is not reproducible")
-        val recomputedCommitment = batchCommitmentSha256(batches, run.batches)
-        if (recomputedCommitment != state.batchCommitmentSha256) {
-            resumeValidationFailure("planning batch commitment is not reproducible")
-        }
-        val semantic = semanticFingerprint(functions, failures, globals, types)
-        if (semantic.canonicalBytes != state.canonicalBytes || semantic.sha256 != state.semanticSha256) {
-            resumeValidationFailure("planning semantic fingerprint is not reproducible")
-        }
-        if (progress.completed != state.functionCount || progress.partial != partial || progress.failed != failed) {
-            resumeValidationFailure("terminal progress differs from the validated planning batches")
-        }
+    fun assessInterruptedPrefix(
+        rawState: ByteArray,
+        rawProgress: ByteArray,
+        rawBatches: List<GccPlanningBatchBytes>,
+        limits: GccResumeByteValidationLimits = GccResumeByteValidationLimits(),
+    ): GccInterruptedPrefixAssessment = validateInterruptedPrefix(
+        captureInterruptedPrefix(rawState, rawProgress, rawBatches, limits),
+        limits,
+    ).assessment
 
-        reauthenticateRun(run, state, progress, batches)
-        verifyAssembledModel(run.programModel, state.inputSha256, functions, globals.values.toList(), types.values.toList(), limits)
-        return GccCompletedRunAssessment(
+    @Suppress("LongParameterList")
+    fun assessResumeEquivalence(
+        rawInterruptedState: ByteArray,
+        rawInterruptedProgress: ByteArray,
+        rawInterruptedBatches: List<GccPlanningBatchBytes>,
+        rawResumedState: ByteArray,
+        rawResumedProgress: ByteArray,
+        rawResumedBatches: List<GccPlanningBatchBytes>,
+        rawResumedProgramModel: ByteArray,
+        rawResumedModulePlan: ByteArray,
+        rawFreshState: ByteArray,
+        rawFreshProgress: ByteArray,
+        rawFreshBatches: List<GccPlanningBatchBytes>,
+        rawFreshProgramModel: ByteArray,
+        rawFreshModulePlan: ByteArray,
+        limits: GccResumeByteValidationLimits = GccResumeByteValidationLimits(),
+    ): GccResumeEquivalenceAssessment {
+        val captureBudget = CaptureBudget(limits.transitionAggregateBytes)
+        val interrupted = captureInterruptedPrefix(
+            rawInterruptedState,
+            rawInterruptedProgress,
+            rawInterruptedBatches,
+            limits,
+            captureBudget,
+        )
+        val resumed = captureRun(
+            rawResumedState,
+            rawResumedProgress,
+            rawResumedBatches,
+            rawResumedProgramModel,
+            limits,
+            "resumed run",
+            captureBudget,
+        )
+        val resumedModulePlan = snapshotBounded(
+            rawResumedModulePlan,
+            limits.modulePlanBytes,
+            false,
+            "resumed module plan",
+            captureBudget,
+        )
+        val fresh = captureRun(
+            rawFreshState,
+            rawFreshProgress,
+            rawFreshBatches,
+            rawFreshProgramModel,
+            limits,
+            "fresh run",
+            captureBudget,
+        )
+        val freshModulePlan = snapshotBounded(
+            rawFreshModulePlan,
+            limits.modulePlanBytes,
+            false,
+            "fresh module plan",
+            captureBudget,
+        )
+
+        val interruptedValidation = validateInterruptedPrefix(interrupted, limits)
+        val resumedValidation = validateCompletedRun(resumed, limits)
+        val freshValidation = validateCompletedRun(fresh, limits)
+        requireExactArtifactBytes(interrupted.state, resumed.state, "interrupted and resumed exporter state")
+        requireExactArtifactBytes(interrupted.state, fresh.state, "interrupted and fresh exporter state")
+        requireFrozenPrefix(interrupted, resumed)
+        if (resumedValidation.progress.reused != interruptedValidation.progress.completed) {
+            resumeValidationFailure("resumed reuse count differs from the frozen interrupted prefix")
+        }
+        if (freshValidation.progress.reused != 0L) {
+            resumeValidationFailure("fresh control unexpectedly reused planning records")
+        }
+        requireExactArtifactBytes(resumed.programModel, fresh.programModel, "resumed and fresh program model")
+        requireExactArtifactBytes(resumedModulePlan, freshModulePlan, "resumed and fresh module plan")
+
+        return GccResumeEquivalenceAssessment(
             authority = NON_AUTHORITATIVE_ASSESSMENT,
-            stateSha256 = state.artifactSha256,
-            progressSha256 = progress.artifactSha256,
-            programModelBytes = run.programModel.size,
-            programModelSha256 = OracleArtifacts.sha256(run.programModel),
-            functionCount = state.functionCount,
-            planningBatchCount = state.planningBatchCount,
-            inventorySha256 = recomputedInventory,
-            semanticCanonicalBytes = semantic.canonicalBytes,
-            semanticSha256 = semantic.sha256,
-            batchCommitmentSha256 = recomputedCommitment,
-            partial = partial,
-            failed = failed,
-            reused = progress.reused,
+            stateSha256 = interruptedValidation.state.artifactSha256,
+            interruptedProgressSha256 = interruptedValidation.progress.artifactSha256,
+            resumedProgressSha256 = resumedValidation.progress.artifactSha256,
+            freshProgressSha256 = freshValidation.progress.artifactSha256,
+            interruptedCompleted = interruptedValidation.progress.completed,
+            functionCount = resumedValidation.state.functionCount,
+            planningBatchCount = resumedValidation.state.planningBatchCount,
+            programModelBytes = resumed.programModel.size,
+            programModelSha256 = OracleArtifacts.sha256(resumed.programModel),
+            modulePlanBytes = resumedModulePlan.size,
+            modulePlanSha256 = OracleArtifacts.sha256(resumedModulePlan),
         )
     }
 }
@@ -1340,7 +1700,9 @@ private const val MAXIMUM_PLANNING_BATCH_CHECKPOINT_BYTES = 256 * 1024
 private const val MAXIMUM_PLANNING_BATCH_FRAGMENT_BYTES = 64 * 1024 * 1024
 private const val MAXIMUM_PLANNING_EVIDENCE_RECORD_BYTES = 1024 * 1024
 private const val MAXIMUM_PROGRAM_MODEL_BYTES = 512 * 1024 * 1024
+private const val MAXIMUM_MODULE_PLAN_BYTES = 512 * 1024 * 1024
 private const val MAXIMUM_RETAINED_FRAGMENT_BYTES = 512L * 1024 * 1024
+private const val MAXIMUM_TRANSITION_CAPTURE_BYTES = 2L * 1024 * 1024 * 1024
 private const val MAXIMUM_SEMANTIC_BYTES = 1024L * 1024 * 1024
 private const val MAXIMUM_UNIQUE_EVIDENCE_BYTES = 512L * 1024 * 1024
 private const val SEMANTIC_FRAME_OVERHEAD = 17L
