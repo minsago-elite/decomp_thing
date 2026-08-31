@@ -340,6 +340,7 @@ internal class FullTreeFunctionObservationPreparedRun private constructor(
 }
 
 private object PREPARED_ISOLATION_AUTHORITY_CONSTRUCTION_PERMIT
+private object ATTACHED_ISOLATION_AUTHORITY_CONSTRUCTION_PERMIT
 
 private enum class PreparedIsolationRunRootBorrowStage {
     BEFORE_LAUNCH,
@@ -365,6 +366,7 @@ internal class FullTreeFunctionObservationPreparedIsolationAuthority private con
     private var runRootBorrowActive = false
     private var scopeAttachmentAttempted = false
     private var launchBoundaryAbsenceAccepted = false
+    private var attachmentPublicationAttempted = false
 
     init {
         if (
@@ -398,6 +400,9 @@ internal class FullTreeFunctionObservationPreparedIsolationAuthority private con
     @Synchronized
     fun requireCurrentAfterScopeAttachment() {
         check(!closed) { "function-observation prepared isolation is closed" }
+        if (attachmentPublicationAttempted) {
+            coordinationFail("function-observation attachment publication was already attempted")
+        }
         if (!scopeAttachmentAttempted) {
             coordinationFail("function-observation prepared isolation has not attempted scope attachment")
         }
@@ -421,6 +426,9 @@ internal class FullTreeFunctionObservationPreparedIsolationAuthority private con
     @Synchronized
     fun requireCurrentAfterCgroupAbsence() {
         check(!closed) { "function-observation prepared isolation is closed" }
+        if (attachmentPublicationAttempted) {
+            coordinationFail("function-observation attachment publication was already attempted")
+        }
         if (!scopeAttachmentAttempted) {
             coordinationFail("function-observation prepared isolation has not attempted scope attachment")
         }
@@ -472,6 +480,138 @@ internal class FullTreeFunctionObservationPreparedIsolationAuthority private con
     fun <T> withCurrentRunRootAfterScopeAttachment(
         action: (FullTreeDiskScratchBorrowedRunRoot) -> T,
     ): T = withCurrentRunRoot(PreparedIsolationRunRootBorrowStage.AFTER_SCOPE_ATTACHMENT, action)
+
+    /**
+     * Linearly advances the journal from LEASED to UNIT_ATTACHED while retaining the journal,
+     * mount, and run-root authorities. The receipt is a forgeable byte assertion at this layer;
+     * only the outer live BOOT typestate may call this method, and it must use [requireLiveReceipt]
+     * to revalidate the same opaque live attachment before and after publication.
+     *
+     * Once transaction validation begins, any failure permanently makes this owner cleanup-only;
+     * the flag is set before the first journal operation because that operation may poison its
+     * handle. A poisoned journal cannot be reopened without violating the journal-before-mount lock
+     * order; after the caller proves its locally owned launch boundary absent,
+     * [closeAfterFailedAttachmentPublication] performs disk-only validation and releases the locks
+     * for cold journal completion.
+     */
+    @Synchronized
+    internal fun transferToUnitAttachedIsolationAuthority(
+        receipt: FullTreeFunctionObservationUnitAttachmentReceipt,
+        requireLiveReceipt: () -> Unit,
+        receiptFaultInjector: DescriptorBoundStateFaultInjector? = null,
+        transitionFaultInjector: DescriptorBoundStateFaultInjector? = null,
+    ): FullTreeFunctionObservationUnitAttachedIsolationAuthority {
+        check(!closed) { "function-observation prepared isolation is closed" }
+        if (runRootBorrowActive) {
+            coordinationFail("function-observation prepared isolation cannot transfer while its root is borrowed")
+        }
+        if (!scopeAttachmentAttempted || launchBoundaryAbsenceAccepted || attachmentPublicationAttempted) {
+            coordinationFail("function-observation prepared isolation is not at one live attachment boundary")
+        }
+        requireLiveReceipt()
+        attachmentPublicationAttempted = true
+        try {
+            requireCurrentPreparedRun(
+                leasedHistory,
+                diskEvidence,
+                runRoot,
+                journal,
+                lease,
+                FullTreeDiskScratchStage.AFTER_SCOPE_ATTACHMENT,
+            )
+            val attachedHistory = journal.recordUnitAttached(
+                receipt,
+                receiptFaultInjector,
+                transitionFaultInjector,
+            )
+            val acceptedEvidence = attachedHistory.requireDiskEvidenceIntroducedAt(
+                FullTreeFunctionObservationOperationPhase.LEASED,
+            )
+            val acceptedReceipt = attachedHistory.requireUnitAttachmentReceiptIntroducedAt(
+                FullTreeFunctionObservationOperationPhase.UNIT_ATTACHED,
+            )
+            requireExactEvidence(diskEvidence, acceptedEvidence)
+            requireExactReceipt(receipt, acceptedReceipt)
+            requireCurrentPreparedRun(
+                attachedHistory,
+                diskEvidence,
+                runRoot,
+                journal,
+                lease,
+                FullTreeDiskScratchStage.AFTER_SCOPE_ATTACHMENT,
+            )
+            requireLiveReceipt()
+            requireCurrentPreparedRun(
+                attachedHistory,
+                diskEvidence,
+                runRoot,
+                journal,
+                lease,
+                FullTreeDiskScratchStage.AFTER_SCOPE_ATTACHMENT,
+            )
+            val transferred = FullTreeFunctionObservationUnitAttachedIsolationAuthority.create(
+                attachedHistory,
+                diskEvidence,
+                acceptedReceipt,
+                runRoot,
+                journal,
+                lease,
+                ATTACHED_ISOLATION_AUTHORITY_CONSTRUCTION_PERMIT,
+            )
+            closed = true
+            return transferred
+        } catch (failure: Throwable) {
+            runCatching {
+                lease.requireCurrentOperationRunRoot(
+                    runRoot,
+                    FullTreeDiskScratchStage.AFTER_SCOPE_ATTACHMENT,
+                )
+            }.exceptionOrNull()?.let { validationFailure ->
+                if (validationFailure !== failure) failure.addSuppressed(validationFailure)
+            }
+            throw failure
+        }
+    }
+
+    /** Query-only cleanup routing after a transfer call threw; it never consults the journal. */
+    @Synchronized
+    internal fun attachmentPublicationWasAttempted(): Boolean = attachmentPublicationAttempted
+
+    /**
+     * Cleanup-only terminal path after a failed receipt/transition transaction. The caller must
+     * first prove its locally owned unit, cgroup, and pidfds absent. This method never completes a
+     * journal temporary, appends a phase, mutates scratch, or releases a lease record.
+     */
+    @Synchronized
+    internal fun closeAfterFailedAttachmentPublication() {
+        check(!closed) { "function-observation prepared isolation is closed" }
+        if (!scopeAttachmentAttempted || !attachmentPublicationAttempted) {
+            coordinationFail("function-observation attachment publication has not failed in flight")
+        }
+        if (runRootBorrowActive) {
+            coordinationFail("function-observation prepared isolation cannot close while its root is borrowed")
+        }
+        val validationFailure = runCatching {
+            lease.requireCurrentOperationRunRoot(
+                runRoot,
+                FullTreeDiskScratchStage.AFTER_CGROUP_ABSENCE,
+            )
+            lease.requireCurrentOperationRunRoot(
+                runRoot,
+                FullTreeDiskScratchStage.AFTER_CGROUP_ABSENCE,
+            )
+        }.exceptionOrNull()
+        launchBoundaryAbsenceAccepted = true
+        closed = true
+        val closeFailure = closeOperationResources(lease, journal)
+        if (validationFailure != null) {
+            if (closeFailure != null && closeFailure !== validationFailure) {
+                validationFailure.addSuppressed(closeFailure)
+            }
+            throw validationFailure
+        }
+        closeFailure?.let { throw it }
+    }
 
     private fun <T> withCurrentRunRoot(
         stage: PreparedIsolationRunRootBorrowStage,
@@ -598,6 +738,179 @@ internal class FullTreeFunctionObservationPreparedIsolationAuthority private con
             return FullTreeFunctionObservationPreparedIsolationAuthority(
                 leasedHistory,
                 diskEvidence,
+                runRoot,
+                journal,
+                lease,
+            )
+        }
+    }
+}
+
+/**
+ * Lock-retaining UNIT_ATTACHED authority for one worker still blocked before START. The attached
+ * receipt is historical evidence only; the outer isolation owner must independently match its
+ * live pidfds, InvocationID, cgroup descriptor, BOOT layout, inputs, and runtime on every use.
+ */
+internal class FullTreeFunctionObservationUnitAttachedIsolationAuthority private constructor(
+    val attachedHistory: FullTreeFunctionObservationOperationHistory,
+    val diskEvidence: FullTreeDiskScratchEvidence,
+    val unitAttachmentReceipt: FullTreeFunctionObservationUnitAttachmentReceipt,
+    private val runRoot: FullTreeDiskScratchRunRoot,
+    private val journal: FullTreeFunctionObservationOperationJournal,
+    private val lease: FullTreeDiskScratchLease,
+) : AutoCloseable {
+    private var closed = false
+    private var runRootBorrowActive = false
+    private var launchBoundaryAbsenceAccepted = false
+
+    init {
+        requireExactlyAttachedHistory(attachedHistory, diskEvidence, unitAttachmentReceipt)
+        requireCurrentPreparedRun(
+            attachedHistory,
+            diskEvidence,
+            runRoot,
+            journal,
+            lease,
+            FullTreeDiskScratchStage.AFTER_SCOPE_ATTACHMENT,
+        )
+    }
+
+    @Synchronized
+    fun requireCurrentAtBoot() {
+        check(!closed) { "function-observation attached isolation is closed" }
+        if (launchBoundaryAbsenceAccepted) {
+            coordinationFail("function-observation attached launch boundary is already absent")
+        }
+        requireCurrentPreparedRun(
+            attachedHistory,
+            diskEvidence,
+            runRoot,
+            journal,
+            lease,
+            FullTreeDiskScratchStage.AFTER_SCOPE_ATTACHMENT,
+        )
+    }
+
+    @Synchronized
+    fun <T> withCurrentRunRootAtBoot(
+        action: (FullTreeDiskScratchBorrowedRunRoot) -> T,
+    ): T {
+        check(!closed) { "function-observation attached isolation is closed" }
+        if (runRootBorrowActive) {
+            coordinationFail("function-observation attached run root is already borrowed")
+        }
+        runRootBorrowActive = true
+        try {
+            requireCurrentAtBoot()
+            return try {
+                lease.withCurrentOperationRunRootAfterScopeAttachment(runRoot) { borrowed ->
+                    requireCurrentHistory(attachedHistory, diskEvidence, journal)
+                    try {
+                        action(borrowed).also {
+                            requireCurrentHistory(attachedHistory, diskEvidence, journal)
+                        }
+                    } catch (failure: Throwable) {
+                        runCatching {
+                            requireCurrentHistory(attachedHistory, diskEvidence, journal)
+                        }.exceptionOrNull()?.let { validationFailure ->
+                            if (validationFailure !== failure) failure.addSuppressed(validationFailure)
+                        }
+                        throw failure
+                    }
+                }.also { requireCurrentAtBoot() }
+            } catch (failure: Throwable) {
+                runCatching {
+                    requireCurrentAtBoot()
+                }.exceptionOrNull()?.let { validationFailure ->
+                    if (validationFailure !== failure) failure.addSuppressed(validationFailure)
+                }
+                throw failure
+            }
+        } finally {
+            runRootBorrowActive = false
+        }
+    }
+
+    /** Caller-owned live cleanup must prove cgroup absence before this disk-stage transition. */
+    @Synchronized
+    fun requireCurrentAfterCgroupAbsence() {
+        check(!closed) { "function-observation attached isolation is closed" }
+        if (runRootBorrowActive) {
+            coordinationFail("function-observation attached run root is borrowed")
+        }
+        requireCurrentPreparedRun(
+            attachedHistory,
+            diskEvidence,
+            runRoot,
+            journal,
+            lease,
+            FullTreeDiskScratchStage.AFTER_CGROUP_ABSENCE,
+        )
+        launchBoundaryAbsenceAccepted = true
+    }
+
+    /**
+     * Terminal path after the caller has independently proved live cgroup absence. Validation may
+     * poison the journal, so this method always releases the disk and journal locks before
+     * propagating that validation failure.
+     */
+    @Synchronized
+    internal fun closeAfterProvedCgroupAbsence() {
+        check(!closed) { "function-observation attached isolation is closed" }
+        if (runRootBorrowActive) {
+            coordinationFail("function-observation attached isolation cannot close while its root is borrowed")
+        }
+        val validationFailure = runCatching {
+            requireCurrentPreparedRun(
+                attachedHistory,
+                diskEvidence,
+                runRoot,
+                journal,
+                lease,
+                FullTreeDiskScratchStage.AFTER_CGROUP_ABSENCE,
+            )
+        }.exceptionOrNull()
+        launchBoundaryAbsenceAccepted = true
+        closed = true
+        val closeFailure = closeOperationResources(lease, journal)
+        if (validationFailure != null) {
+            if (closeFailure != null && closeFailure !== validationFailure) {
+                validationFailure.addSuppressed(closeFailure)
+            }
+            throw validationFailure
+        }
+        closeFailure?.let { throw it }
+    }
+
+    @Synchronized
+    override fun close() {
+        if (closed) return
+        if (runRootBorrowActive) {
+            coordinationFail("function-observation attached isolation cannot close while its root is borrowed")
+        }
+        if (!launchBoundaryAbsenceAccepted) {
+            coordinationFail("function-observation attached isolation cannot close before cgroup absence")
+        }
+        closeAfterProvedCgroupAbsence()
+    }
+
+    companion object {
+        internal fun create(
+            attachedHistory: FullTreeFunctionObservationOperationHistory,
+            diskEvidence: FullTreeDiskScratchEvidence,
+            unitAttachmentReceipt: FullTreeFunctionObservationUnitAttachmentReceipt,
+            runRoot: FullTreeDiskScratchRunRoot,
+            journal: FullTreeFunctionObservationOperationJournal,
+            lease: FullTreeDiskScratchLease,
+            constructionPermit: Any,
+        ): FullTreeFunctionObservationUnitAttachedIsolationAuthority {
+            check(constructionPermit === ATTACHED_ISOLATION_AUTHORITY_CONSTRUCTION_PERMIT) {
+                "attached-isolation authorities can only follow durable live attachment"
+            }
+            return FullTreeFunctionObservationUnitAttachedIsolationAuthority(
+                attachedHistory,
+                diskEvidence,
+                unitAttachmentReceipt,
                 runRoot,
                 journal,
                 lease,
@@ -874,6 +1187,9 @@ private fun requireExactlyLeasedHistory(
             FullTreeFunctionObservationOperationPhase.LEASED,
         )
     ) coordinationFail("cold composition requires one fully published LEASED operation")
+    if (history.unitAttachmentReceipt != null) {
+        coordinationFail("cold LEASED composition rejects a staged unit-attachment receipt")
+    }
     return history.requireDiskEvidenceIntroducedAt(
         FullTreeFunctionObservationOperationPhase.LEASED,
     ).also { evidence ->
@@ -881,6 +1197,28 @@ private fun requireExactlyLeasedHistory(
             coordinationFail("cold LEASED history did not retain its parsed disk evidence")
         }
     }
+}
+
+private fun requireExactlyAttachedHistory(
+    history: FullTreeFunctionObservationOperationHistory,
+    expectedEvidence: FullTreeDiskScratchEvidence,
+    expectedReceipt: FullTreeFunctionObservationUnitAttachmentReceipt,
+) {
+    if (
+        history.transitions.map { it.phase } != listOf(
+            FullTreeFunctionObservationOperationPhase.PREPARING,
+            FullTreeFunctionObservationOperationPhase.LEASED,
+            FullTreeFunctionObservationOperationPhase.UNIT_ATTACHED,
+        )
+    ) coordinationFail("attached composition requires one fully published UNIT_ATTACHED operation")
+    val actualEvidence = history.requireDiskEvidenceIntroducedAt(
+        FullTreeFunctionObservationOperationPhase.LEASED,
+    )
+    val actualReceipt = history.requireUnitAttachmentReceiptIntroducedAt(
+        FullTreeFunctionObservationOperationPhase.UNIT_ATTACHED,
+    )
+    requireExactEvidence(expectedEvidence, actualEvidence)
+    requireExactReceipt(expectedReceipt, actualReceipt)
 }
 
 private fun requireCurrentColdLeasedOperation(
@@ -965,17 +1303,31 @@ private fun requireExactEvidence(
     }
 }
 
+private fun requireExactReceipt(
+    expected: FullTreeFunctionObservationUnitAttachmentReceipt,
+    actual: FullTreeFunctionObservationUnitAttachmentReceipt,
+) {
+    if (!MessageDigest.isEqual(expected.canonicalBytes(), actual.canonicalBytes())) {
+        coordinationFail("function-observation operation has a different exact attachment receipt")
+    }
+}
+
 private fun requireExactHistory(
     expected: FullTreeFunctionObservationOperationHistory,
     actual: FullTreeFunctionObservationOperationHistory,
 ) {
+    val expectedReceipt = expected.unitAttachmentReceipt
+    val actualReceipt = actual.unitAttachmentReceipt
     if (
         !MessageDigest.isEqual(expected.binding.canonicalBytes(), actual.binding.canonicalBytes()) ||
         expected.transitions.size != actual.transitions.size ||
         expected.transitions.zip(actual.transitions).any { (left, right) ->
             !MessageDigest.isEqual(left.canonicalBytes(), right.canonicalBytes())
-        }
-    ) coordinationFail("function-observation leased operation journal changed")
+        } ||
+        (expectedReceipt == null) != (actualReceipt == null) ||
+        expectedReceipt != null && actualReceipt != null &&
+        !MessageDigest.isEqual(expectedReceipt.canonicalBytes(), actualReceipt.canonicalBytes())
+    ) coordinationFail("function-observation operation journal changed")
 }
 
 private fun coordinationFail(message: String): Nothing =

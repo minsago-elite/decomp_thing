@@ -811,6 +811,386 @@ class FullTreeFunctionObservationOperationCoordinatorTest {
     }
 
     @Test
+    fun `unit attachment transfer consumes leased authority and retains exact attached locks`() {
+        val mount = provisionedMount()
+        val binding = binding(operationSeed = "d")
+        assertTrue(entryNames(mount).isEmpty(), "provisioned ext4 slot is not empty")
+
+        withJournalRoot { root ->
+            val leaseRoot = mount.resolve(binding.leaseDirectoryName)
+            val expectedRunRoot = leaseRoot.resolve(runDirectoryName(binding.operationId))
+            var leased: FullTreeFunctionObservationLeasedOperation? = null
+            var preparedRun: FullTreeFunctionObservationPreparedRun? = null
+            var preparedIsolation: FullTreeFunctionObservationPreparedIsolationAuthority? = null
+            var attachedIsolation: FullTreeFunctionObservationUnitAttachedIsolationAuthority? = null
+            try {
+                FullTreeFunctionObservationJournalAuthority.open(root).use { authority ->
+                    val operation = FullTreeFunctionObservationOperationCoordinator.prepareNew(
+                        authority,
+                        binding,
+                        mount,
+                    )
+                    leased = operation
+                    val run = operation.prepareRunRoot()
+                    preparedRun = run
+                    operation.close()
+                    leased = null
+
+                    val prepared = run.transferToPreparedIsolationAuthority()
+                    preparedIsolation = prepared
+                    run.close()
+                    preparedRun = null
+                    prepared.withCurrentRunRootForScopeAttachment { borrowed ->
+                        assertEquals(expectedRunRoot, borrowed.path)
+                    }
+                    prepared.requireCurrentAfterScopeAttachment()
+
+                    val receipt = attachmentReceipt(binding, checkNotNull(prepared.leasedHistory.latest))
+                    var liveReceiptChecks = 0
+                    val attached = prepared.transferToUnitAttachedIsolationAuthority(
+                        receipt = receipt,
+                        requireLiveReceipt = { liveReceiptChecks += 1 },
+                    )
+                    attachedIsolation = attached
+                    prepared.close()
+                    preparedIsolation = null
+
+                    assertEquals(2, liveReceiptChecks)
+                    assertEquals(
+                        listOf(
+                            FullTreeFunctionObservationOperationPhase.PREPARING,
+                            FullTreeFunctionObservationOperationPhase.LEASED,
+                            FullTreeFunctionObservationOperationPhase.UNIT_ATTACHED,
+                        ),
+                        attached.attachedHistory.transitions.map { it.phase },
+                    )
+                    assertContentEquals(
+                        receipt.canonicalBytes(),
+                        attached.unitAttachmentReceipt.canonicalBytes(),
+                    )
+                    assertContentEquals(
+                        prepared.diskEvidence.canonicalBytes(),
+                        attached.diskEvidence.canonicalBytes(),
+                    )
+                    assertEquals(
+                        receipt.receiptSha256,
+                        attached.attachedHistory.latest?.unitAttachmentReceiptSha256,
+                    )
+                    assertFailsWith<IllegalStateException> {
+                        prepared.requireCurrentAfterScopeAttachment()
+                    }
+                    attached.requireCurrentAtBoot()
+                    attached.withCurrentRunRootAtBoot { borrowed ->
+                        assertEquals(expectedRunRoot, borrowed.path)
+                    }
+                    assertFailsWith<FullTreeFunctionObservationOperationJournalException> {
+                        authority.openExisting(binding)
+                    }
+                    assertFailsWith<FullTreeDiskScratchException> {
+                        FullTreeDiskScratchAuthority.openExistingReadOnly(
+                            mount,
+                            binding.diskOperation(),
+                            binding.diskPolicy(),
+                        )
+                    }
+
+                    assertFailsWith<FullTreeFunctionObservationOperationCoordinationException> {
+                        attached.close()
+                    }
+                    attached.requireCurrentAtBoot()
+                    attached.requireCurrentAfterCgroupAbsence()
+                    assertFailsWith<FullTreeFunctionObservationOperationCoordinationException> {
+                        attached.requireCurrentAtBoot()
+                    }
+                    attached.close()
+                    attachedIsolation = null
+
+                    requireNotNull(authority.openExisting(binding)).use { journal ->
+                        val reopened = requireNotNull(journal.loadOrNull())
+                        assertEquals(
+                            FullTreeFunctionObservationOperationPhase.UNIT_ATTACHED,
+                            reopened.latest?.phase,
+                        )
+                        assertContentEquals(
+                            receipt.canonicalBytes(),
+                            reopened.requireUnitAttachmentReceiptIntroducedAt(
+                                FullTreeFunctionObservationOperationPhase.UNIT_ATTACHED,
+                            ).canonicalBytes(),
+                        )
+                    }
+                }
+            } finally {
+                runCatching {
+                    attachedIsolation?.requireCurrentAfterCgroupAbsence()
+                    attachedIsolation?.close()
+                }
+                runCatching {
+                    preparedIsolation?.let { prepared ->
+                        if (prepared.attachmentPublicationWasAttempted()) {
+                            prepared.closeAfterFailedAttachmentPublication()
+                        } else {
+                            prepared.requireCurrentAfterCgroupAbsence()
+                            prepared.close()
+                        }
+                    }
+                }
+                runCatching { preparedRun?.close() }
+                runCatching { leased?.close() }
+                removeActiveRunLease(leaseRoot, binding.operationId)
+            }
+        }
+        assertTrue(entryNames(mount).isEmpty())
+    }
+
+    @Test
+    fun `attached terminal close releases locks even when final journal validation poisons`() {
+        val mount = provisionedMount()
+        val binding = binding(operationSeed = "0")
+        assertTrue(entryNames(mount).isEmpty(), "provisioned ext4 slot is not empty")
+
+        withJournalRoot { root ->
+            val leaseRoot = mount.resolve(binding.leaseDirectoryName)
+            val foreignJournalEntry = root.resolve(binding.journalDirectoryName).resolve("foreign-entry")
+            var attachedIsolation: FullTreeFunctionObservationUnitAttachedIsolationAuthority? = null
+            try {
+                FullTreeFunctionObservationJournalAuthority.open(root).use { authority ->
+                    val operation = FullTreeFunctionObservationOperationCoordinator.prepareNew(
+                        authority,
+                        binding,
+                        mount,
+                    )
+                    val run = operation.prepareRunRoot()
+                    operation.close()
+                    val prepared = run.transferToPreparedIsolationAuthority()
+                    run.close()
+                    prepared.withCurrentRunRootForScopeAttachment { }
+                    val receipt = attachmentReceipt(binding, checkNotNull(prepared.leasedHistory.latest))
+                    val attached = prepared.transferToUnitAttachedIsolationAuthority(
+                        receipt,
+                        requireLiveReceipt = { },
+                    )
+                    attachedIsolation = attached
+                    prepared.close()
+                    Files.writeString(foreignJournalEntry, "unowned journal residue")
+
+                    assertFailsWith<FullTreeFunctionObservationOperationJournalException> {
+                        attached.closeAfterProvedCgroupAbsence()
+                    }
+                    attachedIsolation = null
+                    FullTreeDiskScratchAuthority.openExistingReadOnly(
+                        mount,
+                        binding.diskOperation(),
+                        binding.diskPolicy(),
+                    ).use { cold ->
+                        assertEquals(
+                            FullTreeDiskScratchColdPopulation.ACTIVE_OPERATION_RUN,
+                            cold.requireCurrent(attached.diskEvidence).population,
+                        )
+                    }
+                    Files.delete(foreignJournalEntry)
+                    requireNotNull(authority.openExisting(binding)).use { journal ->
+                        assertEquals(
+                            FullTreeFunctionObservationOperationPhase.UNIT_ATTACHED,
+                            requireNotNull(journal.loadOrNull()).latest?.phase,
+                        )
+                    }
+                }
+            } finally {
+                runCatching { attachedIsolation?.closeAfterProvedCgroupAbsence() }
+                Files.deleteIfExists(foreignJournalEntry)
+                removeActiveRunLease(leaseRoot, binding.operationId)
+            }
+        }
+        assertTrue(entryNames(mount).isEmpty())
+    }
+
+    @Test
+    fun `failed attachment publication stays cleanup-only and releases poison for cold completion`() {
+        val mount = provisionedMount()
+        val binding = binding(operationSeed = "e")
+        assertTrue(entryNames(mount).isEmpty(), "provisioned ext4 slot is not empty")
+
+        withJournalRoot { root ->
+            val leaseRoot = mount.resolve(binding.leaseDirectoryName)
+            var preparedIsolation: FullTreeFunctionObservationPreparedIsolationAuthority? = null
+            try {
+                FullTreeFunctionObservationJournalAuthority.open(root).use { authority ->
+                    val operation = FullTreeFunctionObservationOperationCoordinator.prepareNew(
+                        authority,
+                        binding,
+                        mount,
+                    )
+                    val run = operation.prepareRunRoot()
+                    operation.close()
+                    val prepared = run.transferToPreparedIsolationAuthority()
+                    preparedIsolation = prepared
+                    run.close()
+                    prepared.withCurrentRunRootForScopeAttachment { }
+                    val receipt = attachmentReceipt(binding, checkNotNull(prepared.leasedHistory.latest))
+                    val failure = SimulatedCoordinatorProcessDeath()
+
+                    val retained = assertFailsWith<SimulatedCoordinatorProcessDeath> {
+                        prepared.transferToUnitAttachedIsolationAuthority(
+                            receipt = receipt,
+                            requireLiveReceipt = { },
+                            receiptFaultInjector = DescriptorBoundStateFaultInjector { point ->
+                                if (point == DescriptorBoundStateFaultPoint.AFTER_TEMPORARY_DIRECTORY_SYNC) {
+                                    throw failure
+                                }
+                            },
+                        )
+                    }
+                    assertSame(failure, retained)
+                    assertTrue(prepared.attachmentPublicationWasAttempted())
+                    assertFailsWith<FullTreeFunctionObservationOperationCoordinationException> {
+                        prepared.requireCurrentAfterScopeAttachment()
+                    }
+                    assertFailsWith<FullTreeFunctionObservationOperationCoordinationException> {
+                        prepared.close()
+                    }
+                    assertFailsWith<FullTreeFunctionObservationOperationJournalException> {
+                        authority.openExisting(binding)
+                    }
+                    assertFailsWith<FullTreeDiskScratchException> {
+                        FullTreeDiskScratchAuthority.openExistingReadOnly(
+                            mount,
+                            binding.diskOperation(),
+                            binding.diskPolicy(),
+                        )
+                    }
+
+                    prepared.closeAfterFailedAttachmentPublication()
+                    preparedIsolation = null
+
+                    requireNotNull(authority.openExisting(binding)).use { journal ->
+                        val completion = journal.completeExactPendingPublication()
+                        assertEquals(
+                            FullTreeFunctionObservationColdCompletionKind.UNIT_ATTACHMENT_RECEIPT,
+                            completion.kind,
+                        )
+                        val staged = requireNotNull(completion.history)
+                        assertEquals(
+                            FullTreeFunctionObservationOperationPhase.LEASED,
+                            staged.latest?.phase,
+                        )
+                        assertContentEquals(
+                            receipt.canonicalBytes(),
+                            requireNotNull(staged.unitAttachmentReceipt).canonicalBytes(),
+                        )
+                    }
+                    assertFailsWith<FullTreeFunctionObservationOperationCoordinationException> {
+                        FullTreeFunctionObservationOperationCoordinator.openExistingLeasedReadOnly(
+                            authority,
+                            binding,
+                            root.resolve("missing-disk-mount"),
+                        )
+                    }
+                    requireNotNull(authority.openExisting(binding)).use { journal ->
+                        val attached = journal.recordUnitAttached(receipt)
+                        assertEquals(
+                            FullTreeFunctionObservationOperationPhase.UNIT_ATTACHED,
+                            attached.latest?.phase,
+                        )
+                        assertContentEquals(
+                            receipt.canonicalBytes(),
+                            attached.requireUnitAttachmentReceiptIntroducedAt(
+                                FullTreeFunctionObservationOperationPhase.UNIT_ATTACHED,
+                            ).canonicalBytes(),
+                        )
+                    }
+                }
+            } finally {
+                runCatching {
+                    preparedIsolation?.let { prepared ->
+                        if (prepared.attachmentPublicationWasAttempted()) {
+                            prepared.closeAfterFailedAttachmentPublication()
+                        } else {
+                            prepared.requireCurrentAfterCgroupAbsence()
+                            prepared.close()
+                        }
+                    }
+                }
+                removeActiveRunLease(leaseRoot, binding.operationId)
+            }
+        }
+        assertTrue(entryNames(mount).isEmpty())
+    }
+
+    @Test
+    fun `attachment transaction validation marks cleanup-only before journal poison`() {
+        val mount = provisionedMount()
+        val binding = binding(operationSeed = "f")
+        assertTrue(entryNames(mount).isEmpty(), "provisioned ext4 slot is not empty")
+
+        withJournalRoot { root ->
+            val leaseRoot = mount.resolve(binding.leaseDirectoryName)
+            val foreignJournalEntry = root.resolve(binding.journalDirectoryName).resolve("foreign-entry")
+            var preparedIsolation: FullTreeFunctionObservationPreparedIsolationAuthority? = null
+            try {
+                FullTreeFunctionObservationJournalAuthority.open(root).use { authority ->
+                    val operation = FullTreeFunctionObservationOperationCoordinator.prepareNew(
+                        authority,
+                        binding,
+                        mount,
+                    )
+                    val run = operation.prepareRunRoot()
+                    operation.close()
+                    val prepared = run.transferToPreparedIsolationAuthority()
+                    preparedIsolation = prepared
+                    run.close()
+                    prepared.withCurrentRunRootForScopeAttachment { }
+                    val receipt = attachmentReceipt(binding, checkNotNull(prepared.leasedHistory.latest))
+                    Files.writeString(foreignJournalEntry, "unowned journal residue")
+
+                    assertFailsWith<FullTreeFunctionObservationOperationJournalException> {
+                        prepared.transferToUnitAttachedIsolationAuthority(
+                            receipt = receipt,
+                            requireLiveReceipt = { },
+                        )
+                    }
+                    assertTrue(prepared.attachmentPublicationWasAttempted())
+                    assertFailsWith<FullTreeFunctionObservationOperationCoordinationException> {
+                        prepared.requireCurrentAfterScopeAttachment()
+                    }
+                    assertFailsWith<FullTreeFunctionObservationOperationCoordinationException> {
+                        prepared.requireCurrentAfterCgroupAbsence()
+                    }
+                    assertFailsWith<FullTreeFunctionObservationOperationCoordinationException> {
+                        prepared.requireCurrentAfterProvedLaunchBoundaryAbsence()
+                    }
+                    assertFailsWith<FullTreeFunctionObservationOperationJournalException> {
+                        authority.openExisting(binding)
+                    }
+
+                    prepared.closeAfterFailedAttachmentPublication()
+                    preparedIsolation = null
+                    Files.delete(foreignJournalEntry)
+                    requireNotNull(authority.openExisting(binding)).use { journal ->
+                        assertEquals(
+                            FullTreeFunctionObservationOperationPhase.LEASED,
+                            requireNotNull(journal.loadOrNull()).latest?.phase,
+                        )
+                    }
+                }
+            } finally {
+                runCatching {
+                    preparedIsolation?.let { prepared ->
+                        if (prepared.attachmentPublicationWasAttempted()) {
+                            prepared.closeAfterFailedAttachmentPublication()
+                        } else {
+                            prepared.requireCurrentAfterCgroupAbsence()
+                            prepared.close()
+                        }
+                    }
+                }
+                Files.deleteIfExists(foreignJournalEntry)
+                removeActiveRunLease(leaseRoot, binding.operationId)
+            }
+        }
+        assertTrue(entryNames(mount).isEmpty())
+    }
+
+    @Test
     fun `run root synchronization fault leaves a closed lease and exact active residue`() {
         val mount = provisionedMount()
         val binding = binding(operationSeed = "4")

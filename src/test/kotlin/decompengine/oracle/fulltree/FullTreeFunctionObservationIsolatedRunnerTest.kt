@@ -187,6 +187,51 @@ class FullTreeFunctionObservationIsolatedFixtureRunnerTest {
     }
 
     @Test
+    fun `kernel boot identity normalizes only one nonreserved UUID`() {
+        assertEquals(
+            "123456789abcdef00123456789abcdef",
+            normalizeFullTreeFunctionObservationKernelBootId(
+                "12345678-9ABC-DEF0-0123-456789ABCDEF\n",
+            ),
+        )
+        listOf(
+            "00000000-0000-0000-0000-000000000000\n",
+            "ffffffff-ffff-ffff-ffff-ffffffffffff\n",
+            "12345678-9abc-def0-0123-456789abcdef\n\n",
+            "123456789abcdef00123456789abcdef\n",
+        ).forEach { malformed ->
+            assertFailsWith<FullTreeFunctionObservationIsolationException> {
+                normalizeFullTreeFunctionObservationKernelBootId(malformed)
+            }
+        }
+    }
+
+    @Test
+    fun `proc stat start time parser survives spaces parentheses and newline in comm`() {
+        val suffix = "S " + (1L..18L).joinToString(" ") + " 424242 20 21\n"
+
+        assertEquals(
+            424242L,
+            parseFullTreeFunctionObservationProcessStartTimeTicks(
+                321L,
+                "321 (worker ) name\nwith-space) $suffix",
+            ),
+        )
+        assertFailsWith<FullTreeFunctionObservationIsolationException> {
+            parseFullTreeFunctionObservationProcessStartTimeTicks(
+                322L,
+                "321 (worker) $suffix",
+            )
+        }
+        assertFailsWith<FullTreeFunctionObservationIsolationException> {
+            parseFullTreeFunctionObservationProcessStartTimeTicks(
+                321L,
+                "321 (worker) S " + (1L..18L).joinToString(" ") + " 0\n",
+            )
+        }
+    }
+
+    @Test
     fun `cleanup fallback always thaws and retries kill before stop and reset`() {
         val calls = mutableListOf<Pair<List<String>, Set<Int>>>()
 
@@ -206,6 +251,49 @@ class FullTreeFunctionObservationIsolatedFixtureRunnerTest {
             calls.map { it.first },
         )
         assertTrue(calls.all { it.second == setOf(0, 1, 4, 5) })
+    }
+
+    @Test
+    fun `guarded cleanup checks every name mutation and never swallows replacement`() {
+        var absenceChecks = 0
+        val beforeAbsence = mutableListOf<List<String>>()
+        runGuardedObservationSystemdCleanupFallback(
+            unitName = "keeper.service",
+            beforeCommand = {
+                absenceChecks += 1
+                absenceChecks < 3
+            },
+            command = { arguments, _ -> beforeAbsence += arguments },
+        )
+        assertEquals(3, absenceChecks)
+        assertEquals(
+            listOf(
+                listOf("kill", "--kill-whom=all", "--signal=SIGKILL", "keeper.service"),
+                listOf("thaw", "keeper.service"),
+            ),
+            beforeAbsence,
+        )
+
+        val replacement = IllegalStateException("replacement observed")
+        var replacementChecks = 0
+        var attemptedCommands = 0
+        val retained = assertFailsWith<IllegalStateException> {
+            runGuardedObservationSystemdCleanupFallback(
+                unitName = "keeper.service",
+                beforeCommand = {
+                    replacementChecks += 1
+                    if (replacementChecks == 2) throw replacement
+                    true
+                },
+                command = { _, _ ->
+                    attemptedCommands += 1
+                    error("best-effort command failure")
+                },
+            )
+        }
+        assertTrue(retained === replacement)
+        assertEquals(2, replacementChecks)
+        assertEquals(1, attemptedCommands)
     }
 
     @Test
@@ -667,6 +755,93 @@ class FullTreeFunctionObservationIsolatedFixtureRunnerTest {
                 )
             }
             assertTrue(entryNames(mount).isEmpty())
+        }
+
+    @Test
+    fun `production BOOT records exact attachment and transfers to UNIT_ATTACHED typestate`() =
+        inControlTemporaryDirectory { root ->
+            val mount = provisionedOracleExt4Mount()
+            val configuration = availableConfiguration(root.resolve("authenticated-runtime"))
+            if (System.getenv("DECOMP_REQUIRE_ORACLE_EXT4_SCRATCH") == "true") {
+                assertTrue(configuration != null, "required CI authenticated launch boundary is unavailable")
+            }
+            assumeTrue(configuration != null, "authenticated JVM launch boundary is unavailable")
+            checkNotNull(configuration)
+            val fixture = createFullTreeControlFixture(root.resolve("fixture"))
+
+            withPreparedProductionIsolation(
+                root.resolve("unit-attached"),
+                mount,
+                configuration,
+                fixture,
+                "9",
+                allowedRootProtocolFiles = setOf("worker.boot"),
+            ) { context ->
+                var live: AutoCloseable? = null
+                try {
+                    val atBoot = FullTreeFunctionObservationIsolatedOperationRunner.launchToBoot(
+                        context.ready,
+                    )
+                    live = atBoot
+                    val attached = FullTreeFunctionObservationIsolatedOperationRunner.recordUnitAttached(
+                        atBoot,
+                    )
+                    live = attached
+
+                    assertFailsWith<IllegalStateException> { atBoot.requireCurrentAtBoot() }
+                    assertFailsWith<IllegalStateException> {
+                        FullTreeFunctionObservationIsolatedOperationRunner.recordUnitAttached(atBoot)
+                    }
+                    atBoot.close()
+
+                    assertEquals(context.binding.operationId, attached.operationId)
+                    assertEquals(context.binding.shardId, attached.shardId)
+                    assertEquals(context.binding.unitName, attached.unitName)
+                    assertTrue(attached.receiptSha256.matches(Regex("[0-9a-f]{64}")))
+                    attached.requireCurrentAtBoot()
+                    assertOperationLocksRetained(context)
+                    assertEquals(
+                        listOf("runtime", "scratch", "tmp", "worker.boot"),
+                        entryNames(context.runRoot),
+                    )
+                    listOf(
+                        "parent.start",
+                        "worker.ready",
+                        "worker.failure",
+                        "supervisor.failure",
+                        "candidate.json",
+                    ).forEach { name ->
+                        assertTrue(
+                            Files.notExists(context.runRoot.resolve(name), LinkOption.NOFOLLOW_LINKS),
+                            "$name must be absent while UNIT_ATTACHED remains blocked at BOOT",
+                        )
+                    }
+                    assertTrue(Files.notExists(context.output, LinkOption.NOFOLLOW_LINKS))
+
+                    attached.close()
+                    live = null
+                    assertFailsWith<IllegalStateException> { attached.requireCurrentAtBoot() }
+                    requireNotNull(context.authority.openExisting(context.binding)).use { journal ->
+                        val history = requireNotNull(journal.loadOrNull())
+                        assertEquals(
+                            listOf(
+                                FullTreeFunctionObservationOperationPhase.PREPARING,
+                                FullTreeFunctionObservationOperationPhase.LEASED,
+                                FullTreeFunctionObservationOperationPhase.UNIT_ATTACHED,
+                            ),
+                            history.transitions.map { it.phase },
+                        )
+                        val receipt = history.requireUnitAttachmentReceiptIntroducedAt(
+                            FullTreeFunctionObservationOperationPhase.UNIT_ATTACHED,
+                        )
+                        assertEquals(attached.receiptSha256, receipt.receiptSha256)
+                        assertEquals(receipt.receiptSha256, history.latest?.unitAttachmentReceiptSha256)
+                    }
+                    assertTrue(Files.notExists(context.output, LinkOption.NOFOLLOW_LINKS))
+                } finally {
+                    live?.close()
+                }
+            }
         }
 
     @Test
@@ -2447,7 +2622,8 @@ class FullTreeFunctionObservationIsolatedFixtureRunnerTest {
             "list-jobs",
         )
         const val EXACT_UNIT_SHOW_PROPERTIES =
-            "--property=Id,LoadState,ActiveState,SubState,CollectMode,ControlGroup,TasksMax," +
+            "--property=Id,InvocationID,Transient,LoadState,ActiveState,SubState,CollectMode," +
+                "ControlGroup,TasksMax," +
                 "MemoryMax,MemorySwapMax,OOMPolicy,CPUQuotaPerSecUSec,KillMode,SendSIGKILL," +
                 "RuntimeMaxUSec,TimeoutStopUSec,Delegate"
         const val TEST_SYSTEMD_OUTPUT_BYTES = 64 * 1024
