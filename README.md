@@ -136,6 +136,14 @@ a fresh container identity, generate downstream truth, score a reconstruction,
 or authorize a Kotlin-only release by itself. The retained Python LLVM manifest
 verifier is non-authoritative migration compatibility.
 
+The repository also contains a bounded Kotlin/JVM generator for the historical
+LLVM function-recovery oracle v1 bytes. It accepts only the raw manifest,
+reviewed exclusions, artifact root, and an absent output path, and the checked
+rich/stripped pair has exact byte parity with the frozen oracle. CLI and workflow
+cutover remain separate review work, so the existing Python entrypoint is still
+non-authoritative migration compatibility rather than a release gate. See
+[docs/llvm-function-oracle-kotlin-generation.md](docs/llvm-function-oracle-kotlin-generation.md).
+
 The required LLVM push/pull-request lane admits the checked Clang behavior
 corpus, its complete 48-case report, and the 16-case diagnostic ownership
 matrix through the Kotlin/JVM `verifyLlvmBehaviorReferenceEvidence` gate. That

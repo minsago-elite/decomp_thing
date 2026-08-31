@@ -225,14 +225,14 @@ class FullTreeFunctionObservationProducerComposedTest {
     private fun hex(value: Int): String = "0x${value.toString(16)}"
 }
 
-private data class ComposedFunctionObservationArtifact(
+internal data class ComposedFunctionObservationArtifact(
     val bytes: ByteArray,
     val declarationDieOffset: Int,
     val emittedDieOffset: Int,
     val nonEmittedDieOffset: Int,
 )
 
-private object ComposedFunctionObservationElf {
+internal object ComposedFunctionObservationElf {
     private const val IMAGE_BASE = 0x400000L
     private const val ELF_HEADER_BYTES = 64
     private const val PROGRAM_HEADER_BYTES = 56

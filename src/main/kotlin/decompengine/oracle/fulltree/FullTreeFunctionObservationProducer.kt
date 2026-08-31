@@ -631,7 +631,8 @@ private fun modeledLineTableRetainedBytes(limits: FullTreeDwarfLineTableLimits):
     return Math.addExact(Math.addExact(decodedPaths, entryObjects), MODELED_LINE_TABLE_BYTES)
 }
 
-private class FunctionDwarfUnitRepository(
+/** Shared bounded DWARF function-DIE repository used by both full-tree observations and v1 composition. */
+internal class FunctionDwarfUnitRepository(
     private val sections: FullTreeDwarfSections,
     private val headers: List<FullTreeDwarfCompilationUnitHeader>,
     private val controlLimits: FullTreeControlLimits,
@@ -729,7 +730,7 @@ private class FunctionDwarfUnitRepository(
     }
 }
 
-private class FunctionDwarfUnit(
+internal class FunctionDwarfUnit(
     val header: FullTreeDwarfCompilationUnitHeader,
     val index: FullTreeDwarfDieIndex,
     val controlLimits: FullTreeControlLimits,
@@ -866,12 +867,12 @@ private class FunctionDwarfUnit(
     }
 }
 
-private data class ResolvedFunctionDie(
+internal data class ResolvedFunctionDie(
     val unit: FunctionDwarfUnit,
     val record: FullTreeDwarfDieRecord,
 )
 
-private fun functionAttributeContext(attribute: FullTreeDwarfAbbreviationAttribute): FullTreeDwarfFormContext =
+internal fun functionAttributeContext(attribute: FullTreeDwarfAbbreviationAttribute): FullTreeDwarfFormContext =
     when (attribute.name) {
         DW_AT_RANGES -> FullTreeDwarfFormContext.RANGE_LIST
         DW_AT_ENTRY_PC,
@@ -885,7 +886,7 @@ private fun functionAttributeContext(attribute: FullTreeDwarfAbbreviationAttribu
         else -> FullTreeDwarfFormContext.GENERAL
     }
 
-private fun FullTreeDwarfDieRecord.truthy(name: Long, label: String): Boolean =
+internal fun FullTreeDwarfDieRecord.truthy(name: Long, label: String): Boolean =
     optionalUniqueAttribute(name, label)?.value?.let { value ->
         when (value) {
             is FullTreeDwarfNumericValue -> value.value != 0L
@@ -895,7 +896,7 @@ private fun FullTreeDwarfDieRecord.truthy(name: Long, label: String): Boolean =
         }
     } ?: false
 
-private fun FullTreeDwarfDieRecord.optionalIntegral(name: Long, label: String): ULong? =
+internal fun FullTreeDwarfDieRecord.optionalIntegral(name: Long, label: String): ULong? =
     optionalUniqueAttribute(name, label)?.value?.let { value ->
         when (value) {
             is FullTreeDwarfNumericValue -> {
@@ -911,7 +912,7 @@ private fun FullTreeDwarfDieRecord.optionalIntegral(name: Long, label: String): 
         }
     }
 
-private fun FullTreeDwarfDieRecord.optionalNonNegativeLong(name: Long, label: String): Long? =
+internal fun FullTreeDwarfDieRecord.optionalNonNegativeLong(name: Long, label: String): Long? =
     optionalIntegral(name, label)?.let { boundedLong(it, label) }
 
 private fun List<ResolvedFunctionDie>.firstIntegral(name: Long, label: String): ULong? {
@@ -940,40 +941,40 @@ private fun parseDwarfOffset(value: String, label: String): Long {
     return boundedLong(parsed, label)
 }
 
-private fun checkedAddressAdd(left: ULong, right: ULong, label: String): ULong {
+internal fun checkedAddressAdd(left: ULong, right: ULong, label: String): ULong {
     if (right > ULong.MAX_VALUE - left) {
         throw FullTreeControlException("$label overflows unsigned 64-bit address space")
     }
     return left + right
 }
 
-private fun canonicalHex(value: Long): String {
+internal fun canonicalHex(value: Long): String {
     if (value < 0L) throw FullTreeControlException("DWARF offset is negative")
     return "0x${value.toString(16)}"
 }
 
-private const val DW_TAG_SUBPROGRAM = 0x2eL
-private const val DW_AT_NAME = 0x03L
-private const val DW_AT_STMT_LIST = 0x10L
-private const val DW_AT_LOW_PC = 0x11L
-private const val DW_AT_COMP_DIR = 0x1bL
-private const val DW_AT_CONST_VALUE = 0x1cL
-private const val DW_AT_INLINE = 0x20L
-private const val DW_AT_ABSTRACT_ORIGIN = 0x31L
-private const val DW_AT_DECL_COLUMN = 0x39L
-private const val DW_AT_DECL_FILE = 0x3aL
-private const val DW_AT_DECL_LINE = 0x3bL
-private const val DW_AT_DECLARATION = 0x3cL
-private const val DW_AT_SPECIFICATION = 0x47L
-private const val DW_AT_ENTRY_PC = 0x52L
-private const val DW_AT_RANGES = 0x55L
-private const val DW_AT_LINKAGE_NAME = 0x6eL
-private const val DW_AT_STR_OFFSETS_BASE = 0x72L
-private const val DW_AT_ADDR_BASE = 0x73L
-private const val DW_AT_RNGLISTS_BASE = 0x74L
-private const val DW_AT_MIPS_LINKAGE_NAME = 0x2007L
+internal const val DW_TAG_SUBPROGRAM = 0x2eL
+internal const val DW_AT_NAME = 0x03L
+internal const val DW_AT_STMT_LIST = 0x10L
+internal const val DW_AT_LOW_PC = 0x11L
+internal const val DW_AT_COMP_DIR = 0x1bL
+internal const val DW_AT_CONST_VALUE = 0x1cL
+internal const val DW_AT_INLINE = 0x20L
+internal const val DW_AT_ABSTRACT_ORIGIN = 0x31L
+internal const val DW_AT_DECL_COLUMN = 0x39L
+internal const val DW_AT_DECL_FILE = 0x3aL
+internal const val DW_AT_DECL_LINE = 0x3bL
+internal const val DW_AT_DECLARATION = 0x3cL
+internal const val DW_AT_SPECIFICATION = 0x47L
+internal const val DW_AT_ENTRY_PC = 0x52L
+internal const val DW_AT_RANGES = 0x55L
+internal const val DW_AT_LINKAGE_NAME = 0x6eL
+internal const val DW_AT_STR_OFFSETS_BASE = 0x72L
+internal const val DW_AT_ADDR_BASE = 0x73L
+internal const val DW_AT_RNGLISTS_BASE = 0x74L
+internal const val DW_AT_MIPS_LINKAGE_NAME = 0x2007L
 
-private val FUNCTION_NAME_ATTRIBUTES = listOf(
+internal val FUNCTION_NAME_ATTRIBUTES = listOf(
     DW_AT_LINKAGE_NAME to "DW_AT_linkage_name",
     DW_AT_MIPS_LINKAGE_NAME to "DW_AT_MIPS_linkage_name",
     DW_AT_NAME to "DW_AT_name",

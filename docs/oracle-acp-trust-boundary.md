@@ -68,10 +68,11 @@ rather than complete in-memory materialization.
 
 That migration is currently partial. Source and release acquisition, LLVM artifact-manifest/ELF-twin verification,
 scope and inventory controls, full-tree data truth/reconciliation/baselines, bounded completed-run verification, and
-GCC planning have Kotlin/JVM paths. Function/call truth, production structural adapter replay, some ELF/DWARF
-observation generation, and full-tree release orchestration still have Python
-entrypoints. Those entrypoints may preserve historical production evidence and differential parity, but they do not
-satisfy the Kotlin-only authority requirement for the next release.
+GCC planning have Kotlin/JVM paths. A bounded raw-artifact Kotlin generator now reproduces the checked LLVM
+function-recovery v1 bytes exactly, but its CLI and workflow cutover are not part of that checkpoint. Call truth,
+production structural adapter replay, some ELF/DWARF observation generation, and full-tree release orchestration still
+have Python entrypoints. Those entrypoints may preserve historical production evidence and differential parity, but
+they do not satisfy the Kotlin-only authority requirement for the next release.
 
 The required LLVM push/pull-request lane runs full-tree scope verification plus DWARF and source-inventory
 regeneration through stable Kotlin/JVM Gradle entrypoints. The similarly named Python wrappers are retained only for
@@ -87,9 +88,10 @@ manifest, source/local evidence, build-record semantics, full and stripped ELF b
 the fixed no-argument Kotlin/JVM `verifyLlvmOracleArtifacts` gate. Descriptor and terminal checks detect every
 substitution or mutation visible at their checkpoints, but do not claim exclusion of a cooperating same-UID/root
 writer that transiently mutates and perfectly restores bytes. Other Python workflow gates remain in place until live
-build-record workflow cutover, function-oracle, behavior execution, and release-stage semantics have complete Kotlin
-replacements; keeping those regression checks does not promote their outputs to new release authority. The retained
-Python LLVM manifest verifier is explicitly differential migration compatibility and cannot certify a release.
+build-record workflow cutover, LLVM function-oracle CLI/workflow integration, behavior execution, and release-stage
+semantics have complete Kotlin replacements; keeping those regression checks does not promote their outputs to new
+release authority. The retained Python LLVM manifest verifier is explicitly differential migration compatibility and
+cannot certify a release.
 
 During migration, existing Python outputs may be retained as explicitly non-authoritative differential fixtures. They
 cannot enter a new release as truth or validation evidence. A stage becomes authoritative only after frozen-fixture
