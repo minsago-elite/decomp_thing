@@ -1,0 +1,101 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://github.com/minsago-elite/decomp_thing/oracle/llvm-behavior-comparison-assessment.schema.json",
+  "title": "Non-authoritative LLVM candidate behavior comparison assessment",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schemaVersion", "authority", "releaseEligible", "reference", "candidateExecutable", "inputs", "summary", "mismatches"],
+  "properties": {
+    "schemaVersion": {"const": 1},
+    "authority": {"const": "non-authoritative-caller-supplied-observations-v1"},
+    "releaseEligible": {"const": false},
+    "reference": {"$ref": "#/$defs/reference"},
+    "candidateExecutable": {"$ref": "#/$defs/executable"},
+    "inputs": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["observationSha256", "ownershipId", "ownershipSha256"],
+      "properties": {
+        "observationSha256": {"$ref": "#/$defs/sha256"},
+        "ownershipId": {"const": "clang-22-1-6-behavior-case-ownership-v1"},
+        "ownershipSha256": {"$ref": "#/$defs/sha256"}
+      }
+    },
+    "summary": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["cases", "observed", "notRun", "infrastructureFailed", "matchingObserved", "mismatchingObserved", "mismatchRecords"],
+      "properties": {
+        "cases": {"const": 48},
+        "observed": {"type": "integer", "minimum": 0, "maximum": 48},
+        "notRun": {"type": "integer", "minimum": 0, "maximum": 48},
+        "infrastructureFailed": {"type": "integer", "minimum": 0, "maximum": 48},
+        "matchingObserved": {"type": "integer", "minimum": 0, "maximum": 48},
+        "mismatchingObserved": {"type": "integer", "minimum": 0, "maximum": 48},
+        "mismatchRecords": {"type": "integer", "minimum": 0, "maximum": 50400}
+      }
+    },
+    "mismatches": {
+      "type": "array",
+      "maxItems": 50400,
+      "items": {"$ref": "#/$defs/mismatch"}
+    }
+  },
+  "$defs": {
+    "sha256": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
+    "id": {"type": "string", "pattern": "^[a-z][a-z0-9]*(?:-[a-z0-9]+)*$", "maxLength": 128},
+    "path": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 4096,
+      "pattern": "^(?!/)(?!.*(?:^|/)\\.{1,2}(?:/|$))(?!.*//)(?!.*\\\\)[^/]+(?:/[^/]+)*$"
+    },
+    "reference": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["corpusId", "corpusSha256", "reportSha256", "diagnosticMatrixSha256", "diagnosticMatrixSelfSha256", "artifactManifestSha256", "sandboxSha256"],
+      "properties": {
+        "corpusId": {"$ref": "#/$defs/id"},
+        "corpusSha256": {"$ref": "#/$defs/sha256"},
+        "reportSha256": {"$ref": "#/$defs/sha256"},
+        "diagnosticMatrixSha256": {"$ref": "#/$defs/sha256"},
+        "diagnosticMatrixSelfSha256": {"$ref": "#/$defs/sha256"},
+        "artifactManifestSha256": {"$ref": "#/$defs/sha256"},
+        "sandboxSha256": {"$ref": "#/$defs/sha256"}
+      }
+    },
+    "executable": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["bytes", "sha256"],
+      "properties": {
+        "bytes": {"type": "integer", "minimum": 1, "maximum": 134217728},
+        "sha256": {"$ref": "#/$defs/sha256"}
+      }
+    },
+    "mismatch": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["mismatchId", "caseId", "kind", "artifactPath", "ownerSubsystem", "failureCode"],
+      "properties": {
+        "mismatchId": {"type": "string", "pattern": "^(?:clang-diagnostic|clang-behavior)-[0-9a-f]{32}$"},
+        "caseId": {"$ref": "#/$defs/id"},
+        "kind": {
+          "enum": [
+            "artifact-content",
+            "artifact-mode",
+            "artifact-presence",
+            "execution",
+            "exitCode",
+            "stderr",
+            "stdout",
+            "unexpected-artifact"
+          ]
+        },
+        "artifactPath": {"oneOf": [{"$ref": "#/$defs/path"}, {"type": "null"}]},
+        "ownerSubsystem": {"$ref": "#/$defs/id"},
+        "failureCode": {"oneOf": [{"$ref": "#/$defs/id"}, {"type": "null"}]}
+      }
+    }
+  }
+}

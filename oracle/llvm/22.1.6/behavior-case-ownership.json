@@ -1,0 +1,202 @@
+{
+  "cases": [
+    {
+      "id": "assemble-invalid",
+      "ownerSubsystem": "clang-integrated-assembler"
+    },
+    {
+      "id": "assemble-valid",
+      "ownerSubsystem": "clang-integrated-assembler"
+    },
+    {
+      "id": "compile-c-standard",
+      "ownerSubsystem": "clang-codegen"
+    },
+    {
+      "id": "compile-cxx-standard",
+      "ownerSubsystem": "clang-codegen"
+    },
+    {
+      "id": "compile-file",
+      "ownerSubsystem": "clang-codegen"
+    },
+    {
+      "id": "compile-stdin",
+      "ownerSubsystem": "clang-codegen"
+    },
+    {
+      "id": "diagnostic-color-always",
+      "ownerSubsystem": "clang-diagnostics-renderer"
+    },
+    {
+      "id": "diagnostic-color-never",
+      "ownerSubsystem": "clang-diagnostics-renderer"
+    },
+    {
+      "id": "diagnostic-error-limit",
+      "ownerSubsystem": "clang-diagnostics-engine"
+    },
+    {
+      "id": "diagnostic-fixit",
+      "ownerSubsystem": "clang-parser"
+    },
+    {
+      "id": "diagnostic-invalid-option",
+      "ownerSubsystem": "clang-driver-options"
+    },
+    {
+      "id": "diagnostic-missing-include",
+      "ownerSubsystem": "clang-lex"
+    },
+    {
+      "id": "diagnostic-syntax",
+      "ownerSubsystem": "clang-parser"
+    },
+    {
+      "id": "diagnostic-template-backtrace",
+      "ownerSubsystem": "clang-sema"
+    },
+    {
+      "id": "diagnostic-warning-option",
+      "ownerSubsystem": "clang-sema"
+    },
+    {
+      "id": "driver-missing-linker",
+      "ownerSubsystem": "clang-driver-toolchain"
+    },
+    {
+      "id": "driver-print-commands",
+      "ownerSubsystem": "clang-driver"
+    },
+    {
+      "id": "emit-assembly",
+      "ownerSubsystem": "clang-codegen"
+    },
+    {
+      "id": "emit-llvm-ir",
+      "ownerSubsystem": "clang-codegen"
+    },
+    {
+      "id": "help-driver",
+      "ownerSubsystem": "clang-driver-options"
+    },
+    {
+      "id": "include-cycle-guarded",
+      "ownerSubsystem": "clang-lex"
+    },
+    {
+      "id": "include-framework-order",
+      "ownerSubsystem": "clang-header-search"
+    },
+    {
+      "id": "include-search-order",
+      "ownerSubsystem": "clang-header-search"
+    },
+    {
+      "id": "include-trace",
+      "ownerSubsystem": "clang-header-search"
+    },
+    {
+      "id": "link-program",
+      "ownerSubsystem": "clang-driver-linker"
+    },
+    {
+      "id": "link-undefined-symbol",
+      "ownerSubsystem": "clang-driver-linker"
+    },
+    {
+      "id": "metadata-resource-dir",
+      "ownerSubsystem": "clang-driver-toolchain"
+    },
+    {
+      "id": "metadata-target",
+      "ownerSubsystem": "clang-driver-targets"
+    },
+    {
+      "id": "metadata-version",
+      "ownerSubsystem": "clang-driver"
+    },
+    {
+      "id": "modules-flag-supported",
+      "ownerSubsystem": "clang-driver-options"
+    },
+    {
+      "id": "objective-c-syntax",
+      "ownerSubsystem": "clang-parser"
+    },
+    {
+      "id": "pch-reuse-valid",
+      "ownerSubsystem": "clang-serialization"
+    },
+    {
+      "id": "pch-reuse-wrong-target",
+      "ownerSubsystem": "clang-serialization"
+    },
+    {
+      "id": "precompile-header",
+      "ownerSubsystem": "clang-serialization"
+    },
+    {
+      "id": "preprocess-dependencies",
+      "ownerSubsystem": "clang-dependency-scanning"
+    },
+    {
+      "id": "preprocess-file",
+      "ownerSubsystem": "clang-lex"
+    },
+    {
+      "id": "preprocess-macro-state",
+      "ownerSubsystem": "clang-lex"
+    },
+    {
+      "id": "preprocess-malformed-macro",
+      "ownerSubsystem": "clang-lex"
+    },
+    {
+      "id": "preprocess-pragma-once",
+      "ownerSubsystem": "clang-lex"
+    },
+    {
+      "id": "preprocess-stdin",
+      "ownerSubsystem": "clang-lex"
+    },
+    {
+      "id": "response-file",
+      "ownerSubsystem": "clang-driver-response-files"
+    },
+    {
+      "id": "response-file-nested",
+      "ownerSubsystem": "clang-driver-response-files"
+    },
+    {
+      "id": "response-file-quoted-paths",
+      "ownerSubsystem": "clang-driver-response-files"
+    },
+    {
+      "id": "response-file-recursion",
+      "ownerSubsystem": "clang-driver-response-files"
+    },
+    {
+      "id": "response-file-stdin",
+      "ownerSubsystem": "clang-driver-response-files"
+    },
+    {
+      "id": "target-i386-object",
+      "ownerSubsystem": "clang-driver-targets"
+    },
+    {
+      "id": "target-unsupported-aarch64",
+      "ownerSubsystem": "clang-driver-targets"
+    },
+    {
+      "id": "target-x86-macros",
+      "ownerSubsystem": "clang-driver-targets"
+    }
+  ],
+  "id": "clang-22-1-6-behavior-case-ownership-v1",
+  "reference": {
+    "corpusId": "clang-22-1-6-driver-behavior",
+    "corpusSha256": "acaa7b33c390b2c9fde15b4e21b0a899ffff62fe98ce22226866272b4efe8d5b"
+  },
+  "schemaVersion": 1
+}

@@ -1,0 +1,35 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://github.com/minsago-elite/decomp_thing/oracle/llvm-behavior-case-ownership.schema.json",
+  "title": "Reviewed LLVM behavior-case subsystem ownership",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schemaVersion", "id", "reference", "cases"],
+  "properties": {
+    "schemaVersion": {"const": 1},
+    "id": {"const": "clang-22-1-6-behavior-case-ownership-v1"},
+    "reference": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["corpusId", "corpusSha256"],
+      "properties": {
+        "corpusId": {"const": "clang-22-1-6-driver-behavior"},
+        "corpusSha256": {"const": "acaa7b33c390b2c9fde15b4e21b0a899ffff62fe98ce22226866272b4efe8d5b"}
+      }
+    },
+    "cases": {
+      "type": "array",
+      "minItems": 48,
+      "maxItems": 48,
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["id", "ownerSubsystem"],
+        "properties": {
+          "id": {"type": "string", "pattern": "^[a-z][a-z0-9]*(?:-[a-z0-9]+)*$", "maxLength": 128},
+          "ownerSubsystem": {"type": "string", "pattern": "^[a-z][a-z0-9]*(?:-[a-z0-9]+)*$", "maxLength": 128}
+        }
+      }
+    }
+  }
+}
