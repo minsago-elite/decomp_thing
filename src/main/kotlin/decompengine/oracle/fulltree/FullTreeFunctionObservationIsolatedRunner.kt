@@ -34,6 +34,37 @@ internal class FullTreeFunctionObservationIsolationException(
     cause: Throwable? = null,
 ) : IllegalArgumentException(message, cause)
 
+internal enum class FullTreeFunctionObservationLaunchFaultPoint {
+    BEFORE_INITIAL_UNIT_ABSENCE,
+    BEFORE_FINAL_UNIT_ABSENCE,
+    AFTER_PROCESS_START_RETURNED,
+    AFTER_SCOPE_ATTACHED,
+    BEFORE_DESTRUCTIVE_CLEANUP,
+    BEFORE_FINAL_CLEANUP_ABSENCE,
+}
+
+internal fun interface FullTreeFunctionObservationLaunchFaultInjector {
+    fun at(point: FullTreeFunctionObservationLaunchFaultPoint, unitName: String)
+}
+
+/** Observes only pinned systemctl control calls; it does not observe launch or process signals. */
+internal fun interface FullTreeFunctionObservationSystemctlCommandObserver {
+    fun beforeCommand(unitName: String, arguments: List<String>)
+}
+
+/** Explicit fail-only test seam; the production entry point never accepts or constructs one. */
+internal class FullTreeFunctionObservationLaunchTestHooks(
+    val faultInjector: FullTreeFunctionObservationLaunchFaultInjector? = null,
+    val systemctlCommandObserver: FullTreeFunctionObservationSystemctlCommandObserver? = null,
+    val forceProcessStartFailure: Boolean = false,
+) {
+    init {
+        require(faultInjector != null || systemctlCommandObserver != null || forceProcessStartFailure) {
+            "function-observation launch test hooks cannot be empty"
+        }
+    }
+}
+
 /** Exact authenticated files reloaded by the isolated Kotlin worker. */
 internal data class FullTreeFunctionObservationScopeFiles(
     val scope: Path,
@@ -684,6 +715,11 @@ internal object FullTreeFunctionObservationIsolatedOperationRunner {
     fun launchToBoot(
         preparedIsolation: FullTreeFunctionObservationPreparedIsolation,
     ): FullTreeFunctionObservationBootedIsolation = preparedIsolation.launchToBoot()
+
+    internal fun launchToBootWithTestHooks(
+        preparedIsolation: FullTreeFunctionObservationPreparedIsolation,
+        testHooks: FullTreeFunctionObservationLaunchTestHooks,
+    ): Nothing = preparedIsolation.launchToBootWithTestHooks(testHooks)
 }
 
 /**
@@ -780,7 +816,21 @@ internal class FullTreeFunctionObservationPreparedIsolation private constructor(
     }
 
     @Synchronized
-    internal fun launchToBoot(): FullTreeFunctionObservationBootedIsolation {
+    internal fun launchToBoot(): FullTreeFunctionObservationBootedIsolation =
+        launchToBootInternal(testHooks = null)
+
+    /** A hooked launch can fault or fail, but it can never return a production BOOT owner. */
+    @Synchronized
+    internal fun launchToBootWithTestHooks(
+        testHooks: FullTreeFunctionObservationLaunchTestHooks,
+    ): Nothing {
+        launchToBootInternal(testHooks)
+        error("fault-injected function-observation launch escaped its fail-only transaction")
+    }
+
+    private fun launchToBootInternal(
+        testHooks: FullTreeFunctionObservationLaunchTestHooks?,
+    ): FullTreeFunctionObservationBootedIsolation {
         check(!closed) { "function-observation prepared isolation is closed" }
         if (operationActive) {
             isolationFail("function-observation prepared isolation operation is already active")
@@ -793,7 +843,12 @@ internal class FullTreeFunctionObservationPreparedIsolation private constructor(
         try {
             requireCurrentBeforeLaunchInternal()
             val binding = authority.leasedHistory.binding
-            val openedBoundary = TrustedObservationBoundary(configuration, runtime, materializedClassPath)
+            val openedBoundary = TrustedObservationBoundary(
+                configuration,
+                runtime,
+                materializedClassPath,
+                testHooks,
+            )
             boundary = openedBoundary
             cleanupBoundary = openedBoundary
             val request = IsolatedWorkerRequest(
@@ -849,6 +904,9 @@ internal class FullTreeFunctionObservationPreparedIsolation private constructor(
             openedBoundary.verifyLiveOperation()
             runtime.verify("after isolated BOOT attachment")
             inputGuards.verifyCurrent("after isolated BOOT attachment")
+            if (testHooks != null) {
+                throw AssertionError("fault-injected function-observation launch unexpectedly reached BOOT")
+            }
             val booted = createBootedObservationIsolation(
                 paths,
                 runDirectory,
@@ -2277,6 +2335,7 @@ internal class BorrowedObservationRunTree private constructor(
 
 private class PendingObservationLaunch(
     private val controller: ObservationSystemdController,
+    private val testHooks: FullTreeFunctionObservationLaunchTestHooks?,
 ) : AutoCloseable {
     val unitName: String
         get() = controller.unitName
@@ -2284,19 +2343,25 @@ private class PendingObservationLaunch(
     var processHandle: decompengine.acp.LinuxProcessDescriptor? = null
     var cleaned = false
         private set
-    private var launchAttempted = false
 
-    fun retainStartedProcess(started: Process) {
-        check(!launchAttempted && process == null && processHandle == null) {
+    /** Stores destructive cleanup ownership on the first instruction after start returns. */
+    fun start(builder: ProcessBuilder, forcedFailureDirectory: Path?): Process {
+        check(process == null && processHandle == null) {
             "isolated process launch attempt is not linear"
         }
-        launchAttempted = true
+        forcedFailureDirectory?.let { builder.directory(it.toFile()) }
+        val started = builder.start()
         process = started
+        return started
     }
 
     override fun close() {
         if (cleaned) return
-        if (launchAttempted) {
+        if (process != null) {
+            testHooks?.faultInjector?.at(
+                FullTreeFunctionObservationLaunchFaultPoint.BEFORE_DESTRUCTIVE_CLEANUP,
+                unitName,
+            )
             controller.killStopAndRequireAbsent(
                 process = process,
                 processHandle = processHandle,
@@ -2314,6 +2379,7 @@ private class TrustedObservationBoundary(
     private val configuration: FullTreeFunctionObservationIsolationConfiguration,
     private val authenticatedRuntime: AuthenticatedObservationRuntime,
     private val materializedClassPath: MaterializedObservationClassPath,
+    private val testHooks: FullTreeFunctionObservationLaunchTestHooks? = null,
 ) : AutoCloseable {
     private val java = PinnedSecurityExecutable.pin(
         configuration.javaExecutable,
@@ -2385,13 +2451,22 @@ private class TrustedObservationBoundary(
             "one isolation boundary may launch only one worker"
         }
         retainUnitName(unitName)
-        val controller = ObservationSystemdController(inspector, bus, unitName)
-        val pending = PendingObservationLaunch(controller)
+        val controller = ObservationSystemdController(
+            inspector,
+            bus,
+            unitName,
+            testHooks?.systemctlCommandObserver,
+        )
+        val pending = PendingObservationLaunch(controller, testHooks)
         pendingLaunch = pending
         try {
             requireUnchanged()
             authenticatedRuntime.verify("at isolated boundary launch")
             materializedClassPath.verify("at isolated boundary launch")
+            testHooks?.faultInjector?.at(
+                FullTreeFunctionObservationLaunchFaultPoint.BEFORE_INITIAL_UNIT_ABSENCE,
+                unitName,
+            )
             controller.requireAbsent()
             val worker = buildWorkerCommand(request, resources)
             val scoped = buildScopeCommand(unitName, resources, worker)
@@ -2402,9 +2477,13 @@ private class TrustedObservationBoundary(
             immediatelyBeforeStart()
             authenticatedRuntime.verify("at final isolated process start gate")
             materializedClassPath.verify("at final isolated process start gate")
+            testHooks?.faultInjector?.at(
+                FullTreeFunctionObservationLaunchFaultPoint.BEFORE_FINAL_UNIT_ABSENCE,
+                unitName,
+            )
             controller.requireAbsent()
             requireUnchanged()
-            val started = ProcessBuilder(command)
+            val processBuilder = ProcessBuilder(command)
                 .redirectInput(ProcessBuilder.Redirect.PIPE)
                 .redirectOutput(ProcessBuilder.Redirect.DISCARD)
                 .redirectError(ProcessBuilder.Redirect.DISCARD)
@@ -2412,8 +2491,14 @@ private class TrustedObservationBoundary(
                     builder.environment().clear()
                     builder.environment().putAll(bus.controlEnvironment)
                 }
-                .start()
-            pending.retainStartedProcess(started)
+            val started = pending.start(
+                processBuilder,
+                request.paths.richArtifact.takeIf { testHooks?.forceProcessStartFailure == true },
+            )
+            testHooks?.faultInjector?.at(
+                FullTreeFunctionObservationLaunchFaultPoint.AFTER_PROCESS_START_RETURNED,
+                unitName,
+            )
             val pinnedProcess = LinuxFilesystemSyscalls.openProcessHandle(started.pid())
             pending.processHandle = pinnedProcess
             if (!started.isAlive) isolationFail("isolated local scope process exited before pidfd pinning")
@@ -2433,6 +2518,10 @@ private class TrustedObservationBoundary(
             pending.processHandle = null
             pendingLaunch = null
             managedUnit.awaitScopeAttached()
+            testHooks?.faultInjector?.at(
+                FullTreeFunctionObservationLaunchFaultPoint.AFTER_SCOPE_ATTACHED,
+                unitName,
+            )
             requireUnchanged()
             authenticatedRuntime.verify("immediately after isolated scope attachment")
             materializedClassPath.verify("immediately after isolated scope attachment")
@@ -2616,7 +2705,12 @@ private class TrustedObservationBoundary(
         REQUIRED_SYSTEMD_RUN_OPTIONS.forEach { option ->
             if (option !in systemdHelp.output) isolationFail("isolated systemd supervisor lacks $option")
         }
-        val manager = ObservationSystemdController(inspector, bus, "decomp-oracle-probe.scope")
+        val manager = ObservationSystemdController(
+            inspector,
+            bus,
+            "decomp-oracle-probe.scope",
+            testHooks?.systemctlCommandObserver,
+        )
             .managerVersion()
         if (!manager.matches(SYSTEMD_MANAGER_VERSION)) {
             isolationFail("systemd user manager is unavailable to the isolated worker")
@@ -2671,7 +2765,8 @@ private class TrustedObservationBoundary(
         }
         if (active == null && pendingLaunch == null) {
             pendingLaunch = PendingObservationLaunch(
-                ObservationSystemdController(inspector, bus, unitName),
+                ObservationSystemdController(inspector, bus, unitName, testHooks?.systemctlCommandObserver),
+                testHooks,
             )
         }
         close()
@@ -2679,14 +2774,25 @@ private class TrustedObservationBoundary(
 
     override fun close() {
         val unit = active
-        if (unit != null && !unit.cleaned) unit.close()
+        if (unit != null && !unit.cleaned) {
+            testHooks?.faultInjector?.at(
+                FullTreeFunctionObservationLaunchFaultPoint.BEFORE_DESTRUCTIVE_CLEANUP,
+                unit.unitName,
+            )
+            unit.close()
+        }
         pendingLaunch?.let { pending ->
             pending.close()
             pendingLaunch = null
         }
         retainedUnitName?.let { unitName ->
+            testHooks?.faultInjector?.at(
+                FullTreeFunctionObservationLaunchFaultPoint.BEFORE_FINAL_CLEANUP_ABSENCE,
+                unitName,
+            )
             val finalAbsence = PendingObservationLaunch(
-                ObservationSystemdController(inspector, bus, unitName),
+                ObservationSystemdController(inspector, bus, unitName, testHooks?.systemctlCommandObserver),
+                testHooks,
             )
             pendingLaunch = finalAbsence
             finalAbsence.close()
@@ -2707,6 +2813,7 @@ private class ObservationSystemdController(
     private val inspector: PinnedSecurityExecutable,
     private val bus: PinnedSystemdBusEndpoint,
     val unitName: String,
+    private val commandObserver: FullTreeFunctionObservationSystemctlCommandObserver? = null,
 ) {
     fun managerVersion(): String = systemctl(
         listOf("show", "--property=Version", "--value"),
@@ -2817,6 +2924,7 @@ private class ObservationSystemdController(
     ): TrustedCommandResult {
         inspector.requireUnchanged()
         bus.requireUnchanged()
+        commandObserver?.beforeCommand(unitName, java.util.List.copyOf(arguments))
         val result = runTrustedCommand(
             listOf(inspector.path.toString(), "--user") + arguments,
             bus.controlEnvironment,
@@ -4132,7 +4240,7 @@ private fun syntheticDestinationParents(destinations: Collection<Path>): List<Pa
 }
 
 /** Bounded absence proof for attachment failures before systemd reports ControlGroup. */
-private fun findObservationCgroupsForUnit(unitName: String): List<Path> {
+internal fun findObservationCgroupsForUnit(unitName: String): List<Path> {
     if (
         !unitName.matches(PRODUCTION_OBSERVATION_UNIT_NAME) &&
         !unitName.matches(FIXTURE_OBSERVATION_UNIT_NAME)

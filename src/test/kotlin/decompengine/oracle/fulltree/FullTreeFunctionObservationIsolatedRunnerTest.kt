@@ -1,7 +1,9 @@
 package decompengine.oracle.fulltree
 
 import decompengine.acp.AcpRuntimeClosureLimits
+import decompengine.acp.LinuxDescriptor
 import decompengine.acp.LinuxFilesystemSyscalls
+import decompengine.acp.LinuxProcessDescriptor
 import decompengine.oracle.core.OracleArtifacts
 import decompengine.oracle.core.OracleJson
 import java.io.File
@@ -565,6 +567,267 @@ class FullTreeFunctionObservationIsolatedFixtureRunnerTest {
         }
 
     @Test
+    fun `pre-launch unit collisions stay untouched at both deterministic absence gates`() =
+        inControlTemporaryDirectory { root ->
+            val mount = provisionedOracleExt4Mount()
+            val configuration = availableConfiguration(root.resolve("authenticated-runtime"))
+            if (System.getenv("DECOMP_REQUIRE_ORACLE_EXT4_SCRATCH") == "true") {
+                assertTrue(configuration != null, "required CI authenticated launch boundary is unavailable")
+            }
+            assumeTrue(configuration != null, "authenticated JVM launch boundary is unavailable")
+            checkNotNull(configuration)
+            val sleep = Path.of("/usr/bin/sleep").realExecutableOrNull()
+            if (System.getenv("DECOMP_REQUIRE_ORACLE_EXT4_SCRATCH") == "true") {
+                assertTrue(sleep != null, "required CI collision helper /usr/bin/sleep is unavailable")
+            }
+            assumeTrue(sleep != null, "an executable /usr/bin/sleep is required for collision coverage")
+            checkNotNull(sleep)
+            val fixture = createFullTreeControlFixture(root.resolve("fixture"))
+
+            listOf(
+                "d" to FullTreeFunctionObservationLaunchFaultPoint.BEFORE_INITIAL_UNIT_ABSENCE,
+                "c" to FullTreeFunctionObservationLaunchFaultPoint.BEFORE_FINAL_UNIT_ABSENCE,
+            ).forEach { (seed, collisionPoint) ->
+                withPreparedProductionIsolation(
+                    root.resolve("collision-$seed"),
+                    mount,
+                    configuration,
+                    fixture,
+                    seed,
+                ) { context ->
+                    val commands = mutableListOf<List<String>>()
+                    var occupant: OccupiedObservationUnit? = null
+                    val hooks = FullTreeFunctionObservationLaunchTestHooks(
+                        faultInjector = FullTreeFunctionObservationLaunchFaultInjector { point, unitName ->
+                            if (point == collisionPoint) {
+                                check(occupant == null)
+                                occupant = startOccupiedObservationUnit(configuration, unitName, sleep)
+                            }
+                        },
+                        systemctlCommandObserver = FullTreeFunctionObservationSystemctlCommandObserver { unitName, arguments ->
+                            if (unitName == context.binding.unitName) commands += arguments
+                        },
+                    )
+                    try {
+                        val collision = assertFailsWith<FullTreeFunctionObservationIsolationException> {
+                            FullTreeFunctionObservationIsolatedOperationRunner.launchToBootWithTestHooks(
+                                context.ready,
+                                hooks,
+                            )
+                        }
+                        assertTrue(collision.message.orEmpty().contains("already in use"), collision.message)
+                        val occupied = checkNotNull(occupant)
+                        assertOccupiedObservationUnitUnchanged(configuration, occupied)
+                        assertOnlyExactUnitObservationSystemctlCommands(commands, context.binding.unitName)
+                        assertOperationLocksRetained(context)
+
+                        val retainedCollision = assertFailsWith<FullTreeFunctionObservationIsolationException> {
+                            context.ready.close()
+                        }
+                        assertTrue(
+                            retainedCollision.message.orEmpty().contains("already in use"),
+                            retainedCollision.message,
+                        )
+                        assertOccupiedObservationUnitUnchanged(configuration, occupied)
+                        assertOnlyExactUnitObservationSystemctlCommands(commands, context.binding.unitName)
+                        assertOperationLocksRetained(context)
+
+                        try {
+                            stopOccupiedObservationUnit(configuration, occupied)
+                        } finally {
+                            occupant = null
+                        }
+                        closeAfterExternalUnitCleanup(context.ready)
+                        assertColdLeasedResidue(context)
+                    } finally {
+                        occupant?.let { occupied ->
+                            stopOccupiedObservationUnit(configuration, occupied)
+                        }
+                    }
+                }
+            }
+        }
+
+    @Test
+    fun `process start return is the exact destructive cleanup ownership threshold`() =
+        inControlTemporaryDirectory { root ->
+            val mount = provisionedOracleExt4Mount()
+            val configuration = availableConfiguration(root.resolve("authenticated-runtime"))
+            if (System.getenv("DECOMP_REQUIRE_ORACLE_EXT4_SCRATCH") == "true") {
+                assertTrue(configuration != null, "required CI authenticated launch boundary is unavailable")
+            }
+            assumeTrue(configuration != null, "authenticated JVM launch boundary is unavailable")
+            checkNotNull(configuration)
+            val fixture = createFullTreeControlFixture(root.resolve("fixture"))
+
+            withPreparedProductionIsolation(
+                root.resolve("start-throws"),
+                mount,
+                configuration,
+                fixture,
+                "e",
+            ) { context ->
+                val commands = mutableListOf<List<String>>()
+                var destructiveCleanupEntries = 0
+                val hooks = FullTreeFunctionObservationLaunchTestHooks(
+                    faultInjector = FullTreeFunctionObservationLaunchFaultInjector { point, _ ->
+                        if (point == FullTreeFunctionObservationLaunchFaultPoint.BEFORE_DESTRUCTIVE_CLEANUP) {
+                            destructiveCleanupEntries += 1
+                        }
+                    },
+                    systemctlCommandObserver = FullTreeFunctionObservationSystemctlCommandObserver { unitName, arguments ->
+                        if (unitName == context.binding.unitName) commands += arguments
+                    },
+                    forceProcessStartFailure = true,
+                )
+
+                val startFailure = assertFailsWith<java.io.IOException> {
+                    FullTreeFunctionObservationIsolatedOperationRunner.launchToBootWithTestHooks(
+                        context.ready,
+                        hooks,
+                    )
+                }
+                assertTrue(startFailure.message.orEmpty().isNotBlank())
+                assertEquals(0, destructiveCleanupEntries)
+                assertOnlyExactUnitObservationSystemctlCommands(commands, context.binding.unitName)
+                assertObservationUnitAndCgroupAbsent(configuration, context.binding.unitName)
+                assertColdLeasedResidue(context)
+            }
+
+            withPreparedProductionIsolation(
+                root.resolve("start-returned"),
+                mount,
+                configuration,
+                fixture,
+                "f",
+                allowedRootProtocolFiles = LIVE_FAULT_PROTOCOL_FILES,
+            ) { context ->
+                val launchFailure = SimulatedObservationAfterProcessStartFailure()
+                var afterStartEntries = 0
+                var destructiveCleanupEntries = 0
+                val hooks = FullTreeFunctionObservationLaunchTestHooks(
+                    faultInjector = FullTreeFunctionObservationLaunchFaultInjector { point, _ ->
+                        when (point) {
+                            FullTreeFunctionObservationLaunchFaultPoint.AFTER_PROCESS_START_RETURNED -> {
+                                afterStartEntries += 1
+                                throw launchFailure
+                            }
+
+                            FullTreeFunctionObservationLaunchFaultPoint.BEFORE_DESTRUCTIVE_CLEANUP ->
+                                destructiveCleanupEntries += 1
+
+                            else -> Unit
+                        }
+                    },
+                )
+
+                val retained = assertFailsWith<SimulatedObservationAfterProcessStartFailure> {
+                    FullTreeFunctionObservationIsolatedOperationRunner.launchToBootWithTestHooks(
+                        context.ready,
+                        hooks,
+                    )
+                }
+                assertTrue(retained === launchFailure)
+                assertEquals(1, afterStartEntries)
+                assertEquals(1, destructiveCleanupEntries)
+                assertObservationUnitAndCgroupAbsent(configuration, context.binding.unitName)
+                assertColdLeasedResidue(context)
+            }
+        }
+
+    @Test
+    fun `post-attachment cleanup and final absence faults retain retry authority`() =
+        inControlTemporaryDirectory { root ->
+            val mount = provisionedOracleExt4Mount()
+            val configuration = availableConfiguration(root.resolve("authenticated-runtime"))
+            if (System.getenv("DECOMP_REQUIRE_ORACLE_EXT4_SCRATCH") == "true") {
+                assertTrue(configuration != null, "required CI authenticated launch boundary is unavailable")
+            }
+            assumeTrue(configuration != null, "authenticated JVM launch boundary is unavailable")
+            checkNotNull(configuration)
+            val fixture = createFullTreeControlFixture(root.resolve("fixture"))
+
+            withPreparedProductionIsolation(
+                root.resolve("cleanup-retry"),
+                mount,
+                configuration,
+                fixture,
+                "b",
+                allowedRootProtocolFiles = LIVE_FAULT_PROTOCOL_FILES,
+            ) { context ->
+                val commands = mutableListOf<List<String>>()
+                val launchFailure = SimulatedObservationLaunchFailure()
+                var destructiveCleanupEntries = 0
+                var finalAbsenceFaults = 0
+                val hooks = FullTreeFunctionObservationLaunchTestHooks(
+                    faultInjector = FullTreeFunctionObservationLaunchFaultInjector { point, _ ->
+                        when (point) {
+                            FullTreeFunctionObservationLaunchFaultPoint.AFTER_SCOPE_ATTACHED ->
+                                throw launchFailure
+
+                            FullTreeFunctionObservationLaunchFaultPoint.BEFORE_DESTRUCTIVE_CLEANUP -> {
+                                destructiveCleanupEntries += 1
+                                if (destructiveCleanupEntries <= 2) {
+                                    throw SimulatedObservationCleanupFailure()
+                                }
+                            }
+
+                            FullTreeFunctionObservationLaunchFaultPoint.BEFORE_FINAL_CLEANUP_ABSENCE -> {
+                                finalAbsenceFaults += 1
+                                if (finalAbsenceFaults == 1) {
+                                    throw SimulatedObservationFinalAbsenceFailure()
+                                }
+                            }
+
+                            else -> Unit
+                        }
+                    },
+                    systemctlCommandObserver = FullTreeFunctionObservationSystemctlCommandObserver { unitName, arguments ->
+                        if (unitName == context.binding.unitName) commands += arguments
+                    },
+                )
+
+                val retained = assertFailsWith<SimulatedObservationLaunchFailure> {
+                    FullTreeFunctionObservationIsolatedOperationRunner.launchToBootWithTestHooks(
+                        context.ready,
+                        hooks,
+                    )
+                }
+                assertTrue(retained === launchFailure)
+                assertEquals(2, destructiveCleanupEntries)
+                assertEquals(0, finalAbsenceFaults)
+                assertOperationLocksRetained(context)
+
+                val commandsBeforeCleanupRetry = commands.size
+                assertFailsWith<SimulatedObservationFinalAbsenceFailure> {
+                    context.ready.close()
+                }
+                assertEquals(3, destructiveCleanupEntries)
+                assertEquals(1, finalAbsenceFaults)
+                assertTrue(
+                    commands.drop(commandsBeforeCleanupRetry).any { arguments ->
+                        arguments.firstOrNull() == "show"
+                    },
+                    "post-attachment cleanup never reached a fresh exact-unit observation",
+                )
+                assertObservationUnitAndCgroupAbsent(configuration, context.binding.unitName)
+                assertOperationLocksRetained(context)
+                assertTrue(Files.notExists(context.output, LinkOption.NOFOLLOW_LINKS))
+                assertTrue(Files.notExists(context.runRoot.resolve("parent.start"), LinkOption.NOFOLLOW_LINKS))
+
+                val commandsBeforeFinalAbsenceRetry = commands.size
+                context.ready.close()
+                assertEquals(2, finalAbsenceFaults)
+                assertOnlyExactUnitObservationSystemctlCommands(
+                    commands.drop(commandsBeforeFinalAbsenceRetry),
+                    context.binding.unitName,
+                )
+                assertObservationUnitAndCgroupAbsent(configuration, context.binding.unitName)
+                assertColdLeasedResidue(context)
+            }
+        }
+
+    @Test
     fun `fixture boundary rejects inherited socket and session-runtime descriptors`() {
         val runtime = Path.of("/run/user/1000")
 
@@ -728,6 +991,580 @@ class FullTreeFunctionObservationIsolatedFixtureRunnerTest {
             assertContentEquals(sentinel, Files.readAllBytes(output))
             assertTrue(Files.list(scratch).use { it.findAny().isEmpty })
         }
+
+    private data class PreparedProductionIsolationTestContext(
+        val binding: FullTreeFunctionObservationOperationBinding,
+        val mount: Path,
+        val runRoot: Path,
+        val output: Path,
+        val authority: FullTreeFunctionObservationJournalAuthority,
+        val ready: FullTreeFunctionObservationPreparedIsolation,
+    )
+
+    private fun withPreparedProductionIsolation(
+        root: Path,
+        mount: Path,
+        configuration: FullTreeFunctionObservationIsolationConfiguration,
+        fixture: FullTreeControlFixture,
+        operationSeed: String,
+        allowedRootProtocolFiles: Set<String> = emptySet(),
+        action: (PreparedProductionIsolationTestContext) -> Unit,
+    ) {
+        require(operationSeed.matches(Regex("[0-9a-f]")))
+        require(allowedRootProtocolFiles.all { it in LIVE_FAULT_PROTOCOL_FILES })
+        assertTrue(entryNames(mount).isEmpty(), "provisioned ext4 slot is not empty")
+        privateDirectory(root)
+        val authenticatedScope = fixture.authenticatedScope()
+        val inputs = FullTreeFunctionObservationProducer.authenticateShardInputs(
+            fixture.inventory,
+            authenticatedScope,
+            "clang-lib-driver",
+        )
+        val output = privateDirectory(root.resolve("output")).resolve("clang-lib-driver.json")
+        val journalRoot = privateDirectory(root.resolve("journal"))
+        val capacity = LinuxFilesystemSyscalls.openRoot(mount).use { descriptor ->
+            LinuxFilesystemSyscalls.filesystemCapacity(descriptor)
+        }
+        val binding = FullTreeFunctionObservationOperationBinding.create(
+            operationId = operationSeed.repeat(64),
+            shardId = inputs.shard.identifier,
+            shardInputSha256 = inputs.shard.inputSha256,
+            scopeSha256 = authenticatedScope.sha256,
+            inventoryArtifactSha256 = inputs.inventoryArtifactSha256,
+            richArtifactSha256 = fixtureSha256(fixture.richArtifact),
+            isolationConfiguration = configuration,
+            output = output,
+            diskPolicy = FullTreeDiskScratchPolicy(
+                requiredAvailableBytes = 1,
+                maximumFilesystemBytes = capacity.totalBytes,
+                requiredAvailableInodes = 4,
+                maximumFilesystemInodes = capacity.totalInodes,
+            ),
+        )
+        val leaseRoot = mount.resolve(binding.leaseDirectoryName)
+        val runRoot = leaseRoot.resolve(binding.runDirectoryName)
+        var leased: FullTreeFunctionObservationLeasedOperation? = null
+        var prepared: FullTreeFunctionObservationPreparedRun? = null
+        var isolation: FullTreeFunctionObservationPreparedIsolation? = null
+        try {
+            FullTreeFunctionObservationJournalAuthority.open(journalRoot).use { authority ->
+                val acquired = FullTreeFunctionObservationOperationCoordinator.prepareNew(
+                    authority,
+                    binding,
+                    mount,
+                )
+                leased = acquired
+                val run = acquired.prepareRunRoot()
+                prepared = run
+                acquired.close()
+                leased = null
+
+                val ready = FullTreeFunctionObservationIsolatedOperationRunner.prepareBeforeLaunch(
+                    preparedRun = run,
+                    richArtifact = fixture.richArtifact,
+                    inventoryPath = fixture.inventory,
+                    scopeFiles = FullTreeFunctionObservationScopeFiles(
+                        fixture.scope,
+                        fixture.sourceLock,
+                        fixture.manifest,
+                    ),
+                    output = output,
+                    configuration = configuration,
+                )
+                isolation = ready
+                run.close()
+                prepared = null
+                action(
+                    PreparedProductionIsolationTestContext(
+                        binding,
+                        mount,
+                        runRoot,
+                        output,
+                        authority,
+                        ready,
+                    ),
+                )
+            }
+        } finally {
+            var cleanupFailure: Throwable? = null
+            listOf<() -> Unit>(
+                { closePreparedIsolationAfterTest(isolation) },
+                { prepared?.close() },
+                { leased?.close() },
+            ).forEach { cleanup ->
+                runCatching(cleanup).exceptionOrNull()?.let { failure ->
+                    val prior = cleanupFailure
+                    if (prior == null) cleanupFailure = failure else if (failure !== prior) {
+                        prior.addSuppressed(failure)
+                    }
+                }
+            }
+            cleanupFailure?.let { throw it }
+            assertObservationUnitAndCgroupAbsent(configuration, binding.unitName)
+            val rootFiles = if (Files.isDirectory(runRoot, LinkOption.NOFOLLOW_LINKS)) {
+                entryNames(runRoot).filterNot { it in PREPARED_RUN_DIRECTORIES }
+            } else {
+                emptyList()
+            }
+            assertTrue(
+                rootFiles.all { it in allowedRootProtocolFiles },
+                "faulted BOOT run retained unexpected members: $rootFiles",
+            )
+            rootFiles.forEach { name ->
+                assertFaultProtocolFile(runRoot.resolve(name), name, binding.bindingSha256)
+            }
+            removePreparedIsolationLease(
+                leaseRoot,
+                binding.runDirectoryName,
+                configuration.workerClassPath.size,
+                rootFiles,
+            )
+        }
+        assertTrue(entryNames(mount).isEmpty())
+    }
+
+    private fun closePreparedIsolationAfterTest(
+        isolation: FullTreeFunctionObservationPreparedIsolation?,
+    ) {
+        if (isolation == null) return
+        val deadline = System.nanoTime() + TimeUnit.SECONDS.toNanos(5)
+        var last: Throwable? = null
+        while (System.nanoTime() < deadline) {
+            try {
+                isolation.close()
+                return
+            } catch (failure: Throwable) {
+                last = failure
+                Thread.sleep(25)
+            }
+        }
+        throw checkNotNull(last)
+    }
+
+    private fun assertOperationLocksRetained(context: PreparedProductionIsolationTestContext) {
+        assertFailsWith<FullTreeFunctionObservationOperationJournalException> {
+            context.authority.openExisting(context.binding)
+        }
+        assertFailsWith<FullTreeDiskScratchException> {
+            FullTreeDiskScratchAuthority.openExistingReadOnly(
+                context.mount,
+                context.binding.diskOperation(),
+                context.binding.diskPolicy(),
+            )
+        }
+    }
+
+    private fun assertColdLeasedResidue(context: PreparedProductionIsolationTestContext) {
+        FullTreeFunctionObservationOperationCoordinator.openExistingLeasedReadOnly(
+            context.authority,
+            context.binding,
+            context.mount,
+        ).use { cold ->
+            assertEquals(
+                listOf(
+                    FullTreeFunctionObservationOperationPhase.PREPARING,
+                    FullTreeFunctionObservationOperationPhase.LEASED,
+                ),
+                cold.leasedHistory.transitions.map { it.phase },
+            )
+            assertEquals(FullTreeDiskScratchColdPopulation.ACTIVE_OPERATION_RUN, cold.observedPopulation)
+            cold.requireCurrentReadOnly()
+        }
+        assertTrue(Files.notExists(context.output, LinkOption.NOFOLLOW_LINKS))
+        listOf("parent.start", "worker.ready", "candidate.json").forEach { name ->
+            assertTrue(Files.notExists(context.runRoot.resolve(name), LinkOption.NOFOLLOW_LINKS))
+        }
+    }
+
+    private fun assertOnlyExactUnitObservationSystemctlCommands(
+        commands: List<List<String>>,
+        unitName: String,
+    ) {
+        assertTrue(commands.isNotEmpty(), "exact-unit systemctl observer was not exercised")
+        assertTrue(
+            commands.all { arguments ->
+                    arguments.size == 3 &&
+                    arguments[0] == "show" &&
+                    arguments[1] == unitName &&
+                    arguments[2] == EXACT_UNIT_SHOW_PROPERTIES
+            },
+            "pre-launch absence-only path issued a non-observation systemctl command: $commands",
+        )
+    }
+
+    private fun assertFaultProtocolFile(path: Path, name: String, nonce: String) {
+        assertTrue(
+            Files.isRegularFile(path, LinkOption.NOFOLLOW_LINKS),
+            "faulted BOOT protocol residue is not a regular file: $name",
+        )
+        val bytes = Files.newInputStream(path, LinkOption.NOFOLLOW_LINKS).use { input ->
+            input.readNBytes(TEST_FAULT_PROTOCOL_BYTES + 1)
+        }
+        assertTrue(
+            bytes.size <= TEST_FAULT_PROTOCOL_BYTES,
+            "fault protocol residue exceeds its byte bound: $name",
+        )
+        val content = bytes.toString(Charsets.UTF_8)
+        when (name) {
+            "worker.boot" -> assertEquals("BOOT\t1\t$nonce\n", content)
+            "worker.failure", "supervisor.failure" -> {
+                assertTrue(
+                    content.endsWith('\n') && content.count { it == '\n' } == 1,
+                    "fault protocol residue is not one canonical line: $name",
+                )
+                val fields = content.removeSuffix("\n").split('\t')
+                assertEquals(5, fields.size, "fault protocol residue has an invalid field count: $name")
+                assertEquals("FAIL", fields[0])
+                assertEquals("1", fields[1])
+                assertEquals(nonce, fields[2])
+                assertTrue(fields[3].isNotBlank(), "fault protocol class is empty: $name")
+                assertTrue(fields[3].length <= TEST_FAILURE_CLASS_CHARS, "fault protocol class is too long: $name")
+                assertTrue(fields[4].length <= TEST_FAILURE_MESSAGE_CHARS, "fault protocol message is too long: $name")
+                assertTrue(
+                    fields.drop(3).all { field -> field.none(Char::isISOControl) },
+                    "fault protocol residue contains a control character: $name",
+                )
+            }
+
+            else -> error("unexpected fault protocol residue: $name")
+        }
+    }
+
+    private fun assertObservationUnitAndCgroupAbsent(
+        configuration: FullTreeFunctionObservationIsolationConfiguration,
+        unitName: String,
+    ) {
+        val loadState = runTestSystemctl(
+            configuration,
+            listOf("show", unitName, "--property=LoadState", "--value"),
+            setOf(0, 1, 4),
+        ).trim()
+        assertEquals("not-found", loadState, "test observation unit remains loaded")
+        assertTrue(
+            findObservationCgroupsForUnit(unitName).isEmpty(),
+            "test observation cgroup remains present",
+        )
+    }
+
+    private data class TestObservationUnitSnapshot(
+        val unitName: String,
+        val controlGroup: String,
+        val invocationId: String,
+        val cgroupPath: Path,
+    )
+
+    private class OccupiedObservationUnit(
+        val process: Process,
+        val processHandle: LinuxProcessDescriptor,
+        val snapshot: TestObservationUnitSnapshot,
+        val cgroup: LinuxDescriptor,
+    ) : AutoCloseable {
+        override fun close() {
+            processHandle.close()
+            cgroup.close()
+        }
+    }
+
+    private fun startOccupiedObservationUnit(
+        configuration: FullTreeFunctionObservationIsolationConfiguration,
+        unitName: String,
+        sleep: Path,
+    ): OccupiedObservationUnit {
+        val started = ProcessBuilder(
+            configuration.scopeSupervisorExecutable.toString(),
+            "--user",
+            "--scope",
+            "--quiet",
+            "--collect",
+            "--unit=$unitName",
+            "--property=KillMode=control-group",
+            "--property=SendSIGKILL=yes",
+            "--",
+            sleep.toString(),
+            "60",
+        ).redirectInput(ProcessBuilder.Redirect.PIPE)
+            .redirectOutput(ProcessBuilder.Redirect.DISCARD)
+            .redirectError(ProcessBuilder.Redirect.DISCARD)
+            .also { builder -> configureTestSystemdEnvironment(builder, configuration) }
+            .start()
+        started.outputStream.close()
+        try {
+            val deadline = System.nanoTime() + TimeUnit.SECONDS.toNanos(5)
+            while (System.nanoTime() < deadline) {
+                check(started.isAlive) { "collision scope exited before systemd observed it" }
+                val snapshot = readTestObservationUnitSnapshot(configuration, unitName)
+                if (snapshot != null) {
+                    val cgroup = LinuxFilesystemSyscalls.openRoot(snapshot.cgroupPath)
+                    try {
+                        val processHandle = LinuxFilesystemSyscalls.openProcessHandle(started.pid())
+                        try {
+                            val occupied = OccupiedObservationUnit(started, processHandle, snapshot, cgroup)
+                            assertOccupiedObservationUnitUnchanged(configuration, occupied)
+                            return occupied
+                        } catch (failure: Throwable) {
+                            processHandle.close()
+                            throw failure
+                        }
+                    } catch (failure: Throwable) {
+                        cgroup.close()
+                        throw failure
+                    }
+                }
+                Thread.sleep(25)
+            }
+            error("collision scope did not become visible to systemd")
+        } catch (failure: Throwable) {
+            if (started.isAlive) started.destroyForcibly()
+            if (!started.waitFor(5, TimeUnit.SECONDS)) {
+                failure.addSuppressed(IllegalStateException("collision scope process survived failed setup"))
+            }
+            val deadline = System.nanoTime() + TimeUnit.SECONDS.toNanos(5)
+            while (System.nanoTime() < deadline) {
+                val absent = runCatching {
+                    !started.isAlive &&
+                        readTestObservationUnitProperties(configuration, unitName)["LoadState"] == "not-found" &&
+                        findObservationCgroupsForUnit(unitName).isEmpty()
+                }.getOrDefault(false)
+                if (absent) throw failure
+                Thread.sleep(25)
+            }
+            failure.addSuppressed(IllegalStateException("failed collision setup retained unit residue"))
+            throw failure
+        }
+    }
+
+    private fun stopOccupiedObservationUnit(
+        configuration: FullTreeFunctionObservationIsolationConfiguration,
+        occupied: OccupiedObservationUnit,
+    ) {
+        var retainedFailure: Throwable? = null
+        fun retain(failure: Throwable) {
+            val prior = retainedFailure
+            if (prior == null) retainedFailure = failure else if (failure !== prior) prior.addSuppressed(failure)
+        }
+        try {
+            if (occupied.process.isAlive) {
+                runCatching { assertOccupiedObservationUnitUnchanged(configuration, occupied) }
+                    .exceptionOrNull()?.let(::retain)
+                runCatching { LinuxFilesystemSyscalls.killProcess(occupied.processHandle) }
+                    .exceptionOrNull()?.let(::retain)
+                if (occupied.process.isAlive) {
+                    runCatching { occupied.process.destroyForcibly() }.exceptionOrNull()?.let(::retain)
+                }
+            }
+            if (!occupied.process.waitFor(5, TimeUnit.SECONDS)) {
+                retain(IllegalStateException("collision scope process survived exact pidfd cleanup"))
+            }
+            val deadline = System.nanoTime() + TimeUnit.SECONDS.toNanos(5)
+            var absent = false
+            while (System.nanoTime() < deadline) {
+                val loaded = try {
+                    requireOwnedObservationUnitLoadedOrAbsent(configuration, occupied.snapshot)
+                } catch (failure: Throwable) {
+                    retain(failure)
+                    break
+                }
+                val cgroups = try {
+                    findObservationCgroupsForUnit(occupied.snapshot.unitName)
+                } catch (failure: Throwable) {
+                    retain(failure)
+                    break
+                }
+                absent = !loaded &&
+                    cgroups.isEmpty() &&
+                    Files.notExists(occupied.snapshot.cgroupPath, LinkOption.NOFOLLOW_LINKS) &&
+                    !LinuxFilesystemSyscalls.processExists(occupied.processHandle)
+                if (absent) break
+                Thread.sleep(25)
+            }
+            if (!absent) retain(IllegalStateException("collision scope did not become absent after exact pidfd cleanup"))
+        } finally {
+            occupied.close()
+        }
+        retainedFailure?.let { throw it }
+    }
+
+    private fun assertOccupiedObservationUnitUnchanged(
+        configuration: FullTreeFunctionObservationIsolationConfiguration,
+        occupied: OccupiedObservationUnit,
+    ) {
+        assertTrue(occupied.process.isAlive, "collision scope process is no longer live")
+        assertTrue(
+            LinuxFilesystemSyscalls.processExists(occupied.processHandle),
+            "collision scope pidfd no longer names a live process",
+        )
+        assertEquals(
+            occupied.snapshot,
+            readTestObservationUnitSnapshot(configuration, occupied.snapshot.unitName),
+            "collision scope systemd identity or state changed",
+        )
+        LinuxFilesystemSyscalls.openRoot(occupied.snapshot.cgroupPath).use { current ->
+            assertEquals(occupied.cgroup.identity, current.identity, "collision cgroup identity changed")
+        }
+        assertEquals(
+            setOf(occupied.process.pid()),
+            readTestCgroupProcesses(occupied.snapshot.cgroupPath),
+            "collision scope process population changed",
+        )
+        assertEquals(
+            "0",
+            Files.readString(occupied.snapshot.cgroupPath.resolve("cgroup.freeze")).trim(),
+            "collision scope was frozen",
+        )
+    }
+
+    private fun readTestObservationUnitSnapshot(
+        configuration: FullTreeFunctionObservationIsolationConfiguration,
+        unitName: String,
+    ): TestObservationUnitSnapshot? {
+        val properties = readTestObservationUnitProperties(configuration, unitName)
+        if (properties["LoadState"] == "not-found") return null
+        check(properties["Id"] == unitName) { "test systemd observed a different unit identity" }
+        check(properties["LoadState"] == "loaded") { "test collision scope is not loaded" }
+        check(properties["ActiveState"] == "active") { "test collision scope is not active" }
+        check(properties["SubState"] == "running") { "test collision scope is not running" }
+        check(properties["FreezerState"] == "running") { "test collision scope is not thawed" }
+        val controlGroup = properties["ControlGroup"].orEmpty()
+        val cgroupPath = testCgroupPath(unitName, controlGroup)
+        val invocationId = properties["InvocationID"].orEmpty()
+        check(invocationId.matches(Regex("[0-9a-f]{32}"))) {
+            "test collision scope has an invalid invocation identity"
+        }
+        return TestObservationUnitSnapshot(unitName, controlGroup, invocationId, cgroupPath)
+    }
+
+    private fun requireOwnedObservationUnitLoadedOrAbsent(
+        configuration: FullTreeFunctionObservationIsolationConfiguration,
+        expected: TestObservationUnitSnapshot,
+    ): Boolean {
+        val properties = readTestObservationUnitProperties(configuration, expected.unitName)
+        if (properties["LoadState"] == "not-found") return false
+        check(properties["Id"] == expected.unitName) {
+            "refusing to observe a replacement collision unit identity"
+        }
+        check(properties["InvocationID"] == expected.invocationId) {
+            "refusing to observe a replacement collision invocation"
+        }
+        val controlGroup = properties["ControlGroup"].orEmpty()
+        check(controlGroup.isEmpty() || controlGroup == expected.controlGroup) {
+            "refusing to observe a replacement collision cgroup"
+        }
+        return true
+    }
+
+    private fun readTestObservationUnitProperties(
+        configuration: FullTreeFunctionObservationIsolationConfiguration,
+        unitName: String,
+    ): Map<String, String> {
+        val output = runTestSystemctl(
+            configuration,
+            listOf(
+                "show",
+                unitName,
+                "--property=Id,LoadState,ActiveState,SubState,ControlGroup,InvocationID,FreezerState",
+            ),
+            setOf(0, 1, 4),
+        )
+        val properties = linkedMapOf<String, String>()
+        output.lineSequence().filter(String::isNotBlank).forEach { line ->
+            check('=' in line) { "test systemd returned a malformed unit property" }
+            val name = line.substringBefore('=')
+            check(properties.put(name, line.substringAfter('=')) == null) {
+                "test systemd returned a duplicate unit property"
+            }
+        }
+        return properties
+    }
+
+    private fun testCgroupPath(unitName: String, controlGroup: String): Path {
+        check(controlGroup.startsWith('/') && '\u0000' !in controlGroup) {
+            "test collision scope has an invalid control group"
+        }
+        val cgroupPath = TEST_CGROUP_ROOT.resolve(controlGroup.removePrefix("/")).normalize()
+        check(
+            cgroupPath.startsWith(TEST_CGROUP_ROOT) &&
+                cgroupPath != TEST_CGROUP_ROOT &&
+                cgroupPath.fileName?.toString() == unitName
+        ) { "test collision scope escaped the cgroup root" }
+        return cgroupPath
+    }
+
+    private fun readTestCgroupProcesses(cgroup: Path): Set<Long> {
+        val processFile = cgroup.resolve("cgroup.procs")
+        val bytes = Files.newInputStream(processFile).use { input ->
+            input.readNBytes(TEST_CGROUP_PROCS_BYTES + 1)
+        }
+        check(bytes.size <= TEST_CGROUP_PROCS_BYTES) {
+            "test collision cgroup process list exceeded its bound"
+        }
+        val values = bytes.toString(Charsets.UTF_8).lineSequence().filter(String::isNotBlank).map { line ->
+            line.trim().toLongOrNull()?.takeIf { it in 1..Int.MAX_VALUE.toLong() }
+                ?: error("test collision cgroup contained an invalid process id")
+        }.toList()
+        check(values.size == values.toSet().size) {
+            "test collision cgroup contained a duplicate process id"
+        }
+        return values.toSet()
+    }
+
+    private fun closeAfterExternalUnitCleanup(ready: FullTreeFunctionObservationPreparedIsolation) {
+        val deadline = System.nanoTime() + TimeUnit.SECONDS.toNanos(5)
+        var last: FullTreeFunctionObservationIsolationException? = null
+        while (System.nanoTime() < deadline) {
+            try {
+                ready.close()
+                return
+            } catch (failure: FullTreeFunctionObservationIsolationException) {
+                last = failure
+                Thread.sleep(25)
+            }
+        }
+        throw FullTreeFunctionObservationIsolationException(
+            "prepared isolation did not accept externally proved collision cleanup",
+            last,
+        )
+    }
+
+    private fun runTestSystemctl(
+        configuration: FullTreeFunctionObservationIsolationConfiguration,
+        arguments: List<String>,
+        allowedExitCodes: Set<Int>,
+    ): String {
+        val process = ProcessBuilder(
+            listOf(configuration.scopeInspectorExecutable.toString(), "--user") + arguments,
+        ).redirectErrorStream(true)
+            .also { builder -> configureTestSystemdEnvironment(builder, configuration) }
+            .start()
+        if (!process.waitFor(5, TimeUnit.SECONDS)) {
+            process.destroyForcibly()
+            process.waitFor(1, TimeUnit.SECONDS)
+            error("test systemd command timed out")
+        }
+        val bytes = process.inputStream.readNBytes(TEST_SYSTEMD_OUTPUT_BYTES + 1)
+        check(bytes.size <= TEST_SYSTEMD_OUTPUT_BYTES) { "test systemd output exceeded its bound" }
+        check(process.exitValue() in allowedExitCodes) {
+            "test systemd command failed with exit ${process.exitValue()}: ${bytes.toString(Charsets.UTF_8)}"
+        }
+        return bytes.toString(Charsets.UTF_8)
+    }
+
+    private fun configureTestSystemdEnvironment(
+        builder: ProcessBuilder,
+        configuration: FullTreeFunctionObservationIsolationConfiguration,
+    ) {
+        builder.environment().clear()
+        builder.environment()["XDG_RUNTIME_DIR"] = configuration.systemdUserRuntimeDirectory.toString()
+        builder.environment()["DBUS_SESSION_BUS_ADDRESS"] =
+            "unix:path=${configuration.systemdUserRuntimeDirectory.resolve("bus")}"
+    }
+
+    private class SimulatedObservationLaunchFailure : RuntimeException()
+
+    private class SimulatedObservationAfterProcessStartFailure : RuntimeException()
+
+    private class SimulatedObservationCleanupFailure : RuntimeException()
+
+    private class SimulatedObservationFinalAbsenceFailure : RuntimeException()
 
     private fun availableConfiguration(
         runtimeParent: Path,
@@ -959,6 +1796,18 @@ class FullTreeFunctionObservationIsolatedFixtureRunnerTest {
     }
 
     private companion object {
+        val PREPARED_RUN_DIRECTORIES = setOf("runtime", "scratch", "tmp")
+        val LIVE_FAULT_PROTOCOL_FILES = setOf("worker.boot", "worker.failure", "supervisor.failure")
+        const val EXACT_UNIT_SHOW_PROPERTIES =
+            "--property=Id,LoadState,ActiveState,SubState,CollectMode,ControlGroup,TasksMax," +
+                "MemoryMax,MemorySwapMax,OOMPolicy,CPUQuotaPerSecUSec,KillMode,SendSIGKILL," +
+                "RuntimeMaxUSec,TimeoutStopUSec,Delegate"
+        const val TEST_SYSTEMD_OUTPUT_BYTES = 64 * 1024
+        const val TEST_CGROUP_PROCS_BYTES = 64 * 1024
+        const val TEST_FAULT_PROTOCOL_BYTES = 8 * 1024
+        const val TEST_FAILURE_CLASS_CHARS = 256
+        const val TEST_FAILURE_MESSAGE_CHARS = 1024
+        val TEST_CGROUP_ROOT = Path.of("/sys/fs/cgroup")
         const val ZERO_SHA256 =
             "0000000000000000000000000000000000000000000000000000000000000000"
         const val FROZEN_ISOLATION_CONFIGURATION_SHA256 =
