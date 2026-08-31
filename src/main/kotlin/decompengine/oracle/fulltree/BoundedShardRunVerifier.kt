@@ -119,7 +119,28 @@ object BoundedShardRunVerifier {
         expectedIndexArtifactSha256: String,
         limits: BoundedShardRunLimits = BoundedShardRunLimits(),
     ): BoundedShardRunBinding = exceptionBoundary {
-        verifyInternal(root, expectedIndexArtifactSha256, limits, SYSTEM_RUNTIME)
+        verifyInternal(root, expectedIndexArtifactSha256, limits, SYSTEM_RUNTIME, emptySet())
+    }
+
+    /**
+     * Authenticates an embedded bounded-shard tree whose owning format has a fixed set of sibling
+     * members. The additional names are implementation-owned, not accepted from a public caller;
+     * the owning validator must exact-validate membership and authenticate every permitted sibling.
+     */
+    internal fun verifyEmbedded(
+        root: Path,
+        expectedIndexArtifactSha256: String,
+        additionalRootMembers: Set<String>,
+        limits: BoundedShardRunLimits = BoundedShardRunLimits(),
+    ): BoundedShardRunBinding = exceptionBoundary {
+        if (additionalRootMembers.size > MAXIMUM_EMBEDDED_ROOT_MEMBERS || additionalRootMembers.any {
+                it.length !in 1..MAXIMUM_EMBEDDED_ROOT_MEMBER_CHARACTERS ||
+                    !it.matches(EMBEDDED_ROOT_MEMBER) || it in ROOT_MEMBERS
+            }
+        ) {
+            throw BoundedShardRunException("embedded bounded-shard root member name is invalid")
+        }
+        verifyInternal(root, expectedIndexArtifactSha256, limits, SYSTEM_RUNTIME, additionalRootMembers)
     }
 
     internal fun verifyForTesting(
@@ -128,7 +149,7 @@ object BoundedShardRunVerifier {
         limits: BoundedShardRunLimits = BoundedShardRunLimits(),
         runtime: BoundedShardVerifierRuntime,
     ): BoundedShardRunBinding = exceptionBoundary {
-        verifyInternal(root, expectedIndexArtifactSha256, limits, runtime)
+        verifyInternal(root, expectedIndexArtifactSha256, limits, runtime, emptySet())
     }
 
     private fun verifyInternal(
@@ -136,6 +157,7 @@ object BoundedShardRunVerifier {
         expectedIndexArtifactSha256: String,
         limits: BoundedShardRunLimits,
         runtime: BoundedShardVerifierRuntime,
+        additionalRootMembers: Set<String>,
     ): BoundedShardRunBinding {
         requireSha256(expectedIndexArtifactSha256, "bounded-shard index artifact")
         val budget = VerificationBudget(limits, runtime, runtime.sample("at bounded-shard verification entry"))
@@ -144,7 +166,8 @@ object BoundedShardRunVerifier {
         val root = requireTrustedDirectory(rootPath, "bounded-shard run root")
         val rootParentVersion = trustedDirectoryVersion(root.parent, "bounded-shard run parent")
         val rootVersion = trustedDirectoryVersion(root, "bounded-shard run root")
-        requireDirectMembership(root, ROOT_MEMBERS, "bounded-shard run root", budget)
+        val expectedRootMembers = ROOT_MEMBERS + additionalRootMembers
+        requireDirectMembership(root, expectedRootMembers, "bounded-shard run root", budget)
 
         val outputsDirectory = root.resolve(OUTPUTS_DIRECTORY)
         val checkpointsDirectory = root.resolve(CHECKPOINTS_DIRECTORY)
@@ -264,7 +287,7 @@ object BoundedShardRunVerifier {
             throw BoundedShardRunException("bounded-shard index leaf commitment does not reconcile")
         }
 
-        requireDirectMembership(root, ROOT_MEMBERS, "bounded-shard run root", budget)
+        requireDirectMembership(root, expectedRootMembers, "bounded-shard run root", budget)
         requireDirectMembership(outputsDirectory, outputNames, "bounded-shard outputs directory", budget)
         requireDirectMembership(checkpointsDirectory, outputNames, "bounded-shard checkpoints directory", budget)
         ensureVersion(root.parent, rootParentVersion, "bounded-shard run parent")
@@ -1102,6 +1125,7 @@ object BoundedShardRunVerifier {
         )
     }
     private val ROOT_MEMBERS = setOf(RUN_FILE, INDEX_FILE, OUTPUTS_DIRECTORY, CHECKPOINTS_DIRECTORY)
+    private val EMBEDDED_ROOT_MEMBER = Regex("[a-z0-9]+(?:[.-][a-z0-9]+)*")
     private val RUN_FIELDS = setOf("bounds", "id", "schemaVersion", "shards")
     private val BOUND_FIELDS = setOf(
         "maximumResidentBytes",
@@ -1142,4 +1166,6 @@ object BoundedShardRunVerifier {
     private const val OUTPUTS_DIRECTORY = "outputs"
     private const val CHECKPOINTS_DIRECTORY = "checkpoints"
     private const val CHECKPOINT_BYTES = 1024L * 1024L
+    private const val MAXIMUM_EMBEDDED_ROOT_MEMBERS = 8
+    private const val MAXIMUM_EMBEDDED_ROOT_MEMBER_CHARACTERS = 128
 }
