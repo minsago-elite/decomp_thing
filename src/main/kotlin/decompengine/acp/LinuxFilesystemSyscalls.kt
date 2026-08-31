@@ -85,6 +85,9 @@ internal object LinuxFilesystemSyscalls {
     /** Forcibly signals the exact process pinned by [handle]. */
     fun killProcess(handle: LinuxProcessDescriptor): Boolean = signalProcess(handle, SIGKILL)
 
+    /** Tests the exact pidfd-pinned process without signaling a later process that reused its PID. */
+    fun processExists(handle: LinuxProcessDescriptor): Boolean = signalProcess(handle, 0)
+
     /** Signals the pinned process, never a later process reusing its numeric PID. */
     private fun signalProcess(handle: LinuxProcessDescriptor, signal: Int): Boolean =
         handle.signalWhileOpen { descriptor ->

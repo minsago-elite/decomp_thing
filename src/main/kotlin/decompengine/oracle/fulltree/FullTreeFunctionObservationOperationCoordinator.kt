@@ -341,10 +341,18 @@ internal class FullTreeFunctionObservationPreparedRun private constructor(
 
 private object PREPARED_ISOLATION_AUTHORITY_CONSTRUCTION_PERMIT
 
+private enum class PreparedIsolationRunRootBorrowStage {
+    BEFORE_LAUNCH,
+    SCOPE_ATTACHMENT,
+    AFTER_SCOPE_ATTACHMENT,
+}
+
 /**
  * Content-opaque lock-retaining owner used while the isolation layer authenticates and materializes
  * the deterministic run tree. Only the outer typed isolation handle proves interior layout. This
- * history is still LEASED: no worker or unit claim exists, and failed preparation preserves residue.
+ * history is still LEASED: no durable worker or unit claim exists, and failed preparation preserves
+ * residue. Crossing the scope-attachment borrow consumes pre-launch authority even though a later
+ * live-unit proof remains mandatory before any journal phase may advance.
  */
 internal class FullTreeFunctionObservationPreparedIsolationAuthority private constructor(
     val leasedHistory: FullTreeFunctionObservationOperationHistory,
@@ -355,6 +363,8 @@ internal class FullTreeFunctionObservationPreparedIsolationAuthority private con
 ) : AutoCloseable {
     private var closed = false
     private var runRootBorrowActive = false
+    private var scopeAttachmentAttempted = false
+    private var launchBoundaryAbsenceAccepted = false
 
     init {
         if (
@@ -371,12 +381,100 @@ internal class FullTreeFunctionObservationPreparedIsolationAuthority private con
     @Synchronized
     fun requireCurrentBeforeLaunch() {
         check(!closed) { "function-observation prepared isolation is closed" }
-        requireCurrentPreparedRun(leasedHistory, diskEvidence, runRoot, journal, lease)
+        if (scopeAttachmentAttempted) {
+            coordinationFail("function-observation prepared isolation already attempted scope attachment")
+        }
+        requireCurrentPreparedRun(
+            leasedHistory,
+            diskEvidence,
+            runRoot,
+            journal,
+            lease,
+            FullTreeDiskScratchStage.BEFORE_LAUNCH,
+        )
+    }
+
+    /** Revalidates the still-LEASED journal and run root after a caller-owned attachment attempt. */
+    @Synchronized
+    fun requireCurrentAfterScopeAttachment() {
+        check(!closed) { "function-observation prepared isolation is closed" }
+        if (!scopeAttachmentAttempted) {
+            coordinationFail("function-observation prepared isolation has not attempted scope attachment")
+        }
+        if (launchBoundaryAbsenceAccepted) {
+            coordinationFail("function-observation launch boundary absence was already accepted")
+        }
+        requireCurrentPreparedRun(
+            leasedHistory,
+            diskEvidence,
+            runRoot,
+            journal,
+            lease,
+            FullTreeDiskScratchStage.AFTER_SCOPE_ATTACHMENT,
+        )
+    }
+
+    /**
+     * Revalidates the still-LEASED journal and active run after the caller independently proves
+     * cgroup absence. It does not itself inspect, kill, or certify any unit or cgroup.
+     */
+    @Synchronized
+    fun requireCurrentAfterCgroupAbsence() {
+        check(!closed) { "function-observation prepared isolation is closed" }
+        if (!scopeAttachmentAttempted) {
+            coordinationFail("function-observation prepared isolation has not attempted scope attachment")
+        }
+        requireCurrentPreparedRun(
+            leasedHistory,
+            diskEvidence,
+            runRoot,
+            journal,
+            lease,
+            FullTreeDiskScratchStage.AFTER_CGROUP_ABSENCE,
+        )
+        launchBoundaryAbsenceAccepted = true
+    }
+
+    /**
+     * Selects the only honest close-side disk stage after the caller has proved that its launch
+     * boundary is absent. A callback that was never entered remains pre-launch; entering the
+     * callback, even if it later failed, permanently requires AFTER_CGROUP_ABSENCE validation.
+     * This method does not inspect or certify process, unit, or cgroup absence itself.
+     */
+    @Synchronized
+    fun requireCurrentAfterProvedLaunchBoundaryAbsence() {
+        if (scopeAttachmentAttempted) {
+            requireCurrentAfterCgroupAbsence()
+        } else {
+            requireCurrentBeforeLaunch()
+        }
     }
 
     /** Grants one revocable pinned borrow while retaining the transferred lock hierarchy. */
     @Synchronized
     fun <T> withCurrentRunRootBeforeLaunch(
+        action: (FullTreeDiskScratchBorrowedRunRoot) -> T,
+    ): T = withCurrentRunRoot(PreparedIsolationRunRootBorrowStage.BEFORE_LAUNCH, action)
+
+    /**
+     * Retains the journal/mount lock hierarchy across one external scope-attachment attempt. The
+     * callback is entered only after pre-launch disk validation; entering it irrevocably consumes
+     * this authority's pre-launch state because an exception cannot prove that no process started.
+     * The callback result is not by itself live-unit or UNIT_ATTACHED evidence.
+     */
+    @Synchronized
+    fun <T> withCurrentRunRootForScopeAttachment(
+        action: (FullTreeDiskScratchBorrowedRunRoot) -> T,
+    ): T = withCurrentRunRoot(PreparedIsolationRunRootBorrowStage.SCOPE_ATTACHMENT, action)
+
+    /** Grants a non-owning run-root borrow after attachment while history honestly remains LEASED. */
+    @Synchronized
+    fun <T> withCurrentRunRootAfterScopeAttachment(
+        action: (FullTreeDiskScratchBorrowedRunRoot) -> T,
+    ): T = withCurrentRunRoot(PreparedIsolationRunRootBorrowStage.AFTER_SCOPE_ATTACHMENT, action)
+
+    private fun <T> withCurrentRunRoot(
+        stage: PreparedIsolationRunRootBorrowStage,
         action: (FullTreeDiskScratchBorrowedRunRoot) -> T,
     ): T {
         check(!closed) { "function-observation prepared isolation is closed" }
@@ -385,10 +483,13 @@ internal class FullTreeFunctionObservationPreparedIsolationAuthority private con
         }
         runRootBorrowActive = true
         try {
-            requireCurrentBeforeLaunch()
+            requireCurrentForBorrow(stage)
             return try {
-                lease.withCurrentOperationRunRootBeforeLaunch(runRoot) { borrowed ->
+                val invoke: (FullTreeDiskScratchBorrowedRunRoot) -> T = { borrowed ->
                     requireCurrentHistory(leasedHistory, diskEvidence, journal)
+                    if (stage == PreparedIsolationRunRootBorrowStage.SCOPE_ATTACHMENT) {
+                        scopeAttachmentAttempted = true
+                    }
                     try {
                         action(borrowed).also {
                             requireCurrentHistory(leasedHistory, diskEvidence, journal)
@@ -401,9 +502,20 @@ internal class FullTreeFunctionObservationPreparedIsolationAuthority private con
                         }
                         throw failure
                     }
-                }.also { requireCurrentBeforeLaunch() }
+                }
+                val result = when (stage) {
+                    PreparedIsolationRunRootBorrowStage.BEFORE_LAUNCH ->
+                        lease.withCurrentOperationRunRootBeforeLaunch(runRoot, invoke)
+
+                    PreparedIsolationRunRootBorrowStage.SCOPE_ATTACHMENT ->
+                        lease.withCurrentOperationRunRootForScopeAttachment(runRoot, invoke)
+
+                    PreparedIsolationRunRootBorrowStage.AFTER_SCOPE_ATTACHMENT ->
+                        lease.withCurrentOperationRunRootAfterScopeAttachment(runRoot, invoke)
+                }
+                result.also { requireCurrentAfterBorrow(stage) }
             } catch (failure: Throwable) {
-                runCatching { requireCurrentBeforeLaunch() }.exceptionOrNull()?.let { validationFailure ->
+                runCatching { requireCurrentAfterBorrow(stage) }.exceptionOrNull()?.let { validationFailure ->
                     if (validationFailure !== failure) failure.addSuppressed(validationFailure)
                 }
                 throw failure
@@ -413,14 +525,62 @@ internal class FullTreeFunctionObservationPreparedIsolationAuthority private con
         }
     }
 
+    private fun requireCurrentForBorrow(stage: PreparedIsolationRunRootBorrowStage) {
+        when (stage) {
+            PreparedIsolationRunRootBorrowStage.BEFORE_LAUNCH,
+            PreparedIsolationRunRootBorrowStage.SCOPE_ATTACHMENT,
+            -> requireCurrentBeforeLaunch()
+
+            PreparedIsolationRunRootBorrowStage.AFTER_SCOPE_ATTACHMENT ->
+                requireCurrentAfterScopeAttachment()
+        }
+    }
+
+    private fun requireCurrentAfterBorrow(stage: PreparedIsolationRunRootBorrowStage) {
+        if (
+            stage == PreparedIsolationRunRootBorrowStage.AFTER_SCOPE_ATTACHMENT ||
+            scopeAttachmentAttempted
+        ) {
+            requireCurrentAfterScopeAttachment()
+        } else {
+            requireCurrentBeforeLaunch()
+        }
+    }
+
     @Synchronized
     override fun close() {
         if (closed) return
         if (runRootBorrowActive) {
             coordinationFail("function-observation prepared isolation cannot close while its root is borrowed")
         }
+        if (scopeAttachmentAttempted && !launchBoundaryAbsenceAccepted) {
+            coordinationFail(
+                "function-observation prepared isolation cannot close before proved launch-boundary absence",
+            )
+        }
+        val validationFailure = runCatching {
+            requireCurrentPreparedRun(
+                leasedHistory,
+                diskEvidence,
+                runRoot,
+                journal,
+                lease,
+                if (scopeAttachmentAttempted) {
+                    FullTreeDiskScratchStage.AFTER_CGROUP_ABSENCE
+                } else {
+                    FullTreeDiskScratchStage.BEFORE_LAUNCH
+                },
+            )
+        }.exceptionOrNull()
         closed = true
-        closeOperationResources(lease, journal)?.let { throw it }
+        val closeFailure = closeOperationResources(lease, journal)
+        if (validationFailure != null) {
+            if (closeFailure != null && closeFailure !== validationFailure) {
+                validationFailure.addSuppressed(closeFailure)
+            }
+            throw validationFailure
+        }
+        closeFailure?.let { throw it }
     }
 
     companion object {
@@ -579,11 +739,12 @@ private fun requireCurrentPreparedRun(
     runRoot: FullTreeDiskScratchRunRoot,
     journal: FullTreeFunctionObservationOperationJournal,
     lease: FullTreeDiskScratchLease,
+    stage: FullTreeDiskScratchStage = FullTreeDiskScratchStage.BEFORE_LAUNCH,
 ) {
     requireCurrentHistory(expectedHistory, expectedEvidence, journal)
-    lease.requireCurrentOperationRunRoot(runRoot, FullTreeDiskScratchStage.BEFORE_LAUNCH)
+    lease.requireCurrentOperationRunRoot(runRoot, stage)
     requireCurrentHistory(expectedHistory, expectedEvidence, journal)
-    lease.requireCurrentOperationRunRoot(runRoot, FullTreeDiskScratchStage.BEFORE_LAUNCH)
+    lease.requireCurrentOperationRunRoot(runRoot, stage)
 }
 
 private fun closeOperationResources(

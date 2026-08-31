@@ -401,13 +401,17 @@ private class MaterializedObservationClassPath(
                 root,
                 paths,
                 expected,
+                rootFiles = emptyList(),
                 retained = null,
             )
         }
     }
 
     @Synchronized
-    fun requirePreparedLayout(runTree: ObservationRunTreeAccess) {
+    fun requirePreparedLayout(
+        runTree: ObservationRunTreeAccess,
+        rootFiles: List<String> = emptyList(),
+    ) {
         val retained = preparedLayout
             ?: isolationFail("prepared class-path layout has no authenticated inode snapshot")
         val current = runTree.withPinnedDescriptor { root ->
@@ -416,6 +420,7 @@ private class MaterializedObservationClassPath(
                 root,
                 paths,
                 expected,
+                rootFiles,
                 retained,
             )
         }
@@ -429,14 +434,15 @@ private class MaterializedObservationClassPath(
  * Authenticates one point-in-time ext4 production layout through pinned descriptors and records
  * inode identities for comparison by later point-in-time validation. Logical size and content are
  * rechecked separately because LinuxFileIdentity intentionally contains neither size nor
- * timestamps. This does not by itself exclude a cooperating same-UID writer; the launch phase must
- * revalidate inside the final borrow and keep the scratch authority unreachable by ACP.
+ * timestamps. This does not exclude a cooperating same-UID writer; deployment-level separation of
+ * the oracle and ACP principals remains mandatory for that stronger property.
  */
 private fun authenticatePreparedObservationRunLayout(
     runPath: Path,
     root: LinuxDescriptor,
     classPathPaths: List<Path>,
     classPathExpected: List<Pair<Long, String>>,
+    rootFiles: List<String>,
     retained: PreparedObservationRunLayout?,
 ): PreparedObservationRunLayout {
     if (!runPath.isAbsolute || runPath.normalize() != runPath || runPath.parent == null) {
@@ -444,6 +450,9 @@ private fun authenticatePreparedObservationRunLayout(
     }
     if (classPathPaths.size != classPathExpected.size) {
         isolationFail("prepared function-observation class-path identity count differs")
+    }
+    if (rootFiles.isNotEmpty() && rootFiles != listOf(BOOT_FILE)) {
+        isolationFail("prepared function-observation root-file allowance is invalid")
     }
     val classPathNames = classPathExpected.indices.map { index -> "classpath-$index.jar" }
     val expectedPaths = classPathNames.map { name ->
@@ -469,7 +478,7 @@ private fun authenticatePreparedObservationRunLayout(
     }
     requireExactPreparedNames(
         root,
-        listOf(RUNTIME_DIRECTORY, SCRATCH_DIRECTORY, TEMP_DIRECTORY),
+        listOf(RUNTIME_DIRECTORY, SCRATCH_DIRECTORY, TEMP_DIRECTORY) + rootFiles,
         "run root",
     )
 
@@ -556,7 +565,7 @@ private fun authenticatePreparedObservationRunLayout(
                 }
                 requireExactPreparedNames(
                     root,
-                    listOf(RUNTIME_DIRECTORY, SCRATCH_DIRECTORY, TEMP_DIRECTORY),
+                    listOf(RUNTIME_DIRECTORY, SCRATCH_DIRECTORY, TEMP_DIRECTORY) + rootFiles,
                     "run root after validation",
                 )
                 val rootAfter = LinuxFilesystemSyscalls.identity(root.fd)
@@ -619,6 +628,18 @@ private fun requirePreparedClassPathIdentity(
     ) isolationFail("prepared class-path entry is outside the exact private layout: $name")
 }
 
+private fun requireObservationBootLayout(
+    materializedClassPath: MaterializedObservationClassPath,
+    runTree: ObservationRunTreeAccess,
+    nonce: String,
+) {
+    materializedClassPath.requirePreparedLayout(runTree, listOf(BOOT_FILE))
+    val boot = runTree.withPinnedDescriptor { root -> protocolFileOrNull(root, BOOT_FILE) }
+        ?: isolationFail("isolated BOOT record is absent")
+    if (boot != protocol("BOOT", nonce)) isolationFail("isolated BOOT record is invalid")
+    materializedClassPath.requirePreparedLayout(runTree, listOf(BOOT_FILE))
+}
+
 internal data class FullTreeFunctionObservationCgroupReceipt(
     val peakResidentBytes: Long,
     val cpuNanos: Long,
@@ -636,12 +657,11 @@ internal data class FullTreeFunctionObservationIsolatedFixturePublication(
 /**
  * Production pre-launch composition for one durable LEASED operation.
  *
- * This stage authenticates the journal-bound inputs and runtime, transfers the linear journal/disk
- * authority before this layer's first run-tree mutation, initializes the deterministic pinned run
- * root from an exact-empty descriptor view, and snapshots the worker class path. It does not pin the
- * launch executables, contact systemd, launch a process, append UNIT_ATTACHED, publish output, clean
- * residue, or authorize lease release. The supplied prepared handle is consumed on success and on
- * every failure; failures preserve residue.
+ * [prepareBeforeLaunch] authenticates the journal-bound inputs and runtime, transfers the linear
+ * journal/disk authority before this layer's first run-tree mutation, initializes the deterministic
+ * pinned run root, and snapshots the worker class path. [launchToBoot] may then pin the launch
+ * boundary and create the deterministic live scope only through BOOT. Neither operation appends
+ * UNIT_ATTACHED, publishes output, removes residue, or authorizes lease release.
  */
 internal object FullTreeFunctionObservationIsolatedOperationRunner {
     fun prepareBeforeLaunch(
@@ -660,6 +680,10 @@ internal object FullTreeFunctionObservationIsolatedOperationRunner {
             output,
             configuration,
         )
+
+    fun launchToBoot(
+        preparedIsolation: FullTreeFunctionObservationPreparedIsolation,
+    ): FullTreeFunctionObservationBootedIsolation = preparedIsolation.launchToBoot()
 }
 
 /**
@@ -683,6 +707,7 @@ internal class FullTreeFunctionObservationPreparedIsolation private constructor(
     val shardId: String = authority.leasedHistory.binding.shardId
     private var closed = false
     private var operationActive = false
+    private var cleanupBoundary: TrustedObservationBoundary? = null
 
     init {
         requireCurrentBeforeLaunch()
@@ -697,35 +722,42 @@ internal class FullTreeFunctionObservationPreparedIsolation private constructor(
         }
         operationActive = true
         try {
-            val binding = authority.leasedHistory.binding
-            FullTreeScopeControl.validate(authenticatedScope)
-            requireFullTreeObservationDiskClosureCompatibility(binding, resources.cleanupLimits)
-            requirePreparedIsolationBinding(
-                binding,
-                paths,
-                runDirectory,
-                configuration,
-                authenticatedScope,
-                inputGuards,
-                authenticatedInputs,
-            )
-            runtime.verify("while prepared before launch")
-            inputGuards.verifyCurrent("while prepared before launch")
-            authority.withCurrentRunRootBeforeLaunch { borrowed ->
-                if (borrowed.path != runDirectory) {
-                    isolationFail("prepared function-observation run-root locator changed")
-                }
-                BorrowedObservationRunTree.access(borrowed).use { runTree ->
-                    materializedClassPath.requirePreparedLayout(runTree)
-                }
-            }
-            requirePreparedIsolationOutputAbsent(paths.output)
-            runtime.verify("after prepared run-tree revalidation")
-            inputGuards.verifyCurrent("after prepared run-tree revalidation")
-            authority.requireCurrentBeforeLaunch()
+            requireCurrentBeforeLaunchInternal()
         } finally {
             operationActive = false
         }
+    }
+
+    private fun requireCurrentBeforeLaunchInternal() {
+        if (cleanupBoundary != null) {
+            isolationFail("function-observation launch cleanup remains unresolved")
+        }
+        val binding = authority.leasedHistory.binding
+        FullTreeScopeControl.validate(authenticatedScope)
+        requireFullTreeObservationDiskClosureCompatibility(binding, resources.cleanupLimits)
+        requirePreparedIsolationBinding(
+            binding,
+            paths,
+            runDirectory,
+            configuration,
+            authenticatedScope,
+            inputGuards,
+            authenticatedInputs,
+        )
+        runtime.verify("while prepared before launch")
+        inputGuards.verifyCurrent("while prepared before launch")
+        authority.withCurrentRunRootBeforeLaunch { borrowed ->
+            if (borrowed.path != runDirectory) {
+                isolationFail("prepared function-observation run-root locator changed")
+            }
+            BorrowedObservationRunTree.access(borrowed).use { runTree ->
+                materializedClassPath.requirePreparedLayout(runTree)
+            }
+        }
+        requirePreparedIsolationOutputAbsent(paths.output)
+        runtime.verify("after prepared run-tree revalidation")
+        inputGuards.verifyCurrent("after prepared run-tree revalidation")
+        authority.requireCurrentBeforeLaunch()
     }
 
     @Synchronized
@@ -734,6 +766,9 @@ internal class FullTreeFunctionObservationPreparedIsolation private constructor(
         if (operationActive) {
             isolationFail("function-observation prepared isolation cannot close during an active operation")
         }
+        cleanupBoundary?.closeAndProveUnitAbsent(authority.leasedHistory.binding.unitName)
+        authority.requireCurrentAfterProvedLaunchBoundaryAbsence()
+        cleanupBoundary = null
         closed = true
         closePreparedIsolationResources(
             inputGuards = inputGuards,
@@ -742,6 +777,120 @@ internal class FullTreeFunctionObservationPreparedIsolation private constructor(
             untransferred = null,
             priorFailure = null,
         )?.let { throw it }
+    }
+
+    @Synchronized
+    internal fun launchToBoot(): FullTreeFunctionObservationBootedIsolation {
+        check(!closed) { "function-observation prepared isolation is closed" }
+        if (operationActive) {
+            isolationFail("function-observation prepared isolation operation is already active")
+        }
+        if (cleanupBoundary != null) {
+            isolationFail("function-observation launch cleanup must complete before another operation")
+        }
+        operationActive = true
+        var boundary: TrustedObservationBoundary? = null
+        try {
+            requireCurrentBeforeLaunchInternal()
+            val binding = authority.leasedHistory.binding
+            val openedBoundary = TrustedObservationBoundary(configuration, runtime, materializedClassPath)
+            boundary = openedBoundary
+            cleanupBoundary = openedBoundary
+            val request = IsolatedWorkerRequest(
+                nonce = binding.bindingSha256,
+                paths = paths,
+                shardId = binding.shardId,
+                runDirectory = runDirectory,
+            )
+            val managed = authority.withCurrentRunRootForScopeAttachment { borrowed ->
+                if (borrowed.path != runDirectory) {
+                    isolationFail("attached function-observation run-root locator changed")
+                }
+                BorrowedObservationRunTree.access(borrowed).use { runTree ->
+                    fun requireFinalPreparedState(label: String) {
+                        FullTreeScopeControl.validate(authenticatedScope)
+                        requirePreparedIsolationBinding(
+                            binding,
+                            paths,
+                            runDirectory,
+                            configuration,
+                            authenticatedScope,
+                            inputGuards,
+                            authenticatedInputs,
+                        )
+                        runtime.verify(label)
+                        inputGuards.verifyCurrent(label)
+                        materializedClassPath.requirePreparedLayout(runTree)
+                        requirePreparedIsolationOutputAbsent(paths.output)
+                    }
+                    requireFinalPreparedState("before isolated scope attachment")
+                    val unit = openedBoundary.launch(
+                        unitName = binding.unitName,
+                        request = request,
+                        resources = resources,
+                        immediatelyBeforeStart = {
+                            requireFinalPreparedState("immediately before isolated process start")
+                        },
+                    )
+                    unit.awaitBoot(binding.bindingSha256, runTree)
+                    unit.verifyLiveContainment(resources)
+                    requireObservationBootLayout(
+                        materializedClassPath,
+                        runTree,
+                        binding.bindingSha256,
+                    )
+                    runtime.verify("at isolated BOOT")
+                    inputGuards.verifyCurrent("at isolated BOOT")
+                    requirePreparedIsolationOutputAbsent(paths.output)
+                    unit
+                }
+            }
+            authority.requireCurrentAfterScopeAttachment()
+            openedBoundary.verifyLiveOperation()
+            runtime.verify("after isolated BOOT attachment")
+            inputGuards.verifyCurrent("after isolated BOOT attachment")
+            val booted = createBootedObservationIsolation(
+                paths,
+                runDirectory,
+                configuration,
+                authenticatedScope,
+                authenticatedInputs,
+                resources,
+                runtime,
+                inputGuards,
+                materializedClassPath,
+                authority,
+                openedBoundary,
+                managed,
+            )
+            cleanupBoundary = null
+            boundary = null
+            closed = true
+            return booted
+        } catch (failure: Throwable) {
+            val openedBoundary = boundary
+            val cleanupFailure = runCatching {
+                openedBoundary?.closeAndProveUnitAbsent(authority.leasedHistory.binding.unitName)
+                authority.requireCurrentAfterProvedLaunchBoundaryAbsence()
+            }.exceptionOrNull()
+            if (cleanupFailure != null) {
+                if (cleanupFailure !== failure) failure.addSuppressed(cleanupFailure)
+                cleanupBoundary = openedBoundary
+                throw failure
+            }
+            cleanupBoundary = null
+            closed = true
+            closePreparedIsolationResources(
+                inputGuards = inputGuards,
+                runtime = runtime,
+                authority = authority,
+                untransferred = null,
+                priorFailure = failure,
+            )
+            throw failure
+        } finally {
+            operationActive = false
+        }
     }
 
     companion object {
@@ -855,6 +1004,165 @@ internal class FullTreeFunctionObservationPreparedIsolation private constructor(
         }
     }
 }
+
+private data class BootedObservationIsolationOwnership(
+    val paths: IsolatedObservationPaths,
+    val runDirectory: Path,
+    val configuration: FullTreeFunctionObservationIsolationConfiguration,
+    val authenticatedScope: AuthenticatedFullTreeScope,
+    val authenticatedInputs: FullTreeFunctionObservationAuthenticatedInputs,
+    val resources: IsolatedObservationResources,
+    val runtime: AuthenticatedObservationRuntime,
+    val inputGuards: ParentObservationInputGuards,
+    val materializedClassPath: MaterializedObservationClassPath,
+    val authority: FullTreeFunctionObservationPreparedIsolationAuthority,
+    val boundary: TrustedObservationBoundary,
+    val unit: ManagedObservationUnit,
+)
+
+private object BOOTED_OBSERVATION_ISOLATION_CONSTRUCTION_PERMIT
+
+/**
+ * Ephemeral Kotlin-owned point-in-time BOOT containment observation for one deterministic live
+ * scope. The worker is blocked before START, the journal deliberately remains LEASED, and this type
+ * grants no truth, publication, recovery-adoption, release, or same-UID-writer-exclusion authority.
+ * Close proves exact unit/cgroup/pidfd absence before it releases the journal and disk locks; an
+ * unproved cleanup retains this owner and its authorities for cleanup retry.
+ */
+internal class FullTreeFunctionObservationBootedIsolation : AutoCloseable {
+    private val ownership: BootedObservationIsolationOwnership
+    val operationId: String
+    val shardId: String
+    val unitName: String
+    private val bindingSha256: String
+    private var closed = false
+    private var operationActive = false
+
+    internal constructor(opaqueOwnership: Any, constructionPermit: Any) {
+        check(constructionPermit === BOOTED_OBSERVATION_ISOLATION_CONSTRUCTION_PERMIT) {
+            "booted function-observation isolation can only follow proved live attachment"
+        }
+        ownership = opaqueOwnership as? BootedObservationIsolationOwnership
+            ?: error("booted function-observation isolation ownership is invalid")
+        val binding = ownership.authority.leasedHistory.binding
+        operationId = binding.operationId
+        shardId = binding.shardId
+        unitName = binding.unitName
+        bindingSha256 = binding.bindingSha256
+        requireCurrentAtBoot()
+    }
+
+    @Synchronized
+    fun requireCurrentAtBoot() {
+        check(!closed) { "function-observation BOOT isolation is closed" }
+        if (operationActive) {
+            isolationFail("function-observation BOOT isolation operation is already active")
+        }
+        operationActive = true
+        try {
+            val binding = ownership.authority.leasedHistory.binding
+            if (
+                binding.operationId != operationId || binding.shardId != shardId ||
+                binding.unitName != unitName || binding.bindingSha256 != bindingSha256
+            ) isolationFail("function-observation BOOT identity changed")
+            FullTreeScopeControl.validate(ownership.authenticatedScope)
+            requireFullTreeObservationDiskClosureCompatibility(binding, ownership.resources.cleanupLimits)
+            requirePreparedIsolationBinding(
+                binding,
+                ownership.paths,
+                ownership.runDirectory,
+                ownership.configuration,
+                ownership.authenticatedScope,
+                ownership.inputGuards,
+                ownership.authenticatedInputs,
+            )
+            ownership.runtime.verify("while isolated worker is at BOOT")
+            ownership.inputGuards.verifyCurrent("while isolated worker is at BOOT")
+            ownership.authority.requireCurrentAfterScopeAttachment()
+            ownership.boundary.verifyLiveOperation()
+            ownership.authority.withCurrentRunRootAfterScopeAttachment { borrowed ->
+                if (borrowed.path != ownership.runDirectory) {
+                    isolationFail("BOOT function-observation run-root locator changed")
+                }
+                BorrowedObservationRunTree.access(borrowed).use { runTree ->
+                    requireObservationBootLayout(
+                        ownership.materializedClassPath,
+                        runTree,
+                        binding.bindingSha256,
+                    )
+                    ownership.unit.awaitBoot(binding.bindingSha256, runTree)
+                    ownership.unit.verifyLiveContainment(ownership.resources)
+                    requireObservationBootLayout(
+                        ownership.materializedClassPath,
+                        runTree,
+                        binding.bindingSha256,
+                    )
+                }
+            }
+            requirePreparedIsolationOutputAbsent(ownership.paths.output)
+            ownership.boundary.verifyLiveOperation()
+            ownership.runtime.verify("after isolated BOOT revalidation")
+            ownership.inputGuards.verifyCurrent("after isolated BOOT revalidation")
+            ownership.authority.requireCurrentAfterScopeAttachment()
+        } finally {
+            operationActive = false
+        }
+    }
+
+    @Synchronized
+    override fun close() {
+        if (closed) return
+        if (operationActive) {
+            isolationFail("function-observation BOOT isolation cannot close during an active operation")
+        }
+        operationActive = true
+        try {
+            ownership.boundary.close()
+            ownership.authority.requireCurrentAfterCgroupAbsence()
+            closed = true
+            closePreparedIsolationResources(
+                inputGuards = ownership.inputGuards,
+                runtime = ownership.runtime,
+                authority = ownership.authority,
+                untransferred = null,
+                priorFailure = null,
+            )?.let { throw it }
+        } finally {
+            operationActive = false
+        }
+    }
+}
+
+private fun createBootedObservationIsolation(
+    paths: IsolatedObservationPaths,
+    runDirectory: Path,
+    configuration: FullTreeFunctionObservationIsolationConfiguration,
+    authenticatedScope: AuthenticatedFullTreeScope,
+    authenticatedInputs: FullTreeFunctionObservationAuthenticatedInputs,
+    resources: IsolatedObservationResources,
+    runtime: AuthenticatedObservationRuntime,
+    inputGuards: ParentObservationInputGuards,
+    materializedClassPath: MaterializedObservationClassPath,
+    authority: FullTreeFunctionObservationPreparedIsolationAuthority,
+    boundary: TrustedObservationBoundary,
+    unit: ManagedObservationUnit,
+): FullTreeFunctionObservationBootedIsolation = FullTreeFunctionObservationBootedIsolation(
+    BootedObservationIsolationOwnership(
+        paths,
+        runDirectory,
+        configuration,
+        authenticatedScope,
+        authenticatedInputs,
+        resources,
+        runtime,
+        inputGuards,
+        materializedClassPath,
+        authority,
+        boundary,
+        unit,
+    ),
+    BOOTED_OBSERVATION_ISOLATION_CONSTRUCTION_PERMIT,
+)
 
 /**
  * Parent-owned, non-authoritative containment fixture for one function-observation shard.
@@ -1015,7 +1323,7 @@ internal object FullTreeFunctionObservationIsolatedFixtureRunner {
     }
 }
 
-/** Process entry point used only inside [FullTreeFunctionObservationIsolatedFixtureRunner]'s boundary. */
+/** Process entry point used only inside the Kotlin-owned fixture or production isolation boundary. */
 internal object FullTreeFunctionObservationIsolatedWorker {
     @JvmStatic
     fun main(arguments: Array<String>) {
@@ -1967,6 +2275,41 @@ internal class BorrowedObservationRunTree private constructor(
     }
 }
 
+private class PendingObservationLaunch(
+    private val controller: ObservationSystemdController,
+) : AutoCloseable {
+    val unitName: String
+        get() = controller.unitName
+    var process: Process? = null
+    var processHandle: decompengine.acp.LinuxProcessDescriptor? = null
+    var cleaned = false
+        private set
+    private var launchAttempted = false
+
+    fun retainStartedProcess(started: Process) {
+        check(!launchAttempted && process == null && processHandle == null) {
+            "isolated process launch attempt is not linear"
+        }
+        launchAttempted = true
+        process = started
+    }
+
+    override fun close() {
+        if (cleaned) return
+        if (launchAttempted) {
+            controller.killStopAndRequireAbsent(
+                process = process,
+                processHandle = processHandle,
+            )
+        } else {
+            controller.requireAbsent()
+        }
+        processHandle?.close()
+        processHandle = null
+        cleaned = true
+    }
+}
+
 private class TrustedObservationBoundary(
     private val configuration: FullTreeFunctionObservationIsolationConfiguration,
     private val authenticatedRuntime: AuthenticatedObservationRuntime,
@@ -1999,6 +2342,8 @@ private class TrustedObservationBoundary(
     )
     private val bus = PinnedSystemdBusEndpoint.pin(configuration.systemdUserRuntimeDirectory)
     private var active: ManagedObservationUnit? = null
+    private var pendingLaunch: PendingObservationLaunch? = null
+    private var retainedUnitName: String? = null
 
     init {
         probeBoundaries()
@@ -2008,19 +2353,57 @@ private class TrustedObservationBoundary(
         request: IsolatedWorkerRequest,
         resources: IsolatedObservationResources,
     ): ManagedObservationUnit {
-        check(active == null) { "one isolation boundary may launch only one worker" }
-        requireUnchanged()
-        authenticatedRuntime.verify("at isolated boundary launch")
-        materializedClassPath.verify("at isolated boundary launch")
         val unitName = "decomp-oracle-function-${UUID.randomUUID()}.scope"
+        check(unitName.matches(FIXTURE_OBSERVATION_UNIT_NAME))
+        return launchValidated(
+            unitName = unitName,
+            request = request,
+            resources = resources,
+            immediatelyBeforeStart = {},
+        )
+    }
+
+    fun launch(
+        unitName: String,
+        request: IsolatedWorkerRequest,
+        resources: IsolatedObservationResources,
+        immediatelyBeforeStart: () -> Unit,
+    ): ManagedObservationUnit {
+        if (!unitName.matches(PRODUCTION_OBSERVATION_UNIT_NAME)) {
+            isolationFail("deterministic isolated systemd unit name is not canonical")
+        }
+        return launchValidated(unitName, request, resources, immediatelyBeforeStart)
+    }
+
+    private fun launchValidated(
+        unitName: String,
+        request: IsolatedWorkerRequest,
+        resources: IsolatedObservationResources,
+        immediatelyBeforeStart: () -> Unit,
+    ): ManagedObservationUnit {
+        check(active == null && pendingLaunch == null) {
+            "one isolation boundary may launch only one worker"
+        }
+        retainUnitName(unitName)
         val controller = ObservationSystemdController(inspector, bus, unitName)
-        controller.requireAbsent()
-        val worker = buildWorkerCommand(request, resources)
-        val scoped = buildScopeCommand(unitName, resources, worker)
-        val command = buildResourceLimitedCommand(resources, scoped)
-        var process: Process? = null
-        var processHandle: decompengine.acp.LinuxProcessDescriptor? = null
+        val pending = PendingObservationLaunch(controller)
+        pendingLaunch = pending
         try {
+            requireUnchanged()
+            authenticatedRuntime.verify("at isolated boundary launch")
+            materializedClassPath.verify("at isolated boundary launch")
+            controller.requireAbsent()
+            val worker = buildWorkerCommand(request, resources)
+            val scoped = buildScopeCommand(unitName, resources, worker)
+            val command = buildResourceLimitedCommand(resources, scoped)
+            requireUnchanged()
+            authenticatedRuntime.verify("immediately before isolated process start")
+            materializedClassPath.verify("immediately before isolated process start")
+            immediatelyBeforeStart()
+            authenticatedRuntime.verify("at final isolated process start gate")
+            materializedClassPath.verify("at final isolated process start gate")
+            controller.requireAbsent()
+            requireUnchanged()
             val started = ProcessBuilder(command)
                 .redirectInput(ProcessBuilder.Redirect.PIPE)
                 .redirectOutput(ProcessBuilder.Redirect.DISCARD)
@@ -2030,12 +2413,12 @@ private class TrustedObservationBoundary(
                     builder.environment().putAll(bus.controlEnvironment)
                 }
                 .start()
-            process = started
+            pending.retainStartedProcess(started)
             val pinnedProcess = LinuxFilesystemSyscalls.openProcessHandle(started.pid())
-            processHandle = pinnedProcess
+            pending.processHandle = pinnedProcess
             if (!started.isAlive) isolationFail("isolated local scope process exited before pidfd pinning")
             started.outputStream.close()
-            val managed = ManagedObservationUnit(
+            val managedUnit = ManagedObservationUnit(
                 controller,
                 request.runDirectory,
                 request.nonce,
@@ -2046,16 +2429,18 @@ private class TrustedObservationBoundary(
                 pinnedProcess,
                 configuration.systemdUserRuntimeDirectory,
             )
-            processHandle = null
-            managed.awaitScopeAttached()
+            active = managedUnit
+            pending.processHandle = null
+            pendingLaunch = null
+            managedUnit.awaitScopeAttached()
             requireUnchanged()
             authenticatedRuntime.verify("immediately after isolated scope attachment")
             materializedClassPath.verify("immediately after isolated scope attachment")
-            return managed.also { active = it }
+            return managedUnit
         } catch (failure: Throwable) {
-            runCatching { controller.killStopAndRequireAbsent(null, process, processHandle) }
-                .exceptionOrNull()?.let(failure::addSuppressed)
-            runCatching { processHandle?.close() }.exceptionOrNull()?.let(failure::addSuppressed)
+            runCatching { close() }.exceptionOrNull()?.let { cleanupFailure ->
+                if (cleanupFailure !== failure) failure.addSuppressed(cleanupFailure)
+            }
             throw failure
         }
     }
@@ -2267,9 +2652,54 @@ private class TrustedObservationBoundary(
         authenticatedRuntime.verify("before parent publication")
     }
 
+    fun verifyLiveOperation() {
+        requireUnchanged()
+        authenticatedRuntime.verify("while isolated operation is live")
+        materializedClassPath.verify("while isolated operation is live")
+    }
+
+    fun closeAndProveUnitAbsent(unitName: String) {
+        if (!unitName.matches(PRODUCTION_OBSERVATION_UNIT_NAME)) {
+            isolationFail("cleanup unit name is not one deterministic operation unit")
+        }
+        retainUnitName(unitName)
+        active?.let { unit ->
+            if (unit.unitName != unitName) isolationFail("live cleanup unit identity changed")
+        }
+        pendingLaunch?.let { pending ->
+            if (pending.unitName != unitName) isolationFail("pending cleanup unit identity changed")
+        }
+        if (active == null && pendingLaunch == null) {
+            pendingLaunch = PendingObservationLaunch(
+                ObservationSystemdController(inspector, bus, unitName),
+            )
+        }
+        close()
+    }
+
     override fun close() {
         val unit = active
         if (unit != null && !unit.cleaned) unit.close()
+        pendingLaunch?.let { pending ->
+            pending.close()
+            pendingLaunch = null
+        }
+        retainedUnitName?.let { unitName ->
+            val finalAbsence = PendingObservationLaunch(
+                ObservationSystemdController(inspector, bus, unitName),
+            )
+            pendingLaunch = finalAbsence
+            finalAbsence.close()
+            pendingLaunch = null
+        }
+    }
+
+    private fun retainUnitName(unitName: String) {
+        val retained = retainedUnitName
+        if (retained != null && retained != unitName) {
+            isolationFail("isolation boundary unit identity changed")
+        }
+        retainedUnitName = unitName
     }
 }
 
@@ -2283,8 +2713,8 @@ private class ObservationSystemdController(
     ).output.trim()
 
     fun requireAbsent() {
-        if (show()["LoadState"] != "not-found") {
-            isolationFail("random isolated systemd unit name is already in use")
+        if (show()["LoadState"] != "not-found" || findObservationCgroupsForUnit(unitName).isNotEmpty()) {
+            isolationFail("isolated systemd unit or cgroup name is already in use")
         }
     }
 
@@ -2353,7 +2783,10 @@ private class ObservationSystemdController(
             runCatching { process?.waitFor(SYSTEMD_POLL_MILLIS, TimeUnit.MILLISECONDS) }
             try {
                 val absent = show()["LoadState"] == "not-found"
-                val candidates = exactCgroup?.let(::listOf) ?: findObservationCgroupsForUnit(unitName)
+                val candidates = buildSet {
+                    exactCgroup?.let(::add)
+                    addAll(findObservationCgroupsForUnit(unitName))
+                }
                 val cgroupAbsent = candidates.none { Files.exists(it, LinkOption.NOFOLLOW_LINKS) }
                 if (absent && cgroupAbsent && process?.isAlive != true) return
             } catch (failure: Throwable) {
@@ -2459,9 +2892,12 @@ private class ManagedObservationUnit(
     private val processHandle: decompengine.acp.LinuxProcessDescriptor,
     private val systemdUserRuntimeDirectory: Path,
 ) : AutoCloseable {
+    val unitName: String
+        get() = controller.unitName
     private var cgroupPath: Path? = null
     private val mainPid: Long = process.pid()
     private var keeperPids: Set<Long>? = null
+    private var bootProcessHandles: Map<Long, decompengine.acp.LinuxProcessDescriptor>? = null
     private var frozen = false
     var cleaned: Boolean = false
         private set
@@ -2490,19 +2926,22 @@ private class ManagedObservationUnit(
         )
     }
 
-    fun awaitBoot(expectedNonce: String) {
+    fun awaitBoot(
+        expectedNonce: String,
+        runTree: ObservationRunTreeAccess? = null,
+    ) {
         check(expectedNonce == nonce)
         val deadline = deadlineAfter(WORKER_START_TIMEOUT, "isolated worker bootstrap")
         var nextStatus = 0L
         while (System.nanoTime() < deadline) {
-            protocolFileOrNull(runDirectory, BOOT_FILE)?.let { content ->
+            bootProtocolFileOrNull(runTree, BOOT_FILE)?.let { content ->
                 if (content != protocol("BOOT", nonce)) isolationFail("isolated worker BOOT proof is invalid")
                 return
             }
-            protocolFileOrNull(runDirectory, FAILURE_FILE)?.let {
+            bootProtocolFileOrNull(runTree, FAILURE_FILE)?.let {
                 isolationFail("isolated worker failed before its BOOT proof")
             }
-            protocolFileOrNull(runDirectory, SUPERVISOR_FAILURE_FILE)?.let {
+            bootProtocolFileOrNull(runTree, SUPERVISOR_FAILURE_FILE)?.let {
                 isolationFail("isolated supervisor failed before the worker BOOT proof")
             }
             val now = System.nanoTime()
@@ -2515,6 +2954,15 @@ private class ManagedObservationUnit(
         isolationFail("isolated worker did not reach its BOOT barrier")
     }
 
+    private fun bootProtocolFileOrNull(
+        runTree: ObservationRunTreeAccess?,
+        name: String,
+    ): String? = if (runTree == null) {
+        protocolFileOrNull(runDirectory, name)
+    } else {
+        runTree.withPinnedDescriptor { root -> protocolFileOrNull(root, name) }
+    }
+
     fun verifyLiveContainment(expected: IsolatedObservationResources) {
         val properties = controller.show()
         requireLiveProperties(properties, expected)
@@ -2522,16 +2970,99 @@ private class ManagedObservationUnit(
         val cgroup = requireCgroupPath(controlGroup)
         requireLocalLeader(cgroup)
         requireActualControllers(cgroup, expected)
-        val javaProcesses = readCgroupProcesses(cgroup).filter { pid ->
+        val processes = requireBootProcesses(cgroup)
+        retainBootProcessHandles(cgroup, processes)
+        if (requireBootProcesses(cgroup) != processes) {
+            isolationFail("isolated BOOT process inventory changed after pidfd pinning")
+        }
+        requireRetainedBootProcessesLive(processes)
+    }
+
+    private fun requireBootProcesses(cgroup: Path): Set<Long> {
+        val before = readCgroupProcesses(cgroup)
+        if (before.size != BOOT_PROCESS_COUNT || mainPid !in before) {
+            isolationFail("isolated BOOT cgroup does not contain exactly four processes and its leader")
+        }
+        val processIdentities = mutableMapOf<Long, ObservationProcessIdentity>()
+        val bubblewrapProcesses = mutableListOf<Long>()
+        val javaProcesses = mutableListOf<Long>()
+        before.sorted().forEach { pid ->
             LinuxFilesystemSyscalls.openProcessExecutable(pid).use { executable ->
-                executable.identity.key.device == java.identity.device &&
-                    executable.identity.key.inode == java.identity.inode
+                val identity = executable.identity
+                val isJava = identity.key.device == java.identity.device &&
+                    identity.key.inode == java.identity.inode
+                val isBubblewrap = identity.key.device == bubblewrap.identity.device &&
+                    identity.key.inode == bubblewrap.identity.inode
+                when {
+                    isJava -> {
+                        javaProcesses += pid
+                        requireNoHostSessionAuthority(pid)
+                    }
+
+                    isBubblewrap -> bubblewrapProcesses += pid
+                    else -> isolationFail("isolated BOOT cgroup contains an unexpected executable")
+                }
             }
+            processIdentities[pid] = readProcessIdentity(pid)
         }
-        if (javaProcesses.size != 2) {
-            isolationFail("isolated startup does not contain exactly the supervisor and worker JVMs")
+        if (bubblewrapProcesses.size != 2 || javaProcesses.size != 2 || mainPid !in bubblewrapProcesses) {
+            isolationFail("isolated BOOT cgroup lacks its exact bubblewrap and JVM population")
         }
-        javaProcesses.forEach(::requireNoHostSessionAuthority)
+        val outer = mainPid
+        val inner = bubblewrapProcesses.single { it != outer }
+        val outerIdentity = processIdentities.getValue(outer)
+        val innerIdentity = processIdentities.getValue(inner)
+        if (
+            outerIdentity.namespacePids != listOf(outer) ||
+            innerIdentity.parentPid != outer || innerIdentity.namespacePids != listOf(inner, 1L)
+        ) isolationFail("isolated BOOT bubblewrap processes have the wrong PID-namespace chain")
+        val supervisor = javaProcesses.singleOrNull { pid ->
+            processIdentities.getValue(pid).parentPid == inner
+        } ?: isolationFail("isolated BOOT cgroup lacks one supervisor JVM")
+        val worker = javaProcesses.single { it != supervisor }
+        val supervisorIdentity = processIdentities.getValue(supervisor)
+        val workerIdentity = processIdentities.getValue(worker)
+        val supervisorNamespacePid = supervisorIdentity.namespacePids.getOrNull(1)
+        val workerNamespacePid = workerIdentity.namespacePids.getOrNull(1)
+        if (
+            supervisorIdentity.namespacePids.size != 2 || workerIdentity.namespacePids.size != 2 ||
+            supervisorNamespacePid == null || workerNamespacePid == null ||
+            supervisorNamespacePid <= 1L || workerNamespacePid <= 1L ||
+            supervisorNamespacePid == workerNamespacePid || workerIdentity.parentPid != supervisor
+        ) isolationFail("isolated BOOT JVMs have the wrong parent or PID-namespace chain")
+        val after = readCgroupProcesses(cgroup)
+        if (after != before) isolationFail("isolated BOOT process inventory changed while verified")
+        return before
+    }
+
+    private fun retainBootProcessHandles(cgroup: Path, processes: Set<Long>) {
+        val retained = bootProcessHandles
+        if (retained != null) {
+            requireRetainedBootProcessesLive(processes)
+            return
+        }
+        val opened = linkedMapOf<Long, decompengine.acp.LinuxProcessDescriptor>()
+        try {
+            processes.sorted().forEach { pid ->
+                opened[pid] = LinuxFilesystemSyscalls.openProcessHandle(pid)
+            }
+            if (
+                opened.values.any { !LinuxFilesystemSyscalls.processExists(it) } ||
+                readCgroupProcesses(cgroup) != processes
+            ) isolationFail("isolated BOOT process inventory changed during pidfd pinning")
+            bootProcessHandles = opened.toMap()
+        } catch (failure: Throwable) {
+            opened.values.forEach { handle -> runCatching { handle.close() } }
+            throw failure
+        }
+    }
+
+    private fun requireRetainedBootProcessesLive(processes: Set<Long>) {
+        val retained = bootProcessHandles
+            ?: isolationFail("isolated BOOT pidfd inventory is absent")
+        if (retained.keys != processes || retained.values.any { !LinuxFilesystemSyscalls.processExists(it) }) {
+            isolationFail("isolated BOOT pidfd inventory is no longer live")
+        }
     }
 
     private fun requireActualControllers(cgroup: Path, expected: IsolatedObservationResources) {
@@ -2900,16 +3431,18 @@ private class ManagedObservationUnit(
     fun stopAndProveRemoved() {
         if (cleaned) return
         controller.killStopAndRequireAbsent(cgroupPath, process, processHandle)
+        val retained = bootProcessHandles
+        if (retained != null && retained.values.any { LinuxFilesystemSyscalls.processExists(it) }) {
+            isolationFail("isolated BOOT pidfd remained live after unit and cgroup absence")
+        }
+        retained?.values?.forEach { it.close() }
+        bootProcessHandles = null
         processHandle.close()
         cleaned = true
     }
 
     override fun close() {
-        if (!cleaned) {
-            controller.killStopAndRequireAbsent(cgroupPath, process, processHandle)
-            processHandle.close()
-            cleaned = true
-        }
+        stopAndProveRemoved()
     }
 
     private fun requireUnitStillRunning(properties: Map<String, String>, label: String) {
@@ -3600,7 +4133,10 @@ private fun syntheticDestinationParents(destinations: Collection<Path>): List<Pa
 
 /** Bounded absence proof for attachment failures before systemd reports ControlGroup. */
 private fun findObservationCgroupsForUnit(unitName: String): List<Path> {
-    if (!unitName.matches(Regex("decomp-oracle-function-[0-9a-f-]+\\.scope"))) {
+    if (
+        !unitName.matches(PRODUCTION_OBSERVATION_UNIT_NAME) &&
+        !unitName.matches(FIXTURE_OBSERVATION_UNIT_NAME)
+    ) {
         isolationFail("isolated scope name is unsafe for cgroup absence verification")
     }
     val matches = mutableListOf<Path>()
@@ -3794,6 +4330,7 @@ private const val MAXIMUM_PROC_STATUS_BYTES = 1024 * 1024
 private const val MAXIMUM_PROC_ENVIRONMENT_BYTES = 1024 * 1024
 private const val CGROUP_TEXT_BYTES = 64 * 1024
 private const val CGROUP_PROCS_BYTES = 1024 * 1024
+private const val BOOT_PROCESS_COUNT = 4
 private const val KEEPER_PROCESS_COUNT = 3
 private const val MAXIMUM_PROC_DESCRIPTOR_TARGET_CHARS = 8192
 private const val MAXIMUM_CGROUP_SEARCH_ENTRIES = 100_000
@@ -3842,6 +4379,10 @@ private val SECURE_RANDOM = SecureRandom()
 private val SHA256 = Regex("[0-9a-f]{64}")
 private val PROTOCOL_NONCE = Regex("[0-9a-f]{64}")
 private val SHARD_IDENTIFIER = Regex("[a-z0-9]+(?:-[a-z0-9]+)*")
+private val PRODUCTION_OBSERVATION_UNIT_NAME =
+    Regex("decomp-oracle-function-[0-9a-f]{64}\\.scope")
+private val FIXTURE_OBSERVATION_UNIT_NAME =
+    Regex("decomp-oracle-function-[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}\\.scope")
 private val COUNTER_NAME = Regex("[a-z][a-z0-9_.]*")
 private val MEMORY_BACKED_FILE_SYSTEMS = setOf("tmpfs", "ramfs", "hugetlbfs")
 private val BUBBLEWRAP_VERSION = Regex("bubblewrap [0-9]+(?:\\.[0-9]+){1,2}")

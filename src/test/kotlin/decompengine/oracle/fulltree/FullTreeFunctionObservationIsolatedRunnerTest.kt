@@ -418,6 +418,153 @@ class FullTreeFunctionObservationIsolatedFixtureRunnerTest {
         }
 
     @Test
+    fun `production attachment reaches deterministic BOOT while history remains leased`() =
+        inControlTemporaryDirectory { root ->
+            val mount = provisionedOracleExt4Mount()
+            assertTrue(entryNames(mount).isEmpty(), "provisioned ext4 slot is not empty")
+            val configuration = availableConfiguration(root.resolve("authenticated-runtime"))
+            if (System.getenv("DECOMP_REQUIRE_ORACLE_EXT4_SCRATCH") == "true") {
+                assertTrue(configuration != null, "required CI authenticated launch boundary is unavailable")
+            }
+            assumeTrue(configuration != null, "authenticated JVM launch boundary is unavailable")
+            checkNotNull(configuration)
+
+            val fixture = createFullTreeControlFixture(root.resolve("fixture"))
+            val authenticatedScope = fixture.authenticatedScope()
+            val inputs = FullTreeFunctionObservationProducer.authenticateShardInputs(
+                fixture.inventory,
+                authenticatedScope,
+                "clang-lib-driver",
+            )
+            val output = privateDirectory(root.resolve("output")).resolve("clang-lib-driver.json")
+            val journalRoot = privateDirectory(root.resolve("journal"))
+            val capacity = LinuxFilesystemSyscalls.openRoot(mount).use { descriptor ->
+                LinuxFilesystemSyscalls.filesystemCapacity(descriptor)
+            }
+            val binding = FullTreeFunctionObservationOperationBinding.create(
+                operationId = "e".repeat(64),
+                shardId = inputs.shard.identifier,
+                shardInputSha256 = inputs.shard.inputSha256,
+                scopeSha256 = authenticatedScope.sha256,
+                inventoryArtifactSha256 = inputs.inventoryArtifactSha256,
+                richArtifactSha256 = fixtureSha256(fixture.richArtifact),
+                isolationConfiguration = configuration,
+                output = output,
+                diskPolicy = FullTreeDiskScratchPolicy(
+                    requiredAvailableBytes = 1,
+                    maximumFilesystemBytes = capacity.totalBytes,
+                    requiredAvailableInodes = 4,
+                    maximumFilesystemInodes = capacity.totalInodes,
+                ),
+            )
+            val leaseRoot = mount.resolve(binding.leaseDirectoryName)
+            val runRoot = leaseRoot.resolve(binding.runDirectoryName)
+            var leased: FullTreeFunctionObservationLeasedOperation? = null
+            var prepared: FullTreeFunctionObservationPreparedRun? = null
+            var isolation: FullTreeFunctionObservationPreparedIsolation? = null
+            var booted: FullTreeFunctionObservationBootedIsolation? = null
+            try {
+                FullTreeFunctionObservationJournalAuthority.open(journalRoot).use { authority ->
+                    val acquired = FullTreeFunctionObservationOperationCoordinator.prepareNew(
+                        authority,
+                        binding,
+                        mount,
+                    )
+                    leased = acquired
+                    val run = acquired.prepareRunRoot()
+                    prepared = run
+                    acquired.close()
+                    leased = null
+
+                    val ready = FullTreeFunctionObservationIsolatedOperationRunner.prepareBeforeLaunch(
+                        preparedRun = run,
+                        richArtifact = fixture.richArtifact,
+                        inventoryPath = fixture.inventory,
+                        scopeFiles = FullTreeFunctionObservationScopeFiles(
+                            fixture.scope,
+                            fixture.sourceLock,
+                            fixture.manifest,
+                        ),
+                        output = output,
+                        configuration = configuration,
+                    )
+                    isolation = ready
+                    run.close()
+                    prepared = null
+
+                    val atBoot = FullTreeFunctionObservationIsolatedOperationRunner.launchToBoot(ready)
+                    booted = atBoot
+                    assertFailsWith<IllegalStateException> { ready.requireCurrentBeforeLaunch() }
+                    ready.close()
+                    isolation = null
+
+                    assertEquals(binding.operationId, atBoot.operationId)
+                    assertEquals(binding.shardId, atBoot.shardId)
+                    assertEquals(binding.unitName, atBoot.unitName)
+                    atBoot.requireCurrentAtBoot()
+                    assertEquals(
+                        listOf("runtime", "scratch", "tmp", "worker.boot"),
+                        entryNames(runRoot),
+                    )
+                    listOf(
+                        "parent.start",
+                        "worker.ready",
+                        "worker.failure",
+                        "supervisor.failure",
+                        "candidate.json",
+                    ).forEach { name ->
+                        assertTrue(
+                            Files.notExists(runRoot.resolve(name), LinkOption.NOFOLLOW_LINKS),
+                            "$name must be absent while the worker is blocked at BOOT",
+                        )
+                    }
+                    assertTrue(Files.notExists(output, LinkOption.NOFOLLOW_LINKS))
+
+                    atBoot.close()
+                    booted = null
+                    FullTreeFunctionObservationOperationCoordinator.openExistingLeasedReadOnly(
+                        authority,
+                        binding,
+                        mount,
+                    ).use { cold ->
+                        assertEquals(
+                            FullTreeFunctionObservationOperationPhase.LEASED,
+                            cold.leasedHistory.latest?.phase,
+                        )
+                        assertEquals(
+                            FullTreeDiskScratchColdPopulation.ACTIVE_OPERATION_RUN,
+                            cold.observedPopulation,
+                        )
+                        cold.requireCurrentReadOnly()
+                    }
+                }
+            } finally {
+                var cleanupFailure: Throwable? = null
+                listOf<() -> Unit>(
+                    { booted?.close() },
+                    { isolation?.close() },
+                    { prepared?.close() },
+                    { leased?.close() },
+                ).forEach { cleanup ->
+                    runCatching(cleanup).exceptionOrNull()?.let { failure ->
+                        val prior = cleanupFailure
+                        if (prior == null) cleanupFailure = failure else if (failure !== prior) {
+                            prior.addSuppressed(failure)
+                        }
+                    }
+                }
+                cleanupFailure?.let { throw it }
+                removePreparedIsolationLease(
+                    leaseRoot,
+                    binding.runDirectoryName,
+                    configuration.workerClassPath.size,
+                    rootFiles = listOf("worker.boot"),
+                )
+            }
+            assertTrue(entryNames(mount).isEmpty())
+        }
+
+    @Test
     fun `fixture boundary rejects inherited socket and session-runtime descriptors`() {
         val runtime = Path.of("/run/user/1000")
 
@@ -768,12 +915,14 @@ class FullTreeFunctionObservationIsolatedFixtureRunnerTest {
         leaseRoot: Path,
         runDirectoryName: String,
         classPathEntries: Int,
+        rootFiles: List<String> = emptyList(),
     ) {
         val runRoot = leaseRoot.resolve(runDirectoryName)
         val runtime = runRoot.resolve("runtime")
         repeat(classPathEntries) { index ->
             Files.deleteIfExists(runtime.resolve("classpath-$index.jar"))
         }
+        rootFiles.forEach { name -> Files.deleteIfExists(runRoot.resolve(name)) }
         Files.deleteIfExists(runtime)
         Files.deleteIfExists(runRoot.resolve("scratch"))
         Files.deleteIfExists(runRoot.resolve("tmp"))

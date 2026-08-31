@@ -657,6 +657,68 @@ class FullTreeFunctionObservationOperationCoordinatorTest {
                             )
                         }
                     }
+                    assertFailsWith<FullTreeFunctionObservationOperationCoordinationException> {
+                        transferred.requireCurrentAfterScopeAttachment()
+                    }
+                    assertFailsWith<FullTreeFunctionObservationOperationCoordinationException> {
+                        transferred.requireCurrentAfterCgroupAbsence()
+                    }
+
+                    lateinit var attachmentBorrow: FullTreeDiskScratchBorrowedRunRoot
+                    val attachmentFailure = SimulatedPreparedRunBorrowFailure()
+                    val retainedAttachmentFailure = assertFailsWith<SimulatedPreparedRunBorrowFailure> {
+                        transferred.withCurrentRunRootForScopeAttachment { borrowed ->
+                            attachmentBorrow = borrowed
+                            assertEquals(expectedRunRoot, borrowed.path)
+                            assertFailsWith<FullTreeFunctionObservationOperationCoordinationException> {
+                                transferred.close()
+                            }
+                            assertFailsWith<FullTreeFunctionObservationOperationCoordinationException> {
+                                transferred.withCurrentRunRootAfterScopeAttachment {
+                                    error("nested attached-stage borrow callback must not run")
+                                }
+                            }
+                            throw attachmentFailure
+                        }
+                    }
+                    assertSame(attachmentFailure, retainedAttachmentFailure)
+                    assertTrue(retainedAttachmentFailure.suppressed.isEmpty())
+                    assertFailsWith<IllegalStateException> { attachmentBorrow.path }
+                    assertFailsWith<FullTreeFunctionObservationOperationCoordinationException> {
+                        transferred.requireCurrentBeforeLaunch()
+                    }
+                    assertFailsWith<FullTreeFunctionObservationOperationCoordinationException> {
+                        transferred.withCurrentRunRootForScopeAttachment {
+                            error("a second scope-attachment callback must not run")
+                        }
+                    }
+                    transferred.requireCurrentAfterScopeAttachment()
+                    lateinit var attachedBorrow: FullTreeDiskScratchBorrowedRunRoot
+                    assertEquals(
+                        "attached-borrow",
+                        transferred.withCurrentRunRootAfterScopeAttachment { borrowed ->
+                            attachedBorrow = borrowed
+                            borrowed.withPinnedDescriptor { descriptor ->
+                                assertEquals(
+                                    initializedNames,
+                                    LinuxFilesystemSyscalls.directoryEntryNames(descriptor, 4).sorted(),
+                                )
+                            }
+                            "attached-borrow"
+                        },
+                    )
+                    assertFailsWith<IllegalStateException> { attachedBorrow.path }
+                    assertFailsWith<FullTreeFunctionObservationOperationCoordinationException> {
+                        transferred.close()
+                    }
+                    transferred.requireCurrentAfterCgroupAbsence()
+                    assertFailsWith<FullTreeFunctionObservationOperationCoordinationException> {
+                        transferred.requireCurrentAfterScopeAttachment()
+                    }
+                    assertEquals(
+                        FullTreeFunctionObservationOperationPhase.LEASED,
+                        transferred.leasedHistory.latest?.phase,
+                    )
                     assertFailsWith<FullTreeFunctionObservationOperationJournalException> {
                         FullTreeFunctionObservationJournalAuthority.open(root)
                     }
@@ -675,7 +737,15 @@ class FullTreeFunctionObservationOperationCoordinatorTest {
                     val evidenceBytes = run.diskEvidence.canonicalBytes()
                     val mountNames = entryNames(mount)
                     val leaseNames = entryNames(leaseRoot)
-                    transferred.close()
+                    val displacedRunRoot = leaseRoot.resolve(".displaced-during-authority-close")
+                    Files.move(expectedRunRoot, displacedRunRoot)
+                    try {
+                        assertFailsWith<FullTreeDiskScratchException> { transferred.close() }
+                    } finally {
+                        if (Files.exists(displacedRunRoot, LinkOption.NOFOLLOW_LINKS)) {
+                            Files.move(displacedRunRoot, expectedRunRoot)
+                        }
+                    }
                     isolationAuthority = null
                     transferred.close()
 

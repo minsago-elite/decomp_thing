@@ -452,8 +452,10 @@ class LinuxBubblewrapBoundaryTest {
         val handle = LinuxFilesystemSyscalls.openProcessHandle(exited.pid())
         val survivor = ProcessBuilder("/usr/bin/sleep", "30").start()
         try {
+            assertTrue(LinuxFilesystemSyscalls.processExists(handle))
             exited.destroyForcibly()
             assertTrue(exited.waitFor(3, TimeUnit.SECONDS))
+            assertFalse(LinuxFilesystemSyscalls.processExists(handle))
             assertFalse(LinuxFilesystemSyscalls.killProcess(handle))
             assertTrue(survivor.isAlive, "a stale process handle must not signal another process")
         } finally {

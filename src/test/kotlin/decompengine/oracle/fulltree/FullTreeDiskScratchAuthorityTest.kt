@@ -383,9 +383,36 @@ class FullTreeDiskScratchAuthorityTest {
             Files.move(replacement, run)
             displaced = null
             lease.requireCurrent(FullTreeDiskScratchStage.BEFORE_LAUNCH)
-            lease.requireCurrent(FullTreeDiskScratchStage.AFTER_SCOPE_ATTACHMENT)
+            lateinit var attachmentBorrow: FullTreeDiskScratchBorrowedRunRoot
+            assertEquals(
+                "scope-attached",
+                lease.withCurrentOperationRunRootForScopeAttachment(preparedRun) { borrowed ->
+                    attachmentBorrow = borrowed
+                    assertEquals(run, borrowed.path)
+                    assertFailsWith<FullTreeDiskScratchException> {
+                        lease.withCurrentOperationRunRootAfterScopeAttachment(preparedRun) {
+                            error("nested attached-stage borrow callback must not run")
+                        }
+                    }
+                    "scope-attached"
+                },
+            )
+            assertFailsWith<IllegalStateException> { attachmentBorrow.path }
+            lease.requireCurrentOperationRunRootAfterScopeAttachment(preparedRun)
+            lateinit var attachedBorrow: FullTreeDiskScratchBorrowedRunRoot
+            assertEquals(
+                "attached-borrow",
+                lease.withCurrentOperationRunRootAfterScopeAttachment(preparedRun) { borrowed ->
+                    attachedBorrow = borrowed
+                    borrowed.withPinnedDescriptor { descriptor ->
+                        assertTrue(Files.isSameFile(run, LinuxFilesystemSyscalls.descriptorPath(descriptor)))
+                    }
+                    "attached-borrow"
+                },
+            )
+            assertFailsWith<IllegalStateException> { attachedBorrow.path }
             lease.requireCurrent(FullTreeDiskScratchStage.FROZEN_BARRIER)
-            lease.requireCurrent(FullTreeDiskScratchStage.AFTER_CGROUP_ABSENCE)
+            lease.requireCurrentOperationRunRootAfterCgroupAbsence(preparedRun)
             assertFailsWith<FullTreeDiskScratchException> {
                 lease.requireCurrent(FullTreeDiskScratchStage.BEFORE_PUBLICATION)
             }
