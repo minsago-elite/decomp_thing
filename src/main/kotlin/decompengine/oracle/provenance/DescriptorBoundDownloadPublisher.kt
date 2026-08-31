@@ -51,6 +51,43 @@ internal fun interface DownloadPublicationFaultInjector {
     fun hit(point: DownloadPublicationPoint)
 }
 
+/** One verification phase over the exact inode selected by the publisher. */
+internal fun interface DescriptorBoundArtifactVerifier {
+    fun verify(artifact: DescriptorBoundArtifact)
+}
+
+/** Read-only access to a publisher-owned descriptor without exposing its path or close authority. */
+internal class DescriptorBoundArtifact internal constructor(
+    private val descriptor: LinuxDescriptor,
+    val bytes: Long,
+    val sha256: String,
+) {
+    fun <T> withReadableChannel(action: (FileChannel) -> T): T {
+        val expected = LinuxFilesystemSyscalls.identity(descriptor.fd)
+        LinuxFilesystemSyscalls.openReadableWithoutAtimeFrom(descriptor).use { readable ->
+            val reopened = LinuxFilesystemSyscalls.identity(readable.fd)
+            if (!sameAuthenticatedRegularFile(expected, reopened)) {
+                provenanceFail("descriptor-bound artifact changed while opening a readable view")
+            }
+            return FileChannel.open(
+                LinuxFilesystemSyscalls.stableDescriptorPath(readable.fd),
+                StandardOpenOption.READ,
+            ).use { channel ->
+                if (channel.size() != bytes) {
+                    provenanceFail("descriptor-bound artifact changed size before verification")
+                }
+                action(channel).also {
+                    if (channel.size() != bytes ||
+                        !sameAuthenticatedRegularFile(expected, LinuxFilesystemSyscalls.identity(readable.fd))
+                    ) {
+                        provenanceFail("descriptor-bound artifact changed during verification")
+                    }
+                }
+            }
+        }
+    }
+}
+
 /**
  * Streams one large input into an unnamed inode, makes it read-only, and installs it without replacement.
  *
@@ -64,6 +101,7 @@ internal object DescriptorBoundDownloadPublisher {
         expectedBytes: Long,
         expectedSha256: String,
         verifyInputs: () -> Unit,
+        verificationPhases: List<DescriptorBoundArtifactVerifier> = emptyList(),
         faultInjector: DownloadPublicationFaultInjector? = null,
         download: (WritableByteChannel) -> HttpsDownloadReceipt,
     ): AuthenticatedDownloadedArtifact {
@@ -76,6 +114,7 @@ internal object DescriptorBoundDownloadPublisher {
                 expectedBytes,
                 expectedSha256,
                 verifyInputs,
+                verificationPhases,
                 faultInjector,
                 download,
             )
@@ -88,6 +127,7 @@ internal object DescriptorBoundDownloadPublisher {
         expectedBytes: Long,
         expectedSha256: String,
         verifyInputs: () -> Unit,
+        verificationPhases: List<DescriptorBoundArtifactVerifier> = emptyList(),
         faultInjector: DownloadPublicationFaultInjector? = null,
         download: (WritableByteChannel) -> HttpsDownloadReceipt,
     ): AuthenticatedDownloadedArtifact {
@@ -100,6 +140,7 @@ internal object DescriptorBoundDownloadPublisher {
         requireDescriptorName(name)
         val parentIdentity = authenticatedParent.identity
         val parentDescriptor = authenticatedParent.descriptor
+        val selectedVerificationPhases = verificationPhases.toList()
         requirePinnedParent(parent, parentDescriptor, parentIdentity)
         verifiedNamedArtifactOrNull(
             parentDescriptor,
@@ -109,9 +150,21 @@ internal object DescriptorBoundDownloadPublisher {
             expectedSha256,
             synchronizeBeforeAcceptance = true,
             faultInjector = faultInjector,
+            expectedParent = parentIdentity,
+            verifyInputs = verifyInputs,
+            verificationPhases = selectedVerificationPhases,
         )?.let {
             synchronizeAcceptedDirectory(parent, parentDescriptor, parentIdentity, faultInjector)
-            requireTerminalAcceptance(parent, parentDescriptor, parentIdentity, name, it.identity, faultInjector)
+            requireTerminalAcceptance(
+                parent,
+                parentDescriptor,
+                parentIdentity,
+                name,
+                it.identity,
+                expectedBytes,
+                expectedSha256,
+                faultInjector,
+            )
             return it.artifact
         }
 
@@ -147,6 +200,19 @@ internal object DescriptorBoundDownloadPublisher {
             }
             faultInjector?.hit(DownloadPublicationPoint.AFTER_STAGE_SYNC)
             verifyInputs()
+            verifyDescriptorPhases(
+                descriptor = stage,
+                expectedIdentity = stageIdentity,
+                expectedBytes = expectedBytes,
+                expectedSha256 = expectedSha256,
+                label = "download staging inode",
+                parentPath = parent,
+                parent = parentDescriptor,
+                expectedParent = parentIdentity,
+                name = null,
+                verifyInputs = verifyInputs,
+                verificationPhases = selectedVerificationPhases,
+            )
             requirePinnedParent(parent, parentDescriptor, parentIdentity)
             faultInjector?.hit(DownloadPublicationPoint.BEFORE_LINK)
             requirePinnedParent(parent, parentDescriptor, parentIdentity)
@@ -163,6 +229,9 @@ internal object DescriptorBoundDownloadPublisher {
                     expectedSha256,
                     synchronizeBeforeAcceptance = true,
                     faultInjector = faultInjector,
+                    expectedParent = parentIdentity,
+                    verifyInputs = verifyInputs,
+                    verificationPhases = selectedVerificationPhases,
                 ) ?: provenanceFail("release artifact race winner disappeared")
                 synchronizeAcceptedDirectory(parent, parentDescriptor, parentIdentity, faultInjector)
                 requireTerminalAcceptance(
@@ -171,6 +240,8 @@ internal object DescriptorBoundDownloadPublisher {
                     parentIdentity,
                     name,
                     winner.identity,
+                    expectedBytes,
+                    expectedSha256,
                     faultInjector,
                 )
                 return winner.artifact
@@ -190,6 +261,9 @@ internal object DescriptorBoundDownloadPublisher {
                 expectedSha256,
                 synchronizeBeforeAcceptance = false,
                 faultInjector = faultInjector,
+                expectedParent = parentIdentity,
+                verifyInputs = {},
+                verificationPhases = emptyList(),
             ) ?: provenanceFail("published release artifact disappeared")
             requirePinnedParent(parent, parentDescriptor, parentIdentity)
             if (!samePublishedStage(stageIdentity, published.identity)) {
@@ -201,6 +275,8 @@ internal object DescriptorBoundDownloadPublisher {
                 parentIdentity,
                 name,
                 published.identity,
+                expectedBytes,
+                expectedSha256,
                 faultInjector,
             )
             return published.artifact
@@ -227,10 +303,22 @@ internal object DescriptorBoundDownloadPublisher {
                 expectedSha256,
                 synchronizeBeforeAcceptance = true,
                 faultInjector = null,
+                expectedParent = parentIdentity,
+                verifyInputs = {},
+                verificationPhases = emptyList(),
             )
                 ?: provenanceFail("release artifact is missing: $target")
             synchronizeAcceptedDirectory(parent, descriptor, parentIdentity, null)
-            requireTerminalAcceptance(parent, descriptor, parentIdentity, name, verified.identity, null)
+            requireTerminalAcceptance(
+                parent,
+                descriptor,
+                parentIdentity,
+                name,
+                verified.identity,
+                expectedBytes,
+                expectedSha256,
+                null,
+            )
             return verified.artifact
         }
     }
@@ -243,6 +331,9 @@ internal object DescriptorBoundDownloadPublisher {
         expectedSha256: String,
         synchronizeBeforeAcceptance: Boolean,
         faultInjector: DownloadPublicationFaultInjector?,
+        expectedParent: LinuxFileIdentity,
+        verifyInputs: () -> Unit,
+        verificationPhases: List<DescriptorBoundArtifactVerifier>,
     ): VerifiedNamedArtifact? {
         val selected = LinuxFilesystemSyscalls.openRegularFileAtOrNull(parent.fd, name) ?: return null
         selected.use {
@@ -252,6 +343,21 @@ internal object DescriptorBoundDownloadPublisher {
                 expectedSha256,
                 "release artifact",
                 requireReadOnly = true,
+            )
+            verifyInputs()
+            requireSelectedName(parent, name, verified.identity)
+            verifyDescriptorPhases(
+                descriptor = selected,
+                expectedIdentity = verified.identity,
+                expectedBytes = expectedBytes,
+                expectedSha256 = expectedSha256,
+                label = "release artifact",
+                parentPath = target.parent ?: provenanceFail("release artifact path has no parent"),
+                parent = parent,
+                expectedParent = expectedParent,
+                name = name,
+                verifyInputs = verifyInputs,
+                verificationPhases = verificationPhases,
             )
             if (synchronizeBeforeAcceptance) {
                 LinuxFilesystemSyscalls.openReadableFrom(selected).use { readable ->
@@ -307,16 +413,69 @@ internal object DescriptorBoundDownloadPublisher {
         expectedParent: LinuxFileIdentity,
         name: String,
         expectedFile: LinuxFileIdentity,
+        expectedBytes: Long,
+        expectedSha256: String,
         faultInjector: DownloadPublicationFaultInjector?,
     ) {
         faultInjector?.hit(DownloadPublicationPoint.BEFORE_TERMINAL_ACCEPTANCE)
         requirePinnedParent(parentPath, parent, expectedParent)
         LinuxFilesystemSyscalls.openRegularFileAtOrNull(parent.fd, name)?.use { terminal ->
-            if (!sameAuthenticatedFile(expectedFile, LinuxFilesystemSyscalls.identity(terminal.fd))) {
+            val terminalIdentity = LinuxFilesystemSyscalls.identity(terminal.fd)
+            if (!sameAuthenticatedFile(expectedFile, terminalIdentity)) {
                 provenanceFail("release artifact identity changed before terminal acceptance")
+            }
+            val digest = digestDescriptor(
+                terminal,
+                expectedBytes,
+                expectedSha256,
+                "terminal release artifact",
+                requireReadOnly = true,
+            )
+            if (!sameAuthenticatedFile(expectedFile, digest.identity)) {
+                provenanceFail("release artifact identity changed during terminal acceptance")
             }
         } ?: provenanceFail("release artifact disappeared before terminal acceptance")
         requirePinnedParent(parentPath, parent, expectedParent)
+    }
+
+    private fun verifyDescriptorPhases(
+        descriptor: LinuxDescriptor,
+        expectedIdentity: LinuxFileIdentity,
+        expectedBytes: Long,
+        expectedSha256: String,
+        label: String,
+        parentPath: Path,
+        parent: LinuxDescriptor,
+        expectedParent: LinuxFileIdentity,
+        name: String?,
+        verifyInputs: () -> Unit,
+        verificationPhases: List<DescriptorBoundArtifactVerifier>,
+    ) {
+        val view = DescriptorBoundArtifact(descriptor, expectedBytes, expectedSha256)
+        verificationPhases.forEach { phase ->
+            phase.verify(view)
+            verifyInputs()
+            val checked = digestDescriptor(
+                descriptor,
+                expectedBytes,
+                expectedSha256,
+                label,
+                requireReadOnly = true,
+            )
+            if (!sameAuthenticatedFile(expectedIdentity, checked.identity)) {
+                provenanceFail("$label identity changed during descriptor-bound verification")
+            }
+            requirePinnedParent(parentPath, parent, expectedParent)
+            if (name != null) requireSelectedName(parent, name, expectedIdentity)
+        }
+    }
+
+    private fun requireSelectedName(parent: LinuxDescriptor, name: String, expected: LinuxFileIdentity) {
+        LinuxFilesystemSyscalls.openRegularFileAtOrNull(parent.fd, name)?.use { selected ->
+            if (!sameAuthenticatedFile(expected, LinuxFilesystemSyscalls.identity(selected.fd))) {
+                provenanceFail("release artifact name changed during descriptor-bound verification")
+            }
+        } ?: provenanceFail("release artifact disappeared during descriptor-bound verification")
     }
 
     private fun samePublishedStage(stage: LinuxFileIdentity, published: LinuxFileIdentity): Boolean =
@@ -400,8 +559,7 @@ internal object DescriptorBoundDownloadPublisher {
             !left.isSymbolicLink && !right.isSymbolicLink
 
     private fun sameAuthenticatedFile(left: LinuxFileIdentity, right: LinuxFileIdentity): Boolean =
-        sameRegularFile(left, right) && left.mode == right.mode && left.uid == right.uid &&
-            left.gid == right.gid && left.linkCount == right.linkCount
+        sameAuthenticatedRegularFile(left, right)
 
     private data class DescriptorDigest(
         val identity: LinuxFileIdentity,
@@ -559,6 +717,12 @@ private fun requireDirectoryName(name: String) {
 private const val LINUX_ENOENT = 2
 private const val OWNER_DIRECTORY_MODE = 0x1c0 // 0700
 private const val UNTRUSTED_DIRECTORY_WRITE_MODE = 0x12 // group-write or other-write
+
+private fun sameAuthenticatedRegularFile(left: LinuxFileIdentity, right: LinuxFileIdentity): Boolean =
+    left.key == right.key && left.mountId == right.mountId && left.mode == right.mode &&
+        left.uid == right.uid && left.gid == right.gid && left.linkCount == right.linkCount &&
+        left.isRegularFile && right.isRegularFile && !left.isDirectory && !right.isDirectory &&
+        !left.isSymbolicLink && !right.isSymbolicLink
 
 private fun ByteArray.hex(): String = joinToString("") { byte ->
     (byte.toInt() and 0xff).toString(16).padStart(2, '0')

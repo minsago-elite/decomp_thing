@@ -17,6 +17,168 @@ import kotlin.test.assertTrue
 
 class DescriptorBoundDownloadPublisherTest {
     @Test
+    fun `cache invokes input and descriptor verification without downloading`() {
+        val root = privateDirectory(createTempDirectory("release-cache-verifier-"))
+        try {
+            val payload = "authenticated cache".toByteArray()
+            val target = root.resolve("artifact.bin")
+            Files.write(target, payload)
+            Files.setPosixFilePermissions(target, PosixFilePermissions.fromString("r--------"))
+            var inputs = 0
+            var phases = 0
+
+            DescriptorBoundDownloadPublisher.materialize(
+                target,
+                payload.size.toLong(),
+                payload.sha256(),
+                verifyInputs = { inputs++ },
+                verificationPhases = listOf(
+                    DescriptorBoundArtifactVerifier { artifact ->
+                        phases++
+                        val observed = artifact.withReadableChannel { channel ->
+                            ByteArray(payload.size).also { bytes -> channel.read(ByteBuffer.wrap(bytes)) }
+                        }
+                        assertContentEquals(payload, observed)
+                    },
+                ),
+                download = { error("verified cache must not invoke the downloader") },
+            )
+
+            assertEquals(2, inputs, "inputs are checked before selection and after the semantic phase")
+            assertEquals(1, phases)
+        } finally {
+            deleteTree(root)
+        }
+    }
+
+    @Test
+    fun `callback failure leaves a fresh artifact unnamed`() {
+        val root = privateDirectory(createTempDirectory("release-callback-failure-"))
+        try {
+            val payload = "never publish".toByteArray()
+            val target = root.resolve("artifact.bin")
+
+            assertFailsWith<InjectedFailure> {
+                DescriptorBoundDownloadPublisher.materialize(
+                    target,
+                    payload.size.toLong(),
+                    payload.sha256(),
+                    verifyInputs = {},
+                    verificationPhases = listOf(
+                        DescriptorBoundArtifactVerifier { throw InjectedFailure() },
+                    ),
+                    download = { channel -> writeReceipt(channel, payload) },
+                )
+            }
+            assertFalse(Files.exists(target, LinkOption.NOFOLLOW_LINKS))
+        } finally {
+            deleteTree(root)
+        }
+    }
+
+    @Test
+    fun `phase checkpoint rejects same-inode cache mutation`() {
+        val root = privateDirectory(createTempDirectory("release-phase-mutation-"))
+        try {
+            val payload = "locked payload".toByteArray()
+            val mutation = "evil payload!!".toByteArray()
+            assertEquals(payload.size, mutation.size)
+            val target = root.resolve("artifact.bin")
+            Files.write(target, payload)
+            Files.setPosixFilePermissions(target, PosixFilePermissions.fromString("r--------"))
+
+            assertFailsWith<ReleaseArtifactProvenanceException> {
+                DescriptorBoundDownloadPublisher.materialize(
+                    target,
+                    payload.size.toLong(),
+                    payload.sha256(),
+                    verifyInputs = {},
+                    verificationPhases = listOf(
+                        DescriptorBoundArtifactVerifier {
+                            Files.setPosixFilePermissions(target, PosixFilePermissions.fromString("rw-------"))
+                            Files.write(target, mutation)
+                            Files.setPosixFilePermissions(target, PosixFilePermissions.fromString("r--------"))
+                        },
+                        DescriptorBoundArtifactVerifier { error("mutation must fail before the next phase") },
+                    ),
+                    download = { error("the selected cache must not download") },
+                )
+            }
+            assertContentEquals(mutation, Files.readAllBytes(target))
+        } finally {
+            deleteTree(root)
+        }
+    }
+
+    @Test
+    fun `EEXIST winner reruns semantic verification and can be rejected`() {
+        val root = privateDirectory(createTempDirectory("release-winner-verifier-"))
+        try {
+            val payload = "race winner".toByteArray()
+            val target = root.resolve("artifact.bin")
+            var phases = 0
+
+            assertFailsWith<InjectedFailure> {
+                DescriptorBoundDownloadPublisher.materialize(
+                    target,
+                    payload.size.toLong(),
+                    payload.sha256(),
+                    verifyInputs = {},
+                    verificationPhases = listOf(
+                        DescriptorBoundArtifactVerifier {
+                            phases++
+                            if (phases == 2) throw InjectedFailure()
+                        },
+                    ),
+                    faultInjector = DownloadPublicationFaultInjector { point ->
+                        if (point == DownloadPublicationPoint.BEFORE_LINK) {
+                            Files.write(target, payload)
+                            Files.setPosixFilePermissions(target, PosixFilePermissions.fromString("r--------"))
+                        }
+                    },
+                    download = { channel -> writeReceipt(channel, payload) },
+                )
+            }
+            assertEquals(2, phases)
+            assertContentEquals(payload, Files.readAllBytes(target))
+        } finally {
+            deleteTree(root)
+        }
+    }
+
+    @Test
+    fun `terminal digest rejects same-inode content mutation`() {
+        val root = privateDirectory(createTempDirectory("release-terminal-mutation-"))
+        try {
+            val payload = "terminal good".toByteArray()
+            val mutation = "terminal evil".toByteArray()
+            assertEquals(payload.size, mutation.size)
+            val target = root.resolve("artifact.bin")
+
+            assertFailsWith<ReleaseArtifactProvenanceException> {
+                DescriptorBoundDownloadPublisher.materialize(
+                    target,
+                    payload.size.toLong(),
+                    payload.sha256(),
+                    verifyInputs = {},
+                    verificationPhases = listOf(DescriptorBoundArtifactVerifier {}),
+                    faultInjector = DownloadPublicationFaultInjector { point ->
+                        if (point == DownloadPublicationPoint.BEFORE_TERMINAL_ACCEPTANCE) {
+                            Files.setPosixFilePermissions(target, PosixFilePermissions.fromString("rw-------"))
+                            Files.write(target, mutation)
+                            Files.setPosixFilePermissions(target, PosixFilePermissions.fromString("r--------"))
+                        }
+                    },
+                    download = { channel -> writeReceipt(channel, payload) },
+                )
+            }
+            assertContentEquals(mutation, Files.readAllBytes(target))
+        } finally {
+            deleteTree(root)
+        }
+    }
+
+    @Test
     fun `publishes a private read-only inode and reuses only exact existing bytes`() {
         val root = privateDirectory(createTempDirectory("release-publisher-"))
         try {
