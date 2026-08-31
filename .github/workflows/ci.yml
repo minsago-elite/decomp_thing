@@ -43,6 +43,8 @@ jobs:
         run: scripts/ci.sh
       - name: Qualify pinned credential-free third-party ACP initialize
         run: scripts/ci-qualify-goose-acp.sh
+      - name: Qualify pinned credential-free codex-acp authentication boundary
+        run: scripts/ci-qualify-codex-acp.sh
       - name: Release bounded ext4 oracle scratch authority
         if: always()
         run: |
@@ -80,6 +82,11 @@ jobs:
         with:
           name: acp-goose-compatibility-evidence
           path: build/acp-compatibility/results
+      - uses: actions/upload-artifact@v7
+        if: always()
+        with:
+          name: acp-codex-authentication-evidence
+          path: build/acp-codex-compatibility/results
 
   archival-ghidra:
     runs-on: ubuntu-24.04

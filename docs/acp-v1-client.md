@@ -137,29 +137,45 @@ requires no credential and the preflight never sends `session/new` or `session/p
 available to the launched agent during initialize; do not claim that a third-party agent will ignore it. A missing
 capability, incompatible ACP version, agent crash, stale process, or cleanup failure makes the preflight fail.
 
-### Required credential-free third-party checkpoint
+### Required credential-free third-party checkpoints
 
-Pull-request CI also runs [`scripts/ci-qualify-goose-acp.sh`](../scripts/ci-qualify-goose-acp.sh). It downloads the
-independently implemented Block Goose `1.46.0` Linux x86-64 release, requires the pinned archive SHA-256
-`a1cf4856a765d07d6b95689a53c7bca21fcc6e6d65c0dfd064fc704052b85a7b`, and provisions an exact host-specific
-read-only ELF dependency closure. The agent receives no inherited environment, credential, network, workspace, or
-model prompt. The same production `AcpHarnessFactory` and `AcpAgentHarness` used by workflows must negotiate stable
-ACP v1 with peer identity `goose`/`1.46.0`, advertise its capabilities, and prove cgroup, process-tree, output, and
-sandbox cleanup. A skip is not accepted in this lane.
+Pull-request CI pins two meaningfully different external ACP implementations. Goose exposes its own coding-agent ACP
+server behind an `acp` subcommand. Zed's `codex-acp` is a separate Rust adapter around OpenAI Codex, starts directly
+with no subcommand, advertises explicit authentication methods, and rejects an unauthenticated `session/new` before
+creating a model session. Core reconstruction and repair code contains no agent-name conditional; these differences
+exist only in the pinned provisioning and compatibility evidence.
 
-Each CI attempt uploads its results directory under the `acp-goose-compatibility-evidence` artifact. A successful run
-contains the strict private provisioning document, target metadata, their digest list, and a structured receipt. A
-preflight failure retains its structured failure receipt when that stage was reached; an earlier provisioning failure
-may retain only the metadata produced before it failed. Receipts include the client/SDK/protocol, archive and
-executable bindings, negotiated identity and capabilities when available, elapsed time, containment/tool hashes,
-resource limits, output accounting, and cleanup result. They explicitly record that no session or prompt was created.
+| Agent | Pinned Linux x86-64 release | Credential-free required case | Current proven boundary |
+|---|---|---|---|
+| Block Goose | `1.46.0`, archive SHA-256 `a1cf4856a765d07d6b95689a53c7bca21fcc6e6d65c0dfd064fc704052b85a7b` | [`ci-qualify-goose-acp.sh`](../scripts/ci-qualify-goose-acp.sh) | stable-v1 initialize, advertised capabilities, contained clean shutdown; no session or prompt |
+| Zed `codex-acp` | `0.16.0`, archive SHA-256 `0a9ad6c31ec9b2b87dccb7e9da3faf5d387e74470d24dbced75a160ed7b22d06` | [`ci-qualify-codex-acp.sh`](../scripts/ci-qualify-codex-acp.sh) | stable-v1 initialize followed by an attempted `session/new`, typed ACP authentication-required `-32000` with absent error data, then contained clean shutdown; no session or prompt |
 
-This is the first external-agent interoperability checkpoint, not the complete compatibility matrix from issue #67.
-It proves initialize and clean shutdown only. Session creation, prompt streaming, editing, permission handling,
-cancellation, reconstruction/repair smokes, and a second independent agent remain required before B1/B2 can close.
-The scripted Python fake agent remains a hostile wire/containment fixture and is not counted as an independent agent.
-ACP receives authenticated oracle artifacts read-only; this checkpoint gives it no authority to generate, validate,
-score, or certify oracle truth.
+Both scripts verify the exact release archive and provision a host-specific read-only ELF dependency closure. The
+`codex-acp` archive must contain exactly `codex-acp` and `codex-resources/bwrap`; the executable SHA-256 is
+`23a9f2af247fc61aa9a895d5ee91a62a35d05a883bddc2c85d1dc6b2be697087` and the bundled helper SHA-256 is
+`5a5104807cfbe9b509d0b9fa1c46054ff48dbed5393f30d261b34263ebf0e3fe`. The authentication-boundary case does not
+mount or execute that bundled helper. A future authenticated Codex task must qualify it explicitly if the task needs
+the agent's inner sandbox.
+
+The agents receive no inherited environment, credential, outer network, terminal authority, permission grant, model
+prompt, or oracle path. Goose receives no workspace. The Codex case receives a fresh empty synthetic workspace with
+an empty access policy; complete empty filesystem/terminal/permission audits and unchanged directory metadata are
+required afterward. It records successful initialize but lifecycle phase `INITIALIZED`, never `SESSION_CREATED`.
+After the verified download, neither required case needs network access. A positive Codex or Goose model session will
+require separately brokered provider credentials and network and is therefore not part of pull-request CI.
+
+Each CI attempt uploads the Goose results under `acp-goose-compatibility-evidence` and the Codex results under
+`acp-codex-authentication-evidence`. Results contain the strict private provisioning document, target metadata,
+artifact digests, and structured production-harness evidence. Receipts bind client/SDK/protocol, negotiated identity
+and capabilities, elapsed time, containment/tool hashes, resource limits, output accounting, lifecycle boundary,
+complete policy-audit counts, terminal outcome, and cleanup result. A skip is not accepted in either lane.
+
+This is still not the complete compatibility matrix from issue #67. Neither lane proves a successful real-agent
+session, prompt streaming, authorized edit, permission handling, cancellation, or reconstruction/repair smoke. Those
+credentialed cases remain required before B1/B2 can close. The scripted Python fake agent remains a hostile
+wire/containment fixture and is not counted as an independent agent. ACP receives authenticated oracle artifacts
+read-only in production workflows; these compatibility checkpoints expose no oracle artifact and give ACP no
+authority to generate, validate, score, or certify oracle truth.
 
 The Compose `acp-host` profile is only a host-prerequisite qualification surface. It deliberately uses host PID and
 cgroup namespaces plus read-only binds of `/sys/fs/cgroup` and the dedicated UID's user bus so the existing production

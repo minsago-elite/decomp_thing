@@ -32,6 +32,8 @@ public final class AcpCompatibilityProvisioner {
         Path.of("/usr/lib/x86_64-linux-gnu")
     );
     private static final int MAXIMUM_LDD_BYTES = 64 * 1024;
+    private static final int MAXIMUM_AGENT_ARGUMENTS = 1_023;
+    private static final long MAXIMUM_AGENT_ARGUMENT_BYTES = 1_048_576L;
     private static final Pattern IMPLEMENTATION_ID =
         Pattern.compile("[A-Za-z0-9_][A-Za-z0-9_.-]{0,127}");
     private static final Pattern NEEDED_LIBRARY = Pattern.compile("[A-Za-z0-9_.+~-]{1,128}");
@@ -45,9 +47,10 @@ public final class AcpCompatibilityProvisioner {
     private AcpCompatibilityProvisioner() {}
 
     public static void main(String[] arguments) throws Exception {
-        if (arguments.length != 4) {
+        if (arguments.length < 4) {
             throw new IllegalArgumentException(
-                "usage: AcpCompatibilityProvisioner <agent> <gate-helper> <implementation-id> <output-config>"
+                "usage: AcpCompatibilityProvisioner <agent> <gate-helper> <implementation-id> " +
+                    "<output-config> [agent-argument ...]"
             );
         }
         var agent = requireCanonicalExecutable("ACP compatibility agent", Path.of(arguments[0]));
@@ -57,6 +60,7 @@ public final class AcpCompatibilityProvisioner {
             throw new IllegalArgumentException("ACP compatibility implementation id is invalid");
         }
         var output = requireNewOutput(Path.of(arguments[3]));
+        var agentArguments = requireBoundedArguments(arguments, 4);
         var mounts = discoverRuntimeMounts(agent);
 
         var root = object(
@@ -64,7 +68,7 @@ public final class AcpCompatibilityProvisioner {
             "implementationId", implementationId,
             "agent", object(
                 "executable", agent.toString(),
-                "arguments", List.of("acp"),
+                "arguments", agentArguments,
                 "environment", List.of(
                     environment("HOME", "/tmp/decomp-acp-compatibility/home"),
                     environment("XDG_CONFIG_HOME", "/tmp/decomp-acp-compatibility/config"),
@@ -326,6 +330,27 @@ public final class AcpCompatibilityProvisioner {
             throw new IllegalArgumentException(label + " must be a canonical executable file");
         }
         return real;
+    }
+
+    private static List<String> requireBoundedArguments(String[] arguments, int offset) {
+        var count = arguments.length - offset;
+        if (count > MAXIMUM_AGENT_ARGUMENTS) {
+            throw new IllegalArgumentException("ACP compatibility argv exceeds its argument-count limit");
+        }
+        var result = new java.util.ArrayList<String>(count);
+        long encodedBytes = 0;
+        for (var index = offset; index < arguments.length; index++) {
+            var argument = arguments[index];
+            encodedBytes = Math.addExact(
+                encodedBytes,
+                argument.getBytes(StandardCharsets.UTF_8).length + 1L
+            );
+            if (encodedBytes > MAXIMUM_AGENT_ARGUMENT_BYTES) {
+                throw new IllegalArgumentException("ACP compatibility argv exceeds its byte limit");
+            }
+            result.add(argument);
+        }
+        return List.copyOf(result);
     }
 
     private static Path requireNewOutput(Path configured) throws Exception {

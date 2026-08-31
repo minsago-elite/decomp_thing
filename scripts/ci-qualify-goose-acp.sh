@@ -114,7 +114,8 @@ java -cp "$support_classes:$distribution_lib/*" AcpCompatibilityProvisioner \
   "$agent_executable" \
   "$gate_helper" \
   "goose-$GOOSE_VERSION" \
-  "$config_file"
+  "$config_file" \
+  acp
 executable_manifest_sha256=$(scripts/calculate-acp-runtime-manifest.sh "$agent_executable")
 
 evidence_file="$result_directory/evidence.json"
