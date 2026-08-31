@@ -1,4 +1,4 @@
-"""Fail-closed materialization of hash-locked oracle release assets."""
+"""Legacy Python compatibility materializer; not Kotlin/JVM oracle or release authority."""
 
 from __future__ import annotations
 

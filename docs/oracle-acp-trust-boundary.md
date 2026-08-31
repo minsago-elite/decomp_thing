@@ -75,9 +75,11 @@ satisfy the Kotlin-only authority requirement for the next release.
 The required LLVM push/pull-request lane runs full-tree scope verification plus DWARF and source-inventory
 regeneration through stable Kotlin/JVM Gradle entrypoints. The similarly named Python wrappers are retained only for
 legacy migration compatibility, are not invoked by that lane, and cannot authorize or enter a Kotlin-only release.
-Other Python workflow gates remain in place until their source/artifact provenance, function-oracle, behavior, and
-release-stage semantics have complete Kotlin replacements; keeping those regression checks does not promote their
-outputs to new release authority.
+That lane and the manual clean-rebuild workflow also fetch the hash-locked LLVM release artifacts through bounded
+Kotlin/JVM HTTPS and descriptor-bound no-replace publication. The Python release-asset materializer is retained only
+for legacy compatibility. Other Python workflow gates remain in place until source/OpenPGP provenance, ELF-twin
+verification, function-oracle, behavior, and release-stage semantics have complete Kotlin replacements; keeping those
+regression checks does not promote their outputs to new release authority.
 
 During migration, existing Python outputs may be retained as explicitly non-authoritative differential fixtures. They
 cannot enter a new release as truth or validation evidence. A stage becomes authoritative only after frozen-fixture

@@ -52,6 +52,12 @@ registerOracleJavaExecTask(
     entryPoint = "decompengine.oracle.fulltree.FullTreeSourceInventoryGeneratorCli",
 )
 
+registerOracleJavaExecTask(
+    taskName = "fetchLlvmReleaseArtifacts",
+    taskDescription = "Fetches and authenticates the hash-locked LLVM oracle release artifacts in Kotlin/JVM",
+    entryPoint = "decompengine.oracle.provenance.LlvmReleaseArtifactFetcherCli",
+)
+
 val acpGateHelperSource = layout.projectDirectory.file("src/main/c/decomp_acp_gate_helper.c")
 val acpGateHelperBinary = layout.buildDirectory.file("native/acp/decomp-acp-gate-helper")
 val acpGateHelperChecksum = layout.buildDirectory.file("native/acp/decomp-acp-gate-helper.sha256")

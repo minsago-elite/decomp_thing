@@ -176,7 +176,17 @@ jobs:
       - name: Test oracle schemas and ELF twin verifier
         env:
           DOCKER: ${{ runner.temp }}/docker-client/docker/docker
-        run: python3 -m unittest discover -s tests/oracle -v
+        run: |
+          oracle_tests=()
+          for path in tests/oracle/test_*.py; do
+            # Retained for local legacy-compatibility runs; Kotlin/JVM owns this required gate.
+            if [[ "$path" == "tests/oracle/test_release_artifacts.py" ]]; then
+              continue
+            fi
+            module="${path%.py}"
+            oracle_tests+=("${module//\//.}")
+          done
+          python3 -m unittest "${oracle_tests[@]}" -v
       - name: Cross-check checked behavior corpus and evidence offline
         run: |
           python3 scripts/check-behavior-corpus-evidence.py \

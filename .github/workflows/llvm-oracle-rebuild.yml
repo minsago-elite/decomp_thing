@@ -12,6 +12,11 @@ jobs:
     timeout-minutes: 120
     steps:
       - uses: actions/checkout@v7
+      - uses: actions/setup-java@v6
+        with:
+          distribution: temurin
+          java-version: "21"
+          cache: gradle
       - name: Build the pinned LLVM toolchain image
         run: |
           docker buildx build \
@@ -27,8 +32,8 @@ jobs:
       - name: Fetch and authenticate LLVM 22.1.6
         run: |
           python3 scripts/fetch-llvm-oracle-source.py "$RUNNER_TEMP/source-cache"
-          python3 scripts/fetch-llvm-oracle-artifacts.py \
-            "$RUNNER_TEMP/reference-oracle"
+          ./gradlew --no-daemon fetchLlvmReleaseArtifacts \
+            --args="$RUNNER_TEMP/reference-oracle"
       - name: Build the monolithic Clang oracle pair
         run: |
           # The container intentionally drops every capability, including the

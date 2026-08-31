@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Fetch the Clang oracle twins from their hash-locked release."""
+"""Legacy Python compatibility fetcher; not Kotlin/JVM oracle or release authority."""
 
 from __future__ import annotations
 

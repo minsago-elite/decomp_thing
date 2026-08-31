@@ -96,15 +96,25 @@ build/target exclusion reasons, the generated driver CU is separate, and
 
 ## Verify
 
-Source/artifact fetching and provenance verification do not yet have Kotlin replacements. Install their exact Python
-dependencies and use the migration-compatibility commands to populate the locked inputs. These commands preserve
-historical regression coverage but cannot certify a new Kotlin-only release:
+Source fetching and OpenPGP provenance verification do not yet have Kotlin replacements. Install the exact Python
+dependencies and use the source migration-compatibility commands to populate that locked input. These commands
+preserve historical regression coverage but cannot certify a new Kotlin-only release:
 
 ```sh
 python3 -m pip install -r requirements/oracle-generation.txt
 python3 scripts/verify-llvm-oracle-source.py --metadata-only
 python3 scripts/fetch-llvm-oracle-source.py /tmp/llvm-oracle-source
-python3 scripts/fetch-llvm-oracle-artifacts.py /tmp/llvm-oracle-release
+```
+
+Release-asset lock, manifest, repository/tag/URL, byte-length, SHA-256, HTTPS, and no-replace publication authority now
+run in Kotlin/JVM. The fetcher accepts an existing authenticated root or creates exactly one child beneath an existing
+authenticated parent; it never recursively follows or creates missing ancestors. The retained
+`scripts/fetch-llvm-oracle-artifacts.py` command is legacy compatibility only:
+
+```sh
+release_root="$(mktemp -d)"
+./gradlew --no-daemon fetchLlvmReleaseArtifacts \
+  --args="$release_root"
 ```
 
 Full-tree scope, DWARF inventory, and source-inventory authority run through Kotlin/JVM. Invoke the stable Gradle

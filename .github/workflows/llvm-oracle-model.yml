@@ -28,8 +28,8 @@ jobs:
           python3 scripts/fetch-llvm-oracle-source.py "$RUNNER_TEMP/llvm-source"
       - name: Fetch hash-locked Clang release artifacts
         run: |
-          python3 scripts/fetch-llvm-oracle-artifacts.py \
-            "$RUNNER_TEMP/llvm-oracle-release"
+          ./gradlew --no-daemon fetchLlvmReleaseArtifacts \
+            --args="$RUNNER_TEMP/llvm-oracle-release"
           echo "LLVM_ORACLE_ARTIFACT_ROOT=$RUNNER_TEMP/llvm-oracle-release" \
             >> "$GITHUB_ENV"
       - name: Reproduce and verify the recorded LLVM toolchain image
@@ -101,7 +101,6 @@ jobs:
         run: |
           python3 -m unittest \
             tests.oracle.test_capture_oracle_tools \
-            tests.oracle.test_release_artifacts \
             tests.oracle.test_stable_toolchain_reproduction \
             tests.oracle.test_llvm_source_lock \
             tests.oracle.test_llvm_oracle_profiles \
