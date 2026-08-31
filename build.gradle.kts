@@ -104,6 +104,10 @@ val acpGateHelperSource = layout.projectDirectory.file("src/main/c/decomp_acp_ga
 val acpGateHelperBinary = layout.buildDirectory.file("native/acp/decomp-acp-gate-helper")
 val acpGateHelperChecksum = layout.buildDirectory.file("native/acp/decomp-acp-gate-helper.sha256")
 val acpGateHelperCompiler = providers.gradleProperty("acpGateHelperCompiler").orElse("/usr/bin/cc")
+val llvmBehaviorHelperSource = layout.projectDirectory.file("src/main/c/decomp_llvm_behavior_helper.c")
+val llvmBehaviorHelperBinary = layout.buildDirectory.file("native/behavior/decomp-llvm-behavior-helper")
+val llvmBehaviorHelperChecksum = layout.buildDirectory.file("native/behavior/decomp-llvm-behavior-helper.sha256")
+val llvmBehaviorHelperCompiler = providers.gradleProperty("llvmBehaviorHelperCompiler").orElse("/usr/bin/cc")
 
 val buildAcpGateHelper = tasks.register<Exec>("buildAcpGateHelper") {
     group = "build"
@@ -145,6 +149,52 @@ val buildAcpGateHelper = tasks.register<Exec>("buildAcpGateHelper") {
     doLast {
         Files.setPosixFilePermissions(
             acpGateHelperBinary.get().asFile.toPath(),
+            PosixFilePermissions.fromString("rwxr-xr-x"),
+        )
+    }
+}
+
+val buildLlvmBehaviorHelper = tasks.register<Exec>("buildLlvmBehaviorHelper") {
+    group = "build"
+    description = "Builds the non-authoritative static LLVM behavior runtime helper prerequisite"
+    inputs.file(llvmBehaviorHelperSource)
+    inputs.property("compiler", llvmBehaviorHelperCompiler)
+    inputs.property("hostArchitecture", providers.systemProperty("os.arch"))
+    outputs.file(llvmBehaviorHelperBinary)
+    // The compiler identity is security-relevant but is not represented by its configured path.
+    outputs.upToDateWhen { false }
+
+    doFirst {
+        val osName = System.getProperty("os.name", "").lowercase()
+        val architecture = System.getProperty("os.arch", "")
+        require("linux" in osName && architecture in setOf("amd64", "x86_64", "aarch64")) {
+            "the LLVM behavior helper supports only Linux x86-64 or aarch64"
+        }
+        val configuredCompiler = file(llvmBehaviorHelperCompiler.get()).toPath().toAbsolutePath().normalize()
+        val compiler = configuredCompiler.toRealPath()
+        require(Files.isRegularFile(compiler, LinkOption.NOFOLLOW_LINKS) && Files.isExecutable(compiler)) {
+            "LLVM behavior-helper compiler is not an executable regular file: $compiler"
+        }
+        val output = llvmBehaviorHelperBinary.get().asFile.toPath()
+        Files.createDirectories(output.parent)
+        commandLine(
+            compiler.toString(),
+            "-std=c11",
+            "-O2",
+            "-static",
+            "-Wall",
+            "-Wextra",
+            "-Werror",
+            "-Wformat=2",
+            "-Wl,--build-id=none",
+            llvmBehaviorHelperSource.asFile.absolutePath,
+            "-o",
+            output.toString(),
+        )
+    }
+    doLast {
+        Files.setPosixFilePermissions(
+            llvmBehaviorHelperBinary.get().asFile.toPath(),
             PosixFilePermissions.fromString("rwxr-xr-x"),
         )
     }
@@ -231,6 +281,107 @@ val verifyAcpGateHelper = tasks.register("verifyAcpGateHelper") {
     }
 }
 
+val verifyLlvmBehaviorHelper = tasks.register("verifyLlvmBehaviorHelper") {
+    group = "verification"
+    description = "Verifies the LLVM behavior helper's static ELF and fail-closed v2 contract"
+    dependsOn(buildLlvmBehaviorHelper)
+    inputs.file(llvmBehaviorHelperBinary)
+
+    doLast {
+        val helper = llvmBehaviorHelperBinary.get().asFile.toPath()
+        val helperSize = Files.size(helper)
+        require(helperSize in 64L..(4L * 1024L * 1024L)) {
+            "LLVM behavior helper must be a bounded ELF64 executable"
+        }
+        val bytes = Files.readAllBytes(helper)
+        require(
+            bytes[0] == 0x7f.toByte() && bytes[1] == 'E'.code.toByte() &&
+                bytes[2] == 'L'.code.toByte() && bytes[3] == 'F'.code.toByte() &&
+                bytes[4] == 2.toByte() && bytes[5] == 1.toByte(),
+        ) { "LLVM behavior helper must be a little-endian ELF64 executable" }
+        val elf = ByteBuffer.wrap(bytes).order(ByteOrder.LITTLE_ENDIAN)
+        val expectedMachine = when (System.getProperty("os.arch", "")) {
+            "amd64", "x86_64" -> 62
+            "aarch64" -> 183
+            else -> error("unsupported LLVM behavior-helper architecture")
+        }
+        require(elf.getShort(18).toInt() and 0xffff == expectedMachine) {
+            "LLVM behavior-helper architecture does not match the build host"
+        }
+        val programOffset = elf.getLong(32)
+        val programEntrySize = elf.getShort(54).toInt() and 0xffff
+        val programCount = elf.getShort(56).toInt() and 0xffff
+        require(programOffset >= 0 && programEntrySize >= 56 && programCount > 0) {
+            "LLVM behavior helper has an invalid ELF program-header table"
+        }
+        var executableLoads = 0
+        var stackRecords = 0
+        repeat(programCount) { index ->
+            val offset = Math.addExact(
+                programOffset,
+                Math.multiplyExact(index.toLong(), programEntrySize.toLong()),
+            )
+            require(offset <= bytes.size.toLong() - programEntrySize) {
+                "LLVM behavior-helper program headers exceed the artifact"
+            }
+            val kind = elf.getInt(offset.toInt())
+            val flags = elf.getInt(offset.toInt() + 4)
+            when (kind) {
+                1 -> {
+                    require(flags and 3 != 3) {
+                        "LLVM behavior helper contains a writable executable segment"
+                    }
+                    if (flags and 1 != 0) executableLoads++
+                }
+                3 -> error("LLVM behavior helper must not contain PT_INTERP")
+                2 -> {
+                    val dynamicOffset = elf.getLong(offset.toInt() + 8)
+                    val dynamicSize = elf.getLong(offset.toInt() + 32)
+                    require(
+                        dynamicOffset >= 0 && dynamicSize >= 0 && dynamicSize % 16L == 0L &&
+                            dynamicOffset <= bytes.size.toLong() - dynamicSize,
+                    ) { "LLVM behavior-helper dynamic table is malformed" }
+                    var cursor = dynamicOffset
+                    var terminated = false
+                    while (cursor < dynamicOffset + dynamicSize) {
+                        when (elf.getLong(cursor.toInt())) {
+                            0L -> {
+                                terminated = true
+                                break
+                            }
+                            1L -> error("LLVM behavior helper must not contain DT_NEEDED")
+                        }
+                        cursor += 16L
+                    }
+                    require(terminated) { "LLVM behavior-helper dynamic table is unterminated" }
+                }
+                0x6474e551 -> {
+                    stackRecords++
+                    require(flags and 1 == 0) { "LLVM behavior helper requests an executable stack" }
+                }
+            }
+        }
+        require(executableLoads > 0 && stackRecords == 1) {
+            "LLVM behavior helper lacks its executable load or unique non-executable stack declaration"
+        }
+        require(bytes.toString(Charsets.ISO_8859_1).contains("decomp-llvm-behavior-helper-v2")) {
+            "LLVM behavior helper omits its closed v2 protocol marker"
+        }
+        val probe = ProcessBuilder(helper.toString()).also { builder ->
+            builder.environment().clear()
+        }.start()
+        probe.outputStream.close()
+        val exited = probe.waitFor(5, TimeUnit.SECONDS)
+        if (!exited) {
+            probe.destroyForcibly()
+            probe.waitFor(2, TimeUnit.SECONDS)
+        }
+        require(exited && probe.exitValue() == 125) {
+            "LLVM behavior helper did not fail closed on a missing protocol invocation"
+        }
+    }
+}
+
 val generateAcpGateHelperChecksum = tasks.register("generateAcpGateHelperChecksum") {
     group = "distribution"
     description = "Writes the content digest shipped with the production ACP gate helper"
@@ -250,6 +401,25 @@ val generateAcpGateHelperChecksum = tasks.register("generateAcpGateHelperChecksu
     }
 }
 
+val generateLlvmBehaviorHelperChecksum = tasks.register("generateLlvmBehaviorHelperChecksum") {
+    group = "distribution"
+    description = "Writes the digest shipped with the static LLVM behavior helper prerequisite"
+    dependsOn(verifyLlvmBehaviorHelper)
+    inputs.file(llvmBehaviorHelperBinary)
+    outputs.file(llvmBehaviorHelperChecksum)
+
+    doLast {
+        val helper = llvmBehaviorHelperBinary.get().asFile.toPath()
+        val digest = MessageDigest.getInstance("SHA-256")
+            .digest(Files.readAllBytes(helper))
+            .joinToString("") { byte -> "%02x".format(byte) }
+        Files.writeString(
+            llvmBehaviorHelperChecksum.get().asFile.toPath(),
+            "$digest  decomp-llvm-behavior-helper\n",
+        )
+    }
+}
+
 distributions {
     main {
         contents {
@@ -261,6 +431,14 @@ distributions {
                 into("libexec")
                 filePermissions { unix("rw-r--r--") }
             }
+            from(llvmBehaviorHelperBinary) {
+                into("libexec")
+                filePermissions { unix("rwxr-xr-x") }
+            }
+            from(llvmBehaviorHelperChecksum) {
+                into("libexec")
+                filePermissions { unix("rw-r--r--") }
+            }
         }
     }
 }
@@ -268,8 +446,11 @@ distributions {
 tasks.test {
     useJUnitPlatform()
     dependsOn(generateAcpGateHelperChecksum)
+    dependsOn(generateLlvmBehaviorHelperChecksum)
     inputs.file(acpGateHelperBinary)
     inputs.file(acpGateHelperChecksum)
+    inputs.file(llvmBehaviorHelperBinary)
+    inputs.file(llvmBehaviorHelperChecksum)
     doFirst {
         systemProperty(
             "decompengine.acp.gateHelperExecutable",
@@ -278,6 +459,14 @@ tasks.test {
         systemProperty(
             "decompengine.acp.gateHelperChecksum",
             acpGateHelperChecksum.get().asFile.absolutePath,
+        )
+        systemProperty(
+            "decompengine.oracle.behavior.nativeHelperExecutable",
+            llvmBehaviorHelperBinary.get().asFile.absolutePath,
+        )
+        systemProperty(
+            "decompengine.oracle.behavior.nativeHelperChecksum",
+            llvmBehaviorHelperChecksum.get().asFile.absolutePath,
         )
     }
     environment(
@@ -313,6 +502,7 @@ tasks.processResources {
 listOf("installDist", "distZip", "distTar").forEach { taskName ->
     tasks.named(taskName) {
         dependsOn(generateAcpGateHelperChecksum)
+        dependsOn(generateLlvmBehaviorHelperChecksum)
     }
 }
 
@@ -340,6 +530,31 @@ val verifyAcpGateHelperDistribution = tasks.register("verifyAcpGateHelperDistrib
     }
 }
 
+val verifyLlvmBehaviorHelperDistribution = tasks.register("verifyLlvmBehaviorHelperDistribution") {
+    group = "verification"
+    description = "Verifies that installDist preserves the static LLVM behavior helper and digest"
+    dependsOn(tasks.named("installDist"))
+
+    doLast {
+        val root = layout.buildDirectory.dir("install/llm_bin_patch/libexec").get().asFile.toPath()
+        val installedHelper = root.resolve("decomp-llvm-behavior-helper")
+        val installedChecksum = root.resolve("decomp-llvm-behavior-helper.sha256")
+        require(Files.isRegularFile(installedHelper, LinkOption.NOFOLLOW_LINKS)) {
+            "installDist omitted the LLVM behavior helper"
+        }
+        require(Files.isExecutable(installedHelper)) {
+            "installDist removed the LLVM behavior-helper executable mode"
+        }
+        val digest = MessageDigest.getInstance("SHA-256")
+            .digest(Files.readAllBytes(installedHelper))
+            .joinToString("") { byte -> "%02x".format(byte) }
+        require(Files.readString(installedChecksum) == "$digest  decomp-llvm-behavior-helper\n") {
+            "installed LLVM behavior-helper digest does not authenticate the installed bytes"
+        }
+    }
+}
+
 tasks.named("check") {
     dependsOn(verifyAcpGateHelperDistribution)
+    dependsOn(verifyLlvmBehaviorHelperDistribution)
 }
