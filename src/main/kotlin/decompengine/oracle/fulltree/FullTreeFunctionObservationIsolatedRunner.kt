@@ -37,6 +37,7 @@ internal class FullTreeFunctionObservationIsolationException(
 internal enum class FullTreeFunctionObservationLaunchFaultPoint {
     BEFORE_INITIAL_UNIT_ABSENCE,
     BEFORE_FINAL_UNIT_ABSENCE,
+    AFTER_FINAL_UNIT_ABSENCE,
     AFTER_PROCESS_START_RETURNED,
     AFTER_SCOPE_ATTACHED,
     BEFORE_DESTRUCTIVE_CLEANUP,
@@ -2344,7 +2345,7 @@ private class PendingObservationLaunch(
     var cleaned = false
         private set
 
-    /** Stores destructive cleanup ownership on the first instruction after start returns. */
+    /** Pins exact local-process cleanup ownership before control can escape a successful start. */
     fun start(builder: ProcessBuilder, forcedFailureDirectory: Path?): Process {
         check(process == null && processHandle == null) {
             "isolated process launch attempt is not linear"
@@ -2352,18 +2353,43 @@ private class PendingObservationLaunch(
         forcedFailureDirectory?.let { builder.directory(it.toFile()) }
         val started = builder.start()
         process = started
-        return started
+        return try {
+            val openedHandle = try {
+                LinuxFilesystemSyscalls.openProcessHandle(started.pid())
+            } catch (failure: Throwable) {
+                throw FullTreeFunctionObservationIsolationException(
+                    "isolated local scope process could not be pidfd-pinned",
+                    failure,
+                )
+            }
+            try {
+                if (!started.isAlive || !LinuxFilesystemSyscalls.processExists(openedHandle)) {
+                    isolationFail("isolated local scope process exited while its pidfd was pinned")
+                }
+                processHandle = openedHandle
+            } catch (failure: Throwable) {
+                openedHandle.close()
+                throw failure
+            }
+            started
+        } catch (failure: Throwable) {
+            if (started.isAlive) {
+                runCatching { started.destroyForcibly() }.exceptionOrNull()?.let(failure::addSuppressed)
+            }
+            throw failure
+        }
     }
 
     override fun close() {
         if (cleaned) return
-        if (process != null) {
+        val started = process
+        if (started != null) {
             testHooks?.faultInjector?.at(
                 FullTreeFunctionObservationLaunchFaultPoint.BEFORE_DESTRUCTIVE_CLEANUP,
                 unitName,
             )
-            controller.killStopAndRequireAbsent(
-                process = process,
+            controller.killLocalProcessAndRequireAbsentWithoutUnitMutation(
+                process = started,
                 processHandle = processHandle,
             )
         } else {
@@ -2482,6 +2508,10 @@ private class TrustedObservationBoundary(
                 unitName,
             )
             controller.requireAbsent()
+            testHooks?.faultInjector?.at(
+                FullTreeFunctionObservationLaunchFaultPoint.AFTER_FINAL_UNIT_ABSENCE,
+                unitName,
+            )
             requireUnchanged()
             val processBuilder = ProcessBuilder(command)
                 .redirectInput(ProcessBuilder.Redirect.PIPE)
@@ -2499,9 +2529,9 @@ private class TrustedObservationBoundary(
                 FullTreeFunctionObservationLaunchFaultPoint.AFTER_PROCESS_START_RETURNED,
                 unitName,
             )
-            val pinnedProcess = LinuxFilesystemSyscalls.openProcessHandle(started.pid())
-            pending.processHandle = pinnedProcess
-            if (!started.isAlive) isolationFail("isolated local scope process exited before pidfd pinning")
+            val pinnedProcess = checkNotNull(pending.processHandle) {
+                "isolated local scope process lost its pinned cleanup handle"
+            }
             started.outputStream.close()
             val managedUnit = ManagedObservationUnit(
                 controller,
@@ -2514,10 +2544,10 @@ private class TrustedObservationBoundary(
                 pinnedProcess,
                 configuration.systemdUserRuntimeDirectory,
             )
+            managedUnit.awaitScopeAttached()
             active = managedUnit
             pending.processHandle = null
             pendingLaunch = null
-            managedUnit.awaitScopeAttached()
             testHooks?.faultInjector?.at(
                 FullTreeFunctionObservationLaunchFaultPoint.AFTER_SCOPE_ATTACHED,
                 unitName,
@@ -2971,6 +3001,41 @@ private class ObservationSystemdController(
             listOf("kill", "--kill-whom=all", "--signal=SIGKILL", unitName),
         )
         if (result.output.isNotBlank()) isolationFail("isolated frozen-keeper kill was not quiet")
+    }
+
+    /**
+     * Cleans only the pidfd-pinned process returned by the local launch attempt. Until
+     * [ManagedObservationUnit.awaitScopeAttached] proves that process belongs to this exact scope,
+     * the deterministic unit name is merely an observed namespace candidate: stopping or killing
+     * it could mutate a foreign winner of the StartTransientUnit name race.
+     */
+    fun killLocalProcessAndRequireAbsentWithoutUnitMutation(
+        process: Process,
+        processHandle: decompengine.acp.LinuxProcessDescriptor?,
+    ) {
+        val deadline = deadlineAfter(SERVICE_CLEANUP_TIMEOUT, "unattached local launch cleanup")
+        var last: Throwable? = null
+        while (System.nanoTime() < deadline) {
+            runCatching {
+                if (processHandle != null) LinuxFilesystemSyscalls.killProcess(processHandle)
+                else if (process.isAlive) process.destroyForcibly()
+            }.exceptionOrNull()?.let { last = it }
+            runCatching { process.waitFor(SYSTEMD_POLL_MILLIS, TimeUnit.MILLISECONDS) }
+                .exceptionOrNull()?.let { last = it }
+            try {
+                val unitAbsent = show()["LoadState"] == "not-found"
+                val cgroupAbsent = findObservationCgroupsForUnit(unitName).isEmpty()
+                if (!process.isAlive && unitAbsent && cgroupAbsent) return
+            } catch (failure: Throwable) {
+                last = failure
+            }
+            Thread.sleep(SYSTEMD_POLL_MILLIS)
+        }
+        throw FullTreeFunctionObservationIsolationException(
+            "unattached local launch residue or a foreign same-name scope remains; " +
+                "no unit-name mutation was attempted",
+            last,
+        )
     }
 
     fun show(): Map<String, String> {

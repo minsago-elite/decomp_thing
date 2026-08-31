@@ -868,7 +868,7 @@ class FullTreeFunctionObservationIsolatedFixtureRunnerTest {
         }
 
     @Test
-    fun `pre-launch unit collisions stay untouched at both deterministic absence gates`() =
+    fun `unit collisions around deterministic absence sweeps stay untouched`() =
         inControlTemporaryDirectory { root ->
             val mount = provisionedOracleExt4Mount()
             val configuration = availableConfiguration(root.resolve("authenticated-runtime"))
@@ -886,9 +886,10 @@ class FullTreeFunctionObservationIsolatedFixtureRunnerTest {
             val fixture = createFullTreeControlFixture(root.resolve("fixture"))
 
             listOf(
-                "d" to FullTreeFunctionObservationLaunchFaultPoint.BEFORE_INITIAL_UNIT_ABSENCE,
-                "c" to FullTreeFunctionObservationLaunchFaultPoint.BEFORE_FINAL_UNIT_ABSENCE,
-            ).forEach { (seed, collisionPoint) ->
+                Triple("d", FullTreeFunctionObservationLaunchFaultPoint.BEFORE_INITIAL_UNIT_ABSENCE, true),
+                Triple("c", FullTreeFunctionObservationLaunchFaultPoint.BEFORE_FINAL_UNIT_ABSENCE, true),
+                Triple("a", FullTreeFunctionObservationLaunchFaultPoint.AFTER_FINAL_UNIT_ABSENCE, false),
+            ).forEach { (seed, collisionPoint, rejectedByAbsenceSweep) ->
                 withPreparedProductionIsolation(
                     root.resolve("collision-$seed"),
                     mount,
@@ -916,7 +917,9 @@ class FullTreeFunctionObservationIsolatedFixtureRunnerTest {
                                 hooks,
                             )
                         }
-                        assertTrue(collision.message.orEmpty().contains("already in use"), collision.message)
+                        if (rejectedByAbsenceSweep) {
+                            assertTrue(collision.message.orEmpty().contains("already in use"), collision.message)
+                        }
                         val occupied = checkNotNull(occupant)
                         assertOccupiedObservationUnitUnchanged(configuration, occupied)
                         assertOnlyExactUnitObservationSystemctlCommands(commands, context.binding.unitName)
@@ -925,10 +928,12 @@ class FullTreeFunctionObservationIsolatedFixtureRunnerTest {
                         val retainedCollision = assertFailsWith<FullTreeFunctionObservationIsolationException> {
                             context.ready.close()
                         }
-                        assertTrue(
-                            retainedCollision.message.orEmpty().contains("already in use"),
-                            retainedCollision.message,
-                        )
+                        if (rejectedByAbsenceSweep) {
+                            assertTrue(
+                                retainedCollision.message.orEmpty().contains("already in use"),
+                                retainedCollision.message,
+                            )
+                        }
                         assertOccupiedObservationUnitUnchanged(configuration, occupied)
                         assertOnlyExactUnitObservationSystemctlCommands(commands, context.binding.unitName)
                         assertOperationLocksRetained(context)
@@ -950,7 +955,7 @@ class FullTreeFunctionObservationIsolatedFixtureRunnerTest {
         }
 
     @Test
-    fun `process start return is the exact destructive cleanup ownership threshold`() =
+    fun `process start return grants only exact local pidfd cleanup before attachment`() =
         inControlTemporaryDirectory { root ->
             val mount = provisionedOracleExt4Mount()
             val configuration = availableConfiguration(root.resolve("authenticated-runtime"))
@@ -1006,6 +1011,7 @@ class FullTreeFunctionObservationIsolatedFixtureRunnerTest {
                 val launchFailure = SimulatedObservationAfterProcessStartFailure()
                 var afterStartEntries = 0
                 var destructiveCleanupEntries = 0
+                val commands = mutableListOf<List<String>>()
                 val hooks = FullTreeFunctionObservationLaunchTestHooks(
                     faultInjector = FullTreeFunctionObservationLaunchFaultInjector { point, _ ->
                         when (point) {
@@ -1020,6 +1026,9 @@ class FullTreeFunctionObservationIsolatedFixtureRunnerTest {
                             else -> Unit
                         }
                     },
+                    systemctlCommandObserver = FullTreeFunctionObservationSystemctlCommandObserver { unitName, arguments ->
+                        if (unitName == context.binding.unitName) commands += arguments
+                    },
                 )
 
                 val retained = assertFailsWith<SimulatedObservationAfterProcessStartFailure> {
@@ -1031,6 +1040,7 @@ class FullTreeFunctionObservationIsolatedFixtureRunnerTest {
                 assertTrue(retained === launchFailure)
                 assertEquals(1, afterStartEntries)
                 assertEquals(1, destructiveCleanupEntries)
+                assertOnlyExactUnitObservationSystemctlCommands(commands, context.binding.unitName)
                 assertObservationUnitAndCgroupAbsent(configuration, context.binding.unitName)
                 assertColdLeasedResidue(context)
             }
