@@ -27,8 +27,18 @@ class LlvmBehaviorHostedContainerV1InspectTest {
             OracleJson.canonicalBytes(JsonArray(listOf(fixture.container))),
             fixture.expectation,
         )
+        val splitImage = LlvmBehaviorHostedWorkerImageV1Inspect.project(
+            rawInspectBytes(fixture.image),
+            fixture.expectation.imageId,
+        )
+        val splitContainer = LlvmBehaviorHostedStoppedContainerV1Inspect.project(
+            rawInspectBytes(fixture.container),
+            fixture.expectation,
+        )
 
         assertEquals(canonical, raw)
+        assertEquals(raw.image, splitImage)
+        assertEquals(raw.container, splitContainer)
         assertEquals(IMAGE_ID, raw.image.imageId)
         assertEquals("linux/amd64", raw.image.platform)
         assertEquals(2, raw.image.rootfsLayerCount)
@@ -76,7 +86,7 @@ class LlvmBehaviorHostedContainerV1InspectTest {
         )
         malformed.forEach { (label, bytes) ->
             assertFailsWith<LlvmBehaviorHostedContainerV1InspectException>(label) {
-                LlvmBehaviorHostedContainerV1Inspect.inspect(bytes, validContainer, fixture.expectation)
+                LlvmBehaviorHostedWorkerImageV1Inspect.project(bytes, fixture.expectation.imageId)
             }
         }
         listOf(
@@ -87,8 +97,44 @@ class LlvmBehaviorHostedContainerV1InspectTest {
             "oversized container response" to ByteArray(2 * 1024 * 1024 + 1) { ' '.code.toByte() },
         ).forEach { (label, bytes) ->
             assertFailsWith<LlvmBehaviorHostedContainerV1InspectException>(label) {
-                LlvmBehaviorHostedContainerV1Inspect.inspect(validImage, bytes, fixture.expectation)
+                LlvmBehaviorHostedStoppedContainerV1Inspect.project(bytes, fixture.expectation)
             }
+        }
+
+        // Keep the compatibility surface exercised independently of the split failure assertions.
+        assertEquals(
+            LlvmBehaviorHostedContainerV1Inspection(
+                LlvmBehaviorHostedWorkerImageV1Inspect.project(validImage, fixture.expectation.imageId),
+                LlvmBehaviorHostedStoppedContainerV1Inspect.project(validContainer, fixture.expectation),
+            ),
+            LlvmBehaviorHostedContainerV1Inspect.inspect(validImage, validContainer, fixture.expectation),
+        )
+    }
+
+    @Test
+    fun `worker image projection validates the exact caller expected image ID`() {
+        val fixture = InspectFixture()
+        val imageBytes = rawInspectBytes(fixture.image)
+
+        assertEquals(
+            IMAGE_ID,
+            LlvmBehaviorHostedWorkerImageV1Inspect.project(imageBytes, IMAGE_ID).imageId,
+        )
+        listOf(
+            "tag" to "latest",
+            "short digest" to "sha256:1234",
+            "uppercase digest" to "sha256:${"A".repeat(64)}",
+            "bare hash" to "1".repeat(64),
+        ).forEach { (label, expectedImageId) ->
+            assertFailsWith<LlvmBehaviorHostedContainerV1InspectException>(label) {
+                LlvmBehaviorHostedWorkerImageV1Inspect.project(imageBytes, expectedImageId)
+            }
+        }
+        assertFailsWith<LlvmBehaviorHostedContainerV1InspectException>("cross-paired exact digest") {
+            LlvmBehaviorHostedWorkerImageV1Inspect.project(
+                imageBytes,
+                "sha256:${"9".repeat(64)}",
+            )
         }
     }
 
@@ -589,18 +635,16 @@ private class InspectFixture {
 
     fun assertImageRejected(label: String, mutatedImage: JsonObject) {
         assertFailsWith<LlvmBehaviorHostedContainerV1InspectException>(label) {
-            LlvmBehaviorHostedContainerV1Inspect.inspect(
+            LlvmBehaviorHostedWorkerImageV1Inspect.project(
                 rawInspectBytes(mutatedImage),
-                rawInspectBytes(container),
-                expectation,
+                expectation.imageId,
             )
         }
     }
 
     fun assertContainerRejected(label: String, mutatedContainer: JsonObject) {
         assertFailsWith<LlvmBehaviorHostedContainerV1InspectException>(label) {
-            LlvmBehaviorHostedContainerV1Inspect.inspect(
-                rawInspectBytes(image),
+            LlvmBehaviorHostedStoppedContainerV1Inspect.project(
                 rawInspectBytes(mutatedContainer),
                 expectation,
             )

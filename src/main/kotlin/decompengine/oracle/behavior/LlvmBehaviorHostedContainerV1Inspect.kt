@@ -75,6 +75,41 @@ internal data class LlvmBehaviorHostedContainerV1Inspection(
 )
 
 /**
+ * Strictly projects one raw `docker image inspect` response before any container exists.
+ *
+ * This entry point is deliberately non-authoritative. Its caller supplies both the bytes and the
+ * expected image ID; the result authenticates no image origin, Docker invocation, executable,
+ * endpoint, journal, input, staging directory, CREATE eligibility, or later lifecycle fact.
+ */
+internal object LlvmBehaviorHostedWorkerImageV1Inspect {
+    fun project(
+        imageInspectBytes: ByteArray,
+        expectedImageId: String,
+    ): LlvmBehaviorHostedWorkerImageV1Projection {
+        requireExpectedImageId(expectedImageId)
+        val imageRecord = parseOneInspectRecord(imageInspectBytes, "worker image inspect")
+        return verifyImage(imageRecord, expectedImageId)
+    }
+}
+
+/**
+ * Strictly projects one raw stopped `docker container inspect` response.
+ *
+ * This entry point is deliberately non-authoritative. The caller owns the response bytes and all
+ * expected identities; the result grants no image, container, START, containment, cleanup,
+ * observation, scoring, publication, or release authority.
+ */
+internal object LlvmBehaviorHostedStoppedContainerV1Inspect {
+    fun project(
+        containerInspectBytes: ByteArray,
+        expectation: LlvmBehaviorHostedContainerV1Expectation,
+    ): LlvmBehaviorHostedContainerV1Projection {
+        val containerRecord = parseOneInspectRecord(containerInspectBytes, "worker container inspect")
+        return verifyContainer(containerRecord, expectation)
+    }
+}
+
+/**
  * Strictly parses raw `docker image inspect` and `docker container inspect` JSON.
  *
  * The result is a structural projection only. The caller remains responsible for authenticating
@@ -86,19 +121,17 @@ internal object LlvmBehaviorHostedContainerV1Inspect {
         containerInspectBytes: ByteArray,
         expectation: LlvmBehaviorHostedContainerV1Expectation,
     ): LlvmBehaviorHostedContainerV1Inspection {
-        val imageRecord = parseOneInspectRecord(imageInspectBytes, "worker image inspect")
-        val image = verifyImage(imageRecord, expectation)
-        val containerRecord = parseOneInspectRecord(containerInspectBytes, "worker container inspect")
-        val container = verifyContainer(containerRecord, expectation)
+        val image = LlvmBehaviorHostedWorkerImageV1Inspect.project(imageInspectBytes, expectation.imageId)
+        val container = LlvmBehaviorHostedStoppedContainerV1Inspect.project(containerInspectBytes, expectation)
         return LlvmBehaviorHostedContainerV1Inspection(image, container)
     }
 }
 
 private fun verifyImage(
     image: JsonObject,
-    expectation: LlvmBehaviorHostedContainerV1Expectation,
+    expectedImageId: String,
 ): LlvmBehaviorHostedWorkerImageV1Projection {
-    requireExact(image.inspectString("Id", "worker image"), expectation.imageId, "worker image ID")
+    requireExact(image.inspectString("Id", "worker image"), expectedImageId, "worker image ID")
     requireExact(image.inspectString("Os", "worker image"), REQUIRED_OS, "worker image OS")
     requireExact(
         image.inspectString("Architecture", "worker image"),
@@ -131,12 +164,18 @@ private fun verifyImage(
         ),
     )
     return LlvmBehaviorHostedWorkerImageV1Projection(
-        imageId = expectation.imageId,
+        imageId = expectedImageId,
         platform = REQUIRED_PLATFORM,
         rootfsLayerCount = layerIds.size,
         rootfsProjectionSha256 = canonicalSha256(rootfsProjection),
         executionProjectionSha256 = canonicalSha256(imageExecutionProjection()),
     )
+}
+
+private fun requireExpectedImageId(expectedImageId: String) {
+    if (!expectedImageId.matches(IMAGE_ID)) {
+        hostedContainerInspectFail("expected worker image ID is malformed")
+    }
 }
 
 private fun verifyImageConfig(config: JsonObject) {
