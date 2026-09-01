@@ -34,6 +34,7 @@ class LlvmBehaviorHostedContainerV1InspectTest {
         assertEquals(2, raw.image.rootfsLayerCount)
         assertEquals(CONTAINER_ID, raw.container.containerId)
         assertEquals(CONTAINER_NAME, raw.container.containerName)
+        assertEquals(OPERATION_ID, raw.container.operationId)
         assertEquals(IMAGE_ID, raw.container.imageId)
         assertEquals("1001:1002", raw.container.user)
         assertEquals("created", raw.container.state)
@@ -222,6 +223,17 @@ class LlvmBehaviorHostedContainerV1InspectTest {
                 "Config",
                 config.withField("Healthcheck", JsonObject(mapOf("Test" to stringArray("NONE")))),
             ),
+            "missing operation label" to fixture.container.withField(
+                "Config",
+                config.withField("Labels", fixture.imageLabels()),
+            ),
+            "cross-paired operation label" to fixture.container.withField(
+                "Config",
+                config.withField(
+                    "Labels",
+                    fixture.containerLabels().withField(OPERATION_LABEL, JsonPrimitive("f".repeat(64))),
+                ),
+            ),
             "container stop timeout" to fixture.container.withField(
                 "Config",
                 config.withField("StopTimeout", JsonPrimitive(1)),
@@ -232,7 +244,7 @@ class LlvmBehaviorHostedContainerV1InspectTest {
     }
 
     @Test
-    fun `host config rejects containment authority device logging restart and resource mutations`() {
+    fun `host config rejects containment-sensitive device logging restart and resource mutations`() {
         val fixture = InspectFixture()
         val host = fixture.container.objectField("HostConfig")
         val restart = host.objectField("RestartPolicy")
@@ -278,6 +290,10 @@ class LlvmBehaviorHostedContainerV1InspectTest {
             "CPU period" to host.withField("CpuPeriod", JsonPrimitive(50_000)),
             "shared memory" to host.withField("ShmSize", JsonPrimitive(1024)),
             "OOM protection" to host.withField("OomScoreAdj", JsonPrimitive(-1000)),
+            "container annotation" to host.withField(
+                "Annotations",
+                JsonObject(mapOf("caller" to JsonPrimitive("unreviewed"))),
+            ),
             "alternate nano CPU controller" to host.withField("NanoCpus", JsonPrimitive(2_000_000_000)),
             "memory reservation" to host.withField("MemoryReservation", JsonPrimitive(1024)),
             "memory swappiness" to host.withField("MemorySwappiness", JsonPrimitive(100)),
@@ -385,6 +401,15 @@ class LlvmBehaviorHostedContainerV1InspectTest {
                             "BindOptions",
                             inputRequest.objectField("BindOptions").withField("Propagation", JsonPrimitive("rshared")),
                         ),
+                        stageRequest,
+                    ),
+                ),
+            ),
+            "cluster options on bind" to host.withField(
+                "Mounts",
+                JsonArray(
+                    listOf(
+                        inputRequest.withField("ClusterOptions", JsonObject(emptyMap())),
                         stageRequest,
                     ),
                 ),
@@ -505,10 +530,13 @@ class LlvmBehaviorHostedContainerV1InspectTest {
         invalid(imageId = "latest")
         invalid(containerId = "short")
         invalid(name = "/caller/name")
+        invalid(name = "safe-looking-caller-name")
         invalid(uid = 0)
         invalid(gid = 0)
         invalid(inputs = Path.of("relative"))
         invalid(inputs = Path.of("/var/lib/decomp/../escape"))
+        invalid(inputs = Path.of("/var/lib/decomp/unsafe,mount"))
+        invalid(inputs = Path.of("/var/lib/decomp/unsafe mount"))
         invalid(inputs = INPUTS_SOURCE, stage = INPUTS_SOURCE)
     }
 }
@@ -648,7 +676,7 @@ private class InspectFixture {
             "Volumes" to JsonNull,
             "Healthcheck" to JsonNull,
             "ExposedPorts" to JsonNull,
-            "Labels" to imageLabels(),
+            "Labels" to containerLabels(),
             "Shell" to JsonNull,
             "OnBuild" to JsonNull,
             "StopSignal" to JsonPrimitive(""),
@@ -752,6 +780,7 @@ private class InspectFixture {
             put("PortBindings", JsonObject(emptyMap()))
             put("StorageOpt", JsonNull)
             put("Sysctls", JsonNull)
+            put("Annotations", JsonObject(emptyMap()))
             put("ConsoleSize", JsonArray(listOf(JsonPrimitive(0), JsonPrimitive(0))))
             put(
                 "MaskedPaths",
@@ -869,8 +898,12 @@ private class InspectFixture {
         ),
     )
 
-    private fun imageLabels(): JsonObject = JsonObject(
+    fun imageLabels(): JsonObject = JsonObject(
         mapOf("org.opencontainers.image.version" to JsonPrimitive("24.04")),
+    )
+
+    fun containerLabels(): JsonObject = JsonObject(
+        imageLabels() + (OPERATION_LABEL to JsonPrimitive(OPERATION_ID)),
     )
 
     private fun ulimit(name: String, ceiling: Long): JsonObject = JsonObject(
@@ -900,7 +933,9 @@ private fun JsonObject.withField(name: String, value: JsonElement): JsonObject =
 
 private const val IMAGE_ID = "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
 private const val CONTAINER_ID = "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
-private const val CONTAINER_NAME = "llvm-hosted-build-op-0123456789abcdef"
+private const val OPERATION_ID = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
+private const val CONTAINER_NAME = "decomp-llvm-behavior-v1-$OPERATION_ID"
+private const val OPERATION_LABEL = "dev.decompengine.llvm-behavior-hosted-operation"
 private const val LAYER_ONE = "sha256:cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc"
 private const val LAYER_TWO = "sha256:dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd"
 private const val ZERO_TIMESTAMP = "0001-01-01T00:00:00Z"

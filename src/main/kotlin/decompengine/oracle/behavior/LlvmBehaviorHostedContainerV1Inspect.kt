@@ -25,10 +25,13 @@ internal data class LlvmBehaviorHostedContainerV1Expectation(
     val inputsSource: Path,
     val stageOutputSource: Path,
 ) {
+    val operationId: String
+
     init {
         if (!imageId.matches(IMAGE_ID)) hostedContainerInspectFail("expected worker image ID is malformed")
         if (!containerId.matches(CONTAINER_ID)) hostedContainerInspectFail("expected container ID is malformed")
-        if (!containerName.matches(CONTAINER_NAME)) hostedContainerInspectFail("expected container name is malformed")
+        operationId = CONTAINER_NAME.matchEntire(containerName)?.groupValues?.get(1)
+            ?: hostedContainerInspectFail("expected container name is not journal-derived")
         if (uid <= 0 || gid <= 0) hostedContainerInspectFail("worker UID and GID must both be non-root")
         requireBindSource(inputsSource, "inputs")
         requireBindSource(stageOutputSource, "stage output")
@@ -51,6 +54,7 @@ internal data class LlvmBehaviorHostedWorkerImageV1Projection(
 internal data class LlvmBehaviorHostedContainerV1Projection(
     val containerId: String,
     val containerName: String,
+    val operationId: String,
     val imageId: String,
     val user: String,
     val state: String,
@@ -201,6 +205,7 @@ private fun verifyContainer(
     return LlvmBehaviorHostedContainerV1Projection(
         containerId = expectation.containerId,
         containerName = expectation.containerName,
+        operationId = expectation.operationId,
         imageId = expectation.imageId,
         user = user,
         state = CREATED_STATE,
@@ -272,7 +277,7 @@ private fun verifyContainerConfig(
     requireNullOrEmptyObject(config, "Volumes", "worker container config")
     requireAbsentOrNull(config, "Healthcheck", "worker container config")
     requireNullOrEmptyObject(config, "ExposedPorts", "worker container config")
-    requireExactStringObject(config, "Labels", EXPECTED_IMAGE_LABELS, "worker container config")
+    requireExactStringObject(config, "Labels", expectedContainerLabels(expectation), "worker container config")
     requireNullOrEmptyArray(config, "Shell", "worker container config")
     requireNullOrEmptyArray(config, "OnBuild", "worker container config")
     requireAbsentNullOrEmptyString(config, "StopSignal", "worker container config")
@@ -343,6 +348,7 @@ private fun verifyHostConfig(
     }
     requireAbsentOrNull(host, "MemorySwappiness", "worker host config")
     OPTIONAL_ZERO_RESOURCE_FIELDS.forEach { field -> requireAbsentNullOrZero(host, field, "worker host config") }
+    requireNullOrEmptyObject(host, "Annotations", "worker host config")
 
     verifyExactRestartPolicy(host.inspectObject("RestartPolicy", "worker host config"))
     verifyExactLogConfig(host.inspectObject("LogConfig", "worker host config"))
@@ -433,7 +439,7 @@ private fun verifyRequestedBind(
     }
     requireAbsentNullOrEmptyString(mount, "Consistency", "worker host bind request")
     val options = mount.inspectObject("BindOptions", "worker host bind request")
-    listOf("VolumeOptions", "TmpfsOptions", "ImageOptions").forEach { field ->
+    listOf("VolumeOptions", "TmpfsOptions", "ImageOptions", "ClusterOptions").forEach { field ->
         requireAbsentOrNull(mount, field, "worker host bind request")
     }
     requireExact(options.inspectString("Propagation", "worker host bind options"), "rprivate", "bind propagation")
@@ -617,6 +623,7 @@ private fun containerPreStartProjection(expectation: LlvmBehaviorHostedContainer
     mapOf(
         "containerId" to JsonPrimitive(expectation.containerId),
         "containerName" to JsonPrimitive(expectation.containerName),
+        "operationId" to JsonPrimitive(expectation.operationId),
         "execution" to JsonObject(
             mapOf(
                 "cmd" to JsonArray(emptyList()),
@@ -626,7 +633,9 @@ private fun containerPreStartProjection(expectation: LlvmBehaviorHostedContainer
                 ),
                 "gid" to JsonPrimitive(expectation.gid),
                 "hostname" to JsonPrimitive(EXPECTED_HOSTNAME),
-                "labels" to JsonObject(EXPECTED_IMAGE_LABELS.mapValues { JsonPrimitive(it.value) }),
+                "labels" to JsonObject(
+                    expectedContainerLabels(expectation).mapValues { JsonPrimitive(it.value) },
+                ),
                 "uid" to JsonPrimitive(expectation.uid),
                 "workingDirectory" to JsonPrimitive(EXPECTED_WORKING_DIRECTORY),
             ),
@@ -716,6 +725,9 @@ private fun containerPreStartProjection(expectation: LlvmBehaviorHostedContainer
     ),
 )
 
+private fun expectedContainerLabels(expectation: LlvmBehaviorHostedContainerV1Expectation): Map<String, String> =
+    EXPECTED_IMAGE_LABELS + (OPERATION_LABEL to expectation.operationId)
+
 private fun tmpfsProjection(
     destination: String,
     bytes: Long,
@@ -755,8 +767,14 @@ private fun parseOneInspectRecord(bytes: ByteArray, label: String): JsonObject {
 }
 
 private fun requireBindSource(path: Path, label: String) {
-    if (!path.isAbsolute || path.normalize() != path || path.parent == null || path.toString() == "/" || '\u0000' in path.toString()) {
-        hostedContainerInspectFail("expected $label bind source must be an absolute normalized non-root path")
+    val rendered = path.toString()
+    if (
+        !path.isAbsolute || path.normalize() != path || path.parent == null || rendered == "/" ||
+        !rendered.matches(PORTABLE_BIND_SOURCE)
+    ) {
+        hostedContainerInspectFail(
+            "expected $label bind source must be an absolute normalized non-root portable Docker mount path",
+        )
     }
 }
 
@@ -955,6 +973,7 @@ private val EXPECTED_CONTAINER_ENVIRONMENT = mapOf(
     "TZ" to "UTC",
 )
 private val EXPECTED_IMAGE_LABELS = mapOf("org.opencontainers.image.version" to "24.04")
+private const val OPERATION_LABEL = "dev.decompengine.llvm-behavior-hosted-operation"
 private val EXPECTED_SECURITY_OPTIONS = listOf("no-new-privileges", "seccomp=builtin")
 private val EXPECTED_ULIMITS = mapOf(
     "core" to 0L,
@@ -993,7 +1012,6 @@ private val EXACT_EMPTY_RESOURCE_ARRAY_FIELDS = setOf(
     "BlkioDeviceWriteIOps",
 )
 private val OPTIONAL_ZERO_RESOURCE_FIELDS = setOf(
-    "Annotations",
     "CpuBurst",
     "KernelMemory",
     "KernelMemoryTCP",
@@ -1017,7 +1035,8 @@ private val FORBIDDEN_ENVIRONMENT_PREFIXES = listOf("GLIBC_", "LD_", "MALLOC_", 
 
 private val IMAGE_ID = Regex("sha256:[0-9a-f]{64}")
 private val CONTAINER_ID = Regex("[0-9a-f]{64}")
-private val CONTAINER_NAME = Regex("[a-z0-9][a-z0-9_.-]{0,127}")
+private val CONTAINER_NAME = Regex("decomp-llvm-behavior-v1-([0-9a-f]{64})")
+private val PORTABLE_BIND_SOURCE = Regex("/[A-Za-z0-9._+@%:=-]+(?:/[A-Za-z0-9._+@%:=-]+)*")
 private const val MAXIMUM_INSPECT_BYTES = 2 * 1024 * 1024
 private const val MAXIMUM_ROOTFS_LAYERS = 256
 private val INSPECT_LIMITS = StrictJsonLimits(
