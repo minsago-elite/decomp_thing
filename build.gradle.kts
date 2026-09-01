@@ -69,6 +69,12 @@ registerOracleJavaExecTask(
 )
 
 registerOracleJavaExecTask(
+    taskName = "generateFullTreeGeneratedFileInventory",
+    taskDescription = "Validates an unreceipted A14 generated-file snapshot with Kotlin/JVM authority",
+    entryPoint = "decompengine.oracle.fulltree.FullTreeGeneratedFileInventoryGeneratorCli",
+)
+
+registerOracleJavaExecTask(
     taskName = "fetchLlvmReleaseArtifacts",
     taskDescription = "Fetches and authenticates the hash-locked LLVM oracle release artifacts in Kotlin/JVM",
     entryPoint = "decompengine.oracle.provenance.LlvmReleaseArtifactFetcherCli",

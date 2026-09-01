@@ -60,6 +60,53 @@ Generate the envelope without Python using:
   --output /path/to/full-tree-header-plan-readiness.json"
 ```
 
+## Generated-file snapshot registry
+
+`FullTreeGeneratedFileInventoryControl` is the Kotlin/JVM-only generated-tree input
+boundary that follows readiness. It accepts raw paths to a generated TAR/XZ snapshot,
+its provenance sidecar, and the authenticated planning controls. The snapshot is
+selective by contract: every regular member must be either a case-sensitive
+`.def`, `.h`, `.hh`, `.hpp`, `.hxx`, or `.inc` generated header, or the exact A13
+module whose planning record has `sourceKind: generated`. Other regular files are
+forbidden, every A13 generated module must be present, the sidecar file table must
+equal the streamed archive population, and producer actions must cover those files
+exactly once.
+
+The archive profile is a single CRC64 XZ stream containing canonical USTAR with one
+`generated/` root, normalized ownership and modes, timestamps equal to the build
+record's `SOURCE_DATE_EPOCH`, canonical parent-before-child paths, no PAX metadata,
+and no links. The control streams file byte counts and SHA-256 values under explicit
+compressed, expanded, member, path, per-file, aggregate, action, output, work, and
+serialization bounds. It binds the authenticated CMake and Ninja runner identities,
+commands, build directory, and epoch from the build record; opaque generator and
+Ninja-edge commitments remain sidecar claims.
+
+Accordingly the result is **integrity-verified but unreceipted**. It does not claim
+authenticated origin, complete generated-header population, live Ninja-edge replay,
+a verified physical build root, clean compilation, or release eligibility. Those
+four unresolved classes are emitted as fixed blockers. A separate isolated
+CMake/Ninja capture must bind real generation evidence before later controls can
+clear them.
+
+ACP remains the first-class candidate producer/operator. Its authenticated session,
+change, build-artifact, and provenance lineage can be admitted read-only by later
+Kotlin/JVM host validation, but ACP does not author this snapshot, its provenance,
+the reference population, policy, validation result, score, certification, or
+release decision. ACP lineage is explicitly not an input to generated-snapshot v1.
+
+Validate and publish the canonical registry without Python using:
+
+```bash
+./gradlew generateFullTreeGeneratedFileInventory --args="\
+  --generated-archive /path/to/generated.tar.xz \
+  --generated-provenance /path/to/full-tree-generated-file-provenance.json \
+  --output /path/to/full-tree-generated-file-inventory.json"
+```
+
+No locally discovered build tree is promoted automatically. For production use,
+the archive and sidecar must come from the separately reviewed capture path and must
+reconcile with the checked build record and planning inventory supplied here.
+
 ## Resolution boundary
 
 The assessment scans the strict locked TAR/XZ archive and parses C-family

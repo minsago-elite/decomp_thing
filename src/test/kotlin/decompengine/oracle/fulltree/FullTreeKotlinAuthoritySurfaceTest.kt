@@ -33,6 +33,12 @@ class FullTreeKotlinAuthoritySurfaceTest {
         assertTrue(workflow.contains("oracle/llvm/22.1.6/full-tree-source-inventory.json"))
         assertTrue(workflow.contains("full-tree-planning-inventory.json"))
         assertTrue(workflow.contains("oracle/llvm/22.1.6/full-tree-planning-inventory.json"))
+        assertTrue(build.contains("taskName = \"generateFullTreeGeneratedFileInventory\""))
+        assertTrue(
+            build.contains(
+                "entryPoint = \"decompengine.oracle.fulltree.FullTreeGeneratedFileInventoryGeneratorCli\"",
+            ),
+        )
         assertFalse(workflow.contains("python3 scripts/verify-llvm-full-tree-scope.py"))
         assertFalse(workflow.contains("python3 scripts/generate-llvm-full-tree-inventory.py"))
         assertFalse(workflow.contains("python3 scripts/generate-llvm-full-tree-source-inventory.py"))
