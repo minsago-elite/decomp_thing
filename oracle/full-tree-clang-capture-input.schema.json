@@ -20,6 +20,7 @@
         "captureOutputsPresent": false,
         "exitStatusesPresent": false,
         "compilerCaptureAuthenticated": false,
+        "compilerWriteSetContained": false,
         "headerPopulationComplete": false,
         "headerPlanReady": false,
         "cleanCompilationProven": false,
@@ -56,11 +57,13 @@
     "capturePolicy": {
       "const": {
         "executionDisposition": "not-executed",
-        "argumentTransport": "ordered-execve-argv-no-shell-no-response-files",
+        "argumentTransport": "ordered-execve-argv-no-shell-no-response-or-compiler-config-files",
+        "argumentFraming": "fixed-driver-config-dependency-output-compile-main-frame-plus-self-contained-option-tail",
         "actionCoverage": "exact-one-per-authenticated-a13-module",
         "actionOrdering": "authenticated-a13-source-module-order",
-        "actionIdentity": "kotlin-jvm-derived-from-full-process-input-and-predecessor-bindings",
+        "actionIdentity": "kotlin-jvm-derived-from-complete-explicit-argv-environment-and-predecessor-bindings",
         "commandMutation": "forbidden",
+        "compilerWriteSetDisposition": "not-proven-requires-isolated-runner-containment",
         "headerOutputFormat": "json-v2.0.0",
         "headerFiltering": "direct-per-file",
         "traceSlot": "traces/<derived-action-sha256>.json",
@@ -94,7 +97,7 @@
     "counts": {
       "type": "object",
       "additionalProperties": false,
-      "required": ["actions", "actionPathBytes", "arguments", "argumentBytes", "baseEnvironmentVariables", "blockers", "captureHeaderCandidates", "environmentBytes", "generatedActions", "generatedHeaderCandidates", "handwrittenActions", "outputRecords", "sourceHeaderCandidates", "sourceModules", "sourceOnlyUnits", "workUnits"],
+      "required": ["actions", "actionPathBytes", "arguments", "argumentBytes", "baseEnvironmentVariables", "blockers", "captureHeaderCandidates", "environmentBytes", "generatedActions", "generatedHeaderCandidates", "handwrittenActions", "headerPathBytes", "outputRecords", "sourceHeaderCandidates", "sourceModules", "sourceOnlyUnits", "workUnits"],
       "properties": {
         "actions": {"type": "integer", "minimum": 1, "maximum": 10000},
         "actionPathBytes": {"type": "integer", "minimum": 1, "maximum": 16777216},
@@ -107,6 +110,7 @@
         "generatedActions": {"type": "integer", "minimum": 1, "maximum": 10000},
         "generatedHeaderCandidates": {"type": "integer", "minimum": 0, "maximum": 50000},
         "handwrittenActions": {"type": "integer", "minimum": 0, "maximum": 10000},
+        "headerPathBytes": {"type": "integer", "minimum": 0, "maximum": 16777216},
         "outputRecords": {"type": "integer", "minimum": 11, "maximum": 160263},
         "sourceHeaderCandidates": {"type": "integer", "minimum": 0, "maximum": 50000},
         "sourceModules": {"type": "integer", "minimum": 1, "maximum": 10000},
@@ -263,7 +267,7 @@
       "required": ["name", "value"],
       "properties": {
         "name": {"type": "string", "pattern": "^[A-Z_][A-Z0-9_]*$", "maxLength": 128},
-        "value": {"type": "string", "maxLength": 1048576}
+        "value": {"type": "string", "pattern": "^[^\\u0000]*$", "maxLength": 1048576}
       }
     },
     "toolBinding": {
@@ -314,7 +318,20 @@
           "type": "array",
           "minItems": 11,
           "maxItems": 4096,
-          "items": {"type": "string", "minLength": 1, "maxLength": 16384, "pattern": "^[^\\u0000\\r\\n]+$"}
+          "prefixItems": [
+            {"$ref": "#/$defs/absolutePath"},
+            {"const": "--no-default-config"},
+            {"const": "-MD"},
+            {"const": "-MT"},
+            {"type": "string", "minLength": 1, "maxLength": 16384, "pattern": "^[^\\u0000\\r\\n]+$"},
+            {"const": "-MF"},
+            {"type": "string", "minLength": 1, "maxLength": 16384, "pattern": "^[^\\u0000\\r\\n]+$"},
+            {"const": "-o"},
+            {"type": "string", "minLength": 1, "maxLength": 16384, "pattern": "^[^\\u0000\\r\\n]+$"},
+            {"const": "-c"},
+            {"$ref": "#/$defs/absolutePath"}
+          ],
+          "items": {"type": "string", "minLength": 1, "maxLength": 16384, "pattern": "^-[^\\u0000\\r\\n]*$"}
         }
       }
     }

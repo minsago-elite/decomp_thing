@@ -314,14 +314,14 @@ class FullTreeGeneratedFileInventoryControlTest {
     }
 }
 
-private data class GeneratedFixture(
+internal data class GeneratedFixture(
     val control: FullTreeControlFixture,
     val planning: Path,
     val archive: Path,
     val provenance: Path,
 )
 
-private fun createGeneratedFixture(root: Path): GeneratedFixture {
+internal fun createGeneratedFixture(root: Path): GeneratedFixture {
     Files.createDirectories(root)
     Files.setPosixFilePermissions(root, PosixFilePermissions.fromString("rwx------"))
     val control = createFullTreeControlFixture(root.resolve("control"))
