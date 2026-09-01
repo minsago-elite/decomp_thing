@@ -123,6 +123,17 @@ exit status, stderr, or daemon mutation. No START, wait, or removal suffix is ex
 checkpoint. A future authenticated coordinator must bind all of those process facts and the strict
 stopped-container inspection before it can privately render a mutation command.
 
+The implemented Docker session is correspondingly read-only. Through one descriptor-pinned client,
+an empty descriptor-pinned client configuration, and one descriptor-checked private Unix socket, it
+can execute only worker-image inspection, retained exact-ID container inspection, anchored exact-name
+inventory, and exact-operation-label inventory. Each result is a distinct defensive token bound to
+the operation and journal identities; image and container results also retain their expected exact
+IDs. These tokens are deliberately non-authoritative. The session accepts caller-selected client
+digest and socket bindings, does not authenticate daemon semantics, cannot prove absence from empty
+inventories, and exposes no CREATE or other mutation. Kotlin must first derive the runtime bindings
+from authenticated corpus evidence, strictly verify the image before mutation, and descriptor-bind
+the input and staging roots inside a private coordinator before CREATE can be added.
+
 Kotlin creates a stopped container by exact image ID and then authenticates its effective inspect
 record before START. The container must have:
 
