@@ -63,10 +63,6 @@ class LlvmBehaviorHostedCleanBuildV2VerifierTest {
         val baseline = receiptDocument(executable)
         val builds = baseline.getValue("cleanBuilds") as JsonArray
         val second = builds[1] as JsonObject
-        val changedBuild = JsonObject(second + ("objectSetSha256" to JsonPrimitive("f".repeat(64))))
-        val crossBuild = JsonObject(
-            baseline + ("cleanBuilds" to JsonArray(listOf(builds[0], changedBuild))),
-        )
         val runtime = baseline.getValue("runtimeClosure") as JsonObject
         val crossRuntime = JsonObject(
             baseline + (
@@ -76,7 +72,11 @@ class LlvmBehaviorHostedCleanBuildV2VerifierTest {
                 ),
         )
 
-        listOf(crossBuild, crossRuntime).forEach { malformed ->
+        val crossBuilds = listOf("objectSetSha256", "linkPlanSha256").map { field ->
+            val changedBuild = JsonObject(second + (field to JsonPrimitive("f".repeat(64))))
+            JsonObject(baseline + ("cleanBuilds" to JsonArray(listOf(builds[0], changedBuild))))
+        }
+        (crossBuilds + crossRuntime).forEach { malformed ->
             clearPair(root)
             writePair(root, canonicalReceipt(malformed), executable)
             assertFailsWith<LlvmBehaviorHostedCleanBuildV2VerificationException> {
@@ -241,7 +241,7 @@ class LlvmBehaviorHostedCleanBuildV2VerifierTest {
     @Test
     fun `reviewed hosted receipt schema identity is pinned`() {
         assertEquals(
-            "9dafb9b95b094cb82844371b2f094505761df808d436617d491f39946e448453",
+            "327c964163c2c76a42fe890b780abe44c76183e5a4b07156e4a4a10cfed620a1",
             OracleSchemas.identity(SCHEMA_NAME).sha256,
         )
     }
@@ -381,7 +381,7 @@ class LlvmBehaviorHostedCleanBuildV2VerifierTest {
         "dependencySetSha256" to JsonPrimitive("d".repeat(64)),
         "objectSetSha256" to JsonPrimitive("e".repeat(64)),
         "linkCommandSha256" to JsonPrimitive("1".repeat(64)),
-        "linkPlanInputCount" to JsonPrimitive(8),
+        "linkPlanInputCount" to JsonPrimitive(14),
         "linkPlanSha256" to JsonPrimitive("2".repeat(64)),
         "combinedOutputBytes" to JsonPrimitive(0),
         "combinedOutputSha256" to JsonPrimitive(OracleArtifacts.sha256(byteArrayOf())),

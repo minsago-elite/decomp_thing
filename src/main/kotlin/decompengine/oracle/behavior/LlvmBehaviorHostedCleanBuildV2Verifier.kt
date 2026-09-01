@@ -277,10 +277,13 @@ private fun verifyReceiptBindings(
             verificationFail("hosted clean builds disagree on reproducibility field $field")
         }
     }
-    if (first.requiredLong("dependencyCount", "first clean build") < firstSourceCount ||
-        first.requiredLong("linkPlanInputCount", "first clean build") < firstSourceCount
+    if (first.requiredLong("dependencyCount", "first clean build") < firstSourceCount) {
+        verificationFail("hosted clean-build dependency set is smaller than its translation-unit set")
+    }
+    if (first.requiredLong("linkPlanInputCount", "first clean build") !=
+        firstSourceCount + FIXED_SYSTEM_LINK_PLAN_INPUTS
     ) {
-        verificationFail("hosted clean-build dependency or direct-link plan is smaller than its translation-unit set")
+        verificationFail("hosted clean-build direct-link plan does not have its exact fixed shape")
     }
 
     val candidate = root.requiredObject("candidateExecutable", "hosted receipt")
@@ -493,7 +496,7 @@ private const val MAXIMUM_RECEIPT_BYTES = 128 * 1024
 private const val MAXIMUM_EXECUTABLE_BYTES = 64 * 1024 * 1024
 private const val MAXIMUM_AGGREGATE_HASHED_BYTES = 2L * 1024L * 1024L * 1024L
 private const val EXPECTED_RECEIPT_SCHEMA_SHA256 =
-    "9dafb9b95b094cb82844371b2f094505761df808d436617d491f39946e448453"
+    "327c964163c2c76a42fe890b780abe44c76183e5a4b07156e4a4a10cfed620a1"
 private val OWNER_DIRECTORY_PERMISSIONS = setOf(
     PosixFilePermission.OWNER_READ,
     PosixFilePermission.OWNER_WRITE,
@@ -521,3 +524,4 @@ private val REPRODUCIBILITY_FIELDS = listOf(
     "executableBytes",
     "executableSha256",
 )
+private const val FIXED_SYSTEM_LINK_PLAN_INPUTS = 12L

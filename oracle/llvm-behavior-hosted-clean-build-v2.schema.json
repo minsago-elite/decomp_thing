@@ -336,7 +336,7 @@
         "dependencySetSha256": {"$ref": "#/$defs/sha256"},
         "objectSetSha256": {"$ref": "#/$defs/sha256"},
         "linkCommandSha256": {"$ref": "#/$defs/sha256"},
-        "linkPlanInputCount": {"type": "integer", "minimum": 1, "maximum": 4096},
+        "linkPlanInputCount": {"type": "integer", "minimum": 13, "maximum": 140},
         "linkPlanSha256": {"$ref": "#/$defs/sha256"},
         "combinedOutputBytes": {"type": "integer", "minimum": 0, "maximum": 17179869184},
         "combinedOutputSha256": {"$ref": "#/$defs/sha256"},

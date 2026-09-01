@@ -569,7 +569,7 @@ class LlvmBehaviorCandidateFourWayBindingV2VerifierTest {
         "dependencySetSha256" to JsonPrimitive("d".repeat(64)),
         "objectSetSha256" to JsonPrimitive("e".repeat(64)),
         "linkCommandSha256" to JsonPrimitive("1".repeat(64)),
-        "linkPlanInputCount" to JsonPrimitive(sourceCount + 2),
+        "linkPlanInputCount" to JsonPrimitive(sourceCount + 12),
         "linkPlanSha256" to JsonPrimitive("2".repeat(64)),
         "combinedOutputBytes" to JsonPrimitive(0),
         "combinedOutputSha256" to JsonPrimitive(sha256(byteArrayOf())),

@@ -11,7 +11,9 @@ worker has zero caller-selected paths and reads only fixed future-container path
 writes staged output under `/stage-output`, and creates scratch state only under `/work`. Candidate
 sources and headers are adopted into sealed anonymous identities before Clang can consume them;
 system headers and the normal dynamic-tool runtime remain protected by the inspected read-only
-worker root. Only the pending Kotlin-owned outer container coordinator may launch it.
+worker root. Only the pending Kotlin-owned outer container coordinator may launch it. In particular,
+direct retained-tool execution on an ordinary mutable host is a non-authoritative test seam, not a
+production security boundary.
 The fixed image, pre-START inspection, crash journal, cleanup ordering, and publication requirements
 for that boundary are specified by the
 [`hosted container coordinator v1`](llvm-behavior-hosted-container-coordinator-v1.md) contract.
@@ -84,16 +86,22 @@ keeps those identities until each child has been reaped. A private JNA `posix_sp
 the exact retained executable through a parent-owned descriptor capability while fixing logical
 `argv[0]` to `clang` or `ld.lld`. Descriptor-pinned working directories are applied before exec, the
 environment is rebuilt without `PATH`, `LD_*`, compiler search variables, `HOME`, or `PWD`, and the
-child closes every inherited descriptor above stderr. The inspected worker uses a read-only root
-filesystem and forbids `/etc/ld.so.preload`, preserving normal ELF `DT_NEEDED` semantics without a
-preload-based substitute runtime. There is no shell, Make, Ninja, CMake, project callback,
+child closes every inherited descriptor above stderr. The #140 outer coordinator is a security
+prerequisite: its exact five-mount contract leaves the toolchain loader/cache/library locations on
+the inspected read-only image root, and the inner worker additionally forbids `/etc/ld.so.preload`.
+The kernel and loader may therefore resolve the retained tools' `PT_INTERP` and `DT_NEEDED` names
+only from that fixed read-only runtime TCB; this inner receipt deliberately does not claim to
+authenticate that dynamic closure. There is no shell, Make, Ninja, CMake, project callback,
 caller-provided command, or generic executable runner in the candidate build path.
 
 The descriptor fanout is intentionally finite under the worker's fixed `RLIMIT_NOFILE=1024`:
 at most 128 translation units and 256 total candidate `src/`/`include/` inputs are accepted. Every
 candidate compiler input is checked against the authenticated revision, copied into a sealed memfd,
-and referenced through a sealed Clang VFS overlay with external names disabled. Primary source,
-dependency, and object outputs are descriptor capabilities; object bytes are sealed immediately
+and referenced through a sealed Clang VFS overlay with external names disabled. Clang receives the
+sealed primary-source inode on stdin and searches quoted includes only under its virtual overlay
+parent, so lookup cannot fall through to a physical `/proc` descriptor directory. Kotlin commits
+that authenticated primary explicitly because Clang omits stdin from its depfile. Dependency and object outputs are descriptor capabilities;
+object bytes are sealed immediately
 after the exact Clang child exits. Clang is forced to use integrated cc1 and the integrated assembler,
 an explicit reviewed resource directory, and the GCC installation derived from an authenticated
 fixed query, so it performs no subordinate tool lookup.
@@ -117,7 +125,9 @@ Every result must be one canonical root-owned file with the expected basename; i
 bytes are copied into a sealed identity. LLD receives those retained CRT/libc/compiler-runtime
 identities and the sealed objects in one reviewed order, with no Clang link driver, `-###` parser,
 response file, linker script, `-L`, or `-l` search. The loader's canonical runtime pathname and
-authenticated identity are both committed. `linkPlanInputCount` and the ordered
+authenticated identity are both committed; its sealed identity is also supplied under
+`--as-needed` after `libc_nonshared.a`, matching the reviewed glibc linker-script dependency.
+`linkPlanInputCount` and the ordered
 `linkPlanSha256` bind the exact LLD identity/argv0, link command, resolution role, stable logical
 path, length, and SHA-256 of every occurrence. No PID or descriptor capability enters the receipt.
 LLD writes the candidate ELF to bounded stdout (`-o -`); Kotlin immediately adopts those bytes into
