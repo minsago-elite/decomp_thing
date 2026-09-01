@@ -209,6 +209,63 @@ class GccCompilerEngineLiveContainmentControllerTest {
     }
 
     @Test
+    fun `deployment JAR inspection rejects a versioned directory alias for the BOOT keeper`() =
+        withControllerRoot { root ->
+            val baseBytes = "base-keeper".encodeToByteArray()
+            val versionedBytes = "versioned-directory-alias".encodeToByteArray()
+            val versionedKeeper = "META-INF/versions/9/$TEST_KEEPER_CLASS/"
+            val path = writeReadOnly(
+                root.resolve("versioned-keeper-directory-alias.jar"),
+                storedJar(
+                    listOf(
+                        "META-INF/MANIFEST.MF" to
+                            "Manifest-Version: 1.0\r\nMulti-Release: true\r\n\r\n".encodeToByteArray(),
+                        TEST_KEEPER_CLASS to baseBytes,
+                        "META-INF/versions/9/dummy" to "populate-version-map".encodeToByteArray(),
+                        versionedKeeper to versionedBytes,
+                    ),
+                ),
+            )
+
+            JarFile(path.toFile(), false, ZipFile.OPEN_READ, Runtime.version()).use { jar ->
+                val runtimeEntry = jar.getJarEntry(TEST_KEEPER_CLASS)
+                assertEquals(versionedKeeper, runtimeEntry.realName)
+                assertTrue(runtimeEntry.isDirectory)
+                jar.getInputStream(runtimeEntry).use { input ->
+                    assertContentEquals(versionedBytes, input.readAllBytes())
+                }
+            }
+            val failure = assertFailsWith<GccCompilerEngineLiveContainmentException> {
+                inspectDeploymentJar(path)
+            }
+            assertTrue(failure.message.orEmpty().contains("versioned BOOT keeper"), failure.message)
+        }
+
+    @Test
+    fun `deployment JAR inspection rejects an unversioned directory alias for the BOOT keeper`() =
+        withControllerRoot { root ->
+            val aliasBytes = "unversioned-directory-alias".encodeToByteArray()
+            val keeperAlias = "$TEST_KEEPER_CLASS/"
+            val path = writeReadOnly(
+                root.resolve("unversioned-keeper-directory-alias.jar"),
+                storedJar(listOf(keeperAlias to aliasBytes)),
+            )
+
+            JarFile(path.toFile(), false).use { jar ->
+                val runtimeEntry = jar.getJarEntry(TEST_KEEPER_CLASS)
+                assertEquals(keeperAlias, runtimeEntry.realName)
+                assertTrue(runtimeEntry.isDirectory)
+                jar.getInputStream(runtimeEntry).use { input ->
+                    assertContentEquals(aliasBytes, input.readAllBytes())
+                }
+            }
+            val failure = assertFailsWith<GccCompilerEngineLiveContainmentException> {
+                inspectDeploymentJar(path)
+            }
+            assertTrue(failure.message.orEmpty().contains("BOOT keeper lookup alias"), failure.message)
+        }
+
+    @Test
     fun `raw facade rejects resume before launch and leaves no journal`() = withControllerRoot { root ->
         val fixture = createFixture(root, GccCompilerEngineContainmentRunKind.RESUMED)
 

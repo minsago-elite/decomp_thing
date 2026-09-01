@@ -412,6 +412,11 @@ internal class GccKotlinBootClasspathReference private constructor(
                         "GCC Kotlin BOOT deployment JAR $index contains a versioned BOOT keeper class",
                     )
                 }
+                if (name.startsWith("$KEEPER_CLASS/")) {
+                    liveContainmentFail(
+                        "GCC Kotlin BOOT deployment JAR $index contains a BOOT keeper lookup alias",
+                    )
+                }
                 if (isUnsupportedJarSignatureMetadata(name)) {
                     liveContainmentFail(
                         "GCC Kotlin BOOT deployment JAR $index contains unsupported SIG metadata",
@@ -828,7 +833,7 @@ private const val REFERENCE_PROVIDER = "gcc-kotlin-boot-deployment-classpath-ref
 private const val KEEPER_CLASS =
     "decompengine/oracle/fulltree/KotlinSystemdCgroupBootKeeper.class"
 private val VERSIONED_KEEPER_CLASS = Regex(
-    "META-INF/versions/[0-9]+/${Regex.escape(KEEPER_CLASS)}",
+    "META-INF/versions/[0-9]+/${Regex.escape(KEEPER_CLASS)}(?:/.*)?",
 )
 private const val MAXIMUM_REFERENCE_BYTES = 256 * 1024
 private const val MAXIMUM_REFERENCE_ENTRIES = 512
