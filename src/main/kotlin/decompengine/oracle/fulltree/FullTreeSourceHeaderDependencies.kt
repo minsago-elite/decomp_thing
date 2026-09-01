@@ -63,6 +63,22 @@ sealed interface FullTreeSourceHeaderDependencyAssessment {
     val reportSha256: String
     val directiveCount: Long
     val resolvedLocalReferenceCount: Long
+    /** SHA-256 of the authenticated planning inventory used for this assessment. */
+    val planningInventoryArtifactSha256: String
+    /** SHA-256 of the authenticated source archive scanned for the manifest below. */
+    val sourceArchiveSha256: String
+    /**
+     * Domain-separated commitment to [canonicalSourceHeaderPaths]. This property is not part of
+     * [canonicalBytes], so a consumer must bind it together with the archive, planning-inventory,
+     * dependency-configuration, and dependency-report digests in its own canonical artifact.
+     */
+    val canonicalSourceHeaderManifestSha256: String
+    /**
+     * Canonically ordered `source/` paths for regular files with an eligible header suffix in the
+     * authenticated archive and enabled source roots. This is a source-only candidate population:
+     * generated, external, symlink, and nonstandard-suffix inputs are not represented.
+     */
+    val canonicalSourceHeaderPaths: List<String>
     val canonicalBytes: ByteArray
 }
 
@@ -144,6 +160,12 @@ object FullTreeSourceHeaderDependencies {
         override val reportSha256: String = state.reportSha256
         override val directiveCount: Long = state.directiveCount
         override val resolvedLocalReferenceCount: Long = state.resolvedLocalReferenceCount
+        override val planningInventoryArtifactSha256: String = state.planningInventoryArtifactSha256
+        override val sourceArchiveSha256: String = state.sourceArchiveSha256
+        override val canonicalSourceHeaderManifestSha256: String =
+            state.canonicalSourceHeaderManifestSha256
+        override val canonicalSourceHeaderPaths: List<String> =
+            Collections.unmodifiableList(ArrayList(state.canonicalSourceHeaderPaths))
         override val canonicalBytes: ByteArray
             get() = state.bytes.copyOf()
 
@@ -276,6 +298,17 @@ private fun assessDependencies(
             )
         }
         val archiveEvidence = collector.finish(archiveSummary)
+        val canonicalSourceHeaderPaths = immutableDependencyList(
+            archiveEvidence.regularPaths.asSequence()
+                .filter(::isDependencyPayloadPath)
+                .map(::archiveToSourcePath)
+                .toList(),
+        )
+        val canonicalSourceHeaderManifestSha256 = commitStrings(
+            "full-tree-source-header-manifest-v1",
+            "canonical-source-header-paths",
+            canonicalSourceHeaderPaths,
+        )
         plannedArchivePaths.forEach { required ->
             if (required !in archiveEvidence.regularPaths) {
                 dependencyFailure("planned handwritten/source-only input is absent from the authenticated archive: $required")
@@ -311,6 +344,10 @@ private fun assessDependencies(
             reportSha256 = projection.document.controlString("reportSha256"),
             directiveCount = projection.directiveCount,
             resolvedLocalReferenceCount = projection.resolvedLocalReferenceCount,
+            planningInventoryArtifactSha256 = registry.artifactSha256,
+            sourceArchiveSha256 = archiveSha256,
+            canonicalSourceHeaderManifestSha256 = canonicalSourceHeaderManifestSha256,
+            canonicalSourceHeaderPaths = canonicalSourceHeaderPaths,
             bytes = bytes.copyOf(),
         )
     } finally {
@@ -1401,6 +1438,9 @@ private fun addDependencyCount(left: Long, right: Long, label: String): Long = t
 
 private fun incrementDependency(value: Long, label: String): Long = addDependencyCount(value, 1L, label)
 
+private fun <T> immutableDependencyList(values: Collection<T>): List<T> =
+    Collections.unmodifiableList(ArrayList(values))
+
 private fun dependencyFailure(message: String): Nothing = throw FullTreeSourceHeaderDependencyException(message)
 
 private fun ByteArray.hexDependency(): String = joinToString("") { byte ->
@@ -1433,6 +1473,10 @@ private data class DependencyAssessmentState(
     val reportSha256: String,
     val directiveCount: Long,
     val resolvedLocalReferenceCount: Long,
+    val planningInventoryArtifactSha256: String,
+    val sourceArchiveSha256: String,
+    val canonicalSourceHeaderManifestSha256: String,
+    val canonicalSourceHeaderPaths: List<String>,
     val bytes: ByteArray,
 )
 

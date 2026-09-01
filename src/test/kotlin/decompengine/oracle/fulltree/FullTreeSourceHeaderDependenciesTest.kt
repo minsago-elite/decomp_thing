@@ -4,6 +4,8 @@ import decompengine.oracle.core.OracleArtifacts
 import decompengine.oracle.core.OracleJson
 import decompengine.oracle.core.OracleSchemaException
 import decompengine.oracle.core.OracleSchemas
+import java.io.ByteArrayInputStream
+import java.io.ByteArrayOutputStream
 import java.lang.reflect.Modifier
 import java.nio.file.Files
 import java.nio.file.Path
@@ -18,6 +20,8 @@ import kotlinx.serialization.json.JsonArray
 import kotlinx.serialization.json.JsonNull
 import kotlinx.serialization.json.JsonObject
 import kotlinx.serialization.json.JsonPrimitive
+import org.apache.commons.compress.compressors.xz.XZCompressorInputStream
+import org.apache.commons.compress.compressors.xz.XZCompressorOutputStream
 import org.junit.jupiter.api.Assumptions.assumeTrue
 
 class FullTreeSourceHeaderDependenciesTest {
@@ -30,6 +34,16 @@ class FullTreeSourceHeaderDependenciesTest {
             val second = assessDependencies(fixture)
             assertContentEquals(first.canonicalBytes, second.canonicalBytes)
             assertEquals(first.reportSha256, second.reportSha256)
+            assertEquals(fixtureSha256(fixture.planning), first.planningInventoryArtifactSha256)
+            assertEquals(fixtureSha256(fixture.sourceArchive), first.sourceArchiveSha256)
+            assertEquals(first.canonicalSourceHeaderManifestSha256, second.canonicalSourceHeaderManifestSha256)
+            assertEquals(first.canonicalSourceHeaderPaths, second.canonicalSourceHeaderPaths)
+            assertTrue(first.canonicalSourceHeaderPaths.isEmpty())
+            assertTrue(first.canonicalSourceHeaderManifestSha256.matches(Regex("[0-9a-f]{64}")))
+            assertFailsWith<UnsupportedOperationException> {
+                @Suppress("UNCHECKED_CAST")
+                (first.canonicalSourceHeaderPaths as MutableList<String>).add("source/forged.h")
+            }
 
             val document = dependencyDocument(first)
             assertEquals(
@@ -67,6 +81,22 @@ class FullTreeSourceHeaderDependenciesTest {
             assertTrue(document.controlArray("modules").controlObjects("modules").none {
                 it.controlString("moduleId") == "core"
             })
+        }
+
+    @Test
+    fun `authenticated source header manifest includes eligible regular archive files`() =
+        inControlTemporaryDirectory { directory ->
+            val fixture = createDependencyFixtureWithSourceHeader(directory.resolve("with-header"))
+
+            val assessment = assessDependencies(fixture)
+
+            assertEquals(listOf("source/clang/include/fixture.h"), assessment.canonicalSourceHeaderPaths)
+            assertEquals(
+                "0bbcb99f8f2797a547f8949d044d6181350601a0d5be0451bd8e7dd02f8d0ded",
+                assessment.canonicalSourceHeaderManifestSha256,
+            )
+            assertEquals(fixtureSha256(fixture.sourceArchive), assessment.sourceArchiveSha256)
+            assertEquals(fixtureSha256(fixture.planning), assessment.planningInventoryArtifactSha256)
         }
 
     @Test
@@ -352,6 +382,12 @@ class FullTreeSourceHeaderDependenciesTest {
         assertEquals(2_161_858_560L, archiveEvidence.controlLong("expandedBytes"))
         assertEquals(184_819L, archiveEvidence.controlLong("memberCount"))
         assertEquals(169_003L, archiveEvidence.controlLong("regularFileCount"))
+        assertEquals(REAL_SOURCE_HEADER_COUNT, assessment.canonicalSourceHeaderPaths.size)
+        assertEquals(REAL_SOURCE_HEADER_MANIFEST_SHA256, assessment.canonicalSourceHeaderManifestSha256)
+        assertEquals(
+            assessment.canonicalSourceHeaderPaths.sortedWith(FULL_TREE_CODE_POINT_ORDER),
+            assessment.canonicalSourceHeaderPaths,
+        )
         assertEquals(REAL_PARITY_OUTPUT_SHA256, OracleArtifacts.sha256(assessment.canonicalBytes))
         assertEquals(REAL_PARITY_REPORT_SHA256, assessment.reportSha256)
         assertEquals(REAL_PARITY_OUTPUT_BYTES, assessment.canonicalBytes.size)
@@ -363,6 +399,9 @@ class FullTreeSourceHeaderDependenciesTest {
         const val REAL_PARITY_REPORT_SHA256 =
             "33abce3226fc60143c5d4586689f2e43db0ab14e10acaf4288c062899ff329bf"
         const val REAL_PARITY_OUTPUT_BYTES = 14_218_981
+        const val REAL_SOURCE_HEADER_COUNT = 6_579
+        const val REAL_SOURCE_HEADER_MANIFEST_SHA256 =
+            "a508d401c9904e2a18b52bb6f1e77cf06d0944e5ced8888c4c010f196e2310fc"
     }
 }
 
@@ -387,6 +426,164 @@ private fun createDependencyFixture(root: Path): DependencyFixture {
         planning,
     )
     return DependencyFixture(control, planning)
+}
+
+private fun createDependencyFixtureWithSourceHeader(root: Path): DependencyFixture {
+    val fixture = createDependencyFixture(root)
+    addFixtureSourceHeader(fixture.control.sourceArchive)
+
+    val archiveSha256 = fixtureSha256(fixture.control.sourceArchive)
+    val archiveBytes = Files.size(fixture.control.sourceArchive)
+    val sourceLock = parseControlObject(fixture.control.sourceLock)
+    val source = sourceLock.controlObject("source")
+    val archive = source.controlObject("archive")
+    writeControlObject(
+        fixture.control.sourceLock,
+        JsonObject(
+            sourceLock + ("source" to JsonObject(
+                source + ("archive" to JsonObject(
+                    archive + mapOf(
+                        "bytes" to JsonPrimitive(archiveBytes),
+                        "sha256" to JsonPrimitive(archiveSha256),
+                    ),
+                )),
+            )),
+        ),
+    )
+    val sourceLockSha256 = fixtureSha256(fixture.control.sourceLock)
+    val buildRecord = parseControlObject(fixture.control.buildRecord)
+    writeControlObject(
+        fixture.control.buildRecord,
+        JsonObject(
+            buildRecord + ("oracle" to JsonObject(
+                buildRecord.controlObject("oracle") +
+                    ("sourceLockSha256" to JsonPrimitive(sourceLockSha256)),
+            )),
+        ),
+    )
+    val scope = parseControlObject(fixture.control.scope)
+    writeControlObject(
+        fixture.control.scope,
+        JsonObject(
+            scope + ("oracle" to JsonObject(
+                scope.controlObject("oracle") +
+                    ("sourceLockSha256" to JsonPrimitive(sourceLockSha256)),
+            )),
+        ),
+    )
+    val authenticatedScope = FullTreeScopeControl.load(
+        fixture.control.scope,
+        fixture.control.sourceLock,
+        fixture.control.manifest,
+    )
+    FullTreeInventoryControl.generateAndPublish(
+        fixture.control.richArtifact,
+        authenticatedScope,
+        fixture.control.inventory,
+        maximumWorkers = 1,
+    )
+    FullTreeSourceInventoryControl.generateAndPublish(
+        fixture.control.sourceArchive,
+        authenticatedScope,
+        fixture.control.buildRecord,
+        fixture.control.inventory,
+        fixture.control.sourceInventory,
+        maximumWorkers = 1,
+    )
+    FullTreePlanningInventoryControl.generateAndPublish(
+        fixture.control.scope,
+        fixture.control.sourceLock,
+        fixture.control.manifest,
+        fixture.control.buildRecord,
+        fixture.control.inventory,
+        fixture.control.sourceInventory,
+        fixture.planning,
+    )
+    return fixture
+}
+
+private fun addFixtureSourceHeader(archivePath: Path) {
+    val expanded = XZCompressorInputStream(
+        ByteArrayInputStream(Files.readAllBytes(archivePath)),
+    ).use { it.readAllBytes() }
+    val prefixBytes = fixtureTarPrefixBytes(expanded)
+    val entry = canonicalFixtureTarEntry(
+        "llvm-project-22.1.6.src/clang/include/fixture.h",
+        0x1b4,
+        "#pragma once\n".toByteArray(),
+    )
+    val unpaddedBytes = Math.addExact(prefixBytes, entry.size)
+    var terminatorBytes = (10_240 - unpaddedBytes % 10_240) % 10_240
+    if (terminatorBytes < 1_024) terminatorBytes += 10_240
+    require(terminatorBytes in 1_024..10_752 && terminatorBytes % 512 == 0)
+    val encoded = ByteArrayOutputStream()
+    XZCompressorOutputStream(encoded).use { compressed ->
+        compressed.write(expanded, 0, prefixBytes)
+        compressed.write(entry)
+        compressed.write(ByteArray(terminatorBytes))
+    }
+    Files.write(archivePath, encoded.toByteArray())
+    Files.setPosixFilePermissions(archivePath, PosixFilePermissions.fromString("rw-r--r--"))
+}
+
+private fun fixtureTarPrefixBytes(expanded: ByteArray): Int {
+    var offset = 0
+    while (true) {
+        require(offset <= expanded.size - 512)
+        if ((offset until offset + 512).all { expanded[it] == 0.toByte() }) return offset
+        val size = expanded.copyOfRange(offset + 124, offset + 136)
+        require(size.last() == 0.toByte())
+        val payloadBytes = size.copyOfRange(0, size.lastIndex)
+            .toString(Charsets.US_ASCII)
+            .toLong(8)
+        val paddedPayloadBytes = Math.multiplyExact(Math.addExact(payloadBytes, 511) / 512, 512)
+        offset = Math.toIntExact(Math.addExact(offset.toLong() + 512, paddedPayloadBytes))
+    }
+}
+
+private fun canonicalFixtureTarEntry(name: String, mode: Int, bytes: ByteArray): ByteArray {
+    val header = ByteArray(512)
+    require(name.toByteArray(Charsets.US_ASCII).size <= 100)
+    putFixtureTarText(header, 0, 100, name)
+    putFixtureTarOctal(header, 100, 8, mode.toLong())
+    putFixtureTarOctal(header, 108, 8, 0)
+    putFixtureTarOctal(header, 116, 8, 0)
+    putFixtureTarOctal(header, 124, 12, bytes.size.toLong())
+    putFixtureTarOctal(header, 136, 12, 0)
+    header.fill(0x20, 148, 156)
+    header[156] = '0'.code.toByte()
+    putFixtureTarText(header, 257, 6, "ustar")
+    putFixtureTarText(header, 263, 2, "00", terminate = false)
+    putFixtureTarText(header, 265, 32, "root")
+    putFixtureTarText(header, 297, 32, "root")
+    putFixtureTarOctal(header, 329, 8, 0)
+    putFixtureTarOctal(header, 337, 8, 0)
+    putFixtureTarOctal(header, 148, 8, header.sumOf { it.toInt() and 0xff }.toLong())
+    return ByteArrayOutputStream().use { output ->
+        output.write(header)
+        output.write(bytes)
+        output.write(ByteArray((512 - bytes.size % 512) % 512))
+        output.toByteArray()
+    }
+}
+
+private fun putFixtureTarText(
+    target: ByteArray,
+    offset: Int,
+    length: Int,
+    value: String,
+    terminate: Boolean = true,
+) {
+    val bytes = value.toByteArray(Charsets.US_ASCII)
+    require(bytes.size <= length - if (terminate) 1 else 0)
+    bytes.copyInto(target, offset)
+}
+
+private fun putFixtureTarOctal(target: ByteArray, offset: Int, length: Int, value: Long) {
+    val encoded = value.toString(8).padStart(length - 1, '0').toByteArray(Charsets.US_ASCII)
+    require(encoded.size == length - 1)
+    encoded.copyInto(target, offset)
+    target[offset + length - 1] = 0
 }
 
 private fun assessDependencies(
