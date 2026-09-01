@@ -51,10 +51,17 @@ The LLVM oracle workflow sets `DECOMP_REQUIRE_LLVM_HOSTED_WORKER_IMAGE=1` and ru
 image ID. The test calls the production build-context owner with a separately provisioned,
 root-owned JDK, emits that owner's deterministic tar without adding test files, verifies the tar's
 recorded size and digest, builds it with networking and cache disabled, and applies the strict
-worker-image inspect projector. A missing Docker executable/socket, exact toolchain image ID,
-trusted JDK, successful build, or accepted inspect record is a required-lane failure rather than a
-skip. Ordinary local test runs skip this live test unless the required environment flag and all
-four explicit settings are present; they do not claim that Docker ran.
+worker-image inspect projector. The root-owned JDK copy preserves symbolic links so copying cannot
+silently import an external target and breaks all hard links. If the distribution uses the known
+Temurin Debian `lib/security/cacerts` link, the workflow accepts only the exact
+`/etc/ssl/certs/adoptium/cacerts` target after proving its real path, root ownership, non-writable
+path chain, regular-file type, and byte bound; it copies and compares that file before atomically
+replacing only the staged link. The production stager then proves every remaining link is relative,
+non-dangling, and resolves lexically and physically inside the copied JDK. A missing, changed, or
+unexpected target, Docker executable/socket, exact toolchain image ID, trusted JDK, successful
+build, or accepted inspect record is a required-lane failure rather than a skip. Ordinary local
+test runs skip this live test unless the required environment flag and all four explicit settings
+are present; they do not claim that Docker ran.
 
 The test does not pass a bare local image ID to Dockerfile `FROM`, because BuildKit does not accept
 that form as a local base reference. It first proves a bounded UUID tag absent, arms cleanup, tags

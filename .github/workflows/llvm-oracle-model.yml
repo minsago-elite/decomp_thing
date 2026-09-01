@@ -85,11 +85,49 @@ jobs:
         run: |
           hosted_jdk=/opt/decomp-llvm-hosted-worker-jdk
           sudo test ! -e "$hosted_jdk"
-          sudo install -d -m 0755 "$hosted_jdk"
-          sudo cp -a --no-preserve=links \
+          sudo install -d -m 0700 "$hosted_jdk"
+          # Preserve links so an external target cannot silently enter the JDK copy.
+          # Break hard links and make every copied inode root-owned instead.
+          sudo cp --archive --no-preserve=ownership,links \
             "${JAVA_HOME:?setup-java did not set JAVA_HOME}/." "$hosted_jdk/"
-          sudo chown -R root:root "$hosted_jdk"
+          sudo chmod 0700 "$hosted_jdk"
+          sudo chown -hR root:root "$hosted_jdk"
           sudo chmod -R go-w "$hosted_jdk"
+          for staged_jdk_directory in "$hosted_jdk" "$hosted_jdk/lib" \
+            "$hosted_jdk/lib/security"; do
+            sudo test -d "$staged_jdk_directory"
+            sudo test ! -L "$staged_jdk_directory"
+            test "$(sudo realpath -e -- "$staged_jdk_directory")" = \
+              "$staged_jdk_directory"
+          done
+          staged_cacerts="$hosted_jdk/lib/security/cacerts"
+          if sudo test -L "$staged_cacerts"; then
+            cacerts_target="$(sudo readlink -- "$staged_cacerts")"
+            test "$cacerts_target" = /etc/ssl/certs/adoptium/cacerts
+            test "$(sudo realpath -e -- "$cacerts_target")" = "$cacerts_target"
+            for cacerts_path in / /etc /etc/ssl /etc/ssl/certs \
+              /etc/ssl/certs/adoptium "$cacerts_target"; do
+              test "$(sudo stat -c '%u' -- "$cacerts_path")" = 0
+              cacerts_mode="$(sudo stat -c '%a' -- "$cacerts_path")"
+              test "$((8#$cacerts_mode & 8#022))" = 0
+            done
+            sudo test -f "$cacerts_target"
+            sudo test ! -L "$cacerts_target"
+            cacerts_bytes="$(sudo stat -c '%s' -- "$cacerts_target")"
+            test "$cacerts_bytes" -le 16777216
+            staged_cacerts_temporary="$hosted_jdk/lib/security/.cacerts.materialized"
+            sudo test ! -e "$staged_cacerts_temporary"
+            sudo test ! -L "$staged_cacerts_temporary"
+            sudo install -o root -g root -m 0444 -- \
+              "$cacerts_target" "$staged_cacerts_temporary"
+            sudo cmp -- "$cacerts_target" "$staged_cacerts_temporary"
+            sudo mv -T -- "$staged_cacerts_temporary" "$staged_cacerts"
+            sudo test -f "$staged_cacerts"
+            sudo test ! -L "$staged_cacerts"
+            sudo cmp -- "$cacerts_target" "$staged_cacerts"
+          fi
+          sudo test -s "$staged_cacerts"
+          sudo chmod 0755 "$hosted_jdk"
           test -x "$hosted_jdk/bin/java"
           ./gradlew --no-daemon test \
             --tests decompengine.oracle.behavior.LlvmBehaviorHostedWorkerImageLiveIntegrationTest
