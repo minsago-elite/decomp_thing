@@ -3,8 +3,6 @@ package decompengine.oracle.behavior
 import decompengine.acp.LinuxBoundedSessionCommand
 import decompengine.acp.LinuxBoundedSessionProcess
 import decompengine.acp.LinuxBoundedSessionResult
-import decompengine.acp.LinuxDescriptor
-import decompengine.acp.LinuxFileIdentity
 import decompengine.acp.LinuxFilesystemSyscalls
 import decompengine.acp.permissions
 import decompengine.oracle.core.DescriptorBoundAtomicStateFile
@@ -13,7 +11,6 @@ import decompengine.oracle.core.OracleJson
 import decompengine.oracle.core.OracleSchemas
 import decompengine.oracle.core.StrictJsonLimits
 import decompengine.oracle.fulltree.StableControlFile
-import decompengine.oracle.fulltree.requireStableDirectory
 import java.io.ByteArrayOutputStream
 import java.io.IOException
 import java.nio.ByteBuffer
@@ -23,7 +20,6 @@ import java.nio.file.Files
 import java.nio.file.LinkOption
 import java.nio.file.Path
 import java.nio.file.attribute.BasicFileAttributes
-import java.nio.file.attribute.PosixFilePermission
 import java.security.MessageDigest
 import java.time.Duration
 import java.util.Collections
@@ -219,98 +215,84 @@ private fun deriveAndPublishPreflight(
                         limits.maximumArtifactManifestBytes.toLong(),
                         "LLVM artifact manifest",
                     ).use { manifestGuard ->
-                        StableControlFile.open(
-                            paths.controlClient,
-                            limits.maximumControlClientBytes,
-                            "runtime control client",
-                        ).use { clientGuard ->
-                            val corpusBytes = corpusGuard.readExactly(
-                                0L,
-                                corpusGuard.size.toPreflightInt("LLVM behavior corpus"),
-                                "LLVM behavior corpus",
+                        val corpusBytes = corpusGuard.readExactly(
+                            0L,
+                            corpusGuard.size.toPreflightInt("LLVM behavior corpus"),
+                            "LLVM behavior corpus",
+                        )
+                        val corpus = parsePreflightCorpus(corpusBytes)
+                        val declaration = parseRuntimeDeclaration(corpus)
+                        val corpusSha256 = OracleArtifacts.sha256(corpusBytes)
+                        val reference = LlvmBehaviorReferenceEvidenceVerifier.verify(
+                            paths.corpus,
+                            paths.referenceReport,
+                            paths.diagnosticMatrix,
+                            paths.artifactManifest,
+                        )
+                        requireReferenceMatches(reference, declaration.corpusId, corpusSha256)
+
+                        capturePinnedDockerRuntimeBindings(
+                            controlClientPath = paths.controlClient,
+                            expectedControlClientBytes = declaration.controlClientBytes,
+                            expectedControlClientSha256 = declaration.controlClientSha256,
+                            maximumControlClientBytes = limits.maximumControlClientBytes,
+                            dockerConfigPath = paths.dockerConfig,
+                            runtimeSocketPath = paths.runtimeSocket,
+                        ).use { runtimeBindings ->
+                            val executor = LiveRuntimeCommandExecutor(runtimeBindings, limits)
+                            val verification = verifyLiveRuntime(declaration, executor)
+                            requireStableReferenceInputs(
+                                corpusGuard,
+                                reportGuard,
+                                matrixGuard,
+                                manifestGuard,
                             )
-                            val corpus = parsePreflightCorpus(corpusBytes)
-                            val declaration = parseRuntimeDeclaration(corpus)
-                            val corpusSha256 = OracleArtifacts.sha256(corpusBytes)
-                            val reference = LlvmBehaviorReferenceEvidenceVerifier.verify(
+                            runtimeBindings.requireCurrent()
+                            val terminalReference = LlvmBehaviorReferenceEvidenceVerifier.verify(
                                 paths.corpus,
                                 paths.referenceReport,
                                 paths.diagnosticMatrix,
                                 paths.artifactManifest,
                             )
-                            requireReferenceMatches(reference, declaration.corpusId, corpusSha256)
+                            if (!samePreflightReference(reference, terminalReference)) {
+                                preflightFail("LLVM reference evidence changed during runtime preflight")
+                            }
+                            requireStableReferenceInputs(
+                                corpusGuard,
+                                reportGuard,
+                                matrixGuard,
+                                manifestGuard,
+                            )
+                            runtimeBindings.requireCurrent()
 
-                            PinnedControlClient.capture(
-                                paths.controlClient,
-                                clientGuard,
+                            val bytes = renderPreflightReceipt(
                                 declaration,
-                            ).use { client ->
-                                PinnedEmptyDockerConfig.capture(paths.dockerConfig).use { config ->
-                                    PinnedPrivateRuntimeSocket.capture(paths.runtimeSocket).use { socket ->
-                                        val executor = LiveRuntimeCommandExecutor(
-                                            client,
-                                            config,
-                                            socket,
-                                            limits,
-                                        )
-                                        val verification = verifyLiveRuntime(declaration, executor)
-                                        requireStableReferenceInputs(
-                                            corpusGuard,
-                                            reportGuard,
-                                            matrixGuard,
-                                            manifestGuard,
-                                        )
-                                        client.requireCurrent()
-                                        config.requireCurrent()
-                                        socket.requireCurrent()
-                                        val terminalReference = LlvmBehaviorReferenceEvidenceVerifier.verify(
-                                            paths.corpus,
-                                            paths.referenceReport,
-                                            paths.diagnosticMatrix,
-                                            paths.artifactManifest,
-                                        )
-                                        if (!samePreflightReference(reference, terminalReference)) {
-                                            preflightFail("LLVM reference evidence changed during runtime preflight")
-                                        }
-                                        requireStableReferenceInputs(
-                                            corpusGuard,
-                                            reportGuard,
-                                            matrixGuard,
-                                            manifestGuard,
-                                        )
-                                        client.requireCurrent()
-                                        config.requireCurrent()
-                                        socket.requireCurrent()
-
-                                        val bytes = renderPreflightReceipt(
-                                            declaration,
-                                            reference,
-                                            verification,
-                                            client,
-                                            config,
-                                            socket,
-                                            limits,
-                                        )
-                                        val parent = paths.output.parent
-                                            ?: preflightFail("runtime preflight output must have a parent")
-                                        LinuxFilesystemSyscalls.openRoot(parent).use { parentDescriptor ->
-                                            val published = DescriptorBoundAtomicStateFile.publishNoReplace(
-                                                parentDescriptor,
-                                                paths.output.fileName.toString(),
-                                                bytes,
-                                                MAXIMUM_PREFLIGHT_BYTES,
-                                            )
-                                            if (!published.bytes.contentEquals(bytes)) {
-                                                preflightFail("published runtime preflight bytes changed")
-                                            }
-                                        }
-                                        // Directory-inode separation above means receipt publication cannot
-                                        // populate the directory still described as the empty Docker config.
-                                        config.requireCurrent()
-                                        return DerivedPreflight(corpusSha256, client.sha256, bytes)
-                                    }
+                                reference,
+                                verification,
+                                runtimeBindings,
+                                limits,
+                            )
+                            val parent = paths.output.parent
+                                ?: preflightFail("runtime preflight output must have a parent")
+                            LinuxFilesystemSyscalls.openRoot(parent).use { parentDescriptor ->
+                                val published = DescriptorBoundAtomicStateFile.publishNoReplace(
+                                    parentDescriptor,
+                                    paths.output.fileName.toString(),
+                                    bytes,
+                                    MAXIMUM_PREFLIGHT_BYTES,
+                                )
+                                if (!published.bytes.contentEquals(bytes)) {
+                                    preflightFail("published runtime preflight bytes changed")
                                 }
                             }
+                            // Directory-inode separation above means receipt publication cannot
+                            // populate the directory still described as the empty Docker config.
+                            runtimeBindings.requireCurrent()
+                            return DerivedPreflight(
+                                corpusSha256,
+                                runtimeBindings.controlClientSha256,
+                                bytes,
+                            )
                         }
                     }
                 }
@@ -323,39 +305,52 @@ private fun deriveAndPublishPreflight(
     }
 }
 
+private fun capturePinnedDockerRuntimeBindings(
+    controlClientPath: Path,
+    expectedControlClientBytes: Long,
+    expectedControlClientSha256: String,
+    maximumControlClientBytes: Long,
+    dockerConfigPath: Path,
+    runtimeSocketPath: Path,
+): PinnedDockerRuntimeBindings = try {
+    PinnedDockerRuntimeBindings.capture(
+        controlClientPath = controlClientPath,
+        expectedControlClientBytes = expectedControlClientBytes,
+        expectedControlClientSha256 = expectedControlClientSha256,
+        maximumControlClientBytes = maximumControlClientBytes,
+        dockerConfigPath = dockerConfigPath,
+        runtimeSocketPath = runtimeSocketPath,
+    )
+} catch (failure: PinnedDockerRuntimeBindingsException) {
+    preflightFail(failure.message ?: "cannot capture pinned Docker runtime bindings", failure)
+}
+
 private class LiveRuntimeCommandExecutor(
-    private val client: PinnedControlClient,
-    private val config: PinnedEmptyDockerConfig,
-    private val socket: PinnedPrivateRuntimeSocket,
+    private val runtimeBindings: PinnedDockerRuntimeBindings,
     private val limits: LlvmBehaviorRuntimePreflightLimits,
 ) : RuntimeCommandExecutor {
     override fun run(id: RuntimeQueryId, arguments: List<String>): RuntimeCommandObservation {
-        client.requirePinnedDescriptor()
-        config.requireCurrent()
-        socket.requireCurrent()
-        val fullArguments = listOf(client.executableDescriptorPath.toString()) + arguments
+        runtimeBindings.requireCurrent()
+        val fullArguments = listOf(runtimeBindings.executableDescriptorPath.toString()) + arguments
         val result = try {
             LinuxBoundedSessionProcess.execute(
                 LinuxBoundedSessionCommand(
                     arguments = fullArguments,
-                    environment = linkedMapOf(
-                        "DOCKER_CONFIG" to config.path.toString(),
-                        "DOCKER_HOST" to "unix://${socket.path}",
-                        "HOME" to "/nonexistent",
-                        "LANG" to "C",
-                        "LC_ALL" to "C",
-                    ),
+                    environment = runtimeBindings.environment,
                     timeout = Duration.ofMillis(limits.commandTimeoutMilliseconds),
                     maximumStdoutBytes = limits.maximumCommandStdoutBytes,
                     maximumStderrBytes = limits.maximumCommandStderrBytes,
                 ),
             )
         } catch (failure: Exception) {
+            try {
+                runtimeBindings.requireCurrent()
+            } catch (bindingFailure: Exception) {
+                failure.addSuppressed(bindingFailure)
+            }
             preflightFail("runtime ${id.label} query did not complete within its hard bounds", failure)
         }
-        config.requireCurrent()
-        socket.requireCurrent()
-        client.requirePinnedDescriptor()
+        runtimeBindings.requireCurrent()
         return requireSuccessfulRuntimeCommand(id, arguments, result)
     }
 }
@@ -747,226 +742,11 @@ private fun parseRuntimeDeclaration(corpus: JsonObject): RuntimeDeclaration {
     )
 }
 
-private class PinnedControlClient private constructor(
-    val path: Path,
-    val size: Long,
-    val sha256: String,
-    val identity: LinuxFileIdentity,
-    private val guard: StableControlFile,
-    private val descriptor: LinuxDescriptor,
-) : AutoCloseable {
-    val executableDescriptorPath: Path
-        get() = LinuxFilesystemSyscalls.stableDescriptorPath(descriptor.fd)
-
-    fun requirePinnedDescriptor() {
-        val current = LinuxFilesystemSyscalls.identity(descriptor.fd)
-        if (current != identity || !current.isRegularFile || current.isSymbolicLink) {
-            preflightFail("pinned runtime control-client descriptor changed")
-        }
-    }
-
-    fun requireCurrent() {
-        requirePinnedDescriptor()
-        guard.verifyUnchanged("runtime control client")
-        if (guard.size != size || guard.sha256(label = "runtime control client terminal authentication") != sha256) {
-            preflightFail("runtime control-client bytes changed during preflight")
-        }
-        requireExecutableControlClient(path)
-        val terminal = LinuxFilesystemSyscalls.openAbsolutePathOrNull(path)
-            ?: preflightFail("runtime control-client path disappeared")
-        terminal.use {
-            val terminalIdentity = LinuxFilesystemSyscalls.identity(terminal.fd)
-            if (terminalIdentity != identity || !Files.isSameFile(path, LinuxFilesystemSyscalls.descriptorPath(descriptor))) {
-                preflightFail("runtime control-client path changed identity during preflight")
-            }
-        }
-    }
-
-    fun identitySha256(): String = identityCommitment(identity)
-
-    override fun close() = descriptor.close()
-
-    companion object {
-        fun capture(
-            path: Path,
-            guard: StableControlFile,
-            declaration: RuntimeDeclaration,
-        ): PinnedControlClient {
-            requireExecutableControlClient(path)
-            if (guard.size != declaration.controlClientBytes) {
-                preflightFail("runtime control-client byte length differs from the corpus")
-            }
-            val digest = guard.sha256(label = "runtime control client")
-            if (digest != declaration.controlClientSha256) {
-                preflightFail("runtime control-client SHA-256 differs from the corpus")
-            }
-            val descriptor = LinuxFilesystemSyscalls.openAbsolutePathOrNull(path)
-                ?: preflightFail("runtime control client is unavailable")
-            try {
-                val identity = LinuxFilesystemSyscalls.identity(descriptor.fd)
-                if (!identity.isRegularFile || identity.isDirectory || identity.isSymbolicLink || identity.linkCount != 1) {
-                    preflightFail("runtime control client must be a pinned single-link regular file")
-                }
-                if (!Files.isSameFile(path, LinuxFilesystemSyscalls.descriptorPath(descriptor))) {
-                    preflightFail("runtime control-client descriptor differs from its authenticated path")
-                }
-                return PinnedControlClient(path, guard.size, digest, identity, guard, descriptor)
-            } catch (failure: Throwable) {
-                descriptor.close()
-                throw failure
-            }
-        }
-    }
-}
-
-private class PinnedEmptyDockerConfig private constructor(
-    val path: Path,
-    private val descriptor: LinuxDescriptor,
-    private val identity: LinuxFileIdentity,
-) : AutoCloseable {
-    fun requireCurrent() {
-        val pinned = LinuxFilesystemSyscalls.identity(descriptor.fd)
-        if (pinned != identity) preflightFail("pinned Docker config directory changed")
-        requireEmptyPrivateDirectory(descriptor, "Docker config directory")
-        val named = LinuxFilesystemSyscalls.openRoot(path)
-        named.use {
-            if (LinuxFilesystemSyscalls.identity(named.fd) != identity) {
-                preflightFail("Docker config directory path changed identity")
-            }
-        }
-    }
-
-    fun identitySha256(): String = identityCommitment(identity)
-
-    override fun close() = descriptor.close()
-
-    companion object {
-        fun capture(path: Path): PinnedEmptyDockerConfig {
-            requireCanonicalDirectoryPath(path, "Docker config directory")
-            val descriptor = LinuxFilesystemSyscalls.openRoot(path)
-            try {
-                requireEmptyPrivateDirectory(descriptor, "Docker config directory")
-                return PinnedEmptyDockerConfig(path, descriptor, LinuxFilesystemSyscalls.identity(descriptor.fd))
-            } catch (failure: Throwable) {
-                descriptor.close()
-                throw failure
-            }
-        }
-    }
-}
-
-private class PinnedPrivateRuntimeSocket private constructor(
-    val path: Path,
-    private val parent: LinuxDescriptor,
-    private val socket: LinuxDescriptor,
-    private val parentIdentity: LinuxFileIdentity,
-    private val socketIdentity: LinuxFileIdentity,
-) : AutoCloseable {
-    fun requireCurrent() {
-        if (LinuxFilesystemSyscalls.identity(parent.fd) != parentIdentity) {
-            preflightFail("pinned runtime socket parent changed")
-        }
-        if (LinuxFilesystemSyscalls.identity(socket.fd) != socketIdentity) {
-            preflightFail("pinned runtime socket changed")
-        }
-        requirePrivateSocketIdentity(socketIdentity, parentIdentity)
-        val namedParent = LinuxFilesystemSyscalls.openRoot(path.parent)
-        namedParent.use {
-            if (LinuxFilesystemSyscalls.identity(namedParent.fd) != parentIdentity) {
-                preflightFail("runtime socket parent path changed identity")
-            }
-        }
-        val namedSocket = LinuxFilesystemSyscalls.openAbsolutePathOrNull(path)
-            ?: preflightFail("runtime socket disappeared")
-        namedSocket.use {
-            if (LinuxFilesystemSyscalls.identity(namedSocket.fd) != socketIdentity) {
-                preflightFail("runtime socket path changed identity")
-            }
-        }
-    }
-
-    fun identitySha256(): String = identityCommitment(socketIdentity)
-    fun parentIdentitySha256(): String = identityCommitment(parentIdentity)
-    val mode: String get() = "0o${socketIdentity.mode.permissions.toString(8).padStart(3, '0')}"
-
-    override fun close() {
-        socket.close()
-        parent.close()
-    }
-
-    companion object {
-        fun capture(path: Path): PinnedPrivateRuntimeSocket {
-            requireCanonicalFilePath(path, "runtime socket")
-            requireCanonicalDirectoryPath(path.parent, "runtime socket parent")
-            val parent = LinuxFilesystemSyscalls.openRoot(path.parent)
-            var socket: LinuxDescriptor? = null
-            try {
-                val parentIdentity = LinuxFilesystemSyscalls.identity(parent.fd)
-                val openedSocket = LinuxFilesystemSyscalls.openAbsolutePathOrNull(path)
-                    ?: preflightFail("runtime socket is unavailable")
-                socket = openedSocket
-                val socketIdentity = LinuxFilesystemSyscalls.identity(openedSocket.fd)
-                requirePrivateSocketIdentity(socketIdentity, parentIdentity)
-                return PinnedPrivateRuntimeSocket(path, parent, openedSocket, parentIdentity, socketIdentity)
-            } catch (failure: Throwable) {
-                socket?.close()
-                parent.close()
-                throw failure
-            }
-        }
-    }
-}
-
-private fun requireExecutableControlClient(path: Path) {
-    requireCanonicalFilePath(path, "runtime control client")
-    requireStableDirectory(path.parent, "runtime control-client parent")
-    val attributes = preflightFileAttributes(path, "runtime control client")
-    if (!attributes.isRegularFile || attributes.isSymbolicLink || attributes.fileKey() == null) {
-        preflightFail("runtime control client must be an identified regular file")
-    }
-    val permissions = try {
-        Files.getPosixFilePermissions(path, LinkOption.NOFOLLOW_LINKS)
-    } catch (failure: Exception) {
-        preflightFail("runtime control-client permissions are unavailable", failure)
-    }
-    if (PosixFilePermission.OWNER_EXECUTE !in permissions ||
-        PosixFilePermission.GROUP_WRITE in permissions || PosixFilePermission.OTHERS_WRITE in permissions
-    ) {
-        preflightFail("runtime control client must be owner-executable and not group/world writable")
-    }
-    val links = (Files.getAttribute(path, "unix:nlink", LinkOption.NOFOLLOW_LINKS) as Number).toLong()
-    if (links != 1L) preflightFail("runtime control client must have exactly one link")
-}
-
-private fun requireEmptyPrivateDirectory(descriptor: LinuxDescriptor, label: String) {
-    val identity = LinuxFilesystemSyscalls.identity(descriptor.fd)
-    if (!identity.isDirectory || identity.isSymbolicLink || identity.uid != currentUid() ||
-        identity.mode.permissions != OWNER_DIRECTORY_MODE
-    ) {
-        preflightFail("$label must be a pinned current-user mode-0700 directory")
-    }
-    val entries = LinuxFilesystemSyscalls.directoryEntryNames(descriptor, maximumEntries = 1)
-    if (entries.isNotEmpty()) preflightFail("$label must be empty")
-}
-
-private fun requirePrivateSocketIdentity(socket: LinuxFileIdentity, parent: LinuxFileIdentity) {
-    if (!parent.isDirectory || parent.isSymbolicLink || parent.uid != currentUid() ||
-        parent.mode.permissions != OWNER_DIRECTORY_MODE
-    ) preflightFail("runtime socket parent must be a pinned current-user mode-0700 directory")
-    if (socket.mode and FILE_TYPE_MASK != SOCKET_FILE_TYPE || socket.isRegularFile || socket.isDirectory ||
-        socket.isSymbolicLink || socket.uid != currentUid() || socket.linkCount != 1 ||
-        socket.mode.permissions and OWNER_SOCKET_PERMISSIONS != OWNER_SOCKET_PERMISSIONS ||
-        socket.mode.permissions and SPECIAL_MODE_BITS != 0
-    ) preflightFail("runtime endpoint must be a current-user Unix socket in its private parent")
-}
-
 private fun renderPreflightReceipt(
     declaration: RuntimeDeclaration,
     reference: LlvmBehaviorReferenceEvidence,
     verification: RuntimeVerification,
-    client: PinnedControlClient,
-    config: PinnedEmptyDockerConfig,
-    socket: PinnedPrivateRuntimeSocket,
+    runtimeBindings: PinnedDockerRuntimeBindings,
     limits: LlvmBehaviorRuntimePreflightLimits,
 ): ByteArray {
     val engine = verification.engine
@@ -982,10 +762,10 @@ private fun renderPreflightReceipt(
             ),
             "controlClient" to JsonObject(
                 linkedMapOf(
-                    "bytes" to JsonPrimitive(client.size),
+                    "bytes" to JsonPrimitive(runtimeBindings.controlClientBytes),
                     "executedFromPinnedDescriptor" to JsonPrimitive(true),
-                    "identitySha256" to JsonPrimitive(client.identitySha256()),
-                    "sha256" to JsonPrimitive(client.sha256),
+                    "identitySha256" to JsonPrimitive(runtimeBindings.controlClientIdentitySha256),
+                    "sha256" to JsonPrimitive(runtimeBindings.controlClientSha256),
                     "versionSha256" to JsonPrimitive(
                         OracleArtifacts.sha256(declaration.controlClientVersion.encodeToByteArray()),
                     ),
@@ -1001,9 +781,9 @@ private fun renderPreflightReceipt(
             "dockerConfig" to JsonObject(
                 linkedMapOf(
                     "empty" to JsonPrimitive(true),
-                    "identitySha256" to JsonPrimitive(config.identitySha256()),
+                    "identitySha256" to JsonPrimitive(runtimeBindings.dockerConfigIdentitySha256),
                     "mode" to JsonPrimitive("0o700"),
-                    "pathSha256" to JsonPrimitive(OracleArtifacts.sha256(config.path.toString().encodeToByteArray())),
+                    "pathSha256" to JsonPrimitive(runtimeBindings.dockerConfigPathSha256),
                 ),
             ),
             "executionClaimed" to JsonPrimitive(false),
@@ -1067,10 +847,10 @@ private fun renderPreflightReceipt(
             ),
             "runtimeEndpoint" to JsonObject(
                 linkedMapOf(
-                    "identitySha256" to JsonPrimitive(socket.identitySha256()),
-                    "mode" to JsonPrimitive(socket.mode),
-                    "parentIdentitySha256" to JsonPrimitive(socket.parentIdentitySha256()),
-                    "pathSha256" to JsonPrimitive(OracleArtifacts.sha256(socket.path.toString().encodeToByteArray())),
+                    "identitySha256" to JsonPrimitive(runtimeBindings.runtimeSocketIdentitySha256),
+                    "mode" to JsonPrimitive(runtimeBindings.runtimeSocketMode),
+                    "parentIdentitySha256" to JsonPrimitive(runtimeBindings.runtimeSocketParentIdentitySha256),
+                    "pathSha256" to JsonPrimitive(runtimeBindings.runtimeSocketPathSha256),
                     "scheme" to JsonPrimitive("unix"),
                 ),
             ),
@@ -1210,10 +990,6 @@ private fun requireAbsoluteNormalizedDirectoryPath(path: Path, label: String): P
         preflightFail("$label path must be absolute, normalized, and name a non-root directory")
     }
     return path
-}
-
-private fun requireCanonicalFilePath(path: Path, label: String) {
-    if (path.toRealPath() != path) preflightFail("$label path may not contain symbolic links")
 }
 
 private fun requireCanonicalDirectoryPath(path: Path, label: String) {
@@ -1492,20 +1268,6 @@ private fun canonicalPreflightSha256(value: JsonElement): String = try {
     preflightFail("runtime declaration exceeds its canonical commitment bounds", failure)
 }
 
-private fun identityCommitment(identity: LinuxFileIdentity): String = canonicalPreflightSha256(
-    JsonObject(
-        linkedMapOf(
-            "device" to JsonPrimitive(identity.key.device),
-            "gid" to JsonPrimitive(identity.gid),
-            "inode" to JsonPrimitive(identity.key.inode),
-            "linkCount" to JsonPrimitive(identity.linkCount),
-            "mode" to JsonPrimitive(identity.mode),
-            "mountId" to JsonPrimitive(identity.mountId),
-            "uid" to JsonPrimitive(identity.uid),
-        ),
-    ),
-)
-
 private fun JsonObject.runtimeObject(name: String, label: String): JsonObject =
     this[name] as? JsonObject ?: preflightFail("$label $name must be an object")
 
@@ -1644,7 +1406,3 @@ private const val MAXIMUM_RUNTIME_STRING_BYTES = 16 * 1024
 private const val MAXIMUM_RUNTIME_STRING_ARRAY_ITEMS = 256
 private const val MAXIMUM_COMPACT_DIGEST_BYTES = 1024L * 1024L
 private const val OWNER_DIRECTORY_MODE = 0x1c0 // 0700
-private const val OWNER_SOCKET_PERMISSIONS = 0x180 // 0600
-private const val SPECIAL_MODE_BITS = 0xe00 // setuid, setgid, sticky
-private const val FILE_TYPE_MASK = 0xf000
-private const val SOCKET_FILE_TYPE = 0xc000
