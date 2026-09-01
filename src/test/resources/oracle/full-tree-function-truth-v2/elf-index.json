@@ -1,0 +1,149 @@
+{
+  "artifacts": {
+    "rich": {
+      "inputSha256": "28105cb58b619f88d8718e8cf30c0c3471b7f0c8825e95e171eebc940954b859",
+      "scannedSymbols": 12,
+      "sizeBytes": 4096
+    },
+    "stripped": {
+      "inputSha256": "65e57857bfaf9f98a552f2fd371938e11175158bc4c11c849bd6ecbfef30c006",
+      "scannedSymbols": 8,
+      "sizeBytes": 2048
+    }
+  },
+  "counts": {
+    "aliases": 6,
+    "externalFunctions": 0,
+    "functionRvas": 4,
+    "strippedFunctionRvas": 2
+  },
+  "externalFunctions": [],
+  "functions": [
+    {
+      "aliases": [
+        {
+          "availability": {
+            "rich": "surviving",
+            "stripped": "removed"
+          },
+          "evidence": [
+            {
+              "kind": "elf-symbol",
+              "locator": "rich:synthetic-symbol[0]"
+            }
+          ],
+          "name": "_Z6singlev"
+        },
+        {
+          "availability": {
+            "rich": "surviving",
+            "stripped": "surviving"
+          },
+          "evidence": [
+            {
+              "kind": "elf-symbol",
+              "locator": "rich:synthetic-symbol[1]"
+            },
+            {
+              "kind": "elf-symbol",
+              "locator": "stripped:synthetic-symbol[1]"
+            }
+          ],
+          "name": "single"
+        }
+      ],
+      "id": "function-rva-0x10",
+      "rva": "0x10"
+    },
+    {
+      "aliases": [
+        {
+          "availability": {
+            "rich": "surviving",
+            "stripped": "surviving"
+          },
+          "evidence": [
+            {
+              "kind": "elf-symbol",
+              "locator": "rich:synthetic-symbol[2]"
+            },
+            {
+              "kind": "elf-symbol",
+              "locator": "stripped:synthetic-symbol[2]"
+            }
+          ],
+          "name": "_Z6sharedv"
+        },
+        {
+          "availability": {
+            "rich": "surviving",
+            "stripped": "removed"
+          },
+          "evidence": [
+            {
+              "kind": "elf-symbol",
+              "locator": "rich:synthetic-symbol[3]"
+            }
+          ],
+          "name": "shared"
+        }
+      ],
+      "id": "function-rva-0x20",
+      "rva": "0x20"
+    },
+    {
+      "aliases": [
+        {
+          "availability": {
+            "rich": "surviving",
+            "stripped": "removed"
+          },
+          "evidence": [
+            {
+              "kind": "elf-symbol",
+              "locator": "rich:synthetic-symbol[4]"
+            }
+          ],
+          "name": "elf_only"
+        }
+      ],
+      "id": "function-rva-0x40",
+      "rva": "0x40"
+    },
+    {
+      "aliases": [
+        {
+          "availability": {
+            "rich": "surviving",
+            "stripped": "removed"
+          },
+          "evidence": [
+            {
+              "kind": "elf-symbol",
+              "locator": "rich:synthetic-symbol[5]"
+            }
+          ],
+          "name": "_ZThn8_N1C1fEv"
+        }
+      ],
+      "id": "function-rva-0x50",
+      "rva": "0x50"
+    }
+  ],
+  "image": {
+    "elfType": "ET_EXEC",
+    "executableRanges": [
+      {
+        "endExclusive": "0x100",
+        "start": "0x0"
+      }
+    ],
+    "imageBase": "0x0"
+  },
+  "oracle": {
+    "configurationSha256": "5305350fd10d902979a5a1bc109dd424d8f7c274e22bd5e4bd47bc18ae639f2f",
+    "inventoryIndexSha256": "e8a49cd70bdcccfeb1d2267da4d1131b3967520620f23f2ed23608942dcbe13e",
+    "scopeSha256": "9f097308c076fbbc8822169db6088ecfa94e2a95449eb2434a39a60a3db6973e"
+  },
+  "schemaVersion": 1
+}

@@ -1,0 +1,10 @@
+{
+  "entities": 8,
+  "inputSha256": "0cad64f42fc3d48e468d32a500544bb7926a3ec388a55e94040da7bc9f33dc13",
+  "outputBytes": 8395,
+  "outputSha256": "bc040ed53a452df499ec6a5656680ebd7d3e3e4de067170f8cfcfe291348dac9",
+  "runSha256": "565beb1db22e62df6db4550a1f939c5bf6f87afc019be9e8b6bb5dddc18caaf2",
+  "schemaVersion": 1,
+  "shardId": "generated-tools-clang",
+  "status": "complete"
+}

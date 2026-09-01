@@ -1,0 +1,27 @@
+{
+  "bounds": {
+    "maximumResidentBytes": 17179869184,
+    "maximumShards": 2,
+    "maximumWorkers": 2,
+    "perShardBytes": 1048576,
+    "perShardCpuSeconds": 2400,
+    "perShardEntities": 320000,
+    "perShardSeconds": 1200,
+    "wholeRunBytes": 16777216,
+    "wholeRunCpuSeconds": 7200,
+    "wholeRunEntities": 2500000,
+    "wholeRunSeconds": 1800
+  },
+  "id": "full-tree-functions-9f097308c076fbbc",
+  "schemaVersion": 1,
+  "shards": [
+    {
+      "id": "clang-lib-driver",
+      "inputSha256": "ceaf5d42f1699edc64b8293d85e5d8591ba968a94107a0159f665e7d7718df54"
+    },
+    {
+      "id": "generated-tools-clang",
+      "inputSha256": "0cad64f42fc3d48e468d32a500544bb7926a3ec388a55e94040da7bc9f33dc13"
+    }
+  ]
+}

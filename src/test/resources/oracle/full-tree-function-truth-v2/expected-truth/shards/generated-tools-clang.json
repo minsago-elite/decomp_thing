@@ -1,0 +1,409 @@
+{
+  "counts": {
+    "functions": 4,
+    "nonEmitted": 4
+  },
+  "functions": [
+    {
+      "aliases": [
+        {
+          "evidence": [
+            {
+              "kind": "dwarf-subprogram",
+              "locator": "generated-tools-clang:die[0x80]",
+              "unitId": "cu-52db46961f4d6b928aa25c36872c8137"
+            },
+            {
+              "kind": "elf-symbol",
+              "locator": "rich:synthetic-symbol[0]",
+              "unitId": null
+            }
+          ],
+          "name": "_Z6singlev"
+        },
+        {
+          "evidence": [
+            {
+              "kind": "dwarf-subprogram",
+              "locator": "generated-tools-clang:die[0x80]:linkage",
+              "unitId": "cu-52db46961f4d6b928aa25c36872c8137"
+            },
+            {
+              "kind": "elf-symbol",
+              "locator": "rich:synthetic-symbol[1]",
+              "unitId": null
+            },
+            {
+              "kind": "elf-symbol",
+              "locator": "stripped:synthetic-symbol[1]",
+              "unitId": null
+            }
+          ],
+          "name": "single"
+        }
+      ],
+      "declarations": [
+        {
+          "column": 3,
+          "externalPathSha256": null,
+          "fileIndex": 1,
+          "line": 10,
+          "sourcePath": "source/clang/include/shared.hpp",
+          "unitSourcePath": "generated/tools/clang/lib/Basic/Generated.cpp"
+        }
+      ],
+      "emissionKind": "single-definition",
+      "entityKind": "function",
+      "id": "function-rva-0x10",
+      "ownerUnitId": "cu-52db46961f4d6b928aa25c36872c8137",
+      "ownershipCandidates": [
+        "cu-52db46961f4d6b928aa25c36872c8137"
+      ],
+      "population": "scored",
+      "reasonCode": null,
+      "rva": "0x10"
+    },
+    {
+      "aliases": [
+        {
+          "evidence": [
+            {
+              "kind": "dwarf-subprogram",
+              "locator": "clang-lib-driver:die[0x20]",
+              "unitId": "cu-f18ff488b29044c4cc641b83652c3f8f"
+            },
+            {
+              "kind": "dwarf-subprogram",
+              "locator": "generated-tools-clang:die[0x81]",
+              "unitId": "cu-52db46961f4d6b928aa25c36872c8137"
+            },
+            {
+              "kind": "elf-symbol",
+              "locator": "rich:synthetic-symbol[2]",
+              "unitId": null
+            },
+            {
+              "kind": "elf-symbol",
+              "locator": "stripped:synthetic-symbol[2]",
+              "unitId": null
+            }
+          ],
+          "name": "_Z6sharedv"
+        },
+        {
+          "evidence": [
+            {
+              "kind": "dwarf-subprogram",
+              "locator": "clang-lib-driver:die[0x20]:linkage",
+              "unitId": "cu-f18ff488b29044c4cc641b83652c3f8f"
+            },
+            {
+              "kind": "dwarf-subprogram",
+              "locator": "generated-tools-clang:die[0x81]:linkage",
+              "unitId": "cu-52db46961f4d6b928aa25c36872c8137"
+            },
+            {
+              "kind": "elf-symbol",
+              "locator": "rich:synthetic-symbol[3]",
+              "unitId": null
+            }
+          ],
+          "name": "shared"
+        }
+      ],
+      "declarations": [
+        {
+          "column": 3,
+          "externalPathSha256": null,
+          "fileIndex": 1,
+          "line": 20,
+          "sourcePath": "source/clang/include/shared.hpp",
+          "unitSourcePath": "generated/tools/clang/lib/Basic/Generated.cpp"
+        },
+        {
+          "column": 3,
+          "externalPathSha256": null,
+          "fileIndex": 1,
+          "line": 20,
+          "sourcePath": "source/clang/include/shared.hpp",
+          "unitSourcePath": "source/clang/lib/Driver/main.cpp"
+        }
+      ],
+      "emissionKind": "coalesced-odr-or-comdat",
+      "entityKind": "function",
+      "id": "function-rva-0x20",
+      "ownerUnitId": "cu-52db46961f4d6b928aa25c36872c8137",
+      "ownershipCandidates": [
+        "cu-52db46961f4d6b928aa25c36872c8137",
+        "cu-f18ff488b29044c4cc641b83652c3f8f"
+      ],
+      "population": "scored",
+      "reasonCode": null,
+      "rva": "0x20"
+    },
+    {
+      "aliases": [
+        {
+          "evidence": [
+            {
+              "kind": "dwarf-subprogram",
+              "locator": "generated-tools-clang:die[0x82]",
+              "unitId": "cu-52db46961f4d6b928aa25c36872c8137"
+            }
+          ],
+          "name": "_Z9dwarfOnlyv"
+        }
+      ],
+      "declarations": [
+        {
+          "column": 3,
+          "externalPathSha256": null,
+          "fileIndex": 1,
+          "line": 30,
+          "sourcePath": "source/clang/include/shared.hpp",
+          "unitSourcePath": "generated/tools/clang/lib/Basic/Generated.cpp"
+        }
+      ],
+      "emissionKind": "single-definition",
+      "entityKind": "function",
+      "id": "function-rva-0x30",
+      "ownerUnitId": "cu-52db46961f4d6b928aa25c36872c8137",
+      "ownershipCandidates": [
+        "cu-52db46961f4d6b928aa25c36872c8137"
+      ],
+      "population": "excluded",
+      "reasonCode": "dwarf-rva-without-elf-function",
+      "rva": "0x30"
+    },
+    {
+      "aliases": [
+        {
+          "evidence": [
+            {
+              "kind": "dwarf-subprogram",
+              "locator": "generated-tools-clang:die[0x83]",
+              "unitId": "cu-52db46961f4d6b928aa25c36872c8137"
+            },
+            {
+              "kind": "elf-symbol",
+              "locator": "rich:synthetic-symbol[5]",
+              "unitId": null
+            }
+          ],
+          "name": "_ZThn8_N1C1fEv"
+        }
+      ],
+      "declarations": [
+        {
+          "column": 3,
+          "externalPathSha256": null,
+          "fileIndex": 1,
+          "line": 50,
+          "sourcePath": "source/clang/include/shared.hpp",
+          "unitSourcePath": "generated/tools/clang/lib/Basic/Generated.cpp"
+        }
+      ],
+      "emissionKind": "single-definition",
+      "entityKind": "thunk",
+      "id": "function-rva-0x50",
+      "ownerUnitId": "cu-52db46961f4d6b928aa25c36872c8137",
+      "ownershipCandidates": [
+        "cu-52db46961f4d6b928aa25c36872c8137"
+      ],
+      "population": "scored",
+      "reasonCode": null,
+      "rva": "0x50"
+    }
+  ],
+  "nonEmitted": [
+    {
+      "aliases": [
+        {
+          "evidence": [
+            {
+              "kind": "dwarf-subprogram",
+              "locator": "generated-tools-clang:die[0x71]",
+              "unitId": "cu-52db46961f4d6b928aa25c36872c8137"
+            }
+          ],
+          "name": "_Z5neverv"
+        }
+      ],
+      "declarations": [
+        {
+          "column": 3,
+          "externalPathSha256": null,
+          "fileIndex": 1,
+          "line": 80,
+          "sourcePath": "source/clang/include/shared.hpp",
+          "unitSourcePath": "generated/tools/clang/lib/Basic/Generated.cpp"
+        }
+      ],
+      "id": "non-emitted-function-b6de07b38ddccf2c691ca6efae50763d",
+      "observationDieOffsets": [
+        {
+          "dieOffset": "0x71",
+          "unitId": "cu-52db46961f4d6b928aa25c36872c8137"
+        }
+      ],
+      "observationIds": [
+        "non-emitted-observation-0a448141f43d7bb1a6ad1ec1b31d3b27"
+      ],
+      "ownerUnitId": "cu-52db46961f4d6b928aa25c36872c8137",
+      "population": "unobservable",
+      "reasonCode": "definition-no-emitted-range"
+    },
+    {
+      "aliases": [
+        {
+          "evidence": [
+            {
+              "kind": "dwarf-subprogram",
+              "locator": "generated-tools-clang:die[0x72]",
+              "unitId": "cu-52db46961f4d6b928aa25c36872c8137"
+            }
+          ],
+          "name": "_Z9inlineOnlyv"
+        }
+      ],
+      "declarations": [
+        {
+          "column": 3,
+          "externalPathSha256": null,
+          "fileIndex": 1,
+          "line": 90,
+          "sourcePath": "source/clang/include/shared.hpp",
+          "unitSourcePath": "generated/tools/clang/lib/Basic/Generated.cpp"
+        }
+      ],
+      "id": "non-emitted-function-b938abf23ec75f4bcfb4ef9d6b630234",
+      "observationDieOffsets": [
+        {
+          "dieOffset": "0x72",
+          "unitId": "cu-52db46961f4d6b928aa25c36872c8137"
+        }
+      ],
+      "observationIds": [
+        "non-emitted-observation-c70694b3a02b12f8ea48f045a19f87b2"
+      ],
+      "ownerUnitId": "cu-52db46961f4d6b928aa25c36872c8137",
+      "population": "unobservable",
+      "reasonCode": "inline-no-emitted-range"
+    },
+    {
+      "aliases": [
+        {
+          "evidence": [
+            {
+              "kind": "dwarf-subprogram",
+              "locator": "clang-lib-driver:die[0x10]",
+              "unitId": "cu-f18ff488b29044c4cc641b83652c3f8f"
+            },
+            {
+              "kind": "dwarf-subprogram",
+              "locator": "generated-tools-clang:die[0x70]",
+              "unitId": "cu-52db46961f4d6b928aa25c36872c8137"
+            }
+          ],
+          "name": "_Z6sharedv"
+        }
+      ],
+      "declarations": [
+        {
+          "column": 3,
+          "externalPathSha256": null,
+          "fileIndex": 1,
+          "line": 70,
+          "sourcePath": "source/clang/include/shared.hpp",
+          "unitSourcePath": "generated/tools/clang/lib/Basic/Generated.cpp"
+        },
+        {
+          "column": 3,
+          "externalPathSha256": null,
+          "fileIndex": 1,
+          "line": 70,
+          "sourcePath": "source/clang/include/shared.hpp",
+          "unitSourcePath": "source/clang/lib/Driver/main.cpp"
+        }
+      ],
+      "id": "non-emitted-function-caed447b5008bf891b1ed82784d3e023",
+      "observationDieOffsets": [
+        {
+          "dieOffset": "0x70",
+          "unitId": "cu-52db46961f4d6b928aa25c36872c8137"
+        },
+        {
+          "dieOffset": "0x10",
+          "unitId": "cu-f18ff488b29044c4cc641b83652c3f8f"
+        }
+      ],
+      "observationIds": [
+        "non-emitted-observation-442fc0daebcc0c188c50f9b435f915f4",
+        "non-emitted-observation-4f54eff854d1139f92d1d89645806013"
+      ],
+      "ownerUnitId": "cu-52db46961f4d6b928aa25c36872c8137",
+      "population": "unobservable",
+      "reasonCode": "comdat-or-odr-selected-elsewhere"
+    },
+    {
+      "aliases": [
+        {
+          "evidence": [
+            {
+              "kind": "dwarf-subprogram",
+              "locator": "generated-tools-clang:die[0x73]",
+              "unitId": "cu-52db46961f4d6b928aa25c36872c8137"
+            },
+            {
+              "kind": "dwarf-subprogram",
+              "locator": "generated-tools-clang:die[0x74]",
+              "unitId": "cu-52db46961f4d6b928aa25c36872c8137"
+            }
+          ],
+          "name": "_Z6singlev"
+        }
+      ],
+      "declarations": [
+        {
+          "column": 3,
+          "externalPathSha256": null,
+          "fileIndex": 1,
+          "line": 100,
+          "sourcePath": "source/clang/include/shared.hpp",
+          "unitSourcePath": "generated/tools/clang/lib/Basic/Generated.cpp"
+        }
+      ],
+      "id": "non-emitted-function-deedb54c14d403791c79ef610f79a7fe",
+      "observationDieOffsets": [
+        {
+          "dieOffset": "0x73",
+          "unitId": "cu-52db46961f4d6b928aa25c36872c8137"
+        },
+        {
+          "dieOffset": "0x74",
+          "unitId": "cu-52db46961f4d6b928aa25c36872c8137"
+        }
+      ],
+      "observationIds": [
+        "non-emitted-observation-eba53bb3d5d3499cfa2b758af42b6102"
+      ],
+      "ownerUnitId": "cu-52db46961f4d6b928aa25c36872c8137",
+      "population": "unobservable",
+      "reasonCode": "comdat-or-odr-selected-elsewhere"
+    }
+  ],
+  "oracle": {
+    "configurationSha256": "17c61e43524b98a215075b82fa50732d6d8f50d883dce235e511731612da04e5",
+    "elfIndexSha256": "d598700faf867ef4fffd8f99793446f3e85830b9ccb9dddbe9d424e2b7409813",
+    "inventoryIndexSha256": "e8a49cd70bdcccfeb1d2267da4d1131b3967520620f23f2ed23608942dcbe13e",
+    "observationIndexSha256": "913ff7c6f737bb2d8076518878bf86d2d9b535bf77fb13f4197eb9471af44da9",
+    "scopeSha256": "9f097308c076fbbc8822169db6088ecfa94e2a95449eb2434a39a60a3db6973e"
+  },
+  "schemaVersion": 1,
+  "shard": {
+    "id": "generated-tools-clang",
+    "unitIds": [
+      "cu-52db46961f4d6b928aa25c36872c8137"
+    ]
+  }
+}

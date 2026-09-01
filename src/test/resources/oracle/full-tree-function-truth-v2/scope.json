@@ -1,0 +1,77 @@
+{
+  "bounds": {
+    "perShard": {
+      "compilationUnits": 10,
+      "cpuSeconds": 2400,
+      "entities": 320000,
+      "maximumResidentBytes": 4294967296,
+      "serializedBytes": 1048576,
+      "wallClockSeconds": 1200
+    },
+    "wholeRun": {
+      "compilationUnits": 20,
+      "cpuSeconds": 7200,
+      "entities": 2500000,
+      "maximumResidentBytes": 17179869184,
+      "serializedBytes": 16777216,
+      "wallClockSeconds": 1800
+    }
+  },
+  "oracle": {
+    "artifactManifestSha256": "6bd78d1a4fa0613f37581262bbea15c14e7d86ccf415d1ac383fcf542e39a1f1",
+    "id": "clang-llvm-full-tree-22.1.6",
+    "richArtifactSha256": "28105cb58b619f88d8718e8cf30c0c3471b7f0c8825e95e171eebc940954b859",
+    "sourceLockSha256": "0478d3a9279d67489e441d8b154857aa95f45425843d84ed1af3ca89d06e8381",
+    "strippedArtifactSha256": "65e57857bfaf9f98a552f2fd371938e11175158bc4c11c849bd6ecbfef30c006"
+  },
+  "pathPolicy": {
+    "prefixMaps": [
+      {
+        "from": "/fixture/build/",
+        "to": "generated/"
+      },
+      {
+        "from": "/fixture/source-tree/",
+        "to": "source/"
+      }
+    ]
+  },
+  "populations": {
+    "excluded": "entities matching one reviewed exclusion record and no scored record",
+    "exclusions": [],
+    "scored": "emitted ELF entities with independently source-aligned DWARF ownership",
+    "unobservable": "authenticated source or DWARF entities without an emitted address"
+  },
+  "schemaVersion": 1,
+  "sharding": {
+    "duplicateOwnership": "lowest-source-aligned-unit-id; aliases remain evidence on one emitted RVA",
+    "mergeOrdering": "shard-id,source-path,unit-id,entity-kind,entity-id",
+    "rules": [
+      {
+        "componentDepth": 1,
+        "pathPrefix": "source/clang/lib/",
+        "shardPrefix": "clang-lib"
+      },
+      {
+        "componentDepth": 1,
+        "pathPrefix": "source/clang/tools/",
+        "shardPrefix": "clang-tools"
+      },
+      {
+        "componentDepth": 1,
+        "pathPrefix": "source/llvm/lib/",
+        "shardPrefix": "llvm-lib"
+      },
+      {
+        "componentDepth": 1,
+        "pathPrefix": "source/llvm/tools/",
+        "shardPrefix": "llvm-tools"
+      },
+      {
+        "componentDepth": 2,
+        "pathPrefix": "generated/",
+        "shardPrefix": "generated"
+      }
+    ]
+  }
+}

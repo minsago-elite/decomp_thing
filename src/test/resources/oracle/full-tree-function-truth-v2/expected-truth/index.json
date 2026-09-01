@@ -1,0 +1,51 @@
+{
+  "complete": true,
+  "counts": {
+    "coalescedEmittedRvas": 1,
+    "definitionNoRangeUnique": 1,
+    "dwarfOnlyRvas": 1,
+    "dwarfRvas": 4,
+    "elfOnlyRvas": 1,
+    "elfRvas": 4,
+    "inlineOnlyUnique": 1,
+    "nonEmittedObservations": 6,
+    "nonEmittedUnique": 4,
+    "scoredRvas": 3,
+    "selectedElsewhereUnique": 2
+  },
+  "exclusions": {
+    "bytes": 954,
+    "functions": 1,
+    "id": "elf-only-exclusions",
+    "nonEmitted": 0,
+    "path": "exclusions.json",
+    "sha256": "82172ea78544a7bb83fda10b42449d418b82ecbcb8f2a6a634c6d9ea16f1de5c"
+  },
+  "indexSha256": "321862d95175deb8a70d1fb316f5ef026a9e77a903d288260350c9e19c7e65ca",
+  "oracle": {
+    "configurationSha256": "17c61e43524b98a215075b82fa50732d6d8f50d883dce235e511731612da04e5",
+    "elfIndexSha256": "d598700faf867ef4fffd8f99793446f3e85830b9ccb9dddbe9d424e2b7409813",
+    "inventoryIndexSha256": "e8a49cd70bdcccfeb1d2267da4d1131b3967520620f23f2ed23608942dcbe13e",
+    "observationIndexSha256": "913ff7c6f737bb2d8076518878bf86d2d9b535bf77fb13f4197eb9471af44da9",
+    "scopeSha256": "9f097308c076fbbc8822169db6088ecfa94e2a95449eb2434a39a60a3db6973e"
+  },
+  "schemaVersion": 1,
+  "shards": [
+    {
+      "bytes": 722,
+      "functions": 0,
+      "id": "clang-lib-driver",
+      "nonEmitted": 0,
+      "path": "shards/clang-lib-driver.json",
+      "sha256": "e235c48c77c8335d9217232fb31a0eb1eb24c0dd3e807d6a6678b3ac9b7aa909"
+    },
+    {
+      "bytes": 12128,
+      "functions": 4,
+      "id": "generated-tools-clang",
+      "nonEmitted": 4,
+      "path": "shards/generated-tools-clang.json",
+      "sha256": "02b3eb539f94248ee98621a819eb07701712ad3545f0715c52558328b5ebac56"
+    }
+  ]
+}

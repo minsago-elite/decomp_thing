@@ -1,0 +1,195 @@
+FULL-TREE FUNCTION TRUTH V2 DIFFERENTIAL FIXTURE PROVENANCE
+================================================================
+
+AUTHORITY WARNING
+
+These are Python-origin differential bytes. They are inert merge-parity test
+resources only.
+
+They are NOT an authoritative oracle, NOT release evidence, and NOT production
+input. Never pass any file in this directory to a production run. In particular,
+ACP or any candidate producer must never author, bless, validate, repair, or
+select these expected bytes. The Kotlin-owned production implementation remains
+the semantic and publication authority; this fixture can only detect an
+unexplained byte-level difference while the Python implementation is removed.
+
+SYNTHETIC CONTROL AND EVIDENCE STATUS
+
+scope.json and inventory.json are exact byte copies of the synthetic migration
+controls in src/test/resources/oracle/control-plane-v1/. They are included here
+so the specialized run identity, inventory binding, unit identities, source
+kinds, shard assignment, DWARF-unit bounds, and v3 shard-input commitments can
+be tested independently. They do not describe a real production artifact run.
+
+  scope artifact SHA-256:
+    9f097308c076fbbc8822169db6088ecfa94e2a95449eb2434a39a60a3db6973e
+  inventory artifact SHA-256:
+    dac7198c2a5d4395bcc9cd46f8c72dbc9ab07178f8740dd9133ed1d44624b7bc
+  inventory logical index SHA-256:
+    e8a49cd70bdcccfeb1d2267da4d1131b3967520620f23f2ed23608942dcbe13e
+  rich artifact binding:
+    28105cb58b619f88d8718e8cf30c0c3471b7f0c8825e95e171eebc940954b859
+  stripped artifact binding:
+    65e57857bfaf9f98a552f2fd371938e11175158bc4c11c849bd6ecbfef30c006
+
+elf-index.json is synthetic merge input. It was not derived by scanning the
+bound rich or stripped ELF bytes and must never be treated as raw-ELF evidence.
+The two observation envelopes are also synthetic merge input. They were not
+derived by scanning raw DWARF. They do satisfy the current Python schema and
+bindings and the independent Kotlin v3 control/envelope semantics, including
+source-path-derived unit IDs, sourceKind, scope shard assignment, absolute DIE
+offset bounds, scan-count coverage, canonical ordering, and exact input hashes.
+
+The bounded tree uses the production-specialized scope identity:
+
+  run ID:
+    full-tree-functions-9f097308c076fbbc
+  run artifact / runSha256:
+    565beb1db22e62df6db4550a1f939c5bf6f87afc019be9e8b6bb5dddc18caaf2
+  bounded index artifact SHA-256:
+    913ff7c6f737bb2d8076518878bf86d2d9b535bf77fb13f4197eb9471af44da9
+  bounded leaf indexSha256:
+    11934bc16a3571b67c5e3c4404e4dddb8160c9150926aee32e98a97a14c86203
+  clang-lib-driver input SHA-256:
+    ceaf5d42f1699edc64b8293d85e5d8591ba968a94107a0159f665e7d7718df54
+  generated-tools-clang input SHA-256:
+    0cad64f42fc3d48e468d32a500544bb7926a3ec388a55e94040da7bc9f33dc13
+
+run.json copies the authenticated scope bounds exactly as the historical Python
+bounded runner did: per-shard entity/byte/wall/CPU limits, whole-run
+entity/byte/wall/CPU limits, and the whole-run 17179869184-byte resident limit.
+There are two shards and two workers.
+
+The adversarial merge cases are: scored single-definition, scored cross-shard
+COMDAT/ODR coalescing with lowest-unit ownership, one DWARF-only RVA, one
+ELF-only RVA, thunk classification, alias/evidence union, definition without a
+range, inline without a range, selected-elsewhere by emitted alias overlap, and
+mixed definition/inline reason precedence. The expected aggregate counts are:
+
+  scored=3; dwarf-only=1; ELF-only=1; coalesced-emitted=1
+  non-emitted observations=6; unique=4
+  selected-elsewhere=2; definition-no-range=1; inline-no-range=1
+
+KNOWN PYTHON PRODUCER/VALIDATOR CONTRADICTION AND EXCLUDED CASE
+
+This vector intentionally has no coalesced DWARF-only RVA. In the captured
+Python producer, oracle/full_tree_function_truth.py lines 454-457 increment
+coalescedEmittedRvas only inside "if elf_record". The validator at lines 255-256
+increments the same count for every coalesced truth function, including an
+excluded DWARF-only record. A coalesced DWARF-only case therefore makes that
+producer reject its own output. Excluding the case is only a migration-fixture
+workaround; it is not a semantic decision and must not be copied into Kotlin
+production policy.
+
+POLICY, CONFIGURATION, AND SOURCE SNAPSHOT
+
+Repository HEAD when the fixture was constructed:
+  a8b3ffa69366fc2e014e677cc062508726ace204
+
+Current producer configuration SHA-256 values:
+  full-tree-function-observations v3:
+    dffe8bad65e82b46150cd1f5368925ae10709fd01adf905d27f1e8784634a86e
+  full-tree-elf-functions v1:
+    5305350fd10d902979a5a1bc109dd424d8f7c274e22bd5e4bd47bc18ae639f2f
+  full-tree-function-truth v2:
+    17c61e43524b98a215075b82fa50732d6d8f50d883dce235e511731612da04e5
+
+The full-tree-function-truth v2 policy was:
+  id=full-tree-function-truth
+  version=2
+  emittedIdentity=one-record-per-rva
+  ownerSelection=lowest-source-aligned-unit-id
+  nonEmittedIdentity=declaration-and-alias-name-sha256-prefix-128
+  nonEmissionPolicy=inline-or-definition-without-range-and-emitted-alias-reconciliation
+  elfOnlyPopulation=excluded-elf-no-source-aligned-dwarf
+
+Captured Python/schema file SHA-256 values:
+  20f4bf947d45c48561d99c8104fa8da6276971ddb5aff7a3b02d9ad25f637af8  oracle/full_tree_function_truth.py
+  39437396018fe0d8272c0e673c4c2a09884f2722b65e276ed2f540a105e7f116  oracle/full_tree_function_observations.py
+  ac231f1011a590bc757bdb903c2fa7ea82c77d05fc3cacd74be6469658ab5000  oracle/full_tree_elf_functions.py
+  9f446ce4b122df4e2c45b473d0a43269a457bd04512cc3a9df84aae3329fad25  oracle/full-tree-function-exclusions.schema.json
+  b21be27d085c61c60cbaba11da1208b24c897c264001c790b0ca32b2ae24e5f7  oracle/full-tree-function-truth.schema.json
+  40a2c4d0c3a1b3317e010fd267b56e6ea3ec94620abd79c591b01bc6357e084f  oracle/full-tree-function-truth-index.schema.json
+  cb160dc07fbadbdc481289a25cf12741b565be209a3b3e3e2442e71a9ac641dd  oracle/full-tree-function-observations.schema.json
+  6cac4825b3bed5e7bb07fe8333e59dfde13e46ff55b610c2d268e3e371778f07  oracle/full-tree-elf-functions.schema.json
+
+GENERATION ENVIRONMENT AND EXACT TRUTH REPLAY
+
+Construction date: 2026-09-02 (Asia/Seoul).
+Working directory: /home/june/decomp_thing
+Environment fixed for generation:
+  LC_ALL=C.UTF-8
+  TZ=UTC
+  PYTHONHASHSEED=0
+Runtime:
+  CPython 3.14.7
+  fastjsonschema 2.22.2
+  SQLite 3.53.4
+  Linux 7.1.8-gentoo-dist-hardened x86_64, glibc 2.43
+
+The synthetic inputs were canonicalized with
+oracle.full_tree_scope.canonical_json_bytes. The observation tree was published
+with oracle.bounded_shards.run_bounded_shards. The ELF object was checked with
+validate_full_tree_elf_function_index. The current-v2 truth reconciler was run
+twice into separate trees; all four output members were byte-identical. The
+following exact command was then run after promotion as an independent replay
+against the checked inputs, again producing two byte-identical trees:
+
+  LC_ALL=C.UTF-8 TZ=UTC PYTHONHASHSEED=0 python3 - <<'PY'
+  import hashlib
+  import json
+  from pathlib import Path
+  import shutil
+
+  from oracle.full_tree_function_truth import reconcile_full_tree_function_truth
+
+  root = Path('src/test/resources/oracle/full-tree-function-truth-v2')
+  scope_payload = (root / 'scope.json').read_bytes()
+  scope = json.loads(scope_payload.decode('utf-8'))
+  inventory = json.loads((root / 'inventory.json').read_text(encoding='utf-8'))
+  outputs = [
+      Path('/tmp/full-tree-function-truth-v2-replay-a'),
+      Path('/tmp/full-tree-function-truth-v2-replay-b'),
+  ]
+  for output in outputs:
+      if output.exists():
+          shutil.rmtree(output)
+      reconcile_full_tree_function_truth(
+          scope=scope,
+          scope_sha256=hashlib.sha256(scope_payload).hexdigest(),
+          inventory=inventory,
+          elf_index_path=root / 'elf-index.json',
+          observation_root=root / 'observations',
+          output_root=output,
+      )
+  for expected_path in sorted((root / 'expected-truth').rglob('*')):
+      if expected_path.is_file():
+          relative = expected_path.relative_to(root / 'expected-truth')
+          expected = expected_path.read_bytes()
+          assert (outputs[0] / relative).read_bytes() == expected
+          assert (outputs[1] / relative).read_bytes() == expected
+  print('two replay trees are byte-identical to checked expected-truth')
+  PY
+
+FILE BYTE HASHES
+
+All JSON members are listed below as SHA-256, byte count, relative path:
+
+  d598700faf867ef4fffd8f99793446f3e85830b9ccb9dddbe9d424e2b7409813  3497  elf-index.json
+  82172ea78544a7bb83fda10b42449d418b82ecbcb8f2a6a634c6d9ea16f1de5c   954  expected-truth/exclusions.json
+  9f6a6e61cee7a63e538fc76104fd0b51f564405ef31ba416b131248d00e9b907  1658  expected-truth/index.json
+  e235c48c77c8335d9217232fb31a0eb1eb24c0dd3e807d6a6678b3ac9b7aa909   722  expected-truth/shards/clang-lib-driver.json
+  02b3eb539f94248ee98621a819eb07701712ad3545f0715c52558328b5ebac56 12128  expected-truth/shards/generated-tools-clang.json
+  dac7198c2a5d4395bcc9cd46f8c72dbc9ab07178f8740dd9133ed1d44624b7bc  1893  inventory.json
+  8e0ba2c02c31fd71bd9e90a044c6e370cdcd4b62a48192bacb3f12283d6b0784   376  observations/checkpoints/clang-lib-driver.json
+  fcdaa2a7e7ec8d5385718d4b793220b507415226142fc52d1985033ca8b70f69   381  observations/checkpoints/generated-tools-clang.json
+  913ff7c6f737bb2d8076518878bf86d2d9b535bf77fb13f4197eb9471af44da9  1155  observations/index.json
+  0cb03850570c0f8296c5a3f4e59daa112367202a5c0972f1e05f452d5a09cfc7  2649  observations/outputs/clang-lib-driver.json
+  bc040ed53a452df499ec6a5656680ebd7d3e3e4de067170f8cfcfe291348dac9  8395  observations/outputs/generated-tools-clang.json
+  565beb1db22e62df6db4550a1f939c5bf6f87afc019be9e8b6bb5dddc18caaf2   718  observations/run.json
+  9f097308c076fbbc8822169db6088ecfa94e2a95449eb2434a39a60a3db6973e  2270  scope.json
+
+PROVENANCE.txt cannot contain its own SHA-256 without a self-reference. Its
+post-promotion SHA-256 is reported with the verification result, outside this
+file.
+

@@ -1,0 +1,22 @@
+{
+  "counts": {
+    "functions": 0,
+    "nonEmitted": 0
+  },
+  "functions": [],
+  "nonEmitted": [],
+  "oracle": {
+    "configurationSha256": "17c61e43524b98a215075b82fa50732d6d8f50d883dce235e511731612da04e5",
+    "elfIndexSha256": "d598700faf867ef4fffd8f99793446f3e85830b9ccb9dddbe9d424e2b7409813",
+    "inventoryIndexSha256": "e8a49cd70bdcccfeb1d2267da4d1131b3967520620f23f2ed23608942dcbe13e",
+    "observationIndexSha256": "913ff7c6f737bb2d8076518878bf86d2d9b535bf77fb13f4197eb9471af44da9",
+    "scopeSha256": "9f097308c076fbbc8822169db6088ecfa94e2a95449eb2434a39a60a3db6973e"
+  },
+  "schemaVersion": 1,
+  "shard": {
+    "id": "clang-lib-driver",
+    "unitIds": [
+      "cu-f18ff488b29044c4cc641b83652c3f8f"
+    ]
+  }
+}

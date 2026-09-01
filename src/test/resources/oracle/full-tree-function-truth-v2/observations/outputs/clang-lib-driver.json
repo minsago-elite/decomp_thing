@@ -1,0 +1,98 @@
+{
+  "counts": {
+    "emittedRvas": 1,
+    "nonEmitted": 1,
+    "nonEmittedDies": 1,
+    "scannedDies": 15,
+    "units": 1
+  },
+  "emitted": [
+    {
+      "aliases": [
+        {
+          "evidence": [
+            {
+              "kind": "dwarf-subprogram",
+              "locator": "clang-lib-driver:die[0x20]",
+              "unitId": "cu-f18ff488b29044c4cc641b83652c3f8f"
+            }
+          ],
+          "name": "_Z6sharedv"
+        },
+        {
+          "evidence": [
+            {
+              "kind": "dwarf-subprogram",
+              "locator": "clang-lib-driver:die[0x20]:linkage",
+              "unitId": "cu-f18ff488b29044c4cc641b83652c3f8f"
+            }
+          ],
+          "name": "shared"
+        }
+      ],
+      "declarations": [
+        {
+          "column": 3,
+          "externalPathSha256": null,
+          "fileIndex": 1,
+          "line": 20,
+          "sourcePath": "source/clang/include/shared.hpp",
+          "unitSourcePath": "source/clang/lib/Driver/main.cpp"
+        }
+      ],
+      "id": "function-rva-0x20",
+      "ownerUnitIds": [
+        "cu-f18ff488b29044c4cc641b83652c3f8f"
+      ],
+      "rva": "0x20"
+    }
+  ],
+  "nonEmitted": [
+    {
+      "aliases": [
+        {
+          "evidence": [
+            {
+              "kind": "dwarf-subprogram",
+              "locator": "clang-lib-driver:die[0x10]",
+              "unitId": "cu-f18ff488b29044c4cc641b83652c3f8f"
+            }
+          ],
+          "name": "_Z6sharedv"
+        }
+      ],
+      "declaration": {
+        "column": 3,
+        "externalPathSha256": null,
+        "fileIndex": 1,
+        "line": 70,
+        "sourcePath": "source/clang/include/shared.hpp",
+        "unitSourcePath": "source/clang/lib/Driver/main.cpp"
+      },
+      "dieOffsets": [
+        {
+          "dieOffset": "0x10",
+          "unitId": "cu-f18ff488b29044c4cc641b83652c3f8f"
+        }
+      ],
+      "id": "non-emitted-observation-442fc0daebcc0c188c50f9b435f915f4",
+      "reasonCodes": [
+        "definition-no-emitted-range"
+      ],
+      "unitIds": [
+        "cu-f18ff488b29044c4cc641b83652c3f8f"
+      ]
+    }
+  ],
+  "oracle": {
+    "configurationSha256": "dffe8bad65e82b46150cd1f5368925ae10709fd01adf905d27f1e8784634a86e",
+    "inventoryIndexSha256": "e8a49cd70bdcccfeb1d2267da4d1131b3967520620f23f2ed23608942dcbe13e",
+    "richArtifactSha256": "28105cb58b619f88d8718e8cf30c0c3471b7f0c8825e95e171eebc940954b859",
+    "scopeSha256": "9f097308c076fbbc8822169db6088ecfa94e2a95449eb2434a39a60a3db6973e"
+  },
+  "schemaVersion": 1,
+  "shard": {
+    "id": "clang-lib-driver",
+    "inputSha256": "ceaf5d42f1699edc64b8293d85e5d8591ba968a94107a0159f665e7d7718df54"
+  }
+}

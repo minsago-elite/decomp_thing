@@ -1,0 +1,10 @@
+{
+  "entities": 2,
+  "inputSha256": "ceaf5d42f1699edc64b8293d85e5d8591ba968a94107a0159f665e7d7718df54",
+  "outputBytes": 2649,
+  "outputSha256": "0cb03850570c0f8296c5a3f4e59daa112367202a5c0972f1e05f452d5a09cfc7",
+  "runSha256": "565beb1db22e62df6db4550a1f939c5bf6f87afc019be9e8b6bb5dddc18caaf2",
+  "schemaVersion": 1,
+  "shardId": "clang-lib-driver",
+  "status": "complete"
+}
