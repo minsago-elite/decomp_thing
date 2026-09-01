@@ -642,7 +642,7 @@ internal class GccKotlinBootClasspathReference private constructor(
         ) {
             val byName = centralEntries.associateBy(CentralJarEntry::name)
             val signatureMetadataPresent = centralEntries.any { entry ->
-                isJarVerifierMetadata(entry.name)
+                isJarVerificationMetadata(entry.name)
             }
             val seen = HashSet<String>(centralEntries.size)
             val buffer = ByteArray(JAR_STREAM_BUFFER_BYTES)
@@ -666,7 +666,7 @@ internal class GccKotlinBootClasspathReference private constructor(
                     if (!seen.add(entry.name)) {
                         liveContainmentFail("GCC Kotlin BOOT deployment JAR $index verifier saw a duplicate entry")
                     }
-                    val verifierMetadata = isJarVerifierMetadata(entry.name)
+                    val verifierMetadata = isJarVerificationMetadata(entry.name)
                     if (verifierMetadata && !verifierMetadataOpen) {
                         liveContainmentFail(
                             "GCC Kotlin BOOT deployment JAR $index has signature metadata after payload entries",
