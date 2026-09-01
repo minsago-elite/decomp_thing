@@ -151,6 +151,7 @@ object OracleSchemas {
         "full-tree-call-observations",
         "full-tree-call-truth",
         "full-tree-call-truth-index",
+        "full-tree-clang-compdb-reconciliation",
         "full-tree-clang-capture-input",
         "full-tree-data-baseline",
         "full-tree-data-observations",

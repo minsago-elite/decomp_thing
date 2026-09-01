@@ -467,7 +467,7 @@ class FullTreeClangCaptureInputControlTest {
         }
 }
 
-private data class CaptureFixture(
+internal data class CaptureFixture(
     val generated: GeneratedFixture,
     val readiness: Path,
     val generatedInventory: Path,
@@ -475,7 +475,7 @@ private data class CaptureFixture(
     val headerPathBytes: Long,
 )
 
-private fun createCaptureFixture(root: Path): CaptureFixture {
+internal fun createCaptureFixture(root: Path): CaptureFixture {
     Files.createDirectories(root)
     val generatedFixture = createGeneratedFixture(root.resolve("predecessors"))
     val control = generatedFixture.control
@@ -824,7 +824,7 @@ private fun buildCaptureDocument(
     return rehashCapture(withoutHash)
 }
 
-private fun loadCapture(
+internal fun loadCapture(
     fixture: CaptureFixture,
     path: Path = fixture.captureInput,
     limits: FullTreeClangCaptureInputLimits = FullTreeClangCaptureInputLimits(),

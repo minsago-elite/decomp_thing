@@ -1,0 +1,273 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://github.com/minsago-elite/decomp_thing/oracle/full-tree-clang-compdb-reconciliation.schema.json",
+  "title": "Integrity-validated external and unreceipted Clang compilation-database reconciliation",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schemaVersion", "kind", "authority", "acpBoundary", "reconciliationPolicy", "bounds", "counts", "oracle", "build", "evidence", "commitments", "matches", "blockerDispositions", "blockers", "reportSha256"],
+  "properties": {
+    "schemaVersion": {"const": 1},
+    "kind": {"const": "full-tree-clang-compdb-reconciliation-v1"},
+    "authority": {
+      "const": {
+        "status": "external-unreceipted-compdb-reconciliation",
+        "predecessorBindingsReconciled": true,
+        "rawEvidenceIntegrityVerified": true,
+        "captureActionExternalCompdbMatchExact": true,
+        "strictArgumentTransformationVerified": true,
+        "captureInputAuthenticated": false,
+        "compilerOptionArityValidated": false,
+        "compilerActionsAuthenticated": false,
+        "externalEvidenceAuthenticated": false,
+        "compdbExecutionAuthenticated": false,
+        "buildGraphOriginAuthenticated": false,
+        "compilerExecuted": false,
+        "captureStarted": false,
+        "captureOutputsPresent": false,
+        "exitStatusesPresent": false,
+        "compilerCaptureAuthenticated": false,
+        "compilerWriteSetContained": false,
+        "generatedSnapshotAuthenticated": false,
+        "headerPopulationComplete": false,
+        "headerPlanReady": false,
+        "cleanCompilationProven": false,
+        "releaseEligible": false
+      }
+    },
+    "acpBoundary": {
+      "const": {
+        "role": "first-class-candidate-producer-operator",
+        "candidateContribution": "authenticated-session-change-build-artifact-provenance",
+        "candidateProvenanceAccess": "read-only-oracle-input",
+        "candidateAdmissionOwner": "kotlin-jvm-host",
+        "candidateLiveExecutionOwner": "separately-reviewed-kotlin-jvm-host",
+        "candidateEvidenceDisposition": "non-authoritative-input-to-later-host-validation",
+        "candidateLineageAdmission": "not-an-input-to-clang-compdb-reconciliation-v1",
+        "referenceSubjectAdmission": "kotlin-jvm-host-only",
+        "captureInputAuthoringAuthority": false,
+        "graphEvidenceAuthoringAuthority": false,
+        "compdbEvidenceAuthoringAuthority": false,
+        "compilerActionAuthoringAuthority": false,
+        "captureAuthority": false,
+        "executionAuthority": false,
+        "oracleAuthority": false,
+        "referenceAuthoringAuthority": false,
+        "policyAuthoringAuthority": false,
+        "validationAuthority": false,
+        "observationAuthoringAuthority": false,
+        "startAuthority": false,
+        "containmentAuthority": false,
+        "terminalAbsenceAuthority": false,
+        "scoringAuthority": false,
+        "certificationAuthority": false,
+        "releaseAuthority": false
+      }
+    },
+    "reconciliationPolicy": {
+      "const": {
+        "evidenceOrigin": "external-caller-supplied-unreceipted-compdb-bytes",
+        "executionDisposition": "not-executed-by-this-boundary",
+        "driverSpelling": "canonical-absolute-path",
+        "inputFormat": "strict-utf8-four-string-field-clang-compilation-database-json",
+        "recordSelection": "exactly-one-complete-compdb-record-per-reconciled-capture-main-input",
+        "ignoredActionInputDisposition": "forbidden-no-ignored-record-file-or-terminal-c-operand-may-equal-a-capture-main-input",
+        "matchCoverage": "exact-one-per-reconciled-capture-action",
+        "matchOrdering": "reconciled-capture-action-order",
+        "ignoredRecordDisposition": "digest-bound-ignored-non-authoritative",
+        "commandDecoding": "ascii-safe-unquoted-words-separated-by-single-u0020-no-shell",
+        "commandGrammar": "safe-word=[A-Za-z0-9_+./=,:@%-]+",
+        "rawCommandFrame": "driver-option-prefix-followed-by-exact-terminal-md-mt-object-mf-depfile-o-object-c-main-frame",
+        "rawOptionPrefix": "every-non-driver-pre-frame-word-dash-prefixed",
+        "rawOptionProfile": "dash-prefixed-no-indirection-opaque-forwarding-language-override-header-overlay-or-fixed-and-noncompiling-modes",
+        "recordPopulationDisposition": "caller-supplied-compiler-rule-filtered-population-filter-origin-unreceipted",
+        "recordCommandFieldAgreement": "every-record-command-terminal-frame-byte-equals-record-file-and-output-fields",
+        "rawRecordJoin": "record-file-byte-equals-frame-main-and-record-output-byte-equals-frame-mt-and-o-with-frame-mf-equal-output-plus-dot-d",
+        "capturePathJoin": "directory-byte-equals-capture-working-directory-record-file-resolves-to-capture-main-record-output-byte-equals-capture-raw-output-and-resolved-output-equals-capture-object-output",
+        "captureTransformation": "driver-plus-no-default-config-plus-exact-raw-frame-plus-original-option-prefix",
+        "commandMutation": "only-fixed-no-default-config-insertion-and-frame-relocation",
+        "optionArityDisposition": "unvalidated-carried-from-capture-input",
+        "pathMapping": "exact-recorded-roots-no-rewrite-no-realpath",
+        "identity": "kotlin-jvm-domain-separated-length-framed-sha256",
+        "matchIdentity": "configuration-capture-input-artifact-capture-context-capture-action-raw-compdb-record-index-record-decoded-arguments-and-derived-arguments",
+        "outputRecordModel": "one-match-per-capture-action-plus-eight-blockers",
+        "workUnitModel": "64-plus-4-per-compdb-record-plus-6-per-match-plus-4-per-command-word-plus-2-per-blocker"
+      }
+    },
+    "bounds": {
+      "const": {
+        "maximumActions": 10000,
+        "maximumBlockers": 8,
+        "maximumCanonicalBytes": 33554432,
+        "maximumCommandBytes": 262144,
+        "maximumCommandWordsPerAction": 4095,
+        "maximumCompdbBytes": 67108864,
+        "maximumCompdbRecords": 100000,
+        "maximumOutputRecords": 10008,
+        "maximumPathBytes": 4096,
+        "maximumPathComponentBytes": 255,
+        "maximumRawStringBytes": 67108864,
+        "maximumTotalCommandBytes": 33554432,
+        "maximumTotalCommandWords": 499999,
+        "maximumWorkUnits": 5000000
+      }
+    },
+    "counts": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["captureActions", "compdbBytes", "compdbCommandBytes", "compdbCommandWords", "compdbRecords", "ignoredCompdbRecords", "matches", "rawStringBytes", "selectedCommandBytes", "selectedCommandWords", "blockers", "outputRecords", "workUnits"],
+      "properties": {
+        "captureActions": {"type": "integer", "minimum": 1, "maximum": 10000},
+        "compdbBytes": {"type": "integer", "minimum": 2, "maximum": 67108864},
+        "compdbCommandBytes": {"type": "integer", "minimum": 1, "maximum": 33554432},
+        "compdbCommandWords": {"type": "integer", "minimum": 10, "maximum": 499999},
+        "compdbRecords": {"type": "integer", "minimum": 1, "maximum": 100000},
+        "ignoredCompdbRecords": {"type": "integer", "minimum": 0, "maximum": 99999},
+        "matches": {"type": "integer", "minimum": 1, "maximum": 10000},
+        "rawStringBytes": {"type": "integer", "minimum": 1, "maximum": 67108864},
+        "selectedCommandBytes": {"type": "integer", "minimum": 1, "maximum": 33554432},
+        "selectedCommandWords": {"type": "integer", "minimum": 10, "maximum": 499999},
+        "blockers": {"const": 8},
+        "outputRecords": {"type": "integer", "minimum": 9, "maximum": 10008},
+        "workUnits": {"type": "integer", "minimum": 1, "maximum": 5000000}
+      }
+    },
+    "oracle": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["id", "configurationSha256", "captureInputArtifactBytes", "captureInputArtifactSha256", "captureInputReportSha256", "captureInputConfigurationSha256", "captureContextSha256", "captureActionsSha256", "buildRecordSha256", "planningInventoryArtifactSha256", "headerPlanReadinessArtifactSha256", "generatedFileInventoryArtifactSha256"],
+      "properties": {
+        "id": {"type": "string", "minLength": 1, "maxLength": 256},
+        "configurationSha256": {"$ref": "#/$defs/sha256"},
+        "captureInputArtifactBytes": {"type": "integer", "minimum": 1, "maximum": 67108864},
+        "captureInputArtifactSha256": {"$ref": "#/$defs/sha256"},
+        "captureInputReportSha256": {"$ref": "#/$defs/sha256"},
+        "captureInputConfigurationSha256": {"$ref": "#/$defs/sha256"},
+        "captureContextSha256": {"$ref": "#/$defs/sha256"},
+        "captureActionsSha256": {"$ref": "#/$defs/sha256"},
+        "buildRecordSha256": {"$ref": "#/$defs/sha256"},
+        "planningInventoryArtifactSha256": {"$ref": "#/$defs/sha256"},
+        "headerPlanReadinessArtifactSha256": {"$ref": "#/$defs/sha256"},
+        "generatedFileInventoryArtifactSha256": {"$ref": "#/$defs/sha256"}
+      }
+    },
+    "build": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["buildDirectory", "ninjaTool", "ninjaToolIdentitySha256", "ninjaManifestBytes", "ninjaManifestSha256", "baseEnvironmentSha256", "inheritedEnvironment", "manifestClosureBound", "compdbExecutionReceiptBound"],
+      "properties": {
+        "buildDirectory": {"$ref": "#/$defs/absolutePath"},
+        "ninjaTool": {"$ref": "#/$defs/ninjaTool"},
+        "ninjaToolIdentitySha256": {"$ref": "#/$defs/sha256"},
+        "ninjaManifestBytes": {"type": "integer", "minimum": 1, "maximum": 536870912},
+        "ninjaManifestSha256": {"$ref": "#/$defs/sha256"},
+        "baseEnvironmentSha256": {"$ref": "#/$defs/sha256"},
+        "inheritedEnvironment": {"const": "cleared"},
+        "manifestClosureBound": {"const": false},
+        "compdbExecutionReceiptBound": {"const": false}
+      }
+    },
+    "evidence": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["transport", "compdbBytes", "compdbSha256", "canonicalCompdbSha256", "strictUtf8", "duplicateKeysRejected", "compdbExecutionReceiptBound", "manifestClosureBound", "exitStatusBound", "stderrBound"],
+      "properties": {
+        "transport": {"const": "external-raw-filtered-compdb-sidecar"},
+        "compdbBytes": {"type": "integer", "minimum": 2, "maximum": 67108864},
+        "compdbSha256": {"$ref": "#/$defs/sha256"},
+        "canonicalCompdbSha256": {"$ref": "#/$defs/sha256"},
+        "strictUtf8": {"const": true},
+        "duplicateKeysRejected": {"const": true},
+        "compdbExecutionReceiptBound": {"const": false},
+        "manifestClosureBound": {"const": false},
+        "exitStatusBound": {"const": false},
+        "stderrBound": {"const": false}
+      }
+    },
+    "commitments": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["captureContextSha256", "selectedCompdbRecordManifestSha256", "ignoredCompdbRecordManifestSha256", "matchManifestSha256"],
+      "properties": {
+        "captureContextSha256": {"$ref": "#/$defs/sha256"},
+        "selectedCompdbRecordManifestSha256": {"$ref": "#/$defs/sha256"},
+        "ignoredCompdbRecordManifestSha256": {"$ref": "#/$defs/sha256"},
+        "matchManifestSha256": {"$ref": "#/$defs/sha256"}
+      }
+    },
+    "matches": {
+      "type": "array",
+      "minItems": 1,
+      "maxItems": 10000,
+      "items": {"$ref": "#/$defs/match"}
+    },
+    "blockerDispositions": {
+      "const": [
+        {"source": "clang-capture-input-v1", "code": "complete-project-header-inventory-missing", "disposition": "carried", "activeCodes": ["complete-project-header-inventory-missing"]},
+        {"source": "clang-capture-input-v1", "code": "compiler-capture-provenance-missing", "disposition": "carried", "activeCodes": ["compiler-capture-provenance-missing"]},
+        {"source": "clang-capture-input-v1", "code": "compiler-option-arity-unvalidated", "disposition": "carried", "activeCodes": ["compiler-option-arity-unvalidated"]},
+        {"source": "clang-capture-input-v1", "code": "generated-generation-receipt-missing", "disposition": "carried", "activeCodes": ["generated-generation-receipt-missing"]},
+        {"source": "clang-capture-input-v1", "code": "generated-snapshot-completeness-unproven", "disposition": "carried", "activeCodes": ["generated-snapshot-completeness-unproven"]},
+        {"source": "clang-capture-input-v1", "code": "ninja-live-edge-replay-missing", "disposition": "carried", "activeCodes": ["ninja-live-edge-replay-missing"]},
+        {"source": "clang-capture-input-v1", "code": "physical-build-root-unverified", "disposition": "carried", "activeCodes": ["physical-build-root-unverified"]},
+        {"source": "clang-capture-input-v1", "code": "physical-project-roots-unverified", "disposition": "carried", "activeCodes": ["physical-project-roots-unverified"]}
+      ]
+    },
+    "blockers": {
+      "const": [
+        {"code": "complete-project-header-inventory-missing", "status": "unresolved"},
+        {"code": "compiler-capture-provenance-missing", "status": "unresolved"},
+        {"code": "compiler-option-arity-unvalidated", "status": "unresolved"},
+        {"code": "generated-generation-receipt-missing", "status": "unresolved"},
+        {"code": "generated-snapshot-completeness-unproven", "status": "unresolved"},
+        {"code": "ninja-live-edge-replay-missing", "status": "unresolved"},
+        {"code": "physical-build-root-unverified", "status": "unresolved"},
+        {"code": "physical-project-roots-unverified", "status": "unresolved"}
+      ]
+    },
+    "reportSha256": {"$ref": "#/$defs/sha256"}
+  },
+  "$defs": {
+    "sha256": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
+    "absolutePath": {"type": "string", "minLength": 1, "maxLength": 4096, "pattern": "^/(?!\\.{1,2}(?:/|$))(?!.*(?:/\\.{1,2})(?:/|$))[^/\\\\\\u0000\\r\\n]+(?:/[^/\\\\\\u0000\\r\\n]+)*$"},
+    "relativePath": {"type": "string", "minLength": 1, "maxLength": 4096, "pattern": "^(?!\\.{1,2}(?:/|$))(?!.*(?:/\\.{1,2})(?:/|$))[^/\\\\\\u0000\\r\\n]+(?:/[^/\\\\\\u0000\\r\\n]+)*$"},
+    "pathSpelling": {
+      "oneOf": [
+        {"$ref": "#/$defs/absolutePath"},
+        {"$ref": "#/$defs/relativePath"}
+      ]
+    },
+    "toolBinding": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["role", "path", "executableBytes", "executableSha256", "versionOutputSha256"],
+      "properties": {
+        "role": {"const": "buildGenerator"},
+        "path": {"$ref": "#/$defs/absolutePath"},
+        "executableBytes": {"type": "integer", "minimum": 1, "maximum": 536870912},
+        "executableSha256": {"$ref": "#/$defs/sha256"},
+        "versionOutputSha256": {"$ref": "#/$defs/sha256"}
+      }
+    },
+    "ninjaTool": {"$ref": "#/$defs/toolBinding"},
+    "match": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["captureActionSha256", "compdbRecordIndex", "directory", "file", "output", "resolvedOutput", "commandBytes", "commandSha256", "commandWords", "compdbRecordSha256", "decodedArgumentsSha256", "derivedCaptureArgumentsSha256", "matchSha256"],
+      "properties": {
+        "captureActionSha256": {"$ref": "#/$defs/sha256"},
+        "compdbRecordIndex": {"type": "integer", "minimum": 0, "maximum": 99999},
+        "directory": {"$ref": "#/$defs/absolutePath"},
+        "file": {"$ref": "#/$defs/absolutePath"},
+        "output": {"$ref": "#/$defs/pathSpelling"},
+        "resolvedOutput": {"$ref": "#/$defs/absolutePath"},
+        "commandBytes": {"type": "integer", "minimum": 1, "maximum": 262144},
+        "commandSha256": {"$ref": "#/$defs/sha256"},
+        "commandWords": {"type": "integer", "minimum": 10, "maximum": 4095},
+        "compdbRecordSha256": {"$ref": "#/$defs/sha256"},
+        "decodedArgumentsSha256": {"$ref": "#/$defs/sha256"},
+        "derivedCaptureArgumentsSha256": {"$ref": "#/$defs/sha256"},
+        "matchSha256": {"$ref": "#/$defs/sha256"}
+      }
+    }
+  }
+}

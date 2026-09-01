@@ -172,6 +172,66 @@ input nor gains compiler-action, capture, execution, oracle, reference, policy,
 validation, observation, scoring, certification, or release authority, and ACP
 lineage is not an input to capture-input v1.
 
+## External compilation-database reconciliation
+
+`FullTreeClangCompdbReconciliationControl` is the Kotlin/JVM boundary that can
+project caller-supplied Clang compilation-database bytes onto the unexecuted
+capture registry. It accepts raw paths only, reconstructs the capture input from
+all of its raw predecessors, and publishes a schema-valid reconciliation. It does
+not start Ninja, Clang, a shell, or any other process. In particular, this artifact
+is not a Ninja receipt, live-edge replay, authenticated build graph, or compiler
+capture.
+
+The accepted compilation database is deliberately narrower than the general
+Clang format. The caller must first supply a compiler-rule-filtered population;
+the origin and completeness of that filtering are unreceipted here, so an
+unfiltered `ninja -t compdb` stream is not implicitly accepted or authenticated.
+The root is a bounded strict-UTF-8 JSON array; every record has
+exactly the four string fields `directory`, `command`, `file`, and `output`.
+Directories and files use canonical absolute spellings, outputs use canonical
+absolute or relative spellings, every driver is a canonical absolute path, and
+every command consists solely of safe unquoted words separated by one U+0020 byte.
+Every word between the driver and the terminal compile frame must also be
+dash-prefixed. Quotes, escapes, response files, shell
+syntax, tabs, newlines, extra fields, duplicate keys, and caller-supplied
+`arguments` arrays fail closed.
+
+Every command's terminal compile frame must agree byte-for-byte with its own
+`file` and `output` fields. Across the complete database, each capture action's
+recorded main-input path must consequently name exactly one record. That record
+must byte-match the capture working directory and raw output, resolve to the
+committed object output, and end with the exact raw
+`-MD -MT <object> -MF <object>.d -o <object> -c <main-input>` frame. Kotlin performs
+the only permitted transformation: it inserts the fixed `--no-default-config`
+token and moves that terminal frame ahead of the original option prefix. The
+result must equal the complete committed capture argv byte-for-byte. An ignored
+record may not name any capture main input or collide with a capture object output.
+
+The artifact commits the raw and canonical database, every selected and ignored
+record, decoded and derived argv, record index, exact match relation, complete
+capture context, and predecessor identities. Caller-lowered limits cover input,
+record, path, command, aggregate word/byte, output-record, and work-unit
+populations. Loading repeats the derivation from raw inputs and rejects aliases,
+hard links, mutation, schema forgery, report-hash forgery, or terminal predecessor
+drift.
+
+Its authority status is therefore
+`external-unreceipted-compdb-reconciliation`. The exact eight capture-input
+blockers are carried unchanged, including missing live Ninja-edge replay and
+unvalidated compiler-option arity; no execution, authentication, containment,
+capture, clean-build, or release claim becomes true. A separately reviewed,
+fixed-purpose Kotlin isolated runner must bind the authenticated Ninja binary,
+descriptor-backed manifest closure, execution receipt, and resource/process/write
+containment before those claims can advance. That runner must also bind the exact
+compiler-rule selection that produced the filtered record population.
+
+ACP remains machine-recorded as the first-class candidate producer/operator. Its
+authenticated candidate session, change, build-artifact, and provenance evidence
+may be admitted read-only by a later Kotlin candidate-validation boundary. ACP does
+not author these external reference compdb bytes, the capture transformation, or
+the reconciliation, and receives no graph, capture, execution, oracle, reference,
+policy, validation, observation, scoring, certification, or release authority.
+
 ## Resolution boundary
 
 The assessment scans the strict locked TAR/XZ archive and parses C-family
