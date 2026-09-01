@@ -1,0 +1,322 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://github.com/minsago-elite/decomp_thing/oracle/full-tree-clang-capture-input.schema.json",
+  "title": "Integrity-validated unexecuted and unreceipted full-tree Clang capture input",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schemaVersion", "kind", "authority", "acpBoundary", "capturePolicy", "bounds", "counts", "oracle", "source", "generated", "compiler", "build", "environment", "commitments", "canonicalCaptureHeaderCandidatePaths", "actions", "blockerDispositions", "blockers", "reportSha256"],
+  "properties": {
+    "schemaVersion": {"const": 1},
+    "kind": {"const": "full-tree-clang-capture-input-v1"},
+    "authority": {
+      "const": {
+        "status": "unexecuted-unreceipted-capture-input",
+        "a13ModuleActionJoinExact": true,
+        "predecessorBindingsReconciled": true,
+        "sourceAndGeneratedHeaderCandidatesCombined": true,
+        "captureInputAuthenticated": false,
+        "compilerActionsAuthenticated": false,
+        "captureStarted": false,
+        "captureOutputsPresent": false,
+        "exitStatusesPresent": false,
+        "compilerCaptureAuthenticated": false,
+        "headerPopulationComplete": false,
+        "headerPlanReady": false,
+        "cleanCompilationProven": false,
+        "releaseEligible": false
+      }
+    },
+    "acpBoundary": {
+      "const": {
+        "role": "first-class-candidate-producer-operator",
+        "candidateContribution": "authenticated-session-change-build-artifact-provenance",
+        "candidateProvenanceAccess": "read-only-oracle-input",
+        "candidateAdmissionOwner": "kotlin-jvm-host",
+        "candidateLiveExecutionOwner": "separately-reviewed-kotlin-jvm-host",
+        "candidateEvidenceDisposition": "non-authoritative-input-to-later-host-validation",
+        "candidateLineageAdmission": "not-an-input-to-clang-capture-input-v1",
+        "referenceSubjectAdmission": "kotlin-jvm-host-only",
+        "captureInputAuthoringAuthority": false,
+        "compilerActionAuthoringAuthority": false,
+        "captureAuthority": false,
+        "executionAuthority": false,
+        "oracleAuthority": false,
+        "referenceAuthoringAuthority": false,
+        "policyAuthoringAuthority": false,
+        "validationAuthority": false,
+        "observationAuthoringAuthority": false,
+        "startAuthority": false,
+        "containmentAuthority": false,
+        "terminalAbsenceAuthority": false,
+        "scoringAuthority": false,
+        "certificationAuthority": false,
+        "releaseAuthority": false
+      }
+    },
+    "capturePolicy": {
+      "const": {
+        "executionDisposition": "not-executed",
+        "argumentTransport": "ordered-execve-argv-no-shell-no-response-files",
+        "actionCoverage": "exact-one-per-authenticated-a13-module",
+        "actionOrdering": "authenticated-a13-source-module-order",
+        "actionIdentity": "kotlin-jvm-derived-from-full-process-input-and-predecessor-bindings",
+        "commandMutation": "forbidden",
+        "headerOutputFormat": "json-v2.0.0",
+        "headerFiltering": "direct-per-file",
+        "traceSlot": "traces/<derived-action-sha256>.json",
+        "zeroByteTraceDisposition": "present-empty-not-missing",
+        "outputRecordModel": "actions-plus-header-candidates-plus-source-only-plus-base-environment-plus-seven-blockers",
+        "workUnitModel": "64-plus-12-per-action-plus-4-per-argument-plus-3-per-header-plus-2-per-source-only-plus-2-per-base-environment-plus-2-per-blocker"
+      }
+    },
+    "bounds": {
+      "const": {
+        "maximumActions": 10000,
+        "maximumActionPathBytes": 16777216,
+        "maximumArgumentBytes": 16384,
+        "maximumArgumentsPerAction": 4096,
+        "maximumBaseEnvironmentVariables": 256,
+        "maximumBlockers": 7,
+        "maximumCanonicalBytes": 67108864,
+        "maximumCaptureHeaderCandidates": 100000,
+        "maximumCompilerBytes": 536870912,
+        "maximumEnvironmentBytes": 4194304,
+        "maximumHeaderPathBytes": 16777216,
+        "maximumOutputRecords": 160263,
+        "maximumPathBytes": 4096,
+        "maximumPathComponentBytes": 255,
+        "maximumSourceOnlyUnits": 50000,
+        "maximumTotalArgumentBytes": 33554432,
+        "maximumTotalArguments": 500000,
+        "maximumWorkUnits": 5000000
+      }
+    },
+    "counts": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["actions", "actionPathBytes", "arguments", "argumentBytes", "baseEnvironmentVariables", "blockers", "captureHeaderCandidates", "environmentBytes", "generatedActions", "generatedHeaderCandidates", "handwrittenActions", "outputRecords", "sourceHeaderCandidates", "sourceModules", "sourceOnlyUnits", "workUnits"],
+      "properties": {
+        "actions": {"type": "integer", "minimum": 1, "maximum": 10000},
+        "actionPathBytes": {"type": "integer", "minimum": 1, "maximum": 16777216},
+        "arguments": {"type": "integer", "minimum": 11, "maximum": 500000},
+        "argumentBytes": {"type": "integer", "minimum": 1, "maximum": 33554432},
+        "baseEnvironmentVariables": {"type": "integer", "minimum": 3, "maximum": 256},
+        "blockers": {"const": 7},
+        "captureHeaderCandidates": {"type": "integer", "minimum": 0, "maximum": 100000},
+        "environmentBytes": {"type": "integer", "minimum": 1, "maximum": 4194304},
+        "generatedActions": {"type": "integer", "minimum": 1, "maximum": 10000},
+        "generatedHeaderCandidates": {"type": "integer", "minimum": 0, "maximum": 50000},
+        "handwrittenActions": {"type": "integer", "minimum": 0, "maximum": 10000},
+        "outputRecords": {"type": "integer", "minimum": 11, "maximum": 160263},
+        "sourceHeaderCandidates": {"type": "integer", "minimum": 0, "maximum": 50000},
+        "sourceModules": {"type": "integer", "minimum": 1, "maximum": 10000},
+        "sourceOnlyUnits": {"type": "integer", "minimum": 0, "maximum": 50000},
+        "workUnits": {"type": "integer", "minimum": 1, "maximum": 5000000}
+      }
+    },
+    "oracle": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["id", "configurationSha256", "scopeSha256", "sourceLockSha256", "artifactManifestSha256", "buildRecordSha256", "inventoryArtifactSha256", "sourceInventoryArtifactSha256", "planningInventoryArtifactSha256", "planningInventoryReportSha256", "planningInventoryConfigurationSha256", "headerPlanReadinessArtifactBytes", "headerPlanReadinessArtifactSha256", "headerPlanReadinessReportSha256", "headerPlanReadinessConfigurationSha256", "generatedFileInventoryArtifactBytes", "generatedFileInventoryArtifactSha256", "generatedFileInventoryReportSha256", "generatedFileInventoryConfigurationSha256"],
+      "properties": {
+        "id": {"type": "string", "minLength": 1, "maxLength": 256},
+        "configurationSha256": {"$ref": "#/$defs/sha256"},
+        "scopeSha256": {"$ref": "#/$defs/sha256"},
+        "sourceLockSha256": {"$ref": "#/$defs/sha256"},
+        "artifactManifestSha256": {"$ref": "#/$defs/sha256"},
+        "buildRecordSha256": {"$ref": "#/$defs/sha256"},
+        "inventoryArtifactSha256": {"$ref": "#/$defs/sha256"},
+        "sourceInventoryArtifactSha256": {"$ref": "#/$defs/sha256"},
+        "planningInventoryArtifactSha256": {"$ref": "#/$defs/sha256"},
+        "planningInventoryReportSha256": {"$ref": "#/$defs/sha256"},
+        "planningInventoryConfigurationSha256": {"$ref": "#/$defs/sha256"},
+        "headerPlanReadinessArtifactBytes": {"type": "integer", "minimum": 1, "maximum": 16777216},
+        "headerPlanReadinessArtifactSha256": {"$ref": "#/$defs/sha256"},
+        "headerPlanReadinessReportSha256": {"$ref": "#/$defs/sha256"},
+        "headerPlanReadinessConfigurationSha256": {"$ref": "#/$defs/sha256"},
+        "generatedFileInventoryArtifactBytes": {"type": "integer", "minimum": 1, "maximum": 67108864},
+        "generatedFileInventoryArtifactSha256": {"$ref": "#/$defs/sha256"},
+        "generatedFileInventoryReportSha256": {"$ref": "#/$defs/sha256"},
+        "generatedFileInventoryConfigurationSha256": {"$ref": "#/$defs/sha256"}
+      }
+    },
+    "source": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["archiveSha256", "dependencyArtifactSha256", "dependencyReportSha256", "dependencyConfigurationSha256", "headerCandidateManifestSha256", "headerCandidates"],
+      "properties": {
+        "archiveSha256": {"$ref": "#/$defs/sha256"},
+        "dependencyArtifactSha256": {"$ref": "#/$defs/sha256"},
+        "dependencyReportSha256": {"$ref": "#/$defs/sha256"},
+        "dependencyConfigurationSha256": {"$ref": "#/$defs/sha256"},
+        "headerCandidateManifestSha256": {"$ref": "#/$defs/sha256"},
+        "headerCandidates": {"type": "integer", "minimum": 0, "maximum": 50000}
+      }
+    },
+    "generated": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["archiveSha256", "provenanceSha256", "canonicalFileManifestSha256", "canonicalHeaderManifestSha256", "buildGraphProvenanceSha256", "files", "headers", "translationUnits", "snapshotBytesIntegrityVerified", "snapshotBytesAuthenticated", "generationReceiptBound"],
+      "properties": {
+        "archiveSha256": {"$ref": "#/$defs/sha256"},
+        "provenanceSha256": {"$ref": "#/$defs/sha256"},
+        "canonicalFileManifestSha256": {"$ref": "#/$defs/sha256"},
+        "canonicalHeaderManifestSha256": {"$ref": "#/$defs/sha256"},
+        "buildGraphProvenanceSha256": {"$ref": "#/$defs/sha256"},
+        "files": {"type": "integer", "minimum": 1, "maximum": 60000},
+        "headers": {"type": "integer", "minimum": 0, "maximum": 50000},
+        "translationUnits": {"type": "integer", "minimum": 1, "maximum": 10000},
+        "snapshotBytesIntegrityVerified": {"const": true},
+        "snapshotBytesAuthenticated": {"const": false},
+        "generationReceiptBound": {"const": false}
+      }
+    },
+    "compiler": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["cDriverPath", "cxxDriverPath", "recordedTool", "recordedToolIdentitySha256", "cxxDriverIdentityAuthenticated"],
+      "properties": {
+        "cDriverPath": {"$ref": "#/$defs/absolutePath"},
+        "cxxDriverPath": {"$ref": "#/$defs/absolutePath"},
+        "recordedTool": {"$ref": "#/$defs/compilerTool"},
+        "recordedToolIdentitySha256": {"$ref": "#/$defs/sha256"},
+        "cxxDriverIdentityAuthenticated": {"const": false}
+      }
+    },
+    "build": {"$ref": "#/$defs/build"},
+    "environment": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["inheritedEnvironment", "baseVariables", "baseEnvironmentSha256", "fixedCaptureVariables", "perActionHeaderOutput"],
+      "properties": {
+        "inheritedEnvironment": {"const": "cleared"},
+        "baseVariables": {
+          "type": "array",
+          "minItems": 3,
+          "maxItems": 256,
+          "items": {"$ref": "#/$defs/environmentVariable"}
+        },
+        "baseEnvironmentSha256": {"$ref": "#/$defs/sha256"},
+        "fixedCaptureVariables": {
+          "const": [
+            {"name": "CC_PRINT_HEADERS_FILTERING", "value": "direct-per-file"},
+            {"name": "CC_PRINT_HEADERS_FORMAT", "value": "json"}
+          ]
+        },
+        "perActionHeaderOutput": {
+          "const": {
+            "name": "CC_PRINT_HEADERS_FILE",
+            "valueSource": "trusted-scratch-root-plus-derived-trace-slot"
+          }
+        }
+      }
+    },
+    "commitments": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["actionsSha256", "canonicalCaptureHeaderCandidateManifestSha256"],
+      "properties": {
+        "actionsSha256": {"$ref": "#/$defs/sha256"},
+        "canonicalCaptureHeaderCandidateManifestSha256": {"$ref": "#/$defs/sha256"}
+      }
+    },
+    "canonicalCaptureHeaderCandidatePaths": {
+      "type": "array",
+      "maxItems": 100000,
+      "items": {"$ref": "#/$defs/headerCandidatePath"}
+    },
+    "actions": {
+      "type": "array",
+      "minItems": 1,
+      "maxItems": 10000,
+      "items": {"$ref": "#/$defs/action"}
+    },
+    "blockerDispositions": {"const": [
+      {"source": "header-plan-readiness-v1", "code": "complete-project-header-inventory-missing", "disposition": "carried", "activeCodes": ["complete-project-header-inventory-missing"]},
+      {"source": "header-plan-readiness-v1", "code": "compiler-capture-provenance-missing", "disposition": "carried", "activeCodes": ["compiler-capture-provenance-missing"]},
+      {"source": "header-plan-readiness-v1", "code": "generated-file-provenance-missing", "disposition": "refined-by-generated-registry", "activeCodes": ["generated-generation-receipt-missing", "generated-snapshot-completeness-unproven"]},
+      {"source": "header-plan-readiness-v1", "code": "ninja-generator-provenance-missing", "disposition": "refined-by-generated-registry", "activeCodes": ["ninja-live-edge-replay-missing"]},
+      {"source": "header-plan-readiness-v1", "code": "physical-project-roots-unverified", "disposition": "carried", "activeCodes": ["physical-project-roots-unverified"]},
+      {"source": "generated-file-inventory-v1", "code": "generated-generation-receipt-missing", "disposition": "carried", "activeCodes": ["generated-generation-receipt-missing"]},
+      {"source": "generated-file-inventory-v1", "code": "generated-snapshot-completeness-unproven", "disposition": "carried", "activeCodes": ["generated-snapshot-completeness-unproven"]},
+      {"source": "generated-file-inventory-v1", "code": "ninja-live-edge-replay-missing", "disposition": "carried", "activeCodes": ["ninja-live-edge-replay-missing"]},
+      {"source": "generated-file-inventory-v1", "code": "physical-build-root-unverified", "disposition": "carried", "activeCodes": ["physical-build-root-unverified"]}
+    ]},
+    "blockers": {"const": [
+      {"code": "complete-project-header-inventory-missing", "status": "unresolved"},
+      {"code": "compiler-capture-provenance-missing", "status": "unresolved"},
+      {"code": "generated-generation-receipt-missing", "status": "unresolved"},
+      {"code": "generated-snapshot-completeness-unproven", "status": "unresolved"},
+      {"code": "ninja-live-edge-replay-missing", "status": "unresolved"},
+      {"code": "physical-build-root-unverified", "status": "unresolved"},
+      {"code": "physical-project-roots-unverified", "status": "unresolved"}
+    ]},
+    "reportSha256": {"$ref": "#/$defs/sha256"}
+  },
+  "$defs": {
+    "sha256": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
+    "absolutePath": {"type": "string", "pattern": "^/(?!$)(?!\\.{1,2}(?:/|$))(?!.*(?:^|/)\\.{1,2}(?:/|$))(?!.*//)[^\\\\\\u0000\\r\\n]+$", "maxLength": 4096},
+    "headerCandidatePath": {"type": "string", "pattern": "^(source|generated)/(?:(?!\\.{1,2}(?:/|$))[^/\\\\\\u0000\\r\\n]{1,255}/)*(?!\\.{1,2}$)[^/\\\\\\u0000\\r\\n]{1,255}\\.(def|h|hh|hpp|hxx|inc)$", "maxLength": 4096},
+    "environmentVariable": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["name", "value"],
+      "properties": {
+        "name": {"type": "string", "pattern": "^[A-Z_][A-Z0-9_]*$", "maxLength": 128},
+        "value": {"type": "string", "maxLength": 1048576}
+      }
+    },
+    "toolBinding": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["role", "path", "executableBytes", "executableSha256", "versionOutputSha256"],
+      "properties": {
+        "role": {"enum": ["compiler", "buildSystem", "buildGenerator"]},
+        "path": {"$ref": "#/$defs/absolutePath"},
+        "executableBytes": {"type": "integer", "minimum": 1, "maximum": 536870912},
+        "executableSha256": {"$ref": "#/$defs/sha256"},
+        "versionOutputSha256": {"$ref": "#/$defs/sha256"}
+      }
+    },
+    "compilerTool": {"allOf": [{"$ref": "#/$defs/toolBinding"}, {"properties": {"role": {"const": "compiler"}}}]},
+    "cmakeTool": {"allOf": [{"$ref": "#/$defs/toolBinding"}, {"properties": {"role": {"const": "buildSystem"}}}]},
+    "ninjaTool": {"allOf": [{"$ref": "#/$defs/toolBinding"}, {"properties": {"role": {"const": "buildGenerator"}}}]},
+    "build": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["sourceDirectory", "buildDirectory", "installDirectory", "sourceDateEpoch", "containerImage", "containerDigest", "platform", "configureCommandSha256", "compileCommandSha256", "cmakeTool", "ninjaTool", "cmakeCacheBytes", "cmakeCacheSha256", "ninjaManifestBytes", "ninjaManifestSha256"],
+      "properties": {
+        "sourceDirectory": {"$ref": "#/$defs/absolutePath"},
+        "buildDirectory": {"$ref": "#/$defs/absolutePath"},
+        "installDirectory": {"$ref": "#/$defs/absolutePath"},
+        "sourceDateEpoch": {"type": "integer", "minimum": 1, "maximum": 8589934591},
+        "containerImage": {"type": "string", "minLength": 1, "maxLength": 1024},
+        "containerDigest": {"type": "string", "pattern": "^sha256:[0-9a-f]{64}$"},
+        "platform": {"const": "linux/amd64"},
+        "configureCommandSha256": {"$ref": "#/$defs/sha256"},
+        "compileCommandSha256": {"$ref": "#/$defs/sha256"},
+        "cmakeTool": {"$ref": "#/$defs/cmakeTool"},
+        "ninjaTool": {"$ref": "#/$defs/ninjaTool"},
+        "cmakeCacheBytes": {"type": "integer", "minimum": 1, "maximum": 67108864},
+        "cmakeCacheSha256": {"$ref": "#/$defs/sha256"},
+        "ninjaManifestBytes": {"type": "integer", "minimum": 1, "maximum": 536870912},
+        "ninjaManifestSha256": {"$ref": "#/$defs/sha256"}
+      }
+    },
+    "action": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["workingDirectory", "mainInput", "arguments"],
+      "properties": {
+        "workingDirectory": {"$ref": "#/$defs/absolutePath"},
+        "mainInput": {"$ref": "#/$defs/absolutePath"},
+        "arguments": {
+          "type": "array",
+          "minItems": 11,
+          "maxItems": 4096,
+          "items": {"type": "string", "minLength": 1, "maxLength": 16384, "pattern": "^[^\\u0000\\r\\n]+$"}
+        }
+      }
+    }
+  }
+}
