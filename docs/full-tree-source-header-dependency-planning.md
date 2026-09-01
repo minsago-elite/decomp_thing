@@ -126,9 +126,11 @@ producer-action commitments.
 The command profile is positional rather than token-count based. It requires the
 configured C or C++ driver, then exactly one `--no-default-config`, the fixed
 `-MD -MT <object> -MF <depfile> -o <object> -c <main-input>` frame, and only
-self-contained option tokens afterward. This prevents another option from consuming
-a required token, prevents a second primary input, and prevents Clang from loading an
-uncommitted implicit configuration file.
+dash-prefixed tokens afterward. This prevents a second bare primary input and keeps
+the required frame positional, but it does not prove the operand arity of every
+possible Clang option spelling. That limitation is an explicit active blocker; a
+reviewed option profile is required before execution. The fixed config token still
+prevents Clang from loading an uncommitted implicit configuration file.
 
 The required dependency file must be the required object operand plus `.d`; both
 must resolve strictly below the recorded build root and be collision-free. The
@@ -140,7 +142,10 @@ forwarding, language overrides, preprocessing-only and dependency-only modes, pa
 escapes, extra translation-unit operands, and caller-authored header-capture overlays
 fail closed. The loader derives a
 domain-separated action SHA-256 and `traces/<action-sha256>.json` slot from the exact
-argv and predecessor evidence without rewriting the command.
+argv and a global context commitment covering all predecessor summaries, the build
+and compiler bindings, the environment, and the complete candidate-header manifest.
+Changing dependency-visible source or generated context therefore changes every
+action and trace identity even when one module's argv is byte-identical.
 
 The inherited environment is cleared. Sorted build-record variables are retained as
 the base environment, while Kotlin fixes `CC_PRINT_HEADERS_FORMAT=json` and
@@ -154,8 +159,8 @@ positive authority facts are exact A13 module/action joining, reconciled predece
 bindings, and combination of the two header-candidate sources. Compiler-action and
 capture authentication, execution, exit statuses, complete header coverage, a ready
 header plan, compiler write-set containment, clean compilation, and release
-eligibility all remain false. Seven active blockers record missing complete project
-headers, compiler-capture provenance,
+eligibility all remain false. Eight active blockers record missing complete project
+headers, compiler-capture provenance, unvalidated compiler-option arity,
 generated-generation receipts, generated-snapshot completeness, live Ninja-edge
 replay, and verified physical build and project roots. A fixed disposition ledger
 shows how the readiness blockers are carried or refined; none disappear implicitly.

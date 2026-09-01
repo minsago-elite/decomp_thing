@@ -17,6 +17,7 @@ import kotlin.test.assertContentEquals
 import kotlin.test.assertEquals
 import kotlin.test.assertFailsWith
 import kotlin.test.assertFalse
+import kotlin.test.assertNotEquals
 import kotlin.test.assertTrue
 import kotlinx.serialization.json.JsonArray
 import kotlinx.serialization.json.JsonElement
@@ -51,9 +52,33 @@ class FullTreeClangCaptureInputControlTest {
             assertEquals(EXPECTED_BLOCKERS, first.blockerCodes)
             assertContentEquals(first.canonicalBytes, second.canonicalBytes)
             assertEquals(first.captureActionsSha256, second.captureActionsSha256)
+            assertEquals(first.captureContextSha256, second.captureContextSha256)
             assertEquals(
                 document.controlObject("commitments").controlString("actionsSha256"),
                 first.captureActionsSha256,
+            )
+            assertEquals(
+                document.controlObject("commitments").controlString("captureContextSha256"),
+                first.captureContextSha256,
+            )
+            val handwritten = first.actions.single { it.sourceKind == "handwritten" }
+            val expectedHandwrittenIdentity = captureActionIdentityForTest(
+                handwritten,
+                first.captureContextSha256,
+                document.controlObject("oracle").controlString("buildRecordSha256"),
+                document.controlObject("environment").controlString("baseEnvironmentSha256"),
+                document.controlObject("source").controlString("archiveSha256"),
+            )
+            assertEquals(expectedHandwrittenIdentity, handwritten.actionSha256)
+            assertNotEquals(
+                handwritten.actionSha256,
+                captureActionIdentityForTest(
+                    handwritten,
+                    "f".repeat(64),
+                    document.controlObject("oracle").controlString("buildRecordSha256"),
+                    document.controlObject("environment").controlString("baseEnvironmentSha256"),
+                    document.controlObject("source").controlString("archiveSha256"),
+                ),
             )
 
             first.actions.forEach { action ->
@@ -75,6 +100,7 @@ class FullTreeClangCaptureInputControlTest {
             listOf(
                 "captureInputAuthenticated",
                 "compilerActionsAuthenticated",
+                "compilerOptionArityValidated",
                 "captureStarted",
                 "captureOutputsPresent",
                 "exitStatusesPresent",
@@ -107,8 +133,8 @@ class FullTreeClangCaptureInputControlTest {
                 "releaseAuthority",
             ).forEach { field -> assertFalse(acp.getValue(field).toString().toBoolean()) }
 
-            assertEquals(18L, document.controlObject("counts").controlLong("outputRecords"))
-            assertEquals(218L, document.controlObject("counts").controlLong("workUnits"))
+            assertEquals(19L, document.controlObject("counts").controlLong("outputRecords"))
+            assertEquals(220L, document.controlObject("counts").controlLong("workUnits"))
             assertEquals(
                 fixture.headerPathBytes,
                 document.controlObject("counts").controlLong("headerPathBytes"),
@@ -541,6 +567,119 @@ private fun buildCaptureDocument(
             "perActionHeaderOutput" to captureSchemaConst("environment", "perActionHeaderOutput"),
         ),
     )
+    val headers = TreeSet(FULL_TREE_CODE_POINT_ORDER).apply {
+        addAll(readiness.authenticatedSourceHeaderCandidatePaths)
+        addAll(generated.canonicalGeneratedHeaderPaths)
+    }.toList()
+    val headerManifestSha256 = TestCaptureCommitment(HEADER_MANIFEST_DOMAIN).apply {
+        long(headers.size.toLong())
+        headers.forEach { token(it.utf8Bytes()) }
+    }.finish()
+    val buildRecordSha256 = fixtureSha256(fixture.control.buildRecord)
+    val buildDocument = JsonObject(
+        mapOf(
+            "buildDirectory" to JsonPrimitive(buildRoot),
+            "cmakeCacheBytes" to generatedBuildGraph.getValue("cmakeCacheBytes"),
+            "cmakeCacheSha256" to generatedBuildGraph.getValue("cmakeCacheSha256"),
+            "cmakeTool" to generatedBuildGraph.getValue("cmakeTool"),
+            "compileCommandSha256" to JsonPrimitive(
+                fullTreeGeneratedCompileCommandSha256(commands.controlArray("compile")),
+            ),
+            "configureCommandSha256" to JsonPrimitive(
+                fullTreeGeneratedConfigureCommandSha256(commands.controlArray("configure")),
+            ),
+            "containerDigest" to buildRecord.controlObject("environment")
+                .controlObject("container").getValue("digest"),
+            "containerImage" to buildRecord.controlObject("environment")
+                .controlObject("container").getValue("image"),
+            "installDirectory" to JsonPrimitive(installRoot),
+            "ninjaManifestBytes" to generatedBuildGraph.getValue("ninjaManifestBytes"),
+            "ninjaManifestSha256" to generatedBuildGraph.getValue("ninjaManifestSha256"),
+            "ninjaTool" to generatedBuildGraph.getValue("ninjaTool"),
+            "platform" to buildRecord.controlObject("environment")
+                .controlObject("container").getValue("platform"),
+            "sourceDateEpoch" to generatedBuildGraph.getValue("sourceDateEpoch"),
+            "sourceDirectory" to JsonPrimitive(sourceRoot),
+        ),
+    )
+    val sourceDocument = JsonObject(
+        mapOf(
+            "archiveSha256" to JsonPrimitive(readiness.sourceArchiveSha256),
+            "dependencyArtifactSha256" to JsonPrimitive(readiness.sourceDependencyArtifactSha256),
+            "dependencyConfigurationSha256" to JsonPrimitive(readiness.sourceDependencyConfigurationSha256),
+            "dependencyReportSha256" to JsonPrimitive(readiness.sourceDependencyReportSha256),
+            "headerCandidateManifestSha256" to JsonPrimitive(readiness.sourceHeaderManifestSha256),
+            "headerCandidates" to JsonPrimitive(readiness.authenticatedSourceHeaderCandidatePaths.size),
+        ),
+    )
+    val generatedDocumentSummary = JsonObject(
+        mapOf(
+            "archiveSha256" to JsonPrimitive(generated.archiveSha256),
+            "buildGraphProvenanceSha256" to JsonPrimitive(generated.buildGraphProvenanceSha256),
+            "canonicalFileManifestSha256" to JsonPrimitive(generated.canonicalGeneratedFileManifestSha256),
+            "canonicalHeaderManifestSha256" to JsonPrimitive(
+                generated.canonicalGeneratedHeaderManifestSha256,
+            ),
+            "files" to JsonPrimitive(generated.generatedFiles.size),
+            "generationReceiptBound" to JsonPrimitive(false),
+            "headers" to JsonPrimitive(generated.generatedHeaders.size),
+            "provenanceSha256" to JsonPrimitive(generated.provenanceSha256),
+            "snapshotBytesAuthenticated" to JsonPrimitive(false),
+            "snapshotBytesIntegrityVerified" to JsonPrimitive(true),
+            "translationUnits" to JsonPrimitive(generated.generatedTranslationUnits.size),
+        ),
+    )
+    val compilerDocument = JsonObject(
+        mapOf(
+            "cDriverPath" to JsonPrimitive(cDriver),
+            "cxxDriverIdentityAuthenticated" to JsonPrimitive(false),
+            "cxxDriverPath" to JsonPrimitive(cxxDriver),
+            "recordedTool" to compilerBinding,
+            "recordedToolIdentitySha256" to JsonPrimitive(compilerIdentity),
+        ),
+    )
+    val oracleDocument = JsonObject(
+        mapOf(
+            "artifactManifestSha256" to planningOracle.getValue("artifactManifestSha256"),
+            "buildRecordSha256" to JsonPrimitive(buildRecordSha256),
+            "configurationSha256" to JsonPrimitive(FullTreeClangCaptureInputControl.configurationSha256),
+            "generatedFileInventoryArtifactBytes" to JsonPrimitive(generated.artifactBytes),
+            "generatedFileInventoryArtifactSha256" to JsonPrimitive(generated.artifactSha256),
+            "generatedFileInventoryConfigurationSha256" to JsonPrimitive(generated.configurationSha256),
+            "generatedFileInventoryReportSha256" to JsonPrimitive(generated.reportSha256),
+            "headerPlanReadinessArtifactBytes" to JsonPrimitive(readiness.artifactBytes),
+            "headerPlanReadinessArtifactSha256" to JsonPrimitive(readiness.artifactSha256),
+            "headerPlanReadinessConfigurationSha256" to JsonPrimitive(readiness.configurationSha256),
+            "headerPlanReadinessReportSha256" to JsonPrimitive(readiness.reportSha256),
+            "id" to buildRecord.controlObject("oracle").getValue("id"),
+            "inventoryArtifactSha256" to planningOracle.getValue("inventoryArtifactSha256"),
+            "planningInventoryArtifactSha256" to JsonPrimitive(readiness.planningInventoryArtifactSha256),
+            "planningInventoryConfigurationSha256" to JsonPrimitive(
+                readiness.planningInventoryConfigurationSha256,
+            ),
+            "planningInventoryReportSha256" to JsonPrimitive(readiness.planningInventoryReportSha256),
+            "scopeSha256" to planningOracle.getValue("scopeSha256"),
+            "sourceInventoryArtifactSha256" to planningOracle.getValue("sourceInventoryArtifactSha256"),
+            "sourceLockSha256" to planningOracle.getValue("sourceLockSha256"),
+        ),
+    )
+    val captureContextSha256 = TestCaptureCommitment(CONTEXT_DOMAIN).token(
+        canonicalCaptureBytes(
+            JsonObject(
+                mapOf(
+                    "build" to buildDocument,
+                    "canonicalCaptureHeaderCandidateManifestSha256" to JsonPrimitive(
+                        headerManifestSha256,
+                    ),
+                    "compiler" to compilerDocument,
+                    "environment" to environment,
+                    "generated" to generatedDocumentSummary,
+                    "oracle" to oracleDocument,
+                    "source" to sourceDocument,
+                ),
+            ),
+        ),
+    ).finish()
 
     val generatedUnits = generated.generatedTranslationUnits.associateBy { it.unitId }
     val actionRecords = ArrayList<JsonObject>()
@@ -575,6 +714,7 @@ private fun buildCaptureDocument(
         val dependencyFile = "$buildRoot/$dependencyRaw"
         val actionIdentity = TestCaptureCommitment(ACTION_DOMAIN).apply {
             token(FullTreeClangCaptureInputControl.configurationSha256.asciiBytes())
+            token(captureContextSha256.asciiBytes())
             token(fixtureSha256(fixture.control.buildRecord).asciiBytes())
             token(baseEnvironmentSha256.asciiBytes())
             token(module.moduleId.utf8Bytes())
@@ -616,14 +756,6 @@ private fun buildCaptureDocument(
         actionIdentities.forEach { token(it.asciiBytes()) }
     }.finish()
 
-    val headers = TreeSet(FULL_TREE_CODE_POINT_ORDER).apply {
-        addAll(readiness.authenticatedSourceHeaderCandidatePaths)
-        addAll(generated.canonicalGeneratedHeaderPaths)
-    }.toList()
-    val headerManifestSha256 = TestCaptureCommitment(HEADER_MANIFEST_DOMAIN).apply {
-        long(headers.size.toLong())
-        headers.forEach { token(it.utf8Bytes()) }
-    }.finish()
     val environmentBytes = baseVariables.sumOf { record ->
         record.controlString("name").utf8Bytes().size.toLong() +
             record.controlString("value").utf8Bytes().size.toLong()
@@ -633,8 +765,6 @@ private fun buildCaptureDocument(
         baseVariables.size + EXPECTED_BLOCKERS.size
     val workUnits = 64L + 12L * actionRecords.size + 4L * argumentsCount + 3L * headers.size +
         2L * readiness.sourceOnlyUnits.size + 2L * baseVariables.size + 2L * EXPECTED_BLOCKERS.size
-
-    val buildRecordSha256 = fixtureSha256(fixture.control.buildRecord)
     val withoutHash = JsonObject(
         mapOf(
             "acpBoundary" to captureSchemaConst("acpBoundary"),
@@ -643,51 +773,19 @@ private fun buildCaptureDocument(
             "blockerDispositions" to captureSchemaConst("blockerDispositions"),
             "blockers" to captureSchemaConst("blockers"),
             "bounds" to captureSchemaConst("bounds"),
-            "build" to JsonObject(
-                mapOf(
-                    "buildDirectory" to JsonPrimitive(buildRoot),
-                    "cmakeCacheBytes" to generatedBuildGraph.getValue("cmakeCacheBytes"),
-                    "cmakeCacheSha256" to generatedBuildGraph.getValue("cmakeCacheSha256"),
-                    "cmakeTool" to generatedBuildGraph.getValue("cmakeTool"),
-                    "compileCommandSha256" to JsonPrimitive(
-                        fullTreeGeneratedCompileCommandSha256(commands.controlArray("compile")),
-                    ),
-                    "configureCommandSha256" to JsonPrimitive(
-                        fullTreeGeneratedConfigureCommandSha256(commands.controlArray("configure")),
-                    ),
-                    "containerDigest" to buildRecord.controlObject("environment")
-                        .controlObject("container").getValue("digest"),
-                    "containerImage" to buildRecord.controlObject("environment")
-                        .controlObject("container").getValue("image"),
-                    "installDirectory" to JsonPrimitive(installRoot),
-                    "ninjaManifestBytes" to generatedBuildGraph.getValue("ninjaManifestBytes"),
-                    "ninjaManifestSha256" to generatedBuildGraph.getValue("ninjaManifestSha256"),
-                    "ninjaTool" to generatedBuildGraph.getValue("ninjaTool"),
-                    "platform" to buildRecord.controlObject("environment")
-                        .controlObject("container").getValue("platform"),
-                    "sourceDateEpoch" to generatedBuildGraph.getValue("sourceDateEpoch"),
-                    "sourceDirectory" to JsonPrimitive(sourceRoot),
-                ),
-            ),
+            "build" to buildDocument,
             "canonicalCaptureHeaderCandidatePaths" to JsonArray(headers.map(::JsonPrimitive)),
             "capturePolicy" to captureSchemaConst("capturePolicy"),
             "commitments" to JsonObject(
                 mapOf(
                     "actionsSha256" to JsonPrimitive(actionsSha256),
+                    "captureContextSha256" to JsonPrimitive(captureContextSha256),
                     "canonicalCaptureHeaderCandidateManifestSha256" to JsonPrimitive(
                         headerManifestSha256,
                     ),
                 ),
             ),
-            "compiler" to JsonObject(
-                mapOf(
-                    "cDriverPath" to JsonPrimitive(cDriver),
-                    "cxxDriverIdentityAuthenticated" to JsonPrimitive(false),
-                    "cxxDriverPath" to JsonPrimitive(cxxDriver),
-                    "recordedTool" to compilerBinding,
-                    "recordedToolIdentitySha256" to JsonPrimitive(compilerIdentity),
-                ),
-            ),
+            "compiler" to compilerDocument,
             "counts" to JsonObject(
                 mapOf(
                     "actionPathBytes" to JsonPrimitive(actionPathValues.sumOf { it.utf8Bytes().size.toLong() }),
@@ -716,74 +814,11 @@ private fun buildCaptureDocument(
                 ),
             ),
             "environment" to environment,
-            "generated" to JsonObject(
-                mapOf(
-                    "archiveSha256" to JsonPrimitive(generated.archiveSha256),
-                    "buildGraphProvenanceSha256" to JsonPrimitive(generated.buildGraphProvenanceSha256),
-                    "canonicalFileManifestSha256" to JsonPrimitive(
-                        generated.canonicalGeneratedFileManifestSha256,
-                    ),
-                    "canonicalHeaderManifestSha256" to JsonPrimitive(
-                        generated.canonicalGeneratedHeaderManifestSha256,
-                    ),
-                    "files" to JsonPrimitive(generated.generatedFiles.size),
-                    "generationReceiptBound" to JsonPrimitive(false),
-                    "headers" to JsonPrimitive(generated.generatedHeaders.size),
-                    "provenanceSha256" to JsonPrimitive(generated.provenanceSha256),
-                    "snapshotBytesAuthenticated" to JsonPrimitive(false),
-                    "snapshotBytesIntegrityVerified" to JsonPrimitive(true),
-                    "translationUnits" to JsonPrimitive(generated.generatedTranslationUnits.size),
-                ),
-            ),
+            "generated" to generatedDocumentSummary,
             "kind" to JsonPrimitive("full-tree-clang-capture-input-v1"),
-            "oracle" to JsonObject(
-                mapOf(
-                    "artifactManifestSha256" to planningOracle.getValue("artifactManifestSha256"),
-                    "buildRecordSha256" to JsonPrimitive(buildRecordSha256),
-                    "configurationSha256" to JsonPrimitive(
-                        FullTreeClangCaptureInputControl.configurationSha256,
-                    ),
-                    "generatedFileInventoryArtifactBytes" to JsonPrimitive(generated.artifactBytes),
-                    "generatedFileInventoryArtifactSha256" to JsonPrimitive(generated.artifactSha256),
-                    "generatedFileInventoryConfigurationSha256" to JsonPrimitive(generated.configurationSha256),
-                    "generatedFileInventoryReportSha256" to JsonPrimitive(generated.reportSha256),
-                    "headerPlanReadinessArtifactBytes" to JsonPrimitive(readiness.artifactBytes),
-                    "headerPlanReadinessArtifactSha256" to JsonPrimitive(readiness.artifactSha256),
-                    "headerPlanReadinessConfigurationSha256" to JsonPrimitive(readiness.configurationSha256),
-                    "headerPlanReadinessReportSha256" to JsonPrimitive(readiness.reportSha256),
-                    "id" to buildRecord.controlObject("oracle").getValue("id"),
-                    "inventoryArtifactSha256" to planningOracle.getValue("inventoryArtifactSha256"),
-                    "planningInventoryArtifactSha256" to JsonPrimitive(
-                        readiness.planningInventoryArtifactSha256,
-                    ),
-                    "planningInventoryConfigurationSha256" to JsonPrimitive(
-                        readiness.planningInventoryConfigurationSha256,
-                    ),
-                    "planningInventoryReportSha256" to JsonPrimitive(
-                        readiness.planningInventoryReportSha256,
-                    ),
-                    "scopeSha256" to planningOracle.getValue("scopeSha256"),
-                    "sourceInventoryArtifactSha256" to planningOracle.getValue(
-                        "sourceInventoryArtifactSha256",
-                    ),
-                    "sourceLockSha256" to planningOracle.getValue("sourceLockSha256"),
-                ),
-            ),
+            "oracle" to oracleDocument,
             "schemaVersion" to JsonPrimitive(1),
-            "source" to JsonObject(
-                mapOf(
-                    "archiveSha256" to JsonPrimitive(readiness.sourceArchiveSha256),
-                    "dependencyArtifactSha256" to JsonPrimitive(readiness.sourceDependencyArtifactSha256),
-                    "dependencyConfigurationSha256" to JsonPrimitive(
-                        readiness.sourceDependencyConfigurationSha256,
-                    ),
-                    "dependencyReportSha256" to JsonPrimitive(readiness.sourceDependencyReportSha256),
-                    "headerCandidateManifestSha256" to JsonPrimitive(readiness.sourceHeaderManifestSha256),
-                    "headerCandidates" to JsonPrimitive(
-                        readiness.authenticatedSourceHeaderCandidatePaths.size,
-                    ),
-                ),
-            ),
+            "source" to sourceDocument,
         ),
     )
     return rehashCapture(withoutHash)
@@ -821,6 +856,32 @@ private fun captureToolBindingForTest(tool: JsonObject, role: String): JsonObjec
         ),
     ),
 )
+
+private fun captureActionIdentityForTest(
+    action: FullTreeClangCaptureAction,
+    captureContextSha256: String,
+    buildRecordSha256: String,
+    baseEnvironmentSha256: String,
+    sourceArchiveSha256: String,
+): String = TestCaptureCommitment(ACTION_DOMAIN).apply {
+    token(FullTreeClangCaptureInputControl.configurationSha256.asciiBytes())
+    token(captureContextSha256.asciiBytes())
+    token(buildRecordSha256.asciiBytes())
+    token(baseEnvironmentSha256.asciiBytes())
+    token(action.moduleId.utf8Bytes())
+    token(action.unitId.utf8Bytes())
+    token(action.shardId.utf8Bytes())
+    token(action.sourceKind.utf8Bytes())
+    token(action.sourcePath.utf8Bytes())
+    token("source-archive".asciiBytes())
+    token(sourceArchiveSha256.asciiBytes())
+    token(action.workingDirectory.utf8Bytes())
+    token(action.mainInput.utf8Bytes())
+    long(action.arguments.size.toLong())
+    action.arguments.forEach { token(it.utf8Bytes()) }
+    token(action.objectOutput.utf8Bytes())
+    token(action.dependencyFile.utf8Bytes())
+}.finish()
 
 private fun replaceAction(
     actions: List<JsonObject>,
@@ -927,13 +988,15 @@ private fun String.asciiBytes(): ByteArray = toByteArray(StandardCharsets.US_ASC
 
 private const val COMPILER_IDENTITY_DOMAIN = "full-tree-clang-capture-compiler-identity-v1"
 private const val BASE_ENVIRONMENT_DOMAIN = "full-tree-clang-capture-base-environment-v1"
-private const val ACTION_DOMAIN = "full-tree-clang-capture-action-v1"
+private const val CONTEXT_DOMAIN = "full-tree-clang-capture-global-context-v1"
+private const val ACTION_DOMAIN = "full-tree-clang-capture-action-v2"
 private const val ACTION_MANIFEST_DOMAIN = "full-tree-clang-capture-action-manifest-v1"
 private const val HEADER_MANIFEST_DOMAIN = "full-tree-clang-capture-header-candidate-manifest-v1"
 
 private val EXPECTED_BLOCKERS = listOf(
     "complete-project-header-inventory-missing",
     "compiler-capture-provenance-missing",
+    "compiler-option-arity-unvalidated",
     "generated-generation-receipt-missing",
     "generated-snapshot-completeness-unproven",
     "ninja-live-edge-replay-missing",

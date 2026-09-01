@@ -89,6 +89,7 @@ sealed interface FullTreeClangCaptureInputRegistry {
     val artifactBytes: Long
     val reportSha256: String
     val configurationSha256: String
+    val captureContextSha256: String
     val captureActionsSha256: String
     val canonicalCaptureHeaderCandidateManifestSha256: String
     val actions: List<FullTreeClangCaptureAction>
@@ -456,6 +457,22 @@ object FullTreeClangCaptureInputControl {
                 "recordedToolIdentitySha256" to JsonPrimitive(compilerIdentity),
             ),
         )
+        val headerManifestSha256 = CaptureCommitment(CAPTURE_HEADER_MANIFEST_DOMAIN).apply {
+            long(captureHeaders.size.toLong())
+            captureHeaders.forEach { path -> token(path.toByteArray(StandardCharsets.UTF_8)) }
+        }.finish()
+        val captureContextSha256 = captureCanonicalCommitment(
+            CAPTURE_CONTEXT_DOMAIN,
+            captureContextDocument(
+                oracleDocument,
+                sourceDocument,
+                generatedDocumentSummary,
+                compilerDocument,
+                expectedBuild,
+                environment.document,
+                headerManifestSha256,
+            ),
+        )
         return CaptureExpectedContext(
             planningDocument = planningDocument,
             buildRecord = buildRecord,
@@ -470,6 +487,8 @@ object FullTreeClangCaptureInputControl {
             baseEnvironment = environment.variables,
             baseEnvironmentSha256 = environment.sha256,
             environmentBytes = environment.bytes,
+            captureContextSha256 = captureContextSha256,
+            headerManifestSha256 = headerManifestSha256,
             buildRoot = buildRoot,
             cDriver = cDriver,
             cxxDriver = cxxDriver,
@@ -803,7 +822,7 @@ object FullTreeClangCaptureInputControl {
             captureFail("capture action duplicates a fixed compiler-frame token")
         }
         if (arguments.drop(CAPTURE_COMPILE_FRAME_SIZE).any { !it.startsWith('-') }) {
-            captureFail("capture action tail must contain only joined option tokens")
+            captureFail("capture action tail must contain only dash-prefixed tokens")
         }
         val usesIndirectArguments = arguments.any { argument ->
             argument.startsWith('@') || argument.startsWith("--config")
@@ -846,6 +865,7 @@ object FullTreeClangCaptureInputControl {
         }
         val actionSha256 = CaptureCommitment(CAPTURE_ACTION_DOMAIN).apply {
             token(configurationSha256.toByteArray(StandardCharsets.US_ASCII))
+            token(context.captureContextSha256.toByteArray(StandardCharsets.US_ASCII))
             token(context.buildRecordSha256.toByteArray(StandardCharsets.US_ASCII))
             token(context.baseEnvironmentSha256.toByteArray(StandardCharsets.US_ASCII))
             token(module.moduleId.toByteArray(StandardCharsets.UTF_8))
@@ -924,10 +944,6 @@ object FullTreeClangCaptureInputControl {
         limits: FullTreeClangCaptureInputLimits,
     ): JsonObject {
         val context = predecessors.context
-        val headerManifestSha256 = CaptureCommitment(CAPTURE_HEADER_MANIFEST_DOMAIN).apply {
-            long(context.headerPaths.size.toLong())
-            context.headerPaths.forEach { path -> token(path.toByteArray(StandardCharsets.UTF_8)) }
-        }.finish()
         val actionCount = actions.actions.size.toLong()
         val headerCount = context.headerPaths.size.toLong()
         val sourceOnlyCount = context.sourceOnlyUnits.size.toLong()
@@ -970,8 +986,9 @@ object FullTreeClangCaptureInputControl {
                 "commitments" to JsonObject(
                     mapOf(
                         "actionsSha256" to JsonPrimitive(actions.actionsSha256),
+                        "captureContextSha256" to JsonPrimitive(context.captureContextSha256),
                         "canonicalCaptureHeaderCandidateManifestSha256" to JsonPrimitive(
-                            headerManifestSha256,
+                            context.headerManifestSha256,
                         ),
                     ),
                 ),
@@ -1036,6 +1053,7 @@ object FullTreeClangCaptureInputControl {
         reportSha256 = document.controlString("reportSha256"),
         configurationSha256 = document.controlObject("oracle").controlString("configurationSha256"),
         actionsSha256 = actions.actionsSha256,
+        captureContextSha256 = predecessors.context.captureContextSha256,
         headerManifestSha256 = document.controlObject("commitments")
             .controlString("canonicalCaptureHeaderCandidateManifestSha256"),
         actions = actions.actions,
@@ -1057,6 +1075,7 @@ object FullTreeClangCaptureInputControl {
         override val artifactBytes: Long = state.artifactBytes
         override val reportSha256: String = state.reportSha256
         override val configurationSha256: String = state.configurationSha256
+        override val captureContextSha256: String = state.captureContextSha256
         override val captureActionsSha256: String = state.actionsSha256
         override val canonicalCaptureHeaderCandidateManifestSha256: String = state.headerManifestSha256
         override val actions: List<FullTreeClangCaptureAction> = Collections.unmodifiableList(
@@ -1154,6 +1173,8 @@ private data class CaptureExpectedContext(
     val baseEnvironment: Map<String, String>,
     val baseEnvironmentSha256: String,
     val environmentBytes: Long,
+    val captureContextSha256: String,
+    val headerManifestSha256: String,
     val buildRoot: String,
     val cDriver: String,
     val cxxDriver: String,
@@ -1212,6 +1233,7 @@ private data class ValidatedCaptureInputState(
     val artifactBytes: Long,
     val reportSha256: String,
     val configurationSha256: String,
+    val captureContextSha256: String,
     val actionsSha256: String,
     val headerManifestSha256: String,
     val actions: List<ValidatedClangCaptureAction>,
@@ -1459,6 +1481,26 @@ private fun captureCanonicalCommitment(domain: String, value: JsonArray): String
         )
     }.finish()
 
+private fun captureContextDocument(
+    oracle: JsonObject,
+    source: JsonObject,
+    generated: JsonObject,
+    compiler: JsonObject,
+    build: JsonObject,
+    environment: JsonObject,
+    headerManifestSha256: String,
+): JsonObject = JsonObject(
+    mapOf(
+        "build" to build,
+        "canonicalCaptureHeaderCandidateManifestSha256" to JsonPrimitive(headerManifestSha256),
+        "compiler" to compiler,
+        "environment" to environment,
+        "generated" to generated,
+        "oracle" to oracle,
+        "source" to source,
+    ),
+)
+
 private class CaptureCommitment(domain: String) {
     private val digest = MessageDigest.getInstance("SHA-256")
 
@@ -1487,6 +1529,7 @@ private val CAPTURE_AUTHORITY = JsonObject(
         "cleanCompilationProven" to JsonPrimitive(false),
         "compilerActionsAuthenticated" to JsonPrimitive(false),
         "compilerCaptureAuthenticated" to JsonPrimitive(false),
+        "compilerOptionArityValidated" to JsonPrimitive(false),
         "compilerWriteSetContained" to JsonPrimitive(false),
         "exitStatusesPresent" to JsonPrimitive(false),
         "headerPlanReady" to JsonPrimitive(false),
@@ -1530,11 +1573,11 @@ private val CAPTURE_POLICY = JsonObject(
     mapOf(
         "actionCoverage" to JsonPrimitive("exact-one-per-authenticated-a13-module"),
         "actionIdentity" to JsonPrimitive(
-            "kotlin-jvm-derived-from-complete-explicit-argv-environment-and-predecessor-bindings",
+            "kotlin-jvm-derived-from-global-predecessor-context-and-complete-explicit-argv-environment-bindings",
         ),
         "actionOrdering" to JsonPrimitive("authenticated-a13-source-module-order"),
         "argumentFraming" to JsonPrimitive(
-            "fixed-driver-config-dependency-output-compile-main-frame-plus-self-contained-option-tail",
+            "fixed-driver-config-dependency-output-compile-main-frame-plus-dash-prefixed-token-tail",
         ),
         "argumentTransport" to JsonPrimitive(
             "ordered-execve-argv-no-shell-no-response-or-compiler-config-files",
@@ -1547,12 +1590,15 @@ private val CAPTURE_POLICY = JsonObject(
         "headerFiltering" to JsonPrimitive("direct-per-file"),
         "headerOutputFormat" to JsonPrimitive("json-v2.0.0"),
         "outputRecordModel" to JsonPrimitive(
-            "actions-plus-header-candidates-plus-source-only-plus-base-environment-plus-seven-blockers",
+            "actions-plus-header-candidates-plus-source-only-plus-base-environment-plus-eight-blockers",
+        ),
+        "tailOptionArityDisposition" to JsonPrimitive(
+            "unvalidated-requires-reviewed-option-profile-before-execution",
         ),
         "traceSlot" to JsonPrimitive("traces/<derived-action-sha256>.json"),
         "workUnitModel" to JsonPrimitive(
             "64-plus-12-per-action-plus-4-per-argument-plus-3-per-header-plus-2-per-source-only-" +
-                "plus-2-per-base-environment-plus-2-per-blocker",
+            "plus-2-per-base-environment-plus-2-per-blocker",
         ),
         "zeroByteTraceDisposition" to JsonPrimitive("present-empty-not-missing"),
     ),
@@ -1565,7 +1611,7 @@ private val CAPTURE_BOUNDS = JsonObject(
         "maximumArgumentBytes" to JsonPrimitive(CAPTURE_MAXIMUM_ARGUMENT_BYTES),
         "maximumArgumentsPerAction" to JsonPrimitive(CAPTURE_MAXIMUM_ARGUMENTS_PER_ACTION),
         "maximumBaseEnvironmentVariables" to JsonPrimitive(CAPTURE_MAXIMUM_BASE_ENVIRONMENT_VARIABLES),
-        "maximumBlockers" to JsonPrimitive(7),
+        "maximumBlockers" to JsonPrimitive(8),
         "maximumCanonicalBytes" to JsonPrimitive(CAPTURE_MAXIMUM_CANONICAL_BYTES),
         "maximumCaptureHeaderCandidates" to JsonPrimitive(CAPTURE_MAXIMUM_HEADER_CANDIDATES),
         "maximumCompilerBytes" to JsonPrimitive(CAPTURE_MAXIMUM_COMPILER_BYTES),
@@ -1661,11 +1707,18 @@ private val CAPTURE_BLOCKER_DISPOSITIONS = listOf(
         "carried",
         "physical-build-root-unverified",
     ),
+    captureBlockerDisposition(
+        "clang-capture-input-v1",
+        "compiler-option-arity-unvalidated",
+        "introduced",
+        "compiler-option-arity-unvalidated",
+    ),
 )
 
 private val CAPTURE_BLOCKERS = listOf(
     captureBlocker("complete-project-header-inventory-missing"),
     captureBlocker("compiler-capture-provenance-missing"),
+    captureBlocker("compiler-option-arity-unvalidated"),
     captureBlocker("generated-generation-receipt-missing"),
     captureBlocker("generated-snapshot-completeness-unproven"),
     captureBlocker("ninja-live-edge-replay-missing"),
@@ -1740,7 +1793,8 @@ private const val CAPTURE_SCHEMA = "full-tree-clang-capture-input"
 private const val CAPTURE_COMPILE_FRAME_SIZE = 11
 private const val CAPTURE_COMPILER_IDENTITY_DOMAIN = "full-tree-clang-capture-compiler-identity-v1"
 private const val CAPTURE_ENVIRONMENT_DOMAIN = "full-tree-clang-capture-base-environment-v1"
-private const val CAPTURE_ACTION_DOMAIN = "full-tree-clang-capture-action-v1"
+private const val CAPTURE_CONTEXT_DOMAIN = "full-tree-clang-capture-global-context-v1"
+private const val CAPTURE_ACTION_DOMAIN = "full-tree-clang-capture-action-v2"
 private const val CAPTURE_ACTION_MANIFEST_DOMAIN = "full-tree-clang-capture-action-manifest-v1"
 private const val CAPTURE_HEADER_MANIFEST_DOMAIN = "full-tree-clang-capture-header-candidate-manifest-v1"
 private const val CAPTURE_MAXIMUM_ACTIONS = 10_000
@@ -1753,7 +1807,7 @@ private const val CAPTURE_MAXIMUM_HEADER_CANDIDATES = 100_000
 private const val CAPTURE_MAXIMUM_COMPILER_BYTES = 512L * 1024L * 1024L
 private const val CAPTURE_MAXIMUM_ENVIRONMENT_BYTES = 4L * 1024L * 1024L
 private const val CAPTURE_MAXIMUM_HEADER_PATH_BYTES = 16L * 1024L * 1024L
-private const val CAPTURE_MAXIMUM_OUTPUT_RECORDS = 160_263L
+private const val CAPTURE_MAXIMUM_OUTPUT_RECORDS = 160_264L
 private const val CAPTURE_MAXIMUM_PATH_BYTES = 4096
 private const val CAPTURE_MAXIMUM_PATH_COMPONENT_BYTES = 255
 private const val CAPTURE_MAXIMUM_SOURCE_ONLY_UNITS = 50_000
