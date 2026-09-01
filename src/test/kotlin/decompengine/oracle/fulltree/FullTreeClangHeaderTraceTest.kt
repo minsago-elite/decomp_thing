@@ -149,6 +149,45 @@ class FullTreeClangHeaderTraceTest {
     }
 
     @Test
+    fun `ordinary physical locations canonicalize across authenticated root mappings`() {
+        val firstBytes = document(
+            listOf(
+                record(
+                    "/first/source/clang/lib/Lex/Lexer.cpp",
+                    listOf(
+                        include(
+                            "/first/source/clang/lib/Lex/Lexer.cpp:1:1",
+                            "/first/build/X.h",
+                        ),
+                    ),
+                ),
+            ),
+        ).toByteArray()
+        val secondBytes = firstBytes.decodeToString()
+            .replace("/first/source", "/second/source")
+            .replace("/first/build", "/second/build")
+            .toByteArray()
+        val first = FullTreeClangHeaderTraceParser.parse(
+            firstBytes,
+            listOf(
+                FullTreeClangTraceRoot("/first/source", "source"),
+                FullTreeClangTraceRoot("/first/build", "generated"),
+            ),
+            "source/clang/lib/Lex/Lexer.cpp",
+        )
+        val second = FullTreeClangHeaderTraceParser.parse(
+            secondBytes,
+            listOf(
+                FullTreeClangTraceRoot("/second/source", "source"),
+                FullTreeClangTraceRoot("/second/build", "generated"),
+            ),
+            "source/clang/lib/Lex/Lexer.cpp",
+        )
+        assertNotEquals(first.inputSha256, second.inputSha256)
+        assertEquals(first.canonicalFactsSha256, second.canonicalFactsSha256)
+    }
+
+    @Test
     fun `schema path source and root confusion fail closed`() {
         val valid = document(
             listOf(
@@ -162,7 +201,10 @@ class FullTreeClangHeaderTraceTest {
             valid.replace("\"version\":\"2.0.0\"", "\"version\":\"1.0.0\""),
             valid.replace("\"imports\":[]", "\"imports\":[],\"extra\":false"),
             valid.replace("/oracle/build/X.h", "/oracle\\build\\X.h"),
-            valid.replace("/oracle/source/clang/lib/Lex/Lexer.cpp", "outside/Lexer.cpp"),
+            valid.replace(
+                "\"source\":\"/oracle/source/clang/lib/Lex/Lexer.cpp\"",
+                "\"source\":\"\"",
+            ),
             valid.replace(":1:1", ":1:0"),
         ).forEach { malformed ->
             assertFailsWith<FullTreeClangHeaderTraceException> { parse(malformed.toByteArray()) }
@@ -229,6 +271,23 @@ class FullTreeClangHeaderTraceTest {
             "/oracle/build/subdirectory/../X.h",
             noncanonical.externalIncludeOccurrences.single().observedDependencyPath,
         )
+
+        val relative = parse(
+            document(
+                listOf(
+                    record(
+                        "source/clang/lib/Lex/Lexer.cpp",
+                        listOf(include("source/clang/lib/Lex/Lexer.cpp:1:1", "generated/X.h")),
+                    ),
+                ),
+            ).toByteArray(),
+        )
+        assertEquals(
+            listOf("generated/X.h", "source/clang/lib/Lex/Lexer.cpp"),
+            relative.externalFiles,
+        )
+        assertEquals(1, relative.externalConsumerIncludeOccurrences.size)
+        assertNotEquals(relative.canonicalFactsSha256, parse(normalizedProject).canonicalFactsSha256)
     }
 
     @Test

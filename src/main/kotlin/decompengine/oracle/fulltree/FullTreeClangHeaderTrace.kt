@@ -99,6 +99,7 @@ internal data class FullTreeClangExternalConsumerModuleImport(
 internal data class FullTreeClangHeaderTrace(
     val inputSha256: String,
     val canonicalFactsSha256: String,
+    val expectedMainSourcePath: String,
     val dependencyFileCount: Int,
     val externalFiles: List<String>,
     val includeOccurrences: List<FullTreeClangIncludeOccurrence>,
@@ -151,6 +152,7 @@ private fun parseTrace(
         return FullTreeClangHeaderTrace(
             inputSha256 = OracleArtifacts.sha256(bytes),
             canonicalFactsSha256 = OracleArtifacts.sha256(canonicalFacts),
+            expectedMainSourcePath = expectedMainSourcePath,
             dependencyFileCount = 0,
             externalFiles = emptyList(),
             includeOccurrences = emptyList(),
@@ -209,16 +211,19 @@ private fun parseTrace(
                 ?: traceFail("include record $dependencyIndex/$includeIndex must be an object")
             include.requireExactKeys(setOf("file", "location"), "include record")
             val location = parseTraceLocation(include.requiredTraceString("location"), limits)
+            val locationFact = canonicalTraceLocation(location.path, observedConsumer, consumer)
             val observedDependency = include.requiredTraceString("file").validatedObservedPath(limits)
             val dependencyPath = projectPath(observedDependency, roots)
             if (dependencyPath != null) projectFiles += dependencyPath else externalFiles += observedDependency
             canonicalIncludes += JsonObject(
                 mapOf(
                     "dependency" to JsonPrimitive(dependencyPath ?: observedDependency),
-                    "dependencyKind" to JsonPrimitive(if (dependencyPath == null) "external" else "project"),
+                    "dependencyKind" to JsonPrimitive(
+                        if (dependencyPath == null) observedTracePathKind(observedDependency) else "project",
+                    ),
                     "locationColumn" to JsonPrimitive(location.column),
-                    "locationFile" to JsonPrimitive(location.path),
-                    "locationFileKind" to JsonPrimitive("opaque-presumed-label"),
+                    "locationFile" to JsonPrimitive(locationFact.first),
+                    "locationFileKind" to JsonPrimitive(locationFact.second),
                     "locationLine" to JsonPrimitive(location.line),
                 ),
             )
@@ -258,6 +263,7 @@ private fun parseTrace(
                 ?: traceFail("import record $dependencyIndex/$importIndex must be an object")
             imported.requireExactKeys(setOf("file", "location", "module"), "import record")
             val location = parseTraceLocation(imported.requiredTraceString("location"), limits)
+            val locationFact = canonicalTraceLocation(location.path, observedConsumer, consumer)
             val module = imported.requiredTraceString("module")
             requireBoundedTraceScalar(module, limits.maximumPathBytes, "module name")
             val moduleMap = imported.requiredTraceString("file").validatedObservedPath(limits)
@@ -266,12 +272,14 @@ private fun parseTrace(
             canonicalImports += JsonObject(
                 mapOf(
                     "locationColumn" to JsonPrimitive(location.column),
-                    "locationFile" to JsonPrimitive(location.path),
-                    "locationFileKind" to JsonPrimitive("opaque-presumed-label"),
+                    "locationFile" to JsonPrimitive(locationFact.first),
+                    "locationFileKind" to JsonPrimitive(locationFact.second),
                     "locationLine" to JsonPrimitive(location.line),
                     "module" to JsonPrimitive(module),
                     "moduleMap" to JsonPrimitive(canonicalModuleMap ?: moduleMap),
-                    "moduleMapKind" to JsonPrimitive(if (canonicalModuleMap == null) "external" else "project"),
+                    "moduleMapKind" to JsonPrimitive(
+                        if (canonicalModuleMap == null) observedTracePathKind(moduleMap) else "project",
+                    ),
                 ),
             )
             if (consumer == null) {
@@ -312,6 +320,9 @@ private fun parseTrace(
                     "imports" to JsonArray(canonicalImports),
                     "includes" to JsonArray(canonicalIncludes),
                     "source" to JsonPrimitive(consumer ?: observedConsumer),
+                    "sourceKind" to JsonPrimitive(
+                        if (consumer == null) observedTracePathKind(observedConsumer) else "project",
+                    ),
                 ),
             ),
         )
@@ -332,6 +343,7 @@ private fun parseTrace(
     return FullTreeClangHeaderTrace(
         inputSha256 = OracleArtifacts.sha256(bytes),
         canonicalFactsSha256 = OracleArtifacts.sha256(canonicalFacts),
+        expectedMainSourcePath = expectedMainSourcePath,
         dependencyFileCount = dependencies.size,
         externalFiles = immutableTraceList(externalFiles),
         includeOccurrences = immutableTraceList(occurrences),
@@ -388,6 +400,17 @@ private data class ParsedTraceDependencyRecord(
 
 private data class TraceLocation(val path: String, val line: Long, val column: Long)
 
+private fun canonicalTraceLocation(
+    presumedPath: String,
+    observedConsumer: String,
+    projectConsumer: String?,
+): Pair<String, String> = if (presumedPath == observedConsumer) {
+    (projectConsumer ?: observedConsumer) to
+        if (projectConsumer == null) "external-consumer" else "project-consumer"
+} else {
+    presumedPath to "opaque-presumed-label"
+}
+
 private fun parseTraceLocation(raw: String, limits: FullTreeClangHeaderTraceLimits): TraceLocation {
     requireBoundedTraceScalar(raw, limits.maximumPathBytes + 64, "include location")
     val columnSeparator = raw.lastIndexOf(':')
@@ -423,9 +446,15 @@ private fun canonicalTraceFacts(
 
 private fun String.validatedObservedPath(limits: FullTreeClangHeaderTraceLimits): String {
     requireBoundedTraceScalar(this, limits.maximumPathBytes, "observed path")
-    if (!startsWith('/') || '\\' in this) traceFail("observed path is not absolute POSIX syntax")
+    if ('\\' in this) traceFail("observed path is not POSIX syntax")
     if (this == "/") traceFail("observed path names the filesystem root")
     return this
+}
+
+private fun observedTracePathKind(path: String): String = when {
+    !path.startsWith('/') -> "external-relative"
+    isCanonicalTraceAbsolutePath(path) -> "external-absolute"
+    else -> "external-noncanonical-absolute"
 }
 
 private fun requireCanonicalProjectTracePath(path: String, maximumPathBytes: Int, label: String) {
