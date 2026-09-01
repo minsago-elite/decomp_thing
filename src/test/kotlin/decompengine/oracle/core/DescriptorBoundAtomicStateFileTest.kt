@@ -82,6 +82,16 @@ class DescriptorBoundAtomicStateFileTest {
                         MAXIMUM_BYTES,
                     ).bytes,
                 )
+                DescriptorBoundAtomicStateFile.inspectExecutableOrNull(
+                    root,
+                    EXECUTABLE_FILE,
+                    MAXIMUM_BYTES,
+                ).use { inspection ->
+                    assertContentEquals(expected, requireNotNull(inspection).bytes)
+                }
+                assertFailsWith<IOException> {
+                    DescriptorBoundAtomicStateFile.inspectOrNull(root, EXECUTABLE_FILE, MAXIMUM_BYTES)
+                }
                 assertFailsWith<IOException> {
                     DescriptorBoundAtomicStateFile.publishExecutableNoReplace(
                         root,

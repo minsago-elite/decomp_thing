@@ -1,7 +1,7 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "$id": "https://github.com/minsago-elite/decomp_thing/oracle/llvm-behavior-hosted-clean-build-v2.schema.json",
-  "title": "Kotlin/JVM LLVM behavior hosted clean-build producer receipt v2",
+  "title": "Kotlin/JVM LLVM behavior fixed-container inner clean-build worker receipt v2",
   "type": "object",
   "additionalProperties": false,
   "required": [
@@ -23,7 +23,7 @@
   "properties": {
     "schemaVersion": {"const": 2},
     "kind": {"const": "llvm-behavior-hosted-clean-build-v2"},
-    "authority": {"const": "kotlin-jvm-unsigned-hosted-clean-build-producer-v2"},
+    "authority": {"const": "kotlin-jvm-unsigned-inner-clean-build-worker-v2"},
     "schema": {
       "type": "object",
       "additionalProperties": false,
@@ -124,7 +124,7 @@
         "dockerfileSha256",
         "buildRecordSha256",
         "recordedOriginImageDigest",
-        "inspectedImageDigest",
+        "inspectArtifactImageDigest",
         "platform",
         "SOURCE_DATE_EPOCH",
         "compiler",
@@ -136,7 +136,7 @@
         "dockerfileSha256": {"const": "97e2d13915806242c14489b5a8b1417bd0478f3a11dc05e76888ba2ab43b1291"},
         "buildRecordSha256": {"const": "415afaf3554f954aed4442f0fa3c83ecc7e9f1fe0ddf68fb4c39e9231ece9005"},
         "recordedOriginImageDigest": {"const": "sha256:73285d9a2dad159a7171fe4bbcac7d97d285402955d8c6fb8b44b101cf2df550"},
-        "inspectedImageDigest": {"$ref": "#/$defs/imageDigest"},
+        "inspectArtifactImageDigest": {"$ref": "#/$defs/imageDigest"},
         "platform": {"const": "linux/amd64"},
         "SOURCE_DATE_EPOCH": {"const": "1779182222"},
         "compiler": {
@@ -194,7 +194,7 @@
         "elfClass": {"const": "ELF64"},
         "endianness": {"const": "little-endian"},
         "machine": {"const": "x86-64"},
-        "bytes": {"type": "integer", "minimum": 1, "maximum": 536870912},
+        "bytes": {"type": "integer", "minimum": 1, "maximum": 67108864},
         "sha256": {"$ref": "#/$defs/sha256"},
         "identicalAcrossBuilds": {"const": true}
       }
@@ -202,10 +202,10 @@
     "runtimeClosure": {
       "type": "object",
       "additionalProperties": false,
-      "required": ["kind", "inspectedImageDigest", "platform", "buildCount", "authenticated"],
+      "required": ["kind", "inspectArtifactImageDigest", "platform", "buildCount", "authenticated"],
       "properties": {
         "kind": {"const": "container-image-closure"},
-        "inspectedImageDigest": {"$ref": "#/$defs/imageDigest"},
+        "inspectArtifactImageDigest": {"$ref": "#/$defs/imageDigest"},
         "platform": {"const": "linux/amd64"},
         "buildCount": {"const": 2},
         "authenticated": {"const": false}
@@ -261,7 +261,8 @@
         "candidateLineageBound": true,
         "sourceRevisionBound": true,
         "lockedToolchainBound": true,
-        "runtimeImageInspected": true,
+        "runtimeInspectArtifactParsed": true,
+        "runtimeImageInspected": false,
         "runtimeClosureAuthenticated": false,
         "twoCleanBuildsCompleted": true,
         "executableReproduced": true,
@@ -307,8 +308,14 @@
         "buildContractTrusted",
         "sourceRevisionSha256",
         "sourceCount",
+        "buildEnvironmentSha256",
         "compileCommandSetSha256",
+        "dependencyCount",
+        "dependencySetSha256",
         "objectSetSha256",
+        "linkCommandSha256",
+        "linkDependencyCount",
+        "linkDependencySetSha256",
         "combinedOutputBytes",
         "combinedOutputSha256",
         "executableBytes",
@@ -323,11 +330,17 @@
         "buildContractTrusted": {"const": false},
         "sourceRevisionSha256": {"$ref": "#/$defs/sha256"},
         "sourceCount": {"type": "integer", "minimum": 1, "maximum": 100000},
+        "buildEnvironmentSha256": {"$ref": "#/$defs/sha256"},
         "compileCommandSetSha256": {"$ref": "#/$defs/sha256"},
+        "dependencyCount": {"type": "integer", "minimum": 1, "maximum": 1000000},
+        "dependencySetSha256": {"$ref": "#/$defs/sha256"},
         "objectSetSha256": {"$ref": "#/$defs/sha256"},
+        "linkCommandSha256": {"$ref": "#/$defs/sha256"},
+        "linkDependencyCount": {"type": "integer", "minimum": 1, "maximum": 4096},
+        "linkDependencySetSha256": {"$ref": "#/$defs/sha256"},
         "combinedOutputBytes": {"type": "integer", "minimum": 0, "maximum": 17179869184},
         "combinedOutputSha256": {"$ref": "#/$defs/sha256"},
-        "executableBytes": {"type": "integer", "minimum": 1, "maximum": 536870912},
+        "executableBytes": {"type": "integer", "minimum": 1, "maximum": 67108864},
         "executableSha256": {"$ref": "#/$defs/sha256"}
       }
     },

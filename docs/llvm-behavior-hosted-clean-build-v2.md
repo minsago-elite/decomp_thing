@@ -1,36 +1,49 @@
-# LLVM behavior hosted clean-build receipt v2
+# LLVM behavior fixed-container inner clean-build worker receipt v2
 
-`candidate-hosted-clean-build-v2.json` is a Kotlin/JVM-produced, unsigned receipt for the
-deterministic candidate build facts required by #140 and #115. It binds one independently verified
+`candidate-hosted-clean-build-v2.json` is a Kotlin/JVM-produced, unsigned inner-worker receipt for
+the deterministic candidate build facts required by #140 and #115. It binds one independently verified
 reconstruction archive and its `candidate-acp-lineage-index-v2.json` to two clean builds and one
 byte-identical ELF candidate. It is producer evidence, not an authenticated GitHub Actions or
 Sigstore attestation.
 
-The receipt is strict canonical JSON. Production and verification must apply fixed input,
-canonical-output, depth, node, and string limits before schema validation. Every object is closed,
-the build array has exactly two positional entries, detailed commands and objects are represented
-only by count/hash commitments, and no field can carry an unbounded report or provenance list.
+This checkpoint intentionally exposes no general build CLI or host-side Gradle task. The internal
+worker has zero caller-selected paths and reads only fixed future-container paths under `/inputs`,
+writes staged output under `/stage-output`, and creates scratch state only under `/work`. Dependency
+authentication happens after Clang reads a file, so running this worker against an ordinary host
+filesystem would be unsafe. Only the pending Kotlin-owned outer container coordinator may launch it.
+
+The inner worker writes strict canonical JSON under fixed input, canonical-output, depth, node, and
+string limits before schema validation. Every object is closed, the build array has exactly two
+positional entries, detailed commands and objects are represented only by count/hash commitments,
+and no field can carry an unbounded report or provenance list. JSON Schema checks shape and fixed
+constants only. `LlvmBehaviorHostedCleanBuildV2Verifier` separately reopens a mode-0400 receipt and
+mode-0500 executable from one closed mode-0700 directory, pins the reviewed schema hash, checks all
+explicitly supported repeated-field equalities, inspects the exact ELF, and terminally
+reauthenticates both files and their lexical parent. Its public result exposes no archive, lineage,
+runtime, or producer-authority projection: those remain opaque receipt claims. That pair verifier
+still cannot prove that the builds occurred or authenticate the archive, container, workflow, or
+Sigstore provenance.
 
 ## Archive and ACP lineage binding
 
-The producer starts from raw archive and lineage-index paths. Kotlin independently authenticates
+The inner worker starts from its fixed archive and lineage-index paths. Kotlin independently authenticates
 the archive before projecting its stored byte length and SHA-256, archive-manifest identity, and
 source-tree-manifest identity. `archive.verified=true` means that verification completed; it is not
 a caller assertion.
 
-The producer parses the lineage index as strict canonical schema-v2 JSON and cross-checks it against
+The inner worker parses the lineage index as strict canonical schema-v2 JSON and cross-checks it against
 the archive-derived value. The receipt retains its exact bytes and SHA-256, the
 `candidateSourceLineageSha256`, the accepted reconstruction/repair counts, and all four ACP
 aggregates: receipt, session, change, and joined lineage sets. It also repeats the authenticated
-reconstruction profile and full source revision. The verifier requires every repeated count,
-revision, and aggregate to equal both the index and the archive projection.
+reconstruction profile and full source revision. During production, Kotlin requires every repeated
+count, revision, and aggregate to equal both the index and the archive projection.
 
 This makes ACP a `first-class-candidate-producer-operator`. ACP evidence remains read-only input to
 Kotlin. ACP has no oracle, reference-authoring, policy-authoring, validation,
 observation-authoring, START, containment, terminal-absence, scoring, certification, or release
 authority.
 
-## Locked toolchain and observed runtime
+## Locked toolchain and inspect artifact
 
 The receipt fixes the exact reviewed LLVM 22.1.6 build environment through the SHA-256 identities
 of:
@@ -41,14 +54,15 @@ of:
 - `oracle/llvm/22.1.6/build-toolchain.Dockerfile`.
 
 Those hashes, the recorded-origin image digest, `linux/amd64`, `SOURCE_DATE_EPOCH`, and the compiler
-and linker paths, executable lengths, hashes, and version-output hashes are schema constants. A
-fresh image is rebuilt from the locked Dockerfile and base image. Its inspected image ID is retained
-separately: a fresh image ID is runtime evidence and is not rewritten into the historical
-recorded-origin identity.
+and linker paths, executable lengths, hashes, and version-output hashes are schema constants. The
+reproduction artifacts describe a fresh image rebuilt from the locked Dockerfile and base image.
+The image ID parsed from their Docker-inspect artifact is retained separately and is not rewritten
+into the historical recorded-origin identity.
 
-`runtimeClosure` cross-binds that inspected image digest to both builds and requires the inspected
-platform to be `linux/amd64`. This unsigned producer consumes a bounded Docker-inspect artifact, so
-it sets `runtimeClosure.authenticated=false` and `runtimeClosureAuthenticated=false`. A tag,
+`runtimeClosure` cross-binds the image digest parsed from that inspect artifact to both builds and
+requires the recorded platform to be `linux/amd64`. This unsigned inner worker consumes a bounded
+Docker-inspect artifact, so it sets `runtimeImageInspected=false`,
+`runtimeClosure.authenticated=false`, and `runtimeClosureAuthenticated=false`. A tag,
 caller-claimed digest, or build-record string cannot replace the inspect artifact. The later hosted
 workflow attestation (or a Kotlin-owned container coordinator) must prove that both builds actually
 ran in that exact inspected image before the runtime boundary is authenticated.
@@ -67,23 +81,40 @@ shell, Make, Ninja, CMake, project callback, or caller-provided command in the c
 
 Each build entry is constant-size. `sourceCount` is the number of authenticated `src/**/*.c`
 translation units. `compileCommandSetSha256` is the domain-separated, length-prefixed commitment to
-the commands in source-path order; each command retains its ordinal and every exact argv token.
+the commands in source-path order; each command retains its ordinal and every argv token after
+private source and build roots are replaced by the fixed `${SOURCE}` and `${BUILD}` placeholders.
+This keeps the commitment exact while making retries independent of random scratch-directory names.
+Each compile emits a bounded dependency file. Kotlin rejects dependencies outside the authenticated
+source revision and reviewed container system-header roots, and commits every canonical dependency
+path, byte length, and SHA-256 through `dependencyCount` and `dependencySetSha256`.
 `objectSetSha256` uses the same encoding over project-relative object path, byte length, and SHA-256
-leaves in source-path order. `combinedOutputSha256` is SHA-256 over each command's bounded merged
-stdout/stderr bytes in execution order, with `combinedOutputBytes` equal to their total raw byte
-length. Detailed commands, objects, stdout, and stderr remain in ephemeral build state and cannot
-expand the receipt.
+leaves in source-path order. The sorted environment and link argv have separate commitments using
+the same fixed private-root placeholders. Locked LLD writes a bounded dependency manifest; Kotlin
+authenticates and commits its ordered-unique CRT, object, library, linker-script, and dynamic-linker
+dependency set, rejecting paths outside the private object root and reviewed container
+system-library roots. The exact link-command commitment retains repeated argv inputs that LLD
+deduplicates in that manifest. `combinedOutputSha256` is SHA-256 over each command's
+bounded merged stdout/stderr bytes in execution order after the same private-root replacement, with
+`combinedOutputBytes` equal to that canonical byte stream's length. Detailed commands, objects,
+stdout, and stderr remain in ephemeral build state and cannot expand the receipt.
 
-The producer compares the two final files byte-for-byte, not only by a claimed digest. It then
+Each command has a ten-minute cap, each whole clean build has a thirty-minute cap, and compiled
+objects have a two-GiB aggregate cap in addition to their individual bounds. Dependency and link
+closure bytes are separately aggregate-bounded, and the final executable is capped at 64 MiB.
+These are producer resource ceilings, not evidence that a later candidate behavior run was
+contained or reached terminal absence.
+
+The inner worker compares the two final files byte-for-byte, not only by a claimed digest. It then
 validates the common file as little-endian ELF64 with machine `x86-64` and records its exact length
 and SHA-256 as `candidateExecutable`. The per-build executable identities and the projected
 candidate identity must all match.
 
 ## Deliberately unsigned claims
 
-This producer receipt truthfully establishes `twoCleanBuildsCompleted=true` and
+This inner-worker receipt truthfully establishes `twoCleanBuildsCompleted=true` and
 `executableReproduced=true`. It also records the verified archive/lineage/toolchain bindings and the
-inspected, but not yet authenticated, runtime image identity.
+image identity parsed from the inspect artifact, without claiming a live image inspection or an
+authenticated runtime closure.
 
 It deliberately fixes all of these claims false:
 
@@ -93,14 +124,14 @@ It deliberately fixes all of these claims false:
 - oracle and reference-authoring or reference-truth authority; and
 - scoring, certification, release authority, and release eligibility.
 
-The word “hosted” describes where the producer is intended to run. An unsigned receipt alone does
+The word “hosted” describes where the worker is intended to run. An unsigned receipt alone does
 not prove which workflow ran it. It grants no candidate admission or behavior-execution authority.
 
 ## Next attestation boundary
 
-The default next step is one default-provenance invocation of
-[`actions/attest@v4`](https://github.com/actions/attest) after the producer has closed both output
-files:
+After the missing outer coordinator has validated the staged pair, proved container cleanup, and
+published the final pair, the default next step is one default-provenance invocation of
+[`actions/attest@v4`](https://github.com/actions/attest) over both final files:
 
 ```yaml
 permissions:
@@ -123,7 +154,7 @@ The explicit list must resolve to exactly two subjects in one Sigstore bundle, n
 additional subjects, two separate single-subject attestations, and a bundle that covers only the
 executable all fail closed.
 
-A later Kotlin verifier must work offline from raw receipt, executable, bundle, and independently
+A later Kotlin attestation verifier must work offline from raw receipt, executable, bundle, and independently
 pinned trusted-root/policy bytes. It must bound and parse the Sigstore bundle, verify its signature,
 certificate and transparency evidence, authenticate the expected repository/workflow/ref/commit
 identity, validate the SLSA statement, and require an exact two-element subject set whose names and

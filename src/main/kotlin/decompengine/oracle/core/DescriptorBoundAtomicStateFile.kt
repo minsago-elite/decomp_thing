@@ -202,6 +202,19 @@ internal object DescriptorBoundAtomicStateFile {
         OWNER_READ_ONLY_MODE,
     )
 
+    /** Opens one already-published immutable executable while enforcing its exact 0500 mode. */
+    fun inspectExecutableOrNull(
+        parent: LinuxDescriptor,
+        name: String,
+        maximumBytes: Int,
+    ): DescriptorBoundStateInspection? = inspectWithModeOrNull(
+        parent,
+        name,
+        maximumBytes,
+        MAXIMUM_EXECUTABLE_BYTES,
+        OWNER_READ_EXECUTE_MODE,
+    )
+
     private fun inspectWithModeOrNull(
         parent: LinuxDescriptor,
         name: String,
