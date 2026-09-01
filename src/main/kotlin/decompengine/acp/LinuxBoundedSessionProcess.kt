@@ -13,6 +13,8 @@ import java.nio.charset.StandardCharsets
 import java.nio.file.FileSystems
 import java.nio.file.Path
 import java.time.Duration
+import java.util.Collections
+import java.util.LinkedHashMap
 
 /**
  * One bounded, non-interactive Linux control-plane command.
@@ -24,45 +26,51 @@ import java.time.Duration
  * only a separately verified cgroup boundary can close that gap. The executable itself must be
  * authenticated by the caller; this layer deliberately accepts no claimed digest.
  */
-internal data class LinuxBoundedSessionCommand(
-    val arguments: List<String>,
-    val environment: Map<String, String>,
+internal class LinuxBoundedSessionCommand(
+    arguments: List<String>,
+    environment: Map<String, String>,
     val workingDirectory: Path = Path.of("/"),
     val timeout: Duration,
     val maximumStdoutBytes: Int,
     val maximumStderrBytes: Int,
 ) {
+    val arguments: List<String> = Collections.unmodifiableList(arguments.toList())
+    val environment: Map<String, String> = Collections.unmodifiableMap(LinkedHashMap(environment))
+
     init {
-        require(arguments.isNotEmpty() && arguments.size <= MAXIMUM_ARGUMENTS) {
+        require(this.arguments.isNotEmpty() && this.arguments.size <= MAXIMUM_ARGUMENTS) {
             "bounded session command must contain 1..$MAXIMUM_ARGUMENTS arguments"
         }
-        require(arguments.all(::portableNativeString)) {
+        require(this.arguments.all(::portableNativeString)) {
             "bounded session command contains an invalid native argument"
         }
         val executable = try {
-            Path.of(arguments.first())
+            Path.of(this.arguments.first())
         } catch (failure: Exception) {
             throw IllegalArgumentException("bounded session executable path is invalid", failure)
         }
         require(
             executable.isAbsolute && executable.normalize() == executable && executable.fileName != null &&
-                executable.toString() == arguments.first(),
+                executable.toString() == this.arguments.first(),
         ) {
             "bounded session executable path must be exact, normalized, absolute, and name a file"
         }
-        require(arguments.sumOf { it.toByteArray(StandardCharsets.UTF_8).size.toLong() } <= MAXIMUM_ARGUMENT_BYTES) {
+        require(
+            this.arguments.sumOf { it.toByteArray(StandardCharsets.UTF_8).size.toLong() } <=
+                MAXIMUM_ARGUMENT_BYTES,
+        ) {
             "bounded session command arguments exceed their byte limit"
         }
-        require(environment.size <= MAXIMUM_ENVIRONMENT_BINDINGS) {
+        require(this.environment.size <= MAXIMUM_ENVIRONMENT_BINDINGS) {
             "bounded session environment contains too many bindings"
         }
-        require(environment.keys.all { it.matches(PORTABLE_ENVIRONMENT_NAME) }) {
+        require(this.environment.keys.all { it.matches(PORTABLE_ENVIRONMENT_NAME) }) {
             "bounded session environment contains an invalid name"
         }
-        require(environment.entries.all { portableNativeString(it.value) }) {
+        require(this.environment.entries.all { portableNativeString(it.value) }) {
             "bounded session environment contains an invalid value"
         }
-        require(environment.entries.sumOf {
+        require(this.environment.entries.sumOf {
             it.key.toByteArray(StandardCharsets.UTF_8).size.toLong() +
                 it.value.toByteArray(StandardCharsets.UTF_8).size.toLong() + 1L
         } <= MAXIMUM_ENVIRONMENT_BYTES) {
@@ -380,25 +388,19 @@ private class NativeSessionCommand(
         val deadline = addDeadline(System.nanoTime(), CLEANUP_TIMEOUT.toNanos())
         var lastFailure: Throwable? = null
         closeParentWriteEnds()
-        try {
-            makeParentReadEndsNonblocking()
-        } catch (failure: Throwable) {
-            lastFailure = failure
-            // A failed transition leaves the access mode unknown. Closing both read ends is the
-            // only bounded choice; cleanup must never call read(2) on a possibly blocking pipe.
-            closeFd(stdoutReadFd)
-            stdoutReadFd = -1
-            closeFd(stderrReadFd)
-            stderrReadFd = -1
-        }
+        // Output is already unusable on this failure path. Close both read ends instead of
+        // draining them: a descendant that escaped the session and continuously writes to an
+        // inherited pipe must not be able to keep cleanup inside read(2) beyond its deadline.
+        closeFd(stdoutReadFd)
+        stdoutReadFd = -1
+        closeFd(stderrReadFd)
+        stderrReadFd = -1
         while (true) {
             try {
                 // pid remains a reserved child identity until waitpid succeeds. Never use the
                 // negative group id after reap, when it could have been assigned to another group.
                 signalGroup(SIGKILL)
                 processHandle?.let { LinuxFilesystemSyscalls.killProcess(it) }
-                drainWithoutRetaining(stdoutReadFd)
-                drainWithoutRetaining(stderrReadFd)
                 val rootExited = processHandle?.let(LinuxFilesystemSyscalls::processExited)
                     ?: leaderExitedWithoutReaping()
                 if (rootExited) {
@@ -516,21 +518,6 @@ private class NativeSessionCommand(
         stdoutWriteFd = -1
         closeFd(stderrWriteFd)
         stderrWriteFd = -1
-    }
-
-    private fun drainWithoutRetaining(descriptor: Int) {
-        if (descriptor < 0) return
-        val buffer = Memory(CAPTURE_CHUNK_BYTES.toLong())
-        while (true) {
-            val count = libc.read(descriptor, buffer, NativeLong(CAPTURE_CHUNK_BYTES.toLong())).toLong()
-            when {
-                count > 0L -> continue
-                count == 0L -> return
-                Native.getLastError() == EINTR -> continue
-                Native.getLastError() in setOf(EAGAIN, EWOULDBLOCK) -> return
-                else -> throw syscallFailure("drain bounded session pipe during cleanup")
-            }
-        }
     }
 
     private fun closeFd(descriptor: Int) {

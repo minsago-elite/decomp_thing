@@ -3,6 +3,8 @@ package decompengine.acp
 import java.nio.file.Files
 import java.nio.file.Path
 import java.time.Duration
+import java.util.concurrent.atomic.AtomicLong
+import kotlin.concurrent.thread
 import kotlin.test.Test
 import kotlin.test.assertContentEquals
 import kotlin.test.assertEquals
@@ -107,6 +109,90 @@ class LinuxBoundedSessionProcessTest {
                 maximumStdoutBytes = 1024 * 1024 + 1,
                 maximumStderrBytes = 1,
             )
+        }
+    }
+
+    @Test
+    fun freezesArgumentsAndEnvironmentBeforeSpawn() {
+        requireLinux()
+        val arguments = mutableListOf(
+            "/bin/sh",
+            "-c",
+            "test \"\${BOUND_VALUE-}\" = frozen; printf frozen",
+        )
+        val environment = linkedMapOf("BOUND_VALUE" to "frozen")
+        val command = LinuxBoundedSessionCommand(
+            arguments = arguments,
+            environment = environment,
+            timeout = Duration.ofSeconds(2),
+            maximumStdoutBytes = 64,
+            maximumStderrBytes = 64,
+        )
+
+        arguments[2] = "printf mutated"
+        environment["BOUND_VALUE"] = "mutated"
+
+        val result = LinuxBoundedSessionProcess.execute(command)
+        assertEquals(0, result.exitCode)
+        assertNull(result.signal)
+        assertContentEquals("frozen".toByteArray(), result.stdout)
+        assertContentEquals(byteArrayOf(), result.stderr)
+        assertFailsWith<UnsupportedOperationException> {
+            @Suppress("UNCHECKED_CAST")
+            (command.arguments as MutableList<String>)[0] = "/bin/false"
+        }
+        assertFailsWith<UnsupportedOperationException> {
+            @Suppress("UNCHECKED_CAST")
+            (command.environment as MutableMap<String, String>)["BOUND_VALUE"] = "mutated"
+        }
+    }
+
+    @Test
+    fun outputFailureCleanupIsBoundedAgainstAnEscapedContinuousWriter() {
+        requireLinux()
+        val marker = Files.createTempFile("bounded-session-escaped-writer-", ".pid")
+        val escapedPid = AtomicLong(-1L)
+        val fallback = thread(start = true, isDaemon = true, name = "escaped-writer-test-cleanup") {
+            try {
+                repeat(500) {
+                    val candidate = runCatching { Files.readString(marker).trim().toLong() }.getOrNull()
+                    if (candidate != null && candidate > 0L) {
+                        escapedPid.set(candidate)
+                        Thread.sleep(2_000)
+                        ProcessHandle.of(candidate).ifPresent { it.destroyForcibly() }
+                        return@thread
+                    }
+                    Thread.sleep(10)
+                }
+            } catch (_: InterruptedException) {
+                // The primary test path already killed the escaped writer.
+            }
+        }
+        try {
+            val quotedMarker = marker.toString().replace("'", "'\\''")
+            val started = System.nanoTime()
+            assertFailsWith<LinuxBoundedSessionOutputLimitException> {
+                LinuxBoundedSessionProcess.execute(
+                    command(
+                        "/bin/sh",
+                        "-c",
+                        "setsid /bin/sh -c 'trap \"\" PIPE; printf %s \"\$\$\" > \"$quotedMarker\"; " +
+                            "while :; do printf 0123456789 || :; done' & " +
+                            "while test ! -s '$quotedMarker'; do :; done; " +
+                            "while :; do printf 0123456789; done",
+                        maximumStdoutBytes = 64,
+                    ),
+                )
+            }
+            val elapsed = Duration.ofNanos(System.nanoTime() - started)
+            assertTrue(elapsed < Duration.ofSeconds(2), "cleanup took $elapsed")
+        } finally {
+            val candidate = escapedPid.get().takeIf { it > 0L }
+                ?: runCatching { Files.readString(marker).trim().toLong() }.getOrNull()
+            candidate?.let { pid -> ProcessHandle.of(pid).ifPresent { it.destroyForcibly() } }
+            fallback.interrupt()
+            fallback.join(1_000)
+            Files.deleteIfExists(marker)
         }
     }
 
