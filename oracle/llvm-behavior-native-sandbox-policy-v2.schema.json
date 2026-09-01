@@ -1,0 +1,433 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://github.com/minsago-elite/decomp_thing/oracle/llvm-behavior-native-sandbox-policy-v2.schema.json",
+  "title": "Non-authoritative LLVM native-helper sandbox policy v2 draft validation",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schemaVersion",
+    "kind",
+    "authority",
+    "acpBoundary",
+    "backend",
+    "helper",
+    "environment",
+    "container",
+    "roles",
+    "mountProfiles",
+    "cgroup",
+    "rlimits",
+    "workspace",
+    "captures",
+    "unboundRuntimeInputs",
+    "claims"
+  ],
+  "properties": {
+    "schemaVersion": {"const": 2},
+    "kind": {"const": "llvm-behavior-native-sandbox-helper-policy-draft"},
+    "authority": {"const": "non-authoritative-native-sandbox-helper-policy-v2-draft-validation"},
+    "acpBoundary": {
+      "const": {
+        "role": "first-class-candidate-producer-operator",
+        "candidateContribution": "authenticated-session-change-build-artifact-provenance",
+        "candidateProvenanceAccess": "read-only-oracle-input",
+        "candidateAdmissionOwner": "kotlin-jvm-host",
+        "candidateLiveExecutionOwner": "separately-reviewed-kotlin-jvm-host",
+        "referenceSubjectAdmission": "kotlin-jvm-host-only",
+        "oracleAuthority": false,
+        "referenceAuthoringAuthority": false,
+        "policyAuthoringAuthority": false,
+        "validationAuthority": false,
+        "observationAuthoringAuthority": false,
+        "startAuthority": false,
+        "containmentAuthority": false,
+        "terminalAbsenceAuthority": false,
+        "scoringAuthority": false,
+        "certificationAuthority": false,
+        "releaseAuthority": false
+      }
+    },
+    "backend": {"const": "oci-container-v2"},
+    "helper": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "fileName",
+        "checksumFileName",
+        "bytes",
+        "sha256",
+        "checksumSha256",
+        "protocol",
+        "containerPath",
+        "preExecFrame",
+        "source",
+        "buildRecord"
+      ],
+      "properties": {
+        "fileName": {"const": "decomp-llvm-behavior-helper"},
+        "checksumFileName": {"const": "decomp-llvm-behavior-helper.sha256"},
+        "bytes": {"type": "integer", "minimum": 64, "maximum": 4194304},
+        "sha256": {"$ref": "#/$defs/sha256"},
+        "checksumSha256": {"$ref": "#/$defs/sha256"},
+        "protocol": {"const": "decomp-llvm-behavior-helper-v2"},
+        "containerPath": {"const": "/decomp-llvm-behavior-helper"},
+        "preExecFrame": {"const": "behavior-preexec-v2:"},
+        "source": {"$ref": "#/$defs/sourceFile"},
+        "buildRecord": {"$ref": "#/$defs/buildRecordFile"}
+      }
+    },
+    "environment": {
+      "const": {
+        "launcher": "/usr/bin/env",
+        "clearCommandEnvironment": true,
+        "preExecAllowlist": ["GCC_MIRRORS", "GCC_VERSION", "GPG_KEYS", "PATH"],
+        "preExecValuesBinding": "${AUTHENTICATED_IMAGE_ENVIRONMENT}",
+        "commandAllowlists": {
+          "keeper": [],
+          "setup": ["TARGET_UID", "TARGET_GID", "WORKSPACE_BYTES", "WORKSPACE_ENTRIES"],
+          "target": ["${COMMAND_ENVIRONMENT_NAMES}"],
+          "collector": ["TARGET_UID", "TARGET_GID", "WORKSPACE_BYTES", "WORKSPACE_ENTRIES"]
+        },
+        "targetCommandEnvironment": {
+          "binding": "${COMMAND_ENVIRONMENT}",
+          "source": "authenticated-corpus-global-plus-case-overlay",
+          "ordering": "unicode-code-point-by-name",
+          "maximumBindings": 128,
+          "maximumBytes": 65536,
+          "portableNamesOnly": true,
+          "duplicatesAllowed": false
+        }
+      }
+    },
+    "container": {
+      "const": {
+        "platform": "linux/amd64",
+        "pull": "never",
+        "network": "none",
+        "pidNamespace": "private",
+        "ipc": "private",
+        "cgroupNamespace": "private",
+        "rootFilesystemReadOnly": true,
+        "capabilityDrop": ["ALL"],
+        "noNewPrivileges": true,
+        "seccomp": "builtin",
+        "init": false,
+        "healthcheck": false,
+        "logDriver": "none",
+        "hostname": "behavior-corpus",
+        "stdinAttached": true,
+        "stdoutAttached": true,
+        "stderrAttached": true
+      }
+    },
+    "roles": {
+      "const": {
+        "keeper": {
+          "user": {"uid": 0, "gid": 0},
+          "workingDirectory": "/",
+          "resourceProfile": "control",
+          "mountProfile": "keeper",
+          "shmBytes": 65536,
+          "capabilities": [],
+          "preExecArgvTemplate": [
+            "/decomp-llvm-behavior-helper",
+            "decomp-llvm-behavior-helper-v2",
+            "pre-exec",
+            "keeper",
+            "${NONCE}",
+            "536870912",
+            "64",
+            "100000",
+            "100000",
+            "65536",
+            "128",
+            "64",
+            "30",
+            "500",
+            "--"
+          ],
+          "commandArgvTemplate": ["/usr/bin/env", "-i", "/usr/bin/sleep", "infinity"]
+        },
+        "setup": {
+          "user": {"uid": 65534, "gid": 65534},
+          "workingDirectory": "/",
+          "resourceProfile": "control",
+          "mountProfile": "setup",
+          "shmBytes": 65536,
+          "capabilities": [],
+          "preExecArgvTemplate": [
+            "/decomp-llvm-behavior-helper",
+            "decomp-llvm-behavior-helper-v2",
+            "pre-exec",
+            "setup",
+            "${NONCE}",
+            "536870912",
+            "64",
+            "100000",
+            "100000",
+            "65536",
+            "128",
+            "64",
+            "30",
+            "500",
+            "--"
+          ],
+          "commandArgvTemplate": [
+            "/usr/bin/env",
+            "-i",
+            "TARGET_UID=65534",
+            "TARGET_GID=65534",
+            "WORKSPACE_BYTES=33554432",
+            "WORKSPACE_ENTRIES=1024",
+            "/decomp-llvm-behavior-helper",
+            "decomp-llvm-behavior-helper-v2",
+            "stage"
+          ]
+        },
+        "target": {
+          "user": {"uid": 65534, "gid": 65534},
+          "workingDirectory": "/workspace",
+          "resourceProfile": "target",
+          "mountProfile": "target",
+          "shmBytes": 16777216,
+          "capabilities": [],
+          "preExecArgvTemplate": [
+            "/decomp-llvm-behavior-helper",
+            "decomp-llvm-behavior-helper-v2",
+            "pre-exec",
+            "target",
+            "${NONCE}",
+            "1073741824",
+            "128",
+            "100000",
+            "100000",
+            "16777216",
+            "128",
+            "128",
+            "10",
+            "500",
+            "--"
+          ],
+          "commandArgvTemplate": [
+            "/usr/bin/env",
+            "-i",
+            "${COMMAND_ENVIRONMENT}",
+            "/subject/executable",
+            "${CASE_ARGUMENTS}"
+          ]
+        },
+        "collector": {
+          "user": {"uid": 0, "gid": 0},
+          "workingDirectory": "/",
+          "resourceProfile": "control",
+          "mountProfile": "collector",
+          "shmBytes": 65536,
+          "capabilities": ["DAC_OVERRIDE"],
+          "preExecArgvTemplate": [
+            "/decomp-llvm-behavior-helper",
+            "decomp-llvm-behavior-helper-v2",
+            "pre-exec",
+            "collector",
+            "${NONCE}",
+            "536870912",
+            "64",
+            "100000",
+            "100000",
+            "65536",
+            "128",
+            "64",
+            "30",
+            "500",
+            "--"
+          ],
+          "commandArgvTemplate": [
+            "/usr/bin/env",
+            "-i",
+            "TARGET_UID=65534",
+            "TARGET_GID=65534",
+            "WORKSPACE_BYTES=33554432",
+            "WORKSPACE_ENTRIES=1024",
+            "/decomp-llvm-behavior-helper",
+            "decomp-llvm-behavior-helper-v2",
+            "collect"
+          ]
+        }
+      }
+    },
+    "mountProfiles": {
+      "const": {
+        "keeper": [
+          {"kind": "bind", "sourceRole": "native-helper", "destination": "/decomp-llvm-behavior-helper", "readOnly": true, "volumeNoCopy": false, "executable": true},
+          {"kind": "volume", "sourceRole": "bounded-workspace-tmpfs", "destination": "/workspace", "readOnly": false, "volumeNoCopy": true, "executable": true},
+          {"kind": "bind", "sourceRole": "deterministic-hostname", "destination": "/etc/hostname", "readOnly": true, "volumeNoCopy": false, "executable": false},
+          {"kind": "bind", "sourceRole": "deterministic-hosts", "destination": "/etc/hosts", "readOnly": true, "volumeNoCopy": false, "executable": false},
+          {"kind": "bind", "sourceRole": "deterministic-resolver", "destination": "/etc/resolv.conf", "readOnly": true, "volumeNoCopy": false, "executable": false},
+          {"kind": "tmpfs", "sourceRole": "private-temporary", "destination": "/tmp", "readOnly": false, "volumeNoCopy": false, "executable": false, "filesystem": "tmpfs", "device": "tmpfs", "mountOptions": ["rw", "nosuid", "nodev", "noexec"], "sizeBytes": 65536, "nrInodes": 1, "mode": "0o1777"}
+        ],
+        "setup": [
+          {"kind": "bind", "sourceRole": "native-helper", "destination": "/decomp-llvm-behavior-helper", "readOnly": true, "volumeNoCopy": false, "executable": true},
+          {"kind": "volume", "sourceRole": "bounded-workspace-tmpfs", "destination": "/workspace", "readOnly": false, "volumeNoCopy": true, "executable": true},
+          {"kind": "bind", "sourceRole": "case-inputs", "destination": "/case-inputs", "readOnly": true, "volumeNoCopy": false, "executable": false},
+          {"kind": "bind", "sourceRole": "deterministic-hostname", "destination": "/etc/hostname", "readOnly": true, "volumeNoCopy": false, "executable": false},
+          {"kind": "bind", "sourceRole": "deterministic-hosts", "destination": "/etc/hosts", "readOnly": true, "volumeNoCopy": false, "executable": false},
+          {"kind": "bind", "sourceRole": "deterministic-resolver", "destination": "/etc/resolv.conf", "readOnly": true, "volumeNoCopy": false, "executable": false},
+          {"kind": "tmpfs", "sourceRole": "private-temporary", "destination": "/tmp", "readOnly": false, "volumeNoCopy": false, "executable": false, "filesystem": "tmpfs", "device": "tmpfs", "mountOptions": ["rw", "nosuid", "nodev", "noexec"], "sizeBytes": 65536, "nrInodes": 1, "mode": "0o1777"}
+        ],
+        "target": [
+          {"kind": "bind", "sourceRole": "native-helper", "destination": "/decomp-llvm-behavior-helper", "readOnly": true, "volumeNoCopy": false, "executable": true},
+          {"kind": "volume", "sourceRole": "bounded-workspace-tmpfs", "destination": "/workspace", "readOnly": false, "volumeNoCopy": true, "executable": true},
+          {"kind": "bind", "sourceRole": "subject-executable", "destination": "/subject/executable", "readOnly": true, "volumeNoCopy": false, "executable": true},
+          {"kind": "bind", "sourceRole": "deterministic-hostname", "destination": "/etc/hostname", "readOnly": true, "volumeNoCopy": false, "executable": false},
+          {"kind": "bind", "sourceRole": "deterministic-hosts", "destination": "/etc/hosts", "readOnly": true, "volumeNoCopy": false, "executable": false},
+          {"kind": "bind", "sourceRole": "deterministic-resolver", "destination": "/etc/resolv.conf", "readOnly": true, "volumeNoCopy": false, "executable": false},
+          {"kind": "tmpfs", "sourceRole": "private-temporary", "destination": "/tmp", "readOnly": false, "volumeNoCopy": false, "executable": false, "filesystem": "tmpfs", "device": "tmpfs", "mountOptions": ["rw", "nosuid", "nodev", "noexec"], "sizeBytes": 16777216, "nrInodes": 1024, "mode": "0o1777"}
+        ],
+        "collector": [
+          {"kind": "bind", "sourceRole": "native-helper", "destination": "/decomp-llvm-behavior-helper", "readOnly": true, "volumeNoCopy": false, "executable": true},
+          {"kind": "volume", "sourceRole": "bounded-workspace-tmpfs", "destination": "/workspace", "readOnly": true, "volumeNoCopy": true, "executable": true},
+          {"kind": "bind", "sourceRole": "case-results", "destination": "/case-results", "readOnly": false, "volumeNoCopy": false, "executable": false},
+          {"kind": "bind", "sourceRole": "deterministic-hostname", "destination": "/etc/hostname", "readOnly": true, "volumeNoCopy": false, "executable": false},
+          {"kind": "bind", "sourceRole": "deterministic-hosts", "destination": "/etc/hosts", "readOnly": true, "volumeNoCopy": false, "executable": false},
+          {"kind": "bind", "sourceRole": "deterministic-resolver", "destination": "/etc/resolv.conf", "readOnly": true, "volumeNoCopy": false, "executable": false},
+          {"kind": "tmpfs", "sourceRole": "private-temporary", "destination": "/tmp", "readOnly": false, "volumeNoCopy": false, "executable": false, "filesystem": "tmpfs", "device": "tmpfs", "mountOptions": ["rw", "nosuid", "nodev", "noexec"], "sizeBytes": 65536, "nrInodes": 1, "mode": "0o1777"}
+        ]
+      }
+    },
+    "cgroup": {
+      "const": {
+        "version": 2,
+        "mountPath": "/sys/fs/cgroup",
+        "namespacePrivate": true,
+        "namespaceRoot": true,
+        "mountReadOnly": true,
+        "membership": "0::/\n",
+        "requiredControllers": ["cpu", "memory", "pids"],
+        "delegatedChildren": 0,
+        "controlsWritable": false,
+        "type": "domain",
+        "members": 1,
+        "cpuQuotaMicroseconds": 100000,
+        "cpuPeriodMicroseconds": 100000,
+        "cpuWeight": 100,
+        "memorySwapBytes": 0,
+        "memoryHigh": "max",
+        "memoryLowBytes": 0,
+        "memoryMinBytes": 0,
+        "memoryOomGroup": 0,
+        "oomScoreAdjustment": 500,
+        "subtreeControl": "",
+        "optionalDefaults": {
+          "cpu.max.burst": "0",
+          "cpu.idle": "0",
+          "cpu.weight.nice": "0",
+          "cpu.uclamp.min": "0.00",
+          "cpu.uclamp.max": "max",
+          "memory.swap.high": "max",
+          "memory.zswap.max": "max",
+          "memory.zswap.writeback": "1",
+          "io.max": "",
+          "io.weight": "default 100"
+        },
+        "cpusetConfiguredEmptyEffectiveNonempty": true,
+        "profiles": {
+          "control": {"memoryBytes": 536870912, "pids": 64},
+          "target": {"memoryBytes": 1073741824, "pids": 128}
+        }
+      }
+    },
+    "rlimits": {
+      "const": {
+        "control": {"coreBytes": 0, "fileBytes": 65536, "openFiles": 128, "processes": 64, "cpuSeconds": 30, "softEqualsHard": true},
+        "target": {"coreBytes": 0, "fileBytes": 16777216, "openFiles": 128, "processes": 128, "cpuSeconds": 10, "softEqualsHard": true}
+      }
+    },
+    "workspace": {
+      "const": {
+        "caseInputsPath": "/case-inputs",
+        "workspacePath": "/workspace",
+        "caseResultsPath": "/case-results",
+        "filesystem": "tmpfs",
+        "maximumBytes": 33554432,
+        "maximumEntries": 1024,
+        "maximumDepth": 64,
+        "copyBufferBytes": 1048576,
+        "uid": 65534,
+        "gid": 65534,
+        "mode": "0o700",
+        "mountOptions": ["rw", "nosuid", "nodev"],
+        "stageRegularMode": "0o400-or-0o500",
+        "collectionPreservesRegularFileMode": true,
+        "rejectSymlinks": true,
+        "rejectHardLinks": true,
+        "rejectSpecialFiles": true,
+        "descriptorRelativeTraversal": true,
+        "byteLexicographicallySortedTraversal": true
+      }
+    },
+    "captures": {
+      "const": {
+        "targetTimeoutMilliseconds": 10000,
+        "controlTimeoutMilliseconds": 30000,
+        "stdoutBytes": 1048576,
+        "stderrBytes": 1048576,
+        "artifactBytes": 16777216,
+        "preExecFrameMaximumBytes": 96
+      }
+    },
+    "unboundRuntimeInputs": {
+      "const": {
+        "imageDigest": "required-from-fresh-v2-reference-definition",
+        "controlClient": "required-from-authenticated-v2-runtime-preflight",
+        "engineDeclaration": "required-from-authenticated-v2-runtime-preflight",
+        "preExecEnvironmentValues": "required-from-authenticated-v2-image-declaration",
+        "referenceSubjectExecutable": "required-from-fresh-v2-reference-definition",
+        "candidateSubjectExecutable": "candidate-only-required-from-kotlin-candidate-admission",
+        "candidateAcpSessionProvenance": "candidate-only-required-from-authenticated-acp-session-receipt",
+        "candidateAcpChangeProvenance": "candidate-only-required-from-authenticated-acp-change-receipt",
+        "candidateAcpBuildProvenance": "candidate-only-required-from-hosted-clean-build-receipt",
+        "candidateAcpArtifactProvenance": "candidate-only-required-from-kotlin-candidate-admission",
+        "commandEnvironment": "required-from-authenticated-corpus-and-case",
+        "caseArguments": "required-from-authenticated-corpus-case",
+        "caseStdinBytes": "required-from-authenticated-corpus-case",
+        "caseInputTreeBytes": "required-from-authenticated-corpus-case",
+        "deterministicHostFileBytes": "required-from-kotlin-v2-definition",
+        "preExecNonce": "required-from-live-v2-operation-owner",
+        "workspaceVolumeIdentity": "required-from-authenticated-v2-live-owner",
+        "caseResultsLeaseIdentity": "required-from-controller-owned-v2-results-lease",
+        "mountSourceIdentities": "required-from-authenticated-v2-live-owner"
+      }
+    },
+    "claims": {
+      "const": {
+        "referencePinned": false,
+        "candidateStarted": false,
+        "startAuthorized": false,
+        "scoringAuthority": false,
+        "releaseEligible": false
+      }
+    }
+  },
+  "$defs": {
+    "sha256": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
+    "sourceFile": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["fileName", "bytes", "sha256"],
+      "properties": {
+        "fileName": {"const": "decomp_llvm_behavior_helper.c"},
+        "bytes": {"type": "integer", "minimum": 1, "maximum": 2097152},
+        "sha256": {"$ref": "#/$defs/sha256"}
+      }
+    },
+    "buildRecordFile": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["fileName", "bytes", "sha256"],
+      "properties": {
+        "fileName": {"const": "decomp-llvm-behavior-helper-build-v2.json"},
+        "bytes": {"type": "integer", "minimum": 1, "maximum": 131072},
+        "sha256": {"$ref": "#/$defs/sha256"}
+      }
+    }
+  }
+}
