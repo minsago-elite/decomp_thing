@@ -11,6 +11,9 @@ worker has zero caller-selected paths and reads only fixed future-container path
 writes staged output under `/stage-output`, and creates scratch state only under `/work`. Dependency
 authentication happens after Clang reads a file, so running this worker against an ordinary host
 filesystem would be unsafe. Only the pending Kotlin-owned outer container coordinator may launch it.
+The fixed image, pre-START inspection, crash journal, cleanup ordering, and publication requirements
+for that boundary are specified by the
+[`hosted container coordinator v1`](llvm-behavior-hosted-container-coordinator-v1.md) contract.
 
 The inner worker writes strict canonical JSON under fixed input, canonical-output, depth, node, and
 string limits before schema validation. Every object is closed, the build array has exactly two
