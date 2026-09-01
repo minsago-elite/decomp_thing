@@ -40,6 +40,7 @@ import decompengine.project.RecoveredProgramModel
 import decompengine.project.SourceTreeGenerator
 import decompengine.project.ArchivalBundleVerifier
 import decompengine.project.ArchivalPackager
+import decompengine.project.captureBuildSourceRevision
 import decompengine.project.MakeProjectBuilder
 import decompengine.project.GeneratedCRepairIndexProfile
 import decompengine.project.sha256
@@ -2225,11 +2226,23 @@ class ModuleRevisionGraphTest {
 
         val bundle = ArchivalPackager.create(fixture.project, archive)
         val extracted = fixture.project.parent.resolve("repair-release-extracted")
-        ArchivalBundleVerifier.extractAndVerify(bundle.archivePath, extracted)
+        val candidateLineage = ArchivalBundleVerifier.extractAndVerifyCandidateLineage(
+            bundle.archivePath,
+            extracted,
+        )
 
         assertContentEquals(fixture.after, extracted.resolve(fixture.relativePath).readBytes())
         assertTrue(extracted.resolve("reports/repair_history.json").exists())
         assertTrue(extracted.resolve(fixture.receiptPath).exists())
+        val contribution = candidateLineage.source.acceptedAcpContributions.single()
+        assertEquals("repair", contribution.workflow)
+        assertEquals(fixture.receiptPath, contribution.receiptPath)
+        assertEquals(fixture.relativePath, contribution.changes.single().path)
+        assertEquals(candidateLineage.source.repairGraphHeadRevisionSha256, contribution.resultSourceRevisionSha256)
+        assertEquals(
+            captureBuildSourceRevision(extracted).sha256,
+            candidateLineage.source.sourceRevision.sha256,
+        )
     }
 
     @Test

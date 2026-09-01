@@ -210,7 +210,24 @@ object ArchivalBundleVerifier {
         targetDir: Path,
         limits: ArchivalBundleLimits = ArchivalBundleLimits(),
         profile: ReconstructionProfile = GeneratedCMakeReconstructionProfile.descriptor,
-    ): List<Path> {
+    ): List<Path> = extractAndVerifyInternal(archivePath, targetDir, limits, profile).paths
+
+    internal fun extractAndVerifyCandidateLineage(
+        archivePath: Path,
+        targetDir: Path,
+    ): VerifiedCandidateArchiveLineage = extractAndVerifyInternal(
+        archivePath,
+        targetDir,
+        ArchivalBundleLimits(),
+        GeneratedCMakeReconstructionProfile.descriptor,
+    ).lineage
+
+    private fun extractAndVerifyInternal(
+        archivePath: Path,
+        targetDir: Path,
+        limits: ArchivalBundleLimits,
+        profile: ReconstructionProfile,
+    ): VerifiedArchiveExtraction {
         require(Files.isRegularFile(archivePath, LinkOption.NOFOLLOW_LINKS) && !Files.isSymbolicLink(archivePath)) {
             "archive must be a regular non-symbolic-link file"
         }
@@ -299,7 +316,12 @@ object ArchivalBundleVerifier {
                 val path = staging.resolve(relative)
                 ArchivePayload(relative, path, Files.size(path), hash, 0)
             }.associateBy { it.relativePath }
-            validateSourceManifest(staging, payload, profile)
+            val sourceLineage = validateSourceManifest(staging, payload, profile)
+            val candidateLineage = VerifiedCandidateArchiveLineage(
+                archiveManifestBytes = Files.size(manifestPath),
+                archiveManifestSha256 = digestFile(manifestPath),
+                source = sourceLineage,
+            )
             if (existingTargetIdentity != null) {
                 finalizeIntoExistingTarget(staging, targetBase, existingTargetIdentity, extractedRelative.toSet())
             } else {
@@ -309,11 +331,19 @@ object ArchivalBundleVerifier {
                     Files.move(staging, targetBase)
                 }
             }
-            return extractedRelative.map(targetBase::resolve)
+            return VerifiedArchiveExtraction(
+                paths = extractedRelative.map(targetBase::resolve),
+                lineage = candidateLineage,
+            )
         } finally {
             deleteTreeIfExists(staging)
         }
     }
+
+    private data class VerifiedArchiveExtraction(
+        val paths: List<Path>,
+        val lineage: VerifiedCandidateArchiveLineage,
+    )
 }
 
 private val requiredArchivePaths = setOf(
@@ -419,7 +449,7 @@ private fun validateSourceManifest(
     projectDir: Path,
     payload: Map<String, ArchivePayload>,
     expectedProfile: ReconstructionProfile,
-) {
+): VerifiedCandidateArchiveSourceLineage {
     requiredArchivePaths.forEach { relative ->
         require(relative in payload) {
             "archive payload is missing required evidence: $relative"
@@ -451,13 +481,37 @@ private fun validateSourceManifest(
         manifest = manifest,
         reconstructionProfile = expectedProfile,
     )
-    ReconstructionAcpEvidenceArchiveVerifier.verify(
+    val reconstructionContributions = ReconstructionAcpEvidenceArchiveVerifier.verify(
         projectDir = projectDir,
         payloadSha256 = payload.mapValues { (_, item) -> item.sha256 },
         payloadSizes = payload.mapValues { (_, item) -> item.size },
         manifest = manifest,
         profile = expectedProfile,
         repairLineage = repairLineage,
+    )
+    val sourceManifestPayload = requireNotNull(payload["source_tree_manifest.json"])
+    val sourceRevision = captureBuildSourceRevision(projectDir)
+    val archivedBuildInputs = payload.values.asSequence()
+        .filter { item ->
+            item.relativePath == "Makefile" || item.relativePath.startsWith("src/") ||
+                item.relativePath.startsWith("include/")
+        }
+        .map { item -> BuildSourceInput(item.relativePath, item.size, item.sha256) }
+        .sortedBy(BuildSourceInput::path)
+        .toList()
+    require(sourceRevision.inputs == archivedBuildInputs) {
+        "candidate source revision differs from the authenticated archive payload"
+    }
+    return VerifiedCandidateArchiveSourceLineage(
+        profileId = manifest.profileId,
+        profileSha256 = manifest.profileSha256,
+        inputSha256 = manifest.inputSha256,
+        sourceTreeManifestBytes = sourceManifestPayload.size,
+        sourceTreeManifestSha256 = sourceManifestPayload.sha256,
+        sourceRevision = sourceRevision,
+        repairGraphHeadId = repairLineage.graphHeadId,
+        repairGraphHeadRevisionSha256 = repairLineage.graphHeadRevisionSha256,
+        acceptedAcpContributions = reconstructionContributions + repairLineage.acceptedAcpContributions,
     )
 }
 

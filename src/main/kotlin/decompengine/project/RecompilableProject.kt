@@ -12,6 +12,7 @@ import java.nio.file.Files
 import java.nio.file.LinkOption
 import java.nio.file.Path
 import java.security.MessageDigest
+import java.util.Collections
 import java.util.concurrent.CompletableFuture
 import java.util.concurrent.CompletionException
 import java.util.concurrent.TimeUnit
@@ -113,7 +114,10 @@ internal fun captureBuildSourceRevision(projectDir: Path): BuildSourceRevision {
     val canonical = inputs.joinToString("") { input ->
         "${input.path.length}:${input.path}:${input.bytes}:${input.sha256}\n"
     }
-    return BuildSourceRevision(sha256(canonical.toByteArray(Charsets.UTF_8)), inputs)
+    return BuildSourceRevision(
+        sha256(canonical.toByteArray(Charsets.UTF_8)),
+        Collections.unmodifiableList(inputs.toList()),
+    )
 }
 
 private fun sha256File(path: Path, expectedBytes: Long): String {

@@ -14,6 +14,7 @@ import decompengine.repair.TRACE_REPAIR_ACP_TASK_FIELD
 import decompengine.repair.readStableRepairFile
 import java.nio.charset.StandardCharsets
 import java.nio.file.Path
+import java.util.Collections
 import java.util.TreeMap
 import kotlinx.serialization.json.JsonArray
 import kotlinx.serialization.json.JsonElement
@@ -40,17 +41,31 @@ internal data class ArchivedRepairSourceLineage(
 
 internal class ArchivedRepairReleaseLineage private constructor(
     sources: Map<String, ArchivedRepairSourceLineage>,
+    val graphHeadId: String?,
+    val graphHeadRevisionSha256: String?,
+    acceptedAcpContributions: List<VerifiedCandidateAcpContribution>,
 ) {
     private val sources = sources.toMap()
+    val acceptedAcpContributions: List<VerifiedCandidateAcpContribution> =
+        Collections.unmodifiableList(acceptedAcpContributions.toList())
 
     fun repairedSource(path: String): ArchivedRepairSourceLineage? =
         sources[path]?.takeIf { it.lastAcceptedRevisionId != null }
 
     companion object {
-        val NONE = ArchivedRepairReleaseLineage(emptyMap())
+        val NONE = ArchivedRepairReleaseLineage(emptyMap(), null, null, emptyList())
 
-        fun of(sources: Collection<ArchivedRepairSourceLineage>): ArchivedRepairReleaseLineage =
-            ArchivedRepairReleaseLineage(sources.associateBy(ArchivedRepairSourceLineage::path))
+        fun of(
+            sources: Collection<ArchivedRepairSourceLineage>,
+            graphHeadId: String,
+            graphHeadRevisionSha256: String,
+            acceptedAcpContributions: List<VerifiedCandidateAcpContribution>,
+        ): ArchivedRepairReleaseLineage = ArchivedRepairReleaseLineage(
+            sources.associateBy(ArchivedRepairSourceLineage::path),
+            graphHeadId,
+            graphHeadRevisionSha256,
+            acceptedAcpContributions,
+        )
     }
 }
 
@@ -128,10 +143,47 @@ internal object RepairAcpEvidenceArchiveVerifier {
             manifestByPath,
             repairProfile,
         )
-        verifyReceipts(graph, projectDir, payloadSha256, payloadSizes)
+        val verifiedReceipts = verifyReceipts(graph, projectDir, payloadSha256, payloadSizes)
         verifyHistory(graph, projectDir, payloadSha256, payloadSizes)
 
-        return ArchivedRepairReleaseLineage.of(reconstructed)
+        val nodesById = graph.nodes.associateBy(ReleaseRepairNode::id)
+        val acceptedContributions = graph.nodes.drop(1).filter { it.status == "accepted" }.map { node ->
+            val invocation = requireNotNull(node.repairMetadata?.agentInvocation)
+            val verifiedReceipt = requireNotNull(verifiedReceipts[node.id])
+            val releaseFacts = requireNotNull(verifiedReceipt.releaseFacts)
+            val parent = requireNotNull(nodesById[node.parentId])
+            VerifiedCandidateAcpContribution(
+                workflow = "repair",
+                taskId = node.id,
+                receiptPath = invocation.receiptPath,
+                receiptBytes = requireNotNull(payloadSizes[invocation.receiptPath]) {
+                    "repair ACP receipt is absent from the archived payload: ${invocation.receiptPath}"
+                },
+                receiptSha256 = invocation.receiptSha256,
+                requestSha256 = verifiedReceipt.requestSha256,
+                promptSha256 = verifiedReceipt.promptSha256,
+                resultChangesSha256 = verifiedReceipt.resultChangesSha256,
+                session = releaseFacts.session,
+                changes = node.changes.map { change ->
+                    VerifiedCandidateAcpChange(
+                        path = change.path,
+                        kind = "modified",
+                        beforeSha256 = change.beforeSha256,
+                        afterSha256 = change.afterSha256,
+                        bytes = change.afterBytes,
+                    )
+                },
+                parentSourceRevisionSha256 = parent.sourceRevisionSha256,
+                resultSourceRevisionSha256 = node.sourceRevisionSha256,
+            )
+        }
+        val head = requireNotNull(nodesById[graph.headId])
+        return ArchivedRepairReleaseLineage.of(
+            sources = reconstructed,
+            graphHeadId = graph.headId,
+            graphHeadRevisionSha256 = head.sourceRevisionSha256,
+            acceptedAcpContributions = acceptedContributions,
+        )
     }
 
     private fun verifyGraphLineage(
@@ -350,7 +402,8 @@ internal object RepairAcpEvidenceArchiveVerifier {
         projectDir: Path,
         payloadSha256: Map<String, String>,
         payloadSizes: Map<String, Long>,
-    ) {
+    ): Map<String, VerifiedAcpExecutionReceiptDocument> {
+        val verifiedByNode = linkedMapOf<String, VerifiedAcpExecutionReceiptDocument>()
         graph.nodes.drop(1).forEach { node ->
             val metadata = requireNotNull(node.repairMetadata)
             val invocation = requireNotNull(metadata.agentInvocation)
@@ -397,7 +450,9 @@ internal object RepairAcpEvidenceArchiveVerifier {
                     "repair ACP receipt records differ from the exact workflow change set: ${node.id}"
                 }
             }
+            check(verifiedByNode.put(node.id, verified) == null)
         }
+        return verifiedByNode.toMap()
     }
 
     private fun verifyHistory(

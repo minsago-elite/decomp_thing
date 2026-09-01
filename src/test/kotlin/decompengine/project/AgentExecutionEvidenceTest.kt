@@ -211,8 +211,36 @@ class AgentExecutionEvidenceTest {
         val bundle = ArchivalPackager.create(project, temp.resolve("source-tree.zip"))
         assertTrue(evidencePath in bundle.payloadFiles)
         val extracted = temp.resolve("extracted")
-        ArchivalBundleVerifier.extractAndVerify(bundle.archivePath, extracted)
+        val candidateLineage = ArchivalBundleVerifier.extractAndVerifyCandidateLineage(
+            bundle.archivePath,
+            extracted,
+        )
         assertEquals(text, extracted.resolve(evidencePath).readText())
+        val contribution = candidateLineage.source.acceptedAcpContributions.single()
+        assertEquals("reconstruction", contribution.workflow)
+        assertEquals("parse", contribution.taskId)
+        assertEquals(evidencePath, contribution.receiptPath)
+        assertEquals(sha256(evidenceFile.readBytes()), contribution.receiptSha256)
+        assertEquals(harness.requestBinding.requestSha256, contribution.requestSha256)
+        assertEquals(digest(sessionId), contribution.session.sessionId.sha256)
+        assertEquals("src/modules/parse.c", contribution.changes.single().path)
+        assertEquals(
+            captureBuildSourceRevision(extracted).sha256,
+            candidateLineage.source.sourceRevision.sha256,
+        )
+        assertEquals(null, candidateLineage.source.repairGraphHeadId)
+        assertFailsWith<UnsupportedOperationException> {
+            (candidateLineage.source.acceptedAcpContributions as MutableList).clear()
+        }
+        assertFailsWith<UnsupportedOperationException> {
+            (contribution.changes as MutableList).clear()
+        }
+        assertFailsWith<UnsupportedOperationException> {
+            (contribution.session.negotiatedCapabilities as MutableMap).clear()
+        }
+        assertFailsWith<UnsupportedOperationException> {
+            (candidateLineage.source.sourceRevision.inputs as MutableList).clear()
+        }
 
         val sessionCommitment = evidence.getValue("session").jsonObject
             .getValue("sessionId").jsonObject.getValue("sha256").jsonPrimitive.content
