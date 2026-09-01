@@ -1,5 +1,12 @@
 package decompengine.oracle.behavior
 
+import com.sun.jna.Library
+import com.sun.jna.Memory
+import com.sun.jna.Native
+import com.sun.jna.NativeLong
+import com.sun.jna.Platform
+import com.sun.jna.Pointer
+import com.sun.jna.StringArray
 import decompengine.acp.LinuxFilesystemSyscalls
 import decompengine.oracle.core.DescriptorBoundAtomicStateFile
 import decompengine.oracle.core.OracleArtifacts
@@ -36,9 +43,6 @@ import java.security.MessageDigest
 import java.time.Duration
 import java.util.Comparator
 import java.util.Locale
-import java.util.concurrent.TimeUnit
-import java.util.concurrent.atomic.AtomicBoolean
-import java.util.concurrent.atomic.AtomicReference
 import kotlinx.serialization.json.JsonArray
 import kotlinx.serialization.json.JsonElement
 import kotlinx.serialization.json.JsonObject
@@ -126,31 +130,34 @@ internal object LlvmBehaviorHostedCleanBuildV2InnerWorker {
                 ).use { linkerGuard ->
                     requireToolGuard(tools.compiler, compilerGuard, "compiler")
                     requireToolGuard(tools.linker, linkerGuard, "linker")
-                    val derived = deriveTwoCleanBuilds(
-                        guards.archive,
-                        lineageIndex,
-                        tools,
-                        compilerGuard,
-                        linkerGuard,
-                        reproduction.sourceDateEpoch,
-                    )
-                    requireToolGuard(tools.compiler, compilerGuard, "compiler")
-                    requireToolGuard(tools.linker, linkerGuard, "linker")
-                    requireTerminalInputs(guards, fixedInputs, lineageIndex)
+                    HostedAdoptedTools.open(tools, compilerGuard, linkerGuard).use { adoptedTools ->
+                        val derived = deriveTwoCleanBuilds(
+                            guards.archive,
+                            lineageIndex,
+                            tools,
+                            adoptedTools,
+                            compilerGuard,
+                            linkerGuard,
+                            reproduction.sourceDateEpoch,
+                        )
+                        requireToolGuard(tools.compiler, compilerGuard, "compiler")
+                        requireToolGuard(tools.linker, linkerGuard, "linker")
+                        requireTerminalInputs(guards, fixedInputs, lineageIndex)
 
-                    val rendered = renderHostedReceipt(
-                        lineageIndex,
-                        derived.lineage,
-                        reproduction,
-                        tools,
-                        derived.builds,
-                        derived.executableBytes,
-                    )
-                    publishHostedPair(paths, derived.executableBytes, rendered.bytes)
-                    return@translateHostedFailure LlvmBehaviorHostedCleanBuildV2Verifier.verify(
-                        paths.receipt,
-                        paths.executable,
-                    )
+                        val rendered = renderHostedReceipt(
+                            lineageIndex,
+                            derived.lineage,
+                            reproduction,
+                            tools,
+                            derived.builds,
+                            derived.executableBytes,
+                        )
+                        publishHostedPair(paths, derived.executableBytes, rendered.bytes)
+                        return@translateHostedFailure LlvmBehaviorHostedCleanBuildV2Verifier.verify(
+                            paths.receipt,
+                            paths.executable,
+                        )
+                    }
                 }
             }
         } finally {
@@ -165,19 +172,13 @@ internal object LlvmBehaviorHostedCleanBuildV2TestSupport {
     fun requireNoLegacyEvidenceText(value: String) =
         translateHostedFailure { rejectLegacyHostedText(value, "hosted evidence syntax") }
 
-    fun parseLinkDependencyManifest(bytes: ByteArray, expectedTarget: Path): List<String> =
-        translateHostedFailure { parseLldLinkDependencyManifest(bytes, expectedTarget.toAbsolutePath().normalize()) }
-
     fun assess(
         firstSourceRoot: Path,
         secondSourceRoot: Path,
-        compilerPath: Path,
-        linkerPath: Path,
     ): LlvmBehaviorHostedCleanBuildV2Assessment = translateHostedFailure {
         val firstRoot = requireExactTestDirectory(firstSourceRoot, "first test source root")
         val secondRoot = requireExactTestDirectory(secondSourceRoot, "second test source root")
-        val compiler = requireExactHostedPath(compilerPath, "test compiler")
-        val linker = requireExactHostedPath(linkerPath, "test linker")
+        val (compiler, linker) = requireFixedLocalTestToolchain()
         val firstRevision = captureBuildSourceRevision(firstRoot)
         val secondRevision = captureBuildSourceRevision(secondRoot)
         if (firstRevision != secondRevision) hostedFail("test source roots do not have the same source revision")
@@ -202,30 +203,34 @@ internal object LlvmBehaviorHostedCleanBuildV2TestSupport {
                 val scratch = Files.createTempDirectory("hosted-build-test-support-").toAbsolutePath().normalize()
                 try {
                     Files.setPosixFilePermissions(scratch, OWNER_DIRECTORY_PERMISSIONS)
-                    val first = runCleanBuild(
-                        1,
-                        firstRoot,
-                        scratch.resolve("build-1"),
-                        firstRevision,
-                        tools,
-                        compilerGuard,
-                        linkerGuard,
-                        EXPECTED_SOURCE_DATE_EPOCH,
-                    )
-                    val second = runCleanBuild(
-                        2,
-                        secondRoot,
-                        scratch.resolve("build-2"),
-                        secondRevision,
-                        tools,
-                        compilerGuard,
-                        linkerGuard,
-                        EXPECTED_SOURCE_DATE_EPOCH,
-                    )
-                    if (!MessageDigest.isEqual(first.executable, second.executable)) {
-                        hostedFail("test clean builds produced different executable bytes")
+                    HostedAdoptedTools.open(tools, compilerGuard, linkerGuard).use { adoptedTools ->
+                        val first = runCleanBuild(
+                            1,
+                            firstRoot,
+                            scratch.resolve("build-1"),
+                            firstRevision,
+                            tools,
+                            adoptedTools,
+                            compilerGuard,
+                            linkerGuard,
+                            EXPECTED_SOURCE_DATE_EPOCH,
+                        )
+                        val second = runCleanBuild(
+                            2,
+                            secondRoot,
+                            scratch.resolve("build-2"),
+                            secondRevision,
+                            tools,
+                            adoptedTools,
+                            compilerGuard,
+                            linkerGuard,
+                            EXPECTED_SOURCE_DATE_EPOCH,
+                        )
+                        if (!MessageDigest.isEqual(first.executable, second.executable)) {
+                            hostedFail("test clean builds produced different executable bytes")
+                        }
+                        LlvmBehaviorHostedCleanBuildV2Assessment(first.facts, second.facts, first.executable)
                     }
-                    LlvmBehaviorHostedCleanBuildV2Assessment(first.facts, second.facts, first.executable)
                 } finally {
                     deleteScratchTree(scratch)
                 }
@@ -253,9 +258,9 @@ internal class LlvmBehaviorHostedCleanBuildV2Assessment private constructor(
     val secondObjectSetSha256: String = second.objectSetSha256
     val firstLinkCommandSha256: String = first.linkCommandSha256
     val secondLinkCommandSha256: String = second.linkCommandSha256
-    val linkDependencyCount: Int = first.linkDependencyCount
-    val firstLinkDependencySetSha256: String = first.linkDependencySetSha256
-    val secondLinkDependencySetSha256: String = second.linkDependencySetSha256
+    val linkPlanInputCount: Int = first.linkPlanInputCount
+    val firstLinkPlanSha256: String = first.linkPlanSha256
+    val secondLinkPlanSha256: String = second.linkPlanSha256
     val firstCombinedOutputBytes: Long = first.combinedOutputBytes
     val secondCombinedOutputBytes: Long = second.combinedOutputBytes
     val firstCombinedOutputSha256: String = first.combinedOutputSha256
@@ -275,8 +280,8 @@ internal class LlvmBehaviorHostedCleanBuildV2Assessment private constructor(
         require(first.dependencySetSha256 == second.dependencySetSha256)
         require(first.objectSetSha256 == second.objectSetSha256)
         require(first.linkCommandSha256 == second.linkCommandSha256)
-        require(first.linkDependencyCount == second.linkDependencyCount)
-        require(first.linkDependencySetSha256 == second.linkDependencySetSha256)
+        require(first.linkPlanInputCount == second.linkPlanInputCount)
+        require(first.linkPlanSha256 == second.linkPlanSha256)
         require(first.combinedOutputBytes == second.combinedOutputBytes)
         require(first.combinedOutputSha256 == second.combinedOutputSha256)
         require(first.executableBytes == second.executableBytes)
@@ -368,6 +373,57 @@ private data class HostedTool(
     val versionOutputSha256: String,
 )
 
+private class HostedAdoptedTools private constructor(
+    val compiler: HostedRetainedFile,
+    val linker: HostedRetainedFile,
+) : AutoCloseable {
+    override fun close() {
+        runCatching(linker::close)
+        runCatching(compiler::close)
+    }
+
+    companion object {
+        fun open(
+            tools: HostedTools,
+            compilerGuard: StableControlFile,
+            linkerGuard: StableControlFile,
+        ): HostedAdoptedTools {
+            requireClosedGlobalLoaderConfiguration()
+            var compiler: HostedRetainedFile? = null
+            var linker: HostedRetainedFile? = null
+            try {
+                compiler = HostedRetainedFile.snapshot(
+                    compilerGuard,
+                    tools.compiler.bytes,
+                    tools.compiler.sha256,
+                    executable = true,
+                    label = "retained authenticated Clang",
+                )
+                linker = HostedRetainedFile.snapshot(
+                    linkerGuard,
+                    tools.linker.bytes,
+                    tools.linker.sha256,
+                    executable = true,
+                    label = "retained authenticated LLD",
+                )
+                requireToolGuard(tools.compiler, compilerGuard, "compiler")
+                requireToolGuard(tools.linker, linkerGuard, "linker")
+                return HostedAdoptedTools(compiler, linker)
+            } catch (failure: Throwable) {
+                runCatching { linker?.close() }
+                runCatching { compiler?.close() }
+                throw failure
+            }
+        }
+    }
+}
+
+private fun requireClosedGlobalLoaderConfiguration() {
+    if (Files.exists(GLOBAL_LOADER_PRELOAD_PATH, LinkOption.NOFOLLOW_LINKS)) {
+        hostedFail("global dynamic-loader preload configuration is forbidden")
+    }
+}
+
 internal data class HostedBuildFacts(
     val ordinal: Int,
     val sourceRevisionSha256: String,
@@ -378,8 +434,8 @@ internal data class HostedBuildFacts(
     val dependencySetSha256: String,
     val objectSetSha256: String,
     val linkCommandSha256: String,
-    val linkDependencyCount: Int,
-    val linkDependencySetSha256: String,
+    val linkPlanInputCount: Int,
+    val linkPlanSha256: String,
     val combinedOutputBytes: Long,
     val combinedOutputSha256: String,
     val executableBytes: Long,
@@ -446,6 +502,16 @@ private fun requireExactTestDirectory(path: Path, label: String): Path {
         hostedFail("$label must be an identified real directory")
     }
     return normalized
+}
+
+private fun requireFixedLocalTestToolchain(): Pair<Path, Path> {
+    val selected = FIXED_LOCAL_TEST_TOOLCHAINS.firstOrNull { (compiler, linker) ->
+        Files.isRegularFile(compiler, LinkOption.NOFOLLOW_LINKS) &&
+            Files.isRegularFile(linker, LinkOption.NOFOLLOW_LINKS) &&
+            !Files.isSymbolicLink(compiler) && !Files.isSymbolicLink(linker)
+    } ?: hostedFail("the fixed local LLVM 22 test toolchain is unavailable")
+    return requireExactHostedPath(selected.first, "fixed local test compiler") to
+        requireExactHostedPath(selected.second, "fixed local test linker")
 }
 
 private fun requireFixedName(path: Path, expected: String, label: String) {
@@ -603,6 +669,7 @@ private fun deriveTwoCleanBuilds(
     archiveGuard: StableControlFile,
     index: LlvmBehaviorCandidateAcpLineageIndexV2,
     tools: HostedTools,
+    adoptedTools: HostedAdoptedTools,
     compilerGuard: StableControlFile,
     linkerGuard: StableControlFile,
     sourceDateEpoch: String,
@@ -653,6 +720,7 @@ private fun deriveTwoCleanBuilds(
             scratch.resolve("build-1"),
             firstLineage.source.sourceRevision,
             tools,
+            adoptedTools,
             compilerGuard,
             linkerGuard,
             sourceDateEpoch,
@@ -663,6 +731,7 @@ private fun deriveTwoCleanBuilds(
             scratch.resolve("build-2"),
             secondLineage.source.sourceRevision,
             tools,
+            adoptedTools,
             compilerGuard,
             linkerGuard,
             sourceDateEpoch,
@@ -678,8 +747,8 @@ private fun deriveTwoCleanBuilds(
             first.facts.dependencySetSha256 != second.facts.dependencySetSha256 ||
             first.facts.objectSetSha256 != second.facts.objectSetSha256 ||
             first.facts.linkCommandSha256 != second.facts.linkCommandSha256 ||
-            first.facts.linkDependencyCount != second.facts.linkDependencyCount ||
-            first.facts.linkDependencySetSha256 != second.facts.linkDependencySetSha256 ||
+            first.facts.linkPlanInputCount != second.facts.linkPlanInputCount ||
+            first.facts.linkPlanSha256 != second.facts.linkPlanSha256 ||
             first.facts.combinedOutputBytes != second.facts.combinedOutputBytes ||
             first.facts.combinedOutputSha256 != second.facts.combinedOutputSha256
         ) {
@@ -735,6 +804,7 @@ private fun runCleanBuild(
     buildRoot: Path,
     sourceRevision: BuildSourceRevision,
     tools: HostedTools,
+    adoptedTools: HostedAdoptedTools,
     compilerGuard: StableControlFile,
     linkerGuard: StableControlFile,
     sourceDateEpoch: String,
@@ -743,14 +813,9 @@ private fun runCleanBuild(
     val buildDeadline = deadlineAfter(MAXIMUM_CLEAN_BUILD_DURATION)
     Files.createDirectory(buildRoot)
     Files.setPosixFilePermissions(buildRoot, OWNER_DIRECTORY_PERMISSIONS)
-    val objectsRoot = buildRoot.resolve("objects")
-    val dependenciesRoot = buildRoot.resolve("dependencies")
     val temporaryRoot = buildRoot.resolve("tmp")
-    val toolRoot = buildRoot.resolve("tool")
-    listOf(objectsRoot, dependenciesRoot, temporaryRoot, toolRoot).forEach {
-        Files.createDirectory(it)
-        Files.setPosixFilePermissions(it, OWNER_DIRECTORY_PERMISSIONS)
-    }
+    Files.createDirectory(temporaryRoot)
+    Files.setPosixFilePermissions(temporaryRoot, OWNER_DIRECTORY_PERMISSIONS)
     requireSourceRevision(sourceRoot, sourceRevision, "pre-build source revision")
     val sources = sourceRevision.inputs.filter { input ->
         input.path.startsWith("src/") && input.path.endsWith(".c")
@@ -761,295 +826,395 @@ private fun runCleanBuild(
     if (sources.map(BuildSourceInput::path) != sources.map(BuildSourceInput::path).sorted()) {
         hostedFail("authenticated C translation units are not in canonical source order")
     }
-    rejectUnsupportedCompilerInputs(sourceRoot, sourceRevision)
-
-    val environment = sortedMapOf(
-        "LC_ALL" to "C",
-        "PATH" to DETERMINISTIC_PATH,
-        "SOURCE_DATE_EPOCH" to sourceDateEpoch,
-        "TMPDIR" to temporaryRoot.toString(),
-        "TZ" to "UTC",
-    )
-    val environmentDigest = HostedCommitment("hosted-clean-build-environment-v2")
-    environmentDigest.field("variableCount", environment.size.toLong())
-    environment.entries.forEachIndexed { index, (name, value) ->
-        environmentDigest.field("variable[$index].name", name)
-        environmentDigest.field("variable[$index].value", canonicalizeEphemeralPaths(value, sourceRoot, buildRoot))
-    }
-    val commandDigest = HostedCommitment("hosted-clean-build-compile-command-set-v2")
-    commandDigest.field("sourceCount", sources.size.toLong())
-    val objectDigest = HostedCommitment("hosted-clean-build-object-set-v2")
-    objectDigest.field("sourceCount", sources.size.toLong())
-    val dependencies = sortedMapOf<String, HostedDependency>()
-    val outputDigest = MessageDigest.getInstance("SHA-256")
-    var outputBytes = 0L
+    val retainedInputs = adoptCandidateInputs(sourceRoot, sourceRevision)
     val objects = ArrayList<HostedBuildObject>(sources.size)
-    var aggregateObjectBytes = 0L
+    var overlay: HostedRetainedFile? = null
+    var linkPlan: HostedLinkPlan? = null
+    var executable: HostedRetainedFile? = null
+    try {
+        val retainedOverlay = createCandidateOverlay(retainedInputs)
+        overlay = retainedOverlay
+        HostedPinnedDirectory.open(buildRoot, "private clean-build working directory").use { workingDirectory ->
+            HostedPinnedDirectory.open(temporaryRoot, "private compiler temporary directory").use { temporaryDirectory ->
+                val logicalEnvironment = sortedMapOf(
+                    "LC_ALL" to "C",
+                    "SOURCE_DATE_EPOCH" to sourceDateEpoch,
+                    "TMPDIR" to "\${TMPDIR}",
+                    "TZ" to "UTC",
+                )
+                val environment = sortedMapOf(
+                    "LC_ALL" to "C",
+                    "SOURCE_DATE_EPOCH" to sourceDateEpoch,
+                    "TMPDIR" to temporaryDirectory.capabilityPath("compiler temporary directory"),
+                    "TZ" to "UTC",
+                )
+                val environmentDigest = HostedCommitment("hosted-clean-build-environment-v2")
+                environmentDigest.field("variableCount", logicalEnvironment.size.toLong())
+                logicalEnvironment.entries.forEachIndexed { index, (name, value) ->
+                    environmentDigest.field("variable[$index].name", name)
+                    environmentDigest.field("variable[$index].value", value)
+                }
 
-    sources.forEachIndexed { index, source ->
-        val relativeObject = "objects/${source.path.removePrefix("src/").removeSuffix(".c")}.o"
-        val objectPath = buildRoot.resolve(relativeObject).normalize()
-        if (!objectPath.startsWith(objectsRoot)) hostedFail("derived object path escapes its private build root")
-        Files.createDirectories(objectPath.parent)
-        val dependencyPath = dependenciesRoot.resolve("source-${index.toString().padStart(6, '0')}.d")
-        val command = compileCommand(
-            tools.compiler.path,
-            sourceRoot,
-            source.path,
-            objectPath,
-            dependencyPath,
-            relativeObject,
-        )
-        commandDigest.command(index, canonicalizeCommand(command, sourceRoot, buildRoot))
-        val result = runHostedCommand(
-            command,
-            environment,
-            sourceRoot,
-            tools,
-            compilerGuard,
-            linkerGuard,
-            buildDeadline,
-            "compile source ${source.path}",
-        )
-        outputBytes = addProcessOutput(outputBytes, result.output, outputDigest, sourceRoot, buildRoot)
-        if (result.exitCode != 0) hostedFail("direct Clang compile failed for authenticated source ${source.path}")
-        authenticateCompilerDependencies(
-            dependencyPath,
-            relativeObject,
-            sourceRoot,
-            sourceRevision,
-        ).forEach { dependency ->
-            val previous = dependencies.putIfAbsent(dependency.path, dependency)
-            if (previous != null && previous != dependency) {
-                hostedFail("compiler dependency identity changed across translation units")
+                val resourceDirectory = requireCompilerResourceDirectory(tools.compiler.path)
+                val resolvedLinkPlan = resolveHostedLinkPlan(
+                    resourceDirectory,
+                    adoptedTools,
+                    environment,
+                    workingDirectory,
+                    tools,
+                    compilerGuard,
+                    linkerGuard,
+                    buildDeadline,
+                )
+                linkPlan = resolvedLinkPlan
+                val gccInstallDirectory = resolvedLinkPlan.input(HostedLinkRole.CRTBEGIN_S).originalPath.parent
+                    ?: hostedFail("resolved GCC installation has no parent directory")
+                val commandDigest = HostedCommitment("hosted-clean-build-compile-command-set-v2")
+                commandDigest.field("sourceCount", sources.size.toLong())
+                val objectDigest = HostedCommitment("hosted-clean-build-object-set-v2")
+                objectDigest.field("sourceCount", sources.size.toLong())
+                val dependencies = sortedMapOf<String, HostedDependency>()
+                val outputDigest = MessageDigest.getInstance("SHA-256")
+                var outputBytes = 0L
+                var aggregateObjectBytes = 0L
+                val inputsByPath = retainedInputs.associateBy(HostedCandidateInput::relativePath)
+
+                sources.forEachIndexed { index, source ->
+                    val retainedSource = inputsByPath[source.path]
+                        ?: hostedFail("authenticated source is missing its retained identity")
+                    val relativeObject = "objects/${source.path.removePrefix("src/").removeSuffix(".c")}.o"
+                    val retainedDependencyOutput = HostedRetainedFile.writable(
+                        makeExecutable = false,
+                        label = "compiler dependency output",
+                    )
+                    var dependencyOutput: HostedRetainedFile? = retainedDependencyOutput
+                    val retainedObjectOutput = HostedRetainedFile.writable(
+                        makeExecutable = false,
+                        label = "compiled object output",
+                    )
+                    var objectOutput: HostedRetainedFile? = retainedObjectOutput
+                    try {
+                        val invocation = compileCommand(
+                            resourceDirectory,
+                            gccInstallDirectory,
+                            retainedSource,
+                            source.path,
+                            retainedObjectOutput,
+                            retainedDependencyOutput,
+                            retainedOverlay,
+                            relativeObject,
+                        )
+                        commandDigest.command(index, invocation.committedArguments)
+                        val result = runHostedCommand(
+                            HostedExecutableRole.CLANG,
+                            invocation.actualArguments,
+                            environment,
+                            workingDirectory,
+                            adoptedTools,
+                            tools,
+                            compilerGuard,
+                            linkerGuard,
+                            buildDeadline,
+                            "compile source ${source.path}",
+                        )
+                        outputBytes = addProcessOutput(outputBytes, result.output, outputDigest, sourceRoot, buildRoot)
+                        if (result.exitCode != 0) {
+                            hostedFail(
+                                "retained direct Clang compile failed for authenticated source ${source.path}: " +
+                                    boundedHostedFailureOutput(result.output),
+                            )
+                        }
+                        retainedDependencyOutput.sealProduced(
+                            MAXIMUM_DEPENDENCY_FILE_BYTES,
+                            makeExecutable = false,
+                            label = "compiler dependency output",
+                        )
+                        authenticateCompilerDependencies(
+                            retainedDependencyOutput.readBytes(
+                                MAXIMUM_DEPENDENCY_FILE_BYTES,
+                                "compiler dependency output",
+                            ),
+                            relativeObject,
+                            source.path,
+                            retainedSource.retained.capabilityPath("retained compiler source"),
+                            sourceRevision,
+                        ).forEach { dependency ->
+                            val previous = dependencies.putIfAbsent(dependency.path, dependency)
+                            if (previous != null && previous != dependency) {
+                                hostedFail("compiler dependency identity changed across translation units")
+                            }
+                        }
+                        val objectIdentity = retainedObjectOutput.sealProduced(
+                            MAXIMUM_OBJECT_BYTES,
+                            makeExecutable = false,
+                            label = "compiled object",
+                        )
+                        aggregateObjectBytes = Math.addExact(aggregateObjectBytes, objectIdentity.bytes)
+                        if (aggregateObjectBytes > MAXIMUM_AGGREGATE_OBJECT_BYTES) {
+                            hostedFail("compiled objects exceed their aggregate byte bound")
+                        }
+                        objectDigest.field("object[$index].path", relativeObject)
+                        objectDigest.field("object[$index].bytes", objectIdentity.bytes)
+                        objectDigest.field("object[$index].sha256", objectIdentity.sha256)
+                        objects += HostedBuildObject(relativeObject, retainedObjectOutput, objectIdentity)
+                        objectOutput = null
+                    } finally {
+                        dependencyOutput?.close()
+                        objectOutput?.close()
+                    }
+                }
+
+                if (dependencies.isEmpty() || dependencies.size > MAXIMUM_DEPENDENCIES) {
+                    hostedFail("clean build dependency count is outside its bound")
+                }
+                val dependencyDigest = HostedCommitment("hosted-clean-build-dependency-set-v2")
+                dependencyDigest.field("dependencyCount", dependencies.size.toLong())
+                var aggregateDependencyBytes = 0L
+                dependencies.values.forEachIndexed { index, dependency ->
+                    aggregateDependencyBytes = Math.addExact(aggregateDependencyBytes, dependency.bytes)
+                    if (aggregateDependencyBytes > MAXIMUM_AGGREGATE_DEPENDENCY_BYTES) {
+                        hostedFail("clean build dependencies exceed their aggregate byte bound")
+                    }
+                    dependencyDigest.field("dependency[$index].path", dependency.path)
+                    dependencyDigest.field("dependency[$index].bytes", dependency.bytes)
+                    dependencyDigest.field("dependency[$index].sha256", dependency.sha256)
+                }
+
+                val linkInvocation = linkCommand(resolvedLinkPlan, objects)
+                val linkCommandDigest = HostedCommitment("hosted-clean-build-link-command-v2")
+                linkCommandDigest.command(0, linkInvocation.committedArguments)
+                val linkCommandSha256 = linkCommandDigest.finish()
+                val linkResult = runHostedCommand(
+                    HostedExecutableRole.LLD,
+                    linkInvocation.actualArguments,
+                    environment,
+                    workingDirectory,
+                    adoptedTools,
+                    tools,
+                    compilerGuard,
+                    linkerGuard,
+                    buildDeadline,
+                    "link candidate executable",
+                )
+                outputBytes = addProcessOutput(outputBytes, linkResult.stderr, outputDigest, sourceRoot, buildRoot)
+                if (linkResult.exitCode != 0) {
+                    hostedFail("direct retained LLD candidate link failed: ${boundedHostedFailureOutput(linkResult.stderr)}")
+                }
+                if (linkResult.stdout.isEmpty() || linkResult.stdout.size.toLong() > MAXIMUM_EXECUTABLE_BYTES) {
+                    hostedFail("direct retained LLD did not return a bounded executable on stdout")
+                }
+                val retainedExecutable = HostedRetainedFile.snapshot(
+                    linkResult.stdout,
+                    executable = true,
+                    label = "candidate executable",
+                )
+                executable = retainedExecutable
+                val executableIdentity = BuildOutputIdentity(
+                    retainedExecutable.bytes,
+                    retainedExecutable.sha256,
+                )
+                val executableBytes = retainedExecutable.readBytes(MAXIMUM_EXECUTABLE_BYTES, "candidate executable")
+                val elf = inspectRetainedExecutable(executableBytes, executableIdentity, buildRoot)
+                requireHostedElf(elf, executableIdentity)
+
+                val committedPlan = resolvedLinkPlan.committedEntries(objects)
+                if (committedPlan.isEmpty() || committedPlan.size > MAXIMUM_LINK_DEPENDENCIES) {
+                    hostedFail("direct retained LLD link plan is outside its input-count bound")
+                }
+                var aggregateLinkInputBytes = 0L
+                committedPlan.forEach { input ->
+                    aggregateLinkInputBytes = Math.addExact(aggregateLinkInputBytes, input.bytes)
+                    if (aggregateLinkInputBytes > MAXIMUM_AGGREGATE_LINK_DEPENDENCY_BYTES) {
+                        hostedFail("direct retained LLD link plan exceeds its aggregate byte bound")
+                    }
+                }
+                val linkPlanDigest = HostedCommitment("hosted-clean-build-link-plan-v2")
+                linkPlanDigest.field("linkCommandSha256", linkCommandSha256)
+                linkPlanDigest.field("linkerArgv0", HostedExecutableRole.LLD.argumentZero)
+                linkPlanDigest.field("linkerBytes", tools.linker.bytes)
+                linkPlanDigest.field("linkerSha256", tools.linker.sha256)
+                linkPlanDigest.field("inputCount", committedPlan.size.toLong())
+                committedPlan.forEachIndexed { index, input ->
+                    linkPlanDigest.field("input[$index].role", input.role)
+                    linkPlanDigest.field("input[$index].resolution", input.resolution)
+                    linkPlanDigest.field("input[$index].path", input.logicalPath)
+                    linkPlanDigest.field("input[$index].bytes", input.bytes)
+                    linkPlanDigest.field("input[$index].sha256", input.sha256)
+                }
+
+                requireSourceRevision(sourceRoot, sourceRevision, "terminal source revision")
+                requireToolGuard(tools.compiler, compilerGuard, "compiler")
+                requireToolGuard(tools.linker, linkerGuard, "linker")
+                requireBeforeDeadline(buildDeadline, "clean build")
+                return CompletedCleanBuild(
+                    HostedBuildFacts(
+                        ordinal,
+                        sourceRevision.sha256,
+                        sources.size,
+                        environmentDigest.finish(),
+                        commandDigest.finish(),
+                        dependencies.size,
+                        dependencyDigest.finish(),
+                        objectDigest.finish(),
+                        linkCommandSha256,
+                        committedPlan.size,
+                        linkPlanDigest.finish(),
+                        outputBytes,
+                        outputDigest.digest().hex(),
+                        executableIdentity.bytes,
+                        executableIdentity.sha256,
+                    ),
+                    executableBytes,
+                )
             }
         }
-        Files.delete(dependencyPath)
-        val objectIdentity = requireRegularBuildOutput(objectPath, MAXIMUM_OBJECT_BYTES, "compiled object")
-        aggregateObjectBytes = Math.addExact(aggregateObjectBytes, objectIdentity.bytes)
-        if (aggregateObjectBytes > MAXIMUM_AGGREGATE_OBJECT_BYTES) {
-            hostedFail("compiled objects exceed their aggregate byte bound")
-        }
-        objectDigest.field("object[$index].path", relativeObject)
-        objectDigest.field("object[$index].bytes", objectIdentity.bytes)
-        objectDigest.field("object[$index].sha256", objectIdentity.sha256)
-        objects.add(HostedBuildObject(relativeObject, objectPath, objectIdentity))
+    } finally {
+        executable?.close()
+        objects.asReversed().forEach { runCatching(it.retained::close) }
+        linkPlan?.close()
+        overlay?.close()
+        retainedInputs.asReversed().forEach { runCatching(it.retained::close) }
     }
-
-    if (dependencies.isEmpty() || dependencies.size > MAXIMUM_DEPENDENCIES) {
-        hostedFail("clean build dependency count is outside its bound")
-    }
-    val dependencyDigest = HostedCommitment("hosted-clean-build-dependency-set-v2")
-    dependencyDigest.field("dependencyCount", dependencies.size.toLong())
-    var aggregateDependencyBytes = 0L
-    dependencies.values.forEachIndexed { index, dependency ->
-        aggregateDependencyBytes = Math.addExact(aggregateDependencyBytes, dependency.bytes)
-        if (aggregateDependencyBytes > MAXIMUM_AGGREGATE_DEPENDENCY_BYTES) {
-            hostedFail("clean build dependencies exceed their aggregate byte bound")
-        }
-        dependencyDigest.field("dependency[$index].path", dependency.path)
-        dependencyDigest.field("dependency[$index].bytes", dependency.bytes)
-        dependencyDigest.field("dependency[$index].sha256", dependency.sha256)
-    }
-
-    val privateLinker = toolRoot.resolve("ld.lld")
-    val copiedLinkerSha256 = copyGuardedFile(
-        linkerGuard,
-        privateLinker,
-        OWNER_READ_EXECUTE_PERMISSIONS,
-        "private locked linker",
-    )
-    if (copiedLinkerSha256 != tools.linker.sha256 || Files.size(privateLinker) != tools.linker.bytes) {
-        hostedFail("private linker bytes differ from the authenticated LLD")
-    }
-    val executablePath = buildRoot.resolve("candidate-reconstructed")
-    val linkDependencyPath = dependenciesRoot.resolve("link.d")
-    val linkCommand = linkCommand(
-        tools.compiler.path,
-        privateLinker,
-        objects.map(HostedBuildObject::path),
-        executablePath,
-        linkDependencyPath,
-    )
-    val linkCommandDigest = HostedCommitment("hosted-clean-build-link-command-v2")
-    linkCommandDigest.command(0, canonicalizeCommand(linkCommand, sourceRoot, buildRoot))
-    val linkResult = runAuthenticatedPrivateLink(
-        linkCommand = linkCommand,
-        environment = environment,
-        workingDirectory = sourceRoot,
-        tools = tools,
-        compilerGuard = compilerGuard,
-        linkerGuard = linkerGuard,
-        privateLinker = privateLinker,
-        buildDeadline = buildDeadline,
-    )
-    outputBytes = addProcessOutput(outputBytes, linkResult.output, outputDigest, sourceRoot, buildRoot)
-    if (linkResult.exitCode != 0) hostedFail("direct locked-Clang/LLD candidate link failed")
-    val linkDependencies = authenticateLinkDependencies(linkDependencyPath, executablePath, sourceRoot, objects)
-    val linkDependencyDigest = HostedCommitment("hosted-clean-build-link-dependency-set-v2")
-    linkDependencyDigest.field("linkDependencyCount", linkDependencies.size.toLong())
-    linkDependencies.forEachIndexed { index, dependency ->
-        linkDependencyDigest.field("linkDependency[$index].path", dependency.path)
-        linkDependencyDigest.field("linkDependency[$index].bytes", dependency.bytes)
-        linkDependencyDigest.field("linkDependency[$index].sha256", dependency.sha256)
-    }
-    val executableIdentity = requireRegularBuildOutput(
-        executablePath,
-        MAXIMUM_EXECUTABLE_BYTES,
-        "candidate executable",
-        executable = true,
-    )
-    val elf = BoundedElfTwinV1.inspect(
-        executablePath,
-        BoundedElfTwinV1Limits(
-            maximumFileBytes = MAXIMUM_EXECUTABLE_BYTES,
-            maximumRangeBytes = MAXIMUM_EXECUTABLE_BYTES,
-            maximumExecutableBytes = MAXIMUM_EXECUTABLE_BYTES,
-            maximumAggregateHashedBytes = 2L * 1024L * 1024L * 1024L,
-        ),
-    )
-    val entryPoint = elf.elf.header.entryPoint
-    val entryPointIsMemoryBackedExecutable = elf.elf.programHeaders.any { header ->
-        header.type == ELF_PROGRAM_HEADER_LOAD_TYPE &&
-            (header.flags and ELF_PROGRAM_HEADER_EXECUTE_FLAG) != 0UL &&
-            entryPoint >= header.virtualAddress &&
-            entryPoint - header.virtualAddress < header.fileSize
-    }
-    if (elf.bytes != executableIdentity.bytes || elf.sha256 != executableIdentity.sha256 ||
-        elf.elf.header.elfClass != "ELF64" || elf.elf.header.dataEncoding != "little-endian" ||
-        elf.elf.header.machine != 62UL || elf.elf.header.type !in setOf(2UL, 3UL) ||
-        entryPoint == 0UL || elf.elf.executableLoad.bytes <= 0L || !entryPointIsMemoryBackedExecutable
-    ) {
-        hostedFail("candidate output is not the required executable little-endian x86-64 ELF64")
-    }
-    requireSourceRevision(sourceRoot, sourceRevision, "terminal source revision")
-    requireToolGuard(tools.compiler, compilerGuard, "compiler")
-    requireToolGuard(tools.linker, linkerGuard, "linker")
-    requireBeforeDeadline(buildDeadline, "clean build")
-    val executableBytes = Files.readAllBytes(executablePath)
-    if (executableBytes.size.toLong() != executableIdentity.bytes ||
-        OracleArtifacts.sha256(executableBytes) != executableIdentity.sha256
-    ) {
-        hostedFail("candidate executable changed during bounded terminal reading")
-    }
-    return CompletedCleanBuild(
-        HostedBuildFacts(
-            ordinal,
-            sourceRevision.sha256,
-            sources.size,
-            environmentDigest.finish(),
-            commandDigest.finish(),
-            dependencies.size,
-            dependencyDigest.finish(),
-            objectDigest.finish(),
-            linkCommandDigest.finish(),
-            linkDependencies.size,
-            linkDependencyDigest.finish(),
-            outputBytes,
-            outputDigest.digest().hex(),
-            executableIdentity.bytes,
-            executableIdentity.sha256,
-        ),
-        executableBytes,
-    )
 }
 
 private fun compileCommand(
-    compiler: Path,
-    sourceRoot: Path,
+    resourceDirectory: Path,
+    gccInstallDirectory: Path,
+    sourceInput: HostedCandidateInput,
     source: String,
-    output: Path,
-    dependencyOutput: Path,
+    output: HostedRetainedFile,
+    dependencyOutput: HostedRetainedFile,
+    overlay: HostedRetainedFile,
     dependencyTarget: String,
-): List<String> = listOf(
-    compiler.toString(),
-    "--no-default-config",
-    "-std=c11",
-    "-g",
-    "-Wall",
-    "-Wextra",
-    "-Werror",
-    "-Werror=date-time",
-    "-fno-gnu-inline-asm",
-    "-fno-autolink",
-    "-Iinclude",
-    "-ffile-prefix-map=$sourceRoot=.",
-    "-fdebug-prefix-map=$sourceRoot=.",
-    "-fmacro-prefix-map=$sourceRoot=.",
-    "-c",
-    source,
-    "-MD",
-    "-MF",
-    dependencyOutput.toString(),
-    "-MT",
-    dependencyTarget,
-    "-o",
-    output.toString(),
-)
-
-private fun linkCommand(
-    compiler: Path,
-    linker: Path,
-    objects: List<Path>,
-    output: Path,
-    dependencyOutput: Path,
-): List<String> = buildList {
-    add(compiler.toString())
-    add("--no-default-config")
-    add("--ld-path=$linker")
-    add("-Wl,--build-id=sha1")
-    add("-Wl,--fatal-warnings")
-    add("-Wl,--no-dependent-libraries")
-    add("-Wl,--dependency-file=$dependencyOutput")
-    objects.forEach { add(it.toString()) }
-    add("-o")
-    add(output.toString())
+): HostedInvocation {
+    val sourceCapability = sourceInput.retained.capabilityPath("retained compiler source")
+    val overlayCapability = overlay.capabilityPath("retained candidate VFS overlay")
+    val dependencyCapability = dependencyOutput.capabilityPath("compiler dependency output")
+    val outputCapability = output.capabilityPath("compiled object output")
+    val virtualSourceParent = VIRTUAL_CANDIDATE_ROOT.resolve(Path.of(source).parent ?: Path.of("src"))
+        .normalize().toString()
+    val actual = listOf(
+        "--no-default-config",
+        "--target=$HOSTED_TARGET_TRIPLE",
+        "-resource-dir=$resourceDirectory",
+        "--gcc-install-dir=$gccInstallDirectory",
+        "-fintegrated-cc1",
+        "-fintegrated-as",
+        "-std=c11",
+        "-g",
+        "-fdebug-compilation-dir=.",
+        "-fcoverage-compilation-dir=.",
+        "-Wall",
+        "-Wextra",
+        "-Werror",
+        "-Werror=date-time",
+        "-fno-gnu-inline-asm",
+        "-fno-autolink",
+        "-ivfsoverlay",
+        overlayCapability,
+        "-iquote",
+        virtualSourceParent,
+        "-I$VIRTUAL_CANDIDATE_INCLUDE",
+        "-ffile-prefix-map=$sourceCapability=$source",
+        "-fdebug-prefix-map=$sourceCapability=$source",
+        "-fmacro-prefix-map=$sourceCapability=$source",
+        "-ffile-prefix-map=$VIRTUAL_CANDIDATE_ROOT=.",
+        "-fdebug-prefix-map=$VIRTUAL_CANDIDATE_ROOT=.",
+        "-fmacro-prefix-map=$VIRTUAL_CANDIDATE_ROOT=.",
+        "-c",
+        "-x",
+        "c",
+        sourceCapability,
+        "-MD",
+        "-MF",
+        dependencyCapability,
+        "-MT",
+        dependencyTarget,
+        "-o",
+        outputCapability,
+    )
+    val committed = actual.map { argument ->
+        when (argument) {
+            sourceCapability -> source
+            overlayCapability -> "\${CANDIDATE_VFS_OVERLAY}"
+            dependencyCapability -> "dependencies/${dependencyTarget.removePrefix("objects/").removeSuffix(".o")}.d"
+            outputCapability -> dependencyTarget
+            "-ffile-prefix-map=$sourceCapability=$source" -> "-ffile-prefix-map=\${RETAINED_SOURCE}=$source"
+            "-fdebug-prefix-map=$sourceCapability=$source" -> "-fdebug-prefix-map=\${RETAINED_SOURCE}=$source"
+            "-fmacro-prefix-map=$sourceCapability=$source" -> "-fmacro-prefix-map=\${RETAINED_SOURCE}=$source"
+            else -> argument
+        }
+    }
+    return HostedInvocation(actual, listOf(HostedExecutableRole.CLANG.argumentZero) + committed)
 }
 
-private data class HostedProcessResult(val exitCode: Int, val output: ByteArray)
-
-private fun runAuthenticatedPrivateLink(
-    linkCommand: List<String>,
-    environment: Map<String, String>,
-    workingDirectory: Path,
-    tools: HostedTools,
-    compilerGuard: StableControlFile,
-    linkerGuard: StableControlFile,
-    privateLinker: Path,
-    buildDeadline: Long,
-): HostedProcessResult {
-    val executedLinker = tools.linker.copy(path = privateLinker)
-    return StableControlFile.open(
-        privateLinker,
-        MAXIMUM_TOOL_BYTES,
-        "private executed linker",
-    ).use { privateLinkerGuard ->
-        requireToolGuard(executedLinker, privateLinkerGuard, "private executed linker")
-        if (
-            linkCommand.firstOrNull() != tools.compiler.path.toString() ||
-            "--ld-path=$privateLinker" !in linkCommand
-        ) {
-            hostedFail("authenticated link command lost its private tool paths")
-        }
-        val result = runHostedCommand(
-            linkCommand,
-            environment,
-            workingDirectory,
-            tools,
-            compilerGuard,
-            linkerGuard,
-            buildDeadline,
-            "link candidate executable",
-        )
-        requireToolGuard(executedLinker, privateLinkerGuard, "private executed linker")
-        result
+private fun linkCommand(
+    plan: HostedLinkPlan,
+    objects: List<HostedBuildObject>,
+): HostedInvocation {
+    val actual = buildList {
+        add("-flavor")
+        add("gnu")
+        add("--hash-style=gnu")
+        add("--eh-frame-hdr")
+        add("-m")
+        add("elf_x86_64")
+        add("-pie")
+        add("-dynamic-linker")
+        add(plan.input(HostedLinkRole.LOADER).originalPath.toString())
+        add("--build-id=sha1")
+        add("--fatal-warnings")
+        add("--no-dependent-libraries")
+        add("-o")
+        add("-")
+        add(plan.capability(HostedLinkRole.SCRT1))
+        add(plan.capability(HostedLinkRole.CRTI))
+        add(plan.capability(HostedLinkRole.CRTBEGIN_S))
+        objects.forEach { add(it.retained.capabilityPath("sealed compiled object")) }
+        add(plan.capability(HostedLinkRole.LIBGCC_A))
+        add("--as-needed")
+        add(plan.capability(HostedLinkRole.LIBGCC_S))
+        add("--no-as-needed")
+        add(plan.capability(HostedLinkRole.LIBC_SO_6))
+        add(plan.capability(HostedLinkRole.LIBC_NONSHARED))
+        add(plan.capability(HostedLinkRole.LIBGCC_A))
+        add("--as-needed")
+        add(plan.capability(HostedLinkRole.LIBGCC_S))
+        add("--no-as-needed")
+        add(plan.capability(HostedLinkRole.CRTEND_S))
+        add(plan.capability(HostedLinkRole.CRTN))
     }
+    val replacements = linkedMapOf<String, String>()
+    HostedLinkRole.entries.forEach { role ->
+        if (role != HostedLinkRole.LOADER) replacements[plan.capability(role)] = "\${LINK_INPUT:${role.factRole}}"
+    }
+    objects.forEach { objectFile ->
+        replacements[objectFile.retained.capabilityPath("sealed compiled object")] = objectFile.relativePath
+    }
+    val committed = actual.map { replacements[it] ?: it }
+    return HostedInvocation(actual, listOf(HostedExecutableRole.LLD.argumentZero) + committed)
+}
+
+private data class HostedInvocation(
+    val actualArguments: List<String>,
+    val committedArguments: List<String>,
+)
+
+private data class HostedProcessResult(
+    val exitCode: Int,
+    val stdout: ByteArray,
+    val stderr: ByteArray,
+) {
+    val output: ByteArray
+        get() = stdout + stderr
 }
 
 private fun runHostedCommand(
-    command: List<String>,
+    role: HostedExecutableRole,
+    arguments: List<String>,
     environment: Map<String, String>,
-    workingDirectory: Path,
+    workingDirectory: HostedPinnedDirectory,
+    adoptedTools: HostedAdoptedTools,
     tools: HostedTools,
     compilerGuard: StableControlFile,
     linkerGuard: StableControlFile,
@@ -1058,11 +1223,25 @@ private fun runHostedCommand(
 ): HostedProcessResult {
     requireToolGuardMetadata(tools.compiler, compilerGuard, "compiler")
     requireToolGuardMetadata(tools.linker, linkerGuard, "linker")
-    if (command.firstOrNull() != tools.compiler.path.toString()) {
-        hostedFail("$label must execute the guarded private compiler snapshot")
+    val executable = when (role) {
+        HostedExecutableRole.CLANG -> adoptedTools.compiler
+        HostedExecutableRole.LLD -> adoptedTools.linker
     }
+    val expected = when (role) {
+        HostedExecutableRole.CLANG -> tools.compiler
+        HostedExecutableRole.LLD -> tools.linker
+    }
+    if (executable.bytes != expected.bytes || executable.sha256 != expected.sha256) {
+        hostedFail("$label lost its exact adopted ${role.argumentZero} identity")
+    }
+    if (arguments.any { it == "-###" || it.startsWith("@") } ||
+        (role == HostedExecutableRole.LLD && arguments.any { it == "-L" || it.startsWith("-L") ||
+            (it.startsWith("-l") && it.length > 2) })
+    ) hostedFail("$label contains an implicit or shell-text tool-selection argument")
     val result = HostedBuildProcessRunner.run(
-        command,
+        executable,
+        role,
+        arguments,
         environment,
         workingDirectory,
         remainingCommandTimeout(buildDeadline, label),
@@ -1075,272 +1254,1127 @@ private fun runHostedCommand(
     return result
 }
 
+private enum class HostedExecutableRole(val argumentZero: String) {
+    CLANG("clang"),
+    LLD("ld.lld"),
+}
+
+/** One sealed anonymous inode. Its descriptor and procfs capability never leave this private file. */
+private class HostedRetainedFile private constructor(
+    private var descriptor: Int,
+    val bytes: Long,
+    val sha256: String,
+    private val executable: Boolean,
+) : AutoCloseable {
+    @Synchronized
+    fun capabilityPath(label: String): String {
+        if (descriptor < 0) hostedFail("$label retained identity is closed")
+        return hostedDescriptorPath(descriptor)
+    }
+
+    @Synchronized
+    fun executionCapability(label: String): String {
+        if (!executable) hostedFail("$label retained identity is not executable")
+        if (descriptor < 0) hostedFail("$label retained identity is closed")
+        return hostedDescriptorPath(descriptor)
+    }
+
+    @Synchronized
+    fun sealProduced(
+        maximumBytes: Long,
+        makeExecutable: Boolean,
+        label: String,
+    ): BuildOutputIdentity {
+        if (descriptor < 0) hostedFail("$label retained identity is closed")
+        hostedSyscall(label, "synchronize") { HOSTED_LIBC.fsync(descriptor) }
+        hostedSyscall(label, "set mode") {
+            HOSTED_LIBC.fchmod(descriptor, if (makeExecutable) HOSTED_MODE_READ_EXECUTE else HOSTED_MODE_READ_ONLY)
+        }
+        hostedFcntlSeals(descriptor, label)
+        val identity = readRetainedIdentity(descriptor, maximumBytes, label)
+        if (identity.bytes <= 0L) hostedFail("$label is empty")
+        return identity
+    }
+
+    @Synchronized
+    fun readBytes(maximumBytes: Long, label: String): ByteArray {
+        if (descriptor < 0) hostedFail("$label retained identity is closed")
+        return readRetainedBytes(descriptor, maximumBytes, label)
+    }
+
+    override fun close() {
+        val owned = synchronized(this) {
+            val current = descriptor
+            descriptor = -1
+            current
+        }
+        if (owned >= 0) HOSTED_LIBC.close(owned)
+    }
+
+    companion object {
+        fun snapshot(
+            guard: StableControlFile,
+            expectedBytes: Long,
+            expectedSha256: String,
+            executable: Boolean,
+            label: String,
+        ): HostedRetainedFile {
+            if (expectedBytes !in 1L..MAXIMUM_TOOL_BYTES || guard.size != expectedBytes) {
+                hostedFail("$label size is outside its adoption bound")
+            }
+            val descriptor = createHostedMemfd(executable, label)
+            try {
+                val digest = MessageDigest.getInstance("SHA-256")
+                var copied = 0L
+                guard.slice().use { input ->
+                    val buffer = ByteArray(DEFAULT_BUFFER_SIZE)
+                    while (true) {
+                        val count = input.read(buffer)
+                        if (count < 0) break
+                        copied = Math.addExact(copied, count.toLong())
+                        if (copied > expectedBytes) hostedFail("$label grew during adoption")
+                        digest.update(buffer, 0, count)
+                        hostedWriteAll(descriptor, buffer, count, label)
+                    }
+                }
+                val observedSha256 = digest.digest().hex()
+                if (copied != expectedBytes || observedSha256 != expectedSha256) {
+                    hostedFail("$label differs from its authenticated descriptor bytes")
+                }
+                hostedSyscall(label, "synchronize") { HOSTED_LIBC.fsync(descriptor) }
+                hostedSyscall(label, "set mode") {
+                    HOSTED_LIBC.fchmod(
+                        descriptor,
+                        if (executable) HOSTED_MODE_READ_EXECUTE else HOSTED_MODE_READ_ONLY,
+                    )
+                }
+                hostedFcntlSeals(descriptor, label)
+                val identity = readRetainedIdentity(descriptor, expectedBytes, label)
+                if (identity.bytes != expectedBytes || identity.sha256 != expectedSha256) {
+                    hostedFail("$label changed while its anonymous identity was sealed")
+                }
+                return HostedRetainedFile(descriptor, expectedBytes, expectedSha256, executable)
+            } catch (failure: Throwable) {
+                HOSTED_LIBC.close(descriptor)
+                throw failure
+            }
+        }
+
+        fun snapshot(bytes: ByteArray, executable: Boolean, label: String): HostedRetainedFile {
+            val maximumBytes = if (executable) MAXIMUM_EXECUTABLE_BYTES else MAXIMUM_RETAINED_AUXILIARY_BYTES
+            if (bytes.isEmpty() || bytes.size.toLong() > maximumBytes) {
+                hostedFail("$label exceeds its adoption bound")
+            }
+            val descriptor = createHostedMemfd(executable, label)
+            try {
+                hostedWriteAll(descriptor, bytes, bytes.size, label)
+                hostedSyscall(label, "synchronize") { HOSTED_LIBC.fsync(descriptor) }
+                hostedSyscall(label, "set mode") {
+                    HOSTED_LIBC.fchmod(
+                        descriptor,
+                        if (executable) HOSTED_MODE_READ_EXECUTE else HOSTED_MODE_READ_ONLY,
+                    )
+                }
+                hostedFcntlSeals(descriptor, label)
+                val sha256 = OracleArtifacts.sha256(bytes)
+                val identity = readRetainedIdentity(descriptor, bytes.size.toLong(), label)
+                if (identity.bytes != bytes.size.toLong() || identity.sha256 != sha256) {
+                    hostedFail("$label changed while its anonymous identity was sealed")
+                }
+                return HostedRetainedFile(descriptor, identity.bytes, identity.sha256, executable)
+            } catch (failure: Throwable) {
+                HOSTED_LIBC.close(descriptor)
+                throw failure
+            }
+        }
+
+        fun writable(makeExecutable: Boolean, label: String): HostedRetainedFile {
+            val descriptor = createHostedMemfd(makeExecutable, label)
+            return HostedRetainedFile(descriptor, 0L, ZERO_SHA256, makeExecutable)
+        }
+    }
+}
+
+private class HostedPinnedDirectory private constructor(private var descriptor: Int) : AutoCloseable {
+    @Synchronized
+    fun addWorkingDirectoryAction(actions: Pointer, label: String) {
+        if (descriptor < 0) hostedFail("$label pinned working directory is closed")
+        hostedNativeResult(
+            "$label configure descriptor-pinned working directory",
+            HOSTED_LIBC.posix_spawn_file_actions_addfchdir_np(actions, descriptor),
+        )
+    }
+
+    @Synchronized
+    fun capabilityPath(label: String): String {
+        if (descriptor < 0) hostedFail("$label pinned directory is closed")
+        return hostedDescriptorPath(descriptor)
+    }
+
+    override fun close() {
+        val owned = synchronized(this) {
+            val current = descriptor
+            descriptor = -1
+            current
+        }
+        if (owned >= 0) HOSTED_LIBC.close(owned)
+    }
+
+    companion object {
+        fun open(path: Path, label: String): HostedPinnedDirectory {
+            if (!path.isAbsolute || path.normalize() != path || path.toRealPath() != path || !Files.isDirectory(path)) {
+                hostedFail("$label is not a canonical directory")
+            }
+            val before = readBasicAttributes(path, label)
+            val descriptor = hostedOpen(
+                path.toString(),
+                HOSTED_O_RDONLY or HOSTED_O_DIRECTORY or HOSTED_O_NOFOLLOW or HOSTED_O_CLOEXEC,
+                label,
+            )
+            try {
+                val descriptorPath = Path.of(hostedDescriptorPath(descriptor))
+                val after = try {
+                    Files.readAttributes(descriptorPath, BasicFileAttributes::class.java)
+                } catch (failure: Exception) {
+                    throw LlvmBehaviorHostedCleanBuildV2Exception("$label descriptor attributes are unavailable", failure)
+                }
+                if (!before.isDirectory || before.fileKey() == null || before.fileKey() != after.fileKey()) {
+                    hostedFail("$label changed while its descriptor was pinned")
+                }
+                return HostedPinnedDirectory(descriptor)
+            } catch (failure: Throwable) {
+                HOSTED_LIBC.close(descriptor)
+                throw failure
+            }
+        }
+    }
+}
+
 private object HostedBuildProcessRunner {
     fun run(
-        command: List<String>,
+        executable: HostedRetainedFile,
+        role: HostedExecutableRole,
+        arguments: List<String>,
         environment: Map<String, String>,
-        workingDirectory: Path,
+        workingDirectory: HostedPinnedDirectory,
         timeout: Duration,
         maximumOutputBytes: Int,
         cleanupTimeout: Duration,
         label: String,
     ): HostedProcessResult {
-        if (command.isEmpty() || command.any { it.isEmpty() || '\u0000' in it }) hostedFail("$label argv is invalid")
-        val process = try {
-            ProcessBuilder(command)
-                .redirectErrorStream(true)
-                .directory(workingDirectory.toFile())
-                .also { builder ->
-                    builder.environment().clear()
-                    builder.environment().putAll(environment)
-                }
-                .start()
-        } catch (failure: IOException) {
-            throw LlvmBehaviorHostedCleanBuildV2Exception("could not start $label", failure)
-        }
-        runCatching { process.outputStream.close() }
-        val output = ByteArrayOutputStream(minOf(maximumOutputBytes, PROCESS_BUFFER_BYTES))
-        val overflow = AtomicBoolean(false)
-        val readerFailure = AtomicReference<Throwable?>(null)
-        val reader = try {
-            Thread.ofPlatform().daemon(true).name("hosted-clean-build-output").start {
-                try {
-                    val buffer = ByteArray(PROCESS_BUFFER_BYTES)
-                    while (true) {
-                        val count = process.inputStream.read(buffer)
-                        if (count < 0) break
-                        if (count == 0) continue
-                        if (output.size() > maximumOutputBytes - count) {
-                            overflow.set(true)
-                            process.destroyForcibly()
-                            break
-                        }
-                        output.write(buffer, 0, count)
-                    }
-                } catch (failure: Throwable) {
-                    readerFailure.set(failure)
-                }
-            }
-        } catch (failure: Throwable) {
-            process.destroyForcibly()
-            runCatching { process.waitFor(PROCESS_CLEANUP_TIMEOUT.toMillis(), TimeUnit.MILLISECONDS) }
-            throw LlvmBehaviorHostedCleanBuildV2Exception("could not start $label output reader", failure)
-        }
-        val descendants = linkedMapOf<Long, ProcessHandle>()
-        val deadline = deadlineAfter(timeout)
-        var exited = false
-        var failure: LlvmBehaviorHostedCleanBuildV2Exception? = null
-        try {
-            while (!exited && failure == null) {
-                if (!captureDescendants(process, descendants)) {
-                    failure = LlvmBehaviorHostedCleanBuildV2Exception("$label exceeded its descendant-process bound")
-                    continue
-                }
-                when {
-                    overflow.get() -> failure = LlvmBehaviorHostedCleanBuildV2Exception("$label exceeded its output bound")
-                    readerFailure.get() != null -> failure = LlvmBehaviorHostedCleanBuildV2Exception(
-                        "could not read $label output",
-                        readerFailure.get(),
-                    )
-                    System.nanoTime() >= deadline -> failure = LlvmBehaviorHostedCleanBuildV2Exception(
-                        "$label exceeded its deadline",
-                    )
-                    else -> exited = process.waitFor(PROCESS_POLL_MILLIS, TimeUnit.MILLISECONDS)
-                }
-            }
-        } catch (interrupted: InterruptedException) {
-            Thread.currentThread().interrupt()
-            failure = LlvmBehaviorHostedCleanBuildV2Exception("$label wait was interrupted", interrupted)
-        }
-        if (failure != null) {
-            cleanupHostedProcess(process, descendants.values, reader, cleanupTimeout)?.let(failure::addSuppressed)
-            throw failure
-        }
-        if (!captureDescendants(process, descendants)) {
-            val wrapped = LlvmBehaviorHostedCleanBuildV2Exception("$label exceeded its descendant-process bound")
-            cleanupHostedProcess(process, descendants.values, reader, cleanupTimeout)?.let(wrapped::addSuppressed)
-            throw wrapped
-        }
-        val cleanupMillis = cleanupTimeout.toMillis().coerceAtLeast(1L)
-        try {
-            reader.join(cleanupMillis)
-        } catch (interrupted: InterruptedException) {
-            Thread.currentThread().interrupt()
-            val wrapped = LlvmBehaviorHostedCleanBuildV2Exception("$label output cleanup was interrupted", interrupted)
-            cleanupHostedProcess(process, descendants.values, reader, cleanupTimeout)?.let(wrapped::addSuppressed)
-            throw wrapped
-        }
-        if (!captureDescendants(process, descendants)) {
-            val wrapped = LlvmBehaviorHostedCleanBuildV2Exception("$label exceeded its descendant-process bound")
-            cleanupHostedProcess(process, descendants.values, reader, cleanupTimeout)?.let(wrapped::addSuppressed)
-            throw wrapped
-        }
-        val survivors = descendants.values.filter(ProcessHandle::isAlive)
-        if (reader.isAlive || survivors.isNotEmpty()) {
-            val wrapped = LlvmBehaviorHostedCleanBuildV2Exception("$label retained a process or output pipe after exit")
-            cleanupHostedProcess(process, descendants.values, reader, cleanupTimeout)?.let(wrapped::addSuppressed)
-            throw wrapped
-        }
-        readerFailure.get()?.let { throw LlvmBehaviorHostedCleanBuildV2Exception("could not read $label output", it) }
-        if (overflow.get()) hostedFail("$label exceeded its output bound")
-        return HostedProcessResult(process.exitValue(), output.toByteArray())
-    }
-
-    private fun captureDescendants(
-        process: Process,
-        captured: MutableMap<Long, ProcessHandle>,
-    ): Boolean = try {
-        var withinBound = true
-        listOf(process.toHandle(), ProcessHandle.current()).forEach { root ->
-            root.descendants().use { stream ->
-                stream.limit((MAXIMUM_DESCENDANTS + 2).toLong()).forEach { handle ->
-                    if (handle.pid() != process.pid()) {
-                        if (captured.size >= MAXIMUM_DESCENDANTS && handle.pid() !in captured) {
-                            withinBound = false
-                        } else {
-                            captured.putIfAbsent(handle.pid(), handle)
-                        }
-                    }
-                }
-            }
-        }
-        withinBound
-    } catch (_: Throwable) {
-        false
-    }
-
-    private fun cleanupHostedProcess(
-        process: Process,
-        descendants: Collection<ProcessHandle>,
-        reader: Thread,
-        timeout: Duration,
-    ): Throwable? = try {
-        descendants.toList().asReversed().forEach { runCatching { it.destroyForcibly() } }
-        runCatching { process.destroyForcibly() }
-        val millis = timeout.toMillis().coerceAtLeast(1L)
-        runCatching { process.waitFor(millis, TimeUnit.MILLISECONDS) }
-        runCatching { process.inputStream.close() }
-        reader.join(millis)
-        when {
-            process.isAlive || descendants.any(ProcessHandle::isAlive) ->
-                LlvmBehaviorHostedCleanBuildV2Exception("hosted build process survived bounded cleanup")
-            reader.isAlive -> LlvmBehaviorHostedCleanBuildV2Exception("hosted build output reader survived cleanup")
-            else -> null
-        }
-    } catch (failure: Throwable) {
-        if (failure is InterruptedException) Thread.currentThread().interrupt()
-        failure
+        val argv = listOf(role.argumentZero) + arguments
+        requireHostedNativeVector(argv, environment, timeout, maximumOutputBytes, cleanupTimeout, label)
+        return HostedNativeProcess(
+            executable,
+            role,
+            argv,
+            environment,
+            workingDirectory,
+            maximumOutputBytes,
+            cleanupTimeout,
+            label,
+        ).execute(deadlineAfter(timeout))
     }
 }
+
+private class HostedNativeProcess(
+    private val executable: HostedRetainedFile,
+    private val role: HostedExecutableRole,
+    private val arguments: List<String>,
+    private val environment: Map<String, String>,
+    private val workingDirectory: HostedPinnedDirectory,
+    private val maximumOutputBytes: Int,
+    private val cleanupTimeout: Duration,
+    private val label: String,
+) {
+    private val attributes = Memory(HOSTED_OPAQUE_NATIVE_STORAGE_BYTES)
+    private val fileActions = Memory(HOSTED_OPAQUE_NATIVE_STORAGE_BYTES)
+    private var attributesInitialized = false
+    private var fileActionsInitialized = false
+    private var stdinFd = -1
+    private var stdoutReadFd = -1
+    private var stdoutWriteFd = -1
+    private var stderrReadFd = -1
+    private var stderrWriteFd = -1
+    private val reservedStandardDescriptors = mutableListOf<Int>()
+    private var pid = -1
+    private var pidfd = -1
+    private var reaped = false
+
+    fun execute(commandDeadline: Long): HostedProcessResult {
+        var primary: Throwable? = null
+        try {
+            requireHostedDeadline(commandDeadline, label)
+            requireHostedPlatform()
+            prepare(commandDeadline)
+            spawn(commandDeadline)
+            closeParentWriteEnds()
+            makeOutputNonblocking(commandDeadline)
+            val output = capture(commandDeadline)
+            signalGroup(HOSTED_SIGKILL, commandDeadline, cleanup = false)
+            val status = reap(commandDeadline, cleanup = false)
+            val exitCode = when {
+                hostedWaitExited(status) -> hostedWaitExitStatus(status)
+                hostedWaitSignaled(status) -> 128 + hostedWaitTermSignal(status)
+                else -> hostedFail("$label returned an unsupported wait status")
+            }
+            return HostedProcessResult(exitCode, output.first, output.second)
+        } catch (failure: Throwable) {
+            primary = failure
+            if (pid > 0 && !reaped) {
+                try {
+                    cleanup(deadlineAfter(cleanupTimeout))
+                } catch (cleanupFailure: Throwable) {
+                    val wrapped = LlvmBehaviorHostedCleanBuildV2Exception(
+                        "$label failed and its exact session leader could not be killed and reaped",
+                        cleanupFailure,
+                    )
+                    wrapped.addSuppressed(failure)
+                    primary = wrapped
+                }
+            }
+            throw primary
+        } finally {
+            closeFd(stdoutReadFd)
+            stdoutReadFd = -1
+            closeFd(stdoutWriteFd)
+            stdoutWriteFd = -1
+            closeFd(stderrReadFd)
+            stderrReadFd = -1
+            closeFd(stderrWriteFd)
+            stderrWriteFd = -1
+            closeFd(stdinFd)
+            stdinFd = -1
+            reservedStandardDescriptors.forEach(::closeFd)
+            reservedStandardDescriptors.clear()
+            closeFd(pidfd)
+            pidfd = -1
+            if (fileActionsInitialized) HOSTED_LIBC.posix_spawn_file_actions_destroy(fileActions)
+            if (attributesInitialized) HOSTED_LIBC.posix_spawnattr_destroy(attributes)
+        }
+    }
+
+    private fun prepare(deadline: Long) {
+        requireHostedDeadline(deadline, label)
+        val attributesResult = HOSTED_LIBC.posix_spawnattr_init(attributes)
+        if (attributesResult == 0) attributesInitialized = true
+        hostedNativeResult("$label initialize spawn attributes", attributesResult)
+        val defaults = Memory(HOSTED_SIGSET_BYTES)
+        val mask = Memory(HOSTED_SIGSET_BYTES)
+        hostedSyscall(label, "initialize default signals") { HOSTED_LIBC.sigfillset(defaults) }
+        hostedSyscall(label, "exclude SIGKILL from defaults") { HOSTED_LIBC.sigdelset(defaults, HOSTED_SIGKILL) }
+        hostedSyscall(label, "exclude SIGSTOP from defaults") { HOSTED_LIBC.sigdelset(defaults, HOSTED_SIGSTOP) }
+        hostedSyscall(label, "initialize empty signal mask") { HOSTED_LIBC.sigemptyset(mask) }
+        hostedNativeResult(
+            "$label configure default signals",
+            HOSTED_LIBC.posix_spawnattr_setsigdefault(attributes, defaults),
+        )
+        hostedNativeResult(
+            "$label configure signal mask",
+            HOSTED_LIBC.posix_spawnattr_setsigmask(attributes, mask),
+        )
+        hostedNativeResult(
+            "$label configure fresh session",
+            HOSTED_LIBC.posix_spawnattr_setflags(
+                attributes,
+                (HOSTED_POSIX_SPAWN_SETSID or HOSTED_POSIX_SPAWN_SETSIGDEF or
+                    HOSTED_POSIX_SPAWN_SETSIGMASK).toShort(),
+            ),
+        )
+
+        val actionsResult = HOSTED_LIBC.posix_spawn_file_actions_init(fileActions)
+        if (actionsResult == 0) fileActionsInitialized = true
+        hostedNativeResult("$label initialize spawn file actions", actionsResult)
+        reserveClosedStandardDescriptors(deadline)
+        stdinFd = hostedOpen(HOSTED_NULL_DEVICE, HOSTED_O_RDONLY or HOSTED_O_CLOEXEC, label)
+        val stdoutPipe = createPipe("stdout", deadline)
+        stdoutReadFd = stdoutPipe.first
+        stdoutWriteFd = stdoutPipe.second
+        val stderrPipe = createPipe("stderr", deadline)
+        stderrReadFd = stderrPipe.first
+        stderrWriteFd = stderrPipe.second
+        hostedNativeResult(
+            "$label bind stdin",
+            HOSTED_LIBC.posix_spawn_file_actions_adddup2(fileActions, stdinFd, 0),
+        )
+        hostedNativeResult(
+            "$label bind stdout",
+            HOSTED_LIBC.posix_spawn_file_actions_adddup2(fileActions, stdoutWriteFd, 1),
+        )
+        hostedNativeResult(
+            "$label bind stderr",
+            HOSTED_LIBC.posix_spawn_file_actions_adddup2(fileActions, stderrWriteFd, 2),
+        )
+        listOf(stdinFd, stdoutReadFd, stdoutWriteFd, stderrReadFd, stderrWriteFd)
+            .filter { it > 2 }.distinct().forEach { descriptor ->
+            hostedNativeResult(
+                "$label close surplus pipe descriptor",
+                HOSTED_LIBC.posix_spawn_file_actions_addclose(fileActions, descriptor),
+            )
+        }
+        workingDirectory.addWorkingDirectoryAction(fileActions, label)
+        hostedNativeResult(
+            "$label close inherited descriptors",
+            HOSTED_LIBC.posix_spawn_file_actions_addclosefrom_np(fileActions, 3),
+        )
+        requireHostedDeadline(deadline, label)
+    }
+
+    private fun spawn(deadline: Long) {
+        requireHostedDeadline(deadline, label)
+        val pidStorage = Memory(Int.SIZE_BYTES.toLong())
+        val argumentArray = StringArray(arguments.toTypedArray(), StandardCharsets.UTF_8.name())
+        val environmentArray = StringArray(
+            environment.entries.sortedBy { it.key }.map { (name, value) -> "$name=$value" }.toTypedArray(),
+            StandardCharsets.UTF_8.name(),
+        )
+        val result = HOSTED_LIBC.posix_spawn(
+            pidStorage,
+            executable.executionCapability(label),
+            fileActions,
+            attributes,
+            argumentArray,
+            environmentArray,
+        )
+        if (result == 0) pid = pidStorage.getInt(0)
+        hostedNativeResult("$label start exact retained ${role.argumentZero}", result)
+        if (pid <= 0) hostedFail("$label returned an invalid process id")
+        requireHostedDeadline(deadline, label)
+        pidfd = hostedPidfdOpen(pid, deadline, label)
+    }
+
+    private fun capture(deadline: Long): Pair<ByteArray, ByteArray> {
+        val stdout = HostedBoundedCapture(maximumOutputBytes, "$label stdout")
+        val stderr = HostedBoundedCapture(maximumOutputBytes, "$label stderr")
+        var leaderExited = false
+        var exitedGroupSignaled = false
+        while (true) {
+            requireHostedDeadline(deadline, label)
+            if (stdout.drain(stdoutReadFd, deadline)) stdoutReadFd = -1
+            if (stderr.drain(stderrReadFd, deadline)) stderrReadFd = -1
+            leaderExited = leaderExited || pidfdExited(deadline, cleanup = false)
+            if (leaderExited) {
+                if (!exitedGroupSignaled) {
+                    signalGroup(HOSTED_SIGKILL, deadline, cleanup = false)
+                    exitedGroupSignaled = true
+                }
+                if (stdoutReadFd < 0 && stderrReadFd < 0) {
+                    val stdoutBytes = stdout.bytes()
+                    val stderrBytes = stderr.bytes()
+                    if (stdoutBytes.size.toLong() + stderrBytes.size.toLong() > maximumOutputBytes.toLong()) {
+                        hostedFail("$label exceeded its aggregate output bound")
+                    }
+                    return stdoutBytes to stderrBytes
+                }
+            }
+            pollOutput(if (leaderExited) HOSTED_POST_EXIT_POLL_MILLIS else HOSTED_ACTIVE_POLL_MILLIS, deadline)
+        }
+    }
+
+    private fun cleanup(deadline: Long) {
+        closeParentWriteEnds()
+        closeFd(stdoutReadFd)
+        stdoutReadFd = -1
+        closeFd(stderrReadFd)
+        stderrReadFd = -1
+        var lastFailure: Throwable? = null
+        while (true) {
+            try {
+                signalGroup(HOSTED_SIGKILL, deadline, cleanup = true)
+                if (pidfd >= 0) signalPidfd(HOSTED_SIGKILL, deadline, cleanup = true)
+                if ((pidfd >= 0 && pidfdExited(deadline, cleanup = true)) || leaderExitedWithoutReaping(deadline)) {
+                    reap(deadline, cleanup = true)
+                    return
+                }
+            } catch (failure: Throwable) {
+                lastFailure = failure
+            }
+            if (System.nanoTime() >= deadline) {
+                throw LlvmBehaviorHostedCleanBuildV2Exception("$label cleanup exceeded its deadline", lastFailure)
+            }
+            hostedSleep(deadline, HOSTED_CLEANUP_POLL_MILLIS, label, cleanup = true)
+        }
+    }
+
+    private fun reap(deadline: Long, cleanup: Boolean): Int {
+        val status = Memory(Int.SIZE_BYTES.toLong())
+        var attempted = false
+        while (true) {
+            if (attempted) requireHostedDeadline(deadline, label, cleanup)
+            val result = HOSTED_LIBC.waitpid(pid, status, HOSTED_WNOHANG)
+            val error = if (result < 0) Native.getLastError() else 0
+            attempted = true
+            when {
+                result == pid -> {
+                    reaped = true
+                    requireHostedDeadline(deadline, label, cleanup)
+                    return status.getInt(0)
+                }
+                result == 0 -> hostedSleep(deadline, HOSTED_CLEANUP_POLL_MILLIS, label, cleanup)
+                error == HOSTED_EINTR -> requireHostedDeadline(deadline, label, cleanup)
+                else -> throw IOException("$label waitpid failed with errno $error")
+            }
+        }
+    }
+
+    private fun signalGroup(signal: Int, deadline: Long, cleanup: Boolean) {
+        while (true) {
+            requireHostedDeadline(deadline, label, cleanup)
+            val result = HOSTED_LIBC.kill(-pid, signal)
+            val error = if (result != 0) Native.getLastError() else 0
+            if (result == 0 || error == HOSTED_ESRCH) return
+            if (error != HOSTED_EINTR) throw IOException("$label process-group signal failed with errno $error")
+        }
+    }
+
+    private fun signalPidfd(signal: Int, deadline: Long, cleanup: Boolean) {
+        while (true) {
+            requireHostedDeadline(deadline, label, cleanup)
+            val result = HOSTED_LIBC.pidfd_send_signal(pidfd, signal, null, 0)
+            val error = if (result != 0) Native.getLastError() else 0
+            if (result == 0 || error == HOSTED_ESRCH) return
+            if (error != HOSTED_EINTR) throw IOException("$label pidfd signal failed with errno $error")
+        }
+    }
+
+    private fun pidfdExited(deadline: Long, cleanup: Boolean): Boolean {
+        val poll = Memory(HOSTED_POLLFD_BYTES.toLong())
+        poll.setInt(0, pidfd)
+        poll.setShort(Int.SIZE_BYTES.toLong(), HOSTED_POLLIN.toShort())
+        while (true) {
+            requireHostedDeadline(deadline, label, cleanup)
+            val result = HOSTED_LIBC.poll(poll, NativeLong(1), 0)
+            val error = if (result < 0) Native.getLastError() else 0
+            if (result >= 0) {
+                val events = poll.getShort((Int.SIZE_BYTES + Short.SIZE_BYTES).toLong()).toInt() and 0xffff
+                if (events and HOSTED_POLLNVAL != 0) hostedFail("$label pidfd poll observed an invalid descriptor")
+                return result > 0 && events and (HOSTED_POLLIN or HOSTED_POLLHUP or HOSTED_POLLERR) != 0
+            }
+            if (error != HOSTED_EINTR) throw IOException("$label pidfd poll failed with errno $error")
+        }
+    }
+
+    private fun pollOutput(maximumMillis: Int, deadline: Long) {
+        val descriptors = listOf(stdoutReadFd, stderrReadFd).filter { it >= 0 }
+        if (descriptors.isEmpty()) {
+            hostedSleep(deadline, maximumMillis.toLong(), label, cleanup = false)
+            return
+        }
+        val poll = Memory((descriptors.size * HOSTED_POLLFD_BYTES).toLong())
+        descriptors.forEachIndexed { index, descriptor ->
+            val offset = (index * HOSTED_POLLFD_BYTES).toLong()
+            poll.setInt(offset, descriptor)
+            poll.setShort(offset + Int.SIZE_BYTES, HOSTED_POLLIN.toShort())
+        }
+        while (true) {
+            requireHostedDeadline(deadline, label)
+            val remainingMillis = ((deadline - System.nanoTime()).coerceAtLeast(1L) / 1_000_000L)
+                .coerceIn(1L, maximumMillis.toLong()).toInt()
+            val result = HOSTED_LIBC.poll(poll, NativeLong(descriptors.size.toLong()), remainingMillis)
+            val error = if (result < 0) Native.getLastError() else 0
+            if (result >= 0) {
+                descriptors.indices.forEach { index ->
+                    val events = poll.getShort(
+                        (index * HOSTED_POLLFD_BYTES + Int.SIZE_BYTES + Short.SIZE_BYTES).toLong(),
+                    ).toInt() and 0xffff
+                    if (events and HOSTED_POLLNVAL != 0) {
+                        hostedFail("$label output poll observed an invalid descriptor")
+                    }
+                }
+                return
+            }
+            if (error != HOSTED_EINTR) throw IOException("$label output poll failed with errno $error")
+        }
+    }
+
+    private fun leaderExitedWithoutReaping(deadline: Long): Boolean {
+        requireHostedDeadline(deadline, label, cleanup = true)
+        val stat = try {
+            Files.readString(Path.of("/proc", pid.toString(), "stat"))
+        } catch (_: java.nio.file.NoSuchFileException) {
+            return true
+        }
+        if (stat.toByteArray(StandardCharsets.UTF_8).size > HOSTED_MAXIMUM_PROC_STAT_BYTES) {
+            hostedFail("$label proc status exceeds its bound")
+        }
+        val commandEnd = stat.lastIndexOf(") ")
+        if (commandEnd < 0 || commandEnd + 2 >= stat.length) hostedFail("$label proc status is malformed")
+        return stat[commandEnd + 2] in setOf('Z', 'X', 'x')
+    }
+
+    private fun createPipe(stream: String, deadline: Long): Pair<Int, Int> {
+        requireHostedDeadline(deadline, label)
+        val descriptors = Memory((2 * Int.SIZE_BYTES).toLong())
+        val result = HOSTED_LIBC.pipe2(descriptors, HOSTED_O_CLOEXEC)
+        if (result != 0) throw IOException("$label $stream pipe creation failed with errno ${Native.getLastError()}")
+        val pipe = descriptors.getInt(0) to descriptors.getInt(Int.SIZE_BYTES.toLong())
+        try {
+            requireHostedDeadline(deadline, label)
+            return pipe
+        } catch (failure: Throwable) {
+            closeFd(pipe.first)
+            closeFd(pipe.second)
+            throw failure
+        }
+    }
+
+    private fun reserveClosedStandardDescriptors(deadline: Long) {
+        for (target in 0..2) {
+            requireHostedDeadline(deadline, label)
+            val result = HOSTED_LIBC.fcntl(target, HOSTED_F_GETFD, 0)
+            if (result >= 0) continue
+            val error = Native.getLastError()
+            if (error != HOSTED_EBADF) throw IOException("$label stdio inspection failed with errno $error")
+            val opened = hostedOpen(HOSTED_NULL_DEVICE, HOSTED_O_RDWR or HOSTED_O_CLOEXEC, label)
+            if (opened != target) {
+                closeFd(opened)
+                hostedFail("$label could not reserve closed standard descriptor $target")
+            }
+            reservedStandardDescriptors += opened
+        }
+    }
+
+    private fun makeOutputNonblocking(deadline: Long) {
+        requireHostedDeadline(deadline, label)
+        listOf(stdoutReadFd, stderrReadFd).forEach { descriptor ->
+            val flags = HOSTED_LIBC.fcntl(descriptor, HOSTED_F_GETFL, 0)
+            if (flags < 0) throw IOException("$label output flags are unavailable")
+            if (HOSTED_LIBC.fcntl(descriptor, HOSTED_F_SETFL, flags or HOSTED_O_NONBLOCK) < 0) {
+                throw IOException("$label could not make output nonblocking")
+            }
+        }
+    }
+
+    private fun closeParentWriteEnds() {
+        closeFd(stdinFd)
+        stdinFd = -1
+        closeFd(stdoutWriteFd)
+        stdoutWriteFd = -1
+        closeFd(stderrWriteFd)
+        stderrWriteFd = -1
+    }
+
+    private fun closeFd(fd: Int) {
+        if (fd >= 0) HOSTED_LIBC.close(fd)
+    }
+}
+
+private class HostedBoundedCapture(private val maximumBytes: Int, private val label: String) {
+    private val output = ByteArrayOutputStream(minOf(maximumBytes, PROCESS_BUFFER_BYTES))
+    private val buffer = Memory(PROCESS_BUFFER_BYTES.toLong())
+
+    fun drain(descriptor: Int, deadline: Long): Boolean {
+        if (descriptor < 0) return true
+        while (true) {
+            requireHostedDeadline(deadline, label)
+            val count = HOSTED_LIBC.read(
+                descriptor,
+                buffer,
+                NativeLong(PROCESS_BUFFER_BYTES.toLong()),
+            ).toLong()
+            val error = if (count < 0L) Native.getLastError() else 0
+            when {
+                count > 0L -> {
+                    if (count > maximumBytes.toLong() - output.size().toLong()) {
+                        hostedFail("$label exceeded its output bound")
+                    }
+                    output.write(buffer.getByteArray(0, count.toInt()))
+                }
+                count == 0L -> {
+                    HOSTED_LIBC.close(descriptor)
+                    return true
+                }
+                error == HOSTED_EINTR -> continue
+                error == HOSTED_EAGAIN -> return false
+                else -> throw IOException("$label output read failed with errno $error")
+            }
+        }
+    }
+
+    fun bytes(): ByteArray = output.toByteArray()
+}
+
+private interface HostedLibC : Library {
+    fun memfd_create(name: String, flags: Int): Int
+    fun open(path: String, flags: Int): Int
+    fun close(fd: Int): Int
+    fun read(fd: Int, buffer: Pointer, count: NativeLong): NativeLong
+    fun write(fd: Int, buffer: Pointer, count: NativeLong): NativeLong
+    fun fsync(fd: Int): Int
+    fun fchmod(fd: Int, mode: Int): Int
+    fun fcntl(fd: Int, command: Int, argument: Int): Int
+    fun pipe2(descriptors: Pointer, flags: Int): Int
+    fun poll(descriptors: Pointer, count: NativeLong, timeoutMilliseconds: Int): Int
+    fun kill(pid: Int, signal: Int): Int
+    fun waitpid(pid: Int, status: Pointer, options: Int): Int
+    fun pidfd_open(pid: Int, flags: Int): Int
+    fun pidfd_send_signal(pidfd: Int, signal: Int, info: Pointer?, flags: Int): Int
+    fun sigfillset(set: Pointer): Int
+    fun sigemptyset(set: Pointer): Int
+    fun sigdelset(set: Pointer, signal: Int): Int
+    fun posix_spawnattr_init(attributes: Pointer): Int
+    fun posix_spawnattr_destroy(attributes: Pointer): Int
+    fun posix_spawnattr_setflags(attributes: Pointer, flags: Short): Int
+    fun posix_spawnattr_setsigdefault(attributes: Pointer, signals: Pointer): Int
+    fun posix_spawnattr_setsigmask(attributes: Pointer, signals: Pointer): Int
+    fun posix_spawn_file_actions_init(actions: Pointer): Int
+    fun posix_spawn_file_actions_destroy(actions: Pointer): Int
+    fun posix_spawn_file_actions_adddup2(actions: Pointer, descriptor: Int, target: Int): Int
+    fun posix_spawn_file_actions_addclose(actions: Pointer, descriptor: Int): Int
+    fun posix_spawn_file_actions_addclosefrom_np(actions: Pointer, firstDescriptor: Int): Int
+    fun posix_spawn_file_actions_addfchdir_np(actions: Pointer, descriptor: Int): Int
+    fun posix_spawn(
+        pid: Pointer,
+        path: String,
+        actions: Pointer,
+        attributes: Pointer,
+        arguments: Pointer,
+        environment: Pointer,
+    ): Int
+}
+
+private val HOSTED_LIBC: HostedLibC by lazy { Native.load(Platform.C_LIBRARY_NAME, HostedLibC::class.java) }
+private val HOSTED_PARENT_PID: Long = ProcessHandle.current().pid()
+
+private fun createHostedMemfd(executable: Boolean, label: String): Int {
+    requireHostedPlatform()
+    val flags = HOSTED_MFD_CLOEXEC or HOSTED_MFD_ALLOW_SEALING or
+        if (executable) HOSTED_MFD_EXEC else 0
+    while (true) {
+        val descriptor = HOSTED_LIBC.memfd_create("decomp-hosted-retained", flags)
+        if (descriptor >= 0) return descriptor
+        val error = Native.getLastError()
+        if (error != HOSTED_EINTR) {
+            throw IOException("$label could not create an anonymous retained identity: errno $error")
+        }
+    }
+}
+
+private fun hostedWriteAll(descriptor: Int, bytes: ByteArray, count: Int, label: String) {
+    var offset = 0
+    val buffer = Memory(maxOf(1, minOf(count, DEFAULT_BUFFER_SIZE)).toLong())
+    while (offset < count) {
+        val amount = minOf(count - offset, DEFAULT_BUFFER_SIZE)
+        buffer.write(0, bytes, offset, amount)
+        var written = 0
+        while (written < amount) {
+            val result = HOSTED_LIBC.write(
+                descriptor,
+                buffer.share(written.toLong()),
+                NativeLong((amount - written).toLong()),
+            ).toLong()
+            if (result > 0L) {
+                written += result.toInt()
+            } else if (result < 0L && Native.getLastError() == HOSTED_EINTR) {
+                continue
+            } else {
+                throw IOException("$label anonymous write failed with errno ${Native.getLastError()}")
+            }
+        }
+        offset += amount
+    }
+}
+
+private fun hostedFcntlSeals(descriptor: Int, label: String) {
+    val seals = HOSTED_F_SEAL_SEAL or HOSTED_F_SEAL_SHRINK or HOSTED_F_SEAL_GROW or HOSTED_F_SEAL_WRITE
+    while (true) {
+        if (HOSTED_LIBC.fcntl(descriptor, HOSTED_F_ADD_SEALS, seals) >= 0) break
+        val error = Native.getLastError()
+        if (error != HOSTED_EINTR) throw IOException("$label could not be sealed: errno $error")
+    }
+    val observed = HOSTED_LIBC.fcntl(descriptor, HOSTED_F_GET_SEALS, 0)
+    if (observed < 0 || observed and seals != seals) hostedFail("$label did not retain all required write seals")
+}
+
+private fun readRetainedIdentity(descriptor: Int, maximumBytes: Long, label: String): BuildOutputIdentity {
+    val bytes = readRetainedBytes(descriptor, maximumBytes, label)
+    return BuildOutputIdentity(bytes.size.toLong(), OracleArtifacts.sha256(bytes))
+}
+
+private fun readRetainedBytes(descriptor: Int, maximumBytes: Long, label: String): ByteArray {
+    if (maximumBytes !in 1L..Int.MAX_VALUE.toLong()) hostedFail("$label has an unsupported read bound")
+    val output = ByteArrayOutputStream(minOf(maximumBytes.toInt(), PROCESS_BUFFER_BYTES))
+    Files.newInputStream(Path.of(hostedDescriptorPath(descriptor)), StandardOpenOption.READ).use { input ->
+        val buffer = ByteArray(DEFAULT_BUFFER_SIZE)
+        while (true) {
+            val count = input.read(buffer)
+            if (count < 0) break
+            if (output.size().toLong() + count.toLong() > maximumBytes) hostedFail("$label exceeds its byte bound")
+            output.write(buffer, 0, count)
+        }
+    }
+    return output.toByteArray()
+}
+
+private fun hostedDescriptorPath(descriptor: Int): String =
+    "/proc/$HOSTED_PARENT_PID/fd/$descriptor"
+
+private fun hostedOpen(path: String, flags: Int, label: String): Int {
+    while (true) {
+        val descriptor = HOSTED_LIBC.open(path, flags)
+        if (descriptor >= 0) return descriptor
+        val error = Native.getLastError()
+        if (error != HOSTED_EINTR) throw IOException("$label open failed with errno $error")
+    }
+}
+
+private inline fun hostedSyscall(label: String, operation: String, invocation: () -> Int) {
+    while (true) {
+        val result = invocation()
+        if (result == 0) return
+        val error = Native.getLastError()
+        if (error != HOSTED_EINTR) throw IOException("$label $operation failed with errno $error")
+    }
+}
+
+private fun hostedNativeResult(operation: String, result: Int) {
+    if (result != 0) throw IOException("$operation failed with errno $result")
+}
+
+private fun hostedPidfdOpen(pid: Int, deadline: Long, label: String): Int {
+    while (true) {
+        requireHostedDeadline(deadline, label)
+        val descriptor = HOSTED_LIBC.pidfd_open(pid, 0)
+        if (descriptor >= 0) return descriptor
+        val error = Native.getLastError()
+        if (error != HOSTED_EINTR) throw IOException("$label could not pin its process with pidfd: errno $error")
+    }
+}
+
+private fun requireHostedPlatform() {
+    if (System.getProperty("os.name", "") != "Linux" ||
+        System.getProperty("os.arch", "") !in setOf("amd64", "x86_64") ||
+        !Files.isDirectory(Path.of("/proc/self/fd"))
+    ) {
+        hostedFail("hosted retained execution requires Linux x86-64 procfs")
+    }
+}
+
+private fun requireHostedNativeVector(
+    arguments: List<String>,
+    environment: Map<String, String>,
+    timeout: Duration,
+    maximumOutputBytes: Int,
+    cleanupTimeout: Duration,
+    label: String,
+) {
+    if (arguments.isEmpty() || arguments.size > MAXIMUM_HOSTED_ARGUMENTS ||
+        arguments.any { it.isEmpty() || '\u0000' in it ||
+            it.toByteArray(StandardCharsets.UTF_8).size > MAXIMUM_HOSTED_NATIVE_STRING_BYTES }
+    ) hostedFail("$label argv is invalid or outside its count/string bound")
+    val argumentBytes = arguments.sumOf { it.toByteArray(StandardCharsets.UTF_8).size.toLong() + 1L }
+    if (argumentBytes > MAXIMUM_HOSTED_ARGUMENT_BYTES) hostedFail("$label argv exceeds its aggregate byte bound")
+    if (environment.size > MAXIMUM_HOSTED_ENVIRONMENT_BINDINGS ||
+        environment.keys.any { !it.matches(HOSTED_ENVIRONMENT_NAME) } ||
+        environment.entries.any { '\u0000' in it.value } ||
+        environment.keys.any { it.startsWith("LD_") } ||
+        environment.keys.any { it in FORBIDDEN_HOSTED_ENVIRONMENT_NAMES }
+    ) hostedFail("$label environment is not closed and deterministic")
+    val environmentBytes = environment.entries.sumOf { (name, value) ->
+        name.toByteArray(StandardCharsets.UTF_8).size.toLong() +
+            value.toByteArray(StandardCharsets.UTF_8).size.toLong() + 2L
+    }
+    if (environmentBytes > MAXIMUM_HOSTED_ENVIRONMENT_BYTES) hostedFail("$label environment exceeds its byte bound")
+    if (timeout.isZero || timeout.isNegative || timeout > BUILD_COMMAND_TIMEOUT ||
+        cleanupTimeout.isZero || cleanupTimeout.isNegative || cleanupTimeout > PROCESS_CLEANUP_TIMEOUT ||
+        maximumOutputBytes !in 0..MAXIMUM_COMMAND_OUTPUT_BYTES
+    ) hostedFail("$label runtime or capture bound is invalid")
+}
+
+private fun requireHostedDeadline(deadline: Long, label: String, cleanup: Boolean = false) {
+    if (System.nanoTime() < deadline) return
+    hostedFail(if (cleanup) "$label cleanup exceeded its deadline" else "$label exceeded its deadline")
+}
+
+private fun hostedSleep(deadline: Long, maximumMillis: Long, label: String, cleanup: Boolean) {
+    requireHostedDeadline(deadline, label, cleanup)
+    val remainingNanos = deadline - System.nanoTime()
+    val millis = minOf(maximumMillis, maxOf(0L, remainingNanos / 1_000_000L))
+    if (millis > 0L) Thread.sleep(millis) else Thread.onSpinWait()
+    requireHostedDeadline(deadline, label, cleanup)
+}
+
+private fun hostedWaitExited(status: Int): Boolean = status and 0x7f == 0
+private fun hostedWaitExitStatus(status: Int): Int = status ushr 8 and 0xff
+private fun hostedWaitSignaled(status: Int): Boolean = status and 0x7f in 1..0x7e
+private fun hostedWaitTermSignal(status: Int): Int = status and 0x7f
 
 private data class BuildOutputIdentity(val bytes: Long, val sha256: String)
 
 private data class HostedDependency(val path: String, val bytes: Long, val sha256: String)
 
+private data class HostedCandidateInput(
+    val relativePath: String,
+    val identity: BuildOutputIdentity,
+    val retained: HostedRetainedFile,
+)
+
 private data class HostedBuildObject(
     val relativePath: String,
-    val path: Path,
+    val retained: HostedRetainedFile,
     val identity: BuildOutputIdentity,
 )
 
-private data class HostedLinkDependency(val path: String, val bytes: Long, val sha256: String)
+private enum class HostedLinkRole(val queryFileName: String, val factRole: String) {
+    SCRT1("Scrt1.o", "startup-scrt1"),
+    CRTI("crti.o", "startup-crti"),
+    CRTBEGIN_S("crtbeginS.o", "startup-crtbegin-s"),
+    LIBGCC_A("libgcc.a", "compiler-runtime-libgcc-a"),
+    LIBGCC_S("libgcc_s.so.1", "compiler-runtime-libgcc-s"),
+    LIBC_SO_6("libc.so.6", "libc-shared"),
+    LIBC_NONSHARED("libc_nonshared.a", "libc-nonshared"),
+    LOADER("ld-linux-x86-64.so.2", "runtime-loader"),
+    CRTEND_S("crtendS.o", "termination-crtend-s"),
+    CRTN("crtn.o", "termination-crtn"),
+}
 
-private fun authenticateLinkDependencies(
-    dependencyPath: Path,
-    expectedTarget: Path,
-    workingDirectory: Path,
-    objects: List<HostedBuildObject>,
-): List<HostedLinkDependency> {
-    val attributes = readBasicAttributes(dependencyPath, "locked LLD dependency file")
-    if (!attributes.isRegularFile || attributes.isSymbolicLink || attributes.fileKey() == null ||
-        attributes.size() !in 1L..MAXIMUM_LINK_DEPENDENCY_FILE_BYTES || dependencyPath.toRealPath() != dependencyPath
-    ) {
-        hostedFail("locked LLD dependency file is not a bounded canonical regular file")
-    }
-    val rawBytes = Files.readAllBytes(dependencyPath)
-    val terminalAttributes = readBasicAttributes(dependencyPath, "locked LLD dependency file")
-    if (rawBytes.size.toLong() != attributes.size() || attributes.fileKey() != terminalAttributes.fileKey() ||
-        attributes.size() != terminalAttributes.size() ||
-        attributes.lastModifiedTime() != terminalAttributes.lastModifiedTime()
-    ) {
-        hostedFail("locked LLD dependency file changed during reading")
-    }
-    val paths = parseLldLinkDependencyManifest(rawBytes, expectedTarget)
+private data class HostedLinkInput(
+    val role: HostedLinkRole,
+    val resolution: String,
+    val originalPath: Path,
+    val identity: BuildOutputIdentity,
+    val retained: HostedRetainedFile,
+)
 
-    val expectedObjects = objects.associateBy { objectFile ->
-        try {
-            objectFile.path.toRealPath()
-        } catch (failure: Exception) {
-            throw LlvmBehaviorHostedCleanBuildV2Exception("compiled object is unavailable after linking", failure)
+private data class HostedCommittedLinkInput(
+    val role: String,
+    val resolution: String,
+    val logicalPath: String,
+    val bytes: Long,
+    val sha256: String,
+)
+
+private class HostedLinkPlan(private val inputs: Map<HostedLinkRole, HostedLinkInput>) : AutoCloseable {
+    fun input(role: HostedLinkRole): HostedLinkInput =
+        inputs[role] ?: hostedFail("direct LLD link plan is missing ${role.factRole}")
+
+    fun capability(role: HostedLinkRole): String =
+        input(role).retained.capabilityPath("retained ${role.factRole} link input")
+
+    fun committedEntries(objects: List<HostedBuildObject>): List<HostedCommittedLinkInput> = buildList {
+        fun system(role: HostedLinkRole, occurrence: String = role.factRole) {
+            val input = input(role)
+            add(
+                HostedCommittedLinkInput(
+                    occurrence,
+                    input.resolution,
+                    "system:${input.originalPath}",
+                    input.identity.bytes,
+                    input.identity.sha256,
+                ),
+            )
         }
+        system(HostedLinkRole.LOADER)
+        system(HostedLinkRole.SCRT1)
+        system(HostedLinkRole.CRTI)
+        system(HostedLinkRole.CRTBEGIN_S)
+        objects.forEachIndexed { index, objectFile ->
+            add(
+                HostedCommittedLinkInput(
+                    "object[$index]",
+                    "sealed-retained-clang-output",
+                    "object:${objectFile.relativePath}",
+                    objectFile.identity.bytes,
+                    objectFile.identity.sha256,
+                ),
+            )
+        }
+        system(HostedLinkRole.LIBGCC_A, "compiler-runtime-libgcc-a-before-libc")
+        system(HostedLinkRole.LIBGCC_S, "compiler-runtime-libgcc-s-before-libc")
+        system(HostedLinkRole.LIBC_SO_6)
+        system(HostedLinkRole.LIBC_NONSHARED)
+        system(HostedLinkRole.LIBGCC_A, "compiler-runtime-libgcc-a-after-libc")
+        system(HostedLinkRole.LIBGCC_S, "compiler-runtime-libgcc-s-after-libc")
+        system(HostedLinkRole.CRTEND_S)
+        system(HostedLinkRole.CRTN)
     }
-    if (expectedObjects.size != objects.size) hostedFail("compiled object paths do not have distinct identities")
-    val observedObjects = ArrayList<String>(objects.size)
-    val cachedSystemInputs = HashMap<Path, HostedLinkDependency>()
-    val dependencies = ArrayList<HostedLinkDependency>(paths.size)
+
+    override fun close() {
+        inputs.values.toList().asReversed().forEach { runCatching(it.retained::close) }
+    }
+}
+
+private fun adoptCandidateInputs(
+    sourceRoot: Path,
+    revision: BuildSourceRevision,
+): List<HostedCandidateInput> {
+    val selected = revision.inputs.filter { it.path.startsWith("src/") || it.path.startsWith("include/") }
+    if (selected.isEmpty() || selected.size > MAXIMUM_CANDIDATE_INPUT_COUNT) {
+        hostedFail("candidate compiler-input fanout is outside its descriptor-safe bound")
+    }
+    val adopted = ArrayList<HostedCandidateInput>(selected.size)
     var aggregateBytes = 0L
-    paths.forEach { token ->
-        val raw = try {
-            Path.of(token)
-        } catch (failure: Exception) {
-            throw LlvmBehaviorHostedCleanBuildV2Exception("locked LLD dependency file contains an invalid path", failure)
+    try {
+        selected.forEach { expected ->
+            if (!expected.path.matches(CANDIDATE_INPUT_PATH) ||
+                expected.bytes !in 1L..MAXIMUM_CANDIDATE_INPUT_BYTES
+            ) hostedFail("candidate compiler input ${expected.path} is outside its path/byte bound")
+            aggregateBytes = Math.addExact(aggregateBytes, expected.bytes)
+            if (aggregateBytes > MAXIMUM_AGGREGATE_CANDIDATE_INPUT_BYTES) {
+                hostedFail("candidate compiler inputs exceed their aggregate byte bound")
+            }
+            val path = sourceRoot.resolve(expected.path).normalize()
+            if (!path.startsWith(sourceRoot)) hostedFail("candidate compiler input escapes its source root")
+            StableControlFile.open(path, MAXIMUM_CANDIDATE_INPUT_BYTES, "candidate compiler input").use { guard ->
+                val sha256 = guard.sha256(label = "candidate compiler input ${expected.path}")
+                if (guard.size != expected.bytes || sha256 != expected.sha256) {
+                    hostedFail("candidate compiler input differs from its authenticated source revision")
+                }
+                val retained = HostedRetainedFile.snapshot(
+                    guard,
+                    expected.bytes,
+                    expected.sha256,
+                    executable = false,
+                    label = "retained candidate compiler input",
+                )
+                try {
+                    val text = decodeStrictUtf8(
+                        retained.readBytes(MAXIMUM_CANDIDATE_INPUT_BYTES, "retained candidate compiler input"),
+                        "authenticated compiler input ${expected.path}",
+                    )
+                    FORBIDDEN_COMPILER_INPUT_TOKENS.forEach { token ->
+                        if (token in text) {
+                            hostedFail("authenticated compiler input uses unsupported external-input token $token")
+                        }
+                    }
+                    guard.verifyUnchanged("candidate compiler input ${expected.path}")
+                    adopted += HostedCandidateInput(
+                        expected.path,
+                        BuildOutputIdentity(expected.bytes, expected.sha256),
+                        retained,
+                    )
+                } catch (failure: Throwable) {
+                    retained.close()
+                    throw failure
+                }
+            }
         }
-        val normalized = (if (raw.isAbsolute) raw else workingDirectory.resolve(raw)).normalize()
-        val real = try {
-            normalized.toRealPath()
-        } catch (failure: Exception) {
-            throw LlvmBehaviorHostedCleanBuildV2Exception("locked LLD dependency file names an unavailable input", failure)
-        }
-        val objectFile = expectedObjects[real]
-        val input = if (objectFile != null) {
-            val terminal = requireRegularBuildOutput(objectFile.path, MAXIMUM_OBJECT_BYTES, "linked object")
-            if (terminal != objectFile.identity) hostedFail("linked object changed after compilation")
-            observedObjects.add(objectFile.relativePath)
-            HostedLinkDependency("object:${objectFile.relativePath}", terminal.bytes, terminal.sha256)
-        } else {
-            cachedSystemInputs.getOrPut(real) { authenticateSystemLinkInput(real) }
-        }
-        aggregateBytes = Math.addExact(aggregateBytes, input.bytes)
-        if (aggregateBytes > MAXIMUM_AGGREGATE_LINK_DEPENDENCY_BYTES) {
-            hostedFail("locked LLD dependencies exceed their aggregate byte bound")
-        }
-        dependencies.add(input)
+        return adopted
+    } catch (failure: Throwable) {
+        adopted.asReversed().forEach { runCatching(it.retained::close) }
+        throw failure
     }
-    if (observedObjects != objects.map(HostedBuildObject::relativePath)) {
-        hostedFail("locked LLD dependency file does not bind the exact ordered compiled-object set")
-    }
-    return dependencies
 }
 
-private fun parseLldLinkDependencyManifest(rawBytes: ByteArray, expectedTarget: Path): List<String> {
-    if (!expectedTarget.isAbsolute || expectedTarget.normalize() != expectedTarget) {
-        hostedFail("locked LLD dependency target is not absolute and normalized")
+private fun createCandidateOverlay(inputs: List<HostedCandidateInput>): HostedRetainedFile {
+    val roots = inputs.map { input ->
+        jsonObject(
+            "type" to JsonPrimitive("file"),
+            "name" to JsonPrimitive(VIRTUAL_CANDIDATE_ROOT.resolve(input.relativePath).normalize().toString()),
+            "use-external-name" to JsonPrimitive(false),
+            "external-contents" to JsonPrimitive(input.retained.capabilityPath("candidate overlay input")),
+        )
     }
-    val text = decodeStrictUtf8(rawBytes, "locked LLD dependency file")
-    if ('\r' in text || '\u0000' in text) hostedFail("locked LLD dependency file contains forbidden characters")
-    val unfolded = text.replace("\\\n", " ")
-    if ('\\' in unfolded) hostedFail("locked LLD dependency file contains unsupported escaped paths")
-    val ruleLines = unfolded.lineSequence().map(String::trim).filter(String::isNotEmpty).toList()
-    if (ruleLines.isEmpty()) hostedFail("locked LLD dependency file contains no rules")
-    val tokens = ruleLines.first().split(DEPENDENCY_HORIZONTAL_WHITESPACE).filter(String::isNotEmpty)
-    if (tokens.size < 2 || tokens.first() != "$expectedTarget:") {
-        hostedFail("locked LLD dependency file does not bind its exact executable target")
-    }
-    val paths = tokens.drop(1)
-    if (paths.isEmpty() || paths.size > MAXIMUM_LINK_DEPENDENCIES || paths.distinct().size != paths.size ||
-        paths.any { !it.matches(DEPENDENCY_PATH_TOKEN) }
-    ) {
-        hostedFail("locked LLD dependency file does not contain a bounded ordered-unique dependency set")
-    }
-    if (ruleLines.drop(1) != paths.map { path -> "$path:" }) {
-        hostedFail("locked LLD dependency file contains an unexpected phony-rule suffix")
-    }
-    return paths
+    val document = jsonObject(
+        "version" to JsonPrimitive(0),
+        "case-sensitive" to JsonPrimitive(true),
+        "use-external-names" to JsonPrimitive(false),
+        "redirecting-with" to JsonPrimitive("fallthrough"),
+        "roots" to JsonArray(roots),
+    )
+    val bytes = OracleJson.canonicalBytes(document, CANDIDATE_OVERLAY_JSON_LIMITS)
+    return HostedRetainedFile.snapshot(bytes, executable = false, label = "candidate VFS overlay")
 }
 
-private fun authenticateSystemLinkInput(real: Path): HostedLinkDependency {
+private fun requireCompilerResourceDirectory(compilerPath: Path): Path {
+    val toolchainRoot = compilerPath.parent?.parent
+        ?: hostedFail("authenticated Clang path has no reviewed resource-directory derivation")
+    val candidate = listOf(
+        toolchainRoot.resolve("lib/clang/$HOSTED_CLANG_RESOURCE_VERSION").normalize(),
+        compilerPath.parent.resolve("../../../../lib/clang/$HOSTED_CLANG_RESOURCE_VERSION").normalize(),
+    ).firstOrNull { Files.isDirectory(it, LinkOption.NOFOLLOW_LINKS) }
+        ?: hostedFail("Clang resource directory is unavailable")
+    val real = try {
+        candidate.toRealPath()
+    } catch (failure: Exception) {
+        throw LlvmBehaviorHostedCleanBuildV2Exception("Clang resource directory is unavailable", failure)
+    }
+    if (real != candidate || !Files.isDirectory(real, LinkOption.NOFOLLOW_LINKS)) {
+        hostedFail("Clang resource directory is not an exact canonical directory")
+    }
+    requireRootOwnedImmutablePath(real, directory = true, label = "Clang resource directory")
+    return real
+}
+
+private fun resolveHostedLinkPlan(
+    resourceDirectory: Path,
+    adoptedTools: HostedAdoptedTools,
+    environment: Map<String, String>,
+    workingDirectory: HostedPinnedDirectory,
+    tools: HostedTools,
+    compilerGuard: StableControlFile,
+    linkerGuard: StableControlFile,
+    buildDeadline: Long,
+): HostedLinkPlan {
+    val inputs = linkedMapOf<HostedLinkRole, HostedLinkInput>()
+    try {
+        HostedLinkRole.entries.forEach { role ->
+            val query = "--print-file-name=${role.queryFileName}"
+            val result = runHostedCommand(
+                HostedExecutableRole.CLANG,
+                listOf(
+                    "--no-default-config",
+                    "--target=$HOSTED_TARGET_TRIPLE",
+                    "-resource-dir=$resourceDirectory",
+                    query,
+                ),
+                environment,
+                workingDirectory,
+                adoptedTools,
+                tools,
+                compilerGuard,
+                linkerGuard,
+                buildDeadline,
+                "resolve fixed ${role.factRole} link input",
+            )
+            if (result.exitCode != 0 || result.stderr.isNotEmpty() || result.stdout.isEmpty() ||
+                result.stdout.size > MAXIMUM_CLANG_QUERY_OUTPUT_BYTES
+            ) hostedFail("fixed Clang query for ${role.factRole} failed or exceeded its output bound")
+            val output = decodeStrictUtf8(result.stdout, "fixed Clang query for ${role.factRole}")
+            if ('\r' in output || '\u0000' in output || !output.endsWith('\n') ||
+                output.dropLast(1).contains('\n')
+            ) hostedFail("fixed Clang query for ${role.factRole} did not return one exact line")
+            val token = output.dropLast(1)
+            val raw = try {
+                Path.of(token)
+            } catch (failure: Exception) {
+                throw LlvmBehaviorHostedCleanBuildV2Exception(
+                    "fixed Clang query for ${role.factRole} returned an invalid path",
+                    failure,
+                )
+            }
+            if (!raw.isAbsolute || raw.normalize().fileName?.toString() != role.queryFileName) {
+                hostedFail("fixed Clang query for ${role.factRole} did not resolve its reviewed basename")
+            }
+            val real = try {
+                raw.toRealPath()
+            } catch (failure: Exception) {
+                throw LlvmBehaviorHostedCleanBuildV2Exception(
+                    "fixed Clang query for ${role.factRole} returned an unavailable input",
+                    failure,
+                )
+            }
+            if (real.fileName?.toString() != role.queryFileName) {
+                hostedFail("fixed Clang query for ${role.factRole} changed basename after canonicalization")
+            }
+            val input = adoptSystemLinkInput(role, query, real)
+            if (inputs.put(role, input) != null) hostedFail("fixed link plan repeats ${role.factRole}")
+        }
+        if (inputs.keys != HostedLinkRole.entries.toSet()) hostedFail("fixed direct LLD link plan is incomplete")
+        return HostedLinkPlan(inputs)
+    } catch (failure: Throwable) {
+        inputs.values.toList().asReversed().forEach { runCatching(it.retained::close) }
+        throw failure
+    }
+}
+
+private fun adoptSystemLinkInput(
+    role: HostedLinkRole,
+    query: String,
+    real: Path,
+): HostedLinkInput {
     if (!real.isAbsolute || real.normalize() != real || real.toRealPath() != real) {
-        hostedFail("system link input path is not canonical")
+        hostedFail("${role.factRole} link input is not canonical")
     }
     val allowed = SYSTEM_LIBRARY_ROOTS.any { root ->
         try {
@@ -1349,58 +2383,108 @@ private fun authenticateSystemLinkInput(real: Path): HostedLinkDependency {
             false
         }
     }
-    if (!allowed) hostedFail("locked LLD input is outside reviewed container system-library roots")
-    val attributes = readBasicAttributes(real, "system link input")
-    if (!attributes.isRegularFile || attributes.isSymbolicLink || attributes.fileKey() == null ||
-        attributes.size() !in 1L..MAXIMUM_LINK_INPUT_BYTES
-    ) {
-        hostedFail("system link input is not a bounded canonical regular file")
+    if (!allowed) hostedFail("${role.factRole} is outside reviewed container system-library roots")
+    requireRootOwnedImmutablePath(real, directory = false, label = role.factRole)
+    return StableControlFile.open(real, MAXIMUM_LINK_INPUT_BYTES, role.factRole).use { guard ->
+        if (guard.size !in 1L..MAXIMUM_LINK_INPUT_BYTES) hostedFail("${role.factRole} exceeds its byte bound")
+        val sha256 = guard.sha256(label = role.factRole)
+        val retained = HostedRetainedFile.snapshot(
+            guard,
+            guard.size,
+            sha256,
+            executable = false,
+            label = "retained ${role.factRole}",
+        )
+        try {
+            guard.verifyUnchanged(role.factRole)
+            HostedLinkInput(
+                role,
+                "clang-query:$query",
+                real,
+                BuildOutputIdentity(guard.size, sha256),
+                retained,
+            )
+        } catch (failure: Throwable) {
+            retained.close()
+            throw failure
+        }
     }
-    val permissions = Files.getPosixFilePermissions(real, LinkOption.NOFOLLOW_LINKS)
-    if (permissions.any { it in UNTRUSTED_WRITE_PERMISSIONS }) {
-        hostedFail("system link input is writable by an untrusted principal")
-    }
-    val sha256 = sha256File(real, attributes.size(), MAXIMUM_LINK_INPUT_BYTES, "system link input")
-    val terminal = readBasicAttributes(real, "system link input")
-    if (attributes.fileKey() != terminal.fileKey() || attributes.size() != terminal.size() ||
-        attributes.lastModifiedTime() != terminal.lastModifiedTime()
-    ) {
-        hostedFail("system link input changed during authentication")
-    }
-    return HostedLinkDependency("system:$real", attributes.size(), sha256)
 }
 
-private fun rejectUnsupportedCompilerInputs(sourceRoot: Path, revision: BuildSourceRevision) {
-    revision.inputs.asSequence()
-        .filter { it.path.startsWith("src/") || it.path.startsWith("include/") }
-        .forEach { input ->
-            val path = sourceRoot.resolve(input.path).normalize()
-            if (!path.startsWith(sourceRoot) || Files.size(path) != input.bytes) {
-                hostedFail("authenticated compiler input changed before language-policy validation")
-            }
-            val text = decodeStrictUtf8(Files.readAllBytes(path), "authenticated compiler input ${input.path}")
-            FORBIDDEN_COMPILER_INPUT_TOKENS.forEach { token ->
-                if (token in text) {
-                    hostedFail("authenticated compiler input uses unsupported external-input token $token")
-                }
-            }
+private fun requireRootOwnedImmutablePath(path: Path, directory: Boolean, label: String) {
+    val attributes = readBasicAttributes(path, label)
+    if (attributes.fileKey() == null || attributes.isSymbolicLink ||
+        (directory && !attributes.isDirectory) || (!directory && !attributes.isRegularFile)
+    ) hostedFail("$label is not the required canonical filesystem type")
+    var current: Path? = path
+    while (current != null) {
+        val uid = (Files.getAttribute(current, "unix:uid", LinkOption.NOFOLLOW_LINKS) as Number).toLong()
+        val permissions = Files.getPosixFilePermissions(current, LinkOption.NOFOLLOW_LINKS)
+        if (uid != 0L || permissions.any { it in UNTRUSTED_WRITE_PERMISSIONS }) {
+            hostedFail("$label is not held below root-owned non-writable ancestors")
         }
+        current = current.parent
+    }
+}
+
+private fun inspectRetainedExecutable(
+    bytes: ByteArray,
+    identity: BuildOutputIdentity,
+    buildRoot: Path,
+): decompengine.oracle.provenance.BoundedElfArtifactV1 {
+    if (bytes.size.toLong() != identity.bytes || OracleArtifacts.sha256(bytes) != identity.sha256) {
+        hostedFail("candidate executable differs from its sealed retained identity")
+    }
+    val inspectionPath = buildRoot.resolve("candidate-elf-inspection").normalize()
+    if (inspectionPath.parent != buildRoot || Files.exists(inspectionPath, LinkOption.NOFOLLOW_LINKS)) {
+        hostedFail("private ELF inspection target is not fresh")
+    }
+    try {
+        Files.write(inspectionPath, bytes, StandardOpenOption.CREATE_NEW, StandardOpenOption.WRITE)
+        FileChannel.open(inspectionPath, StandardOpenOption.WRITE).use { it.force(true) }
+        Files.setPosixFilePermissions(inspectionPath, OWNER_READ_ONLY_PERMISSIONS)
+        return BoundedElfTwinV1.inspect(
+            inspectionPath,
+            BoundedElfTwinV1Limits(
+                maximumFileBytes = MAXIMUM_EXECUTABLE_BYTES,
+                maximumRangeBytes = MAXIMUM_EXECUTABLE_BYTES,
+                maximumExecutableBytes = MAXIMUM_EXECUTABLE_BYTES,
+                maximumAggregateHashedBytes = 2L * 1024L * 1024L * 1024L,
+            ),
+        )
+    } finally {
+        Files.deleteIfExists(inspectionPath)
+    }
+}
+
+private fun requireHostedElf(
+    elf: decompengine.oracle.provenance.BoundedElfArtifactV1,
+    executableIdentity: BuildOutputIdentity,
+) {
+    val entryPoint = elf.elf.header.entryPoint
+    val entryPointIsMemoryBackedExecutable = elf.elf.programHeaders.any { header ->
+        header.type == ELF_PROGRAM_HEADER_LOAD_TYPE &&
+            (header.flags and ELF_PROGRAM_HEADER_EXECUTE_FLAG) != 0UL &&
+            entryPoint >= header.virtualAddress &&
+            entryPoint - header.virtualAddress < header.fileSize
+    }
+    if (elf.bytes != executableIdentity.bytes || elf.sha256 != executableIdentity.sha256 ||
+        elf.elf.header.elfClass != "ELF64" || elf.elf.header.dataEncoding != "little-endian" ||
+        elf.elf.header.machine != 62UL || elf.elf.header.type !in setOf(2UL, 3UL) ||
+        entryPoint == 0UL || elf.elf.executableLoad.bytes <= 0L || !entryPointIsMemoryBackedExecutable
+    ) hostedFail("candidate output is not the required executable little-endian x86-64 ELF64")
 }
 
 private fun authenticateCompilerDependencies(
-    dependencyPath: Path,
+    raw: ByteArray,
     expectedTarget: String,
-    sourceRoot: Path,
+    expectedSource: String,
+    retainedSourceCapability: String,
     sourceRevision: BuildSourceRevision,
 ): List<HostedDependency> {
-    val attributes = readBasicAttributes(dependencyPath, "compiler dependency file")
-    if (!attributes.isRegularFile || attributes.isSymbolicLink || attributes.fileKey() == null ||
-        attributes.size() !in 1L..MAXIMUM_DEPENDENCY_FILE_BYTES || dependencyPath.toRealPath() != dependencyPath
-    ) {
-        hostedFail("compiler dependency file is not a bounded canonical regular file")
+    if (raw.isEmpty() || raw.size.toLong() > MAXIMUM_DEPENDENCY_FILE_BYTES) {
+        hostedFail("compiler dependency file is outside its byte bound")
     }
-    val raw = Files.readAllBytes(dependencyPath)
-    if (raw.size.toLong() != attributes.size()) hostedFail("compiler dependency file changed while reading")
     val text = decodeStrictUtf8(raw, "compiler dependency file")
     if ('\r' in text || '\u0000' in text) hostedFail("compiler dependency file contains forbidden characters")
     val unfolded = text.replace("\\\n", " ")
@@ -1413,21 +2497,28 @@ private fun authenticateCompilerDependencies(
     val dependencies = linkedMapOf<String, HostedDependency>()
     tokens.drop(1).forEach { token ->
         if (!token.matches(DEPENDENCY_PATH_TOKEN)) hostedFail("compiler dependency path is not canonical")
-        val rawPath = Path.of(token)
-        val dependency = if (rawPath.isAbsolute) {
-            authenticateSystemDependency(rawPath)
-        } else {
-            val normalized = sourceRoot.resolve(rawPath).normalize()
-            if (!normalized.startsWith(sourceRoot)) hostedFail("compiler dependency escapes authenticated source")
-            val relative = sourceRoot.relativize(normalized).toString().replace('\\', '/')
+        val relative = when {
+            token == retainedSourceCapability -> expectedSource
+            token.startsWith("$VIRTUAL_CANDIDATE_ROOT/") -> token.removePrefix("$VIRTUAL_CANDIDATE_ROOT/")
+            else -> null
+        }
+        val dependency = if (relative != null) {
             val expected = expectedInputs[relative]
                 ?: hostedFail("compiler read an archive file outside the authenticated source revision: $relative")
-            if (normalized.toRealPath() != normalized || Files.size(normalized) != expected.bytes ||
-                sha256DependencyFile(normalized, expected.bytes, "source dependency") != expected.sha256
-            ) {
-                hostedFail("compiler source dependency differs from its authenticated revision")
+            if (!relative.matches(CANDIDATE_INPUT_PATH)) {
+                hostedFail("compiler dependency is not a canonical retained candidate input")
             }
             HostedDependency("source:$relative", expected.bytes, expected.sha256)
+        } else {
+            val rawPath = try {
+                Path.of(token)
+            } catch (failure: Exception) {
+                throw LlvmBehaviorHostedCleanBuildV2Exception("compiler dependency path is invalid", failure)
+            }
+            if (!rawPath.isAbsolute || token.startsWith("/proc/")) {
+                hostedFail("compiler consumed an unbound candidate or capability path")
+            }
+            authenticateSystemDependency(rawPath)
         }
         val previous = dependencies.putIfAbsent(dependency.path, dependency)
         if (previous != null && previous != dependency) hostedFail("compiler dependency path has conflicting identities")
@@ -1447,6 +2538,7 @@ private fun authenticateSystemDependency(path: Path): HostedDependency {
         Files.isDirectory(root, LinkOption.NOFOLLOW_LINKS) && real.startsWith(root.toRealPath())
     }
     if (!allowed) hostedFail("compiler dependency is outside reviewed container system-header roots")
+    requireRootOwnedImmutablePath(real, directory = false, label = "system-header dependency")
     val attributes = readBasicAttributes(real, "system-header dependency")
     if (!attributes.isRegularFile || attributes.isSymbolicLink || attributes.fileKey() == null ||
         attributes.size() !in 0L..MAXIMUM_DEPENDENCY_BYTES
@@ -1490,6 +2582,15 @@ private fun decodeStrictUtf8(bytes: ByteArray, label: String): String = try {
         .toString()
 } catch (failure: Exception) {
     throw LlvmBehaviorHostedCleanBuildV2Exception("$label is not valid UTF-8", failure)
+}
+
+private fun boundedHostedFailureOutput(bytes: ByteArray): String {
+    val bounded = if (bytes.size <= MAXIMUM_FAILURE_DIAGNOSTIC_BYTES) bytes else
+        bytes.copyOf(MAXIMUM_FAILURE_DIAGNOSTIC_BYTES)
+    return runCatching { decodeStrictUtf8(bounded, "hosted command failure output") }
+        .getOrElse { "<non-UTF-8 output>" }
+        .replace('\n', ' ')
+        .trim()
 }
 
 private fun requireRegularBuildOutput(
@@ -1678,8 +2779,8 @@ private fun toolDocument(tool: HostedTool): JsonObject = jsonObject(
 private fun buildDocument(build: HostedBuildFacts): JsonObject = jsonObject(
     "ordinal" to JsonPrimitive(build.ordinal),
     "extractionMode" to JsonPrimitive("verified-archive-private-clean-extraction"),
-    "compilerMode" to JsonPrimitive("direct-clang-per-source"),
-    "linkerMode" to JsonPrimitive("direct-clang"),
+    "compilerMode" to JsonPrimitive("retained-descriptor-clang-per-source"),
+    "linkerMode" to JsonPrimitive("retained-descriptor-lld-direct"),
     "makefileExecuted" to JsonPrimitive(false),
     "buildContractTrusted" to JsonPrimitive(false),
     "sourceRevisionSha256" to JsonPrimitive(build.sourceRevisionSha256),
@@ -1690,8 +2791,8 @@ private fun buildDocument(build: HostedBuildFacts): JsonObject = jsonObject(
     "dependencySetSha256" to JsonPrimitive(build.dependencySetSha256),
     "objectSetSha256" to JsonPrimitive(build.objectSetSha256),
     "linkCommandSha256" to JsonPrimitive(build.linkCommandSha256),
-    "linkDependencyCount" to JsonPrimitive(build.linkDependencyCount),
-    "linkDependencySetSha256" to JsonPrimitive(build.linkDependencySetSha256),
+    "linkPlanInputCount" to JsonPrimitive(build.linkPlanInputCount),
+    "linkPlanSha256" to JsonPrimitive(build.linkPlanSha256),
     "combinedOutputBytes" to JsonPrimitive(build.combinedOutputBytes),
     "combinedOutputSha256" to JsonPrimitive(build.combinedOutputSha256),
     "executableBytes" to JsonPrimitive(build.executableBytes),
@@ -1985,6 +3086,7 @@ private val FIXED_REPRODUCTION_LOCK_PATH = FIXED_INPUT_DIRECTORY.resolve(REPRODU
 private val FIXED_DOCKER_INSPECT_PATH = FIXED_INPUT_DIRECTORY.resolve("image-inspect.json")
 private val FIXED_OUTPUT_DIRECTORY = Path.of("/stage-output")
 private val FIXED_WORK_DIRECTORY = Path.of("/work")
+private val GLOBAL_LOADER_PRELOAD_PATH = Path.of("/etc/ld.so.preload")
 private const val ELF_PROGRAM_HEADER_LOAD_TYPE = 1UL
 private const val ELF_PROGRAM_HEADER_EXECUTE_FLAG = 1UL
 private const val MAXIMUM_RECEIPT_BYTES = 128 * 1024
@@ -1997,20 +3099,23 @@ private const val MAXIMUM_TOOL_BYTES = 512L * 1024L * 1024L
 private const val MAXIMUM_EXECUTABLE_BYTES = 64L * 1024L * 1024L
 private const val MAXIMUM_OBJECT_BYTES = 512L * 1024L * 1024L
 private const val MAXIMUM_AGGREGATE_OBJECT_BYTES = 2L * 1024L * 1024L * 1024L
-private const val MAXIMUM_SOURCE_COUNT = 100_000
+private const val MAXIMUM_SOURCE_COUNT = 128
+private const val MAXIMUM_CANDIDATE_INPUT_COUNT = 256
+private const val MAXIMUM_CANDIDATE_INPUT_BYTES = 16L * 1024L * 1024L
+private const val MAXIMUM_AGGREGATE_CANDIDATE_INPUT_BYTES = 256L * 1024L * 1024L
 private const val MAXIMUM_DEPENDENCIES = 1_000_000
 private const val MAXIMUM_DEPENDENCY_FILE_BYTES = 16L * 1024L * 1024L
 private const val MAXIMUM_DEPENDENCY_BYTES = 128L * 1024L * 1024L
 private const val MAXIMUM_AGGREGATE_DEPENDENCY_BYTES = 2L * 1024L * 1024L * 1024L
 private const val MAXIMUM_LINK_DEPENDENCIES = 4096
-private const val MAXIMUM_LINK_DEPENDENCY_FILE_BYTES = 16L * 1024L * 1024L
 private const val MAXIMUM_LINK_INPUT_BYTES = 512L * 1024L * 1024L
 private const val MAXIMUM_AGGREGATE_LINK_DEPENDENCY_BYTES = 2L * 1024L * 1024L * 1024L
-private const val MAXIMUM_COMMAND_OUTPUT_BYTES = 32 * 1024 * 1024
+private const val MAXIMUM_COMMAND_OUTPUT_BYTES = 64 * 1024 * 1024
 private const val MAXIMUM_AGGREGATE_OUTPUT_BYTES = 16L * 1024L * 1024L * 1024L
+private const val MAXIMUM_RETAINED_AUXILIARY_BYTES = 4L * 1024L * 1024L
+private const val MAXIMUM_CLANG_QUERY_OUTPUT_BYTES = 16 * 1024
+private const val MAXIMUM_FAILURE_DIAGNOSTIC_BYTES = 4096
 private const val PROCESS_BUFFER_BYTES = 64 * 1024
-private const val PROCESS_POLL_MILLIS = 25L
-private const val MAXIMUM_DESCENDANTS = 256
 private val BUILD_COMMAND_TIMEOUT = Duration.ofMinutes(10)
 private val MAXIMUM_CLEAN_BUILD_DURATION = Duration.ofMinutes(30)
 private val PROCESS_CLEANUP_TIMEOUT = Duration.ofSeconds(5)
@@ -2024,6 +3129,8 @@ private const val EXPECTED_PLATFORM = "linux/amd64"
 private const val EXPECTED_SOURCE_DATE_EPOCH = "1779182222"
 private const val ZERO_SHA256 = "0000000000000000000000000000000000000000000000000000000000000000"
 private const val DETERMINISTIC_PATH = "/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
+private const val HOSTED_TARGET_TRIPLE = "x86_64-pc-linux-gnu"
+private const val HOSTED_CLANG_RESOURCE_VERSION = "22"
 private val EXPECTED_BUILD_ENVIRONMENT = sortedMapOf(
     "LC_ALL" to "C",
     "PATH" to DETERMINISTIC_PATH,
@@ -2044,16 +3151,16 @@ private val EXPECTED_LINKER = HostedTool(
     "057e42c6104e20a7358a51fb9abb456d74ba37997331d99183e877539da95982",
     "0b47969becd48b365d7fa9302efe7f9191742b5a3d761d008c5cf67132e78451",
 )
+private val FIXED_LOCAL_TEST_TOOLCHAINS = listOf(
+    Path.of("/usr/lib/llvm/22/bin/clang-22") to Path.of("/usr/lib/llvm/22/bin/lld"),
+    Path.of("/usr/lib/llvm-22/bin/clang") to Path.of("/usr/lib/llvm-22/bin/lld"),
+)
 private val OWNER_DIRECTORY_PERMISSIONS = setOf(
     PosixFilePermission.OWNER_READ,
     PosixFilePermission.OWNER_WRITE,
     PosixFilePermission.OWNER_EXECUTE,
 )
 private val OWNER_READ_ONLY_PERMISSIONS = setOf(PosixFilePermission.OWNER_READ)
-private val OWNER_READ_EXECUTE_PERMISSIONS = setOf(
-    PosixFilePermission.OWNER_READ,
-    PosixFilePermission.OWNER_EXECUTE,
-)
 private val UNTRUSTED_WRITE_PERMISSIONS = setOf(
     PosixFilePermission.GROUP_WRITE,
     PosixFilePermission.OTHERS_WRITE,
@@ -2072,8 +3179,10 @@ private val SYSTEM_LIBRARY_ROOTS = listOf(
     Path.of("/lib64"),
 )
 private val DEPENDENCY_WHITESPACE = Regex("[ \\t\\n]+")
-private val DEPENDENCY_HORIZONTAL_WHITESPACE = Regex("[ \\t]+")
 private val DEPENDENCY_PATH_TOKEN = Regex("[A-Za-z0-9_+.,/@%:=~-]+")
+private val CANDIDATE_INPUT_PATH = Regex("(?:src|include)/(?:[A-Za-z0-9_+.,@%=-]+/)*[A-Za-z0-9_+.,@%=-]+")
+private val VIRTUAL_CANDIDATE_ROOT = Path.of("/decomp-candidate")
+private val VIRTUAL_CANDIDATE_INCLUDE = VIRTUAL_CANDIDATE_ROOT.resolve("include")
 private val FORBIDDEN_COMPILER_INPUT_TOKENS = listOf(
     "__has_",
     "##",
@@ -2090,6 +3199,71 @@ private val RECEIPT_JSON_LIMITS = StrictJsonLimits(
     maximumStringBytes = 4096,
     maximumTotalStringBytes = 64 * 1024,
 )
+private val CANDIDATE_OVERLAY_JSON_LIMITS = StrictJsonLimits(
+    maximumInputBytes = MAXIMUM_RETAINED_AUXILIARY_BYTES.toInt(),
+    maximumCanonicalBytes = MAXIMUM_RETAINED_AUXILIARY_BYTES.toInt(),
+    maximumDepth = 8,
+    maximumNodes = 4096,
+    maximumStringBytes = 16 * 1024,
+    maximumTotalStringBytes = 2 * 1024 * 1024,
+)
+private val HOSTED_ENVIRONMENT_NAME = Regex("[A-Za-z_][A-Za-z0-9_]*")
+private val FORBIDDEN_HOSTED_ENVIRONMENT_NAMES = setOf(
+    "CPATH",
+    "LIBRARY_PATH",
+    "COMPILER_PATH",
+    "GCC_EXEC_PREFIX",
+    "HOME",
+    "PWD",
+    "GLIBC_TUNABLES",
+)
+private const val MAXIMUM_HOSTED_ARGUMENTS = 768
+private const val MAXIMUM_HOSTED_ARGUMENT_BYTES = 256L * 1024L
+private const val MAXIMUM_HOSTED_NATIVE_STRING_BYTES = 16 * 1024
+private const val MAXIMUM_HOSTED_ENVIRONMENT_BINDINGS = 16
+private const val MAXIMUM_HOSTED_ENVIRONMENT_BYTES = 64L * 1024L
+private const val HOSTED_OPAQUE_NATIVE_STORAGE_BYTES = 4096L
+private const val HOSTED_SIGSET_BYTES = 128L
+private const val HOSTED_POLLFD_BYTES = 8
+private const val HOSTED_ACTIVE_POLL_MILLIS = 25
+private const val HOSTED_POST_EXIT_POLL_MILLIS = 5
+private const val HOSTED_CLEANUP_POLL_MILLIS = 5L
+private const val HOSTED_MAXIMUM_PROC_STAT_BYTES = 16 * 1024
+private const val HOSTED_NULL_DEVICE = "/dev/null"
+private const val HOSTED_POSIX_SPAWN_SETSIGDEF = 0x04
+private const val HOSTED_POSIX_SPAWN_SETSIGMASK = 0x08
+private const val HOSTED_POSIX_SPAWN_SETSID = 0x80
+private const val HOSTED_MFD_CLOEXEC = 0x0001
+private const val HOSTED_MFD_ALLOW_SEALING = 0x0002
+private const val HOSTED_MFD_EXEC = 0x0010
+private const val HOSTED_F_ADD_SEALS = 1033
+private const val HOSTED_F_GET_SEALS = 1034
+private const val HOSTED_F_SEAL_SEAL = 0x0001
+private const val HOSTED_F_SEAL_SHRINK = 0x0002
+private const val HOSTED_F_SEAL_GROW = 0x0004
+private const val HOSTED_F_SEAL_WRITE = 0x0008
+private const val HOSTED_MODE_READ_ONLY = 0x100
+private const val HOSTED_MODE_READ_EXECUTE = 0x140
+private const val HOSTED_O_RDONLY = 0
+private const val HOSTED_O_RDWR = 2
+private const val HOSTED_O_NONBLOCK = 0x800
+private const val HOSTED_O_DIRECTORY = 0x10000
+private const val HOSTED_O_NOFOLLOW = 0x20000
+private const val HOSTED_O_CLOEXEC = 0x80000
+private const val HOSTED_F_GETFD = 1
+private const val HOSTED_F_GETFL = 3
+private const val HOSTED_F_SETFL = 4
+private const val HOSTED_POLLIN = 0x001
+private const val HOSTED_POLLERR = 0x008
+private const val HOSTED_POLLHUP = 0x010
+private const val HOSTED_POLLNVAL = 0x020
+private const val HOSTED_WNOHANG = 1
+private const val HOSTED_SIGKILL = 9
+private const val HOSTED_SIGSTOP = 19
+private const val HOSTED_EINTR = 4
+private const val HOSTED_EBADF = 9
+private const val HOSTED_EAGAIN = 11
+private const val HOSTED_ESRCH = 3
 private val FORBIDDEN_HOSTED_MARKERS = listOf(
     "python",
     "http://",

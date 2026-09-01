@@ -29,8 +29,6 @@ class LlvmBehaviorHostedCleanBuildV2Test {
             val assessment = LlvmBehaviorHostedCleanBuildV2TestSupport.assess(
                 first,
                 second,
-                toolchain.compiler,
-                toolchain.linker,
             )
 
             assertFalse(Files.exists(marker, LinkOption.NOFOLLOW_LINKS))
@@ -48,10 +46,10 @@ class LlvmBehaviorHostedCleanBuildV2Test {
             assertEquals(assessment.firstDependencySetSha256, assessment.secondDependencySetSha256)
             assertEquals(assessment.firstObjectSetSha256, assessment.secondObjectSetSha256)
             assertEquals(assessment.firstLinkCommandSha256, assessment.secondLinkCommandSha256)
-            assertTrue(assessment.linkDependencyCount >= assessment.sourceCount)
+            assertTrue(assessment.linkPlanInputCount >= assessment.sourceCount)
             assertEquals(
-                assessment.firstLinkDependencySetSha256,
-                assessment.secondLinkDependencySetSha256,
+                assessment.firstLinkPlanSha256,
+                assessment.secondLinkPlanSha256,
             )
             assertEquals(assessment.firstCombinedOutputBytes, assessment.secondCombinedOutputBytes)
             assertEquals(assessment.firstCombinedOutputSha256, assessment.secondCombinedOutputSha256)
@@ -67,15 +65,13 @@ class LlvmBehaviorHostedCleanBuildV2Test {
             val retry = LlvmBehaviorHostedCleanBuildV2TestSupport.assess(
                 first,
                 second,
-                toolchain.compiler,
-                toolchain.linker,
             )
             assertEquals(assessment.firstBuildEnvironmentSha256, retry.firstBuildEnvironmentSha256)
             assertEquals(assessment.firstCompileCommandSetSha256, retry.firstCompileCommandSetSha256)
             assertEquals(assessment.firstDependencySetSha256, retry.firstDependencySetSha256)
             assertEquals(assessment.firstObjectSetSha256, retry.firstObjectSetSha256)
             assertEquals(assessment.firstLinkCommandSha256, retry.firstLinkCommandSha256)
-            assertEquals(assessment.firstLinkDependencySetSha256, retry.firstLinkDependencySetSha256)
+            assertEquals(assessment.firstLinkPlanSha256, retry.firstLinkPlanSha256)
             assertEquals(assessment.firstCombinedOutputBytes, retry.firstCombinedOutputBytes)
             assertEquals(assessment.firstCombinedOutputSha256, retry.firstCombinedOutputSha256)
             assertContentEquals(assessment.executable, retry.executable)
@@ -100,8 +96,6 @@ class LlvmBehaviorHostedCleanBuildV2Test {
                 LlvmBehaviorHostedCleanBuildV2TestSupport.assess(
                     first,
                     second,
-                    toolchain.compiler,
-                    toolchain.linker,
                 )
             }
             assertTrue(failure.message.orEmpty().contains("same source revision"), failure.message)
@@ -131,8 +125,6 @@ class LlvmBehaviorHostedCleanBuildV2Test {
                 LlvmBehaviorHostedCleanBuildV2TestSupport.assess(
                     first,
                     second,
-                    toolchain.compiler,
-                    toolchain.linker,
                 )
             }
             assertTrue(failure.message.orEmpty().contains("outside reviewed container"), failure.message)
@@ -160,52 +152,12 @@ class LlvmBehaviorHostedCleanBuildV2Test {
                 LlvmBehaviorHostedCleanBuildV2TestSupport.assess(
                     first,
                     second,
-                    toolchain.compiler,
-                    toolchain.linker,
                 )
             }
             assertTrue(failure.message.orEmpty().contains("unsupported external-input token"), failure.message)
             assertFalse(Files.exists(marker, LinkOption.NOFOLLOW_LINKS))
         } finally {
             deleteTree(root)
-        }
-    }
-
-    @Test
-    fun `LLD dependency manifest parser binds only one ordered unique rule and its exact phony suffix`() {
-        val target = Path.of("/private-build/candidate-reconstructed")
-        val dependencies = listOf(
-            "/usr/lib64/Scrt1.o",
-            "/private-build/objects/main.o",
-            "/usr/lib64/libc.so",
-            "/lib64/libc.so.6",
-        )
-        val manifest = buildString {
-            append(target).append(": \\\n")
-            dependencies.forEachIndexed { index, dependency ->
-                append(' ').append(dependency)
-                if (index + 1 < dependencies.size) append(" \\\n") else append('\n')
-            }
-            append('\n')
-            dependencies.forEach { dependency -> append(dependency).append(":\n\n") }
-        }.toByteArray()
-
-        assertEquals(
-            dependencies,
-            LlvmBehaviorHostedCleanBuildV2TestSupport.parseLinkDependencyManifest(manifest, target),
-        )
-
-        listOf(
-            manifest.toString(Charsets.UTF_8).replace("/lib64/libc.so.6:\n", "/etc/passwd:\n"),
-            "$target: /usr/lib64/a\\ b\n/usr/lib64/a\\ b:\n",
-            "$target: /usr/lib64/libc.so /usr/lib64/libc.so\n/usr/lib64/libc.so:\n",
-        ).forEach { malformed ->
-            assertFailsWith<LlvmBehaviorHostedCleanBuildV2Exception> {
-                LlvmBehaviorHostedCleanBuildV2TestSupport.parseLinkDependencyManifest(
-                    malformed.toByteArray(),
-                    target,
-                )
-            }
         }
     }
 

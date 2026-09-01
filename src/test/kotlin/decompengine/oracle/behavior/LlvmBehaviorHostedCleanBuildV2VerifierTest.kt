@@ -241,7 +241,7 @@ class LlvmBehaviorHostedCleanBuildV2VerifierTest {
     @Test
     fun `reviewed hosted receipt schema identity is pinned`() {
         assertEquals(
-            "b7b00bdf9f14e119b353f905fe05c7a45adbca7730a3cec6b5688e1ad5b310b9",
+            "9dafb9b95b094cb82844371b2f094505761df808d436617d491f39946e448453",
             OracleSchemas.identity(SCHEMA_NAME).sha256,
         )
     }
@@ -369,8 +369,8 @@ class LlvmBehaviorHostedCleanBuildV2VerifierTest {
     ): JsonObject = obj(
         "ordinal" to JsonPrimitive(ordinal),
         "extractionMode" to JsonPrimitive("verified-archive-private-clean-extraction"),
-        "compilerMode" to JsonPrimitive("direct-clang-per-source"),
-        "linkerMode" to JsonPrimitive("direct-clang"),
+        "compilerMode" to JsonPrimitive("retained-descriptor-clang-per-source"),
+        "linkerMode" to JsonPrimitive("retained-descriptor-lld-direct"),
         "makefileExecuted" to JsonPrimitive(false),
         "buildContractTrusted" to JsonPrimitive(false),
         "sourceRevisionSha256" to JsonPrimitive(sourceRevision),
@@ -381,8 +381,8 @@ class LlvmBehaviorHostedCleanBuildV2VerifierTest {
         "dependencySetSha256" to JsonPrimitive("d".repeat(64)),
         "objectSetSha256" to JsonPrimitive("e".repeat(64)),
         "linkCommandSha256" to JsonPrimitive("1".repeat(64)),
-        "linkDependencyCount" to JsonPrimitive(8),
-        "linkDependencySetSha256" to JsonPrimitive("2".repeat(64)),
+        "linkPlanInputCount" to JsonPrimitive(8),
+        "linkPlanSha256" to JsonPrimitive("2".repeat(64)),
         "combinedOutputBytes" to JsonPrimitive(0),
         "combinedOutputSha256" to JsonPrimitive(OracleArtifacts.sha256(byteArrayOf())),
         "executableBytes" to JsonPrimitive(executableBytes),

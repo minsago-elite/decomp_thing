@@ -8,9 +8,10 @@ Sigstore attestation.
 
 This checkpoint intentionally exposes no general build CLI or host-side Gradle task. The internal
 worker has zero caller-selected paths and reads only fixed future-container paths under `/inputs`,
-writes staged output under `/stage-output`, and creates scratch state only under `/work`. Dependency
-authentication happens after Clang reads a file, so running this worker against an ordinary host
-filesystem would be unsafe. Only the pending Kotlin-owned outer container coordinator may launch it.
+writes staged output under `/stage-output`, and creates scratch state only under `/work`. Candidate
+sources and headers are adopted into sealed anonymous identities before Clang can consume them;
+system headers and the normal dynamic-tool runtime remain protected by the inspected read-only
+worker root. Only the pending Kotlin-owned outer container coordinator may launch it.
 The fixed image, pre-START inspection, crash journal, cleanup ordering, and publication requirements
 for that boundary are specified by the
 [`hosted container coordinator v1`](llvm-behavior-hosted-container-coordinator-v1.md) contract.
@@ -70,7 +71,7 @@ caller-claimed digest, or build-record string cannot replace the inspect artifac
 workflow attestation (or a Kotlin-owned container coordinator) must prove that both builds actually
 ran in that exact inspected image before the runtime boundary is authenticated.
 
-## Exactly two direct-Clang clean builds
+## Exactly two retained-tool clean builds
 
 Build ordinal 1 and build ordinal 2 use separate, empty, private extraction and output roots. Each
 starts by extracting the independently verified archive again. Neither build executes the stored
@@ -78,26 +79,52 @@ starts by extracting the independently verified archive again. Neither build exe
 Those files are untrusted candidate payload for this step.
 
 Kotlin derives the bounded source set and fixed argv directly from authenticated source bytes. It
-invokes the locked Clang executable once per source and invokes the locked Clang driver directly for
-the final link. The linker selected by that fixed driver command is the locked LLD. There is no
-shell, Make, Ninja, CMake, project callback, or caller-provided command in the candidate build path.
+copies authenticated Clang and LLD descriptor bytes into sealed anonymous executable identities and
+keeps those identities until each child has been reaped. A private JNA `posix_spawn` boundary selects
+the exact retained executable through a parent-owned descriptor capability while fixing logical
+`argv[0]` to `clang` or `ld.lld`. Descriptor-pinned working directories are applied before exec, the
+environment is rebuilt without `PATH`, `LD_*`, compiler search variables, `HOME`, or `PWD`, and the
+child closes every inherited descriptor above stderr. The inspected worker uses a read-only root
+filesystem and forbids `/etc/ld.so.preload`, preserving normal ELF `DT_NEEDED` semantics without a
+preload-based substitute runtime. There is no shell, Make, Ninja, CMake, project callback,
+caller-provided command, or generic executable runner in the candidate build path.
+
+The descriptor fanout is intentionally finite under the worker's fixed `RLIMIT_NOFILE=1024`:
+at most 128 translation units and 256 total candidate `src/`/`include/` inputs are accepted. Every
+candidate compiler input is checked against the authenticated revision, copied into a sealed memfd,
+and referenced through a sealed Clang VFS overlay with external names disabled. Primary source,
+dependency, and object outputs are descriptor capabilities; object bytes are sealed immediately
+after the exact Clang child exits. Clang is forced to use integrated cc1 and the integrated assembler,
+an explicit reviewed resource directory, and the GCC installation derived from an authenticated
+fixed query, so it performs no subordinate tool lookup.
 
 Each build entry is constant-size. `sourceCount` is the number of authenticated `src/**/*.c`
 translation units. `compileCommandSetSha256` is the domain-separated, length-prefixed commitment to
-the commands in source-path order; each command retains its ordinal and every argv token after
-private source and build roots are replaced by the fixed `${SOURCE}` and `${BUILD}` placeholders.
-This keeps the commitment exact while making retries independent of random scratch-directory names.
+the commands in source-path order; each command retains its ordinal and every logical argv token,
+while process-local descriptor capabilities are replaced by fixed role placeholders. This keeps the
+commitment exact while making retries independent of process IDs, descriptor numbers, and random
+scratch-directory names.
 Each compile emits a bounded dependency file. Kotlin rejects dependencies outside the authenticated
 source revision and reviewed container system-header roots, and commits every canonical dependency
 path, byte length, and SHA-256 through `dependencyCount` and `dependencySetSha256`.
 `objectSetSha256` uses the same encoding over project-relative object path, byte length, and SHA-256
-leaves in source-path order. The sorted environment and link argv have separate commitments using
-the same fixed private-root placeholders. Locked LLD writes a bounded dependency manifest; Kotlin
-authenticates and commits its ordered-unique CRT, object, library, linker-script, and dynamic-linker
-dependency set, rejecting paths outside the private object root and reviewed container
-system-library roots. The exact link-command commitment retains repeated argv inputs that LLD
-deduplicates in that manifest. `combinedOutputSha256` is SHA-256 over each command's
-bounded merged stdout/stderr bytes in execution order after the same private-root replacement, with
+leaves in source-path order. The sorted environment and link argv have separate commitments.
+
+Linking invokes the exact retained LLD directly. Before compilation, Kotlin runs only the fixed,
+bounded Clang `--print-file-name` queries for `Scrt1.o`, `crti.o`, `crtbeginS.o`, `libgcc.a`,
+`libgcc_s.so.1`, `libc.so.6`, `libc_nonshared.a`, `ld-linux-x86-64.so.2`, `crtendS.o`, and `crtn.o`.
+Every result must be one canonical root-owned file with the expected basename; its authenticated
+bytes are copied into a sealed identity. LLD receives those retained CRT/libc/compiler-runtime
+identities and the sealed objects in one reviewed order, with no Clang link driver, `-###` parser,
+response file, linker script, `-L`, or `-l` search. The loader's canonical runtime pathname and
+authenticated identity are both committed. `linkPlanInputCount` and the ordered
+`linkPlanSha256` bind the exact LLD identity/argv0, link command, resolution role, stable logical
+path, length, and SHA-256 of every occurrence. No PID or descriptor capability enters the receipt.
+LLD writes the candidate ELF to bounded stdout (`-o -`); Kotlin immediately adopts those bytes into
+a sealed executable identity.
+
+`combinedOutputSha256` is SHA-256 over each successful compile's bounded stdout/stderr and LLD's
+bounded diagnostic stderr in execution order after private-root replacement, with
 `combinedOutputBytes` equal to that canonical byte stream's length. Detailed commands, objects,
 stdout, and stderr remain in ephemeral build state and cannot expand the receipt.
 
@@ -106,6 +133,12 @@ objects have a two-GiB aggregate cap in addition to their individual bounds. Dep
 closure bytes are separately aggregate-bounded, and the final executable is capped at 64 MiB.
 These are producer resource ceilings, not evidence that a later candidate behavior run was
 contained or reached terminal absence.
+
+Each command is a fresh session leader and is pidfd-pinned immediately after spawn. Kotlin drains
+separate nonblocking bounded stdout/stderr pipes under the one command deadline. On success, failure,
+timeout, or overflow it signals only that unreaped leader's reserved process group and exact pidfd,
+then performs exact `waitpid` reaping. It never scans or adopts unrelated JVM descendants. Escaped
+sessions remain the responsibility of the separately inspected container cgroup boundary.
 
 The inner worker compares the two final files byte-for-byte, not only by a claimed digest. It then
 validates the common file as little-endian ELF64 with machine `x86-64` and records its exact length
