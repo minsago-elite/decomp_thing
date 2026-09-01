@@ -44,6 +44,7 @@ class LlvmBehaviorHostedWorkerImageV1BuildContextTest {
                 "getApplicationClosureSha256",
                 "getContextManifestSha256",
                 "getContextRootPathSha256",
+                "getDeterministicTarBytes",
                 "getDeterministicTarSha256",
                 "getJdkClosureSha256",
                 "getWorkerDockerfileSha256",
@@ -93,6 +94,7 @@ class LlvmBehaviorHostedWorkerImageV1BuildContextTest {
                 "decompengine.oracle.behavior.LlvmBehaviorHostedCleanBuildV2InnerWorkerMain\n"
             ).encodeToByteArray()
         assertEquals(OracleArtifacts.sha256(expectedArguments), projection.workerArgumentsSha256)
+        assertEquals(tar.size().toLong(), projection.deterministicTarBytes)
         assertEquals(OracleArtifacts.sha256(tar.toByteArray()), projection.deterministicTarSha256)
 
         val archive = parsePaxTar(tar.toByteArray())

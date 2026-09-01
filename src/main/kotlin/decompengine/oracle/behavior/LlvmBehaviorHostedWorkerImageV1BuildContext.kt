@@ -52,6 +52,7 @@ internal sealed interface LlvmBehaviorHostedWorkerImageV1BuildContextOwner : Aut
     val applicationClosureSha256: String
     val contextManifestSha256: String
     val contextRootPathSha256: String
+    val deterministicTarBytes: Long
     val deterministicTarSha256: String
 
     fun requireCurrent()
@@ -104,6 +105,8 @@ internal object LlvmBehaviorHostedWorkerImageV1BuildContext {
             get() = state.contextManifestSha256
         override val contextRootPathSha256: String
             get() = state.contextRootPathSha256
+        override val deterministicTarBytes: Long
+            get() = state.deterministicTarBytes
         override val deterministicTarSha256: String
             get() = state.deterministicTarSha256
 
@@ -231,6 +234,7 @@ internal object LlvmBehaviorHostedWorkerImageV1BuildContextTestSupport {
                 state.applicationClosureSha256,
                 state.workerArgumentsSha256,
                 state.contextManifestSha256,
+                state.deterministicTarBytes,
                 state.deterministicTarSha256,
             )
         }
@@ -255,6 +259,7 @@ internal data class NonAuthoritativeWorkerBuildContextProjection(
     val applicationClosureSha256: String,
     val workerArgumentsSha256: String,
     val contextManifestSha256: String,
+    val deterministicTarBytes: Long,
     val deterministicTarSha256: String,
 )
 
@@ -265,6 +270,7 @@ private class BoundBuildContext(
     val workerArgumentsSha256: String,
     val contextManifestSha256: String,
     val contextRootPathSha256: String,
+    val deterministicTarBytes: Long,
     val deterministicTarSha256: String,
     private val dockerfileGuard: StableControlFile,
     private val application: BoundApplicationClosure,
@@ -318,7 +324,7 @@ private class BoundBuildContext(
             contextProjection,
             output,
         )
-        if (emitted != deterministicTarSha256) {
+        if (emitted.bytes != deterministicTarBytes || emitted.sha256 != deterministicTarSha256) {
             buildContextFail("hosted-worker deterministic build-context tar changed")
         }
         requireCurrent()
@@ -430,7 +436,7 @@ private fun stageBoundContext(
         if (dockerfile.sha256(label = "hosted-worker Dockerfile after staging") != dockerfileSha256) {
             buildContextFail("hosted-worker Dockerfile changed during staging")
         }
-        val deterministicTarSha256 = emitDeterministicTar(
+        val deterministicTar = emitDeterministicTar(
             dockerfile,
             dockerfileSha256,
             openedContext.directory,
@@ -448,7 +454,8 @@ private fun stageBoundContext(
                 CONTEXT_PATH_DOMAIN,
                 listOf(openedContext.path.toString()),
             ),
-            deterministicTarSha256 = deterministicTarSha256,
+            deterministicTarBytes = deterministicTar.bytes,
+            deterministicTarSha256 = deterministicTar.sha256,
             dockerfileGuard = dockerfile,
             application = openedApplication,
             jdk = openedJdk,
@@ -1120,7 +1127,7 @@ private fun emitDeterministicTar(
     contextRoot: LinuxDescriptor,
     projection: TreeProjection,
     output: OutputStream,
-): String {
+): DeterministicTarEmission {
     val tar = DeterministicTarOutput(output)
     tar.writeRegularFile(
         path = TAR_DOCKERFILE_NAME,
@@ -1218,8 +1225,13 @@ private fun emitDeterministicTar(
 
     emitChildren(contextRoot, ROOT_RELATIVE_PATH)
     tar.finish()
-    return tar.sha256()
+    return DeterministicTarEmission(tar.bytes(), tar.sha256())
 }
+
+private data class DeterministicTarEmission(
+    val bytes: Long,
+    val sha256: String,
+)
 
 /** Minimal deterministic POSIX pax/ustar writer; it deliberately has no pathname lookup logic. */
 private class DeterministicTarOutput(
@@ -1227,6 +1239,7 @@ private class DeterministicTarOutput(
 ) {
     private val digest = MessageDigest.getInstance("SHA-256")
     private var entryIndex = 0
+    private var bytesWritten = 0L
     private var finished = false
 
     fun writeDirectory(path: String, mode: Int) {
@@ -1268,6 +1281,11 @@ private class DeterministicTarOutput(
     fun sha256(): String {
         check(finished) { "deterministic hosted-worker tar is incomplete" }
         return digest.digest().toHex()
+    }
+
+    fun bytes(): Long {
+        check(finished) { "deterministic hosted-worker tar is incomplete" }
+        return bytesWritten
     }
 
     private fun writePaxHeader(path: String, linkTarget: String?) {
@@ -1323,17 +1341,20 @@ private class DeterministicTarOutput(
     private fun writeBytes(bytes: ByteArray) {
         destination.write(bytes)
         digest.update(bytes)
+        bytesWritten = Math.addExact(bytesWritten, bytes.size.toLong())
     }
 
     private val hashUpdatingOutput = object : OutputStream() {
         override fun write(value: Int) {
             destination.write(value)
             digest.update(value.toByte())
+            bytesWritten = Math.addExact(bytesWritten, 1L)
         }
 
         override fun write(bytes: ByteArray, offset: Int, length: Int) {
             destination.write(bytes, offset, length)
             digest.update(bytes, offset, length)
+            bytesWritten = Math.addExact(bytesWritten, length.toLong())
         }
     }
 }
