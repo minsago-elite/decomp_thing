@@ -21,16 +21,34 @@ class FullTreeHeaderModulePlanTest {
             modules = fixture.modules.reversed(),
             headers = fixture.headers.reversed(),
             sourceOnly = fixture.sourceOnly.reversed(),
+            observations = fixture.observations.reversed(),
             edges = fixture.edges.reversed(),
         ).build()
 
         assertTrue(first.complete)
         assertEquals(3, first.moduleCount)
         assertEquals(5, first.headerCount)
+        assertEquals(8, first.headerObservationCount)
         assertEquals(7, first.componentCount)
         assertEquals(6, first.condensationEdgeCount)
         assertContentEquals(first.canonicalBytes, permuted.canonicalBytes)
         assertEquals(first.reportSha256, permuted.reportSha256)
+
+        val reassignedContext = fixture.copy(
+            edges = fixture.edges.map { edge ->
+                if (edge.observingModuleId == MODULE_A &&
+                    edge.consumerPath == "source/a/cycle.h" &&
+                    edge.dependencyHeaderPath == "source/b/cycle.h"
+                ) {
+                    edge.copy(observingModuleId = MODULE_B)
+                } else {
+                    edge
+                }
+            },
+        ).build()
+        assertEquals(first.componentCount, reassignedContext.componentCount)
+        assertEquals(first.condensationEdgeCount, reassignedContext.condensationEdgeCount)
+        assertNotEquals(first.reportSha256, reassignedContext.reportSha256)
 
         val document = parse(first)
         assertEquals(1L, document.controlObject("counts").controlLong("isolatedModules"))
@@ -52,6 +70,7 @@ class FullTreeHeaderModulePlanTest {
                 .map { it.controlString("consumer shard") },
         )
         val counts = document.controlObject("counts")
+        assertEquals(8L, counts.controlLong("headerObservations"))
         assertEquals(3L, counts.controlLong("sharedAcrossShardsHeaders"))
         assertEquals(0L, counts.controlLong("unreferencedHeaders"))
 
@@ -108,14 +127,84 @@ class FullTreeHeaderModulePlanTest {
             { valid.copy(modules = valid.modules + valid.modules.first()).build() },
             { valid.copy(headers = valid.headers + valid.headers.first()).build() },
             { valid.copy(edges = valid.edges + valid.edges.first()).build() },
-            { valid.copy(edges = valid.edges + FullTreeResolvedDirectFileEdge("source/missing.cpp", "source/a/a.h")).build() },
-            { valid.copy(edges = valid.edges + FullTreeResolvedDirectFileEdge("source/a/a.cpp", "source/missing.h")).build() },
-            { valid.copy(edges = valid.edges + FullTreeResolvedDirectFileEdge("source/tools/gen.cpp", "source/a/a.h")).build() },
+            { valid.copy(edges = valid.edges + FullTreeResolvedDirectFileEdge(MODULE_A, "source/missing.cpp", "source/a/a.h")).build() },
+            { valid.copy(edges = valid.edges + FullTreeResolvedDirectFileEdge(MODULE_A, "source/a/a.cpp", "source/missing.h")).build() },
+            { valid.copy(edges = valid.edges + FullTreeResolvedDirectFileEdge(MODULE_A, "source/tools/gen.cpp", "source/a/a.h")).build() },
+            { valid.copy(edges = valid.edges + FullTreeResolvedDirectFileEdge(MODULE_B, "source/a/a.cpp", "source/shared/shared.h")).build() },
             { valid.copy(sourceOnly = valid.sourceOnly + FullTreeHeaderSourceOnlyUnit("tools", "source/a/a.cpp")).build() },
         )
         hostile.forEachIndexed { index, build ->
             assertFailsWith<FullTreeHeaderModulePlanException>("hostile fixture $index") { build() }
         }
+    }
+
+    @Test
+    fun `contextual observations reject unknown duplicate and unsupported edge evidence`() {
+        val valid = graphFixture()
+        val unknownObserverEdge = FullTreeResolvedDirectFileEdge(
+            "cu-ffffffffffffffffffffffffffffffff",
+            "source/a/a.cpp",
+            "source/a/a.h",
+        )
+        val unknownHeader = FullTreeObservedHeaderUse(MODULE_A, "source/missing.h")
+        val unknownObserverUse = FullTreeObservedHeaderUse(
+            "cu-ffffffffffffffffffffffffffffffff",
+            "source/a/a.h",
+        )
+        val withoutRequiredObservation = valid.observations.filterNot {
+            it.observingModuleId == MODULE_A && it.headerPath == "source/a/a.h"
+        }
+
+        val hostile = listOf<() -> Unit>(
+            { valid.copy(edges = valid.edges + unknownObserverEdge).build() },
+            { valid.copy(observations = valid.observations + valid.observations.first()).build() },
+            { valid.copy(observations = valid.observations + unknownHeader).build() },
+            { valid.copy(observations = valid.observations + unknownObserverUse).build() },
+            { valid.copy(observations = withoutRequiredObservation).build() },
+        )
+        hostile.forEachIndexed { index, build ->
+            assertFailsWith<FullTreeHeaderModulePlanException>("contextual observation fixture $index") {
+                build()
+            }
+        }
+    }
+
+    @Test
+    fun `header shard boundaries use exact observations instead of union graph reachability`() {
+        val parent = "source/shared/parent.h"
+        val conditional = "source/shared/conditional.h"
+        val result = FullTreeHeaderModulePlan.build(
+            modules = listOf(
+                FullTreeHeaderPlanningModule(MODULE_A, "a", "source/a/a.cpp"),
+                FullTreeHeaderPlanningModule(MODULE_B, "b", "source/b/b.cpp"),
+            ),
+            headers = listOf(FullTreeCanonicalHeader(parent), FullTreeCanonicalHeader(conditional)),
+            sourceOnlyUnits = emptyList(),
+            headerObservations = listOf(
+                FullTreeObservedHeaderUse(MODULE_A, parent),
+                FullTreeObservedHeaderUse(MODULE_A, conditional),
+                FullTreeObservedHeaderUse(MODULE_B, parent),
+            ),
+            directEdges = listOf(
+                FullTreeResolvedDirectFileEdge(MODULE_A, "source/a/a.cpp", parent),
+                FullTreeResolvedDirectFileEdge(MODULE_B, "source/b/b.cpp", parent),
+                FullTreeResolvedDirectFileEdge(MODULE_A, parent, conditional),
+            ),
+            blockers = emptyList(),
+        )
+
+        val owners = parse(result).controlArray("headerOwners").controlObjects("header owners")
+            .associateBy { it.controlString("sourcePath") }
+        assertEquals(
+            listOf("a", "b"),
+            owners.getValue(parent).controlArray("consumerShardIds")
+                .map { it.controlString("parent consumer shard") },
+        )
+        assertEquals(
+            listOf("a"),
+            owners.getValue(conditional).controlArray("consumerShardIds")
+                .map { it.controlString("conditional consumer shard") },
+        )
     }
 
     @Test
@@ -132,7 +221,8 @@ class FullTreeHeaderModulePlanTest {
             listOf(module),
             listOf(header),
             emptyList(),
-            listOf(FullTreeResolvedDirectFileEdge(module.sourcePath, header.sourcePath)),
+            listOf(FullTreeObservedHeaderUse(module.moduleId, header.sourcePath)),
+            listOf(FullTreeResolvedDirectFileEdge(module.moduleId, module.sourcePath, header.sourcePath)),
             listOf(blocker),
         )
         assertFalse(result.complete)
@@ -140,12 +230,12 @@ class FullTreeHeaderModulePlanTest {
         assertEquals(2, result.componentCount)
 
         val invalid = listOf<() -> Unit>(
-            { FullTreeHeaderModulePlan.build(listOf(module), listOf(header), emptyList(), emptyList(), emptyList()) },
-            { FullTreeHeaderModulePlan.build(listOf(module.copy(unresolvedBlockerCount = 0)), listOf(header), emptyList(), emptyList(), listOf(blocker)) },
-            { FullTreeHeaderModulePlan.build(listOf(module), listOf(header), emptyList(), emptyList(), listOf(blocker.copy(consumerPath = "source/unknown.cpp"))) },
-            { FullTreeHeaderModulePlan.build(listOf(module), listOf(header), listOf(FullTreeHeaderSourceOnlyUnit("tools", "source/tools/gen.cpp")), emptyList(), listOf(blocker.copy(consumerPath = "source/tools/gen.cpp"))) },
-            { FullTreeHeaderModulePlan.build(listOf(module), listOf(header), emptyList(), emptyList(), listOf(blocker.copy(evidenceSha256 = "A".repeat(64)))) },
-            { FullTreeHeaderModulePlan.build(listOf(module.copy(unresolvedBlockerCount = 2)), listOf(header), emptyList(), emptyList(), listOf(blocker, blocker)) },
+            { FullTreeHeaderModulePlan.build(listOf(module), listOf(header), emptyList(), emptyList(), emptyList(), emptyList()) },
+            { FullTreeHeaderModulePlan.build(listOf(module.copy(unresolvedBlockerCount = 0)), listOf(header), emptyList(), emptyList(), emptyList(), listOf(blocker)) },
+            { FullTreeHeaderModulePlan.build(listOf(module), listOf(header), emptyList(), emptyList(), emptyList(), listOf(blocker.copy(consumerPath = "source/unknown.cpp"))) },
+            { FullTreeHeaderModulePlan.build(listOf(module), listOf(header), listOf(FullTreeHeaderSourceOnlyUnit("tools", "source/tools/gen.cpp")), emptyList(), emptyList(), listOf(blocker.copy(consumerPath = "source/tools/gen.cpp"))) },
+            { FullTreeHeaderModulePlan.build(listOf(module), listOf(header), emptyList(), emptyList(), emptyList(), listOf(blocker.copy(evidenceSha256 = "A".repeat(64)))) },
+            { FullTreeHeaderModulePlan.build(listOf(module.copy(unresolvedBlockerCount = 2)), listOf(header), emptyList(), emptyList(), emptyList(), listOf(blocker, blocker)) },
         )
         invalid.forEachIndexed { index, build ->
             assertFailsWith<FullTreeHeaderModulePlanException>("blocker fixture $index") { build() }
@@ -160,6 +250,7 @@ class FullTreeHeaderModulePlanTest {
         val bounded = listOf(
             limits.copy(maximumModules = 2),
             limits.copy(maximumHeaders = 4),
+            limits.copy(maximumHeaderObservations = 7),
             limits.copy(maximumDirectEdges = 7),
             limits.copy(maximumGraphNodes = 7),
             limits.copy(maximumCondensationEdges = 5),
@@ -208,10 +299,11 @@ private data class HeaderPlanFixture(
     val modules: List<FullTreeHeaderPlanningModule>,
     val headers: List<FullTreeCanonicalHeader>,
     val sourceOnly: List<FullTreeHeaderSourceOnlyUnit>,
+    val observations: List<FullTreeObservedHeaderUse>,
     val edges: List<FullTreeResolvedDirectFileEdge>,
 ) {
     fun build(limits: FullTreeHeaderModulePlanLimits = FullTreeHeaderModulePlanLimits()) =
-        FullTreeHeaderModulePlan.build(modules, headers, sourceOnly, edges, emptyList(), limits)
+        FullTreeHeaderModulePlan.build(modules, headers, sourceOnly, observations, edges, emptyList(), limits)
 }
 
 private fun graphFixture(): HeaderPlanFixture = HeaderPlanFixture(
@@ -228,15 +320,25 @@ private fun graphFixture(): HeaderPlanFixture = HeaderPlanFixture(
         FullTreeCanonicalHeader("source/b/cycle.h"),
     ),
     sourceOnly = listOf(FullTreeHeaderSourceOnlyUnit("tools", "source/tools/gen.cpp")),
+    observations = listOf(
+        FullTreeObservedHeaderUse(MODULE_A, "source/a/a.h"),
+        FullTreeObservedHeaderUse(MODULE_A, "source/shared/shared.h"),
+        FullTreeObservedHeaderUse(MODULE_A, "source/a/cycle.h"),
+        FullTreeObservedHeaderUse(MODULE_A, "source/b/cycle.h"),
+        FullTreeObservedHeaderUse(MODULE_B, "source/b/b.h"),
+        FullTreeObservedHeaderUse(MODULE_B, "source/shared/shared.h"),
+        FullTreeObservedHeaderUse(MODULE_B, "source/a/cycle.h"),
+        FullTreeObservedHeaderUse(MODULE_B, "source/b/cycle.h"),
+    ),
     edges = listOf(
-        FullTreeResolvedDirectFileEdge("source/a/a.cpp", "source/a/a.h"),
-        FullTreeResolvedDirectFileEdge("source/a/a.cpp", "source/shared/shared.h"),
-        FullTreeResolvedDirectFileEdge("source/b/b.cpp", "source/b/b.h"),
-        FullTreeResolvedDirectFileEdge("source/b/b.cpp", "source/shared/shared.h"),
-        FullTreeResolvedDirectFileEdge("source/a/a.h", "source/a/cycle.h"),
-        FullTreeResolvedDirectFileEdge("source/b/b.h", "source/b/cycle.h"),
-        FullTreeResolvedDirectFileEdge("source/a/cycle.h", "source/b/cycle.h"),
-        FullTreeResolvedDirectFileEdge("source/b/cycle.h", "source/a/cycle.h"),
+        FullTreeResolvedDirectFileEdge(MODULE_A, "source/a/a.cpp", "source/a/a.h"),
+        FullTreeResolvedDirectFileEdge(MODULE_A, "source/a/a.cpp", "source/shared/shared.h"),
+        FullTreeResolvedDirectFileEdge(MODULE_B, "source/b/b.cpp", "source/b/b.h"),
+        FullTreeResolvedDirectFileEdge(MODULE_B, "source/b/b.cpp", "source/shared/shared.h"),
+        FullTreeResolvedDirectFileEdge(MODULE_A, "source/a/a.h", "source/a/cycle.h"),
+        FullTreeResolvedDirectFileEdge(MODULE_B, "source/b/b.h", "source/b/cycle.h"),
+        FullTreeResolvedDirectFileEdge(MODULE_A, "source/a/cycle.h", "source/b/cycle.h"),
+        FullTreeResolvedDirectFileEdge(MODULE_B, "source/b/cycle.h", "source/a/cycle.h"),
     ),
 )
 

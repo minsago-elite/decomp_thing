@@ -37,17 +37,29 @@ internal data class FullTreeHeaderSourceOnlyUnit(
     val sourcePath: String,
 )
 
+/** Per-TU evidence that a compiler trace reached a canonical project header. */
+internal data class FullTreeObservedHeaderUse(
+    val observingModuleId: String,
+    val headerPath: String,
+)
+
 /** A direct file edge already resolved by an authenticated compiler-resolution boundary. */
 internal data class FullTreeResolvedDirectFileEdge(
+    val observingModuleId: String,
     val consumerPath: String,
     val dependencyHeaderPath: String,
 )
 
 internal enum class FullTreeHeaderResolutionBlockerKind(val wireName: String) {
     AMBIGUOUS("ambiguous"),
+    COMPILER_TRACE_UNAUTHENTICATED("compiler-trace-unauthenticated"),
     CONDITIONAL("conditional"),
+    EXTERNAL_INCLUDE("external-include"),
     MACRO("macro"),
+    MODULE_IMPORT("module-import"),
     NONSTANDARD("nonstandard"),
+    NON_HEADER_PROJECT_TARGET("non-header-project-target"),
+    OUT_OF_SCOPE_CONSUMER("out-of-scope-consumer"),
     GENERATED_INPUT_MISSING("generated-input-missing"),
     UNRESOLVED("unresolved"),
 }
@@ -63,6 +75,7 @@ internal data class FullTreeHeaderModulePlanLimits(
     val maximumModules: Int = HEADER_PLAN_MAXIMUM_MODULES,
     val maximumHeaders: Int = HEADER_PLAN_MAXIMUM_HEADERS,
     val maximumSourceOnlyUnits: Int = HEADER_PLAN_MAXIMUM_SOURCE_ONLY_UNITS,
+    val maximumHeaderObservations: Int = HEADER_PLAN_MAXIMUM_HEADER_OBSERVATIONS,
     val maximumDirectEdges: Int = HEADER_PLAN_MAXIMUM_DIRECT_EDGES,
     val maximumBlockers: Int = HEADER_PLAN_MAXIMUM_BLOCKERS,
     val maximumGraphNodes: Int = HEADER_PLAN_MAXIMUM_GRAPH_NODES,
@@ -74,6 +87,7 @@ internal data class FullTreeHeaderModulePlanLimits(
         require(maximumModules in 1..HEADER_PLAN_MAXIMUM_MODULES)
         require(maximumHeaders in 1..HEADER_PLAN_MAXIMUM_HEADERS)
         require(maximumSourceOnlyUnits in 1..HEADER_PLAN_MAXIMUM_SOURCE_ONLY_UNITS)
+        require(maximumHeaderObservations in 1..HEADER_PLAN_MAXIMUM_HEADER_OBSERVATIONS)
         require(maximumDirectEdges in 1..HEADER_PLAN_MAXIMUM_DIRECT_EDGES)
         require(maximumBlockers in 1..HEADER_PLAN_MAXIMUM_BLOCKERS)
         require(maximumGraphNodes in 1..HEADER_PLAN_MAXIMUM_GRAPH_NODES)
@@ -88,6 +102,7 @@ internal sealed interface FullTreeHeaderModulePlanResult {
     val moduleCount: Int
     val headerCount: Int
     val sourceOnlyCount: Int
+    val headerObservationCount: Int
     val directEdgeCount: Int
     val blockerCount: Int
     val componentCount: Int
@@ -111,6 +126,7 @@ internal object FullTreeHeaderModulePlan {
         modules: List<FullTreeHeaderPlanningModule>,
         headers: List<FullTreeCanonicalHeader>,
         sourceOnlyUnits: List<FullTreeHeaderSourceOnlyUnit>,
+        headerObservations: List<FullTreeObservedHeaderUse>,
         directEdges: List<FullTreeResolvedDirectFileEdge>,
         blockers: List<FullTreeHeaderResolutionBlocker>,
         limits: FullTreeHeaderModulePlanLimits = FullTreeHeaderModulePlanLimits(),
@@ -118,6 +134,7 @@ internal object FullTreeHeaderModulePlan {
         modules.toList(),
         headers.toList(),
         sourceOnlyUnits.toList(),
+        headerObservations.toList(),
         directEdges.toList(),
         blockers.toList(),
         limits,
@@ -129,6 +146,7 @@ private class ValidatedHeaderModulePlan(
     override val moduleCount: Int,
     override val headerCount: Int,
     override val sourceOnlyCount: Int,
+    override val headerObservationCount: Int,
     override val directEdgeCount: Int,
     override val blockerCount: Int,
     override val componentCount: Int,
@@ -161,7 +179,16 @@ private data class ValidatedSourceOnly(
     val sourcePath: String,
 )
 
+private data class ValidatedHeaderObservation(
+    val observingModuleId: String,
+    val observingShardId: String,
+    val headerOwnerId: String,
+    val headerPath: String,
+)
+
 private data class ValidatedDirectEdge(
+    val observingModuleId: String,
+    val observingShardId: String,
     val consumerPath: String,
     val dependencyHeaderPath: String,
     val consumerNodeId: String,
@@ -216,11 +243,20 @@ private fun buildHeaderModulePlan(
     rawModules: List<FullTreeHeaderPlanningModule>,
     rawHeaders: List<FullTreeCanonicalHeader>,
     rawSourceOnly: List<FullTreeHeaderSourceOnlyUnit>,
+    rawHeaderObservations: List<FullTreeObservedHeaderUse>,
     rawDirectEdges: List<FullTreeResolvedDirectFileEdge>,
     rawBlockers: List<FullTreeHeaderResolutionBlocker>,
     limits: FullTreeHeaderModulePlanLimits,
 ): FullTreeHeaderModulePlanResult {
-    requireInputCounts(rawModules, rawHeaders, rawSourceOnly, rawDirectEdges, rawBlockers, limits)
+    requireInputCounts(
+        rawModules,
+        rawHeaders,
+        rawSourceOnly,
+        rawHeaderObservations,
+        rawDirectEdges,
+        rawBlockers,
+        limits,
+    )
     val work = HeaderPlanWorkBudget(limits.maximumWorkUnits)
 
     val modules = validateModules(rawModules, limits, work)
@@ -256,6 +292,13 @@ private fun buildHeaderModulePlan(
         headerPlanFail("header module plan exceeds its graph-node bound")
     }
 
+    val headerObservations = validateHeaderObservations(
+        rawHeaderObservations,
+        modules,
+        headers,
+        work,
+    )
+
     val blockers = validateBlockers(
         rawBlockers,
         modules,
@@ -266,9 +309,11 @@ private fun buildHeaderModulePlan(
     )
     val directEdges = validateDirectEdges(
         rawDirectEdges,
+        modules,
         headers,
         nodeIdByPath,
         sourceOnlyPaths,
+        headerObservations,
         work,
     )
     requireExactBlockerAccounting(modules, headers, blockers)
@@ -281,13 +326,14 @@ private fun buildHeaderModulePlan(
         reverseAdjacency.getValue(edge.dependencyNodeId).add(edge.consumerNodeId)
     }
     val graph = buildCondensationGraph(nodes, adjacency, reverseAdjacency, limits, work)
-    val boundaries = buildHeaderPlanBoundaries(nodes, graph, work)
+    val boundaries = buildHeaderPlanBoundaries(nodes, headerObservations, graph, work)
     val directConsumerPaths = directEdges.mapTo(HashSet(), ValidatedDirectEdge::consumerPath)
     val isolatedModules = modules.count { it.sourcePath !in directConsumerPaths }
     val complete = blockers.isEmpty()
 
     work.charge(
         modules.size.toLong() + headers.size.toLong() + sourceOnly.size.toLong() +
+            headerObservations.size.toLong() +
             directEdges.size.toLong() + blockers.size.toLong() + graph.components.size.toLong() +
             graph.edges.size.toLong() + graph.kahnOrder.size.toLong(),
         "canonical output record",
@@ -296,6 +342,7 @@ private fun buildHeaderModulePlan(
         modules,
         headers,
         sourceOnly,
+        headerObservations,
         directEdges,
         blockers,
         graph,
@@ -313,6 +360,7 @@ private fun buildHeaderModulePlan(
         moduleCount = modules.size,
         headerCount = headers.size,
         sourceOnlyCount = sourceOnly.size,
+        headerObservationCount = headerObservations.size,
         directEdgeCount = directEdges.size,
         blockerCount = blockers.size,
         componentCount = graph.components.size,
@@ -327,6 +375,7 @@ private fun requireInputCounts(
     modules: List<FullTreeHeaderPlanningModule>,
     headers: List<FullTreeCanonicalHeader>,
     sourceOnly: List<FullTreeHeaderSourceOnlyUnit>,
+    headerObservations: List<FullTreeObservedHeaderUse>,
     directEdges: List<FullTreeResolvedDirectFileEdge>,
     blockers: List<FullTreeHeaderResolutionBlocker>,
     limits: FullTreeHeaderModulePlanLimits,
@@ -336,6 +385,9 @@ private fun requireInputCounts(
     if (headers.size > limits.maximumHeaders) headerPlanFail("header module plan exceeds its header bound")
     if (sourceOnly.size > limits.maximumSourceOnlyUnits) {
         headerPlanFail("header module plan exceeds its source-only bound")
+    }
+    if (headerObservations.size > limits.maximumHeaderObservations) {
+        headerPlanFail("header module plan exceeds its header-observation bound")
     }
     if (directEdges.size > limits.maximumDirectEdges) {
         headerPlanFail("header module plan exceeds its direct-edge bound")
@@ -423,18 +475,62 @@ private fun addPlanNode(
     }
 }
 
+private fun validateHeaderObservations(
+    raw: List<FullTreeObservedHeaderUse>,
+    modules: List<ValidatedModule>,
+    headers: List<ValidatedHeader>,
+    work: HeaderPlanWorkBudget,
+): List<ValidatedHeaderObservation> {
+    val modulesById = modules.associateBy(ValidatedModule::moduleId)
+    val headersByPath = headers.associateBy(ValidatedHeader::sourcePath)
+    val identities = TreeSet<String>(FULL_TREE_CODE_POINT_ORDER)
+    val result = ArrayList<ValidatedHeaderObservation>(raw.size)
+    raw.forEach { observation ->
+        work.charge("header observation")
+        val observer = modulesById[observation.observingModuleId]
+            ?: headerPlanFail("header observation names an unknown module")
+        val header = headersByPath[observation.headerPath]
+            ?: headerPlanFail("header observation names an unknown canonical header")
+        val identity = "${observer.moduleId}\u0000${header.headerOwnerId}"
+        if (!identities.add(identity)) headerPlanFail("header observations contain a duplicate")
+        result += ValidatedHeaderObservation(
+            observer.moduleId,
+            observer.shardId,
+            header.headerOwnerId,
+            header.sourcePath,
+        )
+    }
+    return immutableHeaderPlanList(
+        result.sortedWith { left, right ->
+            FULL_TREE_CODE_POINT_ORDER.compare(left.observingModuleId, right.observingModuleId)
+                .takeIf { it != 0 }
+                ?: FULL_TREE_CODE_POINT_ORDER.compare(left.headerOwnerId, right.headerOwnerId)
+        },
+    )
+}
+
 private fun validateDirectEdges(
     raw: List<FullTreeResolvedDirectFileEdge>,
+    modules: List<ValidatedModule>,
     headers: List<ValidatedHeader>,
     nodeIdByPath: Map<String, String>,
     sourceOnlyPaths: Set<String>,
+    headerObservations: List<ValidatedHeaderObservation>,
     work: HeaderPlanWorkBudget,
 ): List<ValidatedDirectEdge> {
+    val modulesById = modules.associateBy(ValidatedModule::moduleId)
+    val moduleIds = modulesById.keys
     val headerIds = headers.associate { it.sourcePath to it.headerOwnerId }
+    val headerOwnerIds = headerIds.values.toHashSet()
+    val observedHeaders = headerObservations.mapTo(HashSet()) {
+        it.observingModuleId to it.headerOwnerId
+    }
     val identities = TreeSet<String>(FULL_TREE_CODE_POINT_ORDER)
     val result = ArrayList<ValidatedDirectEdge>(raw.size)
     raw.forEach { edge ->
         work.charge("resolved direct file edge")
+        val observer = modulesById[edge.observingModuleId]
+            ?: headerPlanFail("direct edge names an unknown observing module")
         requireCanonicalPlanPath(edge.consumerPath, "direct-edge consumer")
         requireSourcePath(edge.dependencyHeaderPath, HEADER_PLAN_HEADER_SUFFIXES, "direct-edge dependency")
         if (edge.consumerPath in sourceOnlyPaths) {
@@ -444,9 +540,19 @@ private fun validateDirectEdges(
             ?: headerPlanFail("direct edge names an unknown consumer")
         val dependencyId = headerIds[edge.dependencyHeaderPath]
             ?: headerPlanFail("direct edge names an unknown canonical header dependency")
-        val identity = "$consumerId\u0000$dependencyId"
+        if (consumerId in moduleIds && consumerId != observer.moduleId) {
+            headerPlanFail("direct edge module consumer is not its observing module")
+        }
+        if (observer.moduleId to dependencyId !in observedHeaders ||
+            (consumerId in headerOwnerIds && observer.moduleId to consumerId !in observedHeaders)
+        ) {
+            headerPlanFail("direct edge lacks exact per-TU header observation evidence")
+        }
+        val identity = "${observer.moduleId}\u0000$consumerId\u0000$dependencyId"
         if (!identities.add(identity)) headerPlanFail("resolved direct file edges contain a duplicate")
         result += ValidatedDirectEdge(
+            observer.moduleId,
+            observer.shardId,
             edge.consumerPath,
             edge.dependencyHeaderPath,
             consumerId,
@@ -454,7 +560,8 @@ private fun validateDirectEdges(
         )
     }
     return result.sortedWith { left, right ->
-        FULL_TREE_CODE_POINT_ORDER.compare(left.consumerNodeId, right.consumerNodeId).takeIf { it != 0 }
+        FULL_TREE_CODE_POINT_ORDER.compare(left.observingModuleId, right.observingModuleId).takeIf { it != 0 }
+            ?: FULL_TREE_CODE_POINT_ORDER.compare(left.consumerNodeId, right.consumerNodeId).takeIf { it != 0 }
             ?: FULL_TREE_CODE_POINT_ORDER.compare(left.dependencyNodeId, right.dependencyNodeId)
     }
 }
@@ -690,59 +797,70 @@ private fun deterministicKahnOrder(
 }
 
 /**
- * Propagates the exact A13 module shards backwards through the dependency-first condensation DAG.
- * A shared header keeps its own first-class owner; this set records every downstream subsystem
- * that consumes it without assigning the header arbitrarily to any one of those subsystems.
+ * Retains exact per-TU A13 shard observations without inferring use through the union/may graph.
+ * A shared header keeps its own first-class owner; component facts are only unions of the exact
+ * observations of their members and never transitive reachability claims.
  */
 private fun buildHeaderPlanBoundaries(
     nodes: Map<String, HeaderPlanNode>,
+    headerObservations: List<ValidatedHeaderObservation>,
     graph: HeaderPlanGraph,
     work: HeaderPlanWorkBudget,
 ): HeaderPlanBoundaryFacts {
-    val nodeToComponent = HashMap<String, String>(nodes.size)
+    val assignedNodeIds = HashSet<String>(nodes.size)
     val memberShards = TreeMap<String, TreeSet<String>>(FULL_TREE_CODE_POINT_ORDER)
-    val consumerShards = TreeMap<String, TreeSet<String>>(FULL_TREE_CODE_POINT_ORDER)
+    val nodeConsumerShards = TreeMap<String, TreeSet<String>>(FULL_TREE_CODE_POINT_ORDER)
     graph.components.forEach { component ->
         val shards = TreeSet<String>(FULL_TREE_CODE_POINT_ORDER)
         component.memberNodeIds.forEach { nodeId ->
             work.charge("component boundary member")
-            if (nodeToComponent.putIfAbsent(nodeId, component.componentId) != null) {
-                headerPlanFail("boundary propagation found duplicate component membership")
+            if (!assignedNodeIds.add(nodeId)) {
+                headerPlanFail("boundary construction found duplicate component membership")
             }
-            nodes.getValue(nodeId).shardId?.let(shards::add)
+            val nodeShards = TreeSet<String>(FULL_TREE_CODE_POINT_ORDER)
+            nodes.getValue(nodeId).shardId?.let { shardId ->
+                work.charge("module boundary shard membership")
+                shards.add(shardId)
+                nodeShards.add(shardId)
+            }
+            nodeConsumerShards[nodeId] = nodeShards
         }
         memberShards[component.componentId] = shards
-        consumerShards[component.componentId] = TreeSet<String>(FULL_TREE_CODE_POINT_ORDER).apply {
-            addAll(shards)
-        }
     }
-    val outgoing = TreeMap<String, TreeSet<String>>(FULL_TREE_CODE_POINT_ORDER).apply {
-        graph.components.forEach { put(it.componentId, TreeSet(FULL_TREE_CODE_POINT_ORDER)) }
+    if (assignedNodeIds.size != nodes.size) {
+        headerPlanFail("boundary construction omitted a graph node")
     }
-    graph.edges.forEach { edge ->
-        work.charge("component boundary edge")
-        outgoing.getValue(edge.dependencyComponentId).add(edge.consumerComponentId)
+    headerObservations.forEach { observation ->
+        work.charge("exact header consumer-shard membership")
+        nodeConsumerShards.getValue(observation.headerOwnerId).add(observation.observingShardId)
     }
-    graph.kahnOrder.asReversed().forEach { dependency ->
-        outgoing.getValue(dependency).forEach { consumer ->
-            consumerShards.getValue(consumer).forEach { shard ->
-                work.charge("component consumer-shard membership")
-                consumerShards.getValue(dependency).add(shard)
+
+    val componentConsumerShards = TreeMap<String, TreeSet<String>>(FULL_TREE_CODE_POINT_ORDER)
+    graph.components.forEach { component ->
+        val shards = TreeSet<String>(FULL_TREE_CODE_POINT_ORDER)
+        component.memberNodeIds.forEach { nodeId ->
+            nodeConsumerShards.getValue(nodeId).forEach { shardId ->
+                work.charge("component exact consumer-shard membership")
+                shards.add(shardId)
             }
         }
+        componentConsumerShards[component.componentId] = shards
     }
+
     val headerShards = TreeMap<String, List<String>>(FULL_TREE_CODE_POINT_ORDER)
     nodes.values.filter { it.kind == HeaderPlanNodeKind.HEADER }.forEach { header ->
         work.charge("header consumer boundary")
-        headerShards[header.nodeId] = immutableHeaderPlanList(
-            consumerShards.getValue(nodeToComponent.getValue(header.nodeId)),
-        )
+        val exactShards = nodeConsumerShards.getValue(header.nodeId)
+        work.charge(exactShards.size.toLong(), "header consumer-shard output membership")
+        headerShards[header.nodeId] = immutableHeaderPlanList(exactShards)
     }
     return HeaderPlanBoundaryFacts(
         componentMemberShardIds = immutableHeaderPlanMap(memberShards.mapValues { (_, value) ->
+            work.charge(value.size.toLong(), "component member-shard output membership")
             immutableHeaderPlanList(value)
         }),
-        componentConsumerShardIds = immutableHeaderPlanMap(consumerShards.mapValues { (_, value) ->
+        componentConsumerShardIds = immutableHeaderPlanMap(componentConsumerShards.mapValues { (_, value) ->
+            work.charge(value.size.toLong(), "component consumer-shard output membership")
             immutableHeaderPlanList(value)
         }),
         headerConsumerShardIds = immutableHeaderPlanMap(headerShards),
@@ -753,6 +871,7 @@ private fun renderHeaderModulePlan(
     modules: List<ValidatedModule>,
     headers: List<ValidatedHeader>,
     sourceOnly: List<ValidatedSourceOnly>,
+    headerObservations: List<ValidatedHeaderObservation>,
     directEdges: List<ValidatedDirectEdge>,
     blockers: List<ValidatedBlocker>,
     graph: HeaderPlanGraph,
@@ -810,6 +929,7 @@ private fun renderHeaderModulePlan(
                     )
                 }),
                 "kahnOrder" to JsonArray(graph.kahnOrder.map(::JsonPrimitive)),
+                "graphSemantics" to JsonPrimitive("union-may-graph-across-contextual-per-tu-direct-edges"),
                 "ordering" to JsonPrimitive("unicode-code-point-id-with-code-point-priority-kahn"),
             ),
         ),
@@ -823,6 +943,7 @@ private fun renderHeaderModulePlan(
                 ),
                 "directFileEdges" to JsonPrimitive(directEdges.size),
                 "graphNodes" to JsonPrimitive(modules.size + headers.size),
+                "headerObservations" to JsonPrimitive(headerObservations.size),
                 "isolatedModules" to JsonPrimitive(isolatedModules),
                 "planningModules" to JsonPrimitive(modules.size),
                 "resolutionBlockers" to JsonPrimitive(blockers.size),
@@ -843,6 +964,8 @@ private fun renderHeaderModulePlan(
                     "consumerPath" to JsonPrimitive(edge.consumerPath),
                     "dependencyHeaderOwnerId" to JsonPrimitive(edge.dependencyNodeId),
                     "dependencyHeaderPath" to JsonPrimitive(edge.dependencyHeaderPath),
+                    "observingModuleId" to JsonPrimitive(edge.observingModuleId),
+                    "observingShardId" to JsonPrimitive(edge.observingShardId),
                 ),
             )
         }),
@@ -852,6 +975,7 @@ private fun renderHeaderModulePlan(
                 "maximumCondensationEdges" to JsonPrimitive(limits.maximumCondensationEdges),
                 "maximumDirectEdges" to JsonPrimitive(limits.maximumDirectEdges),
                 "maximumGraphNodes" to JsonPrimitive(limits.maximumGraphNodes),
+                "maximumHeaderObservations" to JsonPrimitive(limits.maximumHeaderObservations),
                 "maximumHeaders" to JsonPrimitive(limits.maximumHeaders),
                 "maximumModules" to JsonPrimitive(limits.maximumModules),
                 "maximumSerializedBytes" to JsonPrimitive(limits.maximumSerializedBytes),
@@ -873,7 +997,17 @@ private fun renderHeaderModulePlan(
                 ),
             )
         }),
-        "kind" to JsonPrimitive("full-tree-header-module-plan-fixture-v1"),
+        "headerObservations" to JsonArray(headerObservations.map { observation ->
+            JsonObject(
+                mapOf(
+                    "headerOwnerId" to JsonPrimitive(observation.headerOwnerId),
+                    "headerPath" to JsonPrimitive(observation.headerPath),
+                    "observingModuleId" to JsonPrimitive(observation.observingModuleId),
+                    "observingShardId" to JsonPrimitive(observation.observingShardId),
+                ),
+            )
+        }),
+        "kind" to JsonPrimitive("full-tree-header-module-plan-fixture-v2"),
         "modules" to JsonArray(modules.map { module ->
             JsonObject(
                 mapOf(
@@ -890,13 +1024,13 @@ private fun renderHeaderModulePlan(
                 "directEdges" to JsonPrimitive("fully-compiler-resolved-file-identities-only"),
                 "headerOwnership" to JsonPrimitive("full-domain-sha256-of-canonical-header-path"),
                 "headerSubsystemBoundary" to JsonPrimitive(
-                    "transitive-consumer-shard-set-without-arbitrary-owner-reassignment",
+                    "exact-per-tu-observing-module-shard-set-without-transitive-inference",
                 ),
                 "sourceOnlyOwnership" to JsonPrimitive("forbidden"),
                 "unresolvedEvidence" to JsonPrimitive("exact-count-accounted-blockers-only"),
             ),
         ),
-        "schemaVersion" to JsonPrimitive(1),
+        "schemaVersion" to JsonPrimitive(2),
         "sourceOnlyUnits" to JsonArray(sourceOnly.map { unit ->
             JsonObject(
                 mapOf(
@@ -1034,6 +1168,7 @@ private const val HEADER_PLAN_MAXIMUM_PATH_BYTES = 4096
 internal const val HEADER_PLAN_MAXIMUM_MODULES = 10_000
 internal const val HEADER_PLAN_MAXIMUM_HEADERS = 50_000
 internal const val HEADER_PLAN_MAXIMUM_SOURCE_ONLY_UNITS = 50_000
+internal const val HEADER_PLAN_MAXIMUM_HEADER_OBSERVATIONS = 100_000
 internal const val HEADER_PLAN_MAXIMUM_DIRECT_EDGES = 100_000
 internal const val HEADER_PLAN_MAXIMUM_BLOCKERS = 50_000
 internal const val HEADER_PLAN_MAXIMUM_GRAPH_NODES = 60_000
