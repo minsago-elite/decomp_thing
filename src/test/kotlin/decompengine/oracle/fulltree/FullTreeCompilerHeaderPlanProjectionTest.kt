@@ -130,6 +130,32 @@ class FullTreeCompilerHeaderPlanProjectionTest {
     }
 
     @Test
+    fun `external consumer bridge retains the reached project header observation without an edge`() {
+        val bridgeTrace = document(
+            listOf(
+                record(
+                    "/usr/include/forced.h",
+                    listOf(include("/usr/include/forced.h:1:1", "/trace/source/include/X.h")),
+                ),
+            ),
+        )
+        val result = project(
+            modules = listOf(module(MODULE_A, "a", SOURCE_A, bridgeTrace)),
+            headers = listOf(HEADER_X),
+            sourceOnly = emptyList(),
+            roots = ROOTS,
+        )
+
+        assertEquals(1, result.headerObservationCount)
+        assertEquals(0, result.directEdgeCount)
+        val owner = parse(result).controlArray("headerOwners").controlObjects("header owners").single()
+        assertEquals(
+            listOf("a"),
+            owner.controlArray("consumerShardIds").map { it.controlString("consumer shard") },
+        )
+    }
+
+    @Test
     fun `missing duplicate and aliased module header and source-only inputs fail closed`() {
         val valid = module(MODULE_A, "a", SOURCE_A, document(aRecords().take(1)))
         val duplicateModuleId = module(MODULE_A, "b", SOURCE_B, byteArrayOf())
@@ -212,6 +238,14 @@ class FullTreeCompilerHeaderPlanProjectionTest {
         }
         assertFailsWith<IllegalArgumentException> {
             defaults.copy(maximumEvidenceBytes = 0)
+        }
+        assertFailsWith<FullTreeCompilerHeaderPlanProjectionException> {
+            module(
+                MODULE_A,
+                "a",
+                SOURCE_A,
+                ByteArray(CLANG_TRACE_MAXIMUM_INPUT_BYTES + 1),
+            )
         }
     }
 

@@ -19,13 +19,20 @@ internal class FullTreeCompilerHeaderTraceModule(
     val sourcePath: String,
     rawTraceBytes: ByteArray,
 ) {
-    private val storedTraceBytes = rawTraceBytes.copyOf()
+    private val storedTraceBytes = boundedTraceSnapshot(rawTraceBytes)
 
     val traceByteCount: Int
         get() = storedTraceBytes.size
 
     val rawTraceBytes: ByteArray
         get() = storedTraceBytes.copyOf()
+}
+
+private fun boundedTraceSnapshot(rawTraceBytes: ByteArray): ByteArray {
+    if (rawTraceBytes.size > CLANG_TRACE_MAXIMUM_INPUT_BYTES) {
+        projectionFail("compiler header trace exceeds the immutable per-trace byte bound")
+    }
+    return rawTraceBytes.copyOf()
 }
 
 /** Caller-lowerable aggregate limits around the independently bounded parser and plan builder. */
