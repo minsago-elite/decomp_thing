@@ -1,17 +1,18 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "$id": "https://github.com/minsago-elite/decomp_thing/oracle/full-tree-generated-file-inventory.schema.json",
-  "title": "Authenticated unreceipted full-tree generated-file snapshot inventory",
+  "title": "Integrity-verified unreceipted full-tree generated-file snapshot inventory",
   "type": "object",
   "additionalProperties": false,
-  "required": ["schemaVersion", "kind", "authority", "acpBoundary", "bounds", "counts", "oracle", "snapshot", "provenance", "generatorActions", "generatedFiles", "canonicalGeneratedFileManifestSha256", "canonicalGeneratedHeaderManifestSha256", "blockers", "reportSha256"],
+  "required": ["schemaVersion", "kind", "authority", "acpBoundary", "selectionPolicy", "bounds", "counts", "oracle", "snapshot", "provenance", "generatorActions", "generatedFiles", "canonicalGeneratedFileManifestSha256", "canonicalGeneratedHeaderManifestSha256", "blockers", "reportSha256"],
   "properties": {
     "schemaVersion": {"const": 1},
     "kind": {"const": "full-tree-generated-file-inventory-v1"},
     "authority": {
       "const": {
         "status": "unreceipted-generated-snapshot",
-        "snapshotBytesAuthenticated": true,
+        "snapshotBytesAuthenticated": false,
+        "snapshotBytesIntegrityVerified": true,
         "generationReceiptBound": false,
         "generatedHeaderPopulationComplete": false,
         "cleanCompilationProven": false,
@@ -41,39 +42,58 @@
         "releaseAuthority": false
       }
     },
+    "selectionPolicy": {
+      "const": {
+        "snapshotKind": "selective-generated-header-and-a13-tu-snapshot",
+        "eligibleHeaderSuffixMatching": "case-sensitive",
+        "regularFilePopulation": "eligible-generated-headers-union-authenticated-a13-generated-tus",
+        "otherRegularFiles": "forbidden",
+        "provenanceFileCoverage": "exact-all-archive-regular-files"
+      }
+    },
     "bounds": {
       "const": {
         "maximumActionOutputReferences": 60000,
         "maximumArchiveBytes": 536870912,
+        "maximumArchiveIndexBytes": 67108864,
         "maximumArchiveMembers": 200000,
+        "maximumBlockers": 4,
+        "maximumCmakeEvidenceBytes": 67108864,
         "maximumExpandedArchiveBytes": 8589934592,
         "maximumGeneratedFileBytes": 536870912,
         "maximumGeneratedFiles": 60000,
         "maximumGeneratedHeaders": 50000,
         "maximumGeneratedTranslationUnits": 10000,
         "maximumGeneratorActions": 60000,
+        "maximumNinjaEvidenceBytes": 536870912,
+        "maximumOutputRecords": 180004,
+        "maximumPathBytes": 4096,
+        "maximumPathComponentBytes": 255,
         "maximumProvenanceBytes": 67108864,
         "maximumSerializedBytes": 67108864,
+        "maximumToolBytes": 536870912,
         "maximumTotalGeneratedFileBytes": 2147483648,
-        "maximumWorkUnits": 5000000
+        "maximumWorkUnits": 5000000,
+        "maximumXzDecoderMemoryKiB": 262144
       }
     },
     "counts": {
       "type": "object",
       "additionalProperties": false,
-      "required": ["archiveDirectories", "archiveMembers", "archiveRegularFiles", "archiveSymbolicLinks", "generatedFileBytes", "generatedFiles", "generatedHeaders", "generatedTranslationUnits", "generatorActionOutputReferences", "generatorActions", "outputRecords", "workUnits"],
+      "required": ["archiveDirectories", "archiveMembers", "archiveRegularFiles", "archiveSymbolicLinks", "blockers", "generatedFileBytes", "generatedFiles", "generatedHeaders", "generatedTranslationUnits", "generatorActionOutputReferences", "generatorActions", "outputRecords", "workUnits"],
       "properties": {
         "archiveDirectories": {"type": "integer", "minimum": 1, "maximum": 200000},
         "archiveMembers": {"type": "integer", "minimum": 2, "maximum": 200000},
         "archiveRegularFiles": {"type": "integer", "minimum": 1, "maximum": 60000},
         "archiveSymbolicLinks": {"const": 0},
+        "blockers": {"const": 4},
         "generatedFileBytes": {"type": "integer", "minimum": 0, "maximum": 2147483648},
         "generatedFiles": {"type": "integer", "minimum": 1, "maximum": 60000},
         "generatedHeaders": {"type": "integer", "minimum": 0, "maximum": 50000},
         "generatedTranslationUnits": {"type": "integer", "minimum": 1, "maximum": 10000},
         "generatorActionOutputReferences": {"type": "integer", "minimum": 1, "maximum": 60000},
         "generatorActions": {"type": "integer", "minimum": 1, "maximum": 60000},
-        "outputRecords": {"type": "integer", "minimum": 3, "maximum": 180004},
+        "outputRecords": {"type": "integer", "minimum": 7, "maximum": 180004},
         "workUnits": {"type": "integer", "minimum": 1, "maximum": 5000000}
       }
     },
@@ -148,9 +168,14 @@
   },
   "$defs": {
     "sha256": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
-    "absolutePath": {"type": "string", "pattern": "^/(?!$)(?!.*(?:^|/)\\.{1,2}(?:/|$))(?!.*//)[^\\\\\\u0000]+$", "maxLength": 4096},
-    "generatedPath": {"type": "string", "pattern": "^generated/[A-Za-z0-9._+/-]+$", "maxLength": 4096},
-    "headerPath": {"type": "string", "pattern": "^generated/[A-Za-z0-9._+/-]+\\.(def|h|hh|hpp|hxx|inc)$", "maxLength": 4096},
+    "absolutePath": {"type": "string", "pattern": "^/(?!$)(?!\\.{1,2}(?:/|$))(?!.*(?:^|/)\\.{1,2}(?:/|$))(?!.*//)[^\\\\\\u0000]+$", "maxLength": 4096},
+    "generatedPath": {"type": "string", "pattern": "^generated/(?:(?!\\.{1,2}(?:/|$))[A-Za-z0-9._+-]{1,255}/)*(?!\\.{1,2}$)[A-Za-z0-9._+-]{1,255}$", "maxLength": 4096},
+    "headerPath": {
+      "allOf": [
+        {"$ref": "#/$defs/generatedPath"},
+        {"pattern": "\\.(def|h|hh|hpp|hxx|inc)$"}
+      ]
+    },
     "compilationUnitId": {"type": "string", "pattern": "^cu-[0-9a-f]{32}$"},
     "shardId": {"type": "string", "pattern": "^[a-z0-9]+(?:-[a-z0-9]+)*$", "maxLength": 128},
     "toolBinding": {
@@ -205,9 +230,10 @@
     "cmakeProducer": {
       "type": "object",
       "additionalProperties": false,
-      "required": ["kind", "generatorIdentitySha256", "generatorCommandSha256", "cmakeOriginSha256", "ninjaDisposition"],
+      "required": ["kind", "runnerIdentitySha256", "generatorIdentitySha256", "generatorCommandSha256", "cmakeOriginSha256", "ninjaDisposition"],
       "properties": {
         "kind": {"const": "cmake-configure"},
+        "runnerIdentitySha256": {"$ref": "#/$defs/sha256"},
         "generatorIdentitySha256": {"$ref": "#/$defs/sha256"},
         "generatorCommandSha256": {"$ref": "#/$defs/sha256"},
         "cmakeOriginSha256": {"$ref": "#/$defs/sha256"},
@@ -217,9 +243,10 @@
     "ninjaProducer": {
       "type": "object",
       "additionalProperties": false,
-      "required": ["kind", "generatorIdentitySha256", "generatorCommandSha256", "cmakeOriginSha256", "ninjaEdgeSha256"],
+      "required": ["kind", "runnerIdentitySha256", "generatorIdentitySha256", "generatorCommandSha256", "cmakeOriginSha256", "ninjaEdgeSha256"],
       "properties": {
         "kind": {"const": "ninja-edge"},
+        "runnerIdentitySha256": {"$ref": "#/$defs/sha256"},
         "generatorIdentitySha256": {"$ref": "#/$defs/sha256"},
         "generatorCommandSha256": {"$ref": "#/$defs/sha256"},
         "cmakeOriginSha256": {"$ref": "#/$defs/sha256"},

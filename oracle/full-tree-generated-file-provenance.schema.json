@@ -64,8 +64,8 @@
   },
   "$defs": {
     "sha256": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
-    "absolutePath": {"type": "string", "pattern": "^/(?!$)(?!.*(?:^|/)\\.{1,2}(?:/|$))(?!.*//)[^\\\\\\u0000]+$", "maxLength": 4096},
-    "generatedPath": {"type": "string", "pattern": "^generated/[A-Za-z0-9._+/-]+$", "maxLength": 4096},
+    "absolutePath": {"type": "string", "pattern": "^/(?!$)(?!\\.{1,2}(?:/|$))(?!.*(?:^|/)\\.{1,2}(?:/|$))(?!.*//)[^\\\\\\u0000]+$", "maxLength": 4096},
+    "generatedPath": {"type": "string", "pattern": "^generated/(?:(?!\\.{1,2}(?:/|$))[A-Za-z0-9._+-]{1,255}/)*(?!\\.{1,2}$)[A-Za-z0-9._+-]{1,255}$", "maxLength": 4096},
     "toolBinding": {
       "type": "object",
       "additionalProperties": false,
@@ -122,9 +122,10 @@
     "cmakeProducer": {
       "type": "object",
       "additionalProperties": false,
-      "required": ["kind", "generatorIdentitySha256", "generatorCommandSha256", "cmakeOriginSha256", "ninjaDisposition"],
+      "required": ["kind", "runnerIdentitySha256", "generatorIdentitySha256", "generatorCommandSha256", "cmakeOriginSha256", "ninjaDisposition"],
       "properties": {
         "kind": {"const": "cmake-configure"},
+        "runnerIdentitySha256": {"$ref": "#/$defs/sha256"},
         "generatorIdentitySha256": {"$ref": "#/$defs/sha256"},
         "generatorCommandSha256": {"$ref": "#/$defs/sha256"},
         "cmakeOriginSha256": {"$ref": "#/$defs/sha256"},
@@ -134,9 +135,10 @@
     "ninjaProducer": {
       "type": "object",
       "additionalProperties": false,
-      "required": ["kind", "generatorIdentitySha256", "generatorCommandSha256", "cmakeOriginSha256", "ninjaEdgeSha256"],
+      "required": ["kind", "runnerIdentitySha256", "generatorIdentitySha256", "generatorCommandSha256", "cmakeOriginSha256", "ninjaEdgeSha256"],
       "properties": {
         "kind": {"const": "ninja-edge"},
+        "runnerIdentitySha256": {"$ref": "#/$defs/sha256"},
         "generatorIdentitySha256": {"$ref": "#/$defs/sha256"},
         "generatorCommandSha256": {"$ref": "#/$defs/sha256"},
         "cmakeOriginSha256": {"$ref": "#/$defs/sha256"},
