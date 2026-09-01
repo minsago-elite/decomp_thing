@@ -66,6 +66,15 @@ internal data class FullTreeClangExternalIncludeOccurrence(
     val observedDependencyPath: String,
 )
 
+internal data class FullTreeClangExternalConsumerIncludeOccurrence(
+    val observedConsumerPath: String,
+    val presumedLocationFile: String,
+    val line: Long,
+    val column: Long,
+    val observedDependencyPath: String,
+    val dependencyProjectPath: String?,
+)
+
 internal data class FullTreeClangModuleImport(
     val consumerPath: String,
     val presumedLocationFile: String,
@@ -76,6 +85,16 @@ internal data class FullTreeClangModuleImport(
     val moduleMapPath: String?,
 )
 
+internal data class FullTreeClangExternalConsumerModuleImport(
+    val observedConsumerPath: String,
+    val presumedLocationFile: String,
+    val line: Long,
+    val column: Long,
+    val moduleName: String,
+    val observedModuleMapPath: String,
+    val moduleMapProjectPath: String?,
+)
+
 /** Strictly parsed Clang `direct-per-file` JSON. No compiler-authenticity claim lives here. */
 internal data class FullTreeClangHeaderTrace(
     val inputSha256: String,
@@ -84,7 +103,9 @@ internal data class FullTreeClangHeaderTrace(
     val externalFiles: List<String>,
     val includeOccurrences: List<FullTreeClangIncludeOccurrence>,
     val externalIncludeOccurrences: List<FullTreeClangExternalIncludeOccurrence>,
+    val externalConsumerIncludeOccurrences: List<FullTreeClangExternalConsumerIncludeOccurrence>,
     val moduleImports: List<FullTreeClangModuleImport>,
+    val externalConsumerModuleImports: List<FullTreeClangExternalConsumerModuleImport>,
     val projectFiles: List<String>,
     val workUnits: Long,
 )
@@ -134,7 +155,9 @@ private fun parseTrace(
             externalFiles = emptyList(),
             includeOccurrences = emptyList(),
             externalIncludeOccurrences = emptyList(),
+            externalConsumerIncludeOccurrences = emptyList(),
             moduleImports = emptyList(),
+            externalConsumerModuleImports = emptyList(),
             projectFiles = emptyList(),
             workUnits = 1,
         )
@@ -155,7 +178,6 @@ private fun parseTrace(
     val projectFiles = TreeSet(FULL_TREE_CODE_POINT_ORDER)
     val externalFiles = TreeSet(FULL_TREE_CODE_POINT_ORDER)
     val dependencySources = HashSet<String>()
-    val canonicalDependencySources = HashSet<String>()
     var rawIncludeOccurrences = 0
     var rawModuleImports = 0
     var workUnits = 1L
@@ -168,12 +190,12 @@ private fun parseTrace(
         val observedConsumer = dependency.requiredTraceString("source").validatedObservedPath(limits)
         if (!dependencySources.add(observedConsumer)) traceFail("trace repeats a dependency source")
         val consumer = projectPath(observedConsumer, roots)
-            ?: traceFail("direct-per-file trace contains a dependency source outside authenticated roots")
-        canonicalDependencySources += consumer
-        projectFiles += consumer
+        if (consumer != null) projectFiles += consumer else externalFiles += observedConsumer
         val recordOccurrences = ArrayList<FullTreeClangIncludeOccurrence>()
         val recordExternalOccurrences = ArrayList<FullTreeClangExternalIncludeOccurrence>()
+        val recordExternalConsumerOccurrences = ArrayList<FullTreeClangExternalConsumerIncludeOccurrence>()
         val recordImports = ArrayList<FullTreeClangModuleImport>()
+        val recordExternalConsumerImports = ArrayList<FullTreeClangExternalConsumerModuleImport>()
         val canonicalIncludes = ArrayList<JsonObject>()
         val canonicalImports = ArrayList<JsonObject>()
 
@@ -195,11 +217,21 @@ private fun parseTrace(
                     "dependency" to JsonPrimitive(dependencyPath ?: observedDependency),
                     "dependencyKind" to JsonPrimitive(if (dependencyPath == null) "external" else "project"),
                     "locationColumn" to JsonPrimitive(location.column),
-                    "locationFile" to JsonPrimitive(canonicalPresumedPath(location.path, roots)),
+                    "locationFile" to JsonPrimitive(location.path),
+                    "locationFileKind" to JsonPrimitive("opaque-presumed-label"),
                     "locationLine" to JsonPrimitive(location.line),
                 ),
             )
-            if (dependencyPath != null) {
+            if (consumer == null) {
+                recordExternalConsumerOccurrences += FullTreeClangExternalConsumerIncludeOccurrence(
+                    observedConsumer,
+                    location.path,
+                    location.line,
+                    location.column,
+                    observedDependency,
+                    dependencyPath,
+                )
+            } else if (dependencyPath != null) {
                 recordOccurrences += FullTreeClangIncludeOccurrence(
                     consumer,
                     location.path,
@@ -234,37 +266,52 @@ private fun parseTrace(
             canonicalImports += JsonObject(
                 mapOf(
                     "locationColumn" to JsonPrimitive(location.column),
-                    "locationFile" to JsonPrimitive(canonicalPresumedPath(location.path, roots)),
+                    "locationFile" to JsonPrimitive(location.path),
+                    "locationFileKind" to JsonPrimitive("opaque-presumed-label"),
                     "locationLine" to JsonPrimitive(location.line),
                     "module" to JsonPrimitive(module),
                     "moduleMap" to JsonPrimitive(canonicalModuleMap ?: moduleMap),
                     "moduleMapKind" to JsonPrimitive(if (canonicalModuleMap == null) "external" else "project"),
                 ),
             )
-            recordImports += FullTreeClangModuleImport(
-                consumer,
-                location.path,
-                location.line,
-                location.column,
-                module,
-                moduleMap,
-                canonicalModuleMap,
-            )
+            if (consumer == null) {
+                recordExternalConsumerImports += FullTreeClangExternalConsumerModuleImport(
+                    observedConsumer,
+                    location.path,
+                    location.line,
+                    location.column,
+                    module,
+                    moduleMap,
+                    canonicalModuleMap,
+                )
+            } else {
+                recordImports += FullTreeClangModuleImport(
+                    consumer,
+                    location.path,
+                    location.line,
+                    location.column,
+                    module,
+                    moduleMap,
+                    canonicalModuleMap,
+                )
+            }
         }
         if (canonicalIncludes.isEmpty() && canonicalImports.isEmpty()) {
             traceFail("Clang direct-per-file output contains an impossible empty dependency record")
         }
         records += ParsedTraceDependencyRecord(
             observedConsumer,
-            consumer,
+            consumer ?: observedConsumer,
             recordOccurrences,
             recordExternalOccurrences,
+            recordExternalConsumerOccurrences,
             recordImports,
+            recordExternalConsumerImports,
             JsonObject(
                 mapOf(
                     "imports" to JsonArray(canonicalImports),
                     "includes" to JsonArray(canonicalIncludes),
-                    "source" to JsonPrimitive(consumer),
+                    "source" to JsonPrimitive(consumer ?: observedConsumer),
                 ),
             ),
         )
@@ -273,10 +320,9 @@ private fun parseTrace(
     val orderedRecords = records.sortedWith(compareBy(FULL_TREE_CODE_POINT_ORDER) { it.canonicalConsumer })
     val occurrences = orderedRecords.flatMap { it.occurrences }
     val externalOccurrences = orderedRecords.flatMap { it.externalOccurrences }
+    val externalConsumerOccurrences = orderedRecords.flatMap { it.externalConsumerOccurrences }
     val imports = orderedRecords.flatMap { it.imports }
-    if (expectedMainSourcePath !in canonicalDependencySources) {
-        traceFail("trace does not contain its expected main source")
-    }
+    val externalConsumerImports = orderedRecords.flatMap { it.externalConsumerImports }
     val canonicalFacts = canonicalTraceFacts(
         expectedMainSourcePath,
         orderedRecords.map { it.canonicalRecord },
@@ -290,7 +336,9 @@ private fun parseTrace(
         externalFiles = immutableTraceList(externalFiles),
         includeOccurrences = immutableTraceList(occurrences),
         externalIncludeOccurrences = immutableTraceList(externalOccurrences),
+        externalConsumerIncludeOccurrences = immutableTraceList(externalConsumerOccurrences),
         moduleImports = immutableTraceList(imports),
+        externalConsumerModuleImports = immutableTraceList(externalConsumerImports),
         projectFiles = immutableTraceList(projectFiles),
         workUnits = workUnits,
     )
@@ -317,6 +365,7 @@ private fun validateTraceRoots(requested: List<FullTreeClangTraceRoot>): List<Fu
 }
 
 private fun projectPath(observed: String, roots: List<FullTreeClangTraceRoot>): String? {
+    if (!isCanonicalTraceAbsolutePath(observed)) return null
     val matching = roots.filter { observed == it.observedRoot || observed.startsWith(it.observedRoot + "/") }
     if (matching.isEmpty()) return null
     if (matching.size != 1) traceFail("observed path matches multiple authenticated roots")
@@ -326,15 +375,14 @@ private fun projectPath(observed: String, roots: List<FullTreeClangTraceRoot>): 
     return "${root.canonicalRoot}/$relative"
 }
 
-private fun canonicalPresumedPath(path: String, roots: List<FullTreeClangTraceRoot>): String =
-    if (isCanonicalTraceAbsolutePath(path)) projectPath(path, roots) ?: path else path
-
 private data class ParsedTraceDependencyRecord(
     val observedConsumer: String,
     val canonicalConsumer: String,
     val occurrences: List<FullTreeClangIncludeOccurrence>,
     val externalOccurrences: List<FullTreeClangExternalIncludeOccurrence>,
+    val externalConsumerOccurrences: List<FullTreeClangExternalConsumerIncludeOccurrence>,
     val imports: List<FullTreeClangModuleImport>,
+    val externalConsumerImports: List<FullTreeClangExternalConsumerModuleImport>,
     val canonicalRecord: JsonObject,
 )
 
@@ -344,12 +392,16 @@ private fun parseTraceLocation(raw: String, limits: FullTreeClangHeaderTraceLimi
     requireBoundedTraceScalar(raw, limits.maximumPathBytes + 64, "include location")
     val columnSeparator = raw.lastIndexOf(':')
     val lineSeparator = if (columnSeparator > 0) raw.lastIndexOf(':', columnSeparator - 1) else -1
-    if (lineSeparator <= 0 || columnSeparator <= lineSeparator + 1 || columnSeparator == raw.lastIndex) {
-        traceFail("include location is not absolute-path:line:column")
+    if (lineSeparator < 0 || columnSeparator <= lineSeparator + 1 || columnSeparator == raw.lastIndex) {
+        traceFail("include location is not filename:line:column")
     }
     val path = raw.substring(0, lineSeparator)
-    requireBoundedTraceScalar(path, limits.maximumPathBytes, "presumed location file")
-    val line = raw.substring(lineSeparator + 1, columnSeparator).strictPositiveTraceNumber("line")
+    if (path.toByteArray(StandardCharsets.UTF_8).size > limits.maximumPathBytes ||
+        '\u0000' in path || '\n' in path || '\r' in path
+    ) {
+        traceFail("presumed location file exceeds its scalar bound")
+    }
+    val line = raw.substring(lineSeparator + 1, columnSeparator).strictTraceNumber("line", allowZero = true)
     val column = raw.substring(columnSeparator + 1).strictPositiveTraceNumber("column")
     return TraceLocation(path, line, column)
 }
@@ -371,7 +423,8 @@ private fun canonicalTraceFacts(
 
 private fun String.validatedObservedPath(limits: FullTreeClangHeaderTraceLimits): String {
     requireBoundedTraceScalar(this, limits.maximumPathBytes, "observed path")
-    if (!isCanonicalTraceAbsolutePath(this)) traceFail("observed path is not canonical and absolute")
+    if (!startsWith('/') || '\\' in this) traceFail("observed path is not absolute POSIX syntax")
+    if (this == "/") traceFail("observed path names the filesystem root")
     return this
 }
 
@@ -385,11 +438,17 @@ private fun requireCanonicalProjectTracePath(path: String, maximumPathBytes: Int
 }
 
 private fun String.strictPositiveTraceNumber(label: String): Long {
+    return strictTraceNumber(label, allowZero = false)
+}
+
+private fun String.strictTraceNumber(label: String, allowZero: Boolean): Long {
     if (isEmpty() || length > 19 || any { it !in '0'..'9' } || (length > 1 && first() == '0')) {
-        traceFail("include $label is not a canonical positive integer")
+        traceFail("include $label is not a canonical integer")
     }
     val value = toLongOrNull() ?: traceFail("include $label is out of range")
-    if (value <= 0) traceFail("include $label must be positive")
+    if (value < 0 || (!allowZero && value == 0L)) {
+        traceFail("include $label is outside its permitted range")
+    }
     return value
 }
 

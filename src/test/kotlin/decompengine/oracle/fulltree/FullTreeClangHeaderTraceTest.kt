@@ -161,9 +161,9 @@ class FullTreeClangHeaderTraceTest {
         listOf(
             valid.replace("\"version\":\"2.0.0\"", "\"version\":\"1.0.0\""),
             valid.replace("\"imports\":[]", "\"imports\":[],\"extra\":false"),
-            valid.replace("/oracle/build/X.h", "/oracle/build/../build/X.h"),
-            valid.replace("/oracle/source/clang/lib/Lex/Lexer.cpp", "/outside/Lexer.cpp"),
-            valid.replace(":1:1", ":0:1"),
+            valid.replace("/oracle/build/X.h", "/oracle\\build\\X.h"),
+            valid.replace("/oracle/source/clang/lib/Lex/Lexer.cpp", "outside/Lexer.cpp"),
+            valid.replace(":1:1", ":1:0"),
         ).forEach { malformed ->
             assertFailsWith<FullTreeClangHeaderTraceException> { parse(malformed.toByteArray()) }
         }
@@ -178,6 +178,81 @@ class FullTreeClangHeaderTraceTest {
                 "source/clang/lib/Lex/Lexer.cpp",
             )
         }
+    }
+
+    @Test
+    fun `outside-root consumers and lexical resource paths remain classified evidence`() {
+        val outside = document(
+            listOf(
+                record(
+                    "/usr/include/gentoo/maybe-stddefs.h",
+                    listOf(
+                        include(
+                            "/usr/include/gentoo/maybe-stddefs.h:1:1",
+                            "/usr/lib/llvm/22/bin/../../../../lib/clang/22/include/stddef.h",
+                        ),
+                    ),
+                ),
+            ),
+        ).toByteArray()
+        val trace = parse(outside)
+        assertEquals(
+            listOf(
+                "/usr/include/gentoo/maybe-stddefs.h",
+                "/usr/lib/llvm/22/bin/../../../../lib/clang/22/include/stddef.h",
+            ),
+            trace.externalFiles,
+        )
+        assertEquals(1, trace.externalConsumerIncludeOccurrences.size)
+        assertEquals(
+            "/usr/lib/llvm/22/bin/../../../../lib/clang/22/include/stddef.h",
+            trace.externalConsumerIncludeOccurrences.single().observedDependencyPath,
+        )
+        assertTrue(trace.projectFiles.isEmpty())
+
+        val normalizedProject = document(
+            listOf(
+                record(
+                    "/oracle/source/clang/lib/Lex/Lexer.cpp",
+                    listOf(
+                        include(
+                            "/oracle/source/clang/lib/Lex/Lexer.cpp:1:1",
+                            "/oracle/build/subdirectory/../X.h",
+                        ),
+                    ),
+                ),
+            ),
+        ).toByteArray()
+        val noncanonical = parse(normalizedProject)
+        assertTrue(noncanonical.includeOccurrences.isEmpty())
+        assertEquals(
+            "/oracle/build/subdirectory/../X.h",
+            noncanonical.externalIncludeOccurrences.single().observedDependencyPath,
+        )
+    }
+
+    @Test
+    fun `presumed filenames remain opaque and allow empty labels and line zero`() {
+        fun withLocation(location: String): FullTreeClangHeaderTrace = parse(
+            document(
+                listOf(
+                    record(
+                        "/oracle/source/clang/lib/Lex/Lexer.cpp",
+                        listOf(include(location, "/oracle/build/X.h")),
+                    ),
+                ),
+            ).toByteArray(),
+        )
+
+        val empty = withLocation(":0:1")
+        assertEquals("", empty.includeOccurrences.single().presumedLocationFile)
+        assertEquals(0, empty.includeOccurrences.single().line)
+        val rootLabel = withLocation("/oracle/source:1:1")
+        assertEquals("/oracle/source", rootLabel.includeOccurrences.single().presumedLocationFile)
+        assertNotEquals(
+            withLocation("/oracle/source/foo:1:1").canonicalFactsSha256,
+            withLocation("source/foo:1:1").canonicalFactsSha256,
+        )
     }
 
     @Test
