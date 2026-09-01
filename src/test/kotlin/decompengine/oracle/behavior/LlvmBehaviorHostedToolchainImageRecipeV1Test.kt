@@ -107,6 +107,7 @@ class LlvmBehaviorHostedToolchainImageRecipeV1Test {
                 "getReproductionLockSha256",
                 "getSourceDateEpoch",
                 "requireCurrent",
+                "transferToImageBuildLease",
                 "writeDeterministicTarTo",
                 "writeDockerfileTo",
             ),
@@ -126,6 +127,44 @@ class LlvmBehaviorHostedToolchainImageRecipeV1Test {
             },
         )
     }
+
+    @Test
+    fun `recipe ownership transfers once and inert aliases cannot close the retained recipe`() =
+        withFixture { fixture ->
+            val owner = fixture.open()
+            val binding = owner.transferToImageBuildLease()
+
+            assertFailsWith<IllegalStateException> { owner.requireCurrent() }
+            assertFailsWith<IllegalStateException> { owner.dockerfileSha256 }
+            assertFailsWith<IllegalStateException> { owner.writeDockerfileTo(ByteArrayOutputStream()) }
+            assertFailsWith<IllegalStateException> { owner.transferToImageBuildLease() }
+            owner.close()
+            owner.close()
+
+            val retained = LlvmBehaviorHostedToolchainImageRecipeV1.consumeImageBuildLeaseBinding(binding)
+            binding.close()
+            binding.close()
+            retained.requireCurrent()
+            val emitted = ByteArrayOutputStream()
+            retained.writeDeterministicTarTo(emitted)
+            assertEquals(DETERMINISTIC_TAR_SHA256, OracleArtifacts.sha256(emitted.toByteArray()))
+            retained.close()
+            retained.close()
+            assertFailsWith<IllegalStateException> { retained.requireCurrent() }
+            assertFailsWith<IllegalStateException> {
+                LlvmBehaviorHostedToolchainImageRecipeV1.consumeImageBuildLeaseBinding(binding)
+            }
+
+            assertTrue(LlvmBehaviorHostedToolchainImageRecipeV1LeaseBinding::class.java.isSealed)
+            assertTrue(LlvmBehaviorHostedToolchainImageRecipeV1LeaseOwner::class.java.isSealed)
+            assertEquals(
+                setOf("close"),
+                LlvmBehaviorHostedToolchainImageRecipeV1LeaseBinding::class.java.declaredMethods
+                    .filterNot { it.isSynthetic }
+                    .map { it.name }
+                    .toSet(),
+            )
+        }
 
     @Test
     fun `mutated cross-named symlinked and writable recipe inputs fail closed`() {

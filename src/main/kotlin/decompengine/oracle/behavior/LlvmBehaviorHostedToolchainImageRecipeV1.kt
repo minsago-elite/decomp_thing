@@ -19,8 +19,9 @@ internal class LlvmBehaviorHostedToolchainImageRecipeV1Exception(
  * This owner authenticates and pins only the reproduction lock, historical build record, and
  * Dockerfile. It exposes no tag, freshly built image ID, Docker executable, endpoint, command,
  * runner, build result, inspect result, image/build authority, or mutation method. A future live
- * Engine builder must accept this owner directly, perform the fresh build, independently inspect
- * the resulting exact ID, and mint a separate sealed image capability itself.
+ * Engine builder must consume this owner's one-shot lease binding, use the resulting internally
+ * retained recipe seam, perform the fresh build, independently inspect the resulting exact ID,
+ * and mint a separate sealed image capability itself.
  *
  * ACP remains the first-class candidate producer/operator outside this image-recipe closure. ACP
  * is not an input here and gains no oracle, reference, policy, validation, observation, START,
@@ -48,6 +49,36 @@ internal sealed interface LlvmBehaviorHostedToolchainImageRecipeV1Owner : AutoCl
     /** Emits the fixed one-file USTAR build context; it performs no Docker operation. */
     fun writeDeterministicTarTo(output: OutputStream)
 
+    /**
+     * Rechecks and irreversibly transfers the retained recipe into an opaque one-shot lease
+     * binding. After success this owner is inert; using or transferring it again fails, and
+     * closing it cannot close the transferred recipe.
+     */
+    fun transferToImageBuildLease(): LlvmBehaviorHostedToolchainImageRecipeV1LeaseBinding
+
+    override fun close()
+}
+
+/** Opaque one-shot handoff intended for the hosted image-build lease factory. */
+internal sealed interface LlvmBehaviorHostedToolchainImageRecipeV1LeaseBinding : AutoCloseable {
+    override fun close()
+}
+
+/** Sole retained recipe ownership after a lease factory consumes its opaque handoff. */
+internal sealed interface LlvmBehaviorHostedToolchainImageRecipeV1LeaseOwner : AutoCloseable {
+    val reproductionLockSha256: String
+    val buildRecordSha256: String
+    val dockerfileSha256: String
+    val dockerfileBytes: Long
+    val deterministicTarSha256: String
+    val deterministicTarBytes: Long
+    val baseImageReference: String
+    val platform: String
+    val sourceDateEpoch: String
+
+    fun requireCurrent()
+    fun writeDockerfileTo(output: OutputStream)
+    fun writeDeterministicTarTo(output: OutputStream)
     override fun close()
 }
 
@@ -63,42 +94,51 @@ internal object LlvmBehaviorHostedToolchainImageRecipeV1 {
         dockerfilePath,
     )
 
+    /** Consumes [binding] exactly once and moves its descriptors into the returned lease owner. */
+    fun consumeImageBuildLeaseBinding(
+        binding: LlvmBehaviorHostedToolchainImageRecipeV1LeaseBinding,
+    ): LlvmBehaviorHostedToolchainImageRecipeV1LeaseOwner {
+        val retained = binding as? RetainedLeaseBinding
+            ?: recipeFail("LLVM hosted toolchain-image recipe lease binding is not owned here")
+        return retained.consume()
+    }
+
     private class BoundOwner(
         reproductionLockPath: Path,
         buildRecordPath: Path,
         dockerfilePath: Path,
     ) : LlvmBehaviorHostedToolchainImageRecipeV1Owner {
-        private val state = translateRecipeFailure("open LLVM hosted toolchain-image recipe") {
+        private var state: BoundRecipe? = translateRecipeFailure("open LLVM hosted toolchain-image recipe") {
             BoundRecipe.open(reproductionLockPath, buildRecordPath, dockerfilePath)
         }
         private var closed = false
         private var poisoned = false
+        private var transferred = false
 
         override val reproductionLockSha256: String
-            get() = state.reproductionLockSha256
+            @Synchronized get() = currentState().reproductionLockSha256
         override val buildRecordSha256: String
-            get() = state.buildRecordSha256
+            @Synchronized get() = currentState().buildRecordSha256
         override val dockerfileSha256: String
-            get() = state.dockerfileSha256
+            @Synchronized get() = currentState().dockerfileSha256
         override val dockerfileBytes: Long
-            get() = state.dockerfileBytes
+            @Synchronized get() = currentState().dockerfileBytes
         override val deterministicTarSha256: String
-            get() = state.deterministicTarSha256
+            @Synchronized get() = currentState().deterministicTarSha256
         override val deterministicTarBytes: Long
-            get() = state.deterministicTarBytes
+            @Synchronized get() = currentState().deterministicTarBytes
         override val baseImageReference: String
-            get() = REVIEWED_BASE_IMAGE_REFERENCE
+            @Synchronized get() = currentState().let { REVIEWED_BASE_IMAGE_REFERENCE }
         override val platform: String
-            get() = REVIEWED_PLATFORM
+            @Synchronized get() = currentState().let { REVIEWED_PLATFORM }
         override val sourceDateEpoch: String
-            get() = REVIEWED_SOURCE_DATE_EPOCH
+            @Synchronized get() = currentState().let { REVIEWED_SOURCE_DATE_EPOCH }
 
         @Synchronized
         override fun requireCurrent() {
-            check(!closed) { "LLVM hosted toolchain-image recipe owner is closed" }
-            if (poisoned) recipeFail("LLVM hosted toolchain-image recipe owner is poisoned")
+            val owned = currentState()
             try {
-                state.requireCurrent()
+                owned.requireCurrent()
             } catch (failure: Throwable) {
                 poisoned = true
                 if (failure is LlvmBehaviorHostedToolchainImageRecipeV1Exception) throw failure
@@ -111,10 +151,9 @@ internal object LlvmBehaviorHostedToolchainImageRecipeV1 {
 
         @Synchronized
         override fun writeDockerfileTo(output: OutputStream) {
-            check(!closed) { "LLVM hosted toolchain-image recipe owner is closed" }
-            if (poisoned) recipeFail("LLVM hosted toolchain-image recipe owner is poisoned")
+            val owned = currentState()
             try {
-                state.writeDockerfileTo(output)
+                owned.writeDockerfileTo(output)
             } catch (failure: Throwable) {
                 poisoned = true
                 if (failure is LlvmBehaviorHostedToolchainImageRecipeV1Exception) throw failure
@@ -127,10 +166,9 @@ internal object LlvmBehaviorHostedToolchainImageRecipeV1 {
 
         @Synchronized
         override fun writeDeterministicTarTo(output: OutputStream) {
-            check(!closed) { "LLVM hosted toolchain-image recipe owner is closed" }
-            if (poisoned) recipeFail("LLVM hosted toolchain-image recipe owner is poisoned")
+            val owned = currentState()
             try {
-                state.writeDeterministicTarTo(output)
+                owned.writeDeterministicTarTo(output)
             } catch (failure: Throwable) {
                 poisoned = true
                 if (failure is LlvmBehaviorHostedToolchainImageRecipeV1Exception) throw failure
@@ -138,6 +176,145 @@ internal object LlvmBehaviorHostedToolchainImageRecipeV1 {
                     "cannot emit the deterministic LLVM toolchain build context",
                     failure,
                 )
+            }
+        }
+
+        @Synchronized
+        override fun transferToImageBuildLease(): LlvmBehaviorHostedToolchainImageRecipeV1LeaseBinding {
+            val owned = currentState()
+            try {
+                owned.requireCurrent()
+            } catch (failure: Throwable) {
+                poisoned = true
+                if (failure is LlvmBehaviorHostedToolchainImageRecipeV1Exception) throw failure
+                throw LlvmBehaviorHostedToolchainImageRecipeV1Exception(
+                    "cannot transfer the reviewed LLVM toolchain recipe",
+                    failure,
+                )
+            }
+            val binding = RetainedLeaseBinding(owned)
+            state = null
+            transferred = true
+            return binding
+        }
+
+        private fun currentState(): BoundRecipe {
+            check(!closed) { "LLVM hosted toolchain-image recipe owner is closed" }
+            check(!transferred) { "LLVM hosted toolchain-image recipe owner was transferred" }
+            if (poisoned) recipeFail("LLVM hosted toolchain-image recipe owner is poisoned")
+            return checkNotNull(state) { "LLVM hosted toolchain-image recipe owner has no retained recipe" }
+        }
+
+        @Synchronized
+        override fun close() {
+            if (closed) return
+            closed = true
+            val owned = state
+            state = null
+            owned?.close()
+        }
+    }
+
+    private class RetainedLeaseBinding(
+        initial: BoundRecipe,
+    ) : LlvmBehaviorHostedToolchainImageRecipeV1LeaseBinding {
+        private var state: BoundRecipe? = initial
+        private var consumed = false
+        private var closed = false
+        private var poisoned = false
+
+        @Synchronized
+        fun consume(): LlvmBehaviorHostedToolchainImageRecipeV1LeaseOwner {
+            check(!closed) { "LLVM hosted toolchain-image recipe lease binding is closed" }
+            check(!consumed) { "LLVM hosted toolchain-image recipe lease binding was consumed" }
+            if (poisoned) recipeFail("LLVM hosted toolchain-image recipe lease binding is poisoned")
+            val owned = checkNotNull(state) {
+                "LLVM hosted toolchain-image recipe lease binding has no retained recipe"
+            }
+            try {
+                owned.requireCurrent()
+            } catch (failure: Throwable) {
+                poisoned = true
+                if (failure is LlvmBehaviorHostedToolchainImageRecipeV1Exception) throw failure
+                throw LlvmBehaviorHostedToolchainImageRecipeV1Exception(
+                    "cannot consume the reviewed LLVM toolchain recipe lease binding",
+                    failure,
+                )
+            }
+            val leaseOwner = LeaseOwner(owned)
+            state = null
+            consumed = true
+            return leaseOwner
+        }
+
+        @Synchronized
+        override fun close() {
+            if (closed) return
+            closed = true
+            val owned = state
+            state = null
+            owned?.close()
+        }
+    }
+
+    private class LeaseOwner(
+        private val state: BoundRecipe,
+    ) : LlvmBehaviorHostedToolchainImageRecipeV1LeaseOwner {
+        private var closed = false
+        private var poisoned = false
+
+        override val reproductionLockSha256: String
+            @Synchronized get() = currentState().reproductionLockSha256
+        override val buildRecordSha256: String
+            @Synchronized get() = currentState().buildRecordSha256
+        override val dockerfileSha256: String
+            @Synchronized get() = currentState().dockerfileSha256
+        override val dockerfileBytes: Long
+            @Synchronized get() = currentState().dockerfileBytes
+        override val deterministicTarSha256: String
+            @Synchronized get() = currentState().deterministicTarSha256
+        override val deterministicTarBytes: Long
+            @Synchronized get() = currentState().deterministicTarBytes
+        override val baseImageReference: String
+            @Synchronized get() = currentState().let { REVIEWED_BASE_IMAGE_REFERENCE }
+        override val platform: String
+            @Synchronized get() = currentState().let { REVIEWED_PLATFORM }
+        override val sourceDateEpoch: String
+            @Synchronized get() = currentState().let { REVIEWED_SOURCE_DATE_EPOCH }
+
+        @Synchronized
+        override fun requireCurrent() = guarded("LLVM hosted toolchain-image lease recipe changed") {
+            state.requireCurrent()
+        }
+
+        @Synchronized
+        override fun writeDockerfileTo(output: OutputStream) = guarded(
+            "cannot emit the reviewed LLVM toolchain Dockerfile from its lease",
+        ) {
+            state.writeDockerfileTo(output)
+        }
+
+        @Synchronized
+        override fun writeDeterministicTarTo(output: OutputStream) = guarded(
+            "cannot emit the deterministic LLVM toolchain build context from its lease",
+        ) {
+            state.writeDeterministicTarTo(output)
+        }
+
+        private fun currentState(): BoundRecipe {
+            check(!closed) { "LLVM hosted toolchain-image lease recipe owner is closed" }
+            if (poisoned) recipeFail("LLVM hosted toolchain-image lease recipe owner is poisoned")
+            return state
+        }
+
+        private inline fun guarded(message: String, action: () -> Unit) {
+            currentState()
+            try {
+                action()
+            } catch (failure: Throwable) {
+                poisoned = true
+                if (failure is LlvmBehaviorHostedToolchainImageRecipeV1Exception) throw failure
+                throw LlvmBehaviorHostedToolchainImageRecipeV1Exception(message, failure)
             }
         }
 
