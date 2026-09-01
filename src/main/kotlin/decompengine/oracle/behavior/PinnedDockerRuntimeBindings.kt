@@ -22,6 +22,20 @@ internal class PinnedDockerRuntimeBindingsException(message: String, cause: Thro
     IllegalArgumentException(message, cause)
 
 /**
+ * Retained identity binding for exactly one private Docker Unix endpoint.
+ *
+ * This owner exposes no pathname, control client, Docker config, environment, command, byte
+ * transport, request, HTTP, build, CREATE, or START operation. A future sealed connector must add a
+ * one-shot consuming transfer which rechecks the named socket immediately around connect; this
+ * binding alone is not usable Engine authority.
+ */
+internal sealed interface PinnedDockerEndpointBinding : AutoCloseable {
+    fun requireCurrent()
+
+    override fun close()
+}
+
+/**
  * Descriptor-backed bindings for one authenticated Docker control plane.
  *
  * This object owns no command renderer or executor and accepts no response, parsed fact, callback,
@@ -50,15 +64,52 @@ internal class PinnedDockerRuntimeBindings private constructor(
     private val dockerConfigPath: Path,
     private val dockerConfigIdentity: LinuxFileIdentity,
     private val dockerConfigDescriptor: LinuxDescriptor,
-    private val runtimeSocketParent: LinuxDescriptor,
-    private val runtimeSocketDescriptor: LinuxDescriptor,
-    private val runtimeSocketParentIdentity: LinuxFileIdentity,
-    private val runtimeSocketIdentity: LinuxFileIdentity,
+    private val endpointState: PinnedDockerEndpointState,
 ) : AutoCloseable {
+    private var closed = false
+    private var ownsEndpointState = true
+
+    @Synchronized
     fun requireCurrent() = translateBindingFailures("verify pinned Docker runtime bindings") {
+        requireOpen()
+        requireCurrentBindings()
+    }
+
+    /**
+     * Irreversibly narrows these CLI bindings to their retained private endpoint identity.
+     *
+     * Transfer succeeds only after a terminal check of every binding. It closes the executable,
+     * executable guard, and Docker-config descriptors before returning, and this object becomes
+     * unusable. The returned owner exposes only currentness and close while privately retaining the
+     * socket pathname and the parent/socket identity descriptors.
+     */
+    @Synchronized
+    fun retainEndpointBinding(): PinnedDockerEndpointBinding =
+        translateBindingFailures("retain pinned Docker endpoint binding") {
+            requireOpen()
+            requireCurrentBindings()
+            try {
+                closeControlBindings()
+            } catch (failure: Throwable) {
+                closed = true
+                ownsEndpointState = false
+                endpointState.close()
+                throw failure
+            }
+            ownsEndpointState = false
+            closed = true
+            try {
+                BoundPinnedDockerEndpointBinding(endpointState)
+            } catch (failure: Throwable) {
+                endpointState.close()
+                throw failure
+            }
+        }
+
+    private fun requireCurrentBindings() {
         requireCurrentControlClient()
         requireCurrentDockerConfig()
-        requireCurrentRuntimeSocket()
+        endpointState.requireCurrent()
     }
 
     private fun requireCurrentControlClient() {
@@ -107,35 +158,23 @@ internal class PinnedDockerRuntimeBindings private constructor(
         }
     }
 
-    private fun requireCurrentRuntimeSocket() {
-        if (LinuxFilesystemSyscalls.identity(runtimeSocketParent.fd) != runtimeSocketParentIdentity) {
-            bindingFail("pinned runtime socket parent changed")
-        }
-        if (LinuxFilesystemSyscalls.identity(runtimeSocketDescriptor.fd) != runtimeSocketIdentity) {
-            bindingFail("pinned runtime socket changed")
-        }
-        requirePrivateSocketIdentity(runtimeSocketIdentity, runtimeSocketParentIdentity)
-        val namedParent = LinuxFilesystemSyscalls.openRoot(runtimeSocketPath.parent)
-        namedParent.use {
-            if (LinuxFilesystemSyscalls.identity(namedParent.fd) != runtimeSocketParentIdentity) {
-                bindingFail("runtime socket parent path changed identity")
-            }
-        }
-        val namedSocket = LinuxFilesystemSyscalls.openAbsolutePathOrNull(runtimeSocketPath)
-            ?: bindingFail("runtime socket disappeared")
-        namedSocket.use {
-            if (LinuxFilesystemSyscalls.identity(namedSocket.fd) != runtimeSocketIdentity) {
-                bindingFail("runtime socket path changed identity")
-            }
-        }
+    private fun requireOpen() {
+        if (closed) bindingFail("pinned Docker runtime bindings are closed or transferred")
     }
 
-    override fun close() {
-        runtimeSocketDescriptor.close()
-        runtimeSocketParent.close()
+    private fun closeControlBindings() {
         dockerConfigDescriptor.close()
         controlClientDescriptor.close()
         controlClientGuard.close()
+    }
+
+    @Synchronized
+    override fun close() {
+        if (closed) return
+        closed = true
+        if (ownsEndpointState) endpointState.close()
+        ownsEndpointState = false
+        closeControlBindings()
     }
 
     companion object {
@@ -227,6 +266,10 @@ internal class PinnedDockerRuntimeBindings private constructor(
                 }
 
                 val executablePath = LinuxFilesystemSyscalls.stableDescriptorPath(openedClient.fd)
+                val socketIdentitySha256 = identityCommitment(socketIdentity)
+                val socketParentIdentitySha256 = identityCommitment(socketParentIdentity)
+                val socketPathSha256 = pathCommitment(runtimeSocketPath)
+                val socketMode = "0o${socketIdentity.mode.permissions.toString(8).padStart(3, '0')}"
                 val fixedEnvironment = Collections.unmodifiableMap(
                     linkedMapOf(
                         "DOCKER_CONFIG" to configExecutionPath.toString(),
@@ -246,10 +289,10 @@ internal class PinnedDockerRuntimeBindings private constructor(
                     controlClientIdentitySha256 = identityCommitment(clientIdentity),
                     dockerConfigIdentitySha256 = identityCommitment(configIdentity),
                     dockerConfigPathSha256 = pathCommitment(dockerConfigPath),
-                    runtimeSocketIdentitySha256 = identityCommitment(socketIdentity),
-                    runtimeSocketParentIdentitySha256 = identityCommitment(socketParentIdentity),
-                    runtimeSocketPathSha256 = pathCommitment(runtimeSocketPath),
-                    runtimeSocketMode = "0o${socketIdentity.mode.permissions.toString(8).padStart(3, '0')}",
+                    runtimeSocketIdentitySha256 = socketIdentitySha256,
+                    runtimeSocketParentIdentitySha256 = socketParentIdentitySha256,
+                    runtimeSocketPathSha256 = socketPathSha256,
+                    runtimeSocketMode = socketMode,
                     controlClientPath = controlClientPath,
                     controlClientIdentity = clientIdentity,
                     controlClientGuard = guard,
@@ -257,10 +300,13 @@ internal class PinnedDockerRuntimeBindings private constructor(
                     dockerConfigPath = dockerConfigPath,
                     dockerConfigIdentity = configIdentity,
                     dockerConfigDescriptor = openedConfig,
-                    runtimeSocketParent = openedSocketParent,
-                    runtimeSocketDescriptor = openedSocket,
-                    runtimeSocketParentIdentity = socketParentIdentity,
-                    runtimeSocketIdentity = socketIdentity,
+                    endpointState = PinnedDockerEndpointState(
+                        runtimeSocketPath = runtimeSocketPath,
+                        runtimeSocketParent = openedSocketParent,
+                        runtimeSocketDescriptor = openedSocket,
+                        runtimeSocketParentIdentity = socketParentIdentity,
+                        runtimeSocketIdentity = socketIdentity,
+                    ),
                 ).also {
                     clientDescriptor = null
                     configDescriptor = null
@@ -276,6 +322,77 @@ internal class PinnedDockerRuntimeBindings private constructor(
                 throw failure
             }
         }
+    }
+}
+
+private class BoundPinnedDockerEndpointBinding(
+    private val state: PinnedDockerEndpointState,
+) : PinnedDockerEndpointBinding {
+    private var closed = false
+    private var poisoned = false
+
+    @Synchronized
+    override fun requireCurrent() = translateBindingFailures(
+        "verify retained Docker endpoint binding",
+    ) {
+        if (closed) bindingFail("retained Docker endpoint binding is closed")
+        if (poisoned) bindingFail("retained Docker endpoint binding is poisoned")
+        try {
+            state.requireCurrent()
+        } catch (failure: Throwable) {
+            poisoned = true
+            throw failure
+        }
+    }
+
+    @Synchronized
+    override fun close() {
+        if (closed) return
+        closed = true
+        state.close()
+    }
+}
+
+private class PinnedDockerEndpointState(
+    private val runtimeSocketPath: Path,
+    private val runtimeSocketParent: LinuxDescriptor,
+    private val runtimeSocketDescriptor: LinuxDescriptor,
+    private val runtimeSocketParentIdentity: LinuxFileIdentity,
+    private val runtimeSocketIdentity: LinuxFileIdentity,
+) : AutoCloseable {
+    private var closed = false
+
+    @Synchronized
+    fun requireCurrent() {
+        if (closed) bindingFail("retained Docker endpoint descriptors are closed")
+        if (LinuxFilesystemSyscalls.identity(runtimeSocketParent.fd) != runtimeSocketParentIdentity) {
+            bindingFail("pinned runtime socket parent changed")
+        }
+        if (LinuxFilesystemSyscalls.identity(runtimeSocketDescriptor.fd) != runtimeSocketIdentity) {
+            bindingFail("pinned runtime socket changed")
+        }
+        requirePrivateSocketIdentity(runtimeSocketIdentity, runtimeSocketParentIdentity)
+        val namedParent = LinuxFilesystemSyscalls.openRoot(runtimeSocketPath.parent)
+        namedParent.use {
+            if (LinuxFilesystemSyscalls.identity(namedParent.fd) != runtimeSocketParentIdentity) {
+                bindingFail("runtime socket parent path changed identity")
+            }
+        }
+        val namedSocket = LinuxFilesystemSyscalls.openAbsolutePathOrNull(runtimeSocketPath)
+            ?: bindingFail("runtime socket disappeared")
+        namedSocket.use {
+            if (LinuxFilesystemSyscalls.identity(namedSocket.fd) != runtimeSocketIdentity) {
+                bindingFail("runtime socket path changed identity")
+            }
+        }
+    }
+
+    @Synchronized
+    override fun close() {
+        if (closed) return
+        closed = true
+        runtimeSocketDescriptor.close()
+        runtimeSocketParent.close()
     }
 }
 

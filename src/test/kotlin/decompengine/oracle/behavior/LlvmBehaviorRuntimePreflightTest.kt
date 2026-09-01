@@ -150,13 +150,67 @@ class LlvmBehaviorRuntimePreflightTest {
             publish.parameterTypes.toList(),
         )
         assertTrue(publish.parameterTypes.none { it.name.contains("Json") || it.name.contains("Runner") || it.name.contains("Function") })
-        val implementation = LlvmBehaviorRuntimePreflightPublisher::class.java.declaredClasses.single {
+        val implementations = LlvmBehaviorRuntimePreflightPublisher::class.java.declaredClasses.filter {
             LlvmBehaviorRuntimePreflight::class.java.isAssignableFrom(it)
         }
-        assertTrue(Modifier.isPrivate(implementation.modifiers))
+        assertEquals(2, implementations.size)
+        implementations.forEach { implementation ->
+            assertTrue(Modifier.isPrivate(implementation.modifiers))
+            assertEquals(
+                List(8) { Path::class.java } + LlvmBehaviorRuntimePreflightLimits::class.java,
+                implementation.declaredConstructors.single().parameterTypes.toList(),
+            )
+        }
+    }
+
+    @Test
+    fun `retained endpoint binding is sealed raw-path-only and has no operation surface`() {
+        assertTrue(LlvmBehaviorRetainedDockerEndpointBinding::class.java.isSealed)
+        val open = LlvmBehaviorRuntimePreflightPublisher::class.java.declaredMethods.single {
+            it.name.startsWith("openRetainedEndpointBinding") && !it.name.endsWith("\$default")
+        }
+        assertTrue(open.isSynthetic)
         assertEquals(
             List(8) { Path::class.java } + LlvmBehaviorRuntimePreflightLimits::class.java,
-            implementation.declaredConstructors.single().parameterTypes.toList(),
+            open.parameterTypes.toList(),
+        )
+        assertEquals(LlvmBehaviorRetainedDockerEndpointBinding::class.java, open.returnType)
+        assertTrue(
+            open.parameterTypes.none {
+                it.name.contains("Json") || it.name.contains("Runner") || it.name.contains("Function") ||
+                    it == PinnedDockerRuntimeBindings::class.java ||
+                    it == PinnedDockerEndpointBinding::class.java
+            },
+        )
+
+        val methods = LlvmBehaviorRetainedDockerEndpointBinding::class.java.methods
+        assertTrue(methods.all { it.parameterCount == 0 })
+        assertEquals(
+            setOf(
+                "close",
+                "getAuthority",
+                "getCandidateStarted",
+                "getCanonicalBytes",
+                "getContainmentCapabilitiesVerified",
+                "getControlClientSha256",
+                "getCorpusSha256",
+                "getImageVerified",
+                "getLiveContainmentVerified",
+                "getPreflightSha256",
+                "getReleaseEligible",
+                "getRuntimeIdentityVerified",
+                "getScoringAuthority",
+                "requireCurrent",
+            ),
+            methods.map { it.name }.toSet(),
+        )
+        assertTrue(methods.none { it.returnType == Path::class.java || it.returnType == Process::class.java })
+        assertTrue(
+            LlvmBehaviorRetainedDockerEndpointBinding::class.java.declaredFields.none {
+                it.type == Process::class.java || it.type == ProcessBuilder::class.java ||
+                    it.type.name.startsWith("kotlin.jvm.functions.") || it.type == ByteArray::class.java ||
+                    it.type == Path::class.java
+            },
         )
     }
 
@@ -248,6 +302,47 @@ class LlvmBehaviorRuntimePreflightTest {
             val rendered = receipt.canonicalBytes.toString(Charsets.UTF_8)
             assertFalse(rendered.contains("expected"))
             assertFalse(rendered.contains("base64"))
+        } finally {
+            root.toFile().deleteRecursively()
+        }
+    }
+
+    @Test
+    fun `opt-in checked private endpoint can remain bound after preflight`() {
+        val clientValue = System.getenv("DECOMP_LLVM_RUNTIME_PREFLIGHT_CLIENT")
+        val configValue = System.getenv("DECOMP_LLVM_RUNTIME_PREFLIGHT_CONFIG")
+        val socketValue = System.getenv("DECOMP_LLVM_RUNTIME_PREFLIGHT_SOCKET")
+        assumeTrue(!clientValue.isNullOrBlank() && !configValue.isNullOrBlank() && !socketValue.isNullOrBlank())
+        val root = Files.createTempDirectory("llvm-runtime-preflight-retained-")
+        val outputParent = root.resolve("receipt").createDirectories()
+        Files.setPosixFilePermissions(outputParent, OWNER_ONLY_DIRECTORY)
+        val output = outputParent.resolve("runtime-preflight.json")
+        try {
+            val retained = LlvmBehaviorRuntimePreflightPublisher.openRetainedEndpointBinding(
+                PROFILE.resolve("behavior-corpus.json"),
+                PROFILE.resolve("behavior-corpus-evidence.json"),
+                PROFILE.resolve("diagnostic-matrix.json"),
+                PROFILE.resolve("oracle-manifest.json"),
+                Path.of(clientValue!!),
+                Path.of(configValue!!),
+                Path.of(socketValue!!),
+                output,
+            )
+            try {
+                retained.requireCurrent()
+                assertTrue(retained.runtimeIdentityVerified)
+                assertTrue(retained.containmentCapabilitiesVerified)
+                assertTrue(retained.imageVerified)
+                assertFalse(retained.candidateStarted)
+                assertFalse(retained.liveContainmentVerified)
+                assertFalse(retained.scoringAuthority)
+                assertFalse(retained.releaseEligible)
+                assertEquals(OWNER_ONLY_FILE, Files.getPosixFilePermissions(output))
+            } finally {
+                retained.close()
+            }
+            val closed = assertFailsWith<LlvmBehaviorRuntimePreflightException> { retained.requireCurrent() }
+            assertTrue(closed.message.orEmpty().contains("closed"), closed.message)
         } finally {
             root.toFile().deleteRecursively()
         }

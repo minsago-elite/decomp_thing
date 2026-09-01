@@ -120,6 +120,69 @@ class PinnedDockerRuntimeBindingsTest {
     }
 
     @Test
+    fun `one-way transfer retains only the current private endpoint binding`() {
+        RuntimeBindingFixture().use { fixture ->
+            val bindings = fixture.capture()
+            val endpoint = bindings.retainEndpointBinding()
+            endpoint.use {
+                bindings.close()
+                assertFailsWith<PinnedDockerRuntimeBindingsException> { bindings.requireCurrent() }
+                assertFailsWith<PinnedDockerRuntimeBindingsException> {
+                    bindings.retainEndpointBinding()
+                }
+
+                val displaced = fixture.root.resolve("control-client.after-transfer")
+                Files.move(fixture.controlClient, displaced, StandardCopyOption.ATOMIC_MOVE)
+                Files.write(fixture.controlClient, "untrusted-replacement".encodeToByteArray())
+                Files.setPosixFilePermissions(fixture.controlClient, OWNER_EXECUTABLE)
+                Files.writeString(fixture.dockerConfig.resolve("config.json"), "{}")
+                endpoint.requireCurrent()
+
+                val methods = PinnedDockerEndpointBinding::class.java.declaredMethods
+                assertTrue(methods.all { it.parameterCount == 0 })
+                assertEquals(setOf("close", "requireCurrent"), methods.map { it.name }.toSet())
+                assertTrue(
+                    methods.none {
+                        it.name.lowercase().contains("http") || it.name.lowercase().contains("request") ||
+                            it.name.lowercase().contains("build") || it.name.lowercase().contains("create") ||
+                            it.name.lowercase().contains("start") || it.name.lowercase().contains("execute") ||
+                            it.name.lowercase().contains("command") || it.name.lowercase().contains("python")
+                    },
+                )
+            }
+        }
+    }
+
+    @Test
+    fun `transfer rejects drift and retained endpoint drift permanently poisons the owner`() {
+        RuntimeBindingFixture().use { fixture ->
+            fixture.capture().use { bindings ->
+                Files.writeString(fixture.dockerConfig.resolve("config.json"), "{}")
+                val failure = assertFailsWith<PinnedDockerRuntimeBindingsException> {
+                    bindings.retainEndpointBinding()
+                }
+                assertTrue(failure.message.orEmpty().contains("Docker config"), failure.message)
+            }
+        }
+
+        RuntimeBindingFixture().use { fixture ->
+            val bindings = fixture.capture()
+            val endpoint = bindings.retainEndpointBinding()
+            try {
+                fixture.replaceRuntimeSocket()
+                val drift = assertFailsWith<PinnedDockerRuntimeBindingsException> { endpoint.requireCurrent() }
+                assertTrue(drift.message.orEmpty().contains("socket"), drift.message)
+                val poisoned = assertFailsWith<PinnedDockerRuntimeBindingsException> { endpoint.requireCurrent() }
+                assertTrue(poisoned.message.orEmpty().contains("poisoned"), poisoned.message)
+            } finally {
+                endpoint.close()
+            }
+            val closed = assertFailsWith<PinnedDockerRuntimeBindingsException> { endpoint.requireCurrent() }
+            assertTrue(closed.message.orEmpty().contains("closed"), closed.message)
+        }
+    }
+
+    @Test
     fun `capture rejects digest drift hard links and a nonempty Docker config`() {
         RuntimeBindingFixture().use { fixture ->
             assertFailsWith<PinnedDockerRuntimeBindingsException> {

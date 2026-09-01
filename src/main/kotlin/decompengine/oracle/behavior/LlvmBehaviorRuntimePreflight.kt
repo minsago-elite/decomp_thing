@@ -100,6 +100,29 @@ sealed interface LlvmBehaviorRuntimePreflight {
 }
 
 /**
+ * Sealed retained binding for only the private Unix endpoint authenticated by this preflight.
+ *
+ * The authenticated CLI and its empty Docker config are closed before this owner is returned. The
+ * raw socket path remains private for a future one-shot Kotlin Engine connector, because Linux
+ * cannot connect through the O_PATH identity descriptor. Until that consuming connector exists,
+ * this binding is not usable Engine authority. This surface deliberately has no pathname, socket
+ * or request transport, HTTP, mutation, build, CREATE, START, wait, cleanup, or parsing method.
+ *
+ * ACP remains the first-class candidate producer/operator and is consumed read-only. Neither ACP
+ * nor this endpoint owner receives oracle, reference, policy, validation, observation, containment,
+ * scoring, certification, publication, or release authority. This retained Kotlin mechanism
+ * invokes no Python; legacy Python-bearing v1 preflight evidence remains non-authoritative for any
+ * future v2 hosted build or candidate admission.
+ */
+internal sealed interface LlvmBehaviorRetainedDockerEndpointBinding :
+    LlvmBehaviorRuntimePreflight,
+    AutoCloseable {
+    fun requireCurrent()
+
+    override fun close()
+}
+
+/**
  * Production authority accepts only eight raw paths and caller-lowered limits. No parser, runner,
  * endpoint facts, response bytes, digest claim, callback, score, or release token is accepted.
  */
@@ -115,6 +138,33 @@ object LlvmBehaviorRuntimePreflightPublisher {
         outputPath: Path,
         limits: LlvmBehaviorRuntimePreflightLimits = LlvmBehaviorRuntimePreflightLimits(),
     ): LlvmBehaviorRuntimePreflight = PublishedPreflight(
+        corpusPath,
+        referenceReportPath,
+        diagnosticMatrixPath,
+        artifactManifestPath,
+        controlClientPath,
+        dockerConfigDirectory,
+        runtimeSocketPath,
+        outputPath,
+        limits,
+    )
+
+    /**
+     * Runs and publishes the same preflight, then narrows its pinned CLI bindings to only the
+     * retained private Unix endpoint. This Kotlin-only owner must be closed by its caller.
+     */
+    @JvmSynthetic
+    internal fun openRetainedEndpointBinding(
+        corpusPath: Path,
+        referenceReportPath: Path,
+        diagnosticMatrixPath: Path,
+        artifactManifestPath: Path,
+        controlClientPath: Path,
+        dockerConfigDirectory: Path,
+        runtimeSocketPath: Path,
+        outputPath: Path,
+        limits: LlvmBehaviorRuntimePreflightLimits = LlvmBehaviorRuntimePreflightLimits(),
+    ): LlvmBehaviorRetainedDockerEndpointBinding = RetainedEndpointBinding(
         corpusPath,
         referenceReportPath,
         diagnosticMatrixPath,
@@ -166,10 +216,91 @@ object LlvmBehaviorRuntimePreflightPublisher {
                 outputPath,
                 limits,
             )
-            corpusSha256 = derived.corpusSha256
-            controlClientSha256 = derived.controlClientSha256
-            storedBytes = derived.bytes.copyOf()
-            preflightSha256 = OracleArtifacts.sha256(storedBytes)
+            try {
+                corpusSha256 = derived.corpusSha256
+                controlClientSha256 = derived.controlClientSha256
+                storedBytes = derived.bytes.copyOf()
+                preflightSha256 = OracleArtifacts.sha256(storedBytes)
+            } finally {
+                derived.endpointBinding.close()
+            }
+        }
+    }
+
+    /* Reflective construction still supplies only the same raw paths and lowering limits. */
+    private class RetainedEndpointBinding(
+        corpusPath: Path,
+        referenceReportPath: Path,
+        diagnosticMatrixPath: Path,
+        artifactManifestPath: Path,
+        controlClientPath: Path,
+        dockerConfigDirectory: Path,
+        runtimeSocketPath: Path,
+        outputPath: Path,
+        limits: LlvmBehaviorRuntimePreflightLimits,
+    ) : LlvmBehaviorRetainedDockerEndpointBinding {
+        private val storedBytes: ByteArray
+        private val endpoint: PinnedDockerEndpointBinding
+        private var closed = false
+        private var poisoned = false
+
+        override val authority = PREFLIGHT_AUTHORITY
+        override val corpusSha256: String
+        override val controlClientSha256: String
+        override val runtimeIdentityVerified = true
+        override val containmentCapabilitiesVerified = true
+        override val imageVerified = true
+        override val candidateStarted = false
+        override val liveContainmentVerified = false
+        override val scoringAuthority = false
+        override val releaseEligible = false
+        override val preflightSha256: String
+
+        override val canonicalBytes: ByteArray
+            get() = storedBytes.copyOf()
+
+        init {
+            val derived = deriveAndPublishPreflight(
+                corpusPath,
+                referenceReportPath,
+                diagnosticMatrixPath,
+                artifactManifestPath,
+                controlClientPath,
+                dockerConfigDirectory,
+                runtimeSocketPath,
+                outputPath,
+                limits,
+            )
+            try {
+                corpusSha256 = derived.corpusSha256
+                controlClientSha256 = derived.controlClientSha256
+                storedBytes = derived.bytes.copyOf()
+                preflightSha256 = OracleArtifacts.sha256(storedBytes)
+                endpoint = derived.endpointBinding
+            } catch (failure: Throwable) {
+                derived.endpointBinding.close()
+                throw failure
+            }
+        }
+
+        @Synchronized
+        override fun requireCurrent() {
+            if (closed) preflightFail("retained Docker endpoint binding is closed")
+            if (poisoned) preflightFail("retained Docker endpoint binding is poisoned")
+            try {
+                endpoint.requireCurrent()
+            } catch (failure: Throwable) {
+                poisoned = true
+                if (failure is LlvmBehaviorRuntimePreflightException) throw failure
+                preflightFail("retained Docker endpoint changed after preflight", failure)
+            }
+        }
+
+        @Synchronized
+        override fun close() {
+            if (closed) return
+            closed = true
+            endpoint.close()
         }
     }
 }
@@ -288,10 +419,12 @@ private fun deriveAndPublishPreflight(
                             // Directory-inode separation above means receipt publication cannot
                             // populate the directory still described as the empty Docker config.
                             runtimeBindings.requireCurrent()
+                            val endpointBinding = runtimeBindings.retainEndpointBinding()
                             return DerivedPreflight(
                                 corpusSha256,
                                 runtimeBindings.controlClientSha256,
                                 bytes,
+                                endpointBinding,
                             )
                         }
                     }
@@ -1361,6 +1494,7 @@ private data class DerivedPreflight(
     val corpusSha256: String,
     val controlClientSha256: String,
     val bytes: ByteArray,
+    val endpointBinding: PinnedDockerEndpointBinding,
 )
 
 private val COMPONENT_DETAIL_EXCLUSIONS = setOf(
