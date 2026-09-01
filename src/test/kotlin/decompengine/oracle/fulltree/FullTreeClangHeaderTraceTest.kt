@@ -4,11 +4,12 @@ import decompengine.oracle.core.OracleArtifacts
 import kotlin.test.Test
 import kotlin.test.assertEquals
 import kotlin.test.assertFailsWith
+import kotlin.test.assertNotEquals
 import kotlin.test.assertTrue
 
 class FullTreeClangHeaderTraceTest {
     @Test
-    fun `structured direct-per-file trace projects source and generated edges exactly`() {
+    fun `structured direct-per-file trace projects project and external facts exactly`() {
         val bytes = """
             {
               "version":"2.0.0",
@@ -16,81 +17,77 @@ class FullTreeClangHeaderTraceTest {
                 {
                   "source":"/oracle/source/clang/lib/Lex/Lexer.cpp",
                   "includes":[
-                    {
-                      "location":"/oracle/source/clang/lib/Lex/Lexer.cpp:7:1",
-                      "file":"/oracle/source/clang/include/clang/Lex/Lexer.h"
-                    },
-                    {
-                      "location":"/oracle/source/clang/lib/Lex/Lexer.cpp:8:1",
-                      "file":"/oracle/build/include/llvm/Config/llvm-config.h"
-                    },
-                    {
-                      "location":"/oracle/source/clang/lib/Lex/Lexer.cpp:9:1",
-                      "file":"/usr/include/stddef.h"
-                    }
+                    {"location":"virtual:name:400:7","file":"/oracle/source/clang/include/clang/Lex/Lexer.h"},
+                    {"location":"/oracle/source/clang/lib/Lex/Lexer.cpp:8:1","file":"/oracle/build/include/llvm/Config/llvm-config.h"},
+                    {"location":"/oracle/source/clang/lib/Lex/Lexer.cpp:9:1","file":"/usr/include/stddef.h"}
                   ],
                   "imports":[]
                 },
                 {
                   "source":"/oracle/source/clang/include/clang/Lex/Lexer.h",
                   "includes":[
-                    {
-                      "location":"/oracle/source/clang/include/clang/Lex/Lexer.h:3:2",
-                      "file":"/oracle/source/llvm/include/llvm/ADT/StringRef.h"
-                    }
+                    {"location":"/oracle/source/clang/include/clang/Lex/Lexer.h:3:2","file":"/oracle/source/llvm/include/llvm/ADT/StringRef.h"}
                   ],
                   "imports":[
-                    {
-                      "location":"/oracle/source/clang/include/clang/Lex/Lexer.h:4:1",
-                      "module":"Builtin",
-                      "file":"/oracle/build/module.modulemap"
-                    }
+                    {"location":"/oracle/source/clang/include/clang/Lex/Lexer.h:4:1","module":"Builtin","file":"/oracle/build/module.modulemap"}
                   ]
-                },
-                {
-                  "source":"/usr/include/stddef.h",
-                  "includes":[],
-                  "imports":[]
                 }
               ]
             }
         """.trimIndent().toByteArray()
 
-        val trace = FullTreeClangHeaderTraceParser.parse(bytes, roots())
+        val trace = parse(bytes)
 
         assertEquals(OracleArtifacts.sha256(bytes), trace.inputSha256)
-        assertEquals(3, trace.dependencyFileCount)
-        assertEquals(2, trace.externalFileCount)
+        assertEquals(2, trace.dependencyFileCount)
+        assertEquals(listOf("/usr/include/stddef.h"), trace.externalFiles)
         assertEquals(
             listOf(
                 FullTreeClangIncludeOccurrence(
-                    "source/clang/lib/Lex/Lexer.cpp",
-                    7,
-                    1,
                     "source/clang/include/clang/Lex/Lexer.h",
-                ),
-                FullTreeClangIncludeOccurrence(
-                    "source/clang/lib/Lex/Lexer.cpp",
-                    8,
-                    1,
-                    "generated/include/llvm/Config/llvm-config.h",
-                ),
-                FullTreeClangIncludeOccurrence(
-                    "source/clang/include/clang/Lex/Lexer.h",
+                    "/oracle/source/clang/include/clang/Lex/Lexer.h",
                     3,
                     2,
                     "source/llvm/include/llvm/ADT/StringRef.h",
+                ),
+                FullTreeClangIncludeOccurrence(
+                    "source/clang/lib/Lex/Lexer.cpp",
+                    "virtual:name",
+                    400,
+                    7,
+                    "source/clang/include/clang/Lex/Lexer.h",
+                ),
+                FullTreeClangIncludeOccurrence(
+                    "source/clang/lib/Lex/Lexer.cpp",
+                    "/oracle/source/clang/lib/Lex/Lexer.cpp",
+                    8,
+                    1,
+                    "generated/include/llvm/Config/llvm-config.h",
                 ),
             ),
             trace.includeOccurrences,
         )
         assertEquals(
             listOf(
+                FullTreeClangExternalIncludeOccurrence(
+                    "source/clang/lib/Lex/Lexer.cpp",
+                    "/oracle/source/clang/lib/Lex/Lexer.cpp",
+                    9,
+                    1,
+                    "/usr/include/stddef.h",
+                ),
+            ),
+            trace.externalIncludeOccurrences,
+        )
+        assertEquals(
+            listOf(
                 FullTreeClangModuleImport(
                     "source/clang/include/clang/Lex/Lexer.h",
+                    "/oracle/source/clang/include/clang/Lex/Lexer.h",
                     4,
                     1,
                     "Builtin",
+                    "/oracle/build/module.modulemap",
                     "generated/module.modulemap",
                 ),
             ),
@@ -109,73 +106,160 @@ class FullTreeClangHeaderTraceTest {
     }
 
     @Test
-    fun `trace rejects schema drift path confusion duplicate sources and location mismatch`() {
-        val valid = trace(
-            source = "/oracle/source/clang/lib/Lex/Lexer.cpp",
-            location = "/oracle/source/clang/lib/Lex/Lexer.cpp:1:1",
-            file = "/oracle/source/clang/include/clang/Lex/Lexer.h",
-        )
-        listOf(
-            valid.replace("\"version\":\"2.0.0\"", "\"version\":\"1.0.0\""),
-            valid.replace("\"imports\":[]", "\"imports\":[],\"extra\":false"),
-            valid.replace("/oracle/source/clang/lib/Lex/Lexer.cpp:1:1", "/oracle/source/clang/lib/Other.cpp:1:1"),
-            valid.replace("/oracle/source/clang/include", "/oracle/source/clang/../clang/include"),
-            """{"version":"2.0.0","dependencies":[${valid.substringAfter("[+").substringBeforeLast("]}")}] }""",
-        ).take(4).forEach { malformed ->
-            assertFailsWith<FullTreeClangHeaderTraceException> {
-                FullTreeClangHeaderTraceParser.parse(malformed.toByteArray(), roots())
-            }
-        }
+    fun `empty output is bound to expected TU while impossible empty JSON records fail`() {
+        val first = parse(byteArrayOf(), "source/clang/lib/Empty.cpp")
+        val second = parse(byteArrayOf(), "source/clang/lib/Other.cpp")
+        assertEquals(0, first.dependencyFileCount)
+        assertTrue(first.includeOccurrences.isEmpty())
+        assertNotEquals(first.canonicalFactsSha256, second.canonicalFactsSha256)
 
-        val record = valid.substringAfter("\"dependencies\":[").substringBeforeLast("]}")
-        val duplicate = """{"version":"2.0.0","dependencies":[$record,$record]}"""
+        val impossible = """
+            {"version":"2.0.0","dependencies":[{
+              "source":"/oracle/source/clang/lib/Lex/Lexer.cpp","includes":[],"imports":[]
+            }]}
+        """.trimIndent().toByteArray()
+        assertFailsWith<FullTreeClangHeaderTraceException> { parse(impossible) }
         assertFailsWith<FullTreeClangHeaderTraceException> {
-            FullTreeClangHeaderTraceParser.parse(duplicate.toByteArray(), roots())
+            parse("""{"version":"2.0.0","dependencies":[]}""".toByteArray())
         }
     }
 
     @Test
-    fun `root overlap entity and work limits fail closed`() {
-        val bytes = trace(
-            source = "/oracle/source/a.cpp",
-            location = "/oracle/source/a.cpp:1:1",
-            file = "/oracle/build/a.h",
+    fun `record order does not affect canonical facts and duplicate occurrences remain`() {
+        val main = record(
+            "/oracle/source/clang/lib/Lex/Lexer.cpp",
+            listOf(
+                include("/oracle/source/clang/lib/Lex/Lexer.cpp:1:1", "/oracle/source/clang/include/X.h"),
+                include("/oracle/source/clang/lib/Lex/Lexer.cpp:1:1", "/oracle/source/clang/include/X.h"),
+            ),
+        )
+        val header = record(
+            "/oracle/source/clang/include/X.h",
+            listOf(include("/oracle/source/clang/include/X.h:2:1", "/usr/include/a.h")),
+        )
+        val first = document(listOf(main, header)).toByteArray()
+        val second = document(listOf(header, main)).toByteArray()
+        val firstTrace = parse(first)
+        val secondTrace = parse(second)
+
+        assertNotEquals(firstTrace.inputSha256, secondTrace.inputSha256)
+        assertEquals(firstTrace.canonicalFactsSha256, secondTrace.canonicalFactsSha256)
+        assertEquals(firstTrace.includeOccurrences, secondTrace.includeOccurrences)
+        assertEquals(2, firstTrace.includeOccurrences.count { it.dependencyPath.endsWith("/X.h") })
+    }
+
+    @Test
+    fun `schema path source and root confusion fail closed`() {
+        val valid = document(
+            listOf(
+                record(
+                    "/oracle/source/clang/lib/Lex/Lexer.cpp",
+                    listOf(include("/oracle/source/clang/lib/Lex/Lexer.cpp:1:1", "/oracle/build/X.h")),
+                ),
+            ),
+        )
+        listOf(
+            valid.replace("\"version\":\"2.0.0\"", "\"version\":\"1.0.0\""),
+            valid.replace("\"imports\":[]", "\"imports\":[],\"extra\":false"),
+            valid.replace("/oracle/build/X.h", "/oracle/build/../build/X.h"),
+            valid.replace("/oracle/source/clang/lib/Lex/Lexer.cpp", "/outside/Lexer.cpp"),
+            valid.replace(":1:1", ":0:1"),
+        ).forEach { malformed ->
+            assertFailsWith<FullTreeClangHeaderTraceException> { parse(malformed.toByteArray()) }
+        }
+
+        assertFailsWith<FullTreeClangHeaderTraceException> {
+            FullTreeClangHeaderTraceParser.parse(
+                byteArrayOf(),
+                listOf(
+                    FullTreeClangTraceRoot("/oracle/root", "source"),
+                    FullTreeClangTraceRoot("/oracle/root", "generated"),
+                ),
+                "source/clang/lib/Lex/Lexer.cpp",
+            )
+        }
+    }
+
+    @Test
+    fun `raw external entities and independent limits fail closed`() {
+        val twoExternalIncludes = document(
+            listOf(
+                record(
+                    "/oracle/source/clang/lib/Lex/Lexer.cpp",
+                    listOf(
+                        include("/oracle/source/clang/lib/Lex/Lexer.cpp:1:1", "/usr/include/a.h"),
+                        include("/oracle/source/clang/lib/Lex/Lexer.cpp:2:1", "/usr/include/b.h"),
+                    ),
+                ),
+            ),
         ).toByteArray()
         assertFailsWith<FullTreeClangHeaderTraceException> {
-            FullTreeClangHeaderTraceParser.parse(
-                bytes,
-                listOf(
-                    FullTreeClangTraceRoot("/oracle", "source"),
-                    FullTreeClangTraceRoot("/oracle/build", "generated"),
+            parse(twoExternalIncludes, limits = FullTreeClangHeaderTraceLimits(maximumIncludeOccurrences = 1))
+        }
+
+        val twoDependencies = document(
+            listOf(
+                record(
+                    "/oracle/source/clang/lib/Lex/Lexer.cpp",
+                    listOf(include("/oracle/source/clang/lib/Lex/Lexer.cpp:1:1", "/oracle/build/X.h")),
                 ),
-            )
+                record(
+                    "/oracle/source/clang/include/X.h",
+                    listOf(include("/oracle/source/clang/include/X.h:1:1", "/oracle/build/Y.h")),
+                ),
+            ),
+        ).toByteArray()
+        assertFailsWith<FullTreeClangHeaderTraceException> {
+            parse(twoDependencies, limits = FullTreeClangHeaderTraceLimits(maximumDependencyFiles = 1))
         }
         assertFailsWith<FullTreeClangHeaderTraceException> {
-            FullTreeClangHeaderTraceParser.parse(
-                bytes,
-                roots(),
-                FullTreeClangHeaderTraceLimits(maximumIncludeOccurrences = 1, maximumWorkUnits = 1),
-            )
+            parse(twoDependencies, limits = FullTreeClangHeaderTraceLimits(maximumWorkUnits = 1))
         }
         assertFailsWith<FullTreeClangHeaderTraceException> {
-            FullTreeClangHeaderTraceParser.parse(
-                bytes,
-                roots(),
-                FullTreeClangHeaderTraceLimits(maximumDependencyFiles = 1, maximumPathBytes = 8),
-            )
+            parse(twoDependencies, limits = FullTreeClangHeaderTraceLimits(maximumPathBytes = 8))
         }
-        assertTrue(
-            FullTreeClangHeaderTraceLimits::class.java.declaredConstructors.all { constructor ->
-                constructor.parameterTypes.none { it == Function::class.java || it == Any::class.java }
-            },
-        )
     }
+
+    @Test
+    fun `returned collections cannot be mutated after fact digest binding`() {
+        val trace = parse(
+            document(
+                listOf(
+                    record(
+                        "/oracle/source/clang/lib/Lex/Lexer.cpp",
+                        listOf(
+                            include("/oracle/source/clang/lib/Lex/Lexer.cpp:1:1", "/oracle/build/A.h"),
+                            include("/oracle/source/clang/lib/Lex/Lexer.cpp:2:1", "/oracle/build/B.h"),
+                        ),
+                    ),
+                ),
+            ).toByteArray(),
+        )
+        @Suppress("UNCHECKED_CAST")
+        val mutable = trace.includeOccurrences as MutableList<FullTreeClangIncludeOccurrence>
+        assertFailsWith<UnsupportedOperationException> { mutable.removeAt(0) }
+        @Suppress("UNCHECKED_CAST")
+        val files = trace.projectFiles as MutableList<String>
+        assertFailsWith<UnsupportedOperationException> { files.add("source/forged.h") }
+    }
+
+    private fun parse(
+        bytes: ByteArray,
+        expected: String = "source/clang/lib/Lex/Lexer.cpp",
+        limits: FullTreeClangHeaderTraceLimits = FullTreeClangHeaderTraceLimits(),
+    ): FullTreeClangHeaderTrace = FullTreeClangHeaderTraceParser.parse(bytes, roots(), expected, limits)
 
     private fun roots(): List<FullTreeClangTraceRoot> = listOf(
         FullTreeClangTraceRoot("/oracle/source", "source"),
         FullTreeClangTraceRoot("/oracle/build", "generated"),
     )
 
-    private fun trace(source: String, location: String, file: String): String =
-        """{"version":"2.0.0","dependencies":[{"source":"$source","includes":[{"location":"$location","file":"$file"}],"imports":[]}]}"""
+    private fun include(location: String, file: String): String =
+        """{"location":"$location","file":"$file"}"""
+
+    private fun record(source: String, includes: List<String>): String =
+        """{"source":"$source","includes":[${includes.joinToString(",")}],"imports":[]}"""
+
+    private fun document(records: List<String>): String =
+        """{"version":"2.0.0","dependencies":[${records.joinToString(",")}]}"""
 }
