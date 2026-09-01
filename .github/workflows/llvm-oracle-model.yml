@@ -45,6 +45,7 @@ jobs:
             oracle/llvm/22.1.6
           observed="$(docker image inspect --format '{{.Id}}' \
             decomp-llvm-oracle-toolchain:22.1.6)"
+          echo "LLVM_TOOLCHAIN_IMAGE_ID=$observed" >> "$GITHUB_ENV"
           install -d -m 0700 "$RUNNER_TEMP/llvm-toolchain-verification"
           (umask 077; docker image inspect "$observed" \
             > "$RUNNER_TEMP/llvm-toolchain-verification/inspect.json")
@@ -74,6 +75,24 @@ jobs:
               --source-lock oracle/llvm/22.1.6/source-lock.json \
               --build-record oracle/llvm/22.1.6/build-record.json \
               --recorded-origin-digest "$recorded_origin"
+      - name: Exercise retained Clang and direct LLD in the production-staged worker image
+        env:
+          DECOMP_REQUIRE_LLVM_HOSTED_WORKER_IMAGE: "1"
+          DECOMP_LLVM_HOSTED_WORKER_DOCKER: /usr/bin/docker
+          DECOMP_LLVM_HOSTED_WORKER_DOCKER_HOST: unix:///var/run/docker.sock
+          DECOMP_LLVM_HOSTED_WORKER_TOOLCHAIN_IMAGE: ${{ env.LLVM_TOOLCHAIN_IMAGE_ID }}
+          DECOMP_LLVM_HOSTED_WORKER_JDK_ROOT: /opt/decomp-llvm-hosted-worker-jdk
+        run: |
+          hosted_jdk=/opt/decomp-llvm-hosted-worker-jdk
+          sudo test ! -e "$hosted_jdk"
+          sudo install -d -m 0755 "$hosted_jdk"
+          sudo cp -a --no-preserve=links \
+            "${JAVA_HOME:?setup-java did not set JAVA_HOME}/." "$hosted_jdk/"
+          sudo chown -R root:root "$hosted_jdk"
+          sudo chmod -R go-w "$hosted_jdk"
+          test -x "$hosted_jdk/bin/java"
+          ./gradlew --no-daemon test \
+            --tests decompengine.oracle.behavior.LlvmBehaviorHostedWorkerImageLiveIntegrationTest
       - name: Verify checked Clang ELF twins
         run: ./gradlew --no-daemon verifyLlvmOracleArtifacts
       - name: Reconcile the complete Clang/LLVM compilation-unit and source inventories in Kotlin

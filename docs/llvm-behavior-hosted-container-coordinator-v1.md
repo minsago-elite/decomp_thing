@@ -44,6 +44,42 @@ Live inspection requires the inherited image configuration to be exactly the rev
 entry point, and an empty command. Inherited volumes, healthchecks, hooks, shell configuration,
 loader/JVM environment, or extra labels fail closed.
 
+### Required live worker-image regression
+
+The LLVM oracle workflow sets `DECOMP_REQUIRE_LLVM_HOSTED_WORKER_IMAGE=1` and runs the opt-in
+`LlvmBehaviorHostedWorkerImageLiveIntegrationTest` against the freshly rebuilt exact toolchain
+image ID. The test calls the production build-context owner with a separately provisioned,
+root-owned JDK, emits that owner's deterministic tar without adding test files, verifies the tar's
+recorded size and digest, builds it with networking and cache disabled, and applies the strict
+worker-image inspect projector. A missing Docker executable/socket, exact toolchain image ID,
+trusted JDK, successful build, or accepted inspect record is a required-lane failure rather than a
+skip. Ordinary local test runs skip this live test unless the required environment flag and all
+four explicit settings are present; they do not claim that Docker ran.
+
+The test does not pass a bare local image ID to Dockerfile `FROM`, because BuildKit does not accept
+that form as a local base reference. It first proves a bounded UUID tag absent, arms cleanup, tags
+the already-selected exact toolchain image ID, and uses only that temporary tag as the build
+argument with pulling disabled. Bounded Docker inspection must resolve the tag to the configured
+exact ID immediately before and after the derived build. The tag is then removed by its exact name;
+the test proves both tag absence and continued inspectability of the original exact toolchain image
+and its pre-existing tags. The temporary tag is compatibility plumbing inside test source, not
+image-selection or production Docker authority.
+
+Only after the derived image has passed strict inspection does the regression mount a generated
+JAR containing only the test-source probe class. The production-staged application JARs are first
+checked not to contain that class. The test uses the fixed `/inputs`, `/stage-output`, `/work`,
+`/tmp`, and `/decomp-jna` targets and the production containment limits, then overrides the image
+entry point solely to call the zero-argument probe. Two fixed read-only candidate fixture trees are
+mounted under `/inputs`; the probe exercises the existing non-authoritative retained-descriptor
+Clang and direct-LLD assessment and rejects any execution of candidate build scripts.
+
+That extra probe-JAR mount, fixture shape, direct `docker run`, and entry-point override are an
+explicit test overlay. They prove that the exact production-staged image contains a working hosted
+Clang/LLD and Kotlin/JNA runtime path, but they are not the fixed inner-worker invocation, a
+production `START`, authenticated ingress, lifecycle/absence proof, receipt, observation, score,
+publication, or release evidence. No test Docker client or probe is present in production source or
+the derived image.
+
 ## State machine
 
 One durable operation has this forward-only sequence:
