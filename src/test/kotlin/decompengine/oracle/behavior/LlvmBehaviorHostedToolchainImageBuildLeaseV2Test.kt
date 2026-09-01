@@ -238,12 +238,33 @@ class LlvmBehaviorHostedToolchainImageBuildLeaseV2Test {
                 }
                 assertEquals(before, journalSnapshot(armed))
             }
+            listOf<(LlvmBehaviorHostedToolchainImageBuildLeaseV2Owner) -> Unit>(
+                { it.recordImageAuthenticated() },
+                { it.recordOrphanImageIdentified() },
+                { it.recordBuildTerminatedNoImage() },
+            ).forEach { forbiddenOutcome ->
+                fixture.recover(armed).use { recovered ->
+                    assertEquals(
+                        LlvmBehaviorHostedToolchainImageBuildLeaseV2Phase.IMAGE_BUILD_POST_ARMED,
+                        recovered.phase,
+                    )
+                    assertFalse(recovered is LlvmBehaviorHostedToolchainImageBuildLeaseV2FreshOwner)
+                    val before = journalSnapshot(armed)
+                    assertFailsWith<LlvmBehaviorHostedToolchainImageBuildLeaseV2Exception> {
+                        forbiddenOutcome(recovered)
+                    }
+                    assertEquals(before, journalSnapshot(armed))
+                }
+            }
             fixture.recover(armed).use { recovered ->
                 assertEquals(
-                    LlvmBehaviorHostedToolchainImageBuildLeaseV2Phase.IMAGE_BUILD_POST_ARMED,
-                    recovered.phase,
+                    LlvmBehaviorHostedToolchainImageBuildLeaseV2Phase.IMAGE_BUILD_OUTCOME_AMBIGUOUS,
+                    recovered.recordImageBuildOutcomeAmbiguous(),
                 )
-                assertFalse(recovered is LlvmBehaviorHostedToolchainImageBuildLeaseV2FreshOwner)
+                assertEquals(
+                    LlvmBehaviorHostedToolchainImageBuildLeaseV2Phase.RECOVERY_FENCE_REQUIRED,
+                    recovered.requireRecoveryFence(),
+                )
             }
 
             val ambiguousBypass = fixture.newJournalRoot("ambiguous-cannot-bypass-fence")

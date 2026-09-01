@@ -168,6 +168,7 @@ internal object LlvmBehaviorHostedToolchainImageBuildLeaseV2 {
     private abstract class BoundOwner(
         private val recipe: LlvmBehaviorHostedToolchainImageRecipeV1LeaseOwner,
         private val opened: OpenedToolchainImageBuildLease,
+        private val freshOpen: Boolean,
     ) : LlvmBehaviorHostedToolchainImageBuildLeaseV2Owner {
         private var history = opened.history
         private var closed = false
@@ -285,6 +286,16 @@ internal object LlvmBehaviorHostedToolchainImageBuildLeaseV2 {
         ) {
             checkOpen()
             try {
+                if (
+                    !freshOpen &&
+                    history.phase == LlvmBehaviorHostedToolchainImageBuildLeaseV2Phase.IMAGE_BUILD_POST_ARMED &&
+                    target !in RECOVERED_ARMED_ALLOWED_TARGETS
+                ) {
+                    leaseFail(
+                        "cold-recovered hosted toolchain image-build POST must enter " +
+                            "ambiguous recovery before any outcome",
+                    )
+                }
                 recipe.requireCurrent()
                 history = opened.journal.append(history, target)
                 recipe.requireCurrent()
@@ -316,7 +327,8 @@ internal object LlvmBehaviorHostedToolchainImageBuildLeaseV2 {
     private class FreshBoundOwner(
         recipe: LlvmBehaviorHostedToolchainImageRecipeV1LeaseOwner,
         opened: OpenedToolchainImageBuildLease,
-    ) : BoundOwner(recipe, opened), LlvmBehaviorHostedToolchainImageBuildLeaseV2FreshOwner {
+    ) : BoundOwner(recipe, opened, freshOpen = true),
+        LlvmBehaviorHostedToolchainImageBuildLeaseV2FreshOwner {
         override fun armImageBuildPost() = append(
             LlvmBehaviorHostedToolchainImageBuildLeaseV2Phase.IMAGE_BUILD_POST_ARMED,
         )
@@ -325,7 +337,7 @@ internal object LlvmBehaviorHostedToolchainImageBuildLeaseV2 {
     private class RecoveredBoundOwner(
         recipe: LlvmBehaviorHostedToolchainImageRecipeV1LeaseOwner,
         opened: OpenedToolchainImageBuildLease,
-    ) : BoundOwner(recipe, opened)
+    ) : BoundOwner(recipe, opened, freshOpen = false)
 }
 
 private data class ToolchainRecipePins(
@@ -1348,6 +1360,11 @@ private fun allowedNextPhases(
     LlvmBehaviorHostedToolchainImageBuildLeaseV2Phase.CLEANUP_BLOCKED,
     -> emptySet()
 }
+
+private val RECOVERED_ARMED_ALLOWED_TARGETS = setOf(
+    LlvmBehaviorHostedToolchainImageBuildLeaseV2Phase.IMAGE_BUILD_OUTCOME_AMBIGUOUS,
+    LlvmBehaviorHostedToolchainImageBuildLeaseV2Phase.CLEANUP_BLOCKED,
+)
 
 private fun atomicTargetName(pendingName: String): String {
     if (pendingName == DescriptorBoundAtomicStateFile.temporaryName(BINDING_FILE)) return BINDING_FILE
