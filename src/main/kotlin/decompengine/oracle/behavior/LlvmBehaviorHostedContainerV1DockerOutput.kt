@@ -6,17 +6,17 @@ import java.util.Collections
 internal class LlvmBehaviorHostedContainerV1DockerOutputException(message: String) :
     IllegalArgumentException(message)
 
-/** Immutable, non-authoritative projection of one successful `container create` stdout record. */
+/** Immutable, non-authoritative projection of one syntactically accepted create-output candidate. */
 internal data class LlvmBehaviorHostedContainerV1CreateOutputProjection(
     val containerId: String,
 )
 
-/** Immutable, non-authoritative projection of one ID acknowledgement written by the Docker CLI. */
+/** Immutable, non-authoritative projection of one syntactically accepted ID acknowledgement candidate. */
 internal data class LlvmBehaviorHostedContainerV1AcknowledgementProjection(
     val containerId: String,
 )
 
-/** Immutable, non-authoritative projection of one `container wait` stdout record. */
+/** Immutable, non-authoritative projection of one syntactically accepted wait-output candidate. */
 internal data class LlvmBehaviorHostedContainerV1WaitOutputProjection(
     val statusCode: Int,
 )

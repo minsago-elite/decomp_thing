@@ -69,8 +69,10 @@ authoritative for every mutation.
 Kotlin exclusively locks a pre-provisioned mode-0700 operation root and replays its bounded,
 append-only journal before accepting new work. The binding derives the sole container name from
 the operation identity before any create attempt, so it remains available after a timeout or
-process crash without accepting a caller-selected locator. A prior armed operation is cleaned by
-that durable name and, when recorded, its exact container ID. Corrupt, rolled-back,
+process crash without accepting a caller-selected locator. The request also carries exactly one
+operation label, `dev.decompengine.llvm-behavior-hosted-operation=<operationId>`, in addition to
+the inherited reviewed image label. A prior armed operation is cleaned by that durable name and,
+when recorded, its exact container ID. Corrupt, rolled-back,
 cross-operation, or unknown journal residue blocks publication.
 
 ### INPUT_AUTHENTICATED
@@ -114,6 +116,13 @@ container ID as soon as creation completes. A timeout can therefore never turn a
 name into an untracked process. The current code-only journal deliberately marks image, container,
 and staging identities unbound; its phase names are not evidence that those checks occurred.
 
+The code-only pre-create plan contains no container-ID input or field and derives its operation
+name only from the locked journal owner. It can structurally parse a candidate create-stdout ID and
+then render only read-only exact-ID inspection. Those bytes do not prove the invocation, endpoint,
+exit status, stderr, or daemon mutation. No START, wait, or removal suffix is exposed by this
+checkpoint. A future authenticated coordinator must bind all of those process facts and the strict
+stopped-container inspection before it can privately render a mutation command.
+
 Kotlin creates a stopped container by exact image ID and then authenticates its effective inspect
 record before START. The container must have:
 
@@ -142,6 +151,16 @@ records do not appear in that latter Moby projection. Both resolved bind `Mode` 
 for modern mount specifications, so read-only input access is cross-checked through requested
 `ReadOnly=true` and resolved `RW=false` rather than a legacy `Mode=ro` string.
 
+Both host bind sources must be absolute, normalized, non-root paths whose segments use only the
+portable ASCII set `[A-Za-z0-9._+@%:=-]`. In particular, commas, whitespace, quotes, backslashes,
+and control characters fail before command construction because Docker's `--mount` CSV syntax
+does not provide a safe generic encoding for those source strings.
+
+The live client must use the descriptor-pinned empty Docker configuration so client-side proxy
+settings cannot add environment variables. The daemon must also be preflighted without additional
+default ulimits: Docker merges such defaults into `HostConfig`, and the exact three-ulimit inspect
+contract intentionally fails closed rather than accepting an injected limit.
+
 ### WORKER_COMPLETED and STAGED_PAIR_VERIFIED
 
 START occurs once by authenticated container ID. There is no `docker exec`. Kotlin applies a
@@ -159,9 +178,16 @@ with the independently verified inputs and live image facts.
 Kotlin force-removes only the retained container ID after checking that it is still the inspected
 object. It also checks the durable name through the complete late-create uncertainty window.
 Terminal proof requires the container object, init pidfd, authenticated cgroup, namespace members,
-mounts, and bounded exact-name/label inventory to be absent. Daemon ambiguity, an ABA replacement,
-surviving descendant, failed removal, unavailable inventory, or interrupted cleanup blocks final
-publication.
+mounts, and two independently bounded inventories—one filtered by the anchored exact name and one
+by the exact operation label—to be absent. A single combined Docker filter is insufficient because
+its AND semantics could hide same-name/wrong-label or same-label/wrong-name residue. Daemon
+ambiguity, an ABA replacement, surviving descendant, failed removal, unavailable inventory, or
+interrupted cleanup blocks final publication.
+
+Each inventory emits only full, untruncated container IDs. Kotlin strictly parses the bounded ID
+set and inspects every returned object by that ID; it does not trust delimiter-sensitive rendered
+names, labels, or state. An unmatched object blocks publication and does not itself authorize
+removal.
 
 The staged pair stays descriptor-pinned throughout cleanup and is reauthenticated afterward.
 
