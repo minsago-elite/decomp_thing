@@ -107,6 +107,66 @@ No locally discovered build tree is promoted automatically. For production use,
 the archive and sidecar must come from the separately reviewed capture path and must
 reconcile with the checked build record and planning inventory supplied here.
 
+## Unexecuted Clang capture-input registry
+
+`FullTreeClangCaptureInputControl` is the load-only Kotlin/JVM boundary for the next
+all-TU compiler-capture step. It accepts only the raw capture-input artifact and the
+twelve raw predecessor paths needed to reconstruct readiness, generated-file, source,
+planning, and build-record state. It has no generator, publisher, process runner,
+callback, parsed-object, or Python surface.
+
+Each raw action contains exactly a working directory, a physical main-input path,
+and the complete ordered compiler argument vector. The loader derives every action
+identity itself and requires one action, in authenticated A13 order, for each source
+module and no action for a source-only unit or header. Handwritten inputs join the
+authenticated source archive. Generated inputs must also join the generated registry
+by both compilation-unit ID and source path, including their byte, file-digest, and
+producer-action commitments.
+
+The command profile is positional rather than token-count based. It requires the
+configured C or C++ driver, then exactly one `--no-default-config`, the fixed
+`-MD -MT <object> -MF <depfile> -o <object> -c <main-input>` frame, and only
+self-contained option tokens afterward. This prevents another option from consuming
+a required token, prevents a second primary input, and prevents Clang from loading an
+uncommitted implicit configuration file.
+
+The required dependency file must be the required object operand plus `.d`; both
+must resolve strictly below the recorded build root and be collision-free. The
+registry does not infer or authorize an exclusive compiler write set. A later
+isolated runner must contain every process write independently before it may execute
+the argv. Response and compiler configuration files, shell/wrapper entry points,
+joined or duplicate critical options, opaque compiler/preprocessor/assembler
+forwarding, language overrides, preprocessing-only and dependency-only modes, path
+escapes, extra translation-unit operands, and caller-authored header-capture overlays
+fail closed. The loader derives a
+domain-separated action SHA-256 and `traces/<action-sha256>.json` slot from the exact
+argv and predecessor evidence without rewriting the command.
+
+The inherited environment is cleared. Sorted build-record variables are retained as
+the base environment, while Kotlin fixes `CC_PRINT_HEADERS_FORMAT=json` and
+`CC_PRINT_HEADERS_FILTERING=direct-per-file`; a later isolated host runner must derive
+`CC_PRINT_HEADERS_FILE` from its trusted scratch root and the action's trace slot.
+Source-readiness and generated-registry header paths are combined into one sorted
+**candidate** population. That population is not a complete project-header universe.
+
+This registry is deliberately `unexecuted-unreceipted-capture-input`. Its only
+positive authority facts are exact A13 module/action joining, reconciled predecessor
+bindings, and combination of the two header-candidate sources. Compiler-action and
+capture authentication, execution, exit statuses, complete header coverage, a ready
+header plan, compiler write-set containment, clean compilation, and release
+eligibility all remain false. Seven active blockers record missing complete project
+headers, compiler-capture provenance,
+generated-generation receipts, generated-snapshot completeness, live Ninja-edge
+replay, and verified physical build and project roots. A fixed disposition ledger
+shows how the readiness blockers are carried or refined; none disappear implicitly.
+
+ACP is machine-recorded as the first-class candidate producer/operator. Authenticated
+ACP session, change, build-artifact, and provenance evidence may enter a later Kotlin
+candidate-admission boundary read-only. ACP neither authors this reference capture
+input nor gains compiler-action, capture, execution, oracle, reference, policy,
+validation, observation, scoring, certification, or release authority, and ACP
+lineage is not an input to capture-input v1.
+
 ## Resolution boundary
 
 The assessment scans the strict locked TAR/XZ archive and parses C-family
