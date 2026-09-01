@@ -188,6 +188,43 @@ class OracleSchemasTest {
     }
 
     @Test
+    fun `ordered multi-schema configuration digest preserves function-truth v2 identity`() {
+        val policy = JsonObject(
+            mapOf(
+                "id" to JsonPrimitive("full-tree-function-truth"),
+                "version" to JsonPrimitive(2),
+                "emittedIdentity" to JsonPrimitive("one-record-per-rva"),
+                "ownerSelection" to JsonPrimitive("lowest-source-aligned-unit-id"),
+                "nonEmittedIdentity" to JsonPrimitive("declaration-and-alias-name-sha256-prefix-128"),
+                "nonEmissionPolicy" to JsonPrimitive(
+                    "inline-or-definition-without-range-and-emitted-alias-reconciliation",
+                ),
+                "elfOnlyPopulation" to JsonPrimitive("excluded-elf-no-source-aligned-dwarf"),
+            ),
+        )
+        val schemas = listOf(
+            "full-tree-function-exclusions",
+            "full-tree-function-truth",
+            "full-tree-function-truth-index",
+        )
+
+        assertEquals(
+            "17c61e43524b98a215075b82fa50732d6d8f50d883dce235e511731612da04e5",
+            OracleSchemas.configurationSha256(schemas, policy),
+        )
+        assertTrue(
+            OracleSchemas.configurationSha256(schemas.reversed(), policy) !=
+                OracleSchemas.configurationSha256(schemas, policy),
+        )
+        assertFailsWith<OracleSchemaException> {
+            OracleSchemas.configurationSha256(emptyList(), policy)
+        }
+        assertFailsWith<OracleSchemaException> {
+            OracleSchemas.configurationSha256(listOf(schemas.first(), schemas.first()), policy)
+        }
+    }
+
+    @Test
     fun `validator accepts caller trees without reparsing permissive JSON`() {
         val emptyPartition = OracleJson.parse(
             """{"counts":{"ambiguousTypeReferences":0,"bases":0,"crossShardTypeReferences":0,"enumerators":0,"fields":0,"globals":0,"resolvedTypeReferences":0,"types":0,"unobservableGlobals":0,"unobservableTypes":0,"unresolvedTypeReferences":0},"globals":[],"oracle":{},"schemaVersion":1,"shard":{},"types":[]}""".toByteArray(),

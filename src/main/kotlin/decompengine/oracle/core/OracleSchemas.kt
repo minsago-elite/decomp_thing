@@ -28,11 +28,24 @@ object OracleSchemas {
     fun identity(name: String): OracleSchemaIdentity = loaded(name).identity
 
     /** Hashes canonical policy bytes followed by the exact bundled schema bytes. */
-    fun configurationSha256(name: String, policy: JsonElement): String {
-        val loaded = loaded(name)
+    fun configurationSha256(name: String, policy: JsonElement): String =
+        configurationSha256(listOf(name), policy)
+
+    /**
+     * Hashes canonical policy bytes followed by exact bundled schema bytes in caller order.
+     *
+     * Logical catalog names are resolved through the same bounded classpath-only loader as
+     * [identity] and [validate]; callers cannot substitute filesystem or remote schema content.
+     */
+    fun configurationSha256(names: List<String>, policy: JsonElement): String {
+        if (names.isEmpty()) throw OracleSchemaException("oracle configuration must bind at least one schema")
+        if (names.toSet().size != names.size) {
+            throw OracleSchemaException("oracle configuration schema names must be unique")
+        }
+        val schemas = names.map(::loaded)
         val digest = MessageDigest.getInstance("SHA-256")
         digest.update(OracleJson.canonicalBytes(policy))
-        digest.update(loaded.bytes)
+        schemas.forEach { digest.update(it.bytes) }
         return digest.digest().joinToString("") { byte ->
             (byte.toInt() and 0xff).toString(16).padStart(2, '0')
         }
