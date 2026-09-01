@@ -161,6 +161,10 @@ internal object LlvmBehaviorHostedCleanBuildV2InnerWorker {
 
 /** Non-authoritative local seam for exercising only the fixed direct-build mechanism. */
 internal object LlvmBehaviorHostedCleanBuildV2TestSupport {
+    /** Syntax-only seam which authenticates no path, receipt, runtime, or build fact. */
+    fun requireNoLegacyEvidenceText(value: String) =
+        translateHostedFailure { rejectLegacyHostedText(value, "hosted evidence syntax") }
+
     fun parseLinkDependencyManifest(bytes: ByteArray, expectedTarget: Path): List<String> =
         translateHostedFailure { parseLldLinkDependencyManifest(bytes, expectedTarget.toAbsolutePath().normalize()) }
 
@@ -2067,6 +2071,8 @@ private val FORBIDDEN_HOSTED_MARKERS = listOf(
     "https://",
     "behavior-preexec-v1",
     "oci-container-v1",
-    "llvm-behavior-candidate-execution-admission-v1",
-    "llvm-behavior-runtime-preflight-v1",
+    "llvm-behavior-candidate-execution-admission",
+    "kotlin-host-pre-start-binding-v1",
+    "llvm-behavior-runtime-preflight",
+    "kotlin-host-live-runtime-preflight-v1",
 )

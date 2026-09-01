@@ -706,6 +706,8 @@ private val FORBIDDEN_INDEX_MARKERS = listOf(
     "python",
     "behavior-preexec-v1",
     "oci-container-v1",
-    "llvm-behavior-candidate-execution-admission-v1",
-    "llvm-behavior-runtime-preflight-v1",
+    "llvm-behavior-candidate-execution-admission",
+    "kotlin-host-pre-start-binding-v1",
+    "llvm-behavior-runtime-preflight",
+    "kotlin-host-live-runtime-preflight-v1",
 )
