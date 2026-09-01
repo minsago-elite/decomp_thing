@@ -19,7 +19,7 @@ import kotlinx.serialization.json.JsonPrimitive
 
 class FullTreeElfFunctionsSqliteTest {
     @Test
-    fun `producer matches frozen historical Python v1 bytes and is worker deterministic`() =
+    fun `producer matches frozen v1 differential bytes and is worker deterministic`() =
         inControlTemporaryDirectory { directory ->
             val fixture = createElfFunctionFixture(directory.resolve("authenticated ?#% inputs"))
             val expected = frozenIndexBytes()
@@ -65,9 +65,11 @@ class FullTreeElfFunctionsSqliteTest {
                 .replaceFirst("{\n", "{\n  \"schemaVersion\": 1,\n")
                 .toByteArray(StandardCharsets.UTF_8)
             val noncanonical = canonical + '\n'.code.toByte()
+            val fixtureScopeSha256 = fixture.scope.sha256
             val staleBinding = canonical.decodeToString()
-                .replaceFirst(FROZEN_SCOPE_SHA256, "f".repeat(64))
+                .replaceFirst(fixtureScopeSha256, "f".repeat(64))
                 .toByteArray(StandardCharsets.UTF_8)
+            assertFalse(canonical.contentEquals(staleBinding))
             val malformedUtf8 = canonical.copyOf().also { bytes ->
                 val name = "_init".toByteArray(StandardCharsets.US_ASCII)
                 val offset = bytes.indexOfSubsequence(name)
@@ -412,6 +414,6 @@ private fun assertNoElfFunctionScratch(root: Path) {
 
 private const val FROZEN_CONFIGURATION_SHA256 =
     "5305350fd10d902979a5a1bc109dd424d8f7c274e22bd5e4bd47bc18ae639f2f"
-private const val FROZEN_SCOPE_SHA256 = "0c49f06a4d24a180dd42c45eb234f99c5dc7b86bf967fe76d7fa2714c3953376"
+private const val FROZEN_SCOPE_SHA256 = "725fbbc9d4f4dbef39f094bfcd751259d4313d22597c4863047e356e91d80578"
 private const val FROZEN_INPUT_SHA256 = "28105cb58b619f88d8718e8cf30c0c3471b7f0c8825e95e171eebc940954b859"
-private const val FROZEN_INDEX_SHA256 = "6267c8d07e33f9eed78dda94abfe87eeeb7a699161f9a1fbbcd507de5091f6ae"
+private const val FROZEN_INDEX_SHA256 = "491e49951e780408962330764944b60b60616d78ad516c9e65d4b0d44b19b492"

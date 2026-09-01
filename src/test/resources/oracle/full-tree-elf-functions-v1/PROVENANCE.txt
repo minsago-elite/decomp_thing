@@ -1,16 +1,17 @@
 Non-authoritative migration fixture for the Kotlin/JVM full-tree ELF-function v1 port.
 
-The expected index was generated once on 2026-08-30 with the checked-in historical
+The functional index body was generated once on 2026-08-30 with the checked-in historical
 oracle/full_tree_elf_functions.py implementation and its pinned pyelftools 0.33 dependency.
-The compact control-plane rich.elf fixture was supplied as both rich and stripped twins;
-the manifest/scope bindings were canonically rebound to that exact pair before generation.
+The compact control-plane rich.elf fixture was supplied as both rich and stripped twins.
+This fixture follows the current reviewed control-plane scope: its canonical scope binding
+was refreshed after the checked-in source-lock/build-record/manifest/scope resources changed.
 
 Python is not invoked by Kotlin production code or tests. These frozen bytes are only an
 independent differential vector for preserving the historical v1 wire contract.
 
 configurationSha256: 5305350fd10d902979a5a1bc109dd424d8f7c274e22bd5e4bd47bc18ae639f2f
 manifestSha256: 40b7fccf717ac1782a0f740845ec6183a363aed0001b55ad1bdb0fbafba538d1
-scopeSha256: 0c49f06a4d24a180dd42c45eb234f99c5dc7b86bf967fe76d7fa2714c3953376
+scopeSha256: 725fbbc9d4f4dbef39f094bfcd751259d4313d22597c4863047e356e91d80578
 inputSha256: 28105cb58b619f88d8718e8cf30c0c3471b7f0c8825e95e171eebc940954b859
 indexBytes: 5377
-indexSha256: 6267c8d07e33f9eed78dda94abfe87eeeb7a699161f9a1fbbcd507de5091f6ae
+indexSha256: 491e49951e780408962330764944b60b60616d78ad516c9e65d4b0d44b19b492
