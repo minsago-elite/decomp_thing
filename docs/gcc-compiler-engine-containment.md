@@ -19,24 +19,33 @@ checkpoint. It defines canonical bounded bytes for three ordered states:
    manager control-group path, descriptor identity for the cgroup-v2 leaf, exact controller and
    systemd policy, a binding-derived BOOT nonce, and pidfd-pinned identities for the scope leader,
    namespace init, and Kotlin BOOT keeper.
-3. `TERMINAL_ABSENT` requires a whole-control-group `SIGKILL` (`--kill-whom=all` semantics), the
-   unit load state `not-found`, no same-name unit or cgroup candidate, the cgroup path absent and
-   unpopulated, every receipt process's pidfd dead, and two independent absence sweeps.
+3. `TERMINAL_ABSENT` binds the cleanup policy: issue systemd `SIGKILL` to all processes only when
+   the exact retained target still exists, refuse mutation if that name was replaced, and use the
+   retained pidfds as the process backstop. The receipt claims outcomes only for the unit load state
+   `not-found`, no same-name unit or cgroup candidate, the cgroup path absent and unpopulated, every
+   receipt process's pidfd dead, and two independent absence sweeps. If the exact scope was already
+   absent, no systemd kill is issued or claimed as a historical event.
 
 The contract accepts fresh raw canonical bytes at every assessment boundary. It never accepts a
 prior assessment as a capability. Every returned object says
 `non-authoritative-caller-supplied-containment-bytes-v1`, `releaseEligible=false`, and
-`startAuthorized=false`. There is no START, launch, attachment, cold-adoption, output publication,
-lease release, scoring, release, ACP, or Python API. The receipt renderers are visibly test-only and
-their bytes are forgeable.
+`startAuthorized=false`. The raw receipt renderers are visibly test-only and their bytes are
+forgeable.
 
-This does **not** prove that either compiler engine ran, reached BOOT, was killed, resumed, stayed
-inside a resource boundary, or produced any artifact. A future host-owned controller must reuse or
-safely generalize the existing descriptor/pidfd-pinned systemd/cgroup-v2 implementation, durably
-publish the binding and live attachment receipt under an owner-held journal/lease lock hierarchy,
-and reobserve the same invocation and descriptors around every mutation. It must also acknowledge
-that cooperative user-systemd naming is not kernel-enforced exclusion against a hostile same-UID
-peer. Only after those authorities exist can a separately reviewed START transition be considered.
+The Kotlin `GccCompilerEngineLiveContainmentController` is a narrower production BOOT checkpoint.
+Its raw-path facade authenticates the definition and exact packaged JVM closure, launches the fixed
+three-process keeper topology in a descriptor/pidfd-pinned systemd/cgroup-v2 scope, durably records
+the attachment, and returns one opaque cleanup-only owner. Pre-attachment failure rollback is a
+definition-bound, descriptor-relative durable state machine; terminal publication rechecks the
+immutable definition and attachment bytes before and after writing absence. There is still no
+START, compiler execution, export, scoring, output-lease release, ACP authority, Python authority,
+or cold reopen of an attached/terminal operation.
+
+This checkpoint does **not** prove that either compiler engine ran, resumed, or produced any
+artifact. Cooperative file locks, owner-only directories, and user-systemd naming also do not
+exclude a hostile process with the same UID (or root); those principals remain part of the trusted
+operating envelope. Only after separately reviewed START and later evidence transitions exist can
+compiler output become oracle evidence.
 
 ACP remains a read-only consumer of later authenticated plans. It cannot create, validate, score,
 or release GCC oracle or containment truth.

@@ -52,7 +52,15 @@ class GccCompilerEngineContainmentContractTest {
         )
         assertFalse(containment.getValue("startTransitionPresent").jsonPrimitive.boolean)
         assertEquals("control-group", containment.getValue("killMode").jsonPrimitive.content)
-        assertEquals("all", containment.getValue("terminalKillWhom").jsonPrimitive.content)
+        assertEquals(
+            "sigkill-all-if-exact-retained-target-present",
+            containment.getValue("terminalSystemdMutation").jsonPrimitive.content,
+        )
+        assertEquals("refuse", containment.getValue("replacementMutation").jsonPrimitive.content)
+        assertEquals(
+            "sigkill-retained-processes",
+            containment.getValue("pidfdBackstop").jsonPrimitive.content,
+        )
         assertTrue(containment.getValue("requireUnitAbsent").jsonPrimitive.boolean)
         assertTrue(containment.getValue("requireCgroupAbsent").jsonPrimitive.boolean)
         assertTrue(containment.getValue("requireAllReceiptPidfdsDead").jsonPrimitive.boolean)
@@ -133,7 +141,7 @@ class GccCompilerEngineContainmentContractTest {
     }
 
     @Test
-    fun `terminal assessment requires whole cgroup kill and every independent absence proof`() {
+    fun `terminal assessment binds conditional cleanup policy and every independent absence proof`() {
         val definition = GccCompilerEngineContainmentContract.assessDefinition(request()).canonicalBytes
         val attached = GccCompilerEngineContainmentContract.renderUnitAttachedAtBootReceiptForTesting(
             definition,
@@ -146,7 +154,27 @@ class GccCompilerEngineContainmentContractTest {
             attached,
         )
         val mutations = listOf(
-            mutateAndRehash(absence, "kill", "whom", JsonPrimitive("main"), "absenceReceiptSha256"),
+            mutateAndRehash(
+                absence,
+                "cleanupPolicy",
+                "systemdMutation",
+                JsonPrimitive("sigkill-all"),
+                "absenceReceiptSha256",
+            ),
+            mutateAndRehash(
+                absence,
+                "cleanupPolicy",
+                "replacementAction",
+                JsonPrimitive("mutate"),
+                "absenceReceiptSha256",
+            ),
+            mutateAndRehash(
+                absence,
+                "cleanupPolicy",
+                "pidfdBackstop",
+                JsonPrimitive("none"),
+                "absenceReceiptSha256",
+            ),
             mutateAndRehash(absence, "unit", "loadState", JsonPrimitive("loaded"), "absenceReceiptSha256"),
             mutateAndRehash(absence, "cgroup", "pathPresent", JsonPrimitive(true), "absenceReceiptSha256"),
             mutateAndRehash(

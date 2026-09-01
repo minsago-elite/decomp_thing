@@ -5,6 +5,8 @@ import java.nio.file.LinkOption
 import java.nio.file.attribute.PosixFilePermissions
 import java.security.MessageDigest
 import java.util.concurrent.TimeUnit
+import java.util.jar.Attributes
+import java.util.jar.JarFile
 
 plugins {
     kotlin("jvm") version "2.4.0"
@@ -108,6 +110,140 @@ val llvmBehaviorHelperSource = layout.projectDirectory.file("src/main/c/decomp_l
 val llvmBehaviorHelperBinary = layout.buildDirectory.file("native/behavior/decomp-llvm-behavior-helper")
 val llvmBehaviorHelperChecksum = layout.buildDirectory.file("native/behavior/decomp-llvm-behavior-helper.sha256")
 val llvmBehaviorHelperCompiler = providers.gradleProperty("llvmBehaviorHelperCompiler").orElse("/usr/bin/cc")
+val kotlinBootRuntimeDirectory = layout.buildDirectory.dir("oracle/gcc/kotlin-boot-runtime")
+val kotlinBootClasspathReference =
+    layout.buildDirectory.file("generated/oracle/gcc/kotlin-boot-classpath-reference-v1.json")
+
+fun sha256(path: java.nio.file.Path): String {
+    val digest = MessageDigest.getInstance("SHA-256")
+    val buffer = ByteArray(1024 * 1024)
+    Files.newInputStream(path).use { input ->
+        while (true) {
+            val read = input.read(buffer)
+            if (read < 0) break
+            if (read > 0) digest.update(buffer, 0, read)
+        }
+    }
+    return digest.digest().joinToString("") { byte -> "%02x".format(byte) }
+}
+
+fun canonicalJsonString(value: String): String = buildString {
+    append('"')
+    value.forEach { character ->
+        when (character) {
+            '"' -> append("\\\"")
+            '\\' -> append("\\\\")
+            '\b' -> append("\\b")
+            '\u000c' -> append("\\f")
+            '\n' -> append("\\n")
+            '\r' -> append("\\r")
+            '\t' -> append("\\t")
+            else -> if (character.code < 0x20) {
+                append("\\u")
+                append(character.code.toString(16).padStart(4, '0'))
+            } else {
+                append(character)
+            }
+        }
+    }
+    append('"')
+}
+
+val stageKotlinBootRuntime = tasks.register<Sync>("stageKotlinBootRuntime") {
+    group = "distribution"
+    description = "Stages the exact deployment-owned JVM closure for the Kotlin BOOT keeper"
+    dependsOn(tasks.named("jar"))
+    duplicatesStrategy = DuplicatesStrategy.FAIL
+    into(kotlinBootRuntimeDirectory)
+    from(tasks.named("jar"))
+    from(configurations.runtimeClasspath)
+}
+
+val generateKotlinBootClasspathReference = tasks.register("generateKotlinBootClasspathReference") {
+    group = "distribution"
+    description = "Generates the external digest reference for the Kotlin BOOT keeper JVM closure"
+    dependsOn(stageKotlinBootRuntime)
+    inputs.dir(kotlinBootRuntimeDirectory)
+    outputs.file(kotlinBootClasspathReference)
+
+    doLast {
+        val runtimeRoot = kotlinBootRuntimeDirectory.get().asFile.toPath()
+        val mainName = tasks.named<Jar>("jar").get().archiveFile.get().asFile.name
+        val dependencyNames = configurations.runtimeClasspath.get().files.map { it.name }.sorted()
+        val names = listOf(mainName) + dependencyNames
+        require(names.size in 1..512 && names.toSet().size == names.size) {
+            "Kotlin BOOT runtime closure has duplicate or excessive logical JAR names"
+        }
+        require(names.all { it.matches(Regex("[A-Za-z0-9][A-Za-z0-9._-]{0,255}\\.jar")) }) {
+            "Kotlin BOOT runtime closure contains an unsafe logical JAR name"
+        }
+        val stagedNames = Files.list(runtimeRoot).use { stream ->
+            stream.map { it.fileName.toString() }.sorted().toList()
+        }
+        require(stagedNames == names.sorted()) {
+            "staged Kotlin BOOT runtime differs from the exact reference input set"
+        }
+        var totalBytes = 0L
+        var keeperClasses = 0
+        val entries = names.map { name ->
+            val path = runtimeRoot.resolve(name)
+            require(Files.isRegularFile(path, LinkOption.NOFOLLOW_LINKS)) {
+                "Kotlin BOOT runtime entry is not a regular JAR: $name"
+            }
+            val bytes = Files.size(path)
+            require(bytes in 1L..(1024L * 1024L * 1024L)) {
+                "Kotlin BOOT runtime JAR exceeds its per-entry bound: $name"
+            }
+            totalBytes = Math.addExact(totalBytes, bytes)
+            require(totalBytes <= 2L * 1024L * 1024L * 1024L) {
+                "Kotlin BOOT runtime closure exceeds its aggregate bound"
+            }
+            JarFile(path.toFile(), true).use { jar ->
+                require(jar.manifest?.mainAttributes?.getValue(Attributes.Name.CLASS_PATH) == null) {
+                    "Kotlin BOOT runtime JAR contains a manifest Class-Path: $name"
+                }
+                require(jar.getJarEntry("META-INF/INDEX.LIST") == null) {
+                    "Kotlin BOOT runtime JAR contains a class-path index: $name"
+                }
+                keeperClasses += jar.entries().asSequence().count {
+                    !it.isDirectory &&
+                        it.name == "decompengine/oracle/fulltree/KotlinSystemdCgroupBootKeeper.class"
+                }
+            }
+            Triple(name, bytes, sha256(path))
+        }
+        require(keeperClasses == 1) {
+            "Kotlin BOOT keeper class must occur exactly once in the deployment closure"
+        }
+        val encodedEntries = entries.joinToString(",\n", prefix = "[\n", postfix = "\n  ]") {
+            (name, bytes, digest) ->
+            "    {\n" +
+                "      \"bytes\": $bytes,\n" +
+                "      \"logicalName\": ${canonicalJsonString(name)},\n" +
+                "      \"sha256\": \"$digest\"\n" +
+                "    }"
+        }
+        val unsigned =
+            "{\n" +
+                "  \"entries\": $encodedEntries,\n" +
+                "  \"provider\": \"gcc-kotlin-boot-deployment-classpath-reference-v1\",\n" +
+                "  \"schemaVersion\": 1\n" +
+                "}\n"
+        val closureSha256 = MessageDigest.getInstance("SHA-256")
+            .digest(unsigned.toByteArray(Charsets.UTF_8))
+            .joinToString("") { byte -> "%02x".format(byte) }
+        val reference =
+            "{\n" +
+                "  \"closureSha256\": \"$closureSha256\",\n" +
+                "  \"entries\": $encodedEntries,\n" +
+                "  \"provider\": \"gcc-kotlin-boot-deployment-classpath-reference-v1\",\n" +
+                "  \"schemaVersion\": 1\n" +
+                "}\n"
+        val output = kotlinBootClasspathReference.get().asFile.toPath()
+        Files.createDirectories(output.parent)
+        Files.writeString(output, reference)
+    }
+}
 
 val buildAcpGateHelper = tasks.register<Exec>("buildAcpGateHelper") {
     group = "build"
@@ -439,6 +575,10 @@ distributions {
                 into("libexec")
                 filePermissions { unix("rw-r--r--") }
             }
+            from(kotlinBootClasspathReference) {
+                into("lib")
+                filePermissions { unix("rw-r--r--") }
+            }
         }
     }
 }
@@ -447,10 +587,13 @@ tasks.test {
     useJUnitPlatform()
     dependsOn(generateAcpGateHelperChecksum)
     dependsOn(generateLlvmBehaviorHelperChecksum)
+    dependsOn(generateKotlinBootClasspathReference)
     inputs.file(acpGateHelperBinary)
     inputs.file(acpGateHelperChecksum)
     inputs.file(llvmBehaviorHelperBinary)
     inputs.file(llvmBehaviorHelperChecksum)
+    inputs.file(kotlinBootClasspathReference)
+    inputs.dir(kotlinBootRuntimeDirectory)
     doFirst {
         systemProperty(
             "decompengine.acp.gateHelperExecutable",
@@ -467,6 +610,14 @@ tasks.test {
         systemProperty(
             "decompengine.oracle.behavior.nativeHelperChecksum",
             llvmBehaviorHelperChecksum.get().asFile.absolutePath,
+        )
+        systemProperty(
+            "decompengine.oracle.gcc.bootKeeperClasspathReference",
+            kotlinBootClasspathReference.get().asFile.absolutePath,
+        )
+        systemProperty(
+            "decompengine.oracle.gcc.bootKeeperClasspathRoot",
+            kotlinBootRuntimeDirectory.get().asFile.absolutePath,
         )
     }
     environment(
@@ -503,6 +654,7 @@ listOf("installDist", "distZip", "distTar").forEach { taskName ->
     tasks.named(taskName) {
         dependsOn(generateAcpGateHelperChecksum)
         dependsOn(generateLlvmBehaviorHelperChecksum)
+        dependsOn(generateKotlinBootClasspathReference)
     }
 }
 
@@ -554,7 +706,44 @@ val verifyLlvmBehaviorHelperDistribution = tasks.register("verifyLlvmBehaviorHel
     }
 }
 
+val verifyKotlinBootClasspathDistribution = tasks.register("verifyKotlinBootClasspathDistribution") {
+    group = "verification"
+    description = "Verifies the installed Kotlin BOOT JVM closure against its external reference"
+    dependsOn(tasks.named("installDist"))
+
+    doLast {
+        val installedRoot = layout.buildDirectory.dir("install/llm_bin_patch/lib").get().asFile.toPath()
+        val stagedRoot = kotlinBootRuntimeDirectory.get().asFile.toPath()
+        val referenceName = kotlinBootClasspathReference.get().asFile.name
+        val installedReference = installedRoot.resolve(referenceName)
+        require(
+            Files.isRegularFile(installedReference, LinkOption.NOFOLLOW_LINKS) &&
+                Files.readAllBytes(installedReference)
+                    .contentEquals(Files.readAllBytes(kotlinBootClasspathReference.get().asFile.toPath())),
+        ) { "installDist omitted or changed the Kotlin BOOT class-path reference" }
+        val stagedNames = Files.list(stagedRoot).use { stream ->
+            stream.map { it.fileName.toString() }.sorted().toList()
+        }
+        val installedJarNames = Files.list(installedRoot).use { stream ->
+            stream.filter { it.fileName.toString().endsWith(".jar") }
+                .map { it.fileName.toString() }.sorted().toList()
+        }
+        require(installedJarNames == stagedNames) {
+            "installDist Kotlin BOOT runtime JAR set differs from its staged reference"
+        }
+        stagedNames.forEach { name ->
+            val staged = stagedRoot.resolve(name)
+            val installed = installedRoot.resolve(name)
+            require(
+                Files.isRegularFile(installed, LinkOption.NOFOLLOW_LINKS) &&
+                    Files.size(installed) == Files.size(staged) && sha256(installed) == sha256(staged),
+            ) { "installDist changed Kotlin BOOT runtime entry $name" }
+        }
+    }
+}
+
 tasks.named("check") {
     dependsOn(verifyAcpGateHelperDistribution)
     dependsOn(verifyLlvmBehaviorHelperDistribution)
+    dependsOn(verifyKotlinBootClasspathDistribution)
 }

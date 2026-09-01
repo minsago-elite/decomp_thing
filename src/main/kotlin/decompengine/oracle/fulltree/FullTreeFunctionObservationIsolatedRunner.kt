@@ -35,6 +35,19 @@ internal class FullTreeFunctionObservationIsolationException(
     cause: Throwable? = null,
 ) : IllegalArgumentException(message, cause)
 
+/**
+ * A failed generic BOOT launch with an explicit cleanup outcome for its host controller.
+ *
+ * [preAttachmentRollbackSafe] is true only when no process launch was attempted and all private
+ * resources closed, or the retained boundary completed its exact-name/cgroup absence proof and
+ * all private resources closed. A missing returned owner alone never implies this outcome.
+ */
+internal class KotlinSystemdCgroupBootLaunchException(
+    message: String,
+    cause: Throwable,
+    val preAttachmentRollbackSafe: Boolean,
+) : IllegalArgumentException(message, cause)
+
 internal enum class FullTreeFunctionObservationLaunchFaultPoint {
     BEFORE_INITIAL_UNIT_ABSENCE,
     BEFORE_FINAL_UNIT_ABSENCE,
@@ -663,7 +676,10 @@ private fun requirePreparedRootIdentity(identity: LinuxFileIdentity) {
     if (
         !identity.isDirectory || identity.isRegularFile || identity.isSymbolicLink ||
         identity.mode.permissions != OWNER_DIRECTORY_MODE || identity.linkCount != PREPARED_ROOT_LINK_COUNT
-    ) isolationFail("prepared function-observation root is not the exact private ext4 layout")
+    ) isolationFail(
+        "prepared function-observation root is not the exact private ext4 layout " +
+            "(mode=${identity.mode.permissions}, links=${identity.linkCount})",
+    )
 }
 
 private fun requirePreparedChildDirectory(
@@ -716,6 +732,368 @@ internal data class FullTreeFunctionObservationCgroupReceipt(
 internal data class FullTreeFunctionObservationIsolatedFixturePublication(
     val fixtureShard: FullTreeFunctionObservationPublishedShard,
     val cgroup: FullTreeFunctionObservationCgroupReceipt,
+)
+
+/**
+ * Fixed-policy resource inputs for the shared Kotlin BOOT-only scope primitive.
+ *
+ * This is deliberately smaller than the function-observation resource model: it can establish
+ * and retain a live systemd/cgroup-v2 boundary, but it cannot authorize the gated command.  The
+ * caller may lower these limits, but cannot raise the process controller's fixed ceilings.
+ */
+internal data class KotlinSystemdCgroupBootResources(
+    val wallClockMillis: Long,
+    val maximumResidentBytes: Long,
+    val pidsMax: Long,
+) {
+    /** Per-file bootstrap ceiling passed to prlimit; protocol records remain separately capped. */
+    val maximumRuntimeFileBytes: Long
+        get() = PROTOCOL_CLEANUP_ALLOWANCE_BYTES
+
+    init {
+        require(wallClockMillis in 1L..KOTLIN_BOOT_MAXIMUM_WALL_MILLIS)
+        require(maximumResidentBytes in KOTLIN_BOOT_MINIMUM_MEMORY_BYTES..KOTLIN_BOOT_MAXIMUM_MEMORY_BYTES)
+        require(pidsMax in KOTLIN_BOOT_MINIMUM_PIDS..KOTLIN_BOOT_MAXIMUM_PIDS)
+    }
+}
+
+internal data class KotlinSystemdCgroupBootProcessReceipt(
+    val role: String,
+    val pid: Long,
+    val startTimeTicks: Long,
+    val parentRole: String?,
+    val namespacePids: List<Long>,
+    val executableSha256: String,
+) {
+    init {
+        require(role in KOTLIN_BOOT_PROCESS_ROLES)
+        require(pid in 1L..Int.MAX_VALUE && startTimeTicks > 0L)
+        require(parentRole == KOTLIN_BOOT_PROCESS_PARENTS.getValue(role))
+        require(namespacePids.isNotEmpty() && namespacePids.size <= 2 && namespacePids.first() == pid)
+        require(namespacePids.all { it in 1L..Int.MAX_VALUE })
+        require(executableSha256.matches(SHA256))
+    }
+}
+
+/** Historical bytes copied from a still-live descriptor/pidfd-backed BOOT owner. */
+internal class KotlinSystemdCgroupBootReceipt(
+    val unitName: String,
+    val nonce: String,
+    val bootId: String,
+    val invocationId: String,
+    val controlGroup: String,
+    val cgroupDevice: Long,
+    val cgroupInode: Long,
+    val cgroupMountId: Long,
+    val runtimeClosureSha256: String,
+    val deploymentClosureSha256: String,
+    val resources: KotlinSystemdCgroupBootResources,
+    processes: List<KotlinSystemdCgroupBootProcessReceipt>,
+) {
+    val processes: List<KotlinSystemdCgroupBootProcessReceipt> = java.util.List.copyOf(processes)
+
+    init {
+        require(unitName.matches(PRODUCTION_KOTLIN_BOOT_UNIT_NAME))
+        require(nonce.matches(SHA256))
+        require(bootId.matches(KERNEL_BOOT_UUID))
+        require(invocationId.matches(SYSTEMD_ID128) && invocationId !in RESERVED_SYSTEMD_ID128S)
+        require(controlGroup.startsWith('/') && controlGroup.substringAfterLast('/') == unitName)
+        require(cgroupDevice > 0L && cgroupInode > 0L && cgroupMountId > 0L)
+        require(runtimeClosureSha256.matches(SHA256))
+        require(deploymentClosureSha256.matches(SHA256))
+        require(this.processes.map(KotlinSystemdCgroupBootProcessReceipt::role) == KOTLIN_BOOT_PROCESS_ROLES)
+    }
+}
+
+private object KOTLIN_SYSTEMD_CGROUP_BOOT_OWNER_PERMIT
+
+/**
+ * Linear owner of one exact Kotlin keeper blocked before START.
+ *
+ * The receipt is historical match data.  Current authority stays in the retained systemd
+ * invocation identity, cgroup descriptor, and pidfds and is reobserved on every operation.  This
+ * type intentionally has no START/release/publication method. [closeAndProveAbsent] conditionally
+ * applies whole-cgroup SIGKILL only to the exact retained target when present, uses retained
+ * pidfds as a backstop, and completes two exact-name absence sweeps before returning.
+ */
+internal class KotlinSystemdCgroupBootOwner internal constructor(
+    private val opaqueOwnership: Any,
+    constructionPermit: Any,
+) : AutoCloseable {
+    private val ownership: KotlinSystemdCgroupBootOwnership
+    val receipt: KotlinSystemdCgroupBootReceipt
+    private var terminal = false
+    private var operationActive = false
+
+    init {
+        check(constructionPermit === KOTLIN_SYSTEMD_CGROUP_BOOT_OWNER_PERMIT) {
+            "Kotlin systemd/cgroup BOOT ownership requires a live verified launch"
+        }
+        ownership = opaqueOwnership as? KotlinSystemdCgroupBootOwnership
+            ?: error("Kotlin systemd/cgroup BOOT ownership is invalid")
+        receipt = ownership.receipt
+        requireCurrentAtBoot()
+    }
+
+    @Synchronized
+    fun requireCurrentAtBoot() {
+        check(!terminal) { "Kotlin systemd/cgroup BOOT owner is terminal" }
+        check(!operationActive) { "Kotlin systemd/cgroup BOOT operation is already active" }
+        operationActive = true
+        try {
+            ownership.requireCurrentAtBoot()
+        } finally {
+            operationActive = false
+        }
+    }
+
+    @Synchronized
+    fun closeAndProveAbsent() {
+        if (terminal) return
+        check(!operationActive) { "Kotlin systemd/cgroup BOOT operation is already active" }
+        operationActive = true
+        try {
+            ownership.closeAndProveAbsent()
+            terminal = true
+        } finally {
+            operationActive = false
+        }
+    }
+
+    override fun close() = closeAndProveAbsent()
+}
+
+private class KotlinSystemdCgroupBootOwnership(
+    val receipt: KotlinSystemdCgroupBootReceipt,
+    private val expectedControlGroup: String,
+    private val nonce: String,
+    private val resources: IsolatedObservationResources,
+    private val runtime: AuthenticatedObservationRuntime,
+    private val runTree: PrivateObservationRunTree,
+    private val materializedClassPath: MaterializedObservationClassPath,
+    private val boundary: TrustedObservationBoundary,
+    private val unit: ManagedObservationUnit,
+) {
+    private var resourcesClosed = false
+
+    fun requireCurrentAtBoot() {
+        if (resourcesClosed) isolationFail("Kotlin systemd/cgroup BOOT resources are closed")
+        boundary.verifyLiveOperation()
+        runtime.verify("while generic Kotlin keeper is at BOOT")
+        runTree.withPinnedDescriptor { descriptor ->
+            requireObservationBootLayout(materializedClassPath, runTree, nonce)
+            requirePrivateDirectory(descriptor, "generic Kotlin BOOT run tree")
+        }
+        unit.awaitBoot(nonce, runTree)
+        val current = unit.captureKotlinBootAttachment(
+            expected = resources,
+            runtimeConfigurationSha256 = receipt.runtimeClosureSha256,
+            requestedResources = receipt.resources,
+            deploymentClosureSha256 = receipt.deploymentClosureSha256,
+        )
+        if (!sameKotlinBootReceipt(current, receipt) || current.controlGroup != expectedControlGroup) {
+            isolationFail("generic Kotlin BOOT attachment differs from its retained receipt")
+        }
+        boundary.verifyLiveOperation()
+        runtime.verify("after generic Kotlin BOOT revalidation")
+    }
+
+    fun closeAndProveAbsent() {
+        if (resourcesClosed) return
+        // Boundary close performs a guarded whole-cgroup kill only when the exact retained target
+        // remains present, plus one full absence proof; retained-name cleanup then performs an
+        // independent exact-name unit/cgroup sweep.
+        boundary.close()
+        var failure: Throwable? = null
+        fun record(next: Throwable) {
+            val primary = failure
+            if (primary == null) failure = next else if (next !== primary) primary.addSuppressed(next)
+        }
+        runCatching { runTree.close() }.exceptionOrNull()?.let(::record)
+        runCatching { runtime.close() }.exceptionOrNull()?.let(::record)
+        // The boundary has already proved whole-cgroup absence and both descriptors have already
+        // received their one terminal close attempt. Never re-enter descriptor cleanup on retry.
+        resourcesClosed = true
+        failure?.let { throw it }
+    }
+}
+
+private fun sameKotlinBootReceipt(
+    left: KotlinSystemdCgroupBootReceipt,
+    right: KotlinSystemdCgroupBootReceipt,
+): Boolean =
+    left.unitName == right.unitName && left.nonce == right.nonce && left.bootId == right.bootId &&
+        left.invocationId == right.invocationId && left.controlGroup == right.controlGroup &&
+        left.cgroupDevice == right.cgroupDevice && left.cgroupInode == right.cgroupInode &&
+        left.cgroupMountId == right.cgroupMountId &&
+        left.runtimeClosureSha256 == right.runtimeClosureSha256 &&
+        left.deploymentClosureSha256 == right.deploymentClosureSha256 &&
+        left.resources == right.resources && left.processes == right.processes
+
+/**
+ * Shared production BOOT primitive extracted from the full-tree controller's proven boundary.
+ * Callers supply a fully authenticated runtime configuration; this method never accepts a
+ * launcher, process observer, receipt, or callback from an untrusted caller and exposes no START.
+ */
+internal object KotlinSystemdCgroupBootLauncher {
+    fun launch(
+        configuration: FullTreeFunctionObservationIsolationConfiguration,
+        scratchParent: Path,
+        unitName: String,
+        expectedControlGroup: String,
+        nonce: String,
+        requestedResources: KotlinSystemdCgroupBootResources,
+        deploymentClosureSha256: String,
+    ): KotlinSystemdCgroupBootOwner = translateIsolationFailures(label = "Kotlin BOOT launch") {
+        var runtime: AuthenticatedObservationRuntime? = null
+        var runTree: PrivateObservationRunTree? = null
+        var boundary: TrustedObservationBoundary? = null
+        var launchAttempted = false
+        try {
+            if (!unitName.matches(PRODUCTION_KOTLIN_BOOT_UNIT_NAME)) {
+                isolationFail("Kotlin BOOT unit name is not a safe bounded scope name")
+            }
+            if (!nonce.matches(SHA256)) isolationFail("Kotlin BOOT nonce is invalid")
+            if (
+                !expectedControlGroup.startsWith('/') ||
+                expectedControlGroup.substringAfterLast('/') != unitName ||
+                expectedControlGroup.contains("..") || '\u0000' in expectedControlGroup
+            ) isolationFail("Kotlin BOOT expected cgroup is invalid")
+            if (!deploymentClosureSha256.matches(SHA256)) {
+                isolationFail("Kotlin BOOT deployment-closure digest is invalid")
+            }
+            val resources = IsolatedObservationResources.forKotlinBoot(requestedResources)
+            val openedRuntime = AuthenticatedObservationRuntime.open(configuration)
+            runtime = openedRuntime
+            val requiredCleanupBytes = addExact(
+                openedRuntime.classPathBytes,
+                PROTOCOL_CLEANUP_ALLOWANCE_BYTES,
+                "Kotlin BOOT private cleanup closure",
+            )
+            if (requiredCleanupBytes > KOTLIN_BOOT_MAXIMUM_PRIVATE_BYTES) {
+                isolationFail("Kotlin BOOT class path exceeds its bounded cleanup closure")
+            }
+            val openedTree = PrivateObservationRunTree.create(scratchParent, resources)
+            runTree = openedTree
+            val classPath = openedRuntime.materializeClassPath(openedTree)
+            classPath.authenticatePreparedLayout(openedTree)
+            val openedBoundary = TrustedObservationBoundary(configuration, openedRuntime, classPath)
+            boundary = openedBoundary
+            launchAttempted = true
+            val unit = openedBoundary.launchKotlinBootKeeper(
+                unitName = unitName,
+                nonce = nonce,
+                runTree = openedTree,
+                resources = resources,
+            )
+            unit.awaitBoot(nonce, openedTree)
+            val receipt = unit.captureKotlinBootAttachment(
+                resources,
+                kotlinSystemdCgroupBootRuntimeClosureSha256(configuration, deploymentClosureSha256),
+                requestedResources,
+                deploymentClosureSha256,
+            )
+            if (receipt.controlGroup != expectedControlGroup) {
+                isolationFail("Kotlin BOOT scope is outside the exact derived cgroup")
+            }
+            val ownership = KotlinSystemdCgroupBootOwnership(
+                receipt,
+                expectedControlGroup,
+                nonce,
+                resources,
+                openedRuntime,
+                openedTree,
+                classPath,
+                openedBoundary,
+                unit,
+            )
+            val result = KotlinSystemdCgroupBootOwner(
+                ownership,
+                KOTLIN_SYSTEMD_CGROUP_BOOT_OWNER_PERMIT,
+            )
+            boundary = null
+            runTree = null
+            runtime = null
+            result
+        } catch (failure: Throwable) {
+            fun suppress(next: Throwable) {
+                if (next !== failure) failure.addSuppressed(next)
+            }
+            val boundaryFailure = runCatching { boundary?.close() }.exceptionOrNull()
+            boundaryFailure?.let(::suppress)
+            var privateCleanupFailed = false
+            if (boundaryFailure == null) {
+                runCatching { runTree?.close() }.exceptionOrNull()?.let {
+                    privateCleanupFailed = true
+                    suppress(it)
+                }
+                runCatching { runtime?.close() }.exceptionOrNull()?.let {
+                    privateCleanupFailed = true
+                    suppress(it)
+                }
+            }
+            val rollbackSafe = boundaryFailure == null && !privateCleanupFailed &&
+                (!launchAttempted || boundary != null)
+            throw KotlinSystemdCgroupBootLaunchException(
+                "generic Kotlin BOOT launch failed before ownership transfer",
+                failure,
+                rollbackSafe,
+            )
+        }
+    }
+}
+
+private fun kotlinSystemdCgroupBootRuntimeClosureSha256(
+    configuration: FullTreeFunctionObservationIsolationConfiguration,
+    deploymentClosureSha256: String,
+): String = OracleArtifacts.sha256(
+    OracleJson.canonicalBytes(
+        JsonObject(
+            mapOf(
+                "bubblewrapExecutable" to JsonPrimitive(configuration.bubblewrapExecutable.toString()),
+                "expectedBubblewrapSha256" to JsonPrimitive(configuration.expectedBubblewrapSha256),
+                "expectedJavaSha256" to JsonPrimitive(configuration.expectedJavaSha256),
+                "expectedResourceLimiterSha256" to
+                    JsonPrimitive(configuration.expectedResourceLimiterSha256),
+                "expectedScopeInspectorSha256" to
+                    JsonPrimitive(configuration.expectedScopeInspectorSha256),
+                "expectedScopeSupervisorSha256" to
+                    JsonPrimitive(configuration.expectedScopeSupervisorSha256),
+                "expectedSystemdBusControllerSha256" to
+                    JsonPrimitive(configuration.expectedSystemdBusControllerSha256),
+                "javaExecutable" to JsonPrimitive(configuration.javaExecutable.toString()),
+                "javaRuntime" to configuration.javaRuntime.canonicalIdentity(),
+                "keeperEntryPoint" to JsonPrimitive(KotlinSystemdCgroupBootKeeper::class.java.name),
+                "deploymentClosureSha256" to
+                    JsonPrimitive(deploymentClosureSha256),
+                "provider" to JsonPrimitive(KOTLIN_BOOT_RUNTIME_PROVIDER),
+                "resourceLimiterExecutable" to
+                    JsonPrimitive(configuration.resourceLimiterExecutable.toString()),
+                "schemaVersion" to JsonPrimitive(1),
+                "scopeInspectorExecutable" to
+                    JsonPrimitive(configuration.scopeInspectorExecutable.toString()),
+                "scopeSupervisorExecutable" to
+                    JsonPrimitive(configuration.scopeSupervisorExecutable.toString()),
+                "systemLibraryMounts" to
+                    JsonArray(configuration.systemLibraryMounts.map { it.canonicalIdentity() }),
+                "systemdBusControllerExecutable" to
+                    JsonPrimitive(configuration.systemdBusControllerExecutable.toString()),
+                "systemdUserRuntimeDirectory" to
+                    JsonPrimitive(configuration.systemdUserRuntimeDirectory.toString()),
+                "workerClassPath" to JsonArray(
+                    configuration.workerClassPath.map { entry ->
+                        JsonObject(
+                            mapOf(
+                                "expectedSha256" to JsonPrimitive(entry.expectedSha256),
+                                "path" to JsonPrimitive(entry.path.toString()),
+                            ),
+                        )
+                    },
+                ),
+            ),
+        ),
+        ISOLATION_CONFIGURATION_JSON_LIMITS,
+    ),
 )
 
 /**
@@ -2152,6 +2530,56 @@ internal object FullTreeFunctionObservationIsolatedSupervisor {
     }
 }
 
+/** Fixed BOOT-only entry point. It has no accepted START byte or export code path. */
+internal object KotlinSystemdCgroupBootKeeper {
+    @JvmStatic
+    fun main(arguments: Array<String>) {
+        var root: LinuxDescriptor? = null
+        var nonce: String? = null
+        try {
+            if (arguments.size != KOTLIN_BOOT_ARGUMENTS || arguments[0] != KOTLIN_BOOT_PROTOCOL_VERSION) {
+                isolationFail("generic Kotlin BOOT keeper arguments are invalid")
+            }
+            val runDirectory = Path.of(arguments[1])
+            if (!runDirectory.isAbsolute || runDirectory.normalize() != runDirectory) {
+                isolationFail("generic Kotlin BOOT run directory is invalid")
+            }
+            val parsedNonce = arguments[2]
+            if (!parsedNonce.matches(SHA256)) isolationFail("generic Kotlin BOOT nonce is invalid")
+            nonce = parsedNonce
+            val (_, identity) = requireStableDirectory(runDirectory, "generic Kotlin BOOT run directory")
+            val opened = LinuxFilesystemSyscalls.openRoot(runDirectory)
+            root = opened
+            if (
+                !Files.isSameFile(runDirectory, LinuxFilesystemSyscalls.stableDescriptorPath(opened.fd)) ||
+                identity != Files.readAttributes(
+                    runDirectory,
+                    java.nio.file.attribute.BasicFileAttributes::class.java,
+                    LinkOption.NOFOLLOW_LINKS,
+                ).fileKey()
+            ) isolationFail("generic Kotlin BOOT run directory changed during startup")
+            requirePrivateDirectory(opened, "generic Kotlin BOOT run directory")
+            writeProtocolFile(opened, BOOT_FILE, protocol("BOOT", parsedNonce))
+
+            // This entry point has no input/token transition at all. The launcher intentionally
+            // closes its stdin after exec, so treating EOF as a terminal event would let the
+            // supposedly retained UNIT_ATTACHED scope disappear immediately after BOOT. Remain
+            // allocation-free and CPU-quiescent until PDEATHSIG or whole-cgroup SIGKILL instead.
+            while (true) Thread.sleep(Long.MAX_VALUE)
+        } catch (failure: Throwable) {
+            val descriptor = root
+            val token = nonce
+            if (descriptor != null && token != null) {
+                runCatching { writeProtocolFile(descriptor, FAILURE_FILE, encodeFailure(token, failure)) }
+                runCatching { Thread.sleep(WORKER_FAILURE_OBSERVATION_MILLIS) }
+            }
+            runCatching { descriptor?.close() }
+            System.err.println("generic Kotlin BOOT keeper failed safely")
+            Runtime.getRuntime().halt(KOTLIN_BOOT_FAILURE_EXIT)
+        }
+    }
+}
+
 private data class IsolatedObservationPaths(
     val richArtifact: Path,
     val inventory: Path,
@@ -2393,6 +2821,8 @@ private data class IsolatedObservationResources(
     val cpuSeconds: Long,
     val wallSeconds: Long,
     val serviceRuntimeSeconds: Long,
+    val tasksMax: Long,
+    val timeoutStopMillis: Long,
     val cleanupLimits: AcpRuntimeClosureLimits,
 ) {
     companion object {
@@ -2455,10 +2885,48 @@ private data class IsolatedObservationResources(
                 cpu,
                 wall,
                 runtime,
+                CGROUP_TASKS_MAX.toLong(),
+                SERVICE_CLEANUP_TIMEOUT.toMillis(),
                 AcpRuntimeClosureLimits(
                     maximumEntries = MAXIMUM_PRIVATE_ENTRIES,
                     maximumUserOwnedFileBytes = cleanupBytes,
                     maximumDepth = MAXIMUM_PRIVATE_DEPTH,
+                ),
+            )
+        }
+
+        fun forKotlinBoot(requested: KotlinSystemdCgroupBootResources): IsolatedObservationResources {
+            if (requested.wallClockMillis % 1_000L != 0L) {
+                isolationFail("Kotlin BOOT wall-clock policy must use whole seconds")
+            }
+            val wallSeconds = requested.wallClockMillis / 1_000L
+            val addressSpace = minOf(
+                maxOf(MINIMUM_WORKER_ADDRESS_SPACE_BYTES, requested.maximumResidentBytes),
+                MAXIMUM_WORKER_ADDRESS_SPACE_BYTES,
+            )
+            if (addressSpace < requested.maximumResidentBytes) {
+                isolationFail("Kotlin BOOT address-space backstop is below its memory cgroup")
+            }
+            return IsolatedObservationResources(
+                maximumResidentBytes = requested.maximumResidentBytes,
+                maximumAddressSpaceBytes = addressSpace,
+                maximumOutputBytes = MAXIMUM_PROTOCOL_BYTES.toLong(),
+                maximumDatabaseBytes = MAXIMUM_PROTOCOL_BYTES.toLong(),
+                // A fresh JVM must extract its authenticated JNA dispatch library before the
+                // descriptor-backed BOOT protocol can run. Keep that bootstrap bounded by the
+                // existing fixed cleanup allowance; writeProtocolFile independently retains the
+                // 16-KiB canonical protocol-record bound.
+                maximumFileBytes = requested.maximumRuntimeFileBytes,
+                maximumEntities = 1L,
+                cpuSeconds = wallSeconds,
+                wallSeconds = wallSeconds,
+                serviceRuntimeSeconds = wallSeconds,
+                tasksMax = requested.pidsMax,
+                timeoutStopMillis = KOTLIN_BOOT_TIMEOUT_STOP_MILLIS,
+                cleanupLimits = AcpRuntimeClosureLimits(
+                    maximumEntries = KOTLIN_BOOT_MAXIMUM_PRIVATE_ENTRIES,
+                    maximumUserOwnedFileBytes = KOTLIN_BOOT_MAXIMUM_PRIVATE_BYTES,
+                    maximumDepth = KOTLIN_BOOT_MAXIMUM_PRIVATE_DEPTH,
                 ),
             )
         }
@@ -3127,6 +3595,32 @@ private class TrustedObservationBoundary(
         return launchValidated(unitName, request, resources, immediatelyBeforeStart)
     }
 
+    fun launchKotlinBootKeeper(
+        unitName: String,
+        nonce: String,
+        runTree: PrivateObservationRunTree,
+        resources: IsolatedObservationResources,
+    ): ManagedObservationUnit {
+        if (!unitName.matches(PRODUCTION_KOTLIN_BOOT_UNIT_NAME)) {
+            isolationFail("generic Kotlin BOOT unit name is not canonical")
+        }
+        if (!nonce.matches(SHA256)) isolationFail("generic Kotlin BOOT nonce is invalid")
+        val worker = buildKotlinBootKeeperCommand(runTree.path, nonce)
+        return launchPrebuilt(
+            unitName = unitName,
+            runDirectory = runTree.path,
+            nonce = nonce,
+            resources = resources,
+            worker = worker,
+            topology = ObservationBootProcessTopology.SINGLE_KOTLIN_KEEPER,
+            forcedStartFailureDirectory = null,
+            immediatelyBeforeStart = {
+                authenticatedRuntime.verify("at generic Kotlin BOOT process-start gate")
+                materializedClassPath.requirePreparedLayout(runTree)
+            },
+        )
+    }
+
     /**
      * Reconstitutes only descriptor-backed ownership of an exact durable BOOT attachment during a
      * deliberate coordinator handoff. Production bubblewrap uses --die-with-parent, so an actual
@@ -3209,6 +3703,28 @@ private class TrustedObservationBoundary(
         request: IsolatedWorkerRequest,
         resources: IsolatedObservationResources,
         immediatelyBeforeStart: () -> Unit,
+    ): ManagedObservationUnit = launchPrebuilt(
+        unitName = unitName,
+        runDirectory = request.runDirectory,
+        nonce = request.nonce,
+        resources = resources,
+        worker = buildWorkerCommand(request, resources),
+        topology = ObservationBootProcessTopology.FULL_TREE_SUPERVISOR,
+        forcedStartFailureDirectory = request.paths.richArtifact.takeIf {
+            testHooks?.forceProcessStartFailure == true
+        },
+        immediatelyBeforeStart = immediatelyBeforeStart,
+    )
+
+    private fun launchPrebuilt(
+        unitName: String,
+        runDirectory: Path,
+        nonce: String,
+        resources: IsolatedObservationResources,
+        worker: List<String>,
+        topology: ObservationBootProcessTopology,
+        forcedStartFailureDirectory: Path?,
+        immediatelyBeforeStart: () -> Unit,
     ): ManagedObservationUnit {
         check(active == null && pendingLaunch == null) {
             "one isolation boundary may launch only one worker"
@@ -3231,7 +3747,6 @@ private class TrustedObservationBoundary(
                 unitName,
             )
             controller.requireAbsent()
-            val worker = buildWorkerCommand(request, resources)
             val scoped = buildScopeCommand(unitName, resources, worker)
             val command = buildResourceLimitedCommand(resources, scoped)
             requireUnchanged()
@@ -3258,10 +3773,7 @@ private class TrustedObservationBoundary(
                     builder.environment().clear()
                     builder.environment().putAll(bus.controlEnvironment)
                 }
-            val started = pending.start(
-                processBuilder,
-                request.paths.richArtifact.takeIf { testHooks?.forceProcessStartFailure == true },
-            )
+            val started = pending.start(processBuilder, forcedStartFailureDirectory)
             testHooks?.faultInjector?.at(
                 FullTreeFunctionObservationLaunchFaultPoint.AFTER_PROCESS_START_RETURNED,
                 unitName,
@@ -3272,14 +3784,15 @@ private class TrustedObservationBoundary(
             started.outputStream.close()
             val managedUnit = ManagedObservationUnit(
                 controller,
-                request.runDirectory,
-                request.nonce,
+                runDirectory,
+                nonce,
                 bubblewrap,
                 java,
                 resources,
                 started,
                 pinnedProcess,
                 configuration.systemdUserRuntimeDirectory,
+                topology,
             )
             managedUnit.awaitScopeAttached()
             active = managedUnit
@@ -3364,6 +3877,61 @@ private class TrustedObservationBoundary(
         }
     }
 
+    private fun buildKotlinBootKeeperCommand(runDirectory: Path, nonce: String): List<String> {
+        if (runDirectory.startsWith(configuration.systemdUserRuntimeDirectory)) {
+            isolationFail("generic Kotlin BOOT run tree exposes the systemd session runtime")
+        }
+        val mounts = authenticatedRuntime.mounts()
+        val javaRelative = configuration.javaRuntime.source.relativize(java.path)
+        val sandboxJava = configuration.javaRuntime.destination.resolve(javaRelative).normalize()
+        requireSyntheticMountPlan(mounts, emptyList(), runDirectory)
+        val destinations = mounts.map { it.destination } + materializedClassPath.paths + listOf(runDirectory)
+        destinations.forEachIndexed { index, destination ->
+            if (!destination.isAbsolute || destination.normalize() != destination || destination == Path.of("/")) {
+                isolationFail("generic Kotlin BOOT synthetic destination $index is invalid: $destination")
+            }
+        }
+        val directories = syntheticDestinationParents(destinations)
+        return buildList {
+            add(bubblewrap.path.toString())
+            addAll(listOf("--die-with-parent", "--new-session", "--unshare-all", "--unshare-user"))
+            addAll(listOf("--disable-userns", "--assert-userns-disabled", "--clearenv"))
+            addAll(listOf("--cap-drop", "ALL", "--hostname", "decomp-oracle"))
+            addAll(listOf("--tmpfs", "/"))
+            directories.forEach { directory -> addAll(listOf("--dir", directory.toString())) }
+            mounts.forEach { mount ->
+                addAll(listOf("--ro-bind", mount.source.toString(), mount.destination.toString()))
+            }
+            addAll(listOf("--bind", runDirectory.toString(), runDirectory.toString()))
+            materializedClassPath.paths.forEach { entry ->
+                addAll(listOf("--ro-bind", entry.toString(), entry.toString()))
+            }
+            addAll(listOf("--proc", "/proc", "--dev", "/dev"))
+            addAll(listOf("--chdir", runDirectory.toString()))
+            addAll(listOf("--setenv", "HOME", runDirectory.toString()))
+            addAll(listOf("--setenv", "TMPDIR", runDirectory.resolve(TEMP_DIRECTORY).toString()))
+            add("--")
+            add(sandboxJava.toString())
+            add("-Xms16m")
+            add("-Xmx64m")
+            add("-XX:+UseSerialGC")
+            add("-XX:ActiveProcessorCount=1")
+            add("-XX:-UsePerfData")
+            add("-XX:MaxMetaspaceSize=64m")
+            add("-XX:ReservedCodeCacheSize=32m")
+            add("-XX:MaxDirectMemorySize=16m")
+            add("-Djna.nosys=true")
+            add("-Djna.tmpdir=${runDirectory.resolve(TEMP_DIRECTORY)}")
+            add("-Djava.io.tmpdir=${runDirectory.resolve(TEMP_DIRECTORY)}")
+            add("-classpath")
+            add(materializedClassPath.encoded)
+            add(KotlinSystemdCgroupBootKeeper::class.java.name)
+            add(KOTLIN_BOOT_PROTOCOL_VERSION)
+            add(runDirectory.toString())
+            add(nonce)
+        }
+    }
+
     private fun requireSyntheticMountPlan(
         mounts: List<FullTreeFunctionObservationRuntimeMount>,
         readOnlyInputs: List<Path>,
@@ -3420,7 +3988,7 @@ private class TrustedObservationBoundary(
         add("--collect")
         add("--expand-environment=no")
         add("--unit=$unitName")
-        add("--property=TasksMax=$CGROUP_TASKS_MAX")
+        add("--property=TasksMax=${resources.tasksMax}")
         add("--property=MemoryMax=${resources.maximumResidentBytes}")
         add("--property=MemorySwapMax=0")
         add("--property=OOMPolicy=kill")
@@ -3428,7 +3996,7 @@ private class TrustedObservationBoundary(
         add("--property=KillMode=control-group")
         add("--property=SendSIGKILL=yes")
         add("--property=RuntimeMaxSec=${resources.serviceRuntimeSeconds}s")
-        add("--property=TimeoutStopSec=${SERVICE_CLEANUP_TIMEOUT.seconds}s")
+        add("--property=TimeoutStopSec=${resources.timeoutStopMillis / 1_000L}s")
         add("--property=Delegate=no")
         add("--")
         addAll(worker)
@@ -4533,6 +5101,11 @@ private data class ObservationProcessIdentity(
     val startTimeTicks: Long,
 )
 
+private enum class ObservationBootProcessTopology {
+    FULL_TREE_SUPERVISOR,
+    SINGLE_KOTLIN_KEEPER,
+}
+
 private data class ObservationAttachmentProcess(
     val role: FullTreeFunctionObservationAttachmentProcessRole,
     val hostPid: Long,
@@ -4666,6 +5239,8 @@ private class ManagedObservationUnit(
     private val process: Process?,
     private val processHandle: decompengine.acp.LinuxProcessDescriptor,
     private val systemdUserRuntimeDirectory: Path,
+    private val bootTopology: ObservationBootProcessTopology =
+        ObservationBootProcessTopology.FULL_TREE_SUPERVISOR,
 ) : AutoCloseable {
     val unitName: String
         get() = controller.unitName
@@ -4833,6 +5408,71 @@ private class ManagedObservationUnit(
         captureStableUnitAttachment(expected)
     }
 
+    fun captureKotlinBootAttachment(
+        expected: IsolatedObservationResources,
+        runtimeConfigurationSha256: String,
+        requestedResources: KotlinSystemdCgroupBootResources,
+        deploymentClosureSha256: String,
+    ): KotlinSystemdCgroupBootReceipt {
+        if (bootTopology != ObservationBootProcessTopology.SINGLE_KOTLIN_KEEPER) {
+            isolationFail("generic Kotlin BOOT receipt requires the single-keeper topology")
+        }
+        if (!runtimeConfigurationSha256.matches(SHA256)) {
+            isolationFail("generic Kotlin BOOT runtime-closure digest is invalid")
+        }
+        if (!deploymentClosureSha256.matches(SHA256)) {
+            isolationFail("generic Kotlin BOOT deployment-closure digest is invalid")
+        }
+        val snapshot = captureStableUnitAttachment(expected)
+        val roles = mapOf(
+            FullTreeFunctionObservationAttachmentProcessRole.OUTER_BUBBLEWRAP to "scope-leader",
+            FullTreeFunctionObservationAttachmentProcessRole.NAMESPACE_INIT_BUBBLEWRAP to "namespace-init",
+            FullTreeFunctionObservationAttachmentProcessRole.SUPERVISOR_JVM to "kotlin-boot-keeper",
+        )
+        val processes = snapshot.population.processes.map { process ->
+            val role = roles[process.role]
+                ?: isolationFail("generic Kotlin BOOT receipt contains an unexpected process role")
+            KotlinSystemdCgroupBootProcessReceipt(
+                role = role,
+                pid = process.hostPid,
+                startTimeTicks = process.startTimeTicks,
+                parentRole = process.parentRole?.let { parent ->
+                    roles[parent] ?: isolationFail("generic Kotlin BOOT receipt has an unexpected parent role")
+                },
+                namespacePids = process.namespacePids,
+                executableSha256 = when (process.role) {
+                    FullTreeFunctionObservationAttachmentProcessRole.OUTER_BUBBLEWRAP,
+                    FullTreeFunctionObservationAttachmentProcessRole.NAMESPACE_INIT_BUBBLEWRAP -> bubblewrap.sha256
+                    FullTreeFunctionObservationAttachmentProcessRole.SUPERVISOR_JVM -> java.sha256
+                    FullTreeFunctionObservationAttachmentProcessRole.WORKER_JVM ->
+                        isolationFail("generic Kotlin BOOT receipt unexpectedly contains a worker JVM")
+                },
+            )
+        }
+        return KotlinSystemdCgroupBootReceipt(
+            unitName = unitName,
+            nonce = nonce,
+            bootId = systemdBootIdToKernelUuid(snapshot.bootId),
+            invocationId = snapshot.invocationId,
+            controlGroup = snapshot.controlGroup,
+            cgroupDevice = snapshot.cgroupIdentity.key.device,
+            cgroupInode = snapshot.cgroupIdentity.key.inode,
+            cgroupMountId = snapshot.cgroupIdentity.mountId,
+            runtimeClosureSha256 = runtimeConfigurationSha256,
+            deploymentClosureSha256 = deploymentClosureSha256,
+            resources = requestedResources,
+            processes = processes,
+        )
+    }
+
+    private fun systemdBootIdToKernelUuid(value: String): String {
+        if (!value.matches(SYSTEMD_ID128) || value in RESERVED_SYSTEMD_ID128S) {
+            isolationFail("generic Kotlin BOOT kernel identity is invalid")
+        }
+        return "${value.substring(0, 8)}-${value.substring(8, 12)}-${value.substring(12, 16)}-" +
+            "${value.substring(16, 20)}-${value.substring(20)}"
+    }
+
     /**
      * Captures only historical receipt data. The returned canonical object neither transfers the
      * live pidfds/cgroup descriptor nor appends UNIT_ATTACHED to the operation journal.
@@ -4933,8 +5573,12 @@ private class ManagedObservationUnit(
 
     private fun requireBootProcesses(cgroup: Path): ObservationBootPopulation {
         val before = readCgroupProcesses(cgroup)
-        if (before.size != BOOT_PROCESS_COUNT || mainPid !in before) {
-            isolationFail("isolated BOOT cgroup does not contain exactly four processes and its leader")
+        val expectedProcessCount = when (bootTopology) {
+            ObservationBootProcessTopology.FULL_TREE_SUPERVISOR -> BOOT_PROCESS_COUNT
+            ObservationBootProcessTopology.SINGLE_KOTLIN_KEEPER -> KOTLIN_BOOT_PROCESS_COUNT
+        }
+        if (before.size != expectedProcessCount || mainPid !in before) {
+            isolationFail("isolated BOOT cgroup has the wrong exact process population")
         }
         val processIdentities = mutableMapOf<Long, ObservationProcessIdentity>()
         val executableIdentities = mutableMapOf<Long, LinuxFileIdentity>()
@@ -4963,7 +5607,14 @@ private class ManagedObservationUnit(
             }
             processIdentities[pid] = readProcessIdentity(pid)
         }
-        if (bubblewrapProcesses.size != 2 || javaProcesses.size != 2 || mainPid !in bubblewrapProcesses) {
+        val expectedJavaProcesses = when (bootTopology) {
+            ObservationBootProcessTopology.FULL_TREE_SUPERVISOR -> 2
+            ObservationBootProcessTopology.SINGLE_KOTLIN_KEEPER -> 1
+        }
+        if (
+            bubblewrapProcesses.size != 2 || javaProcesses.size != expectedJavaProcesses ||
+            mainPid !in bubblewrapProcesses
+        ) {
             isolationFail("isolated BOOT cgroup lacks its exact bubblewrap and JVM population")
         }
         val outer = mainPid
@@ -4976,18 +5627,13 @@ private class ManagedObservationUnit(
         ) isolationFail("isolated BOOT bubblewrap processes have the wrong PID-namespace chain")
         val supervisor = javaProcesses.singleOrNull { pid ->
             processIdentities.getValue(pid).parentPid == inner
-        } ?: isolationFail("isolated BOOT cgroup lacks one supervisor JVM")
-        val worker = javaProcesses.single { it != supervisor }
+        } ?: isolationFail("isolated BOOT cgroup lacks its direct keeper JVM")
         val supervisorIdentity = processIdentities.getValue(supervisor)
-        val workerIdentity = processIdentities.getValue(worker)
         val supervisorNamespacePid = supervisorIdentity.namespacePids.getOrNull(1)
-        val workerNamespacePid = workerIdentity.namespacePids.getOrNull(1)
         if (
-            supervisorIdentity.namespacePids.size != 2 || workerIdentity.namespacePids.size != 2 ||
-            supervisorNamespacePid == null || workerNamespacePid == null ||
-            supervisorNamespacePid <= 1L || workerNamespacePid <= 1L ||
-            supervisorNamespacePid == workerNamespacePid || workerIdentity.parentPid != supervisor
-        ) isolationFail("isolated BOOT JVMs have the wrong parent or PID-namespace chain")
+            supervisorIdentity.namespacePids.size != 2 || supervisorNamespacePid == null ||
+            supervisorNamespacePid <= 1L
+        ) isolationFail("isolated BOOT keeper has the wrong PID-namespace chain")
         fun process(
             role: FullTreeFunctionObservationAttachmentProcessRole,
             pid: Long,
@@ -5006,7 +5652,7 @@ private class ManagedObservationUnit(
                 executableMountId = executableIdentity.mountId,
             )
         }
-        val processes = listOf(
+        val fixedProcesses = listOf(
             process(FullTreeFunctionObservationAttachmentProcessRole.OUTER_BUBBLEWRAP, outer, null),
             process(
                 FullTreeFunctionObservationAttachmentProcessRole.NAMESPACE_INIT_BUBBLEWRAP,
@@ -5018,12 +5664,25 @@ private class ManagedObservationUnit(
                 supervisor,
                 FullTreeFunctionObservationAttachmentProcessRole.NAMESPACE_INIT_BUBBLEWRAP,
             ),
-            process(
-                FullTreeFunctionObservationAttachmentProcessRole.WORKER_JVM,
-                worker,
-                FullTreeFunctionObservationAttachmentProcessRole.SUPERVISOR_JVM,
-            ),
         )
+        val processes = when (bootTopology) {
+            ObservationBootProcessTopology.SINGLE_KOTLIN_KEEPER -> fixedProcesses
+            ObservationBootProcessTopology.FULL_TREE_SUPERVISOR -> {
+                val worker = javaProcesses.single { it != supervisor }
+                val workerIdentity = processIdentities.getValue(worker)
+                val workerNamespacePid = workerIdentity.namespacePids.getOrNull(1)
+                if (
+                    workerIdentity.namespacePids.size != 2 || workerNamespacePid == null ||
+                    workerNamespacePid <= 1L || supervisorNamespacePid == workerNamespacePid ||
+                    workerIdentity.parentPid != supervisor
+                ) isolationFail("isolated BOOT worker JVM has the wrong parent or PID-namespace chain")
+                fixedProcesses + process(
+                    FullTreeFunctionObservationAttachmentProcessRole.WORKER_JVM,
+                    worker,
+                    FullTreeFunctionObservationAttachmentProcessRole.SUPERVISOR_JVM,
+                )
+            }
+        }
         val executableKeys = processes.associate { attachment ->
             attachment.role to listOf(
                 attachment.executableDevice,
@@ -5036,11 +5695,14 @@ private class ManagedObservationUnit(
             executableKeys.getValue(
                 FullTreeFunctionObservationAttachmentProcessRole.NAMESPACE_INIT_BUBBLEWRAP,
             ) ||
-            executableKeys.getValue(FullTreeFunctionObservationAttachmentProcessRole.SUPERVISOR_JVM) !=
-            executableKeys.getValue(FullTreeFunctionObservationAttachmentProcessRole.WORKER_JVM) ||
             executableKeys.getValue(FullTreeFunctionObservationAttachmentProcessRole.OUTER_BUBBLEWRAP) ==
             executableKeys.getValue(FullTreeFunctionObservationAttachmentProcessRole.SUPERVISOR_JVM)
         ) isolationFail("isolated BOOT executable mount identities do not match their roles")
+        if (
+            bootTopology == ObservationBootProcessTopology.FULL_TREE_SUPERVISOR &&
+            executableKeys.getValue(FullTreeFunctionObservationAttachmentProcessRole.SUPERVISOR_JVM) !=
+            executableKeys.getValue(FullTreeFunctionObservationAttachmentProcessRole.WORKER_JVM)
+        ) isolationFail("isolated BOOT JVM executable mount identities differ")
         val after = readCgroupProcesses(cgroup)
         if (after != before) isolationFail("isolated BOOT process inventory changed while verified")
         return ObservationBootPopulation(before, processes)
@@ -5135,7 +5797,7 @@ private class ManagedObservationUnit(
         val quota = cpu.getOrNull(0)?.toLongOrNull()
         val period = cpu.getOrNull(1)?.toLongOrNull()
         if (
-            pidsMax != CGROUP_TASKS_MAX.toLong() || memoryMax != expected.maximumResidentBytes ||
+            pidsMax != expected.tasksMax || memoryMax != expected.maximumResidentBytes ||
             swapMax != 0L || oomGroup != "1" || cpu.size != 2 || quota == null || period == null ||
             quota <= 0L || quota != period
         ) isolationFail("isolated cgroup controllers differ from the authenticated runtime policy")
@@ -5632,7 +6294,7 @@ private class ManagedObservationUnit(
             add("InvocationID")
         }
         if (properties["CollectMode"] != "inactive-or-failed") add("CollectMode")
-        if (properties["TasksMax"] != CGROUP_TASKS_MAX.toString()) add("TasksMax")
+        if (properties["TasksMax"] != expected.tasksMax.toString()) add("TasksMax")
         if (properties["MemoryMax"] != expected.maximumResidentBytes.toString()) add("MemoryMax")
         if (properties["MemorySwapMax"] != "0") add("MemorySwapMax")
         if (properties["OOMPolicy"] != "kill") add("OOMPolicy")
@@ -5648,7 +6310,7 @@ private class ManagedObservationUnit(
         }
         if (
             parseSystemdMicros(properties["TimeoutStopUSec"]) !=
-            SERVICE_CLEANUP_TIMEOUT.toNanos() / 1_000L
+            multiplyExact(expected.timeoutStopMillis, 1_000L, "systemd stop-timeout microseconds")
         ) add("TimeoutStopUSec")
     }
 
@@ -6278,7 +6940,7 @@ private fun syntheticDestinationParents(destinations: Collection<Path>): List<Pa
     val parents = LinkedHashSet<Path>()
     destinations.forEach { destination ->
         if (!destination.isAbsolute || destination.normalize() != destination || destination == Path.of("/")) {
-            isolationFail("isolated synthetic-root destination is invalid")
+            isolationFail("isolated synthetic-root destination is invalid: $destination")
         }
         var current = destination.parent
         while (current != null && current != Path.of("/")) {
@@ -6296,7 +6958,8 @@ private fun syntheticDestinationParents(destinations: Collection<Path>): List<Pa
 internal fun findObservationCgroupsForUnit(unitName: String): List<Path> {
     if (
         !unitName.matches(PRODUCTION_OBSERVATION_UNIT_NAME) &&
-        !unitName.matches(FIXTURE_OBSERVATION_UNIT_NAME)
+        !unitName.matches(FIXTURE_OBSERVATION_UNIT_NAME) &&
+        !unitName.matches(PRODUCTION_KOTLIN_BOOT_UNIT_NAME)
     ) {
         isolationFail("isolated scope name is unsafe for cgroup absence verification")
     }
@@ -6477,6 +7140,8 @@ private inline fun <T> translateIsolationFailures(
     action: () -> T,
 ): T = try {
     action()
+} catch (failure: KotlinSystemdCgroupBootLaunchException) {
+    throw failure
 } catch (failure: FullTreeFunctionObservationIsolationException) {
     throw failure
 } catch (failure: Throwable) {
@@ -6496,10 +7161,14 @@ private const val WORKER_PROTOCOL_VERSION = "1"
 private const val WORKER_ARGUMENTS = 9
 private const val SUPERVISOR_PROTOCOL_VERSION = "1"
 private const val SUPERVISOR_ARGUMENTS = WORKER_ARGUMENTS + 3
+private const val KOTLIN_BOOT_PROTOCOL_VERSION = "1"
+private const val KOTLIN_BOOT_ARGUMENTS = 3
+private const val KOTLIN_BOOT_RUNTIME_PROVIDER = "kotlin-systemd-cgroup-boot-runtime-v1"
 private const val READY_FIELD_COUNT = 19
 private const val KEEPER_FIELD_COUNT = 4
 private const val WORKER_FAILURE_EXIT = 73
 private const val SUPERVISOR_FAILURE_EXIT = 74
+private const val KOTLIN_BOOT_FAILURE_EXIT = 75
 private const val LOCAL_SIGKILL_EXIT = 137
 private const val BOOT_FILE = "worker.boot"
 private const val START_FILE = "parent.start"
@@ -6560,6 +7229,7 @@ private const val PROC_MOUNTINFO_BYTES = 8 * 1024 * 1024
 private const val CGROUP_TEXT_BYTES = 64 * 1024
 private const val CGROUP_PROCS_BYTES = 1024 * 1024
 private const val BOOT_PROCESS_COUNT = 4
+private const val KOTLIN_BOOT_PROCESS_COUNT = 3
 private const val PROC_STAT_START_TIME_SUFFIX_FIELD_COUNT = 20
 private const val KEEPER_PROCESS_COUNT = 3
 private const val MAXIMUM_PROC_DESCRIPTOR_TARGET_CHARS = 8192
@@ -6634,9 +7304,27 @@ private val PROTOCOL_NONCE = Regex("[0-9a-f]{64}")
 private val SHARD_IDENTIFIER = Regex("[a-z0-9]+(?:-[a-z0-9]+)*")
 private val PRODUCTION_OBSERVATION_UNIT_NAME =
     Regex("decomp-oracle-function-[0-9a-f]{64}\\.scope")
+private val PRODUCTION_KOTLIN_BOOT_UNIT_NAME =
+    Regex("[a-z][a-z0-9-]{0,95}-[0-9a-f]{32}\\.scope")
 private val FIXTURE_OBSERVATION_UNIT_NAME =
     Regex("decomp-oracle-function-[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}\\.scope")
 private val COUNTER_NAME = Regex("[a-z][a-z0-9_.]*")
+private val KOTLIN_BOOT_PROCESS_ROLES =
+    listOf("scope-leader", "namespace-init", "kotlin-boot-keeper")
+private val KOTLIN_BOOT_PROCESS_PARENTS = mapOf(
+    "scope-leader" to null,
+    "namespace-init" to "scope-leader",
+    "kotlin-boot-keeper" to "namespace-init",
+)
+private const val KOTLIN_BOOT_MINIMUM_MEMORY_BYTES = 256L * 1024L * 1024L
+private const val KOTLIN_BOOT_MAXIMUM_MEMORY_BYTES = 64L * 1024L * 1024L * 1024L
+private const val KOTLIN_BOOT_MAXIMUM_WALL_MILLIS = 24L * 60L * 60L * 1_000L
+private const val KOTLIN_BOOT_MINIMUM_PIDS = 4L
+private const val KOTLIN_BOOT_MAXIMUM_PIDS = 4_096L
+private const val KOTLIN_BOOT_TIMEOUT_STOP_MILLIS = 30_000L
+private const val KOTLIN_BOOT_MAXIMUM_PRIVATE_ENTRIES = 1_024
+private const val KOTLIN_BOOT_MAXIMUM_PRIVATE_BYTES = 256L * 1024L * 1024L
+private const val KOTLIN_BOOT_MAXIMUM_PRIVATE_DEPTH = 16
 private val MEMORY_BACKED_FILE_SYSTEMS = setOf("tmpfs", "ramfs", "hugetlbfs")
 private val BUBBLEWRAP_VERSION = Regex("bubblewrap [0-9]+(?:\\.[0-9]+){1,2}")
 private val SYSTEMD_MANAGER_VERSION = Regex("[0-9][0-9A-Za-z.+~:_-]*")

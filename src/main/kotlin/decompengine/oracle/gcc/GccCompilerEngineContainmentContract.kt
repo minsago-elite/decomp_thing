@@ -3,6 +3,7 @@ package decompengine.oracle.gcc
 import decompengine.oracle.core.OracleArtifacts
 import decompengine.oracle.core.OracleJson
 import decompengine.oracle.core.StrictJsonLimits
+import decompengine.oracle.fulltree.KotlinSystemdCgroupBootOwner
 import java.nio.file.Path
 import java.security.MessageDigest
 import java.util.Collections
@@ -220,6 +221,62 @@ internal interface GccCompilerEngineTerminalAbsenceAssessment {
     val absenceReceiptSha256: String
 }
 
+/** Private raw-definition projection consumed only by the Kotlin live controller. */
+internal class GccCompilerEngineValidatedContainmentDefinition private constructor(
+    canonicalBytes: ByteArray,
+    val requestSha256: String,
+    val bindingSha256: String,
+    val unitName: String,
+    val engineId: String,
+    val runKind: GccCompilerEngineContainmentRunKind,
+    artifacts: List<GccCompilerEngineContainmentArtifactIdentity>,
+    val analysisState: GccCompilerEngineAnalysisStateIdentity,
+    command: List<String>,
+    environment: Map<String, String>,
+    val outputLease: GccCompilerEngineOutputLeaseIdentity,
+    val budgets: GccCompilerEngineContainmentBudgets,
+    val commandSha256: String,
+    val runtimeSha256: String,
+    val inputSetSha256: String,
+    val outputLeaseSha256: String,
+) {
+    private val bytes = canonicalBytes.copyOf()
+    val canonicalBytes: ByteArray
+        get() = bytes.copyOf()
+    val artifacts: List<GccCompilerEngineContainmentArtifactIdentity> = java.util.List.copyOf(artifacts)
+    val command: List<String> = java.util.List.copyOf(command)
+    val environment: Map<String, String> = java.util.Collections.unmodifiableMap(TreeMap(environment))
+    val expectedControlGroup: String = "/user.slice/user-${outputLease.uid}.slice/" +
+        "user@${outputLease.uid}.service/app.slice/$unitName"
+
+    companion object {
+        private fun from(facts: DefinitionFacts): GccCompilerEngineValidatedContainmentDefinition {
+            val request = facts.request
+            return GccCompilerEngineValidatedContainmentDefinition(
+                facts.canonicalBytes,
+                facts.requestSha256,
+                facts.bindingSha256,
+                facts.unitName,
+                request.engineId,
+                request.runKind,
+                request.artifacts,
+                request.analysisState,
+                request.command,
+                request.environment,
+                request.outputLease,
+                request.budgets,
+                facts.commandSha256,
+                facts.runtimeSha256,
+                facts.inputSetSha256,
+                facts.outputLeaseSha256,
+            )
+        }
+
+        internal fun parse(bytes: ByteArray): GccCompilerEngineValidatedContainmentDefinition =
+            from(parseDefinition(snapshot(bytes, MAXIMUM_DEFINITION_BYTES, "containment definition")))
+    }
+}
+
 /**
  * Bounded, non-authoritative durable-state contract for the future GCC process controller.
  *
@@ -244,6 +301,108 @@ internal object GccCompilerEngineContainmentContract {
     ): GccCompilerEngineTerminalAbsenceAssessment =
         TerminalAbsenceAssessmentImpl.assess(definitionBytes, attachedReceiptBytes, absenceReceiptBytes)
 
+    internal fun parseDefinitionForLiveController(
+        definitionBytes: ByteArray,
+    ): GccCompilerEngineValidatedContainmentDefinition =
+        GccCompilerEngineValidatedContainmentDefinition.parse(definitionBytes)
+
+    internal fun renderLiveUnitAttachedAtBootReceipt(
+        definitionBytes: ByteArray,
+        owner: KotlinSystemdCgroupBootOwner,
+        expectedDeploymentClosureSha256: String,
+    ): ByteArray {
+        owner.requireCurrentAtBoot()
+        return renderRetainedLiveUnitAttachedAtBootReceipt(
+            definitionBytes,
+            owner,
+            expectedDeploymentClosureSha256,
+        )
+    }
+
+    /**
+     * Binds immutable receipt bytes to the already-retained owner without requiring the scope to
+     * remain at BOOT. This is used only to prepare cleanup evidence: runtime expiry or keeper
+     * death must never make the destructive cleanup path unreachable.
+     */
+    private fun renderRetainedLiveUnitAttachedAtBootReceipt(
+        definitionBytes: ByteArray,
+        owner: KotlinSystemdCgroupBootOwner,
+        expectedDeploymentClosureSha256: String,
+    ): ByteArray {
+        val facts = owner.receipt
+        val definition = parseDefinition(snapshot(definitionBytes, MAXIMUM_DEFINITION_BYTES, "definition"))
+        if (
+            facts.controlGroup != derivedControlGroup(definition) ||
+            facts.nonce != definition.bindingSha256 ||
+            !facts.runtimeClosureSha256.matches(SHA256) ||
+            !expectedDeploymentClosureSha256.matches(SHA256) ||
+            facts.deploymentClosureSha256 != expectedDeploymentClosureSha256 ||
+            facts.resources.wallClockMillis != definition.budgets.wallClockMillis ||
+            facts.resources.maximumResidentBytes != definition.budgets.maximumResidentBytes ||
+            facts.resources.pidsMax != definition.budgets.pidsMax ||
+            facts.cgroupDevice <= 0L || facts.cgroupInode <= 0L || facts.cgroupMountId <= 0L ||
+            !facts.bootId.matches(BOOT_ID) || !facts.invocationId.matches(SYSTEMD_ID128) ||
+            facts.invocationId == ZERO_ID128 || facts.processes.size != REQUIRED_BOOT_PROCESS_COUNT
+        ) containmentFail("live BOOT attachment facts are invalid")
+        val processes = JsonArray(facts.processes.map { process ->
+            bootProcessJson(
+                process.role,
+                process.pid,
+                process.startTimeTicks,
+                process.parentRole,
+                process.namespacePids,
+                process.executableSha256,
+            )
+        })
+        // Reuse the strict parser as the final semantic/cross-field check before any bytes escape.
+        val unsigned = attachedReceiptUnsigned(
+            definition,
+            facts.bootId,
+            facts.invocationId,
+            facts.controlGroup,
+            facts.cgroupDevice,
+            facts.cgroupInode,
+            facts.cgroupMountId,
+            facts.runtimeClosureSha256,
+            processes,
+        )
+        return withSelfHash(unsigned, "receiptSha256").also { parseAttachedReceipt(definition, it) }
+    }
+
+    internal fun prepareLiveOwnerTerminalAbsenceReceipt(
+        definitionBytes: ByteArray,
+        attachedReceiptBytes: ByteArray,
+        owner: KotlinSystemdCgroupBootOwner,
+        expectedDeploymentClosureSha256: String,
+    ): ByteArray {
+        // Bind the historical sidecar back to the same opaque owner before mutation. This check
+        // deliberately uses retained launch facts rather than a fresh BOOT observation: cleanup
+        // remains authorized after runtime expiry, keeper death, or other loss of liveness.
+        // A merely parse-valid caller receipt can never select the boot/invocation/PIDs for which
+        // terminal absence will be claimed.
+        val expectedAttached = renderRetainedLiveUnitAttachedAtBootReceipt(
+            definitionBytes,
+            owner,
+            expectedDeploymentClosureSha256,
+        )
+        if (!MessageDigest.isEqual(expectedAttached, attachedReceiptBytes)) {
+            containmentFail("live terminal cleanup attachment differs from its retained BOOT owner")
+        }
+        // Fully render and parse the immutable terminal candidate before the irreversible close.
+        // These private bytes do not escape unless the retained owner subsequently proves absence,
+        // and this leaves no fallible serialization step after the owner becomes terminal.
+        val terminalBytes = renderTerminalAbsenceReceiptForTesting(definitionBytes, attachedReceiptBytes)
+        parseAbsenceReceipt(
+            parseDefinition(snapshot(definitionBytes, MAXIMUM_DEFINITION_BYTES, "definition")),
+            parseAttachedReceipt(
+                parseDefinition(snapshot(definitionBytes, MAXIMUM_DEFINITION_BYTES, "definition")),
+                snapshot(attachedReceiptBytes, MAXIMUM_RECEIPT_BYTES, "UNIT_ATTACHED-at-BOOT receipt"),
+            ),
+            terminalBytes,
+        )
+        return terminalBytes
+    }
+
     /** Forgeable canonical bytes used only to exercise the raw-byte assessment boundary. */
     internal fun renderUnitAttachedAtBootReceiptForTesting(
         definitionBytes: ByteArray,
@@ -253,6 +412,7 @@ internal object GccCompilerEngineContainmentContract {
         cgroupDevice: Long = 11L,
         cgroupInode: Long = 12L,
         cgroupMountId: Long = 13L,
+        runtimeClosureSha256: String = "d".repeat(64),
     ): ByteArray {
         val definition = parseDefinition(snapshot(definitionBytes, MAXIMUM_DEFINITION_BYTES, "definition"))
         val pids = boundedLongCopy(processIds, REQUIRED_BOOT_PROCESS_COUNT, "BOOT process IDs")
@@ -272,6 +432,7 @@ internal object GccCompilerEngineContainmentContract {
             cgroupDevice,
             cgroupInode,
             cgroupMountId,
+            runtimeClosureSha256,
             processes,
         )
         return withSelfHash(unsigned, "receiptSha256")
@@ -289,19 +450,21 @@ internal object GccCompilerEngineContainmentContract {
         )
         val unsigned = JsonObject(
             linkedMapOf(
-                "schemaVersion" to JsonPrimitive(1),
+                "schemaVersion" to JsonPrimitive(2),
                 "provider" to JsonPrimitive(ABSENCE_RECEIPT_PROVIDER),
                 "phase" to JsonPrimitive("TERMINAL_ABSENT"),
                 "bindingSha256" to JsonPrimitive(definition.bindingSha256),
                 "attachedReceiptSha256" to JsonPrimitive(attached.receiptSha256),
                 "bootId" to JsonPrimitive(attached.bootId),
                 "unitName" to JsonPrimitive(definition.unitName),
-                "kill" to JsonObject(
+                "cleanupPolicy" to JsonObject(
                     mapOf(
-                        "mechanism" to JsonPrimitive("systemd-control-group"),
-                        "whom" to JsonPrimitive("all"),
-                        "signal" to JsonPrimitive("SIGKILL"),
+                        "systemdMutation" to JsonPrimitive(
+                            "sigkill-all-if-exact-retained-target-present",
+                        ),
                         "killMode" to JsonPrimitive("control-group"),
+                        "replacementAction" to JsonPrimitive("refuse-mutation"),
+                        "pidfdBackstop" to JsonPrimitive("sigkill-retained-processes"),
                     ),
                 ),
                 "unit" to JsonObject(
@@ -339,6 +502,7 @@ internal object GccCompilerEngineContainmentContract {
 
 private data class DefinitionFacts(
     val canonicalBytes: ByteArray,
+    val request: GccCompilerEngineContainmentRequest,
     val requestSha256: String,
     val bindingSha256: String,
     val unitName: String,
@@ -499,6 +663,7 @@ private fun renderDefinition(request: GccCompilerEngineContainmentRequest): Defi
     )
     return DefinitionFacts(
         canonical,
+        request,
         requestSha256,
         bindingSha256,
         unitName,
@@ -608,10 +773,11 @@ private fun attachedReceiptUnsigned(
     cgroupDevice: Long,
     cgroupInode: Long,
     cgroupMountId: Long,
+    runtimeClosureSha256: String,
     processes: JsonArray,
 ): JsonObject = JsonObject(
     linkedMapOf(
-        "schemaVersion" to JsonPrimitive(1),
+        "schemaVersion" to JsonPrimitive(2),
         "provider" to JsonPrimitive(ATTACHED_RECEIPT_PROVIDER),
         "phase" to JsonPrimitive("UNIT_ATTACHED_AT_BOOT"),
         "bindingSha256" to JsonPrimitive(definition.bindingSha256),
@@ -621,6 +787,7 @@ private fun attachedReceiptUnsigned(
         "invocationId" to JsonPrimitive(invocationId),
         "commandSha256" to JsonPrimitive(definition.commandSha256),
         "runtimeSha256" to JsonPrimitive(definition.runtimeSha256),
+        "runtimeClosureSha256" to JsonPrimitive(runtimeClosureSha256),
         "inputSetSha256" to JsonPrimitive(definition.inputSetSha256),
         "outputLeaseSha256" to JsonPrimitive(definition.outputLeaseSha256),
         "systemd" to JsonObject(
@@ -677,7 +844,7 @@ private fun attachedReceiptUnsigned(
 private fun parseAttachedReceipt(definition: DefinitionFacts, bytes: ByteArray): AttachedReceiptFacts {
     val root = parseCanonicalObject(bytes, "UNIT_ATTACHED-at-BOOT receipt")
     root.requireKeys(ATTACHED_RECEIPT_FIELDS, "UNIT_ATTACHED-at-BOOT receipt")
-    root.requireInt("schemaVersion", 1, "UNIT_ATTACHED-at-BOOT receipt")
+    root.requireInt("schemaVersion", 2, "UNIT_ATTACHED-at-BOOT receipt")
     root.requireString("provider", ATTACHED_RECEIPT_PROVIDER, "UNIT_ATTACHED-at-BOOT receipt")
     root.requireString("phase", "UNIT_ATTACHED_AT_BOOT", "UNIT_ATTACHED-at-BOOT receipt")
     root.requireString("bindingSha256", definition.bindingSha256, "UNIT_ATTACHED-at-BOOT receipt")
@@ -685,6 +852,10 @@ private fun parseAttachedReceipt(definition: DefinitionFacts, bytes: ByteArray):
     root.requireString("unitName", definition.unitName, "UNIT_ATTACHED-at-BOOT receipt")
     root.requireString("commandSha256", definition.commandSha256, "UNIT_ATTACHED-at-BOOT receipt")
     root.requireString("runtimeSha256", definition.runtimeSha256, "UNIT_ATTACHED-at-BOOT receipt")
+    requireSha256(
+        root.stringField("runtimeClosureSha256", "UNIT_ATTACHED-at-BOOT receipt"),
+        "UNIT_ATTACHED-at-BOOT runtime closure",
+    )
     root.requireString("inputSetSha256", definition.inputSetSha256, "UNIT_ATTACHED-at-BOOT receipt")
     root.requireString("outputLeaseSha256", definition.outputLeaseSha256, "UNIT_ATTACHED-at-BOOT receipt")
     val bootId = root.stringField("bootId", "UNIT_ATTACHED-at-BOOT receipt")
@@ -754,19 +925,27 @@ private fun parseAbsenceReceipt(
 ): String {
     val root = parseCanonicalObject(bytes, "terminal-absence receipt")
     root.requireKeys(ABSENCE_RECEIPT_FIELDS, "terminal-absence receipt")
-    root.requireInt("schemaVersion", 1, "terminal-absence receipt")
+    root.requireInt("schemaVersion", 2, "terminal-absence receipt")
     root.requireString("provider", ABSENCE_RECEIPT_PROVIDER, "terminal-absence receipt")
     root.requireString("phase", "TERMINAL_ABSENT", "terminal-absence receipt")
     root.requireString("bindingSha256", definition.bindingSha256, "terminal-absence receipt")
     root.requireString("attachedReceiptSha256", attached.receiptSha256, "terminal-absence receipt")
     root.requireString("bootId", attached.bootId, "terminal-absence receipt")
     root.requireString("unitName", definition.unitName, "terminal-absence receipt")
-    val kill = root.objectField("kill", "terminal-absence receipt")
-    kill.requireKeys(KILL_FIELDS, "whole-cgroup kill")
-    kill.requireString("mechanism", "systemd-control-group", "whole-cgroup kill")
-    kill.requireString("whom", "all", "whole-cgroup kill")
-    kill.requireString("signal", "SIGKILL", "whole-cgroup kill")
-    kill.requireString("killMode", "control-group", "whole-cgroup kill")
+    val cleanupPolicy = root.objectField("cleanupPolicy", "terminal-absence receipt")
+    cleanupPolicy.requireKeys(CLEANUP_POLICY_FIELDS, "terminal cleanup policy")
+    cleanupPolicy.requireString(
+        "systemdMutation",
+        "sigkill-all-if-exact-retained-target-present",
+        "terminal cleanup policy",
+    )
+    cleanupPolicy.requireString("killMode", "control-group", "terminal cleanup policy")
+    cleanupPolicy.requireString("replacementAction", "refuse-mutation", "terminal cleanup policy")
+    cleanupPolicy.requireString(
+        "pidfdBackstop",
+        "sigkill-retained-processes",
+        "terminal cleanup policy",
+    )
     val unit = root.objectField("unit", "terminal-absence receipt")
     unit.requireKeys(UNIT_ABSENCE_FIELDS, "unit absence")
     unit.requireString("loadState", "not-found", "unit absence")
@@ -934,8 +1113,11 @@ private fun containmentJson(budgets: GccCompilerEngineContainmentBudgets): JsonO
         "memoryMaxBytes" to JsonPrimitive(budgets.maximumResidentBytes),
         "memorySwapMaxBytes" to JsonPrimitive(0),
         "pidsMax" to JsonPrimitive(budgets.pidsMax),
-        "terminalKillWhom" to JsonPrimitive("all"),
-        "terminalSignal" to JsonPrimitive("SIGKILL"),
+        "terminalSystemdMutation" to JsonPrimitive(
+            "sigkill-all-if-exact-retained-target-present",
+        ),
+        "replacementMutation" to JsonPrimitive("refuse"),
+        "pidfdBackstop" to JsonPrimitive("sigkill-retained-processes"),
         "requireUnitAbsent" to JsonPrimitive(true),
         "requireCgroupAbsent" to JsonPrimitive(true),
         "requireAllReceiptPidfdsDead" to JsonPrimitive(true),
@@ -1121,8 +1303,8 @@ private fun containmentFail(message: String): Nothing =
     throw GccCompilerEngineContainmentContractException(message)
 
 private const val DEFINITION_PROVIDER = "gcc-compiler-engine-containment-definition-v1"
-private const val ATTACHED_RECEIPT_PROVIDER = "gcc-compiler-engine-unit-attached-at-boot-receipt-v1"
-private const val ABSENCE_RECEIPT_PROVIDER = "gcc-compiler-engine-terminal-absence-receipt-v1"
+private const val ATTACHED_RECEIPT_PROVIDER = "gcc-compiler-engine-unit-attached-at-boot-receipt-v2"
+private const val ABSENCE_RECEIPT_PROVIDER = "gcc-compiler-engine-terminal-absence-receipt-v2"
 private const val ASSESSMENT_AUTHORITY = "non-authoritative-caller-supplied-containment-bytes-v1"
 private const val OWNER_ONLY_DIRECTORY_MODE = 0x1c0 // 0700
 private const val MINIMUM_OUTPUT_INODES = 128L
@@ -1191,7 +1373,8 @@ private val OUTPUT_LEASE_FIELDS = setOf(
 private val BUDGET_FIELDS = setOf("wallClockMillis", "maximumResidentBytes", "pidsMax")
 private val ATTACHED_RECEIPT_FIELDS = setOf(
     "schemaVersion", "provider", "phase", "bindingSha256", "requestSha256", "unitName", "bootId",
-    "invocationId", "commandSha256", "runtimeSha256", "inputSetSha256", "outputLeaseSha256",
+    "invocationId", "commandSha256", "runtimeSha256", "runtimeClosureSha256", "inputSetSha256",
+    "outputLeaseSha256",
     "systemd", "cgroup", "bootProtocol", "processes", "receiptSha256",
 )
 private val SYSTEMD_FIELDS = setOf(
@@ -1209,10 +1392,12 @@ private val BOOT_PROCESS_FIELDS = setOf(
 )
 private val ABSENCE_RECEIPT_FIELDS = setOf(
     "schemaVersion", "provider", "phase", "bindingSha256", "attachedReceiptSha256", "bootId",
-    "unitName", "kill", "unit", "cgroup", "processes", "independentAbsenceSweeps",
+    "unitName", "cleanupPolicy", "unit", "cgroup", "processes", "independentAbsenceSweeps",
     "absenceReceiptSha256",
 )
-private val KILL_FIELDS = setOf("mechanism", "whom", "signal", "killMode")
+private val CLEANUP_POLICY_FIELDS = setOf(
+    "systemdMutation", "killMode", "replacementAction", "pidfdBackstop",
+)
 private val UNIT_ABSENCE_FIELDS = setOf("loadState", "sameNameCandidates", "invocationPresent")
 private val CGROUP_ABSENCE_FIELDS = setOf("pathPresent", "sameNameCandidates", "populated")
 private val ABSENT_PROCESS_FIELDS = setOf("role", "pid", "startTimeTicks", "pidfdAlive")

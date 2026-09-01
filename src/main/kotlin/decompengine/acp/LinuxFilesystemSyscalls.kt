@@ -619,6 +619,10 @@ internal object LinuxFilesystemSyscalls {
         renameAt2(parentFd, from, parentFd, to, RENAME_NOREPLACE)
     }
 
+    fun renameNoReplace(fromParentFd: Int, from: String, toParentFd: Int, to: String) {
+        renameAt2(fromParentFd, from, toParentFd, to, RENAME_NOREPLACE)
+    }
+
     fun exchange(parentFd: Int, first: String, second: String) {
         renameAt2(parentFd, first, parentFd, second, RENAME_EXCHANGE)
     }
