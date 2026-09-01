@@ -321,7 +321,10 @@ internal data class GeneratedFixture(
     val provenance: Path,
 )
 
-internal fun createGeneratedFixture(root: Path): GeneratedFixture {
+internal fun createGeneratedFixture(
+    root: Path,
+    ninjaManifestBytes: ByteArray = "ninja".toByteArray(StandardCharsets.US_ASCII),
+): GeneratedFixture {
     Files.createDirectories(root)
     Files.setPosixFilePermissions(root, PosixFilePermissions.fromString("rwx------"))
     val control = createFullTreeControlFixture(root.resolve("control"))
@@ -345,7 +348,7 @@ internal fun createGeneratedFixture(root: Path): GeneratedFixture {
     val provenance = root.resolve("generated-provenance.json")
     writeControlObject(
         provenance,
-        generatedProvenance(buildRecord, control.buildRecord, archiveBytes),
+        generatedProvenance(buildRecord, control.buildRecord, archiveBytes, ninjaManifestBytes),
     )
     return GeneratedFixture(control, planning, archive, provenance)
 }
@@ -354,6 +357,7 @@ private fun generatedProvenance(
     buildRecord: JsonObject,
     buildRecordPath: Path,
     archiveBytes: ByteArray,
+    ninjaManifestBytes: ByteArray,
 ): JsonObject {
     val commands = buildRecord.controlObject("commands")
     val configureSha256 = fullTreeGeneratedConfigureCommandSha256(commands.controlArray("configure"))
@@ -371,8 +375,8 @@ private fun generatedProvenance(
             "cmakeTool" to cmakeTool,
             "compileCommandSha256" to JsonPrimitive(compileSha256),
             "configureCommandSha256" to JsonPrimitive(configureSha256),
-            "ninjaManifestBytes" to JsonPrimitive(5),
-            "ninjaManifestSha256" to JsonPrimitive(sha256("ninja".toByteArray(StandardCharsets.US_ASCII))),
+            "ninjaManifestBytes" to JsonPrimitive(ninjaManifestBytes.size),
+            "ninjaManifestSha256" to JsonPrimitive(sha256(ninjaManifestBytes)),
             "ninjaTool" to ninjaTool,
             "sourceDateEpoch" to JsonPrimitive(
                 buildRecord.controlObject("environment").controlObject("variables")

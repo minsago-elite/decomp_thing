@@ -323,16 +323,20 @@ class FullTreeClangCompdbReconciliationControlTest {
         }
 }
 
-private data class CompdbFixture(
+internal data class CompdbFixture(
     val captureFixture: CaptureFixture,
     val capture: FullTreeClangCaptureInputRegistry,
     val compdb: Path,
     val reconciliation: Path,
 )
 
-private fun createCompdbFixture(root: Path, includeIgnored: Boolean = false): CompdbFixture {
+internal fun createCompdbFixture(
+    root: Path,
+    includeIgnored: Boolean = false,
+    ninjaManifestBytes: ByteArray = "ninja".toByteArray(StandardCharsets.US_ASCII),
+): CompdbFixture {
     Files.createDirectories(root)
-    val captureFixture = createCaptureFixture(root.resolve("capture"))
+    val captureFixture = createCaptureFixture(root.resolve("capture"), ninjaManifestBytes)
     val capture = loadCapture(captureFixture)
     val records = capture.actions.map { action -> compdbRecord(action) }.toMutableList()
     if (includeIgnored) {
@@ -369,7 +373,7 @@ private fun compdbRecord(action: FullTreeClangCaptureAction): JsonObject {
     )
 }
 
-private fun generateCompdb(
+internal fun generateCompdb(
     fixture: CompdbFixture,
     output: Path = fixture.reconciliation,
     limits: FullTreeClangCompdbReconciliationLimits = FullTreeClangCompdbReconciliationLimits(),
@@ -392,7 +396,7 @@ private fun generateCompdb(
     limits,
 )
 
-private fun loadCompdb(
+internal fun loadCompdb(
     fixture: CompdbFixture,
     path: Path = fixture.reconciliation,
     limits: FullTreeClangCompdbReconciliationLimits = FullTreeClangCompdbReconciliationLimits(),

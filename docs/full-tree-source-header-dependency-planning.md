@@ -232,6 +232,54 @@ not author these external reference compdb bytes, the capture transformation, or
 the reconciliation, and receives no graph, capture, execution, oracle, reference,
 policy, validation, observation, scoring, certification, or release authority.
 
+## Kotlin-bound Ninja compdb prestart
+
+`FullTreeNinjaCompdbPrestartControl` turns the external reconciliation into an
+explicit, persisted pre-START contract. It accepts a strict Ninja-manifest
+snapshot archive plus the raw reconciliation/predecessor paths. Kotlin requires
+the archive's `build.ninja` bytes to equal the generated-file predecessor's
+committed manifest bytes and digest, recursively resolves only literal
+top-level `include` and `subninja` directives, and rejects missing, extra,
+cyclic, aliased, dynamic, absolute, or escaping closure members. The resulting
+file and include-graph manifests describe the exact supplied snapshot; they do
+not authenticate how that snapshot was generated.
+
+Every raw input is opened under a retained, bounded, single-link descriptor
+guard across both derivations and is digest-verified unchanged before return.
+Manifest scanning follows Ninja 1.11.1 whole-line comment and initial-identifier
+semantics, while admitting only a canonical literal directive subset; ambiguous
+tabs, continuations, path separators, and rule identifiers fail closed.
+
+Compiler rule selection is host policy, not caller or ACP input. From unique
+literal rule declarations Kotlin selects the complete recorded-profile
+`ASM_COMPILER__*`, `C_COMPILER__*`, and `CXX_COMPILER__*` population ending in
+`_RelWithDebInfo`, orders it canonically, and derives the only permitted direct
+argv: the recorded absolute Ninja path, `-f build.ninja -t compdb`, then those
+rule names. The working directory is the recorded build directory; inherited
+environment is cleared; the exact authenticated build-record variables are
+bound; stdin is closed; shell execution and `-x` response-file expansion are
+forbidden. The expected stdout byte count and digests come from the already
+validated external reconciliation so a later runner can compare complete,
+non-truncated output.
+
+This artifact is `kotlin-bound-unexecuted-ninja-compdb-prestart`. It launches no
+process and intentionally retains no executable descriptor or bearer authority.
+The recorded Ninja identity, snapshot closure, rule list, invocation, expected
+stdout, required no-network/read-only/cgroup containment policy, and all raw
+predecessor commitments are durable; live Ninja/runtime authentication,
+containment, START, stdout/stderr observation, exit status, graph origin, compiler
+capture, clean compilation, and release eligibility remain false. All eight
+capture blockers are carried unchanged. `ninja -t compdb` is graph interrogation,
+not live edge replay, so even its later successful receipt cannot by itself clear
+`ninja-live-edge-replay-missing`.
+
+ACP remains the first-class candidate producer/operator. Authenticated ACP
+session, change, build-artifact, and provenance may enter a later candidate
+admission boundary read-only, but ACP supplies none of this reference prestart's
+manifest, rule, invocation, containment, or expected-output authority and has no
+oracle, reference, policy, validation, observation, execution, scoring,
+certification, or release authority.
+
 ## Resolution boundary
 
 The assessment scans the strict locked TAR/XZ archive and parses C-family

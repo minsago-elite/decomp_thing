@@ -475,9 +475,12 @@ internal data class CaptureFixture(
     val headerPathBytes: Long,
 )
 
-internal fun createCaptureFixture(root: Path): CaptureFixture {
+internal fun createCaptureFixture(
+    root: Path,
+    ninjaManifestBytes: ByteArray = "ninja".toByteArray(StandardCharsets.US_ASCII),
+): CaptureFixture {
     Files.createDirectories(root)
-    val generatedFixture = createGeneratedFixture(root.resolve("predecessors"))
+    val generatedFixture = createGeneratedFixture(root.resolve("predecessors"), ninjaManifestBytes)
     val control = generatedFixture.control
     val readinessPath = root.resolve("readiness.json")
     val readiness = FullTreeHeaderPlanReadinessControl.generateAndPublish(

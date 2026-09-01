@@ -1,0 +1,785 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://github.com/minsago-elite/decomp_thing/oracle/full-tree-ninja-compdb-prestart.schema.json",
+  "title": "Kotlin-bound persisted and unexecuted Ninja compilation-database prestart",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schemaVersion",
+    "kind",
+    "authority",
+    "acpBoundary",
+    "prestartPolicy",
+    "bounds",
+    "oracle",
+    "ninja",
+    "manifestClosure",
+    "compilerRules",
+    "invocation",
+    "requiredContainment",
+    "execution",
+    "commitments",
+    "blockerDispositions",
+    "blockers",
+    "reportSha256"
+  ],
+  "properties": {
+    "schemaVersion": {
+      "const": 1
+    },
+    "kind": {
+      "const": "full-tree-ninja-compdb-prestart-v1"
+    },
+    "authority": {
+      "const": {
+        "status": "kotlin-bound-unexecuted-ninja-compdb-prestart",
+        "predecessorBindingsReconciled": true,
+        "rawInputIntegrityVerified": true,
+        "buildRecordOracleManifestBindingVerified": true,
+        "recordedNinjaExecutableIdentityBound": true,
+        "liveNinjaExecutableAuthenticated": false,
+        "manifestClosureIntegrityBound": true,
+        "manifestClosureOriginAuthenticated": false,
+        "manifestIncludeGraphValidated": true,
+        "compilerRulesSelectedByKotlinHost": true,
+        "compilerRuleDeclarationsOriginAuthenticated": false,
+        "invocationFixedByKotlinHost": true,
+        "expectedStdoutBound": true,
+        "containmentRequirementsBound": true,
+        "ninjaRuntimeClosureAuthenticated": false,
+        "runtimeProvisioned": false,
+        "retainedRuntimeHandlesPresent": false,
+        "startAuthorized": false,
+        "executionStarted": false,
+        "ninjaExecuted": false,
+        "stdoutObserved": false,
+        "stderrObserved": false,
+        "exitStatusObserved": false,
+        "compdbExecutionAuthenticated": false,
+        "buildGraphOriginAuthenticated": false,
+        "compilerActionGraphOriginAuthenticated": false,
+        "compilerExecuted": false,
+        "captureStarted": false,
+        "captureOutputsPresent": false,
+        "exitStatusesPresent": false,
+        "compilerCaptureAuthenticated": false,
+        "compilerWriteSetContained": false,
+        "generatedSnapshotAuthenticated": false,
+        "headerPopulationComplete": false,
+        "headerPlanReady": false,
+        "cleanCompilationProven": false,
+        "releaseEligible": false
+      }
+    },
+    "acpBoundary": {
+      "const": {
+        "role": "first-class-candidate-producer-operator",
+        "candidateContribution": "authenticated-session-change-build-artifact-provenance",
+        "candidateProvenanceAccess": "read-only-oracle-input",
+        "candidateAdmissionOwner": "kotlin-jvm-host",
+        "candidateLiveExecutionOwner": "separately-reviewed-kotlin-jvm-host",
+        "candidateEvidenceDisposition": "non-authoritative-input-to-later-host-validation",
+        "candidateLineageAdmission": "not-an-input-to-ninja-compdb-prestart-v1",
+        "referenceSubjectAdmission": "kotlin-jvm-host-only",
+        "prestartAuthoringAuthority": false,
+        "manifestClosureAuthoringAuthority": false,
+        "compilerRuleSelectionAuthority": false,
+        "invocationAuthority": false,
+        "graphEvidenceAuthoringAuthority": false,
+        "compdbEvidenceAuthoringAuthority": false,
+        "compilerActionAuthoringAuthority": false,
+        "captureAuthority": false,
+        "executionAuthority": false,
+        "oracleAuthority": false,
+        "referenceAuthoringAuthority": false,
+        "policyAuthoringAuthority": false,
+        "validationAuthority": false,
+        "observationAuthoringAuthority": false,
+        "startAuthority": false,
+        "containmentAuthority": false,
+        "terminalAbsenceAuthority": false,
+        "scoringAuthority": false,
+        "certificationAuthority": false,
+        "releaseAuthority": false
+      }
+    },
+    "prestartPolicy": {
+      "const": {
+        "owner": "kotlin-jvm-host",
+        "artifactState": "persisted-unexecuted-revalidated-prestart",
+        "rawInputModel": "caller-supplied-paths-opened-as-bounded-stable-single-link-regular-files",
+        "manifestArchive": "strict-canonical-ustar-xz-ninja-manifest-only-closure",
+        "manifestGraph": "rooted-build-ninja-recursive-include-and-subninja-closure",
+        "compilerRuleSelection": "kotlin-host-derived-c-cxx-asm-compiler-rule-names-no-caller-rule-list",
+        "invocation": "direct-exec-ninja-f-build-ninja-t-compdb-exact-selected-rules-no-x",
+        "environment": "authenticated-build-record-variables-canonical-name-order-inherited-environment-cleared",
+        "stdoutExpectation": "byte-exact-external-reconciled-compdb-plus-canonical-digest",
+        "stderrDisposition": "separate-bounded-nonmerged-capture-required-at-execution",
+        "executionDisposition": "not-executed-no-process-no-shell-no-callback",
+        "runtimeClosureDisposition": "absent-and-unauthenticated-start-forbidden",
+        "persistence": "canonical-json-rederived-from-raw-predecessors-on-load",
+        "startDisposition": "separate-reviewed-kotlin-host-revalidation-retained-descriptors-and-containment-required",
+        "identity": "kotlin-jvm-domain-separated-length-framed-sha256",
+        "blockerDisposition": "all-eight-clang-compdb-reconciliation-blockers-carried-unchanged"
+      }
+    },
+    "bounds": {
+      "const": {
+        "maximumAddressSpaceBytes": 1073741824,
+        "maximumArchiveBytes": 67108864,
+        "maximumArchiveIndexBytes": 16777216,
+        "maximumArchiveMembers": 10000,
+        "maximumBlockers": 8,
+        "maximumCanonicalBytes": 16777216,
+        "maximumCompilerRules": 65536,
+        "maximumCpuSeconds": 120,
+        "maximumEnvironmentBytes": 4194304,
+        "maximumEnvironmentVariables": 64,
+        "maximumExecutionMillis": 120000,
+        "maximumExpandedArchiveBytes": 268435456,
+        "maximumGraphWorkUnits": 10000000,
+        "maximumIncludeEdges": 32768,
+        "maximumManifestFileBytes": 33554432,
+        "maximumManifestFiles": 4096,
+        "maximumManifestLines": 2000000,
+        "maximumManifestRules": 65536,
+        "maximumManifestTotalBytes": 134217728,
+        "maximumOpenFiles": 128,
+        "maximumPathBytes": 4096,
+        "maximumPathComponentBytes": 255,
+        "maximumProcesses": 16,
+        "maximumRuleNameBytes": 256,
+        "maximumSingleLineBytes": 1048576,
+        "maximumStderrBytes": 8388608,
+        "maximumStdoutBytes": 67108864,
+        "maximumToolBytes": 536870912,
+        "maximumXzDecoderBytes": 268435456,
+        "sourceDateEpochMaximum": 8589934591
+      }
+    },
+    "oracle": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "id",
+        "configurationSha256",
+        "compdbReconciliationArtifactBytes",
+        "compdbReconciliationArtifactSha256",
+        "compdbReconciliationReportSha256",
+        "compdbReconciliationConfigurationSha256",
+        "captureInputArtifactSha256",
+        "captureContextSha256",
+        "matchManifestSha256",
+        "buildRecordBytes",
+        "buildRecordSha256",
+        "oracleManifestSha256",
+        "scopeSha256",
+        "sourceLockSha256"
+      ],
+      "properties": {
+        "id": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 256
+        },
+        "configurationSha256": {
+          "$ref": "#/$defs/sha256"
+        },
+        "compdbReconciliationArtifactBytes": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 33554432
+        },
+        "compdbReconciliationArtifactSha256": {
+          "$ref": "#/$defs/sha256"
+        },
+        "compdbReconciliationReportSha256": {
+          "$ref": "#/$defs/sha256"
+        },
+        "compdbReconciliationConfigurationSha256": {
+          "$ref": "#/$defs/sha256"
+        },
+        "captureInputArtifactSha256": {
+          "$ref": "#/$defs/sha256"
+        },
+        "captureContextSha256": {
+          "$ref": "#/$defs/sha256"
+        },
+        "matchManifestSha256": {
+          "$ref": "#/$defs/sha256"
+        },
+        "buildRecordBytes": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 67108864
+        },
+        "buildRecordSha256": {
+          "$ref": "#/$defs/sha256"
+        },
+        "oracleManifestSha256": {
+          "$ref": "#/$defs/sha256"
+        },
+        "scopeSha256": {
+          "$ref": "#/$defs/sha256"
+        },
+        "sourceLockSha256": {
+          "$ref": "#/$defs/sha256"
+        }
+      }
+    },
+    "ninja": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "role",
+        "path",
+        "executableBytes",
+        "executableSha256",
+        "versionOutputSha256",
+        "toolIdentitySha256",
+        "runtimeClosureManifestSha256"
+      ],
+      "properties": {
+        "role": {
+          "const": "buildGenerator"
+        },
+        "path": {
+          "$ref": "#/$defs/absolutePath"
+        },
+        "executableBytes": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 536870912
+        },
+        "executableSha256": {
+          "$ref": "#/$defs/sha256"
+        },
+        "versionOutputSha256": {
+          "$ref": "#/$defs/sha256"
+        },
+        "toolIdentitySha256": {
+          "$ref": "#/$defs/sha256"
+        },
+        "runtimeClosureManifestSha256": {
+          "const": null
+        }
+      }
+    },
+    "manifestClosure": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "archiveBytes",
+        "archiveSha256",
+        "configurationSha256",
+        "reportSha256",
+        "archiveRoot",
+        "rootManifest",
+        "rootManifestBytes",
+        "rootManifestSha256",
+        "files",
+        "edges",
+        "rules",
+        "totalBytes",
+        "fileManifestSha256",
+        "includeGraphSha256",
+        "ruleManifestSha256"
+      ],
+      "properties": {
+        "archiveBytes": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 67108864
+        },
+        "archiveSha256": {
+          "$ref": "#/$defs/sha256"
+        },
+        "configurationSha256": {
+          "$ref": "#/$defs/sha256"
+        },
+        "reportSha256": {
+          "$ref": "#/$defs/sha256"
+        },
+        "archiveRoot": {
+          "const": "ninja-manifest"
+        },
+        "rootManifest": {
+          "const": "build.ninja"
+        },
+        "rootManifestBytes": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 33554432
+        },
+        "rootManifestSha256": {
+          "$ref": "#/$defs/sha256"
+        },
+        "files": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 4096
+        },
+        "edges": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 32768
+        },
+        "rules": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 65536
+        },
+        "totalBytes": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 134217728
+        },
+        "fileManifestSha256": {
+          "$ref": "#/$defs/sha256"
+        },
+        "includeGraphSha256": {
+          "$ref": "#/$defs/sha256"
+        },
+        "ruleManifestSha256": {
+          "$ref": "#/$defs/sha256"
+        }
+      }
+    },
+    "compilerRules": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "selection",
+        "declaredRuleManifestSha256",
+        "count",
+        "names",
+        "namesSha256"
+      ],
+      "properties": {
+        "selection": {
+          "const": "kotlin-host-prefix-filtered-declared-c-cxx-asm-compiler-rules"
+        },
+        "declaredRuleManifestSha256": {
+          "$ref": "#/$defs/sha256"
+        },
+        "count": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 65536
+        },
+        "names": {
+          "type": "array",
+          "minItems": 1,
+          "maxItems": 65536,
+          "uniqueItems": true,
+          "items": {
+            "$ref": "#/$defs/compilerRuleName"
+          }
+        },
+        "namesSha256": {
+          "$ref": "#/$defs/sha256"
+        }
+      }
+    },
+    "invocation": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "workingDirectory",
+        "argv",
+        "argvSha256",
+        "environment",
+        "environmentSha256",
+        "inheritedEnvironment",
+        "stdin",
+        "shell",
+        "expectedStdout",
+        "stderr"
+      ],
+      "properties": {
+        "workingDirectory": {
+          "$ref": "#/$defs/absolutePath"
+        },
+        "argv": {
+          "type": "array",
+          "minItems": 6,
+          "maxItems": 65541,
+          "prefixItems": [
+            {
+              "$ref": "#/$defs/absolutePath"
+            },
+            {
+              "const": "-f"
+            },
+            {
+              "const": "build.ninja"
+            },
+            {
+              "const": "-t"
+            },
+            {
+              "const": "compdb"
+            }
+          ],
+          "items": {
+            "$ref": "#/$defs/compilerRuleName"
+          }
+        },
+        "argvSha256": {
+          "$ref": "#/$defs/sha256"
+        },
+        "environment": {
+          "type": "array",
+          "minItems": 3,
+          "maxItems": 64,
+          "uniqueItems": true,
+          "items": {
+            "$ref": "#/$defs/environmentVariable"
+          }
+        },
+        "environmentSha256": {
+          "$ref": "#/$defs/sha256"
+        },
+        "inheritedEnvironment": {
+          "const": "cleared"
+        },
+        "stdin": {
+          "const": "closed"
+        },
+        "shell": {
+          "const": false
+        },
+        "expectedStdout": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "bytes",
+            "sha256",
+            "canonicalSha256",
+            "source"
+          ],
+          "properties": {
+            "bytes": {
+              "type": "integer",
+              "minimum": 2,
+              "maximum": 67108864
+            },
+            "sha256": {
+              "$ref": "#/$defs/sha256"
+            },
+            "canonicalSha256": {
+              "$ref": "#/$defs/sha256"
+            },
+            "source": {
+              "const": "external-reconciled-compdb"
+            }
+          }
+        },
+        "stderr": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "maximumBytes",
+            "merge"
+          ],
+          "properties": {
+            "maximumBytes": {
+              "const": 8388608
+            },
+            "merge": {
+              "const": false
+            }
+          }
+        }
+      }
+    },
+    "requiredContainment": {
+      "const": {
+        "boundary": "linux-bubblewrap-boundary",
+        "launchPurpose": "ninja-compdb-query",
+        "startGate": "positive-byte-after-complete-provisioning",
+        "network": "unshared-no-network",
+        "inheritedFilesystem": "none",
+        "manifestClosureMount": "authenticated-read-only-at-recorded-build-directory",
+        "ninjaExecutableMount": "authenticated-read-only",
+        "runtimeClosureMounts": "authenticated-read-only-required-before-start",
+        "callerMounts": "forbidden",
+        "callerStagingRoots": "forbidden",
+        "inheritedEnvironment": "cleared",
+        "stdin": "closed",
+        "shell": "forbidden",
+        "cgroupV2": "pids-memory-cpu-required-no-fallback",
+        "wholeCgroupCleanup": "required-on-every-terminal-path",
+        "terminalAbsenceProof": "required-before-return",
+        "concurrentOutputCapture": "bounded-nontruncating-separate-stdout-stderr-fail-closed",
+        "resourceLimits": {
+          "maximumProcesses": 16,
+          "maximumOpenFiles": 128,
+          "maximumFileBytes": 67108864,
+          "maximumAddressSpaceBytes": 1073741824,
+          "maximumCpuSeconds": 120,
+          "maximumWallMillis": 120000,
+          "maximumStdoutBytes": 67108864,
+          "maximumStderrBytes": 8388608
+        }
+      }
+    },
+    "execution": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "phase",
+        "startAuthorized",
+        "runtimeProvisioned",
+        "processStarted",
+        "stdoutBytes",
+        "stdoutSha256",
+        "stdoutCanonicalSha256",
+        "stderrBytes",
+        "stderrSha256",
+        "exitStatus",
+        "timedOut",
+        "outputLimitExceeded",
+        "cleanupComplete",
+        "terminalAbsenceProven",
+        "containmentReceiptSha256",
+        "compdbReceiptSha256"
+      ],
+      "properties": {
+        "phase": {
+          "const": "pre-start"
+        },
+        "startAuthorized": {
+          "const": false
+        },
+        "runtimeProvisioned": {
+          "const": false
+        },
+        "processStarted": {
+          "const": false
+        },
+        "stdoutBytes": {
+          "const": null
+        },
+        "stdoutSha256": {
+          "const": null
+        },
+        "stdoutCanonicalSha256": {
+          "const": null
+        },
+        "stderrBytes": {
+          "const": null
+        },
+        "stderrSha256": {
+          "const": null
+        },
+        "exitStatus": {
+          "const": null
+        },
+        "timedOut": {
+          "const": null
+        },
+        "outputLimitExceeded": {
+          "const": null
+        },
+        "cleanupComplete": {
+          "const": null
+        },
+        "terminalAbsenceProven": {
+          "const": null
+        },
+        "containmentReceiptSha256": {
+          "const": null
+        },
+        "compdbReceiptSha256": {
+          "const": null
+        }
+      }
+    },
+    "commitments": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "predecessorManifestSha256",
+        "ninjaIdentitySha256",
+        "manifestClosureSha256",
+        "compilerRulesSha256",
+        "invocationSha256",
+        "expectedStdoutSha256",
+        "containmentPolicySha256",
+        "prestartContextSha256"
+      ],
+      "properties": {
+        "predecessorManifestSha256": {
+          "$ref": "#/$defs/sha256"
+        },
+        "ninjaIdentitySha256": {
+          "$ref": "#/$defs/sha256"
+        },
+        "manifestClosureSha256": {
+          "$ref": "#/$defs/sha256"
+        },
+        "compilerRulesSha256": {
+          "$ref": "#/$defs/sha256"
+        },
+        "invocationSha256": {
+          "$ref": "#/$defs/sha256"
+        },
+        "expectedStdoutSha256": {
+          "$ref": "#/$defs/sha256"
+        },
+        "containmentPolicySha256": {
+          "$ref": "#/$defs/sha256"
+        },
+        "prestartContextSha256": {
+          "$ref": "#/$defs/sha256"
+        }
+      }
+    },
+    "blockerDispositions": {
+      "const": [
+        {
+          "source": "clang-compdb-reconciliation-v1",
+          "code": "complete-project-header-inventory-missing",
+          "disposition": "carried",
+          "activeCodes": [
+            "complete-project-header-inventory-missing"
+          ]
+        },
+        {
+          "source": "clang-compdb-reconciliation-v1",
+          "code": "compiler-capture-provenance-missing",
+          "disposition": "carried",
+          "activeCodes": [
+            "compiler-capture-provenance-missing"
+          ]
+        },
+        {
+          "source": "clang-compdb-reconciliation-v1",
+          "code": "compiler-option-arity-unvalidated",
+          "disposition": "carried",
+          "activeCodes": [
+            "compiler-option-arity-unvalidated"
+          ]
+        },
+        {
+          "source": "clang-compdb-reconciliation-v1",
+          "code": "generated-generation-receipt-missing",
+          "disposition": "carried",
+          "activeCodes": [
+            "generated-generation-receipt-missing"
+          ]
+        },
+        {
+          "source": "clang-compdb-reconciliation-v1",
+          "code": "generated-snapshot-completeness-unproven",
+          "disposition": "carried",
+          "activeCodes": [
+            "generated-snapshot-completeness-unproven"
+          ]
+        },
+        {
+          "source": "clang-compdb-reconciliation-v1",
+          "code": "ninja-live-edge-replay-missing",
+          "disposition": "carried",
+          "activeCodes": [
+            "ninja-live-edge-replay-missing"
+          ]
+        },
+        {
+          "source": "clang-compdb-reconciliation-v1",
+          "code": "physical-build-root-unverified",
+          "disposition": "carried",
+          "activeCodes": [
+            "physical-build-root-unverified"
+          ]
+        },
+        {
+          "source": "clang-compdb-reconciliation-v1",
+          "code": "physical-project-roots-unverified",
+          "disposition": "carried",
+          "activeCodes": [
+            "physical-project-roots-unverified"
+          ]
+        }
+      ]
+    },
+    "blockers": {
+      "const": [
+        {
+          "code": "complete-project-header-inventory-missing",
+          "status": "unresolved"
+        },
+        {
+          "code": "compiler-capture-provenance-missing",
+          "status": "unresolved"
+        },
+        {
+          "code": "compiler-option-arity-unvalidated",
+          "status": "unresolved"
+        },
+        {
+          "code": "generated-generation-receipt-missing",
+          "status": "unresolved"
+        },
+        {
+          "code": "generated-snapshot-completeness-unproven",
+          "status": "unresolved"
+        },
+        {
+          "code": "ninja-live-edge-replay-missing",
+          "status": "unresolved"
+        },
+        {
+          "code": "physical-build-root-unverified",
+          "status": "unresolved"
+        },
+        {
+          "code": "physical-project-roots-unverified",
+          "status": "unresolved"
+        }
+      ]
+    },
+    "reportSha256": {
+      "$ref": "#/$defs/sha256"
+    }
+  },
+  "$defs": {
+    "sha256": {
+      "type": "string",
+      "pattern": "^[0-9a-f]{64}$"
+    },
+    "absolutePath": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 4096,
+      "pattern": "^/(?!\\.{1,2}(?:/|$))(?!.*(?:/\\.{1,2})(?:/|$))[^/\\\\\\u0000\\r\\n]+(?:/[^/\\\\\\u0000\\r\\n]+)*$"
+    },
+    "compilerRuleName": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 256,
+      "pattern": "^(C|CXX|ASM)_COMPILER__[A-Za-z0-9_.+-]+_RelWithDebInfo$"
+    },
+    "environmentVariable": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "name",
+        "value"
+      ],
+      "properties": {
+        "name": {
+          "type": "string",
+          "pattern": "^[A-Z_][A-Z0-9_]*$",
+          "maxLength": 128
+        },
+        "value": {
+          "type": "string",
+          "pattern": "^[^\\u0000]*$",
+          "maxLength": 1048576
+        }
+      }
+    }
+  }
+}

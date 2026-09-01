@@ -173,6 +173,7 @@ object OracleSchemas {
         "full-tree-inventory",
         "full-tree-implementation-ownership",
         "full-tree-materialization-determinism",
+        "full-tree-ninja-compdb-prestart",
         "full-tree-planning-inventory",
         "full-tree-release-assets",
         "full-tree-release-evidence",
