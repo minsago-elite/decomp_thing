@@ -6,6 +6,7 @@ import decompengine.acp.LinuxFilesystemSyscalls
 import decompengine.acp.permissions
 import decompengine.oracle.core.DescriptorBoundAtomicStateFile
 import decompengine.oracle.core.DescriptorBoundStateInspection
+import decompengine.oracle.core.DescriptorBoundStateSnapshot
 import decompengine.oracle.core.OracleArtifacts
 import decompengine.oracle.core.OracleJson
 import decompengine.oracle.core.StrictJsonLimits
@@ -83,6 +84,14 @@ sealed interface LlvmBehaviorHostedContainerV1OperationJournalOwner : AutoClosea
     val stagingIdentitiesBound: Boolean
     val executionClaimed: Boolean
     val releaseEligible: Boolean
+
+    /**
+     * Rechecks the retained journal root and the exact immutable state loaded by this owner.
+     *
+     * This method publishes nothing, completes no pending publication, and establishes no fact or
+     * authority. Any descriptor, inode, byte, field, history, or residue drift poisons the owner.
+     */
+    fun requireCurrentBinding(): Unit
 
     fun recordInputAuthenticated(): LlvmBehaviorHostedContainerV1OperationPhase
     fun recordImageAuthenticated(): LlvmBehaviorHostedContainerV1OperationPhase
@@ -182,6 +191,19 @@ object LlvmBehaviorHostedContainerV1OperationJournal {
             get() = false
         override val releaseEligible: Boolean
             get() = false
+
+        @Synchronized
+        override fun requireCurrentBinding(): Unit = translateJournalFailures(
+            "recheck hosted-container v1 operation journal binding",
+        ) {
+            checkOpen()
+            try {
+                opened.journal.requireCurrent(history)
+            } catch (failure: Throwable) {
+                poisoned = true
+                throw failure
+            }
+        }
 
         override fun recordInputAuthenticated() = append(
             LlvmBehaviorHostedContainerV1OperationPhase.INPUT_AUTHENTICATED,
@@ -523,21 +545,56 @@ private class HostedContainerOperationTransition private constructor(
     }
 }
 
-private data class HostedContainerOperationHistory(
+private class HostedContainerOperationHistory private constructor(
     val binding: HostedContainerOperationBinding,
-    val transitions: List<HostedContainerOperationTransition>,
+    transitions: List<HostedContainerOperationTransition>,
+    bindingSnapshot: DescriptorBoundStateSnapshot,
+    transitionSnapshots: List<DescriptorBoundStateSnapshot>,
 ) {
+    val transitions: List<HostedContainerOperationTransition> = transitions.toList()
+    private val bindingBytes = bindingSnapshot.bytes
+    private val bindingIdentity = bindingSnapshot.identity
+    private val transitionBytes = transitionSnapshots.map { it.bytes }
+    private val transitionIdentities = transitionSnapshots.map { it.identity }
+
+    init {
+        if (transitionSnapshots.size != this.transitions.size) {
+            journalFail("hosted-container v1 operation history snapshot is incomplete")
+        }
+        if (!bindingBytes.contentEquals(binding.canonicalBytes())) {
+            journalFail("hosted-container v1 operation binding snapshot is not canonical")
+        }
+        this.transitions.forEachIndexed { index, transition ->
+            if (!transitionBytes[index].contentEquals(transition.canonicalBytes())) {
+                journalFail("hosted-container v1 operation transition snapshot is not canonical")
+            }
+        }
+    }
+
     val latest: HostedContainerOperationTransition
         get() = transitions.lastOrNull()
             ?: journalFail("hosted-container v1 operation has no durable phase")
     val phase: LlvmBehaviorHostedContainerV1OperationPhase
         get() = latest.phase
 
+    fun hasExactDurableState(other: HostedContainerOperationHistory): Boolean =
+        sameBindingFields(binding, other.binding) &&
+            bindingBytes.contentEquals(other.bindingBytes) && bindingIdentity == other.bindingIdentity &&
+            transitions.size == other.transitions.size && transitionBytes.size == other.transitionBytes.size &&
+            transitionIdentities.size == other.transitionIdentities.size &&
+            transitions.indices.all { index ->
+                sameTransitionFields(transitions[index], other.transitions[index]) &&
+                    transitionBytes[index].contentEquals(other.transitionBytes[index]) &&
+                    transitionIdentities[index] == other.transitionIdentities[index]
+            }
+
     companion object {
         fun validatePrefix(
             expectedBinding: HostedContainerOperationBinding,
             actualBinding: HostedContainerOperationBinding,
             transitions: List<HostedContainerOperationTransition>,
+            bindingSnapshot: DescriptorBoundStateSnapshot,
+            transitionSnapshots: List<DescriptorBoundStateSnapshot>,
         ): HostedContainerOperationHistory {
             if (!actualBinding.canonicalBytes().contentEquals(expectedBinding.canonicalBytes())) {
                 journalFail("hosted-container v1 operation journal is bound to a different root")
@@ -562,10 +619,33 @@ private data class HostedContainerOperationHistory(
                 ) journalFail("hosted-container v1 operation transition chain is invalid")
                 previous = actual
             }
-            return HostedContainerOperationHistory(actualBinding, transitions.toList())
+            return HostedContainerOperationHistory(
+                actualBinding,
+                transitions,
+                bindingSnapshot,
+                transitionSnapshots,
+            )
         }
     }
 }
+
+private fun sameBindingFields(
+    first: HostedContainerOperationBinding,
+    second: HostedContainerOperationBinding,
+): Boolean = first.schemaVersion == second.schemaVersion && first.provider == second.provider &&
+    first.authority == second.authority && first.operationId == second.operationId &&
+    first.requestSha256 == second.requestSha256 && first.containerName == second.containerName &&
+    first.journalRootPathSha256 == second.journalRootPathSha256 &&
+    first.bindingSha256 == second.bindingSha256
+
+private fun sameTransitionFields(
+    first: HostedContainerOperationTransition,
+    second: HostedContainerOperationTransition,
+): Boolean = first.schemaVersion == second.schemaVersion && first.provider == second.provider &&
+    first.authority == second.authority && first.operationId == second.operationId &&
+    first.bindingSha256 == second.bindingSha256 && first.sequence == second.sequence &&
+    first.phase == second.phase && first.previousTransitionSha256 == second.previousTransitionSha256 &&
+    first.transitionSha256 == second.transitionSha256
 
 private data class OpenedJournal(
     val journal: HostedContainerDescriptorOperationJournal,
@@ -754,6 +834,17 @@ private class HostedContainerDescriptorOperationJournal(
         }
     }
 
+    /** Reloads and compares the exact immutable state without synchronizing or publishing it. */
+    @Synchronized
+    fun requireCurrent(expected: HostedContainerOperationHistory): Unit = boundOperation {
+        val current = requirePhased(
+            loadPrefix() ?: journalFail("hosted-container v1 operation journal is empty"),
+        )
+        if (!expected.hasExactDurableState(current)) {
+            journalFail("hosted-container v1 operation journal changed after it was loaded")
+        }
+    }
+
     /** Completes at most one exact immutable publication and never invents recovery bytes. */
     @Synchronized
     fun completeExactPendingPublication() = boundOperation {
@@ -834,19 +925,27 @@ private class HostedContainerDescriptorOperationJournal(
         val actualBinding = HostedContainerOperationBinding.parseCanonical(bindingSnapshot.bytes)
         requireExactBinding(actualBinding)
         val transitionNames = names.filter(TRANSITION_FILE_NAME::matches).sorted()
+        val transitionSnapshots = ArrayList<DescriptorBoundStateSnapshot>(transitionNames.size)
         val transitions = transitionNames.map { name ->
             val snapshot = DescriptorBoundAtomicStateFile.readOrNull(
                 directory,
                 name,
                 MAXIMUM_RECORD_BYTES,
             ) ?: journalFail("hosted-container v1 operation transition disappeared")
+            transitionSnapshots += snapshot
             HostedContainerOperationTransition.parseCanonical(snapshot.bytes).also { transition ->
                 if (transition.fileName != name) {
                     journalFail("hosted-container v1 operation transition occupies the wrong name")
                 }
             }
         }
-        return HostedContainerOperationHistory.validatePrefix(expectedBinding, actualBinding, transitions)
+        return HostedContainerOperationHistory.validatePrefix(
+            expectedBinding,
+            actualBinding,
+            transitions,
+            bindingSnapshot,
+            transitionSnapshots,
+        )
     }
 
     private fun entryNames(): List<String> {

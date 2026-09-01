@@ -229,6 +229,7 @@ class LlvmBehaviorHostedContainerV1OperationJournalTest {
                 "getStagingIdentitiesBound",
                 "getExecutionClaimed",
                 "getReleaseEligible",
+                "requireCurrentBinding",
             )
         }
         assertEquals(
@@ -247,6 +248,9 @@ class LlvmBehaviorHostedContainerV1OperationJournalTest {
             mutations.map { it.name }.toSet(),
         )
         assertTrue(mutations.all { it.parameterCount == 0 })
+        val readOnlyRecheck = ownerType.declaredMethods.single { it.name == "requireCurrentBinding" }
+        assertEquals(0, readOnlyRecheck.parameterCount)
+        assertEquals(Void.TYPE, readOnlyRecheck.returnType)
         assertTrue(
             ownerType.methods.none { method ->
                 method.parameterTypes.any { type ->
@@ -272,6 +276,120 @@ class LlvmBehaviorHostedContainerV1OperationJournalTest {
             ),
             LlvmBehaviorHostedContainerV1OperationPhase.entries.map { it.wireName },
         )
+    }
+
+    @Test
+    fun `current binding recheck is read only and idempotent across phases`() =
+        withJournalRoot { root ->
+            LlvmBehaviorHostedContainerV1OperationJournal.open(root).use { owner ->
+                assertReadOnlyCurrentBinding(root, owner)
+                owner.recordInputAuthenticated()
+                assertReadOnlyCurrentBinding(root, owner)
+                owner.recordImageAuthenticated()
+                assertReadOnlyCurrentBinding(root, owner)
+                owner.armCreate()
+                assertReadOnlyCurrentBinding(root, owner)
+                owner.requireCleanup()
+                assertReadOnlyCurrentBinding(root, owner)
+                assertAllAuthorityFalse(owner)
+            }
+        }
+
+    @Test
+    fun `closed and pending-residue-poisoned owners reject read only recheck without writes`() {
+        withJournalRoot { root ->
+            val owner = LlvmBehaviorHostedContainerV1OperationJournal.open(root)
+            owner.close()
+            val before = journalSnapshot(root)
+            assertFailsWith<LlvmBehaviorHostedContainerV1OperationJournalException> {
+                owner.requireCurrentBinding()
+            }
+            assertEquals(before, journalSnapshot(root))
+        }
+
+        withJournalRoot { root ->
+            val owner = LlvmBehaviorHostedContainerV1OperationJournal.open(root)
+            try {
+                val pending = root.resolve(
+                    DescriptorBoundAtomicStateFile.temporaryName("transition-0001.json"),
+                )
+                Files.copy(
+                    root.resolve("transition-0000.json"),
+                    pending,
+                    StandardCopyOption.COPY_ATTRIBUTES,
+                )
+                Files.setPosixFilePermissions(pending, PosixFilePermissions.fromString("r--------"))
+                val before = journalSnapshot(root)
+                assertFailsWith<LlvmBehaviorHostedContainerV1OperationJournalException> {
+                    owner.requireCurrentBinding()
+                }
+                assertEquals(before, journalSnapshot(root))
+                val poisoned = assertFailsWith<LlvmBehaviorHostedContainerV1OperationJournalException> {
+                    owner.requireCurrentBinding()
+                }
+                assertTrue(poisoned.message.orEmpty().contains("poisoned"), poisoned.message)
+                assertEquals(before, journalSnapshot(root))
+            } finally {
+                owner.close()
+            }
+        }
+    }
+
+    @Test
+    fun `current binding recheck detects root replacement and poisons without mutation`() =
+        withJournalRoot { root ->
+            val owner = LlvmBehaviorHostedContainerV1OperationJournal.open(root)
+            val detached = root.parent.resolve("detached-current-binding-journal")
+            try {
+                Files.move(root, detached)
+                Files.createDirectory(root)
+                Files.setPosixFilePermissions(root, PosixFilePermissions.fromString("rwx------"))
+                val replacementBefore = journalSnapshot(root)
+                assertFailsWith<LlvmBehaviorHostedContainerV1OperationJournalException> {
+                    owner.requireCurrentBinding()
+                }
+                assertEquals(replacementBefore, journalSnapshot(root))
+                val poisoned = assertFailsWith<LlvmBehaviorHostedContainerV1OperationJournalException> {
+                    owner.requireCurrentBinding()
+                }
+                assertTrue(poisoned.message.orEmpty().contains("poisoned"), poisoned.message)
+                assertEquals(replacementBefore, journalSnapshot(root))
+            } finally {
+                owner.close()
+            }
+        }
+
+    @Test
+    fun `current binding recheck detects exact inode replacement and byte mutation`() {
+        listOf("binding.json", "transition-0000.json").forEach { targetName ->
+            withJournalRoot { root ->
+                val owner = LlvmBehaviorHostedContainerV1OperationJournal.open(root)
+                try {
+                    val target = root.resolve(targetName)
+                    val exactBytes = Files.readAllBytes(target)
+                    Files.delete(target)
+                    Files.write(target, exactBytes)
+                    Files.setPosixFilePermissions(target, PosixFilePermissions.fromString("r--------"))
+                    assertDriftPoisonsWithoutWrites(root, owner)
+                } finally {
+                    owner.close()
+                }
+            }
+
+            withJournalRoot { root ->
+                val owner = LlvmBehaviorHostedContainerV1OperationJournal.open(root)
+                try {
+                    val target = root.resolve(targetName)
+                    val original = Files.readAllBytes(target)
+                    Files.setPosixFilePermissions(target, PosixFilePermissions.fromString("rw-------"))
+                    Files.write(target, original + '\n'.code.toByte())
+                    Files.setPosixFilePermissions(target, PosixFilePermissions.fromString("r--------"))
+                    assertDriftPoisonsWithoutWrites(root, owner)
+                } finally {
+                    owner.close()
+                }
+            }
+        }
     }
 
     @Test
@@ -506,6 +624,74 @@ class LlvmBehaviorHostedContainerV1OperationJournalTest {
         assertFalse(owner.executionClaimed)
         assertFalse(owner.releaseEligible)
     }
+
+    private fun assertReadOnlyCurrentBinding(
+        root: Path,
+        owner: LlvmBehaviorHostedContainerV1OperationJournalOwner,
+    ) {
+        val phase = owner.phase
+        val latestTransitionSha256 = owner.latestTransitionSha256
+        val before = journalSnapshot(root)
+        owner.requireCurrentBinding()
+        owner.requireCurrentBinding()
+        assertEquals(before, journalSnapshot(root))
+        assertEquals(phase, owner.phase)
+        assertEquals(latestTransitionSha256, owner.latestTransitionSha256)
+    }
+
+    private fun assertDriftPoisonsWithoutWrites(
+        root: Path,
+        owner: LlvmBehaviorHostedContainerV1OperationJournalOwner,
+    ) {
+        val before = journalSnapshot(root)
+        assertFailsWith<LlvmBehaviorHostedContainerV1OperationJournalException> {
+            owner.requireCurrentBinding()
+        }
+        assertEquals(before, journalSnapshot(root))
+        val poisoned = assertFailsWith<LlvmBehaviorHostedContainerV1OperationJournalException> {
+            owner.requireCurrentBinding()
+        }
+        assertTrue(poisoned.message.orEmpty().contains("poisoned"), poisoned.message)
+        assertEquals(before, journalSnapshot(root))
+    }
+
+    private fun journalSnapshot(root: Path): JournalSnapshot {
+        val entries = Files.list(root).use { paths ->
+            paths.sorted().map { path ->
+                path.fileName.toString() to
+                    JournalEntrySnapshot(
+                        device =
+                            (Files.getAttribute(path, "unix:dev", LinkOption.NOFOLLOW_LINKS) as Number).toLong(),
+                        inode =
+                            (Files.getAttribute(path, "unix:ino", LinkOption.NOFOLLOW_LINKS) as Number).toLong(),
+                        mode =
+                            (Files.getAttribute(path, "unix:mode", LinkOption.NOFOLLOW_LINKS) as Number).toInt(),
+                        linkCount =
+                            (Files.getAttribute(path, "unix:nlink", LinkOption.NOFOLLOW_LINKS) as Number).toInt(),
+                        modifiedMillis = Files.getLastModifiedTime(path, LinkOption.NOFOLLOW_LINKS).toMillis(),
+                        bytes = Files.readAllBytes(path).toList(),
+                    )
+            }.toList().toMap()
+        }
+        return JournalSnapshot(
+            modifiedMillis = Files.getLastModifiedTime(root, LinkOption.NOFOLLOW_LINKS).toMillis(),
+            entries = entries,
+        )
+    }
+
+    private data class JournalSnapshot(
+        val modifiedMillis: Long,
+        val entries: Map<String, JournalEntrySnapshot>,
+    )
+
+    private data class JournalEntrySnapshot(
+        val device: Long,
+        val inode: Long,
+        val mode: Int,
+        val linkCount: Int,
+        val modifiedMillis: Long,
+        val bytes: List<Byte>,
+    )
 
     private fun falseClaims(): JsonObject = JsonObject(
         mapOf(
