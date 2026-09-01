@@ -1,0 +1,243 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://github.com/minsago-elite/decomp_thing/oracle/llvm-behavior-reference-input-plan-v2.schema.json",
+  "title": "Kotlin/JVM-owned LLVM behavior reference input plan v2",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schemaVersion",
+    "kind",
+    "authority",
+    "id",
+    "scope",
+    "acpBoundary",
+    "environment",
+    "directories",
+    "diagnosticPolicy",
+    "captureContract",
+    "repetitionContract",
+    "executionOrder",
+    "cases",
+    "claims"
+  ],
+  "properties": {
+    "schemaVersion": {"const": 2},
+    "kind": {"const": "llvm-behavior-reference-input-plan-v2"},
+    "authority": {"const": "kotlin-jvm-authored-reference-input-plan-v2"},
+    "id": {"const": "clang-22-1-6-driver-behavior-reference-input-plan-v2"},
+    "scope": {"const": "production"},
+    "acpBoundary": {
+      "const": {
+        "role": "first-class-candidate-producer-operator",
+        "candidateContribution": "authenticated-session-change-build-artifact-provenance",
+        "candidateProvenanceAccess": "read-only-oracle-input",
+        "candidateAdmissionOwner": "kotlin-jvm-host",
+        "candidateLiveExecutionOwner": "separately-reviewed-kotlin-jvm-host",
+        "referenceSubjectAdmission": "kotlin-jvm-host-only",
+        "oracleAuthority": false,
+        "referenceAuthoringAuthority": false,
+        "policyAuthoringAuthority": false,
+        "validationAuthority": false,
+        "observationAuthoringAuthority": false,
+        "startAuthority": false,
+        "containmentAuthority": false,
+        "terminalAbsenceAuthority": false,
+        "scoringAuthority": false,
+        "certificationAuthority": false,
+        "releaseAuthority": false
+      }
+    },
+    "environment": {
+      "const": {
+        "clearInherited": true,
+        "variables": {
+          "HOME": "/nonexistent",
+          "LANG": "C",
+          "LC_ALL": "C",
+          "PATH": "/usr/bin:/bin",
+          "SOURCE_DATE_EPOCH": "1779182222",
+          "TMPDIR": "/workspace/tmp",
+          "TZ": "UTC"
+        }
+      }
+    },
+    "directories": {
+      "const": ["include", "quoted", "system", "tmp"]
+    },
+    "diagnosticPolicy": {
+      "const": {
+        "forbiddenNormalizations": [
+          "diagnostic-wording",
+          "identifier",
+          "line-column",
+          "option-name",
+          "ordering",
+          "path",
+          "severity"
+        ],
+        "locale": "C",
+        "mismatchIdentity": "reference-definition-sha256-case-id-field-v2",
+        "pathRendering": "raw-bytes-no-rewrite",
+        "terminalWidth": "non-tty-no-width"
+      }
+    },
+    "captureContract": {
+      "const": {
+        "artifacts": "complete-final-workspace-tree",
+        "exitStatus": "raw-process-exit-status",
+        "normalizations": [],
+        "stderr": "raw-bytes",
+        "stdout": "raw-bytes"
+      }
+    },
+    "repetitionContract": {
+      "const": {
+        "agreement": "canonical-observation-payload-byte-identical",
+        "count": 3,
+        "dependencyScope": "same-repetition-only",
+        "freshNonce": true,
+        "freshOperation": true,
+        "freshResultsLease": true,
+        "freshWorkspaceLease": true
+      }
+    },
+    "executionOrder": {
+      "type": "array",
+      "minItems": 48,
+      "maxItems": 48,
+      "uniqueItems": true,
+      "items": {"$ref": "#/$defs/identifier"}
+    },
+    "cases": {
+      "type": "array",
+      "minItems": 48,
+      "maxItems": 48,
+      "items": {"$ref": "#/$defs/case"}
+    },
+    "claims": {
+      "const": {
+        "definitionBound": false,
+        "expectedOutputsPresent": false,
+        "referenceSubjectPinned": false,
+        "observationsCaptured": false,
+        "referenceTruthEstablished": false,
+        "runtimePreflightVerified": false,
+        "liveContainmentVerified": false,
+        "terminalAbsenceVerified": false,
+        "candidateStarted": false,
+        "startAuthorized": false,
+        "scoringAuthority": false,
+        "certificationAuthority": false,
+        "releaseEligible": false
+      }
+    }
+  },
+  "$defs": {
+    "identifier": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 128,
+      "pattern": "^[a-z0-9]+(?:-[a-z0-9]+)*$"
+    },
+    "relativePath": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 512,
+      "pattern": "^(?!(?:.*\\/)?\\.{1,2}(?:\\/|$))[A-Za-z0-9._+](?:[A-Za-z0-9._+ -]*[A-Za-z0-9._+])?(?:/[A-Za-z0-9._+](?:[A-Za-z0-9._+ -]*[A-Za-z0-9._+])?)*$"
+    },
+    "sha256": {
+      "type": "string",
+      "pattern": "^[0-9a-f]{64}$"
+    },
+    "blob": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["base64", "bytes", "sha256"],
+      "properties": {
+        "base64": {"type": "string", "maxLength": 22369624},
+        "bytes": {"type": "integer", "minimum": 0, "maximum": 16777216},
+        "sha256": {"$ref": "#/$defs/sha256"}
+      }
+    },
+    "literalInput": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["kind", "path", "base64", "bytes", "sha256", "executable"],
+      "properties": {
+        "kind": {"const": "literal"},
+        "path": {"$ref": "#/$defs/relativePath"},
+        "base64": {"type": "string", "maxLength": 22369624},
+        "bytes": {"type": "integer", "minimum": 0, "maximum": 16777216},
+        "sha256": {"$ref": "#/$defs/sha256"},
+        "executable": {"const": false}
+      }
+    },
+    "freshArtifactInput": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "kind",
+        "producerCaseId",
+        "producerPath",
+        "targetPath",
+        "compatibilityInputPaths",
+        "producerArtifactType",
+        "producerArtifactFreshness"
+      ],
+      "properties": {
+        "kind": {"const": "same-repetition-fresh-reference-artifact"},
+        "producerCaseId": {"$ref": "#/$defs/identifier"},
+        "producerPath": {"$ref": "#/$defs/relativePath"},
+        "targetPath": {"$ref": "#/$defs/relativePath"},
+        "compatibilityInputPaths": {
+          "const": ["answer.h"]
+        },
+        "producerArtifactType": {"const": "regular-file"},
+        "producerArtifactFreshness": {"const": "same-repetition-produced-not-literal-input"}
+      }
+    },
+    "case": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "id",
+        "ownerSubsystem",
+        "categories",
+        "arguments",
+        "environment",
+        "stdin",
+        "inputs"
+      ],
+      "properties": {
+        "id": {"$ref": "#/$defs/identifier"},
+        "ownerSubsystem": {"$ref": "#/$defs/identifier"},
+        "categories": {
+          "type": "array",
+          "minItems": 1,
+          "maxItems": 32,
+          "uniqueItems": true,
+          "items": {"$ref": "#/$defs/identifier"}
+        },
+        "arguments": {
+          "type": "array",
+          "maxItems": 4096,
+          "items": {"type": "string", "maxLength": 4096}
+        },
+        "environment": {
+          "const": {}
+        },
+        "stdin": {"$ref": "#/$defs/blob"},
+        "inputs": {
+          "type": "array",
+          "maxItems": 256,
+          "items": {
+            "oneOf": [
+              {"$ref": "#/$defs/literalInput"},
+              {"$ref": "#/$defs/freshArtifactInput"}
+            ]
+          }
+        }
+      }
+    }
+  }
+}

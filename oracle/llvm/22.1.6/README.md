@@ -72,6 +72,15 @@ reference compiler first creates the authenticated PCH, its length and SHA-256
 are verified, and only then is that exact artifact injected into the reuse
 case.
 
+The Python-bearing corpus described above is frozen historical v1 evidence. A
+separate [Kotlin/JVM-owned reference input plan v2](../../../docs/llvm-behavior-reference-input-plan-v2.md)
+now authors the same 48 input intents from reviewed Kotlin byte sources without
+importing v1 expected outputs or sandbox material. It replaces both embedded
+PCH inputs with same-repetition producer dependencies and grants no observation,
+truth, START, scoring, or release authority. A fresh v2 runtime declaration and
+fresh repeated observations are still required before it can become a reference
+definition.
+
 ## Full-tree structural evidence
 
 The checked [A13 summary](full-tree-release-evidence.md) and canonical
@@ -215,8 +224,8 @@ upstream archive directly. This remains planning-only: compiler search order,
 generated overlays, transitive header ownership, clean compilation, and release
 authority are not proven.
 
-With the exact Docker executor profile available as `DOCKER` and
-`DOCKER_HOST`, live replay is:
+For frozen historical v1 evidence only, with the exact Docker executor profile
+available as `DOCKER` and `DOCKER_HOST`, compatibility replay is:
 
 ```sh
 python3 scripts/check-llvm-behavior-executor.py

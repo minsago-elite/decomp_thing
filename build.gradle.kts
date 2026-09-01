@@ -102,6 +102,14 @@ registerOracleJavaExecTask(
     entryPoint = "decompengine.oracle.behavior.LlvmBehaviorReferenceEvidenceCli",
 )
 
+registerOracleJavaExecTask(
+    taskName = "generateLlvmBehaviorReferenceInputPlanV2",
+    taskDescription = "Generates the Python-free LLVM behavior reference input plan with Kotlin/JVM authority",
+    entryPoint = "decompengine.oracle.behavior.LlvmBehaviorReferenceInputPlanV2GeneratorCli",
+).configure {
+    args(layout.projectDirectory.file("oracle/llvm/22.1.6/behavior-reference-input-plan-v2.json").asFile.absolutePath)
+}
+
 val acpGateHelperSource = layout.projectDirectory.file("src/main/c/decomp_acp_gate_helper.c")
 val acpGateHelperBinary = layout.buildDirectory.file("native/acp/decomp-acp-gate-helper")
 val acpGateHelperChecksum = layout.buildDirectory.file("native/acp/decomp-acp-gate-helper.sha256")

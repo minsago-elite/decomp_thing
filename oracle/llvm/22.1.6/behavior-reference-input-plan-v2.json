@@ -1,0 +1,1745 @@
+{
+  "acpBoundary": {
+    "candidateAdmissionOwner": "kotlin-jvm-host",
+    "candidateContribution": "authenticated-session-change-build-artifact-provenance",
+    "candidateLiveExecutionOwner": "separately-reviewed-kotlin-jvm-host",
+    "candidateProvenanceAccess": "read-only-oracle-input",
+    "certificationAuthority": false,
+    "containmentAuthority": false,
+    "observationAuthoringAuthority": false,
+    "oracleAuthority": false,
+    "policyAuthoringAuthority": false,
+    "referenceAuthoringAuthority": false,
+    "referenceSubjectAdmission": "kotlin-jvm-host-only",
+    "releaseAuthority": false,
+    "role": "first-class-candidate-producer-operator",
+    "scoringAuthority": false,
+    "startAuthority": false,
+    "terminalAbsenceAuthority": false,
+    "validationAuthority": false
+  },
+  "authority": "kotlin-jvm-authored-reference-input-plan-v2",
+  "captureContract": {
+    "artifacts": "complete-final-workspace-tree",
+    "exitStatus": "raw-process-exit-status",
+    "normalizations": [],
+    "stderr": "raw-bytes",
+    "stdout": "raw-bytes"
+  },
+  "cases": [
+    {
+      "arguments": [
+        "-c",
+        "broken.s",
+        "-o",
+        "broken.o"
+      ],
+      "categories": [
+        "assembler",
+        "diagnostics",
+        "exit-status",
+        "stderr"
+      ],
+      "environment": {},
+      "id": "assemble-invalid",
+      "inputs": [
+        {
+          "base64": "LnRleHQKYW5zd2VyOgogIGRlZmluaXRlbHlfbm90X2FuX2luc3RydWN0aW9uCg==",
+          "bytes": 46,
+          "executable": false,
+          "kind": "literal",
+          "path": "broken.s",
+          "sha256": "43d7636c8c19743b1c82dbcf9ff9cf001ac55040a589e56757f960e1f1587b49"
+        }
+      ],
+      "ownerSubsystem": "clang-integrated-assembler",
+      "stdin": {
+        "base64": "",
+        "bytes": 0,
+        "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+      }
+    },
+    {
+      "arguments": [
+        "-c",
+        "answer.s",
+        "-o",
+        "answer.o"
+      ],
+      "categories": [
+        "artifacts",
+        "assembler",
+        "object-emission"
+      ],
+      "environment": {},
+      "id": "assemble-valid",
+      "inputs": [
+        {
+          "base64": "LnRleHQKLmdsb2JsIGFuc3dlcgoudHlwZSBhbnN3ZXIsQGZ1bmN0aW9uCmFuc3dlcjoKICBtb3YgJDQyLCAlZWF4CiAgcmV0Cg==",
+          "bytes": 73,
+          "executable": false,
+          "kind": "literal",
+          "path": "answer.s",
+          "sha256": "15f56ddb58bac5508ac5da351eadecedcc5fe747891b8fb2def12ac90d7492e4"
+        }
+      ],
+      "ownerSubsystem": "clang-integrated-assembler",
+      "stdin": {
+        "base64": "",
+        "bytes": 0,
+        "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+      }
+    },
+    {
+      "arguments": [
+        "-nostdinc",
+        "-std=c17",
+        "-pedantic-errors",
+        "-c",
+        "source.c",
+        "-o",
+        "c17.o"
+      ],
+      "categories": [
+        "artifacts",
+        "c",
+        "file-compile",
+        "language-standard"
+      ],
+      "environment": {},
+      "id": "compile-c-standard",
+      "inputs": [
+        {
+          "base64": "aW50IGFuc3dlcih2b2lkKSB7IHJldHVybiA0MjsgfQo=",
+          "bytes": 32,
+          "executable": false,
+          "kind": "literal",
+          "path": "source.c",
+          "sha256": "d2ee72eea6fb9b6a2ce93777ac97e9f1d7183f9233923f434ff0d9f61a4aa9d5"
+        }
+      ],
+      "ownerSubsystem": "clang-codegen",
+      "stdin": {
+        "base64": "",
+        "bytes": 0,
+        "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+      }
+    },
+    {
+      "arguments": [
+        "-nostdinc",
+        "-std=c++20",
+        "-c",
+        "source.cpp",
+        "-o",
+        "cxx20.o"
+      ],
+      "categories": [
+        "artifacts",
+        "cxx",
+        "file-compile",
+        "language-standard",
+        "templates"
+      ],
+      "environment": {},
+      "id": "compile-cxx-standard",
+      "inputs": [
+        {
+          "base64": "dGVtcGxhdGUgPGNsYXNzIFQ+IFQgdHdpY2UoVCB2YWx1ZSkgeyByZXR1cm4gdmFsdWUgKyB2YWx1ZTsgfQppbnQgYW5zd2VyKCkgeyByZXR1cm4gdHdpY2UoMjEpOyB9Cg==",
+          "bytes": 97,
+          "executable": false,
+          "kind": "literal",
+          "path": "source.cpp",
+          "sha256": "b6816e00ee73a2fcfc701afc4036655139cc901fe2eca531871100ab2b70e7fa"
+        }
+      ],
+      "ownerSubsystem": "clang-codegen",
+      "stdin": {
+        "base64": "",
+        "bytes": 0,
+        "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+      }
+    },
+    {
+      "arguments": [
+        "-c",
+        "source.c",
+        "-o",
+        "source.o"
+      ],
+      "categories": [
+        "artifacts",
+        "file-compile"
+      ],
+      "environment": {},
+      "id": "compile-file",
+      "inputs": [
+        {
+          "base64": "aW50IGFuc3dlcih2b2lkKSB7IHJldHVybiA0MjsgfQo=",
+          "bytes": 32,
+          "executable": false,
+          "kind": "literal",
+          "path": "source.c",
+          "sha256": "d2ee72eea6fb9b6a2ce93777ac97e9f1d7183f9233923f434ff0d9f61a4aa9d5"
+        }
+      ],
+      "ownerSubsystem": "clang-codegen",
+      "stdin": {
+        "base64": "",
+        "bytes": 0,
+        "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+      }
+    },
+    {
+      "arguments": [
+        "-x",
+        "c",
+        "-c",
+        "-",
+        "-o",
+        "stdin.o"
+      ],
+      "categories": [
+        "artifacts",
+        "file-compile",
+        "stdin"
+      ],
+      "environment": {},
+      "id": "compile-stdin",
+      "inputs": [],
+      "ownerSubsystem": "clang-codegen",
+      "stdin": {
+        "base64": "aW50IGFuc3dlcih2b2lkKSB7IHJldHVybiA0MjsgfQo=",
+        "bytes": 32,
+        "sha256": "d2ee72eea6fb9b6a2ce93777ac97e9f1d7183f9233923f434ff0d9f61a4aa9d5"
+      }
+    },
+    {
+      "arguments": [
+        "-fcolor-diagnostics",
+        "-fsyntax-only",
+        "broken.c"
+      ],
+      "categories": [
+        "color",
+        "diagnostics",
+        "exit-status",
+        "stderr"
+      ],
+      "environment": {},
+      "id": "diagnostic-color-always",
+      "inputs": [
+        {
+          "base64": "aW50IGJyb2tlbiggewo=",
+          "bytes": 14,
+          "executable": false,
+          "kind": "literal",
+          "path": "broken.c",
+          "sha256": "30b71af0334678bd5e966ceabc8d45ffe9402ffd629eea256ca129e60b708616"
+        }
+      ],
+      "ownerSubsystem": "clang-diagnostics-renderer",
+      "stdin": {
+        "base64": "",
+        "bytes": 0,
+        "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+      }
+    },
+    {
+      "arguments": [
+        "-fno-color-diagnostics",
+        "-fsyntax-only",
+        "broken.c"
+      ],
+      "categories": [
+        "color",
+        "diagnostics",
+        "exit-status",
+        "stderr"
+      ],
+      "environment": {},
+      "id": "diagnostic-color-never",
+      "inputs": [
+        {
+          "base64": "aW50IGJyb2tlbiggewo=",
+          "bytes": 14,
+          "executable": false,
+          "kind": "literal",
+          "path": "broken.c",
+          "sha256": "30b71af0334678bd5e966ceabc8d45ffe9402ffd629eea256ca129e60b708616"
+        }
+      ],
+      "ownerSubsystem": "clang-diagnostics-renderer",
+      "stdin": {
+        "base64": "",
+        "bytes": 0,
+        "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+      }
+    },
+    {
+      "arguments": [
+        "-ferror-limit=2",
+        "-fsyntax-only",
+        "many.c"
+      ],
+      "categories": [
+        "diagnostic-limits",
+        "diagnostics",
+        "exit-status",
+        "stderr"
+      ],
+      "environment": {},
+      "id": "diagnostic-error-limit",
+      "inputs": [
+        {
+          "base64": "aW50IGEoIHsKaW50IGIoIHsKaW50IGMoIHsK",
+          "bytes": 27,
+          "executable": false,
+          "kind": "literal",
+          "path": "many.c",
+          "sha256": "5a9942d2cfbc68b953954704ae377182d4c1f0a726ae03f00a2ace1a584eebce"
+        }
+      ],
+      "ownerSubsystem": "clang-diagnostics-engine",
+      "stdin": {
+        "base64": "",
+        "bytes": 0,
+        "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+      }
+    },
+    {
+      "arguments": [
+        "-fdiagnostics-parseable-fixits",
+        "-fsyntax-only",
+        "fixit.c"
+      ],
+      "categories": [
+        "caret-ranges",
+        "diagnostics",
+        "exit-status",
+        "fix-its",
+        "stderr"
+      ],
+      "environment": {},
+      "id": "diagnostic-fixit",
+      "inputs": [
+        {
+          "base64": "aW50IG1haW4odm9pZCkgeyBpbnQgdmFsdWUgPSAxIHJldHVybiB2YWx1ZTsgfQo=",
+          "bytes": 47,
+          "executable": false,
+          "kind": "literal",
+          "path": "fixit.c",
+          "sha256": "d50b14c48193d24493b0569b2866897cafd6fa10fedb78b5bdb90dad3dfdfb93"
+        }
+      ],
+      "ownerSubsystem": "clang-parser",
+      "stdin": {
+        "base64": "",
+        "bytes": 0,
+        "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+      }
+    },
+    {
+      "arguments": [
+        "--definitely-not-a-clang-option"
+      ],
+      "categories": [
+        "diagnostics",
+        "exit-status",
+        "option-handling",
+        "stderr"
+      ],
+      "environment": {},
+      "id": "diagnostic-invalid-option",
+      "inputs": [],
+      "ownerSubsystem": "clang-driver-options",
+      "stdin": {
+        "base64": "",
+        "bytes": 0,
+        "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+      }
+    },
+    {
+      "arguments": [
+        "-nostdinc",
+        "-fsyntax-only",
+        "missing.c"
+      ],
+      "categories": [
+        "diagnostics",
+        "fatal-errors",
+        "include-search",
+        "stderr"
+      ],
+      "environment": {},
+      "id": "diagnostic-missing-include",
+      "inputs": [
+        {
+          "base64": "I2luY2x1ZGUgImFic2VudC5oIgo=",
+          "bytes": 20,
+          "executable": false,
+          "kind": "literal",
+          "path": "missing.c",
+          "sha256": "8b8d2062066fc57da169d6cdddfb75ef3f9ab190e130db1ccacd72e5e75488a3"
+        }
+      ],
+      "ownerSubsystem": "clang-lex",
+      "stdin": {
+        "base64": "",
+        "bytes": 0,
+        "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+      }
+    },
+    {
+      "arguments": [
+        "-fsyntax-only",
+        "broken.c"
+      ],
+      "categories": [
+        "diagnostics",
+        "exit-status",
+        "stderr"
+      ],
+      "environment": {},
+      "id": "diagnostic-syntax",
+      "inputs": [
+        {
+          "base64": "aW50IGJyb2tlbiggewo=",
+          "bytes": 14,
+          "executable": false,
+          "kind": "literal",
+          "path": "broken.c",
+          "sha256": "30b71af0334678bd5e966ceabc8d45ffe9402ffd629eea256ca129e60b708616"
+        }
+      ],
+      "ownerSubsystem": "clang-parser",
+      "stdin": {
+        "base64": "",
+        "bytes": 0,
+        "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+      }
+    },
+    {
+      "arguments": [
+        "-nostdinc",
+        "-std=c++20",
+        "-fsyntax-only",
+        "template.cpp"
+      ],
+      "categories": [
+        "cxx",
+        "diagnostics",
+        "notes",
+        "stderr",
+        "templates"
+      ],
+      "environment": {},
+      "id": "diagnostic-template-backtrace",
+      "inputs": [
+        {
+          "base64": "dGVtcGxhdGU8Y2xhc3MgVD4gaW50IHJlYWQoVCB2YWx1ZSkgeyByZXR1cm4gdmFsdWUubWlzc2luZzsgfQppbnQgYW5zd2VyKCkgeyByZXR1cm4gcmVhZCg0Mik7IH0K",
+          "bytes": 96,
+          "executable": false,
+          "kind": "literal",
+          "path": "template.cpp",
+          "sha256": "9fde27c8dd70f28790c024777acce1c54b4ad6f90d892b28593ea0d7a0cc3294"
+        }
+      ],
+      "ownerSubsystem": "clang-sema",
+      "stdin": {
+        "base64": "",
+        "bytes": 0,
+        "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+      }
+    },
+    {
+      "arguments": [
+        "-nostdinc",
+        "-Wall",
+        "-Wextra",
+        "-fsyntax-only",
+        "warning.c"
+      ],
+      "categories": [
+        "diagnostics",
+        "option-provenance",
+        "stderr",
+        "warnings"
+      ],
+      "environment": {},
+      "id": "diagnostic-warning-option",
+      "inputs": [
+        {
+          "base64": "aW50IGFuc3dlcihpbnQgdW51c2VkKSB7IHJldHVybiA0MjsgfQo=",
+          "bytes": 38,
+          "executable": false,
+          "kind": "literal",
+          "path": "warning.c",
+          "sha256": "535c4d16ee234e9ffdbd165b9c6a4821d63b988dd3eb1654d9e3e7577b392fdb"
+        }
+      ],
+      "ownerSubsystem": "clang-sema",
+      "stdin": {
+        "base64": "",
+        "bytes": 0,
+        "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+      }
+    },
+    {
+      "arguments": [
+        "-nostdlib",
+        "-fuse-ld=definitely-missing",
+        "source.c",
+        "-o",
+        "program"
+      ],
+      "categories": [
+        "diagnostics",
+        "exit-status",
+        "linking",
+        "missing-tools",
+        "stderr"
+      ],
+      "environment": {},
+      "id": "driver-missing-linker",
+      "inputs": [
+        {
+          "base64": "aW50IGFuc3dlcih2b2lkKSB7IHJldHVybiA0MjsgfQo=",
+          "bytes": 32,
+          "executable": false,
+          "kind": "literal",
+          "path": "source.c",
+          "sha256": "d2ee72eea6fb9b6a2ce93777ac97e9f1d7183f9233923f434ff0d9f61a4aa9d5"
+        }
+      ],
+      "ownerSubsystem": "clang-driver-toolchain",
+      "stdin": {
+        "base64": "",
+        "bytes": 0,
+        "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+      }
+    },
+    {
+      "arguments": [
+        "-###",
+        "-save-temps=obj",
+        "-nostdlib",
+        "source.c",
+        "-o",
+        "program"
+      ],
+      "categories": [
+        "assembler",
+        "driver-orchestration",
+        "linking",
+        "stderr"
+      ],
+      "environment": {},
+      "id": "driver-print-commands",
+      "inputs": [
+        {
+          "base64": "aW50IGFuc3dlcih2b2lkKSB7IHJldHVybiA0MjsgfQo=",
+          "bytes": 32,
+          "executable": false,
+          "kind": "literal",
+          "path": "source.c",
+          "sha256": "d2ee72eea6fb9b6a2ce93777ac97e9f1d7183f9233923f434ff0d9f61a4aa9d5"
+        }
+      ],
+      "ownerSubsystem": "clang-driver",
+      "stdin": {
+        "base64": "",
+        "bytes": 0,
+        "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+      }
+    },
+    {
+      "arguments": [
+        "-nostdinc",
+        "-S",
+        "source.c",
+        "-o",
+        "source.s"
+      ],
+      "categories": [
+        "artifacts",
+        "assembly-emission",
+        "code-generation"
+      ],
+      "environment": {},
+      "id": "emit-assembly",
+      "inputs": [
+        {
+          "base64": "aW50IGFuc3dlcih2b2lkKSB7IHJldHVybiA0MjsgfQo=",
+          "bytes": 32,
+          "executable": false,
+          "kind": "literal",
+          "path": "source.c",
+          "sha256": "d2ee72eea6fb9b6a2ce93777ac97e9f1d7183f9233923f434ff0d9f61a4aa9d5"
+        }
+      ],
+      "ownerSubsystem": "clang-codegen",
+      "stdin": {
+        "base64": "",
+        "bytes": 0,
+        "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+      }
+    },
+    {
+      "arguments": [
+        "-nostdinc",
+        "-S",
+        "-emit-llvm",
+        "source.c",
+        "-o",
+        "source.ll"
+      ],
+      "categories": [
+        "artifacts",
+        "code-generation",
+        "llvm-ir"
+      ],
+      "environment": {},
+      "id": "emit-llvm-ir",
+      "inputs": [
+        {
+          "base64": "aW50IGFuc3dlcih2b2lkKSB7IHJldHVybiA0MjsgfQo=",
+          "bytes": 32,
+          "executable": false,
+          "kind": "literal",
+          "path": "source.c",
+          "sha256": "d2ee72eea6fb9b6a2ce93777ac97e9f1d7183f9233923f434ff0d9f61a4aa9d5"
+        }
+      ],
+      "ownerSubsystem": "clang-codegen",
+      "stdin": {
+        "base64": "",
+        "bytes": 0,
+        "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+      }
+    },
+    {
+      "arguments": [
+        "--help"
+      ],
+      "categories": [
+        "help",
+        "option-handling",
+        "stdout"
+      ],
+      "environment": {},
+      "id": "help-driver",
+      "inputs": [],
+      "ownerSubsystem": "clang-driver-options",
+      "stdin": {
+        "base64": "",
+        "bytes": 0,
+        "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+      }
+    },
+    {
+      "arguments": [
+        "-E",
+        "-P",
+        "-nostdinc",
+        "-I",
+        "include",
+        "cycle.c"
+      ],
+      "categories": [
+        "include-guards",
+        "include-search",
+        "preprocessing",
+        "stdout"
+      ],
+      "environment": {},
+      "id": "include-cycle-guarded",
+      "inputs": [
+        {
+          "base64": "I2luY2x1ZGUgImEuaCIKaW50IGFuc3dlciA9IEFfVkFMVUUgKyBCX1ZBTFVFOwo=",
+          "bytes": 47,
+          "executable": false,
+          "kind": "literal",
+          "path": "cycle.c",
+          "sha256": "0e0e0b14ccefed3a1ec4cbc4d5a35a6af738117cefcd6eb4490b70b67a51375f"
+        },
+        {
+          "base64": "I2lmbmRlZiBBX0gKI2RlZmluZSBBX0gKI2luY2x1ZGUgImIuaCIKI2RlZmluZSBBX1ZBTFVFIDIwCiNlbmRpZgo=",
+          "bytes": 65,
+          "executable": false,
+          "kind": "literal",
+          "path": "include/a.h",
+          "sha256": "db33fa7ce2d1f0a7f3e4728bda8e4c7a808b85a0d56c6ba9b30b5e22bbac0dac"
+        },
+        {
+          "base64": "I2lmbmRlZiBCX0gKI2RlZmluZSBCX0gKI2luY2x1ZGUgImEuaCIKI2RlZmluZSBCX1ZBTFVFIDIyCiNlbmRpZgo=",
+          "bytes": 65,
+          "executable": false,
+          "kind": "literal",
+          "path": "include/b.h",
+          "sha256": "ad12cc4f86ef649ea22ed93dfdfdceb7b909cf5b8e58ddf47c8b071a64ff3cb6"
+        }
+      ],
+      "ownerSubsystem": "clang-lex",
+      "stdin": {
+        "base64": "",
+        "bytes": 0,
+        "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+      }
+    },
+    {
+      "arguments": [
+        "-E",
+        "-P",
+        "-nostdinc",
+        "-F",
+        "frameworks",
+        "framework.c"
+      ],
+      "categories": [
+        "framework-includes",
+        "include-search",
+        "preprocessing",
+        "stdout"
+      ],
+      "environment": {},
+      "id": "include-framework-order",
+      "inputs": [
+        {
+          "base64": "I2luY2x1ZGUgPEFuc3dlci9hbnN3ZXIuaD4KaW50IGFuc3dlciA9IEFOU1dFUjsK",
+          "bytes": 48,
+          "executable": false,
+          "kind": "literal",
+          "path": "framework.c",
+          "sha256": "09639f15ee9ae12e638d79bdc63495b21b1a8eb9e67e84eaa21eb56dedf505bc"
+        },
+        {
+          "base64": "I2RlZmluZSBBTlNXRVIgNDIK",
+          "bytes": 18,
+          "executable": false,
+          "kind": "literal",
+          "path": "frameworks/Answer.framework/Headers/answer.h",
+          "sha256": "f711ea18f1eb51cff5fb01d51c35f05281b1b40a6b5094c76de3d94469ec4d3a"
+        }
+      ],
+      "ownerSubsystem": "clang-header-search",
+      "stdin": {
+        "base64": "",
+        "bytes": 0,
+        "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+      }
+    },
+    {
+      "arguments": [
+        "-E",
+        "-P",
+        "-nostdinc",
+        "-I",
+        "quoted",
+        "-isystem",
+        "system",
+        "source.c"
+      ],
+      "categories": [
+        "include-search",
+        "preprocessing",
+        "stdout"
+      ],
+      "environment": {},
+      "id": "include-search-order",
+      "inputs": [
+        {
+          "base64": "aW50IHNlbGVjdGVkID0gMTsK",
+          "bytes": 18,
+          "executable": false,
+          "kind": "literal",
+          "path": "quoted/value.h",
+          "sha256": "3f3a08cdac47a5f791f47be75454e7caf32f62c9c05d0d93aa573d1b0f9dd8a1"
+        },
+        {
+          "base64": "I2luY2x1ZGUgPHZhbHVlLmg+Cg==",
+          "bytes": 19,
+          "executable": false,
+          "kind": "literal",
+          "path": "source.c",
+          "sha256": "1be544ce25d26156987b4f37146053eb787a543487d4c43db310addd2655163e"
+        },
+        {
+          "base64": "aW50IHNlbGVjdGVkID0gMjsK",
+          "bytes": 18,
+          "executable": false,
+          "kind": "literal",
+          "path": "system/value.h",
+          "sha256": "74041843089d5c6c4cd5d6107e6a52c5fb06e3d6154f0db960c0dddc6cdab747"
+        }
+      ],
+      "ownerSubsystem": "clang-header-search",
+      "stdin": {
+        "base64": "",
+        "bytes": 0,
+        "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+      }
+    },
+    {
+      "arguments": [
+        "-E",
+        "-P",
+        "-H",
+        "-nostdinc",
+        "-I",
+        "include",
+        "source.c"
+      ],
+      "categories": [
+        "include-search",
+        "include-trace",
+        "preprocessing",
+        "stderr",
+        "stdout"
+      ],
+      "environment": {},
+      "id": "include-trace",
+      "inputs": [
+        {
+          "base64": "I2RlZmluZSBBTlNXRVIgNDIK",
+          "bytes": 18,
+          "executable": false,
+          "kind": "literal",
+          "path": "include/answer.h",
+          "sha256": "f711ea18f1eb51cff5fb01d51c35f05281b1b40a6b5094c76de3d94469ec4d3a"
+        },
+        {
+          "base64": "I2luY2x1ZGUgImFuc3dlci5oIgppbnQgYW5zd2VyID0gQU5TV0VSOwo=",
+          "bytes": 41,
+          "executable": false,
+          "kind": "literal",
+          "path": "source.c",
+          "sha256": "1041b0323c7d9fba1324a2db429a9d1840ff7d9b07dd9608724d3345f01569d0"
+        }
+      ],
+      "ownerSubsystem": "clang-header-search",
+      "stdin": {
+        "base64": "",
+        "bytes": 0,
+        "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+      }
+    },
+    {
+      "arguments": [
+        "-nostdlib",
+        "-Wl,--build-id=none",
+        "-Wl,-e,answer",
+        "source.c",
+        "-o",
+        "program"
+      ],
+      "categories": [
+        "artifacts",
+        "linking",
+        "produced-program"
+      ],
+      "environment": {},
+      "id": "link-program",
+      "inputs": [
+        {
+          "base64": "aW50IGFuc3dlcih2b2lkKSB7IHJldHVybiA0MjsgfQo=",
+          "bytes": 32,
+          "executable": false,
+          "kind": "literal",
+          "path": "source.c",
+          "sha256": "d2ee72eea6fb9b6a2ce93777ac97e9f1d7183f9233923f434ff0d9f61a4aa9d5"
+        }
+      ],
+      "ownerSubsystem": "clang-driver-linker",
+      "stdin": {
+        "base64": "",
+        "bytes": 0,
+        "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+      }
+    },
+    {
+      "arguments": [
+        "-save-temps=obj",
+        "-nostdlib",
+        "-Wl,--build-id=none",
+        "undefined.c",
+        "-o",
+        "program"
+      ],
+      "categories": [
+        "diagnostics",
+        "exit-status",
+        "linking",
+        "stderr"
+      ],
+      "environment": {},
+      "id": "link-undefined-symbol",
+      "inputs": [
+        {
+          "base64": "ZXh0ZXJuIGludCBtaXNzaW5nKHZvaWQpOyBpbnQgX3N0YXJ0KHZvaWQpIHsgcmV0dXJuIG1pc3NpbmcoKTsgfQo=",
+          "bytes": 65,
+          "executable": false,
+          "kind": "literal",
+          "path": "undefined.c",
+          "sha256": "63b13350537c35410144274fa85c0a5c44d8becfd7c41c33ce4fe461d45f427a"
+        }
+      ],
+      "ownerSubsystem": "clang-driver-linker",
+      "stdin": {
+        "base64": "",
+        "bytes": 0,
+        "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+      }
+    },
+    {
+      "arguments": [
+        "-print-resource-dir"
+      ],
+      "categories": [
+        "metadata",
+        "resource-directory",
+        "stdout"
+      ],
+      "environment": {},
+      "id": "metadata-resource-dir",
+      "inputs": [],
+      "ownerSubsystem": "clang-driver-toolchain",
+      "stdin": {
+        "base64": "",
+        "bytes": 0,
+        "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+      }
+    },
+    {
+      "arguments": [
+        "-dumpmachine"
+      ],
+      "categories": [
+        "metadata",
+        "stdout",
+        "target-query"
+      ],
+      "environment": {},
+      "id": "metadata-target",
+      "inputs": [],
+      "ownerSubsystem": "clang-driver-targets",
+      "stdin": {
+        "base64": "",
+        "bytes": 0,
+        "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+      }
+    },
+    {
+      "arguments": [
+        "--version"
+      ],
+      "categories": [
+        "metadata",
+        "stdout"
+      ],
+      "environment": {},
+      "id": "metadata-version",
+      "inputs": [],
+      "ownerSubsystem": "clang-driver",
+      "stdin": {
+        "base64": "",
+        "bytes": 0,
+        "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+      }
+    },
+    {
+      "arguments": [
+        "-nostdinc",
+        "-std=c++20",
+        "-fmodules",
+        "-fsyntax-only",
+        "source.cpp"
+      ],
+      "categories": [
+        "cxx",
+        "modules",
+        "syntax-only"
+      ],
+      "environment": {},
+      "id": "modules-flag-supported",
+      "inputs": [
+        {
+          "base64": "dGVtcGxhdGUgPGNsYXNzIFQ+IFQgdHdpY2UoVCB2YWx1ZSkgeyByZXR1cm4gdmFsdWUgKyB2YWx1ZTsgfQppbnQgYW5zd2VyKCkgeyByZXR1cm4gdHdpY2UoMjEpOyB9Cg==",
+          "bytes": 97,
+          "executable": false,
+          "kind": "literal",
+          "path": "source.cpp",
+          "sha256": "b6816e00ee73a2fcfc701afc4036655139cc901fe2eca531871100ab2b70e7fa"
+        }
+      ],
+      "ownerSubsystem": "clang-driver-options",
+      "stdin": {
+        "base64": "",
+        "bytes": 0,
+        "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+      }
+    },
+    {
+      "arguments": [
+        "-nostdinc",
+        "-x",
+        "objective-c",
+        "-fsyntax-only",
+        "source.m"
+      ],
+      "categories": [
+        "objective-c",
+        "syntax-only"
+      ],
+      "environment": {},
+      "id": "objective-c-syntax",
+      "inputs": [
+        {
+          "base64": "QGludGVyZmFjZSBCb3gKLSAoaW50KXZhbHVlOwpAZW5kCkBpbXBsZW1lbnRhdGlvbiBCb3gKLSAoaW50KXZhbHVlIHsgcmV0dXJuIDQyOyB9CkBlbmQK",
+          "bytes": 87,
+          "executable": false,
+          "kind": "literal",
+          "path": "source.m",
+          "sha256": "1bb83c8f2dfe975d891dc7eba13791aa8233bea211285cf483123e249b336b15"
+        }
+      ],
+      "ownerSubsystem": "clang-parser",
+      "stdin": {
+        "base64": "",
+        "bytes": 0,
+        "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+      }
+    },
+    {
+      "arguments": [
+        "-nostdinc",
+        "-include-pch",
+        "answer.pch",
+        "-c",
+        "pch-user.c",
+        "-o",
+        "pch-user.o"
+      ],
+      "categories": [
+        "artifacts",
+        "cache-reuse",
+        "pch",
+        "preprocessing-state"
+      ],
+      "environment": {},
+      "id": "pch-reuse-valid",
+      "inputs": [
+        {
+          "base64": "I2lmbmRlZiBBTlNXRVJfSAojZGVmaW5lIEFOU1dFUl9ICiNkZWZpbmUgQU5TV0VSIDQyCiNlbmRpZgo=",
+          "bytes": 59,
+          "executable": false,
+          "kind": "literal",
+          "path": "answer.h",
+          "sha256": "975a36ddd55178051a52f0d568bd67cd6a7fa84959209c4d38cc576d4d9792c5"
+        },
+        {
+          "compatibilityInputPaths": [
+            "answer.h"
+          ],
+          "kind": "same-repetition-fresh-reference-artifact",
+          "producerArtifactFreshness": "same-repetition-produced-not-literal-input",
+          "producerArtifactType": "regular-file",
+          "producerCaseId": "precompile-header",
+          "producerPath": "answer.pch",
+          "targetPath": "answer.pch"
+        },
+        {
+          "base64": "aW50IGFuc3dlcih2b2lkKSB7IHJldHVybiBBTlNXRVI7IH0K",
+          "bytes": 36,
+          "executable": false,
+          "kind": "literal",
+          "path": "pch-user.c",
+          "sha256": "964a799f1b4ea81464b8b6ebd9bf59c61c0f61ccefdfa60cbb362810cc015bac"
+        }
+      ],
+      "ownerSubsystem": "clang-serialization",
+      "stdin": {
+        "base64": "",
+        "bytes": 0,
+        "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+      }
+    },
+    {
+      "arguments": [
+        "--target=i386-unknown-linux-gnu",
+        "-nostdinc",
+        "-include-pch",
+        "answer.pch",
+        "-c",
+        "pch-user.c",
+        "-o",
+        "pch-user.o"
+      ],
+      "categories": [
+        "cache-invalidation",
+        "diagnostics",
+        "exit-status",
+        "pch",
+        "preprocessing-state",
+        "target-selection"
+      ],
+      "environment": {},
+      "id": "pch-reuse-wrong-target",
+      "inputs": [
+        {
+          "base64": "I2lmbmRlZiBBTlNXRVJfSAojZGVmaW5lIEFOU1dFUl9ICiNkZWZpbmUgQU5TV0VSIDQyCiNlbmRpZgo=",
+          "bytes": 59,
+          "executable": false,
+          "kind": "literal",
+          "path": "answer.h",
+          "sha256": "975a36ddd55178051a52f0d568bd67cd6a7fa84959209c4d38cc576d4d9792c5"
+        },
+        {
+          "compatibilityInputPaths": [
+            "answer.h"
+          ],
+          "kind": "same-repetition-fresh-reference-artifact",
+          "producerArtifactFreshness": "same-repetition-produced-not-literal-input",
+          "producerArtifactType": "regular-file",
+          "producerCaseId": "precompile-header",
+          "producerPath": "answer.pch",
+          "targetPath": "answer.pch"
+        },
+        {
+          "base64": "aW50IGFuc3dlcih2b2lkKSB7IHJldHVybiBBTlNXRVI7IH0K",
+          "bytes": 36,
+          "executable": false,
+          "kind": "literal",
+          "path": "pch-user.c",
+          "sha256": "964a799f1b4ea81464b8b6ebd9bf59c61c0f61ccefdfa60cbb362810cc015bac"
+        }
+      ],
+      "ownerSubsystem": "clang-serialization",
+      "stdin": {
+        "base64": "",
+        "bytes": 0,
+        "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+      }
+    },
+    {
+      "arguments": [
+        "-nostdinc",
+        "-x",
+        "c-header",
+        "-Xclang",
+        "-fno-pch-timestamp",
+        "answer.h",
+        "-o",
+        "answer.pch"
+      ],
+      "categories": [
+        "artifacts",
+        "pch",
+        "preprocessing-state"
+      ],
+      "environment": {},
+      "id": "precompile-header",
+      "inputs": [
+        {
+          "base64": "I2lmbmRlZiBBTlNXRVJfSAojZGVmaW5lIEFOU1dFUl9ICiNkZWZpbmUgQU5TV0VSIDQyCiNlbmRpZgo=",
+          "bytes": 59,
+          "executable": false,
+          "kind": "literal",
+          "path": "answer.h",
+          "sha256": "975a36ddd55178051a52f0d568bd67cd6a7fa84959209c4d38cc576d4d9792c5"
+        }
+      ],
+      "ownerSubsystem": "clang-serialization",
+      "stdin": {
+        "base64": "",
+        "bytes": 0,
+        "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+      }
+    },
+    {
+      "arguments": [
+        "-nostdinc",
+        "-I",
+        "include",
+        "-MMD",
+        "-MF",
+        "source.d",
+        "-c",
+        "source.c",
+        "-o",
+        "source.o"
+      ],
+      "categories": [
+        "artifacts",
+        "dependency-output",
+        "preprocessing"
+      ],
+      "environment": {},
+      "id": "preprocess-dependencies",
+      "inputs": [
+        {
+          "base64": "I2RlZmluZSBBTlNXRVIgNDIK",
+          "bytes": 18,
+          "executable": false,
+          "kind": "literal",
+          "path": "include/answer.h",
+          "sha256": "f711ea18f1eb51cff5fb01d51c35f05281b1b40a6b5094c76de3d94469ec4d3a"
+        },
+        {
+          "base64": "I2luY2x1ZGUgImFuc3dlci5oIgppbnQgYW5zd2VyKHZvaWQpIHsgcmV0dXJuIEFOU1dFUjsgfQo=",
+          "bytes": 56,
+          "executable": false,
+          "kind": "literal",
+          "path": "source.c",
+          "sha256": "92ba220a0aa37185600ecdf3440a2ed7fcb96574fddf8a885bb052800665b338"
+        }
+      ],
+      "ownerSubsystem": "clang-dependency-scanning",
+      "stdin": {
+        "base64": "",
+        "bytes": 0,
+        "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+      }
+    },
+    {
+      "arguments": [
+        "-E",
+        "-P",
+        "source.c"
+      ],
+      "categories": [
+        "preprocessing",
+        "stdout"
+      ],
+      "environment": {},
+      "id": "preprocess-file",
+      "inputs": [
+        {
+          "base64": "aW50IGFuc3dlcih2b2lkKSB7IHJldHVybiA0MjsgfQo=",
+          "bytes": 32,
+          "executable": false,
+          "kind": "literal",
+          "path": "source.c",
+          "sha256": "d2ee72eea6fb9b6a2ce93777ac97e9f1d7183f9233923f434ff0d9f61a4aa9d5"
+        }
+      ],
+      "ownerSubsystem": "clang-lex",
+      "stdin": {
+        "base64": "",
+        "bytes": 0,
+        "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+      }
+    },
+    {
+      "arguments": [
+        "-E",
+        "-P",
+        "-nostdinc",
+        "-D",
+        "COMMAND=6",
+        "macro.c"
+      ],
+      "categories": [
+        "macros",
+        "preprocessing",
+        "stdout"
+      ],
+      "environment": {},
+      "id": "preprocess-macro-state",
+      "inputs": [
+        {
+          "base64": "I2RlZmluZSBKT0lOXyhhLGIpIGEjI2IKI2RlZmluZSBKT0lOKGEsYikgSk9JTl8oYSxiKQojZGVmaW5lIFNUUklOR18oeCkgI3gKI2RlZmluZSBTVFJJTkcoeCkgU1RSSU5HXyh4KQojZGVmaW5lIFNVTShmaXJzdCwgLi4uKSBmaXJzdCArIF9fVkFfQVJHU19fCiNpZiBDT01NQU5EID09IDYKaW50IEpPSU4oYW5zLHdlcikgPSBTVU0oQ09NTUFORCwgMzYpOwpjb25zdCBjaGFyICpuYW1lID0gU1RSSU5HKGFuc3dlcik7CiNlbmRpZgo=",
+          "bytes": 245,
+          "executable": false,
+          "kind": "literal",
+          "path": "macro.c",
+          "sha256": "094aae2f5909879be5f2544f40016f2f4d03d27828ddc0fb0f821ec1cacc2b99"
+        }
+      ],
+      "ownerSubsystem": "clang-lex",
+      "stdin": {
+        "base64": "",
+        "bytes": 0,
+        "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+      }
+    },
+    {
+      "arguments": [
+        "-E",
+        "-P",
+        "-nostdinc",
+        "malformed.c"
+      ],
+      "categories": [
+        "diagnostics",
+        "exit-status",
+        "macros",
+        "preprocessing",
+        "stderr"
+      ],
+      "environment": {},
+      "id": "preprocess-malformed-macro",
+      "inputs": [
+        {
+          "base64": "I2RlZmluZSBCUk9LRU4odmFsdWUgdmFsdWUKQlJPS0VOKDQyKQo=",
+          "bytes": 38,
+          "executable": false,
+          "kind": "literal",
+          "path": "malformed.c",
+          "sha256": "a4c3528fd681b92a2de48efd5b050ab104ac71eb1d57bca21b7990ce1747e724"
+        }
+      ],
+      "ownerSubsystem": "clang-lex",
+      "stdin": {
+        "base64": "",
+        "bytes": 0,
+        "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+      }
+    },
+    {
+      "arguments": [
+        "-E",
+        "-P",
+        "-nostdinc",
+        "-I",
+        "include",
+        "pragma.c"
+      ],
+      "categories": [
+        "include-search",
+        "pragma",
+        "preprocessing",
+        "stdout"
+      ],
+      "environment": {},
+      "id": "preprocess-pragma-once",
+      "inputs": [
+        {
+          "base64": "I3ByYWdtYSBvbmNlCmludCBvbmNlX29ubHkgPSA0MjsK",
+          "bytes": 33,
+          "executable": false,
+          "kind": "literal",
+          "path": "include/once.h",
+          "sha256": "0c39dc53943f4c29aaff5938003c26abeee44d0729caca39467cc856fcc12f84"
+        },
+        {
+          "base64": "I2luY2x1ZGUgIm9uY2UuaCIKI2luY2x1ZGUgIm9uY2UuaCIK",
+          "bytes": 36,
+          "executable": false,
+          "kind": "literal",
+          "path": "pragma.c",
+          "sha256": "6367976e76453958356b302edc6ebb68508a7f3e09ce3ea59ac560a0a96e700e"
+        }
+      ],
+      "ownerSubsystem": "clang-lex",
+      "stdin": {
+        "base64": "",
+        "bytes": 0,
+        "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+      }
+    },
+    {
+      "arguments": [
+        "-E",
+        "-P",
+        "-x",
+        "c",
+        "-"
+      ],
+      "categories": [
+        "preprocessing",
+        "stdin",
+        "stdout"
+      ],
+      "environment": {},
+      "id": "preprocess-stdin",
+      "inputs": [],
+      "ownerSubsystem": "clang-lex",
+      "stdin": {
+        "base64": "aW50IGFuc3dlcih2b2lkKSB7IHJldHVybiA0MjsgfQo=",
+        "bytes": 32,
+        "sha256": "d2ee72eea6fb9b6a2ce93777ac97e9f1d7183f9233923f434ff0d9f61a4aa9d5"
+      }
+    },
+    {
+      "arguments": [
+        "@compile.rsp"
+      ],
+      "categories": [
+        "artifacts",
+        "option-handling",
+        "response-files"
+      ],
+      "environment": {},
+      "id": "response-file",
+      "inputs": [
+        {
+          "base64": "LWMgcmVzcG9uc2UuYyAtbyByZXNwb25zZS5vCg==",
+          "bytes": 28,
+          "executable": false,
+          "kind": "literal",
+          "path": "compile.rsp",
+          "sha256": "59b955883b5b25fcec6819cb7f29c862d7c03de3a76619ae2f9936356bd18360"
+        },
+        {
+          "base64": "aW50IGFuc3dlcih2b2lkKSB7IHJldHVybiA0MjsgfQo=",
+          "bytes": 32,
+          "executable": false,
+          "kind": "literal",
+          "path": "response.c",
+          "sha256": "d2ee72eea6fb9b6a2ce93777ac97e9f1d7183f9233923f434ff0d9f61a4aa9d5"
+        }
+      ],
+      "ownerSubsystem": "clang-driver-response-files",
+      "stdin": {
+        "base64": "",
+        "bytes": 0,
+        "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+      }
+    },
+    {
+      "arguments": [
+        "@outer.rsp"
+      ],
+      "categories": [
+        "artifacts",
+        "option-handling",
+        "response-files"
+      ],
+      "environment": {},
+      "id": "response-file-nested",
+      "inputs": [
+        {
+          "base64": "LW5vc3RkaW5jIC1zdGQ9YzE3IC1jIHJlc3BvbnNlLmMgLW8gbmVzdGVkLm8K",
+          "bytes": 45,
+          "executable": false,
+          "kind": "literal",
+          "path": "inner.rsp",
+          "sha256": "e7cc3f474ad92e1d9bd8c0229355b0f9c47f1c9f9682d21019810ce94aed9ce1"
+        },
+        {
+          "base64": "QGlubmVyLnJzcAo=",
+          "bytes": 11,
+          "executable": false,
+          "kind": "literal",
+          "path": "outer.rsp",
+          "sha256": "3f82778302f62c8706f5d8372a3819da7026cfd8b3151a688c457fc4759527e5"
+        },
+        {
+          "base64": "aW50IGFuc3dlcih2b2lkKSB7IHJldHVybiA0MjsgfQo=",
+          "bytes": 32,
+          "executable": false,
+          "kind": "literal",
+          "path": "response.c",
+          "sha256": "d2ee72eea6fb9b6a2ce93777ac97e9f1d7183f9233923f434ff0d9f61a4aa9d5"
+        }
+      ],
+      "ownerSubsystem": "clang-driver-response-files",
+      "stdin": {
+        "base64": "",
+        "bytes": 0,
+        "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+      }
+    },
+    {
+      "arguments": [
+        "@quoted.rsp"
+      ],
+      "categories": [
+        "artifacts",
+        "option-handling",
+        "quoted-arguments",
+        "response-files"
+      ],
+      "environment": {},
+      "id": "response-file-quoted-paths",
+      "inputs": [
+        {
+          "base64": "LW5vc3RkaW5jIC1jICJyZXNwb25zZSBzb3VyY2UuYyIgLW8gInF1b3RlZCByZXNwb25zZS5vIgo=",
+          "bytes": 56,
+          "executable": false,
+          "kind": "literal",
+          "path": "quoted.rsp",
+          "sha256": "f83f779632d32815d18272baa2e7e014f8ecb29ccd3069aca9335dc532dd66bc"
+        },
+        {
+          "base64": "aW50IGFuc3dlcih2b2lkKSB7IHJldHVybiA0MjsgfQo=",
+          "bytes": 32,
+          "executable": false,
+          "kind": "literal",
+          "path": "response source.c",
+          "sha256": "d2ee72eea6fb9b6a2ce93777ac97e9f1d7183f9233923f434ff0d9f61a4aa9d5"
+        }
+      ],
+      "ownerSubsystem": "clang-driver-response-files",
+      "stdin": {
+        "base64": "",
+        "bytes": 0,
+        "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+      }
+    },
+    {
+      "arguments": [
+        "@recursive.rsp"
+      ],
+      "categories": [
+        "diagnostics",
+        "exit-status",
+        "response-files",
+        "stderr"
+      ],
+      "environment": {},
+      "id": "response-file-recursion",
+      "inputs": [
+        {
+          "base64": "QHJlY3Vyc2l2ZS5yc3AK",
+          "bytes": 15,
+          "executable": false,
+          "kind": "literal",
+          "path": "recursive.rsp",
+          "sha256": "c7506d7c889656efc6a9223fab0659c4f76c90bb2a82a617d03d38d9ecbd7c93"
+        }
+      ],
+      "ownerSubsystem": "clang-driver-response-files",
+      "stdin": {
+        "base64": "",
+        "bytes": 0,
+        "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+      }
+    },
+    {
+      "arguments": [
+        "@stdin.rsp"
+      ],
+      "categories": [
+        "artifacts",
+        "option-handling",
+        "response-files",
+        "stdin"
+      ],
+      "environment": {},
+      "id": "response-file-stdin",
+      "inputs": [
+        {
+          "base64": "LW5vc3RkaW5jIC14IGMgLWMgLSAtbyByZXNwb25zZS1zdGRpbi5vCg==",
+          "bytes": 40,
+          "executable": false,
+          "kind": "literal",
+          "path": "stdin.rsp",
+          "sha256": "1009dde08a8f9703a69c3a90b937e6da529b2b92cc0ea46324b879b81f628f02"
+        }
+      ],
+      "ownerSubsystem": "clang-driver-response-files",
+      "stdin": {
+        "base64": "aW50IGFuc3dlcih2b2lkKSB7IHJldHVybiA0MjsgfQo=",
+        "bytes": 32,
+        "sha256": "d2ee72eea6fb9b6a2ce93777ac97e9f1d7183f9233923f434ff0d9f61a4aa9d5"
+      }
+    },
+    {
+      "arguments": [
+        "--target=i386-unknown-linux-gnu",
+        "-nostdinc",
+        "-c",
+        "source.c",
+        "-o",
+        "i386.o"
+      ],
+      "categories": [
+        "artifacts",
+        "object-emission",
+        "target-i386",
+        "target-selection"
+      ],
+      "environment": {},
+      "id": "target-i386-object",
+      "inputs": [
+        {
+          "base64": "aW50IGFuc3dlcih2b2lkKSB7IHJldHVybiA0MjsgfQo=",
+          "bytes": 32,
+          "executable": false,
+          "kind": "literal",
+          "path": "source.c",
+          "sha256": "d2ee72eea6fb9b6a2ce93777ac97e9f1d7183f9233923f434ff0d9f61a4aa9d5"
+        }
+      ],
+      "ownerSubsystem": "clang-driver-targets",
+      "stdin": {
+        "base64": "",
+        "bytes": 0,
+        "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+      }
+    },
+    {
+      "arguments": [
+        "--target=aarch64-unknown-linux-gnu",
+        "-nostdinc",
+        "-c",
+        "source.c",
+        "-o",
+        "aarch64.o"
+      ],
+      "categories": [
+        "diagnostics",
+        "exit-status",
+        "target-selection",
+        "unsupported-mode"
+      ],
+      "environment": {},
+      "id": "target-unsupported-aarch64",
+      "inputs": [
+        {
+          "base64": "aW50IGFuc3dlcih2b2lkKSB7IHJldHVybiA0MjsgfQo=",
+          "bytes": 32,
+          "executable": false,
+          "kind": "literal",
+          "path": "source.c",
+          "sha256": "d2ee72eea6fb9b6a2ce93777ac97e9f1d7183f9233923f434ff0d9f61a4aa9d5"
+        }
+      ],
+      "ownerSubsystem": "clang-driver-targets",
+      "stdin": {
+        "base64": "",
+        "bytes": 0,
+        "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+      }
+    },
+    {
+      "arguments": [
+        "--target=x86_64-unknown-linux-gnu",
+        "-nostdinc",
+        "-dM",
+        "-E",
+        "-x",
+        "c",
+        "/dev/null"
+      ],
+      "categories": [
+        "preprocessing",
+        "stdout",
+        "target-selection",
+        "target-x86-64"
+      ],
+      "environment": {},
+      "id": "target-x86-macros",
+      "inputs": [],
+      "ownerSubsystem": "clang-driver-targets",
+      "stdin": {
+        "base64": "",
+        "bytes": 0,
+        "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+      }
+    }
+  ],
+  "claims": {
+    "candidateStarted": false,
+    "certificationAuthority": false,
+    "definitionBound": false,
+    "expectedOutputsPresent": false,
+    "liveContainmentVerified": false,
+    "observationsCaptured": false,
+    "referenceSubjectPinned": false,
+    "referenceTruthEstablished": false,
+    "releaseEligible": false,
+    "runtimePreflightVerified": false,
+    "scoringAuthority": false,
+    "startAuthorized": false,
+    "terminalAbsenceVerified": false
+  },
+  "diagnosticPolicy": {
+    "forbiddenNormalizations": [
+      "diagnostic-wording",
+      "identifier",
+      "line-column",
+      "option-name",
+      "ordering",
+      "path",
+      "severity"
+    ],
+    "locale": "C",
+    "mismatchIdentity": "reference-definition-sha256-case-id-field-v2",
+    "pathRendering": "raw-bytes-no-rewrite",
+    "terminalWidth": "non-tty-no-width"
+  },
+  "directories": [
+    "include",
+    "quoted",
+    "system",
+    "tmp"
+  ],
+  "environment": {
+    "clearInherited": true,
+    "variables": {
+      "HOME": "/nonexistent",
+      "LANG": "C",
+      "LC_ALL": "C",
+      "PATH": "/usr/bin:/bin",
+      "SOURCE_DATE_EPOCH": "1779182222",
+      "TMPDIR": "/workspace/tmp",
+      "TZ": "UTC"
+    }
+  },
+  "executionOrder": [
+    "assemble-invalid",
+    "assemble-valid",
+    "compile-c-standard",
+    "compile-cxx-standard",
+    "compile-file",
+    "compile-stdin",
+    "diagnostic-color-always",
+    "diagnostic-color-never",
+    "diagnostic-error-limit",
+    "diagnostic-fixit",
+    "diagnostic-invalid-option",
+    "diagnostic-missing-include",
+    "diagnostic-syntax",
+    "diagnostic-template-backtrace",
+    "diagnostic-warning-option",
+    "driver-missing-linker",
+    "driver-print-commands",
+    "emit-assembly",
+    "emit-llvm-ir",
+    "help-driver",
+    "include-cycle-guarded",
+    "include-framework-order",
+    "include-search-order",
+    "include-trace",
+    "link-program",
+    "link-undefined-symbol",
+    "metadata-resource-dir",
+    "metadata-target",
+    "metadata-version",
+    "modules-flag-supported",
+    "objective-c-syntax",
+    "precompile-header",
+    "pch-reuse-valid",
+    "pch-reuse-wrong-target",
+    "preprocess-dependencies",
+    "preprocess-file",
+    "preprocess-macro-state",
+    "preprocess-malformed-macro",
+    "preprocess-pragma-once",
+    "preprocess-stdin",
+    "response-file",
+    "response-file-nested",
+    "response-file-quoted-paths",
+    "response-file-recursion",
+    "response-file-stdin",
+    "target-i386-object",
+    "target-unsupported-aarch64",
+    "target-x86-macros"
+  ],
+  "id": "clang-22-1-6-driver-behavior-reference-input-plan-v2",
+  "kind": "llvm-behavior-reference-input-plan-v2",
+  "repetitionContract": {
+    "agreement": "canonical-observation-payload-byte-identical",
+    "count": 3,
+    "dependencyScope": "same-repetition-only",
+    "freshNonce": true,
+    "freshOperation": true,
+    "freshResultsLease": true,
+    "freshWorkspaceLease": true
+  },
+  "schemaVersion": 2,
+  "scope": "production"
+}
