@@ -34,18 +34,37 @@ class FullTreeHeaderModulePlanTest {
 
         val document = parse(first)
         assertEquals(1L, document.controlObject("counts").controlLong("isolatedModules"))
-        val owners = document.controlArray("headerOwners").controlObjects("header owners")
-            .associate { it.controlString("sourcePath") to it.controlString("headerOwnerId") }
+        val ownerRecords = document.controlArray("headerOwners").controlObjects("header owners")
+            .associateBy { it.controlString("sourcePath") }
+        val owners = ownerRecords.mapValues { (_, owner) -> owner.controlString("headerOwnerId") }
         assertEquals(5, owners.values.toSet().size)
         assertTrue(owners.values.all { it.matches(Regex("header-[0-9a-f]{64}")) })
         assertTrue(owners.values.none { owner -> fixture.modules.any { it.moduleId == owner } })
         assertNotEquals(owners.getValue("source/a/cycle.h"), owners.getValue("source/b/cycle.h"))
+        assertEquals(
+            listOf("a", "b"),
+            ownerRecords.getValue("source/shared/shared.h").controlArray("consumerShardIds")
+                .map { it.controlString("consumer shard") },
+        )
+        assertEquals(
+            listOf("a", "b"),
+            ownerRecords.getValue("source/a/cycle.h").controlArray("consumerShardIds")
+                .map { it.controlString("consumer shard") },
+        )
+        val counts = document.controlObject("counts")
+        assertEquals(3L, counts.controlLong("sharedAcrossShardsHeaders"))
+        assertEquals(0L, counts.controlLong("unreferencedHeaders"))
 
         val dag = document.controlObject("condensationDag")
         val components = dag.controlArray("components").controlObjects("components")
         val componentIds = components.map { it.controlString("componentId") }
         assertEquals(componentIds.sortedWith(FULL_TREE_CODE_POINT_ORDER), componentIds)
         assertTrue(componentIds.all { it.matches(Regex("scc-[0-9a-f]{64}")) })
+        components.forEach { component ->
+            val consumerShards = component.controlArray("consumerShardIds")
+                .map { it.controlString("consumer shard") }
+            assertEquals(consumerShards.sortedWith(FULL_TREE_CODE_POINT_ORDER), consumerShards)
+        }
         assertEquals(
             components.single {
                 owners.getValue("source/a/cycle.h") in

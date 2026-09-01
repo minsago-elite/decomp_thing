@@ -206,6 +206,12 @@ private data class HeaderPlanGraph(
     val kahnOrder: List<String>,
 )
 
+private data class HeaderPlanBoundaryFacts(
+    val componentMemberShardIds: Map<String, List<String>>,
+    val componentConsumerShardIds: Map<String, List<String>>,
+    val headerConsumerShardIds: Map<String, List<String>>,
+)
+
 private fun buildHeaderModulePlan(
     rawModules: List<FullTreeHeaderPlanningModule>,
     rawHeaders: List<FullTreeCanonicalHeader>,
@@ -275,6 +281,7 @@ private fun buildHeaderModulePlan(
         reverseAdjacency.getValue(edge.dependencyNodeId).add(edge.consumerNodeId)
     }
     val graph = buildCondensationGraph(nodes, adjacency, reverseAdjacency, limits, work)
+    val boundaries = buildHeaderPlanBoundaries(nodes, graph, work)
     val directConsumerPaths = directEdges.mapTo(HashSet(), ValidatedDirectEdge::consumerPath)
     val isolatedModules = modules.count { it.sourcePath !in directConsumerPaths }
     val complete = blockers.isEmpty()
@@ -292,6 +299,7 @@ private fun buildHeaderModulePlan(
         directEdges,
         blockers,
         graph,
+        boundaries,
         complete,
         isolatedModules,
         work.used,
@@ -681,6 +689,66 @@ private fun deterministicKahnOrder(
     return order
 }
 
+/**
+ * Propagates the exact A13 module shards backwards through the dependency-first condensation DAG.
+ * A shared header keeps its own first-class owner; this set records every downstream subsystem
+ * that consumes it without assigning the header arbitrarily to any one of those subsystems.
+ */
+private fun buildHeaderPlanBoundaries(
+    nodes: Map<String, HeaderPlanNode>,
+    graph: HeaderPlanGraph,
+    work: HeaderPlanWorkBudget,
+): HeaderPlanBoundaryFacts {
+    val nodeToComponent = HashMap<String, String>(nodes.size)
+    val memberShards = TreeMap<String, TreeSet<String>>(FULL_TREE_CODE_POINT_ORDER)
+    val consumerShards = TreeMap<String, TreeSet<String>>(FULL_TREE_CODE_POINT_ORDER)
+    graph.components.forEach { component ->
+        val shards = TreeSet<String>(FULL_TREE_CODE_POINT_ORDER)
+        component.memberNodeIds.forEach { nodeId ->
+            work.charge("component boundary member")
+            if (nodeToComponent.putIfAbsent(nodeId, component.componentId) != null) {
+                headerPlanFail("boundary propagation found duplicate component membership")
+            }
+            nodes.getValue(nodeId).shardId?.let(shards::add)
+        }
+        memberShards[component.componentId] = shards
+        consumerShards[component.componentId] = TreeSet<String>(FULL_TREE_CODE_POINT_ORDER).apply {
+            addAll(shards)
+        }
+    }
+    val outgoing = TreeMap<String, TreeSet<String>>(FULL_TREE_CODE_POINT_ORDER).apply {
+        graph.components.forEach { put(it.componentId, TreeSet(FULL_TREE_CODE_POINT_ORDER)) }
+    }
+    graph.edges.forEach { edge ->
+        work.charge("component boundary edge")
+        outgoing.getValue(edge.dependencyComponentId).add(edge.consumerComponentId)
+    }
+    graph.kahnOrder.asReversed().forEach { dependency ->
+        outgoing.getValue(dependency).forEach { consumer ->
+            consumerShards.getValue(consumer).forEach { shard ->
+                work.charge("component consumer-shard membership")
+                consumerShards.getValue(dependency).add(shard)
+            }
+        }
+    }
+    val headerShards = TreeMap<String, List<String>>(FULL_TREE_CODE_POINT_ORDER)
+    nodes.values.filter { it.kind == HeaderPlanNodeKind.HEADER }.forEach { header ->
+        work.charge("header consumer boundary")
+        headerShards[header.nodeId] = immutableHeaderPlanList(
+            consumerShards.getValue(nodeToComponent.getValue(header.nodeId)),
+        )
+    }
+    return HeaderPlanBoundaryFacts(
+        componentMemberShardIds = immutableHeaderPlanMap(memberShards.mapValues { (_, value) ->
+            immutableHeaderPlanList(value)
+        }),
+        componentConsumerShardIds = immutableHeaderPlanMap(consumerShards.mapValues { (_, value) ->
+            immutableHeaderPlanList(value)
+        }),
+        headerConsumerShardIds = immutableHeaderPlanMap(headerShards),
+    )
+}
+
 private fun renderHeaderModulePlan(
     modules: List<ValidatedModule>,
     headers: List<ValidatedHeader>,
@@ -688,6 +756,7 @@ private fun renderHeaderModulePlan(
     directEdges: List<ValidatedDirectEdge>,
     blockers: List<ValidatedBlocker>,
     graph: HeaderPlanGraph,
+    boundaries: HeaderPlanBoundaryFacts,
     complete: Boolean,
     isolatedModules: Int,
     workUnits: Long,
@@ -714,8 +783,19 @@ private fun renderHeaderModulePlan(
                     JsonObject(
                         mapOf(
                             "componentId" to JsonPrimitive(component.componentId),
+                            "consumerShardIds" to JsonArray(
+                                boundaries.componentConsumerShardIds.getValue(component.componentId)
+                                    .map(::JsonPrimitive),
+                            ),
+                            "crossShardConsumer" to JsonPrimitive(
+                                boundaries.componentConsumerShardIds.getValue(component.componentId).size > 1,
+                            ),
                             "headerOwnerIds" to JsonArray(component.headerOwnerIds.map(::JsonPrimitive)),
                             "memberNodeIds" to JsonArray(component.memberNodeIds.map(::JsonPrimitive)),
+                            "memberShardIds" to JsonArray(
+                                boundaries.componentMemberShardIds.getValue(component.componentId)
+                                    .map(::JsonPrimitive),
+                            ),
                             "moduleIds" to JsonArray(component.moduleIds.map(::JsonPrimitive)),
                         ),
                     )
@@ -738,12 +818,21 @@ private fun renderHeaderModulePlan(
                 "canonicalHeaders" to JsonPrimitive(headers.size),
                 "condensationComponents" to JsonPrimitive(graph.components.size),
                 "condensationEdges" to JsonPrimitive(graph.edges.size),
+                "crossShardConsumerComponents" to JsonPrimitive(
+                    boundaries.componentConsumerShardIds.values.count { it.size > 1 },
+                ),
                 "directFileEdges" to JsonPrimitive(directEdges.size),
                 "graphNodes" to JsonPrimitive(modules.size + headers.size),
                 "isolatedModules" to JsonPrimitive(isolatedModules),
                 "planningModules" to JsonPrimitive(modules.size),
                 "resolutionBlockers" to JsonPrimitive(blockers.size),
                 "sourceOnlyUnits" to JsonPrimitive(sourceOnly.size),
+                "sharedAcrossShardsHeaders" to JsonPrimitive(
+                    boundaries.headerConsumerShardIds.values.count { it.size > 1 },
+                ),
+                "unreferencedHeaders" to JsonPrimitive(
+                    boundaries.headerConsumerShardIds.values.count(List<String>::isEmpty),
+                ),
                 "workUnits" to JsonPrimitive(workUnits),
             ),
         ),
@@ -775,6 +864,9 @@ private fun renderHeaderModulePlan(
                 mapOf(
                     "graphNodeId" to JsonPrimitive(header.headerOwnerId),
                     "headerOwnerId" to JsonPrimitive(header.headerOwnerId),
+                    "consumerShardIds" to JsonArray(
+                        boundaries.headerConsumerShardIds.getValue(header.headerOwnerId).map(::JsonPrimitive),
+                    ),
                     "ownerKind" to JsonPrimitive("canonical-header-first-class-sha256"),
                     "sourcePath" to JsonPrimitive(header.sourcePath),
                     "unresolvedBlockerCount" to JsonPrimitive(header.unresolvedBlockerCount),
@@ -797,6 +889,9 @@ private fun renderHeaderModulePlan(
             mapOf(
                 "directEdges" to JsonPrimitive("fully-compiler-resolved-file-identities-only"),
                 "headerOwnership" to JsonPrimitive("full-domain-sha256-of-canonical-header-path"),
+                "headerSubsystemBoundary" to JsonPrimitive(
+                    "transitive-consumer-shard-set-without-arbitrary-owner-reassignment",
+                ),
                 "sourceOnlyOwnership" to JsonPrimitive("forbidden"),
                 "unresolvedEvidence" to JsonPrimitive("exact-count-accounted-blockers-only"),
             ),
@@ -899,6 +994,12 @@ private fun canonicalHeaderPlanBytes(
 } catch (failure: Exception) {
     throw FullTreeHeaderModulePlanException("header module plan exceeds its canonical JSON bounds", failure)
 }
+
+private fun <T> immutableHeaderPlanList(values: Collection<T>): List<T> =
+    Collections.unmodifiableList(ArrayList(values))
+
+private fun <T> immutableHeaderPlanMap(values: Map<String, T>): Map<String, T> =
+    Collections.unmodifiableMap(TreeMap<String, T>(FULL_TREE_CODE_POINT_ORDER).apply { putAll(values) })
 
 private class HeaderPlanWorkBudget(private val maximum: Long) {
     var used: Long = 0L
