@@ -165,6 +165,7 @@ object OracleSchemas {
         "full-tree-function-observations",
         "full-tree-function-truth",
         "full-tree-function-truth-index",
+        "full-tree-header-plan-readiness",
         "full-tree-inventory",
         "full-tree-implementation-ownership",
         "full-tree-materialization-determinism",

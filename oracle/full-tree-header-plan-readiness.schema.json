@@ -1,0 +1,153 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://github.com/minsago-elite/decomp_thing/oracle/full-tree-header-plan-readiness.schema.json",
+  "title": "Authenticated full-tree header-plan readiness prerequisites",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schemaVersion", "kind", "authority", "acpBoundary", "bounds", "counts", "oracle", "populations", "blockers", "reportSha256"],
+  "properties": {
+    "schemaVersion": {"const": 1},
+    "kind": {"const": "full-tree-header-plan-readiness-v1"},
+    "authority": {
+      "const": {
+        "cleanCompilationProven": false,
+        "compilerCaptureAuthenticated": false,
+        "headerPlanReady": false,
+        "headerPopulationComplete": false,
+        "purpose": "a14-header-plan-readiness",
+        "releaseEligible": false,
+        "status": "incomplete-authenticated-prerequisites"
+      }
+    },
+    "acpBoundary": {
+      "const": {
+        "role": "first-class-candidate-producer-operator",
+        "candidateContribution": "authenticated-session-change-build-artifact-provenance",
+        "candidateProvenanceAccess": "read-only-oracle-input",
+        "candidateAdmissionOwner": "kotlin-jvm-host",
+        "candidateLiveExecutionOwner": "separately-reviewed-kotlin-jvm-host",
+        "candidateEvidenceDisposition": "non-authoritative-input-to-later-host-validation",
+        "candidateLineageAdmission": "not-an-input-to-readiness-v1",
+        "referenceSubjectAdmission": "kotlin-jvm-host-only",
+        "oracleAuthority": false,
+        "referenceAuthoringAuthority": false,
+        "policyAuthoringAuthority": false,
+        "validationAuthority": false,
+        "observationAuthoringAuthority": false,
+        "startAuthority": false,
+        "containmentAuthority": false,
+        "terminalAbsenceAuthority": false,
+        "scoringAuthority": false,
+        "certificationAuthority": false,
+        "releaseAuthority": false
+      }
+    },
+    "bounds": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["maximumAuthenticatedSourceHeaderCandidates", "maximumBlockers", "maximumOutputRecords", "maximumSerializedBytes", "maximumSourceModules", "maximumSourceOnlyUnits", "maximumWorkUnits"],
+      "properties": {
+        "maximumAuthenticatedSourceHeaderCandidates": {"const": 50000},
+        "maximumBlockers": {"const": 5},
+        "maximumOutputRecords": {"const": 110005},
+        "maximumSerializedBytes": {"const": 16777216},
+        "maximumSourceModules": {"const": 10000},
+        "maximumSourceOnlyUnits": {"const": 50000},
+        "maximumWorkUnits": {"const": 1000000}
+      }
+    },
+    "counts": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["authenticatedSourceHeaderCandidates", "blockers", "generatedSourceModules", "handwrittenSourceModules", "outputRecords", "sourceModules", "sourceOnlyUnits", "workUnits"],
+      "properties": {
+        "authenticatedSourceHeaderCandidates": {"type": "integer", "minimum": 0, "maximum": 50000},
+        "blockers": {"const": 5},
+        "generatedSourceModules": {"type": "integer", "minimum": 0, "maximum": 10000},
+        "handwrittenSourceModules": {"type": "integer", "minimum": 0, "maximum": 10000},
+        "outputRecords": {"type": "integer", "minimum": 6, "maximum": 110005},
+        "sourceModules": {"type": "integer", "minimum": 1, "maximum": 10000},
+        "sourceOnlyUnits": {"type": "integer", "minimum": 0, "maximum": 50000},
+        "workUnits": {"type": "integer", "minimum": 1, "maximum": 1000000}
+      }
+    },
+    "oracle": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["configurationSha256", "planningInventoryArtifactSha256", "planningInventoryConfigurationSha256", "planningInventoryReportSha256", "sourceArchiveSha256", "sourceDependencyArtifactSha256", "sourceDependencyConfigurationSha256", "sourceDependencyReportSha256", "sourceHeaderManifestSha256"],
+      "properties": {
+        "configurationSha256": {"$ref": "#/$defs/sha256"},
+        "planningInventoryArtifactSha256": {"$ref": "#/$defs/sha256"},
+        "planningInventoryConfigurationSha256": {"$ref": "#/$defs/sha256"},
+        "planningInventoryReportSha256": {"$ref": "#/$defs/sha256"},
+        "sourceArchiveSha256": {"$ref": "#/$defs/sha256"},
+        "sourceDependencyArtifactSha256": {"$ref": "#/$defs/sha256"},
+        "sourceDependencyConfigurationSha256": {"$ref": "#/$defs/sha256"},
+        "sourceDependencyReportSha256": {"$ref": "#/$defs/sha256"},
+        "sourceHeaderManifestSha256": {"$ref": "#/$defs/sha256"}
+      }
+    },
+    "populations": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["authenticatedSourceHeaderCandidates", "sourceModules", "sourceOnlyUnits"],
+      "properties": {
+        "authenticatedSourceHeaderCandidates": {
+          "type": "array",
+          "maxItems": 50000,
+          "items": {"$ref": "#/$defs/sourceHeaderPath"}
+        },
+        "sourceModules": {
+          "type": "array",
+          "minItems": 1,
+          "maxItems": 10000,
+          "items": {"$ref": "#/$defs/sourceModule"}
+        },
+        "sourceOnlyUnits": {
+          "type": "array",
+          "maxItems": 50000,
+          "items": {"$ref": "#/$defs/sourceOnlyUnit"}
+        }
+      }
+    },
+    "blockers": {
+      "const": [
+        {"code": "complete-project-header-inventory-missing", "status": "unresolved"},
+        {"code": "compiler-capture-provenance-missing", "status": "unresolved"},
+        {"code": "generated-file-provenance-missing", "status": "unresolved"},
+        {"code": "ninja-generator-provenance-missing", "status": "unresolved"},
+        {"code": "physical-project-roots-unverified", "status": "unresolved"}
+      ]
+    },
+    "reportSha256": {"$ref": "#/$defs/sha256"}
+  },
+  "$defs": {
+    "sha256": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
+    "compilationUnitId": {"type": "string", "pattern": "^cu-[0-9a-f]{32}$"},
+    "shardId": {"type": "string", "pattern": "^[a-z0-9]+(?:-[a-z0-9]+)*$", "maxLength": 128},
+    "sourcePath": {"type": "string", "pattern": "^(source|generated)/[^\\u0000]+$", "maxLength": 4096},
+    "sourceHeaderPath": {"type": "string", "pattern": "^source/[^\\u0000]+\\.(def|h|hh|hpp|hxx|inc)$", "maxLength": 4096},
+    "sourceModule": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["moduleId", "unitId", "shardId", "sourceKind", "sourcePath"],
+      "properties": {
+        "moduleId": {"$ref": "#/$defs/compilationUnitId"},
+        "unitId": {"$ref": "#/$defs/compilationUnitId"},
+        "shardId": {"$ref": "#/$defs/shardId"},
+        "sourceKind": {"enum": ["generated", "handwritten"]},
+        "sourcePath": {"$ref": "#/$defs/sourcePath"}
+      }
+    },
+    "sourceOnlyUnit": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["sourcePath", "shardId", "reasonCode"],
+      "properties": {
+        "sourcePath": {"type": "string", "pattern": "^source/[^\\u0000]+$", "maxLength": 4096},
+        "shardId": {"$ref": "#/$defs/shardId"},
+        "reasonCode": {"enum": ["tool-not-linked-into-clang-driver", "target-not-enabled-or-not-linked", "not-selected-by-authenticated-build-graph"]}
+      }
+    }
+  }
+}

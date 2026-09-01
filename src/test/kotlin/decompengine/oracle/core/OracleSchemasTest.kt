@@ -70,7 +70,7 @@ class OracleSchemasTest {
 
     @Test
     fun `every catalogued schema is bundled and compilable`() {
-        assertEquals(59, OracleSchemas.supportedNames.size)
+        assertEquals(60, OracleSchemas.supportedNames.size)
         OracleSchemas.supportedNames.forEach { name ->
             val identity = OracleSchemas.identity(name)
             assertEquals(name, identity.name)

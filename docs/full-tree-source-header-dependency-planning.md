@@ -14,6 +14,52 @@ graph until compiler-resolution semantics and header ownership are authenticated
 The absence of a `moduleGraph.edges` array is deliberate: this checkpoint neither
 emits an empty graph nor claims that the real build has no dependencies.
 
+## Authenticated header-plan readiness envelope
+
+`FullTreeHeaderPlanReadinessControl` is the Kotlin/JVM-owned aggregation boundary
+between the source assessment and later compiler capture. It accepts only the source
+archive and seven existing control paths. It reconstructs the A13 planning registry,
+runs the source/header assessment internally, requires their planning-artifact
+bindings to agree, and publishes a canonical `full-tree-header-plan-readiness-v1`
+envelope. Callers cannot supply module IDs, shards, source-only records, header paths,
+digests, blockers, readiness flags, parsed facts, or callbacks.
+
+The envelope serializes the exact authenticated module and source-only populations
+plus the eligible regular source-header candidate subset. For the locked 22.1.6
+archive that subset contains 6,579 `.def`, `.h`, `.hh`, `.hpp`, `.hxx`, and `.inc`
+files under the enabled A13-derived source roots. It is deliberately not called a
+complete project-header universe. Source files outside those roots, generated files,
+external files, symlinks, and nonstandard suffixes are not represented.
+
+Readiness v1 fixes these unresolved blockers in the machine contract:
+
+- `complete-project-header-inventory-missing`;
+- `compiler-capture-provenance-missing`;
+- `generated-file-provenance-missing`;
+- `ninja-generator-provenance-missing`; and
+- `physical-project-roots-unverified`.
+
+Consequently `headerPlanReady`, `headerPopulationComplete`,
+`compilerCaptureAuthenticated`, `cleanCompilationProven`, and `releaseEligible` are
+all false by construction. The ACP section is also machine-fixed: ACP is the
+first-class candidate producer/operator and later candidate lineage may enter host
+validation read-only, but no ACP lineage is admitted by readiness v1 and every
+oracle, reference-authoring, policy, validation, observation, execution, scoring,
+certification, and release authority remains false.
+
+Readiness accounting charges one output record per module, source-only exclusion,
+source-header candidate, and fixed blocker. Aggregation work charges three units per
+population record, two per fixed blocker, and nine for the committed provenance
+bindings; the locked population therefore uses 11,059 records and 33,181 work units.
+
+Generate the envelope without Python using:
+
+```bash
+./gradlew generateFullTreeHeaderPlanReadiness --args="\
+  --archive /path/to/llvm-project-22.1.6.src.tar.xz \
+  --output /path/to/full-tree-header-plan-readiness.json"
+```
+
 ## Resolution boundary
 
 The assessment scans the strict locked TAR/XZ archive and parses C-family
@@ -105,9 +151,10 @@ time; retained observations, edges, blocker keys, fact counts, fact bytes, parse
 work, and projection work are checked while accumulating rather than only after the
 plan is materialized.
 
-This remains a fixture/planning bridge, not the production #113 control. Its supplied
-module IDs and header manifest are not yet reconstructed from the authenticated A13
-registry and complete source/generated regular-file inventory. It does not bind the
+This remains a fixture/planning bridge, not the production #113 control. The
+readiness envelope now reconstructs the module universe and authenticated source
+candidate subset, but the trace projection still accepts a supplied module/header
+universe and no complete source/generated regular-file inventory exists. It does not bind the
 recorded Clang executable, command, environment, sysroot, generated overlay, Ninja
 depfile/order-only generator provenance, exit status, or exact coverage of all A13
 translation units. A production wrapper must derive those identities from the

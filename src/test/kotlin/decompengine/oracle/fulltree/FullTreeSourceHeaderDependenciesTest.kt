@@ -86,7 +86,7 @@ class FullTreeSourceHeaderDependenciesTest {
     @Test
     fun `authenticated source header manifest includes eligible regular archive files`() =
         inControlTemporaryDirectory { directory ->
-            val fixture = createDependencyFixtureWithSourceHeader(directory.resolve("with-header"))
+            val fixture = createDependencyFixtureWithSourceHeaders(directory.resolve("with-header"))
 
             val assessment = assessDependencies(fixture)
 
@@ -405,7 +405,7 @@ class FullTreeSourceHeaderDependenciesTest {
     }
 }
 
-private data class DependencyFixture(
+internal data class DependencyFixture(
     val control: FullTreeControlFixture,
     val planning: Path,
     val sourceArchive: Path = control.sourceArchive,
@@ -428,9 +428,12 @@ private fun createDependencyFixture(root: Path): DependencyFixture {
     return DependencyFixture(control, planning)
 }
 
-private fun createDependencyFixtureWithSourceHeader(root: Path): DependencyFixture {
+internal fun createDependencyFixtureWithSourceHeaders(
+    root: Path,
+    headerNames: List<String> = listOf("fixture.h"),
+): DependencyFixture {
     val fixture = createDependencyFixture(root)
-    addFixtureSourceHeader(fixture.control.sourceArchive)
+    addFixtureSourceHeaders(fixture.control.sourceArchive, headerNames)
 
     val archiveSha256 = fixtureSha256(fixture.control.sourceArchive)
     val archiveBytes = Files.size(fixture.control.sourceArchive)
@@ -502,24 +505,28 @@ private fun createDependencyFixtureWithSourceHeader(root: Path): DependencyFixtu
     return fixture
 }
 
-private fun addFixtureSourceHeader(archivePath: Path) {
+private fun addFixtureSourceHeaders(archivePath: Path, headerNames: List<String>) {
+    require(headerNames.isNotEmpty() && headerNames.distinct().size == headerNames.size)
     val expanded = XZCompressorInputStream(
         ByteArrayInputStream(Files.readAllBytes(archivePath)),
     ).use { it.readAllBytes() }
     val prefixBytes = fixtureTarPrefixBytes(expanded)
-    val entry = canonicalFixtureTarEntry(
-        "llvm-project-22.1.6.src/clang/include/fixture.h",
-        0x1b4,
-        "#pragma once\n".toByteArray(),
-    )
-    val unpaddedBytes = Math.addExact(prefixBytes, entry.size)
+    val entries = headerNames.map { name ->
+        require(name.matches(Regex("[A-Za-z0-9][A-Za-z0-9._+-]*")))
+        canonicalFixtureTarEntry(
+            "llvm-project-22.1.6.src/clang/include/$name",
+            0x1b4,
+            "#pragma once\n".toByteArray(),
+        )
+    }
+    val unpaddedBytes = entries.fold(prefixBytes) { total, entry -> Math.addExact(total, entry.size) }
     var terminatorBytes = (10_240 - unpaddedBytes % 10_240) % 10_240
     if (terminatorBytes < 1_024) terminatorBytes += 10_240
     require(terminatorBytes in 1_024..10_752 && terminatorBytes % 512 == 0)
     val encoded = ByteArrayOutputStream()
     XZCompressorOutputStream(encoded).use { compressed ->
         compressed.write(expanded, 0, prefixBytes)
-        compressed.write(entry)
+        entries.forEach(compressed::write)
         compressed.write(ByteArray(terminatorBytes))
     }
     Files.write(archivePath, encoded.toByteArray())

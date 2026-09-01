@@ -63,6 +63,12 @@ registerOracleJavaExecTask(
 )
 
 registerOracleJavaExecTask(
+    taskName = "generateFullTreeHeaderPlanReadiness",
+    taskDescription = "Generates the incomplete authenticated A14 header-plan readiness envelope in Kotlin/JVM",
+    entryPoint = "decompengine.oracle.fulltree.FullTreeHeaderPlanReadinessGeneratorCli",
+)
+
+registerOracleJavaExecTask(
     taskName = "fetchLlvmReleaseArtifacts",
     taskDescription = "Fetches and authenticates the hash-locked LLVM oracle release artifacts in Kotlin/JVM",
     entryPoint = "decompengine.oracle.provenance.LlvmReleaseArtifactFetcherCli",
