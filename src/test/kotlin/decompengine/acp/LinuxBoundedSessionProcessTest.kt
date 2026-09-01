@@ -91,6 +91,61 @@ class LinuxBoundedSessionProcessTest {
     }
 
     @Test
+    fun commandDeadlineStartsBeforeSpawnReturnsToCapture() {
+        requireLinux()
+        var spawnedPid = -1L
+        assertFailsWith<LinuxBoundedSessionTimeoutException> {
+            LinuxBoundedSessionProcess.executeForNonAuthoritativeTest(
+                command(
+                    "/bin/true",
+                    timeout = Duration.ofSeconds(1),
+                ),
+                NonAuthoritativeSessionTestHook(
+                    spawnedPidObserver = { processId ->
+                        spawnedPid = processId
+                        // This existing non-authoritative hook stands in for a late native spawn
+                        // return. The production path checks the original deadline immediately
+                        // afterward. A fresh capture budget would incorrectly accept /bin/true.
+                        Thread.sleep(1_250)
+                    },
+                ),
+            )
+        }
+        assertTrue(spawnedPid > 0L)
+        assertFalse(Files.exists(Path.of("/proc", spawnedPid.toString())))
+    }
+
+    @Test
+    fun escapedPostExitPipeHolderCannotOpenAFreshCleanupWindow() {
+        requireLinux()
+        val marker = Files.createTempFile("bounded-session-post-exit-holder-", ".pid")
+        val setsid = listOf(Path.of("/usr/bin/setsid"), Path.of("/bin/setsid"))
+            .firstOrNull(Files::isExecutable)
+            ?: error("Linux setsid executable is unavailable")
+        try {
+            val quotedMarker = marker.toString().replace("'", "'\\''")
+            assertFailsWith<LinuxBoundedSessionTimeoutException> {
+                LinuxBoundedSessionProcess.execute(
+                    command(
+                        "/bin/sh",
+                        "-c",
+                        "$setsid /bin/sh -c 'printf %s \"\$\$\" > \"$quotedMarker\"; " +
+                            "exec /bin/sleep 2' & " +
+                            "while test ! -s '$quotedMarker'; do :; done",
+                        timeout = Duration.ofSeconds(1),
+                    ),
+                )
+            }
+            assertTrue(Files.readString(marker).trim().isNotEmpty(), "escaped pipe holder never started")
+        } finally {
+            runCatching { Files.readString(marker).trim().toLong() }.getOrNull()?.let { processId ->
+                awaitProcessExitOrKill(processId)
+            }
+            Files.deleteIfExists(marker)
+        }
+    }
+
+    @Test
     fun validatesHardBoundsBeforeStartingAnything() {
         assertFailsWith<IllegalArgumentException> {
             LinuxBoundedSessionCommand(
@@ -281,6 +336,20 @@ class LinuxBoundedSessionProcessTest {
             Thread.sleep(10)
         }
         assertFalse(Files.exists(path), "bounded session child remained live: $pid")
+    }
+
+    private fun awaitProcessExitOrKill(pid: Long) {
+        val path = Path.of("/proc", pid.toString())
+        repeat(300) {
+            if (!Files.exists(path)) return
+            Thread.sleep(10)
+        }
+        ProcessHandle.of(pid).ifPresent { it.destroyForcibly() }
+        repeat(200) {
+            if (!Files.exists(path)) return
+            Thread.sleep(10)
+        }
+        assertFalse(Files.exists(path), "escaped bounded-session pipe holder remained live: $pid")
     }
 
     private fun requireLinux() {
