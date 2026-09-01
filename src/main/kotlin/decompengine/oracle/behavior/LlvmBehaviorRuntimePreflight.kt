@@ -100,13 +100,16 @@ sealed interface LlvmBehaviorRuntimePreflight {
 }
 
 /**
- * Sealed retained binding for only the private Unix endpoint authenticated by this preflight.
+ * Sealed retained binding for only the private Unix endpoint checked by this preflight run.
  *
  * The authenticated CLI and its empty Docker config are closed before this owner is returned. The
  * raw socket path remains private for a future one-shot Kotlin Engine connector, because Linux
  * cannot connect through the O_PATH identity descriptor. Until that consuming connector exists,
  * this binding is not usable Engine authority. This surface deliberately has no pathname, socket
- * or request transport, HTTP, mutation, build, CREATE, START, wait, cleanup, or parsing method.
+ * or request transport, HTTP, mutation, build, CREATE, START, wait, cleanup, receipt, runtime fact,
+ * image claim, or parsing method. The immutable v1 preflight receipt is published separately and
+ * is not carried by this capability; endpoint currentness alone cannot refresh its point-in-time
+ * runtime or image claims.
  *
  * ACP remains the first-class candidate producer/operator and is consumed read-only. Neither ACP
  * nor this endpoint owner receives oracle, reference, policy, validation, observation, containment,
@@ -114,9 +117,7 @@ sealed interface LlvmBehaviorRuntimePreflight {
  * invokes no Python; legacy Python-bearing v1 preflight evidence remains non-authoritative for any
  * future v2 hosted build or candidate admission.
  */
-internal sealed interface LlvmBehaviorRetainedDockerEndpointBinding :
-    LlvmBehaviorRuntimePreflight,
-    AutoCloseable {
+internal sealed interface LlvmBehaviorRetainedDockerEndpointBinding : AutoCloseable {
     fun requireCurrent()
 
     override fun close()
@@ -151,7 +152,8 @@ object LlvmBehaviorRuntimePreflightPublisher {
 
     /**
      * Runs and publishes the same preflight, then narrows its pinned CLI bindings to only the
-     * retained private Unix endpoint. This Kotlin-only owner must be closed by its caller.
+     * retained private Unix endpoint. The returned Kotlin-only owner carries no preflight receipt
+     * or runtime/image claims and must be closed by its caller.
      */
     @JvmSynthetic
     internal fun openRetainedEndpointBinding(
@@ -239,25 +241,9 @@ object LlvmBehaviorRuntimePreflightPublisher {
         outputPath: Path,
         limits: LlvmBehaviorRuntimePreflightLimits,
     ) : LlvmBehaviorRetainedDockerEndpointBinding {
-        private val storedBytes: ByteArray
         private val endpoint: PinnedDockerEndpointBinding
         private var closed = false
         private var poisoned = false
-
-        override val authority = PREFLIGHT_AUTHORITY
-        override val corpusSha256: String
-        override val controlClientSha256: String
-        override val runtimeIdentityVerified = true
-        override val containmentCapabilitiesVerified = true
-        override val imageVerified = true
-        override val candidateStarted = false
-        override val liveContainmentVerified = false
-        override val scoringAuthority = false
-        override val releaseEligible = false
-        override val preflightSha256: String
-
-        override val canonicalBytes: ByteArray
-            get() = storedBytes.copyOf()
 
         init {
             val derived = deriveAndPublishPreflight(
@@ -271,16 +257,7 @@ object LlvmBehaviorRuntimePreflightPublisher {
                 outputPath,
                 limits,
             )
-            try {
-                corpusSha256 = derived.corpusSha256
-                controlClientSha256 = derived.controlClientSha256
-                storedBytes = derived.bytes.copyOf()
-                preflightSha256 = OracleArtifacts.sha256(storedBytes)
-                endpoint = derived.endpointBinding
-            } catch (failure: Throwable) {
-                derived.endpointBinding.close()
-                throw failure
-            }
+            endpoint = derived.endpointBinding
         }
 
         @Synchronized

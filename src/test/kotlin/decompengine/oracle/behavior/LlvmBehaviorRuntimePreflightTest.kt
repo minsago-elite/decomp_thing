@@ -150,17 +150,14 @@ class LlvmBehaviorRuntimePreflightTest {
             publish.parameterTypes.toList(),
         )
         assertTrue(publish.parameterTypes.none { it.name.contains("Json") || it.name.contains("Runner") || it.name.contains("Function") })
-        val implementations = LlvmBehaviorRuntimePreflightPublisher::class.java.declaredClasses.filter {
+        val implementation = LlvmBehaviorRuntimePreflightPublisher::class.java.declaredClasses.single {
             LlvmBehaviorRuntimePreflight::class.java.isAssignableFrom(it)
         }
-        assertEquals(2, implementations.size)
-        implementations.forEach { implementation ->
-            assertTrue(Modifier.isPrivate(implementation.modifiers))
-            assertEquals(
-                List(8) { Path::class.java } + LlvmBehaviorRuntimePreflightLimits::class.java,
-                implementation.declaredConstructors.single().parameterTypes.toList(),
-            )
-        }
+        assertTrue(Modifier.isPrivate(implementation.modifiers))
+        assertEquals(
+            List(8) { Path::class.java } + LlvmBehaviorRuntimePreflightLimits::class.java,
+            implementation.declaredConstructors.single().parameterTypes.toList(),
+        )
     }
 
     @Test
@@ -185,32 +182,32 @@ class LlvmBehaviorRuntimePreflightTest {
 
         val methods = LlvmBehaviorRetainedDockerEndpointBinding::class.java.methods
         assertTrue(methods.all { it.parameterCount == 0 })
-        assertEquals(
-            setOf(
-                "close",
-                "getAuthority",
-                "getCandidateStarted",
-                "getCanonicalBytes",
-                "getContainmentCapabilitiesVerified",
-                "getControlClientSha256",
-                "getCorpusSha256",
-                "getImageVerified",
-                "getLiveContainmentVerified",
-                "getPreflightSha256",
-                "getReleaseEligible",
-                "getRuntimeIdentityVerified",
-                "getScoringAuthority",
-                "requireCurrent",
-            ),
-            methods.map { it.name }.toSet(),
-        )
+        assertEquals(setOf("close", "requireCurrent"), methods.map { it.name }.toSet())
         assertTrue(methods.none { it.returnType == Path::class.java || it.returnType == Process::class.java })
         assertTrue(
             LlvmBehaviorRetainedDockerEndpointBinding::class.java.declaredFields.none {
                 it.type == Process::class.java || it.type == ProcessBuilder::class.java ||
                     it.type.name.startsWith("kotlin.jvm.functions.") || it.type == ByteArray::class.java ||
-                    it.type == Path::class.java
+                it.type == Path::class.java
             },
+        )
+
+        val implementation = LlvmBehaviorRuntimePreflightPublisher::class.java.declaredClasses.single {
+            LlvmBehaviorRetainedDockerEndpointBinding::class.java.isAssignableFrom(it)
+        }
+        assertTrue(Modifier.isPrivate(implementation.modifiers))
+        assertFalse(LlvmBehaviorRuntimePreflight::class.java.isAssignableFrom(implementation))
+        assertEquals(
+            List(8) { Path::class.java } + LlvmBehaviorRuntimePreflightLimits::class.java,
+            implementation.declaredConstructors.single().parameterTypes.toList(),
+        )
+        assertEquals(
+            mapOf(
+                "closed" to Boolean::class.javaPrimitiveType,
+                "endpoint" to PinnedDockerEndpointBinding::class.java,
+                "poisoned" to Boolean::class.javaPrimitiveType,
+            ),
+            implementation.declaredFields.associate { it.name to it.type },
         )
     }
 
@@ -330,13 +327,6 @@ class LlvmBehaviorRuntimePreflightTest {
             )
             try {
                 retained.requireCurrent()
-                assertTrue(retained.runtimeIdentityVerified)
-                assertTrue(retained.containmentCapabilitiesVerified)
-                assertTrue(retained.imageVerified)
-                assertFalse(retained.candidateStarted)
-                assertFalse(retained.liveContainmentVerified)
-                assertFalse(retained.scoringAuthority)
-                assertFalse(retained.releaseEligible)
                 assertEquals(OWNER_ONLY_FILE, Files.getPosixFilePermissions(output))
             } finally {
                 retained.close()
