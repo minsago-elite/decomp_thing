@@ -12,6 +12,8 @@ import java.nio.file.attribute.PosixFilePermissions
 import java.time.Duration
 import java.util.Comparator
 import java.util.concurrent.TimeUnit
+import java.util.concurrent.atomic.AtomicBoolean
+import java.util.concurrent.atomic.AtomicReference
 import kotlin.io.path.createTempDirectory
 import kotlin.test.Test
 import kotlin.test.assertContentEquals
@@ -443,6 +445,41 @@ class LlvmBehaviorHostedCleanBuildV2Test {
             }.targetException
             assertTrue(crossStreamFailure.message.orEmpty().contains("output bound"), crossStreamFailure.message)
             assertProcessGone(readPid(crossStreamPid))
+            assertTrue(unrelated.isAlive)
+
+            val interruptPid = root.resolve("interrupt.pid")
+            val interruptFailure = AtomicReference<Throwable?>()
+            val interruptRestored = AtomicBoolean(false)
+            val interruptThread = Thread {
+                try {
+                    reflectedRun(
+                        retainedShell,
+                        listOf(
+                            "-c",
+                            "/usr/bin/sleep 30 >/dev/null 2>&1 & child=\$!; " +
+                                "echo \"\$\$ \$child\" > $interruptPid; " +
+                                "exec 1>&- 2>&-; wait",
+                        ),
+                        workingDirectory,
+                        Duration.ofSeconds(5),
+                        1024,
+                        "hostile interrupted command",
+                    )
+                } catch (failure: Throwable) {
+                    interruptFailure.set(failure)
+                } finally {
+                    interruptRestored.set(Thread.currentThread().isInterrupted)
+                }
+            }.also { thread -> thread.isDaemon = true }
+            interruptThread.start()
+            val interruptedPids = readPids(interruptPid)
+            interruptThread.interrupt()
+            interruptThread.join(5_000)
+            assertFalse(interruptThread.isAlive, "interrupted retained runner did not complete exact cleanup")
+            val interruptedTarget = (interruptFailure.get() as? InvocationTargetException)?.targetException
+            assertTrue(interruptedTarget?.message.orEmpty().contains("interrupted"), interruptedTarget?.message)
+            assertTrue(interruptRestored.get(), "retained runner did not restore interruption after exact cleanup")
+            interruptedPids.forEach(::assertProcessGone)
             assertTrue(unrelated.isAlive)
         } finally {
             unrelated.destroyForcibly()

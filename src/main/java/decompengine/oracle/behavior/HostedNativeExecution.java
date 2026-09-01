@@ -605,6 +605,7 @@ final class HostedNativeExecution {
         private boolean waitableIdentityProven;
         private boolean identityLost;
         private boolean reaped;
+        private boolean cleanupInterrupted;
 
         private NativeProcess(
             String executionPath,
@@ -862,22 +863,27 @@ final class HostedNativeExecution {
         }
 
         private void cleanup(long deadline) {
-            closeParentWriteEnds();
-            closeFd(stdoutReadFd);
-            stdoutReadFd = -1;
-            closeFd(stderrReadFd);
-            stderrReadFd = -1;
-            if (pidfd < 0) {
-                emergencyReapUnpinnedLeader(deadline);
-                return;
+            deferCleanupInterrupt();
+            try {
+                closeParentWriteEnds();
+                closeFd(stdoutReadFd);
+                stdoutReadFd = -1;
+                closeFd(stderrReadFd);
+                stderrReadFd = -1;
+                if (pidfd < 0) {
+                    emergencyReapUnpinnedLeader(deadline);
+                    return;
+                }
+                signalPidfd(SIGKILL, deadline, true);
+                waitForPidfdExit(deadline, true);
+                proveWaitableLeader(deadline, true);
+                if (sessionVerified) {
+                    signalVerifiedGroup(SIGKILL, deadline, true);
+                }
+                reapProvenLeader(deadline, true);
+            } finally {
+                restoreCleanupInterrupt();
             }
-            signalPidfd(SIGKILL, deadline, true);
-            waitForPidfdExit(deadline, true);
-            proveWaitableLeader(deadline, true);
-            if (sessionVerified) {
-                signalVerifiedGroup(SIGKILL, deadline, true);
-            }
-            reapProvenLeader(deadline, true);
         }
 
         private void verifyFreshSession(long deadline) {
@@ -1138,44 +1144,84 @@ final class HostedNativeExecution {
             if (pid <= 0 || reaped || identityLost) {
                 return;
             }
-            Memory information = new Memory(SIGINFO_BYTES);
-            while (true) {
-                requireDeadline(deadline, label, true);
-                requireSigchldWaitable(label);
-                information.clear();
-                int waitResult = waitid(P_PID, pid, information, WEXITED | WNOHANG | WNOWAIT);
-                int waitError = waitResult != 0 ? Native.getLastError() : 0;
-                if (waitResult != 0 && waitError == EINTR) {
-                    continue;
-                }
-                if (waitResult != 0 && waitError == ECHILD) {
-                    identityLost = true;
-                    throw fail(label + " lost emergency child wait ownership before numeric cleanup");
-                }
-                if (waitResult != 0) {
-                    throw fail(label + " emergency child wait proof failed with errno " + waitError);
-                }
-                int observedPid = information.getInt(SIGINFO_PID_OFFSET_X86_64);
-                if (observedPid == pid) {
-                    waitableIdentityProven = true;
-                    break;
-                }
-                if (observedPid != 0) {
-                    identityLost = true;
-                    throw fail(label + " emergency wait proof returned a different child " + observedPid);
-                }
+            deferCleanupInterrupt();
+            try {
+                Memory information = new Memory(SIGINFO_BYTES);
+                while (true) {
+                    requireDeadline(deadline, label, true);
+                    requireSigchldWaitable(label);
+                    information.clear();
+                    int waitResult = waitid(P_PID, pid, information, WEXITED | WNOHANG | WNOWAIT);
+                    int waitError = waitResult != 0 ? Native.getLastError() : 0;
+                    if (waitResult != 0 && waitError == EINTR) {
+                        continue;
+                    }
+                    if (waitResult != 0 && waitError == ECHILD) {
+                        identityLost = true;
+                        throw fail(label + " lost emergency child wait ownership before numeric cleanup");
+                    }
+                    if (waitResult != 0) {
+                        throw fail(label + " emergency child wait proof failed with errno " + waitError);
+                    }
+                    int observedPid = information.getInt(SIGINFO_PID_OFFSET_X86_64);
+                    if (observedPid == pid) {
+                        waitableIdentityProven = true;
+                        break;
+                    }
+                    if (observedPid != 0) {
+                        identityLost = true;
+                        throw fail(label + " emergency wait proof returned a different child " + observedPid);
+                    }
 
-                // A zero si_pid with P_PID confirms a matching live child but no waitable event.
-                // Check this before every numeric signal so an observed ECHILD can never be followed
-                // by a potentially reused-pid kill when per-child pidfd acquisition failed.
-                int signalResult = kill(pid, SIGKILL);
-                int signalError = signalResult != 0 ? Native.getLastError() : 0;
-                if (signalResult != 0 && signalError != ESRCH && signalError != EINTR) {
-                    throw fail(label + " emergency exact-child signal failed with errno " + signalError);
+                    // A zero si_pid with P_PID confirms a matching live child but no waitable event.
+                    // Check this before every numeric signal so an observed ECHILD can never be followed
+                    // by a potentially reused-pid kill when per-child pidfd acquisition failed.
+                    int signalResult = kill(pid, SIGKILL);
+                    int signalError = signalResult != 0 ? Native.getLastError() : 0;
+                    if (signalResult != 0 && signalError != ESRCH && signalError != EINTR) {
+                        throw fail(label + " emergency exact-child signal failed with errno " + signalError);
+                    }
+                    sleep(deadline, CLEANUP_POLL_MILLIS, label, true);
                 }
-                sleep(deadline, CLEANUP_POLL_MILLIS, label, true);
+                reapProvenLeader(deadline, true);
+            } finally {
+                restoreCleanupInterrupt();
             }
-            reapProvenLeader(deadline, true);
+        }
+
+        private void deferCleanupInterrupt() {
+            if (Thread.interrupted()) {
+                cleanupInterrupted = true;
+            }
+        }
+
+        private void restoreCleanupInterrupt() {
+            if (Thread.interrupted()) {
+                cleanupInterrupted = true;
+            }
+            if (cleanupInterrupted) {
+                Thread.currentThread().interrupt();
+            }
+        }
+
+        private void sleep(long deadline, long maximumMillis, String sleepLabel, boolean cleanup) {
+            requireDeadline(deadline, sleepLabel, cleanup);
+            long remainingNanos = deadline - System.nanoTime();
+            long millis = Math.min(maximumMillis, Math.max(0L, remainingNanos / 1_000_000L));
+            if (millis <= 0L) {
+                Thread.onSpinWait();
+            } else {
+                try {
+                    Thread.sleep(millis);
+                } catch (InterruptedException failure) {
+                    if (!cleanup) {
+                        Thread.currentThread().interrupt();
+                        throw fail(sleepLabel + " was interrupted", failure);
+                    }
+                    cleanupInterrupted = true;
+                }
+            }
+            requireDeadline(deadline, sleepLabel, cleanup);
         }
     }
 
@@ -1563,23 +1609,6 @@ final class HostedNativeExecution {
         if (System.nanoTime() >= deadline) {
             throw fail(cleanup ? label + " cleanup exceeded its deadline" : label + " exceeded its deadline");
         }
-    }
-
-    private static void sleep(long deadline, long maximumMillis, String label, boolean cleanup) {
-        requireDeadline(deadline, label, cleanup);
-        long remainingNanos = deadline - System.nanoTime();
-        long millis = Math.min(maximumMillis, Math.max(0L, remainingNanos / 1_000_000L));
-        if (millis <= 0L) {
-            Thread.onSpinWait();
-        } else {
-            try {
-                Thread.sleep(millis);
-            } catch (InterruptedException failure) {
-                Thread.currentThread().interrupt();
-                throw fail(label + " was interrupted", failure);
-            }
-        }
-        requireDeadline(deadline, label, cleanup);
     }
 
     private static BasicFileAttributes readAttributes(Path path, String label) {
