@@ -304,18 +304,19 @@ class AcpTerminalBrokerTest {
         val cases = listOf(
             terminalFixture(
                 mode = "escape",
-                durationMillis = 120,
-            ) to null,
+                // Launch attestation and the live probe share this wall budget.
+                durationMillis = 2_000,
+            ) to AcpTerminalAuditReason.TIMEOUT,
             terminalFixture(
                 mode = "terminal-flood",
                 maximumProducedBytes = 1024,
-            ) to null,
+            ) to AcpTerminalAuditReason.OUTPUT_LIMIT,
             terminalFixture(
                 mode = "terminal-burst-exit",
                 maximumProducedBytes = 1024,
-            ) to null,
+            ) to AcpTerminalAuditReason.OUTPUT_LIMIT,
         )
-        cases.forEach { (fixture, _) ->
+        cases.forEach { (fixture, expectedTerminationReason) ->
             val audit = AcpTerminalAuditRecorder()
             val broker = broker(fixture, audit)
             broker.bindSession(SESSION)
@@ -336,9 +337,7 @@ class AcpTerminalBrokerTest {
             val authorized = records.single { it.reason == AcpTerminalAuditReason.LAUNCH_AUTHORIZED }
             val created = records.single { it.reason == AcpTerminalAuditReason.CREATED }
             assertTrue(authorized.sequence < created.sequence)
-            assertTrue(records.any {
-                it.reason == AcpTerminalAuditReason.TIMEOUT || it.reason == AcpTerminalAuditReason.OUTPUT_LIMIT
-            })
+            assertTrue(records.any { it.reason == expectedTerminationReason })
             if (fixture.args.single() == "terminal-burst-exit") {
                 assertEquals(null, completion.exitCode, "fast overflow must not be reported as a clean root exit")
                 val limited = records.single { it.reason == AcpTerminalAuditReason.OUTPUT_LIMIT }
