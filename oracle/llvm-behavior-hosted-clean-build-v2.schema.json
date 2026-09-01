@@ -124,7 +124,7 @@
         "dockerfileSha256",
         "buildRecordSha256",
         "recordedOriginImageDigest",
-        "observedImageDigest",
+        "inspectedImageDigest",
         "platform",
         "SOURCE_DATE_EPOCH",
         "compiler",
@@ -136,7 +136,7 @@
         "dockerfileSha256": {"const": "97e2d13915806242c14489b5a8b1417bd0478f3a11dc05e76888ba2ab43b1291"},
         "buildRecordSha256": {"const": "415afaf3554f954aed4442f0fa3c83ecc7e9f1fe0ddf68fb4c39e9231ece9005"},
         "recordedOriginImageDigest": {"const": "sha256:73285d9a2dad159a7171fe4bbcac7d97d285402955d8c6fb8b44b101cf2df550"},
-        "observedImageDigest": {"$ref": "#/$defs/imageDigest"},
+        "inspectedImageDigest": {"$ref": "#/$defs/imageDigest"},
         "platform": {"const": "linux/amd64"},
         "SOURCE_DATE_EPOCH": {"const": "1779182222"},
         "compiler": {
@@ -194,7 +194,7 @@
         "elfClass": {"const": "ELF64"},
         "endianness": {"const": "little-endian"},
         "machine": {"const": "x86-64"},
-        "bytes": {"type": "integer", "minimum": 1, "maximum": 1610612736},
+        "bytes": {"type": "integer", "minimum": 1, "maximum": 536870912},
         "sha256": {"$ref": "#/$defs/sha256"},
         "identicalAcrossBuilds": {"const": true}
       }
@@ -202,12 +202,13 @@
     "runtimeClosure": {
       "type": "object",
       "additionalProperties": false,
-      "required": ["kind", "observedImageDigest", "platform", "buildCount"],
+      "required": ["kind", "inspectedImageDigest", "platform", "buildCount", "authenticated"],
       "properties": {
         "kind": {"const": "container-image-closure"},
-        "observedImageDigest": {"$ref": "#/$defs/imageDigest"},
+        "inspectedImageDigest": {"$ref": "#/$defs/imageDigest"},
         "platform": {"const": "linux/amd64"},
-        "buildCount": {"const": 2}
+        "buildCount": {"const": 2},
+        "authenticated": {"const": false}
       }
     },
     "attestationBoundary": {
@@ -260,7 +261,8 @@
         "candidateLineageBound": true,
         "sourceRevisionBound": true,
         "lockedToolchainBound": true,
-        "runtimeClosureObserved": true,
+        "runtimeImageInspected": true,
+        "runtimeClosureAuthenticated": false,
         "twoCleanBuildsCompleted": true,
         "executableReproduced": true,
         "hostedWorkflowAuthenticated": false,
@@ -325,7 +327,7 @@
         "objectSetSha256": {"$ref": "#/$defs/sha256"},
         "combinedOutputBytes": {"type": "integer", "minimum": 0, "maximum": 17179869184},
         "combinedOutputSha256": {"$ref": "#/$defs/sha256"},
-        "executableBytes": {"type": "integer", "minimum": 1, "maximum": 1610612736},
+        "executableBytes": {"type": "integer", "minimum": 1, "maximum": 536870912},
         "executableSha256": {"$ref": "#/$defs/sha256"}
       }
     },

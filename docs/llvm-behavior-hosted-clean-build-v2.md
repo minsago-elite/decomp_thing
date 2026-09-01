@@ -42,13 +42,16 @@ of:
 
 Those hashes, the recorded-origin image digest, `linux/amd64`, `SOURCE_DATE_EPOCH`, and the compiler
 and linker paths, executable lengths, hashes, and version-output hashes are schema constants. A
-fresh image is rebuilt from the locked Dockerfile and base image. Its observed image ID is retained
+fresh image is rebuilt from the locked Dockerfile and base image. Its inspected image ID is retained
 separately: a fresh image ID is runtime evidence and is not rewritten into the historical
 recorded-origin identity.
 
-`runtimeClosure` cross-binds that observed image digest to both builds and requires the inspected
-platform to be `linux/amd64`. The producer must observe the image identity and platform from the
-container runtime; a tag, caller-supplied digest, or build-record string is not an observation.
+`runtimeClosure` cross-binds that inspected image digest to both builds and requires the inspected
+platform to be `linux/amd64`. This unsigned producer consumes a bounded Docker-inspect artifact, so
+it sets `runtimeClosure.authenticated=false` and `runtimeClosureAuthenticated=false`. A tag,
+caller-claimed digest, or build-record string cannot replace the inspect artifact. The later hosted
+workflow attestation (or a Kotlin-owned container coordinator) must prove that both builds actually
+ran in that exact inspected image before the runtime boundary is authenticated.
 
 ## Exactly two direct-Clang clean builds
 
@@ -62,10 +65,14 @@ invokes the locked Clang executable once per source and invokes the locked Clang
 the final link. The linker selected by that fixed driver command is the locked LLD. There is no
 shell, Make, Ninja, CMake, project callback, or caller-provided command in the candidate build path.
 
-Each build entry is constant-size. It records the source revision and count, a commitment to every
-exact compile argv, a commitment to every object path/length/hash, a length and commitment for the
-bounded combined process output, and the final executable length/hash. Detailed commands, objects,
-stdout, and stderr remain in ephemeral build state and cannot expand the receipt.
+Each build entry is constant-size. `sourceCount` is the number of authenticated `src/**/*.c`
+translation units. `compileCommandSetSha256` is the domain-separated, length-prefixed commitment to
+the commands in source-path order; each command retains its ordinal and every exact argv token.
+`objectSetSha256` uses the same encoding over project-relative object path, byte length, and SHA-256
+leaves in source-path order. `combinedOutputSha256` is SHA-256 over each command's bounded merged
+stdout/stderr bytes in execution order, with `combinedOutputBytes` equal to their total raw byte
+length. Detailed commands, objects, stdout, and stderr remain in ephemeral build state and cannot
+expand the receipt.
 
 The producer compares the two final files byte-for-byte, not only by a claimed digest. It then
 validates the common file as little-endian ELF64 with machine `x86-64` and records its exact length
@@ -76,7 +83,7 @@ candidate identity must all match.
 
 This producer receipt truthfully establishes `twoCleanBuildsCompleted=true` and
 `executableReproduced=true`. It also records the verified archive/lineage/toolchain bindings and the
-observed runtime closure.
+inspected, but not yet authenticated, runtime image identity.
 
 It deliberately fixes all of these claims false:
 
