@@ -100,6 +100,28 @@ class FullTreeSourceInventoryControlTest {
                     FullTreeSourceInventoryControl.validate(mutation, scope, build, inventory)
                 }
             }
+
+            val exactBuildBytes = Files.readAllBytes(fixture.buildRecord)
+            val toolDigest = build.controlArray("tools").controlObjects("build-record tools")
+                .first().controlString("executableSha256")
+            val replacementDigest = (if (toolDigest[0] == '0') "1" else "0") + toolDigest.drop(1)
+            val crossPairedBuildBytes = exactBuildBytes.toString(Charsets.UTF_8)
+                .replaceFirst(toolDigest, replacementDigest)
+                .toByteArray(Charsets.UTF_8)
+            val crossPairedBuild = OracleJson.parseCanonical(
+                crossPairedBuildBytes,
+                controlJsonLimits(FullTreeControlLimits().maximumBuildRecordBytes),
+            ) as JsonObject
+            val crossPairedReport = rehashReport(
+                JsonObject(original.toMutableMap().apply {
+                    this["oracle"] = JsonObject(original.controlObject("oracle").toMutableMap().apply {
+                        this["buildRecordSha256"] = JsonPrimitive(OracleArtifacts.sha256(crossPairedBuildBytes))
+                    })
+                }),
+            )
+            assertFailsWith<FullTreeControlException> {
+                FullTreeSourceInventoryControl.validate(crossPairedReport, scope, crossPairedBuild, inventory)
+            }
         }
 
     @Test

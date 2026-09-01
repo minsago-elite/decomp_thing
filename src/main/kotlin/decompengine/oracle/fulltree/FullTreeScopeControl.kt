@@ -84,6 +84,13 @@ object FullTreeScopeControl {
         if (OracleArtifacts.sha256(manifestBytes) != scope.artifactManifestSha256) {
             throw FullTreeControlException("artifact-manifest snapshot differs from its authenticated digest")
         }
+        requireManifestInputBinding(
+            manifest,
+            "sourceLock",
+            sourceLockBytes,
+            limits.maximumSourceLockBytes,
+            "source lock",
+        )
         val oracle = document.controlObject("oracle")
         if (oracle.controlString("sourceLockSha256") != scope.sourceLockSha256) {
             throw FullTreeControlException("full-tree scope source-lock binding does not match")
@@ -102,6 +109,47 @@ object FullTreeScopeControl {
             throw FullTreeControlException("full-tree scope stripped artifact binding does not match manifest")
         }
         validatePolicy(document)
+    }
+
+    /**
+     * Requires the exact canonical build-record bytes to be the input authorized by the
+     * authenticated oracle manifest. Callers must still parse and validate the build-record
+     * schema separately; this closes the manifest/build-record cross-pairing boundary.
+     */
+    internal fun requireBuildRecordBinding(
+        scope: AuthenticatedFullTreeScope,
+        buildRecordBytes: ByteArray,
+        limits: FullTreeControlLimits = FullTreeControlLimits(),
+    ): String {
+        validate(scope, limits)
+        return requireManifestInputBinding(
+            scope.artifactManifest,
+            "buildRecord",
+            buildRecordBytes,
+            limits.maximumBuildRecordBytes,
+            "build record",
+        )
+    }
+
+    private fun requireManifestInputBinding(
+        manifest: JsonObject,
+        inputName: String,
+        bytes: ByteArray,
+        maximumBytes: Int,
+        label: String,
+    ): String {
+        if (bytes.size > maximumBytes) {
+            throw FullTreeControlException("$label exceeds its configured byte bound")
+        }
+        val expected = manifest.controlObject("inputs").controlObject(inputName)
+        if (expected.controlLong("bytes") != bytes.size.toLong()) {
+            throw FullTreeControlException("$label byte count differs from the oracle manifest")
+        }
+        val observedSha256 = OracleArtifacts.sha256(bytes)
+        if (expected.controlString("sha256") != observedSha256) {
+            throw FullTreeControlException("$label digest differs from the oracle manifest")
+        }
+        return observedSha256
     }
 
     fun normalizeSourcePath(

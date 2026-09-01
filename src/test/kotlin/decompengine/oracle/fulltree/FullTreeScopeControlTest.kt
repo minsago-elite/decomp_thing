@@ -1,6 +1,5 @@
 package decompengine.oracle.fulltree
 
-import decompengine.oracle.core.OracleJson
 import java.nio.file.Files
 import java.nio.file.attribute.PosixFilePermissions
 import kotlin.test.Test
@@ -107,6 +106,58 @@ class FullTreeScopeControlTest {
                 PosixFilePermissions.fromString("rwxrwx---"),
             )
             assertFailsWith<FullTreeControlException> { writableDirectory.authenticatedScope() }
+        }
+
+    @Test
+    fun `oracle manifest binds the exact full-tree build record bytes`(): Unit =
+        inControlTemporaryDirectory { directory ->
+            val fixture = createFullTreeControlFixture(directory.resolve("build-record-binding"))
+            val scope = fixture.authenticatedScope()
+            val exactBytes = Files.readAllBytes(fixture.buildRecord)
+
+            assertEquals(
+                fixtureSha256(fixture.buildRecord),
+                FullTreeScopeControl.requireBuildRecordBinding(scope, exactBytes),
+            )
+
+            val buildRecord = parseControlObject(fixture.buildRecord)
+            val toolDigest = buildRecord.controlArray("tools").controlObjects("build-record tools")
+                .first().controlString("executableSha256")
+            val replacementDigest = (if (toolDigest[0] == '0') "1" else "0") + toolDigest.drop(1)
+            val crossPairedBytes = exactBytes.toString(Charsets.UTF_8)
+                .replaceFirst(toolDigest, replacementDigest)
+                .toByteArray(Charsets.UTF_8)
+            assertEquals(exactBytes.size, crossPairedBytes.size)
+            assertFailsWith<FullTreeControlException> {
+                FullTreeScopeControl.requireBuildRecordBinding(scope, crossPairedBytes)
+            }
+            assertFailsWith<FullTreeControlException> {
+                FullTreeScopeControl.requireBuildRecordBinding(scope, exactBytes.copyOf(exactBytes.size - 1))
+            }
+        }
+
+    @Test
+    fun `oracle manifest rejects a cross-paired source lock`(): Unit =
+        inControlTemporaryDirectory { directory ->
+            val fixture = createFullTreeControlFixture(directory.resolve("source-lock-binding"))
+            val sourceLock = parseControlObject(fixture.sourceLock)
+            val archiveDigest = sourceLock.controlObject("source").controlObject("archive").controlString("sha256")
+            val replacementDigest = (if (archiveDigest[0] == '0') "1" else "0") + archiveDigest.drop(1)
+            val crossPairedBytes = Files.readAllBytes(fixture.sourceLock).toString(Charsets.UTF_8)
+                .replaceFirst(archiveDigest, replacementDigest)
+                .toByteArray(Charsets.UTF_8)
+            Files.write(fixture.sourceLock, crossPairedBytes)
+
+            val scope = parseControlObject(fixture.scope)
+            writeControlObject(
+                fixture.scope,
+                JsonObject(scope.toMutableMap().apply {
+                    this["oracle"] = JsonObject(scope.controlObject("oracle").toMutableMap().apply {
+                        this["sourceLockSha256"] = JsonPrimitive(fixtureSha256(fixture.sourceLock))
+                    })
+                }),
+            )
+            assertFailsWith<FullTreeControlException> { fixture.authenticatedScope() }
         }
 
     @Test

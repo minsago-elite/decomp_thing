@@ -464,13 +464,40 @@ internal fun createDependencyFixtureWithSourceHeaders(
             )),
         ),
     )
+    val manifest = parseControlObject(fixture.control.manifest)
+    val manifestInputs = manifest.controlObject("inputs")
+    writeControlObject(
+        fixture.control.manifest,
+        JsonObject(
+            manifest + ("inputs" to JsonObject(
+                manifestInputs + mapOf(
+                    "buildRecord" to JsonObject(
+                        manifestInputs.controlObject("buildRecord") + mapOf(
+                            "bytes" to JsonPrimitive(Files.size(fixture.control.buildRecord)),
+                            "sha256" to JsonPrimitive(fixtureSha256(fixture.control.buildRecord)),
+                        ),
+                    ),
+                    "sourceLock" to JsonObject(
+                        manifestInputs.controlObject("sourceLock") + mapOf(
+                            "bytes" to JsonPrimitive(Files.size(fixture.control.sourceLock)),
+                            "sha256" to JsonPrimitive(sourceLockSha256),
+                        ),
+                    ),
+                ),
+            )),
+        ),
+    )
+    val artifactManifestSha256 = fixtureSha256(fixture.control.manifest)
     val scope = parseControlObject(fixture.control.scope)
     writeControlObject(
         fixture.control.scope,
         JsonObject(
             scope + ("oracle" to JsonObject(
                 scope.controlObject("oracle") +
-                    ("sourceLockSha256" to JsonPrimitive(sourceLockSha256)),
+                    mapOf(
+                        "artifactManifestSha256" to JsonPrimitive(artifactManifestSha256),
+                        "sourceLockSha256" to JsonPrimitive(sourceLockSha256),
+                    ),
             )),
         ),
     )

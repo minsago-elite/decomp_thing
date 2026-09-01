@@ -56,7 +56,7 @@ object FullTreeSourceInventoryControl {
             "build-record",
         )
         val inventory = FullTreeInventoryControl.loadAndValidate(inventoryPath, scope, limits)
-        authenticateBuildRecord(buildRecord, scope)
+        authenticateBuildRecord(buildRecord, buildBytes, scope, limits)
         val archiveRecord = scope.sourceLock.controlObject("source").controlObject("archive")
         val expectedArchiveBytes = archiveRecord.controlLong("bytes")
         val expectedArchiveSha256 = archiveRecord.controlString("sha256")
@@ -154,7 +154,7 @@ object FullTreeSourceInventoryControl {
             "full-tree-inventory",
         )
         FullTreeInventoryControl.validate(inventory, scope, limits)
-        authenticateBuildRecord(buildRecord, scope)
+        authenticateBuildRecord(buildRecord, buildBytes, scope, limits)
         val (report, _) = snapshotControlObject(
             value,
             limits.maximumSourceInventoryBytes,
@@ -425,7 +425,13 @@ object FullTreeSourceInventoryControl {
         return JsonObject(withoutHash + ("reportSha256" to JsonPrimitive(reportHash)))
     }
 
-    private fun authenticateBuildRecord(buildRecord: JsonObject, scope: AuthenticatedFullTreeScope) {
+    private fun authenticateBuildRecord(
+        buildRecord: JsonObject,
+        buildRecordBytes: ByteArray,
+        scope: AuthenticatedFullTreeScope,
+        limits: FullTreeControlLimits,
+    ) {
+        FullTreeScopeControl.requireBuildRecordBinding(scope, buildRecordBytes, limits)
         val configure = buildRecord.controlObject("commands").controlArray("configure")
             .map { it.controlString("build configure argument") }
         if ("-DLLVM_ENABLE_PROJECTS=clang" !in configure || "-DLLVM_TARGETS_TO_BUILD=X86" !in configure) {
