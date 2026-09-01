@@ -139,6 +139,72 @@ class BoundedTarXzArchiveTest {
     }
 
     @Test
+    fun `generated snapshot profile omits PAX rejects links and binds SOURCE_DATE_EPOCH`() {
+        val generatedRoot = "generated"
+        val headerPath = "$generatedRoot/include/config.h"
+        val translationUnitPath = "$generatedRoot/lib/table.cpp"
+        val headerBytes = "#define VALUE 1\n".toByteArray(StandardCharsets.US_ASCII)
+        val translationUnitBytes = "int table[] = {1};\n".toByteArray(StandardCharsets.US_ASCII)
+        val entries = listOf(
+            directory(generatedRoot),
+            directory("$generatedRoot/include"),
+            regular(headerPath, headerBytes),
+            directory("$generatedRoot/lib"),
+            regular(translationUnitPath, translationUnitBytes),
+        )
+        val archive = compress(tar(entries, includePax = false))
+        val payloads = linkedMapOf<String, ByteArrayOutputStream>()
+        val summary = BoundedTarXzArchive.scanGeneratedSnapshot(
+            source = ByteArrayTarXzSource(archive),
+            expectedRoot = generatedRoot,
+            expectedMtime = TEST_MTIME,
+            regularFileVisitor = object : BoundedTarXzRegularFileVisitor {
+                override fun wants(entry: BoundedTarEntry): Boolean = entry.kind == BoundedTarEntryKind.REGULAR
+
+                override fun onChunk(
+                    entry: BoundedTarEntry,
+                    bytes: ByteArray,
+                    length: Int,
+                    endOfEntry: Boolean,
+                ) {
+                    payloads.getOrPut(entry.path, ::ByteArrayOutputStream).write(bytes, 0, length)
+                }
+            },
+        )
+
+        assertEquals(5, summary.memberCount)
+        assertEquals(2, summary.regularFileCount)
+        assertEquals(3, summary.directoryCount)
+        assertEquals(0, summary.symbolicLinkCount)
+        assertContentEquals(headerBytes, payloads.getValue(headerPath).toByteArray())
+        assertContentEquals(translationUnitBytes, payloads.getValue(translationUnitPath).toByteArray())
+
+        val paxArchive = compress(tar(entries, includePax = true))
+        val linkedArchive = compress(
+            tar(entries.dropLast(1) + symlink(translationUnitPath, "../include/config.h"), includePax = false),
+        )
+        val wrongMtimeTar = mutateHeader(tar(entries, includePax = false), 0) {
+            writeOctal(it, 136, 12, TEST_MTIME + 1L)
+        }
+        listOf(paxArchive, linkedArchive, compress(wrongMtimeTar)).forEach { rejected ->
+            assertFailsWith<BoundedTarXzException> {
+                BoundedTarXzArchive.scanGeneratedSnapshot(
+                    source = ByteArrayTarXzSource(rejected),
+                    expectedRoot = generatedRoot,
+                    expectedMtime = TEST_MTIME,
+                )
+            }
+        }
+        assertFailsWith<BoundedTarXzException> {
+            BoundedTarXzArchive.scanGeneratedSnapshot(
+                source = ByteArrayTarXzSource(archive),
+                expectedRoot = generatedRoot,
+                expectedMtime = 0L,
+            )
+        }
+    }
+
+    @Test
     fun `XZ stream check trailing and decoder bounds fail closed`() {
         val tar = validTar()
         val valid = compress(tar)
@@ -372,7 +438,7 @@ class BoundedTarXzArchiveTest {
         writeOctal(header, 108, 8, 0)
         writeOctal(header, 116, 8, 0)
         writeOctal(header, 124, 12, entry.data.size.toLong())
-        writeOctal(header, 136, 12, 946_684_800L)
+        writeOctal(header, 136, 12, TEST_MTIME)
         repeat(8) { header[148 + it] = ' '.code.toByte() }
         header[156] = entry.type.code.toByte()
         writeText(header, 157, 100, entry.link)
@@ -500,6 +566,7 @@ class BoundedTarXzArchiveTest {
     private companion object {
         const val TAR_BLOCK_BYTES = 512
         const val TAR_RECORD_BLOCKS = 20
+        const val TEST_MTIME = 946_684_800L
         const val ROOT_HEADER_BLOCK = 2
         const val ROOT = "llvm-project-22.1.6.src"
         const val COMMIT = "fc4aad7b5db3fff421df9a9637605b9ca5667881"

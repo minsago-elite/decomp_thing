@@ -97,9 +97,62 @@ internal object BoundedTarXzArchive {
         selectedRegularPaths: Set<String> = emptySet(),
         regularFileVisitor: BoundedTarXzRegularFileVisitor? = null,
         onEntry: (BoundedTarEntry) -> Unit = {},
+    ): BoundedTarXzSummary = scanProfile(
+        source = source,
+        expectedRoot = expectedRoot,
+        expectedCommit = expectedCommit,
+        expectedMtime = null,
+        allowSymbolicLinks = true,
+        limits = limits,
+        selectedRegularPaths = selectedRegularPaths,
+        regularFileVisitor = regularFileVisitor,
+        onEntry = onEntry,
+    )
+
+    /**
+     * Strict generated-tree snapshot profile. Unlike the reviewed Git archive profile above, this
+     * profile accepts no PAX metadata or links and requires every logical USTAR member timestamp to
+     * equal the authenticated build record's SOURCE_DATE_EPOCH.
+     */
+    fun scanGeneratedSnapshot(
+        source: BoundedTarXzSource,
+        expectedRoot: String,
+        expectedMtime: Long,
+        limits: BoundedTarXzLimits = BoundedTarXzLimits(),
+        regularFileVisitor: BoundedTarXzRegularFileVisitor? = null,
+        onEntry: (BoundedTarEntry) -> Unit = {},
+    ): BoundedTarXzSummary {
+        if (expectedMtime !in 1L..MAXIMUM_CANONICAL_TAR_NUMBER) {
+            archiveFail("generated snapshot modification time is outside the canonical USTAR range")
+        }
+        return scanProfile(
+            source = source,
+            expectedRoot = expectedRoot,
+            expectedCommit = null,
+            expectedMtime = expectedMtime,
+            allowSymbolicLinks = false,
+            limits = limits,
+            selectedRegularPaths = emptySet(),
+            regularFileVisitor = regularFileVisitor,
+            onEntry = onEntry,
+        )
+    }
+
+    private fun scanProfile(
+        source: BoundedTarXzSource,
+        expectedRoot: String,
+        expectedCommit: String?,
+        expectedMtime: Long?,
+        allowSymbolicLinks: Boolean,
+        limits: BoundedTarXzLimits,
+        selectedRegularPaths: Set<String>,
+        regularFileVisitor: BoundedTarXzRegularFileVisitor?,
+        onEntry: (BoundedTarEntry) -> Unit,
     ): BoundedTarXzSummary {
         requireCanonicalRoot(expectedRoot, limits)
-        if (!expectedCommit.matches(GIT_OBJECT)) archiveFail("expected archive commit is invalid")
+        if (expectedCommit != null && !expectedCommit.matches(GIT_OBJECT)) {
+            archiveFail("expected archive commit is invalid")
+        }
         if (source.size !in 1L..limits.maximumCompressedBytes) {
             archiveFail("source archive exceeds its compressed-byte bound")
         }
@@ -129,6 +182,8 @@ internal object BoundedTarXzArchive {
                 ExpandedArchiveInputStream(xz, limits.maximumExpandedBytes),
                 expectedRoot,
                 expectedCommit,
+                expectedMtime,
+                allowSymbolicLinks,
                 limits,
                 selectedRegularPaths,
                 onEntry,
@@ -150,14 +205,14 @@ internal object BoundedTarXzArchive {
     private fun scanTar(
         input: ExpandedArchiveInputStream,
         expectedRoot: String,
-        expectedCommit: String,
+        expectedCommit: String?,
+        expectedMtime: Long?,
+        allowSymbolicLinks: Boolean,
         limits: BoundedTarXzLimits,
         selectedRegularPaths: Set<String>,
         onEntry: (BoundedTarEntry) -> Unit,
         regularFileVisitor: BoundedTarXzRegularFileVisitor?,
     ): BoundedTarXzSummary {
-        val expectedPax = "52 comment=$expectedCommit\n".toByteArray(StandardCharsets.US_ASCII)
-        check(expectedPax.size == 52)
         val entries = LinkedHashMap<String, ArchiveEntryState>()
         val selected = linkedMapOf<String, SelectedTarEntry>()
         var selectedBytes = 0L
@@ -167,24 +222,30 @@ internal object BoundedTarXzArchive {
         var directories = 0
         var symbolicLinks = 0
 
-        val paxHeader = input.readBlockOrNull(TAR_BLOCK_BYTES)
-            ?: archiveFail("source archive is missing its global PAX header")
-        if (paxHeader.all { it == 0.toByte() }) archiveFail("source archive is missing its global PAX header")
-        validateHeaderEnvelope(paxHeader)
-        val paxType = paxHeader[TYPE_OFFSET].toInt() and 0xff
-        val paxName = tarPath(paxHeader)
-        val paxSize = tarNumber(paxHeader, SIZE_OFFSET, SIZE_LENGTH, "global PAX size")
-        val paxMode = tarNumber(paxHeader, MODE_OFFSET, MODE_LENGTH, "global PAX mode")
-        val paxLink = tarTextField(paxHeader, LINK_NAME_OFFSET, LINK_NAME_LENGTH, "global PAX link target")
-        if (paxType != GLOBAL_PAX_TYPE || paxName != GLOBAL_PAX_NAME ||
-            paxSize != expectedPax.size.toLong() || paxMode != GLOBAL_PAX_MODE || paxLink.isNotEmpty()
-        ) {
-            archiveFail("source archive has an unexpected initial global PAX header")
+        if (expectedCommit != null) {
+            val expectedPax = "52 comment=$expectedCommit\n".toByteArray(StandardCharsets.US_ASCII)
+            check(expectedPax.size == 52)
+            val paxHeader = input.readBlockOrNull(TAR_BLOCK_BYTES)
+                ?: archiveFail("source archive is missing its global PAX header")
+            if (paxHeader.all { it == 0.toByte() }) {
+                archiveFail("source archive is missing its global PAX header")
+            }
+            validateHeaderEnvelope(paxHeader, null)
+            val paxType = paxHeader[TYPE_OFFSET].toInt() and 0xff
+            val paxName = tarPath(paxHeader)
+            val paxSize = tarNumber(paxHeader, SIZE_OFFSET, SIZE_LENGTH, "global PAX size")
+            val paxMode = tarNumber(paxHeader, MODE_OFFSET, MODE_LENGTH, "global PAX mode")
+            val paxLink = tarTextField(paxHeader, LINK_NAME_OFFSET, LINK_NAME_LENGTH, "global PAX link target")
+            if (paxType != GLOBAL_PAX_TYPE || paxName != GLOBAL_PAX_NAME ||
+                paxSize != expectedPax.size.toLong() || paxMode != GLOBAL_PAX_MODE || paxLink.isNotEmpty()
+            ) {
+                archiveFail("source archive has an unexpected initial global PAX header")
+            }
+            addBounded(0L, paxSize, limits.maximumMetadataBytes.toLong(), "metadata")
+            val paxPayload = input.readPayload(paxSize, limits.maximumMetadataBytes)
+            if (!paxPayload.contentEquals(expectedPax)) archiveFail("source archive global PAX comment differs")
+            input.skipPadding(paxSize)
         }
-        addBounded(0L, paxSize, limits.maximumMetadataBytes.toLong(), "metadata")
-        val paxPayload = input.readPayload(paxSize, limits.maximumMetadataBytes)
-        if (!paxPayload.contentEquals(expectedPax)) archiveFail("source archive global PAX comment differs")
-        input.skipPadding(paxSize)
 
         var terminated = false
         while (!terminated) {
@@ -212,12 +273,16 @@ internal object BoundedTarXzArchive {
                 continue
             }
 
-            validateHeaderEnvelope(header)
+            validateHeaderEnvelope(header, expectedMtime)
             val rawType = header[TYPE_OFFSET].toInt() and 0xff
             val kind = when (rawType) {
                 REGULAR_TYPE -> BoundedTarEntryKind.REGULAR
                 DIRECTORY_TYPE -> BoundedTarEntryKind.DIRECTORY
-                SYMBOLIC_LINK_TYPE -> BoundedTarEntryKind.SYMBOLIC_LINK
+                SYMBOLIC_LINK_TYPE -> if (allowSymbolicLinks) {
+                    BoundedTarEntryKind.SYMBOLIC_LINK
+                } else {
+                    archiveFail("generated snapshot contains a symbolic link")
+                }
                 else -> archiveFail("source archive contains unsupported member type 0x${rawType.toString(16)}")
             }
             members = Math.addExact(members, 1)
@@ -241,7 +306,7 @@ internal object BoundedTarXzArchive {
                 BoundedTarEntryKind.DIRECTORY -> mode == DIRECTORY_MODE
                 BoundedTarEntryKind.SYMBOLIC_LINK -> mode == SYMBOLIC_LINK_MODE
             }
-            if (!validMode) archiveFail("source archive member mode differs from its Git-archive type profile")
+            if (!validMode) archiveFail("archive member mode differs from its canonical USTAR type profile")
 
             if (entries.containsKey(canonical.path)) archiveFail("source archive duplicates ${canonical.path}")
             if (members == 1) {
@@ -335,7 +400,7 @@ internal object BoundedTarXzArchive {
         )
     }
 
-    private fun validateHeaderEnvelope(header: ByteArray) {
+    private fun validateHeaderEnvelope(header: ByteArray, expectedMtime: Long?) {
         validateTarChecksum(header)
         if (!header.copyOfRange(MAGIC_OFFSET, MAGIC_OFFSET + MAGIC.size).contentEquals(MAGIC) ||
             !header.copyOfRange(VERSION_OFFSET, VERSION_OFFSET + VERSION.size).contentEquals(VERSION)
@@ -348,7 +413,10 @@ internal object BoundedTarXzArchive {
         val uid = tarNumber(header, UID_OFFSET, UID_LENGTH, "tar member uid")
         val gid = tarNumber(header, GID_OFFSET, GID_LENGTH, "tar member gid")
         if (uid != 0L || gid != 0L) archiveFail("source archive member ownership is not normalized")
-        tarNumber(header, MTIME_OFFSET, MTIME_LENGTH, "tar member modification time")
+        val modificationTime = tarNumber(header, MTIME_OFFSET, MTIME_LENGTH, "tar member modification time")
+        if (expectedMtime != null && modificationTime != expectedMtime) {
+            archiveFail("generated snapshot member modification time differs from SOURCE_DATE_EPOCH")
+        }
         val user = tarTextField(header, USER_NAME_OFFSET, USER_GROUP_NAME_LENGTH, "tar user name")
         val group = tarTextField(header, GROUP_NAME_OFFSET, USER_GROUP_NAME_LENGTH, "tar group name")
         if (user != ROOT_OWNER || group != ROOT_OWNER) {
@@ -582,6 +650,7 @@ internal object BoundedTarXzArchive {
     private const val MAXIMUM_TERMINATOR_RECORD_BLOCKS = 21
     private const val XZ_STREAM_FOOTER_BYTES = 12
     private const val INDEX_ENTRY_OVERHEAD_BYTES = 64L
+    private const val MAXIMUM_CANONICAL_TAR_NUMBER = 0x1ffffffffL
     private const val NAME_OFFSET = 0
     private const val NAME_LENGTH = 100
     private const val MODE_OFFSET = 100
