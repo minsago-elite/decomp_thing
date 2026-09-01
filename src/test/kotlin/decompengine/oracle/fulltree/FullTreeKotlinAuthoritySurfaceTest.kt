@@ -117,4 +117,26 @@ class FullTreeKotlinAuthoritySurfaceTest {
             assertTrue(wrapper.contains("cannot"), path)
         }
     }
+
+    @Test
+    fun `function truth keeps ACP and Python outside oracle authority`() {
+        val source = Path.of(
+            "src/main/kotlin/decompengine/oracle/fulltree/FullTreeFunctionTruthSqlite.kt",
+        ).readText()
+        val guide = Path.of("docs/oracle-acp-trust-boundary.md").readText()
+
+        assertTrue(source.contains("internal object FullTreeFunctionTruthSqlite"))
+        assertTrue(source.contains("val authoritativeReleaseEvidence: Boolean = false"))
+        assertTrue(source.contains("exactly the generic four-member bounded-shard tree"))
+        assertFalse(source.contains("ProcessBuilder"))
+        assertFalse(source.contains("oracle.full_tree_function_truth"))
+        assertFalse(source.contains("AcpAgentHarness"))
+        assertFalse(source.contains("AcpClient"))
+
+        assertTrue(guide.contains("Full-tree function-truth v2 now also has an internal Kotlin/SQLite"))
+        assertTrue(guide.contains("authoritativeReleaseEvidence=false"))
+        assertTrue(guide.contains("canonical-path"))
+        assertTrue(guide.contains("presence is therefore never a bearer capability"))
+        assertTrue(guide.contains("an ACP consumer must not infer authority"))
+    }
 }

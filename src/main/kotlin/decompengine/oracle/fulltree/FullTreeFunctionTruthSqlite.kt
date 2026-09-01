@@ -42,7 +42,7 @@ internal class FullTreeFunctionTruthException(message: String, cause: Throwable?
     IllegalArgumentException(message, cause)
 
 /** Exact aggregate populations published by the current function-truth v2 policy. */
-data class FullTreeFunctionTruthCounts(
+internal data class FullTreeFunctionTruthCounts(
     val elfRvas: Long,
     val dwarfRvas: Long,
     val scoredRvas: Long,
@@ -81,7 +81,7 @@ data class FullTreeFunctionTruthCounts(
  * issue #138. ACP may consume the published truth read-only, but neither ACP nor Python belongs to
  * this derivation or validation boundary.
  */
-class FullTreeFunctionTruthGeneration internal constructor(
+internal class FullTreeFunctionTruthGeneration internal constructor(
     val root: Path,
     val index: JsonObject,
     val indexArtifactSha256: String,
@@ -377,6 +377,7 @@ internal object FullTreeFunctionTruthSqlite {
             }
         }
     }
+
 }
 
 private data class AuthenticatedFunctionObservationRun(

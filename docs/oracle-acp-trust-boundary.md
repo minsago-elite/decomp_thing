@@ -111,6 +111,17 @@ cannot enter a new release as truth or validation evidence. A stage becomes auth
 parity, fail-closed mutation coverage, worker-count determinism, repeated byte-identical output, and a Kotlin-only
 production run all pass.
 
+Full-tree function-truth v2 now also has an internal Kotlin/SQLite reconciliation slice. It re-derives the ELF index
+and every DWARF observation shard from pinned raw artifacts, accepts only the exact generic four-member bounded-run
+tree, stores RVAs as unsigned fixed-width SQLite keys, rejects identity-prefix collisions and the historical
+coalesced-DWARF-only producer/validator contradiction, and publishes deterministic no-replace bytes. It neither
+imports nor invokes Python, and ACP supplies no callback, fact, policy, validation, or publication decision. This is
+still migration evidence rather than release authority: its typed receipt fixes `authoritativeReleaseEvidence=false`,
+it assumes cooperation from the owning Unix principal, and it lacks the aggregate ext4 lease/all-shard lifecycle in
+issue #138. Historical roots with unauthenticated `control/`, `usage/`, or `execution-evidence.json` members fail
+closed. The stable v2 disk schema predates authority metadata and still contains `complete=true`; canonical-path
+presence is therefore never a bearer capability, and an ACP consumer must not infer authority from those bytes.
+
 For A15 candidate behavior, Kotlin now has a descriptor-bound
 [pre-START admission](llvm-candidate-execution-prestart.md) which authenticates an opaque candidate and the exact
 input-only command, corpus, runtime-policy, and budget commitments, publishes a mode-0400 non-release receipt, and
