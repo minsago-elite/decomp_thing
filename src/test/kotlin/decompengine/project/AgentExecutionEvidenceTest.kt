@@ -51,7 +51,13 @@ import decompengine.agent.AgentToolStatus
 import decompengine.agent.AgentUsage
 import decompengine.agent.AgentWorkspacePath
 import decompengine.agent.AgentWorkspaceRoot
+import decompengine.oracle.behavior.LlvmBehaviorCandidateAcpLineageIndexV2Publisher
+import decompengine.oracle.behavior.LlvmBehaviorCandidateAcpLineageIndexV2Verifier
+import decompengine.oracle.core.DescriptorBoundAtomicStateFile
 import java.time.Duration
+import java.nio.file.Files
+import java.nio.file.Path
+import java.nio.file.attribute.PosixFilePermission
 import kotlin.io.path.createTempDirectory
 import kotlin.io.path.createDirectories
 import kotlin.io.path.deleteIfExists
@@ -66,6 +72,7 @@ import kotlinx.serialization.json.jsonArray
 import kotlinx.serialization.json.jsonObject
 import kotlinx.serialization.json.jsonPrimitive
 import kotlin.test.Test
+import kotlin.test.assertContentEquals
 import kotlin.test.assertEquals
 import kotlin.test.assertFailsWith
 import kotlin.test.assertFalse
@@ -242,6 +249,193 @@ class AgentExecutionEvidenceTest {
             (candidateLineage.source.sourceRevision.inputs as MutableList).clear()
         }
 
+        val lineageParent = temp.resolve("lineage-index").createDirectories()
+        Files.setPosixFilePermissions(lineageParent, OWNER_DIRECTORY_PERMISSIONS)
+        val lineageIndex = lineageParent.resolve("candidate-acp-lineage-index-v2.json")
+        val publishedLineage = LlvmBehaviorCandidateAcpLineageIndexV2Publisher.publish(
+            bundle.archivePath,
+            lineageIndex,
+        )
+        assertTrue(publishedLineage.candidateLineageBound)
+        assertFalse(publishedLineage.hostedBuildBound)
+        assertFalse(publishedLineage.admittedArtifactBound)
+        assertFalse(publishedLineage.prepared)
+        assertFalse(publishedLineage.candidateStarted)
+        assertFalse(publishedLineage.scoringAuthority)
+        assertFalse(publishedLineage.certificationAuthority)
+        assertFalse(publishedLineage.releaseEligible)
+        assertEquals(1, publishedLineage.acceptedAcpCount)
+        assertEquals(1, publishedLineage.reconstructionCount)
+        assertEquals(0, publishedLineage.repairCount)
+        assertEquals(bundle.archiveSha256, publishedLineage.archiveSha256)
+        assertEquals(candidateLineage.source.sourceRevision.sha256, publishedLineage.sourceRevisionSha256)
+
+        val lineageText = lineageIndex.readText()
+        val lineageDocument = Json.parseToJsonElement(lineageText).jsonObject
+        assertEquals(
+            "first-class-candidate-producer-operator",
+            lineageDocument.getValue("acpBoundary").jsonObject.getValue("role").jsonPrimitive.content,
+        )
+        val boundary = lineageDocument.getValue("acpBoundary").jsonObject
+        assertEquals(
+            "authenticated-session-change-provenance",
+            boundary.getValue("candidateContribution").jsonPrimitive.content,
+        )
+        listOf(
+            "oracleAuthority",
+            "referenceAuthoringAuthority",
+            "policyAuthoringAuthority",
+            "validationAuthority",
+            "observationAuthoringAuthority",
+            "startAuthority",
+            "containmentAuthority",
+            "terminalAbsenceAuthority",
+            "scoringAuthority",
+            "certificationAuthority",
+            "releaseAuthority",
+        ).forEach { field -> assertFalse(boundary.getValue(field).jsonPrimitive.boolean, field) }
+        val claims = lineageDocument.getValue("claims").jsonObject
+        assertTrue(claims.getValue("candidateLineageBound").jsonPrimitive.boolean)
+        claims.filterKeys { it != "candidateLineageBound" }.forEach { (field, value) ->
+            assertFalse(value.jsonPrimitive.boolean, field)
+        }
+        assertFalse(lineageText.lowercase().contains("python"))
+        assertFalse(lineageText.contains("behavior-preexec-v1"))
+        assertFalse(lineageText.contains("build_contract.json"))
+
+        val retry = LlvmBehaviorCandidateAcpLineageIndexV2Publisher.publish(bundle.archivePath, lineageIndex)
+        assertEquals(publishedLineage.indexSha256, retry.indexSha256)
+        val secondParent = temp.resolve("lineage-index-second").createDirectories()
+        Files.setPosixFilePermissions(secondParent, OWNER_DIRECTORY_PERMISSIONS)
+        val secondIndex = secondParent.resolve("candidate-acp-lineage-index-v2.json")
+        LlvmBehaviorCandidateAcpLineageIndexV2Publisher.publish(bundle.archivePath, secondIndex)
+        assertContentEquals(lineageIndex.readBytes(), secondIndex.readBytes())
+
+        val otherHarness = EvidenceHarness(
+            "other-session-secret",
+            "other peer message",
+            "other tool title",
+        )
+        val otherProject = temp.resolve("other-project")
+        SourceTreeGenerator.generate(
+            evidenceModel(),
+            otherProject,
+            reconstructor = BoundedLlmModuleReconstructor(
+                otherHarness,
+                harnessProvenanceDescriptor = otherHarness.factoryProvenance.stableDescriptor,
+            ),
+        )
+        MakeProjectBuilder.build(otherProject)
+        val otherBundle = ArchivalPackager.create(otherProject, temp.resolve("other-source-tree.zip"))
+        assertFailsWith<IllegalArgumentException> {
+            LlvmBehaviorCandidateAcpLineageIndexV2Verifier.verify(otherBundle.archivePath, lineageIndex)
+        }
+        val originalLineageBytes = lineageIndex.readBytes()
+        assertFailsWith<IllegalArgumentException> {
+            LlvmBehaviorCandidateAcpLineageIndexV2Publisher.publish(otherBundle.archivePath, lineageIndex)
+        }
+        assertContentEquals(originalLineageBytes, lineageIndex.readBytes())
+
+        val recoveryParent = temp.resolve("lineage-index-recovery").createDirectories()
+        Files.setPosixFilePermissions(recoveryParent, OWNER_DIRECTORY_PERMISSIONS)
+        val recoveredIndex = recoveryParent.resolve("candidate-acp-lineage-index-v2.json")
+        val recoveryTemporary = recoveryParent.resolve(
+            DescriptorBoundAtomicStateFile.temporaryName(recoveredIndex.fileName.toString()),
+        )
+        Files.write(recoveryTemporary, lineageIndex.readBytes())
+        Files.setPosixFilePermissions(recoveryTemporary, OWNER_READ_ONLY_PERMISSIONS)
+        val recovered = LlvmBehaviorCandidateAcpLineageIndexV2Publisher.publish(
+            bundle.archivePath,
+            recoveredIndex,
+        )
+        assertEquals(publishedLineage.indexSha256, recovered.indexSha256)
+        assertFalse(recoveryTemporary.exists())
+
+        val malformedParent = temp.resolve("lineage-index-malformed").createDirectories()
+        Files.setPosixFilePermissions(malformedParent, OWNER_DIRECTORY_PERMISSIONS)
+        val malformedIndex = malformedParent.resolve("candidate-acp-lineage-index-v2.json")
+        Files.write(malformedIndex, lineageIndex.readBytes() + '\n'.code.toByte())
+        Files.setPosixFilePermissions(malformedIndex, OWNER_READ_ONLY_PERMISSIONS)
+        assertFailsWith<IllegalArgumentException> {
+            LlvmBehaviorCandidateAcpLineageIndexV2Verifier.verify(bundle.archivePath, malformedIndex)
+        }
+
+        val mutatedParent = temp.resolve("lineage-index-mutated").createDirectories()
+        Files.setPosixFilePermissions(mutatedParent, OWNER_DIRECTORY_PERMISSIONS)
+        val mutatedIndex = mutatedParent.resolve("candidate-acp-lineage-index-v2.json")
+        val lineageDigest = lineageDocument.getValue("candidateSourceLineageSha256").jsonPrimitive.content
+        val mutatedDigest = (if (lineageDigest.first() == '0') "1" else "0") + lineageDigest.drop(1)
+        Files.write(mutatedIndex, lineageText.replace(lineageDigest, mutatedDigest).toByteArray())
+        Files.setPosixFilePermissions(mutatedIndex, OWNER_READ_ONLY_PERMISSIONS)
+        assertFailsWith<IllegalArgumentException> {
+            LlvmBehaviorCandidateAcpLineageIndexV2Verifier.verify(bundle.archivePath, mutatedIndex)
+        }
+
+        val oversizedParent = temp.resolve("lineage-index-oversized").createDirectories()
+        Files.setPosixFilePermissions(oversizedParent, OWNER_DIRECTORY_PERMISSIONS)
+        val oversizedIndex = oversizedParent.resolve("candidate-acp-lineage-index-v2.json")
+        Files.write(oversizedIndex, ByteArray(64 * 1024 + 1) { 'x'.code.toByte() })
+        Files.setPosixFilePermissions(oversizedIndex, OWNER_READ_ONLY_PERMISSIONS)
+        assertFailsWith<IllegalArgumentException> {
+            LlvmBehaviorCandidateAcpLineageIndexV2Verifier.verify(bundle.archivePath, oversizedIndex)
+        }
+
+        val contaminatedParent = temp.resolve("lineage-index-contaminated").createDirectories()
+        Files.setPosixFilePermissions(contaminatedParent, OWNER_DIRECTORY_PERMISSIONS)
+        contaminatedParent.resolve("unexpected").writeText("occupied")
+        val contaminatedIndex = contaminatedParent.resolve("candidate-acp-lineage-index-v2.json")
+        assertFailsWith<IllegalArgumentException> {
+            LlvmBehaviorCandidateAcpLineageIndexV2Publisher.publish(bundle.archivePath, contaminatedIndex)
+        }
+        assertFalse(contaminatedIndex.exists())
+
+        val wrongModeParent = temp.resolve("lineage-index-wrong-mode").createDirectories()
+        Files.setPosixFilePermissions(
+            wrongModeParent,
+            OWNER_DIRECTORY_PERMISSIONS + PosixFilePermission.GROUP_READ,
+        )
+        assertFailsWith<IllegalArgumentException> {
+            LlvmBehaviorCandidateAcpLineageIndexV2Publisher.publish(
+                bundle.archivePath,
+                wrongModeParent.resolve("candidate-acp-lineage-index-v2.json"),
+            )
+        }
+
+        val archiveHardLink = temp.resolve("candidate-archive-hard-link.zip")
+        Files.createLink(archiveHardLink, bundle.archivePath)
+        try {
+            val hardLinkOutputParent = temp.resolve("lineage-index-hard-archive").createDirectories()
+            Files.setPosixFilePermissions(hardLinkOutputParent, OWNER_DIRECTORY_PERMISSIONS)
+            assertFailsWith<IllegalArgumentException> {
+                LlvmBehaviorCandidateAcpLineageIndexV2Publisher.publish(
+                    bundle.archivePath,
+                    hardLinkOutputParent.resolve("candidate-acp-lineage-index-v2.json"),
+                )
+            }
+        } finally {
+            Files.delete(archiveHardLink)
+        }
+
+        val indexHardLinkParent = temp.resolve("lineage-index-hard-link").createDirectories()
+        Files.setPosixFilePermissions(indexHardLinkParent, OWNER_DIRECTORY_PERMISSIONS)
+        val indexHardLink = indexHardLinkParent.resolve("candidate-acp-lineage-index-v2.json")
+        Files.createLink(indexHardLink, lineageIndex)
+        try {
+            assertFailsWith<IllegalArgumentException> {
+                LlvmBehaviorCandidateAcpLineageIndexV2Verifier.verify(bundle.archivePath, indexHardLink)
+            }
+        } finally {
+            Files.delete(indexHardLink)
+        }
+
+        listOf(
+            LlvmBehaviorCandidateAcpLineageIndexV2Publisher::class.java to "publish",
+            LlvmBehaviorCandidateAcpLineageIndexV2Verifier::class.java to "verify",
+        ).forEach { (owner, methodName) ->
+            val method = owner.declaredMethods.single { it.name == methodName && !it.isSynthetic }
+            assertEquals(listOf(Path::class.java, Path::class.java), method.parameterTypes.toList())
+        }
+
         val sessionCommitment = evidence.getValue("session").jsonObject
             .getValue("sessionId").jsonObject.getValue("sha256").jsonPrimitive.content
         val filesystemOffset = text.indexOf("\"filesystem\"")
@@ -259,6 +453,25 @@ class AgentExecutionEvidenceTest {
                 "parse",
             )
         }
+    }
+
+    @Test
+    fun `candidate lineage index rejects archives without an accepted ACP contribution`() {
+        val temp = createTempDirectory("candidate-lineage-without-acp-")
+        val project = temp.resolve("project")
+        SourceTreeGenerator.generate(evidenceModel(), project)
+        MakeProjectBuilder.build(project)
+        val archive = ArchivalPackager.create(project, temp.resolve("candidate.zip"))
+        val outputParent = temp.resolve("lineage-index").createDirectories()
+        Files.setPosixFilePermissions(outputParent, OWNER_DIRECTORY_PERMISSIONS)
+
+        val failure = assertFailsWith<IllegalArgumentException> {
+            LlvmBehaviorCandidateAcpLineageIndexV2Publisher.publish(
+                archive.archivePath,
+                outputParent.resolve("candidate-acp-lineage-index-v2.json"),
+            )
+        }
+        assertTrue(failure.message.orEmpty().contains("no accepted first-class ACP contribution"), failure.message)
     }
 
     @Test
@@ -655,6 +868,13 @@ class AgentExecutionEvidenceTest {
 
     private companion object {
         const val IMPLEMENTATION_ID = "test-acp"
+
+        val OWNER_DIRECTORY_PERMISSIONS = setOf(
+            PosixFilePermission.OWNER_READ,
+            PosixFilePermission.OWNER_WRITE,
+            PosixFilePermission.OWNER_EXECUTE,
+        )
+        val OWNER_READ_ONLY_PERMISSIONS = setOf(PosixFilePermission.OWNER_READ)
 
         fun digest(value: String): String = java.security.MessageDigest.getInstance("SHA-256")
             .digest(value.toByteArray())

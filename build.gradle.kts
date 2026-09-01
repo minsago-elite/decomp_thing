@@ -110,6 +110,22 @@ registerOracleJavaExecTask(
     args(layout.projectDirectory.file("oracle/llvm/22.1.6/behavior-reference-input-plan-v2.json").asFile.absolutePath)
 }
 
+registerOracleJavaExecTask(
+    taskName = "generateLlvmBehaviorCandidateAcpLineageIndexV2",
+    taskDescription = "Derives the immutable first-class ACP candidate lineage index from a verified archive",
+    entryPoint = "decompengine.oracle.behavior.LlvmBehaviorCandidateAcpLineageIndexV2Cli",
+).configure {
+    doFirst {
+        val archive = requireNotNull(project.findProperty("candidateArchive") as? String) {
+            "-PcandidateArchive=<absolute archive path> is required"
+        }
+        val output = requireNotNull(project.findProperty("candidateLineageIndex") as? String) {
+            "-PcandidateLineageIndex=<absolute candidate-acp-lineage-index-v2.json path> is required"
+        }
+        args(archive, output)
+    }
+}
+
 val acpGateHelperSource = layout.projectDirectory.file("src/main/c/decomp_acp_gate_helper.c")
 val acpGateHelperBinary = layout.buildDirectory.file("native/acp/decomp-acp-gate-helper")
 val acpGateHelperChecksum = layout.buildDirectory.file("native/acp/decomp-acp-gate-helper.sha256")

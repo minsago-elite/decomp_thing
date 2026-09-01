@@ -1,11 +1,15 @@
 package decompengine.oracle.core
 
+import decompengine.oracle.behavior.LLVM_BEHAVIOR_CANDIDATE_ACP_LINEAGE_MAXIMUM_ARCHIVE_BYTES
 import kotlin.test.Test
 import kotlin.test.assertEquals
 import kotlin.test.assertFailsWith
 import kotlin.test.assertTrue
 import kotlinx.serialization.json.JsonObject
 import kotlinx.serialization.json.JsonPrimitive
+import kotlinx.serialization.json.jsonObject
+import kotlinx.serialization.json.jsonPrimitive
+import kotlinx.serialization.json.long
 
 class OracleSchemasTest {
     @Test
@@ -66,12 +70,28 @@ class OracleSchemasTest {
 
     @Test
     fun `every catalogued schema is bundled and compilable`() {
-        assertEquals(57, OracleSchemas.supportedNames.size)
+        assertEquals(58, OracleSchemas.supportedNames.size)
         OracleSchemas.supportedNames.forEach { name ->
             val identity = OracleSchemas.identity(name)
             assertEquals(name, identity.name)
             assertTrue(identity.sha256.matches(Regex("[0-9a-f]{64}")), name)
         }
+    }
+
+    @Test
+    fun `candidate ACP lineage archive bound matches its bundled schema`() {
+        val schema = requireNotNull(
+            OracleSchemas::class.java.classLoader.getResourceAsStream(
+                "oracle/llvm-behavior-candidate-acp-lineage-index-v2.schema.json",
+            ),
+        ).use { OracleJson.parse(it.readAllBytes()).jsonObject }
+        val schemaMaximum = schema.getValue("properties").jsonObject
+            .getValue("archive").jsonObject
+            .getValue("properties").jsonObject
+            .getValue("bytes").jsonObject
+            .getValue("maximum").jsonPrimitive.long
+
+        assertEquals(LLVM_BEHAVIOR_CANDIDATE_ACP_LINEAGE_MAXIMUM_ARCHIVE_BYTES, schemaMaximum)
     }
 
     @Test

@@ -1,0 +1,177 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://github.com/minsago-elite/decomp_thing/oracle/llvm-behavior-candidate-acp-lineage-index-v2.schema.json",
+  "title": "Kotlin/JVM-verified LLVM behavior candidate ACP lineage index v2",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schemaVersion",
+    "kind",
+    "authority",
+    "schema",
+    "archive",
+    "source",
+    "acceptedAcp",
+    "candidateSourceLineageSha256",
+    "acpBoundary",
+    "claims"
+  ],
+  "properties": {
+    "schemaVersion": {"const": 2},
+    "kind": {"const": "llvm-behavior-candidate-acp-lineage-index-v2"},
+    "authority": {"const": "kotlin-jvm-verified-candidate-acp-lineage-v2"},
+    "schema": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["name", "sha256"],
+      "properties": {
+        "name": {"const": "llvm-behavior-candidate-acp-lineage-index-v2"},
+        "sha256": {"$ref": "#/$defs/sha256"}
+      }
+    },
+    "archive": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "bytes",
+        "sha256",
+        "archiveManifestBytes",
+        "archiveManifestSha256",
+        "sourceTreeManifestBytes",
+        "sourceTreeManifestSha256"
+      ],
+      "properties": {
+        "bytes": {"type": "integer", "minimum": 1, "maximum": 1610612736},
+        "sha256": {"$ref": "#/$defs/sha256"},
+        "archiveManifestBytes": {"type": "integer", "minimum": 1, "maximum": 1073741824},
+        "archiveManifestSha256": {"$ref": "#/$defs/sha256"},
+        "sourceTreeManifestBytes": {"type": "integer", "minimum": 1, "maximum": 134217728},
+        "sourceTreeManifestSha256": {"$ref": "#/$defs/sha256"}
+      }
+    },
+    "source": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "profileId",
+        "profileSha256",
+        "revisionAlgorithm",
+        "inputCount",
+        "revisionSha256",
+        "repairGraphHeadId",
+        "repairGraphHeadRevisionSha256"
+      ],
+      "properties": {
+        "profileId": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 128,
+          "pattern": "^[A-Za-z0-9_][A-Za-z0-9_.-]{0,127}$"
+        },
+        "profileSha256": {"$ref": "#/$defs/sha256"},
+        "revisionAlgorithm": {"const": "length-prefixed-path-bytes-sha256-v1"},
+        "inputCount": {"type": "integer", "minimum": 1, "maximum": 100000},
+        "revisionSha256": {"$ref": "#/$defs/sha256"},
+        "repairGraphHeadId": {
+          "type": ["string", "null"],
+          "minLength": 1,
+          "maxLength": 256,
+          "pattern": "^[A-Za-z0-9_.-]+$"
+        },
+        "repairGraphHeadRevisionSha256": {
+          "anyOf": [{"$ref": "#/$defs/sha256"}, {"type": "null"}]
+        }
+      },
+      "allOf": [
+        {
+          "anyOf": [
+            {
+              "properties": {
+                "repairGraphHeadId": {"type": "null"},
+                "repairGraphHeadRevisionSha256": {"type": "null"}
+              }
+            },
+            {
+              "properties": {
+                "repairGraphHeadId": {"type": "string"},
+                "repairGraphHeadRevisionSha256": {"$ref": "#/$defs/sha256"}
+              }
+            }
+          ]
+        }
+      ]
+    },
+    "acceptedAcp": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "receiptSchemaVersion",
+        "count",
+        "reconstructionCount",
+        "repairCount",
+        "aggregateAlgorithm",
+        "receiptSetSha256",
+        "sessionSetSha256",
+        "changeSetSha256",
+        "lineageSetSha256"
+      ],
+      "properties": {
+        "receiptSchemaVersion": {"const": 2},
+        "count": {"type": "integer", "minimum": 1, "maximum": 100000},
+        "reconstructionCount": {"type": "integer", "minimum": 0, "maximum": 100000},
+        "repairCount": {"type": "integer", "minimum": 0, "maximum": 100000},
+        "aggregateAlgorithm": {"const": "domain-separated-length-prefixed-sorted-leaves-v2"},
+        "receiptSetSha256": {"$ref": "#/$defs/sha256"},
+        "sessionSetSha256": {"$ref": "#/$defs/sha256"},
+        "changeSetSha256": {"$ref": "#/$defs/sha256"},
+        "lineageSetSha256": {"$ref": "#/$defs/sha256"}
+      }
+    },
+    "candidateSourceLineageSha256": {"$ref": "#/$defs/sha256"},
+    "acpBoundary": {
+      "const": {
+        "role": "first-class-candidate-producer-operator",
+        "candidateContribution": "authenticated-session-change-provenance",
+        "candidateProvenanceAccess": "read-only-oracle-input",
+        "candidateAdmissionOwner": "kotlin-jvm-host",
+        "candidateLiveExecutionOwner": "separately-reviewed-kotlin-jvm-host",
+        "referenceSubjectAdmission": "kotlin-jvm-host-only",
+        "oracleAuthority": false,
+        "referenceAuthoringAuthority": false,
+        "policyAuthoringAuthority": false,
+        "validationAuthority": false,
+        "observationAuthoringAuthority": false,
+        "startAuthority": false,
+        "containmentAuthority": false,
+        "terminalAbsenceAuthority": false,
+        "scoringAuthority": false,
+        "certificationAuthority": false,
+        "releaseAuthority": false
+      }
+    },
+    "claims": {
+      "const": {
+        "candidateLineageBound": true,
+        "hostedBuildBound": false,
+        "admittedArtifactBound": false,
+        "prepared": false,
+        "runtimeIdentityVerified": false,
+        "liveContainmentVerified": false,
+        "terminalAbsenceVerified": false,
+        "observationsCaptured": false,
+        "candidateStarted": false,
+        "startAuthorized": false,
+        "referenceTruthEstablished": false,
+        "scoringAuthority": false,
+        "certificationAuthority": false,
+        "releaseEligible": false
+      }
+    }
+  },
+  "$defs": {
+    "sha256": {
+      "type": "string",
+      "pattern": "^[0-9a-f]{64}$"
+    }
+  }
+}

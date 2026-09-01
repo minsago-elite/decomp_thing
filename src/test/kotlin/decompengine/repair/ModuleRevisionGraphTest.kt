@@ -44,6 +44,7 @@ import decompengine.project.captureBuildSourceRevision
 import decompengine.project.MakeProjectBuilder
 import decompengine.project.GeneratedCRepairIndexProfile
 import decompengine.project.sha256
+import decompengine.oracle.behavior.LlvmBehaviorCandidateAcpLineageIndexV2Publisher
 import decompengine.validation.ProcessInput
 import kotlinx.serialization.json.Json
 import kotlinx.serialization.json.jsonObject
@@ -2243,6 +2244,23 @@ class ModuleRevisionGraphTest {
             captureBuildSourceRevision(extracted).sha256,
             candidateLineage.source.sourceRevision.sha256,
         )
+        val lineageParent = fixture.project.parent.resolve("repair-lineage-index").createDirectories()
+        Files.setPosixFilePermissions(
+            lineageParent,
+            setOf(
+                java.nio.file.attribute.PosixFilePermission.OWNER_READ,
+                java.nio.file.attribute.PosixFilePermission.OWNER_WRITE,
+                java.nio.file.attribute.PosixFilePermission.OWNER_EXECUTE,
+            ),
+        )
+        val publishedLineage = LlvmBehaviorCandidateAcpLineageIndexV2Publisher.publish(
+            bundle.archivePath,
+            lineageParent.resolve("candidate-acp-lineage-index-v2.json"),
+        )
+        assertEquals(1, publishedLineage.acceptedAcpCount)
+        assertEquals(0, publishedLineage.reconstructionCount)
+        assertEquals(1, publishedLineage.repairCount)
+        assertEquals(candidateLineage.source.sourceRevision.sha256, publishedLineage.sourceRevisionSha256)
     }
 
     @Test
