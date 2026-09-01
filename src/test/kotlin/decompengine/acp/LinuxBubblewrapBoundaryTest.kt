@@ -184,11 +184,25 @@ class LinuxBubblewrapBoundaryTest {
     }
 
     @Test
-    fun `static helper consumes only G preserves stdin and denies EOF wrong token malformed env and scripts`() {
+    fun `static helper attests inherited or closed stdin and denies malformed protocols`() {
         requireCompiledFixtures()
         val success = runDirectGate("PUBLIC_VALUE=visible\u0000".toByteArray(), "GZ".toByteArray())
         assertEquals(0, success.first, success.second)
         assertEquals("visible:Z\n", success.second)
+        val closed = runDirectGate(
+            "PUBLIC_VALUE=visible\u0000".toByteArray(),
+            "GZ".toByteArray(),
+            stdinDispositionArgument = AcpSandboxStdinDisposition.CLOSED_BEFORE_EXEC.protocolArgument,
+        )
+        assertEquals(80, closed.first, closed.second)
+        assertEquals("", closed.second)
+        val unknownDisposition = runDirectGate(
+            "PUBLIC_VALUE=visible\u0000".toByteArray(),
+            "GZ".toByteArray(),
+            stdinDispositionArgument = "closed-after-exec",
+        )
+        assertNotEquals(0, unknownDisposition.first)
+        assertEquals("", unknownDisposition.second)
         listOf(ByteArray(0), "XZ".toByteArray()).forEach { input ->
             val denied = runDirectGate("PUBLIC_VALUE=visible\u0000".toByteArray(), input)
             assertNotEquals(0, denied.first)
@@ -217,6 +231,163 @@ class LinuxBubblewrapBoundaryTest {
         val scriptDenied = runDirectGate(ByteArray(0), "G".toByteArray(), script, emptyList())
         assertNotEquals(0, scriptDenied.first)
         assertEquals("", scriptDenied.second)
+    }
+
+    @Test
+    fun `Ninja query purpose alone requires closed stdin separate pipes and no ambient roots`() {
+        fun launch(
+            purpose: AcpSandboxLaunchPurpose,
+            stdin: AcpSandboxStdinDisposition,
+            stagingRoots: List<AcpSandboxRootGrant> = emptyList(),
+            emptyDirectories: List<Path> = emptyList(),
+        ) = AcpSandboxLaunch(
+            command = listOf("/usr/bin/ninja", "-t", "compdb"),
+            environment = emptyMap(),
+            workingDirectory = Path.of("/build"),
+            resourceLimits = TEST_LIMITS,
+            maximumWallDuration = Duration.ofSeconds(5),
+            readOnlyMounts = emptyList(),
+            stagingRoots = stagingRoots,
+            purpose = purpose,
+            emptyDirectories = emptyDirectories,
+            stdinDisposition = stdin,
+        )
+
+        assertFailsWith<IllegalArgumentException> {
+            launch(
+                AcpSandboxLaunchPurpose.NINJA_COMPDB_QUERY,
+                AcpSandboxStdinDisposition.INHERITED_PIPE,
+            )
+        }
+        listOf(AcpSandboxLaunchPurpose.OUTER_AGENT, AcpSandboxLaunchPurpose.TERMINAL).forEach { purpose ->
+            assertFailsWith<IllegalArgumentException> {
+                launch(purpose, AcpSandboxStdinDisposition.CLOSED_BEFORE_EXEC)
+            }
+        }
+        assertFailsWith<IllegalArgumentException> {
+            launch(
+                AcpSandboxLaunchPurpose.NINJA_COMPDB_QUERY,
+                AcpSandboxStdinDisposition.CLOSED_BEFORE_EXEC,
+                emptyDirectories = listOf(Path.of("/build")),
+            )
+        }
+
+        val stagingParent = createTempDirectory("acp-ninja-purpose-").toAbsolutePath().normalize()
+        val staging = AcpWorkflowStagingRoot.createReadOnly("ninja-stage", stagingParent)
+        try {
+            assertFailsWith<IllegalArgumentException> {
+                launch(
+                    AcpSandboxLaunchPurpose.NINJA_COMPDB_QUERY,
+                    AcpSandboxStdinDisposition.CLOSED_BEFORE_EXEC,
+                    stagingRoots = listOf(AcpSandboxRootGrant(staging, AcpSandboxRootMode.READ_ONLY)),
+                )
+            }
+        } finally {
+            Files.deleteIfExists(staging.path)
+            Files.deleteIfExists(stagingParent)
+        }
+
+        val query = launch(
+            AcpSandboxLaunchPurpose.NINJA_COMPDB_QUERY,
+            AcpSandboxStdinDisposition.CLOSED_BEFORE_EXEC,
+        )
+        val configuration = syntheticConfiguration(
+            Path.of("/definitely-absent/decomp-bwrap"),
+            "0".repeat(64),
+        )
+        requireAcpSandboxLaunchPolicy(configuration, query, mergeError = false)
+        assertFailsWith<IOException> {
+            requireAcpSandboxLaunchPolicy(configuration, query, mergeError = true)
+        }
+    }
+
+    @Test
+    fun `Ninja runtime closure is immutable bounded manifested and exact at protected destinations`() {
+        val manifest = "a".repeat(64)
+        fun mount(source: String, destination: String, expected: String? = manifest) =
+            AcpSandboxReadOnlyMount(Path.of(source), Path.of(destination), expected)
+
+        val trusted = mount(
+            "/usr/lib64/decomp-ninja-lib.so",
+            "/usr/lib64/decomp-ninja-lib.so",
+        )
+        val supplied = mutableListOf(trusted)
+        val configuration = syntheticConfiguration(
+            Path.of("/definitely-absent/decomp-bwrap"),
+            "0".repeat(64),
+            ninjaCompdbRuntimeMounts = supplied,
+        )
+        supplied.clear()
+        assertEquals(listOf(trusted), configuration.ninjaCompdbRuntimeMounts)
+        assertFailsWith<IllegalArgumentException> {
+            syntheticConfiguration(
+                Path.of("/definitely-absent/decomp-bwrap"),
+                "0".repeat(64),
+                ninjaCompdbRuntimeMounts = listOf(
+                    mount("/usr/lib64/unmanifested.so", "/usr/lib64/unmanifested.so", null),
+                ),
+            )
+        }
+        assertFailsWith<IllegalArgumentException> {
+            syntheticConfiguration(
+                Path.of("/definitely-absent/decomp-bwrap"),
+                "0".repeat(64),
+                agentRuntimeMounts = listOf(
+                    mount("/usr/lib64/agent.so", "/usr/lib64/agent.so"),
+                ),
+                ninjaCompdbRuntimeMounts = (0 until MAXIMUM_SANDBOX_MOUNTS).map { index ->
+                    mount("/opt/ninja-lib-$index", "/usr/lib64/decomp-ninja-lib-$index.so")
+                },
+            )
+        }
+
+        val executable = mount("/usr/bin/ninja", "/usr/bin/ninja")
+        val buildTree = mount("/opt/decomp-ninja-build", "/build")
+        fun query(runtime: List<AcpSandboxReadOnlyMount>) = AcpSandboxLaunch(
+            command = listOf("/usr/bin/ninja", "-f", "build.ninja", "-t", "compdb", "cc"),
+            environment = emptyMap(),
+            workingDirectory = Path.of("/build"),
+            resourceLimits = TEST_LIMITS,
+            maximumWallDuration = Duration.ofSeconds(5),
+            readOnlyMounts = listOf(executable, buildTree) + runtime,
+            stagingRoots = emptyList(),
+            purpose = AcpSandboxLaunchPurpose.NINJA_COMPDB_QUERY,
+            stdinDisposition = AcpSandboxStdinDisposition.CLOSED_BEFORE_EXEC,
+        )
+
+        requireAcpSandboxLaunchPolicy(configuration, query(listOf(trusted)), mergeError = false)
+        listOf(
+            emptyList(),
+            listOf(mount("/usr/lib64/replacement.so", trusted.destination.toString())),
+            listOf(mount(trusted.source.toString(), trusted.destination.toString(), "b".repeat(64))),
+            listOf(trusted, mount("/lib64/unconfigured.so", "/lib64/unconfigured.so")),
+        ).forEach { runtime ->
+            assertFailsWith<IOException> {
+                requireAcpSandboxLaunchPolicy(configuration, query(runtime), mergeError = false)
+            }
+        }
+
+        val outerConfiguration = syntheticConfiguration(
+            Path.of("/definitely-absent/decomp-bwrap"),
+            "0".repeat(64),
+            agentRuntimeMounts = listOf(trusted),
+        )
+        val outer = query(listOf(trusted)).copy(
+            purpose = AcpSandboxLaunchPurpose.OUTER_AGENT,
+            stdinDisposition = AcpSandboxStdinDisposition.INHERITED_PIPE,
+        )
+        requireAcpSandboxLaunchPolicy(outerConfiguration, outer, mergeError = false)
+        assertFailsWith<IOException> {
+            requireAcpSandboxLaunchPolicy(
+                outerConfiguration,
+                outer.copy(readOnlyMounts = listOf(
+                    executable,
+                    buildTree,
+                    mount("/usr/lib64/replacement.so", trusted.destination.toString()),
+                )),
+                mergeError = false,
+            )
+        }
     }
 
     @Test
@@ -807,13 +978,19 @@ class LinuxBubblewrapBoundaryTest {
         target: Path = PROBE,
         targetArguments: List<String> = listOf("gate-protocol"),
         bootstrapEnvironment: Map<String, String> = emptyMap(),
+        stdinDispositionArgument: String = AcpSandboxStdinDisposition.INHERITED_PIPE.protocolArgument,
     ): Pair<Int, String> {
         val directory = createTempDirectory("acp-direct-gate-").toAbsolutePath().normalize()
         val environmentPath = directory.resolve("environment")
         Files.write(environmentPath, environment)
         Files.setPosixFilePermissions(environmentPath, OWNER_READ_WRITE)
         val process = ProcessBuilder(
-            listOf(GATE_HELPER.toString(), environmentPath.toString(), target.toString()) + targetArguments,
+            listOf(
+                GATE_HELPER.toString(),
+                stdinDispositionArgument,
+                environmentPath.toString(),
+                target.toString(),
+            ) + targetArguments,
         ).redirectErrorStream(true).also {
             it.environment().clear()
             it.environment().putAll(bootstrapEnvironment)
@@ -978,7 +1155,12 @@ class LinuxBubblewrapBoundaryTest {
         expectedSandboxGateHelperManifestSha256 = calculateAcpRuntimeManifestSha256(GATE_HELPER),
     )
 
-    private fun syntheticConfiguration(executable: Path, digest: String): AcpLinuxSandboxConfiguration =
+    private fun syntheticConfiguration(
+        executable: Path,
+        digest: String,
+        agentRuntimeMounts: Collection<AcpSandboxReadOnlyMount> = emptyList(),
+        ninjaCompdbRuntimeMounts: Collection<AcpSandboxReadOnlyMount> = emptyList(),
+    ): AcpLinuxSandboxConfiguration =
         AcpLinuxSandboxConfiguration(
             bubblewrapExecutable = executable,
             resourceLimiterExecutable = Path.of("/definitely-absent/decomp-prlimit"),
@@ -987,7 +1169,7 @@ class LinuxBubblewrapBoundaryTest {
             environmentFdOpenerExecutable = Path.of("/definitely-absent/decomp-bash"),
             sandboxGateHelperExecutable = Path.of("/definitely-absent/decomp-gate-helper"),
             launcherRuntimeMounts = emptyList(),
-            agentRuntimeMounts = emptyList(),
+            agentRuntimeMounts = agentRuntimeMounts,
             systemdUserRuntimeDirectory = Path.of("/definitely-absent/decomp-runtime"),
             expectedBubblewrapSha256 = digest,
             expectedResourceLimiterSha256 = "0".repeat(64),
@@ -996,6 +1178,7 @@ class LinuxBubblewrapBoundaryTest {
             expectedEnvironmentFdOpenerSha256 = "0".repeat(64),
             expectedSandboxGateHelperSha256 = "0".repeat(64),
             expectedSandboxGateHelperManifestSha256 = "0".repeat(64),
+            ninjaCompdbRuntimeMounts = ninjaCompdbRuntimeMounts,
         )
 
     private fun controlDirectories(): Set<Path> = Files.list(Path.of("/tmp")).use { entries ->

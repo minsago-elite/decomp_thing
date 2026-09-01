@@ -228,6 +228,7 @@ class AcpSandboxPolicyTest {
         val baseEnvironment = AcpSandboxEnvironmentEvidence(
             sandboxPathSha256 = "d".repeat(64),
             bindingNamesSha256 = "e".repeat(64),
+            contentSha256 = "f".repeat(64),
             bindingCount = 2,
             encodedBytes = 32,
             device = 31,
@@ -260,6 +261,12 @@ class AcpSandboxPolicyTest {
             baseRlimits,
             baseMount,
             listOf(baseMount),
+            "7".repeat(64),
+            false,
+            "8".repeat(64),
+            0,
+            "9".repeat(64),
+            1,
         )
         val baseAudit = AcpTerminalAuditRecord(
             sequence = 0,
@@ -353,6 +360,12 @@ class AcpSandboxPolicyTest {
             evidence(openerDigest = "b".repeat(64)),
             evidence(launches = listOf(baseLaunch.copy(purpose = AcpSandboxLaunchPurpose.TERMINAL))),
             evidence(launches = listOf(baseLaunch.copy(commandSha256 = "d".repeat(64)))),
+            evidence(launches = listOf(baseLaunch.copy(workingDirectorySha256 = "d".repeat(64)))),
+            evidence(launches = listOf(baseLaunch.copy(mergeError = true))),
+            evidence(launches = listOf(baseLaunch.copy(stagingRootsSha256 = "d".repeat(64)))),
+            evidence(launches = listOf(baseLaunch.copy(stagingRootCount = 1))),
+            evidence(launches = listOf(baseLaunch.copy(emptyDirectoriesSha256 = "d".repeat(64)))),
+            evidence(launches = listOf(baseLaunch.copy(emptyDirectoryCount = 2))),
             evidence(launches = listOf(baseLaunch.copy(startGate = baseGate.copy(descriptor = 1)))),
             evidence(launches = listOf(baseLaunch.copy(startGate = baseGate.copy(
                 waiterExecutableSha256 = "d".repeat(64),
@@ -366,6 +379,9 @@ class AcpSandboxPolicyTest {
             )))),
             evidence(launches = listOf(baseLaunch.copy(environment = baseEnvironment.copy(
                 bindingNamesSha256 = "f".repeat(64),
+            )))),
+            evidence(launches = listOf(baseLaunch.copy(environment = baseEnvironment.copy(
+                contentSha256 = "0".repeat(64),
             )))),
             evidence(launches = listOf(baseLaunch.copy(environment = baseEnvironment.copy(bindingCount = 3)))),
             evidence(launches = listOf(baseLaunch.copy(environment = baseEnvironment.copy(encodedBytes = 33)))),

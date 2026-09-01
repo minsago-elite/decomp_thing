@@ -19,6 +19,8 @@
 #define ENVIRONMENT_FD 4
 #define MAX_ENVIRONMENT_BYTES (1024U * 1024U)
 #define MAX_ENVIRONMENT_BINDINGS 1024U
+#define STDIN_INHERITED "inherited"
+#define STDIN_CLOSED_BEFORE_EXEC "closed-before-exec"
 
 extern char **environ;
 
@@ -187,14 +189,22 @@ int main(int argc, char **argv) {
     unsigned char token;
     ssize_t amount;
     char **target_environment;
-    if (argc < 3 || argv[1][0] != '/' || argv[2][0] != '/') {
+    int close_stdin_before_exec;
+    if (argc < 4 || argv[2][0] != '/' || argv[3][0] != '/') {
         fail(120);
+    }
+    if (strcmp(argv[1], STDIN_INHERITED) == 0) {
+        close_stdin_before_exec = 0;
+    } else if (strcmp(argv[1], STDIN_CLOSED_BEFORE_EXEC) == 0) {
+        close_stdin_before_exec = 1;
+    } else {
+        fail(125);
     }
     require_clean_bootstrap_environment();
     normalize_signals();
     close_surplus_descriptors();
-    open_exact(argv[2], O_PATH | O_NOFOLLOW | O_CLOEXEC, TARGET_FD);
-    open_exact(argv[1], O_RDONLY | O_NOFOLLOW | O_CLOEXEC, ENVIRONMENT_FD);
+    open_exact(argv[3], O_PATH | O_NOFOLLOW | O_CLOEXEC, TARGET_FD);
+    open_exact(argv[2], O_RDONLY | O_NOFOLLOW | O_CLOEXEC, ENVIRONMENT_FD);
     if (fstat(TARGET_FD, &target_status) != 0 || !S_ISREG(target_status.st_mode) ||
         (target_status.st_mode & 0111) == 0 ||
         fstat(ENVIRONMENT_FD, &environment_status) != 0 || !S_ISREG(environment_status.st_mode)) {
@@ -206,8 +216,9 @@ int main(int argc, char **argv) {
     if (amount != 1 || token != (unsigned char)'G') fail(122);
     target_environment = read_environment(ENVIRONMENT_FD);
     close(ENVIRONMENT_FD);
+    if (close_stdin_before_exec && close(STDIN_FILENO) != 0) fail(126);
 #ifdef SYS_execveat
-    syscall(SYS_execveat, TARGET_FD, "", &argv[2], target_environment, AT_EMPTY_PATH);
+    syscall(SYS_execveat, TARGET_FD, "", &argv[3], target_environment, AT_EMPTY_PATH);
 #else
 #error "decomp ACP gate helper requires execveat"
 #endif

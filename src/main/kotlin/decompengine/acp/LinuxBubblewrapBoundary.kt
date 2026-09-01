@@ -65,6 +65,7 @@ data class AcpSandboxStartGateEvidence(
 data class AcpSandboxEnvironmentEvidence(
     val sandboxPathSha256: String,
     val bindingNamesSha256: String,
+    val contentSha256: String,
     val bindingCount: Int,
     val encodedBytes: Long,
     val device: Long,
@@ -112,7 +113,7 @@ data class AcpProducedOutputEvidence(
     }
 }
 
-enum class AcpSandboxLaunchPurpose { OUTER_AGENT, TERMINAL }
+enum class AcpSandboxLaunchPurpose { OUTER_AGENT, TERMINAL, NINJA_COMPDB_QUERY }
 
 data class AcpSandboxLaunchEvidence(
     val purpose: AcpSandboxLaunchPurpose,
@@ -124,6 +125,12 @@ data class AcpSandboxLaunchEvidence(
     val effectiveRlimits: AcpSandboxRlimitEvidence,
     val executableMount: AcpSandboxMountEvidence,
     val runtimeMounts: List<AcpSandboxMountEvidence>,
+    val workingDirectorySha256: String,
+    val mergeError: Boolean,
+    val stagingRootsSha256: String,
+    val stagingRootCount: Int,
+    val emptyDirectoriesSha256: String,
+    val emptyDirectoryCount: Int,
 )
 
 /** Metadata-only proof of the boundary frozen for one harness execution. */
@@ -231,6 +238,12 @@ internal enum class AcpProcessContainment {
     LINUX_BUBBLEWRAP_CGROUP_V2,
 }
 
+/** Target fd 0 handling authenticated by the static gate helper immediately before execveat. */
+internal enum class AcpSandboxStdinDisposition(internal val protocolArgument: String) {
+    INHERITED_PIPE("inherited"),
+    CLOSED_BEFORE_EXEC("closed-before-exec"),
+}
+
 internal data class AcpSandboxLaunch(
     val command: List<String>,
     val environment: Map<String, String>,
@@ -242,6 +255,7 @@ internal data class AcpSandboxLaunch(
     val purpose: AcpSandboxLaunchPurpose = AcpSandboxLaunchPurpose.TERMINAL,
     /** Private empty namespace anchors, never host binds. Used for ACP session cwd declarations. */
     val emptyDirectories: List<Path> = emptyList(),
+    val stdinDisposition: AcpSandboxStdinDisposition = AcpSandboxStdinDisposition.INHERITED_PIPE,
 ) {
     init {
         require(!maximumWallDuration.isZero && !maximumWallDuration.isNegative) {
@@ -263,6 +277,21 @@ internal data class AcpSandboxLaunch(
             "sandbox launch exceeds the environment binding-count limit"
         }
         require(command.none { '\u0000' in it }) { "sandbox command arguments may not contain NUL" }
+        if (purpose == AcpSandboxLaunchPurpose.NINJA_COMPDB_QUERY) {
+            require(stdinDisposition == AcpSandboxStdinDisposition.CLOSED_BEFORE_EXEC) {
+                "a Ninja compdb query requires stdin to be closed before exec"
+            }
+            require(stagingRoots.isEmpty()) {
+                "a Ninja compdb query may not receive writable or workflow staging authority"
+            }
+            require(emptyDirectories.isEmpty()) {
+                "a Ninja compdb query may not create unbound empty-directory authorities"
+            }
+        } else {
+            require(stdinDisposition == AcpSandboxStdinDisposition.INHERITED_PIPE) {
+                "only a Ninja compdb query may close stdin before exec"
+            }
+        }
         val encodedArgumentBytes = command.fold(0L) { total, argument ->
             Math.addExact(total, utf8Length(argument) + 1L)
         }
@@ -608,6 +637,7 @@ internal class LinuxBubblewrapBoundary private constructor(
     ): AcpSandboxedProcess {
         closeFailure.get()?.let { throw it }
         if (closed.get()) throw IOException("ACP sandbox boundary is closed")
+        requireAcpSandboxLaunchPolicy(configuration, launch, mergeError, cancellationCheck)
         launch.stagingRoots.forEach { grant ->
             if (grant.mode == AcpSandboxRootMode.READ_WRITE && grant.stagingRoot.quotaProof == null) {
                 throw IOException("writable sandbox staging root lacks verified aggregate quota authority")
@@ -729,6 +759,7 @@ internal class LinuxBubblewrapBoundary private constructor(
                 createdEnvironment.setupAttestation(),
                 launch.command,
                 launch.workingDirectory,
+                launch.stdinDisposition,
                 cancellationCheck = {
                     launchCheckpoint(AcpSandboxLaunchStage.DURING_SETUP_ATTESTATION, cancellationCheck)
                 },
@@ -782,6 +813,7 @@ internal class LinuxBubblewrapBoundary private constructor(
                 createdEnvironment.setupAttestation(),
                 launch.command,
                 launch.workingDirectory,
+                launch.stdinDisposition,
                 setupWaiter,
                 cancellationCheck = {
                     launchCheckpoint(AcpSandboxLaunchStage.DURING_SETUP_ATTESTATION, cancellationCheck)
@@ -815,6 +847,7 @@ internal class LinuxBubblewrapBoundary private constructor(
                 createdEnvironment.setupAttestation(),
                 launch.command,
                 launch.workingDirectory,
+                launch.stdinDisposition,
                 setupWaiter,
                 cancellationCheck = {
                     launchCheckpoint(AcpSandboxLaunchStage.DURING_SETUP_ATTESTATION, cancellationCheck)
@@ -834,13 +867,28 @@ internal class LinuxBubblewrapBoundary private constructor(
                 environment = createdEnvironment.evidence(),
                 effectiveRlimits = effectiveRlimits,
                 executableMount = executableMount.evidence(),
-                runtimeMounts = buildList {
+                runtimeMounts = Collections.unmodifiableList(buildList {
                     val destinations = HashSet<Path>()
                     (launcherMounts.asSequence() + launchMounts.asSequence()).forEach { mount ->
                         cancellationCheck()
                         if (destinations.add(mount.mount.destination)) add(mount.evidence())
                     }
-                },
+                }),
+                workingDirectorySha256 = sha256(launch.workingDirectory.toString()),
+                mergeError = mergeError,
+                stagingRootsSha256 = canonicalStagingRootsDigest(
+                    launch.stagingRoots,
+                    cancellationCheck,
+                ),
+                stagingRootCount = launch.stagingRoots.size,
+                emptyDirectoriesSha256 = canonicalStringDigest(
+                    sortedStrings(
+                        launch.emptyDirectories.distinct().map { it.toString() },
+                        cancellationCheck,
+                    ),
+                    cancellationCheck,
+                ),
+                emptyDirectoryCount = launch.emptyDirectories.distinct().size,
             )
             val authorizationStream = started.outputStream
             // Reserve bounded metadata capacity before the broker's one-way authorization
@@ -1160,9 +1208,6 @@ internal class LinuxBubblewrapBoundary private constructor(
                 throw IOException("sandbox staging authority overlaps a runtime mount or another staging root")
             }
         }
-        cancellationCheck()
-        requireProtectedLauncherClosure(launch, launchMounts, cancellationCheck)
-        cancellationCheck()
         val emptyDirectories = LinkedHashSet<Path>().also { unique ->
             launch.emptyDirectories.forEach { directory ->
                 cancellationCheck()
@@ -1219,56 +1264,9 @@ internal class LinuxBubblewrapBoundary private constructor(
         add(launch.workingDirectory.toString())
         add("--")
         add(ACP_SANDBOX_GATE_HELPER_PATH.toString())
+        add(launch.stdinDisposition.protocolArgument)
         add(environmentFile.sandboxPath.toString())
         addAll(launch.command)
-    }
-
-    private fun requireProtectedLauncherClosure(
-        launch: AcpSandboxLaunch,
-        launchMounts: List<PinnedReadOnlyMount>,
-        cancellationCheck: () -> Unit,
-    ) {
-        val trustedOuterDestinations = if (launch.purpose == AcpSandboxLaunchPurpose.OUTER_AGENT) {
-            configuration.agentRuntimeMounts.mapTo(mutableSetOf()) {
-                cancellationCheck()
-                it.destination
-            }
-        } else emptySet()
-        val unauthorizedMount = launchMounts.firstOrNull { pinned ->
-            cancellationCheck()
-            pinned.mount.destination != ACP_SANDBOX_GATE_HELPER_PATH &&
-                pinned.mount.destination !in trustedOuterDestinations &&
-                PROTECTED_LOADER_DESTINATIONS.any { protected ->
-                    cancellationCheck()
-                    pathsOverlap(pinned.mount.destination, protected)
-                }
-        }
-        if (unauthorizedMount != null) {
-            throw IOException(
-                "request runtime mount overlaps a protected loader/helper destination: " +
-                    unauthorizedMount.mount.destination,
-            )
-        }
-        val unauthorizedRoot = launch.stagingRoots.firstOrNull { grant ->
-            cancellationCheck()
-            PROTECTED_LOADER_DESTINATIONS.any {
-                cancellationCheck()
-                pathsOverlap(grant.sandboxPath, it)
-            }
-        }
-        if (unauthorizedRoot != null) {
-            throw IOException("staging authority overlaps a protected loader/helper destination")
-        }
-        val unauthorizedAnchor = launch.emptyDirectories.firstOrNull { directory ->
-            cancellationCheck()
-            PROTECTED_LOADER_DESTINATIONS.any {
-                cancellationCheck()
-                pathsOverlap(directory, it)
-            }
-        }
-        if (unauthorizedAnchor != null) {
-            throw IOException("empty workspace anchor overlaps a protected loader/helper destination")
-        }
     }
 
     companion object {
@@ -1472,6 +1470,81 @@ internal class LinuxBubblewrapBoundary private constructor(
             PinnedControlDirectory.create(limits)
     }
 }
+
+/** Pure launch-authority validation kept separate from host/runtime probing for focused audits. */
+internal fun requireAcpSandboxLaunchPolicy(
+    configuration: AcpLinuxSandboxConfiguration,
+    launch: AcpSandboxLaunch,
+    mergeError: Boolean,
+    cancellationCheck: () -> Unit = NO_SANDBOX_CHECKPOINT,
+) {
+    cancellationCheck()
+    if (launch.purpose == AcpSandboxLaunchPurpose.NINJA_COMPDB_QUERY && mergeError) {
+        throw IOException("a Ninja compdb query requires separately captured stdout and stderr")
+    }
+
+    val trustedProtectedMounts = when (launch.purpose) {
+        AcpSandboxLaunchPurpose.OUTER_AGENT -> configuration.agentRuntimeMounts
+        AcpSandboxLaunchPurpose.TERMINAL -> emptyList()
+        AcpSandboxLaunchPurpose.NINJA_COMPDB_QUERY -> configuration.ninjaCompdbRuntimeMounts
+    }
+    if (launch.purpose == AcpSandboxLaunchPurpose.NINJA_COMPDB_QUERY) {
+        val omitted = configuration.ninjaCompdbRuntimeMounts.firstOrNull { configured ->
+            cancellationCheck()
+            launch.readOnlyMounts.none { requested ->
+                cancellationCheck()
+                requested.hasSameMountAuthority(configured)
+            }
+        }
+        if (omitted != null) {
+            throw IOException(
+                "Ninja compdb launch omits a configured runtime mount: ${omitted.destination}",
+            )
+        }
+    }
+
+    val unauthorizedMount = launch.readOnlyMounts.firstOrNull { requested ->
+        cancellationCheck()
+        PROTECTED_LOADER_DESTINATIONS.any { protected ->
+            cancellationCheck()
+            pathsOverlap(requested.destination, protected)
+        } && trustedProtectedMounts.none { trusted ->
+            cancellationCheck()
+            requested.hasSameMountAuthority(trusted)
+        }
+    }
+    if (unauthorizedMount != null) {
+        throw IOException(
+            "request runtime mount overlaps a protected loader/helper destination without exact " +
+                "configuration authority: ${unauthorizedMount.destination}",
+        )
+    }
+    val unauthorizedRoot = launch.stagingRoots.firstOrNull { grant ->
+        cancellationCheck()
+        PROTECTED_LOADER_DESTINATIONS.any { protected ->
+            cancellationCheck()
+            pathsOverlap(grant.sandboxPath, protected)
+        }
+    }
+    if (unauthorizedRoot != null) {
+        throw IOException("staging authority overlaps a protected loader/helper destination")
+    }
+    val unauthorizedAnchor = launch.emptyDirectories.firstOrNull { directory ->
+        cancellationCheck()
+        PROTECTED_LOADER_DESTINATIONS.any { protected ->
+            cancellationCheck()
+            pathsOverlap(directory, protected)
+        }
+    }
+    if (unauthorizedAnchor != null) {
+        throw IOException("empty workspace anchor overlaps a protected loader/helper destination")
+    }
+}
+
+private fun AcpSandboxReadOnlyMount.hasSameMountAuthority(other: AcpSandboxReadOnlyMount): Boolean =
+    source == other.source &&
+        destination == other.destination &&
+        expectedManifestSha256 == other.expectedManifestSha256
 
 /** Strong references retained until a failed pre-verification launch can be cleaned in order. */
 private class RetainedLaunchCleanup(
@@ -1928,6 +2001,7 @@ private class SandboxEnvironmentFile private constructor(
     fun evidence(): AcpSandboxEnvironmentEvidence = AcpSandboxEnvironmentEvidence(
         sandboxPathSha256 = sha256(sandboxPath.toString()),
         bindingNamesSha256 = bindingNamesSha256,
+        contentSha256 = expectedContentSha256,
         bindingCount = bindingCount,
         encodedBytes = encodedBytes,
         device = identity.key.device,
@@ -2553,6 +2627,7 @@ internal class VerifiedSystemdScope(
         environmentFile: AcpSetupFileAttestation,
         targetCommand: List<String>,
         workingDirectory: Path,
+        stdinDisposition: AcpSandboxStdinDisposition,
         previous: AcpSetupWaiter? = null,
         cancellationCheck: () -> Unit = NO_SANDBOX_CHECKPOINT,
     ): AcpSetupWaiter {
@@ -2640,6 +2715,7 @@ internal class VerifiedSystemdScope(
                 }
                 val expectedArgv = listOf(
                     ACP_SANDBOX_GATE_HELPER_PATH.toString(),
+                    stdinDisposition.protocolArgument,
                     ACP_SANDBOX_ENVIRONMENT_PATH.toString(),
                 ) + targetCommand
                 if (readProcessArguments(pid, cancellationCheck) != expectedArgv) {
@@ -4906,6 +4982,40 @@ private fun canonicalStringDigest(
     return digest.finish()
 }
 
+private fun canonicalStagingRootsDigest(
+    roots: Collection<AcpSandboxRootGrant>,
+    cancellationCheck: () -> Unit = NO_SANDBOX_CHECKPOINT,
+): String {
+    val digest = CanonicalMetadataDigest(MAXIMUM_SANDBOX_EVIDENCE_BYTES, cancellationCheck)
+    roots.sortedWith { left, right ->
+        compareCheckpointed(
+            left.stagingRoot.rootId + "\u0000" + left.sandboxPath,
+            right.stagingRoot.rootId + "\u0000" + right.sandboxPath,
+            cancellationCheck,
+        )
+    }.forEachIndexed { index, grant ->
+        cancellationCheck()
+        val identity = grant.stagingRoot.identity
+        val quota = grant.stagingRoot.quotaProof?.evidence
+        digest.field("root[$index].id", grant.stagingRoot.rootId)
+        digest.field("root[$index].path", grant.sandboxPath)
+        digest.field("root[$index].mode", grant.mode)
+        digest.field("root[$index].device", identity.key.device)
+        digest.field("root[$index].inode", identity.key.inode)
+        digest.field("root[$index].mount", identity.mountId)
+        digest.field("root[$index].uid", identity.uid)
+        digest.field("root[$index].gid", identity.gid)
+        digest.field("root[$index].permissions", identity.mode.permissions)
+        digest.field("root[$index].links", identity.linkCount)
+        digest.field("root[$index].quota.provider", quota?.provider)
+        digest.field("root[$index].quota.mount", quota?.mountId)
+        digest.field("root[$index].quota.bytes", quota?.maximumBytes)
+        digest.field("root[$index].quota.entries", quota?.maximumEntries)
+        digest.field("root[$index].quota.path", quota?.mountPathSha256)
+    }
+    return digest.finish()
+}
+
 private fun canonicalSandboxEvidenceDigest(
     evidence: AcpSandboxEvidence,
     cancellationCheck: () -> Unit = NO_SANDBOX_CHECKPOINT,
@@ -4966,12 +5076,19 @@ private fun canonicalSandboxEvidenceDigest(
     evidence.launches.forEachIndexed { launchIndex, launch ->
         field("launch[$launchIndex].purpose", launch.purpose)
         field("launch[$launchIndex].command", launch.commandSha256)
+        field("launch[$launchIndex].workingDirectory", launch.workingDirectorySha256)
+        field("launch[$launchIndex].mergeError", launch.mergeError)
+        field("launch[$launchIndex].stagingRoots", launch.stagingRootsSha256)
+        field("launch[$launchIndex].stagingRootCount", launch.stagingRootCount)
+        field("launch[$launchIndex].emptyDirectories", launch.emptyDirectoriesSha256)
+        field("launch[$launchIndex].emptyDirectoryCount", launch.emptyDirectoryCount)
         field("launch[$launchIndex].gate.descriptor", launch.startGate.descriptor)
         field("launch[$launchIndex].gate.waiter", launch.startGate.waiterExecutableSha256)
         field("launch[$launchIndex].gate.protocol", launch.startGate.helperProtocolSha256)
         field("launch[$launchIndex].gate.positiveByte", launch.startGate.positiveByteRequired)
         field("launch[$launchIndex].environment.path", launch.environment.sandboxPathSha256)
         field("launch[$launchIndex].environment.names", launch.environment.bindingNamesSha256)
+        field("launch[$launchIndex].environment.content", launch.environment.contentSha256)
         field("launch[$launchIndex].environment.count", launch.environment.bindingCount)
         field("launch[$launchIndex].environment.bytes", launch.environment.encodedBytes)
         field("launch[$launchIndex].environment.device", launch.environment.device)
@@ -5183,7 +5300,8 @@ private const val SANDBOX_GATE_TARGET_FD = 3
 private const val SANDBOX_GATE_ENVIRONMENT_FD = 4
 private const val START_GATE_RELEASE_BYTE = 'G'.code
 private const val STATIC_GATE_HELPER_PROTOCOL =
-    "decomp-acp-static-gate-v2:empty-or-exact-cwd-PWD;fd0-one-byte-G;fd3-target;fd4-unlinked-env;execveat"
+    "decomp-acp-static-gate-v3:empty-or-exact-cwd-PWD;fd0-one-byte-G;" +
+        "argv1-inherited-or-closed-before-exec;fd3-target;fd4-unlinked-env;execveat"
 private const val ENVIRONMENT_FD_OPENER_ARG0 = "decomp-acp-environment-fd"
 private const val ENVIRONMENT_FD_OPENER_SCRIPT =
     "exec 4<\"\$1\" || exit 125; shift; exec \"\$@\""

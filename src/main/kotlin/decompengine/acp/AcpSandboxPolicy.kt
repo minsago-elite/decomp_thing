@@ -436,12 +436,21 @@ class AcpLinuxSandboxConfiguration(
     val expectedEnvironmentFdOpenerSha256: String,
     val expectedSandboxGateHelperSha256: String,
     val expectedSandboxGateHelperManifestSha256: String,
+    ninjaCompdbRuntimeMounts: Collection<AcpSandboxReadOnlyMount> = emptyList(),
 ) {
     val launcherRuntimeMounts: List<AcpSandboxReadOnlyMount> = immutableList(
         requireBoundedCollection("launcher runtime mounts", launcherRuntimeMounts, MAXIMUM_SANDBOX_MOUNTS),
     )
     val agentRuntimeMounts: List<AcpSandboxReadOnlyMount> = immutableList(
         requireBoundedCollection("agent runtime mounts", agentRuntimeMounts, MAXIMUM_SANDBOX_MOUNTS),
+    )
+    /** Operator-owned dynamic-loader closure available only to an isolated Ninja compdb query. */
+    val ninjaCompdbRuntimeMounts: List<AcpSandboxReadOnlyMount> = immutableList(
+        requireBoundedCollection(
+            "Ninja compdb runtime mounts",
+            ninjaCompdbRuntimeMounts,
+            MAXIMUM_SANDBOX_MOUNTS,
+        ),
     )
 
     init {
@@ -463,10 +472,19 @@ class AcpLinuxSandboxConfiguration(
         validateSha256("environment fd opener", expectedEnvironmentFdOpenerSha256)
         validateSha256("sandbox gate helper", expectedSandboxGateHelperSha256)
         validateSha256("sandbox gate helper manifest", expectedSandboxGateHelperManifestSha256)
-        require(this.launcherRuntimeMounts.size + this.agentRuntimeMounts.size <= MAXIMUM_SANDBOX_MOUNTS) {
-            "combined launcher and agent runtime mounts exceed the sandbox mount-count limit"
+        require(this.ninjaCompdbRuntimeMounts.all { it.expectedManifestSha256 != null }) {
+            "every Ninja compdb runtime mount requires an expected manifest SHA-256"
         }
-        requireUniqueDestinations(this.launcherRuntimeMounts + this.agentRuntimeMounts)
+        require(
+            this.launcherRuntimeMounts.size +
+                this.agentRuntimeMounts.size +
+                this.ninjaCompdbRuntimeMounts.size <= MAXIMUM_SANDBOX_MOUNTS,
+        ) {
+            "combined launcher, agent, and Ninja compdb runtime mounts exceed the sandbox mount-count limit"
+        }
+        requireUniqueDestinations(
+            this.launcherRuntimeMounts + this.agentRuntimeMounts + this.ninjaCompdbRuntimeMounts,
+        )
     }
 }
 
