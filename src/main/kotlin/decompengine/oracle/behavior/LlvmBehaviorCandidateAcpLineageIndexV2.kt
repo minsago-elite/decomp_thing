@@ -76,13 +76,13 @@ object LlvmBehaviorCandidateAcpLineageIndexV2Publisher {
                 "candidate reconstruction archive",
             ).use {
                     archiveGuard ->
-                requireSingleLink(paths.archive, "candidate reconstruction archive")
+                archiveGuard.requireSingleLink("candidate reconstruction archive")
                 val derivation = deriveArchiveLineage(archiveGuard)
                 val rendered = renderIndex(derivation)
 
                 val terminalArchiveSha256 = archiveGuard.sha256(label = "candidate reconstruction archive")
                 archiveGuard.verifyUnchanged("candidate reconstruction archive")
-                requireSingleLink(paths.archive, "candidate reconstruction archive")
+                archiveGuard.requireSingleLink("candidate reconstruction archive")
                 if (terminalArchiveSha256 != derivation.archiveSha256) {
                     lineageFail("candidate reconstruction archive changed before lineage publication")
                 }
@@ -124,10 +124,10 @@ object LlvmBehaviorCandidateAcpLineageIndexV2Verifier {
                 "candidate reconstruction archive",
             ).use {
                     archiveGuard ->
-                requireSingleLink(paths.archive, "candidate reconstruction archive")
+                archiveGuard.requireSingleLink("candidate reconstruction archive")
                 StableControlFile.open(paths.index, MAXIMUM_INDEX_BYTES.toLong(), "candidate ACP lineage index").use {
                         indexGuard ->
-                    requireSingleLink(paths.index, "candidate ACP lineage index")
+                    indexGuard.requireSingleLink("candidate ACP lineage index")
                     val indexBytes = indexGuard.readExactly(
                         0L,
                         indexGuard.size.toInt(),
@@ -147,8 +147,8 @@ object LlvmBehaviorCandidateAcpLineageIndexV2Verifier {
                     val terminalIndexSha256 = indexGuard.sha256(label = "candidate ACP lineage index")
                     archiveGuard.verifyUnchanged("candidate reconstruction archive")
                     indexGuard.verifyUnchanged("candidate ACP lineage index")
-                    requireSingleLink(paths.archive, "candidate reconstruction archive")
-                    requireSingleLink(paths.index, "candidate ACP lineage index")
+                    archiveGuard.requireSingleLink("candidate reconstruction archive")
+                    indexGuard.requireSingleLink("candidate ACP lineage index")
                     if (terminalArchiveSha256 != derivation.archiveSha256 || terminalIndexSha256 != indexSha256) {
                         lineageFail("candidate archive or ACP lineage index changed during terminal authentication")
                     }
@@ -325,15 +325,6 @@ private fun requireDedicatedIndexParent(index: Path) {
     }
 }
 
-private fun requireSingleLink(path: Path, label: String) {
-    val links = try {
-        (Files.getAttribute(path, "unix:nlink", LinkOption.NOFOLLOW_LINKS) as Number).toLong()
-    } catch (failure: Exception) {
-        lineageFail("$label link identity is unavailable", failure)
-    }
-    if (links != 1L) lineageFail("$label must not be hard-linked")
-}
-
 private fun deriveArchiveLineage(archiveGuard: StableControlFile): DerivedArchiveLineage {
     val scratch = Files.createTempDirectory("llvm-candidate-acp-lineage-v2-").toAbsolutePath().normalize()
     try {
@@ -366,18 +357,18 @@ private fun deriveArchiveLineage(archiveGuard: StableControlFile): DerivedArchiv
             "private candidate archive snapshot",
         ).use {
                 snapshotGuard ->
-            requireSingleLink(snapshot, "private candidate archive snapshot")
+            snapshotGuard.requireSingleLink("private candidate archive snapshot")
             val initialSnapshotSha256 = snapshotGuard.sha256(label = "private candidate archive snapshot")
             if (snapshotGuard.size != archiveGuard.size || initialSnapshotSha256 != archiveSha256) {
                 lineageFail("private candidate archive snapshot differs from its descriptor-pinned input")
             }
             val lineage = ArchivalBundleVerifier.extractAndVerifyCandidateLineage(
-                snapshot,
+                snapshotGuard,
                 scratch.resolve("extracted-candidate"),
             )
             val terminalSnapshotSha256 = snapshotGuard.sha256(label = "private candidate archive snapshot")
             snapshotGuard.verifyUnchanged("private candidate archive snapshot")
-            requireSingleLink(snapshot, "private candidate archive snapshot")
+            snapshotGuard.requireSingleLink("private candidate archive snapshot")
             if (terminalSnapshotSha256 != archiveSha256) {
                 lineageFail("private candidate archive snapshot changed during archive verification")
             }

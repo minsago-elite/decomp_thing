@@ -619,9 +619,10 @@ class LlvmBehaviorHostedToolchainImageBuildLeaseV2Test {
         withFixture { fixture ->
             val recipeDriftRoot = fixture.newJournalRoot("recipe-drift")
             val lease = fixture.createFresh(recipeDriftRoot)
+            val dockerfileAlias = fixture.dockerfile.resolveSibling("build-toolchain-hard-link.Dockerfile")
             try {
                 val before = journalSnapshot(recipeDriftRoot)
-                mutate(fixture.dockerfile)
+                Files.createLink(dockerfileAlias, fixture.dockerfile)
                 assertFailsWith<LlvmBehaviorHostedToolchainImageBuildLeaseV2Exception> {
                     lease.requireCurrentBinding()
                 }
@@ -633,7 +634,7 @@ class LlvmBehaviorHostedToolchainImageBuildLeaseV2Test {
                 assertEquals(before, journalSnapshot(recipeDriftRoot))
             } finally {
                 lease.close()
-                fixture.restoreDockerfile()
+                Files.deleteIfExists(dockerfileAlias)
             }
 
             val journalDriftRoot = fixture.newJournalRoot("journal-drift")
@@ -922,10 +923,6 @@ private class LeaseFixture(private val root: Path) {
 
     fun newJournalRoot(label: String): Path = Files.createDirectory(journals.resolve(label)).also {
         Files.setPosixFilePermissions(it, PosixFilePermissions.fromString("rwx------"))
-    }
-
-    fun restoreDockerfile() {
-        Files.copy(CHECKED_ROOT.resolve("build-toolchain.Dockerfile"), dockerfile, StandardCopyOption.REPLACE_EXISTING)
     }
 
     private fun copyChecked(name: String): Path = recipeRoot.resolve(name).also { destination ->

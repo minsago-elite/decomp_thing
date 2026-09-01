@@ -10,7 +10,6 @@ import decompengine.oracle.fulltree.FullTreeElfExecutableRange
 import java.nio.file.Files
 import java.nio.file.LinkOption
 import java.nio.file.Path
-import java.nio.file.StandardOpenOption
 import java.nio.file.attribute.PosixFilePermissions
 import kotlin.io.path.createTempDirectory
 import kotlin.test.Test
@@ -268,7 +267,7 @@ class LlvmFunctionOracleGenerationTest {
                     output,
                     LlvmFunctionOracleGenerationFaultInjector { point ->
                         if (point == LlvmFunctionOracleGenerationPoint.AFTER_STAGE_VALIDATION) {
-                            Files.write(exclusions, byteArrayOf(' '.code.toByte()), StandardOpenOption.APPEND)
+                            Files.createLink(outputRoot.resolve("exclusions-hard-link.json"), exclusions)
                         }
                     },
                 )

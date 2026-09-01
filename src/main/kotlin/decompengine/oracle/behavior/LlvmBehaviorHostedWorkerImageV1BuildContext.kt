@@ -392,7 +392,7 @@ private fun stageBoundContext(
         context = openedContext
         requireEmptyPrivateContext(openedContext)
         requireDistinctRoots(
-            dockerfile.path,
+            workerDockerfilePath.toAbsolutePath().normalize(),
             openedApplication.rootPath,
             openedJdk.path,
             openedContext.path,

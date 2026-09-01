@@ -1,5 +1,6 @@
 package decompengine.project
 
+import decompengine.oracle.fulltree.StableControlFile
 import kotlinx.serialization.json.Json
 import kotlinx.serialization.json.JsonNull
 import kotlinx.serialization.json.booleanOrNull
@@ -10,6 +11,7 @@ import kotlinx.serialization.json.jsonObject
 import kotlinx.serialization.json.jsonPrimitive
 import kotlinx.serialization.json.longOrNull
 import java.io.BufferedInputStream
+import java.io.InputStream
 import java.io.OutputStream
 import java.nio.file.Files
 import java.nio.file.LinkOption
@@ -222,6 +224,19 @@ object ArchivalBundleVerifier {
         GeneratedCMakeReconstructionProfile.descriptor,
     ).lineage
 
+    @JvmSynthetic
+    internal fun extractAndVerifyCandidateLineage(
+        archive: StableControlFile,
+        targetDir: Path,
+    ): VerifiedCandidateArchiveLineage = archive.slice().use { archiveInput ->
+        extractAndVerifyInternal(
+            archiveInput,
+            targetDir,
+            ArchivalBundleLimits(),
+            GeneratedCMakeReconstructionProfile.descriptor,
+        ).lineage
+    }
+
     private fun extractAndVerifyInternal(
         archivePath: Path,
         targetDir: Path,
@@ -231,6 +246,17 @@ object ArchivalBundleVerifier {
         require(Files.isRegularFile(archivePath, LinkOption.NOFOLLOW_LINKS) && !Files.isSymbolicLink(archivePath)) {
             "archive must be a regular non-symbolic-link file"
         }
+        return Files.newInputStream(archivePath).use { archiveInput ->
+            extractAndVerifyInternal(archiveInput, targetDir, limits, profile)
+        }
+    }
+
+    private fun extractAndVerifyInternal(
+        archiveInput: InputStream,
+        targetDir: Path,
+        limits: ArchivalBundleLimits,
+        profile: ReconstructionProfile,
+    ): VerifiedArchiveExtraction {
         val targetBase = targetDir.toAbsolutePath().normalize()
         val targetExisted = Files.exists(targetBase, LinkOption.NOFOLLOW_LINKS)
         require(!Files.isSymbolicLink(targetBase)) { "archive target must not be a symbolic link" }
@@ -252,7 +278,7 @@ object ArchivalBundleVerifier {
             val seen = mutableSetOf<String>()
             val seenPortable = mutableSetOf<String>()
             var totalBytes = 0L
-            ZipInputStream(BufferedInputStream(Files.newInputStream(archivePath))).use { zip ->
+            ZipInputStream(BufferedInputStream(archiveInput)).use { zip ->
                 var entryCount = 0
                 while (true) {
                     val entry = zip.nextEntry ?: break

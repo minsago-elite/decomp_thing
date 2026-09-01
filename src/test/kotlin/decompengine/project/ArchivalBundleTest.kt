@@ -1,5 +1,8 @@
 package decompengine.project
 
+import decompengine.oracle.fulltree.StableControlFile
+import java.io.InputStream
+import java.lang.reflect.Modifier
 import java.nio.file.Files
 import java.nio.file.StandardOpenOption
 import java.util.zip.CRC32
@@ -16,6 +19,20 @@ import kotlin.test.assertFailsWith
 import kotlin.test.assertTrue
 
 class ArchivalBundleTest {
+    @Test
+    fun `candidate lineage extraction exposes no arbitrary stream source`() {
+        val methods = ArchivalBundleVerifier::class.java.declaredMethods
+        assertTrue(methods.none { method ->
+            Modifier.isPublic(method.modifiers) &&
+                method.parameterTypes.any { parameter -> parameter == InputStream::class.java }
+        })
+        val guarded = methods.single { method ->
+            method.parameterTypes.firstOrNull() == StableControlFile::class.java
+        }
+        assertTrue(Modifier.isPublic(guarded.modifiers))
+        assertTrue(guarded.isSynthetic)
+    }
+
     @Test
     fun `identical source trees produce byte-identical verified archives`() {
         val temp = createTempDirectory("archive-")

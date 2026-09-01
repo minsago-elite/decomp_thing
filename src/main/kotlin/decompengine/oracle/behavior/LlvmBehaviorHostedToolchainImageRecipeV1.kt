@@ -420,9 +420,9 @@ private class BoundRecipe private constructor(
                     MAXIMUM_DOCKERFILE_BYTES,
                     "LLVM toolchain Dockerfile",
                 )
-                requireSingleLink(reproductionLock.path, "LLVM toolchain reproduction lock")
-                requireSingleLink(buildRecord.path, "LLVM toolchain build record")
-                requireSingleLink(dockerfile.path, "LLVM toolchain Dockerfile")
+                reproductionLock.requireSingleLink("LLVM toolchain reproduction lock")
+                buildRecord.requireSingleLink("LLVM toolchain build record")
+                dockerfile.requireSingleLink("LLVM toolchain Dockerfile")
 
                 val lockSha256 = reproductionLock.sha256(label = "LLVM toolchain reproduction lock")
                 val buildRecordSha256 = buildRecord.sha256(label = "LLVM toolchain build record")
@@ -500,21 +500,12 @@ private fun requireCanonicalRecipePath(path: Path, label: String): Path {
 }
 
 private fun requireGuardCurrent(guard: StableControlFile, expectedSha256: String, label: String) {
-    requireSingleLink(guard.path, label)
+    guard.requireSingleLink(label)
     if (guard.sha256(label = "$label terminal authentication") != expectedSha256) {
         recipeFail("$label bytes changed")
     }
     guard.verifyUnchanged(label)
-    requireSingleLink(guard.path, label)
-}
-
-private fun requireSingleLink(path: Path, label: String) {
-    val links = try {
-        (Files.getAttribute(path, "unix:nlink", LinkOption.NOFOLLOW_LINKS) as Number).toLong()
-    } catch (failure: Exception) {
-        throw LlvmBehaviorHostedToolchainImageRecipeV1Exception("cannot authenticate $label link count", failure)
-    }
-    if (links != 1L) recipeFail("$label must be a single-link regular file")
+    guard.requireSingleLink(label)
 }
 
 private fun emitReviewedDockerfile(

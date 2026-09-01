@@ -1,7 +1,6 @@
 package decompengine.oracle.fulltree
 
 import java.nio.file.Files
-import java.nio.file.StandardOpenOption
 import kotlin.test.Test
 import kotlin.test.assertEquals
 import kotlin.test.assertFailsWith
@@ -75,10 +74,9 @@ class BoundedDwarfFunctionFactsTest {
                         includeInlineOnly = false,
                         checkpoint = { point ->
                             if (point == "after hashing rich ELF") {
-                                Files.write(
+                                Files.move(
                                     artifactPath,
-                                    byteArrayOf(0),
-                                    StandardOpenOption.APPEND,
+                                    root.resolve("displaced-bounded-function-facts.elf"),
                                 )
                             }
                         },

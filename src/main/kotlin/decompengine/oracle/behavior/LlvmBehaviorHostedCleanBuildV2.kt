@@ -625,8 +625,24 @@ private fun deriveTwoCleanBuilds(
 
         val firstRoot = scratch.resolve("source-1")
         val secondRoot = scratch.resolve("source-2")
-        val firstLineage = ArchivalBundleVerifier.extractAndVerifyCandidateLineage(snapshot, firstRoot)
-        val secondLineage = ArchivalBundleVerifier.extractAndVerifyCandidateLineage(snapshot, secondRoot)
+        val (firstLineage, secondLineage) = StableControlFile.open(
+            snapshot,
+            LLVM_BEHAVIOR_CANDIDATE_ACP_LINEAGE_MAXIMUM_ARCHIVE_BYTES,
+            "private hosted candidate archive snapshot",
+        ).use { snapshotGuard ->
+            snapshotGuard.requireSingleLink("private hosted candidate archive snapshot")
+            if (
+                snapshotGuard.size != index.archiveBytes ||
+                snapshotGuard.sha256(label = "private hosted candidate archive snapshot") != index.archiveSha256
+            ) {
+                hostedFail("private hosted candidate archive snapshot changed before extraction")
+            }
+            val firstLineage = ArchivalBundleVerifier.extractAndVerifyCandidateLineage(snapshotGuard, firstRoot)
+            val secondLineage = ArchivalBundleVerifier.extractAndVerifyCandidateLineage(snapshotGuard, secondRoot)
+            snapshotGuard.verifyUnchanged("private hosted candidate archive snapshot")
+            snapshotGuard.requireSingleLink("private hosted candidate archive snapshot")
+            firstLineage to secondLineage
+        }
         requireExtractedLineage(firstLineage, index, "first")
         requireExtractedLineage(secondLineage, index, "second")
         requireSameExtractedLineage(firstLineage, secondLineage)
@@ -1009,6 +1025,12 @@ private fun runAuthenticatedPrivateLink(
         "private executed linker",
     ).use { privateLinkerGuard ->
         requireToolGuard(executedLinker, privateLinkerGuard, "private executed linker")
+        if (
+            linkCommand.firstOrNull() != tools.compiler.path.toString() ||
+            "--ld-path=$privateLinker" !in linkCommand
+        ) {
+            hostedFail("authenticated link command lost its private tool paths")
+        }
         val result = runHostedCommand(
             linkCommand,
             environment,
@@ -1036,6 +1058,9 @@ private fun runHostedCommand(
 ): HostedProcessResult {
     requireToolGuardMetadata(tools.compiler, compilerGuard, "compiler")
     requireToolGuardMetadata(tools.linker, linkerGuard, "linker")
+    if (command.firstOrNull() != tools.compiler.path.toString()) {
+        hostedFail("$label must execute the guarded private compiler snapshot")
+    }
     val result = HostedBuildProcessRunner.run(
         command,
         environment,
@@ -1773,7 +1798,7 @@ private fun requireTerminalInputs(
     checks.forEach { (guard, expected, label) ->
         if (guard.sha256(label = label) != expected) hostedFail("$label changed during hosted clean builds")
         guard.verifyUnchanged(label)
-        requireSingleLink(guard.path, label)
+        guard.requireSingleLink(label)
     }
 }
 
@@ -1785,9 +1810,9 @@ private fun requireToolGuard(tool: HostedTool, guard: StableControlFile, label: 
 }
 
 private fun requireToolGuardMetadata(tool: HostedTool, guard: StableControlFile, label: String) {
-    if (guard.path != tool.path || guard.size != tool.bytes) hostedFail("authenticated $label identity disagrees")
+    if (guard.size != tool.bytes) hostedFail("authenticated $label identity disagrees")
     guard.verifyUnchanged("authenticated $label")
-    requireSingleLink(tool.path, "authenticated $label")
+    guard.requireSingleLink("authenticated $label")
 }
 
 private fun copyGuardedFile(
