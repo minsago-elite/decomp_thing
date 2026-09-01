@@ -1,8 +1,10 @@
 package decompengine.oracle.fulltree
 
+import java.nio.file.Files
 import java.nio.file.Path
 import kotlin.io.path.readText
 import kotlin.test.Test
+import kotlin.test.assertEquals
 import kotlin.test.assertFalse
 import kotlin.test.assertTrue
 
@@ -132,6 +134,30 @@ class FullTreeKotlinAuthoritySurfaceTest {
         assertFalse(source.contains("oracle.full_tree_function_truth"))
         assertFalse(source.contains("AcpAgentHarness"))
         assertFalse(source.contains("AcpClient"))
+
+        val parityRoot = Path.of(
+            "src/test/resources/oracle/full-tree-function-truth-raw-v2",
+        )
+        val parityMembers = Files.walk(parityRoot).use { paths ->
+            paths.filter { Files.isRegularFile(it) }
+                .map { parityRoot.relativize(it).toString() }
+                .toList()
+                .toSet()
+        }
+        assertEquals(
+            setOf(
+                "PROVENANCE.txt",
+                "expected/clang-lib-driver.json.b64",
+                "expected/exclusions.json.b64",
+                "expected/generated-tools-clang.json.b64",
+                "expected/index.json.b64",
+            ),
+            parityMembers,
+        )
+        assertFalse(parityMembers.any { it.endsWith(".json") })
+        val parityProvenance = parityRoot.resolve("PROVENANCE.txt").readText()
+        assertTrue(parityProvenance.contains("not an oracle"))
+        assertTrue(parityProvenance.contains("not an ingestible full-tree truth publication"))
 
         assertTrue(guide.contains("Full-tree function-truth v2 now also has an internal Kotlin/SQLite"))
         assertTrue(guide.contains("authoritativeReleaseEvidence=false"))

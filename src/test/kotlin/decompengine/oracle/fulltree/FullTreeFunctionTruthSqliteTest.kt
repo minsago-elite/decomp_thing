@@ -35,6 +35,7 @@ class FullTreeFunctionTruthSqliteTest {
             assertEquals(serial.indexArtifactSha256, cappedParallel.indexArtifactSha256)
             assertEquals(serial.indexSha256, cappedParallel.indexSha256)
             assertEquals(serial.counts, cappedParallel.counts)
+            assertFrozenRawV2Truth(serial.root)
             assertFalse(serial.authoritativeReleaseEvidence)
             assertFalse(cappedParallel.authoritativeReleaseEvidence)
             assertTrue(serial.databaseHighWaterBytes > 0L)
@@ -442,6 +443,36 @@ private fun truthTreeBytes(root: Path): Map<String, List<Byte>> = Files.walk(roo
         .sorted()
         .toList()
         .associate { path -> root.relativize(path).toString() to Files.readAllBytes(path).toList() }
+}
+
+private fun assertFrozenRawV2Truth(actualRoot: Path) {
+    val expectedResources = linkedMapOf(
+        "exclusions.json" to "exclusions.json.b64",
+        "index.json" to "index.json.b64",
+        "shards/clang-lib-driver.json" to "clang-lib-driver.json.b64",
+        "shards/generated-tools-clang.json" to "generated-tools-clang.json.b64",
+    )
+    val actualMembers = Files.walk(actualRoot).use { paths ->
+        paths.filter { Files.isRegularFile(it, LinkOption.NOFOLLOW_LINKS) }
+            .map { actualRoot.relativize(it).toString() }
+            .toList()
+            .toSet()
+    }
+    assertEquals(expectedResources.keys, actualMembers)
+    expectedResources.forEach { (relative, resource) ->
+        val encoded = checkNotNull(
+            FullTreeFunctionTruthSqliteTest::class.java.getResourceAsStream(
+                "/oracle/full-tree-function-truth-raw-v2/expected/$resource",
+            ),
+        ) { "frozen raw-path function-truth v2 fixture $resource is unavailable" }.use {
+            it.readAllBytes()
+        }
+        assertContentEquals(
+            Base64.getMimeDecoder().decode(encoded),
+            Files.readAllBytes(actualRoot.resolve(relative)),
+            "raw-derived Kotlin truth differs from the frozen Python-retirement bytes at $relative",
+        )
+    }
 }
 
 private fun privateTruthDirectory(path: Path): Path = path.also {

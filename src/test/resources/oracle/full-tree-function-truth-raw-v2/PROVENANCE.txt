@@ -1,0 +1,96 @@
+FULL-TREE FUNCTION TRUTH V2 RAW-PATH PARITY FIXTURE
+==================================================
+
+AUTHORITY WARNING
+
+The decoded expected bytes in this directory were emitted by the retired Python
+reconciler during a one-time migration check. They are inert test expectations,
+not an oracle, validation result, release evidence, or production input. ACP and
+other candidate producers have no authority to author, select, repair, or bless
+them. Kotlin owns raw-artifact derivation, reconciliation, validation, scoring,
+certification, and release decisions.
+
+The four expected members are stored separately as base64. Consequently this
+resource directory is not an ingestible full-tree truth publication, despite the
+decoded JSON containing the historical complete=true field. The test decodes
+each member only into memory and compares it with a publication produced through
+FullTreeFunctionTruthSqlite.generateAndPublish. Never decode these resources into
+a production or candidate artifact tree.
+
+PURPOSE AND METHOD
+
+On 2026-09-02 (Asia/Seoul), the Kotlin end-to-end test fixture rebound its fixed
+embedded ELF to authenticated test controls, derived the ELF function index from
+the raw ELF, derived and validated both DWARF observation shards, published the
+exact generic bounded observation run, and invoked the real Kotlin raw-input
+function-truth path. A temporary export hook captured those already authenticated
+intermediates and the Kotlin output; the hook was removed before this fixture was
+committed.
+
+The captured intermediates were then passed to the historical Python v2
+reconciler twice in an offline migration replay. Both Python trees had exactly
+the same four-member set and bytes as each other and as the Kotlin tree. The
+checked-in base64 payloads encode the Python output from that replay. The normal
+test regenerates all inputs from the embedded raw ELF with Kotlin and compares
+the Kotlin publication to these decoded bytes; it never runs Python and never
+admits the expected bytes as inputs.
+
+Repository checkpoint used for capture:
+  1b6f20f42534a5f73b901c5a28e3f5361e8daa2d
+
+Configuration SHA-256 values:
+  function observations v3:
+    dffe8bad65e82b46150cd1f5368925ae10709fd01adf905d27f1e8784634a86e
+  ELF functions v1:
+    5305350fd10d902979a5a1bc109dd424d8f7c274e22bd5e4bd47bc18ae639f2f
+  function truth v2:
+    17c61e43524b98a215075b82fa50732d6d8f50d883dce235e511731612da04e5
+
+CAPTURED INPUT HASHES
+
+The raw-compatible capture itself is intentionally not retained. These hashes
+bind the exact bytes used by the offline replay:
+
+  8caa5c8921d3702e895337d42378abdacd7dff732ad8a1f682e46818965350c3  scope.json
+  b0b116fe99cb81cea3817cedf130cdd8033bfe0f4061145c3693484f21a7896e  inventory.json
+  2c0b09523f92cda04a3bb142c26edf28045a03b39142c307f5444f40fb8798e4  elf/functions.json
+  f18b1be7353c75e4f2984fa8c7234138e6e31967317831c0faf5828211287753  observations/run.json
+  ac9ace1d1e67a0a7aa57da10421280005b59ddbfad7643e6ac2be40b780eaa22  observations/index.json
+  0350c21380492fbb9a33bc5b71af2a5414d7176b180c3b83a03dff920e84618d  observations/checkpoints/clang-lib-driver.json
+  c7f1cea0295ece94b4350ffe40ee67586b079745affa4407e94c3100617935fc  observations/checkpoints/generated-tools-clang.json
+  74a2f7e9f9b0f34a79c8d48b05328d9bec788932578dcadda8ba962fca76afcd  observations/outputs/clang-lib-driver.json
+  b7f5ead6586abde90308c144e8aa05593af0658ab88b0658f7e491713bb36574  observations/outputs/generated-tools-clang.json
+
+DECODED OUTPUT HASHES
+
+  11ff070ce408bf1397151998b20e76615d61d28ddbfdfeaf5a268316f7bdd9c3  2231  exclusions.json
+  2273f3477c02398be8bc8d89026977d4934fde1a50a4a348667df48c7c0afd7e  1659  index.json
+  79c19ea225af2fc3a1cab4e9f370345ae18093c8f145fbcc0e77043803e9b1af  1988  shards/clang-lib-driver.json
+  eaec6d0906504390f72d0a081f3870430cb82634f136357bedc19448cbb97ad4  2338  shards/generated-tools-clang.json
+
+PYTHON SNAPSHOT AND ENVIRONMENT
+
+  Python reconciler:
+    20f4bf947d45c48561d99c8104fa8da6276971ddb5aff7a3b02d9ad25f637af8  oracle/full_tree_function_truth.py
+  schemas:
+    b21be27d085c61c60cbaba11da1208b24c897c264001c790b0ca32b2ae24e5f7  oracle/full-tree-function-truth.schema.json
+    40a2c4d0c3a1b3317e010fd267b56e6ea3ec94620abd79c591b01bc6357e084f  oracle/full-tree-function-truth-index.schema.json
+    9f446ce4b122df4e2c45b473d0a43269a457bd04512cc3a9df84aae3329fad25  oracle/full-tree-function-exclusions.schema.json
+
+  LC_ALL=C.UTF-8
+  TZ=UTC
+  PYTHONHASHSEED=0
+  CPython 3.14.7
+  fastjsonschema 2.22.2
+  SQLite 3.53.4
+
+REPLAY SHAPE
+
+The exact replay loaded the captured scope bytes and used their SHA-256 as
+scope_sha256, loaded the captured inventory JSON, and called
+reconcile_full_tree_function_truth with the captured elf/functions.json and
+observations directory. It did so into two fresh output directories. A recursive
+map of relative file name to bytes was then built for both Python outputs and the
+captured Kotlin output; equality of all three maps was required before encoding
+the four Python members stored here.
+
