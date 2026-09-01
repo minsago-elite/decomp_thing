@@ -3,6 +3,7 @@ package decompengine.oracle.behavior
 import decompengine.oracle.core.DescriptorBoundAtomicStateFile
 import decompengine.oracle.core.OracleArtifacts
 import decompengine.oracle.core.OracleJson
+import java.lang.reflect.InvocationTargetException
 import java.lang.reflect.Modifier
 import java.lang.reflect.Proxy
 import java.nio.file.Files
@@ -132,6 +133,12 @@ class LlvmBehaviorHostedToolchainImageBuildLeaseV2Test {
                 assertEquals(firstOperation, replayed.operationId)
                 assertEquals(firstBinding.string("leaseNonce"), binding(replayed).string("leaseNonce"))
                 assertFalse(replayed is LlvmBehaviorHostedToolchainImageBuildLeaseV2FreshOwner)
+                val engineOpen = LlvmBehaviorHostedToolchainImageEngineV1::class.java.declaredMethods
+                    .single { it.name == "open" && !it.isSynthetic }
+                assertFalse(
+                    engineOpen.parameterTypes[1].isInstance(replayed),
+                    "a cold-recovered lease must not satisfy the public Engine fresh capability",
+                )
             }
         }
 
@@ -211,6 +218,38 @@ class LlvmBehaviorHostedToolchainImageBuildLeaseV2Test {
             } finally {
                 first.close()
             }
+        }
+
+    @Test
+    fun `fixed Engine handoff makes every lease alias inert without closing retained ownership`() =
+        withFixture { fixture ->
+            val root = fixture.newJournalRoot("engine-transfer")
+            val owner = fixture.createFresh(root)
+            val operationId = owner.operationId
+            val before = journalSnapshot(root)
+            val retained = consumeFreshLeaseForPrivateEngine(owner)
+
+            assertFailsWith<LlvmBehaviorHostedToolchainImageBuildLeaseV2Exception> {
+                owner.requireCurrentBinding()
+            }
+            assertFailsWith<IllegalStateException> { owner.operationId }
+            assertFailsWith<LlvmBehaviorHostedToolchainImageBuildLeaseV2Exception> {
+                owner.recordRecoveryLocatorsAbsent()
+            }
+            assertFailsWith<LlvmBehaviorHostedToolchainImageBuildLeaseV2Exception> {
+                owner.armImageBuildPost()
+            }
+            owner.close()
+            owner.close()
+
+            retained.requireCurrentBinding()
+            assertEquals(operationId, retained.operationId)
+            assertEquals(operationId, retained.buildId)
+            assertEquals(before, journalSnapshot(root))
+            retained.close()
+            retained.close()
+            assertFailsWith<IllegalStateException> { retained.requireCurrentBinding() }
+            assertFailsWith<IllegalStateException> { retained.operationId }
         }
 
     @Test
@@ -440,6 +479,45 @@ class LlvmBehaviorHostedToolchainImageBuildLeaseV2Test {
             entryPoints.getValue("recover").returnType,
         )
         assertTrue(factory.declaredConstructors.all { Modifier.isPrivate(it.modifiers) })
+        val freshImplementation = factory.declaredClasses.single { it.simpleName == "FreshBoundOwner" }
+        val recoveredImplementation = factory.declaredClasses.single { it.simpleName == "RecoveredBoundOwner" }
+        assertTrue(freshImplementation.declaredConstructors.all { Modifier.isPrivate(it.modifiers) })
+        assertTrue(recoveredImplementation.declaredConstructors.all { Modifier.isPrivate(it.modifiers) })
+        assertTrue(
+            factory.declaredMethods.filter {
+                it.name == "createFreshBoundLease" || it.name == "recoverBoundLease"
+            }.all { Modifier.isPrivate(it.modifiers) },
+        )
+        val fileFacade = Class.forName(
+            "decompengine.oracle.behavior.LlvmBehaviorHostedToolchainImageBuildLeaseV2Kt",
+        )
+        val prohibitedLeaseConstructionTypes = setOf(
+            "OpenedToolchainImageBuildLease",
+            "ToolchainImageBuildDescriptorJournal",
+            "ToolchainImageBuildLeaseBinding",
+            "ToolchainImageBuildLeaseHistory",
+            "FreshBoundOwner",
+            "LlvmBehaviorHostedToolchainImageBuildLeaseV2EngineFreshOwner",
+        )
+        assertTrue(
+            fileFacade.declaredMethods.none { method ->
+                Modifier.isPublic(method.modifiers) &&
+                    (method.returnType.simpleName in prohibitedLeaseConstructionTypes ||
+                        method.name.contains("createFreshBoundLease") ||
+                        method.name.contains("recoverBoundLease") ||
+                        (method.parameterTypes.any {
+                            it == LlvmBehaviorHostedToolchainImageRecipeV1LeaseOwner::class.java
+                        } && method.returnType.simpleName in prohibitedLeaseConstructionTypes))
+            },
+            "the file facade must not expose a fresh or recovered journal construction chain",
+        )
+        listOf(
+            "decompengine.oracle.behavior.OpenedToolchainImageBuildLease",
+            "decompengine.oracle.behavior.ToolchainImageBuildDescriptorJournal",
+        ).forEach { className ->
+            val implementation = Class.forName(className)
+            assertTrue(implementation.declaredConstructors.all { Modifier.isPrivate(it.modifiers) })
+        }
 
         val owner = LlvmBehaviorHostedToolchainImageBuildLeaseV2Owner::class.java
         val freshOwner = LlvmBehaviorHostedToolchainImageBuildLeaseV2FreshOwner::class.java
@@ -801,6 +879,22 @@ class LlvmBehaviorHostedToolchainImageBuildLeaseV2Test {
 
     private fun binding(owner: LlvmBehaviorHostedToolchainImageBuildLeaseV2Owner): JsonObject =
         OracleJson.parse(owner.canonicalBindingBytes) as JsonObject
+}
+
+private fun consumeFreshLeaseForPrivateEngine(
+    owner: LlvmBehaviorHostedToolchainImageBuildLeaseV2FreshOwner,
+): LlvmBehaviorHostedToolchainImageBuildLeaseV2EngineFreshOwner {
+    val method = LlvmBehaviorHostedToolchainImageBuildLeaseV2::class.java.declaredMethods.single {
+        it.name == "consumeFreshForHostedToolchainImageEngineV1"
+    }
+    assertTrue(Modifier.isPrivate(method.modifiers))
+    assertTrue(method.trySetAccessible())
+    return try {
+        method.invoke(LlvmBehaviorHostedToolchainImageBuildLeaseV2, owner)
+            as LlvmBehaviorHostedToolchainImageBuildLeaseV2EngineFreshOwner
+    } catch (failure: InvocationTargetException) {
+        throw failure.targetException
+    }
 }
 
 private class LeaseFixture(private val root: Path) {

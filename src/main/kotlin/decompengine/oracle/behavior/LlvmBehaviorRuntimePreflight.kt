@@ -13,6 +13,7 @@ import decompengine.oracle.core.StrictJsonLimits
 import decompengine.oracle.fulltree.StableControlFile
 import java.io.ByteArrayOutputStream
 import java.io.IOException
+import java.lang.reflect.InvocationTargetException
 import java.nio.ByteBuffer
 import java.nio.charset.CodingErrorAction
 import java.nio.charset.StandardCharsets
@@ -103,13 +104,13 @@ sealed interface LlvmBehaviorRuntimePreflight {
  * Sealed retained binding for only the private Unix endpoint checked by this preflight run.
  *
  * The authenticated CLI and its empty Docker config are closed before this owner is returned. The
- * raw socket path remains private for a future one-shot Kotlin Engine connector, because Linux
- * cannot connect through the O_PATH identity descriptor. Until that consuming connector exists,
- * this binding is not usable Engine authority. This surface deliberately has no pathname, socket
- * or request transport, HTTP, mutation, build, CREATE, START, wait, cleanup, receipt, runtime fact,
- * image claim, or parsing method. The immutable v1 preflight receipt is published separately and
- * is not carried by this capability; endpoint currentness alone cannot refresh its point-in-time
- * runtime or image claims.
+ * raw socket path remains private for the one-shot Kotlin Engine connector, because Linux cannot
+ * connect through the O_PATH identity descriptor. Only the fixed lease-bound Engine factory can
+ * consume it; this binding is not itself usable Engine authority. This surface has no pathname,
+ * socket or request transport, HTTP, mutation, build, CREATE, START, wait, cleanup, receipt,
+ * runtime fact, image claim, or parsing method. The immutable v1 preflight receipt is published
+ * separately and is not carried by this capability; endpoint currentness alone cannot refresh its
+ * point-in-time runtime or image claims.
  *
  * ACP remains the first-class candidate producer/operator and is consumed read-only. Neither ACP
  * nor this endpoint owner receives oracle, reference, policy, validation, observation, containment,
@@ -128,6 +129,26 @@ internal sealed interface LlvmBehaviorRetainedDockerEndpointBinding : AutoClosea
  * endpoint facts, response bytes, digest claim, callback, score, or release token is accepted.
  */
 object LlvmBehaviorRuntimePreflightPublisher {
+    /**
+     * Irreversibly consumes the retained endpoint for the lease-bound fixed Engine owner.
+     * The concrete handoff and named endpoint remain private to this publisher.
+     */
+    private fun openHostedToolchainImageEngineV1(
+        binding: LlvmBehaviorRetainedDockerEndpointBinding,
+        freshLeaseOwner: LlvmBehaviorHostedToolchainImageBuildLeaseV2FreshOwner,
+    ): LlvmBehaviorHostedToolchainImageEngineV1Owner {
+        val retained = binding as? RetainedEndpointBinding
+            ?: preflightFail("retained Docker endpoint binding is not owned by this preflight publisher")
+        val method = RetainedEndpointBinding::class.java.declaredMethods
+            .single { it.name == "openHostedToolchainImageEngineV1" }
+        check(method.trySetAccessible())
+        return try {
+            method.invoke(retained, freshLeaseOwner) as LlvmBehaviorHostedToolchainImageEngineV1Owner
+        } catch (failure: InvocationTargetException) {
+            throw failure.targetException
+        }
+    }
+
     fun publish(
         corpusPath: Path,
         referenceReportPath: Path,
@@ -166,17 +187,35 @@ object LlvmBehaviorRuntimePreflightPublisher {
         runtimeSocketPath: Path,
         outputPath: Path,
         limits: LlvmBehaviorRuntimePreflightLimits = LlvmBehaviorRuntimePreflightLimits(),
-    ): LlvmBehaviorRetainedDockerEndpointBinding = RetainedEndpointBinding(
-        corpusPath,
-        referenceReportPath,
-        diagnosticMatrixPath,
-        artifactManifestPath,
-        controlClientPath,
-        dockerConfigDirectory,
-        runtimeSocketPath,
-        outputPath,
-        limits,
-    )
+    ): LlvmBehaviorRetainedDockerEndpointBinding {
+        val constructor = RetainedEndpointBinding::class.java.getDeclaredConstructor(
+            Path::class.java,
+            Path::class.java,
+            Path::class.java,
+            Path::class.java,
+            Path::class.java,
+            Path::class.java,
+            Path::class.java,
+            Path::class.java,
+            LlvmBehaviorRuntimePreflightLimits::class.java,
+        )
+        check(constructor.trySetAccessible())
+        return try {
+            constructor.newInstance(
+                corpusPath,
+                referenceReportPath,
+                diagnosticMatrixPath,
+                artifactManifestPath,
+                controlClientPath,
+                dockerConfigDirectory,
+                runtimeSocketPath,
+                outputPath,
+                limits,
+            )
+        } catch (failure: InvocationTargetException) {
+            throw failure.targetException
+        }
+    }
 
     /* Reflective construction still supplies only the same raw paths and lowering limits. */
     private class PublishedPreflight(
@@ -230,7 +269,7 @@ object LlvmBehaviorRuntimePreflightPublisher {
     }
 
     /* Reflective construction still supplies only the same raw paths and lowering limits. */
-    private class RetainedEndpointBinding(
+    private class RetainedEndpointBinding private constructor(
         corpusPath: Path,
         referenceReportPath: Path,
         diagnosticMatrixPath: Path,
@@ -241,9 +280,10 @@ object LlvmBehaviorRuntimePreflightPublisher {
         outputPath: Path,
         limits: LlvmBehaviorRuntimePreflightLimits,
     ) : LlvmBehaviorRetainedDockerEndpointBinding {
-        private val endpoint: PinnedDockerEndpointBinding
+        private var endpoint: PinnedDockerEndpointBinding?
         private var closed = false
         private var poisoned = false
+        private var transferred = false
 
         init {
             val derived = deriveAndPublishPreflight(
@@ -262,10 +302,9 @@ object LlvmBehaviorRuntimePreflightPublisher {
 
         @Synchronized
         override fun requireCurrent() {
-            if (closed) preflightFail("retained Docker endpoint binding is closed")
-            if (poisoned) preflightFail("retained Docker endpoint binding is poisoned")
+            val owned = currentEndpoint()
             try {
-                endpoint.requireCurrent()
+                owned.requireCurrent()
             } catch (failure: Throwable) {
                 poisoned = true
                 if (failure is LlvmBehaviorRuntimePreflightException) throw failure
@@ -274,10 +313,48 @@ object LlvmBehaviorRuntimePreflightPublisher {
         }
 
         @Synchronized
+        private fun openHostedToolchainImageEngineV1(
+            freshLeaseOwner: LlvmBehaviorHostedToolchainImageBuildLeaseV2FreshOwner,
+        ): LlvmBehaviorHostedToolchainImageEngineV1Owner {
+            val owned = currentEndpoint()
+            try {
+                owned.requireCurrent()
+                val method = PinnedDockerRuntimeBindings.Companion::class.java.declaredMethods
+                    .single { it.name == "openHostedToolchainImageEngineV1" }
+                check(method.trySetAccessible())
+                val engineOwner = try {
+                    method.invoke(
+                        PinnedDockerRuntimeBindings.Companion,
+                        owned,
+                        freshLeaseOwner,
+                    ) as LlvmBehaviorHostedToolchainImageEngineV1Owner
+                } catch (failure: InvocationTargetException) {
+                    throw failure.targetException
+                }
+                endpoint = null
+                transferred = true
+                return engineOwner
+            } catch (failure: Throwable) {
+                poisoned = true
+                if (failure is LlvmBehaviorRuntimePreflightException) throw failure
+                preflightFail("cannot consume the retained Docker endpoint for the fixed Engine", failure)
+            }
+        }
+
+        private fun currentEndpoint(): PinnedDockerEndpointBinding {
+            if (closed) preflightFail("retained Docker endpoint binding is closed")
+            if (transferred) preflightFail("retained Docker endpoint binding was transferred")
+            if (poisoned) preflightFail("retained Docker endpoint binding is poisoned")
+            return checkNotNull(endpoint) { "retained Docker endpoint binding has no endpoint" }
+        }
+
+        @Synchronized
         override fun close() {
             if (closed) return
             closed = true
-            endpoint.close()
+            val owned = endpoint
+            endpoint = null
+            owned?.close()
         }
     }
 }

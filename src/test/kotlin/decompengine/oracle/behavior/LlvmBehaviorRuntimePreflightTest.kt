@@ -206,6 +206,7 @@ class LlvmBehaviorRuntimePreflightTest {
                 "closed" to Boolean::class.javaPrimitiveType,
                 "endpoint" to PinnedDockerEndpointBinding::class.java,
                 "poisoned" to Boolean::class.javaPrimitiveType,
+                "transferred" to Boolean::class.javaPrimitiveType,
             ),
             implementation.declaredFields.associate { it.name to it.type },
         )

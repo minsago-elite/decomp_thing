@@ -2,6 +2,7 @@ package decompengine.oracle.behavior
 
 import decompengine.oracle.fulltree.StableControlFile
 import java.io.OutputStream
+import java.lang.reflect.InvocationTargetException
 import java.nio.file.FileSystems
 import java.nio.file.Files
 import java.nio.file.LinkOption
@@ -95,12 +96,18 @@ internal object LlvmBehaviorHostedToolchainImageRecipeV1 {
     )
 
     /** Consumes [binding] exactly once and moves its descriptors into the returned lease owner. */
-    fun consumeImageBuildLeaseBinding(
+    private fun consumeImageBuildLeaseBinding(
         binding: LlvmBehaviorHostedToolchainImageRecipeV1LeaseBinding,
     ): LlvmBehaviorHostedToolchainImageRecipeV1LeaseOwner {
         val retained = binding as? RetainedLeaseBinding
             ?: recipeFail("LLVM hosted toolchain-image recipe lease binding is not owned here")
-        return retained.consume()
+        val method = RetainedLeaseBinding::class.java.declaredMethods.single { it.name == "consume" }
+        check(method.trySetAccessible())
+        return try {
+            method.invoke(retained) as LlvmBehaviorHostedToolchainImageRecipeV1LeaseOwner
+        } catch (failure: InvocationTargetException) {
+            throw failure.targetException
+        }
     }
 
     private class BoundOwner(
@@ -192,7 +199,13 @@ internal object LlvmBehaviorHostedToolchainImageRecipeV1 {
                     failure,
                 )
             }
-            val binding = RetainedLeaseBinding(owned)
+            val constructor = RetainedLeaseBinding::class.java.getDeclaredConstructor(BoundRecipe::class.java)
+            check(constructor.trySetAccessible())
+            val binding = try {
+                constructor.newInstance(owned)
+            } catch (failure: InvocationTargetException) {
+                throw failure.targetException
+            }
             state = null
             transferred = true
             return binding
@@ -215,7 +228,7 @@ internal object LlvmBehaviorHostedToolchainImageRecipeV1 {
         }
     }
 
-    private class RetainedLeaseBinding(
+    private class RetainedLeaseBinding private constructor(
         initial: BoundRecipe,
     ) : LlvmBehaviorHostedToolchainImageRecipeV1LeaseBinding {
         private var state: BoundRecipe? = initial
@@ -224,7 +237,7 @@ internal object LlvmBehaviorHostedToolchainImageRecipeV1 {
         private var poisoned = false
 
         @Synchronized
-        fun consume(): LlvmBehaviorHostedToolchainImageRecipeV1LeaseOwner {
+        private fun consume(): LlvmBehaviorHostedToolchainImageRecipeV1LeaseOwner {
             check(!closed) { "LLVM hosted toolchain-image recipe lease binding is closed" }
             check(!consumed) { "LLVM hosted toolchain-image recipe lease binding was consumed" }
             if (poisoned) recipeFail("LLVM hosted toolchain-image recipe lease binding is poisoned")

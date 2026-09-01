@@ -10,6 +10,7 @@ import decompengine.oracle.core.DescriptorBoundStateSnapshot
 import decompengine.oracle.core.OracleArtifacts
 import decompengine.oracle.core.OracleJson
 import decompengine.oracle.core.StrictJsonLimits
+import java.lang.reflect.InvocationTargetException
 import java.nio.file.Files
 import java.nio.file.LinkOption
 import java.nio.file.Path
@@ -115,6 +116,16 @@ internal sealed interface LlvmBehaviorHostedToolchainImageBuildLeaseV2FreshOwner
     fun armImageBuildPost(): LlvmBehaviorHostedToolchainImageBuildLeaseV2Phase
 }
 
+/** Retained fresh-only lease ownership available only inside the fixed hosted Engine coordinator. */
+internal sealed interface LlvmBehaviorHostedToolchainImageBuildLeaseV2EngineFreshOwner : AutoCloseable {
+    val operationId: String
+    val buildId: String
+
+    fun requireCurrentBinding()
+
+    override fun close()
+}
+
 /**
  * Creates or recovers a lease from one raw journal-root path and a consuming recipe handoff.
  *
@@ -125,6 +136,23 @@ internal sealed interface LlvmBehaviorHostedToolchainImageBuildLeaseV2FreshOwner
  * bytes, parsed fact, runner, Engine, or callback is caller supplied.
  */
 internal object LlvmBehaviorHostedToolchainImageBuildLeaseV2 {
+    /** Irreversibly consumes an exact untouched fresh lease for the fixed Engine owner. */
+    private fun consumeFreshForHostedToolchainImageEngineV1(
+        owner: LlvmBehaviorHostedToolchainImageBuildLeaseV2FreshOwner,
+    ): LlvmBehaviorHostedToolchainImageBuildLeaseV2EngineFreshOwner {
+        val bound = owner as? FreshBoundOwner
+            ?: leaseFail("fresh hosted toolchain image-build lease v2 owner is not owned here")
+        val method = BoundOwner::class.java.declaredMethods.single {
+            it.name == "consumeForHostedToolchainImageEngineV1"
+        }
+        check(method.trySetAccessible())
+        return try {
+            method.invoke(bound) as LlvmBehaviorHostedToolchainImageBuildLeaseV2EngineFreshOwner
+        } catch (failure: InvocationTargetException) {
+            throw failure.targetException
+        }
+    }
+
     fun createFresh(
         journalRootPath: Path,
         recipeBinding: LlvmBehaviorHostedToolchainImageRecipeV1LeaseBinding,
@@ -133,7 +161,18 @@ internal object LlvmBehaviorHostedToolchainImageBuildLeaseV2 {
         "create fresh hosted toolchain image-build lease v2",
     ) { recipe ->
         val opened = createFreshBoundLease(journalRootPath, recipe)
-        FreshBoundOwner(recipe, opened)
+        try {
+            val constructor = FreshBoundOwner::class.java.getDeclaredConstructor(
+                LlvmBehaviorHostedToolchainImageRecipeV1LeaseOwner::class.java,
+                OpenedToolchainImageBuildLease::class.java,
+            )
+            check(constructor.trySetAccessible())
+            constructor.newInstance(recipe, opened)
+                as LlvmBehaviorHostedToolchainImageBuildLeaseV2FreshOwner
+        } catch (failure: Throwable) {
+            runCatching { opened.journal.close() }.exceptionOrNull()?.let(failure::addSuppressed)
+            throw failure
+        }
     }
 
     fun recover(
@@ -144,7 +183,18 @@ internal object LlvmBehaviorHostedToolchainImageBuildLeaseV2 {
         "recover hosted toolchain image-build lease v2",
     ) { recipe ->
         val opened = recoverBoundLease(journalRootPath, recipe)
-        RecoveredBoundOwner(recipe, opened)
+        try {
+            val constructor = RecoveredBoundOwner::class.java.getDeclaredConstructor(
+                LlvmBehaviorHostedToolchainImageRecipeV1LeaseOwner::class.java,
+                OpenedToolchainImageBuildLease::class.java,
+            )
+            check(constructor.trySetAccessible())
+            constructor.newInstance(recipe, opened)
+                as LlvmBehaviorHostedToolchainImageBuildLeaseV2Owner
+        } catch (failure: Throwable) {
+            runCatching { opened.journal.close() }.exceptionOrNull()?.let(failure::addSuppressed)
+            throw failure
+        }
     }
 
     private inline fun <T> consumeRecipeBinding(
@@ -154,7 +204,16 @@ internal object LlvmBehaviorHostedToolchainImageBuildLeaseV2 {
     ): T {
         var recipe: LlvmBehaviorHostedToolchainImageRecipeV1LeaseOwner? = null
         try {
-            recipe = LlvmBehaviorHostedToolchainImageRecipeV1.consumeImageBuildLeaseBinding(binding)
+            val method = LlvmBehaviorHostedToolchainImageRecipeV1::class.java.declaredMethods.single {
+                it.name == "consumeImageBuildLeaseBinding"
+            }
+            check(method.trySetAccessible())
+            recipe = try {
+                method.invoke(LlvmBehaviorHostedToolchainImageRecipeV1, binding)
+                    as LlvmBehaviorHostedToolchainImageRecipeV1LeaseOwner
+            } catch (failure: InvocationTargetException) {
+                throw failure.targetException
+            }
             return translateLeaseFailures(label) {
                 action(checkNotNull(recipe))
             }
@@ -165,6 +224,84 @@ internal object LlvmBehaviorHostedToolchainImageBuildLeaseV2 {
         }
     }
 
+    /* Kept inside the sole lease factory so Kotlin emits no public file-facade journal opener. */
+    private fun createFreshBoundLease(
+        journalRootPath: Path,
+        recipeOwner: LlvmBehaviorHostedToolchainImageRecipeV1LeaseOwner,
+    ): OpenedToolchainImageBuildLease {
+        requireExactRawPath(journalRootPath)
+        val recipe = ToolchainRecipePins.capture(recipeOwner)
+        val rootPathSha256 = pathCommitment(journalRootPath)
+        val authority = ToolchainImageBuildJournalRoot.open(journalRootPath)
+        val journal = try {
+            newDescriptorJournal(rootPathSha256, recipe, authority)
+        } catch (failure: Throwable) {
+            runCatching { authority.close() }.exceptionOrNull()?.let(failure::addSuppressed)
+            throw failure
+        }
+        try {
+            val history = journal.createFresh()
+            recipeOwner.requireCurrent()
+            return newOpenedLease(journal, history.binding, history)
+        } catch (failure: Throwable) {
+            runCatching { journal.close() }.exceptionOrNull()?.let(failure::addSuppressed)
+            throw failure
+        }
+    }
+
+    /* Recovery stays equally sealed even though it can never produce POST-arm capability. */
+    private fun recoverBoundLease(
+        journalRootPath: Path,
+        recipeOwner: LlvmBehaviorHostedToolchainImageRecipeV1LeaseOwner,
+    ): OpenedToolchainImageBuildLease {
+        requireExactRawPath(journalRootPath)
+        val recipe = ToolchainRecipePins.capture(recipeOwner)
+        val rootPathSha256 = pathCommitment(journalRootPath)
+        val authority = ToolchainImageBuildJournalRoot.open(journalRootPath)
+        val journal = try {
+            newDescriptorJournal(rootPathSha256, recipe, authority)
+        } catch (failure: Throwable) {
+            runCatching { authority.close() }.exceptionOrNull()?.let(failure::addSuppressed)
+            throw failure
+        }
+        try {
+            val history = journal.recover()
+            recipeOwner.requireCurrent()
+            return newOpenedLease(journal, history.binding, history)
+        } catch (failure: Throwable) {
+            runCatching { journal.close() }.exceptionOrNull()?.let(failure::addSuppressed)
+            throw failure
+        }
+    }
+
+    private fun newDescriptorJournal(
+        rootPathSha256: String,
+        recipe: ToolchainRecipePins,
+        authority: ToolchainImageBuildJournalRoot,
+    ): ToolchainImageBuildDescriptorJournal {
+        val constructor = ToolchainImageBuildDescriptorJournal::class.java.getDeclaredConstructor(
+            String::class.java,
+            ToolchainRecipePins::class.java,
+            ToolchainImageBuildJournalRoot::class.java,
+        )
+        check(constructor.trySetAccessible())
+        return constructor.newInstance(rootPathSha256, recipe, authority)
+    }
+
+    private fun newOpenedLease(
+        journal: ToolchainImageBuildDescriptorJournal,
+        binding: ToolchainImageBuildLeaseBinding,
+        history: ToolchainImageBuildLeaseHistory,
+    ): OpenedToolchainImageBuildLease {
+        val constructor = OpenedToolchainImageBuildLease::class.java.getDeclaredConstructor(
+            ToolchainImageBuildDescriptorJournal::class.java,
+            ToolchainImageBuildLeaseBinding::class.java,
+            ToolchainImageBuildLeaseHistory::class.java,
+        )
+        check(constructor.trySetAccessible())
+        return constructor.newInstance(journal, binding, history)
+    }
+
     private abstract class BoundOwner(
         private val recipe: LlvmBehaviorHostedToolchainImageRecipeV1LeaseOwner,
         private val opened: OpenedToolchainImageBuildLease,
@@ -173,59 +310,61 @@ internal object LlvmBehaviorHostedToolchainImageBuildLeaseV2 {
         private var history = opened.history
         private var closed = false
         private var poisoned = false
+        private var transferred = false
+        private var retainedClosed = false
 
         override val authority: String
-            get() = LEASE_AUTHORITY
+            @Synchronized get() = currentForCaller().let { LEASE_AUTHORITY }
         override val operationId: String
-            get() = opened.binding.operationId
+            @Synchronized get() = currentForCaller().binding.operationId
         override val buildId: String
-            get() = opened.binding.operationId
+            @Synchronized get() = currentForCaller().binding.operationId
         override val buildCancelRequestTarget: String
-            get() = buildCancelRequestTarget(opened.binding.operationId)
+            @Synchronized get() = buildCancelRequestTarget(currentForCaller().binding.operationId)
         override val buildIntentSha256: String
-            get() = opened.binding.buildIntentSha256
+            @Synchronized get() = currentForCaller().binding.buildIntentSha256
         override val requestIntentSha256: String
-            get() = opened.binding.requestIntentSha256
+            @Synchronized get() = currentForCaller().binding.requestIntentSha256
         override val bindingSha256: String
-            get() = opened.binding.bindingSha256
+            @Synchronized get() = currentForCaller().binding.bindingSha256
         override val latestTransitionSha256: String
-            @Synchronized get() = history.latest.transitionSha256
+            @Synchronized get() = currentForCaller().let { history.latest.transitionSha256 }
         override val phase: LlvmBehaviorHostedToolchainImageBuildLeaseV2Phase
-            @Synchronized get() = history.phase
+            @Synchronized get() = currentForCaller().let { history.phase }
         override val recoveryTag: String
-            get() = opened.binding.recoveryTag
+            @Synchronized get() = currentForCaller().binding.recoveryTag
         override val recoveryLeaseLabelKey: String
-            get() = RECOVERY_LEASE_LABEL_KEY
+            @Synchronized get() = currentForCaller().let { RECOVERY_LEASE_LABEL_KEY }
         override val recoveryLeaseLabelValue: String
-            get() = opened.binding.operationId
+            @Synchronized get() = currentForCaller().binding.operationId
         override val contentSha256LabelKey: String
-            get() = CONTENT_SHA256_LABEL_KEY
+            @Synchronized get() = currentForCaller().let { CONTENT_SHA256_LABEL_KEY }
         override val contentSha256LabelValue: String
-            get() = opened.binding.recipe.deterministicTarSha256
+            @Synchronized get() = currentForCaller().binding.recipe.deterministicTarSha256
         override val journalRootPathSha256: String
-            get() = opened.binding.journalRootPathSha256
+            @Synchronized get() = currentForCaller().binding.journalRootPathSha256
 
         override val reproductionLockSha256: String
-            get() = opened.binding.recipe.reproductionLockSha256
+            @Synchronized get() = currentForCaller().binding.recipe.reproductionLockSha256
         override val buildRecordSha256: String
-            get() = opened.binding.recipe.buildRecordSha256
+            @Synchronized get() = currentForCaller().binding.recipe.buildRecordSha256
         override val dockerfileSha256: String
-            get() = opened.binding.recipe.dockerfileSha256
+            @Synchronized get() = currentForCaller().binding.recipe.dockerfileSha256
         override val dockerfileBytes: Long
-            get() = opened.binding.recipe.dockerfileBytes
+            @Synchronized get() = currentForCaller().binding.recipe.dockerfileBytes
         override val deterministicTarSha256: String
-            get() = opened.binding.recipe.deterministicTarSha256
+            @Synchronized get() = currentForCaller().binding.recipe.deterministicTarSha256
         override val deterministicTarBytes: Long
-            get() = opened.binding.recipe.deterministicTarBytes
+            @Synchronized get() = currentForCaller().binding.recipe.deterministicTarBytes
         override val baseImageReference: String
-            get() = opened.binding.recipe.baseImageReference
+            @Synchronized get() = currentForCaller().binding.recipe.baseImageReference
         override val platform: String
-            get() = opened.binding.recipe.platform
+            @Synchronized get() = currentForCaller().binding.recipe.platform
         override val sourceDateEpoch: String
-            get() = opened.binding.recipe.sourceDateEpoch
+            @Synchronized get() = currentForCaller().binding.recipe.sourceDateEpoch
 
         override val canonicalBindingBytes: ByteArray
-            get() = opened.binding.canonicalBytes()
+            @Synchronized get() = currentForCaller().binding.canonicalBytes()
 
         @Synchronized
         override fun requireCurrentBinding() = translateLeaseFailures(
@@ -306,15 +445,88 @@ internal object LlvmBehaviorHostedToolchainImageBuildLeaseV2 {
             }
         }
 
+        @Synchronized
+        private fun consumeForHostedToolchainImageEngineV1():
+            LlvmBehaviorHostedToolchainImageBuildLeaseV2EngineFreshOwner = translateLeaseFailures(
+            "consume hosted toolchain image-build lease v2 for fixed Engine",
+        ) {
+            checkOpen()
+            try {
+                recipe.requireCurrent()
+                opened.journal.requireCurrent(history)
+                recipe.requireCurrent()
+                if (
+                    !freshOpen ||
+                    history.phase != LlvmBehaviorHostedToolchainImageBuildLeaseV2Phase.RECOVERED
+                ) {
+                    leaseFail(
+                        "fixed Engine requires the untouched initial fresh image-build lease position",
+                    )
+                }
+                val constructor = RetainedEngineOwner::class.java.getDeclaredConstructor(
+                    BoundOwner::class.java,
+                    String::class.java,
+                )
+                check(constructor.trySetAccessible())
+                val engineOwner = constructor.newInstance(this, opened.binding.operationId)
+                transferred = true
+                engineOwner
+            } catch (failure: Throwable) {
+                poisoned = true
+                throw failure
+            }
+        }
+
+        @Synchronized
+        fun requireCurrentFromEngine() = translateLeaseFailures(
+            "recheck fixed Engine hosted toolchain image-build lease v2",
+        ) {
+            checkRetainedOpen()
+            try {
+                recipe.requireCurrent()
+                opened.journal.requireCurrent(history)
+                recipe.requireCurrent()
+            } catch (failure: Throwable) {
+                poisoned = true
+                throw failure
+            }
+        }
+
+        private fun currentForCaller(): OpenedToolchainImageBuildLease {
+            checkOpen()
+            return opened
+        }
+
         private fun checkOpen() {
             check(!closed) { "hosted toolchain image-build lease v2 owner is closed" }
+            check(!transferred) { "hosted toolchain image-build lease v2 owner was transferred" }
             check(!poisoned) { "hosted toolchain image-build lease v2 owner is poisoned" }
+        }
+
+        private fun checkRetainedOpen() {
+            check(transferred) { "hosted toolchain image-build lease v2 owner was not transferred" }
+            check(!retainedClosed) { "fixed Engine hosted toolchain image-build lease v2 owner is closed" }
+            check(!poisoned) { "fixed Engine hosted toolchain image-build lease v2 owner is poisoned" }
         }
 
         @Synchronized
         override fun close() {
             if (closed) return
             closed = true
+            if (transferred) return
+            closeRetainedResources()
+        }
+
+        @Synchronized
+        fun closeFromEngine() {
+            if (retainedClosed) return
+            check(transferred) { "hosted toolchain image-build lease v2 owner was not transferred" }
+            closeRetainedResources()
+        }
+
+        private fun closeRetainedResources() {
+            if (retainedClosed) return
+            retainedClosed = true
             var failure: Throwable? = null
             runCatching { opened.journal.close() }.exceptionOrNull()?.let { failure = it }
             runCatching { recipe.close() }.exceptionOrNull()?.let { closeFailure ->
@@ -324,7 +536,37 @@ internal object LlvmBehaviorHostedToolchainImageBuildLeaseV2 {
         }
     }
 
-    private class FreshBoundOwner(
+    private class RetainedEngineOwner private constructor(
+        private val owner: BoundOwner,
+        private val retainedOperationId: String,
+    ) : LlvmBehaviorHostedToolchainImageBuildLeaseV2EngineFreshOwner {
+        private var closed = false
+
+        override val operationId: String
+            @Synchronized get() = currentOperationId()
+        override val buildId: String
+            @Synchronized get() = currentOperationId()
+
+        @Synchronized
+        override fun requireCurrentBinding() {
+            check(!closed) { "fixed Engine hosted toolchain image-build lease v2 owner is closed" }
+            owner.requireCurrentFromEngine()
+        }
+
+        private fun currentOperationId(): String {
+            check(!closed) { "fixed Engine hosted toolchain image-build lease v2 owner is closed" }
+            return retainedOperationId
+        }
+
+        @Synchronized
+        override fun close() {
+            if (closed) return
+            closed = true
+            owner.closeFromEngine()
+        }
+    }
+
+    private class FreshBoundOwner private constructor(
         recipe: LlvmBehaviorHostedToolchainImageRecipeV1LeaseOwner,
         opened: OpenedToolchainImageBuildLease,
     ) : BoundOwner(recipe, opened, freshOpen = true),
@@ -334,7 +576,7 @@ internal object LlvmBehaviorHostedToolchainImageBuildLeaseV2 {
         )
     }
 
-    private class RecoveredBoundOwner(
+    private class RecoveredBoundOwner private constructor(
         recipe: LlvmBehaviorHostedToolchainImageRecipeV1LeaseOwner,
         opened: OpenedToolchainImageBuildLease,
     ) : BoundOwner(recipe, opened, freshOpen = false)
@@ -896,49 +1138,11 @@ private class ToolchainImageBuildLeaseHistory private constructor(
     }
 }
 
-private data class OpenedToolchainImageBuildLease(
+private class OpenedToolchainImageBuildLease private constructor(
     val journal: ToolchainImageBuildDescriptorJournal,
     val binding: ToolchainImageBuildLeaseBinding,
     val history: ToolchainImageBuildLeaseHistory,
 )
-
-private fun createFreshBoundLease(
-    journalRootPath: Path,
-    recipeOwner: LlvmBehaviorHostedToolchainImageRecipeV1LeaseOwner,
-): OpenedToolchainImageBuildLease {
-    requireExactRawPath(journalRootPath)
-    val recipe = ToolchainRecipePins.capture(recipeOwner)
-    val rootPathSha256 = pathCommitment(journalRootPath)
-    val authority = ToolchainImageBuildJournalRoot.open(journalRootPath)
-    val journal = ToolchainImageBuildDescriptorJournal(rootPathSha256, recipe, authority)
-    try {
-        val history = journal.createFresh()
-        recipeOwner.requireCurrent()
-        return OpenedToolchainImageBuildLease(journal, history.binding, history)
-    } catch (failure: Throwable) {
-        runCatching { journal.close() }.exceptionOrNull()?.let(failure::addSuppressed)
-        throw failure
-    }
-}
-
-private fun recoverBoundLease(
-    journalRootPath: Path,
-    recipeOwner: LlvmBehaviorHostedToolchainImageRecipeV1LeaseOwner,
-): OpenedToolchainImageBuildLease {
-    requireExactRawPath(journalRootPath)
-    val recipe = ToolchainRecipePins.capture(recipeOwner)
-    val rootPathSha256 = pathCommitment(journalRootPath)
-    val authority = ToolchainImageBuildJournalRoot.open(journalRootPath)
-    val journal = ToolchainImageBuildDescriptorJournal(rootPathSha256, recipe, authority)
-    try {
-        val history = journal.recover()
-        recipeOwner.requireCurrent()
-        return OpenedToolchainImageBuildLease(journal, history.binding, history)
-    } catch (failure: Throwable) {
-        runCatching { journal.close() }.exceptionOrNull()?.let(failure::addSuppressed)
-        throw failure
-    }
-}
 
 private class ToolchainImageBuildJournalRoot private constructor(
     private val path: Path,
@@ -1055,7 +1259,7 @@ private class ToolchainImageBuildJournalRoot private constructor(
     }
 }
 
-private class ToolchainImageBuildDescriptorJournal(
+private class ToolchainImageBuildDescriptorJournal private constructor(
     private val expectedRootPathSha256: String,
     private val expectedRecipe: ToolchainRecipePins,
     private val authority: ToolchainImageBuildJournalRoot,

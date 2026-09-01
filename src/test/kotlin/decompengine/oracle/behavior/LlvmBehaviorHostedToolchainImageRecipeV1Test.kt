@@ -5,6 +5,7 @@ import decompengine.oracle.provenance.LlvmToolchainReproductionVerification
 import java.io.ByteArrayInputStream
 import java.io.ByteArrayOutputStream
 import java.io.OutputStream
+import java.lang.reflect.InvocationTargetException
 import java.lang.reflect.Modifier
 import java.nio.file.Files
 import java.nio.file.Path
@@ -87,6 +88,17 @@ class LlvmBehaviorHostedToolchainImageRecipeV1Test {
         assertEquals(List(3) { Path::class.java }, open.parameterTypes.toList())
         assertEquals(LlvmBehaviorHostedToolchainImageRecipeV1Owner::class.java, open.returnType)
         assertTrue(factory.declaredConstructors.all { Modifier.isPrivate(it.modifiers) })
+        val leaseConsume = factory.declaredMethods.single {
+            it.name == "consumeImageBuildLeaseBinding"
+        }
+        assertTrue(Modifier.isPrivate(leaseConsume.modifiers))
+        val retainedBinding = factory.declaredClasses.single {
+            LlvmBehaviorHostedToolchainImageRecipeV1LeaseBinding::class.java.isAssignableFrom(it)
+        }
+        assertTrue(retainedBinding.declaredConstructors.all { Modifier.isPrivate(it.modifiers) })
+        assertTrue(
+            Modifier.isPrivate(retainedBinding.declaredMethods.single { it.name == "consume" }.modifiers),
+        )
 
         val owner = LlvmBehaviorHostedToolchainImageRecipeV1Owner::class.java
         assertTrue(owner.isSealed)
@@ -141,7 +153,7 @@ class LlvmBehaviorHostedToolchainImageRecipeV1Test {
             owner.close()
             owner.close()
 
-            val retained = LlvmBehaviorHostedToolchainImageRecipeV1.consumeImageBuildLeaseBinding(binding)
+            val retained = consumeRecipeBindingForPrivateLeaseTest(binding)
             binding.close()
             binding.close()
             retained.requireCurrent()
@@ -152,7 +164,7 @@ class LlvmBehaviorHostedToolchainImageRecipeV1Test {
             retained.close()
             assertFailsWith<IllegalStateException> { retained.requireCurrent() }
             assertFailsWith<IllegalStateException> {
-                LlvmBehaviorHostedToolchainImageRecipeV1.consumeImageBuildLeaseBinding(binding)
+                consumeRecipeBindingForPrivateLeaseTest(binding)
             }
 
             assertTrue(LlvmBehaviorHostedToolchainImageRecipeV1LeaseBinding::class.java.isSealed)
@@ -336,6 +348,22 @@ class LlvmBehaviorHostedToolchainImageRecipeV1Test {
         } finally {
             root.toFile().deleteRecursively()
         }
+    }
+}
+
+private fun consumeRecipeBindingForPrivateLeaseTest(
+    binding: LlvmBehaviorHostedToolchainImageRecipeV1LeaseBinding,
+): LlvmBehaviorHostedToolchainImageRecipeV1LeaseOwner {
+    val method = LlvmBehaviorHostedToolchainImageRecipeV1::class.java.declaredMethods.single {
+        it.name == "consumeImageBuildLeaseBinding"
+    }
+    assertTrue(Modifier.isPrivate(method.modifiers))
+    assertTrue(method.trySetAccessible())
+    return try {
+        method.invoke(LlvmBehaviorHostedToolchainImageRecipeV1, binding)
+            as LlvmBehaviorHostedToolchainImageRecipeV1LeaseOwner
+    } catch (failure: InvocationTargetException) {
+        throw failure.targetException
     }
 }
 

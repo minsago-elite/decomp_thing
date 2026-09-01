@@ -9,12 +9,28 @@ import decompengine.oracle.core.OracleJson
 import decompengine.oracle.core.StrictJsonLimits
 import decompengine.oracle.fulltree.StableControlFile
 import decompengine.oracle.fulltree.requireStableDirectory
+import com.sun.jna.Library
+import com.sun.jna.Memory
+import com.sun.jna.Native
+import com.sun.jna.NativeLong
+import com.sun.jna.Platform
 import java.io.OutputStream
+import java.lang.reflect.InvocationTargetException
+import java.net.StandardProtocolFamily
+import java.net.UnixDomainSocketAddress
+import java.nio.ByteBuffer
+import java.nio.channels.SelectionKey
+import java.nio.channels.Selector
+import java.nio.channels.SocketChannel
+import java.nio.charset.StandardCharsets
 import java.nio.file.Files
 import java.nio.file.LinkOption
 import java.nio.file.Path
+import java.nio.file.attribute.PosixFileAttributes
 import java.security.MessageDigest
 import java.util.Collections
+import java.util.concurrent.TimeUnit
+import jdk.net.ExtendedSocketOptions
 import kotlinx.serialization.json.JsonObject
 import kotlinx.serialization.json.JsonPrimitive
 
@@ -25,11 +41,21 @@ internal class PinnedDockerRuntimeBindingsException(message: String, cause: Thro
  * Retained identity binding for exactly one private Docker Unix endpoint.
  *
  * This owner exposes no pathname, control client, Docker config, environment, command, byte
- * transport, request, HTTP, build, CREATE, or START operation. A future sealed connector must add a
- * one-shot consuming transfer which rechecks the named socket immediately around connect; this
- * binding alone is not usable Engine authority.
+ * transport, request, HTTP, build, CREATE, or START operation. The sealed fixed Engine coordinator
+ * can consume it once through an internal typed bridge which rechecks the named socket immediately
+ * around connect; this binding alone is not usable Engine authority.
  */
 internal sealed interface PinnedDockerEndpointBinding : AutoCloseable {
+    fun requireCurrent()
+
+    override fun close()
+}
+
+/**
+ * Non-operational endpoint ownership after the private fixed Docker Engine v1.55 preflight.
+ * No operation-bearing transport owner escapes the exact endpoint-plus-fresh-lease coordinator.
+ */
+internal sealed interface PinnedDockerEngineV155VerifiedEndpointOwner : AutoCloseable {
     fun requireCurrent()
 
     override fun close()
@@ -99,7 +125,10 @@ internal class PinnedDockerRuntimeBindings private constructor(
             ownsEndpointState = false
             closed = true
             try {
-                BoundPinnedDockerEndpointBinding(endpointState)
+                val constructor = BoundPinnedDockerEndpointBinding::class.java
+                    .getDeclaredConstructor(PinnedDockerEndpointState::class.java)
+                check(constructor.trySetAccessible())
+                constructor.newInstance(endpointState)
             } catch (failure: Throwable) {
                 endpointState.close()
                 throw failure
@@ -178,6 +207,90 @@ internal class PinnedDockerRuntimeBindings private constructor(
     }
 
     companion object {
+        /**
+         * Consumes the endpoint and untouched fresh lease together, performs the private one-shot
+         * preflight, and returns only the final non-operational Engine owner.
+         */
+        private fun openHostedToolchainImageEngineV1(
+            binding: PinnedDockerEndpointBinding,
+            freshLeaseOwner: LlvmBehaviorHostedToolchainImageBuildLeaseV2FreshOwner,
+        ): LlvmBehaviorHostedToolchainImageEngineV1Owner {
+            val retained = binding as? BoundPinnedDockerEndpointBinding
+                ?: bindingFail("retained Docker endpoint binding is not owned here")
+            var state: PinnedDockerEndpointState? = null
+            var endpoint: PinnedDockerEngineV155VerifiedEndpointOwner? = null
+            var lease: LlvmBehaviorHostedToolchainImageBuildLeaseV2EngineFreshOwner? = null
+            try {
+                val consumeEndpoint = BoundPinnedDockerEndpointBinding::class.java.declaredMethods
+                    .single { it.name == "consumeForFixedEngineV155" }
+                check(consumeEndpoint.trySetAccessible())
+                val consumedState = try {
+                    consumeEndpoint.invoke(retained) as PinnedDockerEndpointState
+                } catch (failure: InvocationTargetException) {
+                    throw failure.targetException
+                }
+                state = consumedState
+                val consumeLease = LlvmBehaviorHostedToolchainImageBuildLeaseV2::class.java
+                    .declaredMethods
+                    .single { it.name == "consumeFreshForHostedToolchainImageEngineV1" }
+                check(consumeLease.trySetAccessible())
+                val consumedLease = try {
+                    consumeLease.invoke(
+                        LlvmBehaviorHostedToolchainImageBuildLeaseV2,
+                        freshLeaseOwner,
+                    ) as LlvmBehaviorHostedToolchainImageBuildLeaseV2EngineFreshOwner
+                } catch (failure: InvocationTargetException) {
+                    throw failure.targetException
+                }
+                lease = consumedLease
+                consumedLease.requireCurrentBinding()
+                val headPing = PinnedDockerEndpointState::class.java.declaredMethods
+                    .single { it.name == "requireFixedHeadPing" }
+                check(headPing.trySetAccessible())
+                try {
+                    headPing.invoke(consumedState)
+                } catch (failure: InvocationTargetException) {
+                    throw failure.targetException
+                }
+                consumedState.requireCurrent()
+                consumedLease.requireCurrentBinding()
+                val verifiedConstructor = BoundPinnedDockerEngineV155VerifiedEndpointOwner::class.java
+                    .getDeclaredConstructor(PinnedDockerEndpointState::class.java)
+                check(verifiedConstructor.trySetAccessible())
+                val verifiedEndpoint = try {
+                    verifiedConstructor.newInstance(consumedState)
+                } catch (failure: InvocationTargetException) {
+                    throw failure.targetException
+                }
+                endpoint = verifiedEndpoint
+                state = null
+                val retainEngine = LlvmBehaviorHostedToolchainImageEngineV1::class.java
+                    .declaredMethods
+                    .single { it.name == "retainVerified" }
+                check(retainEngine.trySetAccessible())
+                val engineOwner = try {
+                    retainEngine.invoke(
+                        LlvmBehaviorHostedToolchainImageEngineV1,
+                        verifiedEndpoint,
+                        consumedLease,
+                    ) as LlvmBehaviorHostedToolchainImageEngineV1Owner
+                } catch (failure: InvocationTargetException) {
+                    throw failure.targetException
+                }
+                endpoint = null
+                lease = null
+                return engineOwner
+            } catch (failure: Throwable) {
+                runCatching { endpoint?.close() }
+                runCatching { state?.close() }
+                runCatching { lease?.close() }
+                throw failure
+            } finally {
+                runCatching { binding.close() }
+                runCatching { freshLeaseOwner.close() }
+            }
+        }
+
         fun capture(
             controlClientPath: Path,
             expectedControlClientBytes: Long,
@@ -300,12 +413,18 @@ internal class PinnedDockerRuntimeBindings private constructor(
                     dockerConfigPath = dockerConfigPath,
                     dockerConfigIdentity = configIdentity,
                     dockerConfigDescriptor = openedConfig,
-                    endpointState = PinnedDockerEndpointState(
-                        runtimeSocketPath = runtimeSocketPath,
-                        runtimeSocketParent = openedSocketParent,
-                        runtimeSocketDescriptor = openedSocket,
-                        runtimeSocketParentIdentity = socketParentIdentity,
-                        runtimeSocketIdentity = socketIdentity,
+                    endpointState = PinnedDockerEndpointState::class.java.getDeclaredConstructor(
+                        Path::class.java,
+                        LinuxDescriptor::class.java,
+                        LinuxDescriptor::class.java,
+                        LinuxFileIdentity::class.java,
+                        LinuxFileIdentity::class.java,
+                    ).also { constructor -> check(constructor.trySetAccessible()) }.newInstance(
+                        runtimeSocketPath,
+                        openedSocketParent,
+                        openedSocket,
+                        socketParentIdentity,
+                        socketIdentity,
                     ),
                 ).also {
                     clientDescriptor = null
@@ -323,27 +442,81 @@ internal class PinnedDockerRuntimeBindings private constructor(
             }
         }
     }
-}
 
-private class BoundPinnedDockerEndpointBinding(
-    private val state: PinnedDockerEndpointState,
+private class BoundPinnedDockerEndpointBinding private constructor(
+    initial: PinnedDockerEndpointState,
 ) : PinnedDockerEndpointBinding {
+    private var state: PinnedDockerEndpointState? = initial
     private var closed = false
     private var poisoned = false
+    private var transferred = false
 
     @Synchronized
     override fun requireCurrent() = translateBindingFailures(
         "verify retained Docker endpoint binding",
     ) {
-        if (closed) bindingFail("retained Docker endpoint binding is closed")
-        if (poisoned) bindingFail("retained Docker endpoint binding is poisoned")
+        val owned = currentState()
         try {
-            state.requireCurrent()
+            owned.requireCurrent()
         } catch (failure: Throwable) {
             poisoned = true
             throw failure
         }
     }
+
+    @Synchronized
+    private fun consumeForFixedEngineV155(): PinnedDockerEndpointState {
+        val owned = currentState()
+        try {
+            owned.requireCurrent()
+        } catch (failure: Throwable) {
+            poisoned = true
+            throw failure
+        }
+        state = null
+        transferred = true
+        return owned
+    }
+
+    private fun currentState(): PinnedDockerEndpointState {
+        if (closed) bindingFail("retained Docker endpoint binding is closed")
+        if (transferred) bindingFail("retained Docker endpoint binding was transferred")
+        if (poisoned) bindingFail("retained Docker endpoint binding is poisoned")
+        return checkNotNull(state) { "retained Docker endpoint binding has no endpoint state" }
+    }
+
+    @Synchronized
+    override fun close() {
+        if (closed) return
+        closed = true
+        val owned = state
+        state = null
+        owned?.close()
+    }
+}
+
+private class BoundPinnedDockerEngineV155VerifiedEndpointOwner private constructor(
+    private val state: PinnedDockerEndpointState,
+) : PinnedDockerEngineV155VerifiedEndpointOwner {
+    private var closed = false
+    private var poisoned = false
+
+    @Synchronized
+    override fun requireCurrent() = guarded("verify fixed Docker Engine endpoint") {
+        state.requireCurrent()
+    }
+
+    private inline fun guarded(label: String, action: () -> Unit) =
+        translateBindingFailures(label) {
+            if (closed) bindingFail("fixed Docker Engine endpoint owner is closed")
+            if (poisoned) bindingFail("fixed Docker Engine endpoint owner is poisoned")
+            try {
+                action()
+            } catch (failure: Throwable) {
+                poisoned = true
+                throw failure
+            }
+        }
 
     @Synchronized
     override fun close() {
@@ -353,7 +526,7 @@ private class BoundPinnedDockerEndpointBinding(
     }
 }
 
-private class PinnedDockerEndpointState(
+private class PinnedDockerEndpointState private constructor(
     private val runtimeSocketPath: Path,
     private val runtimeSocketParent: LinuxDescriptor,
     private val runtimeSocketDescriptor: LinuxDescriptor,
@@ -361,6 +534,7 @@ private class PinnedDockerEndpointState(
     private val runtimeSocketIdentity: LinuxFileIdentity,
 ) : AutoCloseable {
     private var closed = false
+    private var headPingAttempted = false
 
     @Synchronized
     fun requireCurrent() {
@@ -387,13 +561,391 @@ private class PinnedDockerEndpointState(
         }
     }
 
+    /** The only request operation in the private endpoint implementation. */
+    @Synchronized
+    private fun requireFixedHeadPing() {
+        if (closed) bindingFail("retained Docker endpoint descriptors are closed")
+        if (headPingAttempted) bindingFail("fixed Docker Engine HEAD /_ping was already attempted")
+        headPingAttempted = true
+        requireCurrent()
+
+        EndpointDirectoryMutationWatch.open(runtimeSocketParent).use { mutationWatch ->
+            try {
+                // Registration is descriptor-relative and precedes the last currentness check
+                // before connect. Do not drain a baseline: every queued mutation is hostile.
+                requireCurrent()
+                mutationWatch.requireQuiet()
+                val deadline = FixedHeadPingDeadline.start()
+                SocketChannel.open(StandardProtocolFamily.UNIX).use { channel ->
+                    Selector.open().use { selector ->
+                        channel.configureBlocking(false)
+                        val key = channel.register(selector, SelectionKey.OP_CONNECT)
+                        deadline.requireRemaining("connect")
+                        requireCurrent()
+                        mutationWatch.requireQuiet()
+                        val connected = channel.connect(UnixDomainSocketAddress.of(runtimeSocketPath))
+                        if (!connected) {
+                            while (true) {
+                                mutationWatch.requireQuiet()
+                                deadline.requireRemaining("connect")
+                                if (channel.finishConnect()) break
+                                deadline.await(selector, mutationWatch, "connect")
+                            }
+                        }
+
+                        // The native queue closes a transient swap-and-restore race which endpoint
+                        // identity sampling and same-UID SO_PEERCRED cannot detect on their own.
+                        mutationWatch.requireQuiet()
+                        requireCurrent()
+                        mutationWatch.requireQuiet()
+                        requireCurrentUserPeer(channel)
+
+                        key.interestOps(SelectionKey.OP_WRITE)
+                        val request = ByteBuffer.wrap(
+                            FIXED_HEAD_PING_REQUEST_TEXT.toByteArray(StandardCharsets.US_ASCII),
+                        )
+                        while (request.hasRemaining()) {
+                            mutationWatch.requireQuiet()
+                            deadline.requireRemaining("write request")
+                            if (channel.write(request) == 0) {
+                                deadline.await(selector, mutationWatch, "write request")
+                            }
+                        }
+
+                        key.interestOps(SelectionKey.OP_READ)
+                        val response = ByteArray(FIXED_HEAD_PING_RESPONSE_BYTES)
+                        var responseBytes = 0
+                        val readBuffer = ByteBuffer.allocate(FIXED_HEAD_PING_READ_BUFFER_BYTES)
+                        while (true) {
+                            mutationWatch.requireQuiet()
+                            deadline.requireRemaining("read response")
+                            readBuffer.clear()
+                            val read = channel.read(readBuffer)
+                            if (read < 0) break
+                            if (read == 0) {
+                                deadline.await(selector, mutationWatch, "read response")
+                                continue
+                            }
+                            if (responseBytes + read > response.size) {
+                                bindingFail("fixed Docker Engine HEAD /_ping response exceeds its byte ceiling")
+                            }
+                            readBuffer.flip()
+                            readBuffer.get(response, responseBytes, read)
+                            responseBytes += read
+                        }
+
+                        // EOF is required framing. Mutations are checked on both sides of the
+                        // terminal name/descriptor check so no accepted response spans an event.
+                        deadline.requireRemaining("complete response")
+                        mutationWatch.requireQuiet()
+                        requireCurrent()
+                        mutationWatch.requireQuiet()
+                        requireFixedHeadPingResponse(response, responseBytes)
+                        mutationWatch.requireQuiet()
+                    }
+                }
+            } catch (failure: Throwable) {
+                // If an I/O error raced a directory mutation, report the mutation as the primary
+                // failure instead of accidentally treating the transport error as sufficient.
+                try {
+                    mutationWatch.requireQuiet()
+                } catch (mutationFailure: Throwable) {
+                    mutationFailure.addSuppressed(failure)
+                    throw mutationFailure
+                }
+                throw failure
+            }
+        }
+    }
+
+    private fun requireCurrentUserPeer(channel: SocketChannel) {
+        val peer = try {
+            if (ExtendedSocketOptions.SO_PEERCRED !in channel.supportedOptions()) {
+                bindingFail("SO_PEERCRED is unavailable for the fixed Docker Engine endpoint")
+            }
+            channel.getOption(ExtendedSocketOptions.SO_PEERCRED)
+                ?: bindingFail("SO_PEERCRED returned no Docker Engine peer")
+        } catch (failure: PinnedDockerRuntimeBindingsException) {
+            throw failure
+        } catch (failure: Exception) {
+            bindingFail("cannot authenticate the fixed Docker Engine peer with SO_PEERCRED", failure)
+        }
+        val socketOwner = try {
+            Files.readAttributes(
+                runtimeSocketPath,
+                PosixFileAttributes::class.java,
+                LinkOption.NOFOLLOW_LINKS,
+            ).owner()
+        } catch (failure: Exception) {
+            bindingFail("cannot re-read the fixed Docker Engine socket owner", failure)
+        }
+        if (peer.user() != socketOwner) {
+            bindingFail("SO_PEERCRED user differs from the pinned Docker Engine socket owner")
+        }
+    }
+
+    private fun requireFixedHeadPingResponse(response: ByteArray, responseBytes: Int) {
+        if (responseBytes !in 1..FIXED_HEAD_PING_RESPONSE_BYTES) {
+            bindingFail("fixed Docker Engine HEAD /_ping response has an invalid byte length")
+        }
+        var lineBytes = 0
+        for (index in 0 until responseBytes) {
+            val value = response[index].toInt() and 0xff
+            when {
+                value == '\r'.code -> {
+                    if (index + 1 >= responseBytes || (response[index + 1].toInt() and 0xff) != '\n'.code) {
+                        bindingFail("fixed Docker Engine HEAD /_ping response contains a bare carriage return")
+                    }
+                }
+                value == '\n'.code -> {
+                    if (index == 0 || (response[index - 1].toInt() and 0xff) != '\r'.code) {
+                        bindingFail("fixed Docker Engine HEAD /_ping response contains a bare line feed")
+                    }
+                    if (lineBytes > FIXED_HEAD_PING_LINE_BYTES) {
+                        bindingFail("fixed Docker Engine HEAD /_ping response line exceeds its byte ceiling")
+                    }
+                    lineBytes = 0
+                }
+                value !in 0x20..0x7e ->
+                    bindingFail("fixed Docker Engine HEAD /_ping response contains a non-ASCII control byte")
+                else -> lineBytes += 1
+            }
+        }
+        val text = String(response, 0, responseBytes, StandardCharsets.US_ASCII)
+        val delimiter = text.indexOf("\r\n\r\n")
+        if (delimiter < 0 || delimiter + 4 != text.length) {
+            bindingFail("fixed Docker Engine HEAD /_ping response has invalid header or body framing")
+        }
+        val lines = text.substring(0, delimiter).split("\r\n")
+        if (lines.isEmpty() || lines.first() != FIXED_HEAD_PING_STATUS) {
+            bindingFail("fixed Docker Engine HEAD /_ping response status differs from HTTP/1.1 200 OK")
+        }
+        val expected = mapOf(
+            "Api-Version" to "1.55",
+            "Builder-Version" to "2",
+            "Cache-Control" to "no-cache, no-store, must-revalidate",
+            "Connection" to "close",
+            "Content-Length" to "0",
+            "Content-Type" to "text/plain; charset=utf-8",
+            "Date" to "",
+            "Docker-Experimental" to "false",
+            "Ostype" to "linux",
+            "Pragma" to "no-cache",
+            "Server" to "Docker/29.7.2 (linux)",
+            "Swarm" to "inactive",
+        )
+        if (lines.size - 1 != expected.size) {
+            bindingFail("fixed Docker Engine HEAD /_ping response has an unexpected header count")
+        }
+        val actual = linkedMapOf<String, String>()
+        val headerName = Regex("[A-Za-z0-9!#$%&'*+.^_`|~-]+")
+        val imfFixdate = Regex(
+            "(?:Mon|Tue|Wed|Thu|Fri|Sat|Sun), [0-9]{2} " +
+                "(?:Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Oct|Nov|Dec) [0-9]{4} " +
+                "[0-9]{2}:[0-9]{2}:[0-9]{2} GMT",
+        )
+        lines.drop(1).forEach { line ->
+            if (line.startsWith(' ') || line.startsWith('\t')) {
+                bindingFail("fixed Docker Engine HEAD /_ping response contains folded headers")
+            }
+            val colon = line.indexOf(':')
+            if (colon <= 0 || colon + 2 > line.length || line[colon + 1] != ' ') {
+                bindingFail("fixed Docker Engine HEAD /_ping response contains malformed header framing")
+            }
+            val name = line.substring(0, colon)
+            val value = line.substring(colon + 2)
+            if (!name.matches(headerName) || value.isEmpty() || value.first() == ' ' || value.last() == ' ') {
+                bindingFail("fixed Docker Engine HEAD /_ping response contains a malformed header")
+            }
+            if (actual.put(name, value) != null) {
+                bindingFail("fixed Docker Engine HEAD /_ping response contains a duplicate header")
+            }
+        }
+        if (actual.keys != expected.keys) {
+            bindingFail("fixed Docker Engine HEAD /_ping response contains an unexpected header name")
+        }
+        expected.forEach { (name, expectedValue) ->
+            val value = actual.getValue(name)
+            if (name == "Date") {
+                if (!value.matches(imfFixdate)) {
+                    bindingFail("fixed Docker Engine HEAD /_ping response Date header is malformed")
+                }
+            } else if (value != expectedValue) {
+                bindingFail("fixed Docker Engine HEAD /_ping response $name policy differs")
+            }
+        }
+    }
+
     @Synchronized
     override fun close() {
         if (closed) return
         closed = true
-        runtimeSocketDescriptor.close()
-        runtimeSocketParent.close()
+        var failure: Throwable? = null
+        runCatching { runtimeSocketDescriptor.close() }.exceptionOrNull()?.let { failure = it }
+        runCatching { runtimeSocketParent.close() }.exceptionOrNull()?.let { closeFailure ->
+            failure = failure?.also { it.addSuppressed(closeFailure) } ?: closeFailure
+        }
+        failure?.let { throw it }
     }
+
+    private class FixedHeadPingDeadline private constructor(
+        private val startedNanos: Long,
+        private val durationNanos: Long,
+    ) {
+        fun requireRemaining(phase: String): Long {
+            val elapsed = System.nanoTime() - startedNanos
+            val remaining = durationNanos - elapsed
+            if (remaining <= 0L) {
+                bindingFail("fixed Docker Engine HEAD /_ping $phase exceeded its absolute deadline")
+            }
+            return remaining
+        }
+
+        fun await(selector: Selector, mutationWatch: EndpointDirectoryMutationWatch, phase: String) {
+            while (true) {
+                mutationWatch.requireQuiet()
+                val remaining = requireRemaining(phase)
+                val timeoutMillis = minOf(
+                    MAXIMUM_SELECTOR_WAIT_MILLISECONDS,
+                    maxOf(1L, (remaining + NANOS_PER_MILLISECOND - 1L) / NANOS_PER_MILLISECOND),
+                )
+                val selected = selector.select(timeoutMillis)
+                mutationWatch.requireQuiet()
+                if (selected > 0) {
+                    selector.selectedKeys().clear()
+                    return
+                }
+            }
+        }
+
+        companion object {
+            fun start(): FixedHeadPingDeadline = FixedHeadPingDeadline(
+                System.nanoTime(),
+                TimeUnit.MILLISECONDS.toNanos(FIXED_HEAD_PING_TIMEOUT_MILLISECONDS),
+            )
+        }
+    }
+
+    private class EndpointDirectoryMutationWatch private constructor(
+        private val libc: InotifyLibC,
+        private var descriptor: Int,
+    ) : AutoCloseable {
+        fun requireQuiet() {
+            val buffer = Memory(INOTIFY_READ_BYTES.toLong())
+            while (true) {
+                val count = libc.read(descriptor, buffer, NativeLong(INOTIFY_READ_BYTES.toLong())).toLong()
+                val error = if (count < 0L) Native.getLastError() else 0
+                when {
+                    count > 0L -> bindingFail(
+                        "fixed Docker Engine socket directory mutated during HEAD /_ping",
+                    )
+                    count == 0L -> bindingFail(
+                        "fixed Docker Engine socket directory watch ended during HEAD /_ping",
+                    )
+                    error == EINTR -> continue
+                    error == EAGAIN -> return
+                    else -> bindingFail(
+                        "cannot read the fixed Docker Engine socket directory watch (errno=$error)",
+                    )
+                }
+            }
+        }
+
+        override fun close() {
+            val owned = descriptor
+            if (owned < 0) return
+            var quietFailure: Throwable? = null
+            try {
+                requireQuiet()
+            } catch (failure: Throwable) {
+                quietFailure = failure
+            }
+            descriptor = -1
+            val closeResult = libc.close(owned)
+            if (quietFailure != null) {
+                if (closeResult != 0) {
+                    quietFailure.addSuppressed(
+                        IllegalStateException(
+                            "cannot close inotify descriptor (errno=${Native.getLastError()})",
+                        ),
+                    )
+                }
+                throw quietFailure
+            }
+            if (closeResult != 0) {
+                bindingFail(
+                    "cannot close the fixed Docker Engine socket directory watch " +
+                        "(errno=${Native.getLastError()})",
+                )
+            }
+        }
+
+        companion object {
+            fun open(parent: LinuxDescriptor): EndpointDirectoryMutationWatch {
+                val libc = Native.load(Platform.C_LIBRARY_NAME, InotifyLibC::class.java)
+                val descriptor = libc.inotify_init1(O_NONBLOCK or O_CLOEXEC)
+                if (descriptor < 0) {
+                    bindingFail(
+                        "cannot open the fixed Docker Engine socket directory watch " +
+                            "(errno=${Native.getLastError()})",
+                    )
+                }
+                try {
+                    val watched = libc.inotify_add_watch(
+                        descriptor,
+                        LinuxFilesystemSyscalls.stableDescriptorPath(parent.fd).toString(),
+                        IN_ONLYDIR or IN_ATTRIB or IN_MODIFY or IN_CLOSE_WRITE or IN_MOVED_FROM or
+                            IN_MOVED_TO or IN_CREATE or IN_DELETE or IN_DELETE_SELF or IN_MOVE_SELF,
+                    )
+                    if (watched < 0) {
+                        bindingFail(
+                            "cannot register the fixed Docker Engine socket directory watch " +
+                                "(errno=${Native.getLastError()})",
+                        )
+                    }
+                    return EndpointDirectoryMutationWatch(libc, descriptor)
+                } catch (failure: Throwable) {
+                    libc.close(descriptor)
+                    throw failure
+                }
+            }
+        }
+    }
+
+    private interface InotifyLibC : Library {
+        fun inotify_init1(flags: Int): Int
+        fun inotify_add_watch(descriptor: Int, path: String, mask: Int): Int
+        fun read(descriptor: Int, buffer: Memory, count: NativeLong): NativeLong
+        fun close(descriptor: Int): Int
+    }
+
+    companion object {
+        private const val FIXED_HEAD_PING_REQUEST_TEXT =
+            "HEAD /_ping HTTP/1.1\r\nHost: docker\r\nConnection: close\r\n\r\n"
+        private const val FIXED_HEAD_PING_STATUS = "HTTP/1.1 200 OK"
+        private const val FIXED_HEAD_PING_TIMEOUT_MILLISECONDS = 2_000L
+        private const val FIXED_HEAD_PING_RESPONSE_BYTES = 4 * 1024
+        private const val FIXED_HEAD_PING_READ_BUFFER_BYTES = 512
+        private const val FIXED_HEAD_PING_LINE_BYTES = 512
+        private const val NANOS_PER_MILLISECOND = 1_000_000L
+        private const val MAXIMUM_SELECTOR_WAIT_MILLISECONDS = 100L
+        private const val INOTIFY_READ_BYTES = 4 * 1024
+        private const val O_NONBLOCK = 0x800
+        private const val O_CLOEXEC = 0x80000
+        private const val EAGAIN = 11
+        private const val EINTR = 4
+        private const val IN_MODIFY = 0x00000002
+        private const val IN_ATTRIB = 0x00000004
+        private const val IN_CLOSE_WRITE = 0x00000008
+        private const val IN_MOVED_FROM = 0x00000040
+        private const val IN_MOVED_TO = 0x00000080
+        private const val IN_CREATE = 0x00000100
+        private const val IN_DELETE = 0x00000200
+        private const val IN_DELETE_SELF = 0x00000400
+        private const val IN_MOVE_SELF = 0x00000800
+        private const val IN_ONLYDIR = 0x01000000
+    }
+}
 }
 
 private data class PinnedControlClientAuthentication(
