@@ -3,8 +3,10 @@
 `FullTreeSourceHeaderDependencies.assess` is the next bounded Kotlin/JVM checkpoint
 for issue #113. It consumes only raw paths to the authenticated full-tree controls,
 the source-bound planning inventory, and the source archive locked by those controls.
-It does not invoke Python and it has no publication, scoring, reconstruction, ACP, or
-release surface.
+It does not invoke Python and it has no publication, scoring, reconstruction, or
+release surface. ACP remains the first-class candidate producer/operator: it may
+consume admitted planning evidence read-only, but it cannot supply header truth,
+validate this control, or turn candidate output into oracle authority.
 
 This output is intentionally **planning-only and non-authoritative**. It records
 `releaseEligible: false`, `cleanCompilationProven: false`, and withholds the module
@@ -47,6 +49,71 @@ suffixes and to exact archive/public-include spellings; its 64-candidate ceiling
 charged only when a parsed literal actually queries that spelling. Quoted resolution
 relative to the including directory may target any authenticated regular member,
 including normalized in-archive `..` targets.
+
+## Compiler-trace and first-class-header checkpoint
+
+The later `FullTreeClangHeaderTraceParser` and
+`FullTreeCompilerHeaderPlanProjection` checkpoints narrow the remaining compiler
+resolution problem without promoting it to production truth. Both are implemented
+in Kotlin/JVM. The parser accepts only raw Clang 22 `direct-per-file` JSON v2 bytes,
+two explicit physical-to-logical roots, and the expected canonical main source. It
+retains project, generated, external, presumed-location, and module-import facts;
+binds both the exact input SHA-256 and canonical-facts SHA-256; treats a zero-byte
+payload as an explicitly attributed empty trace; and never executes a compiler or
+accepts caller-created parsed facts.
+
+The multi-TU projection accepts exactly one raw trace for each module supplied to
+that non-authoritative invocation plus a caller-supplied complete canonical header
+manifest. It derives, rather than accepts, two first-class fact types:
+
+- an exact `(observing compilation-unit ID, canonical header path)` observation for
+  every reached project header; and
+- a contextual `(observing compilation-unit ID, consumer path, dependency header
+  path)` edge for each eligible compiler-resolved local include.
+
+The observing translation unit is part of edge identity and canonical output. This
+is required because macros and compile flags can make the same physical header pair
+an edge in one translation unit but not another. The SCC condensation is therefore
+labeled a union/may graph across contextual TU edges. A header's A13 consumer shards
+come only from its exact TU observations, never from transitive reachability through
+that union graph.
+
+Every manifest header receives its own `header-` ID from a full, domain-separated,
+length-framed SHA-256 of the canonical path. Unreferenced headers remain explicit
+owners with no consumer shards. Strongly connected header sets remain first-class
+members of a deterministic SCC instead of being collapsed into a catch-all owner;
+the condensation order is dependency-first and deterministic.
+
+All five parser event channels have an explicit disposition. External includes,
+module imports, external consumers, non-header project targets, and consumers
+outside the eligible module/header set become digest-bound blockers. A project
+header reached through an external consumer still retains its TU observation.
+Another module's source encountered inside the current trace is a non-header
+blocker, never an edge attributed to that foreign module. The projection also emits
+one unavoidable `compiler-trace-unauthenticated` blocker per supplied module. That
+blocker commits the raw byte length, raw input SHA-256, canonical-facts SHA-256,
+expected source, and sorted root mappings, so the resulting plan is always
+`incomplete-accounted-blockers`.
+
+Aggregate admission is fail-closed before trace copying. Current immutable ceilings
+include 10,000 traces, 16 GiB total raw trace bytes (still subject to the parser's
+16 MiB per-trace ceiling), 100,000 contextual header observations, 100,000 contextual
+edges, 50,000 grouped blockers, 100,000 retained evidence facts, 64 MiB retained
+evidence text, 100,000,000 projection work units, and the nested plan/parser output
+ceilings. Callers may lower every ceiling. Traces are copied and parsed one at a
+time; retained observations, edges, blocker keys, fact counts, fact bytes, parser
+work, and projection work are checked while accumulating rather than only after the
+plan is materialized.
+
+This remains a fixture/planning bridge, not the production #113 control. Its supplied
+module IDs and header manifest are not yet reconstructed from the authenticated A13
+registry and complete source/generated regular-file inventory. It does not bind the
+recorded Clang executable, command, environment, sysroot, generated overlay, Ninja
+depfile/order-only generator provenance, exit status, or exact coverage of all A13
+translation units. A production wrapper must derive those identities from the
+authenticated registry/inventory, commit explicit present-empty/present-nonempty/
+missing coverage for every TU, and authenticate the complete trace batch before any
+blocker can be cleared.
 
 ## Ownership boundary
 
@@ -107,8 +174,10 @@ least two direct module consumers. The 14,218,981 canonical bytes have SHA-256
 report SHA-256
 `33abce3226fc60143c5d4586689f2e43db0ab14e10acaf4288c062899ff329bf`.
 
-Remaining #113 work includes authenticated compiler include resolution, generated
-source/header capture, stable header ownership, a complete dependency-safe acyclic
-module graph, canonical source-tree construction, clean compilation, and release/CI
-authority. Related completeness and alias/template semantics remain dependent on
-#119, #120, and #123.
+Remaining #113 work includes authenticated compiler execution and exact all-TU
+coverage, generated source/header and Ninja generator provenance, an authenticated
+complete header inventory, a production dependency-safe graph, canonical source-tree
+construction, clean compilation, and release/CI authority. ACP-produced candidate
+changes must carry ACP session/change/build lineage into later host validation, but
+ACP cannot clear compiler-trace blockers or author this reference evidence. Related
+completeness and alias/template semantics remain dependent on #119, #120, and #123.
