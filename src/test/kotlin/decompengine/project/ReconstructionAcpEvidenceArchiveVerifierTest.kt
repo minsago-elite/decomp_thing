@@ -30,6 +30,7 @@ import decompengine.agent.AgentMessageRole
 import decompengine.agent.AgentSessionReference
 import decompengine.agent.AgentStopReason
 import decompengine.agent.AgentUsage
+import decompengine.agent.AgentWorkspacePath
 import java.nio.file.Files
 import java.nio.file.Path
 import java.nio.file.StandardCopyOption
@@ -52,6 +53,18 @@ class ReconstructionAcpEvidenceArchiveVerifierTest {
         val temp = createTempDirectory("acp-archive-tampering-")
         val baseline = createAgentProject(temp.resolve("baseline"), accepted = true)
         val sourceSha256 = sha256(baseline.resolve(SOURCE_PATH).readBytes())
+        val sourceBytes = Files.size(baseline.resolve(SOURCE_PATH))
+        val acceptedChangeAggregate = agentFileChangeSetSha256(
+            listOf(
+                AgentFileChange(
+                    AgentWorkspacePath("project", SOURCE_PATH),
+                    AgentFileChangeKind.CREATED,
+                    beforeSha256 = null,
+                    afterSha256 = sourceSha256,
+                    sizeBytes = sourceBytes,
+                ),
+            ),
+        )
         val mutations = linkedMapOf<String, (String) -> String>(
             "duplicate-field" to { text ->
                 text.replaceFirst(
@@ -75,6 +88,9 @@ class ReconstructionAcpEvidenceArchiveVerifierTest {
             "deprecated-factory" to { text -> text.replaceFirst("\"deprecated\": false", "\"deprecated\": true") },
             "result-source" to { text ->
                 text.replaceFirst("\"afterSha256\":\"$sourceSha256\"", "\"afterSha256\":\"${"0".repeat(64)}\"")
+            },
+            "result-change-aggregate" to { text ->
+                text.replace(acceptedChangeAggregate, "0".repeat(64))
             },
             "release-complete" to { text ->
                 text.replaceFirst("\"releaseComplete\": true", "\"releaseComplete\": false")

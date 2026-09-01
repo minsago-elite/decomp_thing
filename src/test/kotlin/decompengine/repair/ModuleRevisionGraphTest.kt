@@ -2273,6 +2273,27 @@ class ModuleRevisionGraphTest {
                 val graph = fixture.project.resolve("reports/repair-revisions/graph.json")
                 graph.writeText(graph.readText().replaceFirst("\"schemaVersion\": 2", "\"schemaVersion\": 1"))
             }),
+            Mutation("receipt-record-cross-pair", "records differ from the exact workflow change set", { fixture ->
+                val receipt = fixture.project.resolve(fixture.receiptPath)
+                val oldReceiptSha256 = sha256(receipt.readBytes())
+                val expectedPathCommitment = sha256(fixture.relativePath.toByteArray())
+                val otherSameLengthPath = "src/modules/bravo.c"
+                check(otherSameLengthPath.toByteArray().size == fixture.relativePath.toByteArray().size)
+                receipt.writeText(
+                    receipt.readText().replace(
+                        expectedPathCommitment,
+                        sha256(otherSameLengthPath.toByteArray()),
+                    ),
+                )
+                val newReceiptSha256 = sha256(receipt.readBytes())
+                listOf(
+                    "reports/repair-revisions/graph.json",
+                    "reports/repair_history.json",
+                ).forEach { relative ->
+                    val path = fixture.project.resolve(relative)
+                    path.writeText(path.readText().replace(oldReceiptSha256, newReceiptSha256))
+                }
+            }),
         )
 
         mutations.forEach { mutation ->

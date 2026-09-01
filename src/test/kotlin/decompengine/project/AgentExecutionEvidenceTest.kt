@@ -213,6 +213,24 @@ class AgentExecutionEvidenceTest {
         val extracted = temp.resolve("extracted")
         ArchivalBundleVerifier.extractAndVerify(bundle.archivePath, extracted)
         assertEquals(text, extracted.resolve(evidencePath).readText())
+
+        val sessionCommitment = evidence.getValue("session").jsonObject
+            .getValue("sessionId").jsonObject.getValue("sha256").jsonPrimitive.content
+        val filesystemOffset = text.indexOf("\"filesystem\"")
+        assertTrue(filesystemOffset >= 0)
+        val tamperedAuditSession = text.substring(0, filesystemOffset) +
+            text.substring(filesystemOffset).replaceFirst(
+                "\"sha256\":\"$sessionCommitment\"",
+                "\"sha256\":\"${"0".repeat(64)}\"",
+            )
+        assertFailsWith<IllegalArgumentException> {
+            verifyAcpExecutionReceiptDocument(
+                tamperedAuditSession.toByteArray(),
+                "decomp-engine.reconstruction-acp-execution-receipt",
+                "moduleId",
+                "parse",
+            )
+        }
     }
 
     @Test

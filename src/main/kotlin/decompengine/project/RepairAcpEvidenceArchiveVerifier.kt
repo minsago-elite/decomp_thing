@@ -380,6 +380,23 @@ internal object RepairAcpEvidenceArchiveVerifier {
                 verified.terminalOutcome == invocation.terminalOutcome &&
                 verified.releaseComplete == invocation.releaseComplete
             ) { "repair ACP receipt content is cross-paired with its workflow assessment: ${node.id}" }
+            verified.releaseFacts?.let { releaseFacts ->
+                val expectedChanges = node.changes.map { change ->
+                    VerifiedAcpReceiptChange(
+                        rootId = expectedAcpTextCommitment("project"),
+                        relativePath = expectedAcpTextCommitment(change.path),
+                        kind = "modified",
+                        beforeSha256 = change.beforeSha256,
+                        afterSha256 = change.afterSha256,
+                        sizeBytes = change.afterBytes,
+                    )
+                }
+                require(releaseFacts.changes == expectedChanges &&
+                    verified.resultChangesSha256 == agentChangeSetSha256(node.changes)
+                ) {
+                    "repair ACP receipt records differ from the exact workflow change set: ${node.id}"
+                }
+            }
         }
     }
 

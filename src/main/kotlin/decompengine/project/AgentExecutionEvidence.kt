@@ -433,6 +433,7 @@ internal data class VerifiedAcpExecutionReceiptDocument(
     val resultChangesSha256: String,
     val terminalOutcome: String,
     val releaseComplete: Boolean,
+    val releaseFacts: VerifiedAcpReleaseReceiptFacts?,
 )
 
 /**
@@ -507,7 +508,7 @@ internal fun verifyAcpExecutionReceiptDocument(
         }
         else -> throw IllegalArgumentException("ACP receipt outcome type is invalid")
     }
-    if (releaseComplete) {
+    val releaseFacts = if (releaseComplete) {
         require(terminalOutcome == "returned-completed" &&
             lifecycle.receiptString("phaseReached") == "final-workspace-snapshot" &&
             lifecycle.receiptString("cleanupDisposition") == "verified" &&
@@ -563,6 +564,8 @@ internal fun verifyAcpExecutionReceiptDocument(
         session.receiptTextCommitment("harnessId", expected = implementationId, requireNonEmpty = true)
         session.receiptTextCommitment("sessionId", requireNonEmpty = true)
         ReconstructionAcpEvidenceArchiveVerifier.verifyReleaseCompleteReceipt(root)
+    } else {
+        null
     }
     return VerifiedAcpExecutionReceiptDocument(
         requestSha256,
@@ -570,6 +573,7 @@ internal fun verifyAcpExecutionReceiptDocument(
         resultChangesSha256,
         terminalOutcome,
         releaseComplete,
+        releaseFacts,
     )
 }
 
