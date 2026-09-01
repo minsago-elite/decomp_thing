@@ -62,9 +62,44 @@ internal object DescriptorBoundAtomicStateFile {
         bytes: ByteArray,
         maximumBytes: Int,
         faultInjector: DescriptorBoundStateFaultInjector? = null,
+    ): DescriptorBoundStateSnapshot = publishNoReplaceWithMode(
+        parent,
+        name,
+        bytes,
+        maximumBytes,
+        MAXIMUM_STATE_FILE_BYTES,
+        OWNER_READ_ONLY_MODE,
+        faultInjector,
+    )
+
+    /** Publishes immutable transport bytes which are owner-readable and owner-executable. */
+    fun publishExecutableNoReplace(
+        parent: LinuxDescriptor,
+        name: String,
+        bytes: ByteArray,
+        maximumBytes: Int,
+        faultInjector: DescriptorBoundStateFaultInjector? = null,
+    ): DescriptorBoundStateSnapshot = publishNoReplaceWithMode(
+        parent,
+        name,
+        bytes,
+        maximumBytes,
+        MAXIMUM_EXECUTABLE_BYTES,
+        OWNER_READ_EXECUTE_MODE,
+        faultInjector,
+    )
+
+    private fun publishNoReplaceWithMode(
+        parent: LinuxDescriptor,
+        name: String,
+        bytes: ByteArray,
+        maximumBytes: Int,
+        maximumAllowedBytes: Int,
+        ownerMode: Int,
+        faultInjector: DescriptorBoundStateFaultInjector?,
     ): DescriptorBoundStateSnapshot {
         requireName(name)
-        require(maximumBytes in 1..MAXIMUM_STATE_FILE_BYTES)
+        require(maximumBytes in 1..maximumAllowedBytes)
         require(bytes.isNotEmpty() && bytes.size <= maximumBytes) {
             "immutable state bytes exceed their configured bound"
         }
@@ -72,25 +107,25 @@ internal object DescriptorBoundAtomicStateFile {
         requireParent(parent)
         val temporaryName = temporaryName(name)
 
-        readOrNull(parent, name, maximumBytes)?.let { existing ->
+        readWithModeOrNull(parent, name, maximumBytes, ownerMode)?.let { existing ->
             requireExactBytes(existing.bytes, expectedBytes, "immutable state target")
-            if (readOrNull(parent, temporaryName, maximumBytes) != null) {
+            if (readWithModeOrNull(parent, temporaryName, maximumBytes, ownerMode) != null) {
                 stateFail("immutable state target and temporary both exist")
             }
             requireNamedIdentity(parent, name, existing.identity, "immutable state target")
             // A prior process may have died after rename but before its directory sync.
             LinuxFilesystemSyscalls.synchronize(parent)
-            return readRequired(parent, name, maximumBytes)
+            return readRequiredWithMode(parent, name, maximumBytes, ownerMode)
         }
 
-        readOrNull(parent, temporaryName, maximumBytes)?.let { temporary ->
+        readWithModeOrNull(parent, temporaryName, maximumBytes, ownerMode)?.let { temporary ->
             requireExactBytes(temporary.bytes, expectedBytes, "immutable state temporary")
             requireNamedIdentity(parent, temporaryName, temporary.identity, "immutable state temporary")
             LinuxFilesystemSyscalls.renameNoReplace(parent.fd, temporaryName, name)
             faultInjector?.hit(DescriptorBoundStateFaultPoint.AFTER_PUBLICATION_RENAME)
             LinuxFilesystemSyscalls.synchronize(parent)
             faultInjector?.hit(DescriptorBoundStateFaultPoint.AFTER_PUBLICATION_DIRECTORY_SYNC)
-            return readRequired(parent, name, maximumBytes).also { published ->
+            return readRequiredWithMode(parent, name, maximumBytes, ownerMode).also { published ->
                 requireExactBytes(published.bytes, expectedBytes, "immutable state target")
                 if (!sameFile(published.identity, temporary.identity)) {
                     stateFail("immutable state target differs from its recovered temporary")
@@ -102,14 +137,14 @@ internal object DescriptorBoundAtomicStateFile {
         try {
             prepared = LinuxFilesystemSyscalls.createTemporaryAt(parent.fd)
             LinuxFilesystemSyscalls.write(prepared, expectedBytes) {}
-            LinuxFilesystemSyscalls.chmod(prepared, OWNER_READ_ONLY_MODE)
+            LinuxFilesystemSyscalls.chmod(prepared, ownerMode)
             LinuxFilesystemSyscalls.synchronize(prepared)
             val unnamedIdentity = LinuxFilesystemSyscalls.identity(prepared.fd)
-            requireUnnamedFile(unnamedIdentity, parent.identity)
+            requireUnnamedFile(unnamedIdentity, parent.identity, ownerMode)
             faultInjector?.hit(DescriptorBoundStateFaultPoint.AFTER_UNNAMED_FILE_SYNC)
 
             LinuxFilesystemSyscalls.linkTemporaryAt(prepared, parent.fd, temporaryName)
-            val materialized = readRequired(parent, temporaryName, maximumBytes)
+            val materialized = readRequiredWithMode(parent, temporaryName, maximumBytes, ownerMode)
             requireExactBytes(materialized.bytes, expectedBytes, "immutable state temporary")
             if (!sameFile(materialized.identity, unnamedIdentity)) {
                 stateFail("immutable state temporary differs from its unnamed inode")
@@ -121,7 +156,7 @@ internal object DescriptorBoundAtomicStateFile {
             faultInjector?.hit(DescriptorBoundStateFaultPoint.AFTER_PUBLICATION_RENAME)
             LinuxFilesystemSyscalls.synchronize(parent)
             faultInjector?.hit(DescriptorBoundStateFaultPoint.AFTER_PUBLICATION_DIRECTORY_SYNC)
-            return readRequired(parent, name, maximumBytes).also { published ->
+            return readRequiredWithMode(parent, name, maximumBytes, ownerMode).also { published ->
                 requireExactBytes(published.bytes, expectedBytes, "immutable state target")
                 if (!sameFile(published.identity, unnamedIdentity)) {
                     stateFail("immutable state target differs from its prepared inode")
@@ -140,17 +175,46 @@ internal object DescriptorBoundAtomicStateFile {
         inspection.snapshot()
     }
 
+    private fun readWithModeOrNull(
+        parent: LinuxDescriptor,
+        name: String,
+        maximumBytes: Int,
+        ownerMode: Int,
+    ): DescriptorBoundStateSnapshot? = inspectWithModeOrNull(
+        parent,
+        name,
+        maximumBytes,
+        MAXIMUM_EXECUTABLE_BYTES,
+        ownerMode,
+    )?.use { inspection ->
+        inspection.snapshot()
+    }
+
     fun inspectOrNull(
         parent: LinuxDescriptor,
         name: String,
         maximumBytes: Int,
+    ): DescriptorBoundStateInspection? = inspectWithModeOrNull(
+        parent,
+        name,
+        maximumBytes,
+        MAXIMUM_STATE_FILE_BYTES,
+        OWNER_READ_ONLY_MODE,
+    )
+
+    private fun inspectWithModeOrNull(
+        parent: LinuxDescriptor,
+        name: String,
+        maximumBytes: Int,
+        maximumAllowedBytes: Int,
+        ownerMode: Int,
     ): DescriptorBoundStateInspection? {
         requireStateName(name)
-        require(maximumBytes in 1..MAXIMUM_STATE_FILE_BYTES)
+        require(maximumBytes in 1..maximumAllowedBytes)
         requireParent(parent)
         val selected = LinuxFilesystemSyscalls.openRegularFileAtOrNull(parent.fd, name) ?: return null
         try {
-            requireManagedFile(selected.identity, parent.identity, "immutable state file")
+            requireManagedFile(selected.identity, parent.identity, ownerMode, "immutable state file")
             val bytes = LinuxFilesystemSyscalls.openReadableFrom(selected).use { readable ->
                 LinuxFilesystemSyscalls.read(readable, maximumBytes) {}
             }
@@ -221,6 +285,14 @@ internal object DescriptorBoundAtomicStateFile {
     ): DescriptorBoundStateSnapshot = readOrNull(parent, name, maximumBytes)
         ?: stateFail("immutable state file is missing: $name")
 
+    private fun readRequiredWithMode(
+        parent: LinuxDescriptor,
+        name: String,
+        maximumBytes: Int,
+        ownerMode: Int,
+    ): DescriptorBoundStateSnapshot = readWithModeOrNull(parent, name, maximumBytes, ownerMode)
+        ?: stateFail("immutable state file is missing: $name")
+
     private fun requireParent(parent: LinuxDescriptor) {
         val current = LinuxFilesystemSyscalls.identity(parent.fd)
         val uid = (Files.getAttribute(Path.of("/proc/self"), "unix:uid") as Number).toInt()
@@ -233,20 +305,21 @@ internal object DescriptorBoundAtomicStateFile {
     private fun requireManagedFile(
         actual: LinuxFileIdentity,
         parent: LinuxFileIdentity,
+        ownerMode: Int,
         label: String,
     ) {
         if (
             !actual.isRegularFile || actual.isDirectory || actual.isSymbolicLink || actual.linkCount != 1 ||
             actual.mountId != parent.mountId || actual.uid != parent.uid ||
-            actual.mode.permissions != OWNER_READ_ONLY_MODE
+            actual.mode.permissions != ownerMode
         ) stateFail("$label is not a single-link owner-only file on its parent filesystem")
     }
 
-    private fun requireUnnamedFile(actual: LinuxFileIdentity, parent: LinuxFileIdentity) {
+    private fun requireUnnamedFile(actual: LinuxFileIdentity, parent: LinuxFileIdentity, ownerMode: Int) {
         if (
             !actual.isRegularFile || actual.isDirectory || actual.isSymbolicLink || actual.linkCount != 0 ||
             actual.mountId != parent.mountId || actual.uid != parent.uid ||
-            actual.mode.permissions != OWNER_READ_ONLY_MODE
+            actual.mode.permissions != ownerMode
         ) stateFail("prepared immutable state is not an owner-only unnamed file")
     }
 
@@ -297,6 +370,8 @@ private fun stateFail(message: String): Nothing = throw IOException(message)
 
 private const val OWNER_DIRECTORY_MODE = 0x1c0 // 0700
 private const val OWNER_READ_ONLY_MODE = 0x100 // 0400
+private const val OWNER_READ_EXECUTE_MODE = 0x140 // 0500
 private const val MAXIMUM_STATE_FILE_BYTES = 1024 * 1024
+private const val MAXIMUM_EXECUTABLE_BYTES = 512 * 1024 * 1024
 private val STATE_NAME = Regex("[a-z0-9][a-z0-9._-]{0,126}[a-z0-9]")
 private val TEMPORARY_STATE_NAME = Regex("\\.[a-z0-9][a-z0-9._-]{0,126}[a-z0-9]\\.atomic")

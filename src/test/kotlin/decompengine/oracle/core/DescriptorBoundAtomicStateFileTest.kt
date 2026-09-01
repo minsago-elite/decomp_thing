@@ -57,6 +57,85 @@ class DescriptorBoundAtomicStateFileTest {
         }
 
     @Test
+    fun `executable publication is durable idempotent and never replaces different bytes`() =
+        withStateDirectory { path ->
+            LinuxFilesystemSyscalls.openRoot(path).use { root ->
+                val expected = byteArrayOf(0x7f, 'E'.code.toByte(), 'L'.code.toByte(), 'F'.code.toByte())
+                val published = DescriptorBoundAtomicStateFile.publishExecutableNoReplace(
+                    root,
+                    EXECUTABLE_FILE,
+                    expected,
+                    MAXIMUM_BYTES,
+                )
+
+                assertContentEquals(expected, published.bytes)
+                assertEquals(
+                    PosixFilePermissions.fromString("r-x------"),
+                    Files.getPosixFilePermissions(path.resolve(EXECUTABLE_FILE), LinkOption.NOFOLLOW_LINKS),
+                )
+                assertContentEquals(
+                    expected,
+                    DescriptorBoundAtomicStateFile.publishExecutableNoReplace(
+                        root,
+                        EXECUTABLE_FILE,
+                        expected,
+                        MAXIMUM_BYTES,
+                    ).bytes,
+                )
+                assertFailsWith<IOException> {
+                    DescriptorBoundAtomicStateFile.publishExecutableNoReplace(
+                        root,
+                        EXECUTABLE_FILE,
+                        byteArrayOf(0x7f, 'B'.code.toByte(), 'A'.code.toByte(), 'D'.code.toByte()),
+                        MAXIMUM_BYTES,
+                    )
+                }
+                assertContentEquals(expected, Files.readAllBytes(path.resolve(EXECUTABLE_FILE)))
+            }
+        }
+
+    @Test
+    fun `every executable crash point converges through an exact retry`() {
+        DescriptorBoundStateFaultPoint.entries.forEachIndexed { index, point ->
+            withStateDirectory { path ->
+                LinuxFilesystemSyscalls.openRoot(path).use { root ->
+                    val name = "candidate-$index"
+                    val expected = byteArrayOf(0x7f, index.toByte(), point.ordinal.toByte())
+                    assertFailsWith<SimulatedProcessDeath> {
+                        DescriptorBoundAtomicStateFile.publishExecutableNoReplace(
+                            root,
+                            name,
+                            expected,
+                            MAXIMUM_BYTES,
+                            DescriptorBoundStateFaultInjector { observed ->
+                                if (observed == point) throw SimulatedProcessDeath()
+                            },
+                        )
+                    }
+
+                    val recovered = DescriptorBoundAtomicStateFile.publishExecutableNoReplace(
+                        root,
+                        name,
+                        expected,
+                        MAXIMUM_BYTES,
+                    )
+                    assertContentEquals(expected, recovered.bytes)
+                    assertEquals(
+                        PosixFilePermissions.fromString("r-x------"),
+                        Files.getPosixFilePermissions(path.resolve(name), LinkOption.NOFOLLOW_LINKS),
+                    )
+                    assertFalse(
+                        Files.exists(
+                            path.resolve(DescriptorBoundAtomicStateFile.temporaryName(name)),
+                            LinkOption.NOFOLLOW_LINKS,
+                        ),
+                    )
+                }
+            }
+        }
+    }
+
+    @Test
     fun `every durable no-replace crash point converges through an exact retry`() {
         DescriptorBoundStateFaultPoint.entries.forEachIndexed { index, point ->
             withStateDirectory { path ->
@@ -186,6 +265,7 @@ class DescriptorBoundAtomicStateFileTest {
 
     private companion object {
         const val STATE_FILE = "operation.json"
+        const val EXECUTABLE_FILE = "candidate-reconstructed"
         const val MAXIMUM_BYTES = 64 * 1024
     }
 }
