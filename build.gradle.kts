@@ -6,7 +6,9 @@ import java.nio.file.attribute.PosixFilePermissions
 import java.security.MessageDigest
 import java.util.concurrent.TimeUnit
 import java.util.jar.Attributes
+import java.util.jar.JarEntry
 import java.util.jar.JarFile
+import java.util.jar.Manifest
 
 plugins {
     kotlin("jvm") version "2.4.0"
@@ -137,6 +139,10 @@ val llvmBehaviorHelperCompiler = providers.gradleProperty("llvmBehaviorHelperCom
 val kotlinBootRuntimeDirectory = layout.buildDirectory.dir("oracle/gcc/kotlin-boot-runtime")
 val kotlinBootClasspathReference =
     layout.buildDirectory.file("generated/oracle/gcc/kotlin-boot-classpath-reference-v1.json")
+val llvmHostedWorkerClasspathReference =
+    layout.buildDirectory.file(
+        "generated/oracle/behavior/llvm-behavior-hosted-worker-classpath-reference-v1.json",
+    )
 
 fun sha256(path: java.nio.file.Path): String {
     val digest = MessageDigest.getInstance("SHA-256")
@@ -149,6 +155,150 @@ fun sha256(path: java.nio.file.Path): String {
         }
     }
     return digest.digest().joinToString("") { byte -> "%02x".format(byte) }
+}
+
+fun littleEndianUnsignedShort(bytes: ByteArray, offset: Int): Int =
+    (bytes[offset].toInt() and 0xff) or ((bytes[offset + 1].toInt() and 0xff) shl 8)
+
+fun littleEndianUnsignedInt(bytes: ByteArray, offset: Int): Long =
+    (bytes[offset].toLong() and 0xffL) or
+        ((bytes[offset + 1].toLong() and 0xffL) shl 8) or
+        ((bytes[offset + 2].toLong() and 0xffL) shl 16) or
+        ((bytes[offset + 3].toLong() and 0xffL) shl 24)
+
+fun readChannelRange(
+    channel: java.nio.channels.SeekableByteChannel,
+    position: Long,
+    length: Int,
+    label: String,
+): ByteArray {
+    val bytes = ByteArray(length)
+    channel.position(position)
+    val buffer = ByteBuffer.wrap(bytes)
+    while (buffer.hasRemaining()) require(channel.read(buffer) > 0) { "$label ended during bounded reading" }
+    return bytes
+}
+
+fun requireClassicZipExtraFields(extra: ByteArray, path: java.nio.file.Path) {
+    var cursor = 0
+    while (cursor < extra.size) {
+        require(extra.size - cursor >= 4) { "JAR has a truncated ZIP extra field: $path" }
+        val identifier = littleEndianUnsignedShort(extra, cursor)
+        val valueBytes = littleEndianUnsignedShort(extra, cursor + 2)
+        val next = Math.addExact(cursor, Math.addExact(4, valueBytes))
+        require(next <= extra.size) { "JAR has a truncated ZIP extra field: $path" }
+        require(identifier != 0x0001) { "JAR contains ZIP64 metadata: $path" }
+        cursor = next
+    }
+}
+
+fun scanClassicCentralDirectory(
+    path: java.nio.file.Path,
+    centralOffset: Long,
+    centralBytes: Long,
+    remainingEntries: Int,
+): Int = Files.newByteChannel(path).use { channel ->
+    val centralEnd = Math.addExact(centralOffset, centralBytes)
+    var cursor = centralOffset
+    var count = 0
+    while (cursor < centralEnd) {
+        require(centralEnd - cursor >= 46L) { "JAR has a truncated central-directory record: $path" }
+        val header = readChannelRange(channel, cursor, 46, "JAR central-directory header: $path")
+        require(littleEndianUnsignedInt(header, 0) == 0x02014b50L) {
+            "JAR has an invalid central-directory signature: $path"
+        }
+        val compressedBytes = littleEndianUnsignedInt(header, 20)
+        val uncompressedBytes = littleEndianUnsignedInt(header, 24)
+        val nameBytes = littleEndianUnsignedShort(header, 28)
+        val extraBytes = littleEndianUnsignedShort(header, 30)
+        val commentBytes = littleEndianUnsignedShort(header, 32)
+        val startDisk = littleEndianUnsignedShort(header, 34)
+        val localHeaderOffset = littleEndianUnsignedInt(header, 42)
+        require(
+            nameBytes > 0 && startDisk == 0 && compressedBytes != 0xffff_ffffL &&
+                uncompressedBytes != 0xffff_ffffL && localHeaderOffset != 0xffff_ffffL &&
+                localHeaderOffset < centralOffset,
+        ) { "JAR contains a non-classic central-directory record: $path" }
+        val recordBytes = Math.addExact(
+            46L,
+            Math.addExact(nameBytes.toLong(), Math.addExact(extraBytes.toLong(), commentBytes.toLong())),
+        )
+        val next = Math.addExact(cursor, recordBytes)
+        require(next <= centralEnd) { "JAR has a truncated central-directory record: $path" }
+        if (extraBytes > 0) {
+            val extra = readChannelRange(
+                channel,
+                cursor + 46L + nameBytes,
+                extraBytes,
+                "JAR central-directory extra fields: $path",
+            )
+            requireClassicZipExtraFields(extra, path)
+        }
+        require(count < 100_000 && count < remainingEntries) {
+            "JAR exceeds its central-directory entry bound: $path"
+        }
+        count += 1
+        cursor = next
+    }
+    require(cursor == centralEnd && count > 0) { "JAR has an invalid central-directory extent: $path" }
+    count
+}
+
+fun preflightClassicJar(path: java.nio.file.Path, remainingEntries: Int): Int {
+    val fileBytes = Files.size(path)
+    require(fileBytes >= 22L && remainingEntries > 0) { "JAR lacks a bounded classic ZIP directory: $path" }
+    val tailBytes = minOf(fileBytes, 65_557L).toInt()
+    val tailOffset = fileBytes - tailBytes
+    val tail = ByteArray(tailBytes)
+    Files.newByteChannel(path).use { channel ->
+        channel.position(tailOffset)
+        val buffer = ByteBuffer.wrap(tail)
+        while (buffer.hasRemaining()) require(channel.read(buffer) > 0) { "JAR ended during ZIP preflight: $path" }
+    }
+    var endOffset = -1
+    for (candidate in tail.size - 22 downTo 0) {
+        if (littleEndianUnsignedInt(tail, candidate) != 0x06054b50L) continue
+        val commentBytes = littleEndianUnsignedShort(tail, candidate + 20)
+        if (candidate + 22 + commentBytes == tail.size) {
+            endOffset = candidate
+            break
+        }
+    }
+    require(endOffset >= 0) { "JAR lacks a bounded classic ZIP end: $path" }
+    val absoluteEndOffset = tailOffset + endOffset
+    if (absoluteEndOffset >= 20L) {
+        val locator = ByteArray(20)
+        Files.newByteChannel(path).use { channel ->
+            channel.position(absoluteEndOffset - 20L)
+            val buffer = ByteBuffer.wrap(locator)
+            while (buffer.hasRemaining()) require(channel.read(buffer) > 0) {
+                "JAR ended during ZIP64 locator preflight: $path"
+            }
+        }
+        require(littleEndianUnsignedInt(locator, 0) != 0x07064b50L) {
+            "JAR contains a ZIP64 end locator: $path"
+        }
+    }
+    val disk = littleEndianUnsignedShort(tail, endOffset + 4)
+    val centralDisk = littleEndianUnsignedShort(tail, endOffset + 6)
+    val diskEntries = littleEndianUnsignedShort(tail, endOffset + 8)
+    val totalEntries = littleEndianUnsignedShort(tail, endOffset + 10)
+    val centralBytes = littleEndianUnsignedInt(tail, endOffset + 12)
+    val centralOffset = littleEndianUnsignedInt(tail, endOffset + 16)
+    require(
+        disk == 0 && centralDisk == 0 && diskEntries == totalEntries && totalEntries != 0xffff &&
+            centralBytes != 0xffff_ffffL && centralOffset != 0xffff_ffffL,
+    ) { "JAR requires unsupported ZIP64 or split ZIP: $path" }
+    require(
+        totalEntries in 1..minOf(100_000, remainingEntries) &&
+            centralBytes in 1L..(64L * 1024L * 1024L) &&
+            centralOffset + centralBytes == absoluteEndOffset,
+    ) { "JAR exceeds its canonical central-directory bound: $path" }
+    val scannedEntries = scanClassicCentralDirectory(path, centralOffset, centralBytes, remainingEntries)
+    require(scannedEntries == diskEntries && scannedEntries == totalEntries) {
+        "JAR central-directory count differs from its ZIP end: $path"
+    }
+    return scannedEntries
 }
 
 fun canonicalJsonString(value: String): String = buildString {
@@ -198,7 +348,7 @@ val generateKotlinBootClasspathReference = tasks.register("generateKotlinBootCla
         require(names.size in 1..512 && names.toSet().size == names.size) {
             "Kotlin BOOT runtime closure has duplicate or excessive logical JAR names"
         }
-        require(names.all { it.matches(Regex("[A-Za-z0-9][A-Za-z0-9._-]{0,255}\\.jar")) }) {
+        require(names.all { it.matches(Regex("[A-Za-z0-9][A-Za-z0-9._-]{0,250}\\.jar")) }) {
             "Kotlin BOOT runtime closure contains an unsafe logical JAR name"
         }
         val stagedNames = Files.list(runtimeRoot).use { stream ->
@@ -264,6 +414,143 @@ val generateKotlinBootClasspathReference = tasks.register("generateKotlinBootCla
                 "  \"schemaVersion\": 1\n" +
                 "}\n"
         val output = kotlinBootClasspathReference.get().asFile.toPath()
+        Files.createDirectories(output.parent)
+        Files.writeString(output, reference)
+    }
+}
+
+val generateLlvmHostedWorkerClasspathReference = tasks.register("generateLlvmHostedWorkerClasspathReference") {
+    group = "distribution"
+    description = "Generates the deployment reference for the fixed LLVM hosted-worker JVM closure"
+    dependsOn(stageKotlinBootRuntime)
+    inputs.dir(kotlinBootRuntimeDirectory)
+    outputs.file(llvmHostedWorkerClasspathReference)
+
+    doLast {
+        val runtimeRoot = kotlinBootRuntimeDirectory.get().asFile.toPath()
+        val mainName = tasks.named<Jar>("jar").get().archiveFile.get().asFile.name
+        val dependencyNames = configurations.runtimeClasspath.get().files.map { it.name }.sorted()
+        val names = listOf(mainName) + dependencyNames
+        require(names.size in 1..512 && names.toSet().size == names.size) {
+            "LLVM hosted-worker runtime closure has duplicate or excessive logical JAR names"
+        }
+        require(names.all { it.matches(Regex("[A-Za-z0-9][A-Za-z0-9._-]{0,250}\\.jar")) }) {
+            "LLVM hosted-worker runtime closure contains an unsafe logical JAR name"
+        }
+        val stagedNames = Files.list(runtimeRoot).use { stream ->
+            stream.map { it.fileName.toString() }.sorted().toList()
+        }
+        require(stagedNames == names.sorted()) {
+            "staged LLVM hosted-worker runtime differs from the exact reference input set"
+        }
+        var totalBytes = 0L
+        var workerMainClasses = 0
+        var workerMainJarIndex = -1
+        var totalJarEntries = 0
+        val entries = names.mapIndexed { index, name ->
+            val path = runtimeRoot.resolve(name)
+            require(Files.isRegularFile(path, LinkOption.NOFOLLOW_LINKS)) {
+                "LLVM hosted-worker runtime entry is not a regular JAR: $name"
+            }
+            val bytes = Files.size(path)
+            require(bytes in 1L..(1024L * 1024L * 1024L)) {
+                "LLVM hosted-worker runtime JAR exceeds its per-entry bound: $name"
+            }
+            totalBytes = Math.addExact(totalBytes, bytes)
+            require(totalBytes <= 2L * 1024L * 1024L * 1024L) {
+                "LLVM hosted-worker runtime closure exceeds its aggregate bound"
+            }
+            val preflightEntries = preflightClassicJar(path, 500_000 - totalJarEntries)
+            // The generated SHA sidecar owns byte authentication; disable implicit signature
+            // verifier reads so only the explicitly bounded manifest is inflated here.
+            JarFile(path.toFile(), false).use { jar ->
+                require(jar.size() == preflightEntries) {
+                    "LLVM hosted-worker runtime JAR central directory changed: $name"
+                }
+                totalJarEntries += preflightEntries
+                val workerMain =
+                    "decompengine/oracle/behavior/LlvmBehaviorHostedCleanBuildV2InnerWorkerMain.class"
+                var visited = 0
+                var manifestEntry: JarEntry? = null
+                jar.entries().asSequence().forEach { entry ->
+                    visited += 1
+                    if (!entry.isDirectory && entry.name.equals(JarFile.MANIFEST_NAME, ignoreCase = true)) {
+                        require(manifestEntry == null) {
+                            "LLVM hosted-worker runtime JAR contains duplicate manifests: $name"
+                        }
+                        manifestEntry = entry
+                    }
+                    require(entry.isDirectory || !entry.name.equals("META-INF/INDEX.LIST", ignoreCase = true)) {
+                        "LLVM hosted-worker runtime JAR contains a class-path index: $name"
+                    }
+                    if (!entry.isDirectory && entry.name == workerMain) {
+                        workerMainClasses += 1
+                        workerMainJarIndex = index
+                    }
+                    require(
+                        entry.isDirectory ||
+                            !Regex("META-INF/versions/[1-9][0-9]*/${Regex.escape(workerMain)}")
+                                .matches(entry.name),
+                    ) {
+                        "LLVM hosted-worker runtime JAR contains a versioned worker main class: $name"
+                    }
+                }
+                require(visited == preflightEntries) {
+                    "LLVM hosted-worker runtime JAR central directory changed: $name"
+                }
+                manifestEntry?.let { entry ->
+                    require(entry.size in 0L..(2L * 1024L * 1024L) &&
+                        entry.compressedSize in 0L..(2L * 1024L * 1024L)
+                    ) {
+                        "LLVM hosted-worker runtime JAR manifest exceeds its byte bound: $name"
+                    }
+                    val manifestBytes = jar.getInputStream(entry).use { input ->
+                        input.readNBytes(2 * 1024 * 1024 + 1)
+                    }
+                    require(manifestBytes.size.toLong() == entry.size && manifestBytes.size <= 2 * 1024 * 1024) {
+                        "LLVM hosted-worker runtime JAR manifest changed length: $name"
+                    }
+                    require(Manifest(manifestBytes.inputStream()).mainAttributes
+                        .getValue(Attributes.Name.CLASS_PATH) == null
+                    ) {
+                        "LLVM hosted-worker runtime JAR contains a manifest Class-Path: $name"
+                    }
+                }
+            }
+            Triple(name, bytes, sha256(path))
+        }
+        require(workerMainClasses == 1) {
+            "LLVM hosted-worker main class must occur exactly once in the deployment closure"
+        }
+        require(workerMainJarIndex == 0) {
+            "LLVM hosted-worker main class must occur in the first deployment JAR"
+        }
+        val encodedEntries = entries.joinToString(",\n", prefix = "[\n", postfix = "\n  ]") {
+            (name, bytes, digest) ->
+            "    {\n" +
+                "      \"bytes\": $bytes,\n" +
+                "      \"logicalName\": ${canonicalJsonString(name)},\n" +
+                "      \"sha256\": \"$digest\"\n" +
+                "    }"
+        }
+        val provider = "llvm-behavior-hosted-worker-deployment-classpath-reference-v1"
+        val unsigned =
+            "{\n" +
+                "  \"entries\": $encodedEntries,\n" +
+                "  \"provider\": \"$provider\",\n" +
+                "  \"schemaVersion\": 1\n" +
+                "}\n"
+        val closureSha256 = MessageDigest.getInstance("SHA-256")
+            .digest(unsigned.toByteArray(Charsets.UTF_8))
+            .joinToString("") { byte -> "%02x".format(byte) }
+        val reference =
+            "{\n" +
+                "  \"closureSha256\": \"$closureSha256\",\n" +
+                "  \"entries\": $encodedEntries,\n" +
+                "  \"provider\": \"$provider\",\n" +
+                "  \"schemaVersion\": 1\n" +
+                "}\n"
+        val output = llvmHostedWorkerClasspathReference.get().asFile.toPath()
         Files.createDirectories(output.parent)
         Files.writeString(output, reference)
     }
@@ -603,6 +890,10 @@ distributions {
                 into("lib")
                 filePermissions { unix("rw-r--r--") }
             }
+            from(llvmHostedWorkerClasspathReference) {
+                into("lib")
+                filePermissions { unix("rw-r--r--") }
+            }
         }
     }
 }
@@ -612,11 +903,13 @@ tasks.test {
     dependsOn(generateAcpGateHelperChecksum)
     dependsOn(generateLlvmBehaviorHelperChecksum)
     dependsOn(generateKotlinBootClasspathReference)
+    dependsOn(generateLlvmHostedWorkerClasspathReference)
     inputs.file(acpGateHelperBinary)
     inputs.file(acpGateHelperChecksum)
     inputs.file(llvmBehaviorHelperBinary)
     inputs.file(llvmBehaviorHelperChecksum)
     inputs.file(kotlinBootClasspathReference)
+    inputs.file(llvmHostedWorkerClasspathReference)
     inputs.dir(kotlinBootRuntimeDirectory)
     doFirst {
         systemProperty(
@@ -643,6 +936,14 @@ tasks.test {
             "decompengine.oracle.gcc.bootKeeperClasspathRoot",
             kotlinBootRuntimeDirectory.get().asFile.absolutePath,
         )
+        systemProperty(
+            "decompengine.oracle.behavior.hostedWorkerClasspathReference",
+            llvmHostedWorkerClasspathReference.get().asFile.absolutePath,
+        )
+        systemProperty(
+            "decompengine.oracle.behavior.hostedWorkerClasspathRoot",
+            kotlinBootRuntimeDirectory.get().asFile.absolutePath,
+        )
     }
     environment(
         "DECOMP_ACP_PARENT_SECRET_CANARY",
@@ -665,6 +966,7 @@ dependencies {
     runtimeOnly("org.slf4j:slf4j-nop:2.0.16")
     implementation("org.jetbrains.kotlinx:kotlinx-serialization-json:1.9.0")
     testImplementation(kotlin("test"))
+    testImplementation("org.apache.commons:commons-compress:1.28.0")
 }
 
 tasks.processResources {
@@ -679,6 +981,7 @@ listOf("installDist", "distZip", "distTar").forEach { taskName ->
         dependsOn(generateAcpGateHelperChecksum)
         dependsOn(generateLlvmBehaviorHelperChecksum)
         dependsOn(generateKotlinBootClasspathReference)
+        dependsOn(generateLlvmHostedWorkerClasspathReference)
     }
 }
 
@@ -745,6 +1048,12 @@ val verifyKotlinBootClasspathDistribution = tasks.register("verifyKotlinBootClas
                 Files.readAllBytes(installedReference)
                     .contentEquals(Files.readAllBytes(kotlinBootClasspathReference.get().asFile.toPath())),
         ) { "installDist omitted or changed the Kotlin BOOT class-path reference" }
+        val installedLlvmReference = installedRoot.resolve(llvmHostedWorkerClasspathReference.get().asFile.name)
+        require(
+            Files.isRegularFile(installedLlvmReference, LinkOption.NOFOLLOW_LINKS) &&
+                Files.readAllBytes(installedLlvmReference)
+                    .contentEquals(Files.readAllBytes(llvmHostedWorkerClasspathReference.get().asFile.toPath())),
+        ) { "installDist omitted or changed the LLVM hosted-worker class-path reference" }
         val stagedNames = Files.list(stagedRoot).use { stream ->
             stream.map { it.fileName.toString() }.sorted().toList()
         }

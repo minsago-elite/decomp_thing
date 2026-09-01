@@ -996,11 +996,7 @@ private const val JNA_TMPFS_INODES = 128L
 
 private val EXPECTED_ENTRYPOINT = listOf(
     "/decomp-jdk/bin/java",
-    "-Djna.nosys=true",
-    "-Djna.tmpdir=/decomp-jna",
-    "-cp",
-    "/decomp-app/lib/*",
-    "decompengine.oracle.behavior.LlvmBehaviorHostedCleanBuildV2InnerWorkerMain",
+    "@/decomp-app/worker.args",
 )
 private val EXPECTED_IMAGE_ENVIRONMENT = mapOf(
     "PATH" to "/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin",

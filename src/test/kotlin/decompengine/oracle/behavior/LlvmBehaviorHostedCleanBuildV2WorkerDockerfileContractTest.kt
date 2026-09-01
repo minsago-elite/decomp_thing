@@ -21,7 +21,8 @@ class LlvmBehaviorHostedCleanBuildV2WorkerDockerfileContractTest {
                 "FROM \${TOOLCHAIN_IMAGE}",
                 "COPY jdk/ /decomp-jdk/",
                 "COPY app/lib/ /decomp-app/lib/",
-                "ENTRYPOINT [\"/decomp-jdk/bin/java\",\"-Djna.nosys=true\",\"-Djna.tmpdir=/decomp-jna\",\"-cp\",\"/decomp-app/lib/*\",\"decompengine.oracle.behavior.LlvmBehaviorHostedCleanBuildV2InnerWorkerMain\"]",
+                "COPY app/worker.args /decomp-app/worker.args",
+                "ENTRYPOINT [\"/decomp-jdk/bin/java\",\"@/decomp-app/worker.args\"]",
                 "CMD []",
             ),
             EXPECTED_DOCKERFILE.lineSequence().filter(String::isNotBlank).toList(),
@@ -32,15 +33,16 @@ class LlvmBehaviorHostedCleanBuildV2WorkerDockerfileContractTest {
         val DOCKERFILE: Path =
             Path.of("oracle/llvm/22.1.6/hosted-clean-build-v2-worker.Dockerfile")
         const val EXPECTED_DOCKERFILE_SHA256 =
-            "6da99d34eed94961fe8657317e90f64bfd16a186fb8f598097589d1a650948da"
+            "fee734ad2acdf083e1cc71a286255af76a14b3175016a888a1761060acb143cf"
         val EXPECTED_DOCKERFILE = """
             ARG TOOLCHAIN_IMAGE
             FROM ${'$'}{TOOLCHAIN_IMAGE}
 
             COPY jdk/ /decomp-jdk/
             COPY app/lib/ /decomp-app/lib/
+            COPY app/worker.args /decomp-app/worker.args
 
-            ENTRYPOINT ["/decomp-jdk/bin/java","-Djna.nosys=true","-Djna.tmpdir=/decomp-jna","-cp","/decomp-app/lib/*","decompengine.oracle.behavior.LlvmBehaviorHostedCleanBuildV2InnerWorkerMain"]
+            ENTRYPOINT ["/decomp-jdk/bin/java","@/decomp-app/worker.args"]
             CMD []
         """.trimIndent() + "\n"
     }

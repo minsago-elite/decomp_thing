@@ -988,9 +988,5 @@ private val INPUTS_SOURCE = Path.of("/var/lib/decomp/operations/op-0123456789abc
 private val STAGE_SOURCE = Path.of("/var/lib/decomp/operations/op-0123456789abcdef/stage-output")
 private val ENTRYPOINT = listOf(
     "/decomp-jdk/bin/java",
-    "-Djna.nosys=true",
-    "-Djna.tmpdir=/decomp-jna",
-    "-cp",
-    "/decomp-app/lib/*",
-    "decompengine.oracle.behavior.LlvmBehaviorHostedCleanBuildV2InnerWorkerMain",
+    "@/decomp-app/worker.args",
 )

@@ -5,6 +5,7 @@ This contract defines the Kotlin/JVM-owned outer boundary that may eventually la
 operator. Its archive, session, and change evidence enter this boundary read-only; ACP has no
 oracle, reference-authoring, policy, validation, observation, START, containment,
 terminal-absence, scoring, certification, or release authority.
+ACP is not an input to the worker-image runtime closure and gains no authority from that closure.
 
 The code-only checkpoint is not hosted-build evidence. Until an authenticated ingress and a live
 Docker run complete, every image, container, cleanup, workflow, admission, scoring, and release
@@ -19,20 +20,21 @@ Clang/LLD toolchain; retained Python compatibility paths cannot satisfy any tran
 The reviewed worker image is derived network-free from two inputs:
 
 1. the freshly rebuilt and independently verified LLVM toolchain image ID; and
-2. a private build context containing only a staged JDK at `jdk/` and the authenticated Kotlin
-   deployment closure at `app/lib/`.
+2. a private build context containing only a staged JDK at `jdk/`, the authenticated Kotlin
+   deployment closure at `app/lib/`, and its exact generated launcher arguments at
+   `app/worker.args`.
 
 The fixed Dockerfile performs no `RUN`, shell, package-manager, network, secret, or remote fetch.
 It copies those two context roots and installs this exact JSON entry point:
 
 ```text
 /decomp-jdk/bin/java
--Djna.nosys=true
--Djna.tmpdir=/decomp-jna
--cp
-/decomp-app/lib/*
-decompengine.oracle.behavior.LlvmBehaviorHostedCleanBuildV2InnerWorkerMain
+@/decomp-app/worker.args
 ```
+
+The authenticated `worker.args` contains `-Djna.nosys=true`, `-Djna.tmpdir=/decomp-jna`, an
+explicit colon-separated `/decomp-app/lib/<jar>` class path in deployment-sidecar order, and the
+fixed worker main class. No wildcard class-path ordering participates in the launch.
 
 The launcher accepts zero arguments and calls the zero-path inner worker. It is not a general
 candidate-build CLI. A derived image ID, rather than a tag or caller digest, binds the JDK, Kotlin
