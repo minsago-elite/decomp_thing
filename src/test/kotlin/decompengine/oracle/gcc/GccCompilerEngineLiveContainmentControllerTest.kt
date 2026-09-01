@@ -8,6 +8,8 @@ import decompengine.oracle.core.DescriptorBoundStateFaultInjector
 import decompengine.oracle.core.DescriptorBoundStateFaultPoint
 import decompengine.oracle.fulltree.KotlinSystemdCgroupBootOwner
 import decompengine.oracle.fulltree.findObservationCgroupsForUnit
+import decompengine.oracle.fulltree.StableControlFile
+import java.io.ByteArrayOutputStream
 import java.lang.reflect.InvocationTargetException
 import java.lang.reflect.Modifier
 import java.nio.ByteBuffer
@@ -20,6 +22,10 @@ import java.nio.file.attribute.PosixFilePermissions
 import java.security.MessageDigest
 import java.util.concurrent.TimeUnit
 import java.util.jar.JarFile
+import java.util.zip.CRC32
+import java.util.zip.ZipEntry
+import java.util.zip.ZipFile
+import java.util.zip.ZipOutputStream
 import kotlin.io.path.createTempDirectory
 import kotlin.test.Test
 import kotlin.test.assertContentEquals
@@ -80,6 +86,106 @@ class GccCompilerEngineLiveContainmentControllerTest {
                 reference.requireCandidateIdentities(exact + exact.first())
             }
         }
+    }
+
+    @Test
+    fun `deployment JAR inspection remains descriptor derived without a lexical reopen seam`() {
+        val inspectionMethods = GccKotlinBootClasspathReference.Companion::class.java.declaredMethods
+            .filter { method ->
+                method.name in setOf(
+                    "inspectJar",
+                    "preflightClassicJar",
+                    "requireExactLocalRecords",
+                    "inspectStreamingJar",
+                    "verifyStreamingJarSignatures",
+                )
+            }
+
+        assertEquals(5, inspectionMethods.size)
+        assertTrue(inspectionMethods.all { Modifier.isPrivate(it.modifiers) })
+        assertTrue(inspectionMethods.all { method ->
+            method.parameterTypes.firstOrNull() == StableControlFile::class.java &&
+                method.parameterTypes.none { parameter ->
+                    parameter == Path::class.java ||
+                        parameter == java.io.File::class.java ||
+                        parameter == JarFile::class.java
+                } &&
+                method.returnType != Path::class.java &&
+                method.returnType != java.io.File::class.java &&
+                method.returnType != JarFile::class.java
+        })
+        assertTrue(
+            GccKotlinBootClasspathReference.Companion::class.java.declaredMethods.none { method ->
+                method.name in setOf("copyGuardedJar", "inspectPrivateJar", "cleanupPrivateJar")
+            },
+        )
+    }
+
+    @Test
+    fun `deployment JAR inspection rejects swapped central local offsets`() = withControllerRoot { root ->
+        val keeperBytes = "AAAA".encodeToByteArray()
+        val decoyBytes = "BBBB".encodeToByteArray()
+        val jarBytes = storedJar(
+            listOf(
+                TEST_KEEPER_CLASS to keeperBytes,
+                TEST_KEEPER_CLASS.replace("Keeper", "Decoyx") to decoyBytes,
+            ),
+        )
+        val path = writeReadOnly(root.resolve("swapped-offsets.jar"), swapFirstTwoCentralOffsets(jarBytes))
+
+        JarFile(path.toFile(), false).use { jar ->
+            assertContentEquals(decoyBytes, jar.getInputStream(jar.getJarEntry(TEST_KEEPER_CLASS)).readAllBytes())
+        }
+        val failure = assertFailsWith<GccCompilerEngineLiveContainmentException> {
+            inspectDeploymentJar(path)
+        }
+        assertTrue(failure.message.orEmpty().contains("different local name"), failure.message)
+    }
+
+    @Test
+    fun `deployment JAR inspection rejects signature metadata after payload`() = withControllerRoot { root ->
+        val path = writeReadOnly(
+            root.resolve("late-signature.jar"),
+            storedJar(
+                listOf(
+                    "META-INF/MANIFEST.MF" to "Manifest-Version: 1.0\r\n\r\n".encodeToByteArray(),
+                    TEST_KEEPER_CLASS to "keeper".encodeToByteArray(),
+                    "META-INF/TEST.SF" to "ignored-late-signature".encodeToByteArray(),
+                ),
+            ),
+        )
+
+        val failure = assertFailsWith<GccCompilerEngineLiveContainmentException> {
+            inspectDeploymentJar(path)
+        }
+        assertTrue(failure.message.orEmpty().contains("signature metadata after payload"), failure.message)
+    }
+
+    @Test
+    fun `deployment JAR inspection rejects a runtime versioned BOOT keeper`() = withControllerRoot { root ->
+        val baseBytes = "base-keeper".encodeToByteArray()
+        val versionedBytes = "versioned!!".encodeToByteArray()
+        val path = writeReadOnly(
+            root.resolve("versioned-keeper.jar"),
+            storedJar(
+                listOf(
+                    "META-INF/MANIFEST.MF" to
+                        "Manifest-Version: 1.0\r\nMulti-Release: true\r\n\r\n".encodeToByteArray(),
+                    TEST_KEEPER_CLASS to baseBytes,
+                    "META-INF/versions/9/$TEST_KEEPER_CLASS" to versionedBytes,
+                ),
+            ),
+        )
+
+        JarFile(path.toFile(), false, ZipFile.OPEN_READ, Runtime.version()).use { jar ->
+            jar.getInputStream(jar.getJarEntry(TEST_KEEPER_CLASS)).use { input ->
+                assertContentEquals(versionedBytes, input.readAllBytes())
+            }
+        }
+        val failure = assertFailsWith<GccCompilerEngineLiveContainmentException> {
+            inspectDeploymentJar(path)
+        }
+        assertTrue(failure.message.orEmpty().contains("versioned BOOT keeper"), failure.message)
     }
 
     @Test
@@ -867,6 +973,81 @@ class GccCompilerEngineLiveContainmentControllerTest {
         return path.toAbsolutePath().normalize()
     }
 
+    private fun inspectDeploymentJar(path: Path): Int = StableControlFile.open(
+        path,
+        16L * 1024L * 1024L,
+        "test GCC deployment JAR",
+    ).use { guard ->
+        val method = GccKotlinBootClasspathReference.Companion::class.java.getDeclaredMethod(
+            "inspectJar",
+            StableControlFile::class.java,
+            Int::class.javaPrimitiveType,
+        ).also { it.isAccessible = true }
+        try {
+            method.invoke(GccKotlinBootClasspathReference.Companion, guard, 0) as Int
+        } catch (failure: InvocationTargetException) {
+            throw failure.targetException
+        }
+    }
+
+    private fun storedJar(entries: List<Pair<String, ByteArray>>): ByteArray {
+        val output = ByteArrayOutputStream()
+        ZipOutputStream(output).use { zip ->
+            entries.forEach { (name, bytes) ->
+                val crc = CRC32().also { it.update(bytes) }.value
+                val entry = ZipEntry(name).also {
+                    it.method = ZipEntry.STORED
+                    it.size = bytes.size.toLong()
+                    it.compressedSize = bytes.size.toLong()
+                    it.crc = crc
+                }
+                zip.putNextEntry(entry)
+                zip.write(bytes)
+                zip.closeEntry()
+            }
+        }
+        return output.toByteArray()
+    }
+
+    private fun swapFirstTwoCentralOffsets(source: ByteArray): ByteArray {
+        val bytes = source.copyOf()
+        var endOffset = bytes.size - TEST_ZIP_END_BYTES
+        while (endOffset >= 0 && testLittleEndianInt(bytes, endOffset) != TEST_ZIP_END_SIGNATURE) {
+            endOffset -= 1
+        }
+        check(endOffset >= 0)
+        val entries = testLittleEndianUnsignedShort(bytes, endOffset + 10)
+        check(entries == 2)
+        var cursor = testLittleEndianInt(bytes, endOffset + 16)
+        val records = ArrayList<Int>(entries)
+        repeat(entries) {
+            check(testLittleEndianInt(bytes, cursor) == TEST_ZIP_CENTRAL_SIGNATURE)
+            records += cursor
+            cursor += TEST_ZIP_CENTRAL_HEADER_BYTES +
+                testLittleEndianUnsignedShort(bytes, cursor + 28) +
+                testLittleEndianUnsignedShort(bytes, cursor + 30) +
+                testLittleEndianUnsignedShort(bytes, cursor + 32)
+        }
+        val firstOffset = testLittleEndianInt(bytes, records[0] + 42)
+        val secondOffset = testLittleEndianInt(bytes, records[1] + 42)
+        putTestLittleEndianInt(bytes, records[0] + 42, secondOffset)
+        putTestLittleEndianInt(bytes, records[1] + 42, firstOffset)
+        return bytes
+    }
+
+    private fun testLittleEndianUnsignedShort(bytes: ByteArray, offset: Int): Int =
+        (bytes[offset].toInt() and 0xff) or ((bytes[offset + 1].toInt() and 0xff) shl 8)
+
+    private fun testLittleEndianInt(bytes: ByteArray, offset: Int): Int =
+        testLittleEndianUnsignedShort(bytes, offset) or
+            (testLittleEndianUnsignedShort(bytes, offset + 2) shl 16)
+
+    private fun putTestLittleEndianInt(bytes: ByteArray, offset: Int, value: Int) {
+        repeat(Integer.BYTES) { byte ->
+            bytes[offset + byte] = (value ushr (byte * Byte.SIZE_BITS)).toByte()
+        }
+    }
+
     private fun replaceReadOnly(path: Path, bytes: ByteArray) {
         Files.setPosixFilePermissions(path, PosixFilePermissions.fromString("rw-------"))
         Files.write(path, bytes)
@@ -922,3 +1103,10 @@ class GccCompilerEngineLiveContainmentControllerTest {
         }
     }
 }
+
+private const val TEST_KEEPER_CLASS =
+    "decompengine/oracle/fulltree/KotlinSystemdCgroupBootKeeper.class"
+private const val TEST_ZIP_CENTRAL_HEADER_BYTES = 46
+private const val TEST_ZIP_CENTRAL_SIGNATURE = 0x02014b50
+private const val TEST_ZIP_END_BYTES = 22
+private const val TEST_ZIP_END_SIGNATURE = 0x06054b50
