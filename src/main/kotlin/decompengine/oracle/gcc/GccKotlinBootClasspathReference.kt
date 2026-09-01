@@ -412,6 +412,11 @@ internal class GccKotlinBootClasspathReference private constructor(
                         "GCC Kotlin BOOT deployment JAR $index contains a versioned BOOT keeper class",
                     )
                 }
+                if (isUnsupportedJarSignatureMetadata(name)) {
+                    liveContainmentFail(
+                        "GCC Kotlin BOOT deployment JAR $index contains unsupported SIG metadata",
+                    )
+                }
                 if (
                     (manifest || isJarVerificationMetadata(name)) &&
                     entryBytes > MAXIMUM_DEPLOYMENT_VERIFICATION_METADATA_BYTES
@@ -642,7 +647,7 @@ internal class GccKotlinBootClasspathReference private constructor(
         ) {
             val byName = centralEntries.associateBy(CentralJarEntry::name)
             val signatureMetadataPresent = centralEntries.any { entry ->
-                isJarVerificationMetadata(entry.name)
+                isJarVerifierMetadata(entry.name)
             }
             val seen = HashSet<String>(centralEntries.size)
             val buffer = ByteArray(JAR_STREAM_BUFFER_BYTES)
@@ -666,7 +671,7 @@ internal class GccKotlinBootClasspathReference private constructor(
                     if (!seen.add(entry.name)) {
                         liveContainmentFail("GCC Kotlin BOOT deployment JAR $index verifier saw a duplicate entry")
                     }
-                    val verifierMetadata = isJarVerificationMetadata(entry.name)
+                    val verifierMetadata = isJarVerifierMetadata(entry.name)
                     if (verifierMetadata && !verifierMetadataOpen) {
                         liveContainmentFail(
                             "GCC Kotlin BOOT deployment JAR $index has signature metadata after payload entries",
@@ -709,6 +714,9 @@ internal class GccKotlinBootClasspathReference private constructor(
             val relative = directMetaInfName(name) ?: return false
             return relative.startsWith("SIG-") || isJarVerifierMetadata(name)
         }
+
+        private fun isUnsupportedJarSignatureMetadata(name: String): Boolean =
+            directMetaInfName(name)?.startsWith("SIG-") == true
 
         private fun isJarVerifierMetadata(name: String): Boolean {
             val relative = directMetaInfName(name) ?: return false

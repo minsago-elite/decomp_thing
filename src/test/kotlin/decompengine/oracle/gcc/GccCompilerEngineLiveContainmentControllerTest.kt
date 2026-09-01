@@ -144,23 +144,41 @@ class GccCompilerEngineLiveContainmentControllerTest {
 
     @Test
     fun `deployment JAR inspection rejects signature metadata after payload`() = withControllerRoot { root ->
-        listOf("META-INF/TEST.SF", "META-INF/SIG-CUSTOM").forEachIndexed { index, metadataName ->
-            val path = writeReadOnly(
-                root.resolve("late-signature-$index.jar"),
-                storedJar(
-                    listOf(
-                        "META-INF/MANIFEST.MF" to "Manifest-Version: 1.0\r\n\r\n".encodeToByteArray(),
-                        TEST_KEEPER_CLASS to "keeper".encodeToByteArray(),
-                        metadataName to "ignored-late-signature".encodeToByteArray(),
-                    ),
+        val path = writeReadOnly(
+            root.resolve("late-signature.jar"),
+            storedJar(
+                listOf(
+                    "META-INF/MANIFEST.MF" to "Manifest-Version: 1.0\r\n\r\n".encodeToByteArray(),
+                    TEST_KEEPER_CLASS to "keeper".encodeToByteArray(),
+                    "META-INF/TEST.SF" to "ignored-late-signature".encodeToByteArray(),
                 ),
-            )
+            ),
+        )
 
-            val failure = assertFailsWith<GccCompilerEngineLiveContainmentException> {
-                inspectDeploymentJar(path)
-            }
-            assertTrue(failure.message.orEmpty().contains("signature metadata after payload"), failure.message)
+        val failure = assertFailsWith<GccCompilerEngineLiveContainmentException> {
+            inspectDeploymentJar(path)
         }
+        assertTrue(failure.message.orEmpty().contains("signature metadata after payload"), failure.message)
+    }
+
+    @Test
+    fun `deployment JAR inspection rejects SIG metadata before verifier phase drift`() = withControllerRoot { root ->
+        val path = writeReadOnly(
+            root.resolve("sig-metadata.jar"),
+            storedJar(
+                listOf(
+                    "META-INF/MANIFEST.MF" to "Manifest-Version: 1.0\r\n\r\n".encodeToByteArray(),
+                    "META-INF/SIG-CUSTOM" to "unsupported-signature-metadata".encodeToByteArray(),
+                    "META-INF/TEST.SF" to "ignored-signature-file".encodeToByteArray(),
+                    TEST_KEEPER_CLASS to "keeper".encodeToByteArray(),
+                ),
+            ),
+        )
+
+        val failure = assertFailsWith<GccCompilerEngineLiveContainmentException> {
+            inspectDeploymentJar(path)
+        }
+        assertTrue(failure.message.orEmpty().contains("unsupported SIG metadata"), failure.message)
     }
 
     @Test
