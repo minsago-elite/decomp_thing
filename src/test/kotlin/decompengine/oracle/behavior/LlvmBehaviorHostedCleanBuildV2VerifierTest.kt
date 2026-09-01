@@ -147,6 +147,35 @@ class LlvmBehaviorHostedCleanBuildV2VerifierTest {
         }
 
     @Test
+    fun `verifier rejects executable byte drift at terminal descriptor authentication`() =
+        withPairDirectory { root ->
+            val executable = systemElf()
+            val receipt = canonicalReceipt(receiptDocument(executable))
+            writePair(root, receipt, executable)
+            val executablePath = root.resolve(EXECUTABLE_FILE)
+            val drifted = executable.copyOf().also { bytes ->
+                bytes[bytes.lastIndex] = (bytes.last().toInt() xor 1).toByte()
+            }
+
+            assertFailsWith<LlvmBehaviorHostedCleanBuildV2VerificationException> {
+                LlvmBehaviorHostedCleanBuildV2Verifier.verifyWithTerminalParentFaultForTest(
+                    root.resolve(RECEIPT_FILE),
+                    executablePath,
+                ) {
+                    Files.setPosixFilePermissions(
+                        executablePath,
+                        PosixFilePermissions.fromString("rwx------"),
+                    )
+                    Files.write(executablePath, drifted)
+                    Files.setPosixFilePermissions(
+                        executablePath,
+                        PosixFilePermissions.fromString("r-x------"),
+                    )
+                }
+            }
+        }
+
+    @Test
     fun `verifier rejects lexical parent replacement after descriptor-pinned pair checks`() {
         val container = createTempDirectory("hosted-pair-parent-race-").toAbsolutePath().normalize()
         val active = container.resolve("active")

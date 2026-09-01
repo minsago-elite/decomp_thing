@@ -65,14 +65,13 @@ object LlvmBehaviorHostedCleanBuildV2Verifier {
                     MAXIMUM_RECEIPT_BYTES,
                 ) ?: verificationFail("hosted worker receipt is missing")
                 receiptInspection.use { pinnedReceipt ->
-                    val executableInspection = DescriptorBoundAtomicStateFile.inspectExecutableOrNull(
+                    val executableInspection = DescriptorBoundAtomicStateFile.inspectExecutableDigestOrNull(
                         parent,
                         EXECUTABLE_FILE_NAME,
                         MAXIMUM_EXECUTABLE_BYTES,
                     ) ?: verificationFail("hosted candidate executable is missing")
                     executableInspection.use { pinnedExecutable ->
                         val receiptBytes = pinnedReceipt.bytes
-                        val executableBytes = pinnedExecutable.bytes
                         val document = parseCanonicalReceipt(receiptBytes)
                         val schema = OracleSchemas.identity(RECEIPT_SCHEMA_NAME)
                         if (schema.sha256 != EXPECTED_RECEIPT_SCHEMA_SHA256) {
@@ -81,19 +80,25 @@ object LlvmBehaviorHostedCleanBuildV2Verifier {
                         OracleSchemas.validate(RECEIPT_SCHEMA_NAME, document)
                         val projection = verifyReceiptBindings(
                             document,
-                            executableBytes.size.toLong(),
-                            OracleArtifacts.sha256(executableBytes),
+                            pinnedExecutable.bytes,
+                            pinnedExecutable.sha256,
                             schema.sha256,
                         )
-                        verifyExecutableElf(paths.executable, executableBytes, projection)
+                        verifyExecutableElf(
+                            paths.executable,
+                            pinnedExecutable.bytes,
+                            pinnedExecutable.sha256,
+                            projection,
+                        )
+                        beforeTerminalParentAuthentication()
                         requireTerminalHostedPair(
                             parent,
                             pinnedReceipt.identity,
                             receiptBytes,
                             pinnedExecutable.identity,
-                            executableBytes,
+                            pinnedExecutable.bytes,
+                            pinnedExecutable.sha256,
                         )
-                        beforeTerminalParentAuthentication()
                         requireHostedPairDirectory(paths.parent)
                         requireExactHostedPairEntries(paths.parent)
                         requireTerminalLexicalParent(paths.parent, parent)
@@ -359,7 +364,8 @@ private fun requireEqualBoolean(
 
 private fun verifyExecutableElf(
     executablePath: Path,
-    executableBytes: ByteArray,
+    executableBytes: Long,
+    executableSha256: String,
     projection: HostedReceiptProjection,
 ) {
     val elf = BoundedElfTwinV1.inspect(
@@ -378,8 +384,8 @@ private fun verifyExecutableElf(
             entryPoint >= header.virtualAddress &&
             entryPoint - header.virtualAddress < header.fileSize
     }
-    if (elf.bytes != projection.executableBytes || elf.sha256 != projection.executableSha256 ||
-        OracleArtifacts.sha256(executableBytes) != projection.executableSha256 ||
+    if (executableBytes != projection.executableBytes || executableSha256 != projection.executableSha256 ||
+        elf.bytes != executableBytes || elf.sha256 != executableSha256 ||
         elf.elf.header.elfClass != "ELF64" || elf.elf.header.dataEncoding != "little-endian" ||
         elf.elf.header.machine != 62UL || elf.elf.header.type !in setOf(2UL, 3UL) ||
         entryPoint == 0UL || elf.elf.executableLoad.bytes <= 0L || !entryPointIsMemoryBackedExecutable
@@ -393,7 +399,8 @@ private fun requireTerminalHostedPair(
     receiptIdentity: decompengine.acp.LinuxFileIdentity,
     receiptBytes: ByteArray,
     executableIdentity: decompengine.acp.LinuxFileIdentity,
-    executableBytes: ByteArray,
+    executableBytes: Long,
+    executableSha256: String,
 ) {
     val terminalReceipt = DescriptorBoundAtomicStateFile.inspectOrNull(
         parent,
@@ -405,13 +412,15 @@ private fun requireTerminalHostedPair(
             verificationFail("hosted worker receipt changed during verification")
         }
     }
-    val terminalExecutable = DescriptorBoundAtomicStateFile.inspectExecutableOrNull(
+    val terminalExecutable = DescriptorBoundAtomicStateFile.inspectExecutableDigestOrNull(
         parent,
         EXECUTABLE_FILE_NAME,
         MAXIMUM_EXECUTABLE_BYTES,
     ) ?: verificationFail("hosted candidate executable disappeared")
     terminalExecutable.use { inspection ->
-        if (inspection.identity != executableIdentity || !MessageDigest.isEqual(inspection.bytes, executableBytes)) {
+        if (inspection.identity != executableIdentity || inspection.bytes != executableBytes ||
+            inspection.sha256 != executableSha256
+        ) {
             verificationFail("hosted candidate executable changed during verification")
         }
     }

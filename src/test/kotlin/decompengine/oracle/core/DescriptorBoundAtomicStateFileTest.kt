@@ -2,10 +2,12 @@ package decompengine.oracle.core
 
 import decompengine.acp.LinuxFilesystemSyscalls
 import java.io.IOException
+import java.lang.reflect.Modifier
 import java.nio.file.Files
 import java.nio.file.LinkOption
 import java.nio.file.Path
 import java.nio.file.attribute.PosixFilePermissions
+import java.security.MessageDigest
 import kotlin.io.path.createTempDirectory
 import kotlin.test.Test
 import kotlin.test.assertContentEquals
@@ -102,6 +104,56 @@ class DescriptorBoundAtomicStateFileTest {
                 }
                 assertContentEquals(expected, Files.readAllBytes(path.resolve(EXECUTABLE_FILE)))
             }
+        }
+
+    @Test
+    fun `streaming executable digest inspection retains no executable byte array`() =
+        withStateDirectory { path ->
+            val executable = path.resolve(EXECUTABLE_FILE)
+            val chunk = ByteArray(STREAM_CHUNK_BYTES) { index -> (index * 31).toByte() }
+            val expectedDigest = MessageDigest.getInstance("SHA-256")
+            Files.newOutputStream(executable).use { output ->
+                repeat(STREAM_CHUNK_COUNT) {
+                    output.write(chunk)
+                    expectedDigest.update(chunk)
+                }
+            }
+            Files.setPosixFilePermissions(executable, PosixFilePermissions.fromString("r-x------"))
+
+            LinuxFilesystemSyscalls.openRoot(path).use { root ->
+                DescriptorBoundAtomicStateFile.inspectExecutableDigestOrNull(
+                    root,
+                    EXECUTABLE_FILE,
+                    MAXIMUM_BYTES,
+                ).use { nullableInspection ->
+                    val inspection = requireNotNull(nullableInspection)
+                    assertEquals((STREAM_CHUNK_BYTES * STREAM_CHUNK_COUNT).toLong(), inspection.bytes)
+                    assertEquals(expectedDigest.digest().hex(), inspection.sha256)
+                }
+            }
+
+            val inspectionClass = DescriptorBoundExecutableDigestInspection::class.java
+            assertFalse(inspectionClass.declaredFields.any { field -> field.type == ByteArray::class.java })
+            assertTrue(
+                inspectionClass.declaredFields
+                    .single { field -> field.type == decompengine.acp.LinuxDescriptor::class.java }
+                    .let { field -> Modifier.isPrivate(field.modifiers) },
+            )
+            assertFalse(
+                inspectionClass.declaredConstructors.any { constructor ->
+                    constructor.parameterTypes.any { type -> type == ByteArray::class.java }
+                },
+            )
+            assertFalse(
+                inspectionClass.declaredMethods.any { method ->
+                    method.returnType == ByteArray::class.java ||
+                        method.returnType == decompengine.acp.LinuxDescriptor::class.java ||
+                        method.parameterTypes.any { type ->
+                            type == ByteArray::class.java ||
+                                type == decompengine.acp.LinuxDescriptor::class.java
+                        }
+                },
+            )
         }
 
     @Test
@@ -277,5 +329,11 @@ class DescriptorBoundAtomicStateFileTest {
         const val STATE_FILE = "operation.json"
         const val EXECUTABLE_FILE = "candidate-reconstructed"
         const val MAXIMUM_BYTES = 64 * 1024
+        const val STREAM_CHUNK_BYTES = 4 * 1024
+        const val STREAM_CHUNK_COUNT = 12
     }
+}
+
+private fun ByteArray.hex(): String = joinToString("") { byte ->
+    "%02x".format(byte.toInt() and 0xff)
 }

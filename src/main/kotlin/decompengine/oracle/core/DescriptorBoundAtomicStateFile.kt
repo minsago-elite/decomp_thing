@@ -5,6 +5,7 @@ import decompengine.acp.LinuxFileIdentity
 import decompengine.acp.LinuxFilesystemSyscalls
 import decompengine.acp.permissions
 import java.io.IOException
+import java.io.OutputStream
 import java.nio.file.Files
 import java.nio.file.Path
 import java.security.MessageDigest
@@ -44,6 +45,16 @@ internal class DescriptorBoundStateInspection internal constructor(
 
     fun snapshot(): DescriptorBoundStateSnapshot = DescriptorBoundStateSnapshot(contents, identity)
 
+    override fun close() = descriptor.close()
+}
+
+/** One still-open immutable executable inode retained with only its streamed size and SHA-256. */
+internal class DescriptorBoundExecutableDigestInspection internal constructor(
+    val bytes: Long,
+    val sha256: String,
+    val identity: LinuxFileIdentity,
+    private val descriptor: LinuxDescriptor,
+) : AutoCloseable {
     override fun close() = descriptor.close()
 }
 
@@ -215,6 +226,51 @@ internal object DescriptorBoundAtomicStateFile {
         OWNER_READ_EXECUTE_MODE,
     )
 
+    /**
+     * Opens one immutable executable by its pinned parent and streams its exact size and SHA-256.
+     *
+     * Unlike [inspectExecutableOrNull], the returned inspection retains no executable byte array.
+     */
+    fun inspectExecutableDigestOrNull(
+        parent: LinuxDescriptor,
+        name: String,
+        maximumBytes: Int,
+    ): DescriptorBoundExecutableDigestInspection? {
+        requireStateName(name)
+        require(maximumBytes in 1..MAXIMUM_EXECUTABLE_BYTES)
+        requireParent(parent)
+        val selected = LinuxFilesystemSyscalls.openRegularFileAtOrNull(parent.fd, name) ?: return null
+        try {
+            requireManagedFile(
+                selected.identity,
+                parent.identity,
+                OWNER_READ_EXECUTE_MODE,
+                "immutable executable",
+            )
+            val digest = MessageDigest.getInstance("SHA-256")
+            val bytes = LinuxFilesystemSyscalls.copyReadableTo(
+                selected,
+                MessageDigestOutputStream(digest),
+                maximumBytes.toLong(),
+            )
+            if (bytes !in 1L..maximumBytes.toLong()) {
+                stateFail("immutable executable must contain 1..$maximumBytes bytes")
+            }
+            val after = selected.whileOpen(LinuxFilesystemSyscalls::identity)
+            if (after != selected.identity) stateFail("immutable executable changed while it was hashed")
+            requireNamedIdentity(parent, name, after, "immutable executable")
+            return DescriptorBoundExecutableDigestInspection(
+                bytes,
+                digest.digest().hex(),
+                after,
+                selected,
+            )
+        } catch (failure: Throwable) {
+            selected.close()
+            throw failure
+        }
+    }
+
     private fun inspectWithModeOrNull(
         parent: LinuxDescriptor,
         name: String,
@@ -377,6 +433,16 @@ internal object DescriptorBoundAtomicStateFile {
             first.uid == second.uid && first.gid == second.gid &&
             first.isDirectory && second.isDirectory &&
             !first.isSymbolicLink && !second.isSymbolicLink
+}
+
+private class MessageDigestOutputStream(private val digest: MessageDigest) : OutputStream() {
+    override fun write(value: Int) = digest.update(value.toByte())
+
+    override fun write(bytes: ByteArray, offset: Int, length: Int) = digest.update(bytes, offset, length)
+}
+
+private fun ByteArray.hex(): String = joinToString("") { byte ->
+    "%02x".format(byte.toInt() and 0xff)
 }
 
 private fun stateFail(message: String): Nothing = throw IOException(message)
