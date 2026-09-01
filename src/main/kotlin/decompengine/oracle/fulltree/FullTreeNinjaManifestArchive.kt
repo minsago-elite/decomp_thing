@@ -166,13 +166,83 @@ object FullTreeNinjaManifestArchive {
     }
 }
 
+/**
+ * Descriptor-authenticated manifest bytes for one private execution materialization.
+ *
+ * This is deliberately module-internal: it is not a second archive-admission surface, and it
+ * grants no process or start authority. Every byte returned to the caller is a defensive copy.
+ */
+internal class FullTreeNinjaManifestMaterialization internal constructor(
+    val snapshot: FullTreeNinjaManifestSnapshot,
+    sourceFiles: Map<String, ByteArray>,
+) {
+    private val storedFiles: Map<String, ByteArray> = Collections.unmodifiableMap(
+        TreeMap<String, ByteArray>(FULL_TREE_CODE_POINT_ORDER).apply {
+            sourceFiles.forEach { (path, bytes) -> put(path, bytes.copyOf()) }
+        },
+    )
+
+    val paths: List<String> = Collections.unmodifiableList(ArrayList(storedFiles.keys))
+
+    fun bytes(path: String): ByteArray = storedFiles[path]?.copyOf()
+        ?: throw FullTreeNinjaManifestArchiveException("Ninja manifest materialization path is absent: $path")
+}
+
+/**
+ * Reuses the exact strict archive admission while retaining only defensive payload copies for the
+ * separately reviewed isolated runner. The public archive object intentionally remains inspect-only.
+ */
+internal fun loadFullTreeNinjaManifestMaterialization(
+    archivePath: Path,
+    expectedRootBytes: Long,
+    expectedRootSha256: String,
+    sourceDateEpoch: Long,
+    limits: FullTreeNinjaManifestArchiveLimits = FullTreeNinjaManifestArchiveLimits(),
+): FullTreeNinjaManifestMaterialization = try {
+    inspectArchiveContents(
+        archivePath,
+        expectedRootBytes,
+        expectedRootSha256,
+        sourceDateEpoch,
+        limits,
+    ).let { contents ->
+        FullTreeNinjaManifestMaterialization(contents.snapshot, contents.archive.files)
+    }
+} catch (failure: FullTreeNinjaManifestArchiveException) {
+    throw failure
+} catch (failure: Exception) {
+    throw FullTreeNinjaManifestArchiveException(
+        "Ninja manifest archive materialization admission failed: ${failure.message}",
+        failure,
+    )
+}
+
 private fun inspectArchive(
     archivePath: Path,
     expectedRootBytes: Long,
     expectedRootSha256: String,
     sourceDateEpoch: Long,
     limits: FullTreeNinjaManifestArchiveLimits,
-): FullTreeNinjaManifestSnapshot {
+): FullTreeNinjaManifestSnapshot = inspectArchiveContents(
+    archivePath,
+    expectedRootBytes,
+    expectedRootSha256,
+    sourceDateEpoch,
+    limits,
+).snapshot
+
+private data class InspectedNinjaManifestArchive(
+    val snapshot: FullTreeNinjaManifestSnapshot,
+    val archive: CollectedNinjaManifestArchive,
+)
+
+private fun inspectArchiveContents(
+    archivePath: Path,
+    expectedRootBytes: Long,
+    expectedRootSha256: String,
+    sourceDateEpoch: Long,
+    limits: FullTreeNinjaManifestArchiveLimits,
+): InspectedNinjaManifestArchive {
     if (expectedRootBytes !in 1L..limits.maximumManifestFileBytes.toLong()) {
         ninjaManifestFailure("expected root manifest byte count exceeds its admitted bound")
     }
@@ -218,7 +288,7 @@ private fun inspectArchive(
         }
         val collected = collector.finish()
         archive.verifyUnchanged("Ninja manifest archive")
-        deriveNinjaManifestSnapshot(
+        val snapshot = deriveNinjaManifestSnapshot(
             archive.size,
             archiveSha256,
             expectedRootBytes,
@@ -227,6 +297,7 @@ private fun inspectArchive(
             collected,
             limits,
         )
+        InspectedNinjaManifestArchive(snapshot, collected)
     }
 }
 

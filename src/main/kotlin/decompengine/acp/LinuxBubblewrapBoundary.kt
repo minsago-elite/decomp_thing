@@ -45,7 +45,7 @@ data class AcpSecurityExecutableEvidence(
     val metadataSha256: String,
 )
 
-data class AcpSandboxMountEvidence(
+data class AcpSandboxMountEvidence @JvmOverloads constructor(
     val sourcePathSha256: String,
     val destinationPathSha256: String,
     val manifestSha256: String,
@@ -53,6 +53,8 @@ data class AcpSandboxMountEvidence(
     val inode: Long,
     val mode: Int,
     val directory: Boolean,
+    /** Manifest of the configured source before any private snapshot is hardened. */
+    val configuredManifestSha256: String = manifestSha256,
 )
 
 data class AcpSandboxStartGateEvidence(
@@ -62,10 +64,9 @@ data class AcpSandboxStartGateEvidence(
     val positiveByteRequired: Boolean,
 )
 
-data class AcpSandboxEnvironmentEvidence(
+data class AcpSandboxEnvironmentEvidence @JvmOverloads constructor(
     val sandboxPathSha256: String,
     val bindingNamesSha256: String,
-    val contentSha256: String,
     val bindingCount: Int,
     val encodedBytes: Long,
     val device: Long,
@@ -73,6 +74,8 @@ data class AcpSandboxEnvironmentEvidence(
     val mountId: Long,
     val mode: Int,
     val linkCount: Int,
+    /** SHA-256 of the exact canonical environment bytes; empty only on legacy evidence. */
+    val contentSha256: String = "",
 )
 
 data class AcpSandboxRlimitEvidence(
@@ -115,7 +118,7 @@ data class AcpProducedOutputEvidence(
 
 enum class AcpSandboxLaunchPurpose { OUTER_AGENT, TERMINAL, NINJA_COMPDB_QUERY }
 
-data class AcpSandboxLaunchEvidence(
+data class AcpSandboxLaunchEvidence @JvmOverloads constructor(
     val purpose: AcpSandboxLaunchPurpose,
     val resourceLimits: AcpSandboxResourceLimits,
     val controllers: AcpCgroupControllerEvidence,
@@ -125,12 +128,13 @@ data class AcpSandboxLaunchEvidence(
     val effectiveRlimits: AcpSandboxRlimitEvidence,
     val executableMount: AcpSandboxMountEvidence,
     val runtimeMounts: List<AcpSandboxMountEvidence>,
-    val workingDirectorySha256: String,
-    val mergeError: Boolean,
-    val stagingRootsSha256: String,
-    val stagingRootCount: Int,
-    val emptyDirectoriesSha256: String,
-    val emptyDirectoryCount: Int,
+    val workingDirectorySha256: String = "",
+    val mergeError: Boolean = false,
+    val stagingRootsSha256: String = "",
+    val stagingRootCount: Int = 0,
+    val emptyDirectoriesSha256: String = "",
+    val emptyDirectoryCount: Int = 0,
+    val stdinDisposition: String = "legacy-unrecorded",
 )
 
 /** Metadata-only proof of the boundary frozen for one harness execution. */
@@ -889,6 +893,7 @@ internal class LinuxBubblewrapBoundary private constructor(
                     cancellationCheck,
                 ),
                 emptyDirectoryCount = launch.emptyDirectories.distinct().size,
+                stdinDisposition = launch.stdinDisposition.protocolArgument,
             )
             val authorizationStream = started.outputStream
             // Reserve bounded metadata capacity before the broker's one-way authorization
@@ -2325,7 +2330,8 @@ private class SystemdScopeController(
     private val limits: AcpSandboxResourceLimits,
     maximumWallDuration: Duration,
 ) {
-    private val runtimeMaximum = maximumWallDuration.plus(CLEANUP_TIMEOUT)
+    private val runtimeMaximumMicros = acpSandboxRuntimeMaximumMicros(maximumWallDuration)
+    private val runtimeMaximumMillis = runtimeMaximumMicros / 1_000L
     @Volatile
     private var knownCgroupPath: Path? = null
 
@@ -2354,7 +2360,7 @@ private class SystemdScopeController(
         add("--property=CPUQuota=100%")
         add("--property=KillMode=control-group")
         add("--property=SendSIGKILL=yes")
-        add("--property=RuntimeMaxSec=${runtimeMaximum.toMillis()}ms")
+        add("--property=RuntimeMaxSec=${runtimeMaximumMillis}ms")
         add("--property=TimeoutStopSec=${CLEANUP_TIMEOUT.toMillis()}ms")
         add("--property=Delegate=no")
         add("--")
@@ -2502,7 +2508,7 @@ private class SystemdScopeController(
             if (properties["OOMPolicy"] != "kill") add("OOMPolicy")
             if (properties["KillMode"] != "control-group") add("KillMode")
             if (properties["SendSIGKILL"] != "yes") add("SendSIGKILL")
-            if (runtimeMaxMicros != runtimeMaximum.toNanos() / 1_000L) add("RuntimeMaxUSec")
+            if (runtimeMaxMicros != runtimeMaximumMicros) add("RuntimeMaxUSec")
             if (timeoutStopMicros != CLEANUP_TIMEOUT.toNanos() / 1_000L) add("TimeoutStopUSec")
             if (properties["Delegate"] != "no") add("Delegate")
         }
@@ -3320,6 +3326,7 @@ private data class RuntimeManifest(
 private class PinnedReadOnlyMount private constructor(
     val mount: AcpSandboxReadOnlyMount,
     private val manifest: RuntimeManifest,
+    private val configuredManifestSha256: String,
     private val limits: AcpRuntimeClosureLimits,
     private val forbidden: Set<ForbiddenRuntimeFile>,
     private val verificationSource: Path,
@@ -3337,6 +3344,7 @@ private class PinnedReadOnlyMount private constructor(
         inode = manifest.rootIdentity.inode,
         mode = manifest.rootIdentity.mode,
         directory = manifest.rootDirectory,
+        configuredManifestSha256 = configuredManifestSha256,
     )
     /**
      * Root-owned closures are immutable; user-owned closures are mounted only from their private,
@@ -3474,6 +3482,7 @@ private class PinnedReadOnlyMount private constructor(
                 return PinnedReadOnlyMount(
                     mount,
                     configuredManifest,
+                    configuredManifest.manifestSha256,
                     limits,
                     forbidden,
                     mount.source,
@@ -3519,6 +3528,7 @@ private class PinnedReadOnlyMount private constructor(
                 return PinnedReadOnlyMount(
                     mount,
                     hardenedManifest,
+                    configuredManifest.manifestSha256,
                     limits,
                     forbidden,
                     snapshot.source,
@@ -4982,6 +4992,38 @@ private fun canonicalStringDigest(
     return digest.finish()
 }
 
+/** Pure digest helpers for Kotlin-owned launch policies that authenticate boundary evidence. */
+internal fun acpSandboxCanonicalStringDigest(values: Collection<String>): String =
+    canonicalStringDigest(values)
+
+internal fun acpSandboxEmptyStagingRootsDigest(): String = canonicalStagingRootsDigest(emptyList())
+
+internal fun acpSandboxEnvironmentPathSha256(): String = sha256(ACP_SANDBOX_ENVIRONMENT_PATH.toString())
+
+internal fun acpSandboxEnvironmentFileMode(): Int = 0x8000 or SANDBOX_ENVIRONMENT_FILE_MODE
+
+internal fun acpSandboxGateHelperPathSha256(): String = sha256(ACP_SANDBOX_GATE_HELPER_PATH.toString())
+
+internal fun acpSandboxGateProtocolSha256(): String = sha256(STATIC_GATE_HELPER_PROTOCOL)
+
+internal fun acpSandboxCleanupTimeoutMicros(): Long = CLEANUP_TIMEOUT.toNanos() / 1_000L
+
+internal fun acpSandboxRuntimeMaximumMicros(maximumWallDuration: Duration): Long {
+    require(!maximumWallDuration.isZero && !maximumWallDuration.isNegative) {
+        "sandbox wall duration must be positive"
+    }
+    val floorMillis = maximumWallDuration.toMillis()
+    val wallMillis = if (Duration.ofMillis(floorMillis) == maximumWallDuration) {
+        floorMillis
+    } else {
+        Math.addExact(floorMillis, 1L)
+    }
+    return Math.multiplyExact(
+        Math.addExact(wallMillis, CLEANUP_TIMEOUT.toMillis()),
+        1_000L,
+    )
+}
+
 private fun canonicalStagingRootsDigest(
     roots: Collection<AcpSandboxRootGrant>,
     cancellationCheck: () -> Unit = NO_SANDBOX_CHECKPOINT,
@@ -5082,6 +5124,7 @@ private fun canonicalSandboxEvidenceDigest(
         field("launch[$launchIndex].stagingRootCount", launch.stagingRootCount)
         field("launch[$launchIndex].emptyDirectories", launch.emptyDirectoriesSha256)
         field("launch[$launchIndex].emptyDirectoryCount", launch.emptyDirectoryCount)
+        field("launch[$launchIndex].stdinDisposition", launch.stdinDisposition)
         field("launch[$launchIndex].gate.descriptor", launch.startGate.descriptor)
         field("launch[$launchIndex].gate.waiter", launch.startGate.waiterExecutableSha256)
         field("launch[$launchIndex].gate.protocol", launch.startGate.helperProtocolSha256)
@@ -5099,6 +5142,10 @@ private fun canonicalSandboxEvidenceDigest(
         field("launch[$launchIndex].executable.source", launch.executableMount.sourcePathSha256)
         field("launch[$launchIndex].executable.destination", launch.executableMount.destinationPathSha256)
         field("launch[$launchIndex].executable.manifest", launch.executableMount.manifestSha256)
+        field(
+            "launch[$launchIndex].executable.configuredManifest",
+            launch.executableMount.configuredManifestSha256,
+        )
         field("launch[$launchIndex].executable.device", launch.executableMount.device)
         field("launch[$launchIndex].executable.inode", launch.executableMount.inode)
         field("launch[$launchIndex].executable.mode", launch.executableMount.mode)
@@ -5128,6 +5175,10 @@ private fun canonicalSandboxEvidenceDigest(
             field("launch[$launchIndex].mount[$mountIndex].source", mount.sourcePathSha256)
             field("launch[$launchIndex].mount[$mountIndex].destination", mount.destinationPathSha256)
             field("launch[$launchIndex].mount[$mountIndex].manifest", mount.manifestSha256)
+            field(
+                "launch[$launchIndex].mount[$mountIndex].configuredManifest",
+                mount.configuredManifestSha256,
+            )
             field("launch[$launchIndex].mount[$mountIndex].device", mount.device)
             field("launch[$launchIndex].mount[$mountIndex].inode", mount.inode)
             field("launch[$launchIndex].mount[$mountIndex].mode", mount.mode)

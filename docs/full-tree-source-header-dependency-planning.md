@@ -280,6 +280,45 @@ manifest, rule, invocation, containment, or expected-output authority and has no
 oracle, reference, policy, validation, observation, execution, scoring,
 certification, or release authority.
 
+## Isolated Kotlin Ninja compdb query
+
+`FullTreeNinjaCompdbIsolatedRunner` is the only production seam that may advance
+that prestart into a historical query receipt. A trusted deployment supplies an
+exact Ninja executable and dynamic-loader file profile, security-boundary
+executables, and a private materialization parent. A run request still supplies
+only the prestart and its raw predecessor paths plus the receipt output path; it
+cannot supply a command, environment, rule list, mount, staging root, shell,
+callback, process, or START handle.
+
+Before START, Kotlin retains the prestart and all sixteen raw predecessors,
+authenticates the live Ninja bytes against the build record, authenticates every
+runtime-profile file by bytes and runtime manifest, materializes the exact
+manifest closure into a descriptor-owned read-only tree, pins the no-replace
+receipt parent, and prestarts separate limit-plus-one stdout and stderr drains.
+The dedicated `NINJA_COMPDB_QUERY` bubblewrap/cgroup purpose permits only the
+configuration-owned loader closure, grants no staging authority, clears the
+inherited environment and filesystem, and uses the attested static gate to close
+fd 0 immediately before direct `execveat`. The final internal gate callback
+rederives the prestart and revalidates every retained input and materialization;
+there is no caller callback at that boundary.
+
+Success requires exit zero, natural EOF on both non-truncating captures, stdout
+byte-for-byte equal to the reconciled compdb, verified whole-cgroup cleanup,
+boundary snapshot/control-tree removal, private source-materialization removal,
+and terminal absence. Only then does Kotlin publish the canonical mode-0400
+receipt without replacement. Persisted receipt bytes are non-bearer audit
+evidence: cold parsing does not recreate execution authority. Only the sealed
+registry returned by that same Kotlin-owned execution authenticates the
+historical query.
+
+The receipt authenticates only that exact contained `ninja -t compdb` graph
+interrogation. Manifest and compiler-rule origin, build-graph origin, compiler
+execution/capture, clean compilation, scoring, certification, and release remain
+false, and all eight blockers remain carried unchanged, including
+`ninja-live-edge-replay-missing`. ACP remains the first-class candidate
+producer/operator, but has no reference-query, containment, receipt-authoring,
+oracle, validation, scoring, certification, or release authority.
+
 ## Resolution boundary
 
 The assessment scans the strict locked TAR/XZ archive and parses C-family

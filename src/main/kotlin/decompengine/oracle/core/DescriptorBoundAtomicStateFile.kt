@@ -67,6 +67,9 @@ internal class DescriptorBoundExecutableDigestInspection internal constructor(
  * hold cooperative exclusive ownership of the directory and exclude same-UID name mutation.
  */
 internal object DescriptorBoundAtomicStateFile {
+    /** Preflights the same owner-only parent requirement used by every publication/read path. */
+    fun requireOwnerOnlyParent(parent: LinuxDescriptor) = requireParent(parent)
+
     fun publishNoReplace(
         parent: LinuxDescriptor,
         name: String,

@@ -1,11 +1,22 @@
 package decompengine.oracle.fulltree
 
+import decompengine.acp.AcpLinuxSandboxConfiguration
+import decompengine.acp.AcpRuntimeClosureLimits
 import decompengine.oracle.core.OracleArtifacts
 import decompengine.oracle.core.OracleJson
+import java.io.IOException
+import java.io.InputStream
+import java.io.OutputStream
 import java.lang.reflect.Modifier
 import java.nio.charset.StandardCharsets
 import java.nio.file.Files
+import java.nio.file.LinkOption
 import java.nio.file.Path
+import java.nio.file.attribute.PosixFilePermissions
+import java.time.Duration
+import java.util.concurrent.CountDownLatch
+import java.util.concurrent.TimeUnit
+import java.util.concurrent.atomic.AtomicBoolean
 import kotlin.test.Test
 import kotlin.test.assertContentEquals
 import kotlin.test.assertEquals
@@ -357,6 +368,290 @@ class FullTreeNinjaCompdbPrestartControlTest {
         }
 }
 
+class FullTreeNinjaCompdbIsolatedRunnerTest {
+    @Test
+    fun `public runner fixes execution inputs and exposes no process callback or cold-load seam`() {
+        val methods = FullTreeNinjaCompdbIsolatedRunner::class.java.declaredMethods
+            .filter { Modifier.isPublic(it.modifiers) && !it.isSynthetic }
+        assertEquals(
+            setOf("generateAndPublish", "getConfigurationSha256"),
+            methods.map { it.name }.toSet(),
+        )
+        val generate = methods.single { it.name == "generateAndPublish" }
+        assertTrue(generate.parameterTypes.count { it == Path::class.java } == 18)
+        assertTrue(generate.parameterTypes.contains(FullTreeNinjaCompdbIsolationDeployment::class.java))
+        assertTrue(generate.parameterTypes.contains(FullTreeNinjaCompdbExecutionLimits::class.java))
+        listOf(
+            java.lang.Process::class.java,
+            ProcessBuilder::class.java,
+            java.io.InputStream::class.java,
+            java.io.OutputStream::class.java,
+            java.util.function.Function::class.java,
+        ).forEach { forbidden -> assertFalse(generate.parameterTypes.contains(forbidden), forbidden.name) }
+
+        assertTrue(FullTreeNinjaCompdbIsolatedRunner.configurationSha256.matches(Regex("[0-9a-f]{64}")))
+        val production = Path.of(
+            "src/main/kotlin/decompengine/oracle/fulltree/FullTreeNinjaCompdbIsolatedRunner.kt",
+        ).toFile().readText()
+        assertFalse(production.contains("python", ignoreCase = true))
+        assertTrue(production.contains("first-class-candidate-producer-operator"))
+        assertTrue(production.contains("artifactBearerAuthority\":false"))
+        assertTrue(production.contains("ninja-live-edge-replay"))
+
+        val publicDeploymentConstructors =
+            FullTreeNinjaCompdbIsolationDeployment::class.java.declaredConstructors
+                .filter { Modifier.isPublic(it.modifiers) && !it.isSynthetic }
+        assertTrue(publicDeploymentConstructors.isEmpty())
+        val publicDeploymentMethods = FullTreeNinjaCompdbIsolationDeployment::class.java.declaredMethods
+            .filter { Modifier.isPublic(it.modifiers) && !it.isSynthetic }
+        assertTrue(publicDeploymentMethods.isEmpty())
+        val publicDeploymentFactories =
+            FullTreeNinjaCompdbIsolationDeployment.Companion::class.java.declaredMethods
+                .filter { Modifier.isPublic(it.modifiers) && !it.isSynthetic }
+        assertTrue(publicDeploymentFactories.isEmpty())
+        assertEquals(
+            setOf("Companion"),
+            FullTreeNinjaCompdbIsolationDeployment::class.java.declaredFields
+                .filter { Modifier.isPublic(it.modifiers) && !it.isSynthetic }
+                .map { it.name }
+                .toSet(),
+        )
+    }
+
+    @Test
+    fun `trusted deployment rejects a runtime profile absent from sandbox configuration`() {
+        val runtime = FullTreeNinjaCompdbRuntimeFile(
+            source = Path.of("/opt/decomp/libfixture.so"),
+            destination = Path.of("/lib64/libfixture.so"),
+            expectedBytes = 1,
+            expectedSha256 = "7".repeat(64),
+            expectedRuntimeManifestSha256 = "8".repeat(64),
+        )
+
+        val failure = assertFailsWith<IllegalArgumentException> {
+            FullTreeNinjaCompdbIsolationDeployment.provision(
+                syntheticNinjaRunnerSandboxConfiguration(),
+                Path.of("/opt/decomp/ninja"),
+                "9".repeat(64),
+                listOf(runtime),
+                Path.of("/var/lib/decomp/ninja-scratch"),
+            )
+        }
+
+        assertTrue(failure.message.orEmpty().contains("runtime mounts differ"))
+    }
+
+    @Test
+    fun `wrong live Ninja identity fails before boundary preparation or receipt publication`() =
+        inControlTemporaryDirectory { directory ->
+            val fixture = createNinjaPrestartFixture(directory.resolve("runner-invalid-ninja"))
+            generateNinjaPrestart(fixture)
+            val wrongNinja = directory.resolve("wrong-ninja")
+            Files.write(wrongNinja, byteArrayOf(0x7f, 'E'.code.toByte(), 'L'.code.toByte(), 'F'.code.toByte()))
+            val scratch = directory.resolve("scratch")
+            Files.createDirectory(scratch)
+            Files.setPosixFilePermissions(scratch, PosixFilePermissions.fromString("rwx------"))
+            val deployment = FullTreeNinjaCompdbIsolationDeployment.provision(
+                syntheticNinjaRunnerSandboxConfiguration(),
+                wrongNinja,
+                "0".repeat(64),
+                emptyList(),
+                scratch,
+            )
+            val output = directory.resolve("execution-receipt.json")
+
+            assertFailsWith<FullTreeControlException> {
+                generateNinjaExecution(fixture, output, deployment)
+            }
+            assertFalse(Files.exists(output, LinkOption.NOFOLLOW_LINKS))
+            assertTrue(Files.list(scratch).use { entries -> entries.findAny().isEmpty })
+        }
+
+    @Test
+    fun `receipt output grammar and no-replace fail before live runtime authentication`() =
+        inControlTemporaryDirectory { directory ->
+            val fixture = createNinjaPrestartFixture(directory.resolve("runner-output-contract"))
+            generateNinjaPrestart(fixture)
+            val wrongNinja = directory.resolve("wrong-ninja-output-contract")
+            Files.write(wrongNinja, byteArrayOf(0x7f, 'E'.code.toByte(), 'L'.code.toByte(), 'F'.code.toByte()))
+            val scratch = directory.resolve("output-contract-scratch")
+            Files.createDirectory(scratch)
+            Files.setPosixFilePermissions(scratch, PosixFilePermissions.fromString("rwx------"))
+            val deployment = FullTreeNinjaCompdbIsolationDeployment.provision(
+                syntheticNinjaRunnerSandboxConfiguration(),
+                wrongNinja,
+                "0".repeat(64),
+                emptyList(),
+                scratch,
+            )
+
+            listOf(
+                "Uppercase.json",
+                "x",
+                "receipt.",
+                "a".repeat(129),
+            ).forEach { name ->
+                val failure = assertFailsWith<IllegalArgumentException>(name) {
+                    generateNinjaExecution(fixture, directory.resolve(name), deployment)
+                }
+                assertTrue(
+                    failure.message.orEmpty().contains("output name is invalid"),
+                    "$name was not rejected by the receipt-name grammar: ${failure.message}",
+                )
+            }
+
+            val sharedOutputParent = directory.resolve("shared-output-parent")
+            Files.createDirectory(sharedOutputParent)
+            Files.setPosixFilePermissions(
+                sharedOutputParent,
+                PosixFilePermissions.fromString("rwxr-xr-x"),
+            )
+            val sharedParentFailure = assertFailsWith<IOException> {
+                generateNinjaExecution(
+                    fixture,
+                    sharedOutputParent.resolve("execution-receipt.json"),
+                    deployment,
+                )
+            }
+            assertTrue(sharedParentFailure.message.orEmpty().contains("owner-only directory"))
+
+            val temporaryTarget = directory.resolve("temporary-receipt.json")
+            val temporary = directory.resolve(".temporary-receipt.json.atomic")
+            val temporarySentinel = "stale-publication-residue\n".toByteArray(StandardCharsets.UTF_8)
+            Files.write(temporary, temporarySentinel)
+            val temporaryFailure = assertFailsWith<FullTreeControlException> {
+                generateNinjaExecution(fixture, temporaryTarget, deployment)
+            }
+            assertTrue(temporaryFailure.message.orEmpty().contains("temporary output already exists"))
+            assertFalse(Files.exists(temporaryTarget, LinkOption.NOFOLLOW_LINKS))
+            assertContentEquals(temporarySentinel, Files.readAllBytes(temporary))
+
+            val output = directory.resolve("existing-receipt.json")
+            val sentinel = "operator-owned-existing-output\n".toByteArray(StandardCharsets.UTF_8)
+            Files.write(output, sentinel)
+            val existing = assertFailsWith<FullTreeControlException> {
+                generateNinjaExecution(fixture, output, deployment)
+            }
+            assertTrue(existing.message.orEmpty().contains("output already exists"))
+            assertContentEquals(sentinel, Files.readAllBytes(output))
+            assertTrue(Files.list(scratch).use { entries -> entries.findAny().isEmpty })
+        }
+
+    @Test
+    fun `manifest cleanup retry removes quarantine but preserves first proof failure`() =
+        inControlTemporaryDirectory { directory ->
+            val fixture = createNinjaPrestartFixture(directory.resolve("runner-cleanup-retry"))
+            val prestart = generateNinjaPrestart(fixture)
+            val materialization = loadFullTreeNinjaManifestMaterialization(
+                fixture.archive,
+                prestart.manifestRootBytes,
+                prestart.manifestRootSha256,
+                fixture.sourceDateEpoch,
+            )
+            val scratch = directory.resolve("cleanup-retry-scratch")
+            Files.createDirectory(scratch)
+            Files.setPosixFilePermissions(scratch, PosixFilePermissions.fromString("rwx------"))
+            val injected = AtomicBoolean(false)
+            val tree = PrivateNinjaManifestTree.create(
+                scratch,
+                materialization,
+                AcpRuntimeClosureLimits(
+                    maximumEntries = 64,
+                    maximumUserOwnedFileBytes = 1024L * 1024L,
+                    maximumDepth = 16,
+                ),
+                NinjaManifestTreeCleanupFaultInjector { stage ->
+                    assertEquals(NinjaManifestTreeCleanupStage.AFTER_QUARANTINE, stage)
+                    if (injected.compareAndSet(false, true)) {
+                        throw IOException("injected post-quarantine cleanup fault")
+                    }
+                },
+            )
+
+            try {
+                val first = assertFailsWith<IOException> { tree.close() }
+                assertTrue(first.cause?.message.orEmpty().contains("injected post-quarantine"))
+                assertFalse(Files.exists(tree.path, LinkOption.NOFOLLOW_LINKS))
+                assertEquals(1L, Files.list(scratch).use { children -> children.count() })
+
+                val remediated = assertFailsWith<IOException> { tree.close() }
+                assertTrue(remediated === first)
+                assertTrue(Files.list(scratch).use { children -> children.findAny().isEmpty })
+
+                val terminal = assertFailsWith<IOException> { tree.close() }
+                assertTrue(terminal === first)
+            } finally {
+                runCatching { tree.close() }
+            }
+        }
+
+    @Test
+    fun `terminal capture abort closes retained pipes and joins blocked workers`() {
+        val stdout = CloseReleasedNinjaInputStream()
+        val stderr = CloseReleasedNinjaInputStream()
+        val capture = PrestartedNinjaPipeCapture("[]\n".toByteArray(), maximumStderrBytes = 1024)
+
+        try {
+            capture.handoff(BlockingNinjaCaptureProcess(stdout, stderr))
+            assertTrue(stdout.readStarted.await(2, TimeUnit.SECONDS))
+            assertTrue(stderr.readStarted.await(2, TimeUnit.SECONDS))
+
+            capture.abortAndAwait(Duration.ofSeconds(2))
+
+            assertTrue(stdout.closed.get())
+            assertTrue(stderr.closed.get())
+        } finally {
+            runCatching { capture.abortAndAwait(Duration.ofSeconds(2)) }
+        }
+    }
+}
+
+private class CloseReleasedNinjaInputStream : InputStream() {
+    val readStarted = CountDownLatch(1)
+    val closed = AtomicBoolean(false)
+    private val released = CountDownLatch(1)
+
+    override fun read(): Int {
+        val single = ByteArray(1)
+        val amount = read(single, 0, 1)
+        return if (amount < 0) -1 else single[0].toInt() and 0xff
+    }
+
+    override fun read(bytes: ByteArray, offset: Int, length: Int): Int {
+        if (length == 0) return 0
+        readStarted.countDown()
+        try {
+            released.await()
+        } catch (interrupted: InterruptedException) {
+            Thread.currentThread().interrupt()
+            throw IOException("blocking test stream was interrupted", interrupted)
+        }
+        throw IOException("blocking test stream was closed")
+    }
+
+    override fun close() {
+        closed.set(true)
+        released.countDown()
+    }
+}
+
+private class BlockingNinjaCaptureProcess(
+    private val stdout: InputStream,
+    private val stderr: InputStream,
+) : Process() {
+    override fun getOutputStream(): OutputStream = OutputStream.nullOutputStream()
+
+    override fun getInputStream(): InputStream = stdout
+
+    override fun getErrorStream(): InputStream = stderr
+
+    override fun waitFor(): Int = 0
+
+    override fun exitValue(): Int = 0
+
+    override fun destroy() = Unit
+}
+
 private data class NinjaPrestartFixture(
     val compdbFixture: CompdbFixture,
     val reconciliation: FullTreeClangCompdbReconciliationRegistry,
@@ -422,6 +717,64 @@ private fun generateNinjaPrestart(
         generated.planning,
         outputPath,
         limits,
+    )
+}
+
+private fun syntheticNinjaRunnerSandboxConfiguration(): AcpLinuxSandboxConfiguration =
+    AcpLinuxSandboxConfiguration(
+        bubblewrapExecutable = Path.of("/opt/decomp/bwrap"),
+        resourceLimiterExecutable = Path.of("/opt/decomp/prlimit"),
+        scopeSupervisorExecutable = Path.of("/opt/decomp/systemd-run"),
+        scopeInspectorExecutable = Path.of("/opt/decomp/systemctl"),
+        environmentFdOpenerExecutable = Path.of("/opt/decomp/bash"),
+        sandboxGateHelperExecutable = Path.of("/opt/decomp/acp-gate-helper"),
+        launcherRuntimeMounts = emptyList(),
+        agentRuntimeMounts = emptyList(),
+        systemdUserRuntimeDirectory = Path.of("/run/user/1000"),
+        runtimeClosureLimits = AcpRuntimeClosureLimits(
+            maximumEntries = 10_000,
+            maximumUserOwnedFileBytes = 512L * 1024L * 1024L,
+            maximumDepth = 64,
+        ),
+        expectedBubblewrapSha256 = "0".repeat(64),
+        expectedResourceLimiterSha256 = "1".repeat(64),
+        expectedScopeSupervisorSha256 = "2".repeat(64),
+        expectedScopeInspectorSha256 = "3".repeat(64),
+        expectedEnvironmentFdOpenerSha256 = "4".repeat(64),
+        expectedSandboxGateHelperSha256 = "5".repeat(64),
+        expectedSandboxGateHelperManifestSha256 = "6".repeat(64),
+        ninjaCompdbRuntimeMounts = emptyList(),
+    )
+
+private fun generateNinjaExecution(
+    fixture: NinjaPrestartFixture,
+    output: Path,
+    deployment: FullTreeNinjaCompdbIsolationDeployment,
+): FullTreeNinjaCompdbExecutionRegistry {
+    val compdb = fixture.compdbFixture
+    val capture = compdb.captureFixture
+    val generated = capture.generated
+    val control = generated.control
+    return FullTreeNinjaCompdbIsolatedRunner.generateAndPublish(
+        fixture.artifact,
+        fixture.archive,
+        compdb.reconciliation,
+        compdb.compdb,
+        capture.captureInput,
+        capture.readiness,
+        capture.generatedInventory,
+        control.sourceArchive,
+        generated.archive,
+        generated.provenance,
+        control.scope,
+        control.sourceLock,
+        control.manifest,
+        control.buildRecord,
+        control.inventory,
+        control.sourceInventory,
+        generated.planning,
+        output,
+        deployment,
     )
 }
 

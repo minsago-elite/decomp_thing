@@ -15,6 +15,13 @@ import kotlin.test.assertTrue
 
 class AcpSandboxPolicyTest {
     @Test
+    fun `public sandbox evidence retains legacy JVM constructor arities`() {
+        assertTrue(AcpSandboxMountEvidence::class.java.constructors.any { it.parameterCount == 7 })
+        assertTrue(AcpSandboxEnvironmentEvidence::class.java.constructors.any { it.parameterCount == 9 })
+        assertTrue(AcpSandboxLaunchEvidence::class.java.constructors.any { it.parameterCount == 9 })
+    }
+
+    @Test
     fun `ordinary writable staging fails closed and invalid ids create no directory`() {
         val parent = createTempDirectory("acp-stage-policy-").toAbsolutePath().normalize()
         val before = Files.list(parent).use { it.count() }
@@ -366,6 +373,7 @@ class AcpSandboxPolicyTest {
             evidence(launches = listOf(baseLaunch.copy(stagingRootCount = 1))),
             evidence(launches = listOf(baseLaunch.copy(emptyDirectoriesSha256 = "d".repeat(64)))),
             evidence(launches = listOf(baseLaunch.copy(emptyDirectoryCount = 2))),
+            evidence(launches = listOf(baseLaunch.copy(stdinDisposition = "closed-before-exec"))),
             evidence(launches = listOf(baseLaunch.copy(startGate = baseGate.copy(descriptor = 1)))),
             evidence(launches = listOf(baseLaunch.copy(startGate = baseGate.copy(
                 waiterExecutableSha256 = "d".repeat(64),
@@ -394,6 +402,9 @@ class AcpSandboxPolicyTest {
             evidence(launches = listOf(baseLaunch.copy(executableMount = baseMount.copy(sourcePathSha256 = "d".repeat(64))))),
             evidence(launches = listOf(baseLaunch.copy(executableMount = baseMount.copy(destinationPathSha256 = "d".repeat(64))))),
             evidence(launches = listOf(baseLaunch.copy(executableMount = baseMount.copy(manifestSha256 = "d".repeat(64))))),
+            evidence(launches = listOf(baseLaunch.copy(executableMount = baseMount.copy(
+                configuredManifestSha256 = "d".repeat(64),
+            )))),
             evidence(launches = listOf(baseLaunch.copy(executableMount = baseMount.copy(device = 14)))),
             evidence(launches = listOf(baseLaunch.copy(executableMount = baseMount.copy(inode = 14)))),
             evidence(launches = listOf(baseLaunch.copy(executableMount = baseMount.copy(mode = 0x16d)))),
@@ -419,6 +430,9 @@ class AcpSandboxPolicyTest {
             evidence(launches = listOf(baseLaunch.copy(runtimeMounts = listOf(baseMount.copy(directory = true))))),
             evidence(launches = listOf(baseLaunch.copy(runtimeMounts = listOf(
                 baseMount.copy(manifestSha256 = "e".repeat(64)),
+            )))),
+            evidence(launches = listOf(baseLaunch.copy(runtimeMounts = listOf(
+                baseMount.copy(configuredManifestSha256 = "e".repeat(64)),
             )))),
             evidence(authorities = listOf(baseAuthority.copy(rootId = "other"))),
             evidence(authorities = listOf(baseAuthority.copy(rootPathSha256 = "4".repeat(64)))),

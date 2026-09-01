@@ -95,6 +95,17 @@ rebuild no longer invokes the Python tool recorder. Remaining Python compatibili
 non-authoritative; keeping those regression checks does not promote their outputs to new release authority. Retained Python LLVM
 manifest/function generators are explicitly differential migration compatibility and cannot certify a release.
 
+The full-tree build-planning boundary also has a Kotlin-owned isolated Ninja
+compilation-database query. ACP remains the first-class candidate
+producer/operator, while a dedicated bubblewrap/cgroup purpose authenticates the
+recorded Ninja executable, exact loader profile, read-only manifest
+materialization, fixed direct invocation, byte-exact stdout, separate bounded
+stderr, cleanup, and terminal absence. Its persisted receipt is non-bearer audit
+evidence and authenticates neither build-graph origin nor compiler execution;
+all eight downstream blockers remain active. No Python implementation, shell,
+caller command, mount, staging root, or callback participates in that reference
+query authority.
+
 During migration, existing Python outputs may be retained as explicitly non-authoritative differential fixtures. They
 cannot enter a new release as truth or validation evidence. A stage becomes authoritative only after frozen-fixture
 parity, fail-closed mutation coverage, worker-count determinism, repeated byte-identical output, and a Kotlin-only

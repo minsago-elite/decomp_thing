@@ -228,6 +228,13 @@ internal class StableControlFile private constructor(
     private val initialSha256: String
     private var closed = false
 
+    /** Initial descriptor-selected content identity, retained without reopening the pathname. */
+    internal val authenticatedSha256: String
+        get() {
+            check(!closed) { "$label is already closed" }
+            return initialSha256
+        }
+
     val size: Long
         get() = authenticatedSize
 

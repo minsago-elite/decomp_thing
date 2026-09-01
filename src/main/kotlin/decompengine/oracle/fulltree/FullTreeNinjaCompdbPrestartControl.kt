@@ -57,16 +57,35 @@ sealed interface FullTreeNinjaCompdbPrestartRegistry {
     val configurationSha256: String
     val reconciliationArtifactSha256: String
     val prestartContextSha256: String
+    val predecessorManifestSha256: String
     val manifestArchiveSha256: String
     val manifestClosureSha256: String
+    val manifestConfigurationSha256: String
+    val manifestReportSha256: String
+    val manifestFileManifestSha256: String
+    val manifestIncludeGraphSha256: String
+    val manifestRuleManifestSha256: String
+    val manifestArchiveRoot: String
+    val manifestRootFile: String
+    val manifestRootBytes: Long
+    val manifestRootSha256: String
     val compilerRulesSha256: String
     val compilerRuleNames: List<String>
+    val ninjaExecutablePath: String
+    val ninjaExecutableBytes: Long
+    val ninjaExecutableSha256: String
+    val ninjaToolIdentitySha256: String
     val workingDirectory: String
     val argv: List<String>
+    val argvSha256: String
     val environment: Map<String, String>
+    val environmentSha256: String
     val expectedStdoutBytes: Long
     val expectedStdoutSha256: String
     val expectedStdoutCanonicalSha256: String
+    val expectedStdoutCommitmentSha256: String
+    val invocationSha256: String
+    val containmentPolicySha256: String
     val blockerCodes: List<String>
     val canonicalBytes: ByteArray
     val startAuthorized: Boolean
@@ -176,7 +195,7 @@ object FullTreeNinjaCompdbPrestartControl {
     )
 }
 
-private data class NinjaPrestartPaths(
+internal data class NinjaPrestartPaths(
     val artifact: Path,
     val manifestArchive: Path,
     val reconciliation: Path,
@@ -246,9 +265,14 @@ private fun loadNinjaPrestart(
     }
 }
 
-private class NinjaPrestartInputGuards private constructor(
+internal class NinjaPrestartInputGuards private constructor(
     private val files: List<Pair<String, StableControlFile>>,
 ) : AutoCloseable {
+    internal fun identities(): List<NinjaPrestartRetainedInputIdentity> =
+        Collections.unmodifiableList(files.map { (label, file) ->
+            NinjaPrestartRetainedInputIdentity(label, file.size, file.authenticatedSha256)
+        })
+
     fun verifyUnchanged() {
         files.forEach { (label, file) ->
             file.requireSingleLink(label)
@@ -373,6 +397,12 @@ private class NinjaPrestartInputGuards private constructor(
         }
     }
 }
+
+internal data class NinjaPrestartRetainedInputIdentity(
+    val label: String,
+    val bytes: Long,
+    val sha256: String,
+)
 
 private fun deriveNinjaPrestartDocument(
     paths: NinjaPrestartPaths,
@@ -904,16 +934,35 @@ private data class ValidatedNinjaPrestartState(
     val configurationSha256: String,
     val reconciliationArtifactSha256: String,
     val prestartContextSha256: String,
+    val predecessorManifestSha256: String,
     val manifestArchiveSha256: String,
     val manifestClosureSha256: String,
+    val manifestConfigurationSha256: String,
+    val manifestReportSha256: String,
+    val manifestFileManifestSha256: String,
+    val manifestIncludeGraphSha256: String,
+    val manifestRuleManifestSha256: String,
+    val manifestArchiveRoot: String,
+    val manifestRootFile: String,
+    val manifestRootBytes: Long,
+    val manifestRootSha256: String,
     val compilerRulesSha256: String,
     val compilerRuleNames: List<String>,
+    val ninjaExecutablePath: String,
+    val ninjaExecutableBytes: Long,
+    val ninjaExecutableSha256: String,
+    val ninjaToolIdentitySha256: String,
     val workingDirectory: String,
     val argv: List<String>,
+    val argvSha256: String,
     val environment: Map<String, String>,
+    val environmentSha256: String,
     val expectedStdoutBytes: Long,
     val expectedStdoutSha256: String,
     val expectedStdoutCanonicalSha256: String,
+    val expectedStdoutCommitmentSha256: String,
+    val invocationSha256: String,
+    val containmentPolicySha256: String,
     val blockerCodes: List<String>,
     val canonicalBytes: ByteArray,
 )
@@ -927,18 +976,37 @@ private class ValidatedNinjaPrestartRegistry(
     override val configurationSha256: String = state.configurationSha256
     override val reconciliationArtifactSha256: String = state.reconciliationArtifactSha256
     override val prestartContextSha256: String = state.prestartContextSha256
+    override val predecessorManifestSha256: String = state.predecessorManifestSha256
     override val manifestArchiveSha256: String = state.manifestArchiveSha256
     override val manifestClosureSha256: String = state.manifestClosureSha256
+    override val manifestConfigurationSha256: String = state.manifestConfigurationSha256
+    override val manifestReportSha256: String = state.manifestReportSha256
+    override val manifestFileManifestSha256: String = state.manifestFileManifestSha256
+    override val manifestIncludeGraphSha256: String = state.manifestIncludeGraphSha256
+    override val manifestRuleManifestSha256: String = state.manifestRuleManifestSha256
+    override val manifestArchiveRoot: String = state.manifestArchiveRoot
+    override val manifestRootFile: String = state.manifestRootFile
+    override val manifestRootBytes: Long = state.manifestRootBytes
+    override val manifestRootSha256: String = state.manifestRootSha256
     override val compilerRulesSha256: String = state.compilerRulesSha256
     override val compilerRuleNames: List<String> =
         Collections.unmodifiableList(ArrayList(state.compilerRuleNames))
+    override val ninjaExecutablePath: String = state.ninjaExecutablePath
+    override val ninjaExecutableBytes: Long = state.ninjaExecutableBytes
+    override val ninjaExecutableSha256: String = state.ninjaExecutableSha256
+    override val ninjaToolIdentitySha256: String = state.ninjaToolIdentitySha256
     override val workingDirectory: String = state.workingDirectory
     override val argv: List<String> = Collections.unmodifiableList(ArrayList(state.argv))
+    override val argvSha256: String = state.argvSha256
     override val environment: Map<String, String> =
         Collections.unmodifiableMap(LinkedHashMap(state.environment))
+    override val environmentSha256: String = state.environmentSha256
     override val expectedStdoutBytes: Long = state.expectedStdoutBytes
     override val expectedStdoutSha256: String = state.expectedStdoutSha256
     override val expectedStdoutCanonicalSha256: String = state.expectedStdoutCanonicalSha256
+    override val expectedStdoutCommitmentSha256: String = state.expectedStdoutCommitmentSha256
+    override val invocationSha256: String = state.invocationSha256
+    override val containmentPolicySha256: String = state.containmentPolicySha256
     override val blockerCodes: List<String> = Collections.unmodifiableList(ArrayList(state.blockerCodes))
     private val storedCanonicalBytes = state.canonicalBytes.copyOf()
     override val canonicalBytes: ByteArray
@@ -955,6 +1023,7 @@ private fun validatedNinjaPrestartState(
     val commitments = document.controlObject("commitments")
     val closure = document.controlObject("manifestClosure")
     val rules = document.controlObject("compilerRules")
+    val ninja = document.controlObject("ninja")
     val invocation = document.controlObject("invocation")
     val expectedStdout = invocation.controlObject("expectedStdout")
     val environment = LinkedHashMap<String, String>()
@@ -970,16 +1039,35 @@ private fun validatedNinjaPrestartState(
         configurationSha256 = oracle.controlString("configurationSha256"),
         reconciliationArtifactSha256 = oracle.controlString("compdbReconciliationArtifactSha256"),
         prestartContextSha256 = commitments.controlString("prestartContextSha256"),
+        predecessorManifestSha256 = commitments.controlString("predecessorManifestSha256"),
         manifestArchiveSha256 = closure.controlString("archiveSha256"),
         manifestClosureSha256 = commitments.controlString("manifestClosureSha256"),
+        manifestConfigurationSha256 = closure.controlString("configurationSha256"),
+        manifestReportSha256 = closure.controlString("reportSha256"),
+        manifestFileManifestSha256 = closure.controlString("fileManifestSha256"),
+        manifestIncludeGraphSha256 = closure.controlString("includeGraphSha256"),
+        manifestRuleManifestSha256 = closure.controlString("ruleManifestSha256"),
+        manifestArchiveRoot = closure.controlString("archiveRoot"),
+        manifestRootFile = closure.controlString("rootManifest"),
+        manifestRootBytes = closure.controlLong("rootManifestBytes"),
+        manifestRootSha256 = closure.controlString("rootManifestSha256"),
         compilerRulesSha256 = commitments.controlString("compilerRulesSha256"),
         compilerRuleNames = rules.controlArray("names").map { it.controlString("compiler rule") },
+        ninjaExecutablePath = ninja.controlString("path"),
+        ninjaExecutableBytes = ninja.controlLong("executableBytes"),
+        ninjaExecutableSha256 = ninja.controlString("executableSha256"),
+        ninjaToolIdentitySha256 = ninja.controlString("toolIdentitySha256"),
         workingDirectory = invocation.controlString("workingDirectory"),
         argv = invocation.controlArray("argv").map { it.controlString("Ninja argv") },
+        argvSha256 = invocation.controlString("argvSha256"),
         environment = environment,
+        environmentSha256 = invocation.controlString("environmentSha256"),
         expectedStdoutBytes = expectedStdout.controlLong("bytes"),
         expectedStdoutSha256 = expectedStdout.controlString("sha256"),
         expectedStdoutCanonicalSha256 = expectedStdout.controlString("canonicalSha256"),
+        expectedStdoutCommitmentSha256 = commitments.controlString("expectedStdoutSha256"),
+        invocationSha256 = commitments.controlString("invocationSha256"),
+        containmentPolicySha256 = commitments.controlString("containmentPolicySha256"),
         blockerCodes = document.controlArray("blockers").controlObjects("prestart blockers")
             .map { it.controlString("code") },
         canonicalBytes = bytes.copyOf(),

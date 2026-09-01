@@ -7,6 +7,7 @@ import decompengine.acp.AcpExecutionEvidenceSnapshot
 import decompengine.acp.AcpExecutionCleanupDisposition
 import decompengine.acp.AcpExecutionEvidenceCompleteness
 import decompengine.acp.AcpExecutionLifecyclePhase
+import decompengine.acp.AcpCgroupControllerEvidence
 import decompengine.acp.AcpFilesystemAuditOutcome
 import decompengine.acp.AcpFilesystemAuditReason
 import decompengine.acp.AcpFilesystemAuditRecord
@@ -20,8 +21,14 @@ import decompengine.acp.AcpPermissionAuditRecord
 import decompengine.acp.AcpProcessDiagnostics
 import decompengine.acp.AcpProducedOutputEvidence
 import decompengine.acp.AcpRuntimeClosureLimits
+import decompengine.acp.AcpSandboxEnvironmentEvidence
 import decompengine.acp.AcpSandboxEvidence
+import decompengine.acp.AcpSandboxLaunchEvidence
+import decompengine.acp.AcpSandboxLaunchPurpose
+import decompengine.acp.AcpSandboxMountEvidence
+import decompengine.acp.AcpSandboxRlimitEvidence
 import decompengine.acp.AcpSandboxResourceLimits
+import decompengine.acp.AcpSandboxStartGateEvidence
 import decompengine.acp.AcpTerminalAuditOutcome
 import decompengine.acp.AcpTerminalAuditReason
 import decompengine.acp.AcpTerminalAuditRecord
@@ -80,6 +87,202 @@ import kotlin.test.assertNotEquals
 import kotlin.test.assertTrue
 
 class AgentExecutionEvidenceTest {
+    @Test
+    fun `schema v1 launch JSON retains every field bound by sandbox evidence`() {
+        val temp = createTempDirectory("acp-v1-launch-evidence-")
+        val root = AgentWorkspaceRoot("root", temp)
+        val request = AgentExecutionRequest(
+            objective = "retain complete launch evidence",
+            workspaceRoots = listOf(root),
+            accessPolicy = AgentAccessPolicy(emptyList()),
+        )
+        val resources = AcpSandboxResourceLimits()
+        val executable = AcpSandboxMountEvidence(
+            sourcePathSha256 = "1".repeat(64),
+            destinationPathSha256 = "2".repeat(64),
+            manifestSha256 = "3".repeat(64),
+            device = 11,
+            inode = 12,
+            mode = 0x8180,
+            directory = false,
+            configuredManifestSha256 = "4".repeat(64),
+        )
+        val runtime = AcpSandboxMountEvidence(
+            sourcePathSha256 = "5".repeat(64),
+            destinationPathSha256 = "6".repeat(64),
+            manifestSha256 = "7".repeat(64),
+            device = 21,
+            inode = 22,
+            mode = 0x4160,
+            directory = true,
+            configuredManifestSha256 = "8".repeat(64),
+        )
+        val launch = AcpSandboxLaunchEvidence(
+            purpose = AcpSandboxLaunchPurpose.TERMINAL,
+            resourceLimits = resources,
+            controllers = AcpCgroupControllerEvidence(
+                pidsMax = resources.maximumProcesses.toLong(),
+                memoryMaxBytes = resources.maximumAddressSpaceBytes,
+                memorySwapMaxBytes = 0,
+                cpuQuotaMicros = 100_000,
+                cpuPeriodMicros = 100_000,
+                memoryOomGroup = true,
+                runtimeMaxMicros = 10_000_000,
+                timeoutStopMicros = 3_000_000,
+            ),
+            commandSha256 = "9".repeat(64),
+            startGate = AcpSandboxStartGateEvidence(
+                descriptor = 0,
+                waiterExecutableSha256 = "a".repeat(64),
+                helperProtocolSha256 = "b".repeat(64),
+                positiveByteRequired = true,
+            ),
+            environment = AcpSandboxEnvironmentEvidence(
+                sandboxPathSha256 = "c".repeat(64),
+                bindingNamesSha256 = "d".repeat(64),
+                bindingCount = 2,
+                encodedBytes = 32,
+                device = 31,
+                inode = 32,
+                mountId = 33,
+                mode = 0x8180,
+                linkCount = 0,
+                contentSha256 = "e".repeat(64),
+            ),
+            effectiveRlimits = AcpSandboxRlimitEvidence(
+                processesSoft = resources.maximumProcesses.toLong(),
+                processesHard = resources.maximumProcesses.toLong(),
+                openFilesSoft = resources.maximumOpenFiles.toLong(),
+                openFilesHard = resources.maximumOpenFiles.toLong(),
+                fileBytesSoft = resources.maximumFileBytes,
+                fileBytesHard = resources.maximumFileBytes,
+                coreBytesSoft = 0,
+                coreBytesHard = 0,
+                addressSpaceSoft = resources.maximumAddressSpaceBytes,
+                addressSpaceHard = resources.maximumAddressSpaceBytes,
+                cpuSecondsSoft = resources.maximumCpuSeconds.toLong(),
+                cpuSecondsHard = resources.maximumCpuSeconds.toLong(),
+            ),
+            executableMount = executable,
+            runtimeMounts = listOf(runtime),
+            workingDirectorySha256 = "f".repeat(64),
+            mergeError = true,
+            stagingRootsSha256 = "0".repeat(64),
+            stagingRootCount = 2,
+            emptyDirectoriesSha256 = "1".repeat(64),
+            emptyDirectoryCount = 3,
+            stdinDisposition = "inherited",
+        )
+        val sandbox = AcpSandboxEvidence(
+            provider = "sandbox-evidence-v1",
+            providerVersion = "1",
+            providerExecutableSha256 = "2".repeat(64),
+            providerExecutableMode = 365,
+            resourceLimiterSha256 = "3".repeat(64),
+            scopeSupervisorSha256 = "4".repeat(64),
+            scopeInspectorSha256 = "5".repeat(64),
+            environmentFdOpenerSha256 = "6".repeat(64),
+            securityExecutables = emptyList(),
+            outerAgentLimits = resources,
+            runtimeClosureLimits = AcpRuntimeClosureLimits(),
+            cgroupV2PidsLimited = true,
+            cgroupV2MemoryLimited = true,
+            cgroupV2CpuLimited = true,
+            networkIsolated = true,
+            outerAgentContained = true,
+            nestedUserNamespacesDisabled = true,
+            newSession = true,
+            dieWithParent = true,
+            policySha256 = "7".repeat(64),
+            terminalLimits = null,
+            launches = listOf(launch),
+            authorities = emptyList(),
+            terminalAudit = emptyList(),
+        )
+        val provenance = AcpHarnessProvenance(
+            harness = "acp",
+            implementationId = IMPLEMENTATION_ID,
+            agentExecutionContractVersion = 1,
+            acpProtocolVersion = ACP_STABLE_PROTOCOL_VERSION,
+            acpSdkVersion = ACP_KOTLIN_SDK_VERSION,
+            configurationSha256 = "8".repeat(64),
+            deprecated = false,
+        )
+        val acp = AcpExecutionEvidenceSnapshot(
+            factoryProvenance = provenance,
+            negotiatedAgent = AcpNegotiatedAgentEvidence(
+                ACP_STABLE_PROTOCOL_VERSION,
+                "test-agent",
+                "1",
+                null,
+                AcpNegotiatedCapabilitiesEvidence(false, false, false, false, false, false, false),
+            ),
+            wirePromptSha256 = "9".repeat(64),
+            diagnostics = AcpProcessDiagnostics(
+                pid = 123,
+                exitCode = 0,
+                stderr = "",
+                stderrTruncated = false,
+                producedOutputBytes = 0,
+                producedOutputLimitBytes = 1024,
+                outputLimitExceeded = false,
+                forcedTermination = false,
+                rootTerminationRequested = false,
+                remainingProcessIds = emptyList(),
+                containment = "linux-bubblewrap",
+                networkIsolated = true,
+                sandboxCleanupVerified = true,
+            ),
+            filesystemAudit = emptyList(),
+            terminalAudit = emptyList(),
+            permissionAudit = emptyList(),
+            sandboxEvidence = sandbox,
+        )
+        val result = AgentExecutionResult(
+            stopReason = AgentStopReason.NO_CHANGES,
+            session = AgentSessionReference(IMPLEMENTATION_ID, "session"),
+        )
+        val json = BoundedAcpExecutionArtifact.capture(
+            request = request,
+            promptSha256 = "a".repeat(64),
+            result = result,
+            events = emptyList(),
+            acp = acp,
+        ).toValidatedJson(
+            AcpExecutionOutcomeBinding(
+                evidenceKind = "test.acp-evidence",
+                taskIdentityField = "taskId",
+                taskId = "task",
+                accepted = true,
+                artifactDigestField = "artifactSha256",
+                artifactSha256 = "b".repeat(64),
+            ),
+        )
+
+        val rootJson = Json.parseToJsonElement(json).jsonObject
+        val launchJson = rootJson.getValue("sandbox").jsonObject
+            .getValue("launches").jsonArray.single().jsonObject
+        assertEquals(sandbox.evidenceSha256, rootJson.getValue("sandbox").jsonObject
+            .getValue("evidenceSha256").jsonPrimitive.content)
+        assertEquals("e".repeat(64), launchJson.getValue("environment").jsonObject
+            .getValue("contentSha256").jsonPrimitive.content)
+        assertEquals("3".repeat(64), launchJson.getValue("executableMount").jsonObject
+            .getValue("manifestSha256").jsonPrimitive.content)
+        assertEquals("4".repeat(64), launchJson.getValue("executableMount").jsonObject
+            .getValue("configuredManifestSha256").jsonPrimitive.content)
+        assertEquals("7".repeat(64), launchJson.getValue("runtimeMounts").jsonArray.single().jsonObject
+            .getValue("manifestSha256").jsonPrimitive.content)
+        assertEquals("8".repeat(64), launchJson.getValue("runtimeMounts").jsonArray.single().jsonObject
+            .getValue("configuredManifestSha256").jsonPrimitive.content)
+        assertEquals("f".repeat(64), launchJson.getValue("workingDirectorySha256").jsonPrimitive.content)
+        assertTrue(launchJson.getValue("mergeError").jsonPrimitive.boolean)
+        assertEquals("0".repeat(64), launchJson.getValue("stagingRootsSha256").jsonPrimitive.content)
+        assertEquals(2, launchJson.getValue("stagingRootCount").jsonPrimitive.int)
+        assertEquals("1".repeat(64), launchJson.getValue("emptyDirectoriesSha256").jsonPrimitive.content)
+        assertEquals(3, launchJson.getValue("emptyDirectoryCount").jsonPrimitive.int)
+        assertEquals("inherited", launchJson.getValue("stdinDisposition").jsonPrimitive.content)
+    }
+
     @Test
     fun `tool detail commitments cannot move delimiters between keys and values`() {
         assertNotEquals(

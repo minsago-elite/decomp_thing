@@ -28,6 +28,17 @@ import org.junit.jupiter.api.Assumptions.assumeTrue
 
 class LinuxBubblewrapBoundaryTest {
     @Test
+    fun `systemd runtime ceiling uses one authenticated millisecond value`() {
+        val cleanup = acpSandboxCleanupTimeoutMicros()
+        assertEquals(cleanup + 1_000L, acpSandboxRuntimeMaximumMicros(Duration.ofNanos(1)))
+        assertEquals(cleanup + 1_000L, acpSandboxRuntimeMaximumMicros(Duration.ofMillis(1)))
+        assertEquals(
+            cleanup + 2_000L,
+            acpSandboxRuntimeMaximumMicros(Duration.ofMillis(1).plusNanos(1)),
+        )
+    }
+
+    @Test
     fun `mandatory command fragment isolates namespaces and never weakens bubblewrap`() {
         val arguments = acpBubblewrapIsolationArguments()
         listOf(
@@ -445,15 +456,48 @@ class LinuxBubblewrapBoundaryTest {
             val evidence = boundary.evidence(null)
             assertEquals(6, evidence.securityExecutables.size)
             assertTrue(evidence.securityExecutables.all { it.mode and 0x12 == 0 })
+            val configuredProbeManifest = calculateAcpRuntimeManifestSha256(PROBE)
             assertTrue(evidence.launches.all { launch ->
                 launch.controllers.pidsMax == launch.resourceLimits.maximumProcesses.toLong() &&
                     launch.controllers.memoryMaxBytes == launch.resourceLimits.maximumAddressSpaceBytes &&
                     launch.controllers.memorySwapMaxBytes == 0L && launch.controllers.memoryOomGroup &&
                     launch.startGate.descriptor == 0 && launch.startGate.positiveByteRequired &&
                     launch.environment.linkCount == 0 &&
+                    launch.executableMount.configuredManifestSha256 == configuredProbeManifest &&
+                    launch.executableMount.manifestSha256 != configuredProbeManifest &&
                     launch.effectiveRlimits.openFilesSoft == launch.resourceLimits.maximumOpenFiles.toLong()
             })
             assertTrue(evidence.evidenceSha256.matches(Regex("[0-9a-f]{64}")))
+        } finally {
+            boundary.close()
+        }
+    }
+
+    @Test
+    fun `live Ninja query purpose closes stdin and retains separate authenticated evidence`() {
+        requireLiveHost()
+        val boundary = LinuxBubblewrapBoundary.prepare(liveConfiguration())
+        try {
+            val launch = probeLaunch(listOf("netns")).copy(
+                purpose = AcpSandboxLaunchPurpose.NINJA_COMPDB_QUERY,
+                stdinDisposition = AcpSandboxStdinDisposition.CLOSED_BEFORE_EXEC,
+            )
+            val contained = boundary.launch(launch, mergeError = false) {}
+            assertTrue(contained.process.waitFor(8, TimeUnit.SECONDS), "Ninja-purpose probe timed out")
+            val stdout = contained.process.inputStream.readAllBytes().toString(Charsets.UTF_8)
+            val stderr = contained.process.errorStream.readAllBytes().toString(Charsets.UTF_8)
+            assertEquals(0, contained.process.exitValue(), stderr)
+            assertTrue(stdout.isNotBlank())
+            assertEquals("", stderr)
+            contained.awaitCleanup(Duration.ofSeconds(5))
+
+            val evidence = boundary.evidence(null).launches.single()
+            assertEquals(AcpSandboxLaunchPurpose.NINJA_COMPDB_QUERY, evidence.purpose)
+            assertEquals("closed-before-exec", evidence.stdinDisposition)
+            assertFalse(evidence.mergeError)
+            assertEquals(acpSandboxCanonicalStringDigest(launch.command), evidence.commandSha256)
+            assertEquals(acpSandboxEmptyStagingRootsDigest(), evidence.stagingRootsSha256)
+            assertEquals(acpSandboxCanonicalStringDigest(emptyList()), evidence.emptyDirectoriesSha256)
         } finally {
             boundary.close()
         }

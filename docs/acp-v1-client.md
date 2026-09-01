@@ -484,7 +484,10 @@ network-isolation state, retained bytes, saturated total-produced bytes, and tru
 argv, cwd/host paths, environment values, or output. `latestSandboxEvidence()` binds every security tool's canonical
 path hash/content digest/mode/metadata digest, effective outer and terminal resource limits, runtime-closure limits, the exact manifested
 agent executable and runtime mounts, actual per-launch cgroup controller values, namespace settings, every staging
-identity/mode/quota proof, aggregate outer stdout/stderr production, and canonicalized terminal command authority. A length-delimited canonical SHA-256 binds the
+identity/mode/quota proof, aggregate outer stdout/stderr production, and canonicalized terminal command authority.
+Each successful launch additionally binds the canonical environment content, working directory, stdin disposition,
+stderr-merge choice, staging-root and private-empty-anchor digests/counts, and both the configured source manifest and
+effective mounted closure manifest for every executable/runtime mount. A length-delimited canonical SHA-256 binds the
 complete metadata record. Evidence is absent for every launch that fails before the write-ahead authorization callback;
 after the one-byte commit attempt, delivery is inherently outcome-ambiguous and the launch is treated and evidenced as
 authorized rather than misreported as a denial.

@@ -1,10 +1,13 @@
 package decompengine.oracle.fulltree
 
+import decompengine.acp.AcpRuntimeClosureLimits
 import java.io.ByteArrayOutputStream
+import java.io.IOException
 import java.lang.reflect.Modifier
 import java.nio.charset.StandardCharsets
 import java.nio.file.Files
 import java.nio.file.Path
+import java.nio.file.LinkOption
 import java.nio.file.attribute.PosixFilePermissions
 import java.security.MessageDigest
 import kotlin.test.Test
@@ -67,6 +70,56 @@ class FullTreeNinjaManifestArchiveTest {
             assertNotEquals(first.includeGraphSha256, first.ruleManifestSha256)
             assertFalse(first.processAuthority)
             assertFalse(first.runAuthority)
+
+            val materialization = loadFullTreeNinjaManifestMaterialization(
+                archivePath,
+                rootBytes.size.toLong(),
+                ninjaManifestTestSha256(rootBytes),
+                NINJA_TEST_EPOCH,
+            )
+            assertEquals(first.reportSha256, materialization.snapshot.reportSha256)
+            assertEquals(files.keys, materialization.paths.toSet())
+            val defensive = materialization.bytes("build.ninja")
+            defensive[0] = (defensive[0].toInt() xor 1).toByte()
+            assertEquals(
+                ninjaManifestTestSha256(rootBytes),
+                ninjaManifestTestSha256(materialization.bytes("build.ninja")),
+            )
+            val sharedScratch = directory.resolve("shared-materialization-scratch")
+            Files.createDirectory(sharedScratch)
+            Files.setPosixFilePermissions(sharedScratch, PosixFilePermissions.fromString("rwxr-xr-x"))
+            assertFailsWith<IOException> {
+                PrivateNinjaManifestTree.create(
+                    sharedScratch,
+                    materialization,
+                    AcpRuntimeClosureLimits(64, 1024L * 1024L, 16),
+                )
+            }
+            assertTrue(Files.list(sharedScratch).use { children -> children.findAny().isEmpty })
+            val scratch = directory.resolve("materialization-scratch")
+            Files.createDirectory(scratch)
+            Files.setPosixFilePermissions(scratch, PosixFilePermissions.fromString("rwx------"))
+            val tree = PrivateNinjaManifestTree.create(
+                scratch,
+                materialization,
+                AcpRuntimeClosureLimits(
+                    maximumEntries = 64,
+                    maximumUserOwnedFileBytes = 1024L * 1024L,
+                    maximumDepth = 16,
+                ),
+            )
+            val treePath = tree.path
+            materialization.paths.forEach { relative ->
+                assertTrue(Files.readAllBytes(treePath.resolve(relative)).contentEquals(files.getValue(relative)))
+                assertEquals(
+                    PosixFilePermissions.fromString("r--------"),
+                    Files.getPosixFilePermissions(treePath.resolve(relative), LinkOption.NOFOLLOW_LINKS),
+                )
+            }
+            tree.verifyUnchanged()
+            tree.close()
+            assertFalse(Files.exists(treePath, LinkOption.NOFOLLOW_LINKS))
+            assertTrue(Files.list(scratch).use { children -> children.findAny().isEmpty })
 
             assertFailsWith<UnsupportedOperationException> {
                 @Suppress("UNCHECKED_CAST")
