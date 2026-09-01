@@ -1,0 +1,313 @@
+package decompengine.oracle.fulltree
+
+import decompengine.oracle.core.OracleArtifacts
+import decompengine.oracle.core.OracleJson
+import decompengine.oracle.core.StrictJsonLimits
+import java.nio.charset.StandardCharsets
+import java.util.TreeSet
+import kotlinx.serialization.json.JsonArray
+import kotlinx.serialization.json.JsonObject
+import kotlinx.serialization.json.JsonPrimitive
+
+class FullTreeClangHeaderTraceException(message: String, cause: Throwable? = null) :
+    IllegalArgumentException(message, cause)
+
+/** Caller-lowerable ceilings beneath the immutable Clang direct-header trace policy. */
+internal data class FullTreeClangHeaderTraceLimits(
+    val maximumInputBytes: Int = CLANG_TRACE_MAXIMUM_INPUT_BYTES,
+    val maximumDependencyFiles: Int = CLANG_TRACE_MAXIMUM_DEPENDENCY_FILES,
+    val maximumIncludeOccurrences: Int = CLANG_TRACE_MAXIMUM_INCLUDE_OCCURRENCES,
+    val maximumModuleImports: Int = CLANG_TRACE_MAXIMUM_MODULE_IMPORTS,
+    val maximumPathBytes: Int = CLANG_TRACE_MAXIMUM_PATH_BYTES,
+    val maximumWorkUnits: Long = CLANG_TRACE_MAXIMUM_WORK_UNITS,
+) {
+    init {
+        require(maximumInputBytes in 1..CLANG_TRACE_MAXIMUM_INPUT_BYTES)
+        require(maximumDependencyFiles in 1..CLANG_TRACE_MAXIMUM_DEPENDENCY_FILES)
+        require(maximumIncludeOccurrences in 1..CLANG_TRACE_MAXIMUM_INCLUDE_OCCURRENCES)
+        require(maximumModuleImports in 1..CLANG_TRACE_MAXIMUM_MODULE_IMPORTS)
+        require(maximumPathBytes in 1..CLANG_TRACE_MAXIMUM_PATH_BYTES)
+        require(maximumWorkUnits in 1L..CLANG_TRACE_MAXIMUM_WORK_UNITS)
+    }
+}
+
+/**
+ * One authenticated logical root in Clang's observed path namespace.
+ *
+ * The compiler coordinator, not this parser, proves the physical identity behind [observedRoot].
+ * This type only performs a strict, segment-aware projection into `source/` or `generated/`.
+ */
+internal data class FullTreeClangTraceRoot(
+    val observedRoot: String,
+    val canonicalRoot: String,
+) {
+    init {
+        require(observedRoot.startsWith('/') && observedRoot.length > 1)
+        require(!observedRoot.endsWith('/'))
+        require(isCanonicalTraceAbsolutePath(observedRoot))
+        require(canonicalRoot == "source" || canonicalRoot == "generated")
+    }
+}
+
+internal data class FullTreeClangIncludeOccurrence(
+    val consumerPath: String,
+    val line: Long,
+    val column: Long,
+    val dependencyPath: String,
+)
+
+internal data class FullTreeClangModuleImport(
+    val consumerPath: String,
+    val line: Long,
+    val column: Long,
+    val moduleName: String,
+    val moduleMapPath: String?,
+)
+
+/** Strictly parsed Clang `direct-per-file` JSON. No compiler-authenticity claim lives here. */
+internal data class FullTreeClangHeaderTrace(
+    val inputSha256: String,
+    val dependencyFileCount: Int,
+    val externalFileCount: Int,
+    val includeOccurrences: List<FullTreeClangIncludeOccurrence>,
+    val moduleImports: List<FullTreeClangModuleImport>,
+    val projectFiles: List<String>,
+    val workUnits: Long,
+)
+
+/**
+ * Bounded parser for Clang 22's structured direct include output.
+ *
+ * It intentionally does not execute Clang and does not accept callbacks, parsed JSON, or caller
+ * supplied edges. The production coordinator must retain and authenticate the compiler, roots,
+ * command, environment, generated overlay, exit status, and this exact byte payload before these
+ * facts can be admitted to an oracle control.
+ */
+internal object FullTreeClangHeaderTraceParser {
+    fun parse(
+        bytes: ByteArray,
+        roots: List<FullTreeClangTraceRoot>,
+        limits: FullTreeClangHeaderTraceLimits = FullTreeClangHeaderTraceLimits(),
+    ): FullTreeClangHeaderTrace = try {
+        parseTrace(bytes, roots, limits)
+    } catch (failure: FullTreeClangHeaderTraceException) {
+        throw failure
+    } catch (failure: Exception) {
+        throw FullTreeClangHeaderTraceException(
+            "Clang direct-header trace parsing failed: ${failure.message}",
+            failure,
+        )
+    }
+}
+
+private fun parseTrace(
+    source: ByteArray,
+    requestedRoots: List<FullTreeClangTraceRoot>,
+    limits: FullTreeClangHeaderTraceLimits,
+): FullTreeClangHeaderTrace {
+    if (source.isEmpty() || source.size > limits.maximumInputBytes) traceFail("trace byte bound exceeded")
+    val bytes = source.copyOf()
+    val roots = validateTraceRoots(requestedRoots)
+    val document = OracleJson.parse(bytes, traceJsonLimits(limits)) as? JsonObject
+        ?: traceFail("trace root must be an object")
+    document.requireExactKeys(setOf("dependencies", "version"), "trace root")
+    if (document.requiredTraceString("version") != "2.0.0") {
+        traceFail("trace version must be 2.0.0")
+    }
+    val dependencies = document.requiredTraceArray("dependencies")
+    if (dependencies.size > limits.maximumDependencyFiles) traceFail("dependency-file bound exceeded")
+
+    val occurrences = ArrayList<FullTreeClangIncludeOccurrence>()
+    val imports = ArrayList<FullTreeClangModuleImport>()
+    val projectFiles = TreeSet(FULL_TREE_CODE_POINT_ORDER)
+    val dependencySources = HashSet<String>()
+    var externalFiles = 0
+    var workUnits = 1L
+
+    dependencies.forEachIndexed { dependencyIndex, element ->
+        workUnits = chargeTraceWork(workUnits, 1, limits)
+        val dependency = element as? JsonObject
+            ?: traceFail("dependency record $dependencyIndex must be an object")
+        dependency.requireExactKeys(setOf("imports", "includes", "source"), "dependency record")
+        val observedConsumer = dependency.requiredTraceString("source").validatedObservedPath(limits)
+        if (!dependencySources.add(observedConsumer)) traceFail("trace repeats a dependency source")
+        val consumer = projectPath(observedConsumer, roots)
+        if (consumer != null) projectFiles += consumer else externalFiles++
+
+        dependency.requiredTraceArray("includes").forEachIndexed { includeIndex, includeElement ->
+            workUnits = chargeTraceWork(workUnits, 1, limits)
+            if (occurrences.size >= limits.maximumIncludeOccurrences) {
+                traceFail("include-occurrence bound exceeded")
+            }
+            val include = includeElement as? JsonObject
+                ?: traceFail("include record $dependencyIndex/$includeIndex must be an object")
+            include.requireExactKeys(setOf("file", "location"), "include record")
+            val location = parseTraceLocation(include.requiredTraceString("location"), limits)
+            if (location.path != observedConsumer) {
+                traceFail("include location does not name its dependency source")
+            }
+            val observedDependency = include.requiredTraceString("file").validatedObservedPath(limits)
+            val dependencyPath = projectPath(observedDependency, roots)
+            if (dependencyPath != null) projectFiles += dependencyPath else externalFiles++
+            if (consumer != null && dependencyPath != null) {
+                occurrences += FullTreeClangIncludeOccurrence(
+                    consumer,
+                    location.line,
+                    location.column,
+                    dependencyPath,
+                )
+            }
+        }
+
+        dependency.requiredTraceArray("imports").forEachIndexed { importIndex, importElement ->
+            workUnits = chargeTraceWork(workUnits, 1, limits)
+            if (imports.size >= limits.maximumModuleImports) traceFail("module-import bound exceeded")
+            val imported = importElement as? JsonObject
+                ?: traceFail("import record $dependencyIndex/$importIndex must be an object")
+            imported.requireExactKeys(setOf("file", "location", "module"), "import record")
+            val location = parseTraceLocation(imported.requiredTraceString("location"), limits)
+            if (location.path != observedConsumer) {
+                traceFail("module import location does not name its dependency source")
+            }
+            val module = imported.requiredTraceString("module")
+            requireBoundedTraceScalar(module, limits.maximumPathBytes, "module name")
+            val moduleMap = imported.requiredTraceString("file").validatedObservedPath(limits)
+            val canonicalModuleMap = projectPath(moduleMap, roots)
+            if (canonicalModuleMap != null) projectFiles += canonicalModuleMap else externalFiles++
+            if (consumer != null) {
+                imports += FullTreeClangModuleImport(
+                    consumer,
+                    location.line,
+                    location.column,
+                    module,
+                    canonicalModuleMap,
+                )
+            }
+        }
+    }
+
+    return FullTreeClangHeaderTrace(
+        inputSha256 = OracleArtifacts.sha256(bytes),
+        dependencyFileCount = dependencies.size,
+        externalFileCount = externalFiles,
+        includeOccurrences = occurrences.toList(),
+        moduleImports = imports.toList(),
+        projectFiles = projectFiles.toList(),
+        workUnits = workUnits,
+    )
+}
+
+private fun validateTraceRoots(requested: List<FullTreeClangTraceRoot>): List<FullTreeClangTraceRoot> {
+    if (requested.size != 2 || requested.map { it.canonicalRoot }.toSet() != setOf("source", "generated")) {
+        traceFail("trace roots must bind source and generated exactly once")
+    }
+    requested.forEach { left ->
+        requested.forEach { right ->
+            if (left !== right &&
+                (left.observedRoot.startsWith(right.observedRoot + "/") ||
+                    right.observedRoot.startsWith(left.observedRoot + "/"))
+            ) {
+                traceFail("trace roots may not overlap")
+            }
+        }
+    }
+    return requested.sortedWith(compareBy(FULL_TREE_CODE_POINT_ORDER) { it.observedRoot })
+}
+
+private fun projectPath(observed: String, roots: List<FullTreeClangTraceRoot>): String? {
+    val matching = roots.filter { observed == it.observedRoot || observed.startsWith(it.observedRoot + "/") }
+    if (matching.isEmpty()) return null
+    if (matching.size != 1) traceFail("observed path matches multiple authenticated roots")
+    val root = matching.single()
+    if (observed == root.observedRoot) traceFail("trace path names a root rather than a file")
+    val relative = observed.substring(root.observedRoot.length + 1)
+    return "${root.canonicalRoot}/$relative"
+}
+
+private data class TraceLocation(val path: String, val line: Long, val column: Long)
+
+private fun parseTraceLocation(raw: String, limits: FullTreeClangHeaderTraceLimits): TraceLocation {
+    requireBoundedTraceScalar(raw, limits.maximumPathBytes + 64, "include location")
+    val columnSeparator = raw.lastIndexOf(':')
+    val lineSeparator = if (columnSeparator > 0) raw.lastIndexOf(':', columnSeparator - 1) else -1
+    if (lineSeparator <= 0 || columnSeparator <= lineSeparator + 1 || columnSeparator == raw.lastIndex) {
+        traceFail("include location is not absolute-path:line:column")
+    }
+    val path = raw.substring(0, lineSeparator).validatedObservedPath(limits)
+    val line = raw.substring(lineSeparator + 1, columnSeparator).strictPositiveTraceNumber("line")
+    val column = raw.substring(columnSeparator + 1).strictPositiveTraceNumber("column")
+    return TraceLocation(path, line, column)
+}
+
+private fun String.validatedObservedPath(limits: FullTreeClangHeaderTraceLimits): String {
+    requireBoundedTraceScalar(this, limits.maximumPathBytes, "observed path")
+    if (!isCanonicalTraceAbsolutePath(this)) traceFail("observed path is not canonical and absolute")
+    return this
+}
+
+private fun String.strictPositiveTraceNumber(label: String): Long {
+    if (isEmpty() || length > 19 || any { it !in '0'..'9' } || (length > 1 && first() == '0')) {
+        traceFail("include $label is not a canonical positive integer")
+    }
+    val value = toLongOrNull() ?: traceFail("include $label is out of range")
+    if (value <= 0) traceFail("include $label must be positive")
+    return value
+}
+
+private fun isCanonicalTraceAbsolutePath(path: String): Boolean =
+    path.startsWith('/') && '\\' !in path && '\u0000' !in path &&
+        path.split('/').drop(1).all { it.isNotEmpty() && it != "." && it != ".." }
+
+private fun requireBoundedTraceScalar(value: String, maximumBytes: Int, label: String) {
+    val bytes = value.toByteArray(StandardCharsets.UTF_8).size
+    if (value.isEmpty() || '\u0000' in value || '\n' in value || '\r' in value || bytes > maximumBytes) {
+        traceFail("$label is empty, non-scalar, or exceeds its byte bound")
+    }
+}
+
+private fun JsonObject.requireExactKeys(expected: Set<String>, label: String) {
+    if (keys != expected) traceFail("$label fields differ from the Clang JSON v2 contract")
+}
+
+private fun JsonObject.requiredTraceString(name: String): String =
+    (get(name) as? JsonPrimitive)?.takeIf { it.isString }?.content
+        ?: traceFail("trace field $name must be a string")
+
+private fun JsonObject.requiredTraceArray(name: String): JsonArray =
+    get(name) as? JsonArray ?: traceFail("trace field $name must be an array")
+
+private fun chargeTraceWork(
+    current: Long,
+    amount: Int,
+    limits: FullTreeClangHeaderTraceLimits,
+): Long {
+    val next = try {
+        Math.addExact(current, amount.toLong())
+    } catch (failure: ArithmeticException) {
+        throw FullTreeClangHeaderTraceException("trace work count overflows", failure)
+    }
+    if (next > limits.maximumWorkUnits) traceFail("trace work-unit bound exceeded")
+    return next
+}
+
+private fun traceJsonLimits(limits: FullTreeClangHeaderTraceLimits): StrictJsonLimits = StrictJsonLimits(
+    maximumInputBytes = limits.maximumInputBytes,
+    maximumCanonicalBytes = limits.maximumInputBytes,
+    maximumDepth = 16,
+    maximumNodes = minOf(
+        1_000_000,
+        8 + limits.maximumDependencyFiles * 5 +
+            limits.maximumIncludeOccurrences * 5 + limits.maximumModuleImports * 7,
+    ),
+    maximumStringBytes = limits.maximumPathBytes + 64,
+    maximumTotalStringBytes = limits.maximumInputBytes,
+)
+
+private fun traceFail(message: String): Nothing = throw FullTreeClangHeaderTraceException(message)
+
+internal const val CLANG_TRACE_MAXIMUM_INPUT_BYTES = 64 * 1024 * 1024
+internal const val CLANG_TRACE_MAXIMUM_DEPENDENCY_FILES = 200_000
+internal const val CLANG_TRACE_MAXIMUM_INCLUDE_OCCURRENCES = 1_000_000
+internal const val CLANG_TRACE_MAXIMUM_MODULE_IMPORTS = 100_000
+internal const val CLANG_TRACE_MAXIMUM_PATH_BYTES = 16 * 1024
+internal const val CLANG_TRACE_MAXIMUM_WORK_UNITS = 2_000_000L
