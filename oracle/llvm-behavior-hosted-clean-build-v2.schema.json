@@ -1,0 +1,345 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://github.com/minsago-elite/decomp_thing/oracle/llvm-behavior-hosted-clean-build-v2.schema.json",
+  "title": "Kotlin/JVM LLVM behavior hosted clean-build producer receipt v2",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schemaVersion",
+    "kind",
+    "authority",
+    "schema",
+    "archive",
+    "candidateLineageIndex",
+    "source",
+    "lockedToolchain",
+    "cleanBuilds",
+    "candidateExecutable",
+    "runtimeClosure",
+    "attestationBoundary",
+    "acpBoundary",
+    "claims"
+  ],
+  "properties": {
+    "schemaVersion": {"const": 2},
+    "kind": {"const": "llvm-behavior-hosted-clean-build-v2"},
+    "authority": {"const": "kotlin-jvm-unsigned-hosted-clean-build-producer-v2"},
+    "schema": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["name", "sha256"],
+      "properties": {
+        "name": {"const": "llvm-behavior-hosted-clean-build-v2"},
+        "sha256": {"$ref": "#/$defs/sha256"}
+      }
+    },
+    "archive": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "bytes",
+        "sha256",
+        "archiveManifestBytes",
+        "archiveManifestSha256",
+        "sourceTreeManifestBytes",
+        "sourceTreeManifestSha256",
+        "verified"
+      ],
+      "properties": {
+        "bytes": {"type": "integer", "minimum": 1, "maximum": 1610612736},
+        "sha256": {"$ref": "#/$defs/sha256"},
+        "archiveManifestBytes": {"type": "integer", "minimum": 1, "maximum": 1073741824},
+        "archiveManifestSha256": {"$ref": "#/$defs/sha256"},
+        "sourceTreeManifestBytes": {"type": "integer", "minimum": 1, "maximum": 134217728},
+        "sourceTreeManifestSha256": {"$ref": "#/$defs/sha256"},
+        "verified": {"const": true}
+      }
+    },
+    "candidateLineageIndex": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "schemaVersion",
+        "bytes",
+        "sha256",
+        "candidateSourceLineageSha256",
+        "acceptedAcp"
+      ],
+      "properties": {
+        "schemaVersion": {"const": 2},
+        "bytes": {"type": "integer", "minimum": 1, "maximum": 65536},
+        "sha256": {"$ref": "#/$defs/sha256"},
+        "candidateSourceLineageSha256": {"$ref": "#/$defs/sha256"},
+        "acceptedAcp": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "receiptSchemaVersion",
+            "count",
+            "reconstructionCount",
+            "repairCount",
+            "aggregateAlgorithm",
+            "receiptSetSha256",
+            "sessionSetSha256",
+            "changeSetSha256",
+            "lineageSetSha256"
+          ],
+          "properties": {
+            "receiptSchemaVersion": {"const": 2},
+            "count": {"type": "integer", "minimum": 1, "maximum": 100000},
+            "reconstructionCount": {"type": "integer", "minimum": 0, "maximum": 100000},
+            "repairCount": {"type": "integer", "minimum": 0, "maximum": 100000},
+            "aggregateAlgorithm": {"const": "domain-separated-length-prefixed-sorted-leaves-v2"},
+            "receiptSetSha256": {"$ref": "#/$defs/sha256"},
+            "sessionSetSha256": {"$ref": "#/$defs/sha256"},
+            "changeSetSha256": {"$ref": "#/$defs/sha256"},
+            "lineageSetSha256": {"$ref": "#/$defs/sha256"}
+          }
+        }
+      }
+    },
+    "source": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["profileId", "profileSha256", "revisionAlgorithm", "inputCount", "revisionSha256"],
+      "properties": {
+        "profileId": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 128,
+          "pattern": "^[A-Za-z0-9_][A-Za-z0-9_.-]{0,127}$"
+        },
+        "profileSha256": {"$ref": "#/$defs/sha256"},
+        "revisionAlgorithm": {"const": "length-prefixed-path-bytes-sha256-v1"},
+        "inputCount": {"type": "integer", "minimum": 1, "maximum": 100000},
+        "revisionSha256": {"$ref": "#/$defs/sha256"}
+      }
+    },
+    "lockedToolchain": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "sourceLockSha256",
+        "reproductionLockSha256",
+        "dockerfileSha256",
+        "buildRecordSha256",
+        "recordedOriginImageDigest",
+        "observedImageDigest",
+        "platform",
+        "SOURCE_DATE_EPOCH",
+        "compiler",
+        "linker"
+      ],
+      "properties": {
+        "sourceLockSha256": {"const": "179b1298b14ddb701c46eb1ed6a5bb0aa60ee01580bafcf5c555b1d13c994306"},
+        "reproductionLockSha256": {"const": "14a383bc5792b7ace786cbbd8964383469c1ffa5a4bb06a99e38c71518643f4f"},
+        "dockerfileSha256": {"const": "97e2d13915806242c14489b5a8b1417bd0478f3a11dc05e76888ba2ab43b1291"},
+        "buildRecordSha256": {"const": "415afaf3554f954aed4442f0fa3c83ecc7e9f1fe0ddf68fb4c39e9231ece9005"},
+        "recordedOriginImageDigest": {"const": "sha256:73285d9a2dad159a7171fe4bbcac7d97d285402955d8c6fb8b44b101cf2df550"},
+        "observedImageDigest": {"$ref": "#/$defs/imageDigest"},
+        "platform": {"const": "linux/amd64"},
+        "SOURCE_DATE_EPOCH": {"const": "1779182222"},
+        "compiler": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["role", "path", "bytes", "sha256", "versionOutputSha256"],
+          "properties": {
+            "role": {"const": "compiler"},
+            "path": {"const": "/usr/lib/llvm-22/bin/clang"},
+            "bytes": {"const": 138184},
+            "sha256": {"const": "9dff149140cff7484c1efd85a5cfe0e3f046edcf71c63b42b5501c4a2ee462ae"},
+            "versionOutputSha256": {"const": "d6d146c61f5ba14a74f0cb00885d4068a7f1b41c88880f93d7c65187efb625ea"}
+          }
+        },
+        "linker": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["role", "path", "bytes", "sha256", "versionOutputSha256"],
+          "properties": {
+            "role": {"const": "linker"},
+            "path": {"const": "/usr/lib/llvm-22/bin/lld"},
+            "bytes": {"const": 6059960},
+            "sha256": {"const": "057e42c6104e20a7358a51fb9abb456d74ba37997331d99183e877539da95982"},
+            "versionOutputSha256": {"const": "0b47969becd48b365d7fa9302efe7f9191742b5a3d761d008c5cf67132e78451"}
+          }
+        }
+      }
+    },
+    "cleanBuilds": {
+      "type": "array",
+      "minItems": 2,
+      "maxItems": 2,
+      "prefixItems": [
+        {"$ref": "#/$defs/cleanBuildOne"},
+        {"$ref": "#/$defs/cleanBuildTwo"}
+      ],
+      "items": false
+    },
+    "candidateExecutable": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "name",
+        "format",
+        "elfClass",
+        "endianness",
+        "machine",
+        "bytes",
+        "sha256",
+        "identicalAcrossBuilds"
+      ],
+      "properties": {
+        "name": {"const": "candidate-reconstructed"},
+        "format": {"const": "ELF"},
+        "elfClass": {"const": "ELF64"},
+        "endianness": {"const": "little-endian"},
+        "machine": {"const": "x86-64"},
+        "bytes": {"type": "integer", "minimum": 1, "maximum": 1610612736},
+        "sha256": {"$ref": "#/$defs/sha256"},
+        "identicalAcrossBuilds": {"const": true}
+      }
+    },
+    "runtimeClosure": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["kind", "observedImageDigest", "platform", "buildCount"],
+      "properties": {
+        "kind": {"const": "container-image-closure"},
+        "observedImageDigest": {"$ref": "#/$defs/imageDigest"},
+        "platform": {"const": "linux/amd64"},
+        "buildCount": {"const": 2}
+      }
+    },
+    "attestationBoundary": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "producerReceipt",
+        "requiredMode",
+        "requiredSubjects",
+        "hostedWorkflowAuthenticated",
+        "sigstoreBundleVerified"
+      ],
+      "properties": {
+        "producerReceipt": {"const": "unsigned-kotlin-jvm-facts"},
+        "requiredMode": {"const": "github-actions-default-slsa-v1-two-subjects"},
+        "requiredSubjects": {
+          "const": [
+            "candidate-hosted-clean-build-v2.json",
+            "candidate-reconstructed"
+          ]
+        },
+        "hostedWorkflowAuthenticated": {"const": false},
+        "sigstoreBundleVerified": {"const": false}
+      }
+    },
+    "acpBoundary": {
+      "const": {
+        "role": "first-class-candidate-producer-operator",
+        "candidateContribution": "authenticated-session-change-provenance",
+        "candidateProvenanceAccess": "read-only-oracle-input",
+        "candidateAdmissionOwner": "kotlin-jvm-host",
+        "candidateLiveExecutionOwner": "separately-reviewed-kotlin-jvm-host",
+        "referenceSubjectAdmission": "kotlin-jvm-host-only",
+        "oracleAuthority": false,
+        "referenceAuthoringAuthority": false,
+        "policyAuthoringAuthority": false,
+        "validationAuthority": false,
+        "observationAuthoringAuthority": false,
+        "startAuthority": false,
+        "containmentAuthority": false,
+        "terminalAbsenceAuthority": false,
+        "scoringAuthority": false,
+        "certificationAuthority": false,
+        "releaseAuthority": false
+      }
+    },
+    "claims": {
+      "const": {
+        "verifiedArchiveBound": true,
+        "candidateLineageBound": true,
+        "sourceRevisionBound": true,
+        "lockedToolchainBound": true,
+        "runtimeClosureObserved": true,
+        "twoCleanBuildsCompleted": true,
+        "executableReproduced": true,
+        "hostedWorkflowAuthenticated": false,
+        "sigstoreBundleVerified": false,
+        "admittedArtifactBound": false,
+        "prepared": false,
+        "liveRuntimeIdentityVerified": false,
+        "liveContainmentVerified": false,
+        "terminalAbsenceVerified": false,
+        "observationsCaptured": false,
+        "startAuthorized": false,
+        "candidateStarted": false,
+        "candidateExecuted": false,
+        "oracleAuthority": false,
+        "referenceAuthoringAuthority": false,
+        "referenceTruthEstablished": false,
+        "scoringAuthority": false,
+        "certificationAuthority": false,
+        "releaseAuthority": false,
+        "releaseEligible": false
+      }
+    }
+  },
+  "$defs": {
+    "sha256": {
+      "type": "string",
+      "pattern": "^[0-9a-f]{64}$"
+    },
+    "imageDigest": {
+      "type": "string",
+      "pattern": "^sha256:[0-9a-f]{64}$"
+    },
+    "cleanBuild": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "ordinal",
+        "extractionMode",
+        "compilerMode",
+        "linkerMode",
+        "makefileExecuted",
+        "buildContractTrusted",
+        "sourceRevisionSha256",
+        "sourceCount",
+        "compileCommandSetSha256",
+        "objectSetSha256",
+        "combinedOutputBytes",
+        "combinedOutputSha256",
+        "executableBytes",
+        "executableSha256"
+      ],
+      "properties": {
+        "ordinal": {"type": "integer", "enum": [1, 2]},
+        "extractionMode": {"const": "verified-archive-private-clean-extraction"},
+        "compilerMode": {"const": "direct-clang-per-source"},
+        "linkerMode": {"const": "direct-clang"},
+        "makefileExecuted": {"const": false},
+        "buildContractTrusted": {"const": false},
+        "sourceRevisionSha256": {"$ref": "#/$defs/sha256"},
+        "sourceCount": {"type": "integer", "minimum": 1, "maximum": 100000},
+        "compileCommandSetSha256": {"$ref": "#/$defs/sha256"},
+        "objectSetSha256": {"$ref": "#/$defs/sha256"},
+        "combinedOutputBytes": {"type": "integer", "minimum": 0, "maximum": 17179869184},
+        "combinedOutputSha256": {"$ref": "#/$defs/sha256"},
+        "executableBytes": {"type": "integer", "minimum": 1, "maximum": 1610612736},
+        "executableSha256": {"$ref": "#/$defs/sha256"}
+      }
+    },
+    "cleanBuildOne": {
+      "allOf": [
+        {"$ref": "#/$defs/cleanBuild"},
+        {"properties": {"ordinal": {"const": 1}}}
+      ]
+    },
+    "cleanBuildTwo": {
+      "allOf": [
+        {"$ref": "#/$defs/cleanBuild"},
+        {"properties": {"ordinal": {"const": 2}}}
+      ]
+    }
+  }
+}
