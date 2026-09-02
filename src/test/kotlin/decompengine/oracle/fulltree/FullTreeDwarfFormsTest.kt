@@ -2,11 +2,58 @@ package decompengine.oracle.fulltree
 
 import java.nio.ByteOrder
 import kotlin.test.Test
+import kotlin.test.assertContentEquals
 import kotlin.test.assertEquals
 import kotlin.test.assertFailsWith
 import kotlin.test.assertIs
 
 class FullTreeDwarfFormsTest {
+    @Test
+    fun `expression context retains bounded exprloc and block bytes while general context discards them`() {
+        val payload = byteArrayOf(0x03, 0x7f, 0xa5.toByte())
+        val encodedForms = listOf(
+            FULL_TREE_DW_FORM_EXPRLOC to (uleb(payload.size.toULong()) + payload),
+            FULL_TREE_DW_FORM_BLOCK to (uleb(payload.size.toULong()) + payload),
+            FULL_TREE_DW_FORM_BLOCK1 to (byteArrayOf(payload.size.toByte()) + payload),
+            FULL_TREE_DW_FORM_BLOCK2 to (unsigned(payload.size.toULong(), 2) + payload),
+            FULL_TREE_DW_FORM_BLOCK4 to (unsigned(payload.size.toULong(), 4) + payload),
+        )
+
+        encodedForms.forEach { (form, bytes) ->
+            val retained = assertIs<FullTreeDwarfExpressionValue>(
+                readForm(bytes, form, context = FullTreeDwarfFormContext.EXPRESSION),
+            )
+            assertContentEquals(payload, retained.bytes, "form 0x${form.toString(16)}")
+            assertEquals(
+                FullTreeDwarfIgnoredValue,
+                readForm(bytes, form, context = FullTreeDwarfFormContext.GENERAL),
+                "form 0x${form.toString(16)}",
+            )
+        }
+
+        val source = payload.copyOf()
+        val value = FullTreeDwarfExpressionValue(source)
+        source[0] = 0
+        val exposed = value.bytes
+        exposed[1] = 0
+        assertContentEquals(payload, value.bytes)
+
+        val boundedLimits = FullTreeControlLimits(maximumDwarfAttributeBytes = payload.size - 1)
+        encodedForms.forEach { (form, bytes) ->
+            assertFailsWith<FullTreeControlException>("form 0x${form.toString(16)}") {
+                readForm(
+                    bytes,
+                    form,
+                    context = FullTreeDwarfFormContext.EXPRESSION,
+                    limits = boundedLimits,
+                )
+            }
+            assertFailsWith<FullTreeControlException>("GENERAL form 0x${form.toString(16)}") {
+                readForm(bytes, form, limits = boundedLimits)
+            }
+        }
+    }
+
     @Test
     fun `constant context retains effective forms signedness and indirect depth`() {
         val unsigned = listOf(
@@ -618,6 +665,7 @@ class FullTreeDwarfFormsTest {
         context: FullTreeDwarfFormContext = FullTreeDwarfFormContext.GENERAL,
         implicitConstant: Long? = null,
         byteOrder: ByteOrder = ByteOrder.LITTLE_ENDIAN,
+        limits: FullTreeControlLimits = FullTreeControlLimits(),
     ): FullTreeDwarfFormValue {
         val section = section(bytes, byteOrder = byteOrder)
         return FullTreeDwarfForms.read(
@@ -627,7 +675,7 @@ class FullTreeDwarfFormsTest {
             version = version,
             addressSize = addressSize,
             offsetSize = offsetSize,
-            limits = FullTreeControlLimits(),
+            limits = limits,
             context = context,
         )
     }

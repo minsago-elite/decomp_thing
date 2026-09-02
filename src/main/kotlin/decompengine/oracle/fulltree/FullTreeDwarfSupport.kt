@@ -298,10 +298,25 @@ internal data class FullTreeDwarfIndexedStringValue(val index: Long) : FullTreeD
 internal data object FullTreeDwarfUnsupportedExternalStringValue : FullTreeDwarfFormValue
 internal data object FullTreeDwarfIgnoredValue : FullTreeDwarfFormValue
 
+/** Exact bounded bytes for a DWARF expression whose attribute contract requires interpretation. */
+internal class FullTreeDwarfExpressionValue(bytes: ByteArray) : FullTreeDwarfFormValue {
+    private val content = bytes.copyOf()
+
+    val bytes: ByteArray
+        get() = content.copyOf()
+
+    internal val size: Int
+        get() = content.size
+
+    /** The callback is internal and must treat the borrowed bytes as read-only and non-escaping. */
+    internal fun <T> inspect(reader: (ByteArray) -> T): T = reader(content)
+}
+
 /** Attribute-class context needed for forms whose interpretation is not intrinsic to the form. */
 internal enum class FullTreeDwarfFormContext {
     GENERAL,
     CONSTANT,
+    EXPRESSION,
     RANGE_LIST,
 }
 
@@ -399,12 +414,10 @@ internal object FullTreeDwarfForms {
                 indirectDepth = indirectDepth,
             )
             FULL_TREE_DW_FORM_BLOCK2 -> cursor.readUnsigned(2).let { length ->
-                cursor.skipBounded(length, limits.maximumDwarfAttributeBytes)
-                FullTreeDwarfIgnoredValue
+                readBlock(cursor, length, limits, context)
             }
             FULL_TREE_DW_FORM_BLOCK4 -> cursor.readUnsigned(4).let { length ->
-                cursor.skipBounded(length, limits.maximumDwarfAttributeBytes)
-                FullTreeDwarfIgnoredValue
+                readBlock(cursor, length, limits, context)
             }
             FULL_TREE_DW_FORM_DATA2 -> readUnsignedConstant(
                 cursor, form, 2, indirectDepth, context, version, offsetSize,
@@ -419,12 +432,10 @@ internal object FullTreeDwarfForms {
                 cursor.readNullTerminated(limits.maximumDwarfAttributeBytes),
             )
             FULL_TREE_DW_FORM_BLOCK -> cursor.readUleb128().let { length ->
-                cursor.skipBounded(length, limits.maximumDwarfAttributeBytes)
-                FullTreeDwarfIgnoredValue
+                readBlock(cursor, length, limits, context)
             }
             FULL_TREE_DW_FORM_BLOCK1 -> cursor.readUnsigned(1).let { length ->
-                cursor.skipBounded(length, limits.maximumDwarfAttributeBytes)
-                FullTreeDwarfIgnoredValue
+                readBlock(cursor, length, limits, context)
             }
             FULL_TREE_DW_FORM_DATA1 -> readUnsignedConstant(
                 cursor, form, 1, indirectDepth, context, version, offsetSize,
@@ -525,8 +536,7 @@ internal object FullTreeDwarfForms {
                 FullTreeDwarfNumericValue(cursor.readUnsigned(offsetSize))
             }
             FULL_TREE_DW_FORM_EXPRLOC -> cursor.readUleb128().let { length ->
-                cursor.skipBounded(length, limits.maximumDwarfAttributeBytes)
-                FullTreeDwarfIgnoredValue
+                readBlock(cursor, length, limits, context)
             }
             FULL_TREE_DW_FORM_FLAG_PRESENT -> FullTreeDwarfNumericValue(1L)
             FULL_TREE_DW_FORM_STRX, FULL_TREE_DW_FORM_GNU_STR_INDEX ->
@@ -584,6 +594,18 @@ internal object FullTreeDwarfForms {
                 "DWARF attribute uses unsupported form 0x${form.toString(16)}",
             )
         }
+    }
+
+    private fun readBlock(
+        cursor: FullTreeDwarfSectionCursor,
+        length: Long,
+        limits: FullTreeControlLimits,
+        context: FullTreeDwarfFormContext,
+    ): FullTreeDwarfFormValue = if (context == FullTreeDwarfFormContext.EXPRESSION) {
+        FullTreeDwarfExpressionValue(cursor.readBytesBounded(length, limits.maximumDwarfAttributeBytes))
+    } else {
+        cursor.skipBounded(length, limits.maximumDwarfAttributeBytes)
+        FullTreeDwarfIgnoredValue
     }
 
     private fun readUnsignedConstant(
@@ -1512,6 +1534,16 @@ internal class FullTreeDwarfSectionCursor(
             throw FullTreeControlException("$label block exceeds its byte bound")
         }
         skip(bytes)
+    }
+
+    fun readBytesBounded(bytes: Long, maximumBytes: Int): ByteArray {
+        if (bytes !in 0L..maximumBytes.toLong()) {
+            throw FullTreeControlException("$label block exceeds its byte bound")
+        }
+        requireAvailable(bytes)
+        val result = ByteArray(bytes.toInt()) { index -> section.byte(position + index).toByte() }
+        position += bytes
+        return result
     }
 
     private fun requireAvailable(bytes: Long) {

@@ -360,7 +360,7 @@ internal object FullTreeFunctionObservationProducer {
             scope,
             producerLimits.lineTableLimits,
         )
-        val start = observeStart(owner, record)
+        val start = owner.functionStart(record)
         val rva = start?.takeIf { it >= layout.imageBase }?.let { address ->
             val candidate = address - layout.imageBase
             candidate.takeIf(executable::contains)
@@ -447,53 +447,7 @@ internal object FullTreeFunctionObservationProducer {
         )
     }
 
-    private fun observeStart(
-        owner: FunctionDwarfUnit,
-        record: FullTreeDwarfDieRecord,
-    ): ULong? {
-        var rangeResolved = false
-        var rangeStart: ULong? = null
-        fun range(): ULong? {
-            if (!rangeResolved) {
-                rangeStart = owner.rangeStart(record)
-                rangeResolved = true
-            }
-            return rangeStart
-        }
-
-        val entry = record.optionalUniqueAttribute(DW_AT_ENTRY_PC, "DW_AT_entry_pc")
-        if (entry != null) {
-            return when (val value = entry.value) {
-                is FullTreeDwarfAddressValue -> value.rawValue
-                is FullTreeDwarfAddressIndexValue -> owner.resolveAddress(value)
-                is FullTreeDwarfUnsignedConstantValue -> checkedAddressAdd(
-                    owner.lowPc(record) ?: range()
-                        ?: throw FullTreeControlException(
-                            "DW_AT_entry_pc on ${canonicalHex(record.offset)} has no function base",
-                        ),
-                    value.rawValue,
-                    "DW_AT_entry_pc",
-                )
-                is FullTreeDwarfSignedConstantValue -> {
-                    if (value.rawValue < 0L) {
-                        throw FullTreeControlException("DW_AT_entry_pc is outside unsigned 64-bit range")
-                    }
-                    checkedAddressAdd(
-                        owner.lowPc(record) ?: range()
-                            ?: throw FullTreeControlException(
-                                "DW_AT_entry_pc on ${canonicalHex(record.offset)} has no function base",
-                            ),
-                        value.rawValue.toULong(),
-                        "DW_AT_entry_pc",
-                    )
-                }
-                else -> throw FullTreeControlException("DW_AT_entry_pc has an unsupported DWARF form class")
-            }
-        }
-        return owner.lowPc(record) ?: range()
-    }
-
-    private fun authenticateInventoryAgainstArtifact(
+    internal fun authenticateInventoryAgainstArtifact(
         inventory: JsonObject,
         observed: List<FullTreeDwarfCompilationUnit>,
         scope: JsonObject,
@@ -539,7 +493,7 @@ internal object FullTreeFunctionObservationProducer {
         }
     }
 
-    private fun readAllHeaders(
+    internal fun readAllHeaders(
         info: FullTreeDwarfSection,
         expectedUnits: Int,
         parseBudget: FullTreeDwarfParseBudget,
@@ -638,9 +592,13 @@ internal class FunctionDwarfUnitRepository(
     private val controlLimits: FullTreeControlLimits,
     private val producerLimits: FullTreeFunctionObservationProducerLimits,
     private val parseBudget: FullTreeDwarfParseBudget,
+    retainedTags: Set<Long> = setOf(DW_TAG_SUBPROGRAM),
+    private val contextForAttribute: (FullTreeDwarfAbbreviationAttribute) -> FullTreeDwarfFormContext =
+        ::functionAttributeContext,
 ) {
     private val info = sections.required(".debug_info")
     private val abbreviations = sections.required(".debug_abbrev")
+    private val retainedTags = Collections.unmodifiableSet(retainedTags.toSet())
     private val cache = object : LinkedHashMap<Long, FunctionDwarfUnit>(16, 0.75f, true) {
         override fun removeEldestEntry(eldest: MutableMap.MutableEntry<Long, FunctionDwarfUnit>): Boolean =
             size > producerLimits.maximumCachedCompilationUnits
@@ -654,8 +612,8 @@ internal class FunctionDwarfUnitRepository(
             controlLimits,
             producerLimits.dieLimits,
             parseBudget,
-            contextForAttribute = ::functionAttributeContext,
-            retainRecord = { tag, depth -> depth == 0 || tag == DW_TAG_SUBPROGRAM },
+            contextForAttribute = contextForAttribute,
+            retainRecord = { tag, depth -> depth == 0 || tag in retainedTags },
         )
         FunctionDwarfUnit(
             header,
@@ -712,6 +670,19 @@ internal class FunctionDwarfUnitRepository(
             }
         }
         return Collections.unmodifiableList(result)
+    }
+
+    fun resolveReference(
+        owner: FunctionDwarfUnit,
+        attribute: FullTreeDwarfDieAttribute,
+        label: String,
+    ): ResolvedFunctionDie {
+        val reference = attribute.value as? FullTreeDwarfReferenceValue
+            ?: throw FullTreeControlException("cannot resolve $label")
+        val target = owner.header.resolveReference(info, reference)
+        val targetHeader = headerContaining(target)
+        val targetUnit = if (targetHeader.offset == owner.header.offset) owner else load(targetHeader)
+        return ResolvedFunctionDie(targetUnit, targetUnit.index.required(target, label))
     }
 
     private fun headerContaining(offset: Long): FullTreeDwarfCompilationUnitHeader {
@@ -850,6 +821,49 @@ internal class FunctionDwarfUnit(
         )
     }
 
+    fun functionStart(record: FullTreeDwarfDieRecord): ULong? {
+        var rangeResolved = false
+        var cachedRangeStart: ULong? = null
+        fun range(): ULong? {
+            if (!rangeResolved) {
+                cachedRangeStart = rangeStart(record)
+                rangeResolved = true
+            }
+            return cachedRangeStart
+        }
+
+        val entry = record.optionalUniqueAttribute(DW_AT_ENTRY_PC, "DW_AT_entry_pc")
+        if (entry != null) {
+            return when (val value = entry.value) {
+                is FullTreeDwarfAddressValue -> value.rawValue
+                is FullTreeDwarfAddressIndexValue -> resolveAddress(value)
+                is FullTreeDwarfUnsignedConstantValue -> checkedAddressAdd(
+                    lowPc(record) ?: range()
+                        ?: throw FullTreeControlException(
+                            "DW_AT_entry_pc on ${canonicalHex(record.offset)} has no function base",
+                        ),
+                    value.rawValue,
+                    "DW_AT_entry_pc",
+                )
+                is FullTreeDwarfSignedConstantValue -> {
+                    if (value.rawValue < 0L) {
+                        throw FullTreeControlException("DW_AT_entry_pc is outside unsigned 64-bit range")
+                    }
+                    checkedAddressAdd(
+                        lowPc(record) ?: range()
+                            ?: throw FullTreeControlException(
+                                "DW_AT_entry_pc on ${canonicalHex(record.offset)} has no function base",
+                            ),
+                        value.rawValue.toULong(),
+                        "DW_AT_entry_pc",
+                    )
+                }
+                else -> throw FullTreeControlException("DW_AT_entry_pc has an unsupported DWARF form class")
+            }
+        }
+        return lowPc(record) ?: range()
+    }
+
     private fun addressResolverOrNull(): FullTreeDwarfAddressResolver? {
         if (!addressResolverResolved) {
             val base = addressBase ?: return null
@@ -932,7 +946,7 @@ private fun boundedLong(value: ULong, label: String): Long {
     return value.toLong()
 }
 
-private fun parseDwarfOffset(value: String, label: String): Long {
+internal fun parseDwarfOffset(value: String, label: String): Long {
     if (!value.matches(Regex("0x(?:0|[1-9a-f][0-9a-f]*)"))) {
         throw FullTreeControlException("$label is not canonical")
     }

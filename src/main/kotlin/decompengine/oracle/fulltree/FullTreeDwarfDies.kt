@@ -41,6 +41,8 @@ internal class FullTreeDwarfDieRecord internal constructor(
     val hasChildren: Boolean,
     val depth: Int,
     val parentOffset: Long?,
+    /** Nearest retained physical ancestor, which may skip decoded-but-unretained lexical scopes. */
+    val nearestRetainedParentOffset: Long?,
     attributes: List<FullTreeDwarfDieAttribute>,
 ) {
     val attributes: List<FullTreeDwarfDieAttribute> =
@@ -126,7 +128,7 @@ internal object FullTreeDwarfDies {
         val cursor = header.dieCursor(info)
         val records = ArrayList<FullTreeDwarfDieRecord>()
         val recordsByOffset = LinkedHashMap<Long, FullTreeDwarfDieRecord>()
-        val openParents = ArrayDeque<Long>()
+        val openParents = ArrayDeque<OpenParent>()
         var physicalRecords = 0L
         var nullRecords = 0L
         var nonNullRecords = 0L
@@ -235,7 +237,8 @@ internal object FullTreeDwarfDies {
                     tag = declaration.tag,
                     hasChildren = declaration.hasChildren == 1,
                     depth = depth,
-                    parentOffset = openParents.lastOrNull(),
+                    parentOffset = openParents.lastOrNull()?.offset,
+                    nearestRetainedParentOffset = openParents.lastOrNull()?.nearestRetainedForChildren,
                     attributes = attributes,
                 )
                 if (recordsByOffset.put(recordOffset, record) != null) {
@@ -247,7 +250,16 @@ internal object FullTreeDwarfDies {
                 if (openParents.size >= dieLimits.maximumTreeDepth) {
                     throw FullTreeControlException("DWARF DIE tree exceeds its depth bound")
                 }
-                openParents.addLast(recordOffset)
+                openParents.addLast(
+                    OpenParent(
+                        offset = recordOffset,
+                        nearestRetainedForChildren = if (retain) {
+                            recordOffset
+                        } else {
+                            openParents.lastOrNull()?.nearestRetainedForChildren
+                        },
+                    ),
+                )
             } else if (isRoot) {
                 treeTerminated = true
             }
@@ -320,8 +332,11 @@ internal object FullTreeDwarfDies {
         return Collections.unmodifiableMap(result)
     }
 
-    private fun inlinePayloadBytes(value: FullTreeDwarfFormValue): Long =
-        if (value is FullTreeDwarfInlineStringValue) value.bytes.size.toLong() else 0L
+    private fun inlinePayloadBytes(value: FullTreeDwarfFormValue): Long = when (value) {
+        is FullTreeDwarfInlineStringValue -> value.bytes.size.toLong()
+        is FullTreeDwarfExpressionValue -> value.size.toLong()
+        else -> 0L
+    }
 
     private fun addCount(left: Long, right: Long, label: String): Long = try {
         Math.addExact(left, right)
@@ -345,6 +360,11 @@ internal object FullTreeDwarfDies {
             }
         }
     }
+
+    private data class OpenParent(
+        val offset: Long,
+        val nearestRetainedForChildren: Long?,
+    )
 
     // Includes collection slots/wrappers, boxed map keys and nodes, object headers, and the usual
     // typed form-value object in addition to each logical record/attribute's scalar fields.
