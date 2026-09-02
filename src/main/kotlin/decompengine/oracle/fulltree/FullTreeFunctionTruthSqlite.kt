@@ -96,6 +96,29 @@ internal class FullTreeFunctionTruthGeneration internal constructor(
     val authoritativeReleaseEvidence: Boolean = false
 }
 
+/**
+ * Exact comparison of an existing tree with a fresh Kotlin reconciliation from raw inputs.
+ *
+ * Candidate bytes never supply oracle facts: the validator independently rederives the ELF index,
+ * every function-observation shard, and the complete truth projection before comparing the closed
+ * tree. This receipt remains non-authoritative until issue #138 supplies the aggregate isolated
+ * lifecycle and a later release owner composes that authority.
+ */
+internal sealed interface FullTreeFunctionTruthValidation {
+    val indexArtifactSha256: String
+    val indexSha256: String
+    val observationIndexArtifactSha256: String
+    val elfIndexArtifactSha256: String
+    val outputBytes: Long
+    val databaseHighWaterBytes: Long
+    val counts: FullTreeFunctionTruthCounts
+    val rawInputsRederived: Boolean
+    val candidateBytesMatchedAtValidationBoundary: Boolean
+    val candidateLeaseRetained: Boolean
+    val downstreamScoringAuthorized: Boolean
+    val authoritativeReleaseEvidence: Boolean
+}
+
 /** Independent implementation ceilings beneath the authenticated full-tree scope. */
 internal data class FullTreeFunctionTruthLimits(
     val control: FullTreeControlLimits = FullTreeControlLimits(),
@@ -185,7 +208,66 @@ internal object FullTreeFunctionTruthSqlite {
         outputRoot: Path,
         maximumWorkers: Int,
         limits: FullTreeFunctionTruthLimits = FullTreeFunctionTruthLimits(),
-    ): FullTreeFunctionTruthGeneration = translateTruthFailures {
+    ): FullTreeFunctionTruthGeneration = reconcile(
+        richArtifact = richArtifact,
+        strippedArtifact = strippedArtifact,
+        inventoryPath = inventoryPath,
+        elfFunctionIndex = elfFunctionIndex,
+        observationRoot = observationRoot,
+        expectedObservationIndexArtifactSha256 = expectedObservationIndexArtifactSha256,
+        scope = scope,
+        scratchParent = scratchParent,
+        resultRoot = outputRoot,
+        maximumWorkers = maximumWorkers,
+        limits = limits,
+        finish = ::publishReconciliation,
+    )
+
+    /**
+     * Validates a candidate tree only by exact comparison with a fresh raw-input reconciliation.
+     * The candidate is read-only input and is never repaired, copied, renamed, or republished.
+     */
+    fun loadAndValidate(
+        candidateRoot: Path,
+        richArtifact: Path,
+        strippedArtifact: Path,
+        inventoryPath: Path,
+        elfFunctionIndex: Path,
+        observationRoot: Path,
+        expectedObservationIndexArtifactSha256: String,
+        scope: AuthenticatedFullTreeScope,
+        scratchParent: Path,
+        maximumWorkers: Int,
+        limits: FullTreeFunctionTruthLimits = FullTreeFunctionTruthLimits(),
+    ): FullTreeFunctionTruthValidation = reconcile(
+        richArtifact = richArtifact,
+        strippedArtifact = strippedArtifact,
+        inventoryPath = inventoryPath,
+        elfFunctionIndex = elfFunctionIndex,
+        observationRoot = observationRoot,
+        expectedObservationIndexArtifactSha256 = expectedObservationIndexArtifactSha256,
+        scope = scope,
+        scratchParent = scratchParent,
+        resultRoot = candidateRoot,
+        maximumWorkers = maximumWorkers,
+        limits = limits,
+        finish = ::validateReconciliation,
+    )
+
+    private fun <T> reconcile(
+        richArtifact: Path,
+        strippedArtifact: Path,
+        inventoryPath: Path,
+        elfFunctionIndex: Path,
+        observationRoot: Path,
+        expectedObservationIndexArtifactSha256: String,
+        scope: AuthenticatedFullTreeScope,
+        scratchParent: Path,
+        resultRoot: Path,
+        maximumWorkers: Int,
+        limits: FullTreeFunctionTruthLimits,
+        finish: (FunctionTruthReconciliation) -> T,
+    ): T = translateTruthFailures {
         requireSha256(expectedObservationIndexArtifactSha256, "function-observation index artifact")
         if (maximumWorkers !in 1..min(limits.maximumWorkers, limits.control.maximumWorkers)) {
             truthFail("function-truth worker count exceeds its implementation bound")
@@ -205,7 +287,7 @@ internal object FullTreeFunctionTruthSqlite {
             elfFunctionIndex,
             observationRoot,
             scratchParent,
-            outputRoot,
+            resultRoot,
         )
         FunctionTruthInputGuards.open(paths, limits).use { guards ->
             val inventory = FullTreeInventoryControl.loadAndValidate(
@@ -325,52 +407,23 @@ internal object FullTreeFunctionTruthSqlite {
                     guards.verifyUnchanged("after function-truth input ingestion")
                     database.reconcile(inventory, scope, limits)
                     database.flush("after reconciling function truth")
-
-                    val publication = FunctionTruthPublication.create(paths.output, limits)
-                    var published = false
-                    try {
-                        val completed = database.writeProjection(
-                            publication.staging,
-                            inventory,
-                            oracle,
-                            observation,
-                            elf,
-                            scope,
-                            limits,
-                        )
-                        database.close()
-                        scratch.releaseDatabase()
-                        scratch.requireEmptyValidationDirectory()
-                        scratch.release()
-
-                        publication.commit(
-                            completed,
-                            inventory,
-                            oracle,
-                            scope,
-                            limits,
-                            budget,
-                        ) {
-                            FullTreeScopeControl.validate(scope, limits.control)
-                            guards.verifyUnchanged("at the function-truth publication boundary")
-                            requireObservationRunUnchanged(
-                                observation,
-                                expectedInputs,
-                                scope,
-                                maximumWorkers,
-                                limits,
-                            )
-                        }
-                        published = true
-                        FunctionTruthGenerationFactory.create(
-                            root = paths.output,
-                            projection = completed,
+                    finish(
+                        FunctionTruthReconciliation(
+                            paths = paths,
+                            inventory = inventory,
+                            oracle = oracle,
                             observation = observation,
                             elf = elf,
-                        )
-                    } finally {
-                        if (!published) publication.close()
-                    }
+                            expectedInputs = expectedInputs,
+                            scope = scope,
+                            maximumWorkers = maximumWorkers,
+                            limits = limits,
+                            budget = budget,
+                            guards = guards,
+                            scratch = scratch,
+                            database = database,
+                        ),
+                    )
                 } finally {
                     database.close()
                 }
@@ -378,6 +431,179 @@ internal object FullTreeFunctionTruthSqlite {
         }
     }
 
+}
+
+private class FunctionTruthReconciliation(
+    val paths: FunctionTruthPaths,
+    val inventory: JsonObject,
+    val oracle: JsonObject,
+    val observation: AuthenticatedFunctionObservationRun,
+    val elf: AuthenticatedFullTreeElfFunctionIndex,
+    val expectedInputs: List<FullTreeFunctionObservationShardInput>,
+    val scope: AuthenticatedFullTreeScope,
+    val maximumWorkers: Int,
+    val limits: FullTreeFunctionTruthLimits,
+    val budget: FunctionTruthBudget,
+    val guards: FunctionTruthInputGuards,
+    val scratch: FunctionTruthScratch,
+    val database: FunctionTruthDatabase,
+)
+
+private fun publishReconciliation(
+    reconciliation: FunctionTruthReconciliation,
+): FullTreeFunctionTruthGeneration = with(reconciliation) {
+    val publication = FunctionTruthPublication.create(paths.output, limits)
+    var published = false
+    try {
+        val completed = database.writeProjection(
+            publication.staging,
+            inventory,
+            oracle,
+            observation,
+            elf,
+            scope,
+            limits,
+        )
+        database.close()
+        scratch.releaseDatabase()
+        scratch.requireEmptyValidationDirectory()
+        scratch.release()
+
+        publication.commit(
+            completed,
+            inventory,
+            oracle,
+            scope,
+            limits,
+            budget,
+        ) {
+            reauthenticateFunctionTruthInputs(reconciliation, "at the function-truth publication boundary")
+        }
+        published = true
+        FunctionTruthGenerationFactory.create(
+            root = paths.output,
+            projection = completed,
+            observation = observation,
+            elf = elf,
+        )
+    } finally {
+        if (!published) publication.close()
+    }
+}
+
+private fun validateReconciliation(
+    reconciliation: FunctionTruthReconciliation,
+): FullTreeFunctionTruthValidation = with(reconciliation) {
+    val candidate = paths.output
+    val candidateParent = candidate.parent
+        ?: truthFail("function-truth candidate root must name a directory")
+    val (_, candidateParentIdentity) = requireStableDirectory(
+        candidateParent,
+        "function-truth candidate parent",
+    )
+    val (_, candidateIdentity) = requireStableDirectory(candidate, "function-truth candidate root")
+    scratch.requireEmptyValidationDirectory()
+    val derived = Files.createDirectory(
+        scratch.validation.resolve("raw-rederived-truth"),
+        PosixFilePermissions.asFileAttribute(PRIVATE_DIRECTORY_PERMISSIONS),
+    )
+    Files.createDirectory(
+        derived.resolve(SHARDS_DIRECTORY),
+        PosixFilePermissions.asFileAttribute(PRIVATE_DIRECTORY_PERMISSIONS),
+    )
+    forceDirectory(derived)
+
+    val validation = try {
+        val completed = database.writeProjection(
+            derived,
+            inventory,
+            oracle,
+            observation,
+            elf,
+            scope,
+            limits,
+        )
+        database.close()
+        scratch.releaseDatabase()
+
+        freezePublicationTree(derived, completed, budget)
+        verifyFunctionTruthPublication(
+            derived,
+            completed,
+            inventory,
+            oracle,
+            scope,
+            limits,
+            budget,
+        )
+        reauthenticateFunctionTruthInputs(
+            reconciliation,
+            "after deriving the candidate comparison tree",
+        )
+        requireDirectoryIdentity(
+            candidateParent,
+            candidateParentIdentity,
+            "function-truth candidate parent",
+        )
+        requireDirectoryIdentity(candidate, candidateIdentity, "function-truth candidate root")
+        verifyFunctionTruthPublication(
+            candidate,
+            completed,
+            inventory,
+            oracle,
+            scope,
+            limits,
+            budget,
+        )
+        budget.checkpoint("after exact-comparing the function-truth candidate")
+        reauthenticateFunctionTruthInputs(reconciliation, "at the function-truth validation boundary")
+        verifyFunctionTruthPublication(
+            candidate,
+            completed,
+            inventory,
+            oracle,
+            scope,
+            limits,
+            budget,
+        )
+        budget.checkpoint("after terminally rechecking the function-truth candidate")
+        requireDirectoryIdentity(
+            candidateParent,
+            candidateParentIdentity,
+            "function-truth candidate parent",
+        )
+        requireDirectoryIdentity(candidate, candidateIdentity, "function-truth candidate root")
+        FunctionTruthValidationFactory.create(completed, observation, elf)
+    } finally {
+        cleanupDerivedFunctionTruth(derived)
+    }
+    scratch.requireEmptyValidationDirectory()
+    scratch.release()
+    validation
+}
+
+private fun reauthenticateFunctionTruthInputs(
+    reconciliation: FunctionTruthReconciliation,
+    label: String,
+) = with(reconciliation) {
+    FullTreeScopeControl.validate(scope, limits.control)
+    guards.verifyUnchanged(label)
+    requireObservationRunUnchanged(
+        observation,
+        expectedInputs,
+        scope,
+        maximumWorkers,
+        limits,
+    )
+}
+
+private fun cleanupDerivedFunctionTruth(root: Path) {
+    if (!Files.exists(root, LinkOption.NOFOLLOW_LINKS)) return
+    makeOwnedTreeWritable(root)
+    Files.walk(root).use { paths ->
+        paths.sorted(Comparator.reverseOrder()).forEach(Files::delete)
+    }
+    forceDirectory(root.parent)
 }
 
 private data class AuthenticatedFunctionObservationRun(
@@ -921,6 +1147,38 @@ private object FunctionTruthGenerationFactory {
         databaseHighWaterBytes = projection.databaseHighWaterBytes,
         counts = projection.counts,
     )
+}
+
+private object FunctionTruthValidationFactory {
+    fun create(
+        projection: FunctionTruthProjection,
+        observation: AuthenticatedFunctionObservationRun,
+        elf: AuthenticatedFullTreeElfFunctionIndex,
+    ): FullTreeFunctionTruthValidation = VerifiedFunctionTruthValidation(
+        indexArtifactSha256 = projection.indexArtifactSha256,
+        indexSha256 = projection.logicalIndexSha256,
+        observationIndexArtifactSha256 = observation.indexArtifactSha256,
+        elfIndexArtifactSha256 = elf.sha256,
+        outputBytes = projection.publishedBytes,
+        databaseHighWaterBytes = projection.databaseHighWaterBytes,
+        counts = projection.counts,
+    )
+}
+
+private class VerifiedFunctionTruthValidation(
+    override val indexArtifactSha256: String,
+    override val indexSha256: String,
+    override val observationIndexArtifactSha256: String,
+    override val elfIndexArtifactSha256: String,
+    override val outputBytes: Long,
+    override val databaseHighWaterBytes: Long,
+    override val counts: FullTreeFunctionTruthCounts,
+) : FullTreeFunctionTruthValidation {
+    override val rawInputsRederived: Boolean = true
+    override val candidateBytesMatchedAtValidationBoundary: Boolean = true
+    override val candidateLeaseRetained: Boolean = false
+    override val downstreamScoringAuthorized: Boolean = false
+    override val authoritativeReleaseEvidence: Boolean = false
 }
 
 private class FunctionTruthDatabase private constructor(
@@ -2372,24 +2630,7 @@ private fun makeOwnedTreeWritable(root: Path) {
 
 private fun requirePublicationMembership(root: Path, projection: FunctionTruthProjection) {
     val expectedRoot = setOf(INDEX_FILE, EXCLUSIONS_FILE, SHARDS_DIRECTORY)
-    val actualRoot = Files.list(root).use { paths -> paths.map { it.fileName.toString() }.toList().toSet() }
-    if (actualRoot != expectedRoot) truthFail("function-truth root membership is incomplete or extra")
-    val expectedShards = projection.shards.mapTo(linkedSetOf()) { Path.of(it.path).fileName.toString() }
     val shardDirectory = root.resolve(SHARDS_DIRECTORY)
-    val actualShards = Files.list(shardDirectory).use { paths ->
-        paths.map { it.fileName.toString() }.toList().toSet()
-    }
-    if (actualShards != expectedShards) truthFail("function-truth shard membership is incomplete or extra")
-    expectedPublicationFiles(root, projection).forEach { file ->
-        val attributes = Files.readAttributes(
-            file,
-            BasicFileAttributes::class.java,
-            LinkOption.NOFOLLOW_LINKS,
-        )
-        if (!attributes.isRegularFile || attributes.isSymbolicLink || attributes.fileKey() == null) {
-            truthFail("function-truth publication member is not an identified regular file")
-        }
-    }
     listOf(root, shardDirectory).forEach { directory ->
         val attributes = Files.readAttributes(
             directory,
@@ -2400,6 +2641,45 @@ private fun requirePublicationMembership(root: Path, projection: FunctionTruthPr
             truthFail("function-truth publication directory is invalid")
         }
     }
+    val actualRoot = boundedDirectoryMembers(root, expectedRoot.size, "function-truth root")
+    if (actualRoot != expectedRoot) truthFail("function-truth root membership is incomplete or extra")
+    val expectedShards = projection.shards.mapTo(linkedSetOf()) { Path.of(it.path).fileName.toString() }
+    val actualShards = boundedDirectoryMembers(
+        shardDirectory,
+        expectedShards.size,
+        "function-truth shard directory",
+    )
+    if (actualShards != expectedShards) truthFail("function-truth shard membership is incomplete or extra")
+    val fileIdentities = HashSet<Any>()
+    expectedPublicationFiles(root, projection).forEach { file ->
+        val attributes = Files.readAttributes(
+            file,
+            BasicFileAttributes::class.java,
+            LinkOption.NOFOLLOW_LINKS,
+        )
+        val identity = attributes.fileKey()
+        val linkCount = (Files.getAttribute(file, "unix:nlink", LinkOption.NOFOLLOW_LINKS) as? Number)
+            ?.toLong()
+            ?: truthFail("function-truth publication member link count is unavailable")
+        if (
+            !attributes.isRegularFile || attributes.isSymbolicLink || identity == null ||
+            linkCount != 1L || !fileIdentities.add(identity)
+        ) {
+            truthFail("function-truth publication member is not an identified regular file")
+        }
+    }
+}
+
+private fun boundedDirectoryMembers(directory: Path, maximumMembers: Int, label: String): Set<String> {
+    if (maximumMembers < 0) truthFail("$label has an invalid member bound")
+    val members = linkedSetOf<String>()
+    Files.newDirectoryStream(directory).use { entries ->
+        entries.forEach { entry ->
+            if (members.size >= maximumMembers) truthFail("$label contains extra members")
+            if (!members.add(entry.fileName.toString())) truthFail("$label repeats a member name")
+        }
+    }
+    return members
 }
 
 private fun expectedPublicationFiles(root: Path, projection: FunctionTruthProjection): List<Path> =

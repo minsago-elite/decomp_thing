@@ -57,6 +57,140 @@ class FullTreeFunctionTruthSqliteTest {
         }
 
     @Test
+    fun `validation rederives raw truth and never repairs candidate bytes`() =
+        inControlTemporaryDirectory { root ->
+            val fixture = createFunctionTruthFixture(root.resolve("validator-inputs"))
+            val generated = generateTruth(fixture, root.resolve("generated-truth"), maximumWorkers = 2)
+            val original = truthTreeBytes(generated.root)
+
+            val validated = validateTruth(fixture, generated.root, maximumWorkers = 4)
+            assertTrue(validated.rawInputsRederived)
+            assertTrue(validated.candidateBytesMatchedAtValidationBoundary)
+            assertFalse(validated.candidateLeaseRetained)
+            assertFalse(validated.downstreamScoringAuthorized)
+            assertFalse(validated.authoritativeReleaseEvidence)
+            assertEquals(generated.indexArtifactSha256, validated.indexArtifactSha256)
+            assertEquals(generated.indexSha256, validated.indexSha256)
+            assertEquals(generated.observationIndexArtifactSha256, validated.observationIndexArtifactSha256)
+            assertEquals(generated.elfIndexArtifactSha256, validated.elfIndexArtifactSha256)
+            assertEquals(generated.outputBytes, validated.outputBytes)
+            assertEquals(generated.counts, validated.counts)
+            assertTrue(validated.databaseHighWaterBytes >= generated.databaseHighWaterBytes)
+            assertEquals(original, truthTreeBytes(generated.root))
+            assertDirectoryEmpty(fixture.scratch)
+            assertNoTruthResidue(root)
+
+            val forged = copyTruthCandidate(generated.root, root.resolve("forged-truth"))
+            forgeSelfConsistentTruthCandidate(forged)
+            val forgedBytes = truthTreeBytes(forged)
+            assertFailsWith<FullTreeFunctionTruthException> {
+                validateTruth(fixture, forged, maximumWorkers = 2)
+            }
+            assertEquals(forgedBytes, truthTreeBytes(forged))
+            assertDirectoryEmpty(fixture.scratch)
+            assertNoTruthResidue(root)
+
+            val missing = copyTruthCandidate(generated.root, root.resolve("missing-truth"))
+            makeTruthCandidateWritable(missing)
+            Files.delete(missing.resolve("shards/clang-lib-driver.json"))
+            freezeTruthCandidate(missing)
+            assertFailsWith<FullTreeFunctionTruthException> {
+                validateTruth(fixture, missing, maximumWorkers = 2)
+            }
+            assertDirectoryEmpty(fixture.scratch)
+            assertNoTruthResidue(root)
+
+            val aliased = copyTruthCandidate(generated.root, root.resolve("aliased-truth"))
+            makeTruthCandidateWritable(aliased)
+            val aliasedShard = aliased.resolve("shards/clang-lib-driver.json")
+            Files.delete(aliasedShard)
+            Files.createLink(aliasedShard, aliased.resolve("shards/generated-tools-clang.json"))
+            freezeTruthCandidate(aliased)
+            assertFailsWith<FullTreeFunctionTruthException> {
+                validateTruth(fixture, aliased, maximumWorkers = 2)
+            }
+            assertDirectoryEmpty(fixture.scratch)
+            assertNoTruthResidue(root)
+
+            val extra = copyTruthCandidate(generated.root, root.resolve("extra-truth"))
+            makeTruthCandidateWritable(extra)
+            Files.write(extra.resolve("unexpected.json"), "{}\n".toByteArray())
+            freezeTruthCandidate(extra)
+            assertFailsWith<FullTreeFunctionTruthException> {
+                validateTruth(fixture, extra, maximumWorkers = 2)
+            }
+            assertDirectoryEmpty(fixture.scratch)
+            assertNoTruthResidue(root)
+
+            val symlinkedDirectory = copyTruthCandidate(generated.root, root.resolve("symlinked-directory-truth"))
+            makeTruthCandidateWritable(symlinkedDirectory)
+            Files.list(symlinkedDirectory.resolve("shards")).use { entries ->
+                entries.forEach(Files::delete)
+            }
+            Files.delete(symlinkedDirectory.resolve("shards"))
+            Files.createSymbolicLink(
+                symlinkedDirectory.resolve("shards"),
+                generated.root.resolve("shards"),
+            )
+            freezeTruthCandidate(symlinkedDirectory)
+            assertFailsWith<FullTreeFunctionTruthException> {
+                validateTruth(fixture, symlinkedDirectory, maximumWorkers = 2)
+            }
+            assertDirectoryEmpty(fixture.scratch)
+            assertNoTruthResidue(root)
+
+            val symlinkedFile = copyTruthCandidate(generated.root, root.resolve("symlinked-file-truth"))
+            makeTruthCandidateWritable(symlinkedFile)
+            val symlinkedShard = symlinkedFile.resolve("shards/clang-lib-driver.json")
+            Files.delete(symlinkedShard)
+            Files.createSymbolicLink(
+                symlinkedShard,
+                generated.root.resolve("shards/clang-lib-driver.json"),
+            )
+            freezeTruthCandidate(symlinkedFile)
+            assertFailsWith<FullTreeFunctionTruthException> {
+                validateTruth(fixture, symlinkedFile, maximumWorkers = 2)
+            }
+            assertDirectoryEmpty(fixture.scratch)
+            assertNoTruthResidue(root)
+
+            val lateMismatch = copyTruthCandidate(generated.root, root.resolve("late-index-mismatch-truth"))
+            makeTruthCandidateWritable(lateMismatch)
+            Files.write(lateMismatch.resolve("index.json"), "{}\n".toByteArray())
+            freezeTruthCandidate(lateMismatch)
+            val lateMismatchBytes = truthTreeBytes(lateMismatch)
+            assertFailsWith<FullTreeFunctionTruthException> {
+                validateTruth(fixture, lateMismatch, maximumWorkers = 2)
+            }
+            assertEquals(lateMismatchBytes, truthTreeBytes(lateMismatch))
+            assertDirectoryEmpty(fixture.scratch)
+            assertNoTruthResidue(root)
+
+            assertFailsWith<FullTreeFunctionTruthException> {
+                validateTruth(fixture, root.resolve("absent-truth"), maximumWorkers = 2)
+            }
+            assertDirectoryEmpty(fixture.scratch)
+            assertNoTruthResidue(root)
+
+            val writable = copyTruthCandidate(generated.root, root.resolve("writable-truth"))
+            Files.setPosixFilePermissions(
+                writable.resolve("index.json"),
+                PosixFilePermissions.fromString("rw-------"),
+            )
+            assertFailsWith<FullTreeFunctionTruthException> {
+                validateTruth(fixture, writable, maximumWorkers = 2)
+            }
+            assertDirectoryEmpty(fixture.scratch)
+            assertNoTruthResidue(root)
+
+            assertFailsWith<FullTreeFunctionTruthException> {
+                validateTruth(fixture, fixture.observationRoot, maximumWorkers = 2)
+            }
+            assertDirectoryEmpty(fixture.scratch)
+            assertNoTruthResidue(root)
+        }
+
+    @Test
     fun `resident model cannot understate configured merge structures`() {
         assertFailsWith<IllegalArgumentException> {
             FullTreeFunctionTruthLimits(modeledResidentBytes = 1L)
@@ -347,6 +481,25 @@ private fun generateTruth(
     limits = limits,
 )
 
+private fun validateTruth(
+    fixture: FunctionTruthFixture,
+    candidate: Path,
+    maximumWorkers: Int,
+    limits: FullTreeFunctionTruthLimits = FullTreeFunctionTruthLimits(),
+): FullTreeFunctionTruthValidation = FullTreeFunctionTruthSqlite.loadAndValidate(
+    candidateRoot = candidate,
+    richArtifact = fixture.rich,
+    strippedArtifact = fixture.stripped,
+    inventoryPath = fixture.inventoryPath,
+    elfFunctionIndex = fixture.elfIndex,
+    observationRoot = fixture.observationRoot,
+    expectedObservationIndexArtifactSha256 = fixture.observationIndexArtifactSha256,
+    scope = fixture.scope,
+    scratchParent = fixture.scratch,
+    maximumWorkers = maximumWorkers,
+    limits = limits,
+)
+
 private fun assertTruthPublication(
     generation: FullTreeFunctionTruthGeneration,
     fixture: FunctionTruthFixture,
@@ -473,6 +626,105 @@ private fun assertFrozenRawV2Truth(actualRoot: Path) {
             "raw-derived Kotlin truth differs from the frozen Python-retirement bytes at $relative",
         )
     }
+}
+
+private fun copyTruthCandidate(source: Path, target: Path): Path {
+    Files.createDirectory(
+        target,
+        PosixFilePermissions.asFileAttribute(PosixFilePermissions.fromString("rwx------")),
+    )
+    Files.createDirectory(
+        target.resolve("shards"),
+        PosixFilePermissions.asFileAttribute(PosixFilePermissions.fromString("rwx------")),
+    )
+    Files.walk(source).use { paths ->
+        paths.filter { Files.isRegularFile(it, LinkOption.NOFOLLOW_LINKS) }.forEach { path ->
+            val destination = target.resolve(source.relativize(path).toString())
+            Files.write(destination, Files.readAllBytes(path))
+        }
+    }
+    freezeTruthCandidate(target)
+    return target
+}
+
+private fun forgeSelfConsistentTruthCandidate(root: Path) {
+    makeTruthCandidateWritable(root)
+    val shardPath = root.resolve("shards/clang-lib-driver.json")
+    val shard = parseControlObject(shardPath)
+    val functions = shard.controlArray("functions").toMutableList()
+    val function = functions.first() as JsonObject
+    val aliases = function.controlArray("aliases").toMutableList()
+    val alias = aliases.first() as JsonObject
+    val evidence = alias.controlArray("evidence").toMutableList()
+    val firstEvidence = evidence.first() as JsonObject
+    evidence[0] = JsonObject(
+        firstEvidence.toMutableMap().apply {
+            this["locator"] = JsonPrimitive(firstEvidence.controlString("locator") + ":forged")
+        },
+    )
+    aliases[0] = JsonObject(
+        alias.toMutableMap().apply { this["evidence"] = JsonArray(evidence) },
+    )
+    functions[0] = JsonObject(
+        function.toMutableMap().apply { this["aliases"] = JsonArray(aliases) },
+    )
+    val forgedShard = JsonObject(
+        shard.toMutableMap().apply { this["functions"] = JsonArray(functions) },
+    )
+    val shardBytes = OracleJson.canonicalBytes(forgedShard)
+    Files.write(shardPath, shardBytes)
+
+    val indexPath = root.resolve("index.json")
+    val index = parseControlObject(indexPath)
+    val shardRecords = index.controlArray("shards").map { raw ->
+        val record = raw as JsonObject
+        if (record.controlString("path") != "shards/clang-lib-driver.json") {
+            record
+        } else {
+            JsonObject(
+                record.toMutableMap().apply {
+                    this["bytes"] = JsonPrimitive(shardBytes.size)
+                    this["sha256"] = JsonPrimitive(OracleArtifacts.sha256(shardBytes))
+                },
+            )
+        }
+    }
+    val withoutSelf = JsonObject(
+        index.toMutableMap().apply {
+            remove("indexSha256")
+            this["shards"] = JsonArray(shardRecords)
+        },
+    )
+    val forgedLogicalIndex = OracleArtifacts.sha256(OracleJson.canonicalBytes(withoutSelf))
+    val forgedIndex = JsonObject(
+        withoutSelf + ("indexSha256" to JsonPrimitive(forgedLogicalIndex)),
+    )
+    Files.write(indexPath, OracleJson.canonicalBytes(forgedIndex))
+    freezeTruthCandidate(root)
+}
+
+private fun makeTruthCandidateWritable(root: Path) {
+    Files.setPosixFilePermissions(root, PosixFilePermissions.fromString("rwx------"))
+    val shards = root.resolve("shards")
+    Files.setPosixFilePermissions(shards, PosixFilePermissions.fromString("rwx------"))
+    Files.walk(root).use { paths ->
+        paths.filter { Files.isRegularFile(it, LinkOption.NOFOLLOW_LINKS) }.forEach { path ->
+            Files.setPosixFilePermissions(path, PosixFilePermissions.fromString("rw-------"))
+        }
+    }
+}
+
+private fun freezeTruthCandidate(root: Path) {
+    Files.walk(root).use { paths ->
+        paths.filter { Files.isRegularFile(it, LinkOption.NOFOLLOW_LINKS) }.forEach { path ->
+            Files.setPosixFilePermissions(path, PosixFilePermissions.fromString("r--------"))
+        }
+    }
+    val shards = root.resolve("shards")
+    if (Files.isDirectory(shards, LinkOption.NOFOLLOW_LINKS)) {
+        Files.setPosixFilePermissions(shards, PosixFilePermissions.fromString("r-x------"))
+    }
+    Files.setPosixFilePermissions(root, PosixFilePermissions.fromString("r-x------"))
 }
 
 private fun privateTruthDirectory(path: Path): Path = path.also {

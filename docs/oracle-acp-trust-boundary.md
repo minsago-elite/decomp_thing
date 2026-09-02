@@ -121,6 +121,13 @@ it assumes cooperation from the owning Unix principal, and it lacks the aggregat
 issue #138. Historical roots with unauthenticated `control/`, `usage/`, or `execution-evidence.json` members fail
 closed. The stable v2 disk schema predates authority metadata and still contains `complete=true`; canonical-path
 presence is therefore never a bearer capability, and an ACP consumer must not infer authority from those bytes.
+The companion Kotlin validator treats an existing truth tree only as read-only candidate bytes. Its expected shard
+membership, bindings, counts, hashes, and complete projection come from a fresh raw ELF/DWARF reconciliation inside
+bounded private scratch; the candidate index contributes no expected fact. Kotlin exact-compares the closed tree,
+rejects missing, extra, aliased, noncanonical, or self-consistently forged members, reauthenticates the raw inputs and
+candidate at the terminal boundary, deletes only its private derived projection, and returns another explicitly
+non-authoritative receipt. That receipt is a detached point-in-time comparison: it retains no candidate lease and
+cannot authorize later scoring. Validation failure never repairs, quarantines, renames, or republishes the candidate.
 
 For A15 candidate behavior, Kotlin now has a descriptor-bound
 [pre-START admission](llvm-candidate-execution-prestart.md) which authenticates an opaque candidate and the exact

@@ -129,7 +129,13 @@ class FullTreeKotlinAuthoritySurfaceTest {
 
         assertTrue(source.contains("internal object FullTreeFunctionTruthSqlite"))
         assertTrue(source.contains("val authoritativeReleaseEvidence: Boolean = false"))
+        assertTrue(source.contains("fun loadAndValidate("))
+        assertTrue(source.contains("val rawInputsRederived: Boolean = true"))
+        assertTrue(source.contains("val candidateLeaseRetained: Boolean = false"))
+        assertTrue(source.contains("val downstreamScoringAuthorized: Boolean = false"))
+        assertTrue(source.contains("The candidate is read-only input"))
         assertTrue(source.contains("exactly the generic four-member bounded-shard tree"))
+        assertFalse(source.contains("generatePinnedDifferentialFixtureForTesting"))
         assertFalse(source.contains("ProcessBuilder"))
         assertFalse(source.contains("oracle.full_tree_function_truth"))
         assertFalse(source.contains("AcpAgentHarness"))
@@ -163,6 +169,8 @@ class FullTreeKotlinAuthoritySurfaceTest {
         assertTrue(guide.contains("authoritativeReleaseEvidence=false"))
         assertTrue(guide.contains("canonical-path"))
         assertTrue(guide.contains("presence is therefore never a bearer capability"))
+        assertTrue(guide.contains("the candidate index contributes no expected fact"))
+        assertTrue(guide.contains("Validation failure never repairs"))
         assertTrue(guide.contains("an ACP consumer must not infer authority"))
     }
 }
