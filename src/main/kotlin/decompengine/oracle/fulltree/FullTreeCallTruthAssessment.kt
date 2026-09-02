@@ -94,9 +94,9 @@ sealed interface FullTreeCallTruthEdgeAssessment {
  * historical 899 MiB call-truth tree; a scalable SQLite/sharded Kotlin producer remains missing.
  *
  * No parsed document, namespace, analyzer, edge, verdict, output path, ACP material, or claimed
- * digest is accepted. The result is permanently non-authoritative because the input function
- * truth and DWARF call observations still originate in Python and the observation scan lacks a
- * Kotlin-owned whole-process-tree containment/runtime receipt.
+ * digest is accepted. The result is permanently non-authoritative because this historical input
+ * tree predates the Kotlin-owned raw producers and lacks a Kotlin-owned whole-process-tree
+ * containment/runtime receipt.
  */
 object FullTreeCallTruthAssessmentVerifier {
     /** Configuration identity of the historical per-shard call-truth v1 format, not this wrapper. */
@@ -1446,23 +1446,17 @@ private fun callObservationInputSha256(
     scopeSha256: String,
     shardId: String,
     units: List<JsonObject>,
-): String = OracleArtifacts.sha256(
-    OracleJson.canonicalBytes(
-        JsonObject(
-            mapOf(
-                "inventoryIndexSha256" to JsonPrimitive(inventoryIndexSha256),
-                "producerConfigurationSha256" to JsonPrimitive(configurationSha256),
-                "richArtifactSha256" to JsonPrimitive(richArtifactSha256),
-                "scopeSha256" to JsonPrimitive(scopeSha256),
-                "shardId" to JsonPrimitive(shardId),
-                "units" to JsonArray(units),
-            ),
-        ),
-    ),
+): String = FullTreeCallObservations.historicalV2InputSha256(
+    inventoryIndexSha256,
+    configurationSha256,
+    richArtifactSha256,
+    scopeSha256,
+    shardId,
+    units,
 )
 
 private fun callObservationConfigurationSha256(): String =
-    OracleSchemas.configurationSha256("full-tree-call-observations", CALL_OBSERVATION_POLICY)
+    FullTreeCallObservations.historicalV2ConfigurationSha256
 
 private fun historicalFunctionTruthConfigurationSha256(): String {
     val digest = MessageDigest.getInstance("SHA-256")
@@ -1775,17 +1769,6 @@ private val SHA256 = Regex("[0-9a-f]{64}")
 private val ADDRESS = Regex("0x(?:0|[1-9a-f][0-9a-f]{0,15})")
 private val ASSESSMENT_DIGEST_DOMAIN =
     "bounded-call-semantics-fixture-assessment-v1\u0000".toByteArray(StandardCharsets.UTF_8)
-
-private val CALL_OBSERVATION_POLICY = JsonObject(
-    mapOf(
-        "id" to JsonPrimitive("full-tree-call-observations"),
-        "siteIdentity" to JsonPrimitive("caller-id-return-pc-rva-or-unit-die-offset"),
-        "siteLocator" to JsonPrimitive("dwarf-call-return-pc"),
-        "tailCalls" to JsonPrimitive("dwarf-call-tail-call-flag"),
-        "targetPolicy" to JsonPrimitive("call-origin-address-virtuality-and-target-expression-closed-classification"),
-        "version" to JsonPrimitive(2),
-    ),
-)
 
 private val FUNCTION_TRUTH_POLICY = JsonObject(
     mapOf(

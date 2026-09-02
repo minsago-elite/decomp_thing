@@ -69,10 +69,10 @@ rather than complete in-memory materialization.
 That migration is currently partial. Source and release acquisition, LLVM artifact-manifest/ELF-twin verification,
 scope and inventory controls, full-tree data truth/reconciliation/baselines, bounded completed-run verification, and
 GCC planning have Kotlin/JVM paths. A bounded raw-artifact Kotlin generator and its narrow Gradle/CLI entry point now
-regenerate the checked LLVM function-recovery v1 bytes exactly in the required workflow. Call truth, production
-structural adapter replay, some ELF/DWARF observation generation, and full-tree release orchestration still have Python
-entrypoints. Those entrypoints may preserve historical production evidence and differential parity, but they do not
-satisfy the Kotlin-only authority requirement for the next release.
+regenerate the checked LLVM function-recovery v1 bytes exactly in the required workflow. Call-truth composition,
+production structural adapter replay, some ELF/DWARF observation generation, and full-tree release orchestration still
+have Python entrypoints. Those entrypoints may preserve historical production evidence and differential parity, but
+they do not satisfy the Kotlin-only authority requirement for the next release.
 
 The required LLVM push/pull-request lane runs full-tree scope verification, DWARF and source-inventory regeneration,
 and function-oracle regeneration through stable Kotlin/JVM Gradle entrypoints. The similarly named Python wrappers are
@@ -142,6 +142,16 @@ neither downstream scoring nor release authority. SQLite scratch has a hard page
 journal, and generation checkpoints the raw-derived tree, database, and staged report. Those checkpoints are not an
 aggregate descriptor lease across the full lifecycle; issue #138 remains the explicit blocker rather than an
 authority claim by this migration slice.
+
+Raw call-site observation now also has a Kotlin/JVM policy-v3 slice. It authenticates scope, inventory, shard work,
+and rich ELF bytes; parses bounded DWARF call sites and expressions; derives stable caller-local identities; and emits
+closed direct, virtual, proven-indirect, and unresolved classifications without Python or ACP input. Only subprogram
+origins can identify direct or virtual callees. Object origins remain indirect, and incompatible reference-chain
+kinds fail closed. Policy v3 has a distinct configuration digest; the bounded historical assessment retains explicit
+policy-v2 digest derivation only for migration evidence. This slice is still an in-memory fixture-scale producer with
+no contained runtime, durable absence receipt, SQLite sink, production call-truth composition, or release authority.
+Its structural envelope validator checks canonical bindings but does not rederive artifact facts and is never an
+authority boundary.
 
 For A15 candidate behavior, Kotlin now has a descriptor-bound
 [pre-START admission](llvm-candidate-execution-prestart.md) which authenticates an opaque candidate and the exact

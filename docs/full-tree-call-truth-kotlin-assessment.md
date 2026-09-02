@@ -21,15 +21,21 @@ The domain-separated assessment digest binds the five raw input identities and t
 digests. `historicalCallTruthConfigurationSha256` identifies the historical per-shard truth format;
 it is not a schema/configuration identity for an assessment wrapper.
 
+The raw call-observation migration now has a Kotlin/JVM producer over authenticated ELF/DWARF. Its
+policy-v3 identity classifies only subprogram origins as direct/virtual candidates; formal-parameter,
+member, and variable origins remain indirect, and incompatible abstract/specification chains fail
+closed. The historical assessment continues to authenticate the frozen policy-v2 configuration and
+input hashes, so corrected v3 semantics never reuse a legacy producer identity. The new producer's
+structural envelope validator does not rederive facts and cannot confer authority by itself.
+
 This checkpoint cannot operate on the known historical full-tree scale: the prior call-truth tree is
 about 899 MiB, function truth about 2.5 GiB, and call observations about 1.1 GiB, while this bounded
-in-memory diagnostic intentionally caps its combined diagnostic output bytes at 64 MiB. Full authority still
-requires all of the following:
+in-memory diagnostic intentionally caps its combined diagnostic output bytes at 64 MiB. Full authority
+still requires all of the following:
 
-- a Kotlin-owned full-tree function-truth producer;
-- a Kotlin-owned raw ELF/DWARF call-observation producer;
+- production integration of the Kotlin-owned raw function/call producers with the call composer;
 - a Kotlin-owned contained whole-process-tree runtime and durable absence receipt for that scan;
-- a scalable SQLite-backed, sharded Kotlin call-truth producer and atomic publication protocol;
+- a scalable SQLite-backed call-observation sink plus sharded Kotlin call-truth publication protocol;
 - real full-tree parity and hostile interruption/restart evidence for those authorities.
 
 The Python producer remains migration/differential compatibility input only. Its usage and execution
