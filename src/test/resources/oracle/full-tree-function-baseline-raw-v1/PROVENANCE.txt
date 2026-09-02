@@ -1,0 +1,31 @@
+NON-AUTHORITATIVE KOTLIN MIGRATION FIXTURE
+
+This directory freezes the exact full-tree-function-baseline v1 report produced by the Kotlin/JVM
+raw-input path exercised by FullTreeFunctionBaselineSqliteTest. The raw rich ELF, independently
+stripped ELF, authenticated inventory/scope, ELF-function index, observation shards, and candidate
+truth are rebuilt during the test. Kotlin exact-compares the candidate with a private raw-derived
+truth projection and derives this report from that private projection while all guards remain live.
+
+The expected report is base64 encoded so this directory is not an ingestible baseline publication.
+It grants no oracle, scoring, certification, or release authority and must never be selected as
+accepted production evidence. Python did not generate or validate these frozen bytes.
+
+`expected/historical-python-v1-report.json.b64` is a separate, inert differential fixture generated
+once by the retired Python v1 implementation from `full-tree-function-truth-v2/expected-truth`.
+Kotlin validates its exact legacy bytes without invoking Python. It exists only to prove migration
+parity and cannot be selected as an oracle, accepted baseline, score, certification, or release
+input.
+
+Configuration SHA-256: c29ef7047ba26e9165e78faffd5781711923f75c1fb265e5f615bfd1ffd21951
+Truth index artifact SHA-256: 184b25045d17802b46ce3c91daf834a13023aaf7931127dbe946ba388ece9316
+Report self SHA-256: 8f8f9e23f81c7def19b9f74ab6b5e8df45ca1bedba9505ccb6322ee5733feda6
+Artifact SHA-256: 3771bc71bda4e054d766c0ee6ecdc3599b85fa22326e8ee537da20079e807c06
+Artifact bytes: 1636
+
+Historical Python v1 differential artifact SHA-256:
+6190f0719ebc52ab01159a4f35455a6113d4b3039baa7116e9d417ff7bb8efa3
+Historical Python v1 truth index artifact SHA-256:
+9f6a6e61cee7a63e538fc76104fd0b51f564405ef31ba416b131248d00e9b907
+
+The fixture has two scored functions with rich ELF/DWARF evidence but no stripped ELF symbols.
+Both are therefore stable missing mismatches; three ownerless ELF RVAs are excluded.

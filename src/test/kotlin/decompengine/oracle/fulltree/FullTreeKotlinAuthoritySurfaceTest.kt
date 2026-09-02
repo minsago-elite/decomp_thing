@@ -139,7 +139,46 @@ class FullTreeKotlinAuthoritySurfaceTest {
         assertFalse(source.contains("ProcessBuilder"))
         assertFalse(source.contains("oracle.full_tree_function_truth"))
         assertFalse(source.contains("AcpAgentHarness"))
+
+        val baselineSource = Path.of(
+            "src/main/kotlin/decompengine/oracle/fulltree/FullTreeFunctionBaselineSqlite.kt",
+        ).readText()
+        assertTrue(baselineSource.contains("internal object FullTreeFunctionBaselineSqlite"))
+        assertTrue(baselineSource.contains("internal fun generateAndPublishFromRawInputs("))
+        assertTrue(baselineSource.contains("private fun publishNonAuthoritativeProjection("))
+        assertTrue(baselineSource.contains("val candidateLeaseRetained: Boolean = false"))
+        assertTrue(baselineSource.contains("val downstreamScoringAuthorized: Boolean = false"))
+        assertTrue(baselineSource.contains("val authoritativeReleaseEvidence: Boolean = false"))
+        assertTrue(baselineSource.contains("never accepts candidate truth as a"))
+        assertFalse(baselineSource.contains("ProcessBuilder"))
+        assertFalse(baselineSource.contains("oracle.full_tree_function_baseline"))
+        assertFalse(baselineSource.contains("AcpAgentHarness"))
         assertFalse(source.contains("AcpClient"))
+
+        val baselineParityRoot = Path.of(
+            "src/test/resources/oracle/full-tree-function-baseline-raw-v1",
+        )
+        val baselineParityMembers = Files.walk(baselineParityRoot).use { paths ->
+            paths.filter { Files.isRegularFile(it) }
+                .map { baselineParityRoot.relativize(it).toString() }
+                .toList()
+                .toSet()
+        }
+        assertEquals(
+            setOf(
+                "PROVENANCE.txt",
+                "expected/report.json.b64",
+                "expected/historical-python-v1-report.json.b64",
+            ),
+            baselineParityMembers,
+        )
+        assertFalse(baselineParityMembers.any { it.endsWith(".json") })
+        val baselineParityProvenance = baselineParityRoot.resolve("PROVENANCE.txt").readText()
+        assertTrue(baselineParityProvenance.contains("NON-AUTHORITATIVE"))
+        assertTrue(baselineParityProvenance.contains("grants no"))
+        assertTrue(baselineParityProvenance.contains("Python did not generate or validate"))
+        assertTrue(baselineParityProvenance.contains("inert differential fixture"))
+        assertTrue(baselineParityProvenance.contains("without invoking Python"))
 
         val parityRoot = Path.of(
             "src/test/resources/oracle/full-tree-function-truth-raw-v2",
@@ -171,6 +210,9 @@ class FullTreeKotlinAuthoritySurfaceTest {
         assertTrue(guide.contains("presence is therefore never a bearer capability"))
         assertTrue(guide.contains("the candidate index contributes no expected fact"))
         assertTrue(guide.contains("Validation failure never repairs"))
+        assertTrue(guide.contains("does not reuse that detached receipt"))
+        assertTrue(guide.contains("fixed SQLite baseline composition"))
+        assertTrue(guide.contains("neither downstream scoring nor release authority"))
         assertTrue(guide.contains("an ACP consumer must not infer authority"))
     }
 }

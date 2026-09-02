@@ -254,6 +254,97 @@ internal object FullTreeFunctionTruthSqlite {
         finish = ::validateReconciliation,
     )
 
+    /**
+     * Derives a function baseline only from the private raw-reconciled projection while the exact
+     * candidate, raw inputs, and observation run remain live and recheckable.
+     */
+    fun generateBaselineAndPublish(
+        candidateRoot: Path,
+        richArtifact: Path,
+        strippedArtifact: Path,
+        inventoryPath: Path,
+        elfFunctionIndex: Path,
+        observationRoot: Path,
+        expectedObservationIndexArtifactSha256: String,
+        scope: AuthenticatedFullTreeScope,
+        scratchParent: Path,
+        outputRoot: Path,
+        maximumWorkers: Int,
+        limits: FullTreeFunctionBaselineLimits = FullTreeFunctionBaselineLimits(),
+    ): FullTreeFunctionBaselineGeneration = FullTreeFunctionBaselineSqlite.generateAndPublishFromRawInputs(
+        candidateRoot = candidateRoot,
+        richArtifact = richArtifact,
+        strippedArtifact = strippedArtifact,
+        inventoryPath = inventoryPath,
+        elfFunctionIndex = elfFunctionIndex,
+        observationRoot = observationRoot,
+        expectedObservationIndexArtifactSha256 = expectedObservationIndexArtifactSha256,
+        scope = scope,
+        scratchParent = scratchParent,
+        outputRoot = outputRoot,
+        maximumWorkers = maximumWorkers,
+        limits = limits,
+    )
+
+    /**
+     * Supplies only a live, raw-rederived projection. Callers cannot substitute candidate bytes;
+     * the private reconciliation owns construction, rechecks, and terminal cleanup.
+     */
+    internal fun <T> withValidatedBaselineProjection(
+        candidateRoot: Path,
+        richArtifact: Path,
+        strippedArtifact: Path,
+        inventoryPath: Path,
+        elfFunctionIndex: Path,
+        observationRoot: Path,
+        expectedObservationIndexArtifactSha256: String,
+        scope: AuthenticatedFullTreeScope,
+        scratchParent: Path,
+        outputRoot: Path,
+        maximumWorkers: Int,
+        limits: FullTreeFunctionBaselineLimits,
+        consume: (
+            FullTreeFunctionBaselineRawProjection,
+            (String) -> Unit,
+            () -> Unit,
+        ) -> T,
+    ): T {
+        requireFunctionBaselineOutputDisjoint(
+            outputRoot,
+            listOf(
+                candidateRoot,
+                richArtifact,
+                strippedArtifact,
+                inventoryPath,
+                elfFunctionIndex,
+                observationRoot,
+                scratchParent,
+            ),
+        )
+        return reconcile(
+            richArtifact = richArtifact,
+            strippedArtifact = strippedArtifact,
+            inventoryPath = inventoryPath,
+            elfFunctionIndex = elfFunctionIndex,
+            observationRoot = observationRoot,
+            expectedObservationIndexArtifactSha256 = expectedObservationIndexArtifactSha256,
+            scope = scope,
+            scratchParent = scratchParent,
+            resultRoot = candidateRoot,
+            maximumWorkers = maximumWorkers,
+            limits = limits.truth,
+            finish = { reconciliation ->
+                withValidatedFunctionTruthCandidate(reconciliation) { validation ->
+                    consume(
+                        validation.baselineProjection(limits),
+                        validation::recheck,
+                        validation::release,
+                    )
+                }
+            },
+        )
+    }
+
     private fun <T> reconcile(
         richArtifact: Path,
         strippedArtifact: Path,
@@ -493,7 +584,19 @@ private fun publishReconciliation(
 
 private fun validateReconciliation(
     reconciliation: FunctionTruthReconciliation,
-): FullTreeFunctionTruthValidation = with(reconciliation) {
+): FullTreeFunctionTruthValidation = withValidatedFunctionTruthCandidate(reconciliation) { validation ->
+    validation.recheck("at the function-truth validation boundary")
+    FunctionTruthValidationFactory.create(
+        validation.projection,
+        reconciliation.observation,
+        reconciliation.elf,
+    )
+}
+
+private fun <T> withValidatedFunctionTruthCandidate(
+    reconciliation: FunctionTruthReconciliation,
+    consume: (FunctionTruthCandidateValidation) -> T,
+): T = with(reconciliation) {
     val candidate = paths.output
     val candidateParent = candidate.parent
         ?: truthFail("function-truth candidate root must name a directory")
@@ -513,7 +616,8 @@ private fun validateReconciliation(
     )
     forceDirectory(derived)
 
-    val validation = try {
+    var validation: FunctionTruthCandidateValidation? = null
+    try {
         val completed = database.writeProjection(
             derived,
             inventory,
@@ -527,19 +631,46 @@ private fun validateReconciliation(
         scratch.releaseDatabase()
 
         freezePublicationTree(derived, completed, budget)
+        val active = FunctionTruthCandidateValidation(
+            reconciliation = reconciliation,
+            candidate = candidate,
+            candidateParent = candidateParent,
+            candidateIdentity = candidateIdentity,
+            candidateParentIdentity = candidateParentIdentity,
+            derived = derived,
+            projection = completed,
+        )
+        validation = active
+        active.recheck("after deriving the candidate comparison tree")
+        consume(active)
+    } finally {
+        validation?.release() ?: cleanupDerivedFunctionTruth(derived)
+    }
+}
+
+private class FunctionTruthCandidateValidation(
+    private val reconciliation: FunctionTruthReconciliation,
+    private val candidate: Path,
+    private val candidateParent: Path,
+    private val candidateIdentity: Any,
+    private val candidateParentIdentity: Any,
+    private val derived: Path,
+    val projection: FunctionTruthProjection,
+) {
+    private var released = false
+
+    fun recheck(label: String) = with(reconciliation) {
+        if (released) truthFail("function-truth candidate validation was already released")
         verifyFunctionTruthPublication(
             derived,
-            completed,
+            projection,
             inventory,
             oracle,
             scope,
             limits,
             budget,
         )
-        reauthenticateFunctionTruthInputs(
-            reconciliation,
-            "after deriving the candidate comparison tree",
-        )
+        reauthenticateFunctionTruthInputs(reconciliation, label)
         requireDirectoryIdentity(
             candidateParent,
             candidateParentIdentity,
@@ -548,38 +679,61 @@ private fun validateReconciliation(
         requireDirectoryIdentity(candidate, candidateIdentity, "function-truth candidate root")
         verifyFunctionTruthPublication(
             candidate,
-            completed,
+            projection,
             inventory,
             oracle,
             scope,
             limits,
             budget,
         )
-        budget.checkpoint("after exact-comparing the function-truth candidate")
-        reauthenticateFunctionTruthInputs(reconciliation, "at the function-truth validation boundary")
-        verifyFunctionTruthPublication(
-            candidate,
-            completed,
-            inventory,
-            oracle,
-            scope,
-            limits,
-            budget,
-        )
-        budget.checkpoint("after terminally rechecking the function-truth candidate")
+        budget.checkpoint(label)
         requireDirectoryIdentity(
             candidateParent,
             candidateParentIdentity,
             "function-truth candidate parent",
         )
         requireDirectoryIdentity(candidate, candidateIdentity, "function-truth candidate root")
-        FunctionTruthValidationFactory.create(completed, observation, elf)
-    } finally {
-        cleanupDerivedFunctionTruth(derived)
     }
-    scratch.requireEmptyValidationDirectory()
-    scratch.release()
-    validation
+
+    fun baselineProjection(limits: FullTreeFunctionBaselineLimits): FullTreeFunctionBaselineRawProjection =
+        with(reconciliation) {
+            if (released) truthFail("function-truth candidate validation was already released")
+            if (limits.truth != this.limits) {
+                truthFail("function-baseline truth limits differ from the live reconciliation")
+            }
+            FullTreeFunctionBaselineRawProjection(
+                root = derived,
+                index = projection.index,
+                indexArtifactSha256 = projection.indexArtifactSha256,
+                counts = projection.counts,
+                scratchParent = scratch.validation,
+                limits = limits,
+                scratchCheckpoint = scratch::checkBound,
+                runtimeCheckpoint = budget::checkpoint,
+            )
+        }
+
+    fun release() = with(reconciliation) {
+        if (released) return@with
+        cleanupDerivedFunctionTruth(derived)
+        scratch.requireEmptyValidationDirectory()
+        scratch.release()
+        released = true
+    }
+}
+
+private fun requireFunctionBaselineOutputDisjoint(outputPath: Path, protectedPaths: List<Path>) {
+    val output = outputPath.toAbsolutePath().normalize()
+    if (output.parent == null || output.fileName == null) {
+        truthFail("function-baseline output root must name a directory")
+    }
+    requireStableDirectory(output.parent, "function-baseline output parent")
+    protectedPaths.forEach { protected ->
+        val normalized = protected.toAbsolutePath().normalize()
+        if (pathsOverlap(output, normalized)) {
+            truthFail("function-baseline output overlaps a truth input or candidate path")
+        }
+    }
 }
 
 private fun reauthenticateFunctionTruthInputs(

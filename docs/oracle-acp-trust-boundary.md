@@ -128,6 +128,20 @@ rejects missing, extra, aliased, noncanonical, or self-consistently forged membe
 candidate at the terminal boundary, deletes only its private derived projection, and returns another explicitly
 non-authoritative receipt. That receipt is a detached point-in-time comparison: it retains no candidate lease and
 cannot authorize later scoring. Validation failure never repairs, quarantines, renames, or republishes the candidate.
+The Kotlin function-baseline v1 path does not reuse that detached receipt and then reopen the candidate. Instead,
+function truth holds the candidate/raw-input guards, exact-compares the candidate with its private raw-rederived
+projection, and passes only that private projection into a fixed SQLite baseline composition. Kotlin derives every
+per-shard denominator, stripped-symbol survival decision, exclusion, and persistent mismatch identity there; it
+strict-canonical-validates the staged report against an explicit truth-index artifact digest and terminally rechecks
+the raw inputs, derived projection, candidate, and exact report bytes before and after the no-replace move. The
+callable producer accepts raw inputs rather than a caller-constructed projection; the lower projection publisher is
+private. Malformed aggregate equations, duplicate shards/mismatches, uncovered or wrongly assigned missing and
+fabricated counts, truth-population or persistent-mismatch drift, denominator or exclusion drift, shard disappearance,
+and recovered/fabricated regressions fail closed. The resulting receipt still retains no candidate lease and grants
+neither downstream scoring nor release authority. SQLite scratch has a hard page ceiling and no transient rollback
+journal, and generation checkpoints the raw-derived tree, database, and staged report. Those checkpoints are not an
+aggregate descriptor lease across the full lifecycle; issue #138 remains the explicit blocker rather than an
+authority claim by this migration slice.
 
 For A15 candidate behavior, Kotlin now has a descriptor-bound
 [pre-START admission](llvm-candidate-execution-prestart.md) which authenticates an opaque candidate and the exact

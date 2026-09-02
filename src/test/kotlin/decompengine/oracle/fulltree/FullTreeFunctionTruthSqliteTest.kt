@@ -288,7 +288,7 @@ class FullTreeFunctionTruthSqliteTest {
         }
 }
 
-private data class FunctionTruthFixture(
+internal data class FunctionTruthFixture(
     val rich: Path,
     val stripped: Path,
     val inventoryPath: Path,
@@ -300,17 +300,18 @@ private data class FunctionTruthFixture(
     val scratch: Path,
 )
 
-private fun createFunctionTruthFixture(
+internal fun createFunctionTruthFixture(
     root: Path,
     observationWorkers: Int = 2,
     runIdOverride: String? = null,
+    strippedBytesOverride: ByteArray? = null,
 ): FunctionTruthFixture {
     Files.createDirectories(root)
     Files.setPosixFilePermissions(root, PosixFilePermissions.fromString("rwx------"))
     val control = createFullTreeControlFixture(root.resolve("control"))
     val original = control.authenticatedScope()
     val richBytes = Base64.getMimeDecoder().decode(fullTreeControlResource("rich.elf.b64"))
-    val strippedBytes = richBytes.copyOf()
+    val strippedBytes = strippedBytesOverride?.copyOf() ?: richBytes.copyOf()
     val rich = writeElf(root.resolve("rich-input.elf"), richBytes)
     val stripped = writeElf(root.resolve("stripped-input.elf"), strippedBytes)
     val originalArtifacts = original.artifactManifest.controlObject("artifacts")
@@ -462,7 +463,7 @@ private fun createFunctionTruthFixture(
     )
 }
 
-private fun generateTruth(
+internal fun generateTruth(
     fixture: FunctionTruthFixture,
     output: Path,
     maximumWorkers: Int,
