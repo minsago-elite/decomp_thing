@@ -2,7 +2,7 @@ import { useEffect, useMemo, useRef, useState } from 'preact/hooks';
 import { createApiClient, ApiClientError } from '../api/client';
 import type { Jobs } from '../api/generated';
 import { jobPath } from '../app/paths';
-import { DEFAULT_FILTERS, JOB_STATUSES, filterSearch, jobFilters } from './query';
+import { DEFAULT_FILTERS, JOB_STATUSES, JobFilterError, filterSearch, jobFilters } from './query';
 import type { JobFilters } from './query';
 import { JobSummary } from './JobSummary';
 
@@ -20,6 +20,11 @@ export function Dashboard({ basePath }: { basePath: string }) {
   const [data, setData] = useState<Jobs | null>(null);
   const [phase, setPhase] = useState<'loading' | 'ready' | 'error'>('loading');
   const [error, setError] = useState('');
+  const [validationError, setValidationError] = useState<JobFilterError | null>(null);
+  const form = useRef<HTMLFormElement>(null);
+  useEffect(() => {
+    if (validationError) form.current?.querySelector<HTMLElement>(`[name="${validationError.field}"]`)?.focus();
+  }, [validationError]);
   const results = useRef<HTMLHeadingElement>(null);
   const moveFocus = useRef(false);
   const client = useMemo(() => createApiClient({ basePath }), [basePath]);
@@ -29,7 +34,7 @@ export function Dashboard({ basePath }: { basePath: string }) {
   useEffect(() => {
     const restore = () => {
       const restored = currentFilters(); setSelection(restored); setDraft(restored.filters);
-      setCursors([null]); setPageIndex(0); setData(null);
+      setCursors([null]); setPageIndex(0); setData(null); setValidationError(null);
     };
     window.addEventListener('popstate', restore);
     return () => { window.removeEventListener('popstate', restore); };
@@ -78,29 +83,37 @@ export function Dashboard({ basePath }: { basePath: string }) {
       const checked = jobFilters(search);
       history.replaceState(null, '', `${location.pathname}${search ? `?${search}` : ''}`);
       setSelection({ filters: checked, valid: true }); setDraft(checked);
-      setPageIndex(0); setCursors([null]); setData(null); setError(''); moveFocus.current = true;
-    } catch { setError('Use a valid search, status and date range. Dates include a time zone.'); }
+      setPageIndex(0); setCursors([null]); setData(null); setError(''); setValidationError(null); moveFocus.current = true;
+    } catch (failure) {
+      if (failure instanceof JobFilterError) setValidationError(failure);
+      else setError('Use valid filter values.');
+    }
   }
   function reload() { setCursors([null]); setPageIndex(0); setRefresh(value => value + 1); }
   function field(key: keyof JobFilters, value: string) { setDraft(previous => ({ ...previous, [key]: value })); }
+  function fieldA11y(key: keyof JobFilters) {
+    return { name: key, 'aria-invalid': validationError?.field === key || undefined,
+      'aria-describedby': validationError?.field === key ? 'job-filter-error' : undefined };
+  }
   const filtered = Object.entries(selection.filters).some(([key, value]) => key !== 'limit' && key !== 'sort' && value !== '');
   return <section aria-labelledby="job-library-title">
     <h2 id="job-library-title">Uploaded jobs</h2>
-    <form class="job-filters" onSubmit={event => { event.preventDefault(); apply(draft); }}>
-      <label>Filename search<input value={draft.search} maxLength={256} onInput={event => field('search', event.currentTarget.value)} /></label>
-      <label>Workflow state<select value={draft.status} onChange={event => field('status', event.currentTarget.value)}>
+    <form ref={form} class="job-filters" onSubmit={event => { event.preventDefault(); apply(draft); }}>
+      <label>Filename search<input {...fieldA11y('search')} value={draft.search} maxLength={256} onInput={event => field('search', event.currentTarget.value)} /></label>
+      <label>Workflow state<select {...fieldA11y('status')} value={draft.status} onChange={event => field('status', event.currentTarget.value)}>
         <option value="">All states</option>{JOB_STATUSES.map(status => <option key={status}>{status}</option>)}
       </select></label>
-      <label>Created at or after<input value={draft.createdAfter} placeholder="2026-09-05T00:00:00Z" onInput={event => field('createdAfter', event.currentTarget.value)} /></label>
-      <label>Created before<input value={draft.createdBefore} placeholder="2026-09-06T00:00:00Z" onInput={event => field('createdBefore', event.currentTarget.value)} /></label>
-      <label>Sort by<select value={draft.sort} onChange={event => field('sort', event.currentTarget.value)}>
+      <label>Created at or after<input {...fieldA11y('createdAfter')} value={draft.createdAfter} placeholder="2026-09-05T00:00:00Z" onInput={event => field('createdAfter', event.currentTarget.value)} /></label>
+      <label>Created before<input {...fieldA11y('createdBefore')} value={draft.createdBefore} placeholder="2026-09-06T00:00:00Z" onInput={event => field('createdBefore', event.currentTarget.value)} /></label>
+      <label>Sort by<select {...fieldA11y('sort')} value={draft.sort} onChange={event => field('sort', event.currentTarget.value)}>
         <option value="newest">Newest first</option><option value="oldest">Oldest first</option>
       </select></label>
-      <label>Jobs per page<select value={draft.limit} onChange={event => field('limit', event.currentTarget.value)}>
+      <label>Jobs per page<select {...fieldA11y('limit')} value={draft.limit} onChange={event => field('limit', event.currentTarget.value)}>
         {[50, 100, 200].map(limit => <option key={limit}>{limit}</option>)}
       </select></label>
       <div class="job-actions"><button type="submit">Apply filters</button><button type="button" onClick={() => apply({ ...DEFAULT_FILTERS })}>Reset filters</button></div>
     </form>
+    {validationError && <p id="job-filter-error" role="alert" class="notice notice-error">{validationError.message}</p>}
     {!selection.valid && <p role="alert">The saved filters are invalid. Reset filters to load jobs.</p>}
     {error && <p role="alert" class="notice notice-error">{error}{data && ' Previously loaded rows are shown below; their state may be outdated.'}</p>}
     <div class="job-actions"><button type="button" disabled={phase === 'loading' || !selection.valid} onClick={reload}>Refresh jobs</button>

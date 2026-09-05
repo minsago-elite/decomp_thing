@@ -111,9 +111,21 @@ export async function qualifyScale({ fixture, makeTarget, cdp, evaluate, ready, 
   for (const name of ['Workflow state', 'Sort by', 'Jobs per page']) assert.equal(named('combobox', name).length, 1);
   for (const name of ['Apply filters', 'Reset filters', 'Refresh jobs', 'Previous page', 'Next page']) assert.equal(named('button', name).length, 1);
   assert.equal(named('list', 'Uploaded jobs').length, 1);
+  const readsBeforeInvalid = tab.requests.filter(request => request.url.endsWith('/api/v1/jobs')).length;
+  await evaluate(tab, `(() => { const field = document.querySelector('[name="createdAfter"]'); field.value = '2026-02-29T00:00:00Z'; field.dispatchEvent(new Event('input', { bubbles: true })); })()`);
+  await evaluate(tab, `[...document.querySelectorAll('button')].find(b => b.textContent === 'Apply filters').click()`);
+  await ready(tab, `document.activeElement.name === 'createdAfter' && document.activeElement.getAttribute('aria-invalid') === 'true'`, 'invalid date field focus');
+  const invalidTree = (await cdp.call('Accessibility.getFullAXTree', {}, tab.sessionId)).nodes;
+  const invalidField = invalidTree.find(node => !node.ignored && node.role?.value === 'textbox' && node.name?.value === 'Created at or after');
+  assert.ok(invalidField.description?.value.includes('valid calendar date'));
+  assert.equal(tab.requests.filter(request => request.url.endsWith('/api/v1/jobs')).length, readsBeforeInvalid);
+  assert.equal((await evaluate(tab, rows)).length, 50);
+  assert.equal(await evaluate(tab, 'location.search'), '');
+  await evaluate(tab, `[...document.querySelectorAll('button')].find(b => b.textContent === 'Reset filters').click()`);
+  await ready(tab, `!document.querySelector('#job-filter-error') && document.activeElement.textContent === 'Job results'`, 'invalid date reset recovery');
   assert.deepEqual(tab.exceptions, []);
   assert.ok(tab.requests.every(request => ['GET', 'HEAD'].includes(request.method)));
   return { persistedJobs: fixture.count, pages: 50, rowsPerPage: 200, reachableJobs: 10000,
-    exactOrder: true, keyboardPaginationFocus: true, searchReload: true, combinedNanosecondFiltersReload: true, oldestFirstPagesReloadReset: true, previousFirstPageRetained: true, narrowReflow: reflow, accessibleFilterNames: true, mutationRequests: 0,
+    exactOrder: true, keyboardPaginationFocus: true, searchReload: true, combinedNanosecondFiltersReload: true, oldestFirstPagesReloadReset: true, previousFirstPageRetained: true, narrowReflow: reflow, accessibleFilterNames: true, invalidDateDescriptionFocusRecovery: true, mutationRequests: 0,
     peakBrowserHeapBytes, pageLatencyMs: timings.map(ms => Math.round(ms)), executionStarted: false };
 }

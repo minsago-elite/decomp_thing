@@ -323,3 +323,28 @@ the corrected positive request-counter check passed alongside all existing
 syntax and diff checks passed. Unit suites were not rerun for this CSS/driver
 change; actual rendered-browser checks verify the layout. Chrome used test-only
 `--no-sandbox`. #168 and #217 remain open for their broader requirements.
+
+## Field-specific filter errors — 2026-09-05
+
+Submitted invalid filters now have a field-specific validation message, separate
+from backend failures. The affected control receives `aria-invalid`, references
+the message with `aria-describedby`, and receives focus after submission.
+Impossible dates explain the expected calendar/timezone format; reversed ranges
+identify the upper bound. Successful submission/reset removes validation state.
+An invalid draft does not fetch, alter the URL, replace the current snapshot or
+incorrectly label its rows stale. Saved invalid URLs retain the existing visible
+reset path because no valid draft can be reconstructed from unknown parameters.
+
+201 frontend tests, lint, typechecked bundle, asset checks and `distZip` passed.
+Component checks cover impossible dates, reversed-range field switching, focus,
+message association, unchanged requests/URL and reset recovery. JVM code did not
+change and JVM tests were not rerun. The packaged scale driver additionally
+checks the invalid date's description in Chrome's accessibility tree and its
+focus/recovery behavior while retaining the populated page.
+
+The packaged browser check passed, including the error's accessible description,
+field focus, unchanged collection-read count, retained rows and reset recovery:
+[`web-dashboard-filter-errors-20260905.json`](evidence/web-dashboard-filter-errors-20260905.json).
+Existing 10,000-job ordering/filter/sort and narrow reflow checks also pass.
+Chrome used explicit test-only `--no-sandbox`. This remains focused automated
+coverage, not manual assistive-technology or complete #217 qualification.

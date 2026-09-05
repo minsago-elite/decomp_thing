@@ -247,3 +247,30 @@ it('does not revive a retained first page after a continuation denies access', a
   expect(await screen.findByText('program-2.elf')).toBeTruthy();
   expect(transport.get).toHaveBeenCalledTimes(3);
 });
+
+it('identifies and focuses invalid dates without changing the current result snapshot', async () => {
+  transport.get.mockResolvedValue(page([job(1)]));
+  render(<Dashboard basePath="" />);
+  expect(await screen.findByText('program-1.elf')).toBeTruthy();
+  const after = screen.getByLabelText('Created at or after');
+  const before = screen.getByLabelText('Created before');
+  fireEvent.input(after, { target: { value: '2026-02-29T00:00:00Z' } });
+  fireEvent.click(screen.getByRole('button', { name: 'Apply filters' }));
+  expect(await screen.findByRole('alert')).toHaveProperty('id', 'job-filter-error');
+  expect(after.getAttribute('aria-invalid')).toBe('true');
+  expect(after.getAttribute('aria-describedby')).toBe('job-filter-error');
+  expect(document.activeElement).toBe(after);
+  expect(screen.queryByText(/Previously loaded rows/)).toBeNull();
+  expect(location.search).toBe('');
+  expect(transport.get).toHaveBeenCalledOnce();
+  fireEvent.input(after, { target: { value: '2026-09-05T00:00:00Z' } });
+  fireEvent.input(before, { target: { value: '2026-09-04T00:00:00Z' } });
+  fireEvent.click(screen.getByRole('button', { name: 'Apply filters' }));
+  await waitFor(() => expect(document.activeElement).toBe(before));
+  expect(after.hasAttribute('aria-invalid')).toBe(false);
+  expect(screen.getByRole('alert').textContent).toContain('must be later');
+  fireEvent.click(screen.getByRole('button', { name: 'Reset filters' }));
+  await waitFor(() => expect(screen.queryByRole('alert')).toBeNull());
+  expect(before.hasAttribute('aria-invalid')).toBe(false);
+  expect(transport.get).toHaveBeenCalledTimes(2);
+});

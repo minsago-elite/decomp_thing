@@ -2,6 +2,10 @@ export const JOB_STATUSES = ['uploaded', 'queued', 'running', 'completed', 'fail
 export type JobFilters = { search: string; status: string; createdAfter: string; createdBefore: string; limit: string; sort: string };
 export const DEFAULT_FILTERS: JobFilters = { search: '', status: '', createdAfter: '', createdBefore: '', limit: '50', sort: 'newest' };
 
+export class JobFilterError extends Error {
+  constructor(public readonly field: keyof JobFilters, message: string) { super(message); }
+}
+
 // Compare the same nanosecond precision accepted by the server's Instant parser.
 // Date.parse alone both truncates sub-millisecond fractions and normalizes bad days.
 function filterInstant(value: string): bigint | null {
@@ -26,12 +30,18 @@ export function jobFilters(search: string): JobFilters {
     if (!Object.hasOwn(DEFAULT_FILTERS, key) || params.getAll(key).length !== 1) throw new Error('Invalid filters');
     values[key as keyof JobFilters] = value;
   }
-  if (values.search.length > 256 || [...values.search].some(character => character.charCodeAt(0) < 32 || character.charCodeAt(0) === 127 || character === '\ufffd')
-    || !['50', '100', '200'].includes(values.limit) || !['newest', 'oldest'].includes(values.sort)
-    || (values.status !== '' && !(JOB_STATUSES as readonly string[]).includes(values.status))) throw new Error('Invalid filters');
-  const after = filterInstant(values.createdAfter);
-  const before = filterInstant(values.createdBefore);
-  if (after !== null && before !== null && after >= before) throw new Error('Invalid filters');
+  if (values.search.length > 256 || [...values.search].some(character => character.charCodeAt(0) < 32 || character.charCodeAt(0) === 127 || character === '\ufffd'))
+    throw new JobFilterError('search', 'Use at most 256 characters without control characters.');
+  if (!['50', '100', '200'].includes(values.limit)) throw new JobFilterError('limit', 'Choose 50, 100 or 200 jobs per page.');
+  if (!['newest', 'oldest'].includes(values.sort)) throw new JobFilterError('sort', 'Choose newest first or oldest first.');
+  if (values.status !== '' && !(JOB_STATUSES as readonly string[]).includes(values.status)) throw new JobFilterError('status', 'Choose a listed workflow state.');
+  function date(field: 'createdAfter' | 'createdBefore') {
+    try { return filterInstant(values[field]); }
+    catch { throw new JobFilterError(field, 'Enter a valid calendar date and time with a time zone, for example 2026-09-05T00:00:00Z.'); }
+  }
+  const after = date('createdAfter');
+  const before = date('createdBefore');
+  if (after !== null && before !== null && after >= before) throw new JobFilterError('createdBefore', 'Created before must be later than Created at or after.');
   return values;
 }
 
