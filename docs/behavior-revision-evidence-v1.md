@@ -132,6 +132,15 @@ paths appear separately in `projectBehaviorReportIds`. `moduleBehaviorEvidence`
 stays empty and `moduleExecutionCoverage` is `not-observed`, because a project
 comparison does not establish which individual modules executed.
 
+For an accepted module, the audit requires its manifest-bound checkpoint to use
+compiler acceptance schema 5, contain no reconstruction issues, and record exactly
+the module plan's function/global owners once each with accepted status. It also
+checks successful compilation of the current source under the profile's command.
+Unsupported schemas, missing or foreign owners, duplicate owners and contradictory
+acceptance details become `moduleCompilationEvidenceProblems` and leave the module's
+entities unresolved. These consistency checks do not authenticate an external
+reconstructor invocation or establish execution coverage.
+
 `sandboxReported` describes a checked execution request. The audit leaves
 `networkIsolationObserved` empty and states the assurance scope explicitly.
 The record's legacy `networkIsolated` fields retain the requested configuration;

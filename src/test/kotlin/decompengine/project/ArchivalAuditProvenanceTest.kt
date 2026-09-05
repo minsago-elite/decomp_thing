@@ -20,7 +20,8 @@ import kotlinx.serialization.json.jsonPrimitive
 class ArchivalAuditProvenanceTest {
     @Test
     fun `accepted flags cannot hide missing or mismatched compiler evidence`() {
-        for (change in listOf("missing", "foreign-source", "failed", "foreign-command")) {
+        for (change in listOf("missing", "foreign-source", "failed", "foreign-command", "old-schema", "future-schema",
+            "foreign-entity", "missing-entity", "duplicate-entity", "unresolved-entity", "unresolved-issue")) {
             val project = fixture(accepted = true)
             assertTrue(ArchivalProjectAuditor.audit(project).moduleCompilationEvidenceProblems.isEmpty())
             val plan = Json.parseToJsonElement(project.resolve("reports/module_plan.json").readText()).jsonObject
@@ -29,10 +30,23 @@ class ArchivalAuditProvenanceTest {
             val path = "reports/modules/$id.json"
             val checkpoint = Json.parseToJsonElement(project.resolve(path).readText()).jsonObject
             val compilation = checkpoint.getValue("compilation").jsonObject
+            val statuses = checkpoint.getValue("entityStatuses").jsonArray
             val changed = when (change) {
                 "missing" -> JsonObject(checkpoint.filterKeys { it != "compilation" })
                 "foreign-source" -> checkpoint.withField("compilation", compilation.withField("sourceSha256", JsonPrimitive("0".repeat(64))))
                 "failed" -> checkpoint.withField("compilation", compilation.withField("outcome", JsonPrimitive("failed")))
+                "old-schema" -> checkpoint.withField("schemaVersion", JsonPrimitive(4))
+                "future-schema" -> checkpoint.withField("schemaVersion", JsonPrimitive(6))
+                "foreign-entity" -> checkpoint.withField("entityStatuses", JsonArray(listOf(
+                    statuses.first().jsonObject.withField("id", JsonPrimitive("foreign-entity")))))
+                "missing-entity" -> checkpoint.withField("entityStatuses", JsonArray(emptyList()))
+                "duplicate-entity" -> checkpoint.withField("entityStatuses", JsonArray(statuses + statuses.first()))
+                "unresolved-entity" -> checkpoint.withField("entityStatuses", JsonArray(listOf(
+                    statuses.first().jsonObject.withField("status", JsonPrimitive("unresolved")))))
+                "unresolved-issue" -> checkpoint.withField("issues", JsonArray(listOf(JsonObject(mapOf(
+                    "code" to JsonPrimitive("unresolved-implementation"), "message" to JsonPrimitive("pending"),
+                    "entityIds" to JsonArray(statuses.map { it.jsonObject.getValue("id") }),
+                )))))
                 else -> checkpoint.withField("compilation", compilation.withField("command", JsonArray(listOf(JsonPrimitive("other-compiler")))))
             }
             writeBoundFile(project, path, changed.toString())
