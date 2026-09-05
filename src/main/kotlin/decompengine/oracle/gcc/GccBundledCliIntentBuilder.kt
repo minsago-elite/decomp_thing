@@ -12,7 +12,7 @@ import java.nio.file.Path
 internal object GccBundledCliIntentBuilder {
     fun build(operationId: String, engineId: String, runKind: GccCompilerEngineContainmentRunKind,
         binary: Path, profilePath: Path, archive: Path, controls: Path, journalRoot: Path, scratch: Path,
-        diskPolicy: FullTreeDiskScratchPolicy): GccBundledOperationIntent {
+        diskPolicy: FullTreeDiskScratchPolicy, cliInvocation: GccBundledCliInvocation? = null): GccBundledOperationIntent {
         require(operationId.matches(Regex("[a-f0-9]{64}")))
         require(engineId in setOf("cc1", "lto1") && runKind in setOf(
             GccCompilerEngineContainmentRunKind.FRESH_CONTROL, GccCompilerEngineContainmentRunKind.INTERRUPTED))
@@ -92,7 +92,7 @@ internal object GccBundledCliIntentBuilder {
                             artifacts += staged(GccCompilerEngineContainmentArtifactRole.EXPORTER_SOURCE, "ExportProgramModel.java", exporter)
                             val intent = GccBundledOperationIntent(operationId, engineId, runKind, artifacts, runtime,
                                 GccCompilerEngineContainmentBudgets(suite.budgets.exportWallClockMillis, suite.budgets.exportMaximumResidentBytes, 128),
-                                diskPolicy, profile)
+                                diskPolicy, profile, cliInvocation)
                             requireDirectory()
                             require(LinuxFilesystemSyscalls.directoryEntryNames(directory, 1).isEmpty())
                             DescriptorBoundAtomicStateFile.publishManifestNoReplace(directory, "boot-classpath.json", manifest, MAXIMUM_CONTROL_BYTES)

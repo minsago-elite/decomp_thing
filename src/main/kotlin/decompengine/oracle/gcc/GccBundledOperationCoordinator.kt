@@ -101,6 +101,8 @@ internal class GccBundledPreparedOperation internal constructor(
     private var completedExport: GccBundledExecutedOperation? = null
     private val completedControls = linkedMapOf<String, LinuxFileIdentity>()
     private var plannerAttempted = false
+    private var completedPlan: GccBundledPlannedOperation? = null
+    private var cliPublicationAttempted = false
 
     val definitionBytes: ByteArray
         get() = definition.copyOf()
@@ -382,10 +384,57 @@ internal class GccBundledPreparedOperation internal constructor(
                 lease.requireCurrentOperationRunRootAfterCgroupAbsence(runRoot)
                 val assessmentReceipt = journal.recordPlannerAssessment(bindWallTime(captured.canonicalBytes))
                 GccBundledPlannedOperation(executionReceipt, assessmentReceipt, captured)
-            }.also { deadline.requireCurrent() }
+            }.also { deadline.requireCurrent(); completedPlan = it }
         } catch (failure: Throwable) {
             poisoned = true
             if (failure is KotlinSystemdCgroupCommandExecutionException) pendingCleanup = failure.cleanup
+            throw failure
+        }
+    }
+
+    /** Publishes bounded result pointers under the same owner/deadline; model and plan remain on the leased scratch. */
+    @Synchronized
+    fun publishCliResult(): Path {
+        check(!closed && !poisoned && !cliPublicationAttempted)
+        val cli = checkNotNull(intent.cliInvocation) { "operation has no bound CLI output" }
+        val exported = checkNotNull(completedExport)
+        val planned = checkNotNull(completedPlan) { "operation has no completed owned plan" }
+        cliPublicationAttempted = true
+        try {
+            val deadline = checkNotNull(operationDeadline)
+            deadline.requireCurrent()
+            inputs.verify("before CLI result publication")
+            journal.verify("before CLI result publication")
+            lease.requireCurrentOperationRunRootAfterCgroupAbsence(runRoot)
+            val original = GccCompilerEngineContainmentContract.parseDefinitionForLiveController(definition)
+            val plannerControl = gccBundledPlannerControlName(intent.requestSha256, OracleArtifacts.sha256(exported.exportAssessmentReceiptBytes))
+            val document = OracleJson.canonicalBytes(JsonObject(mapOf(
+                "provider" to JsonPrimitive("gcc-bundled-cli-result-v1"), "schemaVersion" to JsonPrimitive(1),
+                "complete" to JsonPrimitive(false), "releaseEligible" to JsonPrimitive(false),
+                "operationId" to JsonPrimitive(intent.operationId), "requestSha256" to JsonPrimitive(intent.requestSha256),
+                "journal" to JsonPrimitive(journal.path.toString()),
+                "programModel" to JsonPrimitive(original.outputLease.path.resolve("reports/program_model.json").toString()),
+                "programModelSha256" to JsonPrimitive(exported.assessment.programModelSha256),
+                "modulePlan" to JsonPrimitive(original.outputLease.path.resolve(plannerControl).resolve("reports/module_plan.json").toString()),
+                "modulePlanSha256" to JsonPrimitive(OracleArtifacts.sha256(planned.planBytes)),
+                "exportReceiptSha256" to JsonPrimitive(OracleArtifacts.sha256(exported.exportAssessmentReceiptBytes)),
+                "plannerExecutionReceiptSha256" to JsonPrimitive(OracleArtifacts.sha256(planned.executionReceiptBytes)),
+                "plannerAssessmentReceiptSha256" to JsonPrimitive(OracleArtifacts.sha256(planned.plannerAssessmentReceiptBytes)),
+                "operationWallTime" to deadline.snapshot(),
+                "scratchDisposition" to JsonPrimitive("retained; release and cold recovery unqualified"),
+            )))
+            LinuxFilesystemSyscalls.openRoot(cli.options.output).use { output ->
+                cli.requireCurrent()
+                decompengine.oracle.core.DescriptorBoundAtomicStateFile.publishNoReplace(output, "result.json", document, 256 * 1024)
+                cli.requireCurrent()
+            }
+            inputs.verify("after CLI result publication")
+            journal.verify("after CLI result publication")
+            lease.requireCurrentOperationRunRootAfterCgroupAbsence(runRoot)
+            deadline.requireCurrent()
+            return cli.options.output.resolve("result.json")
+        } catch (failure: Throwable) {
+            poisoned = true
             throw failure
         }
     }
@@ -530,6 +579,11 @@ internal object GccBundledOperationCoordinator {
     ): GccBundledPreparedOperation {
         requireGccBundledOperationPath(journalRoot)
         requireGccBundledOperationPath(provisionedMount)
+        intent.cliInvocation?.let {
+            require(journalRoot == it.options.output.resolve("journal") && provisionedMount == it.options.scratch) {
+                "coordinator roots differ from bound CLI selection"
+            }
+        }
         require(journalRoot.toRealPath() == journalRoot && provisionedMount.toRealPath() == provisionedMount) {
             "GCC bundled operation roots must be canonical existing directories"
         }
