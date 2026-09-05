@@ -13,6 +13,38 @@ import kotlin.test.assertTrue
 
 class WorkspaceSnapshotLimitsTest {
     @Test
+    fun `snapshot hashing preserves valid Linux filenames for exact and recursive rules`() {
+        for (recursive in listOf(false, true)) {
+            val root = workspace()
+            val names = listOf("back\\slash", "line\nbreak", "tab\tname", "control\u0001name", "delete\u007fname")
+            names.forEach { root.resolve("src/$it").writeText("old") }
+            val operations = setOf(AgentOperation.READ_FILE, AgentOperation.WRITE_FILE)
+            val rules = if (recursive) listOf(AgentPathRule(AgentWorkspacePath("project", "src"), operations, recursive = true))
+                else names.map { AgentPathRule(AgentWorkspacePath("project", "src/$it"), operations) }
+            val request = AgentExecutionRequest("snapshot fixture", listOf(AgentWorkspaceRoot("project", root)),
+                emptyList(), AgentAccessPolicy(rules))
+            val limits = WorkspaceSnapshotLimits()
+            val before = capture(request, limits)
+            names.forEach { root.resolve("src/$it").writeText("new") }
+            val changes = before.diff(capture(request, limits), request, budget(limits))
+            assertEquals(names.size, changes.size)
+            assertTrue(changes.all { it.kind == AgentFileChangeKind.MODIFIED && it.beforeSha256 != it.afterSha256 })
+        }
+    }
+
+    @Test
+    fun `snapshot hash paths still reject absolute traversal empty and NUL segments`() {
+        val root = workspace()
+        for (path in listOf("", "/src/data", "../data", "src/../data", "src/./data", "src//data", "src/data/", "src/\u0000data")) {
+            assertFailsWith<IllegalArgumentException> {
+                decompengine.repair.hashStableRegularFile(root, path,
+                    declaredSize = { error("invalid path must not reach file accounting") },
+                    readBytes = { _, _ -> error("invalid path must not read bytes") }, cancellationCheck = {})
+            }
+        }
+    }
+
+    @Test
     fun `unsupported extended attributes are rejected without reading or exposing their values`() {
         verifyExtendedAttributeRejection("private metadata value".toByteArray())
     }
