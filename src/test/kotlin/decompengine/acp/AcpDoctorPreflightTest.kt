@@ -59,7 +59,7 @@ class AcpDoctorPreflightTest {
     @Test
     fun `invalid authentication inventories fail preflight as protocol errors with cleanup`() {
         requireLiveSandboxHost()
-        for (mode in listOf("doctor-auth-duplicate", "doctor-auth-count", "doctor-auth-blank", "doctor-auth-text", "doctor-auth-unicode")) {
+        for (mode in listOf("doctor-auth-duplicate", "doctor-auth-count", "doctor-auth-blank", "doctor-auth-text", "doctor-auth-unicode", "doctor-auth-payload")) {
             val temporary = createTempDirectory("doctor-auth-invalid-")
             val harness = factoryHarness(writeProvisioning(temporary.resolve("acp.json"), mode = mode))
             val error = assertFailsWith<AgentExecutionException> { harness.preflight() }

@@ -755,7 +755,13 @@ in place; arbitrary fragments below this threshold are not claimed to be confide
 index is local to inventory capture and is never serialized. Full-payload commitments remain unchanged. Truncation preserves UTF-16
 surrogate pairs. Redaction checks its 16,384-unit working-text limit after every replacement, before
 another replacement can expand inserted markers; exceeding it produces an omission marker. A single
-replacement can transiently allocate up to ten times that limit. Unknown variants remain
+replacement can transiently allocate up to ten times that limit. The complete SDK-serialized
+method array, including retained variant-specific fields and extension metadata, must also fit
+64 KiB of canonical JSON, 16 levels, 4096 nodes, 16 KiB per string and 64 KiB total string bytes.
+Excess payloads fail preflight as invalid authentication inventories with normal cleanup. The bound
+applies after the existing transport frame and SDK decoding limits; it is not a raw-input parser limit.
+Unknown variants remain
+Unknown variants remain
 explicitly `unknown`, and every method currently reports `loginSupported=false`: this inventory
 is not an authentication action or grant. The printable doctor descriptor includes the count,
 normalized inventory digest and logout advertisement/support flags. Default object string representations omit method IDs and previews.
