@@ -32,6 +32,7 @@ data class ArchivalAudit(
     val moduleCompilationEvidenceProblems: Map<String, String> = emptyMap(),
     val requiredCorpusSha256: List<String> = emptyList(),
     val observedPortableCorpusSha256: List<String> = emptyList(),
+    val recoveryAssessment: JsonObject? = null,
 ) {
     val provenanceComplete: Boolean get() = missingModelProvenance.isEmpty() && missingSourceProvenance.isEmpty()
     val universalEquivalenceClaim: Boolean = false
@@ -39,6 +40,7 @@ data class ArchivalAudit(
     fun toJson(): String = """
         {
           "entityCount": $entityCount,
+          "recoveryAssessment": ${recoveryAssessment ?: "null"},
           "provenanceComplete": $provenanceComplete,
           "missingModelProvenance": [${missingModelProvenance.sorted().joinToString(",") { JsonPrimitive(it).toString() }}],
           "missingSourceProvenance": [${missingSourceProvenance.sorted().joinToString(",") { JsonPrimitive(it).toString() }}],
@@ -58,7 +60,7 @@ data class ArchivalAudit(
           "behaviorEvidenceProblems": {${behaviorEvidenceProblems.toSortedMap().entries.joinToString(",") { (path, problem) -> "${JsonPrimitive(path)}:${JsonPrimitive(problem)}" }}},
           "unresolvedBehaviorReportIds": [${unresolvedBehaviorReportIds.sorted().joinToString(",") { JsonPrimitive(it).toString() }}],
           "universalEquivalenceClaim": false,
-          "limitation": "Confidence is bounded by recovered structure and observed behavior; untested behavior remains unresolved."
+          "limitation": "Extraction, compilation and local behavior observations do not establish calibrated recovery accuracy; untested behavior remains unresolved."
         }
     """.trimIndent() + "\n"
 }
@@ -306,6 +308,7 @@ object ArchivalProjectAuditor {
             moduleCompilationEvidenceProblems = compilationProblems,
             requiredCorpusSha256 = requiredCorpora.sorted(),
             observedPortableCorpusSha256 = observedCorpora.toList(),
+            recoveryAssessment = model.unassessedRecoveryAssessment(sha256(modelText.toByteArray(Charsets.UTF_8))),
         )
         require(readStableRegularFile(projectDir, "source_tree_manifest.json", maximumFileBytes).sha256 == manifestSnapshot.sha256) {
             "audit manifest changed during verification"
