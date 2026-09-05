@@ -99,7 +99,11 @@ fun renderJob(job: Job, sourceTree: SourceTreeView? = null, sourceTreeUnavailabl
                   event.revisionId || '', event.phase || event.kind, event.role || '',
                   event.status || event.stopReason || event.failureKind || event.decision || '',
                   event.acceptedRevisionSha256 ? 'accepted source ' + event.acceptedRevisionSha256 : '',
-                  event.text || ''].filter(value => value !== '').join(' · ');
+                  event.text || '',
+                  ...[['inputTokens', 'input tokens'], ['outputTokens', 'output tokens'],
+                    ['cachedInputTokens', 'cached input tokens'], ['toolCalls', 'tool calls'],
+                    ['wallClock', 'elapsed']].filter(([key]) => event[key] !== undefined && event[key] !== null)
+                    .map(([key, label]) => label + ': ' + event[key])].filter(value => value !== '').join(' · ');
                 list.append(item);
               }
               document.querySelector('#agent-event-gap').textContent = snapshot.truncated
@@ -176,7 +180,11 @@ private fun renderAgentProgress(job: Job): String {
             event.text("phase").ifBlank { event.text("kind") }, event.text("role"),
             event.text("status").ifBlank { event.text("stopReason") }.ifBlank { event.text("failureKind") }
                 .ifBlank { event.text("decision") },
-            event.text("acceptedRevisionSha256").let { if (it.isBlank()) "" else "accepted source $it" }, event.text("text"))
+            event.text("acceptedRevisionSha256").let { if (it.isBlank()) "" else "accepted source $it" }, event.text("text"),
+            listOf("inputTokens" to "input tokens", "outputTokens" to "output tokens",
+                "cachedInputTokens" to "cached input tokens", "toolCalls" to "tool calls", "wallClock" to "elapsed")
+                .mapNotNull { (key, label) -> event.text(key).takeIf { it.isNotBlank() }?.let { "$label: $it" } }
+                .joinToString(" · "))
             .filter(String::isNotBlank).joinToString(" · ")
         "<li>${summary.escapeHtml()}</li>"
     }

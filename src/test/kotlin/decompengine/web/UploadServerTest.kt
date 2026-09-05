@@ -174,6 +174,13 @@ class UploadServerTest {
                     accessPolicy = decompengine.agent.AgentAccessPolicy(emptyList())))
                 task.event(decompengine.agent.AgentMessageEvent(0, "thought", decompengine.agent.AgentMessageRole.THOUGHT,
                     "checking fixture", completed = true))
+                task.complete(decompengine.agent.AgentExecutionReceipt(
+                    decompengine.agent.AgentExecutionRequestBinding.capture(decompengine.agent.AgentExecutionRequest(
+                        "fixture", listOf(decompengine.agent.AgentWorkspaceRoot("project", reports)),
+                        accessPolicy = decompengine.agent.AgentAccessPolicy(emptyList()))),
+                    decompengine.agent.AgentExecutionOutcome.Returned(decompengine.agent.AgentExecutionResult(
+                        decompengine.agent.AgentStopReason.COMPLETED,
+                        usage = decompengine.agent.AgentUsage(cachedInputTokens = 0, wallClock = java.time.Duration.ofMillis(125))))))
             }
             val response = request(server, "GET", "/api/jobs/$jobId/events")
             assertEquals(200, response.status)
@@ -186,6 +193,8 @@ class UploadServerTest {
             assertTrue(page.contains("Accepted revisions are recorded separately"))
             val rows = page.substringAfter("<ol id=\"agent-event-list\"").substringBefore("</ol>")
             assertTrue(rows.contains("message · thought"))
+            assertTrue(rows.contains("cached input tokens: 0"))
+            assertTrue(rows.contains("elapsed: PT0.125S"))
             assertTrue(rows.contains("run_00000001"))
             assertTrue(rows.contains("revision-one"))
             assertTrue(rows.contains("provisional") && rows.contains("exhausted"))

@@ -72,6 +72,13 @@ its `displayOnly` flag and counters must never substitute for complete required 
 
 Focused verification:
 
+Final receipt observations preserve every available `AgentUsage` field: input, output and cached
+input tokens, tool calls and wall-clock duration. Missing fields remain absent rather than becoming
+zero. Durations use ISO-8601 text, preserving subsecond precision without overflowing a millisecond
+conversion. Browser rows label these observations on refresh and incremental updates. They remain
+invocation observations, not aggregate budget accounting, provider billing or validation evidence.
+Live ACP context occupancy and cost updates are separate measurements and are not yet projected.
+
 ACP `agent_thought_chunk` updates use message events with the distinct `thought` role. They share
 the bounded whole-message redaction and omission rules, but do not contribute to the assistant
 result summary. Buffer identity includes both role and peer message ID, so reused IDs cannot mix

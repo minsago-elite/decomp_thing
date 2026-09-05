@@ -9,6 +9,34 @@ import kotlin.test.*
 
 class AgentProgressJournalTest {
     @Test
+    fun `completion preserves available usage including zero cache and exact elapsed duration`() {
+        val root = createTempDirectory("progress-usage-")
+        val request = request(root)
+        AgentProgressJournal(root, "repair").use { journal ->
+            journal.beginTask("with-usage", request).complete(AgentExecutionReceipt(
+                AgentExecutionRequestBinding.capture(request), AgentExecutionOutcome.Returned(
+                    AgentExecutionResult(AgentStopReason.NO_CHANGES, usage = AgentUsage(
+                        inputTokens = 12, outputTokens = 3, cachedInputTokens = 0, toolCalls = 2,
+                        wallClock = java.time.Duration.ofSeconds(4, 123456789))))))
+            journal.beginTask("without-usage", request).complete(AgentExecutionReceipt(
+                AgentExecutionRequestBinding.capture(request), AgentExecutionOutcome.Returned(
+                    AgentExecutionResult(AgentStopReason.NO_CHANGES))))
+        }
+        val finished = AgentProgressJournal.read(root)!!.getValue("events").jsonArray.map { it.jsonObject }.filter {
+            it["kind"]?.jsonPrimitive?.content == "agent_finished"
+        }
+        assertEquals(12L, finished[0].getValue("inputTokens").jsonPrimitive.long)
+        assertEquals(3L, finished[0].getValue("outputTokens").jsonPrimitive.long)
+        assertEquals(0L, finished[0].getValue("cachedInputTokens").jsonPrimitive.long)
+        assertEquals(2, finished[0].getValue("toolCalls").jsonPrimitive.int)
+        assertEquals("PT4.123456789S", finished[0].getValue("wallClock").jsonPrimitive.content)
+        listOf("inputTokens", "outputTokens", "cachedInputTokens", "toolCalls", "wallClock").forEach {
+            assertFalse(it in finished[1])
+        }
+        assertTrue(finished.all { it.getValue("validationPending").jsonPrimitive.boolean })
+    }
+
+    @Test
     fun `source sequence loss suppresses incomplete message previews`() {
         val root = createTempDirectory("progress-message-loss-")
         AgentProgressJournal(root, "reconstruction", listOf("private-credential"), maximumQueuedEvents = 1024).use { journal ->

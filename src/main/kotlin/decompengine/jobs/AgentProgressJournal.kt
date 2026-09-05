@@ -197,7 +197,9 @@ class AgentProgressJournal(
                             outcome.result.usage?.let { usage ->
                                 usage.inputTokens?.let { put("inputTokens", it) }
                                 usage.outputTokens?.let { put("outputTokens", it) }
+                                usage.cachedInputTokens?.let { put("cachedInputTokens", it) }
                                 usage.toolCalls?.let { put("toolCalls", it) }
+                                usage.wallClock?.let { put("wallClock", it.toString()) }
                             }
                         }
                         is AgentExecutionOutcome.Failed -> {
