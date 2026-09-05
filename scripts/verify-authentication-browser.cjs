@@ -188,9 +188,6 @@ const { chromium } = require(process.env.DECOMP_PLAYWRIGHT_MODULE || 'playwright
   fs.writeFileSync(path.join(output,'result.json'), JSON.stringify({passed:true,
 <<<<<<< HEAD
     browser:browserVersion, starts, polls, cancellations, scenarios:['production stylesheet','explicit action','previews','text escaping','failure','retry','empty inventory','advertised logout','cancellation','HTTP cancellation retry','network cancellation retry','late cancellation acknowledgement','HTTP polling recovery','network polling recovery','invalid JSON polling recovery','attach to existing inspection','recover missing admission identity','replacement inspection rejected','restart after replacement rejection','lost admission recovered by polling','lost admission confirmed idle'],
-=======
-    browser:browser.version(), starts, polls, cancellations, scenarios:['production stylesheet','explicit action','previews','text escaping','failure','retry','empty inventory','cancellation','HTTP cancellation retry','network cancellation retry','late cancellation acknowledgement','HTTP polling recovery','network polling recovery','invalid JSON polling recovery','attach to existing inspection'],
->>>>>>> 4594862b (Render the production stylesheet in authentication browser evidence (#274) [skip ci])
     renderedCssSha256:require('node:crypto').createHash('sha256').update(css).digest('hex'),
     renderedHtmlSha256:require('node:crypto').createHash('sha256').update(html).digest('hex')},null,2)+'\n');
 })().catch(error=>{console.error(error);process.exitCode=1;});
