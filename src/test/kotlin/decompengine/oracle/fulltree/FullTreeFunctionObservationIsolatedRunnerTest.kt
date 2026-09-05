@@ -1341,6 +1341,8 @@ class FullTreeFunctionObservationIsolatedFixtureRunnerTest {
                     val liveObservationCommands = mutableListOf<List<String>>()
                     val liveBusctlCommands = mutableListOf<List<String>>()
                     val liveBusctlResults = mutableListOf<String>()
+                    var registrationQueries = 0
+                    var registrationDiagnostic = "registration not observed"
                     var snapshotDiagnostics = "snapshot pair not observed"
                     val liveObserver = FullTreeFunctionObservationColdUnitAbsenceObserver.openWithTestObserver(
                         context.binding,
@@ -1359,6 +1361,11 @@ class FullTreeFunctionObservationIsolatedFixtureRunnerTest {
                                 exitCode: Int,
                                 boundedOutput: String,
                             ) {
+                                if (unitName == context.binding.unitName && label == "manager bus registration") {
+                                    registrationQueries += 1
+                                    registrationDiagnostic = "$label exit=$exitCode output=${JsonPrimitive(boundedOutput)}"
+                                    return
+                                }
                                 if (unitName == context.binding.unitName && liveBusctlResults.size < 14) {
                                     liveBusctlResults += "$label exit=$exitCode output=${JsonPrimitive(boundedOutput)}"
                                 }
@@ -1379,7 +1386,8 @@ class FullTreeFunctionObservationIsolatedFixtureRunnerTest {
                     assertEquals(
                         FullTreeFunctionObservationColdUnitAttachmentObservationOutcome.SYSTEMD_IDENTITY_CANDIDATE,
                         liveObserver.observeUnitAttachment(historical),
-                        "Cold attachment observation: $snapshotDiagnostics\n${liveBusctlResults.joinToString("\n")}",
+                        "Cold attachment observation: $snapshotDiagnostics\n" +
+                            "$registrationDiagnostic (queries=$registrationQueries)\n${liveBusctlResults.joinToString("\n")}",
                     )
                     val hardenedBusctlPrefix = listOf(
                         "--user",
@@ -1389,7 +1397,17 @@ class FullTreeFunctionObservationIsolatedFixtureRunnerTest {
                         "--allow-interactive-authorization=no",
                         "--timeout=2",
                     )
-                    assertEquals(14, liveBusctlCommands.size)
+                    assertTrue(registrationQueries in 1..81)
+                    assertEquals(14, liveBusctlCommands.size - registrationQueries)
+                    assertEquals(14, liveBusctlResults.size)
+                    val registrationArguments = listOf(
+                        "call", "org.freedesktop.DBus", "/org/freedesktop/DBus",
+                        "org.freedesktop.DBus", "NameHasOwner", "s", "org.freedesktop.systemd1",
+                    )
+                    assertEquals(
+                        registrationQueries,
+                        liveBusctlCommands.count { it.drop(hardenedBusctlPrefix.size) == registrationArguments },
+                    )
                     assertTrue(liveBusctlCommands.all { it.take(hardenedBusctlPrefix.size) == hardenedBusctlPrefix })
                     assertEquals(
                         2,

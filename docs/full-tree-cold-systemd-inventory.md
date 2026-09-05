@@ -58,3 +58,28 @@ and which snapshot fields changed. These test-only observers cannot substitute a
 command result or classification, and production construction installs neither.
 Nonzero commands still produce a conservative CHANGED observation; diagnostics
 never authorize retry, loading a unit, START, adoption, mutation or release.
+
+## Session-bus registration before attachment snapshots
+
+An already running user manager can answer systemctl through its private socket
+before its well-known name is registered on the session bus. The reviewed
+[systemd v255 API setup](https://github.com/systemd/systemd/blob/v255/src/core/dbus.c)
+requests `org.freedesktop.systemd1` asynchronously. A local first busctl GetUnit
+query failed with that name absent while the next lookup succeeded. This is a
+confirmed startup condition, not yet proof of the hosted CHANGED failure cause.
+
+Before either attachment snapshot, the observer now asks only the bus daemon's
+`NameHasOwner` method whether that manager name is registered. Successful false
+responses may be polled at 25 ms intervals under one two-second admission deadline
+and an independent 81-query ceiling. Each command receives the remaining budget;
+a reply arriving at or after the deadline cannot admit observation. Transport
+failure, nonzero exit status, malformed replies and interruption abort immediately.
+The existing command termination/output-reader bounds still apply to cleanup.
+
+This availability preflight does not authenticate a manager or grant any unit,
+cgroup or worker authority. Auto-start and interactive authorization remain
+disabled. No identity lookup or CHANGED attachment snapshot is retried; the full
+two-snapshot classifier and invocation-bound property checks are unchanged.
+The test retains only the latest registration response and its bounded query
+count, separately from the 14 identity-command results. No systemd lifetime,
+BOOT/START timeout, journal transition, receipt format or release gate changes.
