@@ -105,6 +105,57 @@ class AcpExecutionSchedulerTest {
     }
 
     @Test
+    fun `blocked caller observers cannot hold scheduler capacity or block other work`() = withWorkers { workers ->
+        for (blockCancellation in listOf(false, true)) {
+            val scheduler = scheduler(active = 2)
+            val first = scheduler.admit("workspace-a")
+            val entered = CountDownLatch(1)
+            val release = CountDownLatch(1)
+            val calls = AtomicInteger()
+            fun observer(): Boolean {
+                if (calls.incrementAndGet() == 2) {
+                    entered.countDown()
+                    check(release.await(5, TimeUnit.SECONDS))
+                }
+                return false
+            }
+            val waiting = workers.submit(Callable {
+                scheduler.acquire("workspace-a",
+                    if (blockCancellation) AgentCancellation { observer() } else AgentCancellation.NONE,
+                    if (blockCancellation) ({ false }) else ({ observer() }))
+            })
+            try {
+                assertTrue(entered.await(2, TimeUnit.SECONDS))
+                // The waiter remains queued while its observer blocks. Releasing the first
+                // permit and reading scheduler state must remain responsive independently.
+                val independent = workers.submit(Callable { scheduler.admit("workspace-b").finish() })
+                independent.get(1, TimeUnit.SECONDS)
+                val releaseFirst = workers.submit(Callable { first.finish(); scheduler.snapshot() })
+                assertEquals(AcpSchedulingSnapshot(0, 1, 0, 0), releaseFirst.get(1, TimeUnit.SECONDS))
+                release.countDown()
+                assertNotNull(waiting.get(2, TimeUnit.SECONDS)).finish()
+                scheduler.admit("workspace-c").finish()
+                assertEmpty(scheduler)
+            } finally {
+                release.countDown()
+                first.finish()
+            }
+        }
+    }
+
+    @Test
+    fun `observer time consumes queue deadline even with spare capacity`() {
+        val scheduler = scheduler(active = 1, queueWait = Duration.ofMillis(25))
+        assertSchedulingFailure(AgentFailureKind.TIMEOUT, "queueDeadline") {
+            scheduler.acquire("workspace", AgentCancellation {
+                Thread.sleep(40)
+                false
+            }) { false }
+        }
+        assertEmpty(scheduler)
+    }
+
+    @Test
     fun `pre-cancelled requests never acquire capacity`() {
         val scheduler = scheduler(active = 1)
         assertNull(scheduler.acquire("workspace", AgentCancellation { true }) { false })

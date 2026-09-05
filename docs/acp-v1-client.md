@@ -248,7 +248,13 @@ launch. At most four invocations run at once, with one active invocation per pri
 holds at most 64 waiting invocations overall and eight per workspace. Eligible waiters run in FIFO order; a waiter
 whose workspace is already active cannot prevent another workspace from using a free global slot.
 
-Waiting consumes the original execution wall-clock budget and has a separate 30-second maximum. Cancellation and
+Waiting consumes the original execution wall-clock budget and has a separate 30-second maximum.
+Caller-provided cancellation/deadline observers run outside the shared scheduler lock. Initial lock
+acquisition uses bounded polling slices, and elapsed observer/lock time is checked against the queue
+deadline before admission, even if capacity is available. Observer callbacks must still return promptly:
+the scheduler cannot preempt arbitrary caller code, and a blocked eligible FIFO head can delay later
+waiters. A blocked workspace observer does not hold the mutex needed for other eligible work, state
+inspection or permit release. Cancellation and
 thread interruption remove a queued invocation without launching a process. Queue overflow, elapsed deadlines,
 and unavailable cleanup capacity return typed invocation-bound receipts with scheduler phase/reason metadata.
 The scheduler creates no threads or secondary executor queue and does not retry work automatically. Active turns
