@@ -154,6 +154,7 @@ class UploadServer(
     private val server = HttpServer.create(InetSocketAddress(host, port), 0)
     private val store = JobStore(dataDir)
     private val sourceEvidence = WebSourceEvidence(store, sourceProfiles)
+    private val archiveEvidence = WebArchiveEvidence(store, sourceEvidence)
     private val ownedExecutor: ExecutorService? = if (executor == null) {
         Executors.newFixedThreadPool(2) { runnable ->
             Thread(runnable, "decomp-web-analysis").apply { isDaemon = true }
@@ -283,7 +284,8 @@ class UploadServer(
 
     private fun handleJob(exchange: HttpExchange, jobId: String) {
         val job = store.get(jobId)
-        val source = runCatching { sourceEvidence.read(jobId).view() }
+        val source = runCatching { archiveEvidence.read(jobId).source }
+            .recoverCatching { sourceEvidence.read(jobId).view() }
         exchange.sendHtml(200, renderJob(job, source.getOrNull(), source.isFailure))
     }
 
@@ -294,16 +296,30 @@ class UploadServer(
             "source path must remain inside the generated tree"
         }
         val source = sourceEvidence.read(jobId)
+        val text = source.text(normalized)
+        val currentBuild = runCatching { archiveEvidence.read(jobId) }.getOrNull()
         exchange.sendHtml(200, renderSourceFile(
             store.get(jobId),
             normalized,
-            source.text(normalized),
+            text,
             source.manifestDocument,
             source.confidence,
+            currentBuild?.manifestDocument == source.manifestDocument,
         ))
     }
 
     private fun handleArtifact(exchange: HttpExchange, jobId: String, relativePath: String) {
+        if (relativePath == WebArchiveEvidence.ARCHIVE_PATH) {
+            val expected = exchange.requestURI.rawQuery?.let { query ->
+                require(query.startsWith("sha256=") && '&' !in query) { "archive query must contain only one SHA-256 digest" }
+                decode(query.removePrefix("sha256="))
+            }
+            val verified = archiveEvidence.read(jobId, expected)
+            exchange.responseHeaders.add("Content-Disposition", "attachment; filename=\"source-tree.zip\"")
+            exchange.responseHeaders.add("ETag", "\"${verified.sha256}\"")
+            exchange.sendBytes(200, verified.bytes, "application/zip")
+            return
+        }
         val artifact = store.readArtifact(jobId, relativePath, MAX_ARTIFACT_BYTES)
         val name = Path.of(relativePath).fileName
         exchange.responseHeaders.add("Content-Disposition", "attachment; filename=\"${name.toString().replace("\"", "")}\"")

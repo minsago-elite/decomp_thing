@@ -206,6 +206,16 @@ object ArchivalPackager {
 object ArchivalBundleVerifier {
     private const val HASH_MANIFEST = "ARCHIVE_MANIFEST.sha256"
 
+    internal fun extractAndVerifySnapshot(
+        archiveBytes: ByteArray,
+        targetDir: Path,
+        limits: ArchivalBundleLimits,
+        profile: ReconstructionProfile,
+        maximumPathDepth: Int,
+    ): List<Path> = archiveBytes.inputStream().use { input ->
+        extractAndVerifyInternal(input, targetDir, limits, profile, maximumPathDepth, strictControlJson = true).paths
+    }
+
     @JvmOverloads
     fun extractAndVerify(
         archivePath: Path,
@@ -256,7 +266,10 @@ object ArchivalBundleVerifier {
         targetDir: Path,
         limits: ArchivalBundleLimits,
         profile: ReconstructionProfile,
+        maximumPathDepth: Int = 2048,
+        strictControlJson: Boolean = false,
     ): VerifiedArchiveExtraction {
+        require(maximumPathDepth in 1..2048) { "archive path depth bound is invalid" }
         val targetBase = targetDir.toAbsolutePath().normalize()
         val targetExisted = Files.exists(targetBase, LinkOption.NOFOLLOW_LINKS)
         require(!Files.isSymbolicLink(targetBase)) { "archive target must not be a symbolic link" }
@@ -287,6 +300,7 @@ object ArchivalBundleVerifier {
                     require(!entry.isDirectory) { "archive contains directory entries" }
                     val normalizedName = entry.name
                     validateRelativePath(normalizedName)
+                    require(normalizedName.split('/').size <= maximumPathDepth) { "archive path exceeds its depth bound" }
                     if (normalizedName != HASH_MANIFEST) rejectPrivateOrCachedPath(normalizedName)
                     require(normalizedName !in seen && seenPortable.add(portablePathKey(normalizedName))) {
                         "archive contains a duplicate or non-portable colliding path: ${entry.name}"
@@ -336,6 +350,12 @@ object ArchivalBundleVerifier {
             require(seen == expected.keys + HASH_MANIFEST) { "archive entries do not match the hash manifest" }
             expected.forEach { (relative, hash) ->
                 require(digestFile(staging.resolve(relative)) == hash) { "archive payload hash mismatch: $relative" }
+            }
+            if (strictControlJson) {
+                for (relative in listOf("source_tree_manifest.json", "reports/build_contract.json", "reports/program_model.json")) {
+                    val snapshot = decompengine.repair.readStableRegularFile(staging, relative, 4L * 1024 * 1024)
+                    decompengine.oracle.core.OracleJson.parse(snapshot.bytes)
+                }
             }
             validateSuccessfulBuild(staging, requireArtifact = false)
             val payload = expected.map { (relative, hash) ->

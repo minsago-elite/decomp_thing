@@ -3,6 +3,9 @@ package decompengine.jobs
 import decompengine.binary.ElfMetadata
 import decompengine.binary.ElfMetadataReader
 import decompengine.binary.InvalidElfException
+import decompengine.acp.LinuxDescriptor
+import decompengine.acp.LinuxFileIdentity
+import decompengine.acp.LinuxFilesystemSyscalls
 import decompengine.oracle.core.OracleJson
 import decompengine.repair.StableRegularFile
 import decompengine.repair.readStableRegularFile
@@ -173,6 +176,57 @@ class JobStore(root: Path) {
         } catch (_: IOException) {
             throw JobStoreException("job input is unavailable or its path changed")
         }
+    }
+
+    internal fun sourceArchiveInventory(jobId: String): Map<String, LinuxFileIdentity> {
+        jobDirectory(jobId)
+        val inventory = sortedMapOf<String, LinuxFileIdentity>()
+        var entries = 1
+        var regularFiles = 0
+        fun visit(directory: LinuxDescriptor, prefix: String, depth: Int) {
+            require(depth <= 30) { "archive source inventory exceeds its depth bound" }
+            inventory[prefix] = directory.identity
+            val names = LinuxFilesystemSyscalls.directoryEntryNames(directory, 100_001 - entries).sorted()
+            for (name in names) {
+                require(++entries <= 100_000) { "archive source inventory exceeds its entry bound" }
+                val relative = if (prefix.isEmpty()) name else "$prefix/$name"
+                val selected = requireNotNull(LinuxFilesystemSyscalls.openPathAtOrNull(directory.fd, name)) {
+                    "archive source entry disappeared"
+                }
+                selected.use { entry ->
+                    require(!entry.identity.isSymbolicLink) { "archive source inventory contains a linked entry" }
+                    if (relative == "build") {
+                        require(entry.identity.isDirectory) { "archive build root is not a directory" }
+                    } else if (entry.identity.isDirectory) {
+                        LinuxFilesystemSyscalls.openDirectoryAt(directory.fd, name).use { child ->
+                            require(child.identity == entry.identity) { "archive source directory changed" }
+                            visit(child, relative, depth + 1)
+                        }
+                    } else {
+                        require(entry.identity.isRegularFile) { "archive source inventory contains a nonregular entry" }
+                        inventory[relative] = entry.identity
+                        require(++regularFiles <= 2048) {
+                            "archive source inventory exceeds its file-count bound"
+                        }
+                    }
+                }
+            }
+            require(names == LinuxFilesystemSyscalls.directoryEntryNames(directory, 100_000).sorted() &&
+                directory.identity == LinuxFilesystemSyscalls.identity(directory.fd)
+            ) { "archive source inventory changed during enumeration" }
+        }
+        try {
+            LinuxFilesystemSyscalls.openRoot(root).use { storeRoot ->
+                LinuxFilesystemSyscalls.openDirectoryAt(storeRoot.fd, jobId).use { job ->
+                    LinuxFilesystemSyscalls.openDirectoryAt(job.fd, "reports").use { reports ->
+                        LinuxFilesystemSyscalls.openDirectoryAt(reports.fd, "source-tree").use { source -> visit(source, "", 0) }
+                    }
+                }
+            }
+        } catch (_: IOException) {
+            throw JobStoreException("archive source inventory is unavailable or changed")
+        }
+        return inventory
     }
 
     @Synchronized
