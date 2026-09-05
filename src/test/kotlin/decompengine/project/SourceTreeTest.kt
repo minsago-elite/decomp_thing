@@ -35,6 +35,88 @@ import kotlinx.serialization.json.jsonPrimitive
 
 class SourceTreeTest {
     @Test
+    fun `interface changes invalidate transitive consumers and resume preserves completed revisions`() {
+        val functions = listOf(
+            RecoveredFunction("leaf", "leaf", 1u, "int leaf(void)"),
+            RecoveredFunction("middle", "middle", 2u, "int middle(void)", calls = setOf("leaf")),
+            RecoveredFunction("root", "root", 3u, "int root(void)", calls = setOf("middle")),
+            RecoveredFunction("unrelated", "unrelated", 4u, "int unrelated(void)"),
+        )
+        val model = RecoveredProgramModel(inputSha256 = "input", functions = functions)
+        val overrides = functions.associate { it.id to it.id }
+        val project = createTempDirectory("source-transitive-resume-")
+        val calls = mutableListOf<String>()
+        var interruptRoot = false
+        val reconstructor = object : ModuleReconstructor {
+            override fun cacheIdentity() = "transitive-resume-test"
+            override fun reconstruct(request: ModuleReconstructionRequest): ReconstructedModule {
+                calls += request.module.id
+                if (interruptRoot && request.module.id == "root") {
+                    throw ModuleReconstructionInterruptedException("root", AgentStopReason.CANCELLED, "test checkpoint interruption")
+                }
+                val function = request.model.functions.single { it.id == request.module.functionIds.single() }
+                val source = "#include \"modules/${request.module.id}.h\"\n/* ${function.id} */\n${function.prototype} { return 1; }\n"
+                return ReconstructedModule(source, "scripted", sha256(source.toByteArray()))
+            }
+        }
+        SourceTreeGenerator.generate(model, project, reconstructor = reconstructor, overrides = overrides)
+        assertEquals(setOf("leaf", "middle", "root", "unrelated"), calls.toSet())
+        val unrelatedCheckpoint = project.resolve("reports/modules/unrelated.json").readText()
+        val changed = model.copy(functions = functions.map { if (it.id == "leaf") it.copy(prototype = "long leaf(void)") else it })
+        calls.clear()
+        interruptRoot = true
+        assertFailsWith<ModuleReconstructionInterruptedException> {
+            SourceTreeGenerator.generate(changed, project, reconstructor = reconstructor, overrides = overrides)
+        }
+        assertEquals(listOf("leaf", "middle", "root"), calls)
+        val completed = listOf("leaf", "middle").associateWith { project.resolve("reports/modules/$it.json").readText() }
+        calls.clear()
+        interruptRoot = false
+        val manifest = SourceTreeGenerator.generate(changed, project, reconstructor = reconstructor, overrides = overrides)
+        assertEquals(listOf("root"), calls)
+        assertTrue(manifest.unresolvedImplementationIds.isEmpty())
+        completed.forEach { (id, bytes) -> assertEquals(bytes, project.resolve("reports/modules/$id.json").readText()) }
+        assertEquals(unrelatedCheckpoint, project.resolve("reports/modules/unrelated.json").readText())
+        val confidence = Json.parseToJsonElement(project.resolve("reports/confidence.json").readText()).jsonObject
+        confidence.getValue("modules").jsonArray.forEach { element ->
+            val revision = element.jsonObject.getValue("revisionEvidence").jsonObject
+            for ((pathField, hashField) in listOf("sourcePath" to "sourceSha256", "checkpointPath" to "checkpointSha256")) {
+                val bytes = project.resolve(revision.getValue(pathField).jsonPrimitive.content).readText().toByteArray()
+                assertEquals(sha256(bytes), revision.getValue(hashField).jsonPrimitive.content)
+            }
+        }
+        assertEquals(0, MakeProjectBuilder.build(project).returnCode)
+    }
+
+    @Test
+    fun `cyclic interface dependencies invalidate together and stabilize on resume`() {
+        val functions = listOf(
+            RecoveredFunction("left", "left", 1u, "int left(void)", calls = setOf("right")),
+            RecoveredFunction("right", "right", 2u, "int right(void)", calls = setOf("left")),
+            RecoveredFunction("unrelated", "unrelated", 3u, "int unrelated(void)"),
+        )
+        val model = RecoveredProgramModel(inputSha256 = "input", functions = functions)
+        val overrides = functions.associate { it.id to it.id }
+        val project = createTempDirectory("source-cycle-interfaces-")
+        val calls = mutableListOf<String>()
+        val reconstructor = ModuleReconstructor { request ->
+            calls += request.module.id
+            validReconstructor().reconstruct(request)
+        }
+        SourceTreeGenerator.generate(model, project, reconstructor = reconstructor, overrides = overrides)
+        val changed = model.copy(functions = functions.map {
+            if (it.id == "left") it.copy(name = "left_updated", prototype = "int left_updated(void)") else it
+        })
+        calls.clear()
+        SourceTreeGenerator.generate(changed, project, reconstructor = reconstructor, overrides = overrides)
+        assertEquals(setOf("left", "right"), calls.toSet())
+        assertEquals(2, calls.size)
+        calls.clear()
+        SourceTreeGenerator.generate(changed, project, reconstructor = reconstructor, overrides = overrides)
+        assertTrue(calls.isEmpty())
+    }
+
+    @Test
     fun `accepted implementations retain unresolved recovery evidence across resume`() {
         val recovered = model().let { original -> original.copy(
             functions = original.functions.map { it.copy(status = RecoveryStatus.PARTIAL) },
