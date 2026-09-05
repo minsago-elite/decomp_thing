@@ -3,8 +3,10 @@
 `GccBundledOperationCoordinator.prepareNew` composes authenticated input files,
 the independent BOOT deployment reference, the retained application-bundled
 Ghidra tree, an external operation journal and a genuine dedicated-ext4 lease.
-It returns an opaque `GccBundledPreparedOperation`, not a launch or result
-capability. `complete`, `startAuthorized` and `releaseEligible` remain false.
+It returns an opaque `GccBundledPreparedOperation`. Preparation alone does not
+authorize START; `complete`, `startAuthorized` and `releaseEligible` remain false.
+Its one-shot `execute()` performs the additional contained fresh-run admission
+described below. It does not support interruption, resume or release.
 
 This is separate from the historical path-based GCC BOOT controller. That
 controller's caller-populated output directory and capacity checks are not
@@ -64,23 +66,75 @@ Ordinary-directory scratch rejection may leave an intent-only journal because
 the journal-before-mount lock order is deliberate; it creates no lease or
 prepared evidence. No cold adoption or retry through ambiguous residue exists.
 
-## Lifetime and remaining execution boundary
+## Lifetime and execution boundary
 
 The prepared owner retains inputs, both journal locks, the dedicated mount/lease
 and the opaque run-root token. Revalidation checks the complete input/journal
 bindings and exact empty run layout. Validation failures poison further use.
-`close()` independently closes resources and **abandons the lease for recovery**;
-it preserves every lease/run/journal member and is not successful release.
+`close()` first retries any retained exact-process cleanup. If absence remains
+unproved it retains the lease, inputs and journal for another cleanup attempt.
+After absence, or if execution was never launched, it independently closes
+resources and **abandons the lease for recovery**. It preserves every
+lease/run/journal member and is not successful release.
 
 The deployment commitment binds BOOT classpath and Ghidra reference/runtime
-identities. Preparation does not yet authenticate the complete Java/system/native
-launch configuration or grant an executable namespace. A distinct authority-
-backed keeper must retain that closure and consume this disk ownership before
-any START. The current BOOT-only keeper still has no accepted START token.
+identities. Preparation does not authenticate the complete Java/system/native
+launch configuration or grant an executable namespace. `execute()` additionally
+authenticates that configuration and consumes a lexical descriptor borrow of the
+retained ext4 run. The separate historical BOOT-only keeper remains unchanged.
 
-Actual execution also requires durable start/exit/interruption records, bounded
-project/export/temp writes, cgroup accounting, pinned output validation and exact
-worker/cgroup absence. Run removal requires a separate after-absence bounded
+## Contained fresh execution
+
+`KotlinSystemdCgroupCommandLauncher` uses a distinct fixed Kotlin keeper inside
+the existing authenticated systemd/cgroup-v2, prlimit and bubblewrap boundary.
+The bundled direct-API child executes the exact definition argv and three-field
+environment. Runtime provider `bundled-ghidra-java-api-runtime-v2` explicitly
+binds `-Duser.home=<run>/tmp` and `-Djava.io.tmpdir=<run>/tmp`; provider v1 still
+parses and preserves its original command but is not accepted for execution.
+Provider v2 also binds one active JVM processor to match the single-CPU scope
+quota and disables the child's JVM attachment mechanism.
+The JDK, native libraries, bundled release, exporter and engine input are
+read-only. Project, reports and temporary writes use the dedicated filesystem;
+the journal, lease record and host systemd socket are absent from the sandbox.
+
+The host sends a random 32-byte handshake key only through the keeper's stdin,
+not through argv, environment or a file. Before any analyzed child exists, the
+host authenticates BOOT and pins the exact three keeper-process identities and
+pidfds. The journal durably publishes `attachment.json`, then
+`start-authorized.json`, before the host delivers authenticated START. The latter
+record means permission was durably recorded, not that a crashed worker must
+have consumed it.
+
+The keeper disables JVM attachment and sets/verifies Linux nondumpability before
+spawning the child. This prevents the same-UID child from obtaining the key from
+keeper memory or `/proc` descriptors. HMAC-SHA256 binds BOOT, START and the reaped
+child's outcome to the request and nonce. File deletion or tampering remains a
+possible denial of completion, never proof of success. Same-UID host principals
+remain part of the controller trust boundary. Child stdout/stderr files are
+diagnostics; authenticated byte counters do not authenticate those file contents.
+
+After an authenticated successful outcome, the host verifies the same retained
+keeper pidfds and exact cgroup population, freezes the cgroup, captures bounded
+resource counters, kills the keeper and proves exact unit/cgroup/process absence.
+It does not attempt protected `/proc` executable reads after nondumpability.
+Failures retain cleanup-only ownership independently of mutable input or journal
+validation. No unmanaged execution fallback exists.
+
+After absence the journal adds `execution.json`. Descriptor-relative bounded
+capture validates exporter state, progress, every expected planning checkpoint
+and fragment, and the assembled model against exact input/exporter/archive
+identities. `export-assessment.json` binds the resulting byte assessment.
+These chained records still have `complete=false` and `releaseEligible=false`:
+a successful fresh run is not A10 scoring, forced-resume equivalence, source
+reconstruction or benchmark qualification.
+
+The required CI fixture uses an authored benign ELF, a separate fixed 1-GiB
+ext4 filesystem and the provisioned root-owned application bundle. It retains
+bounded diagnostic evidence; missing prerequisites fail when
+`DECOMP_REQUIRE_BUNDLED_GHIDRA_EXECUTION=true`. Ordinary local tests cannot stand
+in for that privileged execution proof.
+
+Run removal requires a separate after-absence bounded
 cleanup/quarantine handoff; only record-only lease state can reach independently
 authorized release. Ordinary recursive deletion or `abandonForRecovery` cannot
 stand in for it. The A10 fresh/resumed cc1 and lto1 proofs and #235 remain open.

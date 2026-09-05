@@ -41,11 +41,14 @@ jobs:
         run: bash scripts/ci-prepare-acp-quota.sh
       - name: Prepare bounded ext4 oracle scratch authority
         run: bash scripts/ci-prepare-oracle-ext4-scratch.sh
+      - name: Prepare separate bounded ext4 bundled-analysis scratch
+        run: bash scripts/ci-prepare-oracle-ext4-scratch.sh --bundled-ghidra
       - name: Prepare executable root-owned application-bundled Ghidra
         run: bash scripts/ci-prepare-bundled-ghidra-runtime.sh
       - name: Run JVM and Kotlin checks
         env:
           DECOMP_REQUIRE_ORACLE_EXT4_SCRATCH: "true"
+          DECOMP_REQUIRE_BUNDLED_GHIDRA_EXECUTION: "true"
         run: scripts/ci.sh
       - name: Qualify pinned credential-free third-party ACP initialize
         run: scripts/ci-qualify-goose-acp.sh
@@ -56,29 +59,10 @@ jobs:
         run: bash scripts/ci-release-bundled-ghidra-runtime.sh
       - name: Release bounded ext4 oracle scratch authority
         if: always()
-        run: |
-          if [[ -n "${DECOMP_TEST_ORACLE_EXT4_SCRATCH:-}" ]]; then
-            sudo -n umount "$DECOMP_TEST_ORACLE_EXT4_SCRATCH"
-            if mountpoint --quiet "$DECOMP_TEST_ORACLE_EXT4_SCRATCH"; then
-              echo "bounded ext4 oracle scratch remained mounted" >&2
-              exit 1
-            fi
-            sudo -n rmdir "$DECOMP_TEST_ORACLE_EXT4_SCRATCH"
-            sudo -n rmdir "$(dirname "$DECOMP_TEST_ORACLE_EXT4_SCRATCH")"
-          fi
-          if [[ -n "${DECOMP_TEST_ORACLE_EXT4_IMAGE:-}" ]]; then
-            for attempt in {1..20}; do
-              if [[ -z "$(sudo -n losetup --associated "$DECOMP_TEST_ORACLE_EXT4_IMAGE")" ]]; then
-                break
-              fi
-              if ((attempt == 20)); then
-                echo "bounded ext4 oracle scratch retained a loop device" >&2
-                exit 1
-              fi
-              sleep 0.1
-            done
-            rm -f "$DECOMP_TEST_ORACLE_EXT4_IMAGE"
-          fi
+        run: bash scripts/ci-release-oracle-ext4-scratch.sh
+      - name: Release bounded ext4 bundled-analysis fixture scratch
+        if: always()
+        run: bash scripts/ci-release-oracle-ext4-scratch.sh --bundled-ghidra
       - uses: actions/upload-artifact@v7
         if: always()
         with:
@@ -89,6 +73,11 @@ jobs:
       - name: Release finite ACP quota fixture
         if: always()
         run: bash scripts/ci-release-acp-quota.sh
+      - uses: actions/upload-artifact@v7
+        if: always()
+        with:
+          name: bundled-ghidra-contained-fixture-evidence
+          path: build/contained-ghidra-evidence
       - uses: actions/upload-artifact@v7
         if: always()
         with:

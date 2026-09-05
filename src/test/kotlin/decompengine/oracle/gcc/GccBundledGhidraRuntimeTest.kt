@@ -26,7 +26,7 @@ import kotlinx.serialization.json.jsonPrimitive
 
 class GccBundledGhidraRuntimeTest {
     @Test
-    fun `bundled worker command uses exact shared JVM prefix and planning exporter arguments`() {
+    fun `bundled worker command binds writable JVM home and temp before shared prefix and exporter arguments`() {
         val runtime = runtime()
         val artifacts = artifacts(runtime)
         val byRole = artifacts.associateBy { it.role }
@@ -37,7 +37,8 @@ class GccBundledGhidraRuntimeTest {
             runtime.classPath.map { it.path },
         )
         assertEquals(
-            expectedPrefix + listOf(
+            listOf(expectedPrefix.first(), "-Duser.home=/scratch/run/tmp", "-Djava.io.tmpdir=/scratch/run/tmp",
+                "-XX:ActiveProcessorCount=1", "-XX:+DisableAttachMechanism") + expectedPrefix.drop(1) + listOf(
                 "analyze", "/scratch/run/state", "archival_reconstruction", "/trusted/engine-binary",
                 "/trusted/scripts", "ExportProgramModel.java", "4",
                 byRole.getValue(GccCompilerEngineContainmentArtifactRole.EXPORTER_SOURCE).sha256,
@@ -45,10 +46,29 @@ class GccBundledGhidraRuntimeTest {
             ),
             command,
         )
-        assertEquals("-Xshare:off", command[2])
+        assertEquals("-Xshare:off", command[6])
         assertTrue(command.contains("-Djava.system.class.loader=ghidra.GhidraClassLoader"))
         assertFalse(command.any { it.contains("analyzeHeadless") || it.contains("GHIDRA_HOME") })
         assertEquals(command, request(runtime, artifacts).command)
+    }
+
+    @Test
+    fun `historical runtime provider preserves its exact command and remains distinguishable`() {
+        val historical = GccBundledGhidraRuntime(ROOT, classPath(), invocationVersion = 1)
+        val current = runtime()
+        val historicalCommand = historical.command(artifacts(historical), state(), lease())
+        val currentCommand = current.command(artifacts(current), state(), lease())
+        assertEquals(currentCommand.take(1) + currentCommand.drop(5), historicalCommand)
+        assertEquals("bundled-ghidra-java-api-runtime-v1", historical.toJson().getValue("provider").jsonPrimitive.content)
+        assertEquals("bundled-ghidra-java-api-runtime-v2", current.toJson().getValue("provider").jsonPrimitive.content)
+        val parsed = GccBundledGhidraRuntime.parse(historical.toJson())
+        assertEquals(1, parsed.invocationVersion)
+        assertEquals(historicalCommand, parsed.command(artifacts(parsed), state(), lease()))
+        assertNotEquals(
+            GccCompilerEngineContainmentContract.assessDefinition(request(historical)).bindingSha256,
+            GccCompilerEngineContainmentContract.assessDefinition(request(current)).bindingSha256,
+        )
+        assertFailsWith<IllegalArgumentException> { GccBundledGhidraRuntime(ROOT, classPath(), invocationVersion = 3) }
     }
 
     @Test
@@ -213,6 +233,11 @@ class GccBundledGhidraRuntimeTest {
         val artifacts = artifacts(runtime)
         val valid = runtime.command(artifacts, state(), lease())
         val mutations = listOf(
+            valid.filterNot { it.startsWith("-Duser.home=") },
+            valid.filterNot { it.startsWith("-Djava.io.tmpdir=") },
+            valid.filterNot { it == "-XX:ActiveProcessorCount=1" },
+            valid.filterNot { it == "-XX:+DisableAttachMechanism" },
+            valid.map { if (it.startsWith("-Djava.io.tmpdir=")) "-Djava.io.tmpdir=/unbound" else it },
             listOf("/unbound/java") + valid.drop(1),
             valid.take(1) + "-javaagent:/unbound/agent.jar" + valid.drop(1),
             valid + listOf("-postScript", "Other.java"),

@@ -94,5 +94,7 @@ for passing required provisioned lifecycle tests or complete either issue.
 The separate [prepared-operation coordinator](gcc-bundled-prepared-operations.md)
 now composes retained inputs, an external journal and a genuine dedicated-ext4
 lease before deriving an inode-bound v2 definition. Its opaque prepared owner
-also has no START or release transition; the historical capacity-only BOOT
+has a distinct one-shot contained fresh-execution transition, but no release;
+runtime-provider v2 binds dedicated writable JVM home/temp paths, while runtime
+provider v1 retains its original command. The historical capacity-only BOOT
 controller is not promoted into execution authority by this addition.

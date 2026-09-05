@@ -7,9 +7,29 @@ import decompengine.oracle.fulltree.FullTreeDiskScratchAuthority
 import decompengine.oracle.fulltree.FullTreeDiskScratchLease
 import decompengine.oracle.fulltree.FullTreeDiskScratchRunRoot
 import decompengine.oracle.fulltree.FullTreeDiskScratchStage
+import decompengine.oracle.fulltree.FullTreeFunctionObservationRuntimeMount
+import decompengine.oracle.fulltree.KotlinSystemdCgroupCommandCleanup
+import decompengine.oracle.fulltree.KotlinSystemdCgroupCommandExecutionException
+import decompengine.oracle.fulltree.KotlinSystemdCgroupCommandInput
+import decompengine.oracle.fulltree.KotlinSystemdCgroupCommandLauncher
+import decompengine.oracle.fulltree.KotlinSystemdCgroupCommandResources
+import decompengine.oracle.fulltree.calculateFullTreeObservationRuntimeManifestSha256
 import java.nio.file.Path
 
 private object GCC_BUNDLED_PREPARED_OPERATION_PERMIT
+
+internal class GccBundledExecutedOperation(
+    executionReceiptBytes: ByteArray,
+    exportAssessmentReceiptBytes: ByteArray,
+    val assessment: GccCompletedRunAssessment,
+) {
+    val complete: Boolean = false
+    val releaseEligible: Boolean = false
+    private val execution = executionReceiptBytes.copyOf()
+    private val exportAssessment = exportAssessmentReceiptBytes.copyOf()
+    val executionReceiptBytes: ByteArray get() = execution.copyOf()
+    val exportAssessmentReceiptBytes: ByteArray get() = exportAssessment.copyOf()
+}
 
 internal class GccBundledPreparedOperation internal constructor(
     val intent: GccBundledOperationIntent,
@@ -30,6 +50,8 @@ internal class GccBundledPreparedOperation internal constructor(
     private val diskEvidence = lease.evidence.canonicalBytes()
     private var closed = false
     private var poisoned = false
+    private var executionAttempted = false
+    private var pendingCleanup: KotlinSystemdCgroupCommandCleanup? = null
 
     val definitionBytes: ByteArray
         get() = definition.copyOf()
@@ -45,6 +67,7 @@ internal class GccBundledPreparedOperation internal constructor(
     @Synchronized
     fun requireCurrent() {
         check(!closed && !poisoned) { "GCC bundled prepared operation is closed or poisoned" }
+        check(!executionAttempted) { "GCC bundled prepared operation has already entered execution" }
         try {
             inputs.verify("before prepared operation revalidation")
             journal.verify("before prepared operation revalidation")
@@ -54,6 +77,69 @@ internal class GccBundledPreparedOperation internal constructor(
             requirePreparedLayout()
         } catch (failure: Throwable) {
             poisoned = true
+            throw failure
+        }
+    }
+
+    @Synchronized
+    fun execute(): GccBundledExecutedOperation {
+        requireCurrent()
+        require(intent.runKind == GccCompilerEngineContainmentRunKind.FRESH_CONTROL) {
+            "GCC bundled execution currently supports fresh controls, not interruption or resume"
+        }
+        require(intent.bundledRuntime.invocationVersion == 2) { "GCC contained execution requires explicitly bound JVM home and temporary paths" }
+        executionAttempted = true
+        try {
+            val validated = GccCompilerEngineContainmentContract.parseDefinitionForLiveController(definition)
+            val configuration = deriveRuntimeConfiguration(validated, inputs.classPathEntries)
+            val bundle = intent.bundledRuntime.root
+            val runtimeMount = FullTreeFunctionObservationRuntimeMount(
+                bundle, bundle, calculateFullTreeObservationRuntimeManifestSha256(bundle),
+            )
+            val mountedInputs = intent.artifacts.filter { it.role in setOf(
+                GccCompilerEngineContainmentArtifactRole.ENGINE_BINARY,
+                GccCompilerEngineContainmentArtifactRole.EXPORTER_SOURCE,
+            ) }.map { KotlinSystemdCgroupCommandInput(it.path, it.bytes, it.sha256) }
+            return lease.withCurrentOperationRunRootForContainedExecution(runRoot) { borrowed ->
+                val execution = KotlinSystemdCgroupCommandLauncher.execute(
+                    borrowed = borrowed,
+                    configuration = configuration,
+                    unitName = validated.unitName,
+                    expectedControlGroup = validated.expectedControlGroup,
+                    nonce = validated.bindingSha256,
+                    command = validated.command,
+                    environment = validated.environment,
+                    readOnlyInputs = mountedInputs,
+                    runtimeMounts = listOf(runtimeMount),
+                    resources = KotlinSystemdCgroupCommandResources(
+                        intent.budgets.wallClockMillis, intent.budgets.maximumResidentBytes, intent.budgets.pidsMax,
+                        minOf(intent.diskPolicy.maximumFilesystemBytes, 1024L * 1024 * 1024),
+                    ),
+                    deploymentClosureSha256 = inputs.deploymentClosureSha256,
+                    beforeStart = { attachment ->
+                        inputs.verify("before GCC command START")
+                        lease.requireCurrentOperationRunRootAfterScopeAttachment(runRoot)
+                        journal.recordAttachment(attachment.canonicalBytes)
+                        journal.recordStartAuthorization()
+                        inputs.verify("after durable GCC command START authorization")
+                        journal.verify("before GCC command START delivery")
+                        lease.requireCurrentOperationRunRootAfterScopeAttachment(runRoot)
+                    },
+                )
+                lease.requireCurrentOperationRunRootAfterCgroupAbsence(runRoot)
+                inputs.verify("after GCC command and cgroup absence")
+                val receipt = journal.recordExecution(execution.canonicalBytes)
+                val captured = borrowed.withPinnedDescriptor { descriptor ->
+                    GccBundledExportCapture.capture(descriptor, directories.getValue("reports"), intent.artifacts)
+                }
+                inputs.verify("after GCC export capture")
+                lease.requireCurrentOperationRunRootAfterCgroupAbsence(runRoot)
+                val exportReceipt = journal.recordExportAssessment(captured.canonicalBytes)
+                GccBundledExecutedOperation(receipt, exportReceipt, captured.assessment)
+            }
+        } catch (failure: Throwable) {
+            poisoned = true
+            if (failure is KotlinSystemdCgroupCommandExecutionException) pendingCleanup = failure.cleanup
             throw failure
         }
     }
@@ -78,6 +164,11 @@ internal class GccBundledPreparedOperation internal constructor(
     @Synchronized
     override fun close() {
         if (closed) return
+        pendingCleanup?.let { cleanup ->
+            cleanup.closeAndProveAbsent()
+            check(cleanup.absenceProved) { "GCC bundled command absence remains unproved; retaining disk and input ownership" }
+            pendingCleanup = null
+        }
         closed = true
         var failure: Throwable? = null
         fun record(next: Throwable) {
