@@ -408,23 +408,9 @@ data class Upload(val filename: String, val content: ByteArray)
 
 object MultipartUpload {
     fun parse(body: ByteArray, contentType: String): Upload {
-        require(contentType.startsWith("multipart/form-data")) { "expected multipart/form-data" }
-        val boundary = contentType.substringAfter("boundary=", "").substringBefore(';').trim().trim('"')
-        require(boundary.isNotBlank()) { "missing multipart boundary" }
-        val delimiter = "--$boundary"
-        val text = body.toString(StandardCharsets.ISO_8859_1)
-        for (part in text.split(delimiter)) {
-            if (!part.contains("name=\"binary\"")) continue
-            val headerEnd = part.indexOf("\r\n\r\n")
-            require(headerEnd >= 0) { "malformed binary upload part" }
-            val headers = part.substring(0, headerEnd)
-            val filename = Regex("filename=\"([^\"]*)\"").find(headers)?.groupValues?.get(1)
-                ?.ifBlank { "input.elf" } ?: "input.elf"
-            var payload = part.substring(headerEnd + 4)
-            payload = payload.removeSuffix("\r\n").removeSuffix("--").removeSuffix("\r\n")
-            return Upload(filename, payload.toByteArray(StandardCharsets.ISO_8859_1))
-        }
-        error("missing binary upload field")
+        val bytes = ByteArrayOutputStream()
+        val upload = StreamingMultipartUpload.copy(body.inputStream(), contentType, bytes)
+        return Upload(upload.filename, bytes.toByteArray())
     }
 }
 
