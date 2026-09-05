@@ -68,8 +68,12 @@ contracts still describe their historical authenticated launcher; migrating thos
 contracts and proving their new contained direct-API runtime is tracked in #235.
 The [versioned bundled-runtime definition](gcc-bundled-runtime-contract-v2.md)
 now binds the direct-API command and ordered classpath without reinterpreting
-those historical receipts. It remains non-authoritative; the live BOOT controller
-rejects it pending retained runtime authentication. The distribution also carries
-an [independent full-bundle deployment reference](gcc-bundled-ghidra-deployment-reference.md)
-beside the application JAR; this reference alone cannot grant execution authority.
-This does not close A10/A13.
+those historical receipts. It remains non-authoritative. The live BOOT controller
+separately authenticates and retains the complete root-owned executable bundle
+against the [independent deployment reference](gcc-bundled-ghidra-deployment-reference.md)
+shipped beside the application JAR, alongside the unchanged isolated BOOT
+classpath capability. Its fresh-only BOOT/absence lifecycle does not yet authorize
+START, run Ghidra, accept exports or qualify resumed analysis. The executable
+bundle remains outside the bounded noexec output lease; trusted deployment is
+required, with no automatic application-side privilege escalation or separate
+Ghidra installation. This does not close #235 or A10/A13.

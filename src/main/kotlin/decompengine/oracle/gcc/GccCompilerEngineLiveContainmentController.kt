@@ -414,15 +414,22 @@ private class AuthenticatedLiveContainmentInputs private constructor(
     val definitionBytes: ByteArray,
     val definition: GccCompilerEngineValidatedContainmentDefinition,
     private val deploymentReference: GccKotlinBootClasspathReference,
+    private val bundledRuntime: GccBundledGhidraRetainedRuntime?,
     private val guards: List<Pair<String, StableControlFile>>,
     val classPathEntries: List<FullTreeFunctionObservationClassPathEntry>,
 ) : AutoCloseable {
-    val deploymentClosureSha256: String
-        get() = deploymentReference.closureSha256
+    val deploymentClosureSha256: String = bundledRuntime?.let { runtime ->
+        gccBundledLiveDeploymentClosureSha256(
+            deploymentReference.closureSha256,
+            runtime.deploymentClosureSha256,
+            runtime.runtimeIdentitySha256,
+        )
+    } ?: deploymentReference.closureSha256
 
     fun verify(label: String) {
         definitionGuard.verifyUnchanged("GCC containment definition $label")
         deploymentReference.verify(label)
+        bundledRuntime?.verify(label)
         guards.forEach { (name, guard) -> guard.verifyUnchanged("$name $label") }
     }
 
@@ -438,6 +445,10 @@ private class AuthenticatedLiveContainmentInputs private constructor(
             val first = failure
             if (first == null) failure = next else if (next !== first) first.addSuppressed(next)
         }
+        runCatching { bundledRuntime?.close() }.exceptionOrNull()?.let { next ->
+            val first = failure
+            if (first == null) failure = next else if (next !== first) first.addSuppressed(next)
+        }
         failure?.let { throw it }
     }
 
@@ -445,6 +456,7 @@ private class AuthenticatedLiveContainmentInputs private constructor(
         fun open(definitionPath: Path): AuthenticatedLiveContainmentInputs {
             var definitionGuard: StableControlFile? = null
             var deploymentReference: GccKotlinBootClasspathReference? = null
+            var bundledRuntime: GccBundledGhidraRetainedRuntime? = null
             val opened = ArrayDeque<Pair<String, StableControlFile>>()
             try {
                 val rawDefinition = StableControlFile.open(
@@ -464,6 +476,7 @@ private class AuthenticatedLiveContainmentInputs private constructor(
                 if (definitionPath.toAbsolutePath().normalize().startsWith(definition.outputLease.path)) {
                     liveContainmentFail("GCC containment definition must remain outside the output lease")
                 }
+                bundledRuntime = definition.bundledRuntime?.let { GccBundledGhidraRetainedRuntime.open(definition) }
                 definition.artifacts.forEach { artifact ->
                     val label = "GCC containment artifact ${artifact.role.wireName}"
                     val guard = StableControlFile.open(artifact.path, artifact.bytes, label)
@@ -509,11 +522,13 @@ private class AuthenticatedLiveContainmentInputs private constructor(
                     definitionBytes,
                     definition,
                     reference,
+                    bundledRuntime,
                     Collections.unmodifiableList(opened.toList()),
                     Collections.unmodifiableList(classPath),
                 ).also {
                     definitionGuard = null
                     deploymentReference = null
+                    bundledRuntime = null
                 }
             } catch (failure: Throwable) {
                 opened.forEach { (_, guard) ->
@@ -521,6 +536,8 @@ private class AuthenticatedLiveContainmentInputs private constructor(
                         ?.takeIf { it !== failure }?.let(failure::addSuppressed)
                 }
                 runCatching { deploymentReference?.close() }
+                    .exceptionOrNull()?.takeIf { it !== failure }?.let(failure::addSuppressed)
+                runCatching { bundledRuntime?.close() }
                     .exceptionOrNull()?.takeIf { it !== failure }?.let(failure::addSuppressed)
                 runCatching { definitionGuard?.close() }
                     .exceptionOrNull()?.takeIf { it !== failure }?.let(failure::addSuppressed)
@@ -1309,9 +1326,6 @@ private fun deriveRuntimeConfiguration(
 private fun requireSupportedCheckpoint(
     definition: GccCompilerEngineValidatedContainmentDefinition,
 ): KotlinSystemdCgroupBootResources {
-    if (definition.bundledRuntime != null) {
-        liveContainmentFail("bundled Ghidra v2 requires retained runtime authentication before BOOT or START")
-    }
     if (
         definition.runKind == GccCompilerEngineContainmentRunKind.RESUMED ||
         definition.analysisState.mode != GccCompilerEngineAnalysisStateMode.FRESH_EMPTY
