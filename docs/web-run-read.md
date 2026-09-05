@@ -42,3 +42,11 @@ Frontend fixtures cover exact deep links, prior-attempt links, absent usage,
 logout clearing, aborted reads and rejection of a different job response. JVM SPA
 checks serve pinned attempt routes. Packaged populated-attempt qualification remains
 outstanding; the packaged browser check covers the missing-attempt route and reload.
+
+
+The actual packaged upload-mode browser journey passed against `5da81bc`, including
+a pinned missing-attempt direct request, reload, exact parent-job link and absence
+of mutations. Existing session, asset-recovery, dashboard and upload cancellation/
+retry checks also passed. [Retained report](evidence/web-run-route-20260905.json).
+Pinned Chrome used the test-only --no-sandbox option. This does not qualify a
+populated multi-attempt journey in the packaged browser.
