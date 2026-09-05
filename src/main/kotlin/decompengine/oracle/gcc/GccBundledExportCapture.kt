@@ -24,6 +24,11 @@ internal class GccBundledExportAssessment(
     val canonicalBytes: ByteArray get() = encoded.copyOf()
 }
 
+internal class GccBundledInterruptedExportSnapshot(
+    val assessment: GccInterruptedPrefixAssessment,
+    val planningPrefixSha256: String,
+)
+
 internal object GccBundledExportCapture {
     fun capture(
         run: LinuxDescriptor,
@@ -45,12 +50,38 @@ internal object GccBundledExportCapture {
         expectedReports: LinuxFileIdentity,
         artifacts: List<GccCompilerEngineContainmentArtifactIdentity>,
         limits: GccResumeByteValidationLimits = GccResumeByteValidationLimits(),
-    ): GccInterruptedPrefixAssessment = captureFiles(run, expectedReports, artifacts, limits, interrupted = true) {
+    ): GccInterruptedPrefixAssessment = captureInterruptedSnapshot(run, expectedReports, artifacts, limits).assessment
+
+    fun captureInterruptedSnapshot(
+        run: LinuxDescriptor,
+        expectedReports: LinuxFileIdentity,
+        artifacts: List<GccCompilerEngineContainmentArtifactIdentity>,
+        limits: GccResumeByteValidationLimits = GccResumeByteValidationLimits(),
+    ): GccBundledInterruptedExportSnapshot = captureFiles(run, expectedReports, artifacts, limits, interrupted = true) {
             state, progress, batches, _, reports ->
         requireNoFinalModel(reports)
-        GccCompilerEngineResumeByteValidator.assessInterruptedPrefix(state, progress, batches, limits).also {
-            require(it.reused == 0L) { "fresh interrupted GCC execution unexpectedly reused prior records" }
-        }
+        val assessment = GccCompilerEngineResumeByteValidator.assessInterruptedPrefix(state, progress, batches, limits)
+        require(assessment.reused == 0L) { "fresh interrupted GCC execution unexpectedly reused prior records" }
+        GccBundledInterruptedExportSnapshot(assessment, planningPrefixDigest(batches))
+    }
+
+    fun captureResumed(
+        run: LinuxDescriptor,
+        expectedReports: LinuxFileIdentity,
+        artifacts: List<GccCompilerEngineContainmentArtifactIdentity>,
+        retained: GccBundledInterruptedExportSnapshot,
+        limits: GccResumeByteValidationLimits = GccResumeByteValidationLimits(),
+    ): GccBundledExportAssessment = captureFiles(run, expectedReports, artifacts, limits, interrupted = false) {
+            state, progress, batches, capture, reports ->
+        val model = capture.read(reports, "program_model.json", limits.assembledModelBytes)
+        val assessment = GccCompilerEngineResumeByteValidator.assessCompletedRun(state, progress, batches, model, limits)
+        val prefix = retained.assessment
+        require(assessment.stateSha256 == prefix.stateSha256 && assessment.functionCount == prefix.functionCount &&
+            assessment.inventorySha256 == prefix.declaredInventorySha256 && assessment.reused == prefix.completed &&
+            prefix.observedBatchCount in 1..batches.size.toLong()) { "GCC resumed export differs from its retained checkpoint lineage" }
+        val prefixDigest = planningPrefixDigest(batches.take(prefix.observedBatchCount.toInt()))
+        require(prefixDigest == retained.planningPrefixSha256) { "GCC resumed export changed retained checkpoint bytes" }
+        GccBundledExportAssessment(assessment, renderAssessment(assessment, capture.bytes, prefixDigest))
     }
 
     /** Live observation only. Final checkpoint validation must run after exact process absence. */
@@ -239,7 +270,7 @@ private fun requireBatchNames(directory: LinuxDescriptor, expected: Set<String>)
     }
 }
 
-private fun renderAssessment(assessment: GccCompletedRunAssessment, capturedBytes: Long): ByteArray {
+private fun renderAssessment(assessment: GccCompletedRunAssessment, capturedBytes: Long, prefixDigest: String? = null): ByteArray {
     val fields = linkedMapOf(
         "provider" to JsonPrimitive("gcc-bundled-descriptor-export-assessment-v1"),
         "schemaVersion" to JsonPrimitive(1),
@@ -261,8 +292,20 @@ private fun renderAssessment(assessment: GccCompletedRunAssessment, capturedByte
         "reused" to JsonPrimitive(assessment.reused),
         "capturedBytes" to JsonPrimitive(capturedBytes),
     )
+    if (prefixDigest != null) fields["retainedPlanningPrefixSha256"] = JsonPrimitive(prefixDigest)
     fields["assessmentSha256"] = JsonPrimitive(OracleArtifacts.sha256(OracleJson.canonicalBytes(JsonObject(fields))))
     return OracleJson.canonicalBytes(JsonObject(fields))
 }
 
 private const val BATCH_FUNCTIONS = 512L
+
+/** Length framing covers every byte of every retained fragment, including checkpoint serialization. */
+private fun planningPrefixDigest(batches: List<GccPlanningBatchBytes>): String {
+    val digest = java.security.MessageDigest.getInstance("SHA-256")
+    digest.update("gcc-bundled-planning-prefix-bytes-v1\n".toByteArray(Charsets.UTF_8))
+    for (batch in batches) for (bytes in listOf(batch.checkpoint, batch.functions, batch.globals, batch.types, batch.failures)) {
+        digest.update(ByteBuffer.allocate(8).putLong(bytes.size.toLong()).array())
+        digest.update(bytes)
+    }
+    return digest.digest().joinToString("") { "%02x".format(it.toInt() and 255) }
+}

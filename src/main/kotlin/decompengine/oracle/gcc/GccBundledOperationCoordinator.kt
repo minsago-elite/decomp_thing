@@ -11,6 +11,7 @@ import decompengine.oracle.fulltree.FullTreeDiskScratchRunRoot
 import decompengine.oracle.fulltree.FullTreeDiskScratchStage
 import decompengine.oracle.fulltree.FullTreeFunctionObservationRuntimeMount
 import decompengine.oracle.fulltree.KotlinSystemdCgroupCommandCleanup
+import decompengine.oracle.fulltree.KotlinSystemdCgroupCommandExecution
 import decompengine.oracle.fulltree.KotlinSystemdCgroupCommandExecutionException
 import decompengine.oracle.fulltree.KotlinSystemdCgroupCommandInput
 import decompengine.oracle.fulltree.KotlinSystemdCgroupCommandLauncher
@@ -71,6 +72,9 @@ internal class GccBundledPreparedOperation internal constructor(
     private var poisoned = false
     private var executionAttempted = false
     private var retainedInterruption: GccBundledInterruptedOperation? = null
+    private var resumeAttempted = false
+    private var retainedExport: GccBundledInterruptedExportSnapshot? = null
+    private var retainedControlIdentity: LinuxFileIdentity? = null
     private var retainedTrigger: GccBundledCheckpointTrigger? = null
     private var pendingCleanup: KotlinSystemdCgroupCommandCleanup? = null
 
@@ -104,7 +108,7 @@ internal class GccBundledPreparedOperation internal constructor(
 
     @Synchronized
     fun execute(): GccBundledExecutedOperation = executeRun(GccCompilerEngineContainmentRunKind.FRESH_CONTROL, null) { borrowed, execution ->
-        val receipt = journal.recordExecution(execution)
+        val receipt = journal.recordExecution(execution.canonicalBytes)
         val captured = borrowed.withPinnedDescriptor { descriptor ->
             GccBundledExportCapture.capture(descriptor, directories.getValue("reports"), intent.artifacts)
         }
@@ -117,12 +121,17 @@ internal class GccBundledPreparedOperation internal constructor(
     @Synchronized
     fun executeUntilCheckpoint(minimumCompletedFunctions: Long): GccBundledInterruptedOperation {
         val trigger = GccBundledCheckpointTrigger(minimumCompletedFunctions)
+        var stoppedExport: GccBundledInterruptedExportSnapshot? = null
+        var stoppedControl: LinuxFileIdentity? = null
         return executeRun(GccCompilerEngineContainmentRunKind.INTERRUPTED, trigger) { borrowed, execution ->
-            val receipt = journal.recordInterruptedExecution(execution)
-            val prefix = borrowed.withPinnedDescriptor { descriptor ->
-                GccBundledExportCapture.captureInterruptedPrefix(descriptor, directories.getValue("reports"), intent.artifacts)
+            val receipt = journal.recordInterruptedExecution(execution.canonicalBytes)
+            val snapshot = borrowed.withPinnedDescriptor { descriptor ->
+                GccBundledExportCapture.captureInterruptedSnapshot(descriptor, directories.getValue("reports"), intent.artifacts)
             }
-            val assessment = trigger.assessStoppedPrefix(prefix)
+            val prefix = snapshot.assessment
+            val assessment = trigger.assessStoppedPrefix(prefix, snapshot.planningPrefixSha256)
+            stoppedExport = snapshot
+            stoppedControl = execution.controlDirectoryIdentity
             inputs.verify("after GCC interrupted prefix capture")
             lease.requireCurrentOperationRunRootAfterCgroupAbsence(runRoot)
             val prefixReceipt = journal.recordInterruptedPrefixAssessment(assessment)
@@ -136,6 +145,8 @@ internal class GccBundledPreparedOperation internal constructor(
         }.also {
             retainedInterruption = it
             retainedTrigger = trigger
+            retainedExport = checkNotNull(stoppedExport)
+            retainedControlIdentity = stoppedControl
         }
     }
 
@@ -143,28 +154,109 @@ internal class GccBundledPreparedOperation internal constructor(
     @Synchronized
     fun requireInterruptedStateCurrent() {
         check(!closed && !poisoned) { "GCC bundled prepared operation is closed or poisoned" }
+        check(!resumeAttempted) { "GCC operation has already entered resume" }
         val retained = checkNotNull(retainedInterruption) { "GCC operation has no retained completed interruption" }
-        val trigger = checkNotNull(retainedTrigger)
         try {
             inputs.verify("before retained GCC checkpoint revalidation")
             journal.verify("before retained GCC checkpoint revalidation")
             lease.requireCurrentOperationRunRootAfterCgroupAbsence(runRoot)
             lease.withCurrentOperationRunRootBeforeLaunch(runRoot) { borrowed ->
-                borrowed.withPinnedDescriptor { descriptor ->
-                    GccBundledAnalysisStateCapture.requireUnchanged(
-                        descriptor, directories.getValue("state"), retained.analysisState, analysisStateLimits(),
-                    )
-                    val prefix = GccBundledExportCapture.captureInterruptedPrefix(
-                        descriptor, directories.getValue("reports"), intent.artifacts,
-                    )
-                    trigger.requireUnchangedStoppedPrefix(retained.assessment, prefix)
-                }
+                requireRetainedCheckpoint(borrowed, retained)
             }
             inputs.verify("after retained GCC checkpoint revalidation")
             journal.verify("after retained GCC checkpoint revalidation")
             lease.requireCurrentOperationRunRootAfterCgroupAbsence(runRoot)
         } catch (failure: Throwable) {
             poisoned = true
+            throw failure
+        }
+    }
+
+    private fun requireRetainedCheckpoint(borrowed: FullTreeDiskScratchBorrowedRunRoot, retained: GccBundledInterruptedOperation) {
+        borrowed.withPinnedDescriptor { descriptor ->
+            GccBundledAnalysisStateCapture.requireUnchanged(
+                descriptor, directories.getValue("state"), retained.analysisState, analysisStateLimits(),
+            )
+            val current = GccBundledExportCapture.captureInterruptedSnapshot(descriptor, directories.getValue("reports"), intent.artifacts)
+            checkNotNull(retainedTrigger).requireUnchangedStoppedPrefix(retained.assessment, current.assessment)
+            require(current.planningPrefixSha256 == checkNotNull(retainedExport).planningPrefixSha256) {
+                "GCC retained checkpoint fragment bytes changed"
+            }
+        }
+    }
+
+    /** One second execution under the same live owner; detached receipts cannot authorize resume. */
+    @Synchronized
+    fun resume(): GccBundledExecutedOperation {
+        requireInterruptedStateCurrent()
+        require(intent.bundledRuntime.invocationVersion == 3) { "GCC resume requires an interrupted v3 control layout" }
+        val retained = checkNotNull(retainedInterruption)
+        val prefix = checkNotNull(retainedExport)
+        val oldControl = checkNotNull(retainedControlIdentity) { "GCC interruption lacks its retained control identity" }
+        resumeAttempted = true
+        try {
+            val original = GccCompilerEngineContainmentContract.parseDefinitionForLiveController(definition)
+            val runtime = GccBundledGhidraRuntime(intent.bundledRuntime.root, intent.bundledRuntime.classPath, invocationVersion = 4)
+            val state = original.analysisState.copy(mode = GccCompilerEngineAnalysisStateMode.RESUME_MANIFEST,
+                manifestSha256 = retained.analysisState.sha256, entryCount = retained.analysisState.entryCount,
+                totalBytes = retained.analysisState.totalBytes)
+            val resumedBytes = GccCompilerEngineContainmentContract.assessDefinition(GccCompilerEngineContainmentRequest(
+                original.engineId, GccCompilerEngineContainmentRunKind.RESUMED, original.artifacts, state,
+                runtime.command(original.artifacts, state, original.outputLease), original.environment,
+                original.outputLease, original.budgets, runtime,
+            )).canonicalBytes
+            val resumed = GccCompilerEngineContainmentContract.parseDefinitionForLiveController(resumedBytes)
+            val configuration = deriveRuntimeConfiguration(resumed, inputs.classPathEntries)
+            val runtimeMount = FullTreeFunctionObservationRuntimeMount(runtime.root, runtime.root,
+                calculateFullTreeObservationRuntimeManifestSha256(runtime.root))
+            val mountedInputs = intent.artifacts.filter { it.role in setOf(
+                GccCompilerEngineContainmentArtifactRole.ENGINE_BINARY, GccCompilerEngineContainmentArtifactRole.EXPORTER_SOURCE,
+            ) }.map { KotlinSystemdCgroupCommandInput(it.path, it.bytes, it.sha256) }
+            journal.recordResumePrepared(resumedBytes)
+            return lease.withCurrentOperationRunRootForContainedExecution(runRoot) { borrowed ->
+                requireRetainedCheckpoint(borrowed, retained)
+                val stateIdentity = borrowed.withPinnedDescriptor { descriptor ->
+                    LinuxFilesystemSyscalls.openDirectoryAt(descriptor.fd, "state").use { it.identity }
+                }
+                val execution = KotlinSystemdCgroupCommandLauncher.execute(
+                    borrowed = borrowed, configuration = configuration, unitName = resumed.unitName,
+                    expectedControlGroup = resumed.expectedControlGroup, nonce = resumed.bindingSha256,
+                    command = resumed.command, environment = resumed.environment, readOnlyInputs = mountedInputs,
+                    runtimeMounts = listOf(runtimeMount), resources = KotlinSystemdCgroupCommandResources(
+                        resumed.budgets.wallClockMillis, resumed.budgets.maximumResidentBytes, resumed.budgets.pidsMax,
+                        minOf(intent.diskPolicy.maximumFilesystemBytes, 1024L * 1024 * 1024),
+                    ), deploymentClosureSha256 = inputs.deploymentClosureSha256,
+                    controlDirectoryName = runtime.resumeControlDirectoryName(state, resumed.outputLease),
+                    readOnlyControlDirectories = mapOf(checkNotNull(intent.bundledRuntime.freshControlDirectoryName(borrowed.path)) to oldControl),
+                    readOnlyStateDirectory = stateIdentity,
+                    beforeStart = { attachment ->
+                        inputs.verify("before GCC resume START")
+                        journal.verify("before GCC resume START")
+                        lease.requireCurrentOperationRunRootAfterScopeAttachment(runRoot)
+                        requireRetainedCheckpoint(borrowed, retained)
+                        journal.recordResumeAttachment(attachment.canonicalBytes)
+                        journal.recordResumeStartAuthorization()
+                        inputs.verify("after durable GCC resume START authorization")
+                        requireRetainedCheckpoint(borrowed, retained)
+                        journal.verify("before GCC resume START delivery")
+                        lease.requireCurrentOperationRunRootAfterScopeAttachment(runRoot)
+                    },
+                )
+                lease.requireCurrentOperationRunRootAfterCgroupAbsence(runRoot)
+                inputs.verify("after GCC resume and cgroup absence")
+                val receipt = journal.recordResumeExecution(execution.canonicalBytes)
+                val captured = borrowed.withPinnedDescriptor { descriptor ->
+                    GccBundledAnalysisStateCapture.requireUnchanged(descriptor, directories.getValue("state"), retained.analysisState, analysisStateLimits())
+                    GccBundledExportCapture.captureResumed(descriptor, directories.getValue("reports"), intent.artifacts, prefix)
+                }
+                inputs.verify("after resumed GCC export capture")
+                lease.requireCurrentOperationRunRootAfterCgroupAbsence(runRoot)
+                val exportReceipt = journal.recordResumeExportAssessment(captured.canonicalBytes)
+                GccBundledExecutedOperation(receipt, exportReceipt, captured.assessment)
+            }
+        } catch (failure: Throwable) {
+            poisoned = true
+            if (failure is KotlinSystemdCgroupCommandExecutionException) pendingCleanup = failure.cleanup
             throw failure
         }
     }
@@ -178,7 +270,7 @@ internal class GccBundledPreparedOperation internal constructor(
     private fun <T> executeRun(
         kind: GccCompilerEngineContainmentRunKind,
         trigger: GccBundledCheckpointTrigger?,
-        afterAbsence: (FullTreeDiskScratchBorrowedRunRoot, ByteArray) -> T,
+        afterAbsence: (FullTreeDiskScratchBorrowedRunRoot, KotlinSystemdCgroupCommandExecution) -> T,
     ): T {
         requireCurrent()
         require(intent.runKind == kind) { "GCC bundled execution kind differs from the prepared intent" }
@@ -241,7 +333,7 @@ internal class GccBundledPreparedOperation internal constructor(
                 )
                 lease.requireCurrentOperationRunRootAfterCgroupAbsence(runRoot)
                 inputs.verify("after GCC command and cgroup absence")
-                afterAbsence(borrowed, execution.canonicalBytes)
+                afterAbsence(borrowed, execution)
             }
         } catch (failure: Throwable) {
             poisoned = true

@@ -370,11 +370,11 @@ The command definition binds the stopped manifest and derived fresh paths; it
 does not authenticate the manifest or prove that repeated analysis is identical.
 
 The default remains v3. Fresh operation intents reject v4 before acquiring a
-lease, and the existing execution path accepts only v2/v3. A resume controller
-must revalidate retained state/control evidence, protect the original state,
-create the separate control directory, journal attachment and START, and prove
-absence/resource accounting. No v4 execution or benchmark qualification is
-claimed by command-contract tests.
+lease, and the fresh execution path accepts only v2/v3. The same-owner resume
+path described below selects v4 after stopped-state revalidation, protects the
+original state, and journals the separate attachment and START. Full hosted
+execution and cumulative resource accounting still need qualification; command
+contract tests do not prove either.
 
 ## Resume journal lifecycle
 
@@ -417,3 +417,35 @@ the option is absent. Descriptor fixtures exercise replacement and permission
 changes. A local bubblewrap fixture tests retained write rejection and successful
 writes to the new project/reports, without claiming authenticated runtime,
 systemd/cgroup, dedicated ext4 or live compiler qualification.
+
+## Same-owner resume integration
+
+A successful v3 interruption now retains the first control-directory identity
+and a SHA-256 commitment to all stopped planning checkpoint/fragment bytes.
+The commitment uses the UTF-8 domain `gcc-bundled-planning-prefix-bytes-v1\n`,
+followed in batch order by each checkpoint, functions, globals, types and failures
+file, each framed by its eight-byte big-endian byte length. The stopped-prefix
+journal assessment commits this digest alongside its semantic assessment.
+
+`resume()` accepts no caller-supplied evidence and is available once under the
+same retained owner. It revalidates stopped evidence, constructs the v4 definition,
+records resume preparation, and launches through the existing authenticated keeper
+with the old project and control directory read-only. Before START it recaptures
+the old project and prefix and writes separate attachment/authorization records.
+Failed execution retains cleanup responsibility; any failed attempt poisons the
+owner and cannot be retried by reusing its receipts.
+
+After the launcher proves process/cgroup absence, the coordinator records the
+second execution, verifies the unchanged original project, validates the complete
+export and requires exactly the retained reuse count, exporter state and function
+inventory. It hashes the reused prefix bytes again and rejects changed serialization
+even when the completed model validates. The resumed export receipt binds that
+prefix digest. This result still has complete and release eligibility false.
+
+This is implementation, not qualification: the local suites exercise command,
+journal, namespace and byte-validation components, but have not executed the full
+same-owner compiler lifecycle under the required hosted provisioning. The normal
+CLI, real cc1/lto1 fresh/resumed model and planner comparisons, cumulative resource
+accounting and benchmark publication remain incomplete. Per-leg ceilings are not
+a cumulative A10 budget proof. Interruptions leaving partial in-flight fragments
+still fail closed and retain residue.
