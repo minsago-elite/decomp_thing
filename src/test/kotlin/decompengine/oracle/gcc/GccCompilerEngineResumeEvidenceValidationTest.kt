@@ -139,6 +139,54 @@ class GccCompilerEngineResumeEvidenceValidationTest {
     }
 
     @Test
+    fun `stopped capture validates one committed batch ahead while preserving observed progress`() {
+        val full = threeBatchFixture()
+        val first = transitionFixture(full, interruptedBatchCount = 1)
+        val second = transitionFixture(full, interruptedBatchCount = 2)
+        val raced = second.interrupted.copy(progress = first.interrupted.progress)
+        for (pending in listOf(false, true)) withDescriptorExportFixture(raced, includeModel = false) { captured ->
+            if (pending) Files.writeString(captured.directory.resolve("reports/.program_model.json.progress.json.pending"), "partial-progress")
+            val stopped = GccBundledExportCapture.captureInterruptedSnapshot(captured.root, captured.reportsIdentity, captured.artifacts)
+            assertEquals(1024L, stopped.assessment.completed)
+            assertContentEquals(first.interrupted.progress, stopped.capturedProgress)
+            assertContentEquals(second.interrupted.progress, stopped.effectiveProgress)
+            assertContentEquals(first.interrupted.progress, Files.readAllBytes(captured.directory.resolve("reports/program_model.json.progress.json")))
+            assertEquals(if (pending) 1 else 0, OracleJson.parseCanonical(stopped.inFlightArtifacts).jsonObject.size)
+            val trigger = GccBundledCheckpointTrigger(512)
+            trigger.observe(GccBundledExportCapture.observeProgress(captured.root, captured.reportsIdentity, captured.artifacts))
+            val journalPayload = OracleJson.parseCanonical(trigger.assessStoppedPrefix(stopped.assessment, stopped.planningPrefixSha256,
+                stopped.inFlightArtifacts, stopped.capturedProgress, stopped.effectiveProgress)).jsonObject
+            assertFails { trigger.assessStoppedPrefix(stopped.assessment, capturedProgress = stopped.capturedProgress) }
+            assertFails { trigger.assessStoppedPrefix(stopped.assessment, capturedProgress = stopped.capturedProgress,
+                effectiveProgress = stopped.capturedProgress) }
+            assertTrue(journalPayload.getValue("effectiveProgressDerived").jsonPrimitive.boolean)
+            assertEquals(first.interrupted.progress.decodeToString(), journalPayload.getValue("capturedProgressUtf8").jsonPrimitive.content)
+            assertEquals(sha(first.interrupted.progress), journalPayload.getValue("capturedProgressSha256").jsonPrimitive.content)
+            withDescriptorExportFixture(second.resumed) { resumed ->
+                assertEquals(1024L, GccBundledExportCapture.captureResumed(resumed.root, resumed.reportsIdentity, resumed.artifacts, stopped).assessment.reused)
+            }
+        }
+    }
+
+    @Test
+    fun `stopped progress derivation rejects multiple advances terminal batches and impossible pending layouts`() {
+        val full = threeBatchFixture()
+        val first = transitionFixture(full, interruptedBatchCount = 1)
+        val second = transitionFixture(full, interruptedBatchCount = 2)
+        assertFails { GccCompilerEngineResumeByteValidator.assessStoppedCheckpointPrefix(full.state, first.interrupted.progress, full.batches) }
+        val two = transitionFixture(twoBatchFixture())
+        assertFails { GccCompilerEngineResumeByteValidator.assessStoppedCheckpointPrefix(two.resumed.state, two.interrupted.progress, two.resumed.batches) }
+        withDescriptorExportFixture(first.interrupted, includeModel = false) { captured ->
+            Files.writeString(captured.directory.resolve("reports/.program_model.json.progress.json.pending"), "unexpected")
+            assertFails { GccBundledExportCapture.captureInterruptedSnapshot(captured.root, captured.reportsIdentity, captured.artifacts) }
+        }
+        withDescriptorExportFixture(second.interrupted.copy(progress = first.interrupted.progress), includeModel = false) { captured ->
+            Files.writeString(captured.directory.resolve("reports/program_model.json.export/planning-batches/.batch-00001024-00001025.functions.fragment.pending"), "unexpected")
+            assertFails { GccBundledExportCapture.captureInterruptedSnapshot(captured.root, captured.reportsIdentity, captured.artifacts) }
+        }
+    }
+
+    @Test
     fun `interrupted capture records only the first incomplete batch write sequence without reusing it`() {
         val transition = transitionFixture(twoBatchFixture())
         val suffixes = listOf("functions.fragment", "globals.fragment", "types.fragment", "failures.fragment", "checkpoint")
