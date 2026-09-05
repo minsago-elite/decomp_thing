@@ -24,9 +24,6 @@ import java.nio.file.Files
 import java.nio.ByteBuffer
 import java.nio.channels.FileChannel
 import java.nio.file.LinkOption.NOFOLLOW_LINKS
-import java.nio.file.StandardCopyOption.ATOMIC_MOVE
-import java.nio.file.StandardCopyOption.REPLACE_EXISTING
-import java.nio.file.StandardOpenOption.READ
 import java.nio.file.StandardOpenOption.WRITE
 import java.nio.file.StandardOpenOption.CREATE_NEW
 import java.time.Instant
@@ -63,7 +60,11 @@ data class Job(
     }
 }
 
-class JobStore internal constructor(root: Path, private val uploadPublisher: UploadPublisher) {
+class JobStore internal constructor(
+    root: Path,
+    private val uploadPublisher: UploadPublisher,
+    private val metadataPublisher: JobMetadataPublisher = AtomicJobMetadataPublisher,
+) {
     constructor(root: Path) : this(root, AtomicUploadPublisher)
     private val root = root.toAbsolutePath().normalize()
     internal val storageRoot: Path get() = root
@@ -335,13 +336,9 @@ class JobStore internal constructor(root: Path, private val uploadPublisher: Upl
         }
         val temporary = Files.createTempFile(jobDir, ".job-metadata-", ".tmp")
         try {
-            FileChannel.open(temporary, WRITE, NOFOLLOW_LINKS).use { channel ->
-                val buffer = ByteBuffer.wrap(bytes)
-                while (buffer.hasRemaining()) channel.write(buffer)
-                channel.force(true)
-            }
-            Files.move(temporary, jobDir.resolve("job.json"), ATOMIC_MOVE, REPLACE_EXISTING)
-            FileChannel.open(jobDir, READ).use { it.force(true) }
+            metadataPublisher.writeAndForce(temporary, bytes)
+            metadataPublisher.replace(temporary, jobDir.resolve("job.json"))
+            metadataPublisher.confirmDirectory(jobDir)
         } finally {
             Files.deleteIfExists(temporary)
         }
