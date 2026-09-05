@@ -26,6 +26,7 @@ import decompengine.jobs.ProgressRedactor
 import decompengine.oracle.gcc.GccCompilerEnginePlanningService
 import decompengine.oracle.gcc.GccCompilerEngineProfiles
 import decompengine.oracle.gcc.authenticateGhidraInstallation
+import decompengine.analysis.BundledGhidra
 import decompengine.repair.RepairRuntimeConfiguration
 import decompengine.repair.SecureRepairRuntime
 import decompengine.validation.ProcessInput
@@ -57,7 +58,6 @@ private fun runGccEnginePlan(args: List<String>) {
     var engineId: String? = null
     var binary: Path? = null
     var profilePath: Path? = null
-    var ghidraHome: Path? = null
     var ghidraArchive: Path? = null
     var output: Path? = null
     var index = 0
@@ -66,10 +66,6 @@ private fun runGccEnginePlan(args: List<String>) {
             "--profile" -> {
                 if (index + 1 >= args.size) gccEnginePlanUsageError("--profile requires a file")
                 profilePath = Path.of(args[index + 1]); index += 2
-            }
-            "--ghidra-home" -> {
-                if (index + 1 >= args.size) gccEnginePlanUsageError("--ghidra-home requires a directory")
-                ghidraHome = Path.of(args[index + 1]); index += 2
             }
             "--ghidra-archive" -> {
                 if (index + 1 >= args.size) gccEnginePlanUsageError("--ghidra-archive requires a file")
@@ -88,16 +84,15 @@ private fun runGccEnginePlan(args: List<String>) {
             }
         }
     }
-    if (engineId == null || binary == null || profilePath == null || ghidraHome == null ||
+    if (engineId == null || binary == null || profilePath == null ||
         ghidraArchive == null || output == null
     ) {
-        gccEnginePlanUsageError("gcc-engine-plan requires an engine, binary, profile, Ghidra archive/home, and output")
+        gccEnginePlanUsageError("gcc-engine-plan requires an engine, binary, profile, Ghidra provenance archive, and output")
     }
     val suite = GccCompilerEngineProfiles.load(profilePath)
-    val authenticatedGhidra = suite.analysis.authenticateGhidraInstallation(ghidraArchive, ghidraHome)
+    val authenticatedGhidra = suite.analysis.authenticateGhidraInstallation(ghidraArchive, BundledGhidra.locate().release)
     val reconstructionProfile = suite.reconstructionProfile()
     val analyzer = GhidraHeadlessProgramModelAnalyzer(
-        authenticatedGhidra.home,
         GhidraProgramModelExportLimits.from(reconstructionProfile),
         authenticatedGhidra.archiveSha256,
         GhidraProgramModelRecoveryMode.fromWireName(suite.analysis.exporterMode),
@@ -118,7 +113,7 @@ private fun gccEnginePlanUsageError(message: String): Nothing {
     System.err.println(message)
     System.err.println(
         "usage: llm_bin_patch gcc-engine-plan <cc1|lto1> <stripped-binary> --profile <file> " +
-            "--ghidra-archive <file> --ghidra-home <directory> --output <directory>",
+            "--ghidra-archive <file> --output <directory>",
     )
     kotlin.system.exitProcess(2)
 }
@@ -172,7 +167,7 @@ private fun runReconstruct(args: List<String>) {
         )
         val result = try {
             ArchivalReconstructionService(
-                GhidraHeadlessProgramModelAnalyzer.fromEnvironment(), strategy.reconstructor, progress = progress,
+                GhidraHeadlessProgramModelAnalyzer.bundled(), strategy.reconstructor, progress = progress,
             ).reconstruct(binary, output)
         } catch (failure: Exception) {
             progress.phase(AgentWorkflowPhase.FAILED)
@@ -560,7 +555,7 @@ private fun printHelp() {
           llm_bin_patch repair <original-binary> <project-dir> [--reports <directory>] [--max-iterations <count>] [--explore] [--harness acp|legacy-openai]
           llm_bin_patch explore <binary> --reports <directory> [--arg <value>] [--stdin <value>]
           llm_bin_patch reconstruct <binary> --output <directory> [--evidence-only] [--max-context-chars <count>] [--harness acp|legacy-openai]
-          llm_bin_patch gcc-engine-plan <cc1|lto1> <stripped-binary> --profile <file> --ghidra-archive <file> --ghidra-home <directory> --output <directory>
+          llm_bin_patch gcc-engine-plan <cc1|lto1> <stripped-binary> --profile <file> --ghidra-archive <file> --output <directory>
           llm_bin_patch web [--host 127.0.0.1] [--port 8000] [--data-dir .decomp_engine/jobs]
 
         Agent harness selection for doctor, patch, reconstruction, and repair:

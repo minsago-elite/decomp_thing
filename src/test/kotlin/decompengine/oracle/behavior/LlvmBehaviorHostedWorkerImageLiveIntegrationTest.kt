@@ -345,10 +345,14 @@ class LlvmBehaviorHostedWorkerImageLiveIntegrationTest {
                     INSPECT_TIMEOUT,
                     MAXIMUM_INSPECT_BYTES,
                 )
-                val projection = LlvmBehaviorHostedWorkerImageV1Inspect.project(
-                    inspect.stdout,
-                    retainedImageId,
-                )
+                val projection = try {
+                    LlvmBehaviorHostedWorkerImageV1Inspect.project(inspect.stdout, retainedImageId)
+                } catch (failure: LlvmBehaviorHostedContainerV1InspectException) {
+                    failure.addSuppressed(AssertionError(
+                        "production worker image inspect: ${inspect.stdout.imageInspectDiagnostic()}",
+                    ))
+                    throw failure
+                }
                 assertEquals(retainedImageId, projection.imageId)
                 assertEquals("linux/amd64", projection.platform)
                 owner.requireCurrent()
@@ -769,6 +773,7 @@ private class LiveWorkerImageDockerClient(
                     "--pull=false",
                     "--no-cache",
                     "--platform=linux/amd64",
+                    "--file=Dockerfile",
                     baseTag.buildArgument,
                     "--iidfile=$iidFile",
                     "--quiet",

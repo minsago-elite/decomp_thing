@@ -3,17 +3,20 @@ package decompengine.project
 import decompengine.analysis.GhidraAnalysisException
 import decompengine.agent.AgentWorkflowProgress
 import decompengine.agent.AgentWorkflowPhase
+import decompengine.analysis.BundledGhidra
+import decompengine.analysis.GhidraInvocation
+import decompengine.analysis.GhidraPostScript
 import java.nio.file.Files
 import java.nio.file.LinkOption
 import java.nio.file.Path
 import java.nio.file.attribute.BasicFileAttributes
+import java.security.MessageDigest
 import java.time.Duration
 import java.util.concurrent.CompletableFuture
 import java.util.concurrent.TimeUnit
 import java.util.concurrent.atomic.AtomicBoolean
 import java.util.concurrent.atomic.AtomicLong
 import kotlin.io.path.createDirectories
-import kotlin.io.path.isExecutable
 import kotlin.io.path.pathString
 import kotlin.io.path.readText
 import kotlin.io.path.writeBytes
@@ -22,6 +25,11 @@ import kotlin.io.path.writeText
 fun interface ProgramModelAnalyzer {
     fun analyze(binaryPath: Path, workDir: Path): RecoveredProgramModel
 }
+
+data class RecoveredProgramWithCallSites(
+    val programModel: RecoveredProgramModel,
+    val callSites: RecoveredCallSiteReceipt,
+)
 
 data class GhidraProgramModelExportLimits(
     val wallClockTimeout: Duration = Duration.ofMinutes(10),
@@ -51,21 +59,38 @@ data class GhidraProgramModelExportLimits(
     }
 }
 
-class GhidraHeadlessProgramModelAnalyzer(
-    private val ghidraHome: Path,
+class GhidraHeadlessProgramModelAnalyzer internal constructor(
+    private val commandFactory: (GhidraInvocation) -> List<String>,
     private val limits: GhidraProgramModelExportLimits = GhidraProgramModelExportLimits(),
     private val analysisToolSha256: String = UNAUTHENTICATED_ANALYSIS_TOOL_SHA256,
     private val recoveryMode: GhidraProgramModelRecoveryMode = GhidraProgramModelRecoveryMode.FULL,
 ) : ProgramModelAnalyzer {
+    constructor(
+        limits: GhidraProgramModelExportLimits = GhidraProgramModelExportLimits(),
+        analysisToolSha256: String = BundledGhidra.ARCHIVE_SHA256,
+        recoveryMode: GhidraProgramModelRecoveryMode = GhidraProgramModelRecoveryMode.FULL,
+    ) : this({ BundledGhidra.locate().analysisCommand(it) }, limits, analysisToolSha256, recoveryMode)
+
     init {
         require(analysisToolSha256.matches(Regex("[0-9a-f]{64}"))) {
             "Ghidra analysis-tool identity must be a lowercase SHA-256 digest"
         }
     }
 
-    override fun analyze(binaryPath: Path, workDir: Path): RecoveredProgramModel {
-        val executable = ghidraHome.resolve("support/analyzeHeadless")
-        require(executable.isExecutable()) { "GHIDRA_HOME does not contain executable support/analyzeHeadless" }
+    override fun analyze(binaryPath: Path, workDir: Path): RecoveredProgramModel =
+        analyzeInternal(binaryPath, workDir, false).first
+
+    fun analyzeWithCallSites(binaryPath: Path, workDir: Path): RecoveredProgramWithCallSites {
+        val (model, calls) = analyzeInternal(binaryPath, workDir, true)
+        return RecoveredProgramWithCallSites(model, checkNotNull(calls))
+    }
+
+    private fun analyzeInternal(
+        binaryPath: Path,
+        workDir: Path,
+        includeCallSites: Boolean,
+    ): Pair<RecoveredProgramModel, RecoveredCallSiteReceipt?> {
+        val startedNanos = System.nanoTime()
         val reports = workDir.resolve("reports").createDirectories()
         val scripts = workDir.resolve("scripts").createDirectories()
         val scriptBytes = javaClass.getResourceAsStream("/ghidra_scripts/ExportProgramModel.java")
@@ -73,21 +98,23 @@ class GhidraHeadlessProgramModelAnalyzer(
         scripts.resolve("ExportProgramModel.java").writeBytes(scriptBytes)
         val exporterSha256 = sha256(scriptBytes)
         val output = reports.resolve("program_model.json")
+        val callOutput = reports.resolve("program_model_calls.json")
+        val callScriptBytes = if (includeCallSites) {
+            require(!Files.exists(callOutput, LinkOption.NOFOLLOW_LINKS)) { "call-site output already exists" }
+            javaClass.getResourceAsStream("/ghidra_scripts/ExportRecoveredCallSites.java")
+                ?.use { it.readBytes() } ?: error("bundled ExportRecoveredCallSites.java is missing")
+        } else null
+        callScriptBytes?.let { scripts.resolve("ExportRecoveredCallSites.java").writeBytes(it) }
         val project = workDir.resolve("ghidra_project").createDirectories()
-        val command = listOf(
-            executable.pathString,
-            project.pathString,
-            "archival_reconstruction",
-            "-import", binaryPath.toAbsolutePath().normalize().pathString,
-            "-overwrite",
-            "-scriptPath", scripts.pathString,
-            "-postScript",
-            "ExportProgramModel.java",
-            exporterSha256,
-            analysisToolSha256,
-            recoveryMode.wireName,
-            output.pathString,
+        val postScripts = listOf(GhidraPostScript("ExportProgramModel.java", listOf(
+            exporterSha256, analysisToolSha256, recoveryMode.wireName, output.toAbsolutePath().normalize().pathString,
+        ))) + if (callScriptBytes == null) emptyList() else listOf(
+            GhidraPostScript("ExportRecoveredCallSites.java", listOf(
+                sha256(callScriptBytes), analysisToolSha256, output.toAbsolutePath().normalize().pathString,
+                callOutput.toAbsolutePath().normalize().pathString,
+            )),
         )
+        val command = commandFactory(GhidraInvocation(project, "archival_reconstruction", binaryPath, scripts, postScripts))
         val process = ProcessBuilder(command)
             .directory(workDir.toFile())
             .start()
@@ -135,7 +162,38 @@ class GhidraHeadlessProgramModelAnalyzer(
         require(exitCode == 0 && Files.isRegularFile(output, LinkOption.NOFOLLOW_LINKS)) {
             "Ghidra program recovery failed with exit code $exitCode; see ${reports.resolve("ghidra_stderr.log")}"
         }
-        return ProgramModelJson.readCanonical(readStableProgramModel(output))
+        val modelBytes = readStableProgramModel(output)
+        val model = ProgramModelJson.readCanonical(modelBytes)
+        val calls = callScriptBytes?.let { script ->
+            val callLimits = RecoveredCallSiteLimits()
+            fun requireRemainingTime() {
+                check(!Thread.currentThread().isInterrupted) { "call-site export validation interrupted" }
+                check(System.nanoTime() - startedNanos < limits.wallClockTimeout.toNanos()) {
+                    "call-site export and validation exceeded the analysis wall-clock budget"
+                }
+            }
+            requireRemainingTime()
+            require(Files.isRegularFile(callOutput, LinkOption.NOFOLLOW_LINKS)) { "call-site export did not produce a regular file" }
+            val digest = MessageDigest.getInstance("SHA-256")
+            var bytes = 0L
+            Files.newInputStream(callOutput, java.nio.file.StandardOpenOption.READ, LinkOption.NOFOLLOW_LINKS).use { stream ->
+                val buffer = ByteArray(64 * 1024)
+                while (true) {
+                    requireRemainingTime()
+                    val count = stream.read(buffer)
+                    if (count < 0) break
+                    bytes = Math.addExact(bytes, count.toLong())
+                    require(bytes <= callLimits.maximumInputBytes) { "call-site export exceeds its input byte bound" }
+                    digest.update(buffer, 0, count)
+                }
+            }
+            RecoveredCallSites.read(
+                callOutput, digest.digest().joinToString("") { "%02x".format(it) },
+                RecoveredCallSiteBindings(model.inputSha256, sha256(modelBytes), sha256(script), analysisToolSha256),
+                callLimits,
+            ) { requireRemainingTime() }.also { requireRemainingTime() }
+        }
+        return model to calls
     }
 
     private fun readStableProgramModel(path: Path): ByteArray {
@@ -186,14 +244,9 @@ class GhidraHeadlessProgramModelAnalyzer(
         internal const val UNAUTHENTICATED_ANALYSIS_TOOL_SHA256 =
             "0000000000000000000000000000000000000000000000000000000000000000"
 
-        fun fromEnvironment(
-            environment: Map<String, String> = System.getenv(),
+        fun bundled(
             profile: ReconstructionProfile = GeneratedCMakeReconstructionProfile.descriptor,
-        ): GhidraHeadlessProgramModelAnalyzer {
-            val home = environment["GHIDRA_HOME"]?.takeIf(String::isNotBlank)
-                ?: error("GHIDRA_HOME is required for source-tree reconstruction")
-            return GhidraHeadlessProgramModelAnalyzer(Path.of(home), GhidraProgramModelExportLimits.from(profile))
-        }
+        ): GhidraHeadlessProgramModelAnalyzer = GhidraHeadlessProgramModelAnalyzer(GhidraProgramModelExportLimits.from(profile))
     }
 }
 

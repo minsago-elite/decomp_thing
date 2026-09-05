@@ -91,7 +91,7 @@ object ArchivalPackager {
             "archive output must not be a symbolic link: $archivePath"
         }
         validateSuccessfulBuild(projectDir)
-        val audit = ArchivalProjectAuditor.audit(projectDir)
+        val audit = ArchivalProjectAuditor.audit(projectDir, profile)
         require(audit.provenanceComplete) { "archive project has incomplete model or source provenance" }
         val readme = projectDir.resolve("ARCHIVE_README.md")
         writeProjectEvidenceAtomically(

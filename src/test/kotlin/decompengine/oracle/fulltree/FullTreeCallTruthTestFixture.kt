@@ -13,8 +13,11 @@ internal data class FullTreeCallTruthTestFixture(
     val callRun: FullTreeCallObservationRunPublication,
 )
 
-internal fun createFullTreeCallTruthTestFixture(root: Path): FullTreeCallTruthTestFixture {
-    val raw = createFullTreeCrossShardCallFixture(root)
+internal fun createFullTreeCallTruthTestFixture(
+    root: Path,
+    additionalCalls: List<FullTreeCrossShardFixtureCall> = emptyList(),
+): FullTreeCallTruthTestFixture {
+    val raw = createFullTreeCrossShardCallFixture(root, additionalCalls)
     val scratch = callTruthPrivateDirectory(root.resolve("scratch"))
     val elfIndex = root.resolve("elf-functions.json")
     FullTreeElfFunctionsSqlite.generateAndPublish(

@@ -125,13 +125,13 @@ internal class FullTreeCallTruthFunctionProjection internal constructor(
 }
 
 /**
- * Raw Kotlin policy-v3 reconciliation. Candidate artifacts supply no expected oracle facts.
+ * Raw Kotlin policy-v4 reconciliation. Candidate artifacts supply no expected oracle facts.
  * Indexed scratch and bounded groups replace historical whole-tree maps. Filesystem owners
  * must cooperate; receipts do not grant a retained candidate lease or release/scoring authority.
  */
 internal object FullTreeCallTruthSqlite {
     val configurationSha256: String by lazy {
-        OracleSchemas.configurationSha256(listOf("full-tree-call-truth", "full-tree-call-truth-index"), CALL_TRUTH_POLICY)
+        OracleSchemas.configurationSha256(listOf("full-tree-call-truth-v2", "full-tree-call-truth-index"), CALL_TRUTH_POLICY)
     }
 
     fun generateAndPublish(
@@ -153,7 +153,7 @@ internal object FullTreeCallTruthSqlite {
         richArtifact, strippedArtifact, inventoryPath, elfFunctionIndex, functionObservationRoot,
         expectedFunctionObservationIndexArtifactSha256, functionTruthRoot, callObservationRoot,
         expectedCallObservationIndexArtifactSha256, scope, scratchParent, outputRoot, maximumWorkers, limits, false,
-    )
+    ) { it.publish() }
 
     fun loadAndValidate(
         candidateRoot: Path,
@@ -174,10 +174,73 @@ internal object FullTreeCallTruthSqlite {
         richArtifact, strippedArtifact, inventoryPath, elfFunctionIndex, functionObservationRoot,
         expectedFunctionObservationIndexArtifactSha256, functionTruthRoot, callObservationRoot,
         expectedCallObservationIndexArtifactSha256, scope, scratchParent, candidateRoot, maximumWorkers, limits, true,
-    )
+    ) { it.validate() }
+
+    internal fun <Result> withValidatedBaselineProjection(
+        candidateRoot: Path,
+        richArtifact: Path,
+        strippedArtifact: Path,
+        inventoryPath: Path,
+        elfFunctionIndex: Path,
+        functionObservationRoot: Path,
+        expectedFunctionObservationIndexArtifactSha256: String,
+        functionTruthRoot: Path,
+        callObservationRoot: Path,
+        expectedCallObservationIndexArtifactSha256: String,
+        scope: AuthenticatedFullTreeScope,
+        scratchParent: Path,
+        baselineRoot: Path,
+        maximumWorkers: Int,
+        limits: FullTreeCallTruthLimits,
+        consume: (FullTreeCallBaselineRawProjection) -> Result,
+    ): Result {
+        requireCallTruthDisjoint(baselineRoot, listOf(
+            candidateRoot, richArtifact, strippedArtifact, inventoryPath, elfFunctionIndex,
+            functionObservationRoot, functionTruthRoot, callObservationRoot, scratchParent,
+        ))
+        return reconcileCalls(
+            richArtifact, strippedArtifact, inventoryPath, elfFunctionIndex, functionObservationRoot,
+            expectedFunctionObservationIndexArtifactSha256, functionTruthRoot, callObservationRoot,
+            expectedCallObservationIndexArtifactSha256, scope, scratchParent, candidateRoot, maximumWorkers, limits, true,
+        ) { it.withBaseline(consume) }
+    }
 }
 
-private fun reconcileCalls(
+internal class FullTreeCallBaselineRawProjection internal constructor(
+    val root: Path,
+    val index: JsonObject,
+    val indexArtifactSha256: String,
+    val scope: AuthenticatedFullTreeScope,
+    val scratchParent: Path,
+    private val scratchCheckpoint: (String) -> Long,
+    private val runtimeCheckpoint: (String) -> Unit,
+    private val rawRecheck: (String) -> Unit,
+    private val releaseInputs: () -> Unit,
+) : AutoCloseable {
+    private var released = false
+
+    fun checkpoint(label: String): Long {
+        check(!released) { "call-baseline raw projection has been released" }
+        return scratchCheckpoint(label)
+    }
+
+    fun recheck(label: String) {
+        check(!released) { "call-baseline raw projection has been released" }
+        rawRecheck(label)
+    }
+
+    fun release() {
+        if (released) return
+        releaseInputs()
+        released = true
+    }
+
+    fun terminalCheckpoint(label: String) = runtimeCheckpoint(label)
+
+    override fun close() = release()
+}
+
+private fun <Result> reconcileCalls(
     richArtifact: Path,
     strippedArtifact: Path,
     inventoryPath: Path,
@@ -193,7 +256,8 @@ private fun reconcileCalls(
     maximumWorkers: Int,
     limits: FullTreeCallTruthLimits,
     validating: Boolean,
-): FullTreeCallTruthPublication = translateCallTruthFailure {
+    finish: (CallTruthReconciliation) -> Result,
+): Result = translateCallTruthFailure {
     if (limits.maximumScratchBytes < maxOf(limits.truth.maximumScratchBytes,
             limits.truth.elfFunctions.maximumScratchBytes, limits.callRun.maximumScratchBytes)
     ) callTruthFail("call-truth scratch ceiling does not admit its configured nested raw derivations")
@@ -279,31 +343,75 @@ private fun reconcileCalls(
                     scratch.releaseDatabase()
                     recheck("before terminal call-truth comparison")
                     stage.freeze(projection, budget)
-                    if (validating) {
-                        compareCallTruthTree(result, stage.root, projection, budget)
-                        recheck("after comparing the raw-derived call-truth candidate")
-                        compareCallTruthTree(result, stage.root, projection, budget)
-                        stage.close()
-                        scratch.close()
-                        releaseFunctions()
-                        budget.checkpoint("after releasing call-truth validation scratch")
-                    } else {
-                        scratch.close()
-                        stage.publish(result, projection, budget, { recheck("at call-truth publication") }) {
-                            releaseFunctions()
-                            budget.checkpoint("after releasing call-truth publication scratch")
-                        }
-                    }
-                    FullTreeCallTruthPublication(
-                        result, projection.index, projection.indexArtifactSha256,
-                        projection.index.controlString("indexSha256"), functions.indexArtifactSha256,
-                        expectedElfSha, callRun.indexArtifactSha256, projection.outputBytes,
-                        context.databaseHighWaterBytes, projection.counts, validating,
-                    )
+                    finish(CallTruthReconciliation(
+                        result, projection, stage, scratch, context, functions.indexArtifactSha256,
+                        expectedElfSha, callRun.indexArtifactSha256, ::recheck, releaseFunctions,
+                    ))
                 }
             }
         }
     }
+}
+
+private class CallTruthReconciliation(
+    private val result: Path,
+    private val projection: CallTruthProjection,
+    private val stage: CallTruthStage,
+    private val scratch: CallTruthScratch,
+    private val context: CallTruthContext,
+    private val functionTruthIndexSha256: String,
+    private val elfIndexSha256: String,
+    private val callIndexSha256: String,
+    private val recheckInputs: (String) -> Unit,
+    private val releaseFunctions: () -> Unit,
+) {
+    private var released = false
+
+    fun publish(): FullTreeCallTruthPublication {
+        scratch.close()
+        stage.publish(result, projection, context.budget, { recheckInputs("at call-truth publication") }) {
+            releaseFunctions()
+            context.budget.checkpoint("after releasing call-truth publication scratch")
+        }
+        return receipt(false)
+    }
+
+    fun validate(): FullTreeCallTruthPublication {
+        recheckCandidate("after comparing the raw-derived call-truth candidate")
+        release()
+        return receipt(true)
+    }
+
+    fun <Result> withBaseline(consume: (FullTreeCallBaselineRawProjection) -> Result): Result {
+        recheckCandidate("before consuming the raw call-baseline projection")
+        val live = FullTreeCallBaselineRawProjection(
+            stage.root, projection.index, projection.indexArtifactSha256, context.scope, scratch.root,
+            context::scratchBytes, context.budget::checkpoint, ::recheckCandidate, ::release,
+        )
+        return live.use(consume)
+    }
+
+    private fun recheckCandidate(label: String) {
+        check(!released) { "call-truth candidate projection has been released" }
+        compareCallTruthTree(result, stage.root, projection, context.budget)
+        recheckInputs(label)
+        compareCallTruthTree(result, stage.root, projection, context.budget)
+    }
+
+    private fun release() {
+        if (released) return
+        stage.close()
+        scratch.close()
+        releaseFunctions()
+        released = true
+        context.budget.checkpoint("after releasing call-truth validation scratch")
+    }
+
+    private fun receipt(validating: Boolean): FullTreeCallTruthPublication = FullTreeCallTruthPublication(
+        result, projection.index, projection.indexArtifactSha256, projection.index.controlString("indexSha256"),
+        functionTruthIndexSha256, elfIndexSha256, callIndexSha256, projection.outputBytes,
+        context.databaseHighWaterBytes, projection.counts, validating,
+    )
 }
 
 private class CallTruthContext(
@@ -326,6 +434,13 @@ private class CallTruthContext(
         val residentScratch = functions.checkpoint(label)
         val total = Math.addExact(Math.addExact(residentScratch, transientReservation), if (detachedOutput) outputBytes else 0L)
         if (total > limits.maximumScratchBytes) callTruthFail("call-truth aggregate scratch bound exceeded $label")
+    }
+
+    fun scratchBytes(label: String): Long {
+        budget.checkpoint(label)
+        val bytes = functions.checkpoint(label)
+        if (bytes > limits.maximumScratchBytes) callTruthFail("call-truth aggregate scratch bound exceeded $label")
+        return bytes
     }
 
     fun chargeOutput(bytes: Long) {
@@ -503,9 +618,61 @@ private class CallTruthDatabase private constructor(
     private fun ingestCall(shard: String, observation: JsonObject) {
         observations = Math.addExact(observations, 1L)
         if (observations > context.whole.controlLong("entities")) callTruthFail("call observation whole-run entity bound exceeded")
+        val caller = observation.nullableCallString("callerId")
+        val call = observation.nullableCallString("callPcRva")
+        val returned = observation.nullableCallString("returnPcRva")
+        if (caller != null && call != null && returned != null) {
+            update("INSERT OR IGNORE INTO call_coordinates VALUES(?,?,?)", caller, call, returned)
+            if (mappedCoordinate(caller, call, true) != returned) {
+                callTruthFail("call instruction and return coordinates have conflicting raw mappings")
+            }
+        }
+        update("INSERT INTO raw_calls VALUES(?,?,?)", observation.controlString("id"), shard, context.entityBytes(observation))
+        rowAccepted()
+    }
+
+    private fun mappedCoordinate(caller: String, coordinate: String, fromCall: Boolean): String? {
+        val query = if (fromCall) {
+            "SELECT return_pc FROM call_coordinates WHERE caller_id=? AND call_pc=?"
+        } else {
+            "SELECT call_pc FROM call_coordinates WHERE caller_id=? AND return_pc=?"
+        }
+        val selected = prepared(query)
+        selected.setString(1, caller)
+        selected.setString(2, coordinate)
+        return selected.executeQuery().use { rows -> if (rows.next()) rows.getString(1) else null }
+    }
+
+    private fun reconcileCoordinates(observation: JsonObject): JsonObject {
+        val caller = observation.nullableCallString("callerId") ?: return observation
+        var call = observation.nullableCallString("callPcRva")
+        var returned = observation.nullableCallString("returnPcRva")
+        if (call == null && returned != null) call = mappedCoordinate(caller, returned, false)
+        if (returned == null && call != null) returned = mappedCoordinate(caller, call, true)
+        val start = caller.removePrefix("function-rva-0x").toULong(16)
+        fun relative(coordinate: String?): JsonElement {
+            if (coordinate == null) return JsonNull
+            val address = coordinate.removePrefix("0x").toULong(16)
+            if (address < start) callTruthFail("reconciled call coordinate precedes its caller")
+            return JsonPrimitive("0x${(address - start).toString(16)}")
+        }
+        return JsonObject(observation.toMutableMap().apply {
+            put("callPcRva", call.callJson())
+            put("returnPcRva", returned.callJson())
+            put("callerLocalCallOffset", relative(call))
+            put("callerLocalReturnOffset", relative(returned))
+        })
+    }
+
+    private fun ingestReconciledCall(shard: String, observation: JsonObject) {
         val identifier = observation.controlString("id")
         val identity = if (observation.controlString("population") == "scored") {
-            JsonObject(mapOf("callerId" to observation.getValue("callerId"), "returnPcRva" to observation.getValue("returnPcRva")))
+            val call = observation.nullableCallString("callPcRva")
+            JsonObject(mapOf(
+                "callerId" to observation.getValue("callerId"),
+                "coordinateKind" to JsonPrimitive(if (call != null) "instruction" else "return"),
+                "pcRva" to (call?.let(::JsonPrimitive) ?: observation.getValue("returnPcRva")),
+            ))
         } else {
             JsonObject(mapOf("observationId" to JsonPrimitive(identifier)))
         }
@@ -535,6 +702,17 @@ private class CallTruthDatabase private constructor(
     }
 
     fun compose() {
+        connection.createStatement().use { statement ->
+            statement.executeQuery("SELECT source_shard,canonical FROM raw_calls ORDER BY observation_id COLLATE BINARY").use { rows ->
+                while (rows.next()) {
+                    context.budget.checkpoint("while reconciling typed raw call coordinates")
+                    val observation = OracleJson.parseCanonical(rows.getBytes(2), context.jsonLimits()) as? JsonObject
+                        ?: callTruthFail("raw call-coordinate projection is invalid")
+                    ingestReconciledCall(rows.getString(1), reconcileCoordinates(observation))
+                }
+            }
+        }
+        flush()
         connection.createStatement().use { statement ->
             statement.executeQuery("SELECT edge_key,signature FROM edge_groups ORDER BY edge_key COLLATE BINARY").use { groups ->
                 while (groups.next()) {
@@ -662,6 +840,8 @@ private class CallTruthDatabase private constructor(
             else -> callTruthFail("call target classification is unsupported")
         }
         return JsonObject(mapOf(
+            "callPcRva" to signature.getValue("callPcRva"),
+            "callerLocalCallOffset" to signature.getValue("callerLocalCallOffset"),
             "callerId" to signature.getValue("callerId"), "callerLocalReturnOffset" to signature.getValue("callerLocalReturnOffset"),
             "dispatchKind" to target.getValue("dispatchKind"), "externalTargetIds" to JsonArray(external.map(::JsonPrimitive)),
             "id" to JsonPrimitive("call-edge-${key.take(32)}"), "observationIds" to JsonArray(identifiers.map(::JsonPrimitive)),
@@ -716,7 +896,7 @@ private class CallTruthDatabase private constructor(
                 writer.endArray()
                 writer.field("counts"); writer.value(context.entityBytes(counts.toJson()))
                 writer.field("oracle"); writer.value(context.entityBytes(oracle))
-                writer.field("schemaVersion"); writer.value(context.entityBytes(JsonPrimitive(1)))
+                writer.field("schemaVersion"); writer.value(context.entityBytes(JsonPrimitive(2)))
                 writer.field("shard"); writer.value(context.entityBytes(JsonObject(mapOf("id" to JsonPrimitive(owner)))))
                 writer.endObject()
             }
@@ -765,6 +945,8 @@ private class CallTruthDatabase private constructor(
                     statement.execute("CREATE TABLE functions(function_id TEXT COLLATE BINARY PRIMARY KEY,owner_shard TEXT NOT NULL,kind TEXT NOT NULL) WITHOUT ROWID")
                     statement.execute("CREATE TABLE aliases(name TEXT COLLATE BINARY NOT NULL,function_id TEXT COLLATE BINARY NOT NULL REFERENCES functions(function_id),PRIMARY KEY(name,function_id)) WITHOUT ROWID")
                     statement.execute("CREATE TABLE external_names(name TEXT COLLATE BINARY PRIMARY KEY,external_id TEXT NOT NULL UNIQUE) WITHOUT ROWID")
+                    statement.execute("CREATE TABLE raw_calls(observation_id TEXT COLLATE BINARY PRIMARY KEY,source_shard TEXT NOT NULL,canonical BLOB NOT NULL) WITHOUT ROWID")
+                    statement.execute("CREATE TABLE call_coordinates(caller_id TEXT COLLATE BINARY NOT NULL,call_pc TEXT COLLATE BINARY NOT NULL,return_pc TEXT COLLATE BINARY NOT NULL,PRIMARY KEY(caller_id,call_pc),UNIQUE(caller_id,return_pc)) WITHOUT ROWID")
                     statement.execute("CREATE TABLE edge_groups(edge_key TEXT COLLATE BINARY PRIMARY KEY,identity_payload BLOB NOT NULL,signature BLOB NOT NULL,rows INTEGER NOT NULL,bytes INTEGER NOT NULL) WITHOUT ROWID")
                     statement.execute("CREATE TABLE observations(edge_key TEXT COLLATE BINARY NOT NULL REFERENCES edge_groups(edge_key),observation_id TEXT COLLATE BINARY NOT NULL UNIQUE,source_shard TEXT NOT NULL,PRIMARY KEY(edge_key,observation_id)) WITHOUT ROWID")
                     statement.execute("CREATE TABLE merged(edge_id TEXT COLLATE BINARY PRIMARY KEY,owner_shard TEXT COLLATE BINARY NOT NULL,payload BLOB NOT NULL,target_kind TEXT NOT NULL,tail_call INTEGER NOT NULL,unobservable INTEGER NOT NULL,observation_count INTEGER NOT NULL) WITHOUT ROWID")
@@ -1241,8 +1423,8 @@ private val CALL_TRUTH_POLICY = JsonObject(mapOf(
     "dispatchPolicy" to JsonPrimitive("direct-virtual-indirect-preserved-without-name-inference"),
     "externalNamespace" to JsonPrimitive("exact-undefined-elf-function-name"),
     "id" to JsonPrimitive("full-tree-call-truth"),
-    "identity" to JsonPrimitive("caller-id-and-return-pc-rva"),
-    "inputAuthority" to JsonPrimitive("kotlin-raw-rederived-function-truth-and-call-observation-v3"),
+    "identity" to JsonPrimitive("caller-id-and-typed-pc-with-bijective-raw-coordinate-pair-reconciliation"),
+    "inputAuthority" to JsonPrimitive("kotlin-raw-rederived-function-truth-and-call-observation-v4"),
     "thunkPolicy" to JsonPrimitive("physical-target-retained-semantic-target-explicitly-unresolved"),
-    "version" to JsonPrimitive(3),
+    "version" to JsonPrimitive(4),
 ))

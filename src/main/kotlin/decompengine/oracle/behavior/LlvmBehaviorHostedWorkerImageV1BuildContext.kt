@@ -1116,7 +1116,7 @@ private fun renderWorkerArguments(entries: List<ApplicationEntry>): ByteArray {
 }
 
 /**
- * Emits an always-PAX, USTAR-backed archive in code-point path order. Host uid/gid/mtime/mode are
+ * Emits a plain USTAR Dockerfile followed by PAX entries in code-point path order. Host uid/gid/mtime/mode are
  * never serialized: archive ownership is root, timestamps are fixed, directories/executables are
  * 0555, and other regular files are 0444. Every file is reread from a retained descriptor and
  * checked against its staged digest while its exact bytes flow to the caller-owned sink.
@@ -1264,8 +1264,9 @@ private class DeterministicTarOutput(
         if (size < 0L || size > MAXIMUM_TAR_ENTRY_BYTES) {
             buildContextFail("deterministic hosted-worker tar entry $path exceeds its byte bound")
         }
-        writePaxHeader(path, null)
-        writeHeader(dummyPath(directory = false), mode, size, TAR_REGULAR_FILE_TYPE, "")
+        val plainDockerfile = entryIndex == 0 && path == TAR_DOCKERFILE_NAME
+        if (!plainDockerfile) writePaxHeader(path, null)
+        writeHeader(if (plainDockerfile) path else dummyPath(directory = false), mode, size, TAR_REGULAR_FILE_TYPE, "")
         val written = content(hashUpdatingOutput)
         if (written != size) buildContextFail("deterministic hosted-worker tar entry $path changed length")
         writeZeros(tarPadding(size))

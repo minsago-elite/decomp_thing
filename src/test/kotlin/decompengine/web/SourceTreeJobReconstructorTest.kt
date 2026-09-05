@@ -108,17 +108,19 @@ class SourceTreeJobReconstructorTest {
     }
 
     @Test
-    fun `web job persists stable harness selection before external analysis`() {
+    fun `web job persists stable harness selection before bundled analysis`() {
         val root = createTempDirectory("web-reconstruction-selection-")
         val store = JobStore(root)
         val job = store.createFromUpload("fixture.elf", elfFixture())
         val reports = store.reportsDirectory(job.id)
 
         val failure = assertFailsWith<IllegalStateException> {
-            SourceTreeJobReconstructor(legacyEnvironment()).reconstruct(job, reports)
+            SourceTreeJobReconstructor(legacyEnvironment(), decompengine.project.ProgramModelAnalyzer { _, _ ->
+                error("expected analysis failure")
+            }).reconstruct(job, reports)
         }
 
-        assertTrue(failure.message.orEmpty().contains("GHIDRA_HOME is required"))
+        assertEquals("expected analysis failure", failure.message)
         val artifact = reports.resolve("reconstruction_harness_selection.json")
         assertTrue(artifact.exists())
         val report = Json.parseToJsonElement(artifact.readText()).jsonObject

@@ -1984,7 +1984,7 @@ object SourceTreeManifestReader {
 }
 
 /** Reject duplicate object members before kotlinx.serialization can collapse them. */
-private class UniqueJsonObjectKeyValidator(private val source: String) {
+internal class UniqueJsonObjectKeyValidator(private val source: String) {
     private var cursor = 0
 
     fun validate() {

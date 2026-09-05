@@ -1,16 +1,31 @@
 package decompengine.web
 
 import decompengine.jobs.elfFixture
+import decompengine.project.GeneratedCMakeReconstructionProfile
+import decompengine.project.GeneratedFileEvidence
+import decompengine.project.ProjectContentKind
+import decompengine.project.ProjectFileDeclaration
+import decompengine.project.ProjectFileRole
+import decompengine.project.ProjectLayoutProfile
+import decompengine.project.ReconstructionProfile
+import decompengine.project.SourceTreeManifest
 import kotlinx.serialization.json.Json
 import kotlinx.serialization.json.jsonObject
 import java.net.HttpURLConnection
 import java.net.URI
+import java.nio.ByteBuffer
+import java.nio.channels.FileChannel
+import java.nio.file.Files
+import java.nio.file.Path
+import java.nio.file.StandardOpenOption
+import java.security.MessageDigest
 import java.util.concurrent.Executor
 import kotlin.io.path.createDirectories
 import kotlin.io.path.createTempDirectory
 import kotlin.io.path.exists
 import kotlin.io.path.readBytes
 import kotlin.io.path.writeText
+import kotlin.io.path.writeBytes
 import kotlin.test.Test
 import kotlin.test.assertEquals
 import kotlin.test.assertTrue
@@ -294,8 +309,8 @@ class UploadServerTest {
             tree.resolve("reports").createDirectories()
             tree.resolve("src/modules/core.c").writeText("int core(void) { /* <script>alert(1)</script> */ return 0; }\n")
             tree.resolve("Makefile").writeText("all:\n\t@true\n")
-            tree.resolve("source_tree_manifest.json").writeText("{\"files\":[{\"path\":\"src/modules/core.c\",\"generator\":\"llm\",\"entityIds\":[\"fn_1000\"]}]}")
             tree.resolve("reports/confidence.json").writeText("{\"projectScore\":0.75,\"modules\":[{\"id\":\"core\",\"score\":0.8}]}")
+            writeManifest(tree, listOf("src/modules/core.c", "Makefile", "reports/confidence.json"))
             reportsDir.resolve("reconstruction_progress.json").writeText("{\"phase\":\"modules\",\"completed\":2,\"total\":4,\"module\":\"core\"}")
             reportsDir.resolve("source-tree.zip").writeText("archive")
         }
@@ -314,6 +329,7 @@ class UploadServerTest {
             assertTrue(page.body.decodeToString().contains("src/modules/core.c"))
             assertTrue(page.body.decodeToString().contains("75%"))
             assertTrue(page.body.decodeToString().contains("2 / 4 modules"))
+            assertTrue(!page.body.decodeToString().contains("Download verified source archive"))
             assertEquals(200, source.status)
             assertTrue(source.body.decodeToString().contains("&lt;script&gt;"))
             assertTrue(!source.body.decodeToString().contains("<script>alert"))
@@ -324,14 +340,216 @@ class UploadServerTest {
         }
     }
 
+    @Test
+    fun `artifact and source routes reject final file and parent directory indirection`() {
+        withServer { server, dataDir ->
+            val jobId = uploadedJobId(server)
+            val reports = dataDir.resolve("$jobId/reports").createDirectories()
+            val external = dataDir.resolve("outside").createDirectories()
+            external.resolve("secret.c").writeText("outside-boundary-marker")
+            Files.createSymbolicLink(reports.resolve("source-tree.zip"), external.resolve("secret.c"))
+            Files.createSymbolicLink(reports.resolve("source-tree"), external)
+            assertRejectedWithoutMarker(request(server, "GET", "/jobs/$jobId/artifacts/reports/source-tree.zip"))
+            assertRejectedWithoutMarker(request(server, "GET", "/jobs/$jobId/source/secret.c"))
+            Files.delete(reports.resolve("source-tree"))
+            val tree = reports.resolve("source-tree").createDirectories()
+            Files.createSymbolicLink(tree.resolve("secret.c"), external.resolve("secret.c"))
+            assertRejectedWithoutMarker(request(server, "GET", "/jobs/$jobId/source/secret.c"))
+        }
+    }
+
+    @Test
+    fun `routes reject a substituted job directory instead of following its reports`() {
+        withServer { server, dataDir ->
+            val jobId = uploadedJobId(server)
+            val original = dataDir.resolve(jobId)
+            original.resolve("reports/source-tree").createDirectories()
+            original.resolve("reports/source-tree/source.c").writeText("outside-boundary-marker")
+            val moved = dataDir.resolve("moved-job")
+            Files.move(original, moved)
+            Files.createSymbolicLink(original, moved)
+            assertRejectedWithoutMarker(request(server, "GET", "/jobs/$jobId/source/source.c"))
+            assertRejectedWithoutMarker(request(server, "GET", "/jobs/$jobId/artifacts/reports/source-tree/source.c"))
+            assertRejectedWithoutMarker(request(server, "GET", "/jobs/$jobId"))
+        }
+    }
+
+    @Test
+    fun `source and archive response reads reject oversized sparse files`() {
+        withServer { server, dataDir ->
+            val jobId = uploadedJobId(server)
+            val reports = dataDir.resolve("$jobId/reports").createDirectories()
+            val tree = reports.resolve("source-tree").createDirectories()
+            val source = tree.resolve("src/modules").createDirectories().resolve("large.c")
+            val archive = reports.resolve("source-tree.zip")
+            sparseFile(source, 4L * 1024 * 1024 + 1)
+            sparseFile(archive, 64L * 1024 * 1024 + 1)
+            writeManifest(tree, listOf("src/modules/large.c"))
+            assertEquals(400, request(server, "GET", "/jobs/$jobId/source/src/modules/large.c").status)
+            assertEquals(400, request(server, "GET", "/jobs/$jobId/artifacts/reports/source-tree.zip").status)
+        }
+    }
+
+    @Test
+    fun `source rendering never reads linked or oversized provenance metadata`() {
+        withServer { server, dataDir ->
+            val jobId = uploadedJobId(server)
+            val tree = dataDir.resolve("$jobId/reports/source-tree").createDirectories()
+            tree.resolve("source.c").writeText("int source(void) { return 0; }\n")
+            val external = dataDir.resolve("outside.json")
+            external.writeText("""{"files":[{"path":"source.c","generator":"outside-boundary-marker","entityIds":[]}]}""")
+            Files.createSymbolicLink(tree.resolve("source_tree_manifest.json"), external)
+            val linked = request(server, "GET", "/jobs/$jobId/source/source.c")
+            assertRejectedWithoutMarker(linked)
+            Files.delete(tree.resolve("source_tree_manifest.json"))
+            sparseFile(tree.resolve("source_tree_manifest.json"), 1024L * 1024 + 1)
+            assertEquals(400, request(server, "GET", "/jobs/$jobId/source/source.c").status)
+        }
+    }
+
+    @Test
+    fun `source responses reject malformed UTF8 without replacement decoding`() {
+        withServer { server, dataDir ->
+            val jobId = uploadedJobId(server)
+            val tree = dataDir.resolve("$jobId/reports/source-tree").createDirectories()
+            tree.resolve("src/modules").createDirectories().resolve("invalid.c").writeBytes(byteArrayOf(0xc3.toByte(), 0x28))
+            writeManifest(tree, listOf("src/modules/invalid.c"))
+            assertEquals(400, request(server, "GET", "/jobs/$jobId/source/src/modules/invalid.c").status)
+        }
+    }
+
+    @Test
+    fun `artifact routes reject noncanonical paths and nonregular targets`() {
+        withServer { server, dataDir ->
+            val jobId = uploadedJobId(server)
+            dataDir.resolve("$jobId/reports/directory.json").createDirectories()
+            for (relative in listOf("reports/directory.json", "reports/%2e%2e%2fjob.json", "reports%5cfile.json", "reports/file%0a.json")) {
+                val response = request(server, "GET", "/jobs/$jobId/artifacts/$relative")
+                assertTrue(response.status in 400..499, "unsafe artifact path returned ${response.status}: $relative")
+            }
+        }
+    }
+
+    @Test
+    fun `source roles and text kinds come from an admitted alternate profile not suffixes`() {
+        val profile = ReconstructionProfile(
+            schemaVersion = ReconstructionProfile.CURRENT_SCHEMA_VERSION,
+            id = "web-alternate-text-v1",
+            layout = ProjectLayoutProfile(ProjectLayoutProfile.CURRENT_SCHEMA_VERSION, listOf(
+                ProjectFileDeclaration("text", "units/core.rs", setOf(ProjectFileRole.VIEWABLE, ProjectFileRole.EVIDENCE), ProjectContentKind.UTF8_TEXT),
+                ProjectFileDeclaration("hidden", "private/hidden.c", setOf(ProjectFileRole.EVIDENCE), ProjectContentKind.UTF8_TEXT),
+                ProjectFileDeclaration("binary", "units/binary.c", setOf(ProjectFileRole.VIEWABLE), ProjectContentKind.BINARY),
+            )),
+            budgets = GeneratedCMakeReconstructionProfile.descriptor.budgets,
+        )
+        withServer(profiles = listOf(profile)) { server, dataDir ->
+            val jobId = uploadedJobId(server)
+            val tree = dataDir.resolve("$jobId/reports/source-tree").createDirectories()
+            tree.resolve("units").createDirectories()
+            tree.resolve("private").createDirectories()
+            tree.resolve("units/core.rs").writeText("pub fn core() -> u32 { 7 }\n")
+            tree.resolve("private/hidden.c").writeText("not admitted for source viewing")
+            tree.resolve("units/binary.c").writeBytes(byteArrayOf(0, 1, 2))
+            tree.resolve("unlisted.c").writeText("not declared")
+            writeManifest(tree, listOf("units/core.rs", "private/hidden.c", "units/binary.c"), profile)
+            val text = request(server, "GET", "/jobs/$jobId/source/units/core.rs")
+            assertEquals(200, text.status)
+            assertTrue(text.body.decodeToString().contains("pub fn core()"))
+            for (relative in listOf("private/hidden.c", "units/binary.c", "unlisted.c")) {
+                assertEquals(400, request(server, "GET", "/jobs/$jobId/source/$relative").status)
+            }
+            val page = request(server, "GET", "/jobs/$jobId").body.decodeToString()
+            assertTrue(page.contains("/source/units/core.rs"))
+            assertTrue(!page.contains("/source/private/hidden.c"))
+            assertTrue(!page.contains("/source/units/binary.c"))
+            tree.resolve("source_tree_manifest.json").writeText(
+                Files.readString(tree.resolve("source_tree_manifest.json")).replace(profile.sha256, "0".repeat(64)),
+            )
+            assertEquals(400, request(server, "GET", "/jobs/$jobId/source/units/core.rs").status)
+        }
+    }
+
+    @Test
+    fun `changed source input and same-byte source indirection cannot reuse manifest evidence`() {
+        withServer { server, dataDir ->
+            val jobId = uploadedJobId(server)
+            val tree = dataDir.resolve("$jobId/reports/source-tree").createDirectories()
+            val source = tree.resolve("src/modules").createDirectories().resolve("core.c")
+            val original = "int core(void) { return 7; }\n"
+            source.writeText(original)
+            writeManifest(tree, listOf("src/modules/core.c"))
+            val route = "/jobs/$jobId/source/src/modules/core.c"
+            assertEquals(200, request(server, "GET", route).status)
+            source.writeText(original.replace("7", "8"))
+            assertEquals(400, request(server, "GET", route).status)
+            assertTrue(request(server, "GET", "/jobs/$jobId").body.decodeToString().contains("Source-tree evidence is unavailable"))
+            source.writeText(original)
+            val outside = dataDir.resolve("same-byte-copy.c")
+            outside.writeText(original)
+            Files.delete(source)
+            Files.createSymbolicLink(source, outside)
+            assertTrue(request(server, "GET", route).status in 400..499)
+            Files.delete(source)
+            source.writeText(original)
+            dataDir.resolve("$jobId/input.elf").writeBytes(elfFixture() + byteArrayOf(1))
+            assertEquals(400, request(server, "GET", route).status)
+        }
+    }
+
+    private fun uploadedJobId(server: UploadServer): String =
+        Json.parseToJsonElement(upload(server, "boundary.elf", elfFixture(), acceptJson = true).body.decodeToString())
+            .jsonObject.getValue("id").toString().trim('"')
+
+    private fun writeManifest(
+        tree: Path,
+        paths: List<String>,
+        profile: ReconstructionProfile = GeneratedCMakeReconstructionProfile.descriptor,
+    ) {
+        val manifest = SourceTreeManifest(
+            profileId = profile.id,
+            profileSha256 = profile.sha256,
+            inputSha256 = digest(elfFixture()),
+            files = paths.map { relative ->
+                val declaration = profile.layout.declarationForPath(relative)
+                GeneratedFileEvidence(
+                    path = relative,
+                    sha256 = digest(tree.resolve(relative).readBytes()),
+                    generator = "llm",
+                    entityIds = listOf("fn_1000"),
+                    acceptedImplementation = if (ProjectFileRole.MODULE_IMPLEMENTATION in declaration.roles) true else null,
+                    roles = declaration.roles,
+                    contentKind = declaration.contentKind,
+                )
+            },
+            unresolvedEntityIds = emptyList(),
+        )
+        tree.resolve("source_tree_manifest.json").writeText(manifest.toJson())
+    }
+
+    private fun digest(bytes: ByteArray): String =
+        MessageDigest.getInstance("SHA-256").digest(bytes).joinToString("") { "%02x".format(it) }
+
+    private fun assertRejectedWithoutMarker(response: Response) {
+        assertTrue(response.status in 400..499, "unsafe path returned ${response.status}")
+        assertTrue(!response.body.decodeToString().contains("outside-boundary-marker"))
+    }
+
+    private fun sparseFile(path: Path, size: Long) {
+        FileChannel.open(path, StandardOpenOption.CREATE_NEW, StandardOpenOption.WRITE).use { channel ->
+            channel.position(size - 1)
+            channel.write(ByteBuffer.wrap(byteArrayOf(0)))
+        }
+    }
+
     private fun withServer(
         analyzer: JobAnalyzer = JobAnalyzer { _, _ -> },
         reconstructor: JobReconstructor = JobReconstructor { _, _ -> },
+        profiles: List<ReconstructionProfile> = listOf(GeneratedCMakeReconstructionProfile.descriptor),
         block: (UploadServer, java.nio.file.Path) -> Unit,
     ) {
         val dataDir = createTempDirectory("web-jobs-")
         val directExecutor = Executor { command -> command.run() }
-        val server = UploadServer("127.0.0.1", 0, dataDir, analyzer, reconstructor, directExecutor)
+        val server = UploadServer("127.0.0.1", 0, dataDir, analyzer, reconstructor, directExecutor, profiles)
         server.start()
         try {
             block(server, dataDir)

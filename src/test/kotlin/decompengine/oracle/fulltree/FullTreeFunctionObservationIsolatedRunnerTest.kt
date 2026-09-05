@@ -26,6 +26,8 @@ import kotlin.test.assertEquals
 import kotlin.test.assertFailsWith
 import kotlin.test.assertNotEquals
 import kotlin.test.assertTrue
+import kotlinx.serialization.json.JsonObject
+import kotlinx.serialization.json.JsonPrimitive
 import org.junit.jupiter.api.Assumptions.assumeTrue
 
 class FullTreeFunctionObservationIsolatedFixtureRunnerTest {
@@ -187,9 +189,10 @@ class FullTreeFunctionObservationIsolatedFixtureRunnerTest {
                 val unrelated = run.resolve("unrelated.txt")
                 val unrelatedBytes = "unknown residue must remain untouched".toByteArray()
                 Files.write(unrelated, unrelatedBytes)
-                val arguments = isolatedObservationJvmTemporaryArguments(run)
+                val native = Path.of(checkNotNull(System.getProperty("decompengine.oracle.nativeLibraryDirectory")))
+                val arguments = isolatedObservationJvmTemporaryArguments(run, native)
                 assertEquals(
-                    listOf("-Djna.nosys=true", "-Djna.tmpdir=$temporary", "-Djava.io.tmpdir=$temporary"),
+                    OracleNativeLibraries.jvmArguments(native) + listOf("-Djna.tmpdir=$temporary", "-Djava.io.tmpdir=$temporary"),
                     arguments,
                 )
                 val child = ProcessBuilder(
@@ -250,6 +253,30 @@ class FullTreeFunctionObservationIsolatedFixtureRunnerTest {
         assertEquals(configuration.canonicalSha256, OracleArtifacts.sha256(canonical))
         assertContentEquals(canonical, OracleJson.canonicalBytes(OracleJson.parseCanonical(canonical)))
         assertEquals(FROZEN_ISOLATION_CONFIGURATION_SHA256, configuration.canonicalSha256)
+        val current = OracleJson.parseCanonical(canonical) as JsonObject
+        assertEquals(JsonPrimitive(4), current["schemaVersion"])
+        assertEquals(JsonPrimitive(OracleNativeLibraries.policySha256), current["nativeLibraryProfileSha256"])
+        assertEquals(JsonPrimitive("3"), current["supervisorProtocolVersion"])
+        assertEquals(JsonPrimitive("1"), current["workerProtocolVersion"])
+        assertEquals(JsonPrimitive("2"), current["workerRequestVersion"])
+        assertEquals(JsonPrimitive("scope-derived-systemd-lifetime-upper-bound-v1"), current["workerStartWaitPolicy"])
+        val legacyV3 = JsonObject(current.toMutableMap().apply {
+            remove("workerRequestVersion")
+            remove("workerStartWaitPolicy")
+            put("schemaVersion", JsonPrimitive(3))
+            put("provider", JsonPrimitive("kotlin-full-tree-function-observation-isolation-configuration-v3"))
+            put("supervisorProtocolVersion", JsonPrimitive("2"))
+        })
+        assertEquals(FROZEN_V3_ISOLATION_CONFIGURATION_SHA256, OracleArtifacts.sha256(OracleJson.canonicalBytes(legacyV3)))
+        assertNotEquals(FROZEN_V3_ISOLATION_CONFIGURATION_SHA256, configuration.canonicalSha256)
+        val legacy = JsonObject(legacyV3.toMutableMap().apply {
+            remove("nativeLibraryProfileSha256")
+            put("schemaVersion", JsonPrimitive(2))
+            put("provider", JsonPrimitive("kotlin-full-tree-function-observation-isolation-configuration-v2"))
+            put("supervisorProtocolVersion", JsonPrimitive("1"))
+        })
+        assertEquals(FROZEN_LEGACY_ISOLATION_CONFIGURATION_SHA256, OracleArtifacts.sha256(OracleJson.canonicalBytes(legacy)))
+        assertNotEquals(FROZEN_LEGACY_ISOLATION_CONFIGURATION_SHA256, configuration.canonicalSha256)
 
         mounts.clear()
         classPath.clear()
@@ -1103,7 +1130,9 @@ class FullTreeFunctionObservationIsolatedFixtureRunnerTest {
                     run.close()
                     prepared = null
 
-                    val atBoot = FullTreeFunctionObservationIsolatedOperationRunner.launchToBoot(ready)
+                    val atBoot = withLiveOracleBootDiagnostics(binding.unitName, runRoot) {
+                        FullTreeFunctionObservationIsolatedOperationRunner.launchToBoot(ready)
+                    }
                     booted = atBoot
                     assertFailsWith<IllegalStateException> { ready.requireCurrentBeforeLaunch() }
                     ready.close()
@@ -1197,9 +1226,9 @@ class FullTreeFunctionObservationIsolatedFixtureRunnerTest {
             ) { context ->
                 var live: AutoCloseable? = null
                 try {
-                    val atBoot = FullTreeFunctionObservationIsolatedOperationRunner.launchToBoot(
-                        context.ready,
-                    )
+                    val atBoot = withLiveOracleBootDiagnostics(context.binding.unitName, context.runRoot) {
+                        FullTreeFunctionObservationIsolatedOperationRunner.launchToBoot(context.ready)
+                    }
                     live = atBoot
                     val attached = FullTreeFunctionObservationIsolatedOperationRunner.recordUnitAttached(
                         atBoot,
@@ -1296,7 +1325,9 @@ class FullTreeFunctionObservationIsolatedFixtureRunnerTest {
                 var foreignOccupant: OccupiedObservationUnit? = null
                 var bodyFailure: Throwable? = null
                 try {
-                    val atBoot = FullTreeFunctionObservationIsolatedOperationRunner.launchToBoot(context.ready)
+                    val atBoot = withLiveOracleBootDiagnostics(context.binding.unitName, context.runRoot) {
+                        FullTreeFunctionObservationIsolatedOperationRunner.launchToBoot(context.ready)
+                    }
                     booted = atBoot
                     val durable = FullTreeFunctionObservationIsolatedOperationRunner.recordUnitAttached(atBoot)
                     attached = durable
@@ -1309,19 +1340,54 @@ class FullTreeFunctionObservationIsolatedFixtureRunnerTest {
 
                     val liveObservationCommands = mutableListOf<List<String>>()
                     val liveBusctlCommands = mutableListOf<List<String>>()
+                    val liveBusctlResults = mutableListOf<String>()
+                    var registrationQueries = 0
+                    var registrationDiagnostic = "registration not observed"
+                    var snapshotDiagnostics = "snapshot pair not observed"
                     val liveObserver = FullTreeFunctionObservationColdUnitAbsenceObserver.openWithTestObserver(
                         context.binding,
                         configuration,
                         FullTreeFunctionObservationSystemctlCommandObserver { unitName, arguments ->
                             if (unitName == context.binding.unitName) liveObservationCommands += arguments
                         },
-                        FullTreeFunctionObservationBusctlCommandObserver { unitName, arguments ->
-                            if (unitName == context.binding.unitName) liveBusctlCommands += arguments
+                        object : FullTreeFunctionObservationBusctlCommandObserver {
+                            override fun beforeCommand(unitName: String, arguments: List<String>) {
+                                if (unitName == context.binding.unitName) liveBusctlCommands += arguments
+                            }
+
+                            override fun afterCommand(
+                                unitName: String,
+                                label: String,
+                                exitCode: Int,
+                                boundedOutput: String,
+                            ) {
+                                if (unitName == context.binding.unitName && label == "manager bus registration") {
+                                    registrationQueries += 1
+                                    registrationDiagnostic = "$label exit=$exitCode output=${JsonPrimitive(boundedOutput)}"
+                                    return
+                                }
+                                if (unitName == context.binding.unitName && liveBusctlResults.size < 14) {
+                                    liveBusctlResults += "$label exit=$exitCode output=${JsonPrimitive(boundedOutput)}"
+                                }
+                            }
+                        },
+                        FullTreeFunctionObservationColdSnapshotObserver { before, after ->
+                            snapshotDiagnostics =
+                                "stable=${before.stable}/${after.stable}, " +
+                                "identityPresent=${before.systemdIdentity != null}/${after.systemdIdentity != null}, " +
+                                "cgroupCounts=${before.cgroups.size}/${after.cgroups.size}, " +
+                                "featuresChanged=${before.managerFeatures != after.managerFeatures}, " +
+                                "unitChanged=${before.unit != after.unit}, " +
+                                "jobChanged=${before.job != after.job}, " +
+                                "cgroupsChanged=${before.cgroups != after.cgroups}, " +
+                                "identityChanged=${before.systemdIdentity != after.systemdIdentity}"
                         },
                     )
                     assertEquals(
                         FullTreeFunctionObservationColdUnitAttachmentObservationOutcome.SYSTEMD_IDENTITY_CANDIDATE,
                         liveObserver.observeUnitAttachment(historical),
+                        "Cold attachment observation: $snapshotDiagnostics\n" +
+                            "$registrationDiagnostic (queries=$registrationQueries)\n${liveBusctlResults.joinToString("\n")}",
                     )
                     val hardenedBusctlPrefix = listOf(
                         "--user",
@@ -1331,7 +1397,17 @@ class FullTreeFunctionObservationIsolatedFixtureRunnerTest {
                         "--allow-interactive-authorization=no",
                         "--timeout=2",
                     )
-                    assertEquals(14, liveBusctlCommands.size)
+                    assertTrue(registrationQueries in 1..81)
+                    assertEquals(14, liveBusctlCommands.size - registrationQueries)
+                    assertEquals(14, liveBusctlResults.size)
+                    val registrationArguments = listOf(
+                        "call", "org.freedesktop.DBus", "/org/freedesktop/DBus",
+                        "org.freedesktop.DBus", "NameHasOwner", "s", "org.freedesktop.systemd1",
+                    )
+                    assertEquals(
+                        registrationQueries,
+                        liveBusctlCommands.count { it.drop(hardenedBusctlPrefix.size) == registrationArguments },
+                    )
                     assertTrue(liveBusctlCommands.all { it.take(hardenedBusctlPrefix.size) == hardenedBusctlPrefix })
                     assertEquals(
                         2,
@@ -2398,6 +2474,7 @@ class FullTreeFunctionObservationIsolatedFixtureRunnerTest {
         var leased: FullTreeFunctionObservationLeasedOperation? = null
         var prepared: FullTreeFunctionObservationPreparedRun? = null
         var isolation: FullTreeFunctionObservationPreparedIsolation? = null
+        var primaryFailure: Throwable? = null
         try {
             FullTreeFunctionObservationJournalAuthority.open(journalRoot).use { authority ->
                 val acquired = FullTreeFunctionObservationOperationCoordinator.prepareNew(
@@ -2426,51 +2503,58 @@ class FullTreeFunctionObservationIsolatedFixtureRunnerTest {
                 isolation = ready
                 run.close()
                 prepared = null
-                action(
-                    PreparedProductionIsolationTestContext(
-                        binding,
-                        mount,
-                        runRoot,
-                        output,
-                        authority,
-                        ready,
-                    ),
-                )
-            }
-        } finally {
-            var cleanupFailure: Throwable? = null
-            listOf<() -> Unit>(
-                { closePreparedIsolationAfterTest(isolation) },
-                { prepared?.close() },
-                { leased?.close() },
-            ).forEach { cleanup ->
-                runCatching(cleanup).exceptionOrNull()?.let { failure ->
-                    val prior = cleanupFailure
-                    if (prior == null) cleanupFailure = failure else if (failure !== prior) {
-                        prior.addSuppressed(failure)
-                    }
+                withLiveOracleBootDiagnostics(binding.unitName, runRoot) {
+                    action(
+                        PreparedProductionIsolationTestContext(
+                            binding,
+                            mount,
+                            runRoot,
+                            output,
+                            authority,
+                            ready,
+                        ),
+                    )
                 }
             }
-            cleanupFailure?.let { throw it }
-            assertObservationUnitAndCgroupAbsent(configuration, binding.unitName)
-            val rootFiles = if (Files.isDirectory(runRoot, LinkOption.NOFOLLOW_LINKS)) {
-                entryNames(runRoot).filterNot { it in PREPARED_RUN_DIRECTORIES }
-            } else {
-                emptyList()
+        } catch (failure: Throwable) {
+            primaryFailure = failure
+            throw failure
+        } finally {
+            preserveLiveOracleFailureDuringCleanup(primaryFailure) {
+                var cleanupFailure: Throwable? = null
+                listOf<() -> Unit>(
+                    { closePreparedIsolationAfterTest(isolation) },
+                    { prepared?.close() },
+                    { leased?.close() },
+                ).forEach { cleanup ->
+                    runCatching(cleanup).exceptionOrNull()?.let { failure ->
+                        val prior = cleanupFailure
+                        if (prior == null) cleanupFailure = failure else if (failure !== prior) {
+                            prior.addSuppressed(failure)
+                        }
+                    }
+                }
+                cleanupFailure?.let { throw it }
+                assertObservationUnitAndCgroupAbsent(configuration, binding.unitName)
+                val rootFiles = if (Files.isDirectory(runRoot, LinkOption.NOFOLLOW_LINKS)) {
+                    entryNames(runRoot).filterNot { it in PREPARED_RUN_DIRECTORIES }
+                } else {
+                    emptyList()
+                }
+                assertTrue(
+                    rootFiles.all { it in allowedRootProtocolFiles },
+                    "faulted BOOT run retained unexpected members: $rootFiles",
+                )
+                rootFiles.forEach { name ->
+                    assertFaultProtocolFile(runRoot.resolve(name), name, binding.bindingSha256)
+                }
+                removePreparedIsolationLease(
+                    leaseRoot,
+                    binding.runDirectoryName,
+                    configuration.workerClassPath.size,
+                    rootFiles,
+                )
             }
-            assertTrue(
-                rootFiles.all { it in allowedRootProtocolFiles },
-                "faulted BOOT run retained unexpected members: $rootFiles",
-            )
-            rootFiles.forEach { name ->
-                assertFaultProtocolFile(runRoot.resolve(name), name, binding.bindingSha256)
-            }
-            removePreparedIsolationLease(
-                leaseRoot,
-                binding.runDirectoryName,
-                configuration.workerClassPath.size,
-                rootFiles,
-            )
         }
         assertTrue(entryNames(mount).isEmpty())
     }
@@ -2999,16 +3083,61 @@ class FullTreeFunctionObservationIsolatedFixtureRunnerTest {
         if (controlGroup.isEmpty()) return true
         check(controlGroup == receipt.controlGroup) { "refusing to clean a replacement cgroup path" }
         val cgroup = testCgroupPath(receipt.unitName, controlGroup)
-        LinuxFilesystemSyscalls.openRoot(cgroup).use { descriptor ->
+        return requireCleanupCgroupSameOrAbsent(cgroup, receipt.cgroupDevice, receipt.cgroupInode, receipt.cgroupMountId)
+    }
+
+    private fun requireCleanupCgroupSameOrAbsent(path: Path, device: Long, inode: Long, mountId: Long): Boolean {
+        val selected = LinuxFilesystemSyscalls.openAbsolutePathOrNull(path) ?: return false
+        selected.use { descriptor ->
             val identity = LinuxFilesystemSyscalls.identity(descriptor.fd)
             check(
-                identity.key.device == receipt.cgroupDevice &&
-                    identity.key.inode == receipt.cgroupInode &&
-                    identity.mountId == receipt.cgroupMountId
+                identity.isDirectory && !identity.isSymbolicLink &&
+                    identity.key.device == device && identity.key.inode == inode && identity.mountId == mountId
             ) { "refusing to clean a replacement cgroup identity" }
         }
         return true
     }
+
+    @Test
+    fun `test cleanup stops name mutations when the observed cgroup has disappeared`() =
+        inControlTemporaryDirectory { root ->
+            val cgroup = privateDirectory(root.resolve("disappearing-cgroup"))
+            LinuxFilesystemSyscalls.openRoot(cgroup).use { retained ->
+                val identity = retained.identity
+                assertTrue(requireCleanupCgroupSameOrAbsent(cgroup, identity.key.device, identity.key.inode, identity.mountId))
+                Files.delete(cgroup)
+                var mutations = 0
+                runGuardedObservationSystemdCleanupFallback(
+                    unitName = "test.scope",
+                    beforeCommand = {
+                        requireCleanupCgroupSameOrAbsent(cgroup, identity.key.device, identity.key.inode, identity.mountId)
+                    },
+                    command = { _, _ -> mutations += 1 },
+                )
+                assertEquals(0, mutations)
+            }
+        }
+
+    @Test
+    fun `test cleanup still rejects replaced and linked cgroup targets`() =
+        inControlTemporaryDirectory { root ->
+            val cgroup = privateDirectory(root.resolve("original-cgroup"))
+            LinuxFilesystemSyscalls.openRoot(cgroup).use { retained ->
+                val identity = retained.identity
+                val moved = root.resolve("retained-cgroup")
+                Files.move(cgroup, moved)
+                Files.createDirectory(cgroup)
+                assertFailsWith<IllegalStateException> {
+                    requireCleanupCgroupSameOrAbsent(cgroup, identity.key.device, identity.key.inode, identity.mountId)
+                }
+                Files.delete(cgroup)
+                Files.createSymbolicLink(cgroup, moved)
+                assertFailsWith<IllegalStateException> {
+                    requireCleanupCgroupSameOrAbsent(cgroup, identity.key.device, identity.key.inode, identity.mountId)
+                }
+                Unit
+            }
+        }
 
     private fun readTestObservationUnitSnapshot(
         configuration: FullTreeFunctionObservationIsolationConfiguration,
@@ -3524,6 +3653,10 @@ class FullTreeFunctionObservationIsolatedFixtureRunnerTest {
         const val ZERO_SHA256 =
             "0000000000000000000000000000000000000000000000000000000000000000"
         const val FROZEN_ISOLATION_CONFIGURATION_SHA256 =
+            "4684f36bebedaba80eaedf7c7f578b66f9219d4dd1042d0f1debcab6c64d7a90"
+        const val FROZEN_V3_ISOLATION_CONFIGURATION_SHA256 =
+            "0feb4469bc91b6668777ddc336dd39c4d2db76db932ee4e74a729de34deff740"
+        const val FROZEN_LEGACY_ISOLATION_CONFIGURATION_SHA256 =
             "107fe58551ea95533bada45432758c1882ba3876c5681a1c43282c10433138d3"
         const val TEST_LEASE_RECORD_FILE = "lease.json"
     }

@@ -4,6 +4,7 @@ import decompengine.oracle.core.OracleArtifacts
 import decompengine.oracle.core.OracleJson
 import java.io.ByteArrayInputStream
 import java.io.ByteArrayOutputStream
+import java.io.IOException
 import java.lang.reflect.Modifier
 import java.nio.file.Files
 import java.nio.file.Path
@@ -58,6 +59,42 @@ class LlvmBehaviorHostedWorkerImageV1BuildContextTest {
             .forEach { method ->
                 assertFalse(owner.isAssignableFrom(method.returnType), method.toString())
             }
+    }
+
+    @Test
+    fun `Docker stdin prefix contains a complete regular Dockerfile header before any PAX records`() = withFixture {
+        writeJar(applicationRoot.resolve("worker.jar"), listOf(WORKER_MAIN to byteArrayOf(1, 2, 3)))
+        writeReference(listOf("worker.jar"))
+        val output = ByteArrayOutputStream()
+        LlvmBehaviorHostedWorkerImageV1BuildContextTestSupport.stage(
+            dockerfile, jdkRoot, contextRoot, reference, applicationRoot, uid, output,
+        )
+        val archive = output.toByteArray()
+        for (prefixBytes in listOf(1024, 512)) {
+            TarArchiveInputStream(ByteArrayInputStream(archive.copyOf(prefixBytes))).use { input ->
+                val first = checkNotNull(input.nextEntry) { "Docker stdin probe did not find a logical tar entry" }
+                assertEquals("Dockerfile", first.name)
+                assertTrue(first.isFile && first.isCheckSumOK)
+                assertEquals(Files.size(dockerfile), first.size)
+                assertEquals(292, first.mode)
+                assertEquals(0L, first.longUserId)
+                assertEquals(0L, first.longGroupId)
+            }
+        }
+        assertEquals('0'.code.toByte(), archive[156])
+        assertContentEquals(
+            Files.readAllBytes(dockerfile),
+            archive.copyOfRange(512, 512 + Files.size(dockerfile).toInt()),
+        )
+        val nextHeader = 512 + ((Files.size(dockerfile).toInt() + 511) / 512) * 512
+        val paxPrefix = archive.copyOfRange(nextHeader, nextHeader + 1024)
+        assertEquals('x'.code.toByte(), paxPrefix[156])
+        val recognized = try {
+            TarArchiveInputStream(ByteArrayInputStream(paxPrefix)).use { it.nextEntry != null }
+        } catch (_: IOException) {
+            false
+        }
+        assertFalse(recognized, "a PAX-only prefix must not be mistaken for a complete logical file header")
     }
 
     @Test
@@ -527,7 +564,8 @@ class LlvmBehaviorHostedWorkerImageV1BuildContextTest {
                 }
                 continue
             }
-            val path = checkNotNull(pendingPath)
+            val path = pendingPath ?: header.copyOfRange(0, 100).takeWhile { it != 0.toByte() }
+                .toByteArray().decodeToString()
             pendingPath = null
             result += TarFixtureEntry(
                 path,

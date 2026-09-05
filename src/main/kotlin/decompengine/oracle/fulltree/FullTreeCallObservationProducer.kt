@@ -74,13 +74,15 @@ internal data class FullTreeObservedCallSite(
     val target: FullTreeObservedCallTarget,
     val tailCall: Boolean,
     val unitId: String,
+    val callPcRva: ULong? = null,
+    val callerLocalCallOffset: ULong? = null,
 )
 
 /**
  * Raw Kotlin/JVM call observer over authenticated ELF/DWARF bytes.
  *
  * The bounded diagnostic collector and streaming SQLite sink share the same traversal and
- * policy-v3 record projection. Python and ACP have no entry point into the scan.
+ * policy-v4 record projection. Python and ACP have no entry point into the scan.
  */
 internal object FullTreeCallObservationProducer {
     fun generateShardTo(
@@ -436,14 +438,17 @@ internal object FullTreeCallObservationProducer {
         producerLimits: FullTreeCallObservationProducerLimits,
         parseBudget: FullTreeDwarfParseBudget,
     ): FullTreeObservedCallSite {
+        val callAttribute = call.optionalUniqueAttribute(DW_AT_CALL_PC, "DW_AT_call_pc")
+        val instructionAddress = callAttribute?.let { callAddress(owner, it, "call instruction address") }
+        val callRva = instructionAddress?.toExecutableRva(layout.imageBase, executable)
         val returnAttribute = call.optionalUniqueAttribute(DW_AT_CALL_RETURN_PC, "DW_AT_call_return_pc")
-            ?: call.optionalUniqueAttribute(DW_AT_CALL_PC, "DW_AT_call_pc")
         val returnAddress = returnAttribute?.let { callAddress(owner, it, "call-site return address") }
         val returnRva = returnAddress?.toExecutableRva(layout.imageBase, executable)
+        val locations = listOfNotNull(callRva, returnRva)
         val callerRva = caller?.functionStart(owner)?.toExecutableRva(layout.imageBase, executable)
-            ?.takeIf { returnRva != null && it <= returnRva }
+            ?.takeIf { start -> locations.isNotEmpty() && locations.all { it >= start } }
         val reason = when {
-            returnRva == null -> "call-site-no-address"
+            locations.isEmpty() -> "call-site-no-address"
             callerRva == null -> "caller-no-emitted-range"
             else -> null
         }
@@ -465,6 +470,8 @@ internal object FullTreeCallObservationProducer {
             ),
             tailCall = call.truthy(DW_AT_CALL_TAIL_CALL, "DW_AT_call_tail_call"),
             unitId = unitId,
+            callPcRva = callRva,
+            callerLocalCallOffset = if (callerRva != null && callRva != null) callRva - callerRva else null,
         )
     }
 
@@ -761,6 +768,7 @@ internal fun callObservationDocument(observation: FullTreeObservedCallSite): Jso
     val callerRva = observation.callerId?.removePrefix("function-rva-")
     val identity = JsonObject(
         mapOf(
+            "call" to (observation.callPcRva?.let { JsonPrimitive(callHex(it)) } ?: JsonNull),
             "caller" to (callerRva?.let(::JsonPrimitive) ?: JsonNull),
             "die" to JsonPrimitive(callHex(observation.dieOffset)),
             "return" to (observation.returnPcRva?.let { JsonPrimitive(callHex(it)) } ?: JsonNull),
@@ -770,7 +778,9 @@ internal fun callObservationDocument(observation: FullTreeObservedCallSite): Jso
     val id = "call-" + OracleArtifacts.sha256(OracleJson.canonicalBytes(identity)).take(32)
     return JsonObject(
         mapOf(
+            "callPcRva" to (observation.callPcRva?.let { JsonPrimitive(callHex(it)) } ?: JsonNull),
             "callerId" to (observation.callerId?.let(::JsonPrimitive) ?: JsonNull),
+            "callerLocalCallOffset" to (observation.callerLocalCallOffset?.let { JsonPrimitive(callHex(it)) } ?: JsonNull),
             "callerLocalReturnOffset" to (
                 observation.callerLocalReturnOffset?.let { JsonPrimitive(callHex(it)) } ?: JsonNull
             ),
@@ -816,7 +826,7 @@ internal fun callObservationEnvelope(
                     "scopeSha256" to JsonPrimitive(scopeSha256),
                 ),
             ),
-            "schemaVersion" to JsonPrimitive(1),
+            "schemaVersion" to JsonPrimitive(2),
             "shard" to JsonObject(
                 mapOf(
                     "id" to JsonPrimitive(shard.identifier),

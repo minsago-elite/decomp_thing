@@ -83,7 +83,7 @@ internal class FullTreeCallObservationSqlite private constructor(
         val document = callObservationDocument(observation)
         val bytes = OracleJson.canonicalBytes(document, jsonLimits)
         OracleSchemas.validate(
-            "full-tree-call-observations",
+            "full-tree-call-observations-v2",
             envelope(listOf(document), 1L, if (observation.population == "scored") 1L else 0L, shard.units.size + 1L),
         )
         val identifier = validateRecord(document)

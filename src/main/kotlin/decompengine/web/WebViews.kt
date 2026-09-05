@@ -68,7 +68,7 @@ fun renderDashboard(jobs: List<Job>): String = page(
     """.trimIndent(),
 )
 
-fun renderJob(job: Job): String {
+fun renderJob(job: Job, sourceTree: SourceTreeView? = null, sourceTreeUnavailable: Boolean = false): String {
     val active = job.status in setOf("queued", "analyzing")
     val metadata = job.metadata.toJson().entries.joinToString("") { (key, value) ->
         "<div class=\"datum\"><dt>${key.replace('_', ' ').title().escapeHtml()}</dt><dd>${value.toString().trim('"').escapeHtml()}</dd></div>"
@@ -157,7 +157,8 @@ fun renderJob(job: Job): String {
             ${renderExploration(job)}
             ${renderReconstructionProgress(job)}
             ${renderAgentProgress(job)}
-            ${renderSourceTree(job)}
+            ${sourceTree?.let { renderSourceTree(job, it) }.orEmpty()}
+            ${if (sourceTreeUnavailable) "<section class=\"panel\"><p>Source-tree evidence is unavailable or has not been generated for this revision.</p></section>" else ""}
             ${renderRepairHistory(job)}
             ${renderArtifacts(job, artifacts)}
           </main>
@@ -191,18 +192,22 @@ private fun renderAgentProgress(job: Job): String {
     """.trimIndent()
 }
 
-fun renderSourceFile(job: Job, relativePath: String, source: String): String {
-    val tree = job.binaryPath.parent.resolve("reports/source-tree")
-    val manifest = runCatching { Json.parseToJsonElement(tree.resolve("source_tree_manifest.json").readText()).jsonObject }.getOrNull()
+fun renderSourceFile(
+    job: Job,
+    relativePath: String,
+    source: String,
+    manifest: JsonObject? = null,
+    confidence: JsonObject? = null,
+): String {
     val fileEvidence = manifest?.get("files")?.jsonArray?.mapNotNull { it as? JsonObject }
         ?.firstOrNull { it.text("path") == relativePath }
     val generator = fileEvidence?.text("generator").orEmpty()
     val entities = fileEvidence?.get("entityIds")?.jsonArray?.joinToString(", ") { it.jsonPrimitive.content }.orEmpty()
     val moduleId = relativePath.substringAfterLast('/').substringBeforeLast('.')
     val moduleConfidence = runCatching {
-        Json.parseToJsonElement(tree.resolve("reports/confidence.json").readText()).jsonObject["modules"]?.jsonArray
+        confidence?.get("modules")?.jsonArray
             ?.mapNotNull { it as? JsonObject }?.firstOrNull { it.text("id") == moduleId }
-            ?.get("score")?.jsonPrimitive?.doubleOrNull
+            ?.get("score")?.jsonPrimitive?.doubleOrNull?.takeIf { it.isFinite() && it in 0.0..1.0 }
     }.getOrNull()
     val provenance = if (fileEvidence == null) "" else """
         <div class="source-provenance"><span><b>Generator</b>${generator.escapeHtml()}</span><span><b>Entities</b>${entities.escapeHtml().ifBlank { "none" }}</span>${moduleConfidence?.let { "<span><b>Module confidence</b>${(it * 100).roundToInt()}%</span>" }.orEmpty()}</div>
@@ -344,31 +349,23 @@ private fun renderArtifacts(job: Job, artifacts: List<Path>): String {
     """.trimIndent()
 }
 
-private fun renderSourceTree(job: Job): String {
-    val root = job.binaryPath.parent.resolve("reports/source-tree")
-    val manifest = root.resolve("source_tree_manifest.json")
-    if (!manifest.exists()) return ""
-    val files = Files.walk(root).use { paths ->
-        paths.filter { it.isRegularFile() }.map { root.relativize(it).toString().replace('\\', '/') }
-            .filter { it == "Makefile" || it.endsWith(".c") || it.endsWith(".h") || it.endsWith(".json") || it.endsWith(".md") || it.endsWith(".log") }
-            .sorted().toList()
-    }
-    val rows = files.joinToString("") { relative ->
+private fun renderSourceTree(job: Job, source: SourceTreeView): String {
+    val files = source.files
+    val rows = files.joinToString("") { entry ->
+        val relative = entry.path
         val depth = relative.count { it == '/' }
-        val kind = relative.substringAfterLast('.', "file").uppercase().take(4)
+        val kind = entry.roles.first().wireName.uppercase().take(4)
         "<li style=\"--depth:$depth\"><a href=\"/jobs/${job.id}/source/${encodePath(relative)}\"><span>$kind</span><code>${relative.escapeHtml()}</code><i>→</i></a></li>"
     }
-    val confidencePath = root.resolve("reports/confidence.json")
     val confidence = runCatching {
-        Json.parseToJsonElement(confidencePath.readText()).jsonObject["projectScore"]?.jsonPrimitive?.doubleOrNull
+        source.confidence?.get("projectScore")?.jsonPrimitive?.doubleOrNull?.takeIf { it.isFinite() && it in 0.0..1.0 }
     }.getOrNull()
-    val bundle = job.binaryPath.parent.resolve("reports/source-tree.zip")
     return """
       <section class="panel source-tree-panel">
         <div class="section-heading compact"><span class="step">04</span><div><p class="kicker">Reconstructed project</p><h2>Archival source tree</h2></div>${confidence?.let { "<span class=\"count\">${(it * 100).roundToInt()}%</span>" }.orEmpty()}</div>
         <p class="tree-note">${files.size} readable project files. Confidence is evidence-bounded and does not claim universal equivalence.</p>
         <ul class="source-tree">$rows</ul>
-        ${if (bundle.exists()) "<a class=\"button primary archive-download\" href=\"${artifactHref(job, "reports/source-tree.zip")}\">Download verified source archive ↓</a>" else ""}
+        <p class="tree-note">Archive verification is not established by source browsing. Report downloads are not release certification.</p>
       </section>
     """.trimIndent()
 }
@@ -391,11 +388,25 @@ private fun renderReconstructionProgress(job: Job): String {
 
 private fun listArtifacts(jobDir: Path): List<Path> {
     if (!jobDir.exists()) return emptyList()
-    return Files.walk(jobDir).use { paths ->
-        paths.filter { it.isRegularFile() && it.name != "input.elf" && it.name != "job.json" }
-            .sorted()
-            .toList()
-    }
+    val artifacts = mutableListOf<Path>()
+    var entries = 0
+    Files.walkFileTree(jobDir, object : java.nio.file.SimpleFileVisitor<Path>() {
+        override fun preVisitDirectory(directory: Path, attributes: java.nio.file.attribute.BasicFileAttributes): java.nio.file.FileVisitResult {
+            require(++entries <= 10_000 && jobDir.relativize(directory).nameCount <= 32) {
+                "report listing exceeds its traversal bound"
+            }
+            return if (directory == jobDir.resolve("reports/source-tree")) {
+                java.nio.file.FileVisitResult.SKIP_SUBTREE
+            } else java.nio.file.FileVisitResult.CONTINUE
+        }
+
+        override fun visitFile(file: Path, attributes: java.nio.file.attribute.BasicFileAttributes): java.nio.file.FileVisitResult {
+            require(++entries <= 10_000) { "report listing exceeds its entry bound" }
+            if (attributes.isRegularFile && file.startsWith(jobDir.resolve("reports"))) artifacts.add(file)
+            return java.nio.file.FileVisitResult.CONTINUE
+        }
+    })
+    return artifacts.sorted()
 }
 
 private fun metric(label: String, value: String, detail: String, score: Double? = null): String {

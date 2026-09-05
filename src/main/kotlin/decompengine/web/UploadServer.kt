@@ -21,6 +21,8 @@ import decompengine.project.BoundedLlmModuleReconstructor
 import decompengine.project.EvidenceModuleReconstructor
 import decompengine.project.GhidraHeadlessProgramModelAnalyzer
 import decompengine.project.ModuleReconstructor
+import decompengine.project.GeneratedCMakeReconstructionProfile
+import decompengine.project.ReconstructionProfile
 import kotlinx.serialization.json.Json
 import kotlinx.serialization.json.JsonElement
 import kotlinx.serialization.json.JsonNull
@@ -40,7 +42,6 @@ import java.util.concurrent.RejectedExecutionException
 import java.util.concurrent.ThreadPoolExecutor
 import java.util.concurrent.TimeUnit
 import java.util.concurrent.atomic.AtomicBoolean
-import kotlin.io.path.name
 import kotlin.io.path.pathString
 
 fun interface JobAnalyzer {
@@ -63,6 +64,7 @@ class AutomaticJobAnalyzer : JobAnalyzer {
 
 class SourceTreeJobReconstructor(
     private val environment: Map<String, String> = System.getenv(),
+    private val analyzer: decompengine.project.ProgramModelAnalyzer = GhidraHeadlessProgramModelAnalyzer.bundled(),
 ) : JobReconstructor {
     override fun reconstruct(job: Job, reportsDir: Path) {
         BestEffortProgressJournal(reportsDir, "reconstruction", environment.values).use { progress ->
@@ -74,7 +76,7 @@ class SourceTreeJobReconstructor(
                     renderWebReconstructionHarnessSelection(strategy),
                 )
                 ArchivalReconstructionService(
-                    GhidraHeadlessProgramModelAnalyzer.fromEnvironment(environment),
+                    analyzer,
                     strategy.reconstructor,
                     progress = progress,
                 ).reconstruct(job.binaryPath, reportsDir)
@@ -167,9 +169,11 @@ class UploadServer(
     private val analyzer: JobAnalyzer = AutomaticJobAnalyzer(),
     private val reconstructor: JobReconstructor = SourceTreeJobReconstructor(),
     executor: Executor? = null,
+    sourceProfiles: List<ReconstructionProfile> = listOf(GeneratedCMakeReconstructionProfile.descriptor),
 ) {
     private val server = HttpServer.create(InetSocketAddress(host, port), 0)
     private val store = JobStore(dataDir)
+    private val sourceEvidence = WebSourceEvidence(store, sourceProfiles)
     private val ownedExecutor: ExecutorService? = if (executor == null) {
         ThreadPoolExecutor(2, 2, 0L, TimeUnit.MILLISECONDS, ArrayBlockingQueue(32),
             { runnable -> Thread(runnable, "decomp-web-analysis").apply { isDaemon = true } },
@@ -212,7 +216,7 @@ class UploadServer(
                     exchange.sendBytes(200, APP_CSS.toByteArray(), "text/css; charset=utf-8", cache = true)
                 exchange.requestMethod == "POST" && segments == listOf("jobs") -> handlePostJob(exchange)
                 exchange.requestMethod == "GET" && segments.size == 2 && segments[0] == "jobs" ->
-                    exchange.sendHtml(200, renderJob(store.get(decode(segments[1]))))
+                    handleJob(exchange, decode(segments[1]))
                 exchange.requestMethod == "POST" && segments.size == 3 && segments[0] == "jobs" && segments[2] == "explore" ->
                     handleExplore(exchange, decode(segments[1]))
                 exchange.requestMethod == "POST" && segments.size == 3 && segments[0] == "jobs" && segments[2] == "reconstruct" ->
@@ -335,24 +339,33 @@ class UploadServer(
         }
     }
 
+    private fun handleJob(exchange: HttpExchange, jobId: String) {
+        val job = store.get(jobId)
+        val source = runCatching { sourceEvidence.read(jobId).view() }
+        exchange.sendHtml(200, renderJob(job, source.getOrNull(), source.isFailure))
+    }
+
     private fun handleSource(exchange: HttpExchange, jobId: String, relativePath: String) {
         require(relativePath.isNotBlank()) { "source path must not be blank" }
         val normalized = relativePath.replace('\\', '/')
         require(!normalized.startsWith('/') && normalized.split('/').none { it.isBlank() || it == ".." || it == "." }) {
             "source path must remain inside the generated tree"
         }
-        require(normalized == "Makefile" || normalized.endsWith(".c") || normalized.endsWith(".h") ||
-            normalized.endsWith(".json") || normalized.endsWith(".md") || normalized.endsWith(".log")) {
-            "only generated text files may be viewed"
-        }
-        val source = store.resolveArtifact(jobId, "reports/source-tree/$normalized")
-        exchange.sendHtml(200, renderSourceFile(store.get(jobId), normalized, java.nio.file.Files.readString(source)))
+        val source = sourceEvidence.read(jobId)
+        exchange.sendHtml(200, renderSourceFile(
+            store.get(jobId),
+            normalized,
+            source.text(normalized),
+            source.manifestDocument,
+            source.confidence,
+        ))
     }
 
     private fun handleArtifact(exchange: HttpExchange, jobId: String, relativePath: String) {
-        val artifact = store.resolveArtifact(jobId, relativePath)
-        exchange.responseHeaders.add("Content-Disposition", "attachment; filename=\"${artifact.name.replace("\"", "")}\"")
-        exchange.sendBytes(200, java.nio.file.Files.readAllBytes(artifact), contentType(artifact))
+        val artifact = store.readArtifact(jobId, relativePath, MAX_ARTIFACT_BYTES)
+        val name = Path.of(relativePath).fileName
+        exchange.responseHeaders.add("Content-Disposition", "attachment; filename=\"${name.toString().replace("\"", "")}\"")
+        exchange.sendBytes(200, artifact.bytes, contentType(name))
     }
 
     private fun encodeJob(job: Job): String =
@@ -362,6 +375,7 @@ class UploadServer(
 
     private companion object {
         const val MAX_UPLOAD_BYTES = 32L * 1024 * 1024
+        const val MAX_ARTIFACT_BYTES = 64L * 1024 * 1024
     }
 }
 

@@ -26,22 +26,10 @@ RUN --mount=type=cache,target=/root/.gradle ./gradlew --no-daemon installDist
 
 FROM toolchain AS runtime
 
-ARG GHIDRA_VERSION=12.0.4
-ARG GHIDRA_RELEASE_DATE=20260303
-ARG GHIDRA_SHA256=c3b458661d69e26e203d739c0c82d143cc8a4a29d9e571f099c2cf4bda62a120
 ARG APP_UID=1000
 ARG APP_GID=1000
 
-ENV GHIDRA_HOME=/opt/ghidra
 ENV PATH="/opt/llm_bin_patch/bin:${PATH}"
-
-RUN curl --fail --location --retry 3 \
-        "https://github.com/NationalSecurityAgency/ghidra/releases/download/Ghidra_${GHIDRA_VERSION}_build/ghidra_${GHIDRA_VERSION}_PUBLIC_${GHIDRA_RELEASE_DATE}.zip" \
-        --output /tmp/ghidra.zip \
-    && echo "${GHIDRA_SHA256}  /tmp/ghidra.zip" | sha256sum --check --strict \
-    && unzip -q /tmp/ghidra.zip -d /opt \
-    && mv "/opt/ghidra_${GHIDRA_VERSION}_PUBLIC" "${GHIDRA_HOME}" \
-    && rm /tmp/ghidra.zip
 
 RUN groupadd --gid "${APP_GID}" llm-bin-patch \
     && useradd --uid "${APP_UID}" --gid "${APP_GID}" --create-home --shell /bin/bash llm-bin-patch \

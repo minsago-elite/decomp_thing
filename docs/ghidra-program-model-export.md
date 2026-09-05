@@ -44,7 +44,7 @@ The reference GCC-driver budget is one 10-minute invocation and 4 GiB peak RSS. 
 analyzer identity and resource envelope instead of relying on a workstation default. The A10 cc1/lto1 profile binds
 NSA's Ghidra 12.1.3 release archive (569,445,154 bytes; SHA-256
 `93a5d11a9ad510622acaaf908c556a7b9b764d338e78a7567f3689bf5081fd54`) and allows 30 minutes and 16 GiB for
-authenticated export plus ownership planning. Ghidra's `analyzeHeadless` launcher caps its Java heap independently;
+authenticated export plus ownership planning. The bundled direct-API worker caps its Java heap at 2 GiB independently;
 the Kotlin monitor measures the JVM and its complete descendant process tree against the profile ceiling.
 Each full function decompilation has a 60-second timeout, and full export is deliberately single-function staged so its
 live C body memory is bounded by the largest individual function rather than the complete program. Planning batches
@@ -70,13 +70,12 @@ full decompiled C bodies; those bodies belong to the later reconstruction phase:
 llm_bin_patch gcc-engine-plan cc1 /path/to/gcc-cc1.stripped \
   --profile oracle/gcc/16.2.0/compiler-engines.json \
   --ghidra-archive /path/to/ghidra_12.1.3_PUBLIC_20260817.zip \
-  --ghidra-home /path/to/ghidra_12.1.3_PUBLIC \
   --output /path/to/cc1-plan
 ```
 
 The command authenticates the profile and all of its source/build/toolchain and ELF-manifest bindings, authenticates
 the exact stripped binary and Ghidra archive, proves every installed Ghidra file byte and tree member against that
-archive, runs the bundled exporter, and assigns functions, globals, and types exactly once with the deterministic
+archive using the application's bundled release (no separately installed home), runs the directly linked worker and bundled exporter, and assigns functions, globals, and types exactly once with the deterministic
 planner. It writes a self-hashed `compiler_engine_plan_assessment.json` whose schema version is 2 and whose fixed
 fields are `authority=non-authoritative-caller-supplied-analyzer-v1`, `complete=false`, and
 `releaseEligible=false`. The former schema-1 `complete=true` document is incompatible and cannot be treated as this

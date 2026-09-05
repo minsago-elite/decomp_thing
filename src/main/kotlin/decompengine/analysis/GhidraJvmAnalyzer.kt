@@ -4,29 +4,14 @@ import decompengine.binary.ElfMetadata
 import decompengine.binary.ElfMetadataReader
 import decompengine.binary.ElfSymbolInventoryReader
 import decompengine.binary.SymbolInventory
-import decompengine.project.ProgramModelJson
-import decompengine.project.RecoveredFunction
+import decompengine.project.ProgramModelAnalyzer
+import decompengine.project.GhidraHeadlessProgramModelAnalyzer
 import decompengine.project.RecoveredProgramModel
-import decompengine.project.RecoveryStatus
-import decompengine.project.sha256
-import decompengine.project.stableFunctionId
-
-import java.io.ByteArrayOutputStream
-import java.io.PrintStream
-import java.net.URLClassLoader
 import java.nio.file.Path
 import kotlin.io.path.createDirectories
 import kotlin.io.path.pathString
 import kotlin.io.path.readBytes
-import kotlin.io.path.exists
-import kotlin.io.path.readText
 import kotlin.io.path.writeText
-
-data class GhidraJvmConfig(
-    val classpath: List<Path>,
-    val mainClass: String = "ghidra.app.util.headless.AnalyzeHeadless",
-    val scriptDirectory: Path? = null,
-)
 
 data class GhidraAnalysis(
     val binaryPath: Path,
@@ -43,99 +28,25 @@ data class GhidraAnalysis(
 
 class GhidraAnalysisException(message: String, cause: Throwable? = null) : RuntimeException(message, cause)
 
-class GhidraJvmAnalyzer(private val config: GhidraJvmConfig) {
+class GhidraJvmAnalyzer(private val analyzer: ProgramModelAnalyzer = GhidraHeadlessProgramModelAnalyzer()) {
     fun analyze(binaryPath: Path, outputDir: Path): GhidraAnalysis {
         val reportsDir = outputDir.resolve("reports").createDirectories()
-        val ghidraProjectDir = outputDir.resolve("ghidra_project").createDirectories()
-        val programModelPath = reportsDir.resolve("program_model.json")
-        val args = buildList {
-            addAll(listOf(
-            ghidraProjectDir.pathString,
-            "decomp_engine_l1",
-            "-import",
-            binaryPath.pathString,
-            "-overwrite",
-            ))
-            config.scriptDirectory?.let { scripts ->
-                addAll(listOf("-scriptPath", scripts.pathString, "-postScript", "ExportProgramModel.java", programModelPath.pathString))
-            }
-        }
-
-        val stdout = ByteArrayOutputStream()
-        val stderr = ByteArrayOutputStream()
-        val returnCode = captureOutput(stdout, stderr) {
-            invokeMain(args.toTypedArray())
-        }
-
-        reportsDir.resolve("ghidra_stdout.log").writeText(stdout.toString(Charsets.UTF_8))
-        reportsDir.resolve("ghidra_stderr.log").writeText(stderr.toString(Charsets.UTF_8))
-
+        val programModel = analyzer.analyze(binaryPath, outputDir)
         val binaryBytes = binaryPath.readBytes()
         val metadata = ElfMetadataReader.read(binaryBytes)
-        val programModel = if (programModelPath.exists()) {
-            ProgramModelJson.read(programModelPath.readText())
-        } else {
-            RecoveredProgramModel(
-                inputSha256 = sha256(binaryBytes),
-                functions = listOf(
-                    RecoveredFunction(
-                        id = stableFunctionId(metadata.entryPoint),
-                        name = "decomp_engine_main",
-                        address = metadata.entryPoint,
-                        prototype = "int decomp_engine_main(void)",
-                        status = RecoveryStatus.SYNTHETIC,
-                    ),
-                ),
-            ).also { programModelPath.writeText(it.toJson()) }
-        }
         val analysis = GhidraAnalysis(
             binaryPath = binaryPath,
             reportsDir = reportsDir,
             metadata = metadata,
             symbolInventory = ElfSymbolInventoryReader.read(binaryBytes, metadata),
             programModel = programModel,
-            mainClass = config.mainClass,
-            args = args,
-            returnCode = returnCode,
+            mainClass = BundledGhidra.WORKER_CLASS,
+            args = listOf("analyze", outputDir.resolve("ghidra_project").toAbsolutePath().toString(),
+                "archival_reconstruction", binaryPath.toAbsolutePath().toString()),
+            returnCode = 0,
         )
         analysis.reportPath.writeText(analysis.toJson())
-        if (returnCode != 0) {
-            throw GhidraAnalysisException("Ghidra JVM analysis failed with exit code $returnCode")
-        }
         return analysis
-    }
-
-    private fun invokeMain(args: Array<String>): Int {
-        val urls = config.classpath.map { it.toUri().toURL() }.toTypedArray()
-        URLClassLoader(urls, javaClass.classLoader).use { loader ->
-            val klass = Class.forName(config.mainClass, true, loader)
-            val main = klass.getMethod("main", Array<String>::class.java)
-            try {
-                main.invoke(null, args)
-            } catch (exception: java.lang.reflect.InvocationTargetException) {
-                val cause = exception.cause ?: exception
-                if (cause is SecurityException) throw cause
-                throw GhidraAnalysisException("Ghidra main invocation failed", cause)
-            }
-        }
-        return 0
-    }
-
-    private fun captureOutput(stdout: ByteArrayOutputStream, stderr: ByteArrayOutputStream, block: () -> Int): Int {
-        val previousOut = System.out
-        val previousErr = System.err
-        return try {
-            PrintStream(stdout, true, Charsets.UTF_8).use { out ->
-                PrintStream(stderr, true, Charsets.UTF_8).use { err ->
-                    System.setOut(out)
-                    System.setErr(err)
-                    block()
-                }
-            }
-        } finally {
-            System.setOut(previousOut)
-            System.setErr(previousErr)
-        }
     }
 }
 

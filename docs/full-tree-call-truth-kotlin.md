@@ -1,5 +1,10 @@
 # Raw-derived Kotlin call-truth composition
 
+This document records the policy-v3 checkpoint. Current generation uses
+[policy-v4 typed call coordinates](full-tree-call-coordinates-v4.md), with separate
+instruction/return locations and newly versioned observation/truth schemas. The
+historical v3 counts and hashes below are not silently upgraded to v4.
+
 `FullTreeCallTruthSqlite` composes the Kotlin raw function and call observation paths into
 deterministic, bounded call-truth shards and an index. It is an internal migration boundary,
 not an authoritative release entrypoint or an ACP capability.
@@ -62,3 +67,8 @@ an ext4 quota lease. Production all-shard containment/recovery evidence, source/
 relocation and normalized thunk/virtual evidence, recovered-model scoring and release composition
 remain separate requirements under issues #128, #136 and #138. ACP may consume resulting evidence
 read-only; it does not supply oracle facts, validation decisions, scores or release authority.
+
+The [Kotlin observability baseline](full-tree-call-baseline-kotlin.md) consumes a
+live, raw-reconciled projection through the fixed baseline hook. It rederives the
+same inputs when validating report candidates and preserves the false authority
+flags; its exact/partial counts are not recovered-model accuracy scores.

@@ -49,7 +49,10 @@ runner image: a mutable toolcache JDK or an untrusted entry anywhere under `/usr
 as the live runtime trust root. Production runtime validation keeps the same fail-closed checks.
 
 Supervisor, observer, and BOOT-keeper JVMs explicitly set both JNA and Java temporary paths to the
-existing bounded run `tmp` directory. JNA's Linux home-cache fallback is not an admitted output:
+existing bounded run `tmp` directory. Their JNI libraries are pre-provisioned inside the authenticated
+read-only JDK runtime, not extracted into the `noexec` scratch filesystem. The exact dependency JAR
+and native resource digests are pinned together; see [native runtime provisioning](oracle-native-runtime.md).
+JNA's system-library and unpacking fallbacks are disabled. Its Linux home-cache fallback is not an admitted output:
 the exact lease layout and unknown-residue rejection remain unchanged. The shared user-bus pin
 retains the runtime directory's device, inode, mount, owner, mode, and extended metadata, plus the
 exact socket identity. Ordinary runtime-directory membership changes may update its size or mtime
@@ -60,8 +63,44 @@ The live test captures failure-only journal diagnostics before retained-owner cl
 user-unit, current-boot, and start-time filters select at most 80 events in newest-first order, so
 a long startup command cannot consume the 16 KiB capture before a later termination message.
 The existing three-second collection limit and one-second forced-exit grace remain unchanged.
-These diagnostics grant no lifecycle authority, and the fixture's 60-second runtime budget is not
-increased based on elapsed attachment time alone.
+These diagnostics grant no lifecycle authority. In
+[CI run 33937775172](https://github.com/minsago-elite/decomp_thing/actions/runs/33937775172),
+the exact unit journal reports both `Scope reached runtime time limit` and result `timeout`.
+Attachment returned after about 85.7 seconds, and the first subsequent BOOT revalidation found the
+scope absent. On that evidence, only the long retained-owner live lifecycle fixture now explicitly
+requests 300 seconds instead of 60 seconds. Its expected live receipt must bind exactly that budget;
+memory and PID limits are unchanged. Other fixtures retain their 60-second default, unsupported
+budgets still fail before journal creation, and no production maximum or admission rule changes.
+The subsequent [CI run 33940235344](https://github.com/minsago-elite/decomp_thing/actions/runs/33940235344)
+passed all 22 GCC live-controller tests with no skips, including the retained-owner lifecycle.
+
+The shared test-only journal collector also supports exact deterministic full-tree unit names.
+Three production full-tree BOOT tests additionally sample four allowlisted protocol files through
+a pinned run-root descriptor before worker failure cleanup can remove them. They retain only the
+first observation of each file, at most 4 KiB each, for at most five minutes. Links, nonregular files,
+non-read-only modes and oversized records are rejected. On failure, observed records and the bounded
+journal snapshot are attached as a suppressed diagnostic, preserving the original failure. The
+sampler never sends START, writes protocol files, changes cleanup or authorizes a transition. This
+is best-effort test diagnosis, not authenticated oracle evidence or a production lifecycle observer.
+The subsequent run still failed the three full-tree BOOT tests without producing an allowlisted
+protocol record. A paired local fresh-JVM experiment reproduces JNA's extraction failure on a
+`noexec` filesystem before BOOT; the provisioned-runtime fix still needs hosted confirmation.
+Existing production timeouts, mount flags and containment limits remain unchanged rather than
+assuming the GCC timeout diagnosis applies.
+
+The seven diagnostic regressions and explicit-budget regression run without a live systemd scope:
+
+```bash
+./gradlew test \
+  --tests decompengine.oracle.fulltree.LiveOracleBootDiagnosticsTest \
+  --tests 'decompengine.oracle.gcc.GccCompilerEngineLiveContainmentControllerTest.long live lifecycle fixture*'
+```
+
+The expanded locally available selection passes 45 tests, including existing containment-contract,
+systemd-feature, cleanup and non-live controller cases. An initial 47-test selection also included
+two existing cases that require `/usr/bin/bwrap`; both failed at that missing prerequisite on this
+host and are not counted as verified or silently skipped. The actual live lifecycle and the three
+production full-tree BOOT tests still require the provisioned CI environment.
 
 This checkpoint does **not** prove that either compiler engine ran, resumed, or produced any
 artifact. Cooperative file locks, owner-only directories, and user-systemd naming also do not
