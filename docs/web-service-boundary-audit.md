@@ -100,3 +100,19 @@ concurrent directory mutation. Downloads still require their independent artifac
 All legacy renderer filesystem I/O identified by this audit is now outside `WebViews`; full
 legacy/v1 service parity, inventory containment qualification, privacy, legacy authorization
 and broader CLI/core regression work remain open before #158 can be closed.
+
+## Same-store HTTP adapter parity
+
+A real HTTP regression now switches one temporary store through legacy → SPA → legacy server
+lifetimes. It uploads an inert ELF through legacy multipart POST, reads it through authenticated
+v1 after restart, uploads a second ELF through authenticated v1, and reads both through legacy
+after another restart. Explicit comparisons cover job identity, filename, uploaded status,
+creation/update timestamps, byte count and common ELF metadata. The all-bits-set entry point
+retains the documented legacy signed numeric `-1` and v1 lossless `0xffffffffffffffff` forms.
+
+The test verifies exact `job.json` and `input.elf` bytes after each mode transition and read,
+and injected workflow callbacks remain uncalled. This proves interoperability for the current
+upload/single-job read operations on identical persisted fixtures. It does not establish all
+workflow/action, source/archive, error, authorization or event adapter parity, and does not
+assert every auxiliary store file is unchanged by startup ownership/recovery. Keep the full
+#158 shared-service criterion open until those remaining operation classes are audited.

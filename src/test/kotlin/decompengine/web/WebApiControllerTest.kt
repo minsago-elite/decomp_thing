@@ -25,6 +25,89 @@ class WebApiControllerTest {
     private val client = HttpClient.newBuilder().followRedirects(HttpClient.Redirect.NEVER).build()
 
     @Test
+    fun `legacy and v1 uploads remain equivalent through mode changes on the same store`() {
+        val root = createTempDirectory("web-adapter-parity-")
+        var executions = 0
+        val bytes = elfFixture().also { value -> repeat(8) { value[24 + it] = 0xff.toByte() } }
+        val legacy = mutableMapOf<String, JsonObject>()
+        val versioned = mutableMapOf<String, JsonObject>()
+        val persisted = mutableMapOf<String, ByteArray>()
+        fun server(mode: WebUiMode, action: (UploadServer) -> Unit) {
+            val instance = UploadServer("127.0.0.1", 0, root, JobAnalyzer { _, _ -> executions++ },
+                JobReconstructor { _, _ -> executions++ }, uiMode = mode,
+                basePath = if (mode == WebUiMode.SPA) "/workbench/" else "/")
+            instance.start()
+            try { action(instance) } finally { instance.stop() }
+        }
+        fun remember(id: String) { persisted[id] = Files.readAllBytes(root.resolve(id).resolve("job.json")) }
+        fun unchanged() {
+            persisted.forEach { (id, original) ->
+                kotlin.test.assertContentEquals(original, Files.readAllBytes(root.resolve(id).resolve("job.json")))
+                kotlin.test.assertContentEquals(bytes, Files.readAllBytes(root.resolve(id).resolve("input.elf")))
+            }
+            assertEquals(0, executions)
+        }
+        try {
+            server(WebUiMode.LEGACY) { instance ->
+                val response = upload(instance, bytes, emptyMap(), filename = "legacy.elf", path = "/jobs")
+                assertEquals(201, response.statusCode())
+                val job = Json.parseToJsonElement(response.body()).jsonObject
+                val id = job.getValue("id").jsonPrimitive.content
+                legacy[id] = job
+                remember(id)
+                val read = request(instance, "/api/jobs/$id")
+                assertEquals(200, read.statusCode())
+                assertEquals(job, Json.parseToJsonElement(read.body()))
+                unchanged()
+            }
+            server(WebUiMode.SPA) { instance ->
+                val cookie = establish(instance)
+                val headers = mapOf("Cookie" to cookie)
+                legacy.keys.forEach { id ->
+                    versioned[id] = assertEnvelope(request(instance, "/workbench/api/v1/jobs/$id", headers = headers), 200, "job")
+                }
+                val csrf = assertEnvelope(request(instance, "/workbench/api/v1/bootstrap", headers = headers), 200, "bootstrap")
+                    .getValue("csrfToken").jsonPrimitive.content
+                val uploaded = assertEnvelope(upload(instance, bytes, headers + mapOf("X-CSRF-Token" to csrf,
+                    "Idempotency-Key" to "adapter_parity_upload"), filename = "versioned.elf"), 201, "job")
+                val id = uploaded.getValue("jobId").jsonPrimitive.content
+                versioned[id] = uploaded
+                remember(id)
+                unchanged()
+            }
+            server(WebUiMode.LEGACY) { instance ->
+                versioned.keys.forEach { id ->
+                    val response = request(instance, "/api/jobs/$id")
+                    assertEquals(200, response.statusCode())
+                    legacy[id] = Json.parseToJsonElement(response.body()).jsonObject
+                }
+                unchanged()
+            }
+            assertEquals(2, legacy.size)
+            legacy.forEach { (id, old) ->
+                val current = versioned.getValue(id)
+                mapOf("id" to "jobId", "filename" to "displayFilename", "status" to "status",
+                    "created_at" to "createdAt", "updated_at" to "updatedAt").forEach { (left, right) ->
+                    assertEquals(old.getValue(left), current.getValue(right), left)
+                }
+                assertEquals(old.getValue("size_bytes").jsonPrimitive.content, current.getValue("sizeBytes").jsonPrimitive.content)
+                val metadata = old.getValue("metadata").jsonObject
+                val binary = current.getValue("binary").jsonObject
+                mapOf("format" to "format", "endianness" to "endianness", "object_type" to "objectType",
+                    "machine" to "machine", "os_abi" to "osAbi").forEach { (left, right) -> assertEquals(metadata[left], binary[right]) }
+                assertEquals("-1", metadata.getValue("entry_point").jsonPrimitive.content)
+                assertEquals("0xffffffffffffffff", binary.getValue("entryPoint").jsonPrimitive.content)
+                for (public in listOf(old, current)) {
+                    assertFalse(public.toString().contains(root.toString()))
+                    assertFalse("binary_path" in public)
+                    assertFalse("status_message" in public)
+                }
+            }
+            unchanged()
+        } finally { root.toFile().deleteRecursively() }
+    }
+
+    @Test
     fun `authenticated progress snapshots replay persisted observations and expose retention gaps`() {
         val root = createTempDirectory("web-progress-http-")
         val store = JobStore(root)
@@ -373,10 +456,10 @@ class WebApiControllerTest {
         assertEquals("null", rejected.getValue("jobId").toString())
     }
 
-    private fun upload(server: UploadServer, bytes: ByteArray, headers: Map<String, String>, filename: String = "fixture.elf", boundary: String = "upload_api_fixture"): HttpResponse<String> {
+    private fun upload(server: UploadServer, bytes: ByteArray, headers: Map<String, String>, filename: String = "fixture.elf", boundary: String = "upload_api_fixture", path: String = "/workbench/api/v1/jobs"): HttpResponse<String> {
         val origin = "http://127.0.0.1:${server.serverPort}"
         val body = "--$boundary\r\nContent-Disposition: form-data; name=\"binary\"; filename=\"$filename\"\r\n\r\n".toByteArray() + bytes + "\r\n--$boundary--\r\n".toByteArray()
-        val builder = HttpRequest.newBuilder(URI("$origin/workbench/api/v1/jobs"))
+        val builder = HttpRequest.newBuilder(URI("$origin$path"))
             .POST(HttpRequest.BodyPublishers.ofInputStream { body.inputStream() }) // chunked; no Content-Length authority
         (mapOf("Accept" to "application/json", "Origin" to origin, "Content-Type" to "multipart/form-data; boundary=$boundary") + headers)
             .forEach { (key, value) -> builder.header(key, value) }
