@@ -1,15 +1,26 @@
-import { useRef, useState } from 'preact/hooks';
+import { useLayoutEffect, useMemo, useRef, useState } from 'preact/hooks';
 import { LocationProvider, Route, Router, useLocation } from 'preact-iso/router';
-import lazy from 'preact-iso/lazy';
 import Home from '../routes/Home';
 import { NotFound } from '../routes/NotFound';
 import { ViewBoundary } from '../shared/ViewBoundary';
+import { AssetRecoveryNotice } from '../shared/AssetRecoveryNotice';
+import { lazyRoute } from '../shared/LazyRoute';
+import { createAssetRecovery, observeAssetFailures } from './assetRecovery';
+import type { AssetRecovery } from './assetRecovery';
+import { UNKNOWN_BUILD } from './buildIdentity';
+import type { BuildIdentity } from './buildIdentity';
 import { appPath } from './paths';
 import mark from './mark.svg';
 
-const Runtime = lazy(() => import('../routes/Runtime'));
+type ShellProps = {
+  basePath: string;
+  identity: BuildIdentity;
+  recovery: AssetRecovery;
+  reload: () => void;
+};
 
-function Shell({ basePath }: { basePath: string }) {
+function Shell({ basePath, identity, recovery, reload }: ShellProps) {
+  const Runtime = useMemo(() => lazyRoute(() => import('../routes/Runtime'), recovery), [recovery]);
   const location = useLocation();
   const main = useRef<HTMLElement>(null);
   const [loading, setLoading] = useState(false);
@@ -32,6 +43,7 @@ function Shell({ basePath }: { basePath: string }) {
         </a>
         <span class="build-label">Early preview</span>
       </header>
+      <AssetRecoveryNotice recovery={recovery} identity={identity} reload={reload} />
       <div class="app-layout">
         <nav class="app-nav" aria-label="Main navigation">
           <a href={homePath} aria-current={atHome ? 'page' : undefined}>Workspace</a>
@@ -44,7 +56,7 @@ function Shell({ basePath }: { basePath: string }) {
           <ViewBoundary key={location.path}>
             <Router onLoadStart={() => setLoading(true)} onLoadEnd={viewReady} onRouteChange={viewReady}>
               <Route path={homePath} component={Home} />
-              <Route path={runtimePath} component={Runtime} />
+              <Route path={runtimePath} component={Runtime} identity={identity} />
               <Route default component={NotFound} homePath={homePath} />
             </Router>
           </ViewBoundary>
@@ -55,11 +67,19 @@ function Shell({ basePath }: { basePath: string }) {
   );
 }
 
-export function App({ basePath = '' }: { basePath?: string }) {
+export function App({ basePath = '', identity = UNKNOWN_BUILD, recovery: suppliedRecovery, reload = () => window.location.reload() }: {
+  basePath?: string;
+  identity?: BuildIdentity;
+  recovery?: AssetRecovery;
+  reload?: () => void;
+}) {
+  const ownedRecovery = useMemo(createAssetRecovery, []);
+  const recovery = suppliedRecovery ?? ownedRecovery;
+  useLayoutEffect(() => observeAssetFailures(window, recovery), [recovery]);
   return (
     <ViewBoundary>
       <LocationProvider scope={`${basePath}/`}>
-        <Shell basePath={basePath} />
+        <Shell basePath={basePath} identity={identity} recovery={recovery} reload={reload} />
       </LocationProvider>
     </ViewBoundary>
   );

@@ -1,10 +1,12 @@
 # Frontend development
 
 This workspace implements the D1 embedded workbench shell in
-[#151](https://github.com/minsago-elite/decomp_thing/issues/151). The home and runtime
+[#151](https://github.com/minsago-elite/decomp_thing/issues/151), with asset recovery
+and build identity from #154/#157. The home and runtime
 pages render with Preact, accessible navigation and error recovery. They do not
-fetch private jobs or start workflows. Runtime status remains explicitly
-unavailable until the versioned server API is connected.
+fetch private jobs or start workflows. Tool capability status remains explicitly unavailable until the versioned server
+API is connected. Runtime displays the non-secret build identity from the verified
+server shell when that metadata is available.
 
 ## Supported tools and commands
 
@@ -76,7 +78,8 @@ and Git authority. The frontend does not implement these services.
 
 `npm test` exercises accessible shell landmarks, honest unavailable state, absence
 of API calls, route navigation/back, a direct nested-base link, missing routes,
-error containment/retry, and base-path validation. Type checking covers application,
+error containment/retry, base-path validation, safe lazy-import recovery and verified-shell build identity.
+Type checking covers application,
 tests and build configuration with strict options; lint checks typed promises and
 prevents React compatibility imports. No `skipLibCheck` or ambient untyped shim
 is used to hide dependency declaration problems.
@@ -106,4 +109,32 @@ interfaces in this combination. `@types/babel__core` **7.20.5** supplies the pre
 published Babel types. Preact **10.29.8**, preact-iso **2.12.2** and
 preact-render-to-string **6.7.0** are the declared runtime dependency set; the
 prerender peer contributes no browser modules. All browser components use native
-Preact. Runtime packages are MIT-licensed; preserve their notices when packaging.
+Preact. Runtime packages are MIT-licensed. `THIRD_PARTY_NOTICES.txt` contains their
+notices plus the license for Vite-generated browser helpers; the distribution
+packages this text separately from public UI assets.
+
+## Asset recovery and build identity
+
+All lazy routes use `shared/LazyRoute.tsx`. It consumes an import failure and
+renders a stable unavailable view. The shell observes Vite's documented
+`vite:preloadError` event and shows one persistent version notice. It waits for
+an explicit Reload application action; it has no retry timer, persisted replay
+queue or automatic navigation. Repeat failure notifications and button clicks
+during reload do not request another reload. If browser navigation throws, the
+notice directs the user to the browser's own Reload action.
+
+The event observer leaves the rejection for the loader to handle. Suppressing
+that event can make a failed Vite import resolve to `undefined`; the lazy wrapper
+also recognizes that result so it cannot repeatedly suspend the router. Raw error
+payloads, asset URLs and internal failure details are not rendered. The notice
+preserves the surrounding shell and asks the user to copy unsaved input before
+reloading. A network failure is not claimed to prove a new server version.
+[Vite load-error contract](https://vite.dev/guide/build.html#load-error-handling).
+
+Runtime reads `decomp-ui-build` and `decomp-application-version` meta elements
+inserted by the packaged server from its verified manifest. It shows the full UI
+SHA-256 build identifier and bounded application version as text. Missing,
+malformed or duplicate metadata displays Unavailable. These values identify the
+server that served this page; they do not prove that a later server restart is
+running the same version, and they do not imply workflow capability availability.
+No extra API call, environment value or browser storage supplies an identity.
