@@ -49,6 +49,11 @@ class AcpAuthenticationInventory private constructor(
                     requireInventory(method.name.toByteArray().size <= 512 && (method.description?.toByteArray()?.size ?: 0) <= 2048) {
                         "ACP authentication inventory exceeds its text limit"
                     }
+                    listOfNotNull(method.id.value, method.name, method.description).forEach { value ->
+                        requireInventory(Charsets.UTF_8.newEncoder().canEncode(value)) {
+                            "ACP authentication inventory contains invalid Unicode"
+                        }
+                    }
                     add(buildJsonObject {
                         put("id", method.id.value); put("variant", variant(method))
                         put("name", method.name); put("description", method.description?.let(::JsonPrimitive) ?: JsonNull)
