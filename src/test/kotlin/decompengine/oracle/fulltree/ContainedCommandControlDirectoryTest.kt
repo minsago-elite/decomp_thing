@@ -80,6 +80,45 @@ class ContainedCommandControlDirectoryTest {
         }
     }
 
+    @Test
+    fun `prior controls pin identities and snapshot read-only mount membership`() = fixture { path ->
+        LinuxFilesystemSyscalls.openRoot(path).use { parent ->
+            val oldName = "control-${"a".repeat(64)}"
+            val activeName = "control-${"b".repeat(64)}"
+            createContainedCommandControlDirectory(parent, oldName).use { old ->
+                val previous = mutableMapOf(oldName to LinuxFilesystemSyscalls.identity(old.fd))
+                val controls = ContainedCommandPriorControls(activeName, previous)
+                previous.clear()
+                createContainedCommandControlDirectory(parent, activeName).use {
+                    controls.verify(parent)
+                    val oldPath = path.resolve(oldName).toString()
+                    assertEquals(listOf("--ro-bind", oldPath, oldPath), controls.mountArguments(path))
+                    assertEquals(1, controls.toJson().size)
+                    Files.move(path.resolve(oldName), path.resolve("retained-old"))
+                    Files.createDirectory(path.resolve(oldName))
+                    assertFails { controls.verify(parent) }
+                }
+            }
+        }
+    }
+
+    @Test
+    fun `prior controls reject active overlap unsafe names and changed permissions`() = fixture { path ->
+        LinuxFilesystemSyscalls.openRoot(path).use { parent ->
+            val oldName = "control-${"c".repeat(64)}"
+            val activeName = "control-${"d".repeat(64)}"
+            createContainedCommandControlDirectory(parent, oldName).use { old ->
+                assertFails { ContainedCommandPriorControls(null, mapOf(oldName to LinuxFilesystemSyscalls.identity(old.fd))) }
+                assertFails { ContainedCommandPriorControls(oldName, mapOf(oldName to LinuxFilesystemSyscalls.identity(old.fd))) }
+                assertFails { ContainedCommandPriorControls(activeName, mapOf("../outside" to LinuxFilesystemSyscalls.identity(old.fd))) }
+                val controls = ContainedCommandPriorControls(activeName, mapOf(oldName to LinuxFilesystemSyscalls.identity(old.fd)))
+                controls.verify(parent)
+                Files.setPosixFilePermissions(path.resolve(oldName), PosixFilePermissions.fromString("rwxr-xr-x"))
+                assertFails { controls.verify(parent) }
+            }
+        }
+    }
+
     private fun fixture(action: (Path) -> Unit) {
         val path = Files.createTempDirectory("contained-control-fixture-")
         Files.setPosixFilePermissions(path, PosixFilePermissions.fromString("rwx------"))
