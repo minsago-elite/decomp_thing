@@ -436,6 +436,7 @@ try {
     await capture(home, 'home.png');
     await evaluate(home, `document.querySelector('a[href="/nested/upload"]').click()`);
     await ready(home, `document.querySelector('h1')?.textContent === 'Upload a binary' && document.title === 'Upload a binary · Decomp Workbench'`, 'upload route navigation');
+    assert.equal(home.requests.filter((request) => request.type === 'Document').length, 1, 'Upload client navigation reloaded the document');
     await cdp.call('Page.reload', {}, home.sessionId);
     await ready(home, `document.querySelector('h1')?.textContent === 'Upload a binary' && document.querySelector('nav[aria-label="Breadcrumbs"]')?.textContent.includes('All jobs')`, 'upload direct reload');
     assert.equal(await evaluate(home, 'location.pathname'), '/nested/upload');
@@ -449,7 +450,7 @@ try {
     assert.ok(runtimeIdentity.text.includes(manifest.applicationVersion));
     assert.ok(runtimeIdentity.text.includes(manifest.buildId));
     assert.ok(runtimeIdentity.text.includes('Runtime information is not connected'));
-    assert.equal(home.requests.filter((entry) => entry.type === 'Document').length, 1, 'Client route navigation reloaded the document');
+    assert.equal(home.requests.filter((entry) => entry.type === 'Document').length, 2, 'Runtime client navigation added a document load after the explicit upload reload');
     assert.deepEqual(home.exceptions, []);
     await capture(home, 'runtime.png');
     const runtimeAsset = manifest.files.find((entry) => /^assets\/Runtime-.+\.js$/.test(entry.path));

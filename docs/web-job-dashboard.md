@@ -82,3 +82,13 @@ the distribution build. New checks cover prefixed direct navigation, browser
 history, current-navigation labels, titles, breadcrumbs, focus, inert public views,
 and server route/method handling. Run/revision/tab routing and full D3–D9 workspace
 navigation remain outstanding; this checkpoint does not complete #167.
+
+
+The final packaged browser run passed with the new upload direct-link/reload checks,
+existing job dashboard/upload journeys, and asset-recovery visibility. Early route
+focus exposed a delayed-notice scroll regression; the notice now scrolls into view
+when it appears without taking keyboard focus. The driver separately verifies that
+client navigation adds no document request and that explicit reload adds one.
+[Retained report](evidence/web-upload-route-20260905.json); pinned Chrome used the
+test-only no-sandbox option. The final frontend suite still passed all 184 tests,
+lint and the rebuilt typechecked distribution.

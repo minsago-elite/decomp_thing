@@ -1,4 +1,4 @@
-import { useLayoutEffect, useState } from 'preact/hooks';
+import { useLayoutEffect, useRef, useState } from 'preact/hooks';
 import type { AssetRecovery } from '../app/assetRecovery';
 import type { BuildIdentity } from '../app/buildIdentity';
 
@@ -8,6 +8,10 @@ export function AssetRecoveryNotice({ recovery, identity, reload }: {
   reload: () => void;
 }) {
   const [state, setState] = useState(recovery.snapshot);
+  const notice = useRef<HTMLElement>(null);
+  useLayoutEffect(() => {
+    if (state !== 'ready') notice.current?.scrollIntoView?.({ block: 'start' });
+  }, [state]);
   useLayoutEffect(() => {
     const unsubscribe = recovery.subscribe(setState);
     setState(recovery.snapshot());
@@ -15,7 +19,7 @@ export function AssetRecoveryNotice({ recovery, identity, reload }: {
   }, [recovery]);
   if (state === 'ready') return null;
   return (
-    <aside class="asset-notice notice" aria-labelledby="asset-notice-title" role="alert">
+    <aside ref={notice} class="asset-notice notice" aria-labelledby="asset-notice-title" role="alert">
       <h2 id="asset-notice-title">The application may have updated</h2>
       <p>
         An application file could not be loaded. The server may have updated, or the
