@@ -293,6 +293,11 @@ class SourceTreeTest {
         val report = Json.parseToJsonElement(project.resolve("reports/confidence.json").readText()).jsonObject
         assertEquals("2", report.getValue("schemaVersion").jsonPrimitive.content)
         assertEquals("1.0000", report.getValue("projectScore").jsonPrimitive.content)
+        val interpretation = report.getValue("scoreInterpretation").jsonObject
+        assertEquals("structural-recovery", interpretation.getValue("kind").jsonPrimitive.content)
+        assertEquals("uncalibrated", interpretation.getValue("calibrationStatus").jsonPrimitive.content)
+        assertEquals(JsonNull, interpretation.getValue("calibratedProbability"))
+        assertEquals(JsonNull, interpretation.getValue("empiricalSampleCount"))
         assertTrue(report.getValue("unresolvedRecoveryEntityIds").jsonArray.isEmpty())
         val implementationIds = report.getValue("unresolvedImplementationIds").jsonArray.map { it.jsonPrimitive.content }
         assertEquals(manifest.unresolvedImplementationIds, implementationIds)
