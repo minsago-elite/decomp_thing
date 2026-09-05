@@ -66,3 +66,16 @@ has 81 cases. Local verification passes 75 with six live-terminal skips on the h
 ```
 
 The v4 hosted result must be attached separately; local skips do not qualify its required lane.
+
+The subsequent [checkpoint continuation contract](builtin-checkpoint-v1.md) adds opt-in actual-stage
+snapshot checks, separately persisted commitments and a validated resume API. The earlier recovery
+limitations above describe this journal's initial checkpoint; the continuation contract states what
+is now implemented and what still requires workflow/source/archive integration.
+
+Journal v4 required-host run
+[33951760152](https://github.com/minsago-elite/decomp_thing/actions/runs/33951760152), at
+`41158e92fad44e30c0b7d15dec7c167445410348`, passed 81 cases with zero failures, errors or skips.
+Downloaded artifact `9965204620`, digest
+`sha256:59bb36124ba1bdbcf5f88cd89349bcaa5fa04d0615381385f9761f3ee03c72f8`, was independently checked
+against every suite XML digest and actual case count. This is dated v4 evidence; it does not
+qualify the subsequent checkpoint v5 inventory.
