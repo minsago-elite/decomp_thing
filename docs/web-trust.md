@@ -308,3 +308,10 @@ embedded script's expiry handling, late-response rejection, peer message validat
 confirmed logout, 401 handling and history-cache lifecycle. These deterministic tests use
 a browser model and controlled responses/timers; they do not claim real elapsed server
 expiry or browser history-cache qualification.
+
+The [packaged legacy invalidation report](evidence/web-legacy-session-invalidation-20260905.json)
+at source `f9ec0fd` proves an idle peer clears through notification and an active peer with
+BroadcastChannel disabled clears on an actual server 401 after logout. Neither peer issues
+a mutation. Existing login/upload/download/polling/recovery checks also pass. The report
+retains artifact identities, explicit test fixture edits, test-only browser sandbox override,
+unchanged installation and confirmed cleanup. It does not establish real elapsed expiry.
