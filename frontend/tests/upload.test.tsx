@@ -89,3 +89,35 @@ it('keeps server validation beside the control and aborts pending work on unmoun
   const signal = transport.upload.mock.calls[1]?.[1].signal as AbortSignal;
   view.unmount(); expect(signal.aborted).toBe(true);
 });
+
+it.each([
+  ['UPLOAD_TOO_LARGE', 'The complete upload exceeds the server limit.'],
+  ['UPLOAD_CAPACITY', 'The server has no upload capacity.'],
+  ['UPLOAD_STORAGE', 'The server has no upload capacity.'],
+  ['SESSION_EXPIRED', 'Reconnect your local session, then retry this file.'],
+  ['UPLOAD_RECEIPT_UNAVAILABLE', 'Upload storage needs attention.'],
+])('retains actionable context for %s without retrying automatically', async (serverCode, explanation) => {
+  transport.upload.mockRejectedValue(new ApiClientError('http_error', { serverCode }));
+  await mount(); const file = select();
+  fireEvent.click(screen.getByRole('button', { name: 'Upload binary' }));
+  await waitFor(() => expect(screen.getByText((text) => text.startsWith(explanation))).toBeTruthy());
+  expect(transport.upload).toHaveBeenCalledOnce();
+  expect(transport.route).not.toHaveBeenCalled();
+  expect(screen.getByText(/Selected: binary.elf/)).toBeTruthy();
+  fireEvent.click(screen.getByRole('button', { name: 'Retry this upload' }));
+  await waitFor(() => expect(transport.upload).toHaveBeenCalledTimes(2));
+  expect(transport.upload.mock.calls[1]?.[0]).toBe(file);
+  expect(transport.upload.mock.calls[1]?.[1].idempotencyKey).toBe(transport.upload.mock.calls[0]?.[1].idempotencyKey);
+});
+
+it('accepts one dropped file and rejects multiple files without implicit admission', async () => {
+  await mount();
+  const drop = screen.getByLabelText('Binary file').parentElement!;
+  const first = new File(['one'], 'first.elf');
+  const second = new File(['two'], 'second.elf');
+  fireEvent.drop(drop, { dataTransfer: { files: [first, second] } });
+  expect(await screen.findByText('Choose one binary at a time.')).toBeTruthy();
+  fireEvent.drop(drop, { dataTransfer: { files: [first] } });
+  expect(await screen.findByText(/Selected: first.elf/)).toBeTruthy();
+  expect(transport.upload).not.toHaveBeenCalled();
+});

@@ -52,3 +52,62 @@ export async function qualifyUpload({ makeTarget, cdp, evaluate, ready, browserO
   return { keyboardSubmit: true, publicationResponseLost: true, sameKeyRetry: true, jobsCreated: 1,
     executionStarted: false, jobReload: true, browserStorageEntries: 0, requests: tab.requests };
 }
+
+export async function qualifyUploadFailures({ makeTarget, cdp, evaluate, ready, browserOrigin, data }) {
+  const tab = await makeTarget();
+  // A cancellable stalled fetch isolates the UI's transport stop behavior. Invalid and
+  // oversized requests below still reach the real packaged JVM and its real parser.
+  await cdp.call('Page.addScriptToEvaluateOnNewDocument', { source: `(() => {
+    const original = window.fetch; let stall = false; let aborts = 0;
+    Object.defineProperty(window, '__stallUpload', { value: () => { stall = true; } });
+    Object.defineProperty(window, '__stalledUploadAborts', { value: () => aborts });
+    window.fetch = function(input, options) {
+      if (stall && options?.method === 'POST' && String(input).endsWith('/api/v1/jobs')) {
+        return new Promise((_resolve, reject) => options.signal.addEventListener('abort', () => {
+          aborts++; reject(new DOMException('Isolated transport stopped', 'AbortError'));
+        }, { once: true }));
+      }
+      return original.apply(this, arguments);
+    };
+  })();` }, tab.sessionId);
+  await cdp.call('Page.navigate', { url: browserOrigin + '/nested/' }, tab.sessionId);
+  await ready(tab, `document.body.innerText.includes('Local session connected.')`, 'failure test session');
+  const ids = (await fs.readdir(data)).filter(name => /^[a-f0-9]{32}$/.test(name));
+  async function select(size, name) {
+    await evaluate(tab, `(() => {
+      const transfer = new DataTransfer(); transfer.items.add(new File([new Uint8Array(${size})], ${JSON.stringify(name)}));
+      const picker = document.querySelector('#binary-file'); picker.files = transfer.files;
+      picker.dispatchEvent(new Event('change', { bubbles: true }));
+    })()`);
+  }
+  async function button(label) {
+    await evaluate(tab, `[...document.querySelectorAll('button')].find(button => button.textContent === ${JSON.stringify(label)}).click()`);
+  }
+  await select(16, 'invalid-header.elf');
+  await button('Upload binary');
+  await ready(tab, `document.querySelector('#upload-feedback').textContent.includes('The server rejected this file.')`, 'real server ELF validation');
+  assert.equal(await evaluate(tab, `document.querySelector('#binary-file').getAttribute('aria-describedby').includes('upload-feedback')`), true);
+  await button('Choose another file');
+  assert.equal(await evaluate(tab, `document.activeElement.id`), 'binary-file');
+  await select(33554432, 'oversized.elf');
+  await ready(tab, `document.querySelector('#upload-feedback').textContent.includes('no room for multipart overhead')`, 'advisory size guidance');
+  await button('Upload binary');
+  await ready(tab, `document.querySelector('#upload-feedback').textContent.includes('The complete upload exceeds the server limit.')`, 'real server request size rejection');
+  await button('Choose another file');
+  await select(64, 'stalled.elf');
+  await evaluate(tab, 'window.__stallUpload()');
+  await button('Upload binary');
+  await ready(tab, `document.querySelector('progress') !== null`, 'indeterminate stalled upload');
+  await button('Stop transfer');
+  await ready(tab, `document.querySelector('#upload-feedback').textContent.includes('Transfer stopped.')`, 'explicit transport stop');
+  assert.equal(await evaluate(tab, 'window.__stalledUploadAborts()'), 1);
+  assert.equal(await evaluate(tab, `document.querySelector('progress') === null && document.body.innerText.includes('Selected: stalled.elf')`), true);
+  await button('Choose another file'); // Deliberately dismiss uncertain context before cleanup.
+  assert.deepEqual((await fs.readdir(data)).filter(name => /^[a-f0-9]{32}$/.test(name)), ids);
+  assert.equal((await fs.readdir(data)).some(name => name.startsWith('.upload-')), false);
+  assert.equal(await evaluate(tab, 'localStorage.length + sessionStorage.length'), 0);
+  assert.deepEqual(tab.exceptions, []);
+  return { invalidElfRejectedByServer: true, oversizedRequestRejectedByServer: true,
+    advisorySizeGuidance: true, pickerFocusRestored: true, stalledTransportSimulated: true,
+    stopSettled: true, jobsCreated: 0, stagingEntries: 0, browserStorageEntries: 0, requests: tab.requests };
+}
