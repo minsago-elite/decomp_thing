@@ -157,9 +157,9 @@ private object CrossShardCallElfBytes {
 
     val functions = listOf(
         FullTreeCrossShardFixtureFunction("alpha", "alpha_entry", "source/clang/lib/Alpha/alpha.c", 0x100, 0x80),
-        FullTreeCrossShardFixtureFunction("beta", "beta_alias", "source/clang/lib/Beta/beta.cc", 0x200, 0x80),
+        FullTreeCrossShardFixtureFunction("beta", "_ZN4Beta4callEv", "source/clang/lib/Beta/beta.cc", 0x200, 0x80),
         FullTreeCrossShardFixtureFunction("gamma", "gamma_entry", "source/llvm/lib/Gamma/gamma.c", 0x300, 0x80),
-        FullTreeCrossShardFixtureFunction("thunk", "beta_thunk", "source/llvm/lib/Gamma/gamma.c", 0x380, 0x10),
+        FullTreeCrossShardFixtureFunction("thunk", "_ZTh0_N4Beta4callEv", "source/llvm/lib/Gamma/gamma.c", 0x380, 0x10),
         FullTreeCrossShardFixtureFunction("callback", "callback_entry", "source/clang/lib/Alpha/alpha.c", 0x3a0, 0x20),
     ).associateBy { it.name }
 

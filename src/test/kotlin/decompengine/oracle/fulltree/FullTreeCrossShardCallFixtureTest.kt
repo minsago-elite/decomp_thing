@@ -14,6 +14,24 @@ import kotlinx.serialization.json.JsonPrimitive
 
 class FullTreeCrossShardCallFixtureTest {
     @Test
+    fun `zero adjustment thunk linkage matches its physical tail jump`() =
+        inControlTemporaryDirectory { root ->
+            val fixture = createFullTreeCrossShardCallFixture(root.resolve("fixture"))
+            assertEquals("_ZTh0_N4Beta4callEv", fixture.functions.getValue("thunk").linkageName)
+            assertEquals("_ZN4Beta4callEv", fixture.functions.getValue("beta").linkageName)
+            listOf(fixture.artifact, fixture.strippedArtifact).forEach { artifact ->
+                assertContentEquals(
+                    byteArrayOf(0xe9.toByte(), 0x7b, 0xfe.toByte(), 0xff.toByte(), 0xff.toByte()),
+                    Files.readAllBytes(artifact).copyOfRange(0x380, 0x385),
+                )
+            }
+            val tail = fixture.calls.single { it.name == "thunk-to-beta" }
+            assertEquals(0x380L, tail.addressRva)
+            assertEquals("beta", tail.target)
+            assertTrue(tail.tailCall)
+        }
+
+    @Test
     fun `three authenticated raw shards contain cross-shard cycles and bounded target evidence`() =
         inControlTemporaryDirectory { root ->
             val fixture = createFullTreeCrossShardCallFixture(root.resolve("fixture"))
