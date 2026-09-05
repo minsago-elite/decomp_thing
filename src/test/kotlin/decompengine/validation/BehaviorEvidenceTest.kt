@@ -28,6 +28,39 @@ import kotlinx.serialization.json.jsonPrimitive
 
 class BehaviorEvidenceTest {
     @Test
+    fun `file corpus identity survives relocation but changes with retained contents`() {
+        val fixture = fixture()
+        val firstPath = fixture.original.parent.resolve("first-input")
+        val secondPath = fixture.original.parent.resolve("second-input")
+        firstPath.writeText("same input")
+        secondPath.writeText("same input")
+        fun evaluate(path: Path, id: String) = BehaviorEvidence.decode(BehaviorComparator(fixture.sandbox).evaluate(
+            id, fixture.original, fixture.rebuilt, listOf(ProcessInput("file", listOf("/inputs/input"))),
+            fixture.project.resolve("reports"), BehaviorProjectContext(fixture.project),
+            fileInputs = mapOf("file" to mapOf("input" to path)),
+        ).reportPath.readBytes())
+        val first = evaluate(firstPath, "first")
+        val relocated = evaluate(secondPath, "relocated")
+        assertEquals(first.getValue("corpusSha256"), relocated.getValue("corpusSha256"))
+        assertFalse(first.getValue("observationsSha256") == relocated.getValue("observationsSha256"))
+        secondPath.writeText("changed input")
+        val changed = evaluate(secondPath, "changed")
+        assertFalse(first.getValue("corpusSha256") == changed.getValue("corpusSha256"))
+        val legacyCorpus = JsonArray(first.getValue("cases").jsonArray.map { element ->
+            JsonObject(element.jsonObject.filterKeys { it in setOf("id", "args", "stdinHex", "fileInputs") })
+        })
+        val legacy = JsonObject(first + mapOf(
+            "schemaVersion" to JsonPrimitive(2),
+            "provider" to JsonPrimitive("local-revision-bound-behavior-v2"),
+            "corpusSha256" to JsonPrimitive(OracleArtifacts.sha256(OracleJson.canonicalBytes(legacyCorpus))),
+        ))
+        val legacyRecord = JsonObject(legacy + ("reportSha256" to JsonPrimitive(
+            OracleArtifacts.sha256(OracleJson.canonicalBytes(JsonObject(legacy - "reportSha256"))),
+        )))
+        assertEquals(2, BehaviorEvidence.decode(legacyRecord.toString().toByteArray()).integer("schemaVersion"))
+    }
+
+    @Test
     fun `historical schema one records remain readable without file declarations`() {
         val fixture = fixture()
         val current = BehaviorEvidence.decode(fixture.evaluate().reportPath.readBytes())
@@ -56,7 +89,7 @@ class BehaviorEvidenceTest {
             fileInputs = mapOf("file" to mapOf("nested/input.bin" to input)),
         )
         val record = BehaviorEvidence.decode(report.reportPath.readBytes())
-        assertEquals(2, record.integer("schemaVersion"))
+        assertEquals(3, record.integer("schemaVersion"))
         val case = record.getValue("cases").jsonArray.single().jsonObject
         val retained = case.getValue("fileInputs").jsonArray.single().jsonObject
         assertEquals("00017fff", retained.string("contentHex"))
@@ -72,7 +105,8 @@ class BehaviorEvidenceTest {
         val changedFile = JsonObject(retained + ("contentHex" to JsonPrimitive("00017ffe")))
         val changedCase = JsonObject(case + ("fileInputs" to JsonArray(listOf(changedFile))))
         val changedCases = JsonArray(listOf(changedCase))
-        val corpus = JsonArray(listOf(JsonObject(changedCase.filterKeys { it in setOf("id", "args", "stdinHex", "fileInputs") })))
+        val corpus = JsonArray(listOf(JsonObject(changedCase.filterKeys { it in setOf("id", "args", "stdinHex") } +
+            ("fileInputs" to JsonArray(listOf(JsonObject(changedFile - "sourcePath")))))))
         val changed = JsonObject(record + mapOf(
             "cases" to changedCases,
             "corpusSha256" to JsonPrimitive(OracleArtifacts.sha256(OracleJson.canonicalBytes(corpus))),

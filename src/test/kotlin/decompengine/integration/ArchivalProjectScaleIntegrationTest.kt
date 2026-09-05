@@ -169,6 +169,8 @@ class ArchivalProjectScaleIntegrationTest {
             extracted.resolve("reports"), BehaviorProjectContext(extracted),
             fileInputs = mapOf("file" to mapOf("sample.txt" to restoredInput)),
         )
+        val replayRecord = Json.parseToJsonElement(replay.reportPath.readText()).jsonObject
+        assertEquals(extractedRecord.getValue("corpusSha256"), replayRecord.getValue("corpusSha256"))
         val expectedCases = mapOf(
             "stdin" to (0 to "from-stdin:25\n"),
             "argv" to (0 to "from-argv:25\n"),
