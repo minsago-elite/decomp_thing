@@ -42,6 +42,17 @@ class WebApiControllerTest {
         decompengine.jobs.AgentProgressJournal(reports, "reconstruct").use {
             it.phase(decompengine.agent.AgentWorkflowPhase.PLANNING)
         }
+        val recorded = Json.parseToJsonElement(Files.readString(journalFile)).jsonObject
+        Files.writeString(journalFile, JsonObject(recorded + ("events" to kotlinx.serialization.json.JsonArray(
+            recorded.getValue("events").jsonArray.map { item -> JsonObject(item.jsonObject + mapOf(
+                "text" to JsonPrimitive("PRIVATE_HTTP_PROSE"), "role" to JsonPrimitive("thought"),
+                "path" to JsonPrimitive("/PRIVATE_HTTP_ROOT/input"),
+                "entries" to kotlinx.serialization.json.JsonArray(listOf(JsonObject(mapOf(
+                    "idSha256" to JsonPrimitive("a".repeat(64)), "status" to JsonPrimitive("pending"),
+                    "text" to JsonPrimitive("PRIVATE_HTTP_PLAN"),
+                )))),
+            )) }
+        ))).toString())
         var executed = false
         val server = UploadServer("127.0.0.1", 0, root, JobAnalyzer { _, _ -> executed = true },
             JobReconstructor { _, _ -> executed = true }, uiMode = WebUiMode.SPA, basePath = "/workbench/")
@@ -59,6 +70,10 @@ class WebApiControllerTest {
             assertEquals("2", snapshot.getValue("progress").jsonObject.getValue("nextSequence").jsonPrimitive.content)
             assertEquals("observations", snapshot.getValue("progress").jsonObject.getValue("authority").jsonPrimitive.content)
             val first = assertEnvelope(request(server, "$path/events?limit=1&cursor=${snapshot.getValue("oldestCursor").jsonPrimitive.content}", headers = headers), 200, "events")
+            assertFalse(first.toString().contains("PRIVATE_HTTP_"))
+            val fields = first.getValue("items").jsonArray.single().jsonObject.getValue("payload").jsonObject
+            assertEquals("3", fields.getValue("omittedFieldCount").jsonPrimitive.content)
+            assertEquals("true", fields.getValue("fields").jsonObject.getValue("textOmitted").jsonPrimitive.content)
             val firstCursor = first.getValue("nextCursor").jsonPrimitive.content
             val firstEvent = first.getValue("items").jsonArray.single().jsonObject
             assertEquals("0", firstEvent.getValue("sequence").jsonPrimitive.content)
