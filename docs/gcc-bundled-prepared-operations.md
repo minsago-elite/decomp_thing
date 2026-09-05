@@ -468,8 +468,32 @@ never removes residue. After semantic-state validation, the existing exporter
 can discard its named pending file and rewrite the first incomplete batch; resumed
 capture still requires the exact original committed prefix and reuse count.
 
-A complete next checkpoint whose progress update was interrupted is not yet
-normalized into a larger stopped prefix and remains a rejected, preserved state.
+A complete next nonterminal checkpoint can be validated as described below.
+Terminal batches and multiple advances remain rejected, preserved states.
 Hosted interrupted/resumed compiler qualification and whole-run resource evidence
-remain required; local fixtures establish only this bounded capture/validation
-behavior.
+remain required; local fixtures establish only bounded capture/validation behavior.
+
+## Checkpoint published before progress
+
+If exactly the next checkpoint exists beyond observed progress, stopped capture
+reads its complete fragment set and the validator first validates the observed
+prefix against the original progress bytes. It then validates the next full batch
+and derives effective counters from its authenticated partial/failed counts. The
+full extended prefix is validated again for contiguous inventory, ownership and
+semantic commitments. Only one additional nonterminal full batch is admitted.
+This is a diagnostic derivation, not a claim that the exporter wrote new progress.
+
+The stopped journal payload retains `capturedProgressUtf8` (including its newline)
+and its SHA-256 separately from `effectiveProgressUtf8`, and explicitly records
+`effectiveProgressDerived`. The effective bytes must hash to the stopped assessment's
+progress commitment. Same-owner revalidation requires unchanged captured progress,
+checkpoint bytes and in-flight bindings. Host capture does not rewrite any file.
+The resumed leg must reuse the extended committed count.
+
+A bounded `.program_model.json.progress.json.pending` file may accompany the
+advanced checkpoint; its bytes and identity are recorded as in-flight evidence.
+Later batch fragments cannot accompany this state because the exporter writes
+progress before starting another batch. Pending progress without an advanced
+checkpoint, multiple advances, missing fragments and terminal checkpoints fail
+closed. Local tests cover both sides of this race and the derived/observed evidence
+separation; real hosted interruption and compiler/plan equivalence remain unproven.

@@ -28,7 +28,13 @@ internal class GccBundledInterruptedExportSnapshot(
     val assessment: GccInterruptedPrefixAssessment,
     val planningPrefixSha256: String,
     inFlightArtifacts: ByteArray = OracleJson.canonicalBytes(JsonObject(emptyMap())),
+    capturedProgress: ByteArray? = null,
+    effectiveProgress: ByteArray? = null,
 ) {
+    private val observed = capturedProgress?.copyOf()
+    private val effective = effectiveProgress?.copyOf()
+    val capturedProgress: ByteArray? get() = observed?.copyOf()
+    val effectiveProgress: ByteArray? get() = effective?.copyOf()
     private val inFlight = inFlightArtifacts.copyOf()
     val inFlightArtifacts: ByteArray get() = inFlight.copyOf()
     val inFlightArtifactsSha256: String = OracleArtifacts.sha256(inFlight)
@@ -65,9 +71,10 @@ internal object GccBundledExportCapture {
     ): GccBundledInterruptedExportSnapshot = captureFiles(run, expectedReports, artifacts, limits, interrupted = true) {
             state, progress, batches, capture, reports ->
         requireNoFinalModel(reports)
-        val assessment = GccCompilerEngineResumeByteValidator.assessInterruptedPrefix(state, progress, batches, limits)
+        val stopped = GccCompilerEngineResumeByteValidator.assessStoppedCheckpointPrefix(state, progress, batches, limits)
+        val assessment = stopped.assessment
         require(assessment.reused == 0L) { "fresh interrupted GCC execution unexpectedly reused prior records" }
-        GccBundledInterruptedExportSnapshot(assessment, planningPrefixDigest(batches), capture.inFlightArtifacts)
+        GccBundledInterruptedExportSnapshot(assessment, planningPrefixDigest(batches), capture.inFlightArtifacts, progress, stopped.effectiveProgress)
     }
 
     fun captureResumed(
@@ -137,12 +144,16 @@ internal object GccBundledExportCapture {
                     val stateAssessment = GccCompilerEngineResumeByteValidator.assessExporterState(state, limits)
                     requireInvocation(state, artifacts)
                     val progress = capture.read(reports, "program_model.json.progress.json", limits.progressBytes)
+                    var progressAdvanced = false
                     val batchCount = if (interrupted) {
                         val observed = GccCompilerEngineResumeByteValidator.assessExportProgress(state, progress, limits)
                         require(observed.phase == "planning" && observed.completed > 0 &&
                             observed.completed < observed.total && observed.completed % BATCH_FUNCTIONS == 0L
                         ) { "GCC interrupted capture requires a nonterminal durable planning prefix" }
-                        observed.completed / BATCH_FUNCTIONS
+                        val nextName = String.format(Locale.ROOT, "batch-%08d-%08d.checkpoint", observed.completed,
+                            minOf(observed.completed + BATCH_FUNCTIONS, observed.total))
+                        progressAdvanced = captureEntryExists(batchesDirectory, nextName)
+                        observed.completed / BATCH_FUNCTIONS + if (progressAdvanced) 1 else 0
                     } else stateAssessment.planningBatchCount
                     val expectedNames = linkedSetOf<String>()
                     val batches = (0 until batchCount).map { index ->
@@ -167,6 +178,8 @@ internal object GccBundledExportCapture {
                             stateAssessment.functionCount, limits)
                     } else expectedNames
                     requireBatchNames(batchesDirectory, capturedNames)
+                    if (progressAdvanced) require(capturedNames == expectedNames) { "GCC checkpoint ahead of progress cannot have later in-flight fragments" }
+                    if (interrupted) capture.captureProgressPending(reports, limits, progressAdvanced)
                     val result = assess(state, progress, batches, capture, reports)
                     capture.verify()
                     requireBatchNames(batchesDirectory, capturedNames)
@@ -240,6 +253,23 @@ private class BoundExportFiles(private val maximumBytes: Long) {
         return actual
     }
 
+    private var progressDirectory: LinuxDescriptor? = null
+    private var progressPendingExpected = false
+
+    fun captureProgressPending(reports: LinuxDescriptor, limits: GccResumeByteValidationLimits, allowed: Boolean) {
+        val name = ".program_model.json.progress.json.pending"
+        progressDirectory = reports
+        progressPendingExpected = captureEntryExists(reports, name)
+        if (!progressPendingExpected) return
+        require(allowed) { "GCC pending progress requires a complete checkpoint ahead of observed progress" }
+        val bytes = read(reports, name, limits.progressBytes)
+        val previous = OracleJson.parseCanonical(inFlightArtifacts).jsonObject
+        inFlightArtifacts = OracleJson.canonicalBytes(JsonObject(previous + ("reports/$name" to JsonObject(mapOf(
+            "bytes" to JsonPrimitive(bytes.size), "sha256" to JsonPrimitive(OracleArtifacts.sha256(bytes)),
+            "binding" to files.last().bindingJson(),
+        )))))
+    }
+
     fun read(directory: LinuxDescriptor, name: String, maximumFileBytes: Int): ByteArray {
         val file = requireNotNull(LinuxFilesystemSyscalls.openRegularFileAtOrNull(directory.fd, name)) { "GCC export file is missing: $name" }
         return file.use { selected ->
@@ -264,7 +294,14 @@ private class BoundExportFiles(private val maximumBytes: Long) {
         }
     }
 
-    fun verify() = files.forEach { it.verify() }
+    fun verify() {
+        files.forEach { it.verify() }
+        progressDirectory?.let { directory ->
+            require(captureEntryExists(directory, ".program_model.json.progress.json.pending") == progressPendingExpected) {
+                "GCC pending progress membership changed during capture"
+            }
+        }
+    }
 }
 
 private class BoundExportFile(

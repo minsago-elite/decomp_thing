@@ -747,6 +747,12 @@ internal class GccResumeEquivalenceAssessment internal constructor(
     val modulePlanSha256: String,
 )
 
+/** Diagnostic derived progress; never a replacement for the captured exporter progress file. */
+internal class GccStoppedCheckpointPrefix(val assessment: GccInterruptedPrefixAssessment, effectiveProgress: ByteArray) {
+    private val progress = effectiveProgress.copyOf()
+    val effectiveProgress: ByteArray get() = progress.copyOf()
+}
+
 private class ValidatedInterruptedPrefix(
     val state: ParsedExporterState,
     val progress: ParsedExportProgress,
@@ -1022,6 +1028,38 @@ internal object GccCompilerEngineResumeByteValidator {
         captureInterruptedPrefix(rawState, rawProgress, rawBatches, limits),
         limits,
     ).assessment
+
+    /** Derives at most one nonterminal committed batch beyond the separately validated observed progress. */
+    fun assessStoppedCheckpointPrefix(
+        rawState: ByteArray,
+        rawProgress: ByteArray,
+        rawBatches: List<GccPlanningBatchBytes>,
+        limits: GccResumeByteValidationLimits = GccResumeByteValidationLimits(),
+    ): GccStoppedCheckpointPrefix {
+        val run = captureInterruptedPrefix(rawState, rawProgress, rawBatches, limits)
+        val state = parseExporterState(run.state, limits)
+        val observed = parseExportProgress(state, run.progress, limits)
+        val count = observed.completed / PLANNING_BATCH_FUNCTIONS
+        if (run.batches.size.toLong() == count) {
+            return GccStoppedCheckpointPrefix(validateInterruptedPrefix(run, limits).assessment, run.progress)
+        }
+        if (run.batches.size.toLong() != count + 1 || count < 1) {
+            resumeValidationFailure("stopped checkpoint prefix may advance by at most one batch")
+        }
+        validateInterruptedPrefix(CapturedInterruptedPrefix(run.state, run.progress, run.batches.take(count.toInt())), limits)
+        val next = parsePlanningBatch(state, run.batches.last(), limits)
+        if (next.startIndex != observed.completed || next.endExclusive != observed.completed + PLANNING_BATCH_FUNCTIONS ||
+            next.endExclusive >= observed.total) {
+            resumeValidationFailure("advanced stopped checkpoint must be the next nonterminal full batch")
+        }
+        val effective = renderExportProgress(observed.copy(
+            completed = next.endExclusive,
+            partial = exactAdd("stopped partial count", observed.partial, next.partial),
+            failed = exactAdd("stopped failed count", observed.failed, next.failed),
+        )).toByteArray(StandardCharsets.UTF_8)
+        val assessment = validateInterruptedPrefix(CapturedInterruptedPrefix(run.state, effective, run.batches), limits).assessment
+        return GccStoppedCheckpointPrefix(assessment, effective)
+    }
 
     @Suppress("LongParameterList")
     fun assessResumeEquivalence(

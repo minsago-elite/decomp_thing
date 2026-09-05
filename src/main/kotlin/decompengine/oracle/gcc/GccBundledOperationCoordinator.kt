@@ -129,7 +129,8 @@ internal class GccBundledPreparedOperation internal constructor(
                 GccBundledExportCapture.captureInterruptedSnapshot(descriptor, directories.getValue("reports"), intent.artifacts)
             }
             val prefix = snapshot.assessment
-            val assessment = trigger.assessStoppedPrefix(prefix, snapshot.planningPrefixSha256, snapshot.inFlightArtifacts)
+            val assessment = trigger.assessStoppedPrefix(prefix, snapshot.planningPrefixSha256, snapshot.inFlightArtifacts,
+                snapshot.capturedProgress, snapshot.effectiveProgress)
             stoppedExport = snapshot
             stoppedControl = execution.controlDirectoryIdentity
             inputs.verify("after GCC interrupted prefix capture")
@@ -181,7 +182,8 @@ internal class GccBundledPreparedOperation internal constructor(
             checkNotNull(retainedTrigger).requireUnchangedStoppedPrefix(retained.assessment, current.assessment)
             val expected = checkNotNull(retainedExport)
             require(current.planningPrefixSha256 == expected.planningPrefixSha256 &&
-                current.inFlightArtifacts.contentEquals(expected.inFlightArtifacts)) {
+                current.inFlightArtifacts.contentEquals(expected.inFlightArtifacts) &&
+                checkNotNull(current.capturedProgress).contentEquals(checkNotNull(expected.capturedProgress))) {
                 "GCC retained checkpoint or in-flight fragment bytes changed"
             }
         }
