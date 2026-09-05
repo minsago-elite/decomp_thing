@@ -270,7 +270,7 @@ class JobStore internal constructor(
     internal fun recoverInterruptedJobs(maximumEntries: Int, maximumMetadataBytes: Long) {
         require(maximumEntries in 1..4096 && maximumMetadataBytes in 1..64L * 1024 * 1024)
         if (!root.exists()) return
-        val pending = ArrayList<String>()
+        val pending = ArrayList<Job>()
         try {
             var scanned = 0
             var remaining = maximumMetadataBytes
@@ -285,14 +285,19 @@ class JobStore internal constructor(
                     remaining -= bytes.size
                     val job = decodeJob(id, bytes)
                     check(job.status in VALID_STATUSES)
-                    if (job.status == "queued" || job.status == "analyzing") pending.add(id)
+                    if (job.status == "queued" || job.status == "analyzing") pending.add(job)
                 }
             }
         } catch (_: Exception) {
             throw JobStoreException("Job recovery inspection is incomplete; no recovery statuses were changed")
         }
-        pending.forEach { id ->
-            updateStatus(id, "failed", "Analysis was interrupted before the server restarted")
+        pending.forEach { job ->
+            // Reuse the bounded inspection: updateStatus would read this metadata a second time.
+            persist(job.copy(
+                status = "failed",
+                updatedAt = Instant.now().toString(),
+                statusMessage = "Analysis was interrupted before the server restarted",
+            ))
         }
     }
 

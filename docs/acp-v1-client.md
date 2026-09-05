@@ -297,7 +297,8 @@ durable recovery of indeterminate external work require the separate #68/#71 rec
 Before startup recovery, a web server acquires a nonblocking exclusive `.web-owner.lock` for its job store.
 A second cooperating server fails before changing job status. Startup recovery scans at most 4,096
 store entries and reads at most 64 MiB of metadata, with the existing 256 KiB per-record limit.
-It finishes inspection before changing any recovery status. A valid job-name candidate with unreadable,
+It finishes inspection before changing any recovery status and publishes from the inspected records,
+without rereading their metadata outside that budget. A valid job-name candidate with unreadable,
 invalid or unknown-status metadata, or an exhausted budget, fails startup with a fixed incomplete-scan
 message. No recovery status changes during a failed scan. Unknown names and private stages remain
 retained; their entries count toward the scan limit. Once status writes begin, a later write failure may
