@@ -1,5 +1,6 @@
 package decompengine.exploration
 
+import decompengine.assessment.HeuristicScoreInterpretation
 import decompengine.validation.ProcessInput
 import decompengine.validation.SandboxRunner
 import kotlinx.serialization.json.Json
@@ -424,6 +425,7 @@ private fun ExplorationReport.toJson(): String = """
   "newOutputSignatures": [${coverage.newSignatures.sorted().joinToString(", ") { "\"${it.escapeJson()}\"" }}],
   "angr": ${angrDiagnostics?.toJson() ?: "null"},
   "confidence": {
+    "scoreInterpretation": ${HeuristicScoreInterpretation.EXPLORATION_BREADTH.toJson()},
     "score": ${String.format(Locale.ROOT, "%.4f", confidence.score)},
     "inputCount": ${confidence.inputCount},
     "sourceCount": ${confidence.sourceCount},
