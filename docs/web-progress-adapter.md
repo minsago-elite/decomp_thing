@@ -73,7 +73,7 @@ counts, absent omission accounting, untyped text objects and excess plan items.
 The typed client generation includes the new branch. Existing clients that do
 not know this branch retain their explicit unsupported-contract behavior.
 
-This is the schema/consumer preparation for #174. The producer projection,
+The mapper below implements the producer projection for this schema. The
 authenticated HTTP endpoint, cursor cutover/gap handling and UI activity view
 remain to be connected and qualified; no streaming capability is enabled here.
 
@@ -81,3 +81,38 @@ Contract verification passed 36 valid and 26 invalid fixtures. All 210 frontend
 tests, lint, generated-type drift checks and the typechecked bundle passed.
 JVM and browser tests were not rerun for this schema-only checkpoint; those are
 required when the producer and HTTP/UI adapters land.
+
+## Journal-to-observation mapping
+
+`webProgressObservation` now maps one decoded journal record to the shared
+`workflow.observation` shape. The caller supplies the authenticated job/attempt
+and replay cursor; those are never taken from the writer's `runId`. Writer,
+workflow and kind are validated independently. Sequence and usage values are
+canonical unsigned decimal strings, preserving exact integers without floating
+point conversion. Timestamp text is normalized to a supported UTC instant.
+
+The mapper copies only known typed fields and bounded plan entries. Unknown
+root fields contribute to `omittedFieldCount`; neither their names nor values
+are copied. Invalid known fields fail rather than being silently coerced or
+counted as omitted. It bounds source field count and serialized output to 64 KiB.
+That is a per-event ceiling; the future page adapter still needs its own total
+response-byte budget. It does not mint replay cursors or establish storage/session
+authority by itself.
+
+Integration with the actual writer exposed an initial schema bound mismatch:
+`ProgressRedactor` appends a 21-character marker after taking a 512-character
+preview (160 for plan text). The corresponding contract and mapper bounds are
+now 533 and 181, preserving the original producer text and marker. A shared
+fixture and actual persisted journal test cover this case.
+
+Tests compare exact output with the shared observation and truncated-plan
+fixtures, reject invalid known field types/counts/commitments, count unknown
+fields without leaking their content, and map actual persisted writer records
+while retaining distinct attempt/writer identities. This completes the producer
+projection function; authenticated reads, replay/cutover/gaps and HTTP/UI
+integration remain required under #174.
+
+Final verification passed 153 journal/web JVM tests, 211 frontend tests,
+37 valid and 26 invalid contract fixtures, lint and the typechecked bundle.
+Browser qualification was not rerun because this mapper is not yet attached to
+an HTTP route or UI view.

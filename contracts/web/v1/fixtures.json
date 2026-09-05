@@ -265,6 +265,10 @@
     {
       "file": "fixtures/invalid-observation-plan-limit.json",
       "valid": false
+    },
+    {
+      "file": "fixtures/event-observation-truncated-preview.json",
+      "valid": true
     }
   ]
 }

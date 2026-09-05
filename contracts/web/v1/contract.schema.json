@@ -2337,59 +2337,59 @@
           "properties": {
             "taskId": {
               "type": "string",
-              "maxLength": 512
+              "maxLength": 533
             },
             "workflowRunId": {
               "type": "string",
-              "maxLength": 512
+              "maxLength": 533
             },
             "revisionId": {
               "type": "string",
-              "maxLength": 512
+              "maxLength": 533
             },
             "phase": {
               "type": "string",
-              "maxLength": 512
+              "maxLength": 533
             },
             "status": {
               "type": "string",
-              "maxLength": 512
+              "maxLength": 533
             },
             "stopReason": {
               "type": "string",
-              "maxLength": 512
+              "maxLength": 533
             },
             "failureKind": {
               "type": "string",
-              "maxLength": 512
+              "maxLength": 533
             },
             "role": {
               "type": "string",
-              "maxLength": 512
+              "maxLength": 533
             },
             "decision": {
               "type": "string",
-              "maxLength": 512
+              "maxLength": 533
             },
             "path": {
               "type": "string",
-              "maxLength": 512
+              "maxLength": 533
             },
             "change": {
               "type": "string",
-              "maxLength": 512
+              "maxLength": 533
             },
             "wallClock": {
               "type": "string",
-              "maxLength": 512
+              "maxLength": 533
             },
             "reportedCostAmount": {
               "type": "string",
-              "maxLength": 512
+              "maxLength": 533
             },
             "reportedCostCurrency": {
               "type": "string",
-              "maxLength": 512
+              "maxLength": 533
             },
             "text": {
               "type": "string",
@@ -2500,7 +2500,7 @@
                   },
                   "text": {
                     "type": "string",
-                    "maxLength": 160
+                    "maxLength": 181
                   }
                 },
                 "required": [
