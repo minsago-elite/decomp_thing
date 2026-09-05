@@ -30,6 +30,8 @@ class AcpAuthenticationInventory private constructor(
             require(methods.size <= 32) { "ACP authentication inventory exceeds its method limit" }
             val ids = HashSet<String>()
             val redactor = ProgressRedactor(sensitiveValues)
+            val fragments = AuthenticationPreviewFragments(sensitiveValues)
+            fun preview(text: String, limit: Int) = fragments.conceal(redactor.text(text, limit))
             val commitment = buildJsonArray {
                 methods.forEach { method ->
                     require(method.id.value.isNotBlank() && method.id.value.toByteArray().size <= 256 && ids.add(method.id.value)) {
@@ -47,8 +49,8 @@ class AcpAuthenticationInventory private constructor(
             val digest = MessageDigest.getInstance("SHA-256").digest(OracleJson.canonicalBytes(commitment))
                 .joinToString("") { "%02x".format(it) }
             return AcpAuthenticationInventory(methods.map {
-                AcpAuthenticationMethod(it.id.value, variant(it), redactor.text(it.name, 128),
-                    it.description?.let { description -> redactor.text(description, 256) })
+                AcpAuthenticationMethod(it.id.value, variant(it), preview(it.name, 128),
+                    it.description?.let { description -> preview(description, 256) })
             }, digest)
         }
 

@@ -5,6 +5,31 @@ import com.agentclientprotocol.model.AuthMethodId
 import kotlin.test.*
 
 class AcpAuthenticationInventoryTest {
+    @Test fun `long private fragments are withheld at every alignment in operator previews`() {
+        val secret = "0123456789abcdefghijklmnopqrstuvwxyzABCD"
+        val fragments = listOf(secret.dropLast(1), secret.drop(1)) +
+            (0..secret.length - 15).map { secret.substring(it, it + 15) }
+        for (fragment in fragments) {
+            val method = AcpAuthenticationInventory.capture(listOf(
+                AuthMethod.AgentAuth(AuthMethodId("id-$fragment"), "Name $fragment", "Description $fragment")),
+                listOf(secret)).methods.single()
+            assertEquals("", method.namePreview)
+            assertEquals("", method.descriptionPreview)
+        }
+        val controlSplit = secret.take(12) + '\u0001' + secret.drop(12)
+        val normalized = AcpAuthenticationInventory.capture(listOf(
+            AuthMethod.AgentAuth(AuthMethodId("id"), secret.dropLast(1), null)), listOf(controlSplit))
+        assertEquals("", normalized.methods.single().namePreview)
+    }
+
+    @Test fun `fragment filtering retains unrelated text at the full private value budget`() {
+        val values = List(4096) { it.toString().padStart(256, 'x') }
+        val method = AcpAuthenticationInventory.capture(listOf(
+            AuthMethod.AgentAuth(AuthMethodId("public"), "Public login", "Use your account")), values).methods.single()
+        assertEquals("Public login", method.namePreview)
+        assertEquals("Use your account", method.descriptionPreview)
+    }
+
     @Test fun `control normalization precedes literal and credential preview redaction`() {
         val secret = "private-credential-fixture"
         for (control in listOf('\u0000', '\u0001', '\r', '\u007f')) {

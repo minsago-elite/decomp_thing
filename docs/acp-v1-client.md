@@ -745,7 +745,14 @@ methods. IDs are exact and bounded to 256 UTF-8 bytes; duplicate or blank IDs fa
 Names/descriptions are bounded before redacted previews are retained. Removable control
 characters are normalized in both preview input and private values before literal and credential-pattern
 matching, so later stripping cannot reconstruct a secret. Raw input/private-value limits still apply
-before normalization. Truncation preserves UTF-16
+before normalization.
+Authentication ID/name/description previews also pass a bounded private-fragment filter after
+redaction and truncation. Non-overlapping eight-UTF-16-unit blocks from normalized private values
+are indexed (at most 131,072 entries under the existing 1 MiB allowance). Every contiguous private
+fragment of at least 15 units contains one such block; a matching preview is withheld as an empty
+string. Some shorter matches are conservatively withheld too. Ordinary full-value redaction remains
+in place; arbitrary fragments below this threshold are not claimed to be confidential. The private
+index is local to inventory capture and is never serialized. Full-payload commitments remain unchanged. Truncation preserves UTF-16
 surrogate pairs. Redaction checks its 16,384-unit working-text limit after every replacement, before
 another replacement can expand inserted markers; exceeding it produces an omission marker. A single
 replacement can transiently allocate up to ten times that limit. Unknown variants remain
