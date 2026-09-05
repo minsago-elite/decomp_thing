@@ -191,6 +191,8 @@ class UploadServer(
     }
     private val analysisExecutor: Executor = executor ?: ownedExecutor!!
     private val runningJobs = ConcurrentHashMap.newKeySet<String>()
+    private val lifecycleLock = Any()
+    private var stopping = false
     val serverPort: Int get() = server.address.port
 
     init {
@@ -201,6 +203,8 @@ class UploadServer(
     fun start() = server.start()
 
     fun stop(delaySeconds: Int = 0) {
+        require(delaySeconds >= 0) { "shutdown delay must be nonnegative" }
+        synchronized(lifecycleLock) { stopping = true }
         server.stop(delaySeconds)
         val discarded = ownedExecutor?.shutdownNow().orEmpty()
         var failure: Exception? = null
@@ -316,7 +320,13 @@ class UploadServer(
                 try {
                     val active = store.updateStatus(job.id, "analyzing", activeMessage)
                     operation(active)
-                    store.updateStatus(job.id, "complete", completeMessage)
+                    synchronized(lifecycleLock) {
+                        if (stopping) {
+                            store.updateStatus(job.id, "failed", "Server stopped before the operation reported completion")
+                        } else {
+                            store.updateStatus(job.id, "complete", completeMessage)
+                        }
+                    }
                 } catch (failure: Exception) {
                     store.updateStatus(job.id, "failed", diagnostic(failure, "Background operation failed"))
                 } finally {

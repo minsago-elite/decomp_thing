@@ -16,13 +16,22 @@ import kotlin.test.assertTrue
 class WebShutdownTest {
     @Test
     fun `JVM shutdown interrupts owned workers and persists discarded queued jobs`() {
+        verifyShutdown(swallowInterruption = false)
+    }
+
+    @Test
+    fun `workers returning after shutdown cannot report successful completion`() {
+        verifyShutdown(swallowInterruption = true)
+    }
+
+    private fun verifyShutdown(swallowInterruption: Boolean) {
         val root = createTempDirectory("web-shutdown-")
         val log = root.resolve("child.log")
         val process = ProcessBuilder(
             Path.of(System.getProperty("java.home"), "bin", "java").toString(),
             "-Djava.io.tmpdir=${System.getProperty("java.io.tmpdir")}",
             "-cp", System.getProperty("java.class.path"),
-            WebShutdownFixture::class.java.name, root.toString(),
+            WebShutdownFixture::class.java.name, root.toString(), swallowInterruption.toString(),
         ).redirectErrorStream(true).redirectOutput(log.toFile()).apply { environment().clear() }.start()
         try {
             val deadline = System.nanoTime() + TimeUnit.SECONDS.toNanos(20)
@@ -37,6 +46,9 @@ class WebShutdownTest {
             ids.take(2).forEach { id ->
                 assertTrue(Files.exists(root.resolve("interrupted-$id")))
                 assertEquals("failed", store.get(id).status)
+                if (swallowInterruption) {
+                    assertEquals("Server stopped before the operation reported completion", store.get(id).statusMessage)
+                }
             }
             assertEquals("failed", store.get(ids.last()).status)
             assertEquals("Server stopped before the operation started", store.get(ids.last()).statusMessage)
@@ -51,7 +63,8 @@ class WebShutdownTest {
 object WebShutdownFixture {
     @JvmStatic
     fun main(args: Array<String>) {
-        val root = Path.of(args.single())
+        val root = Path.of(args[0])
+        val swallowInterruption = args[1].toBooleanStrict()
         val started = CountDownLatch(2)
         val neverReleased = CountDownLatch(1)
         val server = UploadServer("127.0.0.1", 0, root.resolve("jobs"),
@@ -59,6 +72,8 @@ object WebShutdownFixture {
                 started.countDown()
                 try {
                     neverReleased.await()
+                } catch (failure: InterruptedException) {
+                    if (!swallowInterruption) throw failure
                 } finally {
                     Files.writeString(root.resolve("interrupted-${job.id}"), "worker exited")
                 }

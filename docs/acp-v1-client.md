@@ -279,6 +279,9 @@ The web CLI registers a JVM shutdown hook before starting its listener. Normal J
 SIGTERM) calls the same stop path: close the listener, interrupt owned workers, and persist discarded jobs.
 After attempting every discarded-job update, stop waits up to five seconds for owned workers to terminate.
 A timeout or cleanup error is reported with a fixed diagnostic; it never establishes subprocess cleanup.
+Shutdown and successful job-status publication share a lock: once shutdown begins, a worker that catches
+interruption and returns normally is recorded as failed with an explicit shutdown diagnostic. Previously
+published completion remains intact. This controls the web status only, not artifact acceptance or rollback.
 Injected executors remain outside this lifecycle. SIGKILL, power loss, stalled filesystem writes, and
 durable recovery of indeterminate external work require the separate #68/#71 recovery mechanisms.
 
