@@ -310,6 +310,10 @@ qualify stalled kernel I/O or abrupt host failure.
 a worker that remains blocked past the grace period. The last case verifies the fixed cleanup diagnostic,
 then starts a new server and checks that unfinished jobs become interrupted failures without rerunning.
 This is benign JVM-worker evidence; it does not cover orphaned external processes or power loss.
+The abrupt-death case forcibly terminates the child JVM after two active jobs and one queued job are
+persisted. It verifies no worker completion markers appear, then starts a replacement server and checks
+that all three jobs become interrupted failures without replay. This exercises OS lock release on process
+death and recovery from complete persisted records; it is not interruption during a filesystem write.
 
 Job metadata updates write and force a temporary file in the job directory, atomically replace `job.json`,
 then force the directory. There is no non-atomic fallback. An existing reader retains its previous complete
