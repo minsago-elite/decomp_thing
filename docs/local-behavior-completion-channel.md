@@ -24,7 +24,10 @@ wrapper exits matched.
 and supplies descriptor 3 to Bubblewrap. Dynamic arguments remain separate argv
 values. The application child does not retain that descriptor. The local deadline
 starts before launch; capture is bounded to 4 KiB and the temporary file and directory
-are removed on success or failure. Existing stream bounds and process cleanup apply.
+are removed on success or failure. Cleanup attempts both owned paths and preserves
+the execution error as primary if removal also fails. A cleanup failure after
+success prevents publication; unrelated directory contents are never recursively
+deleted. Existing stream bounds and process cleanup apply.
 
 Schema-4 behavior records bind the launcher's identity and retain the exact launcher
 argv, channel locator and status bytes alongside the logical sandbox request.

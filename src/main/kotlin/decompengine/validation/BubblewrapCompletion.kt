@@ -2,11 +2,41 @@ package decompengine.validation
 
 import decompengine.oracle.core.OracleJson
 import decompengine.oracle.core.StrictJsonLimits
+import java.nio.file.Files
+import java.nio.file.Path
 import kotlinx.serialization.json.JsonObject
 import kotlinx.serialization.json.JsonPrimitive
 import kotlinx.serialization.json.longOrNull
 
 internal const val MAXIMUM_BUBBLEWRAP_COMPLETION_BYTES = 4096
+
+/** Own only these two paths; retain the execution failure if cleanup also fails. */
+internal fun <T> withCompletionChannel(action: (Path) -> T): T {
+    val directory = Files.createTempDirectory("behavior-completion-")
+    val channel = directory.resolve("status.jsonl")
+    var primaryFailure: Throwable? = null
+    try {
+        Files.createFile(channel)
+        return action(channel)
+    } catch (failure: Throwable) {
+        primaryFailure = failure
+        throw failure
+    } finally {
+        var cleanupFailure: Throwable? = null
+        for (path in listOf(channel, directory)) {
+            try {
+                Files.deleteIfExists(path)
+            } catch (failure: Throwable) {
+                val prior = cleanupFailure
+                if (prior == null) cleanupFailure = failure else prior.addSuppressed(failure)
+            }
+        }
+        cleanupFailure?.let { failure ->
+            val primary = primaryFailure
+            if (primary != null) primary.addSuppressed(failure) else throw failure
+        }
+    }
+}
 
 internal fun completionLaunchCommand(command: List<String>, launcher: java.nio.file.Path, channel: java.nio.file.Path): List<String> {
     require(command.size >= 3)
