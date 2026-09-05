@@ -39,6 +39,39 @@ import kotlin.test.assertTrue
 
 class UploadServerTest {
     @Test
+    fun `HTML exploration uses supplied data and bounded unavailable report reads`() = withServer { server, root ->
+        val id = uploadedJobId(server)
+        val job = decompengine.jobs.JobStore(root).get(id)
+        val reports = root.resolve(id).resolve("reports").createDirectories()
+        val report = reports.resolve("exploration.json")
+        val source = """{"confidence":{"score":0.63},"candidateCount":1,"expandedOutputSignatures":1,"newOutputSignatures":[],"candidates":[{"id":"supplied_case","source":"SEED","args":[],"stdinHex":""}],"observations":[]}"""
+        report.writeText(source.replace("supplied_case", "stored_case"))
+        val bytes = report.readBytes()
+        val rendered = renderJob(job, explorationReport = Json.parseToJsonElement(source).jsonObject)
+        assertTrue(rendered.contains("supplied_case"))
+        assertTrue(!rendered.contains("stored_case"))
+        val unsupplied = renderJob(job)
+        assertTrue(unsupplied.contains("The exploration report is unavailable"))
+        assertTrue(!unsupplied.contains("stored_case"))
+        val actual = request(server, "GET", "/jobs/$id")
+        assertEquals(200, actual.status)
+        assertTrue(actual.body.decodeToString().contains("stored_case"))
+        assertTrue(actual.body.decodeToString().contains("63%"))
+        assertContentEquals(bytes, report.readBytes())
+        for (invalid in listOf("PRIVATE_REPORT {", "x".repeat(1_048_577), "{\"confidence\":[]}", "{\"confidence\":{},\"confidence\":{}}")) {
+            report.writeText(invalid)
+            val response = request(server, "GET", "/jobs/$id")
+            assertEquals(200, response.status)
+            assertTrue(response.body.decodeToString().contains("The exploration report is unavailable"))
+            assertTrue(!response.body.decodeToString().contains("PRIVATE_REPORT"))
+            assertEquals(invalid, report.readBytes().decodeToString())
+        }
+        Files.delete(report)
+        assertTrue(request(server, "GET", "/jobs/$id").body.decodeToString().contains("The exploration report is unavailable"))
+        assertTrue(!report.exists())
+    }
+
+    @Test
     fun `legacy JSON read routes negotiate methods and Accept before storage access`() = withServer { server, root ->
         val id = uploadedJobId(server)
         val record = root.resolve(id).resolve("job.json")

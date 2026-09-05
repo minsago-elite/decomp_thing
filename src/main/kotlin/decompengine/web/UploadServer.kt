@@ -431,8 +431,12 @@ class UploadServer(
         val source = runCatching { archiveEvidence.read(jobId, reportPrefix = view.reports.artifactPrefix).source }
             .recoverCatching { sourceEvidence.read(jobId, view.reports.artifactPrefix).view() }
         val progress = runCatching { readLegacyProgress(jobId, view.reports.runId) }.getOrNull()
+        val exploration = runCatching {
+            decompengine.oracle.core.OracleJson.parse(jobs.readArtifact(jobId,
+                "${view.reports.artifactPrefix}/exploration.json", 1_048_576).bytes) as kotlinx.serialization.json.JsonObject
+        }.getOrNull()
         exchange.sendHtml(200, renderJob(view.job, view.reports, view.diagnostics, source.getOrNull(), source.isFailure,
-            progressSnapshot = progress))
+            progressSnapshot = progress, explorationReport = exploration))
     }
 
     private fun handleSource(exchange: HttpExchange, jobId: String, relativePath: String) {

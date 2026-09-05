@@ -49,3 +49,19 @@ The machine-readable [verification record](evidence/web-service-boundary-audit-2
 records the exact source commit, command, per-suite counts and log hash. The run includes all
 web/journal tests plus `JobStoreTest` and `WorkflowAttemptStoreTest`. This documentation-only
 audit does not rerun frontend/browser suites or claim native/live-agent functionality.
+
+## Subsequent exploration renderer migration
+
+The legacy job controller now reads `exploration.json` through `WebJobService.readArtifact`
+using the selected report prefix and a 1 MiB limit, matching the v1 exploration source ceiling.
+Strict JSON decoding rejects duplicate keys and malformed input before supplying a JSON object
+to `renderJob`. The exploration renderer no longer performs file I/O; absent explicit input
+renders an unavailable report even if a file exists beside the job. Malformed report shapes
+also render unavailable without making the entire job page fail.
+
+A regression compares differing supplied/stored reports and proves the renderer uses only
+supplied data. HTTP checks preserve the existing confidence/candidate display for valid data
+and cover missing, malformed, oversized, duplicate-key and wrong-shape input with unchanged
+report bytes. This completes the exploration-specific direct read identified above; repair
+history, reconstruction and artifact inventory reads, full privacy classification, legacy
+authorization and broader CLI/core qualification remain separate unresolved migration work.

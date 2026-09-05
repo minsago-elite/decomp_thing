@@ -71,7 +71,7 @@ fun renderDashboard(jobs: List<Job>, diagnostics: List<WebJobDiagnostic> = empty
 fun renderJob(job: Job, reportContext: WebReportContext? = null,
     diagnostics: List<decompengine.jobs.WorkflowStoreDiagnostic> = emptyList(),
     sourceTree: SourceTreeView? = null, sourceTreeUnavailable: Boolean = false,
-    progressSnapshot: JsonObject? = null): String {
+    progressSnapshot: JsonObject? = null, explorationReport: JsonObject? = null): String {
     val reports = reportsFor(job, reportContext)
     val active = job.status in setOf("queued", "analyzing")
     val metadata = job.metadata.toJson().entries.joinToString("") { (key, value) ->
@@ -170,7 +170,7 @@ fun renderJob(job: Job, reportContext: WebReportContext? = null,
                 </ol>
               </section>
             </div>
-            ${renderExploration(job, reports)}
+            ${runCatching { renderExploration(job, reports, explorationReport) }.getOrElse { renderExploration(job, reports, null) }}
             ${renderReconstructionProgress(job, reports)}
             ${renderAgentProgress(progressSnapshot)}
             ${sourceTree?.let { renderSourceTree(job, it, reports) }.orEmpty()}
@@ -291,16 +291,13 @@ private fun renderJobList(jobs: List<Job>): String {
     } + "</div>"
 }
 
-private fun renderExploration(job: Job, reports: WebReportContext): String {
-    val reportPath = reports.reportsDirectory.resolve("exploration.json")
-    if (!reportPath.exists()) return """
+private fun renderExploration(job: Job, reports: WebReportContext, root: JsonObject?): String {
+    if (root == null) return """
         <section class="panel evidence-panel pending-evidence">
           <div class="section-heading compact"><span class="step">03</span><div><p class="kicker">Evidence</p><h2>Exploration report</h2></div></div>
-          <p>Run automatic exploration to generate input, coverage, and confidence evidence.</p>
+          <p>The exploration report is unavailable or has not been generated for this attempt.</p>
         </section>
     """.trimIndent()
-    val root = runCatching { Json.parseToJsonElement(reportPath.readText()).jsonObject }.getOrNull()
-        ?: return "<section class=\"panel evidence-panel\"><h2>Exploration report</h2><p>The report could not be parsed.</p></section>"
     val confidence = root["confidence"]?.jsonObject
     val score = confidence?.get("score")?.jsonPrimitive?.doubleOrNull ?: 0.0
     val candidates = root["candidates"]?.jsonArray ?: JsonArray(emptyList())
