@@ -104,3 +104,11 @@ but missing cleanup proof blocks workspace reconciliation and no completed turn 
 is inferred. Repeated reopen attempts preserve source bytes and the recorded event cursor. These
 fixtures do not launch an ACP peer or prove cleanup of surviving descendants; automatic host-death
 recovery and exactly-once workflow acceptance still require their separate lifecycle qualification.
+
+The journal-only crash fixture also halts immediately before or after acceptance acknowledgement,
+following a synthetic completed cleanup-verified turn and an externally supplied text commitment.
+Restart supplies that same commitment to the public acknowledgement API. A missing acknowledgement
+is completed; replay after publication preserves journal bytes and modification time, retains one
+completed turn, and reconciles the unchanged text. This tests the journal's idempotent acknowledgement,
+not source checkpoint durability, compiler/behavior validation, or exactly-once workflow dispatch.
+The fixture releases the journal lock for the public API before these two halt points.
