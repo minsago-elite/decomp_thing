@@ -71,6 +71,8 @@ internal fun interface FullTreeFunctionObservationSystemctlCommandObserver {
 /** Observes only pinned busctl invocations; it does not observe launch or process signals. */
 internal fun interface FullTreeFunctionObservationBusctlCommandObserver {
     fun beforeCommand(unitName: String, arguments: List<String>)
+
+    fun afterCommand(unitName: String, label: String, exitCode: Int, boundedOutput: String) = Unit
 }
 
 /** Explicit fail-only test seam; the production entry point never accepts or constructs one. */
@@ -4300,6 +4302,13 @@ internal data class FullTreeFunctionObservationColdUnitSnapshot(
     val stable: Boolean = true,
 )
 
+internal fun interface FullTreeFunctionObservationColdSnapshotObserver {
+    fun afterObservation(
+        before: FullTreeFunctionObservationColdUnitSnapshot,
+        after: FullTreeFunctionObservationColdUnitSnapshot,
+    )
+}
+
 private data class FullTreeFunctionObservationColdCgroupInventory(
     val cgroups: List<FullTreeFunctionObservationColdCgroupIdentity>,
     val stable: Boolean,
@@ -4380,6 +4389,7 @@ internal class FullTreeFunctionObservationColdUnitAbsenceObserver private constr
     val isolationConfigurationSha256: String,
     private val commandObserver: FullTreeFunctionObservationSystemctlCommandObserver?,
     private val busctlCommandObserver: FullTreeFunctionObservationBusctlCommandObserver?,
+    private val snapshotObserver: FullTreeFunctionObservationColdSnapshotObserver?,
 ) {
     val unitName: String = binding.unitName
 
@@ -4442,25 +4452,29 @@ internal class FullTreeFunctionObservationColdUnitAbsenceObserver private constr
         val featuresAfter = observeUnfilteredUnitInventory()
         requireUnchanged()
 
-        return classifyFullTreeFunctionObservationColdUnitSnapshots(
-            expected = FullTreeFunctionObservationColdUnitReceiptIdentity.from(receipt),
-            before = FullTreeFunctionObservationColdUnitSnapshot(
-                managerFeatures = featuresBefore,
-                unit = unitBefore,
-                job = jobBefore,
-                cgroups = cgroupsBefore.cgroups,
-                systemdIdentity = identityBefore.identity,
-                stable = cgroupsBefore.stable && identityBefore.stable,
-            ),
-            after = FullTreeFunctionObservationColdUnitSnapshot(
-                managerFeatures = featuresAfter,
-                unit = unitAfter,
-                job = jobAfter,
-                cgroups = cgroupsAfter.cgroups,
-                systemdIdentity = identityAfter.identity,
-                stable = cgroupsAfter.stable && identityAfter.stable,
-            ),
+        val before = FullTreeFunctionObservationColdUnitSnapshot(
+            managerFeatures = featuresBefore,
+            unit = unitBefore,
+            job = jobBefore,
+            cgroups = cgroupsBefore.cgroups,
+            systemdIdentity = identityBefore.identity,
+            stable = cgroupsBefore.stable && identityBefore.stable,
         )
+        val after = FullTreeFunctionObservationColdUnitSnapshot(
+            managerFeatures = featuresAfter,
+            unit = unitAfter,
+            job = jobAfter,
+            cgroups = cgroupsAfter.cgroups,
+            systemdIdentity = identityAfter.identity,
+            stable = cgroupsAfter.stable && identityAfter.stable,
+        )
+        val outcome = classifyFullTreeFunctionObservationColdUnitSnapshots(
+            expected = FullTreeFunctionObservationColdUnitReceiptIdentity.from(receipt),
+            before = before,
+            after = after,
+        )
+        snapshotObserver?.afterObservation(before, after)
+        return outcome
     }
 
     private fun requireReceiptBinding(
@@ -4674,6 +4688,7 @@ internal class FullTreeFunctionObservationColdUnitAbsenceObserver private constr
         inspector.requireUnchanged()
         busController.requireUnchanged()
         bus.requireUnchanged()
+        busctlCommandObserver?.afterCommand(unitName, label, result.exitCode, result.output.take(1024))
         return result
     }
 
@@ -4713,14 +4728,16 @@ internal class FullTreeFunctionObservationColdUnitAbsenceObserver private constr
             configuration: FullTreeFunctionObservationIsolationConfiguration,
             commandObserver: FullTreeFunctionObservationSystemctlCommandObserver,
             busctlCommandObserver: FullTreeFunctionObservationBusctlCommandObserver? = null,
+            snapshotObserver: FullTreeFunctionObservationColdSnapshotObserver? = null,
         ): FullTreeFunctionObservationColdUnitAbsenceObserver =
-            create(binding, configuration, commandObserver, busctlCommandObserver)
+            create(binding, configuration, commandObserver, busctlCommandObserver, snapshotObserver)
 
         private fun create(
             binding: FullTreeFunctionObservationOperationBinding,
             configuration: FullTreeFunctionObservationIsolationConfiguration,
             commandObserver: FullTreeFunctionObservationSystemctlCommandObserver?,
             busctlCommandObserver: FullTreeFunctionObservationBusctlCommandObserver? = null,
+            snapshotObserver: FullTreeFunctionObservationColdSnapshotObserver? = null,
         ): FullTreeFunctionObservationColdUnitAbsenceObserver {
             if (configuration.canonicalSha256 != binding.isolationConfigurationSha256) {
                 isolationFail("cold systemd observation configuration differs from its operation binding")
@@ -4744,6 +4761,7 @@ internal class FullTreeFunctionObservationColdUnitAbsenceObserver private constr
                 configuration.canonicalSha256,
                 commandObserver,
                 busctlCommandObserver,
+                snapshotObserver,
             )
         }
     }

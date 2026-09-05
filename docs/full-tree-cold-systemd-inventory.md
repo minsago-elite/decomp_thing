@@ -48,3 +48,13 @@ The exact-name unit and job queries still bracket the bounded exhaustive cgroup
 scan; none of these observations loads, starts, stops or reserves the unit name.
 This remains an observation under the documented cooperative same-UID assumption,
 not exclusion of a name race or a new containment/authority claim.
+
+## Live attachment failure diagnostics
+
+The cold UNIT_ATTACHED integration test retains at most 14 identity-command
+results, each with an exit status and at most 1,024 output characters escaped as a
+JSON string. It also records snapshot stability, identity presence, cgroup counts
+and which snapshot fields changed. These test-only observers cannot substitute a
+command result or classification, and production construction installs neither.
+Nonzero commands still produce a conservative CHANGED observation; diagnostics
+never authorize retry, loading a unit, START, adoption, mutation or release.
