@@ -234,6 +234,7 @@ class UploadServer(
     }.apply { removeOnCancelPolicy = true }
     private val lifecycleLock = Any()
     private var stopping = false
+    private var started = false
     private var activeRequests = 0
     val serverPort: Int get() = server.address.port
     val browserOrigin: String = devFrontendOrigin ?: webOrigin(host, serverPort)
@@ -269,13 +270,23 @@ class UploadServer(
         }
     }
 
-    fun start() = server.start()
+    fun start() = synchronized(lifecycleLock) {
+        server.start()
+        started = true
+    }
 
     fun stop(delaySeconds: Int = 0) {
         require(delaySeconds >= 0) { "shutdown delay must be nonnegative" }
         val callerWasInterrupted = Thread.currentThread().isInterrupted
         val inspection = synchronized(lifecycleLock) {
             stopping = true
+            // JDK HttpServer.stop does not release a bound listener before start. Start its
+            // dispatcher only after closing request admission, then close it below. This also
+            // covers failed ownership/recovery admission and explicit stop-before-start.
+            if (!started) {
+                server.start()
+                started = true
+            }
             authenticationInspectionCancellation.set(true)
             authenticationInspectionWorker.get()
         }

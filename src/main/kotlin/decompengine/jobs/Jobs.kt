@@ -137,6 +137,8 @@ class JobStore internal constructor(
         return decodeJobRecord(jobId, payload)
     }
 
+    private fun decodeJob(jobId: String, bytes: ByteArray): Job = decodeJobRecord(jobId, OracleJson.parse(bytes).jsonObject)
+
     internal fun decodeJobRecord(jobId: String, payload: JsonObject): Job {
         val jobDir = jobDirectory(jobId)
         require(payload.string("id") == jobId &&
@@ -308,9 +310,36 @@ class JobStore internal constructor(
     }
 
     @Synchronized
-    fun recoverInterruptedJobs() {
-        list().filter { it.status in setOf("queued", "analyzing") }.forEach { job ->
-            updateStatus(job.id, "failed", "Analysis was interrupted before the server restarted")
+    fun recoverInterruptedJobs() = recoverInterruptedJobs(4096, 64L * 1024 * 1024)
+
+    /** Complete bounded inspection precedes every recovery write; errors never imply rollback. */
+    @Synchronized
+    internal fun recoverInterruptedJobs(maximumEntries: Int, maximumMetadataBytes: Long) {
+        require(maximumEntries in 1..4096 && maximumMetadataBytes in 1..64L * 1024 * 1024)
+        if (!root.exists()) return
+        val pending = ArrayList<String>()
+        try {
+            var scanned = 0
+            var remaining = maximumMetadataBytes
+            Files.newDirectoryStream(root).use { entries ->
+                for (entry in entries) {
+                    check(++scanned <= maximumEntries)
+                    val id = entry.fileName.toString()
+                    if (!id.matches(Regex("[a-f0-9]{32}"))) continue
+                    check(remaining > 0)
+                    val bytes = readStableRegularFile(root, "$id/job.json",
+                        minOf(MAX_METADATA_BYTES.toLong(), remaining)).bytes
+                    remaining -= bytes.size
+                    val job = decodeJob(id, bytes)
+                    check(job.status in VALID_STATUSES)
+                    if (job.status == "queued" || job.status == "analyzing") pending.add(id)
+                }
+            }
+        } catch (_: Exception) {
+            throw JobStoreException("Job recovery inspection is incomplete; no recovery statuses were changed")
+        }
+        pending.forEach { id ->
+            updateStatus(id, "failed", "Analysis was interrupted before the server restarted")
         }
     }
 

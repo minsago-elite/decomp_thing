@@ -295,7 +295,17 @@ SIGKILL, power loss, stalled filesystem writes, and
 durable recovery of indeterminate external work require the separate #68/#71 recovery mechanisms.
 
 Before startup recovery, a web server acquires a nonblocking exclusive `.web-owner.lock` for its job store.
-A second cooperating server fails before changing job status. Same-JVM owners are tracked by canonical store
+A second cooperating server fails before changing job status. Startup recovery scans at most 4,096
+store entries and reads at most 64 MiB of metadata, with the existing 256 KiB per-record limit.
+It finishes inspection before changing any recovery status. A valid job-name candidate with unreadable,
+invalid or unknown-status metadata, or an exhausted budget, fails startup with a fixed incomplete-scan
+message. No recovery status changes during a failed scan. Unknown names and private stages remain
+retained; their entries count toward the scan limit. Once status writes begin, a later write failure may
+leave some records reconciled and does not imply rollback. These are work/byte bounds, not deadlines
+for stalled filesystem calls or fencing of concurrent direct writers.
+Failed startup and explicit stop-before-start also close the bound HTTP listener. Shutdown closes
+request admission before starting the JDK dispatcher needed to release an unstarted bound listener;
+no admitted handler can mutate the store during that cleanup. Same-JVM owners are tracked by canonical store
 path to avoid opening another channel to an owned lock file (see the [JDK FileLock platform notes](https://docs.oracle.com/en/java/javase/21/docs/api/java.base/java/nio/channels/FileLock.html)).
 The lock file is never deleted. Stop releases ownership only after owned workers have terminated and no
 scheduled operations or admitted HTTP handlers remain. Request admission closes when shutdown begins; the
