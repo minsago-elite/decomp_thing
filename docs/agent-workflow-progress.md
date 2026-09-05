@@ -72,6 +72,11 @@ its `displayOnly` flag and counters must never substitute for complete required 
 
 Focused verification:
 
+At prompt end the ACP adapter completes up to 16 tracked role/message identities, including earlier
+interleaved IDs rather than only the last ID per role. An ID change alone does not complete a message.
+The bounded drain is idempotent; identities beyond its capacity retain the journal's explicit omission
+behavior. This closes displayed messages at prompt completion, not at guessed intermediate boundaries.
+
 Final receipt observations preserve every available `AgentUsage` field: input, output and cached
 input tokens, tool calls and wall-clock duration. Missing fields remain absent rather than becoming
 zero. Durations use ISO-8601 text, preserving subsecond precision without overflowing a millisecond

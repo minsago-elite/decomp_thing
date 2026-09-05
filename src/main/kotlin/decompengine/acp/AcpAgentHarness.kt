@@ -2542,6 +2542,8 @@ internal class AcpEventTranslator(
     private val sessionId = AtomicReference<String?>()
     private val conversationRestored = AtomicBoolean(false)
     private val messageIds = ConcurrentHashMap<AgentMessageRole, String>()
+    private val pendingMessages = linkedSetOf<Pair<AgentMessageRole, String>>()
+    private var messageTrackingExhausted = false
     private val toolTitles = ConcurrentHashMap<String, String>()
     private val toolIds = ConcurrentHashMap.newKeySet<String>()
     private val summary = StringBuilder()
@@ -2666,12 +2668,15 @@ internal class AcpEventTranslator(
         }
     }
 
+    @Synchronized
     fun completeMessages() {
-        messageIds.entries.sortedBy { it.key.ordinal }.forEach { (role, id) ->
+        pendingMessages.sortedBy { it.first.ordinal }.forEach { (role, id) ->
             emitter.emit { sequence -> AgentMessageEvent(sequence, id, role, "", completed = true) }
         }
+        pendingMessages.clear()
     }
 
+    @Synchronized
     private fun emitMessage(role: AgentMessageRole, providedId: String?, content: ContentBlock) {
         val text = when (content) {
             is ContentBlock.Text -> content.text
@@ -2683,6 +2688,11 @@ internal class AcpEventTranslator(
         val id = providedId?.let { requirePeerText("message id", it) }
             ?: messageIds.computeIfAbsent(role) { "acp-${role.name.lowercase()}-message" }
         messageIds[role] = id
+        val identity = role to id
+        if (identity !in pendingMessages && !messageTrackingExhausted) {
+            if (pendingMessages.size < 16) pendingMessages += identity
+            else messageTrackingExhausted = true
+        }
         if (role == AgentMessageRole.ASSISTANT) synchronized(this) {
             val room = SUMMARY_CHARACTER_LIMIT - summary.length
             if (room > 0) summary.append(text.take(room))
