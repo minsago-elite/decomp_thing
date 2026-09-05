@@ -29,6 +29,7 @@ data class ArchivalAudit(
     val unresolvedBehaviorReportIds: List<String>,
     val behaviorEvidenceProblems: Map<String, String> = emptyMap(),
     val projectBehaviorReportIds: List<String> = emptyList(),
+    val moduleCompilationEvidenceProblems: Map<String, String> = emptyMap(),
 ) {
     val provenanceComplete: Boolean get() = missingModelProvenance.isEmpty() && missingSourceProvenance.isEmpty()
     val universalEquivalenceClaim: Boolean = false
@@ -46,6 +47,7 @@ data class ArchivalAudit(
           "networkIsolationObserved": [${networkIsolation.sorted().joinToString(",")}],
           "moduleSourceRevisions": [${moduleRevisionSha256.toSortedMap().entries.joinToString(",") { (id, hash) -> "{\"moduleId\":${JsonPrimitive(id)},\"sourceRevisionSha256\":${JsonPrimitive(hash)}}" }}],
           "moduleBehaviorEvidence": [],
+          "moduleCompilationEvidenceProblems": {${moduleCompilationEvidenceProblems.toSortedMap().entries.joinToString(",") { (id, problem) -> "${JsonPrimitive(id)}:${JsonPrimitive(problem)}" }}},
           "moduleExecutionCoverage": "not-observed",
           "projectBehaviorReportIds": [${projectBehaviorReportIds.sorted().joinToString(",") { JsonPrimitive(it).toString() }}],
           "isolationAssurance": "local requests only; no retained production containment evidence",
@@ -104,6 +106,8 @@ object ArchivalProjectAuditor {
         val planned = mutableSetOf<String>()
         val moduleRevisions = linkedMapOf<String, String>()
         val implementationOwners = mutableSetOf<String>()
+        val compilationProblems = linkedMapOf<String, String>()
+        val compilationUnresolved = mutableSetOf<String>()
         for (element in planJson.getValue("modules").jsonArray) {
             val module = element.jsonObject
             require(module.keys == setOf("id", "sourcePath", "headerPath", "functionIds", "globalIds", "typeIds", "boundaryEvidence")) {
@@ -138,6 +142,33 @@ object ArchivalProjectAuditor {
             val header = requireNotNull(files[text("headerPath")]) { "audit module header is absent from its manifest" }
             require(ProjectFileRole.PUBLIC_INTERFACE in header.roles) { "audit module header has no declared interface role" }
             require(moduleRevisions.put(identifier, hashes.getValue(source)) == null) { "audit module IDs are duplicated" }
+            if (file.acceptedImplementation == true) {
+                try {
+                    val checkpointPath = profile.layout.declaration("module-evidence").materialize(mapOf("module" to identifier))
+                    val expectedHash = requireNotNull(hashes[checkpointPath]) { "module compiler checkpoint is absent from the manifest" }
+                    val snapshot = readStableRegularFile(projectDir, checkpointPath, maximumFileBytes)
+                    require(snapshot.sha256 == expectedHash) { "module compiler checkpoint changed during audit" }
+                    val checkpointText = snapshot.bytes.decodeToString(throwOnInvalidSequence = true)
+                    UniqueJsonObjectKeyValidator(checkpointText).validate()
+                    val checkpoint = Json.parseToJsonElement(checkpointText).jsonObject
+                    require(checkpoint.boolean("accepted")) { "module checkpoint does not record acceptance" }
+                    require(checkpoint.string("sourceSha256") == hashes.getValue(source)) { "module checkpoint does not bind the current source" }
+                    val compilation = checkpoint.getValue("compilation").jsonObject
+                    require(compilation.string("sourceSha256") == hashes.getValue(source)) { "compiler evidence does not bind the current source" }
+                    require(compilation.string("outcome") == "passed" && compilation.getValue("returnCode") == JsonPrimitive(0)) {
+                        "module compiler gate did not pass"
+                    }
+                    val command = compilation.getValue("command").jsonArray.map {
+                        require(it.jsonPrimitive.isString) { "compiler argument must be a string" }
+                        it.jsonPrimitive.content
+                    }
+                    require(command == GeneratedCModuleValidation.command(profile, source)) { "compiler command differs from the reconstruction profile" }
+                } catch (failure: Exception) {
+                    if (failure is InterruptedException) throw failure
+                    compilationProblems[identifier] = failure.message.orEmpty().take(512).ifEmpty { failure.javaClass.simpleName }
+                    compilationUnresolved += owned
+                }
+            }
         }
         for (cycle in planJson.getValue("dependencyCycles").jsonArray) {
             val members = cycle.jsonArray.map {
@@ -220,7 +251,7 @@ object ArchivalProjectAuditor {
                 model.types.filter { it.status != RecoveryStatus.RECOVERED }.map { it.id } +
                 manifest.unresolvedEntityIds + manifest.unresolvedImplementationIds +
                 implementations.filter { it.acceptedImplementation != true }.flatMap { it.entityIds } +
-                missingModel + missingSource).distinct().sorted(),
+                missingModel + missingSource + compilationUnresolved).distinct().sorted(),
             behaviorReportCount = behaviorPaths.size,
             behaviorMatched = when {
                 verifiedBehavior.values.any { !it } -> false
@@ -233,6 +264,7 @@ object ArchivalProjectAuditor {
             unresolvedBehaviorReportIds = unresolvedBehavior.sorted(),
             behaviorEvidenceProblems = problems,
             projectBehaviorReportIds = verifiedBehavior.keys.sorted(),
+            moduleCompilationEvidenceProblems = compilationProblems,
         )
         require(readStableRegularFile(projectDir, "source_tree_manifest.json", maximumFileBytes).sha256 == manifestSnapshot.sha256) {
             "audit manifest changed during verification"
