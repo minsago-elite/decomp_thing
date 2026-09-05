@@ -26,6 +26,18 @@ import java.nio.file.Path
 
 private object GCC_BUNDLED_PREPARED_OPERATION_PERMIT
 
+internal class GccBundledPlannedOperation(executionReceipt: ByteArray, assessmentReceipt: ByteArray,
+    captured: GccBundledCapturedPlannerOutput) {
+    private val execution = executionReceipt.copyOf()
+    private val assessment = assessmentReceipt.copyOf()
+    private val plan = captured.planBytes
+    val executionReceiptBytes: ByteArray get() = execution.copyOf()
+    val plannerAssessmentReceiptBytes: ByteArray get() = assessment.copyOf()
+    val planBytes: ByteArray get() = plan.copyOf()
+    val complete: Boolean = false
+    val releaseEligible: Boolean = false
+}
+
 internal class GccBundledExecutedOperation(
     executionReceiptBytes: ByteArray,
     exportAssessmentReceiptBytes: ByteArray,
@@ -86,6 +98,9 @@ internal class GccBundledPreparedOperation internal constructor(
     private var retainedControlIdentity: LinuxFileIdentity? = null
     private var retainedTrigger: GccBundledCheckpointTrigger? = null
     private var pendingCleanup: KotlinSystemdCgroupCommandCleanup? = null
+    private var completedExport: GccBundledExecutedOperation? = null
+    private val completedControls = linkedMapOf<String, LinuxFileIdentity>()
+    private var plannerAttempted = false
 
     val definitionBytes: ByteArray
         get() = definition.copyOf()
@@ -125,7 +140,7 @@ internal class GccBundledPreparedOperation internal constructor(
         lease.requireCurrentOperationRunRootAfterCgroupAbsence(runRoot)
         val exportReceipt = journal.recordExportAssessment(bindWallTime(captured.canonicalBytes))
         GccBundledExecutedOperation(receipt, exportReceipt, captured)
-    }
+    }.also { completedExport = it }
 
     @Synchronized
     fun executeUntilCheckpoint(minimumCompletedFunctions: Long): GccBundledInterruptedOperation {
@@ -269,8 +284,105 @@ internal class GccBundledPreparedOperation internal constructor(
                 inputs.verify("after resumed GCC export capture")
                 lease.requireCurrentOperationRunRootAfterCgroupAbsence(runRoot)
                 val exportReceipt = journal.recordResumeExportAssessment(bindWallTime(captured.canonicalBytes))
+                completedControls[runtime.resumeControlDirectoryName(state, resumed.outputLease)] =
+                    checkNotNull(execution.controlDirectoryIdentity)
                 GccBundledExecutedOperation(receipt, exportReceipt, captured)
-            }.also { checkNotNull(operationDeadline).requireCurrent() }
+            }.also { checkNotNull(operationDeadline).requireCurrent(); completedExport = it }
+        } catch (failure: Throwable) {
+            poisoned = true
+            if (failure is KotlinSystemdCgroupCommandExecutionException) pendingCleanup = failure.cleanup
+            throw failure
+        }
+    }
+
+    /** Plans only this owner's successfully captured export; detached results cannot authorize execution. */
+    @Synchronized
+    fun plan(): GccBundledPlannedOperation {
+        check(!closed && !poisoned && !plannerAttempted) { "GCC planner owner is closed, poisoned, or already used" }
+        val exported = checkNotNull(completedExport) { "GCC planning requires this owner's completed export" }
+        check(intent.bundledRuntime.invocationVersion == 3) { "GCC planning requires separate retained control directories" }
+        plannerAttempted = true
+        try {
+            val deadline = checkNotNull(operationDeadline)
+            deadline.requireCurrent()
+            inputs.verify("before GCC planner preparation")
+            journal.verify("before GCC planner preparation")
+            lease.requireCurrentOperationRunRootAfterCgroupAbsence(runRoot)
+            val original = GccCompilerEngineContainmentContract.parseDefinitionForLiveController(definition)
+            val configuration = deriveRuntimeConfiguration(original, inputs.classPathEntries)
+            val controlName = gccBundledPlannerControlName(intent.requestSha256, OracleArtifacts.sha256(exported.exportAssessmentReceiptBytes))
+            val controlPath = original.outputLease.path.resolve(controlName)
+            val request = inputs.plannerRequest(intent, exported, original.outputLease.path.resolve("reports/program_model.json"),
+                controlPath.resolve("reports"))
+            val requestBytes = request.canonicalBytes
+            val requestSha = OracleArtifacts.sha256(requestBytes)
+            val requestPath = journal.path.resolve("planner-request.json")
+            val runtime = intent.bundledRuntime.root
+            val runtimeMount = FullTreeFunctionObservationRuntimeMount(runtime, runtime,
+                calculateFullTreeObservationRuntimeManifestSha256(runtime))
+            val unit = "decomp-gcc-planner-${requestSha.take(32)}.scope"
+            val command = listOf(configuration.javaExecutable.toString(),
+                "-Xmx${intent.budgets.maximumResidentBytes / (1024 * 1024) * 3 / 4}m", "-XX:+DisableAttachMechanism",
+                "-Duser.home=${controlPath.resolve("state")}", "-Djava.io.tmpdir=${controlPath.resolve("tmp")}",
+                "-cp", inputs.classPathEntries.indices.joinToString(java.io.File.pathSeparator) {
+                    controlPath.resolve("runtime/classpath-$it.jar").toString()
+                }, GccBundledPlannerWorker::class.java.name, requestPath.toString(), requestSha)
+            journal.recordPlannerPrepared(requestBytes)
+            return lease.withCurrentOperationRunRootForContainedExecution(runRoot) { borrowed ->
+                fun requireCapturedModel() {
+                    deadline.requireCurrent()
+                    val current = borrowed.withPinnedDescriptor { descriptor ->
+                        val prefix = retainedExport
+                        if (prefix == null) GccBundledExportCapture.capture(descriptor, directories.getValue("reports"), intent.artifacts)
+                        else GccBundledExportCapture.captureResumed(descriptor, directories.getValue("reports"), intent.artifacts, prefix)
+                    }
+                    require(current.programModelBytes.contentEquals(exported.programModelBytes)) { "GCC captured model changed before planning" }
+                    deadline.requireCurrent()
+                }
+                requireCapturedModel()
+                val protectedDirectories = borrowed.withPinnedDescriptor { descriptor ->
+                    listOf("state", "reports").associateWith { name ->
+                        LinuxFilesystemSyscalls.openDirectoryAt(descriptor.fd, name).use { it.identity }
+                    }
+                }
+                val maximumFileBytes = minOf(intent.diskPolicy.maximumFilesystemBytes, 1024L * 1024 * 1024)
+                val execution = KotlinSystemdCgroupCommandLauncher.execute(
+                    borrowed, configuration, unit, original.expectedControlGroup.substringBeforeLast('/') + "/" + unit,
+                    requestSha, command, original.environment,
+                    listOf(KotlinSystemdCgroupCommandInput(requestPath, requestBytes.size.toLong(), requestSha)),
+                    listOf(runtimeMount), KotlinSystemdCgroupCommandResources(
+                        deadline.remainingWholeSecondsMillis(intent.budgets.wallClockMillis), intent.budgets.maximumResidentBytes,
+                        intent.budgets.pidsMax, maximumFileBytes), inputs.deploymentClosureSha256,
+                    controlDirectoryName = controlName, readOnlyControlDirectories = completedControls.toMap(),
+                    readOnlyStateDirectory = protectedDirectories.getValue("state"),
+                    readOnlyReportsDirectory = protectedDirectories.getValue("reports"), operationDeadline = deadline,
+                    beforeStart = { attachment ->
+                        inputs.verify("before GCC planner START")
+                        journal.verify("before GCC planner START")
+                        lease.requireCurrentOperationRunRootAfterScopeAttachment(runRoot)
+                        requireCapturedModel()
+                        journal.recordPlannerAttachment(attachment.canonicalBytes)
+                        journal.recordPlannerStartAuthorization()
+                        inputs.verify("after durable GCC planner START authorization")
+                        requireCapturedModel()
+                        journal.verify("before GCC planner START delivery")
+                        lease.requireCurrentOperationRunRootAfterScopeAttachment(runRoot)
+                        deadline.requireCurrent()
+                    },
+                )
+                lease.requireCurrentOperationRunRootAfterCgroupAbsence(runRoot)
+                inputs.verify("after GCC planner and cgroup absence")
+                val executionReceipt = journal.recordPlannerExecution(execution.canonicalBytes)
+                val logLimit = minOf(maximumFileBytes, 64L * 1024 * 1024).toInt()
+                val captured = borrowed.withPinnedDescriptor { descriptor ->
+                    GccBundledPlannerOutputCapture.capture(descriptor, controlName, checkNotNull(execution.controlDirectoryIdentity),
+                        request, exported.programModelBytes, logLimit, logLimit)
+                }
+                inputs.verify("after GCC planner output capture")
+                lease.requireCurrentOperationRunRootAfterCgroupAbsence(runRoot)
+                val assessmentReceipt = journal.recordPlannerAssessment(bindWallTime(captured.canonicalBytes))
+                GccBundledPlannedOperation(executionReceipt, assessmentReceipt, captured)
+            }.also { deadline.requireCurrent() }
         } catch (failure: Throwable) {
             poisoned = true
             if (failure is KotlinSystemdCgroupCommandExecutionException) pendingCleanup = failure.cleanup
@@ -360,6 +472,9 @@ internal class GccBundledPreparedOperation internal constructor(
                 )
                 lease.requireCurrentOperationRunRootAfterCgroupAbsence(runRoot)
                 inputs.verify("after GCC command and cgroup absence")
+                intent.bundledRuntime.freshControlDirectoryName(borrowed.path)?.let { name ->
+                    completedControls[name] = checkNotNull(execution.controlDirectoryIdentity)
+                }
                 afterAbsence(borrowed, execution).also { checkNotNull(operationDeadline).requireCurrent() }
             }.also { checkNotNull(operationDeadline).requireCurrent() }
         } catch (failure: Throwable) {

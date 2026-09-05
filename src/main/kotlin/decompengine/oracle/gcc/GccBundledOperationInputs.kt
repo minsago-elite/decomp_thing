@@ -24,6 +24,16 @@ internal class GccBundledOperationInputs private constructor(
     private var closed = false
 
     @Synchronized
+    fun plannerRequest(intent: GccBundledOperationIntent, exported: GccBundledExecutedOperation,
+        modelPath: Path, outputDirectory: Path): GccBundledPlannerRequest {
+        verify("before planner request derivation")
+        val profile = checkNotNull(plannerProfile) { "GCC planning requires a retained planner profile" }
+        return GccBundledPlannerRequest.fromProfile(profile, intent.engineId, exported, intent.requestSha256,
+            modelPath, outputDirectory, minOf(intent.diskPolicy.maximumFilesystemBytes, 512L * 1024 * 1024).toInt())
+            .also { verify("after planner request derivation") }
+    }
+
+    @Synchronized
     fun verify(label: String) {
         check(!closed) { "bundled operation inputs are closed" }
         plannerProfile?.requireCurrent()

@@ -170,6 +170,7 @@ class GccBundledOperationCoordinatorTest {
                     owner.requireCurrent()
                     assertFailsWith<IllegalStateException> { owner.requireInterruptedStateCurrent() }
                     assertFailsWith<IllegalStateException> { owner.resume() }
+                    assertFailsWith<IllegalStateException> { owner.plan() }
                     owner.requireCurrent()
                     assertFailsWith<FullTreeDiskScratchException> {
                         FullTreeDiskScratchAuthority.acquireDedicatedFilesystem(
@@ -180,6 +181,7 @@ class GccBundledOperationCoordinatorTest {
                     owner.close()
                     prepared = null
                     assertFailsWith<IllegalStateException> { owner.requireCurrent() }
+                    assertFailsWith<IllegalStateException> { owner.plan() }
                     assertContentEquals(leaseRecord, Files.readAllBytes(leaseRoot.resolve("lease.json")))
                     assertEquals(listOf("reports", "state", "tmp"), names(output))
                     for ((name, bytes) in expectedJournal) assertContentEquals(bytes, Files.readAllBytes(operationJournal.resolve(name)))
