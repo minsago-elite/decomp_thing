@@ -985,9 +985,9 @@ object SourceTreeGenerator {
             profileSha256 = profile.sha256,
             inputSha256 = model.inputSha256,
             files = generated,
-            unresolvedEntityIds = model.functions.filter { it.status != RecoveryStatus.RECOVERED }.map { it.id } +
-                model.globals.filter { it.status != RecoveryStatus.RECOVERED }.map { it.id } +
-                model.types.filter { it.status != RecoveryStatus.RECOVERED }.map { it.id },
+            unresolvedEntityIds = model.functions.filter { model.isRecoveryUnresolved(it.status) }.map { it.id } +
+                model.globals.filter { model.isRecoveryUnresolved(it.status) }.map { it.id } +
+                model.types.filter { model.isRecoveryUnresolved(it.status) }.map { it.id },
             unresolvedImplementationIds = unresolvedImplementations.toList(),
         )
         projectDir.resolve("source_tree_manifest.json").writeText(manifest.toJson())
@@ -1730,9 +1730,9 @@ object SourceTreeGenerator {
         }
         val allStatuses = model.functions.map { it.status } + model.globals.map { it.status } + model.types.map { it.status }
         val projectScore = if (allStatuses.isEmpty()) 0.0 else allStatuses.map(::score).average()
-        val unresolvedRecovery = model.functions.filter { it.status != RecoveryStatus.RECOVERED }.map { it.id } +
-            model.globals.filter { it.status != RecoveryStatus.RECOVERED }.map { it.id } +
-            model.types.filter { it.status != RecoveryStatus.RECOVERED }.map { it.id }
+        val unresolvedRecovery = model.functions.filter { model.isRecoveryUnresolved(it.status) }.map { it.id } +
+            model.globals.filter { model.isRecoveryUnresolved(it.status) }.map { it.id } +
+            model.types.filter { model.isRecoveryUnresolved(it.status) }.map { it.id }
         fun idsJson(ids: Collection<String>) = ids.distinct().sorted().joinToString(prefix = "[", postfix = "]", separator = ",") {
             "\"${it.jsonEscape()}\""
         }
@@ -1785,9 +1785,9 @@ object SourceTreeGenerator {
         unresolvedImplementationIds: Set<String>,
     ): String {
         val rows = buildList {
-            model.functions.filter { it.status != RecoveryStatus.RECOVERED }.forEach { add("function" to Triple(it.id, it.status, "0x${it.address.toString(16)}")) }
-            model.globals.filter { it.status != RecoveryStatus.RECOVERED }.forEach { add("global" to Triple(it.id, it.status, "0x${it.address.toString(16)}")) }
-            model.types.filter { it.status != RecoveryStatus.RECOVERED }.forEach { add("type" to Triple(it.id, it.status, it.sourceAddress?.let { address -> "0x${address.toString(16)}" } ?: "no address")) }
+            model.functions.filter { model.isRecoveryUnresolved(it.status) }.forEach { add("function" to Triple(it.id, it.status, "0x${it.address.toString(16)}")) }
+            model.globals.filter { model.isRecoveryUnresolved(it.status) }.forEach { add("global" to Triple(it.id, it.status, "0x${it.address.toString(16)}")) }
+            model.types.filter { model.isRecoveryUnresolved(it.status) }.forEach { add("type" to Triple(it.id, it.status, it.sourceAddress?.let { address -> "0x${address.toString(16)}" } ?: "no address")) }
         }
         return buildString {
             append("# Unresolved reconstruction evidence\n\n")
@@ -1796,7 +1796,9 @@ object SourceTreeGenerator {
             else {
                 append("| Kind | Stable ID | Status | Provenance |\n|---|---|---|---|\n")
                 rows.sortedBy { it.second.first }.forEach { (kind, details) ->
-                    append("| $kind | `${details.first}` | ${details.second.name.lowercase()} | ${details.third} |\n")
+                    val status = details.second.name.lowercase()
+                    val assessment = if (model.schemaVersion == 2) "unassessed (extraction: $status)" else status
+                    append("| $kind | `${details.first}` | $assessment | ${details.third} |\n")
                 }
             }
             append("\n## Implementation generation\n\n")
