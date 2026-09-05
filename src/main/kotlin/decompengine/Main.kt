@@ -560,7 +560,7 @@ private fun printHelp() {
 
         Agent harness selection for doctor, patch, reconstruction, and repair:
           --harness acp            use the ACP agent provisioned by ACP_CONFIG_FILE (default)
-          --harness legacy-openai  use the deprecated built-in OpenAI-compatible adapter
+          --harness legacy-openai  use the deprecated direct OpenAI-compatible adapter
           Doctor performs an initialize-only ACP v1 preflight for all workflows by default.
           Doctor's --tools-only mode is agent-free and cannot be combined with agent selectors.
           Reconstruction's --evidence-only mode is agent-free and cannot be combined with --harness.
