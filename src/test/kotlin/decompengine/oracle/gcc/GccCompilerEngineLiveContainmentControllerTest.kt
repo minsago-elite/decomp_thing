@@ -1,6 +1,7 @@
 package decompengine.oracle.gcc
 
 import decompengine.acp.LinuxFilesystemSyscalls
+import decompengine.analysis.BundledGhidra
 import decompengine.oracle.fulltree.KotlinSystemdCgroupBootResources
 import decompengine.oracle.core.OracleArtifacts
 import decompengine.oracle.core.OracleJson
@@ -38,6 +39,7 @@ import kotlin.test.assertFalse
 import kotlin.test.assertNotNull
 import kotlin.test.assertTrue
 import org.junit.jupiter.api.Assumptions.assumeTrue
+import org.opentest4j.TestAbortedException
 import kotlinx.serialization.json.JsonArray
 import kotlinx.serialization.json.JsonObject
 import kotlinx.serialization.json.JsonPrimitive
@@ -867,6 +869,88 @@ class GccCompilerEngineLiveContainmentControllerTest {
             }
         }
 
+    @Test
+    fun `provisioned bundled v2 runtime reaches BOOT and proves absence without permitting START`() {
+        try {
+            val configured = System.getenv("DECOMP_TEST_BUNDLED_GHIDRA_ROOT")?.takeIf(String::isNotBlank)
+            assumeTrue(configured != null, "a root-owned bundled runtime is not provisioned")
+            val bundledRoot = Path.of(checkNotNull(configured))
+            assertTrue(bundledRoot.isAbsolute && bundledRoot.normalize() == bundledRoot && bundledRoot.toRealPath() == bundledRoot)
+            withControllerRoot(useBuildFilesystem = true) { root ->
+                assumeLiveBoundary()
+                val fixture = createFixture(root, liveRuntime = true, budgets = longLiveLifecycleBudgets(), bundledRoot = bundledRoot)
+                val definition = GccCompilerEngineContainmentContract.parseDefinitionForLiveController(fixture.definitionBytes)
+                assertTrue(definition.command.contains(BundledGhidra.WORKER_CLASS))
+                assertEquals(GCC_BUNDLED_CONTAINMENT_ARTIFACT_ROLES, definition.artifacts.map { it.role }.toSet())
+                val runtimeIdentities = GccBundledGhidraRetainedRuntime.open(definition).use {
+                    it.deploymentClosureSha256 to it.runtimeIdentitySha256
+                }
+                val bootClosure = GccKotlinBootClasspathReference.open().use { it.closureSha256 }
+                val expectedClosure = gccBundledLiveDeploymentClosureSha256(bootClosure, runtimeIdentities.first, runtimeIdentities.second)
+                val sinceEpochSeconds = Instant.now().epochSecond
+                var retainedOwner: GccCompilerEngineLiveAttachedAtBoot? = null
+                var primaryFailure: Throwable? = null
+                try {
+                    val owner = GccCompilerEngineLiveContainmentController.attachAtBoot(fixture.definitionPath)
+                    retainedOwner = owner
+                    assertEquals("kotlin-live-systemd-cgroup-boot-owner-v1", owner.authority)
+                    assertFalse(owner.complete)
+                    assertFalse(owner.startAuthorized)
+                    assertFalse(owner.releaseEligible)
+                    assertEquals(fixture.assessment.bindingSha256, owner.bindingSha256)
+                    val genericOwner = retainedGenericOwner(owner)
+                    assertEquals(expectedClosure, genericOwner.receipt.deploymentClosureSha256)
+                    assertFalse(expectedClosure == bootClosure)
+                    val attached = OracleJson.parseCanonical(owner.unitAttachedReceiptBytes).jsonObject
+                    assertEquals(genericOwner.receipt.runtimeClosureSha256, attached.getValue("runtimeClosureSha256").jsonPrimitive.content)
+                    assertEquals(listOf("definition.json", "unit-attached.json"), entryNames(owner.journalDirectory))
+                    assertFalse(Files.exists(fixture.outputLease.resolve("reports/program_model.json")))
+                    val protocolNames = Files.walk(fixture.analysisState).use { paths ->
+                        paths.map { it.fileName.toString() }.toList()
+                    }
+                    assertTrue(protocolNames.none { it in setOf("parent.start", "worker.ready", "candidate.json") })
+                    owner.requireCurrentAtBoot()
+                    owner.requireCurrentAtBoot()
+                    assertFalse(findObservationCgroupsForUnit(owner.unitName).isEmpty())
+                    GccCompilerEngineContainmentContract.assessUnitAttachedAtBoot(fixture.definitionBytes, owner.unitAttachedReceiptBytes)
+                    val terminal = owner.closeAndProveAbsent()
+                    assertEquals("kotlin-proved-systemd-cgroup-terminal-absence-v1", terminal.authority)
+                    assertFalse(terminal.complete)
+                    assertFalse(terminal.startAuthorized)
+                    assertFalse(terminal.releaseEligible)
+                    assertEquals(listOf("definition.json", "terminal-absence.json", "unit-attached.json"), entryNames(owner.journalDirectory))
+                    assertTrue(entryNames(fixture.analysisState).isEmpty())
+                    assertTrue(findObservationCgroupsForUnit(owner.unitName).isEmpty())
+                    assertEquals("not-found", unitLoadState(owner.unitName))
+                    assertContentEquals(terminal.terminalAbsenceReceiptBytes, Files.readAllBytes(owner.journalDirectory.resolve("terminal-absence.json")))
+                    GccCompilerEngineContainmentContract.assessTerminalAbsence(
+                        fixture.definitionBytes, terminal.unitAttachedReceiptBytes, terminal.terminalAbsenceReceiptBytes,
+                    )
+                    assertFailsWith<IllegalStateException> { owner.requireCurrentAtBoot() }
+                } catch (failure: Throwable) {
+                    primaryFailure = failure
+                    val journal = runCatching { boundedLiveOracleUnitJournal(fixture.assessment.unitName, sinceEpochSeconds) }
+                        .getOrElse { "journal unavailable: ${it.javaClass.name}: ${it.message.orEmpty().take(512)}" }
+                    failure.addSuppressed(AssertionError("Bundled v2 BOOT diagnostics for ${fixture.assessment.unitName}:\n$journal"))
+                    throw failure
+                } finally {
+                    try {
+                        retainedOwner?.close()
+                    } catch (cleanupFailure: Throwable) {
+                        val primary = primaryFailure
+                        if (primary == null) throw cleanupFailure
+                        if (cleanupFailure !== primary) primary.addSuppressed(cleanupFailure)
+                    }
+                }
+            }
+        } catch (unavailable: TestAbortedException) {
+            if (System.getenv("DECOMP_REQUIRE_BUNDLED_GHIDRA_RUNTIME") == "true") {
+                throw AssertionError("required bundled runtime BOOT lifecycle prerequisites are unavailable", unavailable)
+            }
+            throw unavailable
+        }
+    }
+
     private data class Fixture(
         val definitionPath: Path,
         val definitionBytes: ByteArray,
@@ -897,6 +981,7 @@ class GccCompilerEngineLiveContainmentControllerTest {
             maximumResidentBytes = 512L * 1024L * 1024L,
             pidsMax = 32L,
         ),
+        bundledRoot: Path? = null,
         manifestTransform: (JsonObject) -> JsonObject = { it },
     ): Fixture {
         Files.createDirectories(root)
@@ -934,10 +1019,33 @@ class GccCompilerEngineLiveContainmentControllerTest {
             OracleJson.canonicalBytes(manifestObject),
         )
         val liveExecutables = if (liveRuntime) liveExecutables() else emptyMap()
-        val artifacts = GCC_LEGACY_CONTAINMENT_ARTIFACT_ROLES.mapIndexed { index, role ->
+        val bundledRuntime = bundledRoot?.let { bundle ->
+            GccBundledGhidraDeploymentReference.open().use { deployment ->
+                GccBundledGhidraRuntime(bundle, deployment.reference.classPath.map { relative ->
+                    val entry = deployment.reference.entries.getValue(relative)
+                    GccBundledGhidraClassPathEntry(bundle.resolve(relative), checkNotNull(entry.bytes), checkNotNull(entry.sha256))
+                })
+            }
+        }
+        val bundledFiles = bundledRoot?.let { bundle ->
+            val exporter = checkNotNull(javaClass.getResourceAsStream("/ghidra_scripts/ExportProgramModel.java"))
+                .use { it.readNBytes(4 * 1024 * 1024 + 1) }
+            check(exporter.size in 1..4 * 1024 * 1024)
+            mapOf(
+                GccCompilerEngineContainmentArtifactRole.GHIDRA_BRIDGE_JAR to bundle.resolve("decomp-ghidra-bridge.jar"),
+                GccCompilerEngineContainmentArtifactRole.GHIDRA_EXPORT_GUARD to bundle.resolve("scripts/RunBundledExports.class"),
+                GccCompilerEngineContainmentArtifactRole.GHIDRA_RUNTIME_MANIFEST to bundle.resolve("bundle.sha256"),
+                GccCompilerEngineContainmentArtifactRole.EXPORTER_SOURCE to writeReadOnly(inputs.resolve("ExportProgramModel.java"), exporter),
+                GccCompilerEngineContainmentArtifactRole.GHIDRA_ARCHIVE to Path.of(
+                    checkNotNull(System.getProperty("decompengine.ghidra.provenanceArchive")),
+                ).toRealPath(),
+            )
+        }.orEmpty()
+        val roles = if (bundledRuntime == null) GCC_LEGACY_CONTAINMENT_ARTIFACT_ROLES else GCC_BUNDLED_CONTAINMENT_ARTIFACT_ROLES
+        val artifacts = roles.mapIndexed { index, role ->
             val path = artifactPathOverrides[role] ?: when (role) {
                 GccCompilerEngineContainmentArtifactRole.BOOT_KEEPER_CLASSPATH -> manifest
-                else -> liveExecutables[role] ?: writeReadOnly(
+                else -> bundledFiles[role] ?: liveExecutables[role] ?: writeReadOnly(
                     inputs.resolve("${index.toString().padStart(2, '0')}-${role.wireName}.bin"),
                     "fixture-${role.wireName}\n".encodeToByteArray(),
                 )
@@ -988,7 +1096,7 @@ class GccCompilerEngineLiveContainmentControllerTest {
             runKind = runKind,
             artifacts = artifacts,
             analysisState = stateIdentity,
-            command = listOf(
+            command = bundledRuntime?.command(artifacts, stateIdentity, outputIdentity) ?: listOf(
                 byRole.getValue(
                     GccCompilerEngineContainmentArtifactRole.GHIDRA_ANALYZE_HEADLESS,
                 ).path.toString(),
@@ -1002,6 +1110,7 @@ class GccCompilerEngineLiveContainmentControllerTest {
             environment = mapOf("LANG" to "C.UTF-8", "LC_ALL" to "C.UTF-8", "TZ" to "UTC"),
             outputLease = outputIdentity,
             budgets = budgets,
+            bundledRuntime = bundledRuntime,
         )
         val assessment = GccCompilerEngineContainmentContract.assessDefinition(request)
         val bytes = assessment.canonicalBytes
