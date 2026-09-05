@@ -17,6 +17,7 @@ describe('public workbench shell', () => {
     expect(screen.getByRole('heading', { level: 1, name: 'Your work, with its evidence' })).toBeTruthy();
     expect(screen.getByText(/does not read jobs or start workflows/)).toBeTruthy();
     expect(fetch).not.toHaveBeenCalled();
+    expect(document.title).toBe('Jobs · Decomp Workbench');
   });
 
   it('loads the split runtime route and returns with browser history', async () => {
@@ -24,10 +25,12 @@ describe('public workbench shell', () => {
     fireEvent.click(screen.getByRole('link', { name: 'Runtime status' }));
     expect(await screen.findByRole('heading', { level: 1, name: 'Runtime status' })).toBeTruthy();
     expect(window.location.pathname).toBe('/runtime');
+    expect(document.title).toBe('Runtime status · Decomp Workbench');
     await waitFor(() => expect(document.activeElement).toBe(screen.getByRole('main')));
     window.history.back();
     expect(await screen.findByRole('heading', { level: 1, name: 'Your work, with its evidence' })).toBeTruthy();
     expect(window.location.pathname).toBe('/');
+    expect(document.title).toBe('Jobs · Decomp Workbench');
   });
 
   it('preserves the deployment prefix for direct routes and navigation', async () => {
@@ -39,6 +42,23 @@ describe('public workbench shell', () => {
     fireEvent.click(screen.getByRole('link', { name: 'Workspace' }));
     expect(await screen.findByRole('heading', { name: 'Your work, with its evidence' })).toBeTruthy();
     expect(window.location.pathname).toBe('/tools/decomp/');
+  });
+
+  it('restores the dedicated upload route through navigation and history without starting work', async () => {
+    const fetch = vi.fn(); vi.stubGlobal('fetch', fetch);
+    window.history.replaceState(null, '', '/tools/decomp/upload');
+    render(<App basePath="/tools/decomp" />);
+    expect(screen.getByRole('heading', { level: 1, name: 'Upload a binary' })).toBeTruthy();
+    expect(document.title).toBe('Upload a binary · Decomp Workbench');
+    expect(screen.getByRole('navigation', { name: 'Breadcrumbs' }).textContent).toContain('All jobs');
+    expect(screen.getByRole('link', { name: 'Upload' }).getAttribute('aria-current')).toBe('page');
+    fireEvent.click(screen.getByRole('link', { name: 'All jobs' }));
+    expect(await screen.findByRole('heading', { name: 'Your work, with its evidence' })).toBeTruthy();
+    expect(screen.getByRole('link', { name: 'Workspace' }).getAttribute('aria-current')).toBe('page');
+    window.history.back();
+    expect(await screen.findByRole('heading', { level: 1, name: 'Upload a binary' })).toBeTruthy();
+    await waitFor(() => expect(document.activeElement).toBe(screen.getByRole('main')));
+    expect(fetch).not.toHaveBeenCalled();
   });
 
   it('keeps a version notice in view when focusing the next route', async () => {
@@ -60,6 +80,7 @@ describe('public workbench shell', () => {
     window.history.replaceState(null, '', '/missing.view');
     render(<App />);
     expect(screen.getByRole('heading', { name: 'This page could not be found' })).toBeTruthy();
+    expect(document.title).toBe('Page unavailable · Decomp Workbench');
     expect(screen.getByRole('link', { name: 'Return to the workspace' }).getAttribute('href')).toBe('/');
   });
 });

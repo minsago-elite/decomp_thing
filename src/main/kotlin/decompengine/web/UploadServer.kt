@@ -323,9 +323,10 @@ class UploadServer(
         }
         val base = assets.basePath
         val canonical = when (path) {
-            base, "${base}runtime" -> path
+            base, "${base}runtime", "${base}upload" -> path
             base.removeSuffix("/").ifEmpty { "/" } -> base
             "${base}runtime/" -> "${base}runtime"
+            "${base}upload/" -> "${base}upload"
             else -> path.takeIf { it.startsWith("${base}jobs/") &&
                 it.removePrefix("${base}jobs/").matches(Regex("[0-9a-f]{32}/?")) }?.removeSuffix("/")
         }

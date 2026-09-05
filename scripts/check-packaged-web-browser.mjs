@@ -434,6 +434,14 @@ try {
     assert.equal(presentation.bodyMargin, '0px');
     assert.equal(presentation.layout, 'grid');
     await capture(home, 'home.png');
+    await evaluate(home, `document.querySelector('a[href="/nested/upload"]').click()`);
+    await ready(home, `document.querySelector('h1')?.textContent === 'Upload a binary' && document.title === 'Upload a binary · Decomp Workbench'`, 'upload route navigation');
+    await cdp.call('Page.reload', {}, home.sessionId);
+    await ready(home, `document.querySelector('h1')?.textContent === 'Upload a binary' && document.querySelector('nav[aria-label="Breadcrumbs"]')?.textContent.includes('All jobs')`, 'upload direct reload');
+    assert.equal(await evaluate(home, 'location.pathname'), '/nested/upload');
+    assert.equal(home.requests.filter((request) => request.method !== 'GET').length, 0);
+    report.uploadRoute = { clientNavigation: true, directReload: true, pageTitle: true, breadcrumbs: true, mutationRequests: 0 };
+
     await evaluate(home, `document.querySelector('a[href="/nested/runtime"]').click()`);
     await ready(home, `document.querySelector('h1')?.textContent === 'Runtime status' && document.body.innerText.includes(${JSON.stringify(manifest.buildId)})`, 'lazy packaged Runtime identity');
     const runtimeIdentity = await evaluate(home, identityExpression);

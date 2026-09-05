@@ -33,7 +33,7 @@ class UploadServerSpaTest {
         )
         server.start()
         try {
-            for (path in listOf("/", "/runtime", "/runtime?capability=fixture", "/jobs/" + "a".repeat(32))) {
+            for (path in listOf("/", "/upload", "/runtime", "/runtime?capability=fixture", "/jobs/" + "a".repeat(32))) {
                 val response = request(server, path)
                 assertEquals(200, response.statusCode())
                 assertTrue(response.body().contains("/assets/ui/assets/index-"))
@@ -48,6 +48,7 @@ class UploadServerSpaTest {
             }
             assertEquals(405, request(server, "/jobs", "POST").statusCode())
             assertEquals(405, request(server, "/runtime", "POST").statusCode())
+            assertEquals(405, request(server, "/upload", "POST").statusCode())
             assertEquals(0, executions)
             assertFalse(Files.exists(data))
         } finally {
@@ -62,6 +63,8 @@ class UploadServerSpaTest {
         val server = UploadServer("127.0.0.1", 0, data, uiMode = WebUiMode.SPA, basePath = "/workbench/")
         server.start()
         try {
+            assertEquals(200, request(server, "/workbench/upload").statusCode())
+            assertEquals("/workbench/upload", request(server, "/workbench/upload/").headers().firstValue("Location").orElseThrow())
             val response = request(server, "/workbench/runtime")
             assertEquals(200, response.statusCode())
             assertTrue(response.body().contains("/workbench/assets/ui/assets/index-"))

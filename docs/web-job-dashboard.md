@@ -56,3 +56,29 @@ used `--no-sandbox`. Exact ZIP/JAR/UI identities and source-report hash are reta
 this is not multi-browser or populated-library release qualification. Session
 restoration/logout, credential-storage checks, Runtime snapshots and missing-chunk
 recovery also passed in the same journey.
+
+
+## Upload route and shell navigation checkpoint
+
+The SPA now has a durable `/upload` route under the configured base path, alongside
+the retained dashboard upload shortcut. Both render the same upload component and
+use the existing tab-scoped retry ticket; navigation aborts an active transfer and
+returning asks for file reselection instead of resubmitting it.
+
+Global navigation exposes Upload. Secondary pages show an All jobs breadcrumb and
+the current page. Page titles distinguish Jobs, Upload a binary, Job overview,
+Runtime status and unavailable client routes. Titles contain no filename, source,
+credential or raw failure details. Path changes focus the main landmark, including
+history transitions between eagerly loaded views; query-only dashboard changes
+retain the dashboard's own focus policy. Asset-recovery notices keep their existing
+scroll protection.
+
+The packaged JVM serves GET/HEAD `/upload`, canonicalizes its trailing slash, and
+rejects POST to this presentation route. Upload mutations remain on the existing
+API endpoints. The explicit frontend URL allowlist includes the new route.
+
+Verification: 184 frontend tests and lint passed, along with 173 web/jobs tests and
+the distribution build. New checks cover prefixed direct navigation, browser
+history, current-navigation labels, titles, breadcrumbs, focus, inert public views,
+and server route/method handling. Run/revision/tab routing and full D3–D9 workspace
+navigation remain outstanding; this checkpoint does not complete #167.

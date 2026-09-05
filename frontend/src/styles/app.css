@@ -91,3 +91,6 @@ button:disabled { opacity: 0.65; cursor: wait; }
 .upload-drop label { display: block; font-weight: 600; margin-bottom: 0.5rem; }
 .upload-drop input { max-width: 100%; }
 .upload-panel progress { width: 100%; }
+
+.breadcrumbs { display: flex; flex-wrap: wrap; gap: .5rem; padding: 0; list-style: none; }
+.breadcrumbs li + li::before { content: "/"; margin-inline-end: .5rem; }

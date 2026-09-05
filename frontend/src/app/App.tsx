@@ -1,6 +1,7 @@
 import { useLayoutEffect, useMemo, useRef, useState } from 'preact/hooks';
 import { LocationProvider, Route, Router, useLocation } from 'preact-iso/router';
 import Home from '../routes/Home';
+import UploadPage from '../routes/UploadPage';
 import { NotFound } from '../routes/NotFound';
 import { ViewBoundary } from '../shared/ViewBoundary';
 import { AssetRecoveryNotice } from '../shared/AssetRecoveryNotice';
@@ -30,7 +31,15 @@ function Shell({ basePath, identity, recovery, reload, session }: ShellProps) {
   const [loading, setLoading] = useState(false);
   const homePath = appPath(basePath, '/');
   const runtimePath = appPath(basePath, '/runtime');
-  const atHome = location.path === (basePath || '/');
+  const atHome = location.path === (basePath || '/') || location.path === homePath;
+  const uploadPath = appPath(basePath, '/upload');
+  const isJob = location.path.startsWith(`${basePath}/jobs/`) && location.path.slice(`${basePath}/jobs/`.length).indexOf('/') < 0;
+  const pageTitle = atHome ? 'Jobs' : location.path === uploadPath ? 'Upload a binary'
+    : location.path === runtimePath ? 'Runtime status' : isJob ? 'Job overview' : 'Page unavailable';
+  useLayoutEffect(() => {
+    document.title = `${pageTitle} · Decomp Workbench`;
+    main.current?.focus({ preventScroll: recovery.snapshot() !== 'ready' });
+  }, [pageTitle, location.path, recovery]);
 
   function viewReady() {
     setLoading(false);
@@ -52,15 +61,20 @@ function Shell({ basePath, identity, recovery, reload, session }: ShellProps) {
       <div class="app-layout">
         <nav class="app-nav" aria-label="Main navigation">
           <a href={homePath} aria-current={atHome ? 'page' : undefined}>Workspace</a>
+          <a href={uploadPath} aria-current={location.path === uploadPath ? 'page' : undefined}>Upload</a>
           <a href={runtimePath} aria-current={location.path === runtimePath ? 'page' : undefined}>
             Runtime status
           </a>
         </nav>
         <main id="main" ref={main} tabIndex={-1} aria-busy={loading}>
           <p class="sr-only" role="status">{loading ? 'Opening view…' : ''}</p>
+          {!atHome && <nav aria-label="Breadcrumbs">
+            <ol class="breadcrumbs"><li><a href={homePath}>All jobs</a></li><li aria-current="page">{pageTitle}</li></ol>
+          </nav>}
           <ViewBoundary key={location.path}>
             <Router onLoadStart={() => setLoading(true)} onLoadEnd={viewReady} onRouteChange={viewReady}>
               <Route path={homePath} component={Home} basePath={basePath} session={session} />
+              <Route path={uploadPath} component={UploadPage} basePath={basePath} session={session} />
               <Route path={runtimePath} component={Runtime} identity={identity} session={session} />
               <Route path={`${basePath}/jobs/:jobId`} component={Job} basePath={basePath} session={session} />
               <Route default component={NotFound} homePath={homePath} />

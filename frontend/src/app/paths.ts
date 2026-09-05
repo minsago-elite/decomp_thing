@@ -17,8 +17,8 @@ export function normalizeBasePath(value: string): string {
   return value.replace(/\/$/, '');
 }
 
-export function appPath(basePath: string, route: '/' | '/runtime'): string {
-  if (route !== '/' && route !== '/runtime') return invalidUrl();
+export function appPath(basePath: string, route: '/' | '/runtime' | '/upload'): string {
+  if (route !== '/' && route !== '/runtime' && route !== '/upload') return invalidUrl();
   return `${normalizeBasePath(basePath)}${route}`;
 }
 
