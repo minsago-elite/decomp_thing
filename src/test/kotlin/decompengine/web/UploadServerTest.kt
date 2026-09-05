@@ -53,6 +53,42 @@ class UploadServerTest {
     }
 
     @Test
+    fun `shutdown discards caller-queued work and late delivery cannot alter a new owner state`() {
+        val dataDir = createTempDirectory("web-caller-queue-")
+        val queued = java.util.concurrent.CopyOnWriteArrayList<Runnable>()
+        val invocations = java.util.concurrent.atomic.AtomicInteger()
+        val executor = Executor { queued.add(it) }
+        val server = UploadServer("127.0.0.1", 0, dataDir,
+            analyzer = JobAnalyzer { _, _ -> invocations.incrementAndGet() }, executor = executor)
+        server.start()
+        try {
+            val uploaded = upload(server, "pending.elf", elfFixture(), acceptJson = true)
+            val id = Json.parseToJsonElement(uploaded.body.decodeToString()).jsonObject["id"].toString().trim('"')
+            assertEquals(303, request(server, "POST", "/jobs/$id/explore", followRedirects = false).status)
+            assertEquals(1, queued.size)
+            server.stop()
+            val store = decompengine.jobs.JobStore(dataDir)
+            assertEquals("failed", store.get(id).status)
+            assertEquals("Server stopped before the operation started", store.get(id).statusMessage)
+            val restarted = UploadServer("127.0.0.1", 0, dataDir)
+            try {
+                restarted.start()
+                val replacement = store.updateStatus(id, "complete", "New owner state")
+                repeat(2) { queued.single().run() }
+                assertEquals(0, invocations.get())
+                assertEquals(replacement, store.get(id))
+                executor.execute { invocations.incrementAndGet() }
+                queued.last().run()
+                assertEquals(1, invocations.get())
+            } finally {
+                restarted.stop()
+            }
+        } finally {
+            server.stop()
+        }
+    }
+
+    @Test
     fun `shutdown timeout retains store ownership until the worker exits and cleanup is retried`() {
         val dataDir = createTempDirectory("web-retained-owner-")
         val started = java.util.concurrent.CountDownLatch(1)

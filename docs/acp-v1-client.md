@@ -282,7 +282,10 @@ A timeout or cleanup error is reported with a fixed diagnostic; it never establi
 Shutdown and successful job-status publication share a lock: once shutdown begins, a worker that catches
 interruption and returns normally is recorded as failed with an explicit shutdown diagnostic. Previously
 published completion remains intact. This controls the web status only, not artifact acceptance or rollback.
-Injected executors remain outside this lifecycle. SIGKILL, power loss, stalled filesystem writes, and
+Injected executors are not shut down. The server tracks and discards its pending operations independently
+of executor ownership, so late or repeated callback delivery cannot start cancelled work or change a new
+owner's job status. Already-claimed work still requires its caller's cancellation/cleanup cooperation.
+SIGKILL, power loss, stalled filesystem writes, and
 durable recovery of indeterminate external work require the separate #68/#71 recovery mechanisms.
 
 Before startup recovery, a web server acquires a nonblocking exclusive `.web-owner.lock` for its job store.
