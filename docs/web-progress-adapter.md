@@ -275,3 +275,44 @@ byte-preservation checks remain in the same journey. The retained report is
 #175 fixture evidence without claiming complete stage views, public provider
 messages, durable task/session/revision evidence pages or full accessibility
 qualification.
+
+## Activity connection recovery
+
+A shared browser-availability hook suspends activity reads when the browser
+reports offline or the document becomes hidden. It unregisters its listeners on
+unmount. Suspension cancels the current read/timer but keeps the bounded page,
+filters and cursor. Returning online or visible reads a new identity-checked
+snapshot before continuing from the retained cursor. Obsolete responses are
+ignored after cancellation. None of these transitions controls server work.
+
+Network errors, timeouts and HTTP 502/504 trigger at most four automatic retries
+with exponential delays of 1, 2, 4 and 8 seconds, each jittered by ±20%. Each
+retry reconciles a new snapshot. A successful event-page read resets the retry
+budget; exhaustion stops reading until explicit fresh-history recovery. Session
+401 and access 403 are distinct non-retry failures and clear retained content.
+Protocol/identity errors and retention gaps are not automatically retried.
+
+The view distinguishes paused, background-suspended, browser-reported offline,
+reconnecting, exhausted and session/access-denied states. It displays the browser
+UTC time of the last successfully received activity page outside the live region.
+That timestamp is a receipt time, not an assertion about the source journal's
+freshness. The latest snapshot remains labeled separately from observation rows.
+A retention gap may result from restart or eviction; this implementation does
+not infer which occurred or automatically discard history to conceal the gap.
+
+231 frontend tests, lint and typechecked `distZip` passed. Six focused connection
+tests cover visibility/offline suspension, cursor/selection preservation,
+reconciliation, bounded retries, session/access denial and late-response rejection.
+The packaged browser uses actual tab foreground/background changes and CDP
+network offline/online emulation. It verifies no reads in three-second suspended
+windows, exactly one fresh snapshot for each resumption and retention of the
+same five rows. Existing pause, pagination, focus, filters and fixture byte
+preservation checks also pass. Evidence:
+[`web-activity-connection-20260905.json`](evidence/web-activity-connection-20260905.json).
+The application used inert observations only; Chrome ran with test-only
+`--no-sandbox`, and shutdown/owned-work cleanup were confirmed.
+
+This is the activity observer portion of #179. A shared connection state machine
+across every private view, a distinct authenticated server-restart signal,
+conflicting multi-tab workflow controls, full restart scenarios and long-running
+qualification remain open. This checkpoint does not close #179 or D4.

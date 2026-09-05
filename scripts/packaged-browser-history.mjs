@@ -137,6 +137,38 @@ export async function qualifyHistory({ fixture, makeTarget, cdp, evaluate, ready
   }
   assert.deepEqual(await evaluate(tab, activityRows), Array.from({ length: 5 }, (_, index) => `Sequence ${index + 200}`));
   assert.equal(await evaluate(tab, 'document.activeElement.textContent'), 'Pause activity');
+  const snapshotRequests = () => tab.requests.filter(request => request.url.endsWith('/snapshot')).length;
+  const beforeHiddenSnapshots = snapshotRequests();
+  const otherTab = await makeTarget();
+  await cdp.call('Page.bringToFront', {}, otherTab.sessionId);
+  await ready(tab, `document.visibilityState === 'hidden' && document.body.innerText.includes('Background tab: activity reads are suspended.')`, 'background activity suspension');
+  const whileHidden = progressRequests();
+  await new Promise(resolve => setTimeout(resolve, 3000));
+  assert.equal(progressRequests(), whileHidden, 'A hidden activity tab must not poll');
+  await cdp.call('Page.bringToFront', {}, tab.sessionId);
+  await ready(tab, `document.visibilityState === 'visible' && document.body.innerText.includes('Following retained activity.')`, 'foreground activity resumption');
+  const foregroundDeadline = Date.now() + 10000;
+  while (progressRequests() < whileHidden + 2) {
+    assert.ok(Date.now() < foregroundDeadline, 'Foreground activity did not reconcile snapshot and events');
+    await new Promise(resolve => setTimeout(resolve, 50));
+  }
+  assert.equal(snapshotRequests(), beforeHiddenSnapshots + 1, 'Foreground resume must read a fresh snapshot');
+  const beforeOfflineSnapshots = snapshotRequests();
+  await cdp.call('Network.emulateNetworkConditions', { offline: true, latency: 0, downloadThroughput: -1, uploadThroughput: -1 }, tab.sessionId);
+  await ready(tab, `document.body.innerText.includes('Browser reports offline. Activity reads are suspended.')`, 'offline activity suspension');
+  const whileOffline = progressRequests();
+  await new Promise(resolve => setTimeout(resolve, 3000));
+  assert.equal(progressRequests(), whileOffline, 'Offline activity must not poll');
+  await cdp.call('Network.emulateNetworkConditions', { offline: false, latency: 0, downloadThroughput: -1, uploadThroughput: -1 }, tab.sessionId);
+  await ready(tab, `document.body.innerText.includes('Following retained activity.')`, 'online activity resumption');
+  const onlineDeadline = Date.now() + 10000;
+  while (progressRequests() < whileOffline + 2) {
+    assert.ok(Date.now() < onlineDeadline, 'Online activity did not reconcile snapshot and events');
+    await new Promise(resolve => setTimeout(resolve, 50));
+  }
+  assert.deepEqual(await evaluate(tab, activityRows), Array.from({ length: 5 }, (_, index) => `Sequence ${index + 200}`));
+  assert.equal(snapshotRequests(), beforeOfflineSnapshots + 1, 'Online resume must read a fresh snapshot');
+  assert.ok(await evaluate(tab, `document.body.innerText.includes('Last activity received:')`));
   const accessibility = await cdp.call('Accessibility.getFullAXTree', {}, tab.sessionId);
   assert.ok(accessibility.nodes.some(node => node.role?.value === 'status' && node.properties?.some(property => property.name === 'live' && property.value.value === 'polite')));
   assert.equal(await evaluate(tab, `document.querySelector('ol[aria-label="Activity observations"]').closest('[aria-live], [role="status"], [role="log"]') === null`), true);
@@ -167,7 +199,7 @@ export async function qualifyHistory({ fixture, makeTarget, cdp, evaluate, ready
   assert.deepEqual(tab.exceptions, []);
   for (const [name, bytes] of Object.entries(fixture.retained)) assert.deepEqual(await fs.readFile(join(fixture.directory, name)), Buffer.from(bytes));
   assert.deepEqual((await fs.readdir(fixture.directory)).sort(), [...Object.keys(fixture.retained), 'reports'].sort());
-  return { activityUi: { categoryAndTaskFilters: true, filtersPreserveCursor: true, exactAttemptLinks: true, correlationReferences: true, narrowViewport: 320, firstPage: 200, continuationPage: 5, keyboardStart: true, focusPreserved: true, pauseStopsPolling: true, resumeWithoutDuplicates: true, navigationStopsPolling: true, privateTextWithheld: true, politeStatusOnly: true }, progressPolling: true, progressBytesUnchanged: true, fixtureAttempts: 55, firstPage: 50, secondPage: 5, exactOrder: true, cursorReload: true,
+  return { activityUi: { backgroundSuspendsReads: true, offlineSuspendsReads: true, recoveryReconcilesSnapshot: true, recoveryPreservesRows: true, lastReceivedTime: true, categoryAndTaskFilters: true, filtersPreserveCursor: true, exactAttemptLinks: true, correlationReferences: true, narrowViewport: 320, firstPage: 200, continuationPage: 5, keyboardStart: true, focusPreserved: true, pauseStopsPolling: true, resumeWithoutDuplicates: true, navigationStopsPolling: true, privateTextWithheld: true, politeStatusOnly: true }, progressPolling: true, progressBytesUnchanged: true, fixtureAttempts: 55, firstPage: 50, secondPage: 5, exactOrder: true, cursorReload: true,
     earlierAttemptReload: true, previousInterruptedAttempt: true, exactUnsignedUsage: true,
     unacceptedCandidate: true, explorationSummary: true, nativeReportDownload: true, downloadedBytesMatch: true, reportBytesUnchanged: true, retainedBytesUnchanged: true, mutationRequests: 0, executionStarted: false };
 }
