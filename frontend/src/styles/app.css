@@ -74,3 +74,14 @@ button:disabled { opacity: 0.65; cursor: wait; }
 }
 
 .session-notice { margin: 1rem 1.5rem; }
+
+.job-filters { display: grid; grid-template-columns: repeat(auto-fit, minmax(14rem, 1fr)); gap: 1rem; margin: 1.5rem 0; }
+.job-filters label { display: grid; gap: 0.4rem; font-weight: 600; }
+.job-filters input, .job-filters select { min-width: 0; width: 100%; padding: 0.6rem; border: 1px solid var(--line); border-radius: 0.3rem; font: inherit; color: inherit; background: var(--surface); }
+.job-actions { display: flex; flex-wrap: wrap; align-items: center; gap: 0.75rem; margin: 1rem 0; }
+.job-list { list-style: none; padding: 0; }
+.job-list > li { padding: 1rem; margin: 1rem 0; background: var(--surface); border: 1px solid var(--line); border-radius: 0.5rem; overflow-wrap: anywhere; }
+.job-list h4 { margin: 0 0 1rem; font-size: 1.1rem; }
+.job-facts { display: grid; grid-template-columns: minmax(6rem, 1fr) minmax(0, 3fr); gap: 0.5rem 1rem; overflow-wrap: anywhere; }
+.job-facts dt { font-weight: 600; }
+.job-facts dd { margin: 0; }

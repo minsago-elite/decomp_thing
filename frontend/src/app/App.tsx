@@ -23,6 +23,7 @@ type ShellProps = {
 };
 
 function Shell({ basePath, identity, recovery, reload, session }: ShellProps) {
+  const Job = useMemo(() => lazyRoute(() => import('../routes/Job'), recovery), [recovery]);
   const Runtime = useMemo(() => lazyRoute(() => import('../routes/Runtime'), recovery), [recovery]);
   const location = useLocation();
   const main = useRef<HTMLElement>(null);
@@ -59,8 +60,9 @@ function Shell({ basePath, identity, recovery, reload, session }: ShellProps) {
           <p class="sr-only" role="status">{loading ? 'Opening view…' : ''}</p>
           <ViewBoundary key={location.path}>
             <Router onLoadStart={() => setLoading(true)} onLoadEnd={viewReady} onRouteChange={viewReady}>
-              <Route path={homePath} component={Home} />
+              <Route path={homePath} component={Home} basePath={basePath} session={session} />
               <Route path={runtimePath} component={Runtime} identity={identity} session={session} />
+              <Route path={`${basePath}/jobs/:jobId`} component={Job} basePath={basePath} session={session} />
               <Route default component={NotFound} homePath={homePath} />
             </Router>
           </ViewBoundary>

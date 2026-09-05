@@ -133,3 +133,9 @@ export function validateResourceHref(basePath: string, href: string, resource: A
   }
   return href;
 }
+
+/** Persistent job routes use the JVM job-store identity grammar. */
+export function jobPath(basePath: string, jobId: string): string {
+  if (!/^[0-9a-f]{32}$/.test(jobId)) return invalidUrl();
+  return `${normalizeBasePath(basePath)}/jobs/${jobId}`;
+}

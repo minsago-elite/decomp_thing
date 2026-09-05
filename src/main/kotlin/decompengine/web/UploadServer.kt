@@ -293,7 +293,8 @@ class UploadServer(
             base, "${base}runtime" -> path
             base.removeSuffix("/").ifEmpty { "/" } -> base
             "${base}runtime/" -> "${base}runtime"
-            else -> null
+            else -> path.takeIf { it.startsWith("${base}jobs/") &&
+                it.removePrefix("${base}jobs/").matches(Regex("[0-9a-f]{32}/?")) }?.removeSuffix("/")
         }
         if (canonical != null) {
             if (path != canonical && exchange.requestMethod in setOf("GET", "HEAD")) {

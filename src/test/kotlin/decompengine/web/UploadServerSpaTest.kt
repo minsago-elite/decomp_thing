@@ -33,7 +33,7 @@ class UploadServerSpaTest {
         )
         server.start()
         try {
-            for (path in listOf("/", "/runtime", "/runtime?capability=fixture")) {
+            for (path in listOf("/", "/runtime", "/runtime?capability=fixture", "/jobs/" + "a".repeat(32))) {
                 val response = request(server, path)
                 assertEquals(200, response.statusCode())
                 assertTrue(response.body().contains("/assets/ui/assets/index-"))
@@ -69,6 +69,10 @@ class UploadServerSpaTest {
             assertEquals(308, redirect.statusCode())
             assertEquals("/workbench/?selection=fixture", redirect.headers().firstValue("Location").orElseThrow())
             assertEquals("/workbench/runtime", request(server, "/workbench/runtime/").headers().firstValue("Location").orElseThrow())
+            val jobPath = "/workbench/jobs/" + "a".repeat(32)
+            assertEquals(200, request(server, jobPath).statusCode())
+            assertEquals(jobPath, request(server, "$jobPath/").headers().firstValue("Location").orElseThrow())
+            assertEquals(404, request(server, "/workbench/jobs/%61" + "a".repeat(31)).statusCode())
             assertEquals(404, request(server, "/runtime").statusCode())
             assertEquals(404, request(server, "/w%6Frkbench/runtime").statusCode())
             assertEquals(404, request(server, "/workbench/assets/ui/missing.js").statusCode())
