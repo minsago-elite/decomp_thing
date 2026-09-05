@@ -27,7 +27,9 @@ starts before launch; capture is bounded to 4 KiB and the temporary file and dir
 are removed on success or failure. Cleanup attempts both owned paths and preserves
 the execution error as primary if removal also fails. A cleanup failure after
 success prevents publication; unrelated directory contents are never recursively
-deleted. Existing stream bounds and process cleanup apply.
+deleted. Existing stream bounds and process cleanup apply. Termination waits retain
+their 250 ms grace and 2 s forced-stop bounds despite thread interruption; cleanup
+restores the interrupt flag before returning to the caller.
 
 Schema-4 behavior records bind the launcher's identity and retain the exact launcher
 argv, channel locator and status bytes alongside the logical sandbox request.
