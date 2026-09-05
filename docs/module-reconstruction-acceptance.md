@@ -23,6 +23,12 @@ regenerates schema-4 checkpoints so new accepted revisions pass the compiler gat
 Full-project linking and behavior validation remain required by their respective
 archive and release workflows.
 
+This compiler gate is a local host subprocess. Its record does not independently
+authenticate the compiler executable, runtime, or consumed header bytes, and it
+does not prove contained production compilation. A local passed record therefore
+does not by itself establish production release eligibility; #64 tracks the
+qualified contained compiler and complete input/output artifact closure.
+
 If a retry fails validation or is cancelled, the workflow restores the preceding
 accepted source and ACP receipt and keeps its checkpoint. A rejected attempt is
 recorded under `reports/modules/<module>.attempt.json`; a returned ACP receipt is
