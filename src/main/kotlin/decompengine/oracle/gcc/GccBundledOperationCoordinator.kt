@@ -70,6 +70,8 @@ internal class GccBundledPreparedOperation internal constructor(
     private var closed = false
     private var poisoned = false
     private var executionAttempted = false
+    private var retainedInterruption: GccBundledInterruptedOperation? = null
+    private var retainedTrigger: GccBundledCheckpointTrigger? = null
     private var pendingCleanup: KotlinSystemdCgroupCommandCleanup? = null
 
     val definitionBytes: ByteArray
@@ -125,18 +127,53 @@ internal class GccBundledPreparedOperation internal constructor(
             lease.requireCurrentOperationRunRootAfterCgroupAbsence(runRoot)
             val prefixReceipt = journal.recordInterruptedPrefixAssessment(assessment)
             val state = borrowed.withPinnedDescriptor { descriptor ->
-                GccBundledAnalysisStateCapture.capture(descriptor, directories.getValue("state"), GccAnalysisStateCaptureLimits(
-                    maximumEntries = minOf(intent.diskPolicy.maximumFilesystemInodes, 32768L).toInt(),
-                    maximumTotalBytes = intent.diskPolicy.maximumFilesystemBytes,
-                    maximumWallMillis = intent.budgets.wallClockMillis,
-                ))
+                GccBundledAnalysisStateCapture.capture(descriptor, directories.getValue("state"), analysisStateLimits())
             }
             inputs.verify("after stopped GCC analysis-state capture")
             lease.requireCurrentOperationRunRootAfterCgroupAbsence(runRoot)
             val stateReceipt = journal.recordInterruptedAnalysisState(state)
             GccBundledInterruptedOperation(receipt, prefixReceipt, prefix, state, stateReceipt)
+        }.also {
+            retainedInterruption = it
+            retainedTrigger = trigger
         }
     }
+
+    /** Retained-owner check only; does not authorize another START or accept detached checkpoint bytes. */
+    @Synchronized
+    fun requireInterruptedStateCurrent() {
+        check(!closed && !poisoned) { "GCC bundled prepared operation is closed or poisoned" }
+        val retained = checkNotNull(retainedInterruption) { "GCC operation has no retained completed interruption" }
+        val trigger = checkNotNull(retainedTrigger)
+        try {
+            inputs.verify("before retained GCC checkpoint revalidation")
+            journal.verify("before retained GCC checkpoint revalidation")
+            lease.requireCurrentOperationRunRootAfterCgroupAbsence(runRoot)
+            lease.withCurrentOperationRunRootBeforeLaunch(runRoot) { borrowed ->
+                borrowed.withPinnedDescriptor { descriptor ->
+                    GccBundledAnalysisStateCapture.requireUnchanged(
+                        descriptor, directories.getValue("state"), retained.analysisState, analysisStateLimits(),
+                    )
+                    val prefix = GccBundledExportCapture.captureInterruptedPrefix(
+                        descriptor, directories.getValue("reports"), intent.artifacts,
+                    )
+                    trigger.requireUnchangedStoppedPrefix(retained.assessment, prefix)
+                }
+            }
+            inputs.verify("after retained GCC checkpoint revalidation")
+            journal.verify("after retained GCC checkpoint revalidation")
+            lease.requireCurrentOperationRunRootAfterCgroupAbsence(runRoot)
+        } catch (failure: Throwable) {
+            poisoned = true
+            throw failure
+        }
+    }
+
+    private fun analysisStateLimits() = GccAnalysisStateCaptureLimits(
+        maximumEntries = minOf(intent.diskPolicy.maximumFilesystemInodes, 32768L).toInt(),
+        maximumTotalBytes = intent.diskPolicy.maximumFilesystemBytes,
+        maximumWallMillis = intent.budgets.wallClockMillis,
+    )
 
     private fun <T> executeRun(
         kind: GccCompilerEngineContainmentRunKind,
