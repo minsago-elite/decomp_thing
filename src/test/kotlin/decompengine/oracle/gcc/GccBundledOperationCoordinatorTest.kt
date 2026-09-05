@@ -282,6 +282,14 @@ class GccBundledOperationCoordinatorTest {
             assertFailsWith<IllegalArgumentException> { intent(engineId = engine) }
         }
         assertFailsWith<IllegalArgumentException> { intent(runKind = GccCompilerEngineContainmentRunKind.RESUMED) }
+        val fresh = intent()
+        assertFailsWith<IllegalArgumentException> {
+            GccBundledOperationIntent(
+                fresh.operationId, fresh.engineId, fresh.runKind, fresh.artifacts,
+                GccBundledGhidraRuntime(fresh.bundledRuntime.root, fresh.bundledRuntime.classPath, invocationVersion = 4),
+                fresh.budgets, fresh.diskPolicy,
+            )
+        }
         assertFailsWith<IllegalArgumentException> { intent(budgets = budgets().copy(wallClockMillis = 60_001)) }
         val maximum = policy().copy(maximumFilesystemBytes = 1024L * 1024 * 1024 * 1024, maximumFilesystemInodes = 2_000_000)
         assertTrue(intent(diskPolicy = maximum).canonicalBytes.isNotEmpty())
