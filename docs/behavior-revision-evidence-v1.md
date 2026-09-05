@@ -141,6 +141,13 @@ acceptance details become `moduleCompilationEvidenceProblems` and leave the modu
 entities unresolved. These consistency checks do not authenticate an external
 reconstructor invocation or establish execution coverage.
 
+Reconstruction resume applies the same module acceptance constraints before reusing
+an accepted checkpoint or supplying it as a rollback baseline. The checkpoint reader
+also rejects entity statuses that contradict the top-level acceptance flag. Invalid
+acceptance requires reconstruction again; a newly validated replacement can then be
+reused normally. Historical checkpoints without compiler acceptance schema 5 do not
+supply accepted rollback evidence.
+
 `sandboxReported` describes a checked execution request. The audit leaves
 `networkIsolationObserved` empty and states the assurance scope explicitly.
 The record's legacy `networkIsolated` fields retain the requested configuration;

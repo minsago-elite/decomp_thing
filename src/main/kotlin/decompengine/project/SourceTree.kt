@@ -727,8 +727,14 @@ object SourceTreeGenerator {
                 throw ModuleReconstructionEvidencePersistenceException(failure)
             }
             val recordedCheckpoint = readCheckpoint(checkpointPath)
+            fun ModuleCheckpoint.hasCurrentModuleAcceptance(): Boolean =
+                schemaVersion == 5 && accepted && issues.isEmpty() &&
+                    entityIds.size == entityIds.toSet().size &&
+                    entityIds.toSet() == (module.functionIds + module.globalIds).toSet() &&
+                    compilation?.passed == true &&
+                    compilation.command == GeneratedCModuleValidation.command(profile, module.sourcePath)
             val verifiedPreviousAcceptance = recordedCheckpoint?.takeIf {
-                it.accepted && sourcePath.exists() && sha256(sourcePath.readBytes()) == it.sourceSha256 &&
+                it.hasCurrentModuleAcceptance() && sourcePath.exists() && sha256(sourcePath.readBytes()) == it.sourceSha256 &&
                     it.hasCurrentExecutionEvidence(projectDir, configuredExecutionEvidencePath, false)
             }
             val request = ModuleReconstructionRequest(
@@ -756,7 +762,7 @@ object SourceTreeGenerator {
                         configuredEvidencePath = configuredExecutionEvidencePath,
                         evidenceRequired = reconstructor.requiresExecutionEvidenceForCheckpointReuse(),
                     ) &&
-                    (checkpoint.accepted || !checkpoint.retryable)
+                    (if (checkpoint.accepted) checkpoint.hasCurrentModuleAcceptance() else !checkpoint.retryable)
             }
             val checkpoint = cached ?: run {
                 val previousAccepted = verifiedPreviousAcceptance
@@ -1235,7 +1241,13 @@ object SourceTreeGenerator {
                     )
                 },
                 entityIds = root.getValue("entityStatuses").jsonArray.map {
-                    it.jsonObject.getValue("id").jsonPrimitive.content
+                    val status = it.jsonObject
+                    require(status.keys == setOf("id", "status")) { "unsupported module entity status fields" }
+                    val expected = if (root.getValue("accepted").jsonPrimitive.boolean) "accepted" else "unresolved"
+                    require(status.getValue("status").jsonPrimitive.isString &&
+                        status.getValue("status").jsonPrimitive.content == expected) { "contradictory module entity acceptance" }
+                    require(status.getValue("id").jsonPrimitive.isString) { "module entity ID must be a string" }
+                    status.getValue("id").jsonPrimitive.content
                 },
                 executionEvidencePath = if (schemaVersion >= 3) optionalString("executionEvidencePath") else null,
                 executionEvidenceSha256 = if (schemaVersion >= 3) optionalString("executionEvidenceSha256") else null,

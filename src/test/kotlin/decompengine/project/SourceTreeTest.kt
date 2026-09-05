@@ -29,6 +29,9 @@ import kotlin.test.assertNull
 import kotlin.test.assertTrue
 import kotlinx.serialization.json.Json
 import kotlinx.serialization.json.JsonNull
+import kotlinx.serialization.json.JsonObject
+import kotlinx.serialization.json.JsonArray
+import kotlinx.serialization.json.JsonPrimitive
 import kotlinx.serialization.json.jsonObject
 import kotlinx.serialization.json.jsonArray
 import kotlinx.serialization.json.jsonPrimitive
@@ -615,6 +618,44 @@ class SourceTreeTest {
 
         assertEquals(before, source.readText())
         assertTrue(project.resolve("reports/modules/parse.attempt.json").readText().contains("\"status\": \"interrupted\""))
+    }
+
+    @Test
+    fun `contradictory accepted checkpoints are neither reused nor offered as rollback baselines`() {
+        for (change in listOf("command", "owners", "duplicate", "status", "issues", "schema")) {
+            val project = createTempDirectory("source-checkpoint-acceptance-")
+            val input = oneModuleModel()
+            SourceTreeGenerator.generate(input, project, reconstructor = validReconstructor())
+            val path = project.resolve("reports/modules/parse.json")
+            val checkpoint = Json.parseToJsonElement(path.readText()).jsonObject
+            val statuses = checkpoint.getValue("entityStatuses").jsonArray
+            val changed = when (change) {
+                "command" -> JsonObject(checkpoint + ("compilation" to JsonObject(
+                    checkpoint.getValue("compilation").jsonObject + ("command" to JsonArray(listOf(JsonPrimitive("other-compiler")))))))
+                "owners" -> JsonObject(checkpoint + ("entityStatuses" to JsonArray(emptyList())))
+                "duplicate" -> JsonObject(checkpoint + ("entityStatuses" to JsonArray(statuses + statuses.first())))
+                "status" -> JsonObject(checkpoint + ("entityStatuses" to JsonArray(statuses.map {
+                    JsonObject(it.jsonObject + ("status" to JsonPrimitive("unresolved")))
+                })))
+                "issues" -> JsonObject(checkpoint + ("issues" to JsonArray(listOf(JsonObject(mapOf(
+                    "code" to JsonPrimitive("pending"), "message" to JsonPrimitive("pending"),
+                    "entityIds" to JsonArray(emptyList()),
+                ))))))
+                else -> JsonObject(checkpoint + ("schemaVersion" to JsonPrimitive(4)))
+            }
+            path.writeText(changed.toString())
+            var calls = 0
+            val delegate = validReconstructor()
+            val reconstructor = ModuleReconstructor { request ->
+                calls++
+                assertNull(request.acceptedSourceSha256, change)
+                delegate.reconstruct(request)
+            }
+            SourceTreeGenerator.generate(input, project, reconstructor = reconstructor)
+            assertEquals(1, calls, change)
+            SourceTreeGenerator.generate(input, project, reconstructor = reconstructor)
+            assertEquals(1, calls, "repaired checkpoint must resume: $change")
+        }
     }
 
     @Test
