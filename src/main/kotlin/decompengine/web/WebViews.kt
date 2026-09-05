@@ -105,14 +105,26 @@ fun renderDashboard(jobs: List<Job>, diagnostics: List<WebJobDiagnostic> = empty
           const response = await fetch('/api/operator/auth-methods', {
             method: 'POST', cache: 'no-store', headers: {'X-Decomp-Operator-Action': 'inspect-auth'}
           });
-          if (!response.ok) throw new Error('unavailable');
-          let inventory = await response.json();
+          if (response.status !== 202 && response.status !== 409) throw new Error('unavailable');
+          // A 409 attaches to the existing inspection; an accepted start needs no body to poll.
+          let inventory = {status: 'inspecting'};
           cancelAuthButton.disabled = false;
           while (inventory.status === 'inspecting') {
             await new Promise(resolve => setTimeout(resolve, 300));
-            const update = await fetch('/api/operator/auth-methods', {cache: 'no-store'});
-            if (!update.ok) throw new Error('unavailable');
-            inventory = await update.json();
+            try {
+              const update = await fetch('/api/operator/auth-methods', {cache: 'no-store'});
+              if (!update.ok) throw new Error('unavailable');
+              const observed = await update.json();
+              if (!observed || !['idle', 'inspecting', 'ready', 'failed', 'cancelled'].includes(observed.status))
+                throw new Error('unavailable');
+              inventory = observed;
+              if (inventory.status === 'inspecting' && status.textContent ===
+                  'Inspection status is unavailable; retrying. Cancellation remains available.')
+                status.textContent = 'Inspecting advertised methods…';
+            } catch (_) {
+              status.textContent = 'Inspection status is unavailable; retrying. Cancellation remains available.';
+              cancelAuthButton.disabled = false;
+            }
           }
           if (inventory.status === 'cancelled') {
             status.textContent = 'Inspection cancelled; no login attempted.';

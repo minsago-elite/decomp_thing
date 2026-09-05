@@ -10,7 +10,7 @@ const { chromium } = require(process.env.DECOMP_PLAYWRIGHT_MODULE || 'playwright
   const html = fs.readFileSync(htmlPath, 'utf8');
   const browser = await chromium.launch({headless: true});
   const browserVersion = browser.version();
-  let starts = 0, polls = 0, cancellations = 0, cancellationFailure = null, context;
+  let starts = 0, polls = 0, cancellations = 0, cancellationFailure = null, pollingFailure = null, admissionStatus = 202, context;
   try {
     context = await browser.newContext();
     await context.tracing.start({screenshots: true, snapshots: true});
@@ -34,9 +34,12 @@ const { chromium } = require(process.env.DECOMP_PLAYWRIGHT_MODULE || 'playwright
       if (request.method() === 'POST') {
         starts++;
         assert.equal(request.headers()['x-decomp-operator-action'], 'inspect-auth');
-        return route.fulfill({status:202, json:{status:'inspecting'}});
+        return route.fulfill({status:admissionStatus, json:{status:'inspecting'}});
       }
       polls++;
+      if (pollingFailure === 'http') return route.fulfill({status:503, body:'unavailable'});
+      if (pollingFailure === 'network') return route.abort('failed');
+      if (pollingFailure === 'json') return route.fulfill({status:200, contentType:'application/json', body:'{' });
       if (mode === 'waiting' || mode === 'cancelled')
         return route.fulfill({json:{status:mode === 'waiting' ? 'inspecting' : 'cancelled'}});
       return route.fulfill({json: mode === 'failed' ? {status:'failed'} : {
@@ -66,6 +69,18 @@ const { chromium } = require(process.env.DECOMP_PLAYWRIGHT_MODULE || 'playwright
     mode = 'waiting';
     await page.locator('#inspect-auth-methods').click();
     await page.waitForFunction(() => !document.querySelector('#cancel-auth-inspection').disabled);
+    for (const failure of ['http', 'network', 'json']) {
+      pollingFailure = failure;
+      const previousPolls = polls;
+      await page.waitForFunction(() => document.querySelector('#auth-inspection-status').textContent ===
+        'Inspection status is unavailable; retrying. Cancellation remains available.');
+      while (polls <= previousPolls) await page.waitForTimeout(50);
+      assert.equal(await page.locator('#cancel-auth-inspection').isEnabled(), true);
+      assert.equal(await page.locator('#inspect-auth-methods').isEnabled(), false);
+    }
+    pollingFailure = null;
+    await page.waitForFunction(() => document.querySelector('#auth-inspection-status').textContent ===
+      'Inspecting advertised methods…');
     for (const failure of ['http', 'network']) {
       cancellationFailure = failure;
       await page.locator('#cancel-auth-inspection').click();
@@ -83,12 +98,22 @@ const { chromium } = require(process.env.DECOMP_PLAYWRIGHT_MODULE || 'playwright
     assert.equal(await page.locator('#inspect-auth-methods').isEnabled(), true);
     assert.equal(await page.locator('#cancel-auth-inspection').isEnabled(), false);
     assert.equal(cancellations, 3); assert.equal(starts, 4); assert.deepEqual(errors, []);
+    admissionStatus = 409; mode = 'waiting';
+    await page.locator('#inspect-auth-methods').click();
+    await page.waitForFunction(() => !document.querySelector('#cancel-auth-inspection').disabled);
+    assert.equal(await page.locator('#inspect-auth-methods').isEnabled(), false);
+    await page.locator('#cancel-auth-inspection').click();
+    await page.waitForFunction(() => document.querySelector('#auth-inspection-status').textContent ===
+      'Inspection cancelled; no login attempted.');
+    await page.waitForTimeout(800);
+    assert.equal(starts, 5); assert.equal(cancellations, 4);
+    assert.equal(await page.locator('#cancel-auth-inspection').isEnabled(), false);
     await page.screenshot({path:path.join(output,'dashboard.png')});
   } finally {
     try { if (context) await context.tracing.stop({path:path.join(output,'trace.zip')}); }
     finally { await browser.close(); }
   }
   fs.writeFileSync(path.join(output,'result.json'), JSON.stringify({passed:true,
-    browser:browserVersion, starts, polls, cancellations, scenarios:['explicit action','previews','text escaping','failure','retry','empty inventory','cancellation','late cancellation acknowledgement'],
+    browser:browserVersion, starts, polls, cancellations, scenarios:['explicit action','previews','text escaping','failure','retry','empty inventory','cancellation','HTTP cancellation retry','network cancellation retry','late cancellation acknowledgement','HTTP polling recovery','network polling recovery','invalid JSON polling recovery','attach to existing inspection'],
     renderedHtmlSha256:require('node:crypto').createHash('sha256').update(html).digest('hex')},null,2)+'\n');
 })().catch(error=>{console.error(error);process.exitCode=1;});
