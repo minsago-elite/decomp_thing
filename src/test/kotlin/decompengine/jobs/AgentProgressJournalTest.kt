@@ -77,7 +77,8 @@ class AgentProgressJournalTest {
             mapOf("events" to JsonArray(events.take(1)), "queueDropped" to JsonPrimitive(1)),
             mapOf("events" to JsonArray(emptyList()), "historyDropped" to JsonPrimitive(2)),
         ).forEach { changes ->
-            val valid = JsonObject(original + changes + ("truncated" to JsonPrimitive(true)))
+            // These fixtures exercise legacy snapshots; explicit omission ranges have separate validation tests.
+            val valid = JsonObject(original - "omittedSequenceRanges" + changes + ("truncated" to JsonPrimitive(true)))
             Files.writeString(root.resolve(AgentProgressJournal.FILE_NAME), valid.toString())
             assertEquals(valid, AgentProgressJournal.read(root))
         }
