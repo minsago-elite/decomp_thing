@@ -94,7 +94,7 @@ class GccBundledContainedExecutionTest {
                     assertTrue(exportTime.getValue("remainingNanos").jsonPrimitive.long > 0)
                     executed.exportAssessmentReceiptBytes[0] = '!'.code.toByte()
                     assertContentEquals(exportBytes, executed.exportAssessmentReceiptBytes)
-                    retainFixtureEvidence(fixture, intent, selectedDefinition, receiptBytes, exportBytes, assessment)
+                    retainFixtureEvidence(fixture, intent, selectedDefinition, receiptBytes, exportBytes, assessment, executed.programModelBytes)
                     assertCopiedExportRejectsIdentityAndLinks(fixture, output, intent.artifacts, assessment)
                     assertFailsWith<IllegalStateException> { prepared.execute() }
                     prepared.close()
@@ -196,11 +196,11 @@ class GccBundledContainedExecutionTest {
                 assertEquals(result.assessment.programModelSha256, assertExport(definition.outputLease.path, artifacts).programModelSha256)
                 originalRecords.forEach { (name, bytes) -> assertContentEquals(bytes, boundedRead(originalJournal.resolve(name), MAXIMUM_METADATA_BYTES)) }
                 assertEquals(17, names(originalJournal).size)
-                resumedModel = boundedRead(definition.outputLease.path.resolve("reports/program_model.json"), MAXIMUM_MODEL_BYTES)
+                resumedModel = result.programModelBytes
                 resumedPlan = authoredPlan(resumedModel)
                 resumedReceiptSha256 = OracleArtifacts.sha256(result.executionReceiptBytes)
                 resumedEvidence = retainFixtureEvidence(fixture, intent, definition, result.executionReceiptBytes, result.exportAssessmentReceiptBytes,
-                    result.assessment, journal, resumedPlan)
+                    result.assessment, resumedModel, journal, resumedPlan)
                 assertFails { owner.resume() }
             }
             val freshIntent = GccBundledOperationIntent("4".repeat(64), intent.engineId, GccCompilerEngineContainmentRunKind.FRESH_CONTROL,
@@ -211,10 +211,10 @@ class GccBundledContainedExecutionTest {
                 outputs.add(definition.outputLease.path)
                 val result = owner.execute()
                 assertEquals(0L, result.assessment.reused)
-                val freshModel = boundedRead(definition.outputLease.path.resolve("reports/program_model.json"), MAXIMUM_MODEL_BYTES)
+                val freshModel = result.programModelBytes
                 val freshPlan = authoredPlan(freshModel)
                 val destination = retainFixtureEvidence(fixture, freshIntent, definition, result.executionReceiptBytes,
-                    result.exportAssessmentReceiptBytes, result.assessment, freshJournal, freshPlan)
+                    result.exportAssessmentReceiptBytes, result.assessment, freshModel, freshJournal, freshPlan)
                 assertContentEquals(resumedModel, freshModel, "resumed model differs from normal fresh import/analysis")
                 assertContentEquals(resumedPlan, freshPlan, "planner-derived ownership differs")
                 readOnlyFile(destination.resolve("resume-comparison.json"), OracleJson.canonicalBytes(JsonObject(mapOf(
@@ -470,6 +470,7 @@ class GccBundledContainedExecutionTest {
         execution: ByteArray,
         exportAssessment: ByteArray,
         assessment: GccCompletedRunAssessment,
+        capturedModel: ByteArray,
         journalRoot: Path = fixture.resolve("journal"),
         plan: ByteArray? = null,
     ): Path {
@@ -495,9 +496,11 @@ class GccBundledContainedExecutionTest {
         val journal = journalRoot.resolve(".gcc-bundled-operation-${intent.operationId}")
         for (name in names(journal)) retain("journal/$name", boundedRead(journal.resolve(name), MAXIMUM_METADATA_BYTES))
         val reports = definition.outputLease.path.resolve("reports")
-        for (name in listOf("program_model.json", "program_model.json.progress.json")) {
-            retain("reports/$name", boundedRead(reports.resolve(name), if (name == "program_model.json") MAXIMUM_MODEL_BYTES else MAXIMUM_LOG_BYTES))
-        }
+        assertTrue(capturedModel.size <= MAXIMUM_MODEL_BYTES)
+        assertEquals(assessment.programModelBytes, capturedModel.size)
+        assertEquals(assessment.programModelSha256, OracleArtifacts.sha256(capturedModel))
+        retain("reports/program_model.json", capturedModel)
+        retain("reports/program_model.json.progress.json", boundedRead(reports.resolve("program_model.json.progress.json"), MAXIMUM_LOG_BYTES))
         val command = OracleJson.parseCanonical(execution).jsonObject.getValue("execution").jsonObject
         val control = Path.of(command.getValue("controlDirectory").jsonPrimitive.content)
         assertEquals(definition.outputLease.path, control.parent)
