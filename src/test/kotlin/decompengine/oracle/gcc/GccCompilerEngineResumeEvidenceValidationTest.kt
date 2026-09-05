@@ -26,6 +26,75 @@ import kotlinx.serialization.json.boolean
 
 class GccCompilerEngineResumeEvidenceValidationTest {
     @Test
+    fun `live progress triggers only a nonterminal full batch and stopped validation binds its state`() {
+        val fixture = transitionFixture(twoBatchFixture()).interrupted
+        withDescriptorExportFixture(fixture, includeModel = false) { captured ->
+            val trigger = GccBundledCheckpointTrigger(512)
+            assertEquals(null, trigger.observe(null))
+            val observation = GccBundledExportCapture.observeProgress(captured.root, captured.reportsIdentity, captured.artifacts)
+            val decision = checkNotNull(trigger.observe(observation))
+            val document = OracleJson.parseCanonical(decision).jsonObject
+            assertEquals(sha(fixture.state), document.getValue("stateSha256").jsonPrimitive.content)
+            assertEquals(sha(fixture.progress), document.getValue("progressSha256").jsonPrimitive.content)
+            assertFails { trigger.observe(observation) }
+            val prefix = GccBundledExportCapture.captureInterruptedPrefix(captured.root, captured.reportsIdentity, captured.artifacts)
+            val assessment = OracleJson.parseCanonical(trigger.assessStoppedPrefix(prefix)).jsonObject
+            assertFalse(assessment.getValue("complete").jsonPrimitive.boolean)
+            assertFalse(assessment.getValue("releaseEligible").jsonPrimitive.boolean)
+            assertEquals(prefix.progressSha256, assessment.getValue("progressSha256").jsonPrimitive.content)
+            assertEquals(sha(OracleJson.canonicalBytes(kotlinx.serialization.json.JsonObject(assessment - "assessmentSha256"))),
+                assessment.getValue("assessmentSha256").jsonPrimitive.content)
+        }
+        withDescriptorExportFixture { captured ->
+            val completed = GccBundledExportCapture.observeProgress(captured.root, captured.reportsIdentity, captured.artifacts)
+            assertEquals(null, GccBundledCheckpointTrigger(512).observe(completed))
+        }
+        for (threshold in listOf(-512L, 0L, 1L, 511L, 513L)) assertFails { GccBundledCheckpointTrigger(threshold) }
+    }
+
+    @Test
+    fun `stopped prefix may advance across committed batches but cannot move backward or change state`() {
+        val full = threeBatchFixture()
+        val first = transitionFixture(full, interruptedBatchCount = 1).interrupted
+        val second = transitionFixture(full, interruptedBatchCount = 2).interrupted
+        val firstObservation = GccCompilerEngineResumeByteValidator.assessExportProgress(first.state, first.progress)
+        val secondObservation = GccCompilerEngineResumeByteValidator.assessExportProgress(second.state, second.progress)
+        val firstPrefix = assessInterrupted(first)
+        val secondPrefix = assessInterrupted(second)
+        val forward = GccBundledCheckpointTrigger(512)
+        forward.observe(firstObservation)
+        forward.assessStoppedPrefix(secondPrefix)
+        val backward = GccBundledCheckpointTrigger(1024)
+        assertEquals(null, backward.observe(firstObservation))
+        backward.observe(secondObservation)
+        assertFails { backward.assessStoppedPrefix(firstPrefix) }
+        assertFails { forward.assessStoppedPrefix(assessInterrupted(transitionFixture(twoBatchFixture()).interrupted)) }
+        assertFails { GccBundledCheckpointTrigger(512).assessStoppedPrefix(firstPrefix) }
+    }
+
+    @Test
+    fun `live progress waits for absent files but rejects substituted invocation and oversized records`() {
+        val fixture = transitionFixture(twoBatchFixture()).interrupted
+        withDescriptorExportFixture(fixture, includeModel = false) { captured ->
+            val progress = captured.directory.resolve("reports/program_model.json.progress.json")
+            val original = captured.directory.resolve("saved-progress")
+            Files.move(progress, original)
+            assertEquals(null, GccBundledExportCapture.observeProgress(captured.root, captured.reportsIdentity, captured.artifacts))
+            Files.move(original, progress)
+            for (role in captured.artifacts.map { it.role }) {
+                val wrong = captured.artifacts.map { if (it.role == role) it.copy(sha256 = SHA_F) else it }
+                assertFails { GccBundledExportCapture.observeProgress(captured.root, captured.reportsIdentity, wrong) }
+            }
+            assertFails { GccBundledExportCapture.observeProgress(captured.root, captured.reportsIdentity, captured.artifacts,
+                GccResumeByteValidationLimits(progressBytes = fixture.progress.size - 1)) }
+            Files.move(progress, original)
+            Files.createSymbolicLink(progress, original)
+            assertFails { GccBundledExportCapture.observeProgress(captured.root, captured.reportsIdentity, captured.artifacts) }
+            assertContentEquals(fixture.progress, Files.readAllBytes(original))
+        }
+    }
+
+    @Test
     fun `interrupted descriptor capture validates the committed prefix without a final model`() {
         val prefix = transitionFixture(twoBatchFixture()).interrupted
         withDescriptorExportFixture(prefix, includeModel = false) { captured ->

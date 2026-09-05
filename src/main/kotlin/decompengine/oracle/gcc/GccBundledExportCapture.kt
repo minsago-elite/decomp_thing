@@ -53,6 +53,33 @@ internal object GccBundledExportCapture {
         }
     }
 
+    /** Live observation only. Final checkpoint validation must run after exact process absence. */
+    fun observeProgress(
+        run: LinuxDescriptor,
+        expectedReports: LinuxFileIdentity,
+        artifacts: List<GccCompilerEngineContainmentArtifactIdentity>,
+        limits: GccResumeByteValidationLimits = GccResumeByteValidationLimits(),
+    ): GccExportProgressAssessment? = LinuxFilesystemSyscalls.openDirectoryAt(run.fd, "reports").use { reports ->
+        require(reports.identity.copy(linkCount = expectedReports.linkCount) == expectedReports) {
+            "GCC progress reports directory changed identity"
+        }
+        if (!captureEntryExists(reports, "program_model.json.export") ||
+            !captureEntryExists(reports, "program_model.json.progress.json")) return@use null
+        LinuxFilesystemSyscalls.openDirectoryAt(reports.fd, "program_model.json.export").use { export ->
+            requireCaptureDirectory(export, reports.identity)
+            if (!captureEntryExists(export, "state.json")) return@use null
+            val capture = BoundExportFiles(limits.transitionAggregateBytes)
+            val state = capture.read(export, "state.json", limits.exporterStateBytes)
+            requireInvocation(state, artifacts)
+            val progress = capture.read(reports, "program_model.json.progress.json", limits.progressBytes)
+            val observation = GccCompilerEngineResumeByteValidator.assessExportProgress(state, progress, limits)
+            capture.verify()
+            requireNamedDirectory(run, "reports", reports)
+            requireNamedDirectory(reports, "program_model.json.export", export)
+            observation
+        }
+    }
+
     private fun <T> captureFiles(
         run: LinuxDescriptor,
         expectedReports: LinuxFileIdentity,
@@ -72,17 +99,7 @@ internal object GccBundledExportCapture {
                     val capture = BoundExportFiles(limits.transitionAggregateBytes)
                     val state = capture.read(export, "state.json", limits.exporterStateBytes)
                     val stateAssessment = GccCompilerEngineResumeByteValidator.assessExporterState(state, limits)
-                    val stateDocument = OracleJson.parse(state).jsonObject
-                    val byRole = artifacts.associateBy { it.role }
-                    for ((field, role) in mapOf(
-                        "inputSha256" to GccCompilerEngineContainmentArtifactRole.ENGINE_BINARY,
-                        "exporterSha256" to GccCompilerEngineContainmentArtifactRole.EXPORTER_SOURCE,
-                        "analysisToolSha256" to GccCompilerEngineContainmentArtifactRole.GHIDRA_ARCHIVE,
-                    )) {
-                        require(stateDocument.getValue(field).jsonPrimitive.content == byRole.getValue(role).sha256) {
-                            "GCC export $field differs from the authenticated invocation"
-                        }
-                    }
+                    requireInvocation(state, artifacts)
                     val progress = capture.read(reports, "program_model.json.progress.json", limits.progressBytes)
                     val batchCount = if (interrupted) {
                         val observed = GccCompilerEngineResumeByteValidator.assessExportProgress(state, progress, limits)
@@ -120,6 +137,24 @@ internal object GccBundledExportCapture {
                     result
                 }
             }
+        }
+    }
+}
+
+private fun captureEntryExists(directory: LinuxDescriptor, name: String): Boolean =
+    LinuxFilesystemSyscalls.openPathAtOrNull(directory.fd, name)?.use { true } ?: false
+
+private fun requireInvocation(state: ByteArray, artifacts: List<GccCompilerEngineContainmentArtifactIdentity>) {
+    val document = OracleJson.parse(state).jsonObject
+    val byRole = artifacts.associateBy { it.role }
+    require(byRole.size == artifacts.size) { "GCC capture contains duplicate invocation roles" }
+    for ((field, role) in mapOf(
+        "inputSha256" to GccCompilerEngineContainmentArtifactRole.ENGINE_BINARY,
+        "exporterSha256" to GccCompilerEngineContainmentArtifactRole.EXPORTER_SOURCE,
+        "analysisToolSha256" to GccCompilerEngineContainmentArtifactRole.GHIDRA_ARCHIVE,
+    )) {
+        require(document.getValue(field).jsonPrimitive.content == byRole.getValue(role).sha256) {
+            "GCC export $field differs from the authenticated invocation"
         }
     }
 }
