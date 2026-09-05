@@ -15,6 +15,7 @@ import decompengine.project.SourceTreeGenerator
 import decompengine.project.sha256
 import decompengine.binary.ElfMetadataReader
 import decompengine.validation.BehaviorComparator
+import decompengine.validation.BehaviorProjectContext
 import decompengine.validation.ProcessInput
 import kotlinx.serialization.json.Json
 import kotlinx.serialization.json.jsonArray
@@ -97,6 +98,7 @@ class ArchivalProjectScaleIntegrationTest {
             rebuilt,
             listOf(ProcessInput("default"), ProcessInput("one_arg", listOf("hello")), ProcessInput("exit_two", listOf("a", "b"))),
             project.resolve("reports"),
+            BehaviorProjectContext(project),
         )
         val bundle = ArchivalPackager.create(project, temp.resolve("small.zip"))
         val extracted = temp.resolve("extracted")
@@ -128,7 +130,9 @@ class ArchivalProjectScaleIntegrationTest {
             ProcessInput("file", args = listOf("--file", "sample.txt")),
             ProcessInput("exit", args = listOf("a", "b", "c")),
         )
-        val behavior = BehaviorComparator().compare("large_archival", original, rebuilt, inputs, project.resolve("reports"))
+        val behavior = BehaviorComparator().compare(
+            "large_archival", original, rebuilt, inputs, project.resolve("reports"), BehaviorProjectContext(project),
+        )
         val first = ArchivalPackager.create(project, temp.resolve("large-1.zip"))
         val second = ArchivalPackager.create(project, temp.resolve("large-2.zip"))
         val extracted = temp.resolve("extracted")

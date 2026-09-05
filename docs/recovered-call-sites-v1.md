@@ -52,10 +52,13 @@ an oracle-proven target set, external identity or normalized thunk destination.
 
 Calls carry an actual return PC at the end of their recorded 1–15 instruction
 bytes. Tail calls and indirect jumps have no return PC. This distinction must
-survive scoring: historical call truth currently folds `DW_AT_call_pc` into a
-return-PC-shaped field when `DW_AT_call_return_pc` is absent. A future scorer
-must recover that source-coordinate distinction; blindly matching either
-instruction or return address can grant incorrect or duplicate credit.
+survive scoring. Historical call truth folded `DW_AT_call_pc` into a return-PC-shaped
+field when `DW_AT_call_return_pc` was absent. Current
+[raw call policy v4](full-tree-call-coordinates-v4.md) retains both coordinate
+kinds independently and reconciles partial observations only through explicit raw
+pairs. A scorer must preserve that distinction; blindly matching either instruction
+or return address can grant incorrect or duplicate credit. The candidate format
+is unchanged by the raw-truth migration.
 
 ## Streaming, bounds and publication
 
@@ -100,7 +103,8 @@ Other tests cover closed grammar, canonical bytes, bindings, counts, target boun
 unsigned addresses, deadline/interruption behavior and speculative callbacks.
 
 This adds usable location-bearing candidate input, not the completed #128 scorer.
-Remaining work includes raw coordinate reconciliation, cross-shard candidate/truth
+Remaining work includes decoder-backed coordinate reconciliation where raw pairs
+are unavailable, cross-shard candidate/truth
 joins, exact/partial/missing/fabricated reports, relocation-bound external/PLT
 identity, virtual-slot evidence, normalized thunk semantics, production full-tree
 scale, CLI/archive integration and authoritative release composition.

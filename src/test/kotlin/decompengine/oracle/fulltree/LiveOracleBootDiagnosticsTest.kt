@@ -154,6 +154,38 @@ class LiveOracleBootDiagnosticsTest {
             }
         }
 
+    @Test
+    fun `fixture cleanup cannot mask a primary BOOT failure or its captured evidence`() {
+        val primary = AssertionError("cold attachment failure")
+        val diagnostic = AssertionError("retained BOOT protocol evidence")
+        primary.addSuppressed(diagnostic)
+        val cleanup = AssertionError("unexpected retained scratch member")
+        val observed = assertFailsWith<AssertionError> {
+            try {
+                throw primary
+            } finally {
+                preserveLiveOracleFailureDuringCleanup(primary) { throw cleanup }
+            }
+        }
+        assertSame(primary, observed)
+        assertEquals(listOf(diagnostic, cleanup), observed.suppressed.toList())
+        preserveLiveOracleFailureDuringCleanup(primary) { throw primary }
+        assertEquals(listOf(diagnostic, cleanup), primary.suppressed.toList())
+    }
+
+    @Test
+    fun `cleanup failure alone still fails and successful cleanup runs exactly once`() {
+        val failure = AssertionError("terminal absence failed")
+        assertSame(failure, assertFailsWith<AssertionError> {
+            preserveLiveOracleFailureDuringCleanup(null) { throw failure }
+        })
+        var calls = 0
+        for (primary in listOf(null, AssertionError("earlier failure"))) {
+            preserveLiveOracleFailureDuringCleanup(primary) { calls += 1 }
+        }
+        assertEquals(2, calls)
+    }
+
     private fun protocolFile(root: Path, name: String, content: String): Path =
         root.resolve(name).also { path ->
             Files.writeString(path, content)

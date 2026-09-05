@@ -254,10 +254,22 @@ class FullTreeFunctionObservationIsolatedFixtureRunnerTest {
         assertContentEquals(canonical, OracleJson.canonicalBytes(OracleJson.parseCanonical(canonical)))
         assertEquals(FROZEN_ISOLATION_CONFIGURATION_SHA256, configuration.canonicalSha256)
         val current = OracleJson.parseCanonical(canonical) as JsonObject
-        assertEquals(JsonPrimitive(3), current["schemaVersion"])
+        assertEquals(JsonPrimitive(4), current["schemaVersion"])
         assertEquals(JsonPrimitive(OracleNativeLibraries.policySha256), current["nativeLibraryProfileSha256"])
-        assertEquals(JsonPrimitive("2"), current["supervisorProtocolVersion"])
-        val legacy = JsonObject(current.toMutableMap().apply {
+        assertEquals(JsonPrimitive("3"), current["supervisorProtocolVersion"])
+        assertEquals(JsonPrimitive("1"), current["workerProtocolVersion"])
+        assertEquals(JsonPrimitive("2"), current["workerRequestVersion"])
+        assertEquals(JsonPrimitive("scope-derived-systemd-lifetime-upper-bound-v1"), current["workerStartWaitPolicy"])
+        val legacyV3 = JsonObject(current.toMutableMap().apply {
+            remove("workerRequestVersion")
+            remove("workerStartWaitPolicy")
+            put("schemaVersion", JsonPrimitive(3))
+            put("provider", JsonPrimitive("kotlin-full-tree-function-observation-isolation-configuration-v3"))
+            put("supervisorProtocolVersion", JsonPrimitive("2"))
+        })
+        assertEquals(FROZEN_V3_ISOLATION_CONFIGURATION_SHA256, OracleArtifacts.sha256(OracleJson.canonicalBytes(legacyV3)))
+        assertNotEquals(FROZEN_V3_ISOLATION_CONFIGURATION_SHA256, configuration.canonicalSha256)
+        val legacy = JsonObject(legacyV3.toMutableMap().apply {
             remove("nativeLibraryProfileSha256")
             put("schemaVersion", JsonPrimitive(2))
             put("provider", JsonPrimitive("kotlin-full-tree-function-observation-isolation-configuration-v2"))
@@ -1328,19 +1340,54 @@ class FullTreeFunctionObservationIsolatedFixtureRunnerTest {
 
                     val liveObservationCommands = mutableListOf<List<String>>()
                     val liveBusctlCommands = mutableListOf<List<String>>()
+                    val liveBusctlResults = mutableListOf<String>()
+                    var registrationQueries = 0
+                    var registrationDiagnostic = "registration not observed"
+                    var snapshotDiagnostics = "snapshot pair not observed"
                     val liveObserver = FullTreeFunctionObservationColdUnitAbsenceObserver.openWithTestObserver(
                         context.binding,
                         configuration,
                         FullTreeFunctionObservationSystemctlCommandObserver { unitName, arguments ->
                             if (unitName == context.binding.unitName) liveObservationCommands += arguments
                         },
-                        FullTreeFunctionObservationBusctlCommandObserver { unitName, arguments ->
-                            if (unitName == context.binding.unitName) liveBusctlCommands += arguments
+                        object : FullTreeFunctionObservationBusctlCommandObserver {
+                            override fun beforeCommand(unitName: String, arguments: List<String>) {
+                                if (unitName == context.binding.unitName) liveBusctlCommands += arguments
+                            }
+
+                            override fun afterCommand(
+                                unitName: String,
+                                label: String,
+                                exitCode: Int,
+                                boundedOutput: String,
+                            ) {
+                                if (unitName == context.binding.unitName && label == "manager bus registration") {
+                                    registrationQueries += 1
+                                    registrationDiagnostic = "$label exit=$exitCode output=${JsonPrimitive(boundedOutput)}"
+                                    return
+                                }
+                                if (unitName == context.binding.unitName && liveBusctlResults.size < 14) {
+                                    liveBusctlResults += "$label exit=$exitCode output=${JsonPrimitive(boundedOutput)}"
+                                }
+                            }
+                        },
+                        FullTreeFunctionObservationColdSnapshotObserver { before, after ->
+                            snapshotDiagnostics =
+                                "stable=${before.stable}/${after.stable}, " +
+                                "identityPresent=${before.systemdIdentity != null}/${after.systemdIdentity != null}, " +
+                                "cgroupCounts=${before.cgroups.size}/${after.cgroups.size}, " +
+                                "featuresChanged=${before.managerFeatures != after.managerFeatures}, " +
+                                "unitChanged=${before.unit != after.unit}, " +
+                                "jobChanged=${before.job != after.job}, " +
+                                "cgroupsChanged=${before.cgroups != after.cgroups}, " +
+                                "identityChanged=${before.systemdIdentity != after.systemdIdentity}"
                         },
                     )
                     assertEquals(
                         FullTreeFunctionObservationColdUnitAttachmentObservationOutcome.SYSTEMD_IDENTITY_CANDIDATE,
                         liveObserver.observeUnitAttachment(historical),
+                        "Cold attachment observation: $snapshotDiagnostics\n" +
+                            "$registrationDiagnostic (queries=$registrationQueries)\n${liveBusctlResults.joinToString("\n")}",
                     )
                     val hardenedBusctlPrefix = listOf(
                         "--user",
@@ -1350,7 +1397,17 @@ class FullTreeFunctionObservationIsolatedFixtureRunnerTest {
                         "--allow-interactive-authorization=no",
                         "--timeout=2",
                     )
-                    assertEquals(14, liveBusctlCommands.size)
+                    assertTrue(registrationQueries in 1..81)
+                    assertEquals(14, liveBusctlCommands.size - registrationQueries)
+                    assertEquals(14, liveBusctlResults.size)
+                    val registrationArguments = listOf(
+                        "call", "org.freedesktop.DBus", "/org/freedesktop/DBus",
+                        "org.freedesktop.DBus", "NameHasOwner", "s", "org.freedesktop.systemd1",
+                    )
+                    assertEquals(
+                        registrationQueries,
+                        liveBusctlCommands.count { it.drop(hardenedBusctlPrefix.size) == registrationArguments },
+                    )
                     assertTrue(liveBusctlCommands.all { it.take(hardenedBusctlPrefix.size) == hardenedBusctlPrefix })
                     assertEquals(
                         2,
@@ -2417,6 +2474,7 @@ class FullTreeFunctionObservationIsolatedFixtureRunnerTest {
         var leased: FullTreeFunctionObservationLeasedOperation? = null
         var prepared: FullTreeFunctionObservationPreparedRun? = null
         var isolation: FullTreeFunctionObservationPreparedIsolation? = null
+        var primaryFailure: Throwable? = null
         try {
             FullTreeFunctionObservationJournalAuthority.open(journalRoot).use { authority ->
                 val acquired = FullTreeFunctionObservationOperationCoordinator.prepareNew(
@@ -2445,51 +2503,58 @@ class FullTreeFunctionObservationIsolatedFixtureRunnerTest {
                 isolation = ready
                 run.close()
                 prepared = null
-                action(
-                    PreparedProductionIsolationTestContext(
-                        binding,
-                        mount,
-                        runRoot,
-                        output,
-                        authority,
-                        ready,
-                    ),
-                )
-            }
-        } finally {
-            var cleanupFailure: Throwable? = null
-            listOf<() -> Unit>(
-                { closePreparedIsolationAfterTest(isolation) },
-                { prepared?.close() },
-                { leased?.close() },
-            ).forEach { cleanup ->
-                runCatching(cleanup).exceptionOrNull()?.let { failure ->
-                    val prior = cleanupFailure
-                    if (prior == null) cleanupFailure = failure else if (failure !== prior) {
-                        prior.addSuppressed(failure)
-                    }
+                withLiveOracleBootDiagnostics(binding.unitName, runRoot) {
+                    action(
+                        PreparedProductionIsolationTestContext(
+                            binding,
+                            mount,
+                            runRoot,
+                            output,
+                            authority,
+                            ready,
+                        ),
+                    )
                 }
             }
-            cleanupFailure?.let { throw it }
-            assertObservationUnitAndCgroupAbsent(configuration, binding.unitName)
-            val rootFiles = if (Files.isDirectory(runRoot, LinkOption.NOFOLLOW_LINKS)) {
-                entryNames(runRoot).filterNot { it in PREPARED_RUN_DIRECTORIES }
-            } else {
-                emptyList()
+        } catch (failure: Throwable) {
+            primaryFailure = failure
+            throw failure
+        } finally {
+            preserveLiveOracleFailureDuringCleanup(primaryFailure) {
+                var cleanupFailure: Throwable? = null
+                listOf<() -> Unit>(
+                    { closePreparedIsolationAfterTest(isolation) },
+                    { prepared?.close() },
+                    { leased?.close() },
+                ).forEach { cleanup ->
+                    runCatching(cleanup).exceptionOrNull()?.let { failure ->
+                        val prior = cleanupFailure
+                        if (prior == null) cleanupFailure = failure else if (failure !== prior) {
+                            prior.addSuppressed(failure)
+                        }
+                    }
+                }
+                cleanupFailure?.let { throw it }
+                assertObservationUnitAndCgroupAbsent(configuration, binding.unitName)
+                val rootFiles = if (Files.isDirectory(runRoot, LinkOption.NOFOLLOW_LINKS)) {
+                    entryNames(runRoot).filterNot { it in PREPARED_RUN_DIRECTORIES }
+                } else {
+                    emptyList()
+                }
+                assertTrue(
+                    rootFiles.all { it in allowedRootProtocolFiles },
+                    "faulted BOOT run retained unexpected members: $rootFiles",
+                )
+                rootFiles.forEach { name ->
+                    assertFaultProtocolFile(runRoot.resolve(name), name, binding.bindingSha256)
+                }
+                removePreparedIsolationLease(
+                    leaseRoot,
+                    binding.runDirectoryName,
+                    configuration.workerClassPath.size,
+                    rootFiles,
+                )
             }
-            assertTrue(
-                rootFiles.all { it in allowedRootProtocolFiles },
-                "faulted BOOT run retained unexpected members: $rootFiles",
-            )
-            rootFiles.forEach { name ->
-                assertFaultProtocolFile(runRoot.resolve(name), name, binding.bindingSha256)
-            }
-            removePreparedIsolationLease(
-                leaseRoot,
-                binding.runDirectoryName,
-                configuration.workerClassPath.size,
-                rootFiles,
-            )
         }
         assertTrue(entryNames(mount).isEmpty())
     }
@@ -3543,6 +3608,8 @@ class FullTreeFunctionObservationIsolatedFixtureRunnerTest {
         const val ZERO_SHA256 =
             "0000000000000000000000000000000000000000000000000000000000000000"
         const val FROZEN_ISOLATION_CONFIGURATION_SHA256 =
+            "4684f36bebedaba80eaedf7c7f578b66f9219d4dd1042d0f1debcab6c64d7a90"
+        const val FROZEN_V3_ISOLATION_CONFIGURATION_SHA256 =
             "0feb4469bc91b6668777ddc336dd39c4d2db76db932ee4e74a729de34deff740"
         const val FROZEN_LEGACY_ISOLATION_CONFIGURATION_SHA256 =
             "107fe58551ea95533bada45432758c1882ba3876c5681a1c43282c10433138d3"

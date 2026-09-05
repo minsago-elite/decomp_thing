@@ -1,5 +1,10 @@
 # Raw-derived Kotlin call-truth composition
 
+This document records the policy-v3 checkpoint. Current generation uses
+[policy-v4 typed call coordinates](full-tree-call-coordinates-v4.md), with separate
+instruction/return locations and newly versioned observation/truth schemas. The
+historical v3 counts and hashes below are not silently upgraded to v4.
+
 `FullTreeCallTruthSqlite` composes the Kotlin raw function and call observation paths into
 deterministic, bounded call-truth shards and an index. It is an internal migration boundary,
 not an authoritative release entrypoint or an ACP capability.

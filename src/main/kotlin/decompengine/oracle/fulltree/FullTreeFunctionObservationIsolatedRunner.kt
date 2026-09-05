@@ -71,6 +71,8 @@ internal fun interface FullTreeFunctionObservationSystemctlCommandObserver {
 /** Observes only pinned busctl invocations; it does not observe launch or process signals. */
 internal fun interface FullTreeFunctionObservationBusctlCommandObserver {
     fun beforeCommand(unitName: String, arguments: List<String>)
+
+    fun afterCommand(unitName: String, label: String, exitCode: Int, boundedOutput: String) = Unit
 }
 
 /** Explicit fail-only test seam; the production entry point never accepts or constructs one. */
@@ -239,6 +241,8 @@ internal class FullTreeFunctionObservationIsolationConfiguration(
                 "workerEntryPoint" to
                     JsonPrimitive(FullTreeFunctionObservationIsolatedWorker::class.java.name),
                 "workerProtocolVersion" to JsonPrimitive(WORKER_PROTOCOL_VERSION),
+                "workerRequestVersion" to JsonPrimitive(WORKER_REQUEST_VERSION),
+                "workerStartWaitPolicy" to JsonPrimitive(WORKER_START_WAIT_POLICY),
             ),
         ),
         ISOLATION_CONFIGURATION_JSON_LIMITS,
@@ -1297,6 +1301,7 @@ internal class FullTreeFunctionObservationPreparedIsolation private constructor(
                 paths = paths,
                 shardId = binding.shardId,
                 runDirectory = runDirectory,
+                maximumStartWaitSeconds = resources.serviceRuntimeSeconds,
             )
             val managed = authority.withCurrentRunRootForScopeAttachment { borrowed ->
                 if (borrowed.path != runDirectory) {
@@ -2298,6 +2303,7 @@ internal object FullTreeFunctionObservationIsolatedFixtureRunner {
                         paths = paths,
                         shardId = shardId,
                         runDirectory = runTree.path,
+                        maximumStartWaitSeconds = resources.serviceRuntimeSeconds,
                     )
                     boundary.launch(request, resources).use { unit ->
                         unit.awaitBoot(request.nonce)
@@ -2408,7 +2414,12 @@ internal object FullTreeFunctionObservationIsolatedWorker {
             }
             requirePrivateDirectory(root, "isolated worker run directory")
             writeProtocolFile(root, BOOT_FILE, protocol("BOOT", request.nonce))
-            awaitWorkerProtocol(root, START_FILE, protocol("START", request.nonce), WORKER_START_TIMEOUT)
+            awaitWorkerProtocol(
+                root,
+                START_FILE,
+                protocol("START", request.nonce),
+                Duration.ofSeconds(request.maximumStartWaitSeconds),
+            )
 
             val scope = FullTreeScopeControl.load(
                 request.paths.scopeFiles.scope,
@@ -2443,9 +2454,6 @@ internal object FullTreeFunctionObservationIsolatedWorker {
                     writeProtocolFile(descriptor, FAILURE_FILE, encodeFailure(token, failure))
                 }
                 runCatching { Thread.sleep(WORKER_FAILURE_OBSERVATION_MILLIS) }
-            }
-            if (descriptor != null) {
-                runCatching { deletePrivateTreeContents(descriptor, WORKER_FAILURE_CLEANUP_LIMITS) }
             }
             runCatching { descriptor?.close() }
             System.err.println("isolated function-observation worker failed safely")
@@ -2850,17 +2858,7 @@ private data class IsolatedObservationResources(
             if (resident < MINIMUM_WORKER_MEMORY_BYTES || entities <= 0L || cpu <= 0L || wall <= 0L) {
                 isolationFail("authenticated isolated runtime bounds are not usable")
             }
-            val runtimeOverhead = listOf(
-                WORKER_START_TIMEOUT,
-                WORKER_ACK_TIMEOUT,
-                WORKER_EXIT_TIMEOUT,
-                WORKER_EXIT_TIMEOUT,
-                CGROUP_FREEZE_TIMEOUT,
-                SERVICE_CLEANUP_TIMEOUT,
-            ).fold(0L) { total, timeout ->
-                addExact(total, timeout.seconds, "systemd runtime overhead")
-            }
-            val runtime = addExact(wall, runtimeOverhead, "systemd runtime bound")
+            val runtime = isolatedObservationServiceRuntimeSeconds(wall)
             val cleanupBytes = isolatedObservationCleanupBytes(
                 maximumOutput,
                 maximumDatabase,
@@ -2940,14 +2938,39 @@ private data class IsolatedObservationResources(
     }
 }
 
+internal fun isolatedObservationServiceRuntimeSeconds(wallSeconds: Long): Long {
+    if (wallSeconds <= 0L) isolationFail("isolated derivation wall-clock bound is empty")
+    val runtimeOverhead = listOf(
+        WORKER_BOOT_TIMEOUT,
+        WORKER_ACK_TIMEOUT,
+        WORKER_EXIT_TIMEOUT,
+        WORKER_EXIT_TIMEOUT,
+        CGROUP_FREEZE_TIMEOUT,
+        SERVICE_CLEANUP_TIMEOUT,
+    ).fold(0L) { total, timeout ->
+        addExact(total, timeout.seconds, "systemd runtime overhead")
+    }
+    return addExact(wallSeconds, runtimeOverhead, "systemd runtime bound").also { seconds ->
+        secondsToNanos(seconds, "isolated service runtime")
+    }
+}
+
+internal fun parseIsolatedObservationStartWaitSeconds(value: String): Long {
+    val seconds = value.toLongOrNull()?.takeIf { parsed -> parsed > 0L && parsed.toString() == value }
+        ?: isolationFail("isolated worker START wait bound is not canonical and positive")
+    secondsToNanos(seconds, "isolated worker START wait")
+    return seconds
+}
+
 private data class IsolatedWorkerRequest(
     val nonce: String,
     val paths: IsolatedObservationPaths,
     val shardId: String,
     val runDirectory: Path,
+    val maximumStartWaitSeconds: Long,
 ) {
     fun arguments(): List<String> = listOf(
-        WORKER_PROTOCOL_VERSION,
+        WORKER_REQUEST_VERSION,
         nonce,
         paths.richArtifact.toString(),
         paths.inventory.toString(),
@@ -2956,11 +2979,12 @@ private data class IsolatedWorkerRequest(
         paths.scopeFiles.artifactManifest.toString(),
         shardId,
         runDirectory.toString(),
+        maximumStartWaitSeconds.toString(),
     )
 
     companion object {
         fun parse(arguments: Array<String>): IsolatedWorkerRequest {
-            if (arguments.size != WORKER_ARGUMENTS || arguments[0] != WORKER_PROTOCOL_VERSION) {
+            if (arguments.size != WORKER_ARGUMENTS || arguments[0] != WORKER_REQUEST_VERSION) {
                 isolationFail("isolated worker request has an unsupported shape")
             }
             val nonce = arguments[1]
@@ -2978,6 +3002,7 @@ private data class IsolatedWorkerRequest(
             if (!run.isAbsolute || run.normalize() != run) {
                 isolationFail("isolated worker run path is not absolute and normalized")
             }
+            val maximumStartWaitSeconds = parseIsolatedObservationStartWaitSeconds(arguments[9])
             return IsolatedWorkerRequest(
                 nonce,
                 IsolatedObservationPaths(
@@ -2989,6 +3014,7 @@ private data class IsolatedWorkerRequest(
                 ),
                 shardId,
                 run,
+                maximumStartWaitSeconds,
             )
         }
     }
@@ -3844,6 +3870,9 @@ private class TrustedObservationBoundary(
         request: IsolatedWorkerRequest,
         resources: IsolatedObservationResources,
     ): List<String> {
+        if (request.maximumStartWaitSeconds != resources.serviceRuntimeSeconds) {
+            isolationFail("isolated worker START wait differs from its systemd lifetime bound")
+        }
         val readOnlyInputs = listOf(
             request.paths.richArtifact,
             request.paths.inventory,
@@ -4273,6 +4302,13 @@ internal data class FullTreeFunctionObservationColdUnitSnapshot(
     val stable: Boolean = true,
 )
 
+internal fun interface FullTreeFunctionObservationColdSnapshotObserver {
+    fun afterObservation(
+        before: FullTreeFunctionObservationColdUnitSnapshot,
+        after: FullTreeFunctionObservationColdUnitSnapshot,
+    )
+}
+
 private data class FullTreeFunctionObservationColdCgroupInventory(
     val cgroups: List<FullTreeFunctionObservationColdCgroupIdentity>,
     val stable: Boolean,
@@ -4353,6 +4389,7 @@ internal class FullTreeFunctionObservationColdUnitAbsenceObserver private constr
     val isolationConfigurationSha256: String,
     private val commandObserver: FullTreeFunctionObservationSystemctlCommandObserver?,
     private val busctlCommandObserver: FullTreeFunctionObservationBusctlCommandObserver?,
+    private val snapshotObserver: FullTreeFunctionObservationColdSnapshotObserver?,
 ) {
     val unitName: String = binding.unitName
 
@@ -4393,6 +4430,23 @@ internal class FullTreeFunctionObservationColdUnitAbsenceObserver private constr
     ): FullTreeFunctionObservationColdUnitAttachmentObservationOutcome {
         requireReceiptBinding(receipt)
         requireUnchanged()
+        awaitColdSystemdManagerBusRegistration(query = { timeout ->
+            val result = runReadOnlyBusctl(
+                listOf(
+                    "call",
+                    "org.freedesktop.DBus",
+                    "/org/freedesktop/DBus",
+                    "org.freedesktop.DBus",
+                    "NameHasOwner",
+                    "s",
+                    SYSTEMD_BUS_SERVICE,
+                ),
+                "manager bus registration",
+                timeout,
+            )
+            if (result.exitCode != 0) isolationFail("cold systemd manager bus registration query failed safely")
+            result.output
+        })
         val featuresBefore = observeUnfilteredUnitInventory()
         val unitBefore = observeUnitInventory()
         val jobBefore = observeJobInventory()
@@ -4415,25 +4469,29 @@ internal class FullTreeFunctionObservationColdUnitAbsenceObserver private constr
         val featuresAfter = observeUnfilteredUnitInventory()
         requireUnchanged()
 
-        return classifyFullTreeFunctionObservationColdUnitSnapshots(
-            expected = FullTreeFunctionObservationColdUnitReceiptIdentity.from(receipt),
-            before = FullTreeFunctionObservationColdUnitSnapshot(
-                managerFeatures = featuresBefore,
-                unit = unitBefore,
-                job = jobBefore,
-                cgroups = cgroupsBefore.cgroups,
-                systemdIdentity = identityBefore.identity,
-                stable = cgroupsBefore.stable && identityBefore.stable,
-            ),
-            after = FullTreeFunctionObservationColdUnitSnapshot(
-                managerFeatures = featuresAfter,
-                unit = unitAfter,
-                job = jobAfter,
-                cgroups = cgroupsAfter.cgroups,
-                systemdIdentity = identityAfter.identity,
-                stable = cgroupsAfter.stable && identityAfter.stable,
-            ),
+        val before = FullTreeFunctionObservationColdUnitSnapshot(
+            managerFeatures = featuresBefore,
+            unit = unitBefore,
+            job = jobBefore,
+            cgroups = cgroupsBefore.cgroups,
+            systemdIdentity = identityBefore.identity,
+            stable = cgroupsBefore.stable && identityBefore.stable,
         )
+        val after = FullTreeFunctionObservationColdUnitSnapshot(
+            managerFeatures = featuresAfter,
+            unit = unitAfter,
+            job = jobAfter,
+            cgroups = cgroupsAfter.cgroups,
+            systemdIdentity = identityAfter.identity,
+            stable = cgroupsAfter.stable && identityAfter.stable,
+        )
+        val outcome = classifyFullTreeFunctionObservationColdUnitSnapshots(
+            expected = FullTreeFunctionObservationColdUnitReceiptIdentity.from(receipt),
+            before = before,
+            after = after,
+        )
+        snapshotObserver?.afterObservation(before, after)
+        return outcome
     }
 
     private fun requireReceiptBinding(
@@ -4632,7 +4690,11 @@ internal class FullTreeFunctionObservationColdUnitAbsenceObserver private constr
         return result.output
     }
 
-    private fun runReadOnlyBusctl(arguments: List<String>, label: String): TrustedCommandResult {
+    private fun runReadOnlyBusctl(
+        arguments: List<String>,
+        label: String,
+        timeout: Duration = SYSTEMD_CONTROL_TIMEOUT,
+    ): TrustedCommandResult {
         inspector.requireUnchanged()
         busController.requireUnchanged()
         bus.requireUnchanged()
@@ -4641,12 +4703,13 @@ internal class FullTreeFunctionObservationColdUnitAbsenceObserver private constr
         val result = runTrustedCommand(
             listOf(busController.path.toString()) + hardenedArguments,
             bus.controlEnvironment,
-            SYSTEMD_CONTROL_TIMEOUT,
+            timeout,
             "cold systemd $label",
         )
         inspector.requireUnchanged()
         busController.requireUnchanged()
         bus.requireUnchanged()
+        busctlCommandObserver?.afterCommand(unitName, label, result.exitCode, result.output.take(1024))
         return result
     }
 
@@ -4686,14 +4749,16 @@ internal class FullTreeFunctionObservationColdUnitAbsenceObserver private constr
             configuration: FullTreeFunctionObservationIsolationConfiguration,
             commandObserver: FullTreeFunctionObservationSystemctlCommandObserver,
             busctlCommandObserver: FullTreeFunctionObservationBusctlCommandObserver? = null,
+            snapshotObserver: FullTreeFunctionObservationColdSnapshotObserver? = null,
         ): FullTreeFunctionObservationColdUnitAbsenceObserver =
-            create(binding, configuration, commandObserver, busctlCommandObserver)
+            create(binding, configuration, commandObserver, busctlCommandObserver, snapshotObserver)
 
         private fun create(
             binding: FullTreeFunctionObservationOperationBinding,
             configuration: FullTreeFunctionObservationIsolationConfiguration,
             commandObserver: FullTreeFunctionObservationSystemctlCommandObserver?,
             busctlCommandObserver: FullTreeFunctionObservationBusctlCommandObserver? = null,
+            snapshotObserver: FullTreeFunctionObservationColdSnapshotObserver? = null,
         ): FullTreeFunctionObservationColdUnitAbsenceObserver {
             if (configuration.canonicalSha256 != binding.isolationConfigurationSha256) {
                 isolationFail("cold systemd observation configuration differs from its operation binding")
@@ -4717,6 +4782,7 @@ internal class FullTreeFunctionObservationColdUnitAbsenceObserver private constr
                 configuration.canonicalSha256,
                 commandObserver,
                 busctlCommandObserver,
+                snapshotObserver,
             )
         }
     }
@@ -4802,6 +4868,15 @@ internal fun parseColdSystemdBusctlStringProperty(output: String, label: String)
 internal fun parseColdSystemdBusctlBooleanProperty(output: String, label: String): Boolean {
     val (type, data) = parseColdSystemdBusctlEnvelope(output, label)
     val value = data as? JsonPrimitive
+    if (type != "b" || value == null || value.isString || value.content !in setOf("true", "false")) {
+        isolationFail("cold systemd $label was malformed")
+    }
+    return value.content == "true"
+}
+
+internal fun parseColdSystemdBusctlBooleanReply(output: String, label: String): Boolean {
+    val (type, data) = parseColdSystemdBusctlEnvelope(output, label)
+    val value = (data as? JsonArray)?.singleOrNull() as? JsonPrimitive
     if (type != "b" || value == null || value.isString || value.content !in setOf("true", "false")) {
         isolationFail("cold systemd $label was malformed")
     }
@@ -5398,7 +5473,7 @@ private class ManagedObservationUnit(
         runTree: ObservationRunTreeAccess? = null,
     ) {
         check(expectedNonce == nonce)
-        val deadline = deadlineAfter(WORKER_START_TIMEOUT, "isolated worker bootstrap")
+        val deadline = deadlineAfter(WORKER_BOOT_TIMEOUT, "isolated worker bootstrap")
         var nextStatus = 0L
         while (System.nanoTime() < deadline) {
             bootProtocolFileOrNull(runTree, BOOT_FILE)?.let { content ->
@@ -7185,12 +7260,14 @@ private inline fun <T> translateIsolationFailures(
 private fun isolationFail(message: String): Nothing =
     throw FullTreeFunctionObservationIsolationException(message)
 
-private const val ISOLATION_CONFIGURATION_SCHEMA_VERSION = 3
+private const val ISOLATION_CONFIGURATION_SCHEMA_VERSION = 4
 private const val ISOLATION_CONFIGURATION_PROVIDER =
-    "kotlin-full-tree-function-observation-isolation-configuration-v3"
+    "kotlin-full-tree-function-observation-isolation-configuration-v4"
 private const val WORKER_PROTOCOL_VERSION = "1"
-private const val WORKER_ARGUMENTS = 9
-private const val SUPERVISOR_PROTOCOL_VERSION = "2"
+private const val WORKER_REQUEST_VERSION = "2"
+private const val WORKER_START_WAIT_POLICY = "scope-derived-systemd-lifetime-upper-bound-v1"
+private const val WORKER_ARGUMENTS = 10
+private const val SUPERVISOR_PROTOCOL_VERSION = "3"
 private const val SUPERVISOR_ARGUMENTS = WORKER_ARGUMENTS + 4
 private const val KOTLIN_BOOT_PROTOCOL_VERSION = "1"
 private const val KOTLIN_BOOT_ARGUMENTS = 3
@@ -7288,7 +7365,7 @@ private const val PROTOCOL_POLL_MILLIS = 20L
 private const val SYSTEMD_POLL_MILLIS = 20L
 private const val TRUSTED_PROCESS_POLL_MILLIS = 20L
 private const val WORKER_FAILURE_OBSERVATION_MILLIS = 1_000L
-private val WORKER_START_TIMEOUT = Duration.ofSeconds(30)
+private val WORKER_BOOT_TIMEOUT = Duration.ofSeconds(30)
 private val WORKER_ACK_TIMEOUT = Duration.ofMinutes(5)
 private val WORKER_EXIT_TIMEOUT = Duration.ofSeconds(10)
 private val CGROUP_FREEZE_TIMEOUT = Duration.ofSeconds(5)
@@ -7300,20 +7377,6 @@ private val PROBE_READER_JOIN_TIMEOUT = Duration.ofSeconds(1)
 private val STATUS_POLL_INTERVAL = Duration.ofSeconds(2)
 private val ISOLATED_PUBLISHER_LIMITS = FullTreeFunctionObservationShardPublisherLimits()
 private val DEFAULT_CONTROL_LIMITS = ISOLATED_PUBLISHER_LIMITS.control
-private val WORKER_FAILURE_CLEANUP_LIMITS = AcpRuntimeClosureLimits(
-    maximumEntries = MAXIMUM_PRIVATE_ENTRIES,
-    maximumUserOwnedFileBytes = isolatedObservationCleanupBytes(
-        ISOLATED_PUBLISHER_LIMITS.maximumOutputBytes,
-        ISOLATED_PUBLISHER_LIMITS.maximumDatabaseBytes,
-        DEFAULT_CONTROL_LIMITS.maximumDwarfScratchBytes,
-        addExact(
-            PROTOCOL_CLEANUP_ALLOWANCE_BYTES,
-            MAXIMUM_AUTHENTICATED_CLASSPATH_BYTES,
-            "worker-failure cleanup runtime allowance",
-        ),
-    ),
-    maximumDepth = MAXIMUM_PRIVATE_DEPTH,
-)
 private val CGROUP_ROOT = Path.of("/sys/fs/cgroup")
 private val KERNEL_BOOT_ID_PATH = Path.of("/proc/sys/kernel/random/boot_id")
 private val SECURE_RANDOM = SecureRandom()

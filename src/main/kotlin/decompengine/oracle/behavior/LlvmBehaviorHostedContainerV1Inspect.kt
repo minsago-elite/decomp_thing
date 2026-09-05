@@ -200,6 +200,7 @@ private fun verifyImageConfig(config: JsonObject) {
     requireAbsentNullOrEmptyString(config, "Hostname", "worker image config")
     requireAbsentNullOrEmptyString(config, "Domainname", "worker image config")
     requireAbsentNullOrEmptyString(config, "Image", "worker image config")
+    if ("ArgsEscaped" in config) config.inspectBoolean("ArgsEscaped", "worker image config")
     listOf(
         "AttachStdin",
         "AttachStdout",
@@ -207,7 +208,6 @@ private fun verifyImageConfig(config: JsonObject) {
         "Tty",
         "OpenStdin",
         "StdinOnce",
-        "ArgsEscaped",
         "NetworkDisabled",
     )
         .forEach { field -> requireAbsentOrFalse(config, field, "worker image config") }

@@ -13,7 +13,7 @@ import kotlinx.serialization.json.JsonPrimitive
 
 class FullTreeCallObservationsTest {
     @Test
-    fun `current v3 policy is deterministic and historical v2 identities remain frozen`() {
+    fun `current v4 policy is deterministic and historical v2 and v3 identities remain frozen`() {
         val fixture = fixture()
         val first = FullTreeCallObservations.shardInputs(
             fixture.inventory,
@@ -29,6 +29,8 @@ class FullTreeCallObservationsTest {
         )
 
         assertEquals(CALL_OBSERVATION_CONFIGURATION, FullTreeCallObservations.configurationSha256)
+        assertEquals("a9c1553036d66122fc108a1599fe209c4d03f47fc94343f002a12c8cd1f55f11",
+            FullTreeCallObservations.historicalV3ConfigurationSha256)
         assertEquals(
             HISTORICAL_V2_CALL_OBSERVATION_CONFIGURATION,
             FullTreeCallObservations.historicalV2ConfigurationSha256,
@@ -39,8 +41,8 @@ class FullTreeCallObservationsTest {
         )
         assertEquals(
             listOf(
-                "eea3e0ec083bd098a2ccdb427b61a46640fd0de1ffbf93e114444c8814d960e0",
-                "ee4de9cf27999fab63aef511da9f9ebbba1e467f0a017d3277255976323bd568",
+                "e2edd67fca6549988298753cd273ea21e5e4ddc26bfbf9c7b044f69a19e00b55",
+                "5ab4b714392fc30aba5899035b3fcba61e0af611925559ddddb82cb9ac74ccc8",
             ),
             first.map(FullTreeCallObservationShardInput::inputSha256),
         )
@@ -249,7 +251,7 @@ class FullTreeCallObservationsTest {
                         "scopeSha256" to JsonPrimitive(fixture.scopeSha256),
                     ),
                 ),
-                "schemaVersion" to JsonPrimitive(1),
+                "schemaVersion" to JsonPrimitive(2),
                 "shard" to JsonObject(
                     mapOf(
                         "id" to JsonPrimitive(input.identifier),
@@ -275,6 +277,7 @@ class FullTreeCallObservationsTest {
             mapOf(
                 "caller" to (callerId?.removePrefix("function-rva-")?.let(::JsonPrimitive) ?: JsonNull),
                 "die" to JsonPrimitive(dieOffset),
+                "call" to JsonNull,
                 "return" to (returnPcRva?.let(::JsonPrimitive) ?: JsonNull),
                 "unit" to JsonPrimitive(unitId),
             ),
@@ -282,6 +285,8 @@ class FullTreeCallObservationsTest {
         return JsonObject(
             mapOf(
                 "callerId" to (callerId?.let(::JsonPrimitive) ?: JsonNull),
+                "callerLocalCallOffset" to JsonNull,
+                "callPcRva" to JsonNull,
                 "callerLocalReturnOffset" to (callerLocalReturnOffset?.let(::JsonPrimitive) ?: JsonNull),
                 "dieOffset" to JsonPrimitive(dieOffset),
                 "id" to JsonPrimitive(
@@ -356,7 +361,7 @@ class FullTreeCallObservationsTest {
 
     private companion object {
         const val CALL_OBSERVATION_CONFIGURATION =
-            "a9c1553036d66122fc108a1599fe209c4d03f47fc94343f002a12c8cd1f55f11"
+            "ec32478cfea2b28fd284d2fbe7a66eb0bc5eaf27e1b3498c93e4e2082f7b2bab"
         const val HISTORICAL_V2_CALL_OBSERVATION_CONFIGURATION =
             "7723b7ff5908661f0c64a80a90a8a8e88d5147bdca524b21e5d1092f77b0826f"
     }

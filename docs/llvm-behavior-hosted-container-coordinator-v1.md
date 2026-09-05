@@ -44,6 +44,51 @@ Live inspection requires the inherited image configuration to be exactly the rev
 entry point, and an empty command. Inherited volumes, healthchecks, hooks, shell configuration,
 loader/JVM environment, or extra labels fail closed.
 
+### Linux image legacy escaping metadata
+
+Image `Config.ArgsEscaped` may be absent or a JSON boolean. BuildKit's
+[`dispatchCmd`](https://github.com/moby/buildkit/blob/703866e5f2e4af295b485b181b447a7755d5099c/frontend/dockerfile/dockerfile2llb/convert.go#L1500)
+sets it true even for the reviewed `CMD []`, without an operating-system condition.
+It is not evidence that the Linux entry point invokes a shell. Docker's
+[Linux OCI process construction](https://github.com/moby/moby/blob/v28.0.4/daemon/oci_linux.go#L659)
+uses the container path and argument array directly. The image projector still
+requires `linux/amd64`, the exact two-element Java entry point, an empty command
+and all existing environment/hook restrictions. Null, strings, numbers and
+structured values for this metadata are rejected. The stopped-container projector
+still requires absent/false `ArgsEscaped`, exact `Path`/`Args` and every existing
+runtime restriction. Execution projections and recipe bytes are unchanged.
+
+The `c962a04` hosted run built the production-staged image, then rejected this
+field before the retained-tool probe. Its exception did not record the actual
+value; the BuildKit behavior above identifies an independently reproducible
+incorrect assumption, not a recovered value from that run. The live test now
+attaches bounded, escaped inspect diagnostics on projection failure. Required
+hosted execution remains necessary; local projector tests are not a Docker pass.
+The new true-valued Linux fixture failed against the old projector. After the
+correction, 50 focused projector/control/journal/live-contract tests yielded
+49 passes, one explicit missing-Docker live skip, and no failures or errors.
+Hosted run [33944212013](https://github.com/minsago-elite/decomp_thing/actions/runs/33944212013)
+at `f8cca3e` subsequently completed successfully, including the required
+production-staged worker-image retained Clang/direct LLD hostile-swap step, Kotlin
+inventory reconciliation, function-oracle generation and reference-evidence gates.
+Artifact `9962935509` retains all ten worker-image tests: ten passed, no skips,
+failures or errors. The live test requires the exact `swaps=5 outside-header=blocked`
+result, empty stderr and absence of candidate build-script execution, then proves
+container/image cleanup. These are real hosted results, not a full-tree
+configure/build or authoritative hosted receipt/release-composition claim.
+
+The corresponding private-execution review checks descriptor-derived sealed tool
+snapshots, fixed `clang`/`ld.lld` argv[0], pinned cwd and closed environment, sealed
+source/header/object inputs, direct authenticated CRT/runtime/LLD selection, and
+bounded pidfd/session cleanup. The current focused inner-worker, verifier and
+live-contract selection has 33 tests: 25 pass and eight tool/Docker-dependent
+local cases skip. Executed cases include the private JVM authority surface,
+argv/cwd/environment/inherited-descriptor checks, and timeout/overflow/interruption
+cleanup without adopting unrelated JVM children. The required hosted probe supplies
+the missing live compiler/linker and hostile input-swap evidence. These results
+complete the retained-tool task #143; ingress/outer receipt authority (#140),
+full configure/build reproduction (#115) and release gates remain separate.
+
 ### Required live worker-image regression
 
 The LLVM oracle workflow sets `DECOMP_REQUIRE_LLVM_HOSTED_WORKER_IMAGE=1` and runs the opt-in

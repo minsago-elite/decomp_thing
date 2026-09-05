@@ -139,6 +139,43 @@ class LlvmBehaviorHostedContainerV1InspectTest {
     }
 
     @Test
+    fun `Linux image accepts the legacy BuildKit boolean without changing execution semantics`() {
+        val fixture = InspectFixture()
+        val config = fixture.image.objectField("Config")
+        val expected = LlvmBehaviorHostedWorkerImageV1Inspect.project(rawInspectBytes(fixture.image), IMAGE_ID)
+        val configurations = listOf(
+            JsonObject(config - "ArgsEscaped"),
+            config.withField("ArgsEscaped", JsonPrimitive(false)),
+            config.withField("ArgsEscaped", JsonPrimitive(true)),
+        )
+        for (configuration in configurations) {
+            val image = fixture.image.withField("Config", configuration)
+            assertEquals(expected, LlvmBehaviorHostedWorkerImageV1Inspect.project(rawInspectBytes(image), IMAGE_ID))
+            fixture.assertImageRejected("Windows still rejected", image.withField("Os", JsonPrimitive("windows")))
+            fixture.assertImageRejected("shell entrypoint still rejected", image.withField(
+                "Config", configuration.withField("Entrypoint", stringArray("/bin/sh", "-c", "exec java")),
+            ))
+            fixture.assertImageRejected("nonempty command still rejected", image.withField(
+                "Config", configuration.withField("Cmd", stringArray("--unexpected")),
+            ))
+        }
+    }
+
+    @Test
+    fun `image legacy escaping flag remains boolean-only and never changes container admission`() {
+        val fixture = InspectFixture()
+        val config = fixture.image.objectField("Config")
+        for (invalid in listOf(JsonNull, JsonPrimitive("true"), JsonPrimitive(1), JsonArray(emptyList()), JsonObject(emptyMap()))) {
+            fixture.assertImageRejected("nonboolean ArgsEscaped", fixture.image.withField(
+                "Config", config.withField("ArgsEscaped", invalid),
+            ))
+        }
+        fixture.assertContainerRejected("container escaping remains forbidden", fixture.container.withField(
+            "Config", fixture.container.objectField("Config").withField("ArgsEscaped", JsonPrimitive(true)),
+        ))
+    }
+
+    @Test
     fun `image inspect rejects identity platform rootfs and inherited execution mutations`() {
         val fixture = InspectFixture()
         val config = fixture.image.objectField("Config")
