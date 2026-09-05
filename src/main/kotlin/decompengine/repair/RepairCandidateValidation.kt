@@ -154,7 +154,7 @@ internal fun validateTestOnlyRepairCandidate(
         }
         Files.createDirectories(request.reportsDir)
         val compile = strategy.compile(workspace, request.reportsDir.resolve("${request.label}.compile.log"), request.budget)
-        val rebuilt = if (compile == null) strategy.rebuiltProgram(workspace, request.budget) else null
+        val rebuilt = if (compile == null && request.originalBinary != null) strategy.rebuiltProgram(workspace, request.budget) else null
         val proof = RepairValidationProof(request.sourceRevisionSha256, request.profileSha256, request.indexSha256,
             request.regressionCorpusSha256, request.originalBinary?.let { sha256(Files.readAllBytes(it)) },
             rebuilt?.takeIf { Files.isRegularFile(it) }?.let { sha256(Files.readAllBytes(it)) },

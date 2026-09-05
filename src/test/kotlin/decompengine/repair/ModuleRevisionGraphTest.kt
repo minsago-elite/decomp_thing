@@ -159,7 +159,8 @@ class ModuleRevisionGraphTest {
 
         ModuleRevisionGraph.open(project, GeneratedCRepairIndexProfile).use { reopened ->
             val iteration = reopened.derivedRepairIterations().single()
-            assertTrue(iteration.releaseComplete)
+            assertFalse(iteration.releaseComplete)
+            assertEquals(RepairAttemptDisposition.LEGACY_UNVERIFIED, iteration.disposition)
             assertEquals(RepairPublicationMode.ACP_RELEASE, iteration.publicationMode)
             assertEquals(binding, iteration.agentInvocation)
         }

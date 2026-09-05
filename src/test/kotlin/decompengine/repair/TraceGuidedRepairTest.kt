@@ -181,7 +181,7 @@ class TraceGuidedRepairTest {
         }
 
         history.reconcile(emptyList())
-        assertTrue(historyPath.readText().startsWith("{\n  \"schemaVersion\": 2,"))
+        assertTrue(historyPath.readText().startsWith("{\n  \"schemaVersion\": 3,"))
     }
 
     @Test
@@ -258,11 +258,12 @@ class TraceGuidedRepairTest {
             failure = failure,
             regressionInputs = listOf(ProcessInput(id = "hello_default")),
         )
-        val build = MakeProjectBuilder.build(projectDir)
-
         assertEquals("compile", iteration.failureKind)
         assertEquals(listOf("hello_default"), iteration.retainedRegressionIds)
-        assertTrue(build.projectDir.resolve("build/reconstructed").exists())
+        assertEquals("compile-valid", iteration.after?.kind)
+        assertEquals(RepairAttemptDisposition.PROVISIONAL, iteration.disposition)
+        assertEquals("int decomp_engine_main(void) {\n", projectDir.resolve("src/reconstructed.c").readText())
+        assertEquals(goodHelloSource(), iteration.patches.single().replacementBytes.toString(Charsets.UTF_8))
         assertFalse(history.all().single().summary.contains("close missing brace"))
         assertEquals(RepairPublicationMode.TEST_ONLY_NON_RELEASE, history.all().single().publicationMode)
         assertFalse(history.all().single().releaseComplete)
@@ -303,7 +304,9 @@ class TraceGuidedRepairTest {
 
         val invocation = assertNotNull(observed)
         assertEquals(budget, invocation.budget)
-        assertEquals(limits, invocation.limits)
+        assertTrue(invocation.limits.wallClockTimeout <= limits.wallClockTimeout)
+        assertTrue(invocation.limits.wallClockTimeout > Duration.ZERO)
+        assertEquals(limits.copy(wallClockTimeout = invocation.limits.wallClockTimeout), invocation.limits)
         assertTrue(invocation.cancellation === cancellation.cancellation)
     }
 
@@ -804,14 +807,12 @@ class TraceGuidedRepairTest {
         assertEquals("valid", result.iterations.last().after?.kind)
         assertTrue(inputs.all { client.requests.last().prompt.contains(it.id) })
         assertTrue(projectDir.resolve("reports/iteration_1_behavior.diff.json").exists())
-        val buildContract = Json.parseToJsonElement(projectDir.resolve("reports/build_contract.json").readText()).jsonObject
-        val reconstructedInput = buildContract.getValue("sourceInputs").jsonArray
-            .map { it.jsonObject }.single { it.getValue("path").jsonPrimitive.content == "src/reconstructed.c" }
-        assertEquals(
-            sha256(projectDir.resolve("src/reconstructed.c").readBytes()),
-            reconstructedInput.getValue("sha256").jsonPrimitive.content,
-        )
-        assertTrue(buildContract.getValue("failedOwners").jsonArray.isEmpty())
+        ModuleRevisionGraph.open(projectDir, GeneratedCRepairIndexProfile).use { graph ->
+            val accepted = graph.snapshot.nodes.single { it.id == graph.snapshot.fullyAcceptedHeadId }
+            assertEquals(accepted.sourceRevisionSha256, accepted.validationProof?.sourceRevisionSha256)
+            assertEquals(RepairRunStatus.FULLY_ACCEPTED, graph.snapshot.runs.last().status)
+            assertTrue(accepted.validationProof?.cleanupVerified == true)
+        }
 
         val reloaded = RepairHistory(historyPath)
         assertEquals(inputs.sortedBy { it.id }, reloaded.retainedInputs())
@@ -856,7 +857,10 @@ class TraceGuidedRepairTest {
             listOf(ProcessInput("default")),
         )
 
-        assertEquals(0, MakeProjectBuilder.build(projectDir).returnCode)
+        assertTrue(parsePath.readText().contains("unfinished_repair"))
+        val repaired = RepairHistory(projectDir.resolve("reports/repair_history.json")).all().single()
+        assertEquals(RepairAttemptDisposition.PROVISIONAL, repaired.disposition)
+        assertEquals(validParse, repaired.patches.single().replacementBytes.toString(Charsets.UTF_8))
         assertTrue("src/modules/parse.c" in client.lastRequest!!.projectFiles)
         assertTrue("include/modules/parse.h" in client.lastRequest!!.projectFiles)
         assertTrue("src/modules/render.c" !in client.lastRequest!!.projectFiles)
@@ -972,7 +976,7 @@ class TraceGuidedRepairTest {
         )
 
         assertEquals(false, iteration.succeeded)
-        assertEquals("behavior", iteration.after?.kind)
+        assertEquals("no-validated-improvement", iteration.after?.kind)
         assertContentEquals(before, target.readBytes())
     }
 
@@ -1289,7 +1293,7 @@ class TraceGuidedRepairTest {
             emptyList(),
         )
 
-        assertContentEquals(candidate, target.readBytes())
+        assertContentEquals(parent, target.readBytes())
         assertContentEquals(candidate, iteration.patches.single().replacementBytes)
         assertTrue(historyPath.readText().contains("\"replacementHex\": \"fe01\""))
         ModuleRevisionGraph.open(project, profile).use { graph ->
@@ -1309,7 +1313,8 @@ class TraceGuidedRepairTest {
             override val assurance = RepairValidationAssurance.TEST_ONLY_HOST_PROCESS
             override fun requireAvailable() = Unit
             override fun compile(projectDir: Path, logPath: Path, budget: RepairResourceBudget): CompileFailure? {
-                assertContentEquals(candidate, target.readBytes())
+                assertContentEquals(candidate, projectDir.resolve("src/reconstructed.c").readBytes())
+                assertEquals(parent, target.readText())
                 throw originalFailure
             }
             override fun rebuiltProgram(projectDir: Path, budget: RepairResourceBudget): Path =

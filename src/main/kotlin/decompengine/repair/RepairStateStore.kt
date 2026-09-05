@@ -58,6 +58,18 @@ internal class RepairStateStore private constructor(
 
     fun writeGraph(bytes: ByteArray) = writeAtomically(revisions, GRAPH_NAME, bytes, "revision-state")
 
+    fun preserveLegacyState(kind: String, bytes: ByteArray, maximumBytes: Long) {
+        require(kind in setOf("graph", "history"))
+        require(bytes.size.toLong() <= maximumBytes)
+        val digest = decompengine.project.sha256(bytes)
+        val name = "legacy-$kind-$digest.json"
+        if (exists(revisions, name)) {
+            require(readRequiredStable(revisions, revisionsPath, name, maximumBytes, "legacy repair state").bytes.contentEquals(bytes))
+        } else {
+            writeAtomically(revisions, name, bytes, "legacy-repair-state", requireAbsent = true)
+        }
+    }
+
     fun writeBinding(bytes: ByteArray) =
         writeAtomically(revisions, RECOVERY_BINDING_NAME, bytes, "recovery-binding")
 
