@@ -341,12 +341,21 @@ Uploads stage their input and metadata together in a private `.upload-` director
 Before parsing or staging, JobStore rejects input above its 32 MiB read limit and takes an owned byte-array
 copy. Metadata, declared size and persisted input all derive from that copy, so later caller mutation cannot
 change what is published. This bounds the retained input per upload, not aggregate request memory or storage.
+Before staging, the store creates missing directories, resolves the canonical store path, then opens and
+forces that directory and each canonical ancestor through the filesystem root, in leaf-to-root order.
+Every upload repeats confirmation, including when all directories already exist: a prior failed attempt
+may have created them without completing confirmation. Failure to open or force an ancestor stops the
+upload before private staging or final publication; existing jobs and newly created empty directories
+are retained. There is no fallback that silently accepts unsupported directory-force operations.
+The original configured path remains the metadata identity. Provisioning/durability of symlink aliases,
+concurrent path replacement and noncooperating filesystem writers remain outside this confirmation
+contract. Directory force calls on the tested local filesystem are not a power-loss qualification.
 The input and metadata are forced before the directory is atomically renamed to its final job ID; the store
 directory is then forced. Metadata records the final input path. Ordinary failures before publication clean
 up the staging directory; failures after rename may leave a complete published job even when the caller
 receives an error. Startup does not treat staging directory names as job IDs. Tests verify interrupted input
 writes leave no partial job and preserve prior jobs. Power-loss injection, abandoned staging/temporary-file
-reclamation, and durability of newly created store ancestors remain open requirements.
+reclamation, and the full supported-filesystem/ancestor-durability qualification remain open requirements.
 
 `GET /api/recovery` exposes a read-only schema-v1 recovery inventory for #242. It reports retained
 upload-stage and metadata-temporary counts, scanned entries, observed bytes as a decimal string,
