@@ -89,7 +89,8 @@ class BuiltinInvocationArchiveDocument private constructor(raw: ByteArray, inter
             check(BuiltinJournal.identity(configuration.identity, identity.binding) == BuiltinJournal.identity(identity.journal, identity.binding))
             request.workflowIdentity?.let { workflow ->
                 check(identity.workflow == workflow.workflow.name.lowercase() && identity.taskId == workflow.taskId)
-                check(identity.promptSha256 == workflow.promptSha256 && identity.journal.acceptedRevisionSha256 == workflow.acceptedRevisionSha256)
+                check(identity.promptSha256 == workflow.promptSha256 && identity.journal.acceptedRevisionSha256 == workflow.acceptedRevisionSha256 &&
+                    identity.journal.inputRevisionSha256 == workflow.inputRevisionSha256)
                 check(identity.journal.stageSha256 == builtinCapturedStageSha256(request, identity.journal.sourceSha256))
             }
             val provider = receipt.providerEvidence
@@ -159,7 +160,8 @@ class BuiltinInvocationArchiveReference internal constructor(
     }
     internal fun requireWorkflow(expected: AgentWorkflowIdentity) {
         require(identity.workflow == expected.workflow.name.lowercase() && identity.taskId == expected.taskId &&
-            identity.promptSha256 == expected.promptSha256 && identity.journal.acceptedRevisionSha256 == expected.acceptedRevisionSha256) {
+            identity.promptSha256 == expected.promptSha256 && identity.journal.acceptedRevisionSha256 == expected.acceptedRevisionSha256 &&
+            identity.journal.inputRevisionSha256 == expected.inputRevisionSha256) {
             "built-in invocation reference differs from its workflow lineage"
         }
     }
@@ -180,7 +182,8 @@ internal fun parseBuiltinInvocationArchiveReference(value: JsonElement): Builtin
             invocation.text("requestSha256"), invocation.text("accessPolicySha256")),
         BuiltinJournalIdentity(invocation.text("provider"), invocation.text("model"), invocation.text("sourceSha256"),
             invocation.text("stageSha256"), invocation.text("acceptedRevisionSha256"),
-            invocation["factoryProvenance"]?.let(::parseBuiltinHarnessProvenance))),
+            invocation["factoryProvenance"]?.let(::parseBuiltinHarnessProvenance),
+            invocation["inputRevisionSha256"]?.jsonPrimitive?.content)),
         BuiltinJournalCommitment(commitment.getValue("records").jsonPrimitive.int, commitment.getValue("bytes").jsonPrimitive.long,
             commitment.text("headSha256")))
     require(reference.json() == root) { "built-in invocation reference has invalid or extra fields" }

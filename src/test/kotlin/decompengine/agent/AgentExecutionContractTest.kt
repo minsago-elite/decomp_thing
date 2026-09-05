@@ -27,7 +27,8 @@ class AgentExecutionContractTest {
         ))
         val variations = listOf(null, identity, identity.copy(workflow = AgentWorkflow.RECONSTRUCTION),
             identity.copy(taskId = "revision_2"), identity.copy(acceptedRevisionSha256 = "c".repeat(64)),
-            identity.copy(promptSha256 = "d".repeat(64)))
+            identity.copy(promptSha256 = "d".repeat(64)), identity.copy(inputRevisionSha256 = "a".repeat(64)),
+            identity.copy(inputRevisionSha256 = "e".repeat(64)))
         assertEquals(variations.size, variations.map { binding(it).requestSha256 }.distinct().size)
         assertEquals(1, variations.map { binding(it).accessPolicySha256 }.distinct().size)
         assertEquals(binding(identity), binding(identity.copy()))
@@ -47,6 +48,9 @@ class AgentExecutionContractTest {
             }
             assertFailsWith<IllegalArgumentException> {
                 AgentWorkflowIdentity(AgentWorkflow.REPAIR, "attempt", "a".repeat(64), digest)
+            }
+            assertFailsWith<IllegalArgumentException> {
+                AgentWorkflowIdentity(AgentWorkflow.REPAIR, "attempt", "a".repeat(64), "b".repeat(64), digest)
             }
         }
     }

@@ -229,7 +229,78 @@ that reads those fields. They do not change version negotiation: they remain v1 
 capability-gated, and usage/message identifiers are normalized rather than exposed as SDK types. The upgrade checks
 below must review these fields explicitly; removal or wire-shape changes require adapter and subprocess-test changes.
 
+Config-option setters are also checked against the current typed SDK option inventory immediately
+before each request. Removal, duplicate IDs/values or a changed option type fails with a
+configuration diagnostic and preference index. Diagnostics preview at most four current option IDs
+and four values, redact configured environment values, and truncate each preview to 48 characters
+plus a truncation marker. These previews are display text, not selectors. The exact initial session advertisement remains a
+separate required authority check: later updates cannot authorize a choice absent from it. Existing
+post-response checks still verify the complete applied preference prefix. This does not make peer
+inventory changes atomic with an RPC or supply an interactive configuration UI.
+
 ## Process and wire boundary
+
+### Admission, queue bounds, and cleanup capacity
+
+Every production `AcpAgentHarness` invocation, including directly constructed harnesses, captured repairs, and
+doctor preflights, shares one application-process scheduler. Admission occurs before filesystem snapshots or agent
+launch. At most four invocations run at once, with one active invocation per primary workspace path. The scheduler
+holds at most 64 waiting invocations overall and eight per workspace. Eligible waiters run in FIFO order; a waiter
+whose workspace is already active cannot prevent another workspace from using a free global slot.
+
+Waiting consumes the original execution wall-clock budget and has a separate 30-second maximum. Cancellation and
+thread interruption remove a queued invocation without launching a process. Queue overflow, elapsed deadlines,
+and unavailable cleanup capacity return typed invocation-bound receipts with scheduler phase/reason metadata.
+The scheduler creates no threads or secondary executor queue and does not retry work automatically. Active turns
+continue using the existing ACP cancellation, terminal teardown, and process containment boundary.
+
+The admission slot covers the full contained invocation through cleanup and final change capture. A failed process
+cleanup proof retains its slot and workspace reservation for the application process lifetime; another harness
+instance cannot turn an unresolved process into fresh capacity. Such a workspace is unavailable for further turns,
+and no new invocation is admitted when all global slots are retained. Operators must resolve the process/cgroup
+failure before restarting the application; this mechanism does not certify cleanup merely because a JVM exits.
+
+Workspace grouping uses the exact normalized primary path already present in the request. Captured repairs use a
+shared synthetic primary path and therefore conservatively share one active repair slot across projects. Separate
+JVMs have separate schedulers. This checkpoint does not provide application-wide project identity,
+cancellation of validation subprocesses, or persistent restart scheduling; those remain part of
+issue #71. Captured repair also defensively copies its caller-supplied source map before admission; admission does
+not yet reserve that input memory. Per-invocation output, terminal, memory, and workspace limits still apply independently.
+
+The web server's owned background executor separately bounds exploration and reconstruction to two active
+operations and 32 pending operations per server instance. Its FIFO queue rejects overflow immediately with HTTP
+503 and `Retry-After: 1`; it never executes rejected work on the HTTP handler. A job may have only one pending or
+active operation. Rejected jobs retain a failed status explaining that admission can be retried. Shutdown interrupts
+active workers and marks discarded pending jobs failed with an explicit never-started message. This is background
+job admission, not a bound on network connections, uploaded job storage, or cross-process resources. Injected
+executors remain caller-owned. Interrupting active workers is not proof of validation subprocess cleanup.
+
+The web CLI registers a JVM shutdown hook before starting its listener. Normal JVM shutdown (including
+SIGTERM) calls the same stop path: close the listener, interrupt owned workers, and persist discarded jobs.
+After attempting every discarded-job update, stop waits up to five seconds for owned workers to terminate.
+A timeout or cleanup error is reported with a fixed diagnostic; it never establishes subprocess cleanup.
+Shutdown and successful job-status publication share a lock: once shutdown begins, a worker that catches
+interruption and returns normally is recorded as failed with an explicit shutdown diagnostic. Previously
+published completion remains intact. This controls the web status only, not artifact acceptance or rollback.
+Injected executors remain outside this lifecycle. SIGKILL, power loss, stalled filesystem writes, and
+durable recovery of indeterminate external work require the separate #68/#71 recovery mechanisms.
+`WebShutdownTest` covers propagated interruption, a worker returning after swallowing interruption, and
+a worker that remains blocked past the grace period. The last case verifies the fixed cleanup diagnostic,
+then starts a new server and checks that unfinished jobs become interrupted failures without rerunning.
+This is benign JVM-worker evidence; it does not cover orphaned external processes or power loss.
+
+Job metadata updates write and force a temporary file in the job directory, atomically replace `job.json`,
+then force the directory. There is no non-atomic fallback. An existing reader retains its previous complete
+snapshot; a failure before replacement leaves the published record intact. Temporary files are removed on
+ordinary failure. A failure after replacement, including directory-force failure, may have published the new
+record and is not proof of rollback. Tests cover held readers and interruption before publication; power-loss
+injection, abandoned temporary-file reclamation, and atomic publication of the whole uploaded job remain open.
+
+`web --listen-backlog` requests a TCP listen backlog of 64 by default and accepts values from 1 to 4096.
+Invalid values fail before the server binds or opens job storage. The underlying TCP implementation controls
+overflow refusal or dropping, as described by the [JDK HttpServer contract](https://docs.oracle.com/en/java/javase/21/docs/api/jdk.httpserver/com/sun/net/httpserver/HttpServer.html).
+This setting covers connections waiting to be accepted; it does not cap already accepted connections,
+idle keep-alive connections, request duration, or stored uploads. Those bounds remain required under #71.
 
 The public `AcpAgentHarness` has no uncontained production mode. Before it starts an ACP agent it verifies an explicit
 Linux boundary made from digest-pinned, canonical, root-owned `bubblewrap`, `prlimit`, `systemd-run`, `systemctl`, and
@@ -506,13 +577,21 @@ tool-call limit exactly once before terminal content can bind any terminal autho
 
 ## Upgrade policy
 
+The bounded `acp/v1/wire-contract.json` corpus currently freezes 49 SDK-decoded and re-encoded
+JSON-RPC messages. It includes the production model/mode setters, select and boolean configuration
+setters, flat and grouped session inventories, terminal token usage, session-info and configuration/mode/command/usage updates, and the original
+prompt/filesystem/terminal/permission lifecycle. `AcpV1WireContractGoldenTest` rejects missing or
+unvalidated entries and pins both Maven and SDK-reported versions. A golden update documents wire
+compatibility only; it does not implement advertised authentication, resume, or operator behavior.
+
 An SDK upgrade is intentional work, not an automated version-range update. A change must:
 
 1. confirm that the SDK still identifies protocol v1 as stable and keeps v2 opt-in;
 2. review the official v1 schema and release notes for wire or capability changes, including the opt-in v1
    additional-directory, usage, and message-id fields;
 3. update the Gradle coordinate and `ACP_KOTLIN_SDK_VERSION` together;
-4. run the scripted subprocess tests plus the full test suite; and
+4. review and run the versioned golden corpus, operator preference exchanges, scripted subprocess
+   tests and full test suite; and
 5. keep v2 disabled until a project issue explicitly adopts it after it becomes stable.
 
 The lifecycle wrapper remains necessary even when SDK internals change: executable selection, OS process ownership,

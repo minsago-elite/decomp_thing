@@ -158,6 +158,7 @@ class BuiltinCapturedRepairHarness(
 
     override fun executeCapturedReceipt(request: AgentExecutionRequest, initialFiles: Map<String, ByteArray>, output: BoundedRepairOutput,
         onEvent: (AgentExecutionEvent) -> Unit): AgentExecutionReceipt {
+        unsupportedBuiltinSessionContinuation(request)?.let { return it }
         val factoryProvenance = invocationProvenance()
         val journalConfiguration = try {
             (journalFactory?.create(request, initialFiles, limits.maximumEvidenceBytes) ?: this.journalConfiguration).also { journal ->
@@ -165,6 +166,7 @@ class BuiltinCapturedRepairHarness(
                 if (journal != null && request.workflowIdentity != null) {
                     require(request.workflowIdentity.workflow == AgentWorkflow.REPAIR)
                     require(journal.identity.acceptedRevisionSha256 == request.workflowIdentity.acceptedRevisionSha256)
+                    require(journal.identity.inputRevisionSha256 == request.workflowIdentity.inputRevisionSha256)
                     require(journal.identity.stageSha256 == builtinCapturedStageSha256(request, journal.identity.sourceSha256))
                 }
             }

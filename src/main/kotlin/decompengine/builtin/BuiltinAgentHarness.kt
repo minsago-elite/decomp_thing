@@ -152,6 +152,7 @@ class BuiltinAgentHarness(
         val usedCallIds = mutableSetOf<String>()
 
         fun run(binding: AgentExecutionRequestBinding): AgentExecutionReceipt {
+            unsupportedBuiltinSessionContinuation(request)?.let { return it }
             var stop: BuiltinStop
             var failureKind: AgentFailureKind? = null
             var cleanup = false
@@ -621,3 +622,9 @@ private fun canonical(value: JsonElement, depth: Int = 0): JsonElement {
     }
 }
 private fun digest(bytes: ByteArray): String = MessageDigest.getInstance("SHA-256").digest(bytes).joinToString("") { "%02x".format(it) }
+
+/** Shared ACP session continuation is distinct from the built-in private checkpoint protocol. */
+internal fun unsupportedBuiltinSessionContinuation(request: AgentExecutionRequest): AgentExecutionReceipt? =
+    if (request.sessionContinuation == null) null else AgentExecutionReceipt(
+        AgentExecutionRequestBinding.capture(request), AgentExecutionOutcome.Failed(
+            AgentFailure(AgentFailureKind.INVALID_REQUEST, "Built-in execution does not support shared session continuation")))

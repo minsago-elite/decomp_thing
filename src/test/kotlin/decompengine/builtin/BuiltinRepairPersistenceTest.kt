@@ -25,7 +25,7 @@ class BuiltinRepairPersistenceTest {
     }
     private fun begin(graph: ModuleRevisionGraph): ModuleRevisionAttempt {
         val corpus = graph.retainedRegressionCorpus()
-        return graph.beginAttempt(listOf(relative), RevisionRepairMetadata(1, "compile", "bounded failure", null,
+        return graph.beginAttempt(listOf(relative), RevisionRepairMetadata(graph.snapshot.nodes.count { it.repairMetadata != null } + 1, "compile", "bounded failure", null,
             corpus.inputs.map { it.id }, null, corpus.sha256))
     }
     private fun document(graph: ModuleRevisionGraph, attempt: ModuleRevisionAttempt, project: Path,
@@ -33,7 +33,7 @@ class BuiltinRepairPersistenceTest {
         val workflow = graph.invocationIdentity(attempt)
         val journals = Files.createTempDirectory(directory, "journals-")
         Files.setPosixFilePermissions(journals, PosixFilePermissions.fromString("rwx------"))
-        val before = project.resolve(relative).readBytes()
+        val before = graph.candidateSources(attempt).getValue(relative)
         var turns = 0
         val harness = BuiltinCapturedRepairHarness(ModelProvider { _, _ ->
             if (turns++ == 0) ModelResponse("", listOf(ModelToolCall("write1", "write_text", buildJsonObject {
@@ -84,6 +84,55 @@ class BuiltinRepairPersistenceTest {
             assertContentEquals(before, project.resolve(relative).readBytes())
             assertContentEquals(raw, project.resolve(binding.receiptPath).readBytes())
         }
+    }
+
+    @Test fun `provisional input remains distinct from accepted baseline through invocation persistence and reload`() {
+        val project = project()
+        val before = project.resolve(relative).readBytes()
+        lateinit var workflow: AgentWorkflowIdentity
+        lateinit var binding: RepairAgentInvocationBinding
+        ModuleRevisionGraph.open(project, GeneratedCRepairIndexProfile).use { graph ->
+            graph.enableRunContract()
+            val corpus = graph.retainedRegressionCorpus()
+            graph.beginRun(2, 60_000)
+            val metadata = RevisionRepairMetadata(graph.snapshot.nodes.count { it.repairMetadata != null } + 1, "compile", "bounded failure", null,
+                corpus.inputs.map { it.id }, null, corpus.sha256,
+                publicationMode = RepairPublicationMode.TEST_ONLY_NON_RELEASE)
+            val baseline = graph.snapshot.nodes.single().sourceRevisionSha256
+            val first = graph.beginAttempt(listOf(relative), metadata)
+            assertEquals(baseline, graph.invocationIdentity(first).inputRevisionSha256)
+            graph.installCandidate(first, mapOf(relative to before + "\n/* provisional */\n".toByteArray()))
+            val provisional = graph.recordProvisional(first, RepairEvidence("compile", "compile only"),
+                RepairValidationProof(repairCandidateSourceSha256(graph.candidateSources(first)), graph.snapshot.profileSha256,
+                    graph.snapshot.indexSha256, corpus.sha256, null, sha256("rebuilt".toByteArray()),
+                    sha256("runtime".toByteArray()), sha256("evidence".toByteArray()), true,
+                    RepairValidationAssurance.TEST_ONLY_HOST_PROCESS))
+            val second = graph.beginAttempt(listOf(relative), metadata.copy(iterationIndex = 2))
+            workflow = graph.invocationIdentity(second)
+            assertEquals(2, workflow.schemaVersion)
+            assertEquals(baseline, workflow.acceptedRevisionSha256)
+            assertEquals(provisional.sourceRevisionSha256, workflow.inputRevisionSha256)
+            assertNotEquals(workflow.acceptedRevisionSha256, workflow.inputRevisionSha256)
+            val document = document(graph, second, project)
+            val reference = assertNotNull(document.builtinArchive)
+            reference.requireWorkflow(workflow)
+            for (wrong in listOf(workflow.copy(inputRevisionSha256 = null),
+                workflow.copy(inputRevisionSha256 = baseline),
+                workflow.copy(acceptedRevisionSha256 = provisional.sourceRevisionSha256))) {
+                assertFails { reference.requireWorkflow(wrong) }
+            }
+            binding = graph.persistAndBindAgentInvocation(second, document)
+            graph.reject(second, RepairEvidence("unqualified", "built-in candidate is not accepted"))
+            graph.finishRun(RepairRunStatus.REJECTED, RepairEvidence("unqualified", "stopped"))
+            graph.synchronizeRepairHistory()
+        }
+        ModuleRevisionGraph.open(project, GeneratedCRepairIndexProfile).use { graph ->
+            val reopened = assertNotNull(graph.snapshot.nodes.last().repairMetadata?.agentInvocation)
+            assertEquals(binding.copy(assessmentStatus = RepairAgentAssessmentStatus.REJECTED), reopened)
+            assertNotNull(reopened.builtinArchive).requireWorkflow(workflow)
+            assertNull(graph.snapshot.fullyAcceptedHeadId)
+        }
+        assertContentEquals(before, project.resolve(relative).readBytes())
     }
 
     @Test fun `graph reload independently checks artifact bytes journal commitment and accepted parent identity`() {
@@ -157,9 +206,8 @@ class BuiltinRepairPersistenceTest {
     }
 
     @Test fun `project archive retains rejected builtin evidence and independently rejects a changed journal reference`() {
-        val project = project()
         lateinit var binding: RepairAgentInvocationBinding
-        ModuleRevisionGraph.open(project, GeneratedCRepairIndexProfile).use { graph ->
+        val project = ModuleRevisionGraphTest().releaseProjectWithRejectedInvocation { graph, project ->
             val attempt = begin(graph)
             binding = graph.persistAndBindAgentInvocation(attempt, document(graph, attempt, project))
             graph.reject(attempt, RepairEvidence("unqualified", "rejected"))
@@ -169,7 +217,8 @@ class BuiltinRepairPersistenceTest {
         val bundle = ArchivalPackager.create(project, directory.resolve("valid.zip"))
         val target = directory.resolve("verified")
         val lineage = ArchivalBundleVerifier.extractAndVerifyCandidateLineage(bundle.archivePath, target)
-        assertTrue(lineage.source.acceptedAcpContributions.isEmpty())
+        assertEquals(2, lineage.source.acceptedAcpContributions.size)
+        assertTrue(lineage.source.acceptedAcpContributions.none { it.receiptPath == binding.receiptPath })
         assertContentEquals(project.resolve(binding.receiptPath).readBytes(), target.resolve(binding.receiptPath).readBytes())
         val entries = linkedMapOf<String, ByteArray>()
         ZipInputStream(Files.newInputStream(bundle.archivePath)).use { zip ->

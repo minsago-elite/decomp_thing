@@ -63,3 +63,14 @@ provider/limit identity into the persisted reference. Operator selection, per-at
 workflow artifacts, built-in acceptance through external compilation and every retained regression,
 and comparative release qualification remain outstanding. Built-in `releaseComplete` remains false;
 the existing acceptance gates have not been relaxed.
+
+
+## Default-branch run-contract integration
+
+Schema-3 repair runs keep the graph open for the whole run and retain provisional revisions as detached
+inputs. Built-in invocation references now distinguish the accepted baseline from the full input
+revision. Rejected built-in artifacts can accompany a fully validated release run, but a schema-1/2
+history or an unresolved schema-3 run cannot become a release archive. The archive fixtures retain a
+built-in rejection between a provisional ACP revision and final ACP acceptance, using the existing
+synthetic validation-receipt fixture. They verify both independent archive extraction and provenance
+after deleting private runtime files. They do not qualify a real validation provider or built-in acceptance.

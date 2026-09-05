@@ -24,7 +24,6 @@ import kotlin.test.assertFailsWith
 import kotlin.test.assertFalse
 import kotlin.test.assertNotEquals
 import kotlin.test.assertTrue
-import org.junit.jupiter.api.Assumptions.assumeTrue
 
 class LinuxBubblewrapBoundaryTest {
     @Test
@@ -81,11 +80,11 @@ class LinuxBubblewrapBoundaryTest {
                 syntheticConfiguration(Path.of("/definitely-absent/decomp-bwrap"), "0".repeat(64)),
             )
         }
-        assumeTrue(Files.isExecutable(BWRAP), "digest mismatch probe requires /usr/bin/bwrap")
+        AcpLiveContractHost.requireCapability(Files.isExecutable(BWRAP), { "digest mismatch probe requires /usr/bin/bwrap" })
         assertFailsWith<IOException> {
             LinuxBubblewrapBoundary.prepare(syntheticConfiguration(BWRAP, "0".repeat(64)))
         }
-        assumeTrue(Files.isExecutable(BASH), "ancestor-chain probe requires /usr/bin/bash")
+        AcpLiveContractHost.requireCapability(Files.isExecutable(BASH), { "ancestor-chain probe requires /usr/bin/bash" })
         val mutableParent = createTempDirectory("acp-mutable-tool-parent-").toAbsolutePath().normalize()
         val copiedTool = mutableParent.resolve("bash")
         Files.copy(BASH, copiedTool)
@@ -771,9 +770,9 @@ class LinuxBubblewrapBoundaryTest {
     fun `quota backed staging contains many entries sparse files and a background writer`() {
         requireLiveHost()
         val mountText = System.getenv("DECOMP_TEST_ACP_QUOTA_TMPFS")
-        assumeTrue(
+        AcpLiveContractHost.requireCapability(
             !mountText.isNullOrBlank(),
-            "set DECOMP_TEST_ACP_QUOTA_TMPFS to an empty user-owned 0700 dedicated tmpfs with finite size,nr_inodes",
+            { "set DECOMP_TEST_ACP_QUOTA_TMPFS to an empty user-owned 0700 dedicated tmpfs with finite size,nr_inodes" },
         )
         val staging = AcpWorkflowStagingRoot.createQuotaBacked(
             "quota",
@@ -1166,17 +1165,17 @@ class LinuxBubblewrapBoundaryTest {
     }
 
     private fun requireCompiledFixtures() {
-        assumeTrue(Files.isExecutable(CC), "static ACP fixtures require /usr/bin/cc")
-        assumeTrue(GATE_HELPER_RESULT.isSuccess, "static gate helper unavailable: ${GATE_HELPER_RESULT.exceptionOrNull()}")
-        assumeTrue(PROBE_RESULT.isSuccess, "static probe unavailable: ${PROBE_RESULT.exceptionOrNull()}")
+        AcpLiveContractHost.requireCapability(Files.isExecutable(CC), { "static ACP fixtures require /usr/bin/cc" })
+        AcpLiveContractHost.requireCapability(GATE_HELPER_RESULT.isSuccess, { "static gate helper unavailable: ${GATE_HELPER_RESULT.exceptionOrNull()}" })
+        AcpLiveContractHost.requireCapability(PROBE_RESULT.isSuccess, { "static probe unavailable: ${PROBE_RESULT.exceptionOrNull()}" })
     }
 
     private fun requireLiveHost() {
         requireCompiledFixtures()
         val missing = SECURITY_TOOLS.filterNot(Files::isExecutable)
-        assumeTrue(missing.isEmpty(), "live ACP sandbox tools unavailable: $missing")
-        assumeTrue(Files.exists(USER_RUNTIME.resolve("bus")), "systemd user bus is unavailable")
-        assumeTrue(Files.isRegularFile(Path.of("/sys/fs/cgroup/cgroup.controllers")), "cgroup v2 is unavailable")
+        AcpLiveContractHost.requireCapability(missing.isEmpty(), { "live ACP sandbox tools unavailable: $missing" })
+        AcpLiveContractHost.requireCapability(Files.exists(USER_RUNTIME.resolve("bus")), { "systemd user bus is unavailable" })
+        AcpLiveContractHost.requireCapability(Files.isRegularFile(Path.of("/sys/fs/cgroup/cgroup.controllers")), { "cgroup v2 is unavailable" })
     }
 
     private fun liveConfiguration(): AcpLinuxSandboxConfiguration = AcpLinuxSandboxConfiguration(

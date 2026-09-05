@@ -47,7 +47,9 @@ data class AgentExecutionRequestBinding(
                         field("workflowIdentity.taskId", identity.taskId)
                         field("workflowIdentity.acceptedRevisionSha256", identity.acceptedRevisionSha256)
                         field("workflowIdentity.promptSha256", identity.promptSha256)
+                        identity.inputRevisionSha256?.let { field("workflowIdentity.inputRevisionSha256", it) }
                     }
+                    request.sessionContinuation?.let { field("sessionContinuationV1", it.bindingSha256()) }
                 }.finish(),
                 accessPolicySha256 = policySha256,
             )

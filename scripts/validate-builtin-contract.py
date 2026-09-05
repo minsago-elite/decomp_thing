@@ -11,6 +11,7 @@ import xml.etree.ElementTree as ET
 ROOT = Path(__file__).resolve().parent.parent
 EXPECTED = {
     "decompengine.agent.AgentExecutionContractTest": 10,
+    "decompengine.agent.AgentSessionJournalTest": 12,
     "decompengine.builtin.BuiltinAgentHarnessTest": 14,
     "decompengine.builtin.BuiltinFilesystemToolsTest": 7,
     "decompengine.builtin.BuiltinCapturedContextToolsTest": 6,
@@ -20,8 +21,8 @@ EXPECTED = {
     "decompengine.builtin.BuiltinCapturedResumeTest": 8,
     "decompengine.builtin.BuiltinSourceStoreTest": 9,
     "decompengine.builtin.BuiltinInvocationArchiveTest": 7,
-    "decompengine.builtin.BuiltinRepairJournalFactoryTest": 5,
-    "decompengine.builtin.BuiltinRepairPersistenceTest": 6,
+    "decompengine.builtin.BuiltinRepairJournalFactoryTest": 6,
+    "decompengine.builtin.BuiltinRepairPersistenceTest": 7,
     "decompengine.builtin.BuiltinHarnessProvisioningTest": 9,
     "decompengine.builtin.BuiltinTerminalToolsTest": 7,
     "decompengine.builtin.provider.OpenAiCompatibleModelProviderTest": 23,
@@ -63,7 +64,7 @@ def main():
     if not source_clean:
         failures.append("Source worktree is not clean")
     verdict = {
-        "schemaVersion": 1, "corpus": "builtin-core-contract-v11",
+        "schemaVersion": 1, "corpus": "builtin-core-contract-v12",
         "commit": subprocess.check_output(["git", "rev-parse", "HEAD"], cwd=ROOT, text=True).strip(),
         "requiredHost": True, "sourceClean": source_clean, "forcedTestExecution": True, "gradleExitCode": result.returncode,
         "passed": result.returncode == 0 and not failures,

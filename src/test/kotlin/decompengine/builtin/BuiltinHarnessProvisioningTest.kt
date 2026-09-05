@@ -208,16 +208,14 @@ class BuiltinHarnessProvisioningTest {
 
     @Test fun `configured factory provenance survives graph recovery and archive extraction without private runtime files`() =
         fixture("src/modules/alpha.c") { endpoint, count, _, _ ->
-            val project = directory.resolve("project")
-            SourceTreeGenerator.generate(RecoveredProgramModel(inputSha256 = "a".repeat(64), functions = listOf(
-                RecoveredFunction("fn_alpha", "alpha_run", 0x1000UL, "int alpha_run(void)"))), project)
             val configuration = privateFile(config(endpoint).toString().toByteArray())
             val provisioned = BuiltinHarnessProvisioning.loadLoopbackFixture(configuration.toString(), mapOf("BUILTIN_FIXTURE_KEY" to secret))
             lateinit var binding: RepairAgentInvocationBinding
-            ModuleRevisionGraph.open(project, GeneratedCRepairIndexProfile).use { graph ->
+            val project = ModuleRevisionGraphTest().releaseProjectWithRejectedInvocation { graph, project ->
                 val relative = "src/modules/alpha.c"
-                val attempt = graph.beginAttempt(listOf(relative), RevisionRepairMetadata(1, "compile", "repair", null,
-                    emptyList(), null, graph.retainedRegressionCorpus().sha256))
+                val attempt = graph.beginAttempt(listOf(relative), RevisionRepairMetadata(
+                    graph.snapshot.nodes.count { it.repairMetadata != null } + 1, "compile", "repair", null,
+                    graph.retainedRegressionCorpus().inputs.map { it.id }, null, graph.retainedRegressionCorpus().sha256))
                 val workflow = graph.invocationIdentity(attempt)
                 lateinit var request: AgentExecutionRequest
                 val events = BoundedAgentExecutionEventRecorder()
@@ -236,17 +234,18 @@ class BuiltinHarnessProvisioningTest {
             directory.resolve("journals").listDirectoryEntries().forEach { it.deleteExisting() }
             directory.resolve("journals").deleteExisting(); configuration.deleteExisting()
             ModuleRevisionGraph.open(project, GeneratedCRepairIndexProfile).use { graph ->
-                assertEquals(provisioned.provenance, graph.snapshot.nodes.last().repairMetadata?.agentInvocation
+                assertEquals(provisioned.provenance, graph.snapshot.nodes.single { it.repairMetadata?.agentInvocation?.receiptPath == binding.receiptPath }.repairMetadata?.agentInvocation
                     ?.builtinArchive?.identity?.journal?.factoryProvenance)
             }
             assertEquals(0, MakeProjectBuilder.build(project).returnCode)
             val bundle = ArchivalPackager.create(project, directory.resolve("factory.zip"))
             val destination = directory.resolve("extracted")
             val lineage = ArchivalBundleVerifier.extractAndVerifyCandidateLineage(bundle.archivePath, destination)
-            assertTrue(lineage.source.acceptedAcpContributions.isEmpty())
+            assertEquals(2, lineage.source.acceptedAcpContributions.size)
+            assertTrue(lineage.source.acceptedAcpContributions.none { it.receiptPath == binding.receiptPath })
             assertContentEquals(project.resolve(binding.receiptPath).readBytes(), destination.resolve(binding.receiptPath).readBytes())
             ModuleRevisionGraph.open(destination, GeneratedCRepairIndexProfile).use { graph ->
-                assertEquals(provisioned.provenance, graph.snapshot.nodes.last().repairMetadata?.agentInvocation
+                assertEquals(provisioned.provenance, graph.snapshot.nodes.single { it.repairMetadata?.agentInvocation?.receiptPath == binding.receiptPath }.repairMetadata?.agentInvocation
                     ?.builtinArchive?.identity?.journal?.factoryProvenance)
             }
         }

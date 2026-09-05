@@ -84,6 +84,20 @@ public final class SecureRepairSession implements AutoCloseable {
         ));
     }
 
+    /** Versioned whole-run result, including provisional/exhausted/non-release outcomes. */
+    public synchronized RepairRunOutcome runRepair(
+        Path projectDirectory, Path originalBinary, List<ProcessInput> inputs,
+        Path reportsDirectory, int maximumIterations
+    ) {
+        requireOpen();
+        RepairRunOutcome result = loop.runRepair(Objects.requireNonNull(projectDirectory),
+            Objects.requireNonNull(originalBinary), copyInputs(inputs), Objects.requireNonNull(reportsDirectory), maximumIterations);
+        ArrayList<RepairIteration> iterations = new ArrayList<>(result.getIterations().size());
+        for (RepairIteration iteration : result.getIterations()) iterations.add(copyIteration(iteration));
+        return new RepairRunOutcome(List.copyOf(iterations),
+            result.getValidation() == null ? null : copyReport(result.getValidation()), result.getRunState());
+    }
+
     @Override
     public synchronized void close() {
         if (closed) return;
@@ -129,14 +143,30 @@ public final class SecureRepairSession implements AutoCloseable {
             List.copyOf(iteration.getRetainedRegressionIds()),
             before,
             after,
-            iteration.getSucceeded()
+            iteration.getSucceeded(),
+            iteration.getAgentInvocation() == null ? null : new RepairAgentInvocationBinding(
+                iteration.getAgentInvocation().getReceiptPath(),
+                iteration.getAgentInvocation().getReceiptSha256(),
+                iteration.getAgentInvocation().getReceiptSchemaVersion(),
+                iteration.getAgentInvocation().getRequestSha256(),
+                iteration.getAgentInvocation().getResultChangesSha256(),
+                iteration.getAgentInvocation().getTerminalOutcome(),
+                iteration.getAgentInvocation().getReceiptReleaseComplete(),
+                iteration.getAgentInvocation().getAssessmentStatus(),
+                iteration.getAgentInvocation().getBuiltinArchive()
+            ),
+            iteration.getPublicationMode(),
+            iteration.getDisposition(),
+            iteration.getRevisionId(),
+            iteration.getParentRevisionId(),
+            iteration.getRunId()
         );
     }
 
     private static RepairRunResult copyRunResult(RepairRunResult result) {
         ArrayList<RepairIteration> iterations = new ArrayList<>(result.getIterations().size());
         for (RepairIteration iteration : result.getIterations()) iterations.add(copyIteration(iteration));
-        return new RepairRunResult(List.copyOf(iterations), copyReport(result.getValidation()));
+        return new RepairRunResult(List.copyOf(iterations), copyReport(result.getValidation()), result.getRunState());
     }
 
     private static BehaviorComparisonReport copyReport(BehaviorComparisonReport report) {

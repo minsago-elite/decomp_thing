@@ -13,6 +13,11 @@ internal data class ProvisionedAcpHarness(
     val canonicalSha256: String,
 )
 
+internal data class ProvisionedAcpSandbox(
+    val configuration: AcpLinuxSandboxConfiguration,
+    val canonicalSha256: String,
+)
+
 internal class AcpProvisioningReadTestHook(
     val afterPinned: () -> Unit = {},
     val afterRead: () -> Unit = {},
@@ -20,6 +25,30 @@ internal class AcpProvisioningReadTestHook(
 
 /** Strict, bounded provisioning for the complete static ACP process/sandbox authority. */
 internal object AcpHarnessProvisioning {
+    /**
+     * Reads only the operator-owned containment configuration. Validation providers share the
+     * audited Linux boundary, but must not resolve agent secrets or create an agent transport.
+     * This returns policy data; [LinuxBubblewrapBoundary.prepare] still authenticates authority.
+     */
+    fun parseSandboxConfiguration(bytes: ByteArray): ProvisionedAcpSandbox {
+        require(bytes.size in 1..MAXIMUM_ACP_CONFIG_BYTES) { "ACP containment configuration exceeds its byte bound" }
+        val text = StandardCharsets.UTF_8.newDecoder()
+            .onMalformedInput(CodingErrorAction.REPORT)
+            .onUnmappableCharacter(CodingErrorAction.REPORT)
+            .decode(ByteBuffer.wrap(bytes)).toString()
+        val root = BoundedProvisioningJsonParser(text).parse().requireObject("ACP configuration")
+        root.requireExactKeys(ROOT_KEYS, "ACP configuration")
+        require(root.requiredInt("schemaVersion", 1..Int.MAX_VALUE, "ACP configuration") == CONFIG_SCHEMA_VERSION) {
+            "unsupported ACP containment configuration schemaVersion"
+        }
+        val executable = root.requiredObject("agent", "ACP configuration")
+            .requiredPath("executable", "ACP agent configuration")
+        return ProvisionedAcpSandbox(
+            parseSandbox(root.requiredObject("sandbox", "ACP configuration"), executable),
+            sha256(root.canonicalJson().toByteArray(StandardCharsets.UTF_8)),
+        )
+    }
+
     fun load(configuredPath: String, hostEnvironment: Map<String, String>): ProvisionedAcpHarness {
         return load(configuredPath, hostEnvironment, null)
     }

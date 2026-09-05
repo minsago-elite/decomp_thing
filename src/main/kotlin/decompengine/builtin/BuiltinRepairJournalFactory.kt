@@ -34,7 +34,7 @@ class BuiltinRepairJournalFactory(
         val stage = builtinCapturedStageSha256(request, source.sha256)
         // Name by the durable task, not the request: changing a request cannot restart the same task.
         val task = checkpointHash("builtin-repair-task-v1\n${workflow.taskId}".toByteArray(Charsets.UTF_8))
-        return configuration(task, BuiltinJournalIdentity(provider, model, source.sha256, stage, workflow.acceptedRevisionSha256, factoryProvenance))
+        return configuration(task, BuiltinJournalIdentity(provider, model, source.sha256, stage, workflow.acceptedRevisionSha256, factoryProvenance, workflow.inputRevisionSha256))
     }
 
     private fun configuration(task: String, identity: BuiltinJournalIdentity) = BuiltinJournalConfiguration(

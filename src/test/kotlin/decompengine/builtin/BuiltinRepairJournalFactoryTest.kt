@@ -109,6 +109,25 @@ class BuiltinRepairJournalFactoryTest {
         assertFalse(Files.exists(configuration.path))
     }
 
+    @Test fun `shared session continuation fails before model tools or journal creation`() {
+        val original = request()
+        for (policy in AgentSessionResumePolicy.entries) {
+            val request = AgentExecutionRequest(original.objective, original.workspaceRoots,
+                accessPolicy = original.accessPolicy, workflowIdentity = identity,
+                sessionContinuation = AgentSessionContinuation(directory.resolve("session"), "e".repeat(64),
+                    identity.taskId, mapOf(AgentWorkspacePath("project", "source.c") to "a".repeat(64)),
+                    identity.acceptedRevisionSha256, policy))
+            val provider = ModelProvider { _, _ -> error("unsupported continuation reached provider") }
+            val ordinary = BuiltinAgentHarness(provider, { _, _ -> error("unsupported continuation opened tools") })
+            val captured = BuiltinCapturedRepairHarness(provider, journalFactory = factory())
+            for (receipt in listOf(ordinary.executeReceipt(request) {}, execute(captured, request).receipt)) {
+                assertEquals(AgentFailureKind.INVALID_REQUEST, assertIs<AgentExecutionOutcome.Failed>(receipt.outcome).failure.kind)
+                assertEquals(AgentExecutionRequestBinding.capture(request), receipt.requestBinding)
+            }
+            Files.list(directory).use { assertEquals(0L, it.count()) }
+        }
+    }
+
     @Test fun `source snapshot admission remains bounded before any provider effect`() {
         var calls = 0
         val harness = BuiltinCapturedRepairHarness(ModelProvider { _, _ -> calls++; response() },

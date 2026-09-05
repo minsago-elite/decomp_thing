@@ -37,6 +37,8 @@ jobs:
         run: bash scripts/ci-prepare-oracle-runtime.sh
       - name: Prepare required live ACP sandbox host
         run: scripts/ci-prepare-acp-sandbox.sh
+      - name: Prepare finite ACP quota fixture
+        run: bash scripts/ci-prepare-acp-quota.sh
       - name: Prepare bounded ext4 oracle scratch authority
         run: bash scripts/ci-prepare-oracle-ext4-scratch.sh
       - name: Prepare executable root-owned application-bundled Ghidra
@@ -84,6 +86,9 @@ jobs:
           path: |
             build/reports/tests/test
             build/test-results/test
+      - name: Release finite ACP quota fixture
+        if: always()
+        run: bash scripts/ci-release-acp-quota.sh
       - uses: actions/upload-artifact@v7
         if: always()
         with:

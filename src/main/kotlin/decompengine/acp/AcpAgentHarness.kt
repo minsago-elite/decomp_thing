@@ -3,6 +3,7 @@ package decompengine.acp
 import com.agentclientprotocol.annotations.UnstableApi
 import com.agentclientprotocol.client.Client
 import com.agentclientprotocol.client.ClientInfo
+import com.agentclientprotocol.client.ClientOperationsFactory
 import com.agentclientprotocol.client.ClientSession
 import com.agentclientprotocol.client.UnsupportedProtocolVersionException
 import com.agentclientprotocol.common.ClientSessionOperations
@@ -32,6 +33,7 @@ import com.agentclientprotocol.model.SessionConfigOption
 import com.agentclientprotocol.model.SessionConfigOptionValue
 import com.agentclientprotocol.model.SessionConfigSelectOptions
 import com.agentclientprotocol.model.SessionModeId
+import com.agentclientprotocol.model.SessionId
 import com.agentclientprotocol.model.StopReason
 import com.agentclientprotocol.model.ToolCallStatus
 import com.agentclientprotocol.model.TerminalOutputResponse
@@ -68,10 +70,13 @@ import decompengine.agent.AgentPlanEntry
 import decompengine.agent.AgentPlanEvent
 import decompengine.agent.AgentPlanStatus
 import decompengine.agent.AgentSessionReference
+import decompengine.agent.AgentSessionJournal
+import decompengine.agent.AgentSessionRecoveryException
 import decompengine.agent.AgentStopReason
 import decompengine.agent.AgentToolEvent
 import decompengine.agent.AgentToolStatus
 import decompengine.agent.AgentUsage
+import decompengine.agent.AgentContextUsageEvent
 import decompengine.agent.AgentWorkspacePath
 import decompengine.agent.AgentWorkspaceRoot
 import decompengine.repair.BoundedRepairOutput
@@ -239,20 +244,55 @@ class AcpAgentHarness(
         capturedFilesystem: AcpCapturedRepairFilesystem?,
         preflightWorkflow: AcpPreflightWorkflow?,
     ): AgentExecutionReceipt {
+        val wallDeadline = MonotonicDeadline(request.limits.wallClockTimeout)
         val binding = AgentExecutionRequestBinding.capture(request)
         val evidenceState = AcpInvocationEvidenceState(factoryProvenance.get())
+        var schedulingPermit: AcpExecutionScheduler.Permit? = null
+        var sessionJournal: AgentSessionJournal? = null
+        var sessionTurnStarted = false
         var cause: Throwable? = null
         val outcome = try {
+            unresolvedCleanupFailure.get()?.let { throw it }
+            schedulingPermit = productionAcpExecutionScheduler.acquire(
+                request.workspaceRoots.first().path.toString(),
+                request.cancellation,
+                wallDeadline::hasExpired,
+            )
+            if (schedulingPermit != null && preflightWorkflow == null) request.sessionContinuation?.let { continuation ->
+                try {
+                    require(factoryProvenance.get() != null) { "durable ACP sessions require configured factory provenance" }
+                    require(capturedFilesystem == null) { "captured repair continuation needs snapshot-backed reconciliation and is not supported" }
+                    sessionJournal = AgentSessionJournal.open(continuation)
+                    sessionJournal.reconcileWorkspace(request.workspaceRoots) {
+                        if (request.cancellation.isCancellationRequested()) throw WorkspaceSnapshotCancelled()
+                        if (wallDeadline.hasExpired()) throw workspaceSnapshotTimeout("session-reconciliation", null)
+                    }
+                    sessionJournal.processStarting(binding.requestSha256)
+                    sessionTurnStarted = true
+                } catch (cancelled: WorkspaceSnapshotCancelled) {
+                    throw cancelled
+                } catch (failure: Exception) {
+                    throw AgentSessionRecoveryException("durable ACP session reconciliation failed; inspect retained session evidence", failure)
+                }
+            }
             AgentExecutionOutcome.Returned(
-                executeInternalResult(
+                if (schedulingPermit == null) AgentExecutionResult(
+                    AgentStopReason.CANCELLED,
+                    "cancelled before ACP scheduler admission",
+                ) else executeInternalResult(
                     request,
                     onEvent,
                     capturedFilesystem,
                     preflightWorkflow,
                     evidenceState,
+                    wallDeadline,
+                    sessionJournal,
                 ),
             )
+        } catch (_: WorkspaceSnapshotCancelled) {
+            AgentExecutionOutcome.Returned(AgentExecutionResult(AgentStopReason.CANCELLED, "cancelled during ACP session reconciliation"))
         } catch (failure: Error) {
+            try { sessionJournal?.close() } catch (cleanup: Throwable) { if (cleanup !== failure) failure.addSuppressed(cleanup) }
             throw failure
         } catch (failure: AgentExecutionException) {
             // Preserve the typed exception itself as the compatibility exception's cause. This
@@ -276,12 +316,25 @@ class AcpAgentHarness(
                     details = mapOf("exception" to failure.javaClass.name),
                 ),
             )
+        } finally {
+            schedulingPermit?.finish(cleanupUnverified = evidenceState.requiresRetainedAdmission())
         }
-        val evidence = evidenceState.snapshot(
-            includeCompleteExecution = preflightWorkflow == null && outcome is AgentExecutionOutcome.Returned,
-        )
-        publishCompatibilityEvidence(evidence, modelExecution = preflightWorkflow == null)
-        return AgentExecutionReceipt(binding, outcome, evidence, cause)
+        try {
+            val evidence = evidenceState.snapshot(
+                includeCompleteExecution = preflightWorkflow == null && outcome is AgentExecutionOutcome.Returned,
+            )
+            publishCompatibilityEvidence(evidence, modelExecution = preflightWorkflow == null)
+            val receipt = AgentExecutionReceipt(binding, outcome, evidence, cause)
+            if (sessionTurnStarted) sessionRecovery {
+                sessionJournal?.finishTurn(
+                    receipt,
+                    cleanupVerified = evidence.cleanupDisposition != AcpExecutionCleanupDisposition.UNVERIFIED,
+                )
+            }
+            return receipt
+        } finally {
+            sessionJournal?.close()
+        }
     }
 
     private fun publishCompatibilityEvidence(
@@ -305,6 +358,8 @@ class AcpAgentHarness(
         capturedFilesystem: AcpCapturedRepairFilesystem?,
         preflightWorkflow: AcpPreflightWorkflow?,
         evidenceState: AcpInvocationEvidenceState,
+        wallDeadline: MonotonicDeadline,
+        sessionJournal: AgentSessionJournal?,
     ): AgentExecutionResult {
         unresolvedCleanupFailure.get()?.let { throw it }
         if (preflightWorkflow != null) {
@@ -319,7 +374,6 @@ class AcpAgentHarness(
         }
 
         val startedAt = System.nanoTime()
-        val wallDeadline = MonotonicDeadline(request.limits.wallClockTimeout)
         val before = if (capturedFilesystem == null && preflightWorkflow == null) {
             evidenceState.reach(AcpExecutionLifecyclePhase.WORKSPACE_SNAPSHOT)
             try {
@@ -342,7 +396,10 @@ class AcpAgentHarness(
             return AgentExecutionResult(AgentStopReason.CANCELLED, "cancelled before the ACP process started")
         }
         if (wallDeadline.hasExpired()) throw workspaceSnapshotTimeout("initial", null)
-        val emitter = SequencedEventEmitter(onEvent)
+        val emitter = SequencedEventEmitter { event ->
+            sessionRecovery { sessionJournal?.event(event) }
+            onEvent(event)
+        }
         val translator = AcpEventTranslator(request, emitter, configuration.implementationId)
         val protocolReference = AtomicReference<Protocol?>()
         val protocolScopeReference = AtomicReference<CoroutineScope?>()
@@ -401,6 +458,7 @@ class AcpAgentHarness(
             )
         } catch (failure: AgentExecutionException) {
             if (failure.containsCleanupProofFailure()) {
+                evidenceState.finishCleanup(clean = false)
                 unresolvedCleanupFailure.compareAndSet(null, failure)
                 throw requireNotNull(unresolvedCleanupFailure.get())
             }
@@ -440,6 +498,7 @@ class AcpAgentHarness(
                         capturedFilesystem = capturedFilesystem,
                         preflightWorkflow = preflightWorkflow,
                         evidenceState = evidenceState,
+                        sessionJournal = sessionJournal,
                     )
                 }
             } catch (failure: Throwable) {
@@ -750,6 +809,7 @@ class AcpAgentHarness(
         capturedFilesystem: AcpCapturedRepairFilesystem?,
         preflightWorkflow: AcpPreflightWorkflow?,
         evidenceState: AcpInvocationEvidenceState,
+        sessionJournal: AgentSessionJournal?,
     ): PromptOutcome {
         val protocolScope = CoroutineScope(SupervisorJob() + Dispatchers.Default)
         protocolScopeReference.set(protocolScope)
@@ -828,66 +888,92 @@ class AcpAgentHarness(
             permissionAuditRecorder,
         )
 
-        evidenceState.recordNegotiatedAgent(
-            initializeAgent(
-                client = client,
-                clientCapabilities = ClientCapabilities(
-                    fs = filesystem.capability,
-                    terminal = terminal.capability,
-                ),
-                requiredCapabilities = configuredCapabilitiesFor(request),
-                running = running,
-                wallDeadline = wallDeadline,
-                cancellation = request.cancellation,
-                protocolScope = protocolScope,
+        val negotiatedAgent = initializeAgent(
+            client = client,
+            clientCapabilities = ClientCapabilities(
+                fs = filesystem.capability,
+                terminal = terminal.capability,
             ),
+            requiredCapabilities = configuredCapabilitiesFor(request),
+            running = running,
+            wallDeadline = wallDeadline,
+            cancellation = request.cancellation,
+            protocolScope = protocolScope,
         )
+        evidenceState.recordNegotiatedAgent(negotiatedAgent)
         evidenceState.reach(AcpExecutionLifecyclePhase.INITIALIZED)
 
         val primaryRoot = request.workspaceRoots.first()
         val additionalRoots = request.workspaceRoots.drop(1).map { it.path.toString() }
         val sessionAdvertisement = AtomicReference<AcpSessionAdvertisement?>()
         val sessionWorkAuthorized = AtomicBoolean(false)
-        val session = awaitPhase(
-            phase = "session/new",
-            phaseDeadline = MonotonicDeadline(configuration.timeouts.request),
-            wallDeadline = wallDeadline,
-            running = running,
-            cancellation = request.cancellation,
-            operationScope = protocolScope,
-        ) {
-            client.newSession(
-                SessionCreationParameters(
-                    cwd = primaryRoot.path.toString(),
-                    mcpServers = emptyList(),
-                    additionalDirectories = additionalRoots.ifEmpty { null },
+        val sessionToLoad = sessionRecovery {
+            sessionJournal?.chooseSession(
+                mapOf(
+                    "factory" to requireNotNull(factoryProvenance.get()).stableDescriptor,
+                    "protocolVersion" to negotiatedAgent.protocolVersion.toString(),
+                    "implementationName" to negotiatedAgent.implementationName,
+                    "implementationVersion" to negotiatedAgent.implementationVersion,
+                    "implementationTitle" to negotiatedAgent.implementationTitle.orEmpty(),
+                    "capabilities" to negotiatedAgent.capabilities.toString(),
                 ),
-            ) { sessionId, createdResponse ->
-                // The SDK resolves params.sessionId before dispatching client operations. Bind
-                // the raw transport guard here so a forged session cannot be rejected inside
-                // the SDK without also becoming a fatal protocol outcome for this execution.
-                running.bindSession(sessionId.value)
-                translator.recordSession(sessionId.value)
-                terminal.bindSession(sessionId.value)
-                val capturedAdvertisement = captureSessionAdvertisement(createdResponse)
-                require(sessionAdvertisement.compareAndSet(null, capturedAdvertisement)) {
-                    "ACP SDK created client operations more than once for session/new"
-                }
-                // The response proves that the agent-side session exists. Validate here, before
-                // returning client operations to the SDK, so pipelined callbacks cannot perform
-                // workspace or terminal work while an invalid preference is being rejected.
-                evidenceState.reach(AcpExecutionLifecyclePhase.SESSION_CREATED)
-                validateSessionPreferences(configuration.sessionPreferences, capturedAdvertisement)
-                PolicyClientOperations(
-                    translator,
-                    filesystem,
-                    terminal,
-                    permission,
-                    sessionId.value,
-                    sessionWorkAuthorized,
-                )
-            }
+                negotiatedAgent.capabilities.loadSession,
+            )
         }
+        val parameters = SessionCreationParameters(
+            cwd = primaryRoot.path.toString(),
+            mcpServers = emptyList(),
+            additionalDirectories = additionalRoots.ifEmpty { null },
+        )
+        val operationsFactory = ClientOperationsFactory { sessionId, createdResponse ->
+            // The SDK resolves params.sessionId before dispatching client operations. Bind
+            // the raw transport guard here so a forged session cannot be rejected inside
+            // the SDK without also becoming a fatal protocol outcome for this execution.
+            running.bindSession(sessionId.value)
+            translator.recordSession(sessionId.value)
+            terminal.bindSession(sessionId.value)
+            val capturedAdvertisement = captureSessionAdvertisement(createdResponse)
+            require(sessionAdvertisement.compareAndSet(null, capturedAdvertisement)) {
+                "ACP SDK created client operations more than once for session creation/load"
+            }
+            // The response proves that the agent-side session exists. Validate here, before
+            // returning client operations to the SDK, so pipelined callbacks cannot perform
+            // workspace or terminal work while an invalid preference is being rejected.
+            evidenceState.reach(AcpExecutionLifecyclePhase.SESSION_CREATED)
+            validateSessionPreferences(configuration.sessionPreferences, capturedAdvertisement)
+            PolicyClientOperations(
+                translator,
+                filesystem,
+                terminal,
+                permission,
+                sessionId.value,
+                sessionWorkAuthorized,
+            )
+        }
+        if (sessionToLoad != null) running.bindSession(sessionToLoad)
+        val session = try {
+            awaitPhase(
+                phase = if (sessionToLoad == null) "session/new" else "session/load",
+                phaseDeadline = MonotonicDeadline(configuration.timeouts.request),
+                wallDeadline = wallDeadline,
+                running = running,
+                cancellation = request.cancellation,
+                operationScope = protocolScope,
+            ) {
+                if (sessionToLoad == null) client.newSession(parameters, operationsFactory)
+                else client.loadSession(SessionId(sessionToLoad), parameters, operationsFactory)
+            }
+        } catch (cancelled: RequestedAcpCancellation) {
+            throw cancelled
+        } catch (failure: Exception) {
+            if (sessionToLoad != null) {
+                sessionRecovery { sessionJournal?.loadFailed() }
+                throw AgentSessionRecoveryException("advertised ACP session/load failed; retain evidence and explicitly select new-session policy before retry", failure)
+            }
+            throw failure
+        }
+        sessionRecovery { sessionJournal?.sessionReady(session.sessionId.value, restored = sessionToLoad != null) }
+        translator.recordConversationRestored(sessionToLoad != null)
         running.bindSession(session.sessionId.value)
         translator.recordSession(session.sessionId.value)
         terminal.bindSession(session.sessionId.value)
@@ -907,6 +993,7 @@ class AcpAgentHarness(
         require(sessionWorkAuthorized.compareAndSet(false, true)) {
             "ACP session work authority was already enabled"
         }
+        sessionRecovery { sessionJournal?.promptStarting() }
         val outcome = runPrompt(
             request,
             session,
@@ -979,6 +1066,8 @@ class AcpAgentHarness(
             // race valid agents and cannot strengthen this setter's postcondition.
         }
         preferences.configOptions.forEachIndexed { index, preference ->
+            requireCurrentSessionConfigPreference(session.configOptions.value, preference, index,
+                configuration.environment.values.map { it.value })
             val wireValue = when (val configured = preference.value) {
                 is AcpSessionConfigValue.Select -> SessionConfigOptionValue.StringValue(configured.valueId)
                 is AcpSessionConfigValue.BooleanValue -> SessionConfigOptionValue.BoolValue(configured.value)
@@ -1571,6 +1660,7 @@ private class AcpInvocationEvidenceState(
 ) {
     private val phase = AtomicReference(AcpExecutionLifecyclePhase.REQUEST_BOUND)
     private val cleanup = AtomicReference(AcpExecutionCleanupDisposition.NOT_REQUIRED)
+    private val retainedAdmission = AtomicBoolean(false)
     private val negotiatedAgent = AtomicReference<AcpNegotiatedAgentEvidence?>()
     private val wirePromptSha256 = AtomicReference<String?>()
     private val diagnostics = AtomicReference<AcpProcessDiagnostics?>()
@@ -1640,17 +1730,16 @@ private class AcpInvocationEvidenceState(
     }
 
     fun finishCleanup(clean: Boolean) {
-        cleanup.set(
-            if (clean && diagnostics.get()?.let {
-                    it.remainingProcessIds.isEmpty() && it.sandboxCleanupVerified
-                } == true
-            ) {
-                AcpExecutionCleanupDisposition.VERIFIED
-            } else {
-                AcpExecutionCleanupDisposition.UNVERIFIED
-            },
-        )
+        val verified = clean && diagnostics.get()?.let {
+            it.remainingProcessIds.isEmpty() && it.sandboxCleanupVerified
+        } == true
+        cleanup.set(if (verified) AcpExecutionCleanupDisposition.VERIFIED else AcpExecutionCleanupDisposition.UNVERIFIED)
+        if (!verified) retainedAdmission.set(true)
     }
+
+    // Quarantine only this invocation's unresolved cleanup. A different concurrent invocation
+    // can make the harness sticky without consuming this invocation's independently clean slot.
+    fun requiresRetainedAdmission(): Boolean = retainedAdmission.get()
 
     fun snapshot(includeCompleteExecution: Boolean): AcpInvocationEvidenceSnapshot {
         val phaseSnapshot = phase.get()
@@ -2420,14 +2509,22 @@ private class BoundedStderrCapture(
     fun truncated(): Boolean = observed > retained.size()
 }
 
-private class ProtocolActivity {
+internal class ProtocolActivity {
     val lastActivityNanos = AtomicLong(System.nanoTime())
     fun touch() {
         lastActivityNanos.set(System.nanoTime())
     }
 }
 
-private class SequencedEventEmitter(private val consumer: (AgentExecutionEvent) -> Unit) {
+private inline fun <T> sessionRecovery(operation: () -> T): T = try {
+    operation()
+} catch (failure: AgentSessionRecoveryException) {
+    throw failure
+} catch (failure: Exception) {
+    throw AgentSessionRecoveryException("durable ACP session recovery failed; inspect retained session evidence", failure)
+}
+
+internal class SequencedEventEmitter(private val consumer: (AgentExecutionEvent) -> Unit) {
     private val sequence = AtomicLong(0)
 
     @Synchronized
@@ -2437,7 +2534,7 @@ private class SequencedEventEmitter(private val consumer: (AgentExecutionEvent) 
 }
 
 @OptIn(UnstableApi::class)
-private class AcpEventTranslator(
+internal class AcpEventTranslator(
     private val request: AgentExecutionRequest,
     private val emitter: SequencedEventEmitter,
     private val implementationId: String,
@@ -2446,7 +2543,10 @@ private class AcpEventTranslator(
     val callbackFailure = AtomicReference<AgentExecutionException?>()
     val limitFailure = AtomicReference<String?>()
     private val sessionId = AtomicReference<String?>()
+    private val conversationRestored = AtomicBoolean(false)
     private val messageIds = ConcurrentHashMap<AgentMessageRole, String>()
+    private val pendingMessages = linkedSetOf<Pair<AgentMessageRole, String>>()
+    private var messageTrackingExhausted = false
     private val toolTitles = ConcurrentHashMap<String, String>()
     private val toolIds = ConcurrentHashMap.newKeySet<String>()
     private val summary = StringBuilder()
@@ -2457,8 +2557,10 @@ private class AcpEventTranslator(
         sessionId.compareAndSet(null, value)
     }
 
+    fun recordConversationRestored(restored: Boolean) { conversationRestored.set(restored) }
+
     fun sessionReference(): AgentSessionReference? = sessionId.get()?.let {
-        AgentSessionReference(implementationId, it)
+        AgentSessionReference(implementationId, it, it.takeIf { conversationRestored.get() })
     }
 
     fun toolCallCount(): Int = toolIds.size
@@ -2472,7 +2574,15 @@ private class AcpEventTranslator(
             when (update) {
                 is SessionUpdate.AgentMessageChunk -> emitMessage(AgentMessageRole.ASSISTANT, update.messageId?.value, update.content)
                 is SessionUpdate.UserMessageChunk -> emitMessage(AgentMessageRole.USER, update.messageId?.value, update.content)
-                is SessionUpdate.AgentThoughtChunk -> Unit
+                is SessionUpdate.AgentThoughtChunk -> emitMessage(AgentMessageRole.THOUGHT, update.messageId?.value, update.content)
+                is SessionUpdate.UsageUpdate -> {
+                    val observation = try {
+                        AgentContextUsageEvent(0, update.used, update.size, update.cost?.amount, update.cost?.currency)
+                    } catch (_: IllegalArgumentException) {
+                        throw AcpProtocolFailure("ACP agent returned invalid context usage")
+                    }
+                    emitter.emit { sequence -> observation.copy(sequence = sequence) }
+                }
                 is SessionUpdate.PlanUpdate -> {
                     if (update.entries.isNotEmpty()) {
                         val entries = update.entries.mapIndexed { index, entry ->
@@ -2569,12 +2679,15 @@ private class AcpEventTranslator(
         }
     }
 
+    @Synchronized
     fun completeMessages() {
-        messageIds.entries.sortedBy { it.key.ordinal }.forEach { (role, id) ->
+        pendingMessages.sortedBy { it.first.ordinal }.forEach { (role, id) ->
             emitter.emit { sequence -> AgentMessageEvent(sequence, id, role, "", completed = true) }
         }
+        pendingMessages.clear()
     }
 
+    @Synchronized
     private fun emitMessage(role: AgentMessageRole, providedId: String?, content: ContentBlock) {
         val text = when (content) {
             is ContentBlock.Text -> content.text
@@ -2586,6 +2699,11 @@ private class AcpEventTranslator(
         val id = providedId?.let { requirePeerText("message id", it) }
             ?: messageIds.computeIfAbsent(role) { "acp-${role.name.lowercase()}-message" }
         messageIds[role] = id
+        val identity = role to id
+        if (identity !in pendingMessages && !messageTrackingExhausted) {
+            if (pendingMessages.size < 16) pendingMessages += identity
+            else messageTrackingExhausted = true
+        }
         if (role == AgentMessageRole.ASSISTANT) synchronized(this) {
             val room = SUMMARY_CHARACTER_LIMIT - summary.length
             if (room > 0) summary.append(text.take(room))

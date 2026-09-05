@@ -25,11 +25,12 @@ class BuiltinJournalIdentity(
     val stageSha256: String,
     val acceptedRevisionSha256: String,
     val factoryProvenance: BuiltinHarnessProvenance? = null,
+    val inputRevisionSha256: String? = null,
 ) {
     init {
         require(provider.matches(Regex("[A-Za-z0-9._/-]{1,128}")))
         require(model.matches(Regex("[A-Za-z0-9._/:-]{1,256}")))
-        listOf(sourceSha256, stageSha256, acceptedRevisionSha256).forEach { require(it.matches(Regex("[a-f0-9]{64}"))) }
+        listOfNotNull(sourceSha256, stageSha256, acceptedRevisionSha256, inputRevisionSha256).forEach { require(it.matches(Regex("[a-f0-9]{64}"))) }
         factoryProvenance?.let { require(it.provider == provider && it.model == model) }
     }
     override fun toString() = "BuiltinJournalIdentity(redacted)"
@@ -276,6 +277,7 @@ internal class BuiltinJournal private constructor(
             put("accessPolicySha256", binding.accessPolicySha256); put("provider", value.provider); put("model", value.model)
             put("sourceSha256", value.sourceSha256); put("stageSha256", value.stageSha256)
             put("acceptedRevisionSha256", value.acceptedRevisionSha256)
+            value.inputRevisionSha256?.let { put("inputRevisionSha256", it) }
             value.factoryProvenance?.let { put("factoryProvenance", it.json()) }
         }
 

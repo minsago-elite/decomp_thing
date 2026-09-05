@@ -631,9 +631,14 @@ data class RepairIteration @JvmOverloads constructor(
     val succeeded: Boolean = false,
     val agentInvocation: RepairAgentInvocationBinding? = null,
     val publicationMode: RepairPublicationMode = RepairPublicationMode.TEST_ONLY_NON_RELEASE,
+    val disposition: RepairAttemptDisposition = RepairAttemptDisposition.LEGACY_UNVERIFIED,
+    val revisionId: String? = null,
+    val parentRevisionId: String? = null,
+    val runId: String? = null,
 ) {
     val releaseComplete: Boolean get() =
-        publicationMode == RepairPublicationMode.ACP_RELEASE &&
+        disposition == RepairAttemptDisposition.FULLY_ACCEPTED && succeeded &&
+            publicationMode == RepairPublicationMode.ACP_RELEASE &&
             agentInvocation?.let { invocation ->
                 invocation.assessmentStatus == RepairAgentAssessmentStatus.ACCEPTED &&
                     invocation.receiptReleaseComplete &&
@@ -650,6 +655,13 @@ data class RepairEvidence(
 data class RepairRunResult(
     val iterations: List<RepairIteration>,
     val validation: BehaviorComparisonReport,
+    val runState: RepairRunState? = null,
+)
+
+data class RepairRunOutcome(
+    val iterations: List<RepairIteration>,
+    val validation: BehaviorComparisonReport?,
+    val runState: RepairRunState,
 )
 
 internal fun RepairIteration.deepFrozenCopy(): RepairIteration = RepairIteration(
@@ -664,6 +676,10 @@ internal fun RepairIteration.deepFrozenCopy(): RepairIteration = RepairIteration
     succeeded = succeeded,
     agentInvocation = agentInvocation?.copy(),
     publicationMode = publicationMode,
+    disposition = disposition,
+    revisionId = revisionId,
+    parentRevisionId = parentRevisionId,
+    runId = runId,
 )
 
 private fun ProcessInput.detachedCopy(): ProcessInput = ProcessInput(
@@ -672,7 +688,10 @@ private fun ProcessInput.detachedCopy(): ProcessInput = ProcessInput(
     stdin = stdin.copyOf(),
 )
 
-class RepairExhaustedException(message: String) : RuntimeException(message)
+class RepairExhaustedException(message: String, val runState: RepairRunState? = null) : RuntimeException(message)
+class RepairRunFailedException(val runState: RepairRunState) : IllegalArgumentException(
+    "repair run ${runState.id} ended as ${runState.status.name.lowercase()}",
+)
 
 class RepairHistory(
     path: Path,
@@ -681,7 +700,8 @@ class RepairHistory(
     private val path = path.toAbsolutePath().normalize()
     private val iterations = mutableListOf<RepairIteration>()
     private val regressionInputs = mutableListOf<ProcessInput>()
-    private var schemaVersion = 2
+    private var schemaVersion = 3
+    private val runs = mutableListOf<RepairRunState>()
 
     init {
         require(maximumBytes in 1..MAXIMUM_REPAIR_PROJECTION_BYTES) { "repair history byte limit is invalid" }
@@ -711,7 +731,7 @@ class RepairHistory(
 
     @Synchronized
     fun append(iteration: RepairIteration) {
-        require(schemaVersion == 2) {
+        require(schemaVersion == 3) {
             "legacy repair history is non-release and cannot append a new repair iteration"
         }
         iterations += iteration.deepFrozenCopy()
@@ -732,6 +752,7 @@ class RepairHistory(
     internal fun adoptCanonicalProjection(
         authoritative: List<RepairIteration>,
         authoritativeRegressionInputs: List<ProcessInput>,
+        authoritativeRuns: List<RepairRunState> = emptyList(),
     ): Boolean {
         val frozenIterations = authoritative.map(RepairIteration::deepFrozenCopy)
         val frozenInputs = authoritativeRegressionInputs.map(ProcessInput::detachedCopy)
@@ -741,13 +762,15 @@ class RepairHistory(
         require(frozenInputs.map { it.id } == frozenInputs.map { it.id }.distinct().sorted()) {
             "authoritative retained regression inputs must have unique sorted IDs"
         }
-        val schemaChanged = schemaVersion != 2
-        schemaVersion = 2
-        if (iterations == frozenIterations && regressionInputs == frozenInputs) return schemaChanged
+        val schemaChanged = schemaVersion != 3
+        schemaVersion = 3
+        if (iterations == frozenIterations && regressionInputs == frozenInputs && runs == authoritativeRuns) return schemaChanged
         iterations.clear()
         iterations += frozenIterations
         regressionInputs.clear()
         regressionInputs += frozenInputs
+        runs.clear()
+        runs += authoritativeRuns
         return true
     }
 
@@ -759,11 +782,15 @@ class RepairHistory(
         Collections.unmodifiableList(ArrayList(regressionInputs.map(ProcessInput::detachedCopy)))
 
     @Synchronized
+    fun runStates(): List<RepairRunState> = Collections.unmodifiableList(ArrayList(runs))
+
+    @Synchronized
     fun toJson(): String = renderRepairHistoryProjection(
         iterations,
         regressionInputs,
         maximumBytes,
         schemaVersion,
+        runs,
     )
 
     private fun persist() {
@@ -779,11 +806,12 @@ class RepairHistory(
         val root = runCatching { Json.parseToJsonElement(payload).jsonObject }
             .getOrElse { error("invalid repair history at ${path.pathString}: ${it.message}") }
         schemaVersion = root["schemaVersion"]?.jsonPrimitive?.intOrNull ?: 1
-        require(schemaVersion in 1..2) { "unsupported repair history schema" }
+        require(schemaVersion in 1..3) { "unsupported repair history schema" }
         root["regressionInputs"]?.jsonArray?.map(::parseProcessInput)?.map(ProcessInput::detachedCopy)
             ?.let(regressionInputs::addAll)
         root["iterations"]?.jsonArray?.map { parseIteration(it, schemaVersion) }?.map(RepairIteration::deepFrozenCopy)
             ?.let(iterations::addAll)
+        if (schemaVersion >= 3) root["runs"]?.jsonArray?.map { parseRepairRunState(it.toString()) }?.let(runs::addAll)
     }
 }
 
@@ -791,10 +819,11 @@ internal fun renderRepairHistoryProjection(
     authoritative: List<RepairIteration>,
     authoritativeRegressionInputs: List<ProcessInput>,
     maximumBytes: Long,
-    schemaVersion: Int = 2,
+    schemaVersion: Int = 3,
+    runs: List<RepairRunState> = emptyList(),
 ): String {
     require(maximumBytes in 1..MAXIMUM_REPAIR_PROJECTION_BYTES) { "repair history byte limit is invalid" }
-    require(schemaVersion in 1..2) { "repair history schema is unsupported" }
+    require(schemaVersion in 1..3) { "repair history schema is unsupported" }
     val iterations = authoritative.map(RepairIteration::deepFrozenCopy)
     val regressionInputs = authoritativeRegressionInputs.map(ProcessInput::detachedCopy)
     require(iterations.map { it.index } == iterations.map { it.index }.distinct().sorted()) {
@@ -804,6 +833,10 @@ internal fun renderRepairHistoryProjection(
         "authoritative retained regression inputs must have unique sorted IDs"
     }
     var projected = 256L
+    runs.forEach { run ->
+        projected = Math.addExact(projected, run.toJson().toByteArray(Charsets.UTF_8).size.toLong() + 1L)
+        if (projected > maximumBytes) throw RepairBudgetExceededException("repair run history exceeds its $maximumBytes-byte limit")
+    }
     fun addText(value: String?) {
         if (value == null) return
         projected = Math.addExact(
@@ -850,7 +883,8 @@ internal fun renderRepairHistoryProjection(
     }
     val payload = buildString {
         append("{\n")
-        if (schemaVersion >= 2) append("  \"schemaVersion\": 2,\n")
+        if (schemaVersion >= 2) append("  \"schemaVersion\": $schemaVersion,\n")
+        if (schemaVersion >= 3) append("  \"runs\": [").append(runs.joinToString(",") { it.toJson() }).append("],\n")
         append("  \"regressionInputs\": [\n")
         append(regressionInputs.joinToString(",\n") { it.toJson().prependIndent("    ") })
         append("\n  ],\n  \"iterations\": [\n")
@@ -873,6 +907,17 @@ private data class RepairTask(
     val before: RepairEvidence?,
 )
 
+private class RepairNoChangesException : IllegalArgumentException("repair agent completed without changing a source file")
+private class RepairAgentStopException(val reason: AgentStopReason) : IllegalArgumentException("repair agent stopped with ${reason.name.lowercase()}")
+
+private fun repairFailureEvidence(kind: String, failure: Exception): RepairEvidence {
+    val provider = failure.suppressed.filterIsInstance<RepairValidationFailureEvidence>().singleOrNull()
+    if (provider == null) return RepairEvidence(kind, "repair terminated before full acceptance")
+    require(provider.receiptSha256.matches(Regex("[0-9a-f]{64}")))
+    return RepairEvidence(kind, "validation=${provider.failureKind.name.lowercase()}; receiptSha256=${provider.receiptSha256}; cleanupVerified=${provider.cleanupVerified}",
+        provider.receiptPath.pathString)
+}
+
 /**
  * Program/build-specific validation capability; repair core never assumes a tool or output path.
  *
@@ -885,6 +930,12 @@ interface RepairValidationStrategy {
     val assurance: RepairValidationAssurance
     /** Fail before graph mutation or agent execution when the required boundary is unavailable. */
     fun requireAvailable()
+    fun validateCandidate(request: RepairCandidateValidationRequest): RepairCandidateValidationOutcome {
+        require(assurance == RepairValidationAssurance.TEST_ONLY_HOST_PROCESS) {
+            "registered production validation must implement immutable candidate validation"
+        }
+        return validateTestOnlyRepairCandidate(this, request)
+    }
     fun compile(projectDir: Path, logPath: Path, budget: RepairResourceBudget): CompileFailure?
     fun rebuiltProgram(projectDir: Path, budget: RepairResourceBudget): Path
 
@@ -988,22 +1039,64 @@ class TraceGuidedRepairLoop private constructor(
         }
     }
 
+    private var activeDeadlineNanos: Long = Long.MAX_VALUE
+    private var lastRunFailure: Exception? = null
+    private var progress: RepairProgressProjection? = null
+
+    private inline fun <T> withProgress(reportsDir: Path, action: () -> T): T {
+        check(progress == null) { "repair run already owns a progress projection" }
+        val projection = RepairProgressProjection(reportsDir)
+        progress = projection
+        return try { action() } finally {
+            projection.close()
+            progress = null
+        }
+    }
+
     fun repairCompileError(projectDir: Path, failure: CompileFailure, regressionInputs: List<ProcessInput>): RepairIteration {
         checkOpen()
         validationStrategy.requireAvailable()
-        val corpus = prepareProjectState(projectDir, regressionInputs)
-        val request = RepairTask(
-            failureKind = "compile",
-            prompt = failure.toPrompt(),
-            context = repairContext(projectDir, "compile", failure.stdout + "\n" + failure.stderr),
-            regressionInputs = corpus.inputs,
-            regressionCorpusSha256 = corpus.sha256,
-            iterationIndex = nextIterationIndex(projectDir),
-            before = RepairEvidence("compile", "compiler exited with code ${failure.exitCode}"),
-        )
-        return applyRepair(projectDir, request)
+        return withProgress(projectDir.resolve("reports")) { openGraph(projectDir).use { graph ->
+            val corpus = prepareProjectState(graph, regressionInputs)
+            graph.beginRun(1, limits.wallClockTimeout.toMillis())
+            activeDeadlineNanos = System.nanoTime() + limits.wallClockTimeout.toNanos()
+            try {
+                checkRunBudget()
+                val request = RepairTask("compile", failure.toPrompt(),
+                    graph.selectContext("compile", failure.stdout + "\n" + failure.stderr), corpus.inputs, corpus.sha256,
+                    Math.addExact(graph.derivedRepairIterations().maxOfOrNull { it.index } ?: 0, 1),
+                    RepairEvidence("compile", "compiler exited with code ${failure.exitCode}"))
+                val execution = executeRepair(projectDir, request, graph)
+                execution.use {
+                    try {
+                        val after = assess(graph, projectDir, null, projectDir.resolve("reports"),
+                            "iteration_${request.iterationIndex}", corpus.inputs, execution.attempt)
+                        checkRunBudget()
+                        if (after is RepairAssessment.CompileOnly) {
+                            execution.provisional(after.evidence, after.proof)
+                            graph.finishRun(RepairRunStatus.COMPILE_VALID, after.evidence)
+                        } else {
+                            execution.reject(after.evidence)
+                            graph.finishRun(RepairRunStatus.REJECTED, after.evidence)
+                        }
+                        execution.reconcile()
+                        execution.iteration(request.iterationIndex)
+                    } catch (failure: Exception) {
+                        execution.abortAndClose(failure, "validation-error")
+                        throw failure
+                    }
+                }
+            } catch (failure: Exception) {
+                finishFailedRun(graph, failure)
+                throw failure
+            } finally {
+                activeDeadlineNanos = Long.MAX_VALUE
+                progress?.state(graph)
+            }
+        } }
     }
 
+    /** Compatibility single-turn behavior repair uses the complete run predicate. */
     fun repairBehaviorMismatch(
         projectDir: Path,
         originalBinary: Path,
@@ -1011,59 +1104,17 @@ class TraceGuidedRepairLoop private constructor(
         inputs: List<ProcessInput>,
         reportsDir: Path,
     ): RepairIteration {
-        checkOpen()
-        validationStrategy.requireAvailable()
-        val corpus = prepareProjectState(projectDir, inputs)
-        val comparison = openGraph(projectDir).use {
-            validationStrategy.evaluateBehavior(
-                "behavior_repair",
-                projectDir,
-                originalBinary,
-                rebuiltBinary,
-                corpus.inputs,
-                reportsDir,
-                resourceBudget,
-            )
-        }
-        if (comparison.matches) error("behavior already matched for ${comparison.id}; no repair needed")
-        val diff = StructuredDiffBuilder.from("behavior_repair", comparison.cases)
-        val diffPath = reportsDir.resolve("behavior_repair.diff.json")
-        writeRepairEvidenceAtomically(diffPath, diff.toJson())
-        val before = RepairEvidence("behavior", "${diff.cases.count { !it.matches }} mismatched case(s)", diffPath.pathString)
-        val request = RepairTask(
-            failureKind = "behavior",
-            prompt = diff.toPrompt(),
-            context = repairContext(projectDir, "behavior"),
-            regressionInputs = corpus.inputs,
-            regressionCorpusSha256 = corpus.sha256,
-            iterationIndex = nextIterationIndex(projectDir),
-            before = before,
-        )
-        val execution = executeRepair(projectDir, request)
-        try {
-            val after = assess(
-                projectDir,
-                originalBinary,
-                reportsDir,
-                "iteration_${request.iterationIndex}",
-                request.regressionInputs,
-                graphLockHeld = true,
-            )
-            if (after is RepairAssessment.Valid) {
-                execution.accept(after.evidence)
-            } else {
-                execution.reject(after.evidence)
-            }
-            execution.reconcile()
-            return execution.iteration(request.iterationIndex)
-        } catch (failure: Exception) {
-            execution.abortAndClose(failure, "assessment-error")
+        // The supplied rebuilt path is retained for API compatibility; the registered validator
+        // rebuilds the exact candidate snapshot and owns executable identity.
+        val outcome = runRepair(projectDir, originalBinary, inputs, reportsDir, 1)
+        lastRunFailure?.let { failure ->
+            failure.addSuppressed(RepairRunFailedException(outcome.runState))
             throw failure
-        } finally {
-            execution.close()
         }
+        return outcome.iterations.singleOrNull() ?: throw RepairRunFailedException(outcome.runState)
     }
 
+    /** Compatibility API returns only full validation. Every other outcome has durable run state. */
     fun repairUntilValid(
         projectDir: Path,
         originalBinary: Path,
@@ -1071,91 +1122,136 @@ class TraceGuidedRepairLoop private constructor(
         reportsDir: Path = projectDir.resolve("reports"),
         maxIterations: Int = 5,
     ): RepairRunResult {
-        checkOpen()
-        require(maxIterations > 0) { "maxIterations must be positive" }
-        validationStrategy.requireAvailable()
-        val corpus = prepareProjectState(projectDir, inputs)
-        reportsDir.createDirectories()
-        val completed = mutableListOf<RepairIteration>()
-        val firstIterationIndex = nextIterationIndex(projectDir)
-        var assessment = assess(projectDir, originalBinary, reportsDir, "initial", corpus.inputs)
-        if (assessment is RepairAssessment.Valid) {
-            return RepairRunResult(emptyList(), assessment.report)
+        val outcome = runRepair(projectDir, originalBinary, inputs, reportsDir, maxIterations)
+        if (outcome.runState.status == RepairRunStatus.FULLY_ACCEPTED) {
+            return RepairRunResult(outcome.iterations, requireNotNull(outcome.validation), outcome.runState)
         }
-
-        repeat(maxIterations) { offset ->
-            val request = assessment.toTask(
-                repairContext(projectDir, assessment.failureKind(), assessment.contextHint()),
-                corpus.inputs,
-                corpus.sha256,
-                Math.addExact(firstIterationIndex, offset),
-            )
-            val execution = executeRepair(projectDir, request)
-            try {
-                val after = assess(
-                    projectDir,
-                    originalBinary,
-                    reportsDir,
-                    "iteration_${Math.addExact(firstIterationIndex, offset)}",
-                    request.regressionInputs,
-                    graphLockHeld = true,
-                )
-                val rolledBack = introducesRetainedRegression(assessment, after)
-                if (rolledBack) {
-                    execution.reject(
-                        RepairEvidence(
-                            "retained-regression",
-                            "candidate regressed behavior that matched before this attempt: ${after.evidence.summary}",
-                            after.evidence.artifactPath,
-                        ),
-                    )
-                } else {
-                    execution.accept(after.evidence)
-                }
-                execution.reconcile()
-                completed += execution.iteration(request.iterationIndex)
-                if (after is RepairAssessment.Valid) {
-                    return RepairRunResult(completed.toList(), after.report)
-                }
-                assessment = if (rolledBack) assessment else after
-            } catch (failure: Exception) {
-                execution.abortAndClose(failure, "assessment-error")
-                throw failure
-            } finally {
-                execution.close()
-            }
+        lastRunFailure?.let { failure ->
+            failure.addSuppressed(RepairRunFailedException(outcome.runState))
+            throw failure
         }
-        throw RepairExhaustedException(
-            "repair did not converge after $maxIterations iteration(s); see ${reportsDir.resolve("repair_history.json")}",
-        )
+        if (outcome.runState.status in setOf(RepairRunStatus.ITERATION_EXHAUSTED, RepairRunStatus.RESOURCE_EXHAUSTED)) {
+            throw RepairExhaustedException("repair did not converge; durable outcome is ${outcome.runState.id}", outcome.runState)
+        }
+        throw RepairRunFailedException(outcome.runState)
     }
 
-    private fun applyRepair(
+    fun runRepair(
         projectDir: Path,
-        request: RepairTask,
-    ): RepairIteration {
-        val execution = executeRepair(projectDir, request)
-        try {
-            val compileFailure = validationStrategy.compile(
-                projectDir,
-                projectDir.resolve("reports/iteration_${request.iterationIndex}.compile.log"),
-                resourceBudget,
-            )
-            if (compileFailure == null) {
-                execution.accept(RepairEvidence("compile-valid", "candidate compiled after source-bound staging"))
-            } else {
-                execution.reject(
-                    RepairEvidence("compile", "candidate compiler exited with code ${compileFailure.exitCode}"),
-                )
+        originalBinary: Path,
+        inputs: List<ProcessInput>,
+        reportsDir: Path = projectDir.resolve("reports"),
+        maxIterations: Int = 5,
+    ): RepairRunOutcome {
+        checkOpen()
+        require(maxIterations > 0)
+        lastRunFailure = null
+        validationStrategy.requireAvailable()
+        return withProgress(reportsDir) { openGraph(projectDir).use { graph ->
+            val corpus = prepareProjectState(graph, inputs)
+            val run = graph.beginRun(maxIterations, limits.wallClockTimeout.toMillis())
+            activeDeadlineNanos = System.nanoTime() + limits.wallClockTimeout.toNanos()
+            var finalReport: BehaviorComparisonReport? = null
+            try {
+                checkRunBudget()
+                var assessment = assess(graph, projectDir, originalBinary, reportsDir, "${run.id}_initial", corpus.inputs)
+                checkRunBudget()
+                if (assessment is RepairAssessment.Valid) {
+                    graph.acceptAssessedBaseline(assessment.proof, assessment.evidence, ::checkRunBudget)
+                    finalReport = assessment.report
+                } else if (assessment is RepairAssessment.CompileOnly) {
+                    graph.finishRun(RepairRunStatus.COMPILE_VALID, assessment.evidence)
+                } else {
+                    for (offset in 0 until maxIterations) {
+                        checkRunBudget()
+                        val request = assessment.toTask(graph.selectContext(assessment.failureKind(), assessment.contextHint()),
+                            corpus.inputs, corpus.sha256,
+                            Math.addExact(graph.derivedRepairIterations().maxOfOrNull { it.index } ?: 0, 1))
+                        val execution = executeRepair(projectDir, request, graph)
+                        execution.use {
+                            try {
+                                val after = assess(graph, projectDir, originalBinary, reportsDir,
+                                    "iteration_${request.iterationIndex}", corpus.inputs, execution.attempt)
+                                checkRunBudget()
+                                when {
+                                    introducesRetainedRegression(assessment, after) -> execution.reject(RepairEvidence(
+                                        "retained-regression", "candidate regressed a previously matching retained case or successful compilation",
+                                        after.evidence.artifactPath))
+                                    after is RepairAssessment.Valid -> {
+                                        execution.accept(after.evidence, after.proof)
+                                        finalReport = after.report
+                                    }
+                                    after is RepairAssessment.CompileOnly -> {
+                                        execution.provisional(after.evidence, after.proof)
+                                        graph.finishRun(RepairRunStatus.COMPILE_VALID, after.evidence)
+                                    }
+                                    isProvisionalImprovement(assessment, after) -> {
+                                        execution.provisional(after.evidence, after.proof)
+                                        assessment = after
+                                    }
+                                    else -> execution.reject(RepairEvidence("no-validated-improvement",
+                                        "candidate did not improve the bounded repair objective", after.evidence.artifactPath))
+                                }
+                                execution.reconcile()
+                            } catch (failure: Exception) {
+                                execution.abortAndClose(failure, "assessment-error")
+                                throw failure
+                            }
+                        }
+                        if (graph.snapshot.runs.last().terminal) break
+                    }
+                    if (finalReport == null) graph.finishRun(RepairRunStatus.ITERATION_EXHAUSTED, assessment.evidence)
+                }
+            } catch (failure: Exception) {
+                lastRunFailure = failure
+                finishFailedRun(graph, failure)
+            } finally {
+                activeDeadlineNanos = Long.MAX_VALUE
+                progress?.state(graph)
             }
-            execution.reconcile()
-            return execution.iteration(request.iterationIndex)
-        } catch (failure: Exception) {
-            execution.abortAndClose(failure, "validation-error")
-            throw failure
-        } finally {
-            execution.close()
+            try {
+                graph.synchronizeRepairHistory()
+            } catch (_: Exception) {
+                // The canonical graph already records the terminal outcome; this disk projection
+                // is retried on open and cannot turn committed acceptance into an API failure.
+            }
+            history.adoptCanonicalProjection(graph.derivedRepairIterations(), corpus.inputs, graph.snapshot.runs)
+            RepairRunOutcome(graph.derivedRepairIterations().filter { it.runId == run.id }, finalReport,
+                graph.snapshot.runs.single { it.id == run.id })
+        } }
+    }
+
+    private fun checkRunBudget() {
+        if (cancellation.isCancellationRequested()) throw RepairTransportCancelledException()
+        if (Thread.currentThread().isInterrupted) throw InterruptedException("repair run interrupted")
+        if (System.nanoTime() >= activeDeadlineNanos) throw RepairBudgetExceededException("aggregate repair wall-clock budget exhausted")
+    }
+
+    private fun finishFailedRun(graph: ModuleRevisionGraph, failure: Exception) {
+        val provider = failure.suppressed.filterIsInstance<RepairValidationFailureEvidence>().singleOrNull()
+        val status = when {
+            graph.snapshot.pendingAttemptId != null -> RepairRunStatus.VALIDATION_FAILED
+            provider?.cleanupVerified == false || provider?.failureKind == RepairValidationFailureKind.CLEANUP_UNVERIFIED -> RepairRunStatus.VALIDATION_FAILED
+            provider?.failureKind == RepairValidationFailureKind.RESOURCE_EXHAUSTED -> RepairRunStatus.RESOURCE_EXHAUSTED
+            provider?.failureKind == RepairValidationFailureKind.CANCELLED -> RepairRunStatus.CANCELLED
+            cancellation.isCancellationRequested() || failure is RepairTransportCancelledException -> RepairRunStatus.CANCELLED
+            failure is InterruptedException || Thread.currentThread().isInterrupted -> RepairRunStatus.INTERRUPTED
+            failure is RepairBudgetExceededException -> RepairRunStatus.RESOURCE_EXHAUSTED
+            failure is RepairNoChangesException -> RepairRunStatus.NO_CHANGES
+            failure is RepairAgentStopException -> when (failure.reason) {
+                AgentStopReason.CANCELLED -> RepairRunStatus.CANCELLED
+                AgentStopReason.LIMIT_EXHAUSTED -> RepairRunStatus.RESOURCE_EXHAUSTED
+                AgentStopReason.NO_CHANGES -> RepairRunStatus.NO_CHANGES
+                else -> RepairRunStatus.REJECTED
+            }
+            failure is AgentExecutionException -> when (failure.failure.kind) {
+                AgentFailureKind.TIMEOUT, AgentFailureKind.RESOURCE_EXHAUSTED -> RepairRunStatus.RESOURCE_EXHAUSTED
+                else -> RepairRunStatus.VALIDATION_FAILED
+            }
+            else -> RepairRunStatus.VALIDATION_FAILED
         }
+        graph.finishRun(status, repairFailureEvidence(status.name.lowercase(), failure))
+        history.adoptCanonicalProjection(graph.derivedRepairIterations(), graph.retainedRegressionCorpus().inputs, graph.snapshot.runs)
     }
 
     private data class AppliedPatch(
@@ -1173,23 +1269,34 @@ class TraceGuidedRepairLoop private constructor(
         val graph: ModuleRevisionGraph,
         val attempt: ModuleRevisionAttempt,
         val projectionHistory: RepairHistory,
+        val checkAcceptance: () -> Unit,
+        val progress: RepairProgressProjection?,
     ) : AutoCloseable {
         private var finalized = false
         private var closed = false
 
-        fun accept(evidence: RepairEvidence?): ModuleRevisionNode = graph.accept(attempt, evidence).also {
+        fun accept(evidence: RepairEvidence?, proof: RepairValidationProof): ModuleRevisionNode = graph.accept(attempt, evidence, proof, checkAcceptance).also {
             finalized = true
+            progress?.state(graph, decompengine.agent.AgentWorkflowPhase.ACCEPTED, it.id)
         }
+
+        fun provisional(evidence: RepairEvidence, proof: RepairValidationProof): ModuleRevisionNode =
+            graph.recordProvisional(attempt, evidence, proof).also {
+                finalized = true
+                progress?.state(graph, decompengine.agent.AgentWorkflowPhase.PROVISIONAL, it.id)
+            }
 
         fun reject(evidence: RepairEvidence?): ModuleRevisionNode = graph.reject(attempt, evidence).also {
             finalized = true
+            progress?.state(graph, decompengine.agent.AgentWorkflowPhase.ROLLED_BACK, it.id)
         }
 
         /** Preserve [original] while making rollback/close failures available as suppressed detail. */
         fun abortAndClose(original: Exception, evidenceKind: String) {
             if (!finalized) {
                 runCatching {
-                    reject(RepairEvidence(evidenceKind, "repair attempt rejected before workflow acceptance"))
+                    reject(repairFailureEvidence(evidenceKind, original))
+                    reconcile()
                 }.onFailure(original::addSuppressed)
             }
             runCatching(::close).onFailure(original::addSuppressed)
@@ -1205,6 +1312,7 @@ class TraceGuidedRepairLoop private constructor(
                 projectionHistory.adoptCanonicalProjection(
                     graph.derivedRepairIterations(),
                     graph.retainedRegressionCorpus().inputs,
+                    graph.snapshot.runs,
                 )
             } catch (_: Exception) {
                 // A committed graph head remains an unambiguous success if this projection fails.
@@ -1214,11 +1322,10 @@ class TraceGuidedRepairLoop private constructor(
         override fun close() {
             if (closed) return
             closed = true
-            graph.close()
         }
     }
 
-    private fun executeRepair(projectDir: Path, repair: RepairTask): ExecutedRepair {
+    private fun executeRepair(projectDir: Path, repair: RepairTask, graph: ModuleRevisionGraph): ExecutedRepair {
         val base = projectDir.toAbsolutePath().normalize()
         val invocationPrompt = portableRepairRequestText(base, repair.prompt)
         val regressionBytes = repair.regressionInputs.fold(0L) { total, input ->
@@ -1242,14 +1349,12 @@ class TraceGuidedRepairLoop private constructor(
                 "repair request requires $requestBytes bytes; limit=${resourceBudget.maximumRequestBytes}",
             )
         }
-        val graph = openGraph(base)
         val readable = repair.context.readablePaths
         val writable = repair.context.writablePaths.toSet()
         val baseContent = try {
             graph.requireContextBinding(repair.context)
             graph.preflightStagingContext(repair.context)
         } catch (failure: Throwable) {
-            runCatching(graph::close).onFailure(failure::addSuppressed)
             throw failure
         }
         val attempt = try {
@@ -1271,12 +1376,12 @@ class TraceGuidedRepairLoop private constructor(
                 ),
             )
         } catch (failure: Throwable) {
-            runCatching(graph::close).onFailure(failure::addSuppressed)
             throw failure
         }
         val stagedBefore = baseContent
         lateinit var agentRequest: AgentExecutionRequest
         val eventRecorder = BoundedAgentExecutionEventRecorder()
+        var taskProgress = decompengine.agent.AgentTaskProgress.NONE
         val stagedExecution = try {
             stagingAuthority.executeReceipt(
                 harness = harness,
@@ -1304,26 +1409,36 @@ class TraceGuidedRepairLoop private constructor(
                             AgentContextInput(RepairClientAgentHarness.FAILURE_KIND_CONTEXT_ID, repair.failureKind),
                             AgentContextInput("retained-regression-inputs", regressionContext),
                             AgentContextInput("dependency-indexed-repair-context", indexedContext, "application/json"),
+                            AgentContextInput("repair-attempt-authority", """
+                                {"schemaVersion":1,"attemptId":"${attempt.id}","canonicalBaselineId":"${graph.snapshot.headId}",
+                                "fullyAcceptedHeadId":${graph.snapshot.fullyAcceptedHeadId?.let { "\"$it\"" } ?: "null"},
+                                "provisionalParentId":${graph.snapshot.provisionalHeadId?.let { "\"$it\"" } ?: "null"},
+                                "editing":"isolated-provisional-candidate","promotionRequires":"complete-retained-validation"}
+                            """.trimIndent(), "application/json"),
                         ),
                         accessPolicy = AgentAccessPolicy(rules),
-                        limits = limits,
+                        limits = limits.copy(wallClockTimeout = Duration.ofNanos(maxOf(1L, activeDeadlineNanos - System.nanoTime()))),
                         cancellation = cancellation,
                         workflowIdentity = graph.invocationIdentity(attempt),
-                    ).also { agentRequest = it }
+                    ).also {
+                        agentRequest = it
+                        taskProgress = progress?.task(attempt.id, it, graph) ?: decompengine.agent.AgentTaskProgress.NONE
+                    }
                 },
                 onEvent = { event ->
                     eventRecorder.record(event)
+                    taskProgress.event(event)
                     onAgentEvent(event)
                 },
             )
         } catch (failure: Throwable) {
             if (failure is Exception) {
                 abortPendingGraph(graph, attempt, failure, "agent-error")
-            } else {
-                runCatching(graph::close).onFailure(failure::addSuppressed)
             }
             throw failure
         }
+        taskProgress.complete(stagedExecution.receipt)
+        progress?.state(graph, decompengine.agent.AgentWorkflowPhase.POLICY_CHECKING, attempt.id)
         val executionEvidence = try {
             RepairAgentInvocationDocument.captureOrNull(
                 request = agentRequest,
@@ -1335,8 +1450,6 @@ class TraceGuidedRepairLoop private constructor(
         } catch (failure: Throwable) {
             if (failure is Exception) {
                 abortPendingGraph(graph, attempt, failure, "invalid-agent-receipt")
-            } else {
-                runCatching(graph::close).onFailure(failure::addSuppressed)
             }
             throw failure
         }
@@ -1352,11 +1465,9 @@ class TraceGuidedRepairLoop private constructor(
             // separate pending assessment are durable before outcome/files are inspected.
             executionEvidence?.let { graph.persistAndBindAgentInvocation(attempt, it) }
         } catch (failure: RepairAgentEvidencePersistenceException) {
-            runCatching(graph::close).onFailure(failure::addSuppressed)
             throw failure
         } catch (failure: Throwable) {
             if (failure is Exception) abortPendingGraph(graph, attempt, failure, "invalid-agent-receipt")
-            else runCatching(graph::close).onFailure(failure::addSuppressed)
             throw failure
         }
         try {
@@ -1369,15 +1480,12 @@ class TraceGuidedRepairLoop private constructor(
                     )
                 )
             }
-            require(result.stopReason == AgentStopReason.COMPLETED) {
-                "repair agent stopped with ${result.stopReason.name.lowercase()}"
-            }
+            if (result.stopReason != AgentStopReason.COMPLETED) throw RepairAgentStopException(result.stopReason)
             if (executionEvidence != null) {
                 require(executionEvidence.releaseComplete) {
                     "repair agent returned without release-complete invocation evidence"
                 }
             }
-            require(result.changes.isNotEmpty()) { "repair agent completed without changing a source file" }
             require(result.changes.map { it.path.relativePath }.distinct().size == result.changes.size) {
                 "repair agent reported a source path more than once"
             }
@@ -1402,6 +1510,7 @@ class TraceGuidedRepairLoop private constructor(
             require(actualChanged == declared.keys) {
                 "repair agent change report does not match workspace changes: actual=$actualChanged reported=${declared.keys}"
             }
+            if (actualChanged.isEmpty()) throw RepairNoChangesException()
             val applied = declared.entries.sortedBy { it.key }.map { (relative, change) ->
                 require(change.kind == AgentFileChangeKind.MODIFIED) {
                     "repair may only modify existing project files: $relative"
@@ -1421,7 +1530,7 @@ class TraceGuidedRepairLoop private constructor(
             val replacements = applied.associate { patch -> patch.path to patch.afterContent }
             graph.installCandidate(attempt, replacements)
             val patches = applied.map { patch -> RepairPatch(patch.path, patch.afterContent) }
-            return ExecutedRepair(result, applied, patches, graph, attempt, history)
+            return ExecutedRepair(result, applied, patches, graph, attempt, history, ::checkRunBudget, progress)
         } catch (failure: Throwable) {
             if (failure is Exception) {
                 val evidenceKind = when (val terminal = stagedExecution.receipt.outcome) {
@@ -1431,12 +1540,11 @@ class TraceGuidedRepairLoop private constructor(
                         terminal.result.stopReason != AgentStopReason.COMPLETED ->
                             "agent-stop-${terminal.result.stopReason.name.lowercase().replace('_', '-')}"
                         executionEvidence?.releaseComplete == false -> "incomplete-agent-receipt"
+                        failure is RepairNoChangesException -> "agent-no-change"
                         else -> "candidate-error"
                     }
                 }
                 abortPendingGraph(graph, attempt, failure, evidenceKind)
-            } else {
-                runCatching(graph::close).onFailure(failure::addSuppressed)
             }
             throw failure
         }
@@ -1450,8 +1558,9 @@ class TraceGuidedRepairLoop private constructor(
     ) {
         runCatching {
             graph.reject(attempt, RepairEvidence(evidenceKind, "repair attempt rejected before workflow acceptance"))
+            graph.synchronizeRepairHistory()
+            history.adoptCanonicalProjection(graph.derivedRepairIterations(), graph.retainedRegressionCorpus().inputs, graph.snapshot.runs)
         }.onFailure(original::addSuppressed)
-        runCatching(graph::close).onFailure(original::addSuppressed)
     }
 
     private fun portableRepairRequestText(projectRoot: Path, value: String): String {
@@ -1465,72 +1574,77 @@ class TraceGuidedRepairLoop private constructor(
     }
 
     private fun assess(
+        graph: ModuleRevisionGraph,
         projectDir: Path,
-        originalBinary: Path,
+        originalBinary: Path?,
         reportsDir: Path,
         label: String,
         regressionInputs: List<ProcessInput>,
-        graphLockHeld: Boolean = false,
+        attempt: ModuleRevisionAttempt? = null,
     ): RepairAssessment {
-        if (!graphLockHeld) {
-            return openGraph(projectDir).use { graph ->
-                val corpus = graph.retainedRegressionCorpus()
-                require(corpus.inputs == regressionInputs) {
-                    "retained regression corpus changed; restart assessment with the merged corpus"
+        checkRunBudget()
+        val corpus = graph.retainedRegressionCorpus()
+        require(corpus.inputs == regressionInputs) { "retained regression corpus changed during validation" }
+        val snapshot = graph.snapshot
+        val sources = graph.candidateSources(attempt)
+        val request = RepairCandidateValidationRequest(projectDir, sources, repairCandidateSourceSha256(sources),
+            snapshot.profileId, snapshot.profileSha256, snapshot.indexSha256, originalBinary, corpus.inputs, corpus.sha256,
+            reportsDir, label, resourceBudget, activeDeadlineNanos, cancellation)
+        progress?.state(graph, decompengine.agent.AgentWorkflowPhase.BUILD_VALIDATING, attempt?.id)
+        val outcome = validationStrategy.validateCandidate(request)
+        checkRunBudget()
+        val proof = outcome.proof
+        require(proof.sourceRevisionSha256 == request.sourceRevisionSha256 && proof.profileSha256 == request.profileSha256 &&
+            proof.indexSha256 == request.indexSha256 && proof.regressionCorpusSha256 == request.regressionCorpusSha256 &&
+            proof.cleanupVerified) { "validation proof is incomplete or bound to a different source/profile/corpus" }
+        require(allowTestOnlyValidation || proof.assurance == RepairValidationAssurance.STRICT_CONTAINED)
+        if (originalBinary != null) graph.bindOriginalBinary(requireNotNull(proof.originalBinarySha256) {
+            "validation proof lacks original binary identity"
+        })
+        val logPath = reportsDir.resolve("$label.validation.json")
+        if (!allowTestOnlyValidation) {
+            require(sha256(readStableRepairFile(reportsDir, logPath.fileName.toString(), resourceBudget.maximumProjectionBytes)) == proof.evidenceSha256) {
+                "validation receipt bytes differ from the registered provider proof"
+            }
+        }
+        return when (outcome) {
+            is RepairCandidateValidationOutcome.CompileFailed -> RepairAssessment.CompileError(outcome.failure, logPath, proof)
+            is RepairCandidateValidationOutcome.CompileValid -> RepairAssessment.CompileOnly(proof, logPath)
+            is RepairCandidateValidationOutcome.BehaviorChecked -> {
+                progress?.state(graph, decompengine.agent.AgentWorkflowPhase.BEHAVIOR_VALIDATING, attempt?.id)
+                val report = outcome.report
+                require(report.cases.map { it.input } == corpus.inputs) {
+                    "behavior validation omitted, changed, reordered or duplicated retained inputs"
                 }
-                assess(projectDir, originalBinary, reportsDir, label, corpus.inputs, graphLockHeld = true)
+                require(allowTestOnlyValidation || report.networkIsolated) { "behavior validation lacks required isolation" }
+                val expected = sha256(buildString {
+                    append(proof.originalBinarySha256).append('\n')
+                    report.cases.forEach { case ->
+                        append(case.input.id.length).append(':').append(case.input.id).append(':')
+                        append(case.original.exitCode).append(':').append(sha256(case.original.stdout)).append(':')
+                            .append(sha256(case.original.stderr)).append('\n')
+                    }
+                }.toByteArray(Charsets.UTF_8))
+                graph.bindExpectedObservations(expected)
+                if (corpus.inputs.isEmpty()) RepairAssessment.CompileOnly(proof, logPath)
+                else if (report.matches) RepairAssessment.Valid(report, proof)
+                else {
+                    val diff = StructuredDiffBuilder.from(report.id, report.cases)
+                    val path = reportsDir.resolve("${report.id}.diff.json")
+                    writeRepairEvidenceAtomically(path, diff.toJson())
+                    RepairAssessment.BehaviorError(diff, path, proof)
+                }
             }
-        }
-        val compile = validationStrategy.compile(projectDir, reportsDir.resolve("$label.compile.log"), resourceBudget)
-        if (compile != null) return RepairAssessment.CompileError(compile, reportsDir.resolve("$label.compile.log"))
-        val rebuilt = validationStrategy.rebuiltProgram(projectDir, resourceBudget)
-        val report = validationStrategy.evaluateBehavior(
-            "${label}_behavior",
-            projectDir,
-            originalBinary,
-            rebuilt,
-            regressionInputs,
-            reportsDir,
-            resourceBudget,
-        )
-        if (report.matches) return RepairAssessment.Valid(report)
-        val diff = StructuredDiffBuilder.from(report.id, report.cases)
-        val path = reportsDir.resolve("${report.id}.diff.json")
-        writeRepairEvidenceAtomically(path, diff.toJson())
-        return RepairAssessment.BehaviorError(diff, path)
-    }
-
-    private fun repairContext(projectDir: Path, failureKind: String, diagnosticHint: String? = null): RepairContextSelection =
-        openGraph(projectDir).use { graph ->
-            graph.selectContext(failureKind, diagnosticHint)
-        }
-
-    private fun prepareProjectState(
-        projectDir: Path,
-        additions: Collection<ProcessInput> = emptyList(),
-    ): RetainedRegressionCorpus {
-        openGraph(projectDir).use { graph ->
-            // Import a pre-graph compatibility history once, then keep the graph authoritative.
-            // A stale compatibility projection can only contribute an identical/subset input; ID
-            // collisions with different bytes fail closed in retainRegressionInputs.
-            val corpus = graph.retainRegressionInputs(history.retainedInputs() + additions)
-            try {
-                graph.synchronizeCompatibilityLog()
-            } catch (_: Exception) {
-                // Best-effort compatibility projection; the graph remains authoritative.
-            }
-            try {
-                graph.synchronizeRepairHistory()
-            } catch (_: Exception) {
-                // The next public entry retries projection reconciliation.
-            }
-            history.adoptCanonicalProjection(graph.derivedRepairIterations(), corpus.inputs)
-            return corpus
         }
     }
 
-    private fun nextIterationIndex(projectDir: Path): Int = openGraph(projectDir)
-        .use { graph -> Math.addExact(graph.derivedRepairIterations().maxOfOrNull { it.index } ?: 0, 1) }
+    private fun prepareProjectState(graph: ModuleRevisionGraph, additions: Collection<ProcessInput>): RetainedRegressionCorpus {
+        graph.enableRunContract()
+        val corpus = graph.retainRegressionInputs(history.retainedInputs() + additions)
+        graph.synchronizeRepairHistory()
+        history.adoptCanonicalProjection(graph.derivedRepairIterations(), corpus.inputs, graph.snapshot.runs)
+        return corpus
+    }
 
     private fun openGraph(projectDir: Path): ModuleRevisionGraph =
         SecureRepairRuntime.openGraph(registeredProfile, projectDir, resourceBudget)
@@ -1545,8 +1659,9 @@ class TraceGuidedRepairLoop private constructor(
 
 private sealed interface RepairAssessment {
     val evidence: RepairEvidence
+    val proof: RepairValidationProof
 
-    data class CompileError(val failure: CompileFailure, val logPath: Path) : RepairAssessment {
+    data class CompileError(val failure: CompileFailure, val logPath: Path, override val proof: RepairValidationProof) : RepairAssessment {
         override val evidence = RepairEvidence(
             kind = "compile",
             summary = "compiler exited with code ${failure.exitCode}",
@@ -1554,7 +1669,7 @@ private sealed interface RepairAssessment {
         )
     }
 
-    data class BehaviorError(val diff: StructuredBehaviorDiff, val diffPath: Path) : RepairAssessment {
+    data class BehaviorError(val diff: StructuredBehaviorDiff, val diffPath: Path, override val proof: RepairValidationProof) : RepairAssessment {
         override val evidence = RepairEvidence(
             kind = "behavior",
             summary = "${diff.cases.count { !it.matches }} of ${diff.cases.size} regression case(s) mismatched",
@@ -1562,24 +1677,29 @@ private sealed interface RepairAssessment {
         )
     }
 
-    data class Valid(val report: BehaviorComparisonReport) : RepairAssessment {
+    data class Valid(val report: BehaviorComparisonReport, override val proof: RepairValidationProof) : RepairAssessment {
         override val evidence = RepairEvidence(
             kind = "valid",
             summary = "all ${report.cases.size} regression case(s) compiled and matched",
             artifactPath = report.reportPath.pathString,
         )
     }
+
+    data class CompileOnly(override val proof: RepairValidationProof, val path: Path) : RepairAssessment {
+        override val evidence = RepairEvidence("compile-valid", "compiled; full retained behavior was not evaluated", path.pathString)
+    }
 }
 
 private fun RepairAssessment.contextHint(): String? = when (this) {
     is RepairAssessment.CompileError -> failure.stdout + "\n" + failure.stderr
-    is RepairAssessment.BehaviorError, is RepairAssessment.Valid -> null
+    is RepairAssessment.BehaviorError, is RepairAssessment.Valid, is RepairAssessment.CompileOnly -> null
 }
 
 private fun RepairAssessment.failureKind(): String = when (this) {
     is RepairAssessment.CompileError -> "compile"
     is RepairAssessment.BehaviorError -> "behavior"
     is RepairAssessment.Valid -> error("valid projects do not need a repair request")
+    is RepairAssessment.CompileOnly -> error("compile-only validation cannot request behavior repair")
 }
 
 private fun RepairAssessment.toTask(
@@ -1607,6 +1727,14 @@ private fun RepairAssessment.toTask(
         before = evidence,
     )
     is RepairAssessment.Valid -> error("valid projects do not need a repair request")
+    is RepairAssessment.CompileOnly -> error("compile-only validation cannot request behavior repair")
+}
+
+private fun isProvisionalImprovement(before: RepairAssessment, after: RepairAssessment): Boolean = when {
+    before is RepairAssessment.CompileError && after !is RepairAssessment.CompileError -> true
+    before is RepairAssessment.BehaviorError && after is RepairAssessment.BehaviorError ->
+        after.diff.cases.count { it.matches } > before.diff.cases.count { it.matches }
+    else -> false
 }
 
 private fun introducesRetainedRegression(before: RepairAssessment, after: RepairAssessment): Boolean {
@@ -1677,6 +1805,12 @@ private fun RepairIteration.toJson(schemaVersion: Int): String = buildString {
         append("\n  \"publicationMode\": \"")
             .append(publicationMode.name.lowercase()).append("\",")
     }
+    if (schemaVersion >= 3) {
+        append("\n  \"disposition\": \"").append(disposition.name.lowercase()).append("\",")
+        append("\n  \"revisionId\": ").append(revisionId?.let { "\"${it.escapeJson()}\"" } ?: "null").append(',')
+        append("\n  \"parentRevisionId\": ").append(parentRevisionId?.let { "\"${it.escapeJson()}\"" } ?: "null").append(',')
+        append("\n  \"runId\": ").append(runId?.let { "\"${it.escapeJson()}\"" } ?: "null").append(',')
+    }
     append("\n  \"patches\": [")
     append(patches.joinToString(",") { "\n" + it.toJson().prependIndent("    ") })
     append("\n  ]\n}")
@@ -1740,7 +1874,7 @@ private fun parseIteration(element: kotlinx.serialization.json.JsonElement, sche
         retainedRegressionIds = value["retainedRegressionIds"]?.jsonArray?.map { it.jsonPrimitive.content } ?: emptyList(),
         before = value["before"]?.let(::parseEvidence),
         after = value["after"]?.let(::parseEvidence),
-        succeeded = value["succeeded"]?.jsonPrimitive?.contentOrNull?.toBooleanStrictOrNull() ?: false,
+        succeeded = schemaVersion >= 3 && (value["succeeded"]?.jsonPrimitive?.contentOrNull?.toBooleanStrictOrNull() ?: false),
         agentInvocation = if (schemaVersion >= 2) {
             value["agentInvocation"]?.takeUnless { it.toString() == "null" }?.let(::parseHistoryAgentInvocation)
         } else {
@@ -1751,6 +1885,10 @@ private fun parseIteration(element: kotlinx.serialization.json.JsonElement, sche
         } else {
             RepairPublicationMode.TEST_ONLY_NON_RELEASE
         },
+        disposition = if (schemaVersion >= 3) RepairAttemptDisposition.valueOf(value.requiredString("disposition").uppercase()) else RepairAttemptDisposition.LEGACY_UNVERIFIED,
+        revisionId = if (schemaVersion >= 3) value["revisionId"]?.jsonPrimitive?.contentOrNull else null,
+        parentRevisionId = if (schemaVersion >= 3) value["parentRevisionId"]?.jsonPrimitive?.contentOrNull else null,
+        runId = if (schemaVersion >= 3) value["runId"]?.jsonPrimitive?.contentOrNull else null,
     )
 }
 
