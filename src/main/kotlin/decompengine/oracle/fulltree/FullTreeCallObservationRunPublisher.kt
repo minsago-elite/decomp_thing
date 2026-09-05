@@ -165,10 +165,30 @@ internal object FullTreeCallObservationRunPublisher {
         maximumWorkers: Int = 1,
         limits: FullTreeCallObservationRunLimits = FullTreeCallObservationRunLimits(),
     ): FullTreeCallObservationRunPublication = translateCallRunFailure {
+        loadAndValidateWithinDeadline(
+            candidateRoot, expectedIndexArtifactSha256, richArtifact, inventoryPath, scope,
+            scratchParent, maximumWorkers, limits,
+            FullTreeCallObservationDeadline.startWholeRun(scope, limits.shard.control),
+        )
+    }
+
+    internal fun loadAndValidateWithinDeadline(
+        candidateRoot: Path,
+        expectedIndexArtifactSha256: String,
+        richArtifact: Path,
+        inventoryPath: Path,
+        scope: AuthenticatedFullTreeScope,
+        scratchParent: Path,
+        maximumWorkers: Int,
+        limits: FullTreeCallObservationRunLimits,
+        deadline: FullTreeCallObservationDeadline,
+    ): FullTreeCallObservationRunPublication = translateCallRunFailure {
+        deadline.requireWholeRunScope(scope)
+        deadline.checkpoint("before validating the complete call-observation run")
+        FullTreeScopeControl.validate(scope, limits.shard.control)
         require(expectedIndexArtifactSha256.matches(Regex("[0-9a-f]{64}"))) {
             "call-observation run index artifact hash is invalid"
         }
-        val deadline = FullTreeCallObservationDeadline.startWholeRun(scope, limits.shard.control)
         val paths = CallRunPaths.authenticate(richArtifact, inventoryPath, scratchParent, candidateRoot)
         withCallRunInputs(paths, scope, maximumWorkers, limits, deadline) { inputs ->
             inputs.requireScratchReservation(0L, generating = false)

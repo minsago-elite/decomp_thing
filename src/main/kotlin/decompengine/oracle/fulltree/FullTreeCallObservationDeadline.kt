@@ -20,6 +20,13 @@ internal class FullTreeCallObservationDeadline private constructor(
         }
     }
 
+    fun requireWholeRunScope(scope: AuthenticatedFullTreeScope) {
+        requireScope(scope)
+        if (!wholeRun) {
+            throw FullTreeControlException("call-observation run requires its whole-operation deadline")
+        }
+    }
+
     fun startShard(
         scope: AuthenticatedFullTreeScope,
         controlLimits: FullTreeControlLimits = FullTreeControlLimits(),

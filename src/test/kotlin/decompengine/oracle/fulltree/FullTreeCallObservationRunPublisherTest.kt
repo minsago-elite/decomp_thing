@@ -356,6 +356,36 @@ class FullTreeCallObservationRunPublisherTest {
         }
 
     @Test
+    fun `raw run validation cannot reset an expired parent deadline or accept a shard deadline`() =
+        withRunFixture(perShardBounds = mapOf("wallClockSeconds" to 5L), wholeRunBounds = mapOf("wallClockSeconds" to 5L)) { fixture ->
+            val candidate = fixture.outputParent.resolve("complete")
+            val receipt = publish(fixture, candidate)
+            val before = fileSnapshot(candidate)
+            val deadline = FullTreeCallObservationDeadline.startWholeRun(fixture.scope)
+            Thread.sleep(5100L)
+            val expired = assertFailsWith<FullTreeCallObservationRunException> {
+                FullTreeCallObservationRunPublisher.loadAndValidateWithinDeadline(
+                    candidate, receipt.indexArtifactSha256, fixture.artifact, fixture.inventoryPath,
+                    fixture.scope, fixture.scratch, 1, FullTreeCallObservationRunLimits(), deadline,
+                )
+            }
+            assertTrue(expired.cause is FullTreeControlException)
+            assertTrue(expired.cause?.message.orEmpty().contains("wall-clock"), expired.cause?.message)
+            assertSnapshot(before, candidate)
+            assertScratchEmpty(fixture)
+            assertEquals(receipt, validate(fixture, candidate, receipt.indexArtifactSha256))
+            assertFailsWith<FullTreeCallObservationRunException> {
+                FullTreeCallObservationRunPublisher.loadAndValidateWithinDeadline(
+                    candidate, receipt.indexArtifactSha256, fixture.artifact, fixture.inventoryPath,
+                    fixture.scope, fixture.scratch, 1, FullTreeCallObservationRunLimits(),
+                    FullTreeCallObservationDeadline.start(fixture.scope),
+                )
+            }
+            assertSnapshot(before, candidate)
+            assertScratchEmpty(fixture)
+        }
+
+    @Test
     fun `preinterrupted whole run preserves interruption and leaves no staging`() = withRunFixture { fixture ->
         val output = fixture.outputParent.resolve("interrupted")
         try {
