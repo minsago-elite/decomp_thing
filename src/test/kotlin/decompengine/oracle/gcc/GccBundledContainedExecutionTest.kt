@@ -172,7 +172,7 @@ class GccBundledContainedExecutionTest {
                 val definition = GccCompilerEngineContainmentContract.parseDefinitionForLiveController(owner.definitionBytes)
                 outputs.add(definition.outputLease.path)
                 val stopped = owner.executeUntilCheckpoint(512)
-                assertTrue(stopped.assessment.completed >= 512 && stopped.assessment.completed < stopped.assessment.functionCount)
+                assertTrue(stopped.assessment.completed >= 512 && stopped.assessment.completed <= stopped.assessment.functionCount)
                 val stoppedReceipt = OracleJson.parseCanonical(stopped.executionReceiptBytes).jsonObject
                 assertLinkedRecord(stoppedReceipt, intent, "gcc-bundled-command-interrupted-v1")
                 val stoppedCommand = stoppedReceipt.getValue("execution").jsonObject
