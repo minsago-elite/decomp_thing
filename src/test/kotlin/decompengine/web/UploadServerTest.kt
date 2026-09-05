@@ -126,6 +126,28 @@ class UploadServerTest {
     }
 
     @Test
+    fun `dashboard reports unavailable when a published job becomes unreadable`() {
+        val root = createTempDirectory("web-listing-admission-")
+        val server = UploadServer("127.0.0.1", 0, root)
+        server.start()
+        try {
+            val id = uploadedJobId(server)
+            val metadata = root.resolve(id).resolve("job.json")
+            val original = metadata.readBytes()
+            metadata.writeText("private-invalid-record")
+            val unavailable = request(server, "GET", "/")
+            assertEquals(503, unavailable.status)
+            val text = unavailable.body.decodeToString()
+            assertTrue(text.contains("Job listing unavailable"))
+            assertTrue(!text.contains("private-invalid-record"))
+            assertTrue(!text.contains(root.toString()))
+            assertEquals("private-invalid-record", metadata.readBytes().decodeToString())
+            metadata.writeBytes(original)
+            assertEquals(200, request(server, "GET", "/").status)
+        } finally { server.stop() }
+    }
+
+    @Test
     fun `early stop signal discards delivered queued work before cleanup takes the lifecycle lock`() {
         val root = createTempDirectory("web-stop-admission-")
         val queued = java.util.concurrent.CopyOnWriteArrayList<Runnable>()

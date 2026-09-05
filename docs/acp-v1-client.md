@@ -876,3 +876,11 @@ are rejected rather than silently dropped by a recovery rewrite. Older records m
 `updated_at` or omit/null `status_message`. The existing signed-Long wire representation of the unsigned
 ELF entry point is preserved. Invalid records remain retained and cause startup inspection to fail
 before recovery status publication; this validates metadata structure, not the uploaded file's identity.
+
+Dashboard listing uses the same read-only scanner as startup recovery: at most 4,096 encountered
+store entries and 64 MiB of metadata, with 256 KiB per record and strict schema validation. A complete
+scan is required before returning sorted jobs. Unreadable records and exhausted budgets produce an
+explicit HTTP 503 “Job listing unavailable” page with fixed diagnostics; they no longer silently remove
+jobs from a successful listing. Listing never rewrites or removes records. After records are repaired
+or the store fits the limits, a later request can succeed. These limits do not provide pagination,
+aggregate storage admission or an atomic snapshot against noncooperating writers.

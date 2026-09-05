@@ -111,6 +111,25 @@ class JobRecoveryAdmissionTest {
         assertEquals("failed", store.get(job.id).status)
     }
 
+    @Test fun `listing refuses partial results on scan limits and invalid metadata without rewriting`() {
+        val root = createTempDirectory("listing-admission-")
+        val store = JobStore(root)
+        val jobs = List(2) { store.createFromUpload("fixture.elf", elfFixture()) }
+        val paths = jobs.map { root.resolve(it.id).resolve("job.json") }
+        val original = paths.map { it.readBytes() }
+        val total = original.sumOf { it.size.toLong() }
+        assertFailsWith<JobListingUnavailableException> { store.list(1, total) }
+        assertFailsWith<JobListingUnavailableException> { store.list(4096, total - 1) }
+        assertEquals(jobs.map { it.id }.toSet(), store.list(4096, total).map { it.id }.toSet())
+        paths.forEachIndexed { index, path -> assertContentEquals(original[index], path.readBytes()) }
+        paths[0].writeText("private-invalid-record")
+        val failure = assertFailsWith<JobListingUnavailableException> { store.list() }
+        assertEquals("Job listing is incomplete. Check retained records and store limits.", failure.message)
+        assertNull(failure.cause)
+        assertEquals("private-invalid-record", paths[0].readText())
+        assertContentEquals(original[1], paths[1].readBytes())
+    }
+
     private fun assertIncomplete(action: () -> Unit) {
         val failure = assertFailsWith<JobStoreException>(block = action)
         assertEquals("Job recovery inspection is incomplete; no recovery statuses were changed", failure.message)

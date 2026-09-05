@@ -415,6 +415,9 @@ class UploadServer(
                 }
                 else -> exchange.sendHtml(404, renderErrorPage(404, "Page not found", "The requested route does not exist."))
             }
+        } catch (_: decompengine.jobs.JobListingUnavailableException) {
+            exchange.sendHtml(503, renderErrorPage(503, "Job listing unavailable",
+                "Job listing is incomplete. Check retained records and store limits."))
         } catch (exception: JobStoreException) {
             exchange.sendHtml(404, renderErrorPage(404, "Job not found", diagnostic(exception, "The job does not exist.")))
         } catch (exception: IllegalArgumentException) {

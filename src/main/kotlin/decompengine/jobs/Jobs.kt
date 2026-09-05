@@ -30,6 +30,9 @@ import kotlin.io.path.name
 import kotlin.io.path.isRegularFile
 
 class JobStoreException(message: String) : RuntimeException(message)
+internal class JobListingUnavailableException : IllegalStateException(
+    "Job listing is incomplete. Check retained records and store limits.",
+)
 internal class JobRecoveryCancelledException(val statusUpdatesStarted: Boolean) : IllegalStateException(
     if (statusUpdatesStarted) "Job recovery cancelled after status publication began; some statuses may have changed"
     else "Job recovery cancelled before status publication; no recovery statuses were changed",
@@ -153,15 +156,19 @@ class JobStore internal constructor(
     fun recoveryInventory(): JobRecoveryInventory = inspectJobRecoveryInventory(root)
 
     @Synchronized
-    fun list(): List<Job> {
-        if (!root.exists()) return emptyList()
-        return Files.list(root).use { paths ->
-            paths.iterator().asSequence()
-                .filter { Files.isDirectory(it) && it.resolve("job.json").isRegularFile() }
-                .toList()
-                .mapNotNull { directory -> runCatching { get(directory.fileName.toString()) }.getOrNull() }
-                .sortedByDescending { it.createdAt }
+    fun list(): List<Job> = list(4096, 64L * 1024 * 1024)
+
+    @Synchronized
+    internal fun list(maximumEntries: Int, maximumMetadataBytes: Long): List<Job> {
+        require(maximumEntries in 1..4096 && maximumMetadataBytes in 1..64L * 1024 * 1024)
+        val jobs = ArrayList<Job>()
+        try {
+            scanJobs(maximumEntries, maximumMetadataBytes,
+                { check(!Thread.currentThread().isInterrupted) }, jobs::add)
+        } catch (_: Exception) {
+            throw JobListingUnavailableException()
         }
+        return jobs.sortedByDescending { it.createdAt }
     }
 
     @Synchronized
@@ -287,25 +294,10 @@ class JobStore internal constructor(
             }
         }
         checkCancellation()
-        if (!root.exists()) return
         val pending = ArrayList<String>()
         try {
-            var scanned = 0
-            var remaining = maximumMetadataBytes
-            Files.newDirectoryStream(root).use { entries ->
-                for (entry in entries) {
-                    checkCancellation()
-                    check(++scanned <= maximumEntries)
-                    val id = entry.fileName.toString()
-                    if (!id.matches(Regex("[a-f0-9]{32}"))) continue
-                    check(remaining > 0)
-                    val bytes = readStableRegularFile(root, "$id/job.json",
-                        minOf(MAX_METADATA_BYTES.toLong(), remaining)).bytes
-                    remaining -= bytes.size
-                    val job = decodeJob(id, bytes)
-                    check(job.status in VALID_STATUSES)
-                    if (job.status == "queued" || job.status == "analyzing") pending.add(id)
-                }
+            scanJobs(maximumEntries, maximumMetadataBytes, ::checkCancellation) { job ->
+                if (job.status == "queued" || job.status == "analyzing") pending.add(job.id)
             }
         } catch (cancelled: JobRecoveryCancelledException) {
             throw cancelled
@@ -318,6 +310,32 @@ class JobStore internal constructor(
             statusUpdatesStarted = true
             updateStatus(id, "failed", "Analysis was interrupted before the server restarted")
         }
+    }
+
+    /** Shared read-only admission for complete listing and recovery inspection. */
+    private fun scanJobs(
+        maximumEntries: Int, maximumMetadataBytes: Long,
+        checkProgress: () -> Unit, accept: (Job) -> Unit,
+    ) {
+        checkProgress()
+        if (Files.notExists(root)) return
+        var scanned = 0
+        var remaining = maximumMetadataBytes
+        val jobName = Regex("[a-f0-9]{32}")
+        Files.newDirectoryStream(root).use { entries ->
+            for (entry in entries) {
+                checkProgress()
+                check(++scanned <= maximumEntries)
+                val id = entry.fileName.toString()
+                if (!id.matches(jobName)) continue
+                check(remaining > 0)
+                val bytes = readStableRegularFile(root, "$id/job.json",
+                    minOf(MAX_METADATA_BYTES.toLong(), remaining)).bytes
+                remaining -= bytes.size
+                accept(decodeJob(id, bytes))
+            }
+        }
+        checkProgress()
     }
 
     private fun jobDirectory(jobId: String): Path {
