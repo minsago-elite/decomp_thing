@@ -74,6 +74,9 @@ class AcpV1WireContractGoldenTest {
     @Test
     fun `sdk serializers match every versioned v1 golden message`() {
         assertExchange("initialize", AcpMethod.AgentMethods.V1.Initialize)
+        assertResponse("initialize-auth.response", "initialize.request", AcpMethod.AgentMethods.V1.Initialize)
+        assertExchange("authenticate", AcpMethod.AgentMethods.V1.Authenticate)
+        assertExchange("logout", AcpMethod.AgentMethods.V1.Logout)
         assertExchange("session-new", AcpMethod.AgentMethods.V1.SessionNew)
         assertExchange("session-load", AcpMethod.AgentMethods.V1.SessionLoad)
         assertResponse("session-load-configured.response", "session-load.request", AcpMethod.AgentMethods.V1.SessionLoad)
@@ -148,6 +151,21 @@ class AcpV1WireContractGoldenTest {
             messages.keys,
             "ACP v1 golden fixture has an unvalidated or missing message",
         )
+    }
+
+    @Test
+    fun `authentication selection and logout advertisement are distinct typed v1 fields`() {
+        val advertised = ACPJson.decodeFromJsonElement(AcpMethod.AgentMethods.V1.Initialize.responseSerializer,
+            message("initialize-auth.response").getValue("result"))
+        val absent = ACPJson.decodeFromJsonElement(AcpMethod.AgentMethods.V1.Initialize.responseSerializer,
+            message("initialize.response").getValue("result"))
+        val request = ACPJson.decodeFromJsonElement(AcpMethod.AgentMethods.V1.Authenticate.requestSerializer,
+            message("authenticate.request").getValue("params"))
+        val method = assertIs<com.agentclientprotocol.model.AuthMethod.AgentAuth>(advertised.authMethods.single())
+        assertEquals(method.id, request.methodId)
+        assertNotNull(advertised.agentCapabilities.auth.logout)
+        assertEquals(emptyList(), absent.authMethods)
+        assertEquals(null, absent.agentCapabilities.auth.logout)
     }
 
     private fun <TRequest : AcpRequest, TResponse : AcpResponse> assertExchange(
@@ -270,6 +288,11 @@ class AcpV1WireContractGoldenTest {
         val EXPECTED_MESSAGE_NAMES: Set<String> = linkedSetOf(
             "initialize.request",
             "initialize.response",
+            "initialize-auth.response",
+            "authenticate.request",
+            "authenticate.response",
+            "logout.request",
+            "logout.response",
             "session-load.request",
             "session-load.response",
             "session-load-configured.response",

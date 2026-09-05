@@ -788,6 +788,65 @@
           }
         ]
       }
+    },
+    "initialize-auth.response": {
+      "jsonrpc": "2.0",
+      "id": 1,
+      "result": {
+        "protocolVersion": 1,
+        "agentCapabilities": {
+          "loadSession": false,
+          "promptCapabilities": {
+            "audio": false,
+            "image": false,
+            "embeddedContext": false
+          },
+          "mcpCapabilities": {
+            "http": false,
+            "sse": false
+          },
+          "sessionCapabilities": {},
+          "auth": {
+            "logout": {}
+          }
+        },
+        "authMethods": [
+          {
+            "id": "operator-login",
+            "name": "Fixture login",
+            "description": "Operator-controlled login",
+            "type": "agent"
+          }
+        ],
+        "agentInfo": {
+          "name": "contract-fixture-agent",
+          "version": "1.0"
+        }
+      }
+    },
+    "authenticate.request": {
+      "jsonrpc": "2.0",
+      "id": 71,
+      "method": "authenticate",
+      "params": {
+        "methodId": "operator-login"
+      }
+    },
+    "authenticate.response": {
+      "jsonrpc": "2.0",
+      "id": 71,
+      "result": {}
+    },
+    "logout.request": {
+      "jsonrpc": "2.0",
+      "id": 72,
+      "method": "logout",
+      "params": {}
+    },
+    "logout.response": {
+      "jsonrpc": "2.0",
+      "id": 72,
+      "result": {}
     }
   }
 }
