@@ -18,6 +18,9 @@ import decompengine.validation.BehaviorComparator
 import decompengine.validation.BehaviorProjectContext
 import decompengine.validation.ProcessInput
 import kotlinx.serialization.json.Json
+import kotlinx.serialization.json.JsonArray
+import kotlinx.serialization.json.JsonObject
+import kotlinx.serialization.json.JsonPrimitive
 import kotlinx.serialization.json.jsonArray
 import kotlinx.serialization.json.jsonObject
 import kotlinx.serialization.json.jsonPrimitive
@@ -34,6 +37,7 @@ import kotlin.io.path.writeText
 import kotlin.test.Test
 import kotlin.test.assertEquals
 import kotlin.test.assertFalse
+import kotlin.test.assertFailsWith
 import kotlin.test.assertTrue
 
 class ArchivalProjectScaleIntegrationTest {
@@ -177,6 +181,11 @@ class ArchivalProjectScaleIntegrationTest {
         )
         val replayRecord = Json.parseToJsonElement(replay.reportPath.readText()).jsonObject
         assertEquals(extractedRecord.getValue("corpusSha256"), replayRecord.getValue("corpusSha256"))
+        val consumerAudit = ArchivalProjectAuditor.audit(extracted, requiredCorpusSha256 = setOf(requiredCorpus))
+        assertEquals(true, consumerAudit.behaviorMatched)
+        assertEquals(listOf(requiredCorpus), consumerAudit.requiredCorpusSha256)
+        assertEquals(listOf(requiredCorpus), consumerAudit.observedPortableCorpusSha256)
+        assertTrue("reports/large_archival_replay.behavior.json" in consumerAudit.projectBehaviorReportIds)
         val expectedCases = mapOf(
             "stdin" to (0 to "from-stdin:25\n"),
             "argv" to (0 to "from-argv:25\n"),
@@ -211,6 +220,24 @@ class ArchivalProjectScaleIntegrationTest {
         assertTrue(audit.sandboxReported)
         assertFalse(audit.universalEquivalenceClaim)
         assertEquals(listOf("opaque_context"), audit.unresolvedEntityIds)
+
+        val unsupportedCorpus = "0".repeat(64)
+        val consumerAuditPath = extracted.resolve("reports/archival_audit.json")
+        val claimedAudit = JsonObject(Json.parseToJsonElement(consumerAuditPath.readText()).jsonObject + mapOf(
+            "requiredCorpusSha256" to JsonArray(listOf(JsonPrimitive(unsupportedCorpus))),
+            "observedPortableCorpusSha256" to JsonArray(listOf(JsonPrimitive(unsupportedCorpus))),
+            "behaviorMatched" to JsonPrimitive(true),
+        ))
+        consumerAuditPath.writeText(claimedAudit.toString())
+        val independentlyRejected = ArchivalProjectAuditor.audit(extracted, requiredCorpusSha256 = setOf(unsupportedCorpus))
+        assertEquals(null, independentlyRejected.behaviorMatched)
+        assertTrue(independentlyRejected.observedPortableCorpusSha256.isEmpty())
+        assertTrue("missing-corpus:$unsupportedCorpus" in independentlyRejected.behaviorEvidenceProblems)
+        val unqualifiedArchive = temp.resolve("unqualified.zip")
+        assertFailsWith<IllegalArgumentException> {
+            ArchivalPackager.create(extracted, unqualifiedArchive, requiredCorpusSha256 = setOf(unsupportedCorpus))
+        }
+        assertFalse(unqualifiedArchive.exists())
     }
 
     private fun largeModel(): RecoveredProgramModel {
