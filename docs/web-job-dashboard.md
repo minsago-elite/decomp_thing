@@ -92,3 +92,35 @@ client navigation adds no document request and that explicit reload adds one.
 [Retained report](evidence/web-upload-route-20260905.json); pinned Chrome used the
 test-only no-sandbox option. The final frontend suite still passed all 184 tests,
 lint and the rebuilt typechecked distribution.
+
+
+## Dashboard acceptance audit
+
+The current dashboard has concrete evidence for exact row fields, fixed newest-first
+sorting, URL filters/reset, bounded paging, stale/denied/error states, deliberate
+refresh and separate job/run/accepted-revision labels. The new storage-failure
+message distinguishes an incomplete backend read from transport failure; it never
+pretends that the collection returned a complete or partial library successfully.
+
+Focused checks now assert lossless size, distinct creation/update timestamps,
+completed job state, latest run and an independently retained accepted revision.
+A simulated backend change does not cause polling or reorder the focused row during
+one minute; deliberate Refresh jobs then reveals new data. Existing component tests
+page a synthetic 10,000-job source in batches of 50, restore filters, retain stale
+rows on refresh failure and clear data on denial. JVM WebJobPages tests verify
+bounded 10,000-row scans and stable snapshot rows across inserts/updates/deletions.
+
+These checks do not prove the full accessibility/scale qualification recorded in
+#168's earlier checkpoint or a 10,000-job packaged-browser workload. Keep #168 open
+for those release checks; this audit does not equate small populated browser data
+with full scale or assistive-technology qualification. Earlier-attempt and evidence
+features have advanced under their own issues, without establishing full D3 parity.
+
+
+The actual packaged history-mode journey passed assertions for the populated row's
+64-byte size, creation timestamp, latest attempt, completed state, absent accepted
+revision and durable nested job link, alongside filter/reload/reset and existing
+history/evidence/download checks. [Retained report](evidence/web-dashboard-audit-20260905.json).
+Validation: 194 frontend tests passed; the nine focused dashboard tests also passed
+after a test-only lint fix. Lint, bounded JVM pagination checks and the rebuilt
+distribution passed. Pinned Chrome used test-only --no-sandbox.

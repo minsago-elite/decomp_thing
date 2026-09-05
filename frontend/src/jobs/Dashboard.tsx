@@ -48,6 +48,8 @@ export function Dashboard({ basePath }: { basePath: string }) {
       setPhase('error');
       if (failure instanceof ApiClientError && (failure.status === 401 || failure.status === 403)) {
         setData(null); setError('Access to this job library is unavailable. Check your local session.');
+      } else if (failure instanceof ApiClientError && ['JOB_RECORD_UNAVAILABLE', 'LISTING_UNAVAILABLE', 'CORRUPT_WORKFLOW_STATE', 'CORRUPT_LEGACY_JOB', 'INVALID_STORAGE_ENTRY'].includes(failure.serverCode ?? '')) {
+        setError('Stored jobs could not be listed completely. The server has not returned a partial library; inspect job storage before retrying.');
       } else if (failure instanceof ApiClientError && ['CURSOR_EXPIRED', 'INVALID_CURSOR'].includes(failure.serverCode ?? '')) {
         setError('This page snapshot expired. Refresh jobs to start a new snapshot.');
       } else setError('Jobs could not be loaded. The server may be unavailable or a stored job may need attention.');

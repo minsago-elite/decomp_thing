@@ -565,6 +565,23 @@ try {
     await ready(authenticated, `document.body.innerText.includes('${historyFixture ? 'synthetic-history.elf' : 'No uploaded jobs yet.'}')`, 'reset job library');
     assert.equal(await evaluate(authenticated, 'location.search'), '');
     report.dashboard = { emptyLibrary: !historyFixture, populatedLibrary: !!historyFixture, noMatches: true, filtersSurviveReload: true, resetFilters: true };
+    if (historyFixture) {
+      const row = await evaluate(authenticated, `(() => {
+        const row = document.querySelector('ul[aria-label="Uploaded jobs"] li');
+        const facts = Object.fromEntries([...row.querySelectorAll('dt')].map(dt => [dt.textContent, dt.nextElementSibling.textContent]));
+        return { facts, href: row.querySelector('a').getAttribute('href'), count: document.querySelector('ul[aria-label="Uploaded jobs"]').children.length };
+      })()`);
+      assert.equal(row.count, 1);
+      assert.equal(row.href, '/nested/jobs/' + historyFixture.jobId);
+      assert.equal(row.facts.Size, '64 bytes');
+      assert.equal(row.facts.Created, '2026-09-05T00:00:00Z');
+      assert.equal(row.facts['Workflow state'], 'completed');
+      assert.equal(row.facts['Latest attempt'], 'run_fixture_54');
+      assert.equal(row.facts['Accepted revision'], 'No accepted revision recorded');
+      assert.ok(row.facts.Updated);
+      report.dashboard.exactRowMetadata = true;
+      report.dashboard.jobAndRunIdentityDistinct = true;
+    }
     const firstRequests = await evaluate(authenticated, 'window.__sessionTestRequests');
     assert.ok(firstRequests.length >= 2);
     assert.ok(firstRequests.every((request) => request.fragmentEmpty));

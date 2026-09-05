@@ -1,6 +1,6 @@
 import { readFileSync } from 'node:fs';
 import { resolve } from 'node:path';
-import { act, fireEvent, render, screen, waitFor } from '@testing-library/preact';
+import { act, fireEvent, render, screen, waitFor, within } from '@testing-library/preact';
 import { beforeEach, expect, it, vi } from 'vitest';
 import type * as ClientModule from '../src/api/client';
 import type { Bootstrap, Job } from '../src/api/generated';
@@ -124,4 +124,42 @@ it('opens an authenticated durable job deep link and clears metadata on logout',
     expect(await screen.findByText('Connect a local session to view this job.')).toBeTruthy();
     expect(screen.queryByText('program-3.elf')).toBeNull();
   } finally { session.dispose(); }
+});
+
+
+it('keeps exact row metadata and separates completion from accepted revisions', async () => {
+  const item = { ...job(1), status: 'completed' as const, latestRunId: 'run_latest', acceptedRevisionId: 'revision_prior', updatedAt: '2026-09-05T01:00:00Z' };
+  transport.get.mockResolvedValue(page([item]));
+  render(<Dashboard basePath="/nested" />);
+  const link = await screen.findByRole('link', { name: item.displayFilename });
+  const row = within(link.closest('li')!);
+  expect(row.getByText(item.sizeBytes + ' bytes')).toBeTruthy();
+  expect(row.getByText(item.createdAt)).toBeTruthy();
+  expect(row.getByText(item.updatedAt)).toBeTruthy();
+  expect(row.getByText('completed')).toBeTruthy();
+  expect(row.getByText('run_latest')).toBeTruthy();
+  expect(row.getByText('revision_prior')).toBeTruthy();
+  expect(screen.getByText('1 jobs on this page. No total count is available.')).toBeTruthy();
+  expect(screen.getByText(/Completion does not establish validated reconstruction/)).toBeTruthy();
+  link.focus();
+  transport.get.mockResolvedValue(page([{ ...job(2), status: 'running' }, item]));
+  vi.useFakeTimers();
+  try {
+    await act(async () => { vi.advanceTimersByTime(60000); await Promise.resolve(); });
+    expect(transport.get).toHaveBeenCalledOnce();
+    expect(document.activeElement).toBe(link);
+    expect(screen.queryByText('program-2.elf')).toBeNull();
+  } finally { vi.useRealTimers(); }
+  fireEvent.click(screen.getByRole('button', { name: 'Refresh jobs' }));
+  expect(await screen.findByText('program-2.elf')).toBeTruthy();
+  expect(transport.get).toHaveBeenCalledTimes(2);
+});
+
+it('distinguishes a partial storage failure from server unavailability', async () => {
+  transport.get.mockRejectedValueOnce(new ApiClientError('http_error', { status: 503, serverCode: 'JOB_RECORD_UNAVAILABLE' }))
+    .mockRejectedValueOnce(new ApiClientError('timeout'));
+  render(<Dashboard basePath="" />);
+  expect(await screen.findByRole('alert')).toHaveProperty('textContent', 'Stored jobs could not be listed completely. The server has not returned a partial library; inspect job storage before retrying.');
+  fireEvent.click(screen.getByRole('button', { name: 'Refresh jobs' }));
+  await waitFor(() => expect(screen.getByRole('alert').textContent).toContain('The server may be unavailable'));
 });
