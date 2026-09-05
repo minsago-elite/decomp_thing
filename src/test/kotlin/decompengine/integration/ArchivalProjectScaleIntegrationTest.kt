@@ -129,9 +129,12 @@ class ArchivalProjectScaleIntegrationTest {
             ProcessInput("file", args = listOf("--file", "/inputs/sample.txt")),
             ProcessInput("exit", args = listOf("a", "b", "c")),
         )
+        // SHA-256 of the independently authored schema-3 logical corpus, using OracleJson canonical encoding.
+        val requiredCorpus = "d916ad4bd5f3aeb8a039cfc9a5a8d6c4d63ad1afd44af43d078589bb671ffc74"
         val behavior = BehaviorComparator().compare(
             "large_archival", original, rebuilt, inputs, project.resolve("reports"), BehaviorProjectContext(project),
             fileInputs = mapOf("file" to mapOf("sample.txt" to fileInput)),
+            expectedCorpusSha256 = requiredCorpus,
         )
         val fileCase = behavior.cases.single { it.input.id == "file" }
         assertEquals(0, fileCase.original.exitCode)
@@ -168,6 +171,7 @@ class ArchivalProjectScaleIntegrationTest {
             "large_archival_replay", original, extracted.resolve("build/reconstructed"), inputs,
             extracted.resolve("reports"), BehaviorProjectContext(extracted),
             fileInputs = mapOf("file" to mapOf("sample.txt" to restoredInput)),
+            expectedCorpusSha256 = requiredCorpus,
         )
         val replayRecord = Json.parseToJsonElement(replay.reportPath.readText()).jsonObject
         assertEquals(extractedRecord.getValue("corpusSha256"), replayRecord.getValue("corpusSha256"))
