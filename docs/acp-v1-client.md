@@ -692,6 +692,26 @@ tool-call limit exactly once before terminal content can bind any terminal autho
 
 ## Upgrade policy
 
+### Reproducing the web job recovery matrix
+
+Run `python3 scripts/verify-web-job-recovery.py` from a provisioned checkout with cached Gradle
+dependencies. This offline command selects eleven benign storage/web test classes covering upload and
+metadata publication, directory preparation, controlled JVM exits, ownership/shutdown, retained-file
+inventory and HTTP presentation. It does not select the patch reproduction lane or certify full B-series
+release readiness. Keep unrelated Gradle invocations separate while it runs.
+
+Each invocation creates a unique directory under `build/web-job-recovery-verification/` with workspace
+temporary files, isolated fresh JUnit/HTML reports, Gradle output and a JSON manifest. The manifest records
+the source commit, dirty-worktree flag and tracked-diff digest, exact command, required suites, runtime
+and test-filesystem details, totals and report digests. For reproducible source identity, run a clean
+committed checkout; the diff digest does not capture untracked source contents. JVM option environment
+variables are removed for this scoped run and temporary storage is directed into its evidence directory.
+The runner disables test output reuse and fails on a nonzero build exit, missing/unexpected/duplicate
+suites, empty or malformed reports, failures, errors or skips. An interrupted run without a terminal
+manifest is incomplete evidence. Its own lock prevents concurrent invocations of this runner.
+
+### ACP SDK upgrades
+
 The bounded `acp/v1/wire-contract.json` corpus currently freezes 49 SDK-decoded and re-encoded
 JSON-RPC messages. It includes the production model/mode setters, select and boolean configuration
 setters, flat and grouped session inventories, terminal token usage, session-info and configuration/mode/command/usage updates, and the original
