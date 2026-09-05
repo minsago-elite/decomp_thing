@@ -20,6 +20,12 @@ export function checkSemantics(document: ContractDocument, basePath = '/'): void
       requireValue((progress.state === 'published') === (progress.jobId !== null));
       break;
     }
+    case 'runs': {
+      const { items, page, jobId } = document.data;
+      requireValue(items.length <= page.limit && new Set(items.map(item => item.runId)).size === items.length);
+      requireValue(items.every(item => item.jobId === jobId));
+      break;
+    }
     case 'jobs': {
       const { items, page } = document.data;
       requireValue(items.length <= page.limit && new Set(items.map((item) => item.jobId)).size === items.length);

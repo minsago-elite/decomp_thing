@@ -23,13 +23,19 @@ internal class WebApiController(
     private val prefix = "${assets.basePath}api/v1/"
     private val applicationBuildId = applicationBuildId()
     private val uploadProgress = WebUploadProgress()
+    private val runPages = WebRunPages { jobId ->
+        when (val inspection = jobs.inspectDurableJob(jobId)) {
+            is decompengine.jobs.WorkflowJobInspection.Available -> inspection.snapshot
+            is decompengine.jobs.WorkflowJobInspection.Unavailable -> throw WebJobServiceException(inspection.diagnostic.code, inspection.diagnostic.message)
+        }
+    }
     private val jobPages = WebJobPages(jobs::collectionRecords)
 
     fun route(exchange: HttpExchange): Boolean {
         val path = exchange.requestURI.rawPath
         if (!path.startsWith("${assets.basePath}api/")) return false
         val resource = path.removePrefix(prefix)
-        if (!path.startsWith(prefix) || !(resource in setOf("session", "bootstrap", "jobs") || resource.matches(Regex("(?:jobs|uploads)/[^/]+|jobs/[^/]+/runs/[^/]+")))) {
+        if (!path.startsWith(prefix) || !(resource in setOf("session", "bootstrap", "jobs") || resource.matches(Regex("(?:jobs|uploads)/[^/]+|jobs/[^/]+/runs(?:/[^/]+)?")))) {
             try {
                 val policy = if (exchange.requestMethod in setOf("POST", "PUT", "PATCH", "DELETE")) {
                     WebEndpointPolicy.jsonMutation(exchange.requestMethod)
@@ -99,6 +105,11 @@ internal class WebApiController(
                         put("totalBytes", progress.totalBytes?.let { JsonPrimitive(it.toString()) } ?: JsonNull)
                         put("state", progress.state); put("jobId", progress.jobId?.let { JsonPrimitive(it) } ?: JsonNull)
                     })
+                }
+                resource.matches(Regex("jobs/[^/]+/runs")) -> {
+                    val session = checkNotNull(access.authorize(exchange, WebEndpointPolicy.privateRead()))
+                    requireJsonAccept(exchange)
+                    send(exchange, 200, "runs", runPages.page(session.sessionId, resource.split('/')[1], exchange.requestURI.rawQuery))
                 }
                 resource.matches(Regex("jobs/[^/]+/runs/[^/]+")) -> {
                     access.authorize(exchange, WebEndpointPolicy.privateRead())

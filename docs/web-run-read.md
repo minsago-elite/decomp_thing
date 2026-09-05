@@ -31,9 +31,8 @@ safe parent navigation.
 
 Limits and usage are displayed without floating-point conversion. Missing values
 are explicitly unreported, and completion is explained separately from accepted
-reconstruction retained elsewhere on the job. The page does not yet provide an
-attempt collection, event stream, source/artifact/evidence navigation or workflow
-controls. Following a previous-run link is not a complete paginated attempt history.
+reconstruction retained elsewhere on the job. The page does not yet provide an event stream, source/artifact/evidence navigation
+or workflow controls. Paginated history is described below.
 
 Verification includes HTTP authorization, interrupted startup projection,
 job/run mismatch and missing-run rejection, strict query handling, read-only
@@ -50,3 +49,36 @@ of mutations. Existing session, asset-recovery, dashboard and upload cancellatio
 retry checks also passed. [Retained report](evidence/web-run-route-20260905.json).
 Pinned Chrome used the test-only --no-sandbox option. This does not qualify a
 populated multi-attempt journey in the packaged browser.
+
+
+## Version-bound attempt history
+
+GET `/api/v1/jobs/{jobId}/runs` returns a v1 `runs` envelope with its explicit job
+identity, rows and page metadata. Default 50, maximum 200 rows; the existing durable
+store bounds a job to 1,024 attempts. Ordering reverses recorded admission order,
+so identical timestamps do not cause unstable ties. A response remains below 1 MiB.
+Only `limit` and `cursor` query parameters are accepted, with duplicate fields and
+unknown filters rejected. POST remains unavailable and now returns method refusal
+for this registered read route.
+
+An opaque HMAC-authenticated continuation binds the session, job, limit, offset and
+job-version digest. No page snapshots or cursor map are retained in memory. Each
+page reads the bounded durable job snapshot; it is not a full job-root scan. If the
+job version changed, a valid cursor receives 410 CURSOR_EXPIRED and must restart
+from the first page. A modified cursor or changed session/job/limit receives 400
+INVALID_CURSOR. Server restart invalidates its process-local signing secret.
+An unchanged version permits repeatable pages; this is not a retained historical
+snapshot across active state updates. Reads never mutate workflow state.
+
+The SPA `/jobs/{jobId}/runs` route is linked from job overview and individual
+attempts. It renders 50 rows, exact attempt links, separate state/acceptance labels,
+explicit empty/denied/error states, first/next controls and deliberate refresh.
+Cursor selection is URL state and participates in browser history. Invalidated
+continuations retain explicitly outdated prior rows until refresh; denied access
+clears them. Obsolete reads are aborted. There is no polling or automatic reorder.
+
+Verification covers all 1,024 attempts without duplicate/omitted rows, cursor
+replay, session/job/limit isolation, version expiry, empty histories and strict
+queries. Shared schema fixtures reject duplicate and cross-job rows. Component
+checks cover URL continuation and browser back navigation. Populated packaged
+multi-attempt qualification and evidence/source/artifact navigation remain open.

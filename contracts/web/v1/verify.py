@@ -26,6 +26,12 @@ def check_semantics(document: dict) -> None:
             raise ValueError("upload progress exceeds the request ceiling")
         if (data["state"] == "published") != (data["jobId"] is not None):
             raise ValueError("upload publication identity is inconsistent")
+    elif kind == "runs":
+        items = data["items"]
+        if len(items) > data["page"]["limit"] or len({item["runId"] for item in items}) != len(items):
+            raise ValueError("invalid attempt page bounds or duplicate identity")
+        if any(item["jobId"] != data["jobId"] for item in items):
+            raise ValueError("attempt belongs to a different job")
     elif kind == "jobs":
         if len(data["items"]) > data["page"]["limit"]:
             raise ValueError("page exceeds its declared record limit")

@@ -25,6 +25,7 @@ type ShellProps = {
 
 function Shell({ basePath, identity, recovery, reload, session }: ShellProps) {
   const Job = useMemo(() => lazyRoute(() => import('../routes/Job'), recovery), [recovery]);
+  const RunHistory = useMemo(() => lazyRoute(() => import('../routes/RunHistory'), recovery), [recovery]);
   const Run = useMemo(() => lazyRoute(() => import('../routes/Run'), recovery), [recovery]);
   const Runtime = useMemo(() => lazyRoute(() => import('../routes/Runtime'), recovery), [recovery]);
   const location = useLocation();
@@ -36,8 +37,9 @@ function Shell({ basePath, identity, recovery, reload, session }: ShellProps) {
   const uploadPath = appPath(basePath, '/upload');
   const isJob = location.path.startsWith(`${basePath}/jobs/`) && location.path.slice(`${basePath}/jobs/`.length).indexOf('/') < 0;
   const isRun = location.path.startsWith(`${basePath}/jobs/`) && /\/runs\/[^/]+$/.test(location.path);
+  const isHistory = location.path.startsWith(`${basePath}/jobs/`) && /^[^/]+\/runs$/.test(location.path.slice(`${basePath}/jobs/`.length));
   const pageTitle = atHome ? 'Jobs' : location.path === uploadPath ? 'Upload a binary'
-    : location.path === runtimePath ? 'Runtime status' : isJob ? 'Job overview' : isRun ? 'Workflow attempt' : 'Page unavailable';
+    : location.path === runtimePath ? 'Runtime status' : isJob ? 'Job overview' : isRun ? 'Workflow attempt' : isHistory ? 'Attempt history' : 'Page unavailable';
   useLayoutEffect(() => {
     document.title = `${pageTitle} · Decomp Workbench`;
     main.current?.focus({ preventScroll: recovery.snapshot() !== 'ready' });
@@ -78,6 +80,7 @@ function Shell({ basePath, identity, recovery, reload, session }: ShellProps) {
               <Route path={homePath} component={Home} basePath={basePath} session={session} />
               <Route path={uploadPath} component={UploadPage} basePath={basePath} session={session} />
               <Route path={runtimePath} component={Runtime} identity={identity} session={session} />
+              <Route path={`${basePath}/jobs/:jobId/runs`} component={RunHistory} basePath={basePath} session={session} />
               <Route path={`${basePath}/jobs/:jobId/runs/:runId`} component={Run} basePath={basePath} session={session} />
               <Route path={`${basePath}/jobs/:jobId`} component={Job} basePath={basePath} session={session} />
               <Route default component={NotFound} homePath={homePath} />

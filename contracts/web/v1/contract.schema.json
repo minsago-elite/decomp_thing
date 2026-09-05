@@ -2270,6 +2270,30 @@
         "jobId"
       ],
       "additionalProperties": false
+    },
+    "runs": {
+      "type": "object",
+      "properties": {
+        "items": {
+          "type": "array",
+          "items": {
+            "$ref": "#/definitions/run"
+          },
+          "maxItems": 200
+        },
+        "page": {
+          "$ref": "#/definitions/page"
+        },
+        "jobId": {
+          "$ref": "#/definitions/id"
+        }
+      },
+      "required": [
+        "items",
+        "page",
+        "jobId"
+      ],
+      "additionalProperties": false
     }
   },
   "oneOf": [
@@ -2702,6 +2726,30 @@
         },
         "data": {
           "$ref": "#/definitions/uploadProgress"
+        }
+      },
+      "required": [
+        "apiVersion",
+        "kind",
+        "requestId",
+        "data"
+      ],
+      "additionalProperties": false
+    },
+    {
+      "type": "object",
+      "properties": {
+        "apiVersion": {
+          "const": 1
+        },
+        "kind": {
+          "const": "runs"
+        },
+        "requestId": {
+          "$ref": "#/definitions/requestId"
+        },
+        "data": {
+          "$ref": "#/definitions/runs"
         }
       },
       "required": [

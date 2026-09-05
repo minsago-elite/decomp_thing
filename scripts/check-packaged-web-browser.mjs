@@ -609,6 +609,12 @@ try {
     assert.deepEqual(runTab.exceptions, []);
     report.attemptRoute = { directLink: true, reload: true, missingExplained: true, exactJobReturn: true, mutationRequests: 0 };
     report.requests.attempt = runTab.requests;
+    await evaluate(runTab, `[...document.querySelectorAll('a')].find(a => a.textContent === 'Browse attempt history').click()`);
+    await ready(runTab, `document.querySelector('h1')?.textContent === 'Attempt history' && document.body.innerText.includes('Attempt history is unavailable. Check the job and local session.')`, 'attempt history navigation');
+    await cdp.call('Page.reload', {}, runTab.sessionId);
+    await ready(runTab, `document.title === 'Attempt history · Decomp Workbench' && document.body.innerText.includes('Attempt history is unavailable. Check the job and local session.')`, 'attempt history reload');
+    assert.ok(runTab.requests.every(request => ['GET', 'HEAD'].includes(request.method)));
+    report.attemptHistory = { navigation: true, directReload: true, missingExplained: true, mutationRequests: 0 };
 
     if (values.mode === 'upload') {
       report.upload = await qualifyUpload({ makeTarget, cdp, evaluate, ready, browserOrigin, data });

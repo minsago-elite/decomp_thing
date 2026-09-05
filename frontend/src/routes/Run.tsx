@@ -70,6 +70,7 @@ export default function Run({ jobId, runId, basePath, session }: { jobId: string
     <h1 id="attempt-title">Workflow attempt</h1>
     {valid ? <>
       <a href={jobPath(basePath, jobId)}>Return to job overview</a>
+      <p><a href={`${jobPath(basePath, jobId)}/runs`}>Browse attempt history</a></p>
       {state?.status === 'authenticated' ? <Details key={`${jobId}/${runId}`} jobId={jobId} runId={runId} basePath={basePath} />
         : <p>Connect a local session to view this attempt.</p>}
     </> : <p role="alert">The requested job or attempt identity is invalid.</p>}

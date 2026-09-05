@@ -221,6 +221,18 @@
     {
       "file": "fixtures/invalid-upload-progress-limit.json",
       "valid": false
+    },
+    {
+      "file": "fixtures/runs-page.json",
+      "valid": true
+    },
+    {
+      "file": "fixtures/runs-wrong-job.json",
+      "valid": false
+    },
+    {
+      "file": "fixtures/runs-duplicate.json",
+      "valid": false
     }
   ]
 }

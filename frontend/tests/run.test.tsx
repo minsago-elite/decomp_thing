@@ -60,3 +60,25 @@ it('aborts obsolete attempt reads and refuses a response for another job', async
     expect(screen.queryByText('9007199254740993')).toBeNull();
   } finally { auth.dispose(); }
 });
+
+it('pages history with URL continuation and restores the first page through browser history', async () => {
+  const auth = await session();
+  transport.get.mockImplementation((_kind, path) => Promise.resolve({ data: {
+    jobId: sample.jobId,
+    items: [{ ...sample, runId: path.includes('cursor=') ? 'run_earlier' : 'run_latest' }],
+    page: { limit: 50, snapshotVersion: 'version_1', nextCursor: path.includes('cursor=') ? null : 'cursor_page_2' },
+  } }));
+  history.replaceState(null, '', `/nested/jobs/${sample.jobId}/runs`);
+  try {
+    render(<App basePath="/nested" session={auth} />);
+    expect(await screen.findByRole('link', { name: 'reconstruct: run_latest' })).toBeTruthy();
+    fireEvent.click(screen.getByRole('button', { name: 'Next attempts' }));
+    expect(await screen.findByRole('link', { name: 'reconstruct: run_earlier' })).toBeTruthy();
+    expect(location.search).toBe('?cursor=cursor_page_2');
+    expect(screen.queryByRole('link', { name: 'reconstruct: run_latest' })).toBeNull();
+    expect(transport.get.mock.calls.at(-1)?.[1]).toContain('limit=50&cursor=cursor_page_2');
+    history.back();
+    expect(await screen.findByRole('link', { name: 'reconstruct: run_latest' })).toBeTruthy();
+    expect(location.search).toBe('');
+  } finally { auth.dispose(); }
+});

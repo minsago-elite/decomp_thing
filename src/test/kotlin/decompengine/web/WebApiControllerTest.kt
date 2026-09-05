@@ -51,6 +51,9 @@ class WebApiControllerTest {
             assertEquals("interrupted", body.getValue("status").jsonPrimitive.content)
             assertEquals("null", body.getValue("acceptedRevisionId").toString())
             assertError(request(server, "/workbench/api/v1/jobs/${otherJob.id}/runs/${run.runId}", headers = mapOf("Cookie" to cookie)), 404, "NOT_FOUND")
+            val history = assertEnvelope(request(server, "/workbench/api/v1/jobs/${job.id}/runs?limit=1", headers = mapOf("Cookie" to cookie)), 200, "runs")
+            assertEquals(job.id, history.getValue("jobId").jsonPrimitive.content)
+            assertEquals(run.runId, history.getValue("items").jsonArray.single().jsonObject.getValue("runId").jsonPrimitive.content)
             val runPath = "/workbench/api/v1/jobs/${job.id}/runs/${run.runId}"
             assertError(request(server, runPath), 401, "SESSION_REQUIRED")
             val attempt = assertEnvelope(request(server, runPath, headers = mapOf("Cookie" to cookie)), 200, "run")
@@ -66,7 +69,7 @@ class WebApiControllerTest {
             assertTrue(bootstrap.getValue("capabilities").toString().contains("PREVIEW_UNAVAILABLE"))
             assertError(request(server, "/workbench/api/v1/jobs/${job.id}/runs", "POST", "{}", mapOf(
                 "Cookie" to cookie, "X-CSRF-Token" to bootstrap.getValue("csrfToken").jsonPrimitive.content,
-            )), 404, "NOT_FOUND")
+            )), 405, "METHOD_NOT_ALLOWED")
             assertEquals(before, Files.readString(record))
             assertFalse(executed)
         } finally { server.stop(); root.toFile().deleteRecursively() }

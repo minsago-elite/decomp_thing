@@ -1,7 +1,7 @@
 import { useEffect, useMemo, useState } from 'preact/hooks';
 import { createApiClient, ApiClientError } from '../api/client';
 import type { Job as JobData } from '../api/generated';
-import { appPath, runPath } from '../app/paths';
+import { appPath, jobPath, runPath } from '../app/paths';
 import type { BrowserSession } from '../session/session';
 import { useSession } from '../session/useSession';
 import { JobSummary } from '../jobs/JobSummary';
@@ -33,6 +33,7 @@ function JobDetails({ jobId, basePath }: { jobId: string; basePath: string }) {
     {job && <>
       <h2>{job.displayFilename}</h2><p>Job identity: <code>{job.jobId}</code></p>
       <JobSummary job={job} />
+      <p><a href={`${jobPath(basePath, job.jobId)}/runs`}>Browse attempt history</a></p>
       {job.latestRunId && <a href={runPath(basePath, job.jobId, job.latestRunId)}>Open latest recorded attempt</a>}
       <h3>Binary metadata</h3>
       <dl class="job-facts">

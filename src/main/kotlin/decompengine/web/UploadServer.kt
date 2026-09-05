@@ -328,7 +328,7 @@ class UploadServer(
             "${base}runtime/" -> "${base}runtime"
             "${base}upload/" -> "${base}upload"
             else -> path.takeIf { it.startsWith("${base}jobs/") &&
-                it.removePrefix("${base}jobs/").matches(Regex("[0-9a-f]{32}(?:/runs/[A-Za-z0-9][A-Za-z0-9_-]{0,127})?/?")) }?.removeSuffix("/")
+                it.removePrefix("${base}jobs/").matches(Regex("[0-9a-f]{32}(?:/runs(?:/[A-Za-z0-9][A-Za-z0-9_-]{0,127})?)?/?")) }?.removeSuffix("/")
         }
         if (canonical != null) {
             if (path != canonical && exchange.requestMethod in setOf("GET", "HEAD")) {
