@@ -14,6 +14,31 @@ import kotlin.test.assertTrue
 
 class JobStoreTest {
     @Test
+    fun `interrupted upload leaves no discoverable partial job or staging directory`() {
+        val root = createTempDirectory("jobs-interrupted-upload-")
+        val store = JobStore(root)
+        val existing = store.createFromUpload("existing.elf", elfFixture())
+        val failure = java.util.concurrent.atomic.AtomicReference<Throwable>()
+        val worker = Thread {
+            Thread.currentThread().interrupt()
+            try {
+                store.createFromUpload("interrupted.elf", elfFixture())
+            } catch (problem: Throwable) {
+                failure.set(problem)
+            }
+        }
+        worker.start()
+        worker.join(5000)
+        assertTrue(!worker.isAlive)
+        assertTrue(failure.get() is java.nio.channels.ClosedByInterruptException, failure.get().toString())
+        assertEquals(listOf(existing.id), JobStore(root).list().map { it.id })
+        java.nio.file.Files.list(root).use { entries ->
+            assertEquals(listOf(existing.id), entries.map { it.fileName.toString() }.toList())
+        }
+        assertEquals(existing, store.get(existing.id))
+    }
+
+    @Test
     fun `metadata publication preserves the complete snapshot held by an existing reader`() {
         val root = createTempDirectory("jobs-atomic-")
         val store = JobStore(root)
