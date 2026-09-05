@@ -9,6 +9,11 @@ import decompengine.project.ProjectFileRole
 import decompengine.project.ProjectLayoutProfile
 import decompengine.project.ReconstructionProfile
 import decompengine.project.SourceTreeManifest
+import decompengine.project.SourceTreeGenerator
+import decompengine.project.RecoveredProgramModel
+import decompengine.project.RecoveredFunction
+import decompengine.project.MakeProjectBuilder
+import decompengine.project.ArchivalPackager
 import kotlinx.serialization.json.Json
 import kotlinx.serialization.json.jsonObject
 import java.net.HttpURLConnection
@@ -28,6 +33,8 @@ import kotlin.io.path.writeText
 import kotlin.io.path.writeBytes
 import kotlin.test.Test
 import kotlin.test.assertEquals
+import kotlin.test.assertContentEquals
+import kotlin.test.assertNotEquals
 import kotlin.test.assertTrue
 
 class UploadServerTest {
@@ -301,7 +308,7 @@ class UploadServerTest {
     }
 
     @Test
-    fun `GUI launches reconstruction browses escaped source and downloads archive`() {
+    fun `GUI launches reconstruction browses escaped source and rejects an unverified archive`() {
         val reconstructor = JobReconstructor { job, reportsDir ->
             assertEquals("analyzing", job.status)
             val tree = reportsDir.resolve("source-tree")
@@ -335,7 +342,7 @@ class UploadServerTest {
             assertTrue(!source.body.decodeToString().contains("<script>alert"))
             assertTrue(source.body.decodeToString().contains("fn_1000"))
             assertTrue(source.body.decodeToString().contains("80%"))
-            assertEquals("archive", archive.body.decodeToString())
+            assertEquals(400, archive.status)
             assertEquals(400, traversal.status)
         }
     }
@@ -496,6 +503,99 @@ class UploadServerTest {
         }
     }
 
+    @Test
+    fun `verified archive links pin bytes and reject stale source build and archive identities`() {
+        withServer { server, dataDir ->
+            val jobId = uploadedJobId(server)
+            val reports = dataDir.resolve("$jobId/reports").createDirectories()
+            val tree = reports.resolve("source-tree")
+            val manifest = SourceTreeGenerator.generate(RecoveredProgramModel(
+                inputSha256 = digest(elfFixture()),
+                functions = listOf(RecoveredFunction("fn_1000", "core", 0x1000uL, "int core(void)")),
+            ), tree)
+            assertEquals(0, MakeProjectBuilder.build(tree).returnCode)
+            val archivePath = reports.resolve("source-tree.zip")
+            val first = ArchivalPackager.create(tree, archivePath)
+            val firstBytes = archivePath.readBytes()
+            val download = "/jobs/$jobId/artifacts/reports/source-tree.zip"
+            val pinned = "$download?sha256=${first.archiveSha256}"
+            val page = request(server, "GET", "/jobs/$jobId").body.decodeToString()
+            assertTrue(page.contains("Download verified source archive"))
+            assertTrue(page.contains(pinned))
+            val initial = request(server, "GET", pinned)
+            assertEquals(200, initial.status)
+            assertContentEquals(firstBytes, initial.body)
+            assertEquals(first.archiveSha256, digest(initial.body))
+            assertEquals("\"${first.archiveSha256}\"", initial.etag)
+            val implementation = manifest.files.first { ProjectFileRole.MODULE_IMPLEMENTATION in it.roles }
+            val sourceRoute = "/jobs/$jobId/source/${implementation.path}"
+            assertTrue(request(server, "GET", sourceRoute).body.decodeToString().contains("Current build identity verified"))
+
+            var deep = tree.resolve("unarchived-depth")
+            repeat(31) { deep = Files.createDirectory(deep).resolve("nested") }
+            assertEquals(400, request(server, "GET", pinned).status)
+            Files.walk(tree.resolve("unarchived-depth")).use { paths ->
+                paths.sorted(Comparator.reverseOrder()).forEach(Files::delete)
+            }
+
+            val extra = tree.resolve("src/extra.c")
+            extra.writeText("int extra(void) { return 1; }\n")
+            assertEquals(400, request(server, "GET", pinned).status)
+            assertTrue(!request(server, "GET", "/jobs/$jobId").body.decodeToString().contains("Download verified source archive"))
+            Files.delete(extra)
+
+            val executable = tree.resolve("build/reconstructed")
+            val executableBytes = executable.readBytes()
+            executable.writeBytes(executableBytes + byteArrayOf(1))
+            assertEquals(400, request(server, "GET", pinned).status)
+            assertTrue(request(server, "GET", sourceRoute).body.decodeToString().contains("Current build verification is unavailable"))
+            executable.writeBytes(executableBytes)
+            assertEquals(200, request(server, "GET", pinned).status)
+            val movedExecutable = reports.resolve("saved-executable")
+            Files.move(executable, movedExecutable)
+            Files.createSymbolicLink(executable, movedExecutable)
+            assertTrue(request(server, "GET", pinned).status in 400..499)
+            Files.delete(executable)
+            Files.move(movedExecutable, executable)
+
+            val contract = tree.resolve("reports/build_contract.json")
+            val contractBytes = contract.readBytes()
+            contract.writeBytes(contractBytes + "\n".toByteArray())
+            assertEquals(400, request(server, "GET", pinned).status)
+            contract.writeBytes(contractBytes)
+
+            tree.resolve("notes.txt").writeText("additional archived context\n")
+            val second = ArchivalPackager.create(tree, archivePath)
+            assertNotEquals(first.archiveSha256, second.archiveSha256)
+            assertEquals(400, request(server, "GET", pinned).status)
+            val updated = request(server, "GET", "$download?sha256=${second.archiveSha256}")
+            assertEquals(200, updated.status)
+            assertEquals(second.archiveSha256, digest(updated.body))
+
+            val marker = "Reconstructed archival source tree".toByteArray()
+            val markerOffset = updated.body.indices.first { offset ->
+                offset + marker.size <= updated.body.size && marker.indices.all { updated.body[offset + it] == marker[it] }
+            }
+            val corrupted = updated.body.clone()
+            corrupted[markerOffset] = 'X'.code.toByte()
+            archivePath.writeBytes(corrupted)
+            val invalid = request(server, "GET", download)
+            assertEquals(400, invalid.status)
+            assertTrue(invalid.body.decodeToString().contains("source archive ZIP is invalid"))
+            archivePath.writeBytes(updated.body)
+
+            val copy = reports.resolve("copy.zip")
+            Files.move(archivePath, copy)
+            Files.createSymbolicLink(archivePath, copy)
+            assertTrue(request(server, "GET", download).status in 400..499)
+            Files.delete(archivePath)
+            archivePath.writeText("not an archive")
+            assertEquals(400, request(server, "GET", download).status)
+            assertEquals(400, request(server, "GET", "$download?sha256=invalid").status)
+            assertEquals(400, request(server, "GET", "$pinned&sha256=${first.archiveSha256}").status)
+        }
+    }
+
     private fun uploadedJobId(server: UploadServer): String =
         Json.parseToJsonElement(upload(server, "boundary.elf", elfFixture(), acceptJson = true).body.decodeToString())
             .jsonObject.getValue("id").toString().trim('"')
@@ -597,10 +697,10 @@ class UploadServerTest {
         }
         val status = connection.responseCode
         val stream = if (status >= 400) connection.errorStream else connection.inputStream
-        return Response(status, stream?.readBytes() ?: ByteArray(0), connection.getHeaderField("Retry-After"))
+        return Response(status, stream?.readBytes() ?: ByteArray(0), connection.getHeaderField("Retry-After"), connection.getHeaderField("ETag"))
     }
 
-    private data class Response(val status: Int, val body: ByteArray, val retryAfter: String? = null)
+    private data class Response(val status: Int, val body: ByteArray, val retryAfter: String? = null, val etag: String? = null)
 }
 
 private fun ByteArray.startsWith(prefix: ByteArray): Boolean =
