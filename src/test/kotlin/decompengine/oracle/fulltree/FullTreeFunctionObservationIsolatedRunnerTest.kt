@@ -1103,7 +1103,9 @@ class FullTreeFunctionObservationIsolatedFixtureRunnerTest {
                     run.close()
                     prepared = null
 
-                    val atBoot = FullTreeFunctionObservationIsolatedOperationRunner.launchToBoot(ready)
+                    val atBoot = withLiveOracleBootDiagnostics(binding.unitName, runRoot) {
+                        FullTreeFunctionObservationIsolatedOperationRunner.launchToBoot(ready)
+                    }
                     booted = atBoot
                     assertFailsWith<IllegalStateException> { ready.requireCurrentBeforeLaunch() }
                     ready.close()
@@ -1197,9 +1199,9 @@ class FullTreeFunctionObservationIsolatedFixtureRunnerTest {
             ) { context ->
                 var live: AutoCloseable? = null
                 try {
-                    val atBoot = FullTreeFunctionObservationIsolatedOperationRunner.launchToBoot(
-                        context.ready,
-                    )
+                    val atBoot = withLiveOracleBootDiagnostics(context.binding.unitName, context.runRoot) {
+                        FullTreeFunctionObservationIsolatedOperationRunner.launchToBoot(context.ready)
+                    }
                     live = atBoot
                     val attached = FullTreeFunctionObservationIsolatedOperationRunner.recordUnitAttached(
                         atBoot,
@@ -1296,7 +1298,9 @@ class FullTreeFunctionObservationIsolatedFixtureRunnerTest {
                 var foreignOccupant: OccupiedObservationUnit? = null
                 var bodyFailure: Throwable? = null
                 try {
-                    val atBoot = FullTreeFunctionObservationIsolatedOperationRunner.launchToBoot(context.ready)
+                    val atBoot = withLiveOracleBootDiagnostics(context.binding.unitName, context.runRoot) {
+                        FullTreeFunctionObservationIsolatedOperationRunner.launchToBoot(context.ready)
+                    }
                     booted = atBoot
                     val durable = FullTreeFunctionObservationIsolatedOperationRunner.recordUnitAttached(atBoot)
                     attached = durable
