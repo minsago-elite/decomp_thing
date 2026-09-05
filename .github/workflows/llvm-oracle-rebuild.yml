@@ -56,7 +56,7 @@ jobs:
             --cap-drop ALL \
             --security-opt no-new-privileges \
             --tmpfs /tmp:rw,nosuid,nodev,noexec \
-            --tmpfs /decomp-jna:rw,nosuid,nodev,size=16777216 \
+            --tmpfs /decomp-jna:rw,nosuid,nodev,exec,size=16777216,nr_inodes=128,mode=0700 \
             --mount "type=bind,src=$GITHUB_WORKSPACE,dst=/repository,readonly" \
             --mount "type=bind,src=$GITHUB_WORKSPACE/build/install/llm_bin_patch,dst=/decomp-app,readonly" \
             --mount "type=bind,src=$llvm_java_home,dst=/decomp-jdk,readonly" \

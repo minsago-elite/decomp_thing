@@ -79,7 +79,7 @@ class FullTreeKotlinAuthoritySurfaceTest {
         assertTrue(workflow.contains("build-record-verification.txt"))
         assertTrue(workflow.contains("--read-only"))
         assertTrue(workflow.contains("--tmpfs /tmp:rw,nosuid,nodev,noexec"))
-        assertTrue(workflow.contains("--tmpfs /decomp-jna:rw,nosuid,nodev,size=16777216"))
+        assertTrue(workflow.contains("--tmpfs /decomp-jna:rw,nosuid,nodev,exec,size=16777216,nr_inodes=128,mode=0700"))
         assertFalse(workflow.contains("scripts/capture-oracle-tools.py"))
         assertFalse(workflow.contains("tool-records.json"))
     }
