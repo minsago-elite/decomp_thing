@@ -57,6 +57,13 @@ not grant permission by itself. A rename is not an independently authorized move
 the observed source deletion and destination creation require their respective
 permissions. Filesystem callbacks and terminal operations remain subject to their
 own contained execution boundaries before this final observation is made.
+The snapshot retains each regular file's mode, owner, group and link count as well
+as its digest and size. If an existing file changes any of those metadata fields,
+diffing fails with WORKSPACE_VIOLATION rather than reporting no change or treating
+WRITE_FILE as metadata authority. The current contract exposes no metadata-edit
+operation. Replacing a file atomically with the same bytes and metadata remains
+unchanged even though its inode differs. Creation-role metadata, extended attributes,
+timestamps and directory metadata still need their complete shared profile policy.
 
 The final report is attached to the invocation-bound execution receipt. A
 successful prompt stop reason does not remove failures in cleanup, final snapshot

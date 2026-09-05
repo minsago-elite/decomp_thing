@@ -13,6 +13,51 @@ import kotlin.test.assertTrue
 
 class WorkspaceSnapshotLimitsTest {
     @Test
+    fun `unchanged bytes cannot hide an unauthorized permission change`() {
+        verifyMetadataRejection(changeContent = false)
+    }
+
+    @Test
+    fun `authorized content write does not authorize a permission change`() {
+        verifyMetadataRejection(changeContent = true)
+    }
+
+    private fun verifyMetadataRejection(changeContent: Boolean) {
+        val root = workspace()
+        val file = root.resolve("src/data")
+        file.writeText("before")
+        val request = request(root)
+        val before = capture(request, WorkspaceSnapshotLimits())
+        if (changeContent) file.writeText("after")
+        val permissions = Files.getPosixFilePermissions(file).toMutableSet()
+        val execute = java.nio.file.attribute.PosixFilePermission.OWNER_EXECUTE
+        if (!permissions.add(execute)) permissions.remove(execute)
+        Files.setPosixFilePermissions(file, permissions)
+        val after = capture(request, WorkspaceSnapshotLimits())
+        val failure = assertFailsWith<AgentExecutionException> {
+            before.diff(after, request, budget(WorkspaceSnapshotLimits()))
+        }.failure
+        assertEquals(AgentFailureKind.WORKSPACE_VIOLATION, failure.kind)
+        assertEquals("file-metadata-changed", failure.details["reason"])
+    }
+
+    @Test
+    fun `atomic same-content replacement preserving metadata remains unchanged`() {
+        val root = workspace()
+        val file = root.resolve("src/data")
+        file.writeText("same bytes")
+        val request = request(root)
+        val before = capture(request, WorkspaceSnapshotLimits())
+        val replacement = root.resolve("replacement")
+        replacement.writeText("same bytes")
+        Files.setPosixFilePermissions(replacement, Files.getPosixFilePermissions(file))
+        Files.move(replacement, file, java.nio.file.StandardCopyOption.ATOMIC_MOVE,
+            java.nio.file.StandardCopyOption.REPLACE_EXISTING)
+        val after = capture(request, WorkspaceSnapshotLimits())
+        assertTrue(before.diff(after, request, budget(WorkspaceSnapshotLimits())).isEmpty())
+    }
+
+    @Test
     fun `non-default filesystem roots are rejected before native path resolution`() {
         val archive = createTempDirectory("snapshot-provider-").resolve("workspace.zip")
         java.nio.file.FileSystems.newFileSystem(archive, mapOf("create" to "true")).use { filesystem ->
