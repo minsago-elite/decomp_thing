@@ -1,0 +1,18 @@
+{
+  "verifiedParentSourceCommit": "0caff98",
+  "runsBeforeCommit": true,
+  "jvmTests": 8,
+  "failures": 0,
+  "errors": 0,
+  "skipped": 0,
+  "browserScenarios": 16,
+  "propagatedTip": "bb00498",
+  "tipTreeIdenticalTo": "d150af9",
+  "files": {
+    "jvm/TEST-decompengine.web.WebAuthenticationInspectionTest.xml": "fd95c214d88f0de152090823f20c3bebbb40fb791deb2a49bd27dad06fc1e8df",
+    "jvm/TEST-decompengine.web.WebAuthenticationSelectionTest.xml": "ed6fb7be658838e8adf08ade2abe80c060d27f85b609a569a3283d5786c51935",
+    "browser/dashboard.png": "ce5d6f8f5485332b46ede309cb7e88f71ffb896736f96c4a67ca60ff7bce322a",
+    "browser/trace.zip": "90703cb9adf1f5bd44161e9a5246c982a371ae6a307e074ae93b8a90a30c58d2",
+    "browser/result.json": "7b28183a74fb4fbbc042bcc55232bcabb66a87a54608ebbc138537e235ec9631"
+  }
+}
