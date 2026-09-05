@@ -24,7 +24,8 @@ import decompengine.validation.BehaviorComparator
 import decompengine.validation.BehaviorComparisonReport
 import decompengine.validation.ProcessInput
 import decompengine.project.sha256
-import decompengine.project.AcpExecutionReceiptDocument
+import decompengine.project.RepairAgentInvocationDocument
+import decompengine.builtin.parseBuiltinInvocationArchiveReference
 import decompengine.project.BoundedAgentExecutionEventRecorder
 import kotlinx.serialization.json.Json
 import kotlinx.serialization.json.JsonArray
@@ -1324,13 +1325,11 @@ class TraceGuidedRepairLoop private constructor(
             throw failure
         }
         val executionEvidence = try {
-            AcpExecutionReceiptDocument.captureOrNull(
+            RepairAgentInvocationDocument.captureOrNull(
                 request = agentRequest,
                 promptSha256 = sha256(receiptCommitmentBytes(invocationPrompt)),
                 receipt = stagedExecution.receipt,
                 events = eventRecorder.receiptSnapshot(),
-                evidenceKind = TRACE_REPAIR_ACP_RECEIPT_KIND,
-                taskIdentityField = TRACE_REPAIR_ACP_TASK_FIELD,
                 taskId = attempt.id,
             )
         } catch (failure: Throwable) {
@@ -1343,9 +1342,9 @@ class TraceGuidedRepairLoop private constructor(
         }
         if (executionEvidence == null && !allowTestOnlyValidation) {
             val failure = IllegalStateException(
-                "repair agent invocation lacks schema-v2 ACP provider evidence",
+                "repair agent invocation lacks a supported immutable receipt",
             )
-            abortPendingGraph(graph, attempt, failure, "missing-acp-receipt")
+            abortPendingGraph(graph, attempt, failure, "missing-agent-receipt")
             throw failure
         }
         try {
@@ -1354,6 +1353,10 @@ class TraceGuidedRepairLoop private constructor(
             executionEvidence?.let { graph.persistAndBindAgentInvocation(attempt, it) }
         } catch (failure: RepairAgentEvidencePersistenceException) {
             runCatching(graph::close).onFailure(failure::addSuppressed)
+            throw failure
+        } catch (failure: Throwable) {
+            if (failure is Exception) abortPendingGraph(graph, attempt, failure, "invalid-agent-receipt")
+            else runCatching(graph::close).onFailure(failure::addSuppressed)
             throw failure
         }
         try {
@@ -1371,7 +1374,7 @@ class TraceGuidedRepairLoop private constructor(
             }
             if (executionEvidence != null) {
                 require(executionEvidence.releaseComplete) {
-                    "repair agent returned without release-complete ACP invocation evidence"
+                    "repair agent returned without release-complete invocation evidence"
                 }
             }
             require(result.changes.isNotEmpty()) { "repair agent completed without changing a source file" }
@@ -1427,7 +1430,7 @@ class TraceGuidedRepairLoop private constructor(
                     is AgentExecutionOutcome.Returned -> when {
                         terminal.result.stopReason != AgentStopReason.COMPLETED ->
                             "agent-stop-${terminal.result.stopReason.name.lowercase().replace('_', '-')}"
-                        executionEvidence?.releaseComplete == false -> "incomplete-acp-receipt"
+                        executionEvidence?.releaseComplete == false -> "incomplete-agent-receipt"
                         else -> "candidate-error"
                     }
                 }
@@ -1685,7 +1688,8 @@ private fun RepairAgentInvocationBinding.toHistoryJson(): String =
         "\"resultChangesSha256\":\"$resultChangesSha256\"," +
         "\"terminalOutcome\":\"${terminalOutcome.escapeJson()}\"," +
         "\"receiptReleaseComplete\":$receiptReleaseComplete," +
-        "\"assessmentStatus\":\"${assessmentStatus.name.lowercase()}\"}"
+        "\"assessmentStatus\":\"${assessmentStatus.name.lowercase()}\"" +
+        (builtinArchive?.let { ",\"builtinArchive\":${it.json()}" } ?: "") + "}"
 
 private fun RepairEvidence.toJson(): String = """
 {
@@ -1767,6 +1771,7 @@ private fun parseHistoryAgentInvocation(
         assessmentStatus = RepairAgentAssessmentStatus.valueOf(
             value.requiredString("assessmentStatus").uppercase(),
         ),
+        builtinArchive = value["builtinArchive"]?.let(::parseBuiltinInvocationArchiveReference),
     )
 }
 

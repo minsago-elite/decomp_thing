@@ -94,6 +94,7 @@ class BuiltinCapturedExecutionEvidence(
     restorationAudit: List<AcpFilesystemAuditRecord> = emptyList(),
     val workflowIdentity: AgentWorkflowIdentity? = null,
     val journalIdentity: BuiltinJournalIdentity? = null,
+    internal val invocationArchive: BuiltinInvocationArchiveDocument? = null,
 ) : AgentExecutionProviderEvidence {
     override val providerId = "builtin"
     override val schemaVersion = 1
@@ -260,8 +261,22 @@ class BuiltinCapturedRepairHarness(
             ) }
         }
         val records = audit.snapshot()
-        return AgentExecutionReceipt(receipt.requestBinding, outcome,
+        val capturedReceipt = AgentExecutionReceipt(receipt.requestBinding, outcome,
             BuiltinCapturedExecutionEvidence(receipt.providerEvidence as BuiltinLoopEvidence, records.drop(restorationRecords), changes,
                 contextTools?.audit().orEmpty(), records.take(restorationRecords), request.workflowIdentity, journalConfiguration?.identity))
+        val evidence = capturedReceipt.providerEvidence as BuiltinCapturedExecutionEvidence
+        val workflow = request.workflowIdentity
+        if (workflow == null || journalConfiguration == null || evidence.loop.journal?.complete != true) return capturedReceipt
+        return try {
+            val identity = BuiltinInvocationArchiveIdentity("repair", workflow.taskId, workflow.promptSha256,
+                capturedReceipt.requestBinding, journalConfiguration.identity)
+            val archive = BuiltinInvocationArchiveDocument.capture(identity, request, capturedReceipt, journalConfiguration)
+            AgentExecutionReceipt(capturedReceipt.requestBinding, outcome, BuiltinCapturedExecutionEvidence(evidence.loop,
+                evidence.filesystemAudit, changes, evidence.contextAudit, evidence.restorationAudit, workflow,
+                journalConfiguration.identity, archive))
+        } catch (_: Exception) {
+            AgentExecutionReceipt(capturedReceipt.requestBinding, AgentExecutionOutcome.Failed(AgentFailure(
+                AgentFailureKind.INTERNAL, "Built-in invocation archive capture failed")), evidence)
+        }
     }
 }

@@ -52,8 +52,8 @@ skips, no failures/errors. Three shared ACP captured-filesystem cases also passe
   --tests 'decompengine.acp.AcpCapturedRepairFilesystemTest' --console=plain
 ```
 
-#75/#77 remain open. The existing repair graph, project archive verifier and accepted-candidate
-lineage still require ACP receipts. This document is the built-in producer/verifier needed for their
-provider-neutral integration; it has not relaxed those gates. Factory provenance, immutable repair
-history publication, project archive registration, compile/full retained-regression acceptance,
-rollback lineage and comparative release evidence still require implementation and qualification.
+#75/#77 remain open. [Repair receipt persistence](builtin-repair-persistence-v1.md) now retains these
+artifacts and their independent journal references in the graph, rejected history and project archives.
+Accepted-candidate lineage still requires ACP release facts. Factory provenance, built-in acceptance
+after compilation/full retained-regression validation, accepted rollback lineage and comparative
+release evidence still require implementation and qualification.

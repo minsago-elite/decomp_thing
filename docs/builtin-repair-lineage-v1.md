@@ -28,20 +28,22 @@ independently trusted expected identities and the journal commitment.
 
 Five provisioning tests cover independent tasks, exclusive same-task admission after request changes,
 missing/wrong workflow identity, contradictory static lineage, and bounded initial-source admission.
-Two shared contract tests cover identity commitment and malformed identities. These bring the required
-built-in core corpus to v9 with 122 cases. The existing version-1 request digest vector remains covered.
+Two shared contract tests cover identity commitment and malformed identities. The initial provisioning
+checkpoint used core v9 with 122 cases. The existing version-1 request digest vector remains covered.
 A separate `TraceGuidedRepairTest` drives a scripted built-in edit through the real graph/request/stage
-path, exports its journal, and verifies graph lineage and unchanged accepted bytes when the current
-ACP-specific receipt gate rejects it. Receipt capture exceptions now reject and close the pending graph
+path and verifies graph lineage and unchanged accepted bytes. The subsequent
+[receipt persistence integration](builtin-repair-persistence-v1.md) publishes its journal-backed artifact
+before rejecting unqualified completion. Receipt capture exceptions reject and close the pending graph
 instead of leaving an open graph handle. The test reopens the graph and checks the rejected attempt.
 
-Local verification: 137 selected cases, 131 passed, six live-terminal skips, no failures/errors:
+The initial provisioning checkpoint verified 137 selected cases: 131 passed and six live-terminal skips.
+The current focused command also exercises receipt persistence; current counts are in its linked contract:
 
 ```sh
 ./gradlew --offline test --tests 'decompengine.builtin.*' --tests 'decompengine.agent.*' \
   --tests 'decompengine.acp.AcpCapturedRepairFilesystemTest' \
   --tests 'decompengine.project.AgentExecutionEvidenceTest' \
-  --tests 'decompengine.repair.TraceGuidedRepairTest.built-in stage receives graph lineage and unsupported receipt rejection releases the graph' \
+  --tests 'decompengine.repair.TraceGuidedRepairTest.built-in stage persists graph-bound evidence before rejecting unqualified completion' \
   --tests 'decompengine.repair.TraceGuidedRepairTest.ordinary ACP terminal outcomes persist immutable receipts before rejected repair history' \
   --console=plain
 ```
@@ -50,7 +52,7 @@ The wider run of all 36 `TraceGuidedRepairTest` cases plus the 15 lineage/contra
 43 passes and eight failures because `/usr/bin/bwrap` is absent on this host. Those behavior tests
 remain unqualified locally; the required hosted lane must run with the configured sandbox boundary.
 
-This is invocation binding, not completed #77 acceptance. Graph receipt persistence, accepted archive
-lineage, factory provenance, operator selection, per-attempt checkpoint provisioning and comparative
+This is invocation binding, not completed #77 acceptance. Accepted archive lineage, factory provenance,
+operator selection, per-attempt checkpoint provisioning and comparative
 compile/retained-regression qualification remain incomplete. Built-in invocation artifacts still report
 `releaseComplete = false`; the workflow's acceptance gates remain in force.

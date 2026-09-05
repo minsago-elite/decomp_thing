@@ -74,14 +74,15 @@ internal class BuiltinInvocationArchiveLimits(
 }
 
 /** A portable immutable invocation artifact. Workflow acceptance is deliberately a different artifact. */
-internal class BuiltinInvocationArchiveDocument private constructor(raw: ByteArray, val verified: VerifiedBuiltinInvocationArchive) {
+class BuiltinInvocationArchiveDocument private constructor(raw: ByteArray, internal val verified: VerifiedBuiltinInvocationArchive,
+    val reference: BuiltinInvocationArchiveReference) {
     private val raw = raw.copyOf()
     val bytes get() = raw.copyOf()
     val sha256 = checkpointHash(raw)
     val schemaVersion = 1
 
     companion object {
-        fun capture(identity: BuiltinInvocationArchiveIdentity, request: AgentExecutionRequest, receipt: AgentExecutionReceipt,
+        internal fun capture(identity: BuiltinInvocationArchiveIdentity, request: AgentExecutionRequest, receipt: AgentExecutionReceipt,
             configuration: BuiltinJournalConfiguration, limits: BuiltinInvocationArchiveLimits = BuiltinInvocationArchiveLimits()): BuiltinInvocationArchiveDocument = guarded {
             check(identity.binding == receipt.requestBinding && identity.binding == AgentExecutionRequestBinding.capture(request))
             check(BuiltinJournal.identity(configuration.identity, identity.binding) == BuiltinJournal.identity(identity.journal, identity.binding))
@@ -132,9 +133,67 @@ internal class BuiltinInvocationArchiveDocument private constructor(raw: ByteArr
                 put("records", JsonArray(journal.records))
             }
             val bytes = boundedProviderJson(limits.maximumBytes) { it.writeProviderValue(json) }
-            BuiltinInvocationArchiveDocument(bytes, verifyBuiltinInvocationArchive(bytes, identity, evidence.commitment, limits))
+            BuiltinInvocationArchiveDocument(bytes, verifyBuiltinInvocationArchive(bytes, identity, evidence.commitment, limits),
+                BuiltinInvocationArchiveReference(identity, evidence.commitment))
         }
     }
+}
+
+/** Detached graph-owned expectations for an invocation artifact; contains no runtime paths or source text. */
+class BuiltinInvocationArchiveReference internal constructor(
+    internal val identity: BuiltinInvocationArchiveIdentity,
+    val commitment: BuiltinJournalCommitment,
+) {
+    init {
+        require(commitment.records in 2..100_000 && commitment.bytes in 1..128L * 1024 * 1024)
+        require(commitment.headSha256.matches(Regex("[a-f0-9]{64}")))
+    }
+    internal fun json() = buildJsonObject {
+        put("identity", identity.json())
+        putJsonObject("commitment") {
+            put("records", commitment.records); put("bytes", commitment.bytes); put("headSha256", commitment.headSha256)
+        }
+    }
+    internal fun requireWorkflow(expected: AgentWorkflowIdentity) {
+        require(identity.workflow == expected.workflow.name.lowercase() && identity.taskId == expected.taskId &&
+            identity.promptSha256 == expected.promptSha256 && identity.journal.acceptedRevisionSha256 == expected.acceptedRevisionSha256) {
+            "built-in invocation reference differs from its workflow lineage"
+        }
+    }
+    override fun equals(other: Any?) = other is BuiltinInvocationArchiveReference && json() == other.json()
+    override fun hashCode() = json().hashCode()
+    override fun toString() = "BuiltinInvocationArchiveReference(redacted)"
+}
+
+internal fun parseBuiltinInvocationArchiveReference(value: JsonElement): BuiltinInvocationArchiveReference {
+    val root = value.jsonObject
+    val identity = root.getValue("identity").jsonObject
+    val invocation = identity.getValue("invocation").jsonObject
+    fun JsonObject.text(name: String) = getValue(name).jsonPrimitive.content
+    val commitment = root.getValue("commitment").jsonObject
+    val reference = BuiltinInvocationArchiveReference(BuiltinInvocationArchiveIdentity(
+        identity.text("workflow"), identity.text("taskId"), identity.text("promptSha256"),
+        AgentExecutionRequestBinding(invocation.getValue("contractVersion").jsonPrimitive.int,
+            invocation.text("requestSha256"), invocation.text("accessPolicySha256")),
+        BuiltinJournalIdentity(invocation.text("provider"), invocation.text("model"), invocation.text("sourceSha256"),
+            invocation.text("stageSha256"), invocation.text("acceptedRevisionSha256"))),
+        BuiltinJournalCommitment(commitment.getValue("records").jsonPrimitive.int, commitment.getValue("bytes").jsonPrimitive.long,
+            commitment.text("headSha256")))
+    require(reference.json() == root) { "built-in invocation reference has invalid or extra fields" }
+    return reference
+}
+
+/** Only for a workflow-owned immutable orphan file, before its graph binding was published. */
+internal fun recoverBuiltinInvocationArchiveReference(bytes: ByteArray, expected: AgentWorkflowIdentity): BuiltinInvocationArchiveReference {
+    val maximumBytes = BuiltinInvocationArchiveLimits().maximumBytes
+    require(bytes.size <= maximumBytes)
+    val root = parseProviderObject(bytes.decodeToString(throwOnInvalidSequence = true), maximumBytes)
+    val reference = parseBuiltinInvocationArchiveReference(buildJsonObject {
+        put("identity", root.getValue("identity")); put("commitment", root.getValue("commitment"))
+    })
+    reference.requireWorkflow(expected)
+    verifyBuiltinInvocationArchive(bytes, reference.identity, reference.commitment)
+    return reference
 }
 
 internal class VerifiedBuiltinInvocationArchive(

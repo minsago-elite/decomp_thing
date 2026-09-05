@@ -25,7 +25,6 @@ import decompengine.agent.AgentWorkflow
 import decompengine.builtin.BuiltinCapturedRepairHarness
 import decompengine.builtin.BuiltinCapturedExecutionEvidence
 import decompengine.builtin.BuiltinRepairJournalFactory
-import decompengine.builtin.BuiltinInvocationArchiveIdentity
 import decompengine.builtin.BuiltinInvocationArchiveDocument
 import decompengine.builtin.provider.ModelProvider
 import decompengine.builtin.provider.ModelResponse
@@ -84,7 +83,7 @@ import kotlin.test.assertIs
 
 class TraceGuidedRepairTest {
     @Test
-    fun `built-in stage receives graph lineage and unsupported receipt rejection releases the graph`() {
+    fun `built-in stage persists graph-bound evidence before rejecting unqualified completion`() {
         val broken = "int decomp_engine_main(void) {\n"
         val project = createProject(createTempDirectory("trace-builtin-lineage-").resolve("project"), broken)
         val journals = createTempDirectory("trace-builtin-journals-")
@@ -110,13 +109,13 @@ class TraceGuidedRepairTest {
                 val evidence = assertIs<BuiltinCapturedExecutionEvidence>(receipt.providerEvidence)
                 val workflow = assertNotNull(request.workflowIdentity)
                 val journal = assertNotNull(evidence.journalIdentity)
-                archived = BuiltinInvocationArchiveDocument.capture(BuiltinInvocationArchiveIdentity("repair", workflow.taskId,
-                    workflow.promptSha256, receipt.requestBinding, journal), request, receipt, factory.create(request, initialFiles, 32L * 1024 * 1024))
+                archived = assertNotNull(evidence.invocationArchive)
+                assertEquals(workflow.acceptedRevisionSha256, journal.acceptedRevisionSha256)
                 return receipt
             }
         }
         val history = RepairHistory(project.resolve("reports/repair_history.json"))
-        // Acceptance remains unavailable until the graph can verify and persist built-in receipts.
+        // Persistence is supported; acceptance still requires qualified invocation evidence.
         assertFailsWith<IllegalArgumentException> {
             generatedCRepairLoop(harness, history).repairCompileError(project, collectCompileFailure(project), emptyList())
         }
@@ -132,7 +131,11 @@ class TraceGuidedRepairTest {
             assertEquals(graph.snapshot.nodes.first().sourceRevisionSha256, identity.acceptedRevisionSha256)
             assertEquals(node.repairMetadata!!.prompt, identity.promptSha256)
             assertEquals(ModuleRevisionStatus.REJECTED, node.status)
-            assertEquals("invalid-agent-receipt", node.evidenceKind)
+            assertEquals("incomplete-agent-receipt", node.evidenceKind)
+            val invocation = assertNotNull(node.repairMetadata.agentInvocation)
+            assertEquals(RepairAgentAssessmentStatus.REJECTED, invocation.assessmentStatus)
+            assertEquals(archived.reference, invocation.builtinArchive)
+            assertContentEquals(archived.bytes, project.resolve(invocation.receiptPath).readBytes())
         }
     }
 

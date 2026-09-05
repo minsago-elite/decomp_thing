@@ -7,8 +7,11 @@ import decompengine.acp.LinuxFilesystemSyscalls
 import decompengine.acp.LinuxResourceLimitException
 import decompengine.acp.permissions
 import decompengine.project.AcpExecutionReceiptDocument
+import decompengine.project.RepairAgentInvocationDocument
+import decompengine.project.verifyRepairAgentInvocationDocument
+import decompengine.builtin.BuiltinInvocationArchiveReference
+import decompengine.builtin.parseBuiltinInvocationArchiveReference
 import decompengine.project.agentFileChangeSetSha256
-import decompengine.project.verifyAcpExecutionReceiptDocument
 import decompengine.project.sha256
 import decompengine.agent.receiptCommitmentBytes
 import decompengine.agent.AgentFileChange
@@ -61,7 +64,7 @@ private const val MAXIMUM_REPAIR_STATE_NON_RECEIPT_ENTRIES = 16
 private val REPAIR_BLOB_DIGEST = Regex("[0-9a-f]{64}")
 private val BLOB_ATOMIC_TEMPORARY = Regex("\\.([0-9a-f]{64})\\.repair-atomic\\.tmp")
 private val REPAIR_RECEIPT_PATH =
-    Regex("reports/repair-revisions/revision_[A-Za-z0-9_]+\\.acp-receipt\\.json")
+    Regex("reports/repair-revisions/revision_[A-Za-z0-9_]+\\.(?:acp|builtin)-receipt\\.json")
 internal const val TRACE_REPAIR_ACP_RECEIPT_KIND = "decomp-engine.trace-repair-acp-execution-receipt"
 internal const val TRACE_REPAIR_ACP_TASK_FIELD = "attemptId"
 
@@ -1325,7 +1328,7 @@ enum class RepairPublicationMode { ACP_RELEASE, TEST_ONLY_NON_RELEASE }
 enum class RepairAgentAssessmentStatus { PENDING, ACCEPTED, REJECTED }
 
 /**
- * Content-addressed link from a repair assessment to its immutable schema-v2 ACP invocation.
+ * Content-addressed link from a repair assessment to its immutable provider invocation.
  * The raw provider evidence remains a separate artifact and is never rewritten as workflow state
  * advances from pending to accepted or rejected.
  */
@@ -1338,11 +1341,18 @@ data class RepairAgentInvocationBinding(
     val terminalOutcome: String,
     val receiptReleaseComplete: Boolean,
     val assessmentStatus: RepairAgentAssessmentStatus,
+    val builtinArchive: BuiltinInvocationArchiveReference? = null,
 ) {
+    val receiptSuffix: String get() = if (builtinArchive == null) "acp-receipt.json" else "builtin-receipt.json"
     init {
         require(receiptPath.matches(REPAIR_RECEIPT_PATH)) { "repair ACP receipt path is invalid" }
+        require(receiptPath.endsWith(".$receiptSuffix")) { "repair receipt format differs from its reference" }
         require(receiptSha256.matches(REPAIR_BLOB_DIGEST)) { "repair ACP receipt digest is invalid" }
-        require(receiptSchemaVersion == 2) { "repair ACP receipt schema is unsupported" }
+        require(receiptSchemaVersion == if (builtinArchive == null) 2 else 1) { "repair receipt schema is unsupported" }
+        builtinArchive?.let {
+            require(!receiptReleaseComplete) { "built-in invocation does not yet qualify for release acceptance" }
+            require(it.identity.binding.requestSha256 == requestSha256) { "built-in request reference differs from graph binding" }
+        }
         require(requestSha256.matches(REPAIR_BLOB_DIGEST)) { "repair ACP request digest is invalid" }
         require(resultChangesSha256.matches(REPAIR_BLOB_DIGEST)) {
             "repair ACP result-change digest is invalid"
@@ -1963,6 +1973,12 @@ internal class ModuleRevisionGraph private constructor(
     internal fun persistAndBindAgentInvocation(
         attempt: ModuleRevisionAttempt,
         document: AcpExecutionReceiptDocument,
+    ): RepairAgentInvocationBinding = persistAndBindAgentInvocation(attempt, RepairAgentInvocationDocument.fromAcp(document))
+
+    @Synchronized
+    internal fun persistAndBindAgentInvocation(
+        attempt: ModuleRevisionAttempt,
+        document: RepairAgentInvocationDocument,
     ): RepairAgentInvocationBinding = graphOperation {
         require(state.schemaVersion == 2) {
             "legacy repair revision graphs are read-only and cannot record ACP invocations"
@@ -1970,18 +1986,17 @@ internal class ModuleRevisionGraph private constructor(
         val pending = requirePending(attempt)
         val metadata = requireNotNull(pending.repairMetadata) { "repair attempt has no iteration metadata" }
         require(metadata.agentInvocation == null) { "repair attempt already has invocation evidence" }
-        val fileName = "${pending.id}.acp-receipt.json"
+        val fileName = "${pending.id}.${document.suffix}"
         val receiptPath = "reports/repair-revisions/$fileName"
-        val bytes = document.json.toByteArray(Charsets.UTF_8)
+        val bytes = document.bytes
         require(bytes.size.toLong() <= MAXIMUM_REPAIR_ACP_RECEIPT_BYTES) {
             "repair ACP receipt exceeds its $MAXIMUM_REPAIR_ACP_RECEIPT_BYTES-byte limit"
         }
         require(sha256(bytes) == document.sha256) { "repair ACP receipt changed after rendering" }
-        val verifiedDocument = verifyAcpExecutionReceiptDocument(
+        val verifiedDocument = verifyRepairAgentInvocationDocument(
             bytes,
-            TRACE_REPAIR_ACP_RECEIPT_KIND,
-            TRACE_REPAIR_ACP_TASK_FIELD,
-            pending.id,
+            AgentWorkflowIdentity(AgentWorkflow.REPAIR, pending.id, pending.parentSourceRevisionSha256, metadata.prompt),
+            document.builtinArchive,
         )
         require(verifiedDocument.requestSha256 == document.requestSha256 &&
             verifiedDocument.promptSha256 == metadata.prompt &&
@@ -2010,6 +2025,7 @@ internal class ModuleRevisionGraph private constructor(
             terminalOutcome = document.terminalOutcome,
             receiptReleaseComplete = document.releaseComplete,
             assessmentStatus = RepairAgentAssessmentStatus.PENDING,
+            builtinArchive = document.builtinArchive,
         )
         val boundState = state.copy(
             pending = pending.copy(
@@ -2139,6 +2155,7 @@ internal class ModuleRevisionGraph private constructor(
                 invocation,
                 pending.id,
                 metadata.prompt,
+                pending.parentSourceRevisionSha256,
                 RepairAgentAssessmentStatus.PENDING,
                 verifyReceiptContents = true,
             )
@@ -2543,6 +2560,7 @@ internal class ModuleRevisionGraph private constructor(
                             invocation,
                             node.id,
                             metadata.prompt,
+                            state.nodes.single { it.id == node.parentId }.sourceRevisionSha256,
                             expectedAssessment,
                             verifyBlobContents,
                         )
@@ -2659,6 +2677,7 @@ internal class ModuleRevisionGraph private constructor(
                             invocation,
                             pending.id,
                             metadata.prompt,
+                            pending.parentSourceRevisionSha256,
                             RepairAgentAssessmentStatus.PENDING,
                             verifyBlobContents,
                         )
@@ -2687,8 +2706,10 @@ internal class ModuleRevisionGraph private constructor(
                 pending.repairMetadata?.agentInvocation?.let { binding ->
                     add(binding.receiptPath.substringAfterLast('/'))
                 } ?: run {
-                    val recoveryName = "${pending.id}.acp-receipt.json"
-                    if (stateStore.revisionFileExists(recoveryName)) add(recoveryName)
+                    val recoveryNames = listOf("acp", "builtin").map { "${pending.id}.$it-receipt.json" }
+                        .filter(stateStore::revisionFileExists)
+                    require(recoveryNames.size <= 1) { "pending repair has ambiguous invocation receipts" }
+                    addAll(recoveryNames)
                 }
             }
         }.sorted()
@@ -2736,11 +2757,14 @@ internal class ModuleRevisionGraph private constructor(
         binding: RepairAgentInvocationBinding,
         attemptId: String,
         expectedPromptSha256: String,
+        expectedParentRevisionSha256: String,
         expectedAssessment: RepairAgentAssessmentStatus,
         verifyReceiptContents: Boolean,
     ) {
         require(state.schemaVersion == 2) { "legacy repair graphs cannot contain ACP receipt bindings" }
-        val expectedName = "$attemptId.acp-receipt.json"
+        val expectedName = "$attemptId.${binding.receiptSuffix}"
+        val expected = AgentWorkflowIdentity(AgentWorkflow.REPAIR, attemptId, expectedParentRevisionSha256, expectedPromptSha256)
+        binding.builtinArchive?.requireWorkflow(expected)
         require(binding.receiptPath == "reports/repair-revisions/$expectedName") {
             "repair ACP receipt path is cross-paired with a different attempt: $attemptId"
         }
@@ -2757,12 +2781,7 @@ internal class ModuleRevisionGraph private constructor(
             require(receipt.sha256 == binding.receiptSha256) {
                 "repair ACP receipt digest differs from graph binding: $attemptId"
             }
-            val verified = verifyAcpExecutionReceiptDocument(
-                receipt.bytes,
-                TRACE_REPAIR_ACP_RECEIPT_KIND,
-                TRACE_REPAIR_ACP_TASK_FIELD,
-                attemptId,
-            )
+            val verified = verifyRepairAgentInvocationDocument(receipt.bytes, expected, binding.builtinArchive)
             require(verified.requestSha256 == binding.requestSha256 &&
                 verified.promptSha256 == expectedPromptSha256 &&
                 verified.resultChangesSha256 == binding.resultChangesSha256 &&
@@ -2823,27 +2842,23 @@ internal class ModuleRevisionGraph private constructor(
     private fun recoverPersistedInvocationBinding(pending: PendingAttempt): PendingAttempt {
         if (state.schemaVersion != 2 || pending.repairMetadata?.agentInvocation != null) return pending
         val metadata = pending.repairMetadata ?: return pending
-        val fileName = "${pending.id}.acp-receipt.json"
-        if (!stateStore.revisionFileExists(fileName)) return pending
+        val files = listOf("acp", "builtin").map { "${pending.id}.$it-receipt.json" }.filter(stateStore::revisionFileExists)
+        require(files.size <= 1) { "pending repair has ambiguous invocation receipts" }
+        val fileName = files.singleOrNull() ?: return pending
         val receipt = stateStore.readRevisionFile(fileName, MAXIMUM_REPAIR_ACP_RECEIPT_BYTES)
-        val verified = verifyAcpExecutionReceiptDocument(
-            receipt.bytes,
-            TRACE_REPAIR_ACP_RECEIPT_KIND,
-            TRACE_REPAIR_ACP_TASK_FIELD,
-            pending.id,
-        )
-        require(verified.promptSha256 == metadata.prompt) {
-            "recovered repair ACP receipt is cross-paired with a different workflow prompt"
-        }
+        val verified = RepairAgentInvocationDocument.recover(receipt.bytes,
+            AgentWorkflowIdentity(AgentWorkflow.REPAIR, pending.id, pending.parentSourceRevisionSha256, metadata.prompt),
+            fileName.endsWith(".builtin-receipt.json"))
         val binding = RepairAgentInvocationBinding(
             receiptPath = "reports/repair-revisions/$fileName",
             receiptSha256 = receipt.sha256,
-            receiptSchemaVersion = 2,
+            receiptSchemaVersion = verified.schemaVersion,
             requestSha256 = verified.requestSha256,
             resultChangesSha256 = verified.resultChangesSha256,
             terminalOutcome = verified.terminalOutcome,
             receiptReleaseComplete = verified.releaseComplete,
             assessmentStatus = RepairAgentAssessmentStatus.PENDING,
+            builtinArchive = verified.builtinArchive,
         )
         return pending.copy(repairMetadata = metadata.copy(agentInvocation = binding))
     }
@@ -4480,7 +4495,8 @@ private fun RepairAgentInvocationBinding.toGraphJson(): String =
         "\"resultChangesSha256\":\"$resultChangesSha256\"," +
         "\"terminalOutcome\":\"${terminalOutcome.jsonEscape()}\"," +
         "\"receiptReleaseComplete\":$receiptReleaseComplete," +
-        "\"assessmentStatus\":\"${assessmentStatus.name.lowercase()}\"}"
+        "\"assessmentStatus\":\"${assessmentStatus.name.lowercase()}\"" +
+        (builtinArchive?.let { ",\"builtinArchive\":${it.json()}" } ?: "") + "}"
 
 private fun List<ProcessInput>.toGraphJson(): String = joinToString(prefix = "[", postfix = "]") { input ->
     "{\"id\":\"${input.id.jsonEscape()}\",\"args\":${input.args.jsonArray()}," +
@@ -4630,6 +4646,7 @@ private fun parseAgentInvocationBinding(element: JsonElement): RepairAgentInvoca
         assessmentStatus = RepairAgentAssessmentStatus.valueOf(
             value.requiredString("assessmentStatus").uppercase(),
         ),
+        builtinArchive = value["builtinArchive"]?.let(::parseBuiltinInvocationArchiveReference),
     )
 }
 

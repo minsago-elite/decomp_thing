@@ -3,14 +3,16 @@ package decompengine.project
 import decompengine.agent.AgentFileChange
 import decompengine.agent.AgentFileChangeKind
 import decompengine.agent.AgentWorkspacePath
+import decompengine.agent.AgentWorkflow
+import decompengine.agent.AgentWorkflowIdentity
+import decompengine.builtin.BuiltinInvocationArchiveReference
+import decompengine.builtin.parseBuiltinInvocationArchiveReference
 import decompengine.oracle.core.OracleJson
 import decompengine.oracle.core.StrictJsonLimits
 import decompengine.repair.MAXIMUM_REPAIR_ACP_RECEIPT_BYTES
 import decompengine.repair.MAXIMUM_REPAIR_PROJECTION_BYTES
 import decompengine.repair.RepairIndexProfile
 import decompengine.repair.RepairResourceBudget
-import decompengine.repair.TRACE_REPAIR_ACP_RECEIPT_KIND
-import decompengine.repair.TRACE_REPAIR_ACP_TASK_FIELD
 import decompengine.repair.readStableRepairFile
 import java.nio.charset.StandardCharsets
 import java.nio.file.Path
@@ -73,7 +75,8 @@ internal class ArchivedRepairReleaseLineage private constructor(
  * Pure release verifier for trace-repair state. It does not open [decompengine.repair.ModuleRevisionGraph],
  * take its mutation lock, recover a pending attempt, or trust the workflow parser. Instead it walks the
  * archive payload, rebuilds the accepted source lineage, verifies the compatibility history projection,
- * and sends every immutable invocation through the independent schema-v2 ACP receipt verifier.
+ * and sends every immutable invocation through its independent receipt verifier. Built-in rejected
+ * invocations can be retained; accepted contributions still require qualified ACP release facts.
  */
 internal object RepairAcpEvidenceArchiveVerifier {
     fun verifyIfPresent(
@@ -402,13 +405,15 @@ internal object RepairAcpEvidenceArchiveVerifier {
         projectDir: Path,
         payloadSha256: Map<String, String>,
         payloadSizes: Map<String, Long>,
-    ): Map<String, VerifiedAcpExecutionReceiptDocument> {
-        val verifiedByNode = linkedMapOf<String, VerifiedAcpExecutionReceiptDocument>()
+    ): Map<String, VerifiedRepairAgentInvocationDocument> {
+        val verifiedByNode = linkedMapOf<String, VerifiedRepairAgentInvocationDocument>()
         graph.nodes.drop(1).forEach { node ->
             val metadata = requireNotNull(node.repairMetadata)
             val invocation = requireNotNull(metadata.agentInvocation)
-            val expectedPath = "reports/repair-revisions/${node.id}.acp-receipt.json"
-            require(invocation.receiptPath == expectedPath && invocation.receiptSchemaVersion == 2) {
+            val suffix = if (invocation.builtinArchive == null) "acp-receipt.json" else "builtin-receipt.json"
+            val expectedPath = "reports/repair-revisions/${node.id}.$suffix"
+            require(invocation.receiptPath == expectedPath && invocation.receiptSchemaVersion ==
+                (if (invocation.builtinArchive == null) 2 else 1)) {
                 "repair ACP receipt path or schema is cross-paired: ${node.id}"
             }
             val bytes = readPayloadFile(
@@ -421,11 +426,11 @@ internal object RepairAcpEvidenceArchiveVerifier {
             require(sha256(bytes) == invocation.receiptSha256) {
                 "repair ACP receipt digest differs from its workflow assessment: ${node.id}"
             }
-            val verified = verifyAcpExecutionReceiptDocument(
+            val verified = verifyRepairAgentInvocationDocument(
                 bytes,
-                TRACE_REPAIR_ACP_RECEIPT_KIND,
-                TRACE_REPAIR_ACP_TASK_FIELD,
-                node.id,
+                AgentWorkflowIdentity(AgentWorkflow.REPAIR, node.id,
+                    graph.nodes.single { it.id == node.parentId }.sourceRevisionSha256, metadata.promptSha256),
+                invocation.builtinArchive,
             )
             require(verified.requestSha256 == invocation.requestSha256 &&
                 verified.promptSha256 == metadata.promptSha256 &&
@@ -804,6 +809,7 @@ private data class ReleaseRepairInvocation(
     val terminalOutcome: String,
     val releaseComplete: Boolean,
     val assessmentStatus: String,
+    val builtinArchive: BuiltinInvocationArchiveReference? = null,
 )
 
 private data class ReleaseRepairEvidence(val kind: String, val summary: String, val artifactPath: String?)
@@ -838,7 +844,7 @@ private fun JsonObject.optionalEvidence(field: String, label: String): ReleaseRe
 
 private fun JsonObject.optionalInvocation(field: String, label: String): ReleaseRepairInvocation? =
     getValue(field).takeUnless { it is JsonNull }?.requiredObject("$label $field")?.let { root ->
-        root.requireExactKeys(INVOCATION_FIELDS, "$label $field")
+        root.requireExactKeys(INVOCATION_FIELDS + if ("builtinArchive" in root) setOf("builtinArchive") else emptySet(), "$label $field")
         ReleaseRepairInvocation(
             receiptPath = root.requiredString("receiptPath", "$label $field"),
             receiptSha256 = root.requiredSha256("receiptSha256", "$label $field"),
@@ -848,6 +854,7 @@ private fun JsonObject.optionalInvocation(field: String, label: String): Release
             terminalOutcome = root.requiredString("terminalOutcome", "$label $field"),
             releaseComplete = root.requiredBoolean("receiptReleaseComplete", "$label $field"),
             assessmentStatus = root.requiredString("assessmentStatus", "$label $field"),
+            builtinArchive = root["builtinArchive"]?.let(::parseBuiltinInvocationArchiveReference),
         )
     }
 
@@ -1022,7 +1029,7 @@ private const val MAXIMUM_REPAIR_GRAPH_RELEASE_BYTES = 64L * 1024 * 1024
 private const val MAXIMUM_REPAIR_RECOVERY_BINDING_BYTES = 4L * 1024 * 1024
 private val SHA256 = Regex("[0-9a-f]{64}")
 private val REPAIR_NODE_ID = Regex("revision_[A-Za-z0-9_]+")
-private val REPAIR_RECEIPT_PATH = Regex("reports/repair-revisions/revision_[A-Za-z0-9_]+\\.acp-receipt\\.json")
+private val REPAIR_RECEIPT_PATH = Regex("reports/repair-revisions/revision_[A-Za-z0-9_]+\\.(?:acp|builtin)-receipt\\.json")
 
 private val GRAPH_JSON_LIMITS = StrictJsonLimits(
     maximumInputBytes = MAXIMUM_REPAIR_GRAPH_RELEASE_BYTES.toInt(),
