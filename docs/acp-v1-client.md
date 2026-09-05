@@ -284,6 +284,10 @@ interruption and returns normally is recorded as failed with an explicit shutdow
 published completion remains intact. This controls the web status only, not artifact acceptance or rollback.
 Injected executors remain outside this lifecycle. SIGKILL, power loss, stalled filesystem writes, and
 durable recovery of indeterminate external work require the separate #68/#71 recovery mechanisms.
+`WebShutdownTest` covers propagated interruption, a worker returning after swallowing interruption, and
+a worker that remains blocked past the grace period. The last case verifies the fixed cleanup diagnostic,
+then starts a new server and checks that unfinished jobs become interrupted failures without rerunning.
+This is benign JVM-worker evidence; it does not cover orphaned external processes or torn metadata writes.
 
 `web --listen-backlog` requests a TCP listen backlog of 64 by default and accepts values from 1 to 4096.
 Invalid values fail before the server binds or opens job storage. The underlying TCP implementation controls

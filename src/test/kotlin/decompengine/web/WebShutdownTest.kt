@@ -24,14 +24,19 @@ class WebShutdownTest {
         verifyShutdown(swallowInterruption = true)
     }
 
-    private fun verifyShutdown(swallowInterruption: Boolean) {
+    @Test
+    fun `uncooperative workers exhaust the grace period and remain interrupted on restart`() {
+        verifyShutdown(swallowInterruption = true, keepWaiting = true)
+    }
+
+    private fun verifyShutdown(swallowInterruption: Boolean, keepWaiting: Boolean = false) {
         val root = createTempDirectory("web-shutdown-")
         val log = root.resolve("child.log")
         val process = ProcessBuilder(
             Path.of(System.getProperty("java.home"), "bin", "java").toString(),
             "-Djava.io.tmpdir=${System.getProperty("java.io.tmpdir")}",
             "-cp", System.getProperty("java.class.path"),
-            WebShutdownFixture::class.java.name, root.toString(), swallowInterruption.toString(),
+            WebShutdownFixture::class.java.name, root.toString(), swallowInterruption.toString(), keepWaiting.toString(),
         ).redirectErrorStream(true).redirectOutput(log.toFile()).apply { environment().clear() }.start()
         try {
             val deadline = System.nanoTime() + TimeUnit.SECONDS.toNanos(20)
@@ -39,20 +44,37 @@ class WebShutdownTest {
                 Thread.sleep(20)
             }
             assertTrue(Files.exists(root.resolve("ready")), Files.readString(log))
+            val shutdownStarted = System.nanoTime()
             process.destroy()
             assertTrue(process.waitFor(15, TimeUnit.SECONDS), "shutdown hook did not finish")
             val ids = Files.readAllLines(root.resolve("ready"))
             val store = JobStore(root.resolve("jobs"))
             ids.take(2).forEach { id ->
-                assertTrue(Files.exists(root.resolve("interrupted-$id")))
-                assertEquals("failed", store.get(id).status)
-                if (swallowInterruption) {
+                assertEquals(!keepWaiting, Files.exists(root.resolve("interrupted-$id")))
+                assertEquals(if (keepWaiting) "analyzing" else "failed", store.get(id).status)
+                if (swallowInterruption && !keepWaiting) {
                     assertEquals("Server stopped before the operation reported completion", store.get(id).statusMessage)
                 }
             }
             assertEquals("failed", store.get(ids.last()).status)
             assertEquals("Server stopped before the operation started", store.get(ids.last()).statusMessage)
             assertTrue(!Files.exists(root.resolve("interrupted-${ids.last()}")))
+            if (keepWaiting) {
+                assertTrue(System.nanoTime() - shutdownStarted >= TimeUnit.SECONDS.toNanos(5))
+                assertTrue(Files.readString(log).contains("Web shutdown did not complete cleanly; recovery is required"))
+                val restarted = UploadServer("127.0.0.1", 0, root.resolve("jobs"),
+                    analyzer = JobAnalyzer { _, _ -> error("recovery must not rerun a job") })
+                try {
+                    restarted.start()
+                    ids.take(2).forEach { id ->
+                        assertEquals("failed", store.get(id).status)
+                        assertEquals("Analysis was interrupted before the server restarted", store.get(id).statusMessage)
+                    }
+                    assertEquals("Server stopped before the operation started", store.get(ids.last()).statusMessage)
+                } finally {
+                    restarted.stop()
+                }
+            }
         } finally {
             if (process.isAlive) process.destroyForcibly().waitFor(5, TimeUnit.SECONDS)
         }
@@ -65,6 +87,7 @@ object WebShutdownFixture {
     fun main(args: Array<String>) {
         val root = Path.of(args[0])
         val swallowInterruption = args[1].toBooleanStrict()
+        val keepWaiting = args[2].toBooleanStrict()
         val started = CountDownLatch(2)
         val neverReleased = CountDownLatch(1)
         val server = UploadServer("127.0.0.1", 0, root.resolve("jobs"),
@@ -74,6 +97,7 @@ object WebShutdownFixture {
                     neverReleased.await()
                 } catch (failure: InterruptedException) {
                     if (!swallowInterruption) throw failure
+                    if (keepWaiting) neverReleased.await()
                 } finally {
                     Files.writeString(root.resolve("interrupted-${job.id}"), "worker exited")
                 }
