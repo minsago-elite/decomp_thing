@@ -714,6 +714,80 @@
           "cachedWriteTokens": 32
         }
       }
+    },
+    "session-load.request": {
+      "jsonrpc": "2.0",
+      "id": 2,
+      "method": "session/load",
+      "params": {
+        "sessionId": "session-1",
+        "cwd": "/workspace",
+        "mcpServers": [],
+        "additionalDirectories": [
+          "/workspace/context"
+        ]
+      }
+    },
+    "session-load.response": {
+      "jsonrpc": "2.0",
+      "id": 2,
+      "result": {}
+    },
+    "session-load-configured.response": {
+      "jsonrpc": "2.0",
+      "id": 2,
+      "result": {
+        "models": {
+          "currentModelId": "model-default",
+          "availableModels": [
+            {
+              "modelId": "model-default",
+              "name": "Default"
+            },
+            {
+              "modelId": "model-safe",
+              "name": "Safe"
+            }
+          ]
+        },
+        "modes": {
+          "currentModeId": "mode-default",
+          "availableModes": [
+            {
+              "id": "mode-default",
+              "name": "Default"
+            },
+            {
+              "id": "mode-safe",
+              "name": "Safe"
+            }
+          ]
+        },
+        "configOptions": [
+          {
+            "type": "select",
+            "id": "reasoning",
+            "name": "Reasoning",
+            "currentValue": "low",
+            "options": [
+              {
+                "value": "low",
+                "name": "Low"
+              },
+              {
+                "value": "high",
+                "name": "High"
+              }
+            ]
+          },
+          {
+            "type": "boolean",
+            "id": "telemetry",
+            "name": "Telemetry",
+            "currentValue": true
+          }
+        ]
+      }
     }
   }
 }

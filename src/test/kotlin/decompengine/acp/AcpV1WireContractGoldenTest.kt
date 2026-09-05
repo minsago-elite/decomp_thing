@@ -75,6 +75,8 @@ class AcpV1WireContractGoldenTest {
     fun `sdk serializers match every versioned v1 golden message`() {
         assertExchange("initialize", AcpMethod.AgentMethods.V1.Initialize)
         assertExchange("session-new", AcpMethod.AgentMethods.V1.SessionNew)
+        assertExchange("session-load", AcpMethod.AgentMethods.V1.SessionLoad)
+        assertResponse("session-load-configured.response", "session-load.request", AcpMethod.AgentMethods.V1.SessionLoad)
         assertResponse("session-new-configured.response", "session-new.request", AcpMethod.AgentMethods.V1.SessionNew)
         assertResponse("session-new-grouped-config.response", "session-new.request", AcpMethod.AgentMethods.V1.SessionNew)
         assertExchange("session-set-model", AcpMethod.AgentMethods.V1.SessionSetModel)
@@ -268,6 +270,9 @@ class AcpV1WireContractGoldenTest {
         val EXPECTED_MESSAGE_NAMES: Set<String> = linkedSetOf(
             "initialize.request",
             "initialize.response",
+            "session-load.request",
+            "session-load.response",
+            "session-load-configured.response",
             "session-new.request",
             "session-new.response",
             "session-new-configured.response",

@@ -5,6 +5,10 @@ import decompengine.acp.LinuxFilesystemSyscalls
 import decompengine.agent.AgentAccessPolicy
 import decompengine.agent.AgentContextInput
 import decompengine.agent.AgentExecutionRequest
+import decompengine.agent.AgentSessionContinuation
+import decompengine.agent.AgentSessionJournal
+import decompengine.agent.AgentSessionRecoveryException
+import decompengine.agent.AgentSessionResumePolicy
 import decompengine.agent.AgentFileChangeKind
 import decompengine.agent.AgentHarness
 import decompengine.agent.AgentOperation
@@ -51,6 +55,8 @@ data class ModuleReconstructionRequest(
     /** Workflow-owned sink invoked before a provider receipt is interpreted or validated. */
     val persistAgentExecutionEvidence: ((ReconstructionAgentExecutionEvidence) -> Unit)? = null,
     val profile: ReconstructionProfile = GeneratedCMakeReconstructionProfile.descriptor,
+    val sessionEvidenceFingerprint: String? = null,
+    val acceptedSourceSha256: String? = null,
 )
 
 data class ReconstructedModule(
@@ -78,6 +84,15 @@ fun interface ModuleReconstructor {
 
     /** Agent-backed strategies may resume only checkpoints carrying authenticated execution evidence. */
     fun requiresExecutionEvidenceForCheckpointReuse(): Boolean = false
+
+    /** Called only with the workflow's independently verified checkpoint/receipt identities. */
+    fun reconcileSessionCheckpoint(
+        request: ModuleReconstructionRequest,
+        accepted: Boolean,
+        sourceSha256: String,
+        executionRequestSha256: String?,
+        executionEvidenceSha256: String?,
+    ) = Unit
 }
 
 /** Emits buildable evidence stubs by default; raw recovered C remains in the program model for later refinement. */
@@ -178,6 +193,7 @@ class BoundedLlmModuleReconstructor(
     private val maximumContextCharacters: Int = 120_000,
     harnessProvenanceDescriptor: String? = null,
     private val progress: AgentWorkflowProgress = AgentWorkflowProgress.NONE,
+    private val sessionResumePolicy: AgentSessionResumePolicy = AgentSessionResumePolicy.LOAD_OR_NEW_WHEN_UNSUPPORTED,
 ) : ModuleReconstructor {
     private val harnessProvenanceSha256 = harnessProvenanceDescriptor?.let { descriptor ->
         require(descriptor.isNotBlank()) { "harness provenance descriptor must not be blank" }
@@ -195,6 +211,60 @@ class BoundedLlmModuleReconstructor(
             "factory-${harnessProvenanceSha256 ?: "unbound"}:v2"
 
     override fun requiresExecutionEvidenceForCheckpointReuse(): Boolean = true
+
+    private fun sessionContinuation(
+        request: ModuleReconstructionRequest,
+        acceptedRevision: String? = request.acceptedSourceSha256,
+    ): AgentSessionContinuation? {
+        val fingerprint = request.sessionEvidenceFingerprint ?: return null
+        if (harnessProvenanceSha256 == null) return null
+        val root = request.workspaceRoot.toAbsolutePath().normalize()
+        val paths = (listOf(
+            request.profile.layout.declaration("shared-interface").materialize(),
+            request.module.headerPath,
+            request.profile.layout.declaration("module-private-interface").materialize(mapOf("module" to request.module.id)),
+            request.module.sourcePath,
+        ) + request.dependencyHeaders.keys).distinct()
+        val files = try {
+            AgentSessionJournal.captureWorkspaceFiles(
+                paths.map { AgentWorkspacePath("project", it) }, listOf(AgentWorkspaceRoot("project", root)),
+            )
+        } catch (failure: Exception) {
+            throw AgentSessionRecoveryException("could not capture the bounded reconstruction session inventory", failure)
+        }
+        val workflowSha256 = sha256(("module-reconstruction-session-v1\n" + request.model.inputSha256 + "\n" +
+            request.profile.sha256 + "\n" + fingerprint).toByteArray())
+        return AgentSessionContinuation(
+            directory = root.parent.resolve(".decomp-agent-sessions")
+                .resolve(sha256(root.toString().toByteArray()))
+                .resolve(sha256(request.module.id.toByteArray()))
+                .resolve(workflowSha256),
+            workflowSha256 = workflowSha256,
+            taskId = request.module.id,
+            workspaceFiles = files,
+            acceptedRevisionSha256 = acceptedRevision,
+            policy = sessionResumePolicy,
+        )
+    }
+
+    override fun reconcileSessionCheckpoint(
+        request: ModuleReconstructionRequest,
+        accepted: Boolean,
+        sourceSha256: String,
+        executionRequestSha256: String?,
+        executionEvidenceSha256: String?,
+    ) {
+        if (executionRequestSha256 == null || executionEvidenceSha256 == null) return
+        val continuation = sessionContinuation(request, sourceSha256.takeIf { accepted } ?: request.acceptedSourceSha256) ?: return
+        val roots = listOf(AgentWorkspaceRoot("project", request.workspaceRoot.toAbsolutePath().normalize()))
+        try {
+            if (accepted) AgentSessionJournal.recordAcceptance(
+                continuation, roots, executionRequestSha256, executionEvidenceSha256, sourceSha256,
+            ) else AgentSessionJournal.recordRejection(continuation, roots, executionRequestSha256)
+        } catch (failure: Exception) {
+            throw AgentSessionRecoveryException("accepted project checkpoint could not be reconciled with the durable ACP session", failure)
+        }
+    }
 
     override fun reconstruct(request: ModuleReconstructionRequest): ReconstructedModule {
         val target = request.module.sourcePath
@@ -283,6 +353,7 @@ class BoundedLlmModuleReconstructor(
                         setOf(AgentOperation.READ_FILE, AgentOperation.WRITE_FILE, AgentOperation.CREATE_FILE),
                     ),
                 ),
+                sessionContinuation = sessionContinuation(request),
             )
             val eventRecorder = BoundedAgentExecutionEventRecorder()
             val taskProgress = progress.beginTask(request.module.id, agentRequest)
@@ -340,6 +411,7 @@ class BoundedLlmModuleReconstructor(
                 agentExecutionEvidence = invocationEvidence,
             )
         } catch (failure: Exception) {
+            if (generateSequence<Throwable>(failure) { it.cause }.any { it is AgentSessionRecoveryException }) throw failure
             if (before == null) sourcePath.deleteIfExists() else sourcePath.writeBytes(before)
             if (failure is ModuleReconstructionInterruptedException ||
                 failure is ModuleReconstructionEvidencePersistenceException ||
@@ -639,6 +711,11 @@ object SourceTreeGenerator {
             } catch (failure: Exception) {
                 throw ModuleReconstructionEvidencePersistenceException(failure)
             }
+            val recordedCheckpoint = readCheckpoint(checkpointPath)
+            val verifiedPreviousAcceptance = recordedCheckpoint?.takeIf {
+                it.accepted && sourcePath.exists() && sha256(sourcePath.readBytes()) == it.sourceSha256 &&
+                    it.hasCurrentExecutionEvidence(projectDir, configuredExecutionEvidencePath, false)
+            }
             val request = ModuleReconstructionRequest(
                 module,
                 model,
@@ -650,9 +727,10 @@ object SourceTreeGenerator {
                 observedBehavior,
                 persistAgentExecutionEvidence = { evidence -> persistExecutionEvidence(evidence) },
                 profile = profile,
+                sessionEvidenceFingerprint = fingerprint,
+                acceptedSourceSha256 = verifiedPreviousAcceptance?.sourceSha256,
             )
             val cacheIdentity = reconstructor.cacheIdentity()
-            val recordedCheckpoint = readCheckpoint(checkpointPath)
             val cached = recordedCheckpoint?.takeIf { checkpoint ->
                 checkpoint.schemaVersion == 5 && checkpoint.fingerprint == fingerprint &&
                     sourcePath.exists() &&
@@ -666,10 +744,7 @@ object SourceTreeGenerator {
                     (checkpoint.accepted || !checkpoint.retryable)
             }
             val checkpoint = cached ?: run {
-                val previousAccepted = recordedCheckpoint?.takeIf {
-                    it.accepted && sourcePath.exists() && sha256(sourcePath.readBytes()) == it.sourceSha256 &&
-                        it.hasCurrentExecutionEvidence(projectDir, configuredExecutionEvidencePath, false)
-                }
+                val previousAccepted = verifiedPreviousAcceptance
                 val previousSource = previousAccepted?.let { sourcePath.readText() }
                 val previousExecutionEvidence = previousAccepted?.executionEvidencePath
                     ?.let { projectDir.resolve(it).readText() }
@@ -708,6 +783,7 @@ object SourceTreeGenerator {
                     restoreAcceptedRevision()
                     throw failure
                 } catch (failure: Exception) {
+                    if (generateSequence<Throwable>(failure) { it.cause }.any { it is AgentSessionRecoveryException }) throw failure
                     unresolvedFallback(request, cacheIdentity, failure)
                 }
                 val normalizedSource = attempted.source.trimEnd() + "\n"
@@ -757,6 +833,10 @@ object SourceTreeGenerator {
                             + "\"previousAcceptedSourceSha256\":\"${previousAccepted.sourceSha256}\","
                             + "\"candidate\":${rejectedCheckpoint.toJson()}}\n",
                     )
+                    reconstructor.reconcileSessionCheckpoint(
+                        request, false, previousAccepted.sourceSha256,
+                        executionEvidence?.requestSha256, executionEvidence?.sha256,
+                    )
                     throw ModuleReconstructionRevisionRejectedException(module.id, issues)
                 }
                 if (executionEvidence == null) configuredExecutionEvidenceFile?.deleteIfExists()
@@ -769,6 +849,10 @@ object SourceTreeGenerator {
             if (checkpoint.executionEvidencePath == null) configuredExecutionEvidenceFile?.deleteIfExists()
             attemptPath.deleteIfExists()
             projectDir.resolve("reports/modules/${module.id}.attempt.execution.json").deleteIfExists()
+            reconstructor.reconcileSessionCheckpoint(
+                request, checkpoint.accepted, checkpoint.sourceSha256,
+                checkpoint.executionRequestSha256, checkpoint.executionEvidenceSha256,
+            )
             val normalizedSource = sourcePath.readText()
             val moduleEntityIds = module.functionIds + module.globalIds
             if (!checkpoint.accepted) unresolvedImplementations += moduleEntityIds

@@ -155,6 +155,7 @@ class AgentExecutionRequest(
     val accessPolicy: AgentAccessPolicy,
     val limits: AgentExecutionLimits = AgentExecutionLimits(),
     val cancellation: AgentCancellation = AgentCancellation.NONE,
+    val sessionContinuation: AgentSessionContinuation? = null,
 ) {
     val schemaVersion: Int = AGENT_EXECUTION_CONTRACT_VERSION
     val workspaceRoots: List<AgentWorkspaceRoot> = immutableList(workspaceRoots)
@@ -170,6 +171,14 @@ class AgentExecutionRequest(
             "context input ids must be unique"
         }
         val rootIds = this.workspaceRoots.mapTo(mutableSetOf()) { it.id }
+        sessionContinuation?.let { continuation ->
+            require(continuation.workspaceFiles.keys.all { accessPolicy.allows(it, AgentOperation.READ_FILE) }) {
+                "session inventory requires explicit workspace read authority"
+            }
+            require(this.workspaceRoots.none { continuation.directory.startsWith(it.path) }) {
+                "session journal must be outside agent workspace roots"
+            }
+        }
         require(accessPolicy.pathRules.all { it.path.rootId in rootIds }) {
             "access policy references an unknown workspace root"
         }

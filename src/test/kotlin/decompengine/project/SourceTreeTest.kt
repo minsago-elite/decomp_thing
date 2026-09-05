@@ -17,6 +17,7 @@ import java.nio.file.StandardOpenOption
 import kotlin.io.path.createDirectories
 import kotlin.io.path.createTempDirectory
 import kotlin.io.path.exists
+import kotlin.io.path.readBytes
 import kotlin.io.path.readText
 import kotlin.io.path.writeText
 import kotlin.test.Test
@@ -211,6 +212,88 @@ class SourceTreeTest {
         assertEquals(before, project.resolve("src/modules/parse.c").readText())
         assertTrue(project.resolve("reports/modules/parse.json").exists())
         assertTrue(project.resolve("reports/modules/render.json").exists())
+    }
+
+    @Test
+    fun `configured reconstruction supplies a durable session scoped to its module evidence`() {
+        val project = createTempDirectory("source-tree-session-descriptor-")
+        val requests = mutableListOf<AgentExecutionRequest>()
+        val harness = AgentHarness { request, _ ->
+            requests += request
+            throw decompengine.agent.AgentSessionRecoveryException("stop before scripted agent dispatch")
+        }
+        val reconstructor = BoundedLlmModuleReconstructor(
+            harness, harnessProvenanceDescriptor = "agent-harness-v1:acp:configuration-${"a".repeat(64)}",
+        )
+        listOf("observed case one", "observed case two").forEach { behavior ->
+            val failure = assertFailsWith<decompengine.agent.AgentExecutionException> {
+                SourceTreeGenerator.generate(oneModuleModel(), project, reconstructor = reconstructor, observedBehavior = behavior)
+            }
+            assertTrue(generateSequence<Throwable>(failure) { it.cause }.any { it is decompengine.agent.AgentSessionRecoveryException })
+        }
+        val first = requireNotNull(requests[0].sessionContinuation)
+        val second = requireNotNull(requests[1].sessionContinuation)
+        assertEquals("parse", first.taskId)
+        assertNull(first.acceptedRevisionSha256)
+        assertFalse(first.directory.startsWith(project))
+        assertTrue(AgentWorkspacePath("project", "src/modules/parse.c") in first.workspaceFiles)
+        assertTrue(first.workspaceFiles.keys.all { requests[0].accessPolicy.allows(it, AgentOperation.READ_FILE) })
+        assertNotEquals(first.workflowSha256, second.workflowSha256)
+        assertNotEquals(first.directory, second.directory)
+    }
+
+    @Test
+    fun `session recovery failures preserve source and prevent unresolved checkpoint publication`() {
+        val project = createTempDirectory("source-tree-session-quarantine-")
+        val source = project.resolve("src/modules/parse.c")
+        source.parent.createDirectories()
+        source.writeText("retained unexplained source")
+        val reconstructor = ModuleReconstructor {
+            throw IllegalStateException("provider failed", decompengine.agent.AgentSessionRecoveryException("quarantined"))
+        }
+        assertFailsWith<IllegalStateException> {
+            SourceTreeGenerator.generate(oneModuleModel(), project, reconstructor = reconstructor)
+        }
+        assertEquals("retained unexplained source", source.readText())
+        assertFalse(project.resolve("reports/modules/parse.json").exists())
+        assertFalse(project.resolve("manifest.json").exists())
+    }
+
+    @Test
+    fun `restart acknowledges the durable accepted checkpoint without redispatching reconstruction`() {
+        val project = createTempDirectory("source-tree-session-ack-")
+        var dispatches = 0
+        var acknowledgements = 0
+        val reconstructor = object : ModuleReconstructor {
+            override fun reconstruct(request: ModuleReconstructionRequest): ReconstructedModule {
+                dispatches++
+                return validReconstructor().reconstruct(request)
+            }
+            override fun reconcileSessionCheckpoint(
+                request: ModuleReconstructionRequest,
+                accepted: Boolean,
+                sourceSha256: String,
+                executionRequestSha256: String?,
+                executionEvidenceSha256: String?,
+            ) {
+                assertTrue(accepted)
+                assertEquals(sourceSha256, sha256(project.resolve(request.module.sourcePath).readBytes()))
+                val checkpoint = project.resolve("reports/modules/${request.module.id}.json").readText()
+                assertTrue(checkpoint.contains("\"accepted\": true"))
+                assertTrue(checkpoint.contains(sourceSha256))
+                acknowledgements++
+                if (acknowledgements == 1) throw IllegalStateException("simulated lost session acknowledgement")
+            }
+        }
+        assertFailsWith<IllegalStateException> {
+            SourceTreeGenerator.generate(oneModuleModel(), project, reconstructor = reconstructor)
+        }
+        val checkpoint = project.resolve("reports/modules/parse.json").readBytes()
+        val manifest = SourceTreeGenerator.generate(oneModuleModel(), project, reconstructor = reconstructor)
+        assertEquals(1, dispatches)
+        assertEquals(2, acknowledgements)
+        assertTrue(manifest.unresolvedImplementationIds.isEmpty())
+        assertTrue(checkpoint.contentEquals(project.resolve("reports/modules/parse.json").readBytes()))
     }
 
     @Test

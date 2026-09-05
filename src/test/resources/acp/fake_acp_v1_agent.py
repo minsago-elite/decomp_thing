@@ -242,7 +242,7 @@ if MODE == "unknown-response-id":
     raise SystemExit(0)
 
 capabilities = {
-    "loadSession": MODE == "load-session-capability",
+    "loadSession": MODE == "load-session-capability" or MODE in ("session-persistence", "session-persistence-load-fails"),
     "promptCapabilities": {"image": False, "audio": False, "embeddedContext": False},
     "mcpCapabilities": {"http": False, "sse": False},
     "sessionCapabilities": {},
@@ -287,8 +287,17 @@ if MODE in (
     raise SystemExit(0)
 
 session_new = read_message()
-if session_new is None or session_new.get("method") != "session/new":
+persistence_mode = MODE.startswith("session-persistence")
+expected_session_method = "session/load" if persistence_mode and SENTINEL == "expect-load" else "session/new"
+if session_new is None or session_new.get("method") != expected_session_method:
     raise SystemExit(92)
+if expected_session_method == "session/load" and session_new.get("params", {}).get("sessionId") != "fixture-session":
+    raise SystemExit(96)
+if expected_session_method == "session/load" and MODE == "session-persistence-load-fails":
+    respond(session_new, error={"code": -32602, "message": "retained fixture session unavailable"})
+    while read_message() is not None:
+        pass
+    raise SystemExit(0)
 cwd = session_new.get("params", {}).get("cwd", "")
 if not cwd.startswith("/"):
     respond(session_new, error={"code": -32602, "message": "cwd must be absolute"})
@@ -320,7 +329,7 @@ if MODE.startswith("session-preferences"):
         }
     if MODE != "session-preferences-no-config-options":
         session_result["configOptions"] = advertised_session_config()
-respond(session_new, session_result)
+respond(session_new, {} if expected_session_method == "session/load" else session_result)
 if MODE == "session-preferences-pipelined-update":
     update({
         "sessionUpdate": "config_option_update",
@@ -465,6 +474,13 @@ else:
 if not prompt_valid:
     respond(prompt, error={"code": -32602, "message": "prompt lost objective or context"})
     raise SystemExit(95)
+
+if persistence_mode:
+    update({"sessionUpdate": "agent_message_chunk", "content": {"type": "text", "text": expected_session_method}})
+    respond(prompt, {"stopReason": "end_turn"})
+    while read_message() is not None:
+        pass
+    raise SystemExit(0)
 
 if MODE == "late-response-id":
     # Re-send the already-consumed initialize response only after the later prompt is in flight.

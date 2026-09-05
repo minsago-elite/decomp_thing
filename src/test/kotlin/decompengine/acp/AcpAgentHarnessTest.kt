@@ -132,7 +132,7 @@ class AcpAgentHarnessTest {
                 }
             }
         }
-        assertEquals(63, acpTestMethods.size, acpTestMethods.joinToString { it.name })
+        assertEquals(66, acpTestMethods.size, acpTestMethods.joinToString { it.name })
         assertTrue(
             acpTestMethods.all { it.returnType == Void.TYPE },
             acpTestMethods.filter { it.returnType != Void.TYPE }.joinToString {
@@ -1705,6 +1705,68 @@ class AcpAgentHarnessTest {
         assertNull(decision.policyPath)
         assertFalse(decision.toString().contains(fixture.workspace.parent.toString()))
     }
+
+    @Test
+    fun `durable session reload uses the advertised stable v1 method across fresh processes`() {
+        val fixture = fixture(wallMillis = 15_000, idleMillis = 3_000)
+        val continuation = continuation(fixture)
+        val request = fixture.request.withContinuation(continuation)
+        harness("session-persistence", sentinel = "expect-new").executeReceipt(request).requireResult()
+        val restored = harness("session-persistence", sentinel = "expect-load").executeReceipt(request).requireResult()
+        assertTrue(restored.summary.orEmpty().contains("session/load"))
+        assertEquals("fixture-session", restored.session?.resumeReference)
+        decompengine.agent.AgentSessionJournal.open(continuation).use { journal ->
+            assertEquals(2, journal.completedTurns)
+            assertEquals("load-advertised-completed-session", journal.decision)
+        }
+        assertEquals("old source\n", fixture.source.readText())
+    }
+
+    @Test
+    fun `agent without load records fresh session fallback instead of conversation restoration`() {
+        val fixture = fixture(wallMillis = 15_000, idleMillis = 3_000)
+        val continuation = continuation(fixture)
+        val request = fixture.request.withContinuation(continuation)
+        repeat(2) { harness("session-persistence-no-load", sentinel = "expect-new").executeReceipt(request).requireResult() }
+        decompengine.agent.AgentSessionJournal.open(continuation).use { journal ->
+            assertEquals(2, journal.completedTurns)
+            assertEquals("new-load-unsupported-project-evidence", journal.decision)
+        }
+    }
+
+    @Test
+    fun `failed load is retained and explicit new-session policy is required before retry`() {
+        val fixture = fixture(wallMillis = 15_000, idleMillis = 3_000)
+        val continuation = continuation(fixture)
+        val request = fixture.request.withContinuation(continuation)
+        harness("session-persistence-load-fails", sentinel = "expect-new").executeReceipt(request).requireResult()
+        val failure = harness("session-persistence-load-fails", sentinel = "expect-load").executeReceipt(request)
+        assertIs<AgentExecutionOutcome.Failed>(failure.outcome)
+        val exception = assertFailsWith<AgentExecutionException> { failure.requireResult() }
+        assertTrue(generateSequence<Throwable>(exception) { it.cause }.any { it is decompengine.agent.AgentSessionRecoveryException })
+        decompengine.agent.AgentSessionJournal.open(continuation).use { journal ->
+            assertEquals("load-failed-no-implicit-fallback", journal.decision)
+            assertEquals(1, journal.completedTurns)
+        }
+        val recreated = decompengine.agent.AgentSessionContinuation(
+            continuation.directory, continuation.workflowSha256, continuation.taskId,
+            continuation.workspaceFiles, policy = decompengine.agent.AgentSessionResumePolicy.NEW_SESSION_FROM_PROJECT_EVIDENCE,
+        )
+        harness("session-persistence-load-fails", sentinel = "expect-new")
+            .executeReceipt(request.withContinuation(recreated)).requireResult()
+        decompengine.agent.AgentSessionJournal.open(recreated).use { journal ->
+            assertEquals("new-explicit-project-evidence", journal.decision)
+            assertEquals(2, journal.completedTurns)
+        }
+    }
+
+    private fun continuation(fixture: Fixture) = decompengine.agent.AgentSessionContinuation(
+        createTempDirectory("acp-durable-session-"), "a".repeat(64), "module",
+        mapOf(AgentWorkspacePath("project", "src/module.c") to sha256(Files.readAllBytes(fixture.source))),
+    )
+
+    private fun AgentExecutionRequest.withContinuation(continuation: decompengine.agent.AgentSessionContinuation) =
+        AgentExecutionRequest(objective, workspaceRoots, contextInputs, accessPolicy, limits, cancellation, continuation)
 
     private data class Fixture(
         val workspace: Path,
