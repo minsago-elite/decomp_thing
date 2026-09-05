@@ -236,6 +236,29 @@ class AcpAgentHarnessTest {
     }
 
     @Test
+    fun `removed later config option stops the real setter flow before prompt and workspace changes`() {
+        val fixture = fixture(genericContract = true)
+        val harness = harness(
+            mode = "session-preferences-config-removes-next",
+            sessionPreferences = AcpSessionPreferences(configOptions = listOf(
+                AcpSessionConfigPreference("reasoning", AcpSessionConfigValue.Select("high")),
+                AcpSessionConfigPreference("telemetry", AcpSessionConfigValue.BooleanValue(false)),
+            )),
+        )
+        val events = mutableListOf<AgentExecutionEvent>()
+        val failure = assertFailsWith<AgentExecutionException> { harness.execute(fixture.request, events::add) }
+        assertEquals(AgentFailureKind.CONFIGURATION, failure.failure.kind)
+        assertEquals("currentInventoryMismatch", failure.failure.details["reason"])
+        assertEquals("1", failure.failure.details["preferenceIndex"])
+        assertEquals("original artifact\n", fixture.source.readText())
+        assertTrue(events.isEmpty())
+        val invocation = assertIs<AcpInvocationEvidenceSnapshot>(failure.receipt?.providerEvidence)
+        assertEquals(AcpExecutionLifecyclePhase.SESSION_CREATED, invocation.phaseReached)
+        assertNull(invocation.wirePromptSha256)
+        assertCleanTermination(harness, "removed later option", fixture, failure = failure, events = events)
+    }
+
+    @Test
     fun `unknown absent and mistyped session preferences fail before every setter prompt and workspace operation`() {
         data class RejectedPreference(
             val label: String,

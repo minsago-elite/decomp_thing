@@ -54,6 +54,7 @@ GENERIC_CONTRACT_MODES = {
     "session-preferences-setter-timeout",
     "session-preferences-config-inconsistent",
     "session-preferences-config-reverts-earlier",
+    "session-preferences-config-removes-next",
     "session-preferences-pipelined-update",
     "session-preferences-pipelined-work",
 }
@@ -387,6 +388,18 @@ if MODE == "session-preferences-config-inconsistent":
     unexpected = read_message()
     if unexpected is not None:
         raise SystemExit(160)
+    raise SystemExit(0)
+
+if MODE == "session-preferences-config-removes-next":
+    first = read_message()
+    if first is None or first.get("method") != "session/set_config_option":
+        raise SystemExit(166)
+    if first.get("params", {}).get("configId") != "reasoning":
+        raise SystemExit(167)
+    respond(first, {"configOptions": advertised_session_config("high", True)[:1]})
+    unexpected = read_message()
+    if unexpected is not None:
+        raise SystemExit(168)
     raise SystemExit(0)
 
 if MODE == "session-preferences-config-reverts-earlier":
