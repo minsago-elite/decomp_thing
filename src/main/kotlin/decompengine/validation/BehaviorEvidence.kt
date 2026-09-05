@@ -328,7 +328,14 @@ internal object BehaviorEvidence {
                 observedOutputBytes += stdoutBytes + stderrBytes
                 require(observedOutputBytes <= policy.count("maximumComparisonOutputBytes"))
                 val expectedCommand = behaviorSandboxCommand(path, arguments, policy.count("timeoutMillis"), bubblewrap, timeout, network, inputFiles.toMap())
-                require(observation.getValue("sandboxCommand") == JsonArray(expectedCommand.map(::JsonPrimitive))) {
+                // Historical records used integer-second native timeouts; the JVM watchdog
+                // still enforced the recorded millisecond limit. Preserve their exact recipe.
+                val historicalCommand = expectedCommand.toMutableList().apply {
+                    this[1] = "${maxOf(1L, policy.count("timeoutMillis") / 1000L)}s"
+                }
+                val recordedCommand = observation.getValue("sandboxCommand")
+                require(recordedCommand == JsonArray(expectedCommand.map(::JsonPrimitive)) ||
+                    recordedCommand == JsonArray(historicalCommand.map(::JsonPrimitive))) {
                     "behavior sandbox command contradicts its inputs or execution policy"
                 }
             }
@@ -428,8 +435,12 @@ internal fun behaviorSandboxCommand(
     networkRequested: Boolean,
     files: Map<String, Path> = emptyMap(),
 ): List<String> = buildList {
+    require(timeoutMillis > 0) { "behavior timeout must be positive" }
     requireBehaviorFileNames(files.keys)
-    addAll(listOf(timeout.toAbsolutePath().normalize().toString(), "${maxOf(1L, timeoutMillis / 1000L)}s",
+    val seconds = timeoutMillis / 1000L
+    val remainder = timeoutMillis % 1000L
+    val duration = if (remainder == 0L) "${seconds}s" else "$seconds.${remainder.toString().padStart(3, '0')}s"
+    addAll(listOf(timeout.toAbsolutePath().normalize().toString(), duration,
         bubblewrap.toAbsolutePath().normalize().toString()))
     if (networkRequested) add("--unshare-net")
     addAll(listOf("--unshare-pid", "--new-session", "--die-with-parent",

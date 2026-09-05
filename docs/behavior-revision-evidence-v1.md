@@ -86,6 +86,15 @@ comparison flag, source-revision encoding and all commitments. It also reconstru
 the expected sandbox argv and checks output sizes against the recorded limits.
 A rehashed contradictory report still fails validation.
 
+Native timeout arguments preserve the selected milliseconds (`1900` becomes
+`1.900s`), alongside the JVM watchdog. Historical integer-second command recipes
+remain readable, but arbitrary durations do not satisfy the recorded policy.
+The live timing regression requires a 1.2-second authored program to finish within
+a 1.9-second policy with its expected output and exit status; equal timeout exits
+cannot satisfy that assertion. Distinguishing native watchdog termination from an
+application's own exit status still requires a separate completion signal in the
+local execution contract.
+
 The record limits are 1,024 cases, 8 MiB of stdin, 1 MiB of argument bytes and
 16 MiB of comparison output. Captured input files are limited to 64 MiB each,
 512 MiB in total and 10,000 tracked paths. Source enumeration has a 10,000-entry

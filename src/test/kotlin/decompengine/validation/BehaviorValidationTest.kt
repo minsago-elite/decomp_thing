@@ -22,6 +22,32 @@ import kotlin.test.assertTrue
 
 class BehaviorValidationTest {
     @Test
+    fun `fractional second timeout does not terminate a program at the preceding whole second`() {
+        val tempDir = createTempDirectory("validation-fractional-timeout-")
+        val source = """
+            #define _POSIX_C_SOURCE 200809L
+            #include <time.h>
+            #include <stdio.h>
+            int main(void) {
+                struct timespec delay = {1, 200000000};
+                if (nanosleep(&delay, NULL) != 0) return 2;
+                puts("completed");
+                return 0;
+            }
+        """.trimIndent() + "\n"
+        val original = compileC(tempDir, "timed-original", source)
+        val rebuilt = compileC(tempDir, "timed-rebuilt", source)
+        val report = BehaviorComparator(SandboxRunner(timeout = java.time.Duration.ofMillis(1900), networkIsolation = false))
+            .compare("fractional", original, rebuilt, listOf(ProcessInput("wait")), tempDir.resolve("reports"))
+        for (output in listOf(report.cases.single().original, report.cases.single().rebuilt)) {
+            assertEquals(0, output.exitCode)
+            assertEquals("completed\n", output.stdout.decodeToString())
+            assertEquals("1.900s", output.sandboxCommand[1])
+        }
+        BehaviorEvidence.decode(java.nio.file.Files.readAllBytes(report.reportPath))
+    }
+
+    @Test
     fun `real sandbox reads retained case files through read-only isolated mounts`() {
         val tempDir = createTempDirectory("validation-file-mounts-")
         val source = """
