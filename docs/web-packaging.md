@@ -1,9 +1,10 @@
 # Building and serving the embedded UI
 
 The D1 frontend is an opt-in packaged preview. It currently provides the public
-shell and runtime view. Persistent jobs/workflows remain on the default legacy UI
-until the D-series parity and access-control gates permit migration. The current
-preview does not expose job APIs or start analysis.
+shell and runtime view, local browser sessions, and authenticated v1 bootstrap
+and single-job metadata reads. Persistent job management and workflow actions
+remain on the default legacy UI until the D-series parity and access-control gates
+permit migration. The preview cannot upload or start a workflow.
 
 Build with the pinned Node/npm versions in [.node-version](../.node-version) and
 [the frontend workspace](../frontend/README.md). Node is a build dependency only.
@@ -58,6 +59,28 @@ distribution. Known shell URLs are `/` and `/runtime` relative to the configured
 base path. Missing API/assets do not receive successful HTML. GET/HEAD and asset
 ETag caching are supported; HTML has `no-store`. Missing or inconsistent packaged
 assets fail startup before a socket is bound.
+
+The SPA launcher prints a five-minute, single-use local session link. Its token
+uses `#bootstrap=...`; the browser removes the fragment before an API request.
+Session cookies are HttpOnly, SameSite=Strict and scoped to the configured base
+path. CSRF stays in memory and is restored by an authenticated no-store bootstrap
+read after reload. Logout is an explicit CSRF-protected request. No job or
+workflow action follows session creation, navigation or refresh.
+
+`POST /api/v1/session`, `DELETE /api/v1/session`, `GET /api/v1/bootstrap` and
+`GET /api/v1/jobs/{jobId}` are implemented relative to the base path. Job DTOs
+omit internal paths and raw status diagnostics, preserve unsigned ELF addresses,
+and leave unknown run/acceptance identity null. Their ETag binds the current
+metadata; it does not prove a reconstruction revision or acceptance. Bootstrap
+identifies the actual application JAR by SHA-256, or reports `development` for
+exploded classes. Workflow capabilities remain unavailable in this preview.
+
+Host/Origin checks precede API dispatch, including namespace misses; private
+responses require the same cookie boundary. The legacy UI has not yet migrated
+to this session boundary and remains separate pending #161/#230. Explicit Vite
+development uses `--dev-frontend-origin http://127.0.0.1:5173`, documented in
+[frontend development](../frontend/README.md); normal SPA serving accepts only
+its configured origin. A non-loopback proxy profile is not enabled by this flag.
 
 Focused checks are:
 

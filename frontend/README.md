@@ -4,8 +4,8 @@ This workspace implements the D1 embedded workbench shell in
 [#151](https://github.com/minsago-elite/decomp_thing/issues/151), with asset recovery
 and build identity from #154/#157. The home and runtime
 pages render with Preact, accessible navigation and error recovery. They do not
-fetch private jobs or start workflows. Tool capability status remains explicitly unavailable until the versioned server
-API is connected. Runtime displays the non-secret build identity from the verified
+fetch private jobs or start workflows. The local session uses the versioned server API. Tool capability status remains
+explicitly unavailable until the runtime capability view is connected. Runtime displays the non-secret build identity from the verified
 server shell when that metadata is available.
 
 ## Supported tools and commands
@@ -72,11 +72,12 @@ that separate server option is deliberately configured. Do not enable wildcard
 CORS, rewrite Origin, or copy cookies/tokens into this configuration.
 
 The proxy cannot create unimplemented endpoints. At the local-session checkpoint,
-only session exchange/logout and authenticated bootstrap exist; job/event/download
+session exchange/logout, authenticated bootstrap and one job-detail read exist.
+The shell uses only session/bootstrap; job collection, workflow and event/download
 services remain owned by their D2/D4 issues. Synthetic upstream integration tests
 verify those transport behaviors without claiming the JVM services already exist.
-Application credentials and the session UI follow #161; this adapter does not
-invent a session, bypass backend authorization or retry a mutation.
+The session UI below uses this same proxy boundary. The adapter does not invent
+a session, bypass backend authorization or retry a mutation.
 
 For development without a JVM, native tools or models:
 
@@ -138,6 +139,8 @@ The Vite behavior used here is documented in its official
 - `src/app/` contains navigation, local brand SVG and route URL helpers.
 - `src/routes/` contains home, missing-page and lazily loaded runtime views.
 - `src/shared/` contains the native Preact render-error boundary and async wrapper.
+- `src/api/` contains generated v1 contracts, strict decoding and bounded native fetch.
+- `src/session/` removes bootstrap fragments and owns page-local session state.
 - `src/styles/` contains local CSS; typography uses system fonts.
 - `tests/` contains isolated component/state fixtures and never enters production.
 - `dev/` contains the explicit server-only proxy configuration, shared-schema fixture
@@ -150,8 +153,9 @@ key. `base: './'` keeps split imports relative to emitted files. The server will
 resolve entry URLs from the manifest under `<basePath>/assets/ui/`, and set the
 escaped `decomp-base-path` meta value for frontend route links. The supported base
 path consists of slash-separated ASCII letters, digits, underscores and hyphens.
-There is no inline script, `<base>` tag, CDN, telemetry, external font or automatic
-API request in the shell. The local SVG is emitted as a file rather than a data URL.
+There is no inline script, `<base>` tag, CDN, telemetry or external font. Startup
+makes one session-bootstrap read when no sign-in fragment is present; it neither
+reads jobs nor starts workflows. The local SVG is emitted as a file rather than a data URL.
 
 `vite.config.ts` sets an empty public environment-variable prefix list. Environment
 files and `VITE_*` variables are not a mechanism for passing browser secrets or
@@ -167,9 +171,10 @@ and Git authority. The frontend does not implement these services.
 
 ## Verification and bundle evidence
 
-`npm test` exercises accessible shell landmarks, honest unavailable state, absence
-of API calls, route navigation/back, a direct nested-base link, missing routes,
-error containment/retry, base-path validation, safe lazy-import recovery and verified-shell build identity.
+`npm test` exercises accessible shell landmarks, honest unavailable state,
+separation of public views from session requests, route navigation/back, a direct nested-base link, missing routes,
+error containment/retry, base-path validation, safe lazy-import recovery,
+verified-shell build identity, strict API transport and page-local session state.
 Type checking covers application,
 tests and build configuration with strict options; lint checks typed promises and
 prevents React compatibility imports. No `skipLibCheck` or ambient untyped shim
@@ -203,6 +208,41 @@ prerender peer contributes no browser modules. All browser components use native
 Preact. Runtime packages are MIT-licensed. `THIRD_PARTY_NOTICES.txt` contains their
 notices plus the license for Vite-generated browser helpers; the distribution
 packages this text separately from public UI assets.
+
+## Local browser session
+
+Open the local URL printed by `web --ui spa`. Its `#bootstrap=…` fragment carries
+one short-lived, single-use credential. Startup removes the fragment with
+`history.replaceState` before any API request and exchanges only its token in the
+JSON session body. A malformed fragment is cleared and rejected; if the browser
+cannot clear it, no session request is sent. Opening a fresh link in the same tab
+also consumes its fragment. No token appears in rendered text, request URLs,
+local/session storage or the frontend configuration.
+
+Without a fragment, the public shell remains available and makes one read-only
+bootstrap request. An existing HttpOnly cookie restores the session and CSRF value;
+a 401 offers local sign-in guidance. CSRF remains in a page-local closure and never
+enters the UI snapshot. The view does not infer workflow capability from session
+success. Absolute expiry clears local authorization without a network request;
+the JVM remains authoritative for idle expiry, restart, revocation and every action.
+
+Check session is an explicit read-only action. Sign out sends one authorized
+DELETE and clears the local CSRF value before sending it. If transport fails, the
+UI says sign-out is unconfirmed; it never assumes revocation or retries the
+mutation. Duplicate initialization/exchange/logout calls coalesce. A fresh link supersedes
+an older session read; during a mutation, only the newest explicit link waits for
+that mutation to settle. Failed fragment removal clears authorization, discards
+queued credentials and blocks stale responses from restoring it. Expired or
+consumed links require a fresh local link, and no old action is replayed after
+session recovery. This is the SPA session slice of #161; it does not claim the legacy web
+migration or remote-access profile is complete.
+
+`api:generate` updates TypeScript contracts from the shared schema; `api:check`
+fails if generated files drift. Typecheck and production build run the latter
+before compiling. Session component/state tests cover fragment removal ordering,
+expiry, duplicate calls, safe errors, unconfirmed logout and absence of credentials
+from rendered state or browser storage. The isolated public App can still be
+rendered without a session controller for component development.
 
 ## Asset recovery and build identity
 

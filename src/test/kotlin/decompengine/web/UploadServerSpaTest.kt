@@ -38,11 +38,11 @@ class UploadServerSpaTest {
             }
             for (path in listOf("/api/v1/missing", "/api/jobs/fixture", "/jobs/fixture", "/missing.js")) {
                 val response = request(server, path)
-                assertEquals(404, response.statusCode(), path)
+                assertEquals(if (path.startsWith("/api/")) 401 else 404, response.statusCode(), path)
                 assertTrue(response.headers().firstValue("Content-Type").orElseThrow().startsWith("application/json"))
                 assertFalse(response.body().contains("<!doctype html>"))
             }
-            assertEquals(404, request(server, "/jobs", "POST").statusCode())
+            assertEquals(405, request(server, "/jobs", "POST").statusCode())
             assertEquals(405, request(server, "/runtime", "POST").statusCode())
             assertEquals(0, executions)
             assertFalse(Files.exists(data))

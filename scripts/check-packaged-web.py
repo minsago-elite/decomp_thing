@@ -143,12 +143,14 @@ def verify() -> list[dict]:
                     html = response.read()
                     assert manifest["buildId"].encode() in html
                     assert b'decomp-application-version' in html
-                for path in ("/nested/api/v1/missing", "/nested/assets/ui/asset-manifest.json", "/nested/jobs/fixture"):
+                for path, expected_status in (("/nested/api/v1/missing", 401),
+                                              ("/nested/assets/ui/asset-manifest.json", 404),
+                                              ("/nested/jobs/fixture", 404)):
                     try:
                         urllib.request.urlopen(origin + path, timeout=5)
                         raise AssertionError(f"Unknown/private path was served: {path}")
                     except urllib.error.HTTPError as error:
-                        assert error.code == 404
+                        assert error.code == expected_status
                 assert not data.exists(), "Public preview must not create/recover job state"
                 assert (app / "docs/frontend-THIRD_PARTY_NOTICES.txt").is_file()
                 results.append({"archive": archive.name, "buildId": manifest["buildId"],

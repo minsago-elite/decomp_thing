@@ -4,6 +4,8 @@ import Home from '../routes/Home';
 import { NotFound } from '../routes/NotFound';
 import { ViewBoundary } from '../shared/ViewBoundary';
 import { AssetRecoveryNotice } from '../shared/AssetRecoveryNotice';
+import { SessionStatus } from '../session/SessionStatus';
+import type { BrowserSession } from '../session/session';
 import { lazyRoute } from '../shared/LazyRoute';
 import { createAssetRecovery, observeAssetFailures } from './assetRecovery';
 import type { AssetRecovery } from './assetRecovery';
@@ -17,9 +19,10 @@ type ShellProps = {
   identity: BuildIdentity;
   recovery: AssetRecovery;
   reload: () => void;
+  session: BrowserSession | null;
 };
 
-function Shell({ basePath, identity, recovery, reload }: ShellProps) {
+function Shell({ basePath, identity, recovery, reload, session }: ShellProps) {
   const Runtime = useMemo(() => lazyRoute(() => import('../routes/Runtime'), recovery), [recovery]);
   const location = useLocation();
   const main = useRef<HTMLElement>(null);
@@ -30,7 +33,7 @@ function Shell({ basePath, identity, recovery, reload }: ShellProps) {
 
   function viewReady() {
     setLoading(false);
-    main.current?.focus();
+    main.current?.focus({ preventScroll: recovery.snapshot() !== 'ready' });
   }
 
   return (
@@ -44,6 +47,7 @@ function Shell({ basePath, identity, recovery, reload }: ShellProps) {
         <span class="build-label">Early preview</span>
       </header>
       <AssetRecoveryNotice recovery={recovery} identity={identity} reload={reload} />
+      {session && <SessionStatus session={session} />}
       <div class="app-layout">
         <nav class="app-nav" aria-label="Main navigation">
           <a href={homePath} aria-current={atHome ? 'page' : undefined}>Workspace</a>
@@ -67,11 +71,12 @@ function Shell({ basePath, identity, recovery, reload }: ShellProps) {
   );
 }
 
-export function App({ basePath = '', identity = UNKNOWN_BUILD, recovery: suppliedRecovery, reload = () => window.location.reload() }: {
+export function App({ basePath = '', identity = UNKNOWN_BUILD, recovery: suppliedRecovery, reload = () => window.location.reload(), session = null }: {
   basePath?: string;
   identity?: BuildIdentity;
   recovery?: AssetRecovery;
   reload?: () => void;
+  session?: BrowserSession | null;
 }) {
   const ownedRecovery = useMemo(createAssetRecovery, []);
   const recovery = suppliedRecovery ?? ownedRecovery;
@@ -79,7 +84,7 @@ export function App({ basePath = '', identity = UNKNOWN_BUILD, recovery: supplie
   return (
     <ViewBoundary>
       <LocationProvider scope={`${basePath}/`}>
-        <Shell basePath={basePath} identity={identity} recovery={recovery} reload={reload} />
+        <Shell basePath={basePath} identity={identity} recovery={recovery} reload={reload} session={session} />
       </LocationProvider>
     </ViewBoundary>
   );

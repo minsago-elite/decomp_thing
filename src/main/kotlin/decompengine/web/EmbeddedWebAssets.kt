@@ -203,7 +203,7 @@ class EmbeddedWebAssets private constructor(
 
         internal fun load(source: WebUiResourceSource, basePath: String = "/"): EmbeddedWebAssets {
             try {
-                require(basePath.matches(Regex("/([A-Za-z0-9_-]+/)*"))) {
+                require(basePath.length <= 256 && basePath.matches(Regex("/([A-Za-z0-9_-]+/)*"))) {
                     "UI base path must be a normalized absolute URL prefix"
                 }
                 val payload = readSmallResource(source, MANIFEST_PATH)

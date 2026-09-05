@@ -31,6 +31,7 @@ import java.nio.file.Path
 import java.util.concurrent.ArrayBlockingQueue
 import java.util.concurrent.Executor
 import java.util.concurrent.ThreadPoolExecutor
+import java.util.concurrent.ScheduledThreadPoolExecutor
 import java.util.concurrent.TimeUnit
 import kotlin.io.path.name
 import kotlin.io.path.pathString
@@ -151,6 +152,7 @@ class UploadServer(
     executor: Executor? = null,
     uiMode: WebUiMode = WebUiMode.LEGACY,
     basePath: String = "/",
+    devFrontendOrigin: String? = null,
 ) {
     // Verify trusted application bytes before binding a listening socket.
     private val spaAssets = when (uiMode) {
@@ -158,26 +160,48 @@ class UploadServer(
             require(java.net.InetAddress.getByName(host).isLoopbackAddress) {
                 "the SPA preview currently requires a loopback host"
             }
+            // Validate the explicit origin spelling before binding, including
+            // when an ephemeral port is requested. No origin comes from HTTP.
+            LocalWebAccessConfiguration(webOrigin(host, port.takeIf { it != 0 } ?: 1), basePath,
+                setOfNotNull(devFrontendOrigin))
             EmbeddedWebAssets.load(basePath = basePath)
         }
         WebUiMode.LEGACY -> {
             require(basePath == "/") { "--base-path is supported by --ui spa" }
+            require(devFrontendOrigin == null) { "--dev-frontend-origin requires --ui spa" }
             null
         }
     }
     private val server = HttpServer.create(InetSocketAddress(host, port), 0)
     private val jobs = WebJobService(JobStore(dataDir), analyzer, reconstructor, executor)
+    private val access = spaAssets?.let {
+        LocalWebAccess(LocalWebAccessConfiguration(webOrigin(host, server.address.port), basePath,
+            setOfNotNull(devFrontendOrigin)))
+    }
+    private val api = access?.let { WebApiController(it, checkNotNull(spaAssets), jobs) }
     private val requestExecutor = ThreadPoolExecutor(
         16, 16, 0, TimeUnit.MILLISECONDS, ArrayBlockingQueue(64),
         { task -> Thread(task, "decomp-web-http").apply { isDaemon = true } },
         ThreadPoolExecutor.AbortPolicy(),
     )
+    private val requestDeadlines = ScheduledThreadPoolExecutor(1) { task ->
+        Thread(task, "decomp-web-deadline").apply { isDaemon = true }
+    }.apply { removeOnCancelPolicy = true }
     val serverPort: Int get() = server.address.port
+    val browserOrigin: String = devFrontendOrigin ?: webOrigin(host, serverPort)
+
+    /** The CLI calls this explicitly; no HTTP route can issue a local link. */
+    fun issueBrowserBootstrap(): WebBootstrapToken = checkNotNull(access) { "Browser sessions require --ui spa" }.issueBootstrap()
 
     init {
         if (spaAssets == null) jobs.recoverInterruptedJobs()
         server.executor = requestExecutor
-        server.createContext("/") { exchange -> route(exchange) }
+        server.createContext("/") { exchange ->
+            val upload = exchange.requestMethod == "POST" &&
+                exchange.requestHeaders.getFirst("Content-Type")?.startsWith("multipart/form-data", true) == true
+            val deadline = requestDeadlines.schedule({ exchange.close() }, if (upload) 120 else 30, TimeUnit.SECONDS)
+            try { route(exchange) } finally { deadline.cancel(false) }
+        }
     }
 
     fun start() = server.start()
@@ -185,12 +209,20 @@ class UploadServer(
     fun stop(delaySeconds: Int = 0) {
         server.stop(delaySeconds)
         requestExecutor.shutdownNow()
+        requestDeadlines.shutdownNow()
+        access?.close()
         jobs.close()
     }
 
     private fun route(exchange: HttpExchange) {
         spaAssets?.let { assets ->
-            routeSpaPreview(exchange, assets)
+            try {
+                if (api?.route(exchange) == true) return
+                checkNotNull(access).authorize(exchange, WebEndpointPolicy.publicRead())
+                routeSpaPreview(exchange, assets)
+            } catch (failure: WebAccessDenied) {
+                checkNotNull(access).sendDenied(exchange, failure)
+            }
             return
         }
         val segments = exchange.requestURI.path.split('/').filter(String::isNotBlank)
@@ -249,19 +281,7 @@ class UploadServer(
             }
             return
         }
-        val requestId = java.util.UUID.randomUUID().toString()
-        val body = buildJsonObject {
-            put("apiVersion", 1)
-            put("kind", "error")
-            put("requestId", requestId)
-            put("error", buildJsonObject {
-                put("code", "NOT_FOUND")
-                put("message", "The requested route is unavailable.")
-                put("retryable", false)
-            })
-        }
-        exchange.responseHeaders.set("X-Request-ID", requestId)
-        exchange.sendJson(404, Json.encodeToString(JsonElement.serializer(), body))
+        checkNotNull(access).sendDenied(exchange, WebAccessDenied(404, "NOT_FOUND", "The requested route is unavailable."))
     }
 
     private fun handlePostJob(exchange: HttpExchange) {
@@ -334,6 +354,11 @@ class UploadServer(
     private companion object {
         const val MAX_UPLOAD_BYTES = 32L * 1024 * 1024
     }
+}
+
+private fun webOrigin(host: String, port: Int): String {
+    val authority = if (':' in host && !host.startsWith('[')) "[$host]" else host
+    return "http://$authority:$port"
 }
 
 data class Upload(val filename: String, val content: ByteArray)

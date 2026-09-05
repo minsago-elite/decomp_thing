@@ -505,6 +505,7 @@ private fun runWeb(args: List<String>) {
     var dataDir = Path.of(".decomp_engine/jobs")
     var uiMode = WebUiMode.LEGACY
     var basePath = "/"
+    var devFrontendOrigin: String? = null
     var index = 0
     while (index < args.size) {
         require(index + 1 < args.size) { "${args[index]} requires a value; see llm_bin_patch --help" }
@@ -533,12 +534,16 @@ private fun runWeb(args: List<String>) {
                 basePath = args[index + 1]
                 index += 2
             }
+            "--dev-frontend-origin" -> {
+                devFrontendOrigin = args[index + 1]
+                index += 2
+            }
             else -> error("unknown web argument: ${args[index]}")
         }
     }
     require(port in 0..65535) { "--port must be between 0 and 65535 (0 selects an available port)" }
     val server = try {
-        UploadServer(host, port, dataDir, uiMode = uiMode, basePath = basePath)
+        UploadServer(host, port, dataDir, uiMode = uiMode, basePath = basePath, devFrontendOrigin = devFrontendOrigin)
     } catch (_: java.net.BindException) {
         System.err.println("Cannot bind web server to $host:$port. Check --host or choose an unused --port.")
         kotlin.system.exitProcess(2)
@@ -547,6 +552,11 @@ private fun runWeb(args: List<String>) {
     Runtime.getRuntime().addShutdownHook(Thread { server.stop() })
     val urlHost = if (':' in host && !host.startsWith('[')) "[$host]" else host
     println("Serving decomp_engine ${uiMode.name.lowercase()} UI on http://$urlHost:${server.serverPort}$basePath")
+    if (uiMode == WebUiMode.SPA) {
+        val bootstrap = server.issueBrowserBootstrap()
+        // This is an explicit local operator handoff, not a request/access log.
+        println("Open local browser session (expires ${bootstrap.expiresAt}): ${server.browserOrigin}${basePath}#bootstrap=${bootstrap.token}")
+    }
 }
 
 private fun printHelp() {
@@ -561,7 +571,7 @@ private fun printHelp() {
           llm_bin_patch explore <binary> --reports <directory> [--arg <value>] [--stdin <value>]
           llm_bin_patch reconstruct <binary> --output <directory> [--evidence-only] [--max-context-chars <count>] [--harness acp|legacy-openai]
           llm_bin_patch gcc-engine-plan <cc1|lto1> <stripped-binary> --profile <file> --ghidra-archive <file> --ghidra-home <directory> --output <directory>
-          llm_bin_patch web [--host 127.0.0.1] [--port 8000] [--data-dir .decomp_engine/jobs] [--ui legacy|spa] [--base-path /]
+          llm_bin_patch web [--host 127.0.0.1] [--port 8000] [--data-dir .decomp_engine/jobs] [--ui legacy|spa] [--base-path /] [--dev-frontend-origin http://127.0.0.1:5173]
 
         Agent harness selection for doctor, patch, reconstruction, and repair:
           --harness acp            use the ACP agent provisioned by ACP_CONFIG_FILE (default)

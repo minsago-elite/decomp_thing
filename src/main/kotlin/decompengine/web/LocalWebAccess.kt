@@ -1,8 +1,13 @@
 package decompengine.web
 
 import com.sun.net.httpserver.HttpExchange
+import decompengine.oracle.core.OracleJson
+import decompengine.oracle.core.StrictJsonException
+import decompengine.oracle.core.StrictJsonLimits
 import kotlinx.serialization.json.JsonArray
 import kotlinx.serialization.json.JsonNull
+import kotlinx.serialization.json.JsonObject
+import kotlinx.serialization.json.JsonPrimitive
 import kotlinx.serialization.json.buildJsonObject
 import kotlinx.serialization.json.put
 import java.io.ByteArrayOutputStream
@@ -27,7 +32,9 @@ class LocalWebAccessConfiguration(
     val cookieName: String
 
     init {
-        require(basePath.matches(Regex("/([A-Za-z0-9_-]+/)*"))) { "local web base path must be a normalized URL prefix" }
+        require(basePath.length <= 256 && basePath.matches(Regex("/([A-Za-z0-9_-]+/)*"))) {
+            "local web base path must be a normalized URL prefix of at most 256 characters"
+        }
         require(additionalLoopbackOrigins.size <= 8) { "too many configured local browser origins" }
         val origins = (listOf(canonicalOrigin) + additionalLoopbackOrigins).distinct()
         val parsed = origins.map { origin ->
@@ -74,6 +81,13 @@ class WebEndpointPolicy private constructor(
     internal val multipart: Boolean,
 ) {
     companion object {
+        /** Routing preflight only; private handlers must still authorize their session/mutation policy. */
+        internal fun transport(methods: Set<String>): WebEndpointPolicy {
+            require(methods.isNotEmpty() && methods.all { it.matches(Regex("[A-Z][A-Z0-9_-]{0,31}")) }) {
+                "transport policy requires explicit bounded methods"
+            }
+            return WebEndpointPolicy(methods.toSet(), false, false, false)
+        }
         /** The router may apply this only to the public login shell and inventoried application assets. */
         fun publicRead(): WebEndpointPolicy = WebEndpointPolicy(setOf("GET", "HEAD"), false, false, false)
         fun privateRead(allowHead: Boolean = false): WebEndpointPolicy =
@@ -145,7 +159,7 @@ class LocalWebAccess(
         return WebBootstrapToken(token, clock.instant().plus(BOOTSTRAP_LIFETIME))
     }
 
-    /** Reads only the bounded canonical {"token":"base64url"} session request body. */
+    /** Reads bounded JSON with a single token string; JSON escaping does not alter token identity. */
     fun establishSession(exchange: HttpExchange): WebSessionCredentials {
         synchronized(this) { ensureOpen() }
         validateBoundary(exchange, WebEndpointPolicy.jsonMutation("POST"))
@@ -166,11 +180,17 @@ class LocalWebAccess(
             }
             output.toByteArray()
         }
-        val body = try { bytes.decodeToString(throwOnInvalidSequence = true) } catch (_: Exception) {
+        val body = try { OracleJson.parse(bytes, BOOTSTRAP_JSON_LIMITS) } catch (_: StrictJsonException) {
             deny(400, "MALFORMED_JSON", "The session request must contain a single bootstrap token.")
         }
-        val token = BOOTSTRAP_BODY.matchEntire(body)?.groupValues?.get(1)
-            ?: deny(400, "MALFORMED_JSON", "The session request must contain a single bootstrap token.")
+        if (body !is JsonObject || body.keys != setOf("token")) {
+            deny(400, "VALIDATION_FAILED", "The session request must contain only the token field.")
+        }
+        val field = body.getValue("token")
+        if (field !is JsonPrimitive || !field.isString) {
+            deny(400, "VALIDATION_FAILED", "The bootstrap token must be a string.")
+        }
+        val token = field.content
         if (!validToken(token)) deny(400, "VALIDATION_FAILED", "The bootstrap token has an invalid format.")
         // Untrusted body I/O must not hold the session lock or block independent authenticated reads.
         return synchronized(this) { establishSessionToken(token) }
@@ -383,7 +403,15 @@ class LocalWebAccess(
         private val SESSION_LIFETIME = Duration.ofHours(8)
         private val IDLE_LIFETIME = Duration.ofMinutes(30)
         private val TOKEN = Regex("[A-Za-z0-9_-]{43}")
-        private val BOOTSTRAP_BODY = Regex("[ \\t\\r\\n]*\\{[ \\t\\r\\n]*\"token\"[ \\t\\r\\n]*:[ \\t\\r\\n]*\"([A-Za-z0-9_-]{43})\"[ \\t\\r\\n]*}[ \\t\\r\\n]*")
+        private val BOOTSTRAP_JSON_LIMITS = StrictJsonLimits(
+            maximumInputBytes = MAX_BOOTSTRAP_BODY_BYTES,
+            maximumCanonicalBytes = MAX_BOOTSTRAP_BODY_BYTES,
+            maximumDepth = 8,
+            maximumNodes = 128,
+            maximumStringBytes = MAX_BOOTSTRAP_BODY_BYTES,
+            maximumTotalStringBytes = MAX_BOOTSTRAP_BODY_BYTES,
+            maximumNumberCharacters = 128,
+        )
         private val JSON_TYPE = Regex("application/json(?:[ \\t]*;[ \\t]*charset=(?:utf-8|\"utf-8\"))?", RegexOption.IGNORE_CASE)
         private val MULTIPART_TYPE = Regex("multipart/form-data[ \\t]*;[ \\t]*boundary=(?:[A-Za-z0-9'()+_,./:=?-]{1,70}|\"[A-Za-z0-9'()+_,./:=? -]{0,69}[A-Za-z0-9'()+_,./:=?-]\")", RegexOption.IGNORE_CASE)
         private val JsonPrimitiveRetry = kotlinx.serialization.json.JsonPrimitive("30000")

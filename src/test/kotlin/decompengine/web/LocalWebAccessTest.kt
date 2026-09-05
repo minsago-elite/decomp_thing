@@ -47,8 +47,42 @@ class LocalWebAccessTest {
         }
         assertFailsWith<IllegalArgumentException> { LocalWebAccessConfiguration(ORIGIN, additionalLoopbackOrigins = setOf("https://localhost:8443")) }
         assertFailsWith<IllegalArgumentException> { LocalWebAccessConfiguration(ORIGIN, "/../") }
+        assertEquals(256, LocalWebAccessConfiguration(ORIGIN, "/" + "a".repeat(254) + "/").basePath.length)
+        assertFailsWith<IllegalArgumentException> { LocalWebAccessConfiguration(ORIGIN, "/" + "a".repeat(255) + "/") }
         assertFailsWith<IllegalArgumentException> { WebEndpointPolicy.jsonMutation("GET") }
         assertNotEquals(LocalWebAccessConfiguration(ORIGIN).cookieName, LocalWebAccessConfiguration("http://127.0.0.1:8001").cookieName)
+    }
+
+    @Test
+    fun `transport preflight enforces boundary before methods without granting session authority`() {
+        val access = access()
+        val methods = mutableSetOf("POST", "DELETE")
+        val policy = WebEndpointPolicy.transport(methods)
+        methods.clear()
+        val request = MemoryExchange("POST", "/api/v1/session").apply {
+            requestHeaders.set("Host", "127.0.0.1:8000")
+        }
+        assertNull(access.authorize(request, policy))
+        assertDenied(403, "ORIGIN_DENIED") { access.authorize(request, WebEndpointPolicy.jsonMutation("POST")) }
+        request.requestHeaders.set("Origin", ORIGIN)
+        request.requestHeaders.set("Content-Type", "application/json")
+        assertDenied(401, "SESSION_REQUIRED") { access.authorize(request, WebEndpointPolicy.jsonMutation("POST")) }
+
+        val unsupported = MemoryExchange("GET", "/api/v1/session").apply {
+            requestHeaders.set("Host", "127.0.0.1:8000")
+        }
+        val denied = assertDenied(405, "METHOD_NOT_ALLOWED") { access.authorize(unsupported, policy) }
+        assertEquals(setOf("POST", "DELETE"), denied.allowedMethods)
+        unsupported.requestHeaders.set("Host", "example.invalid:8000")
+        assertDenied(403, "HOST_DENIED") { access.authorize(unsupported, policy) }
+        unsupported.requestHeaders.set("Host", "127.0.0.1:8000")
+        unsupported.requestHeaders.set("Origin", "http://localhost:8000")
+        assertDenied(403, "ORIGIN_DENIED") { access.authorize(unsupported, policy) }
+        unsupported.requestHeaders.remove("Origin")
+        unsupported.requestHeaders.set("Forwarded", "host=127.0.0.1:8000")
+        assertDenied(403, "FORWARDED_HEADERS_DENIED") { access.authorize(unsupported, policy) }
+        assertFailsWith<IllegalArgumentException> { WebEndpointPolicy.transport(emptySet()) }
+        assertFailsWith<IllegalArgumentException> { WebEndpointPolicy.transport(setOf("GET\n")) }
     }
 
     @Test
@@ -259,12 +293,49 @@ class LocalWebAccessTest {
     fun `bootstrap body is bounded and duplicate unknown and malformed JSON are rejected`() {
         val access = access()
         val token = access.issueBootstrap().token
-        listOf("{\"token\":\"$token\",\"token\":\"$token\"}", "{\"token\":\"$token\",\"extra\":true}", "[]", "{\"token\":123}").forEach { body ->
+        listOf("{\"token\":\"$token\",\"token\":\"$token\"}", "{\"token\":\"$token\",\"to\\u006ben\":\"$token\"}", "{", "[] trailing").forEach { body ->
             assertDenied(400, "MALFORMED_JSON") { access.establishSession(bootstrapRequest(token, body = body)) }
+        }
+        listOf("{\"token\":\"$token\",\"extra\":true}", "[]", "{}", "{\"token\":123}", "{\"token\":null}",
+            "{\"token\":true}", "{\"token\":[]}", "{\"token\":{}}").forEach { body ->
+            assertDenied(400, "VALIDATION_FAILED") { access.establishSession(bootstrapRequest(token, body = body)) }
         }
         assertDenied(413, "BODY_TOO_LARGE") { access.establishSession(bootstrapRequest(token, body = " ".repeat(1025))) }
         val largeDeclared = bootstrapRequest(token).apply { requestHeaders.set("Content-Length", "1025") }
         assertDenied(413, "BODY_TOO_LARGE") { access.establishSession(largeDeclared) }
+        assertNotNull(access.establishSession(bootstrapRequest(token, body = "{\"token\":\"$token\"}".padEnd(1024))).setCookie)
+    }
+
+    @Test
+    fun `session JSON escaping preserves decoded token identity`() {
+        val access = access()
+        val token = access.issueBootstrap().token
+        val escaped = token.map { "\\u" + it.code.toString(16).padStart(4, '0') }.joinToString("")
+        val body = " \n{\"\\u0074oken\":\"$escaped\"}\t\r\n"
+        assertNotNull(access.establishSession(bootstrapRequest(token, body = body)).setCookie)
+        assertDenied(401, "BOOTSTRAP_REQUIRED") { access.establishSession(bootstrapRequest(token)) }
+    }
+
+    @Test
+    fun `valid JSON with invalid or incorrect token receives value or authentication denial`() {
+        val access = access()
+        val token = access.issueBootstrap().token
+        for (incorrect in listOf("a".repeat(32), "synthetic_non_secret_bootstrap_fixture_1234567890", "a".repeat(256))) {
+            assertDenied(400, "VALIDATION_FAILED") { access.establishSession(bootstrapRequest(incorrect)) }
+        }
+        assertDenied(401, "BOOTSTRAP_REQUIRED") { access.establishSession(bootstrapRequest("A".repeat(43))) }
+        assertNotNull(access.establishSession(bootstrapRequest(token)).setCookie)
+    }
+
+    @Test
+    fun `session parser rejects invalid Unicode and excessive nesting without consuming token`() {
+        val access = access()
+        val token = access.issueBootstrap().token
+        val malformedUtf8 = bootstrapRequest(token).apply { customInput = ByteArrayInputStream(byteArrayOf(0xc3.toByte(), 0x28)) }
+        assertDenied(400, "MALFORMED_JSON") { access.establishSession(malformedUtf8) }
+        listOf("{\"token\":\"\\ud800\"}", "[".repeat(9) + "0" + "]".repeat(9)).forEach { body ->
+            assertDenied(400, "MALFORMED_JSON") { access.establishSession(bootstrapRequest(token, body = body)) }
+        }
         assertNotNull(access.establishSession(bootstrapRequest(token)).setCookie)
     }
 

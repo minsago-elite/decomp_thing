@@ -72,3 +72,5 @@ button:disabled { opacity: 0.65; cursor: wait; }
 @media (prefers-reduced-motion: reduce) {
   *, *::before, *::after { scroll-behavior: auto !important; }
 }
+
+.session-notice { margin: 1rem 1.5rem; }
