@@ -253,10 +253,18 @@ failure before restarting the application; this mechanism does not certify clean
 
 Workspace grouping uses the exact normalized primary path already present in the request. Captured repairs use a
 shared synthetic primary path and therefore conservatively share one active repair slot across projects. Separate
-JVMs have separate schedulers. This checkpoint does not provide application-wide project identity, bounded HTTP
-submission queues, cancellation of validation subprocesses, or persistent restart scheduling; those remain part of
+JVMs have separate schedulers. This checkpoint does not provide application-wide project identity,
+cancellation of validation subprocesses, or persistent restart scheduling; those remain part of
 issue #71. Captured repair also defensively copies its caller-supplied source map before admission; admission does
 not yet reserve that input memory. Per-invocation output, terminal, memory, and workspace limits still apply independently.
+
+The web server's owned background executor separately bounds exploration and reconstruction to two active
+operations and 32 pending operations per server instance. Its FIFO queue rejects overflow immediately with HTTP
+503 and `Retry-After: 1`; it never executes rejected work on the HTTP handler. A job may have only one pending or
+active operation. Rejected jobs retain a failed status explaining that admission can be retried. Shutdown interrupts
+active workers and marks discarded pending jobs failed with an explicit never-started message. This is background
+job admission, not a bound on network connections, uploaded job storage, or cross-process resources. Injected
+executors remain caller-owned. Interrupting active workers is not proof of validation subprocess cleanup.
 
 The public `AcpAgentHarness` has no uncontained production mode. Before it starts an ACP agent it verifies an explicit
 Linux boundary made from digest-pinned, canonical, root-owned `bubblewrap`, `prlimit`, `systemd-run`, `systemctl`, and

@@ -17,6 +17,89 @@ import kotlin.test.assertTrue
 
 class UploadServerTest {
     @Test
+    fun `rejected admission can be retried without a stale job reservation`() {
+        val reject = java.util.concurrent.atomic.AtomicBoolean(true)
+        var calls = 0
+        val server = UploadServer("127.0.0.1", 0, createTempDirectory("web-admission-retry-"),
+            analyzer = JobAnalyzer { _, _ -> calls++ },
+            executor = Executor { task ->
+                if (reject.getAndSet(false)) throw java.util.concurrent.RejectedExecutionException("private worker detail")
+                task.run()
+            })
+        server.start()
+        try {
+            val uploaded = upload(server, "retry.elf", elfFixture(), acceptJson = true)
+            val id = Json.parseToJsonElement(uploaded.body.decodeToString()).jsonObject["id"].toString().trim('"')
+            val rejected = request(server, "POST", "/jobs/$id/explore", followRedirects = false)
+            assertEquals(503, rejected.status)
+            assertTrue(!rejected.body.decodeToString().contains("private worker detail"))
+            assertEquals(0, calls)
+            assertEquals(303, request(server, "POST", "/jobs/$id/explore", followRedirects = false).status)
+            assertEquals(1, calls)
+            val job = Json.parseToJsonElement(request(server, "GET", "/api/jobs/$id").body.decodeToString()).jsonObject
+            assertEquals("complete", job["status"].toString().trim('"'))
+        } finally {
+            server.stop()
+        }
+    }
+
+    @Test
+    fun `owned workers bound pending jobs reject overflow and discard queued work at shutdown`() {
+        val dataDir = createTempDirectory("web-bounded-jobs-")
+        val started = java.util.concurrent.CountDownLatch(2)
+        val stopped = java.util.concurrent.CountDownLatch(2)
+        val release = java.util.concurrent.CountDownLatch(1)
+        val invocations = java.util.concurrent.atomic.AtomicInteger()
+        val server = UploadServer("127.0.0.1", 0, dataDir, analyzer = JobAnalyzer { _, _ ->
+            invocations.incrementAndGet()
+            started.countDown()
+            try {
+                release.await()
+            } finally {
+                stopped.countDown()
+            }
+        })
+        server.start()
+        val ids = mutableListOf<String>()
+        var closed = false
+        try {
+            repeat(35) { index ->
+                val uploaded = upload(server, "queued-$index.elf", elfFixture(), acceptJson = true)
+                ids += Json.parseToJsonElement(uploaded.body.decodeToString()).jsonObject["id"].toString().trim('"')
+            }
+            ids.take(2).forEach { id ->
+                assertEquals(303, request(server, "POST", "/jobs/$id/explore", followRedirects = false).status)
+            }
+            assertTrue(started.await(5, java.util.concurrent.TimeUnit.SECONDS))
+            ids.subList(2, 34).forEach { id ->
+                assertEquals(303, request(server, "POST", "/jobs/$id/explore", followRedirects = false).status)
+            }
+            assertEquals(409, request(server, "POST", "/jobs/${ids[2]}/reconstruct", followRedirects = false).status)
+            repeat(2) {
+                val overflow = request(server, "POST", "/jobs/${ids.last()}/explore", followRedirects = false)
+                assertEquals(503, overflow.status)
+                assertEquals("1", overflow.retryAfter)
+            }
+            assertEquals(200, request(server, "GET", "/api/jobs/${ids[0]}").status)
+            assertEquals(2, invocations.get())
+            server.stop()
+            closed = true
+            assertTrue(stopped.await(5, java.util.concurrent.TimeUnit.SECONDS))
+            val store = decompengine.jobs.JobStore(dataDir)
+            ids.subList(2, 34).forEach { id ->
+                val job = store.get(id)
+                assertEquals("failed", job.status)
+                assertEquals("Server stopped before the operation started", job.statusMessage)
+            }
+            assertEquals("failed", store.get(ids.last()).status)
+            assertEquals(2, invocations.get())
+        } finally {
+            release.countDown()
+            if (!closed) server.stop()
+        }
+    }
+
+    @Test
     fun `job event endpoint and refresh render the persisted bounded stream`() {
         withServer { server, dataDir ->
             val uploaded = upload(server, "progress.elf", elfFixture(), acceptJson = true)
@@ -296,10 +379,10 @@ class UploadServerTest {
         }
         val status = connection.responseCode
         val stream = if (status >= 400) connection.errorStream else connection.inputStream
-        return Response(status, stream?.readBytes() ?: ByteArray(0))
+        return Response(status, stream?.readBytes() ?: ByteArray(0), connection.getHeaderField("Retry-After"))
     }
 
-    private data class Response(val status: Int, val body: ByteArray)
+    private data class Response(val status: Int, val body: ByteArray, val retryAfter: String? = null)
 }
 
 private fun ByteArray.startsWith(prefix: ByteArray): Boolean =

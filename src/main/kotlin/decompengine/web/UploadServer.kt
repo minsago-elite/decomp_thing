@@ -35,7 +35,11 @@ import java.nio.file.Path
 import java.util.concurrent.ConcurrentHashMap
 import java.util.concurrent.Executor
 import java.util.concurrent.ExecutorService
-import java.util.concurrent.Executors
+import java.util.concurrent.ArrayBlockingQueue
+import java.util.concurrent.RejectedExecutionException
+import java.util.concurrent.ThreadPoolExecutor
+import java.util.concurrent.TimeUnit
+import java.util.concurrent.atomic.AtomicBoolean
 import kotlin.io.path.name
 import kotlin.io.path.pathString
 
@@ -167,9 +171,9 @@ class UploadServer(
     private val server = HttpServer.create(InetSocketAddress(host, port), 0)
     private val store = JobStore(dataDir)
     private val ownedExecutor: ExecutorService? = if (executor == null) {
-        Executors.newFixedThreadPool(2) { runnable ->
-            Thread(runnable, "decomp-web-analysis").apply { isDaemon = true }
-        }
+        ThreadPoolExecutor(2, 2, 0L, TimeUnit.MILLISECONDS, ArrayBlockingQueue(32),
+            { runnable -> Thread(runnable, "decomp-web-analysis").apply { isDaemon = true } },
+            ThreadPoolExecutor.AbortPolicy())
     } else {
         null
     }
@@ -186,7 +190,16 @@ class UploadServer(
 
     fun stop(delaySeconds: Int = 0) {
         server.stop(delaySeconds)
-        ownedExecutor?.shutdownNow()
+        val discarded = ownedExecutor?.shutdownNow().orEmpty()
+        var failure: Exception? = null
+        discarded.forEach { task ->
+            try {
+                (task as ScheduledJob).discard("Server stopped before the operation started")
+            } catch (exception: Exception) {
+                if (failure == null) failure = exception else failure.addSuppressed(exception)
+            }
+        }
+        failure?.let { throw it }
     }
 
     private fun route(exchange: HttpExchange) {
@@ -277,9 +290,9 @@ class UploadServer(
             exchange.sendHtml(409, renderErrorPage(409, "Analysis already running", "This job already has an active background operation."))
             return
         }
-        store.updateStatus(job.id, "queued", queuedMessage)
         try {
-            analysisExecutor.execute {
+            store.updateStatus(job.id, "queued", queuedMessage)
+            analysisExecutor.execute(ScheduledJob(job.id) {
                 try {
                     val active = store.updateStatus(job.id, "analyzing", activeMessage)
                     operation(active)
@@ -289,13 +302,37 @@ class UploadServer(
                 } finally {
                     runningJobs.remove(job.id)
                 }
-            }
+            })
+        } catch (failure: RejectedExecutionException) {
+            runningJobs.remove(job.id)
+            store.updateStatus(job.id, "failed", "Background job capacity is full or the server is stopping; retry later")
+            exchange.responseHeaders.set("Retry-After", "1")
+            exchange.sendHtml(503, renderErrorPage(503, "Background workers busy", "Job capacity is full or the server is stopping. Retry later."))
+            return
         } catch (failure: Exception) {
             runningJobs.remove(job.id)
             store.updateStatus(job.id, "failed", "Analysis worker rejected the job")
             throw failure
         }
         exchange.redirect("/jobs/${job.id}")
+    }
+
+    /** A queued operation can be claimed once, either by a worker or by shutdown. */
+    private inner class ScheduledJob(private val jobId: String, private val operation: () -> Unit) : Runnable {
+        private val claimed = AtomicBoolean()
+
+        override fun run() {
+            if (claimed.compareAndSet(false, true)) operation()
+        }
+
+        fun discard(message: String) {
+            if (!claimed.compareAndSet(false, true)) return
+            try {
+                store.updateStatus(jobId, "failed", message)
+            } finally {
+                runningJobs.remove(jobId)
+            }
+        }
     }
 
     private fun handleSource(exchange: HttpExchange, jobId: String, relativePath: String) {
