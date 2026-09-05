@@ -89,6 +89,8 @@ class LlvmBehaviorHostedWorkerImageLiveIntegrationTest {
     fun `live probe remains a zero-argument test-classpath-only overlay`() {
         assertTrue(Files.isRegularFile(TEST_PROBE_SOURCE, LinkOption.NOFOLLOW_LINKS))
         assertFalse(Files.exists(PRODUCTION_PROBE_SOURCE, LinkOption.NOFOLLOW_LINKS))
+        assertTrue(Files.isRegularFile(TEST_HOSTILE_CHECK_SOURCE, LinkOption.NOFOLLOW_LINKS))
+        assertFalse(Files.exists(PRODUCTION_HOSTILE_CHECK_SOURCE, LinkOption.NOFOLLOW_LINKS))
         val probeCodeSource = LlvmBehaviorHostedWorkerImageLiveProbeMain::class.java.protectionDomain
             .codeSource.location.toURI().let(Path::of).toAbsolutePath().normalize().toRealPath()
         val productionCodeSource = LlvmBehaviorHostedCleanBuildV2InnerWorkerMain::class.java.protectionDomain
@@ -275,7 +277,7 @@ class LlvmBehaviorHostedWorkerImageLiveIntegrationTest {
         check(jars.isNotEmpty()) { "production worker context has no application JARs" }
         jars.forEach { jar ->
             JarFile(jar.toFile(), false).use { opened ->
-                check(opened.getJarEntry(PROBE_CLASS_ENTRY) == null) {
+                check(TEST_OVERLAY_CLASS_ENTRIES.all { entry -> opened.getJarEntry(entry) == null }) {
                     "test-only retained-tool probe leaked into production application closure"
                 }
             }
@@ -289,13 +291,18 @@ class LlvmBehaviorHostedWorkerImageLiveIntegrationTest {
             "live probe is not loaded from the Gradle test-classes directory"
         }
         val packageRoot = codeSource.resolve(PROBE_CLASS_ENTRY).parent
-        val classPrefix = LlvmBehaviorHostedWorkerImageLiveProbeMain::class.java.simpleName
-        val classes = Files.newDirectoryStream(packageRoot, "$classPrefix*.class").use { stream ->
-            stream.toList().sortedBy { it.fileName.toString() }
+        val classes = TEST_OVERLAY_CLASS_ENTRIES.flatMap { entry ->
+            val className = Path.of(entry).fileName.toString()
+            val classPrefix = className.removeSuffix(".class")
+            Files.newDirectoryStream(packageRoot, "$classPrefix*.class").use { stream ->
+                stream.toList().also { selected ->
+                    check(selected.any { it.fileName.toString() == className }) {
+                        "test-only retained-tool overlay class bytes are unavailable: $entry"
+                    }
+                }
+            }
         }
-        check(classes.isNotEmpty() && classes.any { it.fileName.toString() == "$classPrefix.class" }) {
-            "test-only retained-tool probe class bytes are unavailable"
-        }
+            .sortedBy { it.fileName.toString() }
         JarOutputStream(
             Files.newOutputStream(output, StandardOpenOption.CREATE_NEW, StandardOpenOption.WRITE),
         ).use { jar ->
@@ -310,9 +317,14 @@ class LlvmBehaviorHostedWorkerImageLiveIntegrationTest {
         JarFile(output.toFile(), false).use { jar ->
             val entries = jar.entries().asSequence().map(JarEntry::getName).toList()
             check(entries.isNotEmpty() && entries.all { entry ->
-                entry == PROBE_CLASS_ENTRY ||
-                    entry.startsWith(PROBE_CLASS_ENTRY.removeSuffix(".class") + "$") && entry.endsWith(".class")
+                TEST_OVERLAY_CLASS_ENTRIES.any { allowed ->
+                    entry == allowed ||
+                        entry.startsWith(allowed.removeSuffix(".class") + "$") && entry.endsWith(".class")
+                }
             }) { "test-only retained-tool probe JAR contains an unrelated class" }
+            check(TEST_OVERLAY_CLASS_ENTRIES.all(entries::contains)) {
+                "test-only retained-tool overlay omitted a required regression class"
+            }
         }
         return output
     }
@@ -446,14 +458,27 @@ class LlvmBehaviorHostedWorkerImageLiveIntegrationTest {
         val PRODUCTION_PROBE_SOURCE: Path = Path.of(
             "src/main/kotlin/decompengine/oracle/behavior/LlvmBehaviorHostedWorkerImageLiveProbeMain.kt",
         )
+        val TEST_HOSTILE_CHECK_SOURCE: Path = Path.of(
+            "src/test/kotlin/decompengine/oracle/behavior/LlvmBehaviorHostedRetainedToolChecks.kt",
+        )
+        val PRODUCTION_HOSTILE_CHECK_SOURCE: Path = Path.of(
+            "src/main/kotlin/decompengine/oracle/behavior/LlvmBehaviorHostedRetainedToolChecks.kt",
+        )
         val OWNER_DIRECTORY_PERMISSIONS = PosixFilePermissions.fromString("rwx------")
         val OWNER_READ_ONLY_PERMISSIONS = PosixFilePermissions.fromString("r--------")
         const val PROBE_CLASS_ENTRY =
             "decompengine/oracle/behavior/LlvmBehaviorHostedWorkerImageLiveProbeMain.class"
+        val TEST_OVERLAY_CLASS_ENTRIES = listOf(
+            PROBE_CLASS_ENTRY,
+            "decompengine/oracle/behavior/LlvmBehaviorHostedRetainedToolChecks.class",
+        )
         val PRODUCTION_CLASS_PATH =
             Regex("/decomp-app/lib/[A-Za-z0-9._-]+\\.jar(?::/decomp-app/lib/[A-Za-z0-9._-]+\\.jar)*")
         val RESULT_LINE =
-            Regex("DECOMP_LLVM_HOSTED_WORKER_RETAINED_TOOL_TEST_V1 [0-9a-f]{64} [1-9][0-9]*\\n")
+            Regex(
+                "DECOMP_LLVM_HOSTED_WORKER_RETAINED_TOOL_TEST_V2 [0-9a-f]{64} [1-9][0-9]* " +
+                    "swaps=5 outside-header=blocked\\n",
+            )
         val INSPECT_TIMEOUT: Duration = Duration.ofSeconds(30)
         val LIVE_PROBE_TIMEOUT: Duration = Duration.ofMinutes(3)
         const val MAXIMUM_INSPECT_BYTES = 4 * 1024 * 1024

@@ -75,7 +75,7 @@ jobs:
               --source-lock oracle/llvm/22.1.6/source-lock.json \
               --build-record oracle/llvm/22.1.6/build-record.json \
               --recorded-origin-digest "$recorded_origin"
-      - name: Exercise retained Clang and direct LLD in the production-staged worker image
+      - name: Exercise retained Clang and direct LLD hostile swaps in the production-staged worker image
         env:
           DECOMP_REQUIRE_LLVM_HOSTED_WORKER_IMAGE: "1"
           DECOMP_LLVM_HOSTED_WORKER_DOCKER: /usr/bin/docker

@@ -77,9 +77,9 @@ sealed interface LlvmBehaviorHostedCleanBuildV2PairVerification {
 /**
  * Fixed-path inner worker for the future Kotlin-owned container coordinator.
  *
- * It is deliberately internal and has no general CLI: dependency authentication occurs after
- * Clang reads a file, so invoking this worker outside its secret-free fixed-mount container would
- * be unsafe. The future outer coordinator is the only component allowed to launch it.
+ * It is deliberately internal and has no general CLI: system-header and dynamic-tool runtime
+ * reads require the inspected read-only worker image. The future outer coordinator is the only
+ * component allowed to launch it.
  */
 internal object LlvmBehaviorHostedCleanBuildV2InnerWorker {
     fun produce(): LlvmBehaviorHostedCleanBuildV2PairVerification = translateHostedFailure {
@@ -1445,7 +1445,7 @@ private fun adoptCandidateInputs(
 }
 
 private fun createCandidateOverlay(inputs: List<HostedCandidateInput>): HostedRetainedFile {
-    val roots = inputs.map { input ->
+    val candidateRoots = inputs.map { input ->
         jsonObject(
             "type" to JsonPrimitive("file"),
             "name" to JsonPrimitive(VIRTUAL_CANDIDATE_ROOT.resolve(input.relativePath).normalize().toString()),
@@ -1453,12 +1453,24 @@ private fun createCandidateOverlay(inputs: List<HostedCandidateInput>): HostedRe
             "external-contents" to JsonPrimitive(input.retained.capabilityPath("candidate overlay input")),
         )
     }
+    val systemRoots = SYSTEM_HEADER_ROOTS.filter { root ->
+        Files.isDirectory(root, LinkOption.NOFOLLOW_LINKS)
+    }.map { root ->
+        val real = root.toRealPath()
+        requireRootOwnedImmutablePath(real, directory = true, label = "compiler system-header root")
+        jsonObject(
+            "type" to JsonPrimitive("directory-remap"),
+            "name" to JsonPrimitive(root.toString()),
+            "use-external-name" to JsonPrimitive(false),
+            "external-contents" to JsonPrimitive(real.toString()),
+        )
+    }
     val document = jsonObject(
         "version" to JsonPrimitive(0),
         "case-sensitive" to JsonPrimitive(true),
         "use-external-names" to JsonPrimitive(false),
-        "redirecting-with" to JsonPrimitive("fallthrough"),
-        "roots" to JsonArray(roots),
+        "redirecting-with" to JsonPrimitive("redirect-only"),
+        "roots" to JsonArray(candidateRoots + systemRoots),
     )
     val bytes = OracleJson.canonicalBytes(document, CANDIDATE_OVERLAY_JSON_LIMITS)
     return HostedNativeExecution.snapshot(bytes, false, "candidate VFS overlay")

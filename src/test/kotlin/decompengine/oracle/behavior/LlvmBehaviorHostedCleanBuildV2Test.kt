@@ -7,7 +7,6 @@ import java.lang.reflect.Modifier
 import java.nio.file.Files
 import java.nio.file.LinkOption
 import java.nio.file.Path
-import java.nio.file.StandardCopyOption
 import java.nio.file.attribute.PosixFilePermissions
 import java.time.Duration
 import java.util.Comparator
@@ -21,11 +20,12 @@ import kotlin.test.assertEquals
 import kotlin.test.assertFailsWith
 import kotlin.test.assertFalse
 import kotlin.test.assertTrue
+import org.junit.jupiter.api.Assumptions.assumeTrue
 
 class LlvmBehaviorHostedCleanBuildV2Test {
     @Test
     fun `two fixed direct clang builds ignore candidate build scripts and reproduce exact ELF bytes`() {
-        val toolchain = localClangToolchainOrNull() ?: return
+        localClangToolchain()
         val root = createTempDirectory("hosted-clean-build-test-").toAbsolutePath().normalize()
         val marker = root.resolve("candidate-build-script-ran")
         val first = root.resolve("source-one")
@@ -99,7 +99,7 @@ class LlvmBehaviorHostedCleanBuildV2Test {
 
     @Test
     fun `test build seam rejects cross-paired source revisions before compilation`() {
-        val toolchain = localClangToolchainOrNull() ?: return
+        localClangToolchain()
         val root = createTempDirectory("hosted-clean-build-pairing-").toAbsolutePath().normalize()
         val marker = root.resolve("must-not-run")
         val first = root.resolve("source-one")
@@ -123,37 +123,14 @@ class LlvmBehaviorHostedCleanBuildV2Test {
     }
 
     @Test
-    fun `direct build rejects compiler dependencies outside authenticated source and system roots`() {
-        val toolchain = localClangToolchainOrNull() ?: return
-        val root = createTempDirectory("hosted-clean-build-dependency-").toAbsolutePath().normalize()
-        val marker = root.resolve("must-not-run")
-        val outside = root.resolve("outside-candidate.h")
-        val first = root.resolve("source-one")
-        val second = root.resolve("source-two")
-        try {
-            Files.writeString(outside, "#define OUTSIDE_VALUE 17\n")
-            createCandidate(first, marker)
-            createCandidate(second, marker)
-            val source = "#include \"${outside}\"\nint main(void) { return OUTSIDE_VALUE == 17 ? 0 : 1; }\n"
-            Files.writeString(first.resolve("src/main.c"), source)
-            Files.writeString(second.resolve("src/main.c"), source)
-
-            val failure = assertFailsWith<LlvmBehaviorHostedCleanBuildV2Exception> {
-                LlvmBehaviorHostedCleanBuildV2TestSupport.assess(
-                    first,
-                    second,
-                )
-            }
-            assertTrue(failure.message.orEmpty().contains("outside reviewed container"), failure.message)
-            assertFalse(Files.exists(marker, LinkOption.NOFOLLOW_LINKS))
-        } finally {
-            deleteTree(root)
-        }
+    fun `direct build rejects macro-computed outside headers before consuming their bytes`() {
+        localClangToolchain()
+        LlvmBehaviorHostedRetainedToolChecks.outsideHeaderRejected()
     }
 
     @Test
     fun `direct build rejects inline assembler external-input channels before compilation`() {
-        val toolchain = localClangToolchainOrNull() ?: return
+        localClangToolchain()
         val root = createTempDirectory("hosted-clean-build-assembler-").toAbsolutePath().normalize()
         val marker = root.resolve("must-not-run")
         val first = root.resolve("source-one")
@@ -188,201 +165,25 @@ class LlvmBehaviorHostedCleanBuildV2Test {
 
     @Test
     fun `retained executable ignores a hostile post-adoption tool-name replacement`() {
-        val toolchain = localClangToolchainOrNull() ?: return
-        val root = createTempDirectory("hosted-retained-tool-swap-").toAbsolutePath().normalize()
-        var retained: AutoCloseable? = null
-        var workingDirectory: AutoCloseable? = null
-        try {
-            val selected = root.resolve("selected-clang")
-            val replacement = root.resolve("hostile-replacement")
-            Files.copy(toolchain.compiler, selected)
-            Files.copy(Path.of("/usr/bin/false"), replacement)
-            Files.setPosixFilePermissions(selected, PosixFilePermissions.fromString("r-x------"))
-            Files.setPosixFilePermissions(replacement, PosixFilePermissions.fromString("r-x------"))
-            val authenticatedSha256 = OracleArtifacts.sha256(Files.readAllBytes(selected))
-            retained = reflectedSnapshot(selected, executable = true)
-
-            Files.move(
-                replacement,
-                selected,
-                StandardCopyOption.ATOMIC_MOVE,
-                StandardCopyOption.REPLACE_EXISTING,
-            )
-            assertTrue(OracleArtifacts.sha256(Files.readAllBytes(selected)) != authenticatedSha256)
-
-            workingDirectory = reflectedPinnedDirectory(root)
-            val result = reflectedRun(
-                retained,
-                listOf("--no-default-config", "--version"),
-                workingDirectory,
-                Duration.ofSeconds(5),
-                1024 * 1024,
-                "hostile retained-tool exchange",
-            )
-            assertEquals(0, reflectedInt(result, "getExitCode"))
-            assertTrue(
-                reflectedBytes(result, "getStdout").toString(Charsets.UTF_8).contains("clang version 22.1.8"),
-            )
-            assertTrue(reflectedBytes(result, "getStderr").isEmpty())
-        } finally {
-            runCatching { workingDirectory?.close() }
-            runCatching { retained?.close() }
-            deleteTree(root)
-        }
+        LlvmBehaviorHostedRetainedToolChecks.executableReplacement(localClangToolchain())
     }
 
     @Test
     fun `sealed stdin and VFS inputs ignore hostile source and header name replacement`() {
-        val toolchain = localClangToolchainOrNull() ?: return
-        val root = createTempDirectory("hosted-retained-input-swap-").toAbsolutePath().normalize()
-        var retainedCompiler: AutoCloseable? = null
-        var retainedSource: AutoCloseable? = null
-        var retainedHeader: AutoCloseable? = null
-        var retainedOverlay: AutoCloseable? = null
-        var workingDirectory: AutoCloseable? = null
-        try {
-            val selectedSource = root.resolve("selected-main.c")
-            val selectedHeader = root.resolve("selected-value.h")
-            val hostileSource = root.resolve("hostile-main.c")
-            val hostileHeader = root.resolve("hostile-value.h")
-            Files.writeString(selectedSource, "#include \"value.h\"\nint retained_value(void) { return VALUE; }\n")
-            Files.writeString(selectedHeader, "#define VALUE 17\n")
-            Files.writeString(hostileSource, "#error hostile source substitution\n")
-            Files.writeString(hostileHeader, "#error hostile header substitution\n")
-
-            val compilerSnapshot = reflectedSnapshot(toolchain.compiler, executable = true)
-            retainedCompiler = compilerSnapshot
-            val sourceSnapshot = reflectedSnapshot(selectedSource, executable = false)
-            retainedSource = sourceSnapshot
-            val headerSnapshot = reflectedSnapshot(selectedHeader, executable = false)
-            retainedHeader = headerSnapshot
-            val sourceCapability = reflectedCapability(sourceSnapshot, "retained hostile-test source")
-            val headerCapability = reflectedCapability(headerSnapshot, "retained hostile-test header")
-            val overlayPath = root.resolve("overlay.json")
-            Files.writeString(
-                overlayPath,
-                """{"version":0,"case-sensitive":true,"use-external-names":false,"redirecting-with":"fallthrough","roots":[{"type":"file","name":"/decomp-candidate/src/main.c","use-external-name":false,"external-contents":"$sourceCapability"},{"type":"file","name":"/decomp-candidate/include/value.h","use-external-name":false,"external-contents":"$headerCapability"}]}""",
-            )
-            val overlaySnapshot = reflectedSnapshot(overlayPath, executable = false)
-            retainedOverlay = overlaySnapshot
-            val pinnedDirectory = reflectedPinnedDirectory(root)
-            workingDirectory = pinnedDirectory
-
-            Files.move(
-                hostileSource,
-                selectedSource,
-                StandardCopyOption.ATOMIC_MOVE,
-                StandardCopyOption.REPLACE_EXISTING,
-            )
-            Files.move(
-                hostileHeader,
-                selectedHeader,
-                StandardCopyOption.ATOMIC_MOVE,
-                StandardCopyOption.REPLACE_EXISTING,
-            )
-
-            val result = reflectedRun(
-                compilerSnapshot,
-                listOf(
-                    "--no-default-config",
-                    "--target=x86_64-pc-linux-gnu",
-                    "-fintegrated-cc1",
-                    "-fintegrated-as",
-                    "-nostdinc",
-                    "-ivfsoverlay",
-                    reflectedCapability(overlaySnapshot, "retained hostile-test overlay"),
-                    "-iquote",
-                    "/decomp-candidate/src",
-                    "-I/decomp-candidate/include",
-                    "-std=c11",
-                    "-c",
-                    "-x",
-                    "c",
-                    "-",
-                    "-o",
-                    "-",
-                ),
-                pinnedDirectory,
-                Duration.ofSeconds(5),
-                1024 * 1024,
-                "hostile retained source and header compile",
-                standardInput = sourceSnapshot,
-            )
-            assertEquals(0, reflectedInt(result, "getExitCode"))
-            assertContentEquals(
-                byteArrayOf(0x7f, 'E'.code.toByte(), 'L'.code.toByte(), 'F'.code.toByte()),
-                reflectedBytes(result, "getStdout").copyOfRange(0, 4),
-            )
-            assertTrue(reflectedBytes(result, "getStderr").isEmpty())
-        } finally {
-            runCatching { workingDirectory?.close() }
-            runCatching { retainedOverlay?.close() }
-            runCatching { retainedHeader?.close() }
-            runCatching { retainedSource?.close() }
-            runCatching { retainedCompiler?.close() }
-            deleteTree(root)
-        }
+        LlvmBehaviorHostedRetainedToolChecks.sourceAndHeaderReplacement(localClangToolchain())
     }
 
     @Test
     fun `retained LLD consumes a sealed object after its authenticated name is replaced`() {
-        val toolchain = localClangToolchainOrNull() ?: return
-        val root = createTempDirectory("hosted-retained-object-swap-").toAbsolutePath().normalize()
-        val retained = ArrayList<AutoCloseable>()
-        var workingDirectory: AutoCloseable? = null
-        try {
-            fun snapshot(path: Path, executable: Boolean): AutoCloseable =
-                reflectedSnapshot(path, executable).also(retained::add)
+        LlvmBehaviorHostedRetainedToolChecks.objectReplacement(localClangToolchain())
+    }
 
-            val pinnedDirectory = reflectedPinnedDirectory(root)
-            workingDirectory = pinnedDirectory
-            val compiler = snapshot(toolchain.compiler, executable = true)
-            val query = reflectedRun(
-                compiler,
-                listOf("--no-default-config", "--target=x86_64-pc-linux-gnu", "--print-file-name=crti.o"),
-                pinnedDirectory,
-                Duration.ofSeconds(5),
-                16 * 1024,
-                "resolve hostile-test object fixture",
-            )
-            assertEquals(0, reflectedInt(query, "getExitCode"))
-            val crti = Path.of(reflectedBytes(query, "getStdout").toString(Charsets.UTF_8).trim())
-                .toRealPath()
-            val selected = root.resolve("selected-object.o")
-            val hostile = root.resolve("hostile-object.o")
-            Files.copy(crti, selected)
-            Files.writeString(hostile, "not an ELF object\n")
-            val retainedObject = snapshot(selected, executable = false)
-            val linker = snapshot(toolchain.linker, executable = true)
-
-            Files.move(hostile, selected, StandardCopyOption.ATOMIC_MOVE, StandardCopyOption.REPLACE_EXISTING)
-            val result = reflectedRun(
-                linker,
-                listOf(
-                    "-flavor",
-                    "gnu",
-                    "-r",
-                    "-o",
-                    "-",
-                    reflectedCapability(retainedObject, "retained hostile-test object"),
-                ),
-                pinnedDirectory,
-                Duration.ofSeconds(5),
-                1024 * 1024,
-                "hostile retained-object LLD link",
-                roleName = "LLD",
-            )
-            assertEquals(0, reflectedInt(result, "getExitCode"))
-            assertContentEquals(
-                byteArrayOf(0x7f, 'E'.code.toByte(), 'L'.code.toByte(), 'F'.code.toByte()),
-                reflectedBytes(result, "getStdout").copyOfRange(0, 4),
-            )
-            assertTrue(reflectedBytes(result, "getStderr").isEmpty())
-        } finally {
-            runCatching { workingDirectory?.close() }
-            retained.asReversed().forEach { runCatching(it::close) }
-            deleteTree(root)
+    @Test
+    fun `required hostile toolchain mode cannot silently skip missing tools`() {
+        val failure = assertFailsWith<IllegalStateException> {
+            LlvmBehaviorHostedRetainedToolChecks.requireToolchain(null)
         }
+        assertTrue(failure.message.orEmpty().contains("required retained-tool hostile regressions"))
     }
 
     @Test
@@ -705,17 +506,14 @@ class LlvmBehaviorHostedCleanBuildV2Test {
         )
     }
 
-    private fun localClangToolchainOrNull(): LocalToolchain? {
-        return listOf(
-            LocalToolchain(Path.of("/usr/lib/llvm/22/bin/clang-22"), Path.of("/usr/lib/llvm/22/bin/lld")),
-            LocalToolchain(Path.of("/usr/lib/llvm-22/bin/clang"), Path.of("/usr/lib/llvm-22/bin/lld")),
-        ).firstOrNull { toolchain ->
-            isRegularExecutable(toolchain.compiler) && isRegularExecutable(toolchain.linker)
+    private fun localClangToolchain(): LlvmBehaviorHostedRetainedToolChecks.Toolchain {
+        val available = LlvmBehaviorHostedRetainedToolChecks.availableToolchain()
+        if (System.getenv("DECOMP_REQUIRE_LLVM_RETAINED_TOOLS") == "1") {
+            return LlvmBehaviorHostedRetainedToolChecks.requireToolchain(available)
         }
+        assumeTrue(available != null, "fixed LLVM 22 toolchain is unavailable; hostile compiler checks require the worker image")
+        return checkNotNull(available)
     }
-
-    private fun isRegularExecutable(path: Path): Boolean =
-        Files.isRegularFile(path, LinkOption.NOFOLLOW_LINKS) && !Files.isSymbolicLink(path) && Files.isExecutable(path)
 
     private fun reflectedSnapshot(path: Path, executable: Boolean): AutoCloseable =
         StableControlFile.open(path, 512L * 1024L * 1024L, "hostile reflected snapshot").use { guard ->
@@ -827,6 +625,4 @@ class LlvmBehaviorHostedCleanBuildV2Test {
         if (!Files.exists(root, LinkOption.NOFOLLOW_LINKS)) return
         Files.walk(root).use { paths -> paths.sorted(Comparator.reverseOrder()).forEach(Files::deleteIfExists) }
     }
-
-    private data class LocalToolchain(val compiler: Path, val linker: Path)
 }

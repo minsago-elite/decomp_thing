@@ -97,7 +97,15 @@ caller-provided command, or generic executable runner in the candidate build pat
 The descriptor fanout is intentionally finite under the worker's fixed `RLIMIT_NOFILE=1024`:
 at most 128 translation units and 256 total candidate `src/`/`include/` inputs are accepted. Every
 candidate compiler input is checked against the authenticated revision, copied into a sealed memfd,
-and referenced through a sealed Clang VFS overlay with external names disabled. Clang receives the
+and referenced through a sealed Clang VFS overlay with external names disabled and `redirect-only`
+lookup. Only the sealed candidate files and the fixed reviewed system-header directories are mapped;
+undeclared absolute includes, macro-computed includes into writable scratch, and physical candidate
+pathnames are unavailable to the compiler before their contents can be read. System-header directory
+roots must have canonical root-owned non-writable ancestors, and their descendants remain part of
+the inspected read-only worker-image trust boundary, not a claim of host-wide read confinement.
+The overlay semantics follow the pinned
+[LLVM 22.1.6 VFS contract](https://github.com/llvm/llvm-project/blob/llvmorg-22.1.6/llvm/include/llvm/Support/VirtualFileSystem.h).
+Clang receives the
 sealed primary-source inode on stdin and searches quoted includes only under its virtual overlay
 parent, so lookup cannot fall through to a physical `/proc` descriptor directory. Kotlin commits
 that authenticated primary explicitly because Clang omits stdin from its depfile. Dependency and object outputs are descriptor capabilities;

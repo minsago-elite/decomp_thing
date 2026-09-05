@@ -73,12 +73,20 @@ and its pre-existing tags. The temporary tag is compatibility plumbing inside te
 image-selection or production Docker authority.
 
 Only after the derived image has passed strict inspection does the regression mount a generated
-JAR containing only the test-source probe class. The production-staged application JARs are first
-checked not to contain that class. The test uses the fixed `/inputs`, `/stage-output`, `/work`,
+JAR containing only the test-source probe, its shared hostile-check helper, and their nested classes.
+The production-staged application JARs are first checked not to contain those classes.
+The test uses the fixed `/inputs`, `/stage-output`, `/work`,
 `/tmp`, and `/decomp-jna` targets and the production containment limits, then overrides the image
 entry point solely to call the zero-argument probe. Two fixed read-only candidate fixture trees are
 mounted under `/inputs`; the probe exercises the existing non-authoritative retained-descriptor
-Clang and direct-LLD assessment and rejects any execution of candidate build scripts.
+Clang and direct-LLD assessment and rejects any execution of candidate build scripts. Before the
+two-build reproduction, it replaces both tool names, source/header names, and an object name after
+descriptor adoption and requires the retained bytes to remain effective. It also requires a
+macro-computed include outside the closed VFS to fail before the header's distinctive contents can
+reach compiler diagnostics. The exact success marker records `swaps=5 outside-header=blocked`;
+missing LLVM tools fail the required worker probe rather than silently passing. Optional local
+JUnit runs report missing tools as explicit skips, unless `DECOMP_REQUIRE_LLVM_RETAINED_TOOLS=1`
+requests required-tool mode.
 
 That extra probe-JAR mount, fixture shape, direct `docker run`, and entry-point override are an
 explicit test overlay. They prove that the exact production-staged image contains a working hosted

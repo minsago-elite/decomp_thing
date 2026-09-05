@@ -14,6 +14,12 @@ internal object LlvmBehaviorHostedWorkerImageLiveProbeMain {
             error("candidate-controlled build script marker existed before the retained-tool probe")
         }
 
+        val toolchain = LlvmBehaviorHostedRetainedToolChecks.requireToolchain()
+        LlvmBehaviorHostedRetainedToolChecks.executableReplacement(toolchain)
+        LlvmBehaviorHostedRetainedToolChecks.sourceAndHeaderReplacement(toolchain)
+        LlvmBehaviorHostedRetainedToolChecks.objectReplacement(toolchain)
+        LlvmBehaviorHostedRetainedToolChecks.outsideHeaderRejected()
+
         val assessment = LlvmBehaviorHostedCleanBuildV2TestSupport.assess(
             FIRST_SOURCE_ROOT,
             SECOND_SOURCE_ROOT,
@@ -63,11 +69,13 @@ internal object LlvmBehaviorHostedWorkerImageLiveProbeMain {
             error("candidate-controlled build script ran during the retained-tool probe")
         }
 
-        System.out.print("$RESULT_MAGIC ${assessment.executableSha256} ${assessment.executableBytes}\n")
+        System.out.print(
+            "$RESULT_MAGIC ${assessment.executableSha256} ${assessment.executableBytes} swaps=5 outside-header=blocked\n",
+        )
     }
 
     private val FIRST_SOURCE_ROOT = Path.of("/inputs/retained-tool-source-one")
     private val SECOND_SOURCE_ROOT = Path.of("/inputs/retained-tool-source-two")
     private val CANDIDATE_SCRIPT_MARKER = Path.of("/stage-output/candidate-build-script-ran")
-    private const val RESULT_MAGIC = "DECOMP_LLVM_HOSTED_WORKER_RETAINED_TOOL_TEST_V1"
+    private const val RESULT_MAGIC = "DECOMP_LLVM_HOSTED_WORKER_RETAINED_TOOL_TEST_V2"
 }
