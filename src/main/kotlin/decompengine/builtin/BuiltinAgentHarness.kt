@@ -63,7 +63,7 @@ interface BuiltinToolSession : AutoCloseable {
 
 data class BuiltinTraceRecord(val sequence: Int, val state: BuiltinLoopState, val evidenceSha256: String? = null)
 
-/** Metadata-only receipt evidence. Durable payload transcripts/checkpoint recovery are owned by #75. */
+/** Metadata-only receipt evidence; optional journal commitment never embeds transcript payloads. */
 class BuiltinLoopEvidence(
     val stop: BuiltinStop,
     records: List<BuiltinTraceRecord>,
@@ -74,6 +74,7 @@ class BuiltinLoopEvidence(
     val estimatedUsage: Boolean,
     val cleanupComplete: Boolean,
     contextEntries: List<BuiltinContextEntry> = emptyList(),
+    val journal: BuiltinJournalEvidence? = null,
 ) : AgentExecutionProviderEvidence {
     override val providerId = "builtin"
     override val schemaVersion = 1
@@ -87,6 +88,7 @@ class BuiltinAgentHarness(
     private val openTools: (AgentExecutionRequest, BuiltinExecutionControl) -> BuiltinToolSession,
     private val limits: BuiltinLoopLimits = BuiltinLoopLimits(),
     secrets: Collection<String> = emptyList(),
+    private val journalConfiguration: BuiltinJournalConfiguration? = null,
 ) : AgentHarness {
     private val secrets = secrets.filter { it.isNotEmpty() }.distinct().sortedByDescending { it.length }
     override fun implementationIdentifier() = "builtin-loop-v1"
@@ -111,6 +113,7 @@ class BuiltinAgentHarness(
         var outputBytes = 0L
         var eventSequence = 0L
         var session: BuiltinToolSession? = null
+        var journal: BuiltinJournal? = null
         var changes = emptyList<AgentFileChange>()
         var contextEntries = emptyList<BuiltinContextEntry>()
         val repeated = mutableMapOf<String, Int>()
@@ -121,6 +124,7 @@ class BuiltinAgentHarness(
             var failureKind: AgentFailureKind? = null
             var cleanup = false
             try {
+                journal = journalConfiguration?.let { BuiltinJournal.open(it, request, secrets) }
                 stop = loop()
             } catch (abort: BuiltinAbort) {
                 stop = abort.stop
@@ -144,8 +148,15 @@ class BuiltinAgentHarness(
                 try { session?.close(); cleanup = true } catch (_: Exception) { /* Never claim cleaned-up success. */ }
             }
             if (!cleanup) stop = BuiltinStop.TOOL_FAILED
+            try {
+                journal?.append(BuiltinJournalKind.TERMINAL, buildJsonObject {
+                    put("stop", stop.name); put("cleanupComplete", cleanup); put("usage", usage())
+                    put("state", BuiltinLoopState.TERMINATED.name)
+                })
+            } catch (_: Exception) { stop = BuiltinStop.TOOL_FAILED }
+            try { journal?.close() } catch (_: Exception) { stop = BuiltinStop.TOOL_FAILED }
             records += BuiltinTraceRecord(records.size, BuiltinLoopState.TERMINATED)
-            val evidence = BuiltinLoopEvidence(stop, records, modelCalls, toolCalls, inputTokens, outputTokens, estimated, cleanup, contextEntries)
+            val evidence = BuiltinLoopEvidence(stop, records, modelCalls, toolCalls, inputTokens, outputTokens, estimated, cleanup, contextEntries, journal?.evidence)
             val ordinary = when (stop) {
                 BuiltinStop.COMPLETED, BuiltinStop.VALIDATION_REQUIRED -> AgentStopReason.COMPLETED
                 BuiltinStop.NO_CHANGE -> AgentStopReason.NO_CHANGES
@@ -169,6 +180,9 @@ class BuiltinAgentHarness(
         fun state(value: BuiltinLoopState, digest: String? = null) {
             control.checkpoint()
             if (records.size >= limits.maxTraceRecords - 1) throw BuiltinAbort(BuiltinStop.EXHAUSTED)
+            journal?.append(BuiltinJournalKind.STATE, buildJsonObject {
+                put("state", value.name); digest?.let { put("evidenceSha256", it) }
+            })
             records += BuiltinTraceRecord(records.size, value, digest)
         }
 
@@ -187,6 +201,14 @@ class BuiltinAgentHarness(
             messages.clear(); messages += context.messages
             contextEntries = context.entries
             val schemas = definitions.associate { it.name to JsonSchema.fromDefinition(it.parameters.toString()) }
+            journal?.append(BuiltinJournalKind.CHECKPOINT, buildJsonObject {
+                put("state", BuiltinLoopState.PREPARING_CONTEXT.name)
+                put("context", journalContext(definitions))
+                put("contextSha256", digest(contextBytes(definitions))); put("usage", usage())
+                put("remaining", remainingLimits())
+                put("sourceIdentity", "START.sourceSha256"); put("stageIdentity", "START.stageSha256")
+                put("acceptedRevision", "START.acceptedRevisionSha256")
+            })
             while (true) {
                 val context = contextBytes(definitions)
                 state(BuiltinLoopState.REQUESTING_MODEL, digest(context))
@@ -216,6 +238,21 @@ class BuiltinAgentHarness(
                         onEvent(AgentMessageEvent(eventSequence++, messageId, AgentMessageRole.ASSISTANT, delta))
                     }
                 }
+                journal?.append(BuiltinJournalKind.MODEL_REQUEST, buildJsonObject {
+                    put("context", journalContext(definitions)); put("contextSha256", digest(context))
+                    put("modelCall", modelCalls); put("remaining", remainingLimits())
+                    put("providerLimits", buildJsonObject {
+                        put("maxRequestBytes", providerLimits.maxRequestBytes); put("maxResponseBytes", providerLimits.maxResponseBytes)
+                        put("maxEventBytes", providerLimits.maxEventBytes); put("maxToolCalls", providerLimits.maxToolCalls)
+                        put("maxOutputTokens", providerLimits.maxOutputTokens); put("maxRetries", providerLimits.maxRetries)
+                        put("connectTimeoutNanos", providerLimits.connectTimeout.toNanos())
+                        put("requestTimeoutNanos", providerLimits.requestTimeout.toNanos())
+                        put("streamIdleTimeoutNanos", providerLimits.streamIdleTimeout.toNanos())
+                        put("overallTimeoutNanos", providerLimits.overallTimeout.toNanos())
+                        put("retryBaseDelayNanos", providerLimits.retryBaseDelay.toNanos())
+                        put("maxRetryDelayNanos", providerLimits.maxRetryDelay.toNanos())
+                    })
+                })
                 val response = provider.generate(ModelRequest(messages, definitions, providerLimits, control.cancellation, secrets)) { event ->
                     control.checkpoint()
                     when (event) {
@@ -227,12 +264,23 @@ class BuiltinAgentHarness(
                             streamed.append(event.text); redactor.append(event.text)
                         }
                         is ModelEvent.Retrying -> {
+                            journal?.append(BuiltinJournalKind.MODEL_RETRY, buildJsonObject {
+                                put("attempt", event.attempt); put("kind", event.kind.name); put("delayNanos", event.delay.toNanos())
+                            })
                             if (modelCalls >= request.limits.maxTurns) throw BuiltinAbort(BuiltinStop.EXHAUSTED)
                             modelCalls++
                         }
                         else -> Unit // Streamed tool/finish proposals cannot cause side effects or acceptance.
                     }
                 }
+                journal?.append(BuiltinJournalKind.MODEL_RESPONSE, buildJsonObject {
+                    put("text", response.text); put("calls", JsonArray(response.toolCalls.map(::journalCall)))
+                    put("finishReason", response.finishReason.name); put("attempts", response.attempts)
+                    put("usage", buildJsonObject {
+                        put("inputTokens", response.usage.inputTokens); put("outputTokens", response.usage.outputTokens)
+                        put("estimated", response.usage.estimated)
+                    })
+                })
                 control.checkpoint()
                 if (response.attempts != modelCalls - beforeCallCount) throw BuiltinAbort(BuiltinStop.INVALID_ACTION)
                 if (streamed.isEmpty() && response.text.isNotEmpty()) redactor.append(response.text)
@@ -250,8 +298,17 @@ class BuiltinAgentHarness(
                     ModelFinishReason.STOP -> {
                         if (response.toolCalls.isNotEmpty()) throw BuiltinAbort(BuiltinStop.INVALID_ACTION)
                         state(BuiltinLoopState.VALIDATING_COMPLETION)
+                        journal?.append(BuiltinJournalKind.VALIDATION_REQUEST)
                         changes = tools.changes(control).toList()
                         val validation = tools.validateCompletion(control)
+                        journal?.append(BuiltinJournalKind.VALIDATION_RESULT, buildJsonObject {
+                            put("validation", validation.name)
+                            put("candidateChanges", JsonArray(changes.map { change -> buildJsonObject {
+                                put("root", change.path.rootId); put("path", change.path.relativePath); put("kind", change.kind.name)
+                                put("beforeSha256", change.beforeSha256); put("afterSha256", change.afterSha256)
+                            } }))
+                            put("publicationAuthorized", false)
+                        })
                         control.checkpoint()
                         return when {
                             validation == BuiltinCompletion.REQUIRED -> BuiltinStop.VALIDATION_REQUIRED
@@ -278,16 +335,24 @@ class BuiltinAgentHarness(
                     repeated[identity] = repetitions
                     usedCallIds += call.id
                     toolCalls++
-                    if (!tools.authorize(call, control)) {
+                    val allowed = tools.authorize(call, control)
+                    journal?.append(BuiltinJournalKind.POLICY, buildJsonObject {
+                        put("call", journalCall(call)); put("allowed", allowed)
+                    })
+                    if (!allowed) {
                         onEvent(AgentPermissionEvent(eventSequence++, call.id, AgentPermissionDecision.DENY, reason = "tool policy denied"))
                         throw BuiltinAbort(BuiltinStop.INVALID_ACTION)
                     }
                     state(BuiltinLoopState.EXECUTING_TOOL, identity)
                     onEvent(AgentToolEvent(eventSequence++, call.id, call.name, AgentToolStatus.IN_PROGRESS))
+                    journal?.append(BuiltinJournalKind.TOOL_REQUEST, journalCall(call))
                     val result = tools.execute(call, control)
-                    control.checkpoint()
                     if (result.content.length > limits.maxToolResultBytes || result.content.toByteArray().size > limits.maxToolResultBytes)
                         throw BuiltinAbort(BuiltinStop.EXHAUSTED)
+                    journal?.append(BuiltinJournalKind.TOOL_RESULT, buildJsonObject {
+                        put("callId", call.id); put("content", result.content); put("failed", result.failed)
+                    })
+                    control.checkpoint()
                     chargeOutput(result.content)
                     state(BuiltinLoopState.OBSERVING_RESULT, digest(result.content.toByteArray()))
                     onEvent(AgentToolEvent(eventSequence++, call.id, call.name,
@@ -297,6 +362,32 @@ class BuiltinAgentHarness(
                     contextBytes(definitions)
                 }
             }
+        }
+
+        fun journalCall(call: ModelToolCall) = buildJsonObject {
+            put("id", call.id); put("name", call.name); put("arguments", canonical(call.arguments))
+        }
+
+        fun journalContext(definitions: List<ModelToolDefinition>) = buildJsonObject {
+            put("messages", JsonArray(messages.map { message -> buildJsonObject {
+                put("role", message.role.name); put("content", message.content)
+                put("toolCallId", message.toolCallId); put("toolCalls", JsonArray(message.toolCalls.map(::journalCall)))
+            } }))
+            put("tools", JsonArray(definitions.sortedBy { it.name }.map { definition -> buildJsonObject {
+                put("name", definition.name); put("description", definition.description); put("parameters", canonical(definition.parameters))
+            } }))
+        }
+
+        fun usage() = buildJsonObject {
+            put("modelCalls", modelCalls); put("toolCalls", toolCalls); put("inputTokens", inputTokens)
+            put("outputTokens", outputTokens); put("outputBytes", outputBytes); put("estimated", estimated)
+        }
+
+        fun remainingLimits() = buildJsonObject {
+            put("turns", request.limits.maxTurns - modelCalls); put("toolCalls", request.limits.maxToolCalls - toolCalls)
+            put("inputTokens", minOf(limits.maxInputTokens, request.limits.maxInputTokens ?: Long.MAX_VALUE) - inputTokens)
+            put("outputTokens", minOf(limits.maxOutputTokens, request.limits.maxOutputTokens ?: Long.MAX_VALUE) - outputTokens)
+            put("outputBytes", request.limits.maxOutputBytes - outputBytes); put("wallClockNanos", control.remaining().toNanos())
         }
 
         fun chargeOutput(value: String) {
