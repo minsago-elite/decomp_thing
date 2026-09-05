@@ -52,6 +52,6 @@ internal class WebUploadStorage(
         // Binary body is capped at 32 MiB; the extra MiB covers fixed metadata and directory entries.
         const val RESERVATION_BYTES = 33L * 1024 * 1024
         const val FREE_HEADROOM_BYTES = 64L * 1024 * 1024
-        const val DEFAULT_MAXIMUM_BYTES = 8L * 1024 * 1024 * 1024
+        const val DEFAULT_MAXIMUM_BYTES = 20L * 1024 * 1024 * 1024
     }
 }

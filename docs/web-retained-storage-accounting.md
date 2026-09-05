@@ -36,7 +36,7 @@ upload admission, report-growth enforcement or status-request responsiveness.
 
 ## Upload admission reservations
 
-Streaming upload admission has an 8 GiB logical retained-data ceiling. Embedders
+Streaming upload admission has a 20 GiB logical retained-data ceiling. Embedders
 can set `maximumRetainedStorageBytes` on `WebJobService`; the packaged server uses
 the default. Each admitted transfer reserves 33 MiB: its 32 MiB maximum request
 plus one MiB for the fixed publication metadata and directory entries. A new
