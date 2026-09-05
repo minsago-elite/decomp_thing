@@ -338,7 +338,7 @@ object MakeProjectBuilder {
         )
     }
 
-    private fun terminateBuildProcess(process: Process, graceMillis: Long) {
+    internal fun terminateBuildProcess(process: Process, graceMillis: Long) {
         val handles = (process.toHandle().descendants().toList().asReversed() + process.toHandle()).distinct()
         handles.forEach { if (it.isAlive) it.destroy() }
         val deadline = System.nanoTime() + TimeUnit.MILLISECONDS.toNanos(graceMillis)
@@ -555,7 +555,7 @@ object MakeProjectBuilder {
         )
     }
 
-    private fun sanitizeBuildEnvironment(environment: MutableMap<String, String>) {
+    internal fun sanitizeBuildEnvironment(environment: MutableMap<String, String>) {
         val sensitive = Regex("(^|_)(API(_|$)|TOKEN($|_)|SECRET($|_)|PASSWORD($|_)|BASE_URL$|MODEL$|CACHE($|_))", RegexOption.IGNORE_CASE)
         environment.keys.filter { sensitive.containsMatchIn(it) }.toList().forEach(environment::remove)
         environment.remove("MAKEFLAGS")

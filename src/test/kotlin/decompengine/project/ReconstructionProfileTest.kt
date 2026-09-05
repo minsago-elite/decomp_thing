@@ -143,7 +143,7 @@ class ReconstructionProfileTest {
     }
 
     @Test
-    fun `planner and source tree honour a non-C layout`() {
+    fun `planner honours declared non-C source paths`() {
         val rustLayout = ProjectLayoutProfile(
             ProjectLayoutProfile.CURRENT_SCHEMA_VERSION,
             listOf(
@@ -163,7 +163,7 @@ class ReconstructionProfileTest {
         )
         val budgets = budgets()
         val profile = ReconstructionProfile(ReconstructionProfile.CURRENT_SCHEMA_VERSION, "rust-test-v1", rustLayout, budgets)
-        val planner = DeterministicModulePlanner(maximumFunctionsPerModule = 8, layout = rustLayout)
+        val planner = DeterministicModulePlanner(maximumFunctionsPerModule = 8, layout = profile.layout)
         val model = RecoveredProgramModel(
             inputSha256 = "a".repeat(64),
             functions = listOf(
@@ -179,7 +179,6 @@ class ReconstructionProfileTest {
             assertTrue(module.sourcePath.endsWith(".rs.impl"))
             assertTrue(module.headerPath.endsWith(".rs"))
         }
-        assertEquals(profile.sha256, profile.sha256)
     }
 
     private fun budgets() = ReconstructionBudgets(

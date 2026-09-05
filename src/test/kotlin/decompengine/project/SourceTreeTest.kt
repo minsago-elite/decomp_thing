@@ -134,6 +134,9 @@ class SourceTreeTest {
             ): AgentExecutionResult {
                 assertTrue(request.objective.contains("src/modules/parse.c"))
                 assertTrue(request.contextInputs.single { it.id == "observed-behavior" }.content.contains("case default: stdout=ok"))
+                val instructions = request.objective
+                assertTrue(instructions.contains("-Werror"))
+                assertTrue(instructions.contains("-c src/modules/parse.c -o /dev/null"))
                 val path = AgentWorkspacePath("project", "src/modules/parse.c")
                 assertTrue(request.accessPolicy.allows(path, AgentOperation.CREATE_FILE))
                 val source = "#include \"modules/parse.h\"\n/* fn_0000000000401000 */\nint parse_input(void) { return 17; }\n"
@@ -211,6 +214,88 @@ class SourceTreeTest {
     }
 
     @Test
+    fun `module compiler gate rejects source that passes definition and provenance checks`() {
+        val project = createTempDirectory("source-tree-compiler-gate-")
+        val invalid = ModuleReconstructor { request ->
+            validReconstructor().reconstruct(request).let { candidate ->
+                candidate.copy(source = candidate.source.replace("return 4096;", "return missing_value;"))
+            }
+        }
+
+        val manifest = SourceTreeGenerator.generate(oneModuleModel(), project, reconstructor = invalid)
+
+        assertEquals(oneModuleModel().functions.map { it.id }, manifest.unresolvedImplementationIds)
+        val checkpoint = project.resolve("reports/modules/parse.json").readText()
+        assertTrue(checkpoint.contains("module-compilation-failed"))
+        assertTrue(checkpoint.contains("\"outcome\":\"failed\""))
+        assertTrue(checkpoint.contains("\"accepted\": false"))
+    }
+
+    @Test
+    fun `rejected revision preserves the accepted source checkpoint and manifest`() {
+        val project = createTempDirectory("source-tree-rejected-revision-")
+        val originalModel = oneModuleModel()
+        SourceTreeGenerator.generate(originalModel, project, reconstructor = validReconstructor())
+        val paths = listOf("src/modules/parse.c", "reports/modules/parse.json", "source_tree_manifest.json")
+        val before = paths.associateWith { project.resolve(it).readText() }
+        val nextModel = originalModel.copy(functions = originalModel.functions.map { it.copy(strings = setOf("new evidence")) })
+        val invalid = ModuleReconstructor { request ->
+            validReconstructor().reconstruct(request).let { candidate ->
+                candidate.copy(source = candidate.source.replace("return 4096;", "return missing_value;"))
+            }
+        }
+
+        val rejected = assertFailsWith<ModuleReconstructionRevisionRejectedException> {
+            SourceTreeGenerator.generate(nextModel, project, reconstructor = invalid)
+        }
+
+        assertTrue(rejected.issues.any { it.code == "module-compilation-failed" })
+        paths.forEach { assertEquals(before.getValue(it), project.resolve(it).readText(), it) }
+        val attempt = project.resolve("reports/modules/parse.attempt.json").readText()
+        assertTrue(attempt.contains("\"status\":\"rejected\""))
+        assertTrue(attempt.contains(sha256(before.getValue("src/modules/parse.c").toByteArray())))
+        SourceTreeGenerator.generate(originalModel, project, reconstructor = ModuleReconstructor {
+            error("the preserved accepted revision should resume without rerunning")
+        })
+    }
+
+    @Test
+    fun `interrupted revision restores changes made by the reconstructor`() {
+        val project = createTempDirectory("source-tree-revision-cancelled-")
+        val originalModel = oneModuleModel()
+        SourceTreeGenerator.generate(originalModel, project, reconstructor = validReconstructor())
+        val source = project.resolve("src/modules/parse.c")
+        val before = source.readText()
+        val interrupted = ModuleReconstructor { request ->
+            source.writeText("partial candidate")
+            throw ModuleReconstructionInterruptedException(request.module.id, AgentStopReason.CANCELLED, "cancelled")
+        }
+
+        assertFailsWith<ModuleReconstructionInterruptedException> {
+            SourceTreeGenerator.generate(originalModel, project, reconstructor = interrupted, observedBehavior = "new evidence")
+        }
+
+        assertEquals(before, source.readText())
+        assertTrue(project.resolve("reports/modules/parse.attempt.json").readText().contains("\"status\": \"interrupted\""))
+    }
+
+    @Test
+    fun `historical checkpoints without compiler evidence are regenerated`() {
+        val project = createTempDirectory("source-tree-old-checkpoint-")
+        val input = oneModuleModel()
+        SourceTreeGenerator.generate(input, project, reconstructor = validReconstructor())
+        val checkpoint = project.resolve("reports/modules/parse.json")
+        checkpoint.writeText(checkpoint.readText().replace("\"schemaVersion\": 5", "\"schemaVersion\": 4"))
+        var calls = 0
+
+        SourceTreeGenerator.generate(input, project, reconstructor = validReconstructor { calls++ })
+
+        assertEquals(1, calls)
+        assertTrue(checkpoint.readText().contains("\"schemaVersion\": 5"))
+        assertTrue(checkpoint.readText().contains("\"outcome\":\"passed\""))
+    }
+
+    @Test
     fun `accepted checkpoints require the current reconstructor identity`() {
         val project = createTempDirectory("source-tree-cache-identity-")
         val input = oneModuleModel()
@@ -265,15 +350,17 @@ class SourceTreeTest {
         )
         var calls = 0
 
-        SourceTreeGenerator.generate(
-            input,
-            project,
-            reconstructor = cacheReconstructor(
-                generator = "agent:current",
-                identity = "shared-strategy",
-                executionEvidenceRequired = true,
-            ) { calls++ },
-        )
+        assertFailsWith<ModuleReconstructionRevisionRejectedException> {
+            SourceTreeGenerator.generate(
+                input,
+                project,
+                reconstructor = cacheReconstructor(
+                    generator = "agent:current",
+                    identity = "shared-strategy",
+                    executionEvidenceRequired = true,
+                ) { calls++ },
+            )
+        }
 
         assertEquals(1, calls)
     }

@@ -39,11 +39,14 @@ import java.time.Duration
 import kotlin.io.path.createDirectories
 import kotlin.io.path.createTempDirectory
 import kotlin.io.path.deleteExisting
+import kotlin.io.path.exists
 import kotlin.io.path.readBytes
 import kotlin.io.path.readText
 import kotlin.io.path.relativeTo
 import kotlin.io.path.writeText
 import kotlin.test.Test
+import kotlin.test.assertEquals
+import kotlin.test.assertFalse
 import kotlin.test.assertFailsWith
 import kotlin.test.assertTrue
 
@@ -175,13 +178,80 @@ class ReconstructionAcpEvidenceArchiveVerifierTest {
         val temp = createTempDirectory("acp-archive-downgrade-")
         val project = createAgentProject(temp.resolve("project"), accepted = true)
         rewriteCheckpointAndManifest(project) { checkpoint ->
-            checkpoint.replaceFirst("\"schemaVersion\": 4", "\"schemaVersion\": 3")
+            checkpoint.replaceFirst("\"schemaVersion\": 5", "\"schemaVersion\": 3")
         }
 
         val failure = assertFailsWith<Exception> {
             ArchivalPackager.create(project, temp.resolve("downgraded.zip"))
         }
         assertTrue(failure.message.orEmpty().contains("schema"))
+    }
+
+    @Test
+    fun `archive gate binds compiler acceptance to the profile and source bytes`() {
+        val temp = createTempDirectory("acp-archive-compiler-")
+        val baseline = createAgentProject(temp.resolve("baseline"), accepted = true)
+        val mutations = mapOf<String, (String) -> String>(
+            "failed" to { it.replace("\"outcome\":\"passed\"", "\"outcome\":\"failed\"") },
+            "source" to {
+                it.replace(
+                    "\"compilation\": {\"sourceSha256\":\"${sha256(baseline.resolve(SOURCE_PATH).readBytes())}\"",
+                    "\"compilation\": {\"sourceSha256\":\"${"0".repeat(64)}\"",
+                )
+            },
+            "flags" to { it.replace("\"-Werror\"", "\"-Wno-error\"") },
+            "missing" to { it.replace(Regex("\"compilation\": \\{[^\\n]*}"), "\"compilation\": null") },
+        )
+        mutations.forEach { (name, mutation) ->
+            val project = temp.resolve(name)
+            copyTree(baseline, project)
+            rewriteCheckpointAndManifest(project, mutation)
+            assertFailsWith<Exception>(name) { ArchivalPackager.create(project, temp.resolve("$name.zip")) }
+        }
+    }
+
+    @Test
+    fun `independently verified historical v4 archives remain readable`() {
+        val temp = createTempDirectory("acp-archive-historical-v4-")
+        val project = createAgentProject(temp.resolve("project"), accepted = true)
+        rewriteCheckpointAndManifest(project) { checkpoint ->
+            checkpoint.replace("\"schemaVersion\": 5", "\"schemaVersion\": 4")
+                .replace(Regex("  \"compilation\": [^\\n]*\\n"), "")
+        }
+        ArchivalPackager.create(project, temp.resolve("historical.zip"))
+    }
+
+    @Test
+    fun `rejected ACP revision retains its receipt and restores accepted release evidence`() {
+        val temp = createTempDirectory("acp-rejected-revision-")
+        val project = createAgentProject(temp.resolve("project"), accepted = true)
+        val preservedPaths = listOf(SOURCE_PATH, CHECKPOINT_PATH, EVIDENCE_PATH)
+        val before = preservedPaths.associateWith { project.resolve(it).readText() }
+        val harness = ArchiveEvidenceHarness(accepted = false)
+        val model = RecoveredProgramModel(
+            inputSha256 = "a".repeat(64),
+            functions = listOf(RecoveredFunction("fn_0000000000401000", "parse_input", 0x401000UL, "int parse_input(void)")),
+        )
+
+        assertFailsWith<ModuleReconstructionRevisionRejectedException> {
+            SourceTreeGenerator.generate(
+                model, project,
+                reconstructor = BoundedLlmModuleReconstructor(harness, harnessProvenanceDescriptor = harness.factoryProvenance.stableDescriptor),
+                observedBehavior = "new module evidence",
+            )
+        }
+
+        preservedPaths.forEach { assertEquals(before.getValue(it), project.resolve(it).readText(), it) }
+        val attemptReceipt = project.resolve("reports/modules/parse.attempt.execution.json")
+        assertTrue(attemptReceipt.exists())
+        assertTrue(project.resolve("reports/modules/parse.attempt.json").readText().contains("parse.attempt.execution.json"))
+        SourceTreeGenerator.generate(
+            model, project,
+            reconstructor = BoundedLlmModuleReconstructor(harness, harnessProvenanceDescriptor = harness.factoryProvenance.stableDescriptor),
+        )
+        assertFalse(attemptReceipt.exists())
+        MakeProjectBuilder.build(project)
+        ArchivalPackager.create(project, temp.resolve("preserved.zip"))
     }
 
     @Test
@@ -316,12 +386,14 @@ class ReconstructionAcpEvidenceArchiveVerifierTest {
                 /* fn_0000000000401000 */
                 int parse_input(void) { return $returnValue; }
             """.trimIndent() + "\n"
-            target.resolve(request.workspaceRoots).writeText(source)
+            val targetFile = target.resolve(request.workspaceRoots)
+            val before = targetFile.takeIf { it.exists() }?.readBytes()
+            targetFile.writeText(source)
             val bytes = source.toByteArray()
             val change = AgentFileChange(
                 target,
-                AgentFileChangeKind.CREATED,
-                beforeSha256 = null,
+                if (before == null) AgentFileChangeKind.CREATED else AgentFileChangeKind.MODIFIED,
+                beforeSha256 = before?.let(::sha256),
                 afterSha256 = sha256(bytes),
                 sizeBytes = bytes.size.toLong(),
             )
