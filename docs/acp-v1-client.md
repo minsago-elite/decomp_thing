@@ -338,6 +338,9 @@ These files are deliberately retained pending qualified reclamation. The test co
 publication boundaries, not interruption inside a kernel syscall, whole-upload crash publication, or power loss.
 
 Uploads stage their input and metadata together in a private `.upload-` directory beneath the job store.
+Before parsing or staging, JobStore rejects input above its 32 MiB read limit and takes an owned byte-array
+copy. Metadata, declared size and persisted input all derive from that copy, so later caller mutation cannot
+change what is published. This bounds the retained input per upload, not aggregate request memory or storage.
 The input and metadata are forced before the directory is atomically renamed to its final job ID; the store
 directory is then forced. Metadata records the final input path. Ordinary failures before publication clean
 up the staging directory; failures after rename may leave a complete published job even when the caller
