@@ -68,10 +68,26 @@ The new true-valued Linux fixture failed against the old projector. After the
 correction, 50 focused projector/control/journal/live-contract tests yielded
 49 passes, one explicit missing-Docker live skip, and no failures or errors.
 Hosted run [33944212013](https://github.com/minsago-elite/decomp_thing/actions/runs/33944212013)
-at `f8cca3e` subsequently passed the required production-staged worker-image
-retained Clang/direct LLD hostile-swap step and advanced into the Kotlin inventory
-gates. This is a real required-step pass, not yet a claim that the entire workflow,
-full-tree build or authoritative hosted receipt/release composition is complete.
+at `f8cca3e` subsequently completed successfully, including the required
+production-staged worker-image retained Clang/direct LLD hostile-swap step, Kotlin
+inventory reconciliation, function-oracle generation and reference-evidence gates.
+Artifact `9962935509` retains all ten worker-image tests: ten passed, no skips,
+failures or errors. The live test requires the exact `swaps=5 outside-header=blocked`
+result, empty stderr and absence of candidate build-script execution, then proves
+container/image cleanup. These are real hosted results, not a full-tree
+configure/build or authoritative hosted receipt/release-composition claim.
+
+The corresponding private-execution review checks descriptor-derived sealed tool
+snapshots, fixed `clang`/`ld.lld` argv[0], pinned cwd and closed environment, sealed
+source/header/object inputs, direct authenticated CRT/runtime/LLD selection, and
+bounded pidfd/session cleanup. The current focused inner-worker, verifier and
+live-contract selection has 33 tests: 25 pass and eight tool/Docker-dependent
+local cases skip. Executed cases include the private JVM authority surface,
+argv/cwd/environment/inherited-descriptor checks, and timeout/overflow/interruption
+cleanup without adopting unrelated JVM children. The required hosted probe supplies
+the missing live compiler/linker and hostile input-swap evidence. These results
+complete the retained-tool task #143; ingress/outer receipt authority (#140),
+full configure/build reproduction (#115) and release gates remain separate.
 
 ### Required live worker-image regression
 
