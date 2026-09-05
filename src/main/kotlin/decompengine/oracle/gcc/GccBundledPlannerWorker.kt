@@ -196,3 +196,8 @@ private const val MAXIMUM_PLANNER_ARTIFACT_BYTES = 512 * 1024 * 1024
 private val PLANNER_REQUEST_LIMITS = StrictJsonLimits(maximumInputBytes = 256 * 1024, maximumCanonicalBytes = 256 * 1024,
     maximumDepth = 16, maximumNodes = 8192, maximumStringBytes = 4096, maximumTotalStringBytes = 192 * 1024,
     maximumNumberCharacters = 32)
+
+internal fun gccBundledPlannerControlName(operationRequestSha256: String, exportReceiptSha256: String): String {
+    require(listOf(operationRequestSha256, exportReceiptSha256).all { it.matches(Regex("[a-f0-9]{64}")) })
+    return "control-" + OracleArtifacts.sha256("gcc-bundled-planner-control-v1\n$operationRequestSha256\n$exportReceiptSha256".toByteArray())
+}
