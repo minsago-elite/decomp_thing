@@ -909,3 +909,10 @@ reports that some statuses may have changed, and a later explicit startup can re
 pending jobs. Request admission also checks the cancellation flag, covering a stop request racing the
 last startup check. These cooperative checks do not interrupt a filesystem operation already blocked
 inside the kernel, and ownership remains held until startup/cleanup returns.
+
+The early stop signal is shared by startup recovery, HTTP admission, background submission, queued
+callback claims and successful-completion publication. A callback delivered after observing the stop
+signal is discarded with the existing never-started outcome; an active operation returning after that
+signal is recorded as failed rather than complete. The signal also requests authentication-inspection
+cancellation before cleanup waits on the lifecycle lock. Signalling alone does not release ownership
+or prove resource cleanup; `stop` still closes the listener and waits for the existing lifetime rules.

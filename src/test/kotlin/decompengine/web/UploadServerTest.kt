@@ -189,6 +189,41 @@ class UploadServerTest {
             release.countDown()
             executor.shutdownNow()
         }
+
+    fun `early stop signal discards delivered queued work before cleanup takes the lifecycle lock`() {
+        val root = createTempDirectory("web-stop-admission-")
+        val queued = java.util.concurrent.CopyOnWriteArrayList<Runnable>()
+        val calls = java.util.concurrent.atomic.AtomicInteger()
+        val server = UploadServer("127.0.0.1", 0, root,
+            analyzer = JobAnalyzer { _, _ -> calls.incrementAndGet() }, executor = Executor { queued.add(it) })
+        server.start()
+        try {
+            val id = uploadedJobId(server)
+            assertEquals(303, request(server, "POST", "/jobs/$id/explore", followRedirects = false).status)
+            server.requestStop()
+            assertTrue(!server.withActiveRequest { error("stop-requested server admitted a request") })
+            repeat(2) { queued.single().run() }
+            assertEquals(0, calls.get())
+            val job = decompengine.jobs.JobStore(root).get(id)
+            assertEquals("failed", job.status)
+            assertEquals("Server stopped before the operation started", job.statusMessage)
+        } finally { server.stop() }
+    }
+
+    @Test
+    fun `early stop signal prevents successful completion publication before cleanup`() {
+        val root = createTempDirectory("web-stop-completion-")
+        lateinit var server: UploadServer
+        server = UploadServer("127.0.0.1", 0, root,
+            analyzer = JobAnalyzer { _, _ -> server.requestStop() }, executor = Executor { it.run() })
+        server.start()
+        try {
+            val id = uploadedJobId(server)
+            assertEquals(303, request(server, "POST", "/jobs/$id/explore", followRedirects = false).status)
+            val job = decompengine.jobs.JobStore(root).get(id)
+            assertEquals("failed", job.status)
+            assertEquals("Server stopped before the operation reported completion", job.statusMessage)
+        } finally { server.stop() }
     }
 
     @Test

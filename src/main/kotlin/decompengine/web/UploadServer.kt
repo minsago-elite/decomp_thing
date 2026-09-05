@@ -236,7 +236,7 @@ class UploadServer(
     private var stopping = false
     private var started = false
     private var activeRequests = 0
-    private val startupCancellation = java.util.concurrent.atomic.AtomicBoolean(false)
+    private val stopRequested = java.util.concurrent.atomic.AtomicBoolean(false)
     val serverPort: Int get() = server.address.port
     val browserOrigin: String = devFrontendOrigin ?: webOrigin(host, serverPort)
 
@@ -280,7 +280,7 @@ class UploadServer(
                 try {
                     // Recovery never rewrites historical metadata here; startup must not report
                     // success when a cancellation signal or a late interrupt preceded the listener.
-                    check(!startupCancellation.get() && !Thread.currentThread().isInterrupted) { "Web server startup cancelled" }
+                    check(!stopRequested.get() && !Thread.currentThread().isInterrupted) { "Web server startup cancelled" }
                     server.start()
                     started = true
                 } catch (failure: Exception) {
@@ -299,10 +299,16 @@ class UploadServer(
         }
     }
 
+    /** Publish cancellation before waiting for lifecycle work; stop completes resource cleanup. */
+    internal fun requestStop() {
+        stopRequested.set(true)
+        authenticationInspectionCancellation.set(true)
+    }
+
     fun stop(delaySeconds: Int = 0) {
         require(delaySeconds >= 0) { "shutdown delay must be nonnegative" }
         // Signal recovery even while start holds lifecycleLock through filesystem operations.
-        startupCancellation.set(true)
+        stopRequested.set(true)
         val callerWasInterrupted = Thread.currentThread().isInterrupted
         val inspection = synchronized(lifecycleLock) {
             stopping = true
@@ -340,12 +346,12 @@ class UploadServer(
     /** Admission covers the whole handler, including upload publication and error handling. */
     internal fun withActiveRequest(action: () -> Unit): Boolean {
         synchronized(lifecycleLock) {
-            if (stopping || startupCancellation.get()) return false
+            if (stopping || stopRequested.get()) return false
             activeRequests++
-            // stop() publishes startupCancellation outside lifecycleLock, so a handler that read
+            // stop() publishes stopRequested outside lifecycleLock, so a handler that read
             // the flag before the signal must still be refused when the signal preceded this
             // reservation instead of staying admitted past the stop request.
-            if (startupCancellation.get()) {
+            if (stopRequested.get()) {
                 activeRequests--
                 return false
             }
