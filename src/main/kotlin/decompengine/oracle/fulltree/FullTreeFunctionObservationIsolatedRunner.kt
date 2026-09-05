@@ -1028,6 +1028,7 @@ internal object KotlinSystemdCgroupCommandLauncher {
         resources: KotlinSystemdCgroupCommandResources,
         deploymentClosureSha256: String,
         beforeStart: (KotlinSystemdCgroupCommandAttachment) -> Unit,
+        interruption: KotlinContainedCommandInterruption? = null,
     ): KotlinSystemdCgroupCommandExecution {
         val cleanup = ContainedCommandCleanup()
         val secret = ByteArray(32).also(SECURE_RANDOM::nextBytes)
@@ -1053,6 +1054,9 @@ internal object KotlinSystemdCgroupCommandLauncher {
                 )) }),
                 "keeperEntryPoint" to JsonPrimitive(KotlinContainedCommandKeeper::class.java.name),
                 "requestVersion" to JsonPrimitive(KotlinContainedCommandProtocol.VERSION),
+            ) + if (interruption == null) emptyMap() else mapOf(
+                "interruptionPolicySha256" to JsonPrimitive(interruption.policySha256),
+                "commandRequestProvider" to JsonPrimitive("kotlin-contained-command-request-v2"),
             ))))
             val runtime = AuthenticatedObservationRuntime.open(configuration)
             cleanup.runtime = runtime
@@ -1078,7 +1082,9 @@ internal object KotlinSystemdCgroupCommandLauncher {
                 borrowed.path, nonce, command, environment, minOf(effectiveResources.serviceRuntimeSeconds, 300L),
                 effectiveResources.wallSeconds, minOf(resources.maximumFileBytes, 64L * 1024 * 1024),
                 minOf(resources.maximumFileBytes, 64L * 1024 * 1024),
+                allowInterruption = interruption != null,
             )
+            interruption?.bind(request)
             val requestBytes = request.canonicalBytes
             BorrowedObservationRunTree.access(borrowed).use { runTree ->
                 val preparedDirectories = linkedMapOf<String, LinuxFileIdentity>()
@@ -1178,9 +1184,20 @@ internal object KotlinSystemdCgroupCommandLauncher {
                         KotlinContainedCommandProtocol.MAXIMUM_PROTOCOL_BYTES,
                     )
                 }
-                val outcomeBytes = unit.awaitContainedCommandOutcome(runTree, resources.wallClockMillis)
+                val outcomeBytes = unit.awaitContainedCommandOutcome(runTree, resources.wallClockMillis) {
+                    interruption?.pollAndDeliver(request, secret, keeperPid) { token ->
+                        verifyInputs("before contained command INTERRUPT delivery")
+                        runTree.withPinnedDescriptor { root ->
+                            DescriptorBoundAtomicStateFile.publishNoReplace(root, KotlinContainedCommandProtocol.INTERRUPT_FILE,
+                                token, KotlinContainedCommandProtocol.MAXIMUM_PROTOCOL_BYTES)
+                        }
+                    }
+                }
                 val outcome = KotlinContainedCommandProtocol.requireOutcome(outcomeBytes, secret, request, keeperPid)
-                require(outcome.status == "EXITED" && outcome.exitCode == 0) { "contained command did not exit successfully" }
+                val interruptionAuthorization = if (interruption == null) {
+                    outcome.requireSuccessful()
+                    null
+                } else interruption.requireInterruptedOutcome(outcome)
                 val elapsed = monotonicElapsed(started, System.nanoTime(), "contained command execution")
                 require(elapsed <= secondsToNanos(effectiveResources.wallSeconds, "contained command wall clock"))
                 unit.acceptContainedCommandExit(keeperPid)
@@ -1190,7 +1207,8 @@ internal object KotlinSystemdCgroupCommandLauncher {
                 cleanup.closeAndProveAbsent()
                 val result = JsonObject(mapOf(
                     "schemaVersion" to JsonPrimitive(1),
-                    "provider" to JsonPrimitive("kotlin-lease-contained-command-execution-v1"),
+                    "provider" to JsonPrimitive(if (interruption == null) "kotlin-lease-contained-command-execution-v1"
+                        else "kotlin-lease-contained-command-interrupted-v1"),
                     "attachmentSha256" to JsonPrimitive(OracleArtifacts.sha256(attachment.canonicalBytes)),
                     "requestSha256" to JsonPrimitive(request.sha256),
                     "deploymentClosureSha256" to JsonPrimitive(deploymentClosureSha256),
@@ -1205,6 +1223,9 @@ internal object KotlinSystemdCgroupCommandLauncher {
                         "memoryMaxEvents" to JsonPrimitive(live.memoryMaxEvents), "memoryOomEvents" to JsonPrimitive(live.memoryOomEvents),
                         "memoryOomKillEvents" to JsonPrimitive(live.memoryOomKillEvents),
                     )),
+                ) + if (interruptionAuthorization == null) emptyMap() else mapOf(
+                    "interruptionAuthorization" to OracleJson.parseCanonical(interruptionAuthorization),
+                    "interruptionAuthorizationSha256" to JsonPrimitive(OracleArtifacts.sha256(interruptionAuthorization)),
                 ))
                 return KotlinSystemdCgroupCommandExecution(containedCommandRecord(result, "executionSha256"))
             }
@@ -6022,12 +6043,13 @@ private class ManagedObservationUnit(
         return KotlinSystemdCgroupCommandAttachment(containedCommandRecord(unsigned, "attachmentSha256"))
     }
 
-    fun awaitContainedCommandOutcome(runTree: ObservationRunTreeAccess, wallClockMillis: Long): ByteArray {
+    fun awaitContainedCommandOutcome(runTree: ObservationRunTreeAccess, wallClockMillis: Long, pollControl: () -> Unit = {}): ByteArray {
         require(bootTopology == ObservationBootProcessTopology.SINGLE_KOTLIN_COMMAND_KEEPER)
         val deadline = deadlineAfter(Duration.ofMillis(wallClockMillis), "contained command completion")
         var nextStatus = 0L
         while (System.nanoTime() < deadline) {
             readContainedCommandProtocol(runTree, KotlinContainedCommandProtocol.OUTCOME_FILE)?.let { return it }
+            pollControl()
             val now = System.nanoTime()
             if (now >= nextStatus) {
                 requireUnitStillRunning(controller.show(), "during contained command execution")

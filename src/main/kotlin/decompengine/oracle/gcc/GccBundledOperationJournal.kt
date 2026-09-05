@@ -127,6 +127,29 @@ internal class GccBundledOperationJournal private constructor(
         snapshots.getValue(EXPORT_FILE).bytes
     }
 
+    @Synchronized
+    fun recordInterruptionAuthorization(authorizationBytes: ByteArray) = boundOperation("authorizing GCC command interruption") {
+        check(stage == JournalStage.START_AUTHORIZED) { "GCC interruption requires durable START authorization" }
+        publishLinkedRecord(INTERRUPT_FILE, "gcc-bundled-command-interrupt-authorized-v1", START_FILE, "authorization", authorizationBytes)
+        stage = JournalStage.INTERRUPT_AUTHORIZED
+    }
+
+    @Synchronized
+    fun recordInterruptedExecution(executionBytes: ByteArray): ByteArray = boundOperation("recording interrupted GCC command") {
+        check(stage == JournalStage.INTERRUPT_AUTHORIZED) { "GCC interrupted execution requires durable interruption authorization" }
+        publishLinkedRecord(INTERRUPTED_FILE, "gcc-bundled-command-interrupted-v1", INTERRUPT_FILE, "execution", executionBytes)
+        stage = JournalStage.INTERRUPTED
+        snapshots.getValue(INTERRUPTED_FILE).bytes
+    }
+
+    @Synchronized
+    fun recordInterruptedPrefixAssessment(assessmentBytes: ByteArray): ByteArray = boundOperation("recording interrupted GCC prefix") {
+        check(stage == JournalStage.INTERRUPTED) { "GCC interrupted prefix requires recorded interrupted execution" }
+        publishLinkedRecord(PREFIX_FILE, "gcc-bundled-command-prefix-assessed-v1", INTERRUPTED_FILE, "assessment", assessmentBytes)
+        stage = JournalStage.PREFIX_ASSESSED
+        snapshots.getValue(PREFIX_FILE).bytes
+    }
+
     private fun publishLinkedRecord(name: String, provider: String, previous: String, payloadName: String?, payloadBytes: ByteArray?) {
         val fields = linkedMapOf<String, JsonElement>(
             "provider" to JsonPrimitive(provider),
@@ -170,6 +193,9 @@ internal class GccBundledOperationJournal private constructor(
             JournalStage.START_AUTHORIZED -> setOf(INTENT_FILE, LEASE_FILE, DEFINITION_FILE, PREPARED_FILE, ATTACHMENT_FILE, START_FILE)
             JournalStage.EXECUTED -> setOf(INTENT_FILE, LEASE_FILE, DEFINITION_FILE, PREPARED_FILE, ATTACHMENT_FILE, START_FILE, EXECUTION_FILE)
             JournalStage.EXPORT_ASSESSED -> setOf(INTENT_FILE, LEASE_FILE, DEFINITION_FILE, PREPARED_FILE, ATTACHMENT_FILE, START_FILE, EXECUTION_FILE, EXPORT_FILE)
+            JournalStage.INTERRUPT_AUTHORIZED -> setOf(INTENT_FILE, LEASE_FILE, DEFINITION_FILE, PREPARED_FILE, ATTACHMENT_FILE, START_FILE, INTERRUPT_FILE)
+            JournalStage.INTERRUPTED -> setOf(INTENT_FILE, LEASE_FILE, DEFINITION_FILE, PREPARED_FILE, ATTACHMENT_FILE, START_FILE, INTERRUPT_FILE, INTERRUPTED_FILE)
+            JournalStage.PREFIX_ASSESSED -> setOf(INTENT_FILE, LEASE_FILE, DEFINITION_FILE, PREPARED_FILE, ATTACHMENT_FILE, START_FILE, INTERRUPT_FILE, INTERRUPTED_FILE, PREFIX_FILE)
         }
         if (snapshots.keys != expectedNames) journalFail("GCC bundled journal has inconsistent retained state")
         requireExactNames(expectedNames, label)
@@ -374,7 +400,7 @@ private fun closeJournalDescriptors(
 
 private fun journalFail(message: String): Nothing = throw IllegalArgumentException(message)
 
-private enum class JournalStage { INTENT, LEASED, DEFINITION_STAGED, PREPARED, ATTACHED, START_AUTHORIZED, EXECUTED, EXPORT_ASSESSED }
+private enum class JournalStage { INTENT, LEASED, DEFINITION_STAGED, PREPARED, ATTACHED, START_AUTHORIZED, EXECUTED, EXPORT_ASSESSED, INTERRUPT_AUTHORIZED, INTERRUPTED, PREFIX_ASSESSED }
 private const val INTENT_FILE = "intent.json"
 private const val LEASE_FILE = "lease-evidence.json"
 private const val DEFINITION_FILE = "definition.json"
@@ -383,9 +409,12 @@ private const val ATTACHMENT_FILE = "attachment.json"
 private const val START_FILE = "start-authorized.json"
 private const val EXECUTION_FILE = "execution.json"
 private const val EXPORT_FILE = "export-assessment.json"
+private const val INTERRUPT_FILE = "interrupt-authorized.json"
+private const val INTERRUPTED_FILE = "interrupted-execution.json"
+private const val PREFIX_FILE = "interrupted-prefix-assessment.json"
 private const val OWNER_DIRECTORY_MODE = 0x1c0
 private const val GROUP_OR_OTHER_WRITE_MODE = 0x12
-private const val MAXIMUM_JOURNAL_ENTRIES = 8
+private const val MAXIMUM_JOURNAL_ENTRIES = 9
 private const val MAXIMUM_INTENT_BYTES = 256 * 1024
 private const val MAXIMUM_DEFINITION_BYTES = 1024 * 1024
 private val JOURNAL_JSON_LIMITS = StrictJsonLimits(

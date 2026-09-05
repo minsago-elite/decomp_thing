@@ -65,10 +65,22 @@ class KotlinContainedCommandKeeperTest {
             val keeper = KotlinContainedCommandProtocol.requireBoot(boot, secret, request)
             publishLocalStart(request, KotlinContainedCommandProtocol.start(secret, request, keeper))
             awaitLocalProtocol(process, request.runDirectory, "reports/child-ready")
-            publishLocalStart(request, KotlinContainedCommandProtocol.interrupt(secret, request, keeper), KotlinContainedCommandProtocol.INTERRUPT_FILE)
+            var durableAuthorization: ByteArray? = null
+            val control = KotlinContainedCommandInterruption(OracleJson.canonicalBytes(JsonObject(emptyMap())), {
+                OracleJson.canonicalBytes(JsonObject(mapOf("fixtureReady" to JsonPrimitive(true))))
+            }, { record ->
+                assertTrue(Files.notExists(request.runDirectory.resolve(KotlinContainedCommandProtocol.INTERRUPT_FILE)))
+                durableAuthorization = record
+            })
+            control.bind(request)
+            control.pollAndDeliver(request, secret, keeper) { token ->
+                assertTrue(durableAuthorization != null)
+                publishLocalStart(request, token, KotlinContainedCommandProtocol.INTERRUPT_FILE)
+            }
             val bytes = awaitLocalProtocol(process, request.runDirectory, KotlinContainedCommandProtocol.OUTCOME_FILE)
             val outcome = KotlinContainedCommandProtocol.requireOutcome(bytes, secret, request, keeper)
             assertEquals("INTERRUPTED", outcome.status)
+            assertContentEquals(durableAuthorization, control.requireInterruptedOutcome(outcome))
             assertFailsWith<IllegalArgumentException> { outcome.requireSuccessful() }
             assertTrue(process.isAlive)
             assertFalse(process.descendants().use { it.findAny().isPresent })
