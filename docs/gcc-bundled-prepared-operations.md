@@ -138,3 +138,20 @@ Run removal requires a separate after-absence bounded
 cleanup/quarantine handoff; only record-only lease state can reach independently
 authorized release. Ordinary recursive deletion or `abandonForRecovery` cannot
 stand in for it. The A10 fresh/resumed cc1 and lto1 proofs and #235 remain open.
+
+## Interrupted-prefix capture groundwork
+
+`GccBundledExportCapture.captureInterruptedPrefix` reads a nonterminal planning
+prefix through the retained run/reports directory descriptors, under per-file
+and aggregate byte limits. It checks input/exporter/archive identities and the
+existing Kotlin semantic/checkpoint commitments, and revalidates file identities,
+metadata and exact batch membership. It requires at least one complete 512-function
+batch, no reused records and no final model. Unfinished or extra batch members
+are rejected and retained; this entrypoint does not delete or repair residue.
+
+The returned `GccInterruptedPrefixAssessment` remains a non-authoritative byte
+assessment. Calling it does not stop a process or prove absence. The contained
+coordinator still supports only fresh controls: authenticated checkpoint-triggered
+interruption, durable interruption transitions, same-owner resume and real
+cc1/lto1 fresh/resumed model and ownership-plan comparisons remain required by
+#137. Prefix-only fixtures do not qualify those lifecycle requirements.
