@@ -134,6 +134,7 @@ class BuiltinCapturedRepairHarness(
                 .also { contextTools = it }
             object : BuiltinToolSession {
                 override val definitions = dispatcher.definitions + context.definitions
+                override val supportsContextRetrieval = true
                 override fun authorize(call: ModelToolCall, control: BuiltinExecutionControl): Boolean {
                     control.checkpoint()
                     // Filesystem path/operation authorization is delegated once to the shared callback.
