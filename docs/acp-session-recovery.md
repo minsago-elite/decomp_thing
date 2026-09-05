@@ -118,3 +118,7 @@ lock, before loading or creating session state. Either remnant blocks opening wi
 message, even when an older session record is readable. Admission preserves the remnant, old journal
 and workspace bytes, and releases ownership on failure. It does not promote or delete a candidate,
 or automatically decide whether an interrupted write is safe to retry.
+
+Session and quarantine publication candidates request owner-only permissions in the file creation
+operation itself, matching the existing private lock-file creation contract. The previous post-open
+permission change is no longer needed; content writing still follows successful private creation.
