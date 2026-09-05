@@ -229,6 +229,10 @@ class WebJobService(
         return context(jobId, runId)
     }
 
+    @Synchronized
+    internal fun listArtifactSummaries(jobId: String, runId: String? = null): List<WebArtifactSummary> =
+        listLegacyArtifactSummaries(reportContext(jobId, runId))
+
     /** Shared fixed-path journal read for both HTTP adapters; absence is not empty history. */
     @Synchronized
     internal fun readProgressJournal(jobId: String, runId: String? = null): ByteArray {

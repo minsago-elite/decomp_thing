@@ -2,7 +2,6 @@ package decompengine.web
 
 import decompengine.jobs.Job
 import decompengine.jobs.toJson
-import kotlinx.serialization.json.Json
 import kotlinx.serialization.json.JsonArray
 import kotlinx.serialization.json.JsonObject
 import kotlinx.serialization.json.contentOrNull
@@ -13,11 +12,6 @@ import kotlinx.serialization.json.jsonObject
 import kotlinx.serialization.json.jsonPrimitive
 import java.net.URLEncoder
 import java.nio.charset.StandardCharsets
-import java.nio.file.Files
-import java.nio.file.Path
-import kotlin.io.path.exists
-import kotlin.io.path.isRegularFile
-import kotlin.io.path.name
 import kotlin.math.roundToInt
 
 fun renderDashboard(jobs: List<Job>, diagnostics: List<WebJobDiagnostic> = emptyList()): String = page(
@@ -71,13 +65,13 @@ fun renderJob(job: Job, reportContext: WebReportContext? = null,
     diagnostics: List<decompengine.jobs.WorkflowStoreDiagnostic> = emptyList(),
     sourceTree: SourceTreeView? = null, sourceTreeUnavailable: Boolean = false,
     progressSnapshot: JsonObject? = null, explorationReport: JsonObject? = null,
-    repairHistory: JsonObject? = null, reconstructionProgress: JsonObject? = null): String {
+    repairHistory: JsonObject? = null, reconstructionProgress: JsonObject? = null,
+    artifacts: List<WebArtifactSummary>? = null): String {
     val reports = reportsFor(job, reportContext)
     val active = job.status in setOf("queued", "analyzing")
     val metadata = job.metadata.toJson().entries.joinToString("") { (key, value) ->
         "<div class=\"datum\"><dt>${key.replace('_', ' ').title().escapeHtml()}</dt><dd>${value.toString().trim('"').escapeHtml()}</dd></div>"
     }
-    val artifacts = listArtifacts(reports.reportsDirectory)
     val action = if (reports.runId != null) {
         "<span class=\"status-note\">Legacy workflow actions are unavailable for jobs with durable attempts.</span>"
     } else if (active) {
@@ -176,7 +170,7 @@ fun renderJob(job: Job, reportContext: WebReportContext? = null,
             ${sourceTree?.let { renderSourceTree(job, it, reports) }.orEmpty()}
             ${if (sourceTreeUnavailable) "<section class=\"panel\"><p>Source-tree evidence is unavailable or has not been generated for this revision.</p></section>" else ""}
             ${runCatching { renderRepairHistory(job, reports, repairHistory) }.getOrElse { renderRepairHistory(job, reports, null) }}
-            ${renderArtifacts(job, artifacts, reports)}
+            ${renderArtifacts(job, artifacts)}
           </main>
         """.trimIndent(),
         script = script,
@@ -364,12 +358,12 @@ private fun renderEvidence(label: String, evidence: JsonObject?): String {
     return "<p class=\"evidence-line\"><b>$label:</b><span>${kind.escapeHtml()} — ${summary.escapeHtml()}</span>${if (artifact.isBlank()) "" else "<code>${artifact.escapeHtml()}</code>"}</p>"
 }
 
-private fun renderArtifacts(job: Job, artifacts: List<Path>, reports: WebReportContext): String {
+private fun renderArtifacts(job: Job, artifacts: List<WebArtifactSummary>?): String {
+    if (artifacts == null) return "<section class=\"panel artifacts-panel\"><h2>Artifacts</h2><p>Artifact listing is unavailable.</p></section>"
     if (artifacts.isEmpty()) return ""
-    val root = reports.reportsDirectory
     val links = artifacts.joinToString("") { artifact ->
-        val relative = reports.artifactPrefix + "/" + root.relativize(artifact).toString().replace('\\', '/')
-        "<a class=\"artifact-row\" href=\"${artifactHref(job, relative)}\"><span class=\"artifact-icon\">${artifact.fileName.toString().substringAfterLast('.', "FILE").uppercase().take(4)}</span><span><strong>${artifact.name.escapeHtml()}</strong><small>${relative.escapeHtml()} · ${runCatching { formatBytes(Files.size(artifact).toInt()) }.getOrDefault("unknown")}</small></span><span>↓</span></a>"
+        val relative = artifact.relativePath
+        "<a class=\"artifact-row\" href=\"${artifactHref(job, relative)}\"><span class=\"artifact-icon\">${artifact.displayName.substringAfterLast('.', "FILE").uppercase().take(4).escapeHtml()}</span><span><strong>${artifact.displayName.escapeHtml()}</strong><small>${relative.escapeHtml()} · ${formatBytes(artifact.sizeBytes)}</small></span><span>↓</span></a>"
     }
     return """
       <section class="panel artifacts-panel">
@@ -418,29 +412,6 @@ private fun renderReconstructionProgress(progress: JsonObject?): String {
 
 private fun reportsFor(job: Job, supplied: WebReportContext?): WebReportContext =
     supplied ?: WebReportContext(job.binaryPath.parent.resolve("reports"))
-
-private fun listArtifacts(jobDir: Path): List<Path> {
-    if (!jobDir.exists()) return emptyList()
-    val artifacts = mutableListOf<Path>()
-    var entries = 0
-    Files.walkFileTree(jobDir, object : java.nio.file.SimpleFileVisitor<Path>() {
-        override fun preVisitDirectory(directory: Path, attributes: java.nio.file.attribute.BasicFileAttributes): java.nio.file.FileVisitResult {
-            require(++entries <= 10_000 && jobDir.relativize(directory).nameCount <= 32) {
-                "report listing exceeds its traversal bound"
-            }
-            return if (directory == jobDir.resolve("source-tree") || directory == jobDir.resolve("runs")) {
-                java.nio.file.FileVisitResult.SKIP_SUBTREE
-            } else java.nio.file.FileVisitResult.CONTINUE
-        }
-
-        override fun visitFile(file: Path, attributes: java.nio.file.attribute.BasicFileAttributes): java.nio.file.FileVisitResult {
-            require(++entries <= 10_000) { "report listing exceeds its entry bound" }
-            if (attributes.isRegularFile) artifacts.add(file)
-            return java.nio.file.FileVisitResult.CONTINUE
-        }
-    })
-    return artifacts.sorted()
-}
 
 private fun metric(label: String, value: String, detail: String, score: Double? = null): String {
     val gauge = score?.let { "<span class=\"gauge\"><i style=\"width:${(it.coerceIn(0.0, 1.0) * 100).toInt()}%\"></i></span>" }.orEmpty()
@@ -491,7 +462,9 @@ private fun String.escapeHtml(): String =
 
 private fun String.title(): String = split(' ').joinToString(" ") { it.replaceFirstChar(Char::uppercase) }
 private fun formatTimestamp(value: String): String = value.replace('T', ' ').removeSuffix("Z").substringBefore('.') + " UTC"
-private fun formatBytes(bytes: Int): String = when {
+private fun formatBytes(bytes: Int): String = formatBytes(bytes.toLong())
+
+private fun formatBytes(bytes: Long): String = when {
     bytes >= 1024 * 1024 -> "%.1f MiB".format(java.util.Locale.ROOT, bytes / (1024.0 * 1024.0))
     bytes >= 1024 -> "%.1f KiB".format(java.util.Locale.ROOT, bytes / 1024.0)
     else -> "$bytes B"

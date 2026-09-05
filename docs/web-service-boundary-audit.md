@@ -81,3 +81,22 @@ unavailable/not-generated message. These read failures do not fail the job page 
 report files. This is bounded input handling, not complete semantic validation or certification
 of report prose as public. Artifact inventory enumeration/metadata still performs renderer I/O;
 legacy authorization, privacy classification and broader CLI/core qualification remain open.
+
+## Subsequent artifact listing migration
+
+Artifact enumeration now runs through `WebJobService.listArtifactSummaries` after job/attempt
+report-context validation. It returns relative artifact paths, display names and 64-bit sizes;
+`WebViews` performs neither file enumeration nor metadata reads. The traversal retains its
+10,000-entry/32-level limits and exclusions for the selected report root's `source-tree` and
+`runs` directories. Sizes come from enumeration attributes rather than a later renderer stat.
+The root must be a directory; missing roots yield an empty inventory, and listing failures
+render unavailable without failing the job page. No partial inventory is presented on failure.
+
+Tests compare explicit supplied metadata against different stored files, preserve sizes above
+2 GiB, verify root exclusions and check the HTTP unavailable state at the traversal bound.
+This is a legacy metadata inventory, not a transactional snapshot or download authorization.
+The existing filesystem walk does not establish retained-descriptor containment across every
+concurrent directory mutation. Downloads still require their independent artifact checks.
+All legacy renderer filesystem I/O identified by this audit is now outside `WebViews`; full
+legacy/v1 service parity, inventory containment qualification, privacy, legacy authorization
+and broader CLI/core regression work remain open before #158 can be closed.

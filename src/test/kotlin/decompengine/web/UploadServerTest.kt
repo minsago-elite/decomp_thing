@@ -39,6 +39,37 @@ import kotlin.test.assertTrue
 
 class UploadServerTest {
     @Test
+    fun `artifact display uses supplied metadata and service listing stays bounded`() = withServer { server, root ->
+        val id = uploadedJobId(server)
+        val job = decompengine.jobs.JobStore(root).get(id)
+        val reports = root.resolve(id).resolve("reports").createDirectories()
+        reports.resolve("stored.txt").writeText("stored")
+        reports.resolve("source-tree").createDirectories().resolve("excluded-source.txt").writeText("source")
+        reports.resolve("runs").createDirectories().resolve("excluded-run.txt").writeText("run")
+        val supplied = renderJob(job, artifacts = listOf(WebArtifactSummary("reports/supplied.txt", "supplied.txt", 3L * 1024 * 1024 * 1024)))
+        assertTrue(supplied.contains("supplied.txt"))
+        assertTrue(supplied.contains("3072.0 MiB"))
+        assertTrue(!supplied.contains("stored.txt"))
+        val unsupplied = renderJob(job)
+        assertTrue(unsupplied.contains("Artifact listing is unavailable"))
+        assertTrue(!unsupplied.contains("stored.txt"))
+        val listing = listLegacyArtifactSummaries(WebReportContext(reports))
+        assertEquals(listOf(WebArtifactSummary("reports/stored.txt", "stored.txt", 6)), listing)
+        val response = request(server, "GET", "/jobs/$id")
+        assertEquals(200, response.status)
+        assertTrue(response.body.decodeToString().contains("reports/stored.txt"))
+        assertTrue(response.body.decodeToString().contains("6 B"))
+        assertTrue(!response.body.decodeToString().contains("excluded-source.txt"))
+        assertTrue(!response.body.decodeToString().contains("excluded-run.txt"))
+        var nested = reports
+        repeat(33) { nested = nested.resolve("nested").createDirectories() }
+        val unavailable = request(server, "GET", "/jobs/$id")
+        assertEquals(200, unavailable.status)
+        assertTrue(unavailable.body.decodeToString().contains("Artifact listing is unavailable"))
+        assertEquals("stored", reports.resolve("stored.txt").readBytes().decodeToString())
+    }
+
+    @Test
     fun `repair and reconstruction HTML use bounded supplied reports without renderer IO`() = withServer { server, root ->
         val id = uploadedJobId(server)
         val job = decompengine.jobs.JobStore(root).get(id)

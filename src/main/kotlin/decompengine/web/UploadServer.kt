@@ -435,7 +435,8 @@ class UploadServer(
             progressSnapshot = progress,
             explorationReport = readLegacyJsonReport(jobId, view.reports, LegacyJsonReport.EXPLORATION),
             repairHistory = readLegacyJsonReport(jobId, view.reports, LegacyJsonReport.REPAIR_HISTORY),
-            reconstructionProgress = readLegacyJsonReport(jobId, view.reports, LegacyJsonReport.RECONSTRUCTION_PROGRESS)))
+            reconstructionProgress = readLegacyJsonReport(jobId, view.reports, LegacyJsonReport.RECONSTRUCTION_PROGRESS),
+            artifacts = runCatching { jobs.listArtifactSummaries(jobId, view.reports.runId) }.getOrNull()))
     }
 
     private enum class LegacyJsonReport(val filename: String) {
