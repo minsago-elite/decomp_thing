@@ -126,3 +126,7 @@ queue/history omission counts. Reads and writer restart reject inconsistent coun
 markers with bounded diagnostics; counter validation avoids arithmetic overflow. Rejected history
 is retained unchanged and writer ownership is released. These consistency checks do not authenticate
 history or prove that events pending at a process crash were durable.
+
+The browser labels its latest-30-row window separately from journal retention loss. Refresh and
+polling report unavailable progress history instead of implying an empty complete stream; polling
+continues after an HTTP failure. These display warnings do not alter job status or acceptance.
