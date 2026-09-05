@@ -1,7 +1,7 @@
 // @vitest-environment node
 import { execFileSync } from 'node:child_process';
 import { createServer as createHttpServer } from 'node:http';
-import { mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
+import { mkdir, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
 import { fileURLToPath } from 'node:url';
 import type { AddressInfo } from 'node:net';
 import type { IncomingMessage, Server, ServerResponse } from 'node:http';
@@ -87,6 +87,7 @@ describe('shared-schema deterministic fixtures', () => {
     const fixture = JSON.parse(generated) as { scenarios: { name: string }[]; routes: Record<string, { data: { items: { sizeBytes: string }[] } }> };
     expect(fixture.scenarios.map((scenario) => scenario.name)).toEqual(['running', 'failed', 'interrupted', 'unsupported', 'partial']);
     expect(fixture.routes['/nested/api/v1/jobs']?.data.items[0]?.sizeBytes).toBe('9007199254740993');
+    await mkdir(fileURLToPath(new URL('../../build/', import.meta.url)), { recursive: true });
     const directory = await mkdtemp(fileURLToPath(new URL('../../build/fixture-schema-', import.meta.url)));
     cleanups.push(() => rm(directory, { recursive: true, force: true }));
     const changed = JSON.parse(await readFile(schemaPath, 'utf8')) as { definitions: { job: { required: string[] } } };
