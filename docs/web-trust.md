@@ -251,3 +251,27 @@ authorizes reads through the same access instance, logout requires CSRF, and suc
 revokes access. The existing SPA and legacy web/journal regression suite also passes.
 This extraction does not yet expose session routes or enforce session/CSRF in legacy mode;
 legacy form, CLI bootstrap and packaged-browser migration remain outstanding under #161.
+
+## Authenticated legacy presentation
+
+Legacy mode now requires the same local session for job pages, JSON polling, source views,
+artifact downloads and namespace misses. Only `/login` and the stylesheet are public reads.
+The CLI prints an explicit `/login#bootstrap=…` handoff in legacy mode; login clears the
+fragment before exchanging it through the shared `POST /api/v1/session` handler. The public
+login page contains no job metadata. Unauthenticated HTML navigation receives that page with
+401, while JSON APIs return a typed denial. This supersedes the transport-only limitations
+in the earlier checkpoints above.
+
+Legacy forms intercept submission and restore CSRF through authenticated, no-store
+`GET /api/v1/session/csrf`. The token stays in document memory. Uploads remain multipart;
+explore/reconstruct POSTs use JSON content type. All mutations require exact Origin, a valid
+session cookie and CSRF. Non-browser clients must exchange the operator bootstrap token and
+send those credentials explicitly. Failed mutations are not automatically retried. The
+End session button calls the shared CSRF-protected DELETE handler and clears the local view.
+Normal navigation/reload and file download use the HttpOnly cookie without tokens in links.
+
+The session restoration endpoint uses the v1 `session` envelope (`csrfToken`, `expiresAt`),
+rejects query parameters and requires JSON Accept. It is a legacy presentation adapter;
+SPA restoration continues through its existing bootstrap endpoint. Expired-cookie clearing
+and denial headers are shared with the v1 error responder. Remote access remains unavailable
+until its profile is qualified; this change does not complete all #161 acceptance criteria.

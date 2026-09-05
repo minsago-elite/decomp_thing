@@ -335,7 +335,8 @@ try {
   report.browserSandboxDisabled = values['no-sandbox'];
   if (legacyFixture) {
     const tab = await makeTarget();
-    report.legacy = await qualifyLegacy({ fixture: legacyFixture, origin, tab, cdp, evaluate, ready });
+    const bootstrapUrl = await waitFor(() => applicationOutput.split(/\s+/).find(part => part.startsWith(origin + '/login#bootstrap=')), 'legacy local bootstrap handoff');
+    report.legacy = await qualifyLegacy({ fixture: legacyFixture, origin, bootstrapUrl, tab, cdp, evaluate, ready });
     report.requests.legacy = tab.requests;
   }
   if (values.mode === 'upgrade') {

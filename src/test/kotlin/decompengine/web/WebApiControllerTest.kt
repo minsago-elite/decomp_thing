@@ -49,13 +49,13 @@ class WebApiControllerTest {
         }
         try {
             server(WebUiMode.LEGACY) { instance ->
-                val response = upload(instance, bytes, emptyMap(), filename = "legacy.elf", path = "/jobs")
+                val response = upload(instance, bytes, legacySessionHeaders(instance), filename = "legacy.elf", path = "/jobs")
                 assertEquals(201, response.statusCode())
                 val job = Json.parseToJsonElement(response.body()).jsonObject
                 val id = job.getValue("id").jsonPrimitive.content
                 legacy[id] = job
                 remember(id)
-                val read = request(instance, "/api/jobs/$id")
+                val read = request(instance, "/api/jobs/$id", headers = legacySessionHeaders(instance))
                 assertEquals(200, read.statusCode())
                 assertEquals(job, Json.parseToJsonElement(read.body()))
                 unchanged()
@@ -77,7 +77,7 @@ class WebApiControllerTest {
             }
             server(WebUiMode.LEGACY) { instance ->
                 versioned.keys.forEach { id ->
-                    val response = request(instance, "/api/jobs/$id")
+                    val response = request(instance, "/api/jobs/$id", headers = legacySessionHeaders(instance))
                     assertEquals(200, response.statusCode())
                     legacy[id] = Json.parseToJsonElement(response.body()).jsonObject
                 }

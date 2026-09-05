@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import { promises as fs } from 'node:fs';
-import { join } from 'node:path';
+import { join, dirname } from 'node:path';
 
 export async function seedLegacy(root) {
   await fs.mkdir(root, { mode: 0o700 });
@@ -28,7 +28,22 @@ export async function seedLegacy(root) {
   return { id, directory, reports, input, job, jobPath, journalPath, journal, artifactPath };
 }
 
-export async function qualifyLegacy({ fixture, origin, tab, cdp, evaluate, ready }) {
+export async function qualifyLegacy({ fixture, origin, bootstrapUrl, tab, cdp, evaluate, ready }) {
+  await cdp.call('Page.addScriptToEvaluateOnNewDocument', { source: `(() => {
+    const original = window.fetch;
+    window.fetch = function(input, options) {
+      if (String(input) === '/api/v1/session' && options?.method === 'POST' && location.hash) throw new Error('Bootstrap fragment was not cleared');
+      return original.apply(this, arguments);
+    };
+  })();` }, tab.sessionId);
+  await cdp.call('Page.navigate', { url: `${origin}/jobs/${fixture.id}` }, tab.sessionId);
+  await ready(tab, `document.body.innerText.includes('Open a local session')`, 'legacy unauthenticated page');
+  assert.ok(!await evaluate(tab, `document.body.innerText.includes('legacy-browser.elf')`));
+  assert.equal(await evaluate(tab, `fetch('/api/jobs/${fixture.id}').then(r => r.status)`), 401);
+  await cdp.call('Page.navigate', { url: bootstrapUrl }, tab.sessionId);
+  await ready(tab, `location.pathname === '/' && !!document.querySelector('#binary')`, 'legacy local session');
+  assert.equal(await evaluate(tab, 'location.hash'), '');
+  assert.equal(await evaluate(tab, 'localStorage.length + sessionStorage.length'), 0);
   // Test-owned state only: emulate an in-progress legacy observation after startup recovery.
   // No workflow is admitted or executed. These fixture writes are not application mutations.
   const activeJob = JSON.stringify({ ...fixture.job, status: 'analyzing' });
@@ -58,14 +73,41 @@ export async function qualifyLegacy({ fixture, origin, tab, cdp, evaluate, ready
   await ready(tab, `document.querySelector('#agent-event-list')?.innerText.includes('18446744073709551615')`, 'legacy reload');
   assert.ok(!await evaluate(tab, `document.body.innerText.includes('PRIVATE_LEGACY_')`));
   assert.deepEqual(tab.exceptions, []);
-  assert.ok(tab.requests.every(request => ['GET', 'HEAD'].includes(request.method)));
+  assert.equal(await evaluate(tab, `fetch('/jobs/${fixture.id}/artifacts/reports/fixture.txt').then(r => r.text())`), 'ordinary artifact');
+  await cdp.call('Page.navigate', { url: origin + '/' }, tab.sessionId);
+  await ready(tab, `document.readyState === 'complete' && !!document.querySelector('#binary')`, 'legacy upload dashboard');
+  await evaluate(tab, `(() => {
+    const bytes = new Uint8Array(64); bytes.set([127, 69, 76, 70, 2, 1, 1]);
+    const view = new DataView(bytes.buffer); view.setUint16(16, 2, true); view.setUint16(18, 62, true);
+    view.setUint32(20, 1, true); view.setUint16(52, 64, true);
+    const transfer = new DataTransfer(); transfer.items.add(new File([bytes], 'inert-legacy-upload.elf'));
+    document.querySelector('#binary').files = transfer.files;
+    document.querySelector('form').requestSubmit();
+  })()`);
+  await ready(tab, `location.pathname.startsWith('/jobs/') && document.body.innerText.includes('inert-legacy-upload.elf')`, 'legacy authenticated form upload');
+  const uploadId = await evaluate(tab, `location.pathname.split('/')[2]`);
+  const uploaded = JSON.parse(await fs.readFile(join(dirname(fixture.directory), uploadId, 'job.json'), 'utf8'));
+  assert.equal(uploaded.status, 'uploaded');
+  assert.equal(await evaluate(tab, 'localStorage.length + sessionStorage.length'), 0);
+  await ready(tab, `document.readyState === 'complete' && [...document.querySelectorAll('button')].some(button => button.textContent === 'End session')`, 'legacy session controls');
+  await evaluate(tab, `[...document.querySelectorAll('button')].find(button => button.textContent === 'End session').click()`);
+  await ready(tab, `location.pathname === '/login' && document.body.innerText.includes('Open a local session')`, 'legacy logout');
+  assert.equal(await evaluate(tab, `fetch('/api/jobs/${fixture.id}').then(r => r.status)`), 401);
+  assert.equal(await evaluate(tab, `fetch('/jobs/${fixture.id}/artifacts/reports/fixture.txt').then(r => r.status)`), 401);
+  assert.deepEqual(tab.exceptions, []);
+  const mutations = tab.requests.filter(request => !['GET', 'HEAD'].includes(request.method));
+  assert.deepEqual(mutations.map(request => [request.method, new URL(request.url).pathname]),
+    [['POST', '/api/v1/session'], ['POST', '/jobs'], ['DELETE', '/api/v1/session']]);
   assert.equal(await fs.readFile(fixture.jobPath, 'utf8'), activeJob);
   assert.equal(await fs.readFile(fixture.journalPath, 'utf8'), fixture.journal);
   assert.equal(await fs.readFile(fixture.artifactPath, 'utf8'), 'ordinary artifact');
   assert.deepEqual(await fs.readFile(join(fixture.directory, 'input.elf')), fixture.input);
   return { initialHtml: true, pollingExecuted: true, privateDiagnosticsWithheld: true, privateEventFieldsWithheld: true,
     exactUsage: true, omissionCount: 2, missingJournalPreservesRows: true, validEmptyClearsRows: true,
-    restoredJournalRecovers: true, reload: true, artifactMetadata: true, pageExceptions: 0, mutationRequests: 0,
+    restoredJournalRecovers: true, reload: true, artifactMetadata: true, pageExceptions: 0, mutationRequests: 3,
+    unauthenticatedReadsDenied: true, fragmentClearedBeforeExchange: true, authenticatedDownload: true,
+    authenticatedFormUpload: true, uploadedJobRemainsUnexecuted: true, browserStorageEmpty: true,
+    logoutRevokesReadsAndDownloads: true, testOnlyFetchGuard: 'reject session POST if fragment remains',
     workflowAdmitted: false, testOwnedFixtureEdits: ['status set to analyzing after startup', 'journal removed, emptied and restored'],
     finalJobInputArtifactBytesUnchanged: true, finalJournalMatchesOriginal: true };
 }

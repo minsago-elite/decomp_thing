@@ -443,6 +443,7 @@ private fun page(title: String, body: String, script: String = ""): String = """
   <nav class="topbar"><a href="/" class="brand"><span>de</span> decomp_engine</a><span class="build-label">LOCAL WORKBENCH</span></nav>
 $body
   <footer class="shell"><span>decomp_engine</span><span>Evidence over assumptions.</span></footer>
+  <script>$LEGACY_SESSION_SCRIPT</script>
   ${if (script.isBlank()) "" else "<script>$script</script>"}
 </body>
 </html>

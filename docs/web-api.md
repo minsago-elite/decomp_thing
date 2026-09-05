@@ -452,3 +452,18 @@ configured limits, lifecycle, source and server sample time. Borrowed executors
 report unavailable metrics without zero values. Runtime uses the session-time
 snapshot; it neither polls these counts nor infers workflow availability from
 capacity. See [scheduler summary and verification](web-scheduler-summary.md).
+
+## Legacy session migration
+
+Legacy pages, JSON routes and downloads now require the local session described in
+`web-trust.md`. Use the CLI's `/login#bootstrap=…` handoff or exchange its token via
+`POST /api/v1/session` with exact Origin and JSON content type. The response supplies the
+session cookie and in-memory CSRF token. Legacy-only `GET /api/v1/session/csrf` restores the
+same `session` envelope under the cookie on reload. It rejects query parameters, negotiates
+JSON and is no-store. `DELETE /api/v1/session` requires cookie, exact Origin and CSRF.
+
+Legacy upload/explore/reconstruct requests require `X-CSRF-Token` and the session cookie in
+addition to exact Origin. Upload is multipart; explore/reconstruct are JSON POSTs. Browser
+forms supply these through their session adapter. There is no automatic mutation retry.
+This supersedes earlier descriptions of unauthenticated legacy routes; it does not change
+their existing unversioned job/event payloads or add durable workflow capabilities.

@@ -37,6 +37,7 @@ import kotlin.test.assertNotEquals
 import kotlin.test.assertTrue
 
 class UploadServerTest {
+    private val sessions = java.util.IdentityHashMap<UploadServer, Map<String, String>>()
     private val followingClient = java.net.http.HttpClient.newBuilder().followRedirects(java.net.http.HttpClient.Redirect.NORMAL).build()
     private val directClient = java.net.http.HttpClient.newHttpClient()
 
@@ -70,8 +71,10 @@ class UploadServerTest {
                 assertEquals(403, missing.statusCode())
                 assertTrue(missing.body().contains("Mutations require the exact application origin."))
             }
-            assertEquals(200, transportRequest("GET", "/api/jobs/$id", mapOf("Origin" to origin)).statusCode())
-            assertEquals(200, transportRequest("GET", "/api/jobs/$id").statusCode())
+            assertEquals(401, transportRequest("GET", "/api/jobs/$id").statusCode())
+            val cookie = mapOf("Cookie" to checkNotNull(sessions[server]).getValue("Cookie"))
+            assertEquals(200, transportRequest("GET", "/api/jobs/$id", cookie + ("Origin" to origin)).statusCode())
+            assertEquals(200, transportRequest("GET", "/api/jobs/$id", cookie).statusCode())
             assertContentEquals(original, record.readBytes())
             assertEquals(0, executions)
         }
@@ -1166,7 +1169,8 @@ class UploadServerTest {
         val origin = "http://127.0.0.1:${server.serverPort}"
         val builder = java.net.http.HttpRequest.newBuilder(URI(origin + path)).method(method,
             if (body.isEmpty()) java.net.http.HttpRequest.BodyPublishers.noBody() else java.net.http.HttpRequest.BodyPublishers.ofByteArray(body))
-        val effectiveHeaders = (if (method == "POST") mapOf("Origin" to origin) else emptyMap()) + headers
+        val effectiveHeaders = sessions.getOrPut(server) { legacySessionHeaders(server) } +
+            (if (method == "POST") mapOf("Origin" to origin, "Content-Type" to "application/json") else emptyMap()) + headers
         effectiveHeaders.forEach { (key, value) -> builder.header(key, value) }
         val response = (if (followRedirects) followingClient else directClient).send(builder.build(), java.net.http.HttpResponse.BodyHandlers.ofByteArray())
         fun header(name: String): String? = response.headers().firstValue(name).orElse(null)

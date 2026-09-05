@@ -65,10 +65,14 @@ class WebShutdownTest {
                     analyzer = JobAnalyzer { _, _ -> error("recovery must not rerun a job") })
                 try {
                     restarted.start()
+                    val cookie = legacySessionHeaders(restarted).getValue("Cookie")
                     ids.take(2).forEach { id ->
                         // Recovery projects interruption without overwriting historical legacy metadata.
                         assertEquals("analyzing", store.get(id).status)
-                        val response = URI("http://127.0.0.1:${restarted.serverPort}/api/jobs/$id").toURL().openStream().use {
+                        val connection = URI("http://127.0.0.1:${restarted.serverPort}/api/jobs/$id").toURL().openConnection().apply {
+                            setRequestProperty("Cookie", cookie)
+                        }
+                        val response = connection.getInputStream().use {
                             kotlinx.serialization.json.Json.parseToJsonElement(it.readBytes().decodeToString())
                         } as kotlinx.serialization.json.JsonObject
                         assertEquals(kotlinx.serialization.json.JsonPrimitive("failed"), response["status"])
@@ -112,10 +116,13 @@ object WebShutdownFixture {
         val store = JobStore(root.resolve("jobs"))
         val ids = (0..2).map { store.createFromUpload("benign-$it.elf", elfFixture()).id }
         val client = java.net.http.HttpClient.newHttpClient()
+        val sessionHeaders = legacySessionHeaders(server)
         ids.forEachIndexed { index, id ->
             val origin = "http://127.0.0.1:${server.serverPort}"
             val request = java.net.http.HttpRequest.newBuilder(URI("$origin/jobs/$id/explore"))
-                .header("Origin", origin).timeout(java.time.Duration.ofSeconds(5))
+                .header("Origin", origin).header("Content-Type", "application/json")
+                .header("Cookie", sessionHeaders.getValue("Cookie")).header("X-CSRF-Token", sessionHeaders.getValue("X-CSRF-Token"))
+                .timeout(java.time.Duration.ofSeconds(5))
                 .POST(java.net.http.HttpRequest.BodyPublishers.noBody()).build()
             check(client.send(request, java.net.http.HttpResponse.BodyHandlers.discarding()).statusCode() == 303)
             if (index == 1) check(started.await(5, TimeUnit.SECONDS))

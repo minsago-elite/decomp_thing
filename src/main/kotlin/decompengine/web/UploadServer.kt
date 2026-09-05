@@ -207,6 +207,7 @@ class UploadServer(
     private val archiveEvidence = WebArchiveEvidence(store, sourceEvidence, jobs::readArtifact)
     private val access = LocalWebAccess(LocalWebAccessConfiguration(webOrigin(host, server.address.port), basePath,
         setOfNotNull(devFrontendOrigin)))
+    private val legacySessions = WebSessionController(access)
     private val api = spaAssets?.let { WebApiController(access, it, jobs) }
     private val requestExecutor = ThreadPoolExecutor(
         16, 16, 0, TimeUnit.MILLISECONDS, ArrayBlockingQueue(64),
@@ -221,7 +222,6 @@ class UploadServer(
 
     /** The CLI calls this explicitly; no HTTP route can issue a local link. */
     fun issueBrowserBootstrap(): WebBootstrapToken {
-        check(spaAssets != null) { "Browser sessions require --ui spa" }
         return access.issueBootstrap()
     }
 
@@ -271,19 +271,37 @@ class UploadServer(
         val segments = exchange.requestURI.path.split('/').filter(String::isNotBlank)
         try {
             access.authorize(exchange, WebEndpointPolicy.transport(setOf("GET", "HEAD", "POST", "PUT", "PATCH", "DELETE", "OPTIONS")))
-            val legacyMutation = exchange.requestMethod == "POST" &&
-                (segments == listOf("jobs") || (segments.size == 3 && segments[0] == "jobs" &&
-                    segments[2] in setOf("explore", "reconstruct")))
-            if (legacyMutation && exchange.requestHeaders.getFirst("Origin") == null) {
-                throw WebAccessDenied(403, "ORIGIN_DENIED", "Mutations require the exact application origin.")
+            if (exchange.requestURI.rawPath == "/api/v1/session") {
+                legacySessions.handle(exchange)
+                return
+            }
+            if (exchange.requestURI.rawPath == "/api/v1/session/csrf") {
+                val credentials = access.csrfForSession(exchange)
+                requireNoWebApiQuery(exchange)
+                requireJsonAccept(exchange)
+                sendWebApiResponse(exchange, 200, "session", buildJsonObject {
+                    put("csrfToken", credentials.csrfToken)
+                    put("expiresAt", credentials.session.expiresAt.toString())
+                })
+                return
             }
             val legacyJsonRead = segments.size in 3..4 && segments.take(2) == listOf("api", "jobs") &&
                 (segments.size == 3 || segments[3] == "events")
-            if (legacyJsonRead) {
-                if (exchange.requestMethod != "GET") throw WebAccessDenied(405, "METHOD_NOT_ALLOWED",
-                    "The endpoint does not support this method.", setOf("GET"))
-                requireJsonAccept(exchange)
+            val publicPage = exchange.requestURI.rawPath in setOf("/login", "/assets/app.css")
+            val mutation = exchange.requestMethod in setOf("POST", "PUT", "PATCH", "DELETE")
+            val policy = when {
+                publicPage -> WebEndpointPolicy.publicRead()
+                legacyJsonRead -> WebEndpointPolicy.privateRead()
+                mutation && segments == listOf("jobs") && exchange.requestMethod == "POST" -> WebEndpointPolicy.multipartUpload()
+                mutation -> WebEndpointPolicy.jsonMutation(exchange.requestMethod)
+                else -> WebEndpointPolicy.privateRead(allowHead = true)
             }
+            access.authorize(exchange, policy)
+            if (exchange.requestURI.rawPath == "/login") {
+                exchange.sendHtml(200, renderLegacyLogin())
+                return
+            }
+            if (legacyJsonRead) requireJsonAccept(exchange)
             when {
                 exchange.requestMethod == "GET" && segments.isEmpty() ->
                     renderJobDashboard(exchange)
@@ -315,9 +333,17 @@ class UploadServer(
                 }
             }
         } catch (exception: WebAccessDenied) {
-            if (exception.allowedMethods.isNotEmpty()) {
-                exchange.responseHeaders.set("Allow", exception.allowedMethods.sorted().joinToString(", "))
+            if (exchange.requestURI.rawPath.startsWith("/api/v1/")) {
+                access.sendDenied(exchange, exception)
+                return
             }
+            access.deniedHeaders(exchange, exception)
+            if (exception.status == 401 && !exchange.requestURI.path.startsWith("/api/") &&
+                exchange.requestMethod in setOf("GET", "HEAD")) {
+                exchange.sendHtml(401, renderLegacyLogin())
+                return
+            }
+
             legacyError(exchange, exception.status, exception.code, exception.message ?: "The request was invalid.") {
                 renderErrorPage(exception.status, "Invalid request", exception.message ?: "The request was invalid.")
             }
