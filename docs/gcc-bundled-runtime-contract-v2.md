@@ -90,3 +90,9 @@ but closes its file handles; its returned paths are not retained execution
 authority. The full cc1/lto1 forced-interruption/resume equivalence proof remains
 separately required by #137. These implementation boundaries do not substitute
 for passing required provisioned lifecycle tests or complete either issue.
+
+The separate [prepared-operation coordinator](gcc-bundled-prepared-operations.md)
+now composes retained inputs, an external journal and a genuine dedicated-ext4
+lease before deriving an inode-bound v2 definition. Its opaque prepared owner
+also has no START or release transition; the historical capacity-only BOOT
+controller is not promoted into execution authority by this addition.

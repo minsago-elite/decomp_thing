@@ -67,11 +67,22 @@ internal class GccBundledGhidraRetainedRuntime private constructor(
     companion object {
         fun open(definition: GccCompilerEngineValidatedContainmentDefinition): GccBundledGhidraRetainedRuntime {
             val runtime = requireNotNull(definition.bundledRuntime) { "retained Ghidra runtime requires a bundled v2 definition" }
+            return open(runtime, definition.artifacts, listOf(definition.outputLease.path))
+        }
+
+        fun open(
+            runtime: GccBundledGhidraRuntime,
+            artifacts: List<GccCompilerEngineContainmentArtifactIdentity>,
+            excludedRoots: List<Path>,
+        ): GccBundledGhidraRetainedRuntime {
+            require(excludedRoots.size in 1..16 && excludedRoots.all { it.isAbsolute && it.normalize() == it }) {
+                "bundled Ghidra excluded roots are not bounded canonical paths"
+            }
             val deployment = GccBundledGhidraDeploymentReference.open()
             var descriptor: LinuxDescriptor? = null
             try {
-                deployment.reference.requireCandidate(runtime, definition.artifacts)
-                require(!runtime.root.startsWith(definition.outputLease.path) && !definition.outputLease.path.startsWith(runtime.root)) {
+                deployment.reference.requireCandidate(runtime, artifacts)
+                require(excludedRoots.none { runtime.root.startsWith(it) || it.startsWith(runtime.root) }) {
                     "bundled Ghidra runtime overlaps writable output"
                 }
                 val selected = openTrustedRuntimeRoot(runtime.root)
