@@ -53,6 +53,13 @@ diagnostic unresolved lists can be empty while this population remains completel
 unassessed. Neither successful compilation nor a legacy `recovered` label upgrades
 it. Previously written reports remain unchanged until regenerated or re-audited.
 
+New human unresolved reports state the complete unassessed entity count and its
+function/global/type breakdown before presenting diagnostic or implementation
+findings. An empty historical extraction-status list is labelled as such. The
+reconstruction CLI reports unassessed recovery accuracy, and the source-file view
+states that scored recovery evidence is unavailable there. These presentations do
+not turn the retained heuristics or accepted implementation flags into assessments.
+
 Live benign authored programs verify bundled Java-API Ghidra full/planning export,
 canonical streaming parity and deterministic resume. Planning resume also checks
 that historical exporter state is refused and prior bytes are preserved. This is

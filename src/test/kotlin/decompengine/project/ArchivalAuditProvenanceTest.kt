@@ -35,6 +35,9 @@ class ArchivalAuditProvenanceTest {
         // for the separate scored-assessment population.
         assertTrue(audit.unresolvedEntityIds.isEmpty())
         assertTrue(audit.moduleCompilationEvidenceProblems.isEmpty())
+        val human = project.resolve("UNRESOLVED.md").readText()
+        assertTrue("Recovery assessment: unassessed for 2 entities" in human)
+        assertTrue("historical extraction-status list has no unresolved entries" in human)
     }
 
     @Test
