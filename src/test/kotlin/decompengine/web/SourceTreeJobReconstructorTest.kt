@@ -22,6 +22,19 @@ import kotlin.test.assertTrue
 
 class SourceTreeJobReconstructorTest {
     @Test
+    fun `busy display journal does not replace reconstruction configuration failure`() {
+        val store = JobStore(createTempDirectory("web-reconstruction-busy-"))
+        val job = store.createFromUpload("fixture.elf", elfFixture())
+        val reports = store.reportsDirectory(job.id)
+        decompengine.jobs.AgentProgressJournal(reports, "reconstruction").use {
+            val failure = assertFailsWith<IllegalArgumentException> {
+                SourceTreeJobReconstructor(emptyMap()).reconstruct(job, reports)
+            }
+            assertTrue(failure.message.orEmpty().contains("ACP_CONFIG_FILE is required"))
+        }
+    }
+
+    @Test
     fun `web reconstruction defaults to ACP and never infers legacy use from credentials`() {
         val failure = assertFailsWith<IllegalArgumentException> {
             selectWebReconstructionStrategy(

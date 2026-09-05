@@ -72,8 +72,14 @@ its `displayOnly` flag and counters must never substitute for complete required 
 
 Focused verification:
 
+Reconstruction CLI and browser jobs own their journal through a best-effort adapter. A busy
+writer, persistence failure, or phase-observer exception disables that display and emits a fixed
+diagnostic without replacing the workflow result or original exception. Closing still attempts to
+release the writer after a display failure and preserves the calling thread's interruption state.
+
 ```sh
 ./gradlew test --tests decompengine.jobs.AgentProgressJournalTest \
+  --tests decompengine.jobs.BestEffortProgressJournalTest \
   --tests decompengine.web.UploadServerTest \
   --tests decompengine.web.SourceTreeJobReconstructorTest
 ```

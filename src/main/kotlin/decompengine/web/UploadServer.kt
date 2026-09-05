@@ -12,6 +12,7 @@ import decompengine.jobs.Job
 import decompengine.jobs.JobStore
 import decompengine.jobs.JobStoreException
 import decompengine.jobs.AgentProgressJournal
+import decompengine.jobs.BestEffortProgressJournal
 import decompengine.agent.AgentWorkflowProgress
 import decompengine.agent.AgentWorkflowPhase
 import decompengine.jobs.toJson
@@ -60,7 +61,7 @@ class SourceTreeJobReconstructor(
     private val environment: Map<String, String> = System.getenv(),
 ) : JobReconstructor {
     override fun reconstruct(job: Job, reportsDir: Path) {
-        AgentProgressJournal(reportsDir, "reconstruction", environment.values).use { progress ->
+        BestEffortProgressJournal(reportsDir, "reconstruction", environment.values).use { progress ->
             try {
                 val strategy = selectWebReconstructionStrategy(environment, progress)
                 java.nio.file.Files.createDirectories(reportsDir)
