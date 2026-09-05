@@ -3083,16 +3083,61 @@ class FullTreeFunctionObservationIsolatedFixtureRunnerTest {
         if (controlGroup.isEmpty()) return true
         check(controlGroup == receipt.controlGroup) { "refusing to clean a replacement cgroup path" }
         val cgroup = testCgroupPath(receipt.unitName, controlGroup)
-        LinuxFilesystemSyscalls.openRoot(cgroup).use { descriptor ->
+        return requireCleanupCgroupSameOrAbsent(cgroup, receipt.cgroupDevice, receipt.cgroupInode, receipt.cgroupMountId)
+    }
+
+    private fun requireCleanupCgroupSameOrAbsent(path: Path, device: Long, inode: Long, mountId: Long): Boolean {
+        val selected = LinuxFilesystemSyscalls.openAbsolutePathOrNull(path) ?: return false
+        selected.use { descriptor ->
             val identity = LinuxFilesystemSyscalls.identity(descriptor.fd)
             check(
-                identity.key.device == receipt.cgroupDevice &&
-                    identity.key.inode == receipt.cgroupInode &&
-                    identity.mountId == receipt.cgroupMountId
+                identity.isDirectory && !identity.isSymbolicLink &&
+                    identity.key.device == device && identity.key.inode == inode && identity.mountId == mountId
             ) { "refusing to clean a replacement cgroup identity" }
         }
         return true
     }
+
+    @Test
+    fun `test cleanup stops name mutations when the observed cgroup has disappeared`() =
+        inControlTemporaryDirectory { root ->
+            val cgroup = privateDirectory(root.resolve("disappearing-cgroup"))
+            LinuxFilesystemSyscalls.openRoot(cgroup).use { retained ->
+                val identity = retained.identity
+                assertTrue(requireCleanupCgroupSameOrAbsent(cgroup, identity.key.device, identity.key.inode, identity.mountId))
+                Files.delete(cgroup)
+                var mutations = 0
+                runGuardedObservationSystemdCleanupFallback(
+                    unitName = "test.scope",
+                    beforeCommand = {
+                        requireCleanupCgroupSameOrAbsent(cgroup, identity.key.device, identity.key.inode, identity.mountId)
+                    },
+                    command = { _, _ -> mutations += 1 },
+                )
+                assertEquals(0, mutations)
+            }
+        }
+
+    @Test
+    fun `test cleanup still rejects replaced and linked cgroup targets`() =
+        inControlTemporaryDirectory { root ->
+            val cgroup = privateDirectory(root.resolve("original-cgroup"))
+            LinuxFilesystemSyscalls.openRoot(cgroup).use { retained ->
+                val identity = retained.identity
+                val moved = root.resolve("retained-cgroup")
+                Files.move(cgroup, moved)
+                Files.createDirectory(cgroup)
+                assertFailsWith<IllegalStateException> {
+                    requireCleanupCgroupSameOrAbsent(cgroup, identity.key.device, identity.key.inode, identity.mountId)
+                }
+                Files.delete(cgroup)
+                Files.createSymbolicLink(cgroup, moved)
+                assertFailsWith<IllegalStateException> {
+                    requireCleanupCgroupSameOrAbsent(cgroup, identity.key.device, identity.key.inode, identity.mountId)
+                }
+                Unit
+            }
+        }
 
     private fun readTestObservationUnitSnapshot(
         configuration: FullTreeFunctionObservationIsolationConfiguration,
