@@ -1,7 +1,7 @@
 import { useEffect, useMemo, useState } from 'preact/hooks';
 import { createApiClient, ApiClientError } from '../api/client';
 import type { Job as JobData } from '../api/generated';
-import { appPath } from '../app/paths';
+import { appPath, runPath } from '../app/paths';
 import type { BrowserSession } from '../session/session';
 import { useSession } from '../session/useSession';
 import { JobSummary } from '../jobs/JobSummary';
@@ -33,6 +33,7 @@ function JobDetails({ jobId, basePath }: { jobId: string; basePath: string }) {
     {job && <>
       <h2>{job.displayFilename}</h2><p>Job identity: <code>{job.jobId}</code></p>
       <JobSummary job={job} />
+      {job.latestRunId && <a href={runPath(basePath, job.jobId, job.latestRunId)}>Open latest recorded attempt</a>}
       <h3>Binary metadata</h3>
       <dl class="job-facts">
         <dt>Format</dt><dd>{job.binary.format}</dd><dt>Machine</dt><dd>{job.binary.machine}</dd>
@@ -40,7 +41,7 @@ function JobDetails({ jobId, basePath }: { jobId: string; basePath: string }) {
         <dt>OS ABI</dt><dd>{job.binary.osAbi}</dd><dt>Entry address</dt><dd><code>{job.binary.entryPoint}</code></dd>
       </dl>
       <p>Completion is an attempt outcome. Only the recorded accepted revision identifies accepted reconstruction.</p>
-      <p>Earlier-attempt browsing and evidence views are not connected yet. No input digest is reported by this API.</p>
+      <p>The attempt page retains its exact identity as newer work is recorded. Evidence views are not connected yet. No input digest is reported by this API.</p>
       <a href={appPath(basePath, '/runtime')}>View reported workflow availability</a>
     </>}
   </>;

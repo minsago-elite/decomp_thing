@@ -599,6 +599,16 @@ try {
     report.dashboard.jobDeepLinkAndRefresh = true;
     report.dashboard.missingJobExplained = true;
     report.requests.job = jobTab.requests;
+    const runTab = await makeTarget();
+    await cdp.call('Page.navigate', { url: browserOrigin + absentJobPath + '/runs/run_missing' }, runTab.sessionId);
+    await ready(runTab, `document.querySelector('h1')?.textContent === 'Workflow attempt' && document.body.innerText.includes('This attempt is unavailable for this job.')`, 'pinned attempt deep link');
+    await cdp.call('Page.reload', {}, runTab.sessionId);
+    await ready(runTab, `document.title === 'Workflow attempt · Decomp Workbench' && document.body.innerText.includes('This attempt is unavailable for this job.')`, 'pinned attempt reload');
+    assert.equal(await evaluate(runTab, `[...document.querySelectorAll('a')].find(a => a.textContent === 'Return to job overview')?.getAttribute('href')`), absentJobPath);
+    assert.ok(runTab.requests.every(request => ['GET', 'HEAD'].includes(request.method)));
+    assert.deepEqual(runTab.exceptions, []);
+    report.attemptRoute = { directLink: true, reload: true, missingExplained: true, exactJobReturn: true, mutationRequests: 0 };
+    report.requests.attempt = runTab.requests;
 
     if (values.mode === 'upload') {
       report.upload = await qualifyUpload({ makeTarget, cdp, evaluate, ready, browserOrigin, data });

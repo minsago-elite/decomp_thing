@@ -33,7 +33,7 @@ class UploadServerSpaTest {
         )
         server.start()
         try {
-            for (path in listOf("/", "/upload", "/runtime", "/runtime?capability=fixture", "/jobs/" + "a".repeat(32))) {
+            for (path in listOf("/", "/upload", "/jobs/" + "a".repeat(32) + "/runs/run_example_1", "/runtime", "/runtime?capability=fixture", "/jobs/" + "a".repeat(32))) {
                 val response = request(server, path)
                 assertEquals(200, response.statusCode())
                 assertTrue(response.body().contains("/assets/ui/assets/index-"))

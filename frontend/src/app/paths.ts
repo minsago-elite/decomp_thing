@@ -139,3 +139,8 @@ export function jobPath(basePath: string, jobId: string): string {
   if (!/^[0-9a-f]{32}$/.test(jobId)) return invalidUrl();
   return `${normalizeBasePath(basePath)}/jobs/${jobId}`;
 }
+
+export function runPath(basePath: string, jobId: string, runId: string): string {
+  if (!ID.test(runId)) return invalidUrl();
+  return `${jobPath(basePath, jobId)}/runs/${runId}`;
+}

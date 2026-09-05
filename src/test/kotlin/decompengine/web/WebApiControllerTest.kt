@@ -28,6 +28,7 @@ class WebApiControllerTest {
     fun `startup recovery projects durable identity while bootstrap keeps production workflow capability unavailable`() {
         val root = createTempDirectory("web-durable-projection-")
         val job = JobStore(root).createFromUpload("inert.elf", elfFixture())
+        val otherJob = JobStore(root).createFromUpload("other.elf", elfFixture())
         val run = decompengine.jobs.WorkflowAttemptStore.open(root).use { owner ->
             val original = (owner.inspect(job.id) as decompengine.jobs.WorkflowJobInspection.Available).snapshot
             owner.create(job.id, original.version, decompengine.jobs.NewWorkflowAttempt(
@@ -49,6 +50,18 @@ class WebApiControllerTest {
             assertEquals(run.runId, body.getValue("latestRunId").jsonPrimitive.content)
             assertEquals("interrupted", body.getValue("status").jsonPrimitive.content)
             assertEquals("null", body.getValue("acceptedRevisionId").toString())
+            assertError(request(server, "/workbench/api/v1/jobs/${otherJob.id}/runs/${run.runId}", headers = mapOf("Cookie" to cookie)), 404, "NOT_FOUND")
+            val runPath = "/workbench/api/v1/jobs/${job.id}/runs/${run.runId}"
+            assertError(request(server, runPath), 401, "SESSION_REQUIRED")
+            val attempt = assertEnvelope(request(server, runPath, headers = mapOf("Cookie" to cookie)), 200, "run")
+            assertEquals(run.runId, attempt.getValue("runId").jsonPrimitive.content)
+            assertEquals(job.id, attempt.getValue("jobId").jsonPrimitive.content)
+            assertEquals("interrupted", attempt.getValue("state").jsonPrimitive.content)
+            assertEquals("not-evaluated", attempt.getValue("acceptance").jsonPrimitive.content)
+            assertEquals("PROCESS_INTERRUPTED", attempt.getValue("terminalReason").jsonPrimitive.content)
+            assertEquals("null", attempt.getValue("usage").toString())
+            assertError(request(server, "$runPath?latest=true", headers = mapOf("Cookie" to cookie)), 400, "VALIDATION_FAILED")
+            assertError(request(server, "/workbench/api/v1/jobs/${job.id}/runs/missing", headers = mapOf("Cookie" to cookie)), 404, "NOT_FOUND")
             val bootstrap = assertEnvelope(request(server, "/workbench/api/v1/bootstrap", headers = mapOf("Cookie" to cookie)), 200, "bootstrap")
             assertTrue(bootstrap.getValue("capabilities").toString().contains("PREVIEW_UNAVAILABLE"))
             assertError(request(server, "/workbench/api/v1/jobs/${job.id}/runs", "POST", "{}", mapOf(

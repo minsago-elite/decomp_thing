@@ -29,7 +29,7 @@ internal class WebApiController(
         val path = exchange.requestURI.rawPath
         if (!path.startsWith("${assets.basePath}api/")) return false
         val resource = path.removePrefix(prefix)
-        if (!path.startsWith(prefix) || !(resource in setOf("session", "bootstrap", "jobs") || resource.matches(Regex("(?:jobs|uploads)/[^/]+")))) {
+        if (!path.startsWith(prefix) || !(resource in setOf("session", "bootstrap", "jobs") || resource.matches(Regex("(?:jobs|uploads)/[^/]+|jobs/[^/]+/runs/[^/]+")))) {
             try {
                 val policy = if (exchange.requestMethod in setOf("POST", "PUT", "PATCH", "DELETE")) {
                     WebEndpointPolicy.jsonMutation(exchange.requestMethod)
@@ -99,6 +99,12 @@ internal class WebApiController(
                         put("totalBytes", progress.totalBytes?.let { JsonPrimitive(it.toString()) } ?: JsonNull)
                         put("state", progress.state); put("jobId", progress.jobId?.let { JsonPrimitive(it) } ?: JsonNull)
                     })
+                }
+                resource.matches(Regex("jobs/[^/]+/runs/[^/]+")) -> {
+                    access.authorize(exchange, WebEndpointPolicy.privateRead())
+                    requireNoQuery(exchange); requireJsonAccept(exchange)
+                    val parts = resource.split('/')
+                    send(exchange, 200, "run", webRun(jobs.getAttempt(parts[1], parts[3])))
                 }
                 resource == "jobs" -> {
                     val session = checkNotNull(access.authorize(exchange, WebEndpointPolicy.privateRead()))
