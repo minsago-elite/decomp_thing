@@ -296,11 +296,7 @@ class UploadServer(
                         require(it.matches(Regex("runId=[A-Za-z0-9][A-Za-z0-9_-]{0,127}"))) { "Only an exact workflow attempt selection is supported" }
                         it.removePrefix("runId=")
                     }
-                    val bytes = jobs.readProgressJournal(job.id, runId)
-                    val snapshot = try { legacyProgressPresentation(AgentProgressJournal.decode(bytes)) } catch (_: Exception) {
-                        throw WebJobServiceException("PROGRESS_UNAVAILABLE", "The retained progress journal is unavailable.")
-                    }
-                    exchange.sendJson(200, snapshot.toString())
+                    exchange.sendJson(200, readLegacyProgress(job.id, runId).toString())
                 }
                 else -> legacyError(exchange, 404, "NOT_FOUND", "The requested route does not exist.") {
                     renderErrorPage(404, "Page not found", "The requested route does not exist.")
@@ -423,11 +419,20 @@ class UploadServer(
         diagnosticRedactor.text(failure.message ?: fallback, maximumCharacters = 480)
 
     /** A queued operation can be claimed once, either by a worker or by shutdown. */
+    private fun readLegacyProgress(jobId: String, runId: String?): kotlinx.serialization.json.JsonObject {
+        val bytes = jobs.readProgressJournal(jobId, runId)
+        return try { legacyProgressPresentation(AgentProgressJournal.decode(bytes)) } catch (_: Exception) {
+            throw WebJobServiceException("PROGRESS_UNAVAILABLE", "The retained progress journal is unavailable.")
+        }
+    }
+
     private fun handleJob(exchange: HttpExchange, jobId: String) {
         val view = jobs.presentation(jobId)
         val source = runCatching { archiveEvidence.read(jobId, reportPrefix = view.reports.artifactPrefix).source }
             .recoverCatching { sourceEvidence.read(jobId, view.reports.artifactPrefix).view() }
-        exchange.sendHtml(200, renderJob(view.job, view.reports, view.diagnostics, source.getOrNull(), source.isFailure))
+        val progress = runCatching { readLegacyProgress(jobId, view.reports.runId) }.getOrNull()
+        exchange.sendHtml(200, renderJob(view.job, view.reports, view.diagnostics, source.getOrNull(), source.isFailure,
+            progressSnapshot = progress))
     }
 
     private fun handleSource(exchange: HttpExchange, jobId: String, relativePath: String) {

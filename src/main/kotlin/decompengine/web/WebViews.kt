@@ -1,7 +1,6 @@
 package decompengine.web
 
 import decompengine.jobs.Job
-import decompengine.jobs.AgentProgressJournal
 import decompengine.jobs.toJson
 import kotlinx.serialization.json.Json
 import kotlinx.serialization.json.JsonArray
@@ -71,7 +70,8 @@ fun renderDashboard(jobs: List<Job>, diagnostics: List<WebJobDiagnostic> = empty
 
 fun renderJob(job: Job, reportContext: WebReportContext? = null,
     diagnostics: List<decompengine.jobs.WorkflowStoreDiagnostic> = emptyList(),
-    sourceTree: SourceTreeView? = null, sourceTreeUnavailable: Boolean = false): String {
+    sourceTree: SourceTreeView? = null, sourceTreeUnavailable: Boolean = false,
+    progressSnapshot: JsonObject? = null): String {
     val reports = reportsFor(job, reportContext)
     val active = job.status in setOf("queued", "analyzing")
     val metadata = job.metadata.toJson().entries.joinToString("") { (key, value) ->
@@ -114,7 +114,10 @@ fun renderJob(job: Job, reportContext: WebReportContext? = null,
                 list.append(item);
               }
               document.querySelector('#agent-event-gap').textContent = snapshot.truncated
-                ? 'Earlier events were omitted from this bounded view. Inspect the invocation receipts for retained evidence.' : '';
+                ? 'Earlier events were omitted from this bounded view. Inspect the invocation receipts for retained evidence.'
+                : snapshot.events.length === 0 ? 'The retained journal currently contains no events.' : '';
+            } else {
+              document.querySelector('#agent-event-gap').textContent = 'Retained progress is unavailable. Missing data does not establish an empty history.';
             }
             const response = await fetch('/api/jobs/${job.id}', {cache: 'no-store'});
             if (!response.ok) return;
@@ -169,7 +172,7 @@ fun renderJob(job: Job, reportContext: WebReportContext? = null,
             </div>
             ${renderExploration(job, reports)}
             ${renderReconstructionProgress(job, reports)}
-            ${renderAgentProgress(reports)}
+            ${renderAgentProgress(progressSnapshot)}
             ${sourceTree?.let { renderSourceTree(job, it, reports) }.orEmpty()}
             ${if (sourceTreeUnavailable) "<section class=\"panel\"><p>Source-tree evidence is unavailable or has not been generated for this revision.</p></section>" else ""}
             ${renderRepairHistory(job, reports)}
@@ -180,8 +183,7 @@ fun renderJob(job: Job, reportContext: WebReportContext? = null,
     )
 }
 
-private fun renderAgentProgress(reports: WebReportContext): String {
-    val snapshot = runCatching { AgentProgressJournal.read(reports.reportsDirectory)?.let(::legacyProgressPresentation) }.getOrNull()
+private fun renderAgentProgress(snapshot: JsonObject?): String {
     val events = snapshot?.get("events")?.jsonArray.orEmpty().takeLast(30)
     val rows = events.joinToString("") { item ->
         val event = item.jsonObject
@@ -200,8 +202,12 @@ private fun renderAgentProgress(reports: WebReportContext): String {
             .filter(String::isNotBlank).joinToString(" · ")
         "<li>${summary.escapeHtml()}</li>"
     }
-    val gap = if (snapshot?.get("truncated")?.toString() == "true")
-        "Earlier events were omitted from this bounded view. Inspect the invocation receipts for retained evidence." else ""
+    val gap = when {
+        snapshot == null -> "Retained progress is unavailable. Missing data does not establish an empty history."
+        snapshot["truncated"]?.toString() == "true" -> "Earlier events were omitted from this bounded view. Inspect the invocation receipts for retained evidence."
+        events.isEmpty() -> "The retained journal currently contains no events."
+        else -> ""
+    }
     return """
         <section class="panel agent-progress" aria-labelledby="agent-progress-title">
           <h2 id="agent-progress-title">Agent progress</h2>

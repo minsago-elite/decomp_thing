@@ -460,3 +460,21 @@ the application PATH and confirmed cleanup. Chrome used test-only `--no-sandbox`
 No uploaded binary, native analysis or live agent ran. This covers the embedded SPA on the
 recorded Linux/Chrome environment; legacy-browser automation, other browsers, certified public
 messages and complete classification of retained metadata remain outside this evidence.
+
+## Legacy HTML progress service boundary
+
+The legacy job controller now obtains a projected snapshot through the same bounded service
+read and privacy mapper as the legacy JSON route. `renderJob` accepts that snapshot explicitly;
+its progress renderer no longer opens `agent-progress.json`. Callers that do not supply a
+snapshot get an unavailable-progress label, even if a journal happens to exist beside the job.
+Missing, malformed or oversized journals leave the job page usable and clearly state that
+missing data does not establish empty history. A valid zero-event journal has a distinct
+retained-empty message. Polling errors retain displayed rows and replace the status message
+with unavailable progress; a successful subsequent response can replace that state.
+
+HTTP tests check unavailable and valid-empty HTML alongside JSON and byte preservation. A
+renderer regression supplies a snapshot differing from the on-disk journal and verifies only
+the supplied data appears; an omitted snapshot does not trigger an implicit read. This removes
+the progress-specific direct-read gap from the D2 audit. Other legacy exploration/repair HTML
+report reads and the legacy session boundary remain migration work. Browser execution of the
+legacy polling script is not covered by this JVM verification.

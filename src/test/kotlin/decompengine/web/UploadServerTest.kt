@@ -399,6 +399,24 @@ class UploadServerTest {
     }
 
     @Test
+    fun `HTML progress renders only the supplied snapshot rather than reopening the journal`() = withServer { server, root ->
+        val id = uploadedJobId(server)
+        val reports = root.resolve(id).resolve("reports").createDirectories()
+        val snapshot = Json.parseToJsonElement("""{"schemaVersion":1,"displayOnly":true,"nextSequence":1,"queueDropped":0,"historyDropped":0,"truncated":false,"events":[{"sequence":0,"kind":"workflow_phase","phase":"supplied_snapshot_phase"}]}""").jsonObject
+        val path = reports.resolve(decompengine.jobs.AgentProgressJournal.FILE_NAME)
+        path.writeText(snapshot.toString().replace("supplied_snapshot_phase", "stored_snapshot_phase"))
+        val before = path.readBytes()
+        val job = decompengine.jobs.JobStore(root).get(id)
+        val supplied = renderJob(job, progressSnapshot = snapshot)
+        assertTrue(supplied.contains("supplied_snapshot_phase"))
+        assertTrue(!supplied.contains("stored_snapshot_phase"))
+        val absent = renderJob(job)
+        assertTrue(absent.contains("Retained progress is unavailable"))
+        assertTrue(!absent.contains("stored_snapshot_phase"))
+        assertContentEquals(before, path.readBytes())
+    }
+
+    @Test
     fun `legacy progress distinguishes unavailable journals from a persisted empty journal`() = withServer { server, root ->
         val id = uploadedJobId(server)
         val record = root.resolve(id).resolve("job.json")
@@ -414,6 +432,10 @@ class UploadServerTest {
             listOf("PRIVATE_", root.toString(), "nextSequence", "events").forEach {
                 assertTrue(!response.body.decodeToString().contains(it), it)
             }
+            val page = request(server, "GET", "/jobs/$id")
+            assertEquals(200, page.status)
+            assertTrue(page.body.decodeToString().contains("Retained progress is unavailable"))
+            assertTrue(!page.body.decodeToString().contains("PRIVATE_"))
             assertContentEquals(original, record.readBytes())
         }
         unavailable()
@@ -430,6 +452,9 @@ class UploadServerTest {
         val response = request(server, "GET", "/api/jobs/$id/events")
         assertEquals(200, response.status)
         assertEquals(Json.parseToJsonElement(empty), Json.parseToJsonElement(response.body.decodeToString()))
+        val emptyPage = request(server, "GET", "/jobs/$id")
+        assertTrue(emptyPage.body.decodeToString().contains("The retained journal currently contains no events."))
+        assertTrue(!emptyPage.body.decodeToString().contains("Retained progress is unavailable"))
         assertEquals(empty, journal.readBytes().decodeToString())
         assertContentEquals(original, record.readBytes())
     }
