@@ -7,6 +7,7 @@ import { createServer as createHttpServer } from 'node:http';
 import { fileURLToPath } from 'node:url';
 import { parseArgs } from 'node:util';
 import { qualifyUpload, qualifyUploadFailures, qualifyMeasuredUpload } from './packaged-browser-upload.mjs';
+import { seedHistory, qualifyHistory } from './packaged-browser-history.mjs';
 import { qualifyUpgrade } from './packaged-browser-upgrade.mjs';
 
 // Test driver only: the application is launched with a separate Node-free PATH.
@@ -24,8 +25,8 @@ const { values } = parseArgs({ options: {
   help: { type: 'boolean', default: false },
 } });
 if (values.help) {
-  console.log('Usage: node scripts/check-packaged-web-browser.mjs --archive /absolute/distribution.zip --chrome /absolute/chrome --java-home /absolute/jdk [--mode public|session|upload|proxy|upgrade] [--previous-archive /absolute/previous.zip] [--work-parent /absolute/scratch] [--keep-workdir] [--python /absolute/python3] [--no-sandbox]');
-  console.log('public: packaged home/Runtime/recovery; session: public plus local session journey; upload: session plus inert upload and lost-response retry; proxy: real Vite HMR and session journey against packaged JVM; upgrade: previous JVM to current JVM on one origin with an old tab.');
+  console.log('Usage: node scripts/check-packaged-web-browser.mjs --archive /absolute/distribution.zip --chrome /absolute/chrome --java-home /absolute/jdk [--mode public|session|upload|history|proxy|upgrade] [--previous-archive /absolute/previous.zip] [--work-parent /absolute/scratch] [--keep-workdir] [--python /absolute/python3] [--no-sandbox]');
+  console.log('public: packaged home/Runtime/recovery; session: public plus local session journey; upload: session plus inert upload and lost-response retry; history: session plus preseeded inert multi-page attempts; proxy: real Vite HMR and session journey against packaged JVM; upgrade: previous JVM to current JVM on one origin with an old tab.');
   console.log('upgrade requires --previous-archive and distinct manifest builds with the old Runtime chunk absent from --archive. Its previous extraction is always removed before the current extraction, even with --keep-workdir.');
   console.log('Reports/screenshots stay in build/. Owned extraction/profile/socket directories are removed after confirmed shutdown unless --keep-workdir is set. Proxy requires npm ci --ignore-scripts under the pinned Node beforehand.');
   process.exit(0);
@@ -37,7 +38,7 @@ for (const option of ['archive', 'chrome', 'java-home', 'python']) {
   assert.ok(values[option] && isAbsolute(values[option]), `--${option} must name an absolute existing path; see --help`);
   await fs.access(values[option]);
 }
-assert.ok(['public', 'session', 'upload', 'proxy', 'upgrade'].includes(values.mode), '--mode must be public, session, upload, proxy or upgrade');
+assert.ok(['public', 'session', 'upload', 'history', 'proxy', 'upgrade'].includes(values.mode), '--mode must be public, session, upload, history, proxy or upgrade');
 if (values.mode === 'upgrade') {
   assert.ok(values['previous-archive'] && isAbsolute(values['previous-archive']), 'upgrade requires --previous-archive as an absolute existing ZIP path');
   await fs.access(values['previous-archive']);
@@ -292,6 +293,7 @@ try {
   let installation = await prepareArchive(values.mode === 'upgrade' ? values['previous-archive'] : archive);
   recordInstallation(installation);
   const { manifest, data } = installation;
+  const historyFixture = values.mode === 'history' ? await seedHistory(data) : null;
   let developmentPort;
   let browserOrigin;
   if (values.mode === 'proxy') {
@@ -421,7 +423,7 @@ try {
     report.requests.upgrade = tab.requests;
     report.jobDataCreated = false;
   }
-  if (values.mode === 'public' || values.mode === 'session' || values.mode === 'upload') {
+  if (values.mode === 'public' || values.mode === 'session' || values.mode === 'upload' || values.mode === 'history') {
     const identityExpression = `(() => ({ buildId: document.querySelector('meta[name="decomp-ui-build"]')?.content, applicationVersion: document.querySelector('meta[name="decomp-application-version"]')?.content, page: location.pathname, text: document.body.innerText }))()`;
     const home = await makeTarget();
     await cdp.call('Page.navigate', { url: `${origin}/nested/` }, home.sessionId);
@@ -500,7 +502,7 @@ try {
     assert.ok(allRequests.every((entry) => ['GET', 'HEAD'].includes(entry.method)), 'Navigation/recovery sent a mutation');
     assert.ok(allRequests.every((entry) => entry.url.startsWith(origin + '/')), 'Browser fetched an external dependency');
     assert.deepEqual(recovery.exceptions, []);
-    assert.equal(await fs.stat(data).then(() => true, () => false), false, 'Public SPA browsing created job data');
+    assert.equal(await fs.stat(data).then(() => true, () => false), !!historyFixture, 'Public SPA browsing changed job-root existence');
     report.recovery = { interceptedLazyChunk: runtimeAsset.path, simulatedStatus: 404, warningCount: warning.notices, observationSeconds: 5, automaticReloads: 0, automaticChunkRetries: 0, explicitReloadDocumentRequests: 1, recoveredRuntime: true, mutationRequests: 0, noticeTitleWithinViewport: true };
     report.jobDataCreated = false;
     report.requests = { normal: home.requests, recovery: recovery.requests };
@@ -521,7 +523,7 @@ try {
     report.requests = {};
   }
 
-  if (values.mode === 'session' || values.mode === 'upload' || values.mode === 'proxy') {
+  if (values.mode === 'session' || values.mode === 'upload' || values.mode === 'history' || values.mode === 'proxy') {
     const bootstrapUrl = await waitFor(() => applicationOutput.split(/\s+/).find((part) => part.startsWith(browserOrigin + '/nested/#bootstrap=')), 'local bootstrap handoff');
     const token = new URL(bootstrapUrl).hash.slice('#bootstrap='.length);
     sensitiveValues.push(token);
@@ -549,7 +551,7 @@ try {
       assert.equal(apiProof.buildId, manifest.buildId);
       report.backendBootstrap = apiProof;
     }
-    await ready(authenticated, `document.body.innerText.includes('No uploaded jobs yet.')`, 'empty persistent job library');
+    await ready(authenticated, `document.body.innerText.includes('${historyFixture ? 'synthetic-history.elf' : 'No uploaded jobs yet.'}')`, 'persistent job library');
     await evaluate(authenticated, `(() => {
       const field = [...document.querySelectorAll('label')].find(label => label.textContent.startsWith('Filename search')).querySelector('input');
       field.value = 'absent fixture'; field.dispatchEvent(new Event('input', { bubbles: true }));
@@ -560,9 +562,9 @@ try {
     await cdp.call('Page.reload', {}, authenticated.sessionId);
     await ready(authenticated, `document.body.innerText.includes('Local session connected.') && document.body.innerText.includes('No jobs match these filters.')`, 'saved job filters after reload');
     await evaluate(authenticated, `[...document.querySelectorAll('button')].find(button => button.textContent === 'Reset filters').click()`);
-    await ready(authenticated, `document.body.innerText.includes('No uploaded jobs yet.')`, 'reset job library');
+    await ready(authenticated, `document.body.innerText.includes('${historyFixture ? 'synthetic-history.elf' : 'No uploaded jobs yet.'}')`, 'reset job library');
     assert.equal(await evaluate(authenticated, 'location.search'), '');
-    report.dashboard = { emptyLibrary: true, noMatches: true, filtersSurviveReload: true, resetFilters: true };
+    report.dashboard = { emptyLibrary: !historyFixture, populatedLibrary: !!historyFixture, noMatches: true, filtersSurviveReload: true, resetFilters: true };
     const firstRequests = await evaluate(authenticated, 'window.__sessionTestRequests');
     assert.ok(firstRequests.length >= 2);
     assert.ok(firstRequests.every((request) => request.fragmentEmpty));
@@ -616,6 +618,10 @@ try {
     assert.ok(runTab.requests.every(request => ['GET', 'HEAD'].includes(request.method)));
     report.attemptHistory = { navigation: true, directReload: true, missingExplained: true, mutationRequests: 0 };
 
+    if (historyFixture) {
+      report.populatedHistory = await qualifyHistory({ fixture: historyFixture, makeTarget, cdp, evaluate, ready, browserOrigin });
+      report.jobDataCreated = true;
+    }
     if (values.mode === 'upload') {
       report.upload = await qualifyUpload({ makeTarget, cdp, evaluate, ready, browserOrigin, data });
       report.uploadFailures = await qualifyUploadFailures({ makeTarget, cdp, evaluate, ready, browserOrigin, data });
@@ -640,8 +646,8 @@ try {
     assert.equal(await evaluate(authenticated, 'localStorage.length + sessionStorage.length'), 0);
     assert.ok(authenticated.requests.every((request) => request.url.startsWith(browserOrigin + '/')));
     assert.ok(authenticated.requests.every((request) => ['GET', 'HEAD'].includes(request.method) || request.url === browserOrigin + '/nested/api/v1/session'));
-    assert.equal(await fs.stat(data).then(() => true, () => false), values.mode === 'upload');
-    report.session = { authenticated: true, cookie: { httpOnly: true, sameSite: 'Strict', path: '/nested/', secure: false }, fragmentRemovedBeforeFetch: true, restoredAfterReload: true, explicitLogoutRequests: 1, successfulExchangeRequests: 1, consumedLinkRequests: 1, automaticMutationRetries: 0, storageEntries: 0, installationUnchanged: true, jobDataCreated: values.mode === 'upload' };
+    assert.equal(await fs.stat(data).then(() => true, () => false), values.mode === 'upload' || values.mode === 'history');
+    report.session = { authenticated: true, cookie: { httpOnly: true, sameSite: 'Strict', path: '/nested/', secure: false }, fragmentRemovedBeforeFetch: true, restoredAfterReload: true, explicitLogoutRequests: 1, successfulExchangeRequests: 1, consumedLinkRequests: 1, automaticMutationRetries: 0, storageEntries: 0, installationUnchanged: true, jobDataCreated: values.mode === 'upload' || values.mode === 'history' };
     report.requests.authenticated = authenticated.requests;
   }
 

@@ -91,3 +91,29 @@ checks also passed. [Retained history report](evidence/web-attempt-history-20260
 Pinned Chrome used test-only --no-sandbox. Populated multi-page history in an actual
 packaged browser remains unqualified; bounded populated behavior is covered by the
 JVM and component fixtures described above.
+
+
+## Populated packaged history qualification
+
+The `history` mode of `scripts/check-packaged-web-browser.mjs` now seeds one
+synthetic ELF-header job with 55 terminal attempts before launching the installed
+JVM. The test-only generator lives in `scripts/packaged-browser-history.mjs`, is
+not shipped as a production workflow, and refuses an existing destination root.
+Run IDs, timestamps, outcomes, limits and usage are deterministic. The required
+stored binary path is derived only inside the disposable test installation's data
+root. No user binaries, providers or execution adapters participate.
+
+The real browser and HTTP service traverse 50 then 5 exact identities, restore the
+second-page cursor after reload, open and reload an earlier completed candidate,
+and follow its previous interrupted attempt. The page preserves unsigned maximum
+usage as `18446744073709551615` and distinguishes null usage and unaccepted output.
+Every recorded attempt has no accepted reference; this does not test accepted
+publication attestation. All three retained fixture files and the job directory's
+entry set remain unchanged after browsing, and all view requests are GET/HEAD.
+
+[Retained passed report](evidence/web-populated-history-20260905.json) supersedes
+the earlier populated-history coverage limitation. It also includes session,
+asset-recovery and missing-route checks. Pinned Chrome used test-only --no-sandbox.
+This is packaged integration coverage with inert persisted fixtures, distinct from
+mock transport tests and from live workflow execution. Evidence/source/artifact
+navigation, active history changes and broader fixture families remain outstanding.
