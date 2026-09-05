@@ -93,6 +93,28 @@ requested reference. Daemon, permission, unsupported-platform/API, and unknown f
 indeterminate and abort with bounded escaped diagnostics, including during derived-image cleanup.
 An unsuccessful inspect command alone never proves absence.
 
+Image lookup uses one bounded response containing `Id`, `Os`, `Architecture`, and `Variant`.
+It accepts only the expected image ID with `linux`, `amd64`, and an empty variant; temporary-tag
+identity checks bind the same response to the retained base ID. The test client does not request
+`image inspect --platform`: the hosted
+[Ubuntu image 20260831.293.1 manifest](https://github.com/actions/runner-images/blob/ubuntu24/20260831.293/images/ubuntu/Ubuntu2404-Readme.md)
+ships Docker 28.0.4, whose
+[image-inspect command does not implement that option](https://github.com/docker/cli/blob/v28.0.4/cli/command/image/inspect.go).
+Build and run commands still require `--platform=linux/amd64`, and the derived worker's complete
+inspect response still passes the existing strict image ID, platform, rootfs, and configuration
+projection before execution. This compatibility change does not replace platform verification
+with a daemon default or weaken missing-image classification.
+
+The template deliberately uses the typed Go field `.ID`, not the JSON key `.Id`.
+Docker 28.0.4's [template inspector](https://github.com/docker/cli/blob/v28.0.4/cli/command/inspect/inspector.go)
+first formats the typed response and falls back to a raw JSON map with missing-key errors only
+when typed formatting fails. Its
+[pinned response type](https://github.com/moby/moby/blob/v28.0.4/api/types/image/image_inspect.go)
+declares `ID` with JSON name `Id`, and declares `Variant` as a string omitted from JSON when empty.
+Using `.Id` would force that fallback and then fail on an absent `Variant`. The typed `.ID`, `.Os`,
+and `.Architecture` selectors plus `{{if .Variant}}{{.Variant}}{{end}}` retain a genuinely empty
+variant without accepting a sentinel such as `<no value>`; nonempty variants still fail parsing.
+
 That extra probe-JAR mount, fixture shape, direct `docker run`, and entry-point override are an
 explicit test overlay. They prove that the exact production-staged image contains a working hosted
 Clang/LLD and Kotlin/JNA runtime path, but they are not the fixed inner-worker invocation, a

@@ -142,7 +142,11 @@ class LlvmBehaviorHostedWorkerImageLiveIntegrationTest {
             }
             assertEquals(
                 imageId,
-                parseLiveWorkerImageId(reference, LiveDockerCommandResult(0, "$imageId\n".toByteArray(), byteArrayOf())),
+                parseLiveWorkerImageId(
+                    reference,
+                    LiveDockerCommandResult(0, "$imageId\tlinux\tamd64\t\n".toByteArray(), byteArrayOf()),
+                    expectedImageId = imageId,
+                ),
             )
             val invalidAbsence = listOf(
                 LiveDockerCommandResult(2, byteArrayOf(), missing),
@@ -185,12 +189,15 @@ class LlvmBehaviorHostedWorkerImageLiveIntegrationTest {
     @Test
     fun `Docker image inspect rejects malformed success and bounds escaped failure diagnostics`() {
         val imageId = "sha256:${"3".repeat(64)}"
+        val validProjection = "$imageId\tlinux\tamd64\t\n"
         val invalidResults = listOf(
             LiveDockerCommandResult(0, byteArrayOf(), byteArrayOf()),
             LiveDockerCommandResult(0, imageId.toByteArray(), byteArrayOf()),
             LiveDockerCommandResult(0, "$imageId\n$imageId\n".toByteArray(), byteArrayOf()),
+            LiveDockerCommandResult(0, validProjection.dropLast(1).toByteArray(), byteArrayOf()),
+            LiveDockerCommandResult(0, "$validProjection$validProjection".toByteArray(), byteArrayOf()),
             LiveDockerCommandResult(0, byteArrayOf(0xff.toByte()), byteArrayOf()),
-            LiveDockerCommandResult(0, "$imageId\n".toByteArray(), "warning\n".toByteArray()),
+            LiveDockerCommandResult(0, validProjection.toByteArray(), "warning\n".toByteArray()),
         )
         for (result in invalidResults) {
             assertFailsWith<IllegalStateException> { parseLiveWorkerImageId(imageId, result) }
@@ -206,6 +213,63 @@ class LlvmBehaviorHostedWorkerImageLiveIntegrationTest {
         assertFalse(message.contains("omitted diagnostic tail"))
         assertFalse(message.any { it.code < 0x20 || it.code == 0x7f })
         assertTrue(message.length <= MAXIMUM_IMAGE_INSPECT_DIAGNOSTIC_BYTES * 8 + 512)
+    }
+
+    @Test
+    fun `Docker image lookup binds the exact expected ID and platform in one response`() {
+        val imageId = "sha256:${"4".repeat(64)}"
+        val wrongId = "sha256:${"5".repeat(64)}"
+        val tag = LiveWorkerImageTemporaryBaseTagPlan.create(imageId).reference
+        val invalidPlatforms = listOf(
+            "$imageId\twindows\tamd64\t\n",
+            "$imageId\tlinux\tarm64\t\n",
+            "$imageId\tlinux\tamd64\tv3\n",
+            "$imageId\tlinux\tamd64\t<no value>\n",
+            "$imageId\tlinux\tamd64\tnull\n",
+            "$imageId\tlinux\tamd64\n",
+            "$imageId\tlinux\tamd64\t\textra\n",
+        )
+        for (reference in listOf(imageId, tag)) {
+            for (output in invalidPlatforms + "$wrongId\tlinux\tamd64\t\n") {
+                assertFailsWith<IllegalStateException> {
+                    parseLiveWorkerImageId(
+                        reference,
+                        LiveDockerCommandResult(0, output.toByteArray(), byteArrayOf()),
+                        expectedImageId = imageId,
+                    )
+                }
+            }
+        }
+        assertFailsWith<IllegalStateException> {
+            parseLiveWorkerImageId(
+                imageId,
+                LiveDockerCommandResult(0, "$wrongId\tlinux\tamd64\t\n".toByteArray(), byteArrayOf()),
+            )
+        }
+        for (expectedImageId in listOf(null, wrongId)) {
+            assertFailsWith<IllegalStateException> {
+                parseLiveWorkerImageId(
+                    imageId,
+                    LiveDockerCommandResult(0, "$wrongId\tlinux\tamd64\t\n".toByteArray(), byteArrayOf()),
+                    expectedImageId,
+                )
+            }
+        }
+    }
+
+    @Test
+    fun `Docker image lookup uses Docker 28 compatible inspection without platform selection`() {
+        val imageId = "sha256:${"6".repeat(64)}"
+        assertEquals(
+            listOf(
+                "image",
+                "inspect",
+                "--format={{.ID}}\t{{.Os}}\t{{.Architecture}}\t{{if .Variant}}{{.Variant}}{{end}}",
+                imageId,
+            ),
+            liveWorkerImageIdentityInspectArguments(imageId),
+        )
+        assertFalse(liveWorkerImageIdentityInspectArguments(imageId).any { it.startsWith("--platform") })
     }
 
     @Test
@@ -277,7 +341,7 @@ class LlvmBehaviorHostedWorkerImageLiveIntegrationTest {
                 assertEquals(owner.deterministicTarSha256, sha256(tar))
                 val retainedImageId = checkNotNull(imageId)
                 val inspect = docker.execute(
-                    listOf("image", "inspect", "--platform=linux/amd64", retainedImageId),
+                    listOf("image", "inspect", retainedImageId),
                     INSPECT_TIMEOUT,
                     MAXIMUM_INSPECT_BYTES,
                 )
@@ -792,25 +856,22 @@ private class LiveWorkerImageDockerClient(
     }
 
     private fun requireImageReferenceResolves(reference: String, expectedImageId: String, label: String) {
-        val observed = inspectImageIdOrNull(reference)
+        val observed = inspectImageIdOrNull(reference, expectedImageId)
             ?: throw IllegalStateException("$label is unavailable")
         check(observed == expectedImageId) { "$label resolved to a different image ID" }
     }
 
-    private fun inspectImageIdOrNull(reference: String): String? {
+    private fun inspectImageIdOrNull(
+        reference: String,
+        expectedImageId: String? = reference.takeIf { it.matches(IMAGE_ID) },
+    ): String? {
         val result = execute(
-            listOf(
-                "image",
-                "inspect",
-                "--platform=linux/amd64",
-                "--format={{.Id}}",
-                reference,
-            ),
+            liveWorkerImageIdentityInspectArguments(reference),
             CLEANUP_TIMEOUT,
             MAXIMUM_CLEANUP_OUTPUT_BYTES,
             requireSuccess = false,
         )
-        return parseLiveWorkerImageId(reference, result)
+        return parseLiveWorkerImageId(reference, result, expectedImageId)
     }
 
     private fun requireTagAbsent(reference: String, label: String) {
@@ -837,7 +898,6 @@ private class LiveWorkerImageDockerClient(
             listOf(
                 "image",
                 "inspect",
-                "--platform=linux/amd64",
                 "--format={{json .RepoTags}}",
                 reference,
             ),
@@ -1003,8 +1063,23 @@ private data class LiveDockerCommandResult(
     val stderr: ByteArray,
 )
 
-private fun parseLiveWorkerImageId(reference: String, result: LiveDockerCommandResult): String? {
+private fun liveWorkerImageIdentityInspectArguments(reference: String): List<String> {
     require(reference.matches(IMAGE_ID) || reference.matches(TEMPORARY_BASE_TAG))
+    return listOf(
+        "image",
+        "inspect",
+        "--format={{.ID}}\t{{.Os}}\t{{.Architecture}}\t{{if .Variant}}{{.Variant}}{{end}}",
+        reference,
+    )
+}
+
+private fun parseLiveWorkerImageId(
+    reference: String,
+    result: LiveDockerCommandResult,
+    expectedImageId: String? = reference.takeIf { it.matches(IMAGE_ID) },
+): String? {
+    require(reference.matches(IMAGE_ID) || reference.matches(TEMPORARY_BASE_TAG))
+    require(expectedImageId == null || expectedImageId.matches(IMAGE_ID))
     fun reject(reason: String): Nothing = throw IllegalStateException(
         "Docker image inspect for $reference $reason; exit=${result.exitCode}; " +
             "stdout=${result.stdout.imageInspectDiagnostic()}; stderr=${result.stderr.imageInspectDiagnostic()}",
@@ -1022,8 +1097,16 @@ private fun parseLiveWorkerImageId(reference: String, result: LiveDockerCommandR
     } catch (_: Exception) {
         reject("returned invalid UTF-8")
     }
-    if (!text.matches(IMAGE_ID_LINE)) reject("returned a malformed image ID")
-    return text.dropLast(1)
+    val projection = IMAGE_IDENTITY_LINE.matchEntire(text)
+        ?: reject("returned a malformed image identity or unsupported platform")
+    val observedImageId = projection.groupValues[1]
+    if (reference.matches(IMAGE_ID) && observedImageId != reference) {
+        reject("did not repeat the requested exact image ID")
+    }
+    if (expectedImageId != null && observedImageId != expectedImageId) {
+        reject("resolved to an unexpected image ID")
+    }
+    return observedImageId
 }
 
 private fun ByteArray.imageInspectDiagnostic(): String = buildString {
@@ -1083,7 +1166,7 @@ private const val IMAGE_ID_TEXT_MINIMUM_BYTES = 71L
 private const val IMAGE_ID_TEXT_MAXIMUM_BYTES = 72
 private const val MAXIMUM_IMAGE_INSPECT_DIAGNOSTIC_BYTES = 4096
 private val IMAGE_ID = Regex("sha256:[0-9a-f]{64}")
-private val IMAGE_ID_LINE = Regex("sha256:[0-9a-f]{64}\\n")
+private val IMAGE_IDENTITY_LINE = Regex("(sha256:[0-9a-f]{64})\\tlinux\\tamd64\\t\\n")
 private val TEMPORARY_BASE_TAG = Regex(
     "$TEMPORARY_BASE_TAG_REPOSITORY:[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-" +
         "[0-9a-f]{4}-[0-9a-f]{12}",
