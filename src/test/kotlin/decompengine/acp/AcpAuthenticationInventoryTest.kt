@@ -6,6 +6,30 @@ import kotlin.test.*
 import kotlinx.serialization.json.*
 
 class AcpAuthenticationInventoryTest {
+    @Test fun `numeric payload policy applies at the exact limit to metadata and unknown variants`() {
+        // Preserve the token through SDK serialization so this tests the post-SDK admission boundary.
+        fun methods(token: String): List<AuthMethod> {
+            val payload = buildJsonObject { put("number", JsonUnquotedLiteral(token)) }
+            return listOf(
+                AuthMethod.AgentAuth(AuthMethodId("agent"), "name", null, payload),
+                AuthMethod.UnknownAuthMethod(AuthMethodId("future"), "name", null, "future", payload),
+            )
+        }
+        for (token in listOf("1".repeat(256), "-" + "1".repeat(255), "1.25")) {
+            for (method in methods(token)) {
+                assertEquals(1, AcpAuthenticationInventory.capture(listOf(method), emptyList()).methods.size)
+            }
+        }
+        for (token in listOf("1".repeat(257), "-" + "1".repeat(256), "1e309", "1e-310")) {
+            for (method in methods(token)) {
+                val failure = assertFailsWith<AcpAuthenticationInventoryFailure> {
+                    AcpAuthenticationInventory.capture(listOf(method), emptyList())
+                }
+                assertEquals("ACP authentication inventory exceeds its payload limits", failure.message)
+            }
+        }
+    }
+
     @Test fun `logout advertisement remains independent of methods and execution support`() {
         val absent = AcpAuthenticationInventory.capture(emptyList(), emptyList())
         val advertised = AcpAuthenticationInventory.capture(emptyList(), emptyList(), logoutAdvertised = true)
