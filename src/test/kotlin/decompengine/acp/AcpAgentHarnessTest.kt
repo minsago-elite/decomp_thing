@@ -360,6 +360,17 @@ class AcpAgentHarnessTest {
             }
 
             assertEquals(AgentFailureKind.CONFIGURATION, failure.failure.kind, case.label)
+            val advertisedPreview = when (case.label) {
+                "unknown model" -> "model-safe"
+                "unknown mode" -> "mode-safe"
+                "unknown option" -> "reasoning"
+                "unknown select value" -> "high"
+                else -> null
+            }
+            advertisedPreview?.let {
+                assertTrue(failure.failure.message.contains("Advertised choice previews:"), case.label)
+                assertTrue(failure.failure.message.contains(it), case.label)
+            }
             assertEquals("original artifact\n", fixture.source.readText(), case.label)
             assertTrue(events.isEmpty(), case.label)
             val invocation = assertIs<AcpInvocationEvidenceSnapshot>(failure.receipt?.providerEvidence)
