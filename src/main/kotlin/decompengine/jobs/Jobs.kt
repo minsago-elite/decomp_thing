@@ -23,8 +23,6 @@ import java.util.UUID
 import kotlin.io.path.createDirectories
 import kotlin.io.path.exists
 import kotlin.io.path.name
-import kotlin.io.path.readBytes
-import kotlin.io.path.readText
 import kotlin.io.path.isRegularFile
 import kotlin.io.path.writeBytes
 import kotlin.io.path.writeText
@@ -209,6 +207,15 @@ class JobStore(root: Path) {
             readStableRegularFile(root, "$jobId/$relativePath", maximumBytes)
         } catch (_: IOException) {
             throw JobStoreException("artifact is unavailable or its path changed")
+        }
+    }
+
+    internal fun readInput(jobId: String): StableRegularFile {
+        jobDirectory(jobId)
+        return try {
+            readStableRegularFile(root, "$jobId/input.elf", 32L * 1024 * 1024)
+        } catch (_: IOException) {
+            throw JobStoreException("job input is unavailable or its path changed")
         }
     }
 

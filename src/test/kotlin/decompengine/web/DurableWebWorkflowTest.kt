@@ -339,25 +339,39 @@ class DurableWebWorkflowTest {
         val job = store.createFromUpload("source.elf", elfFixture())
         service(store, listOf(adapter { context ->
             val tree = context.reportsDirectory.resolve("source-tree").createDirectories()
-            tree.resolve("source_tree_manifest.json").writeText("{\"files\":[]}")
-            tree.resolve("source.c").writeText("/* ${context.attempt.runId} */")
+            val relative = "src/modules/source.c"
+            val file = tree.resolve(relative)
+            file.parent.createDirectories()
+            file.writeText("/* ${context.attempt.runId} */")
+            val profile = decompengine.project.GeneratedCMakeReconstructionProfile.descriptor
+            val declaration = profile.layout.declarationForPath(relative)
+            fun digest(bytes: ByteArray) = java.security.MessageDigest.getInstance("SHA-256").digest(bytes).joinToString("") { "%02x".format(it) }
+            val manifest = decompengine.project.SourceTreeManifest(
+                profileId = profile.id, profileSha256 = profile.sha256, inputSha256 = digest(elfFixture()),
+                files = listOf(decompengine.project.GeneratedFileEvidence(path = relative, sha256 = digest(file.readBytes()),
+                    generator = "llm", entityIds = listOf("fn_1000"), acceptedImplementation = true,
+                    roles = declaration.roles, contentKind = declaration.contentKind)), unresolvedEntityIds = emptyList(),
+            )
+            tree.resolve("source_tree_manifest.json").writeText(manifest.toJson())
             DurableWebWorkflowOutcome.Completed()
         })).use { service ->
             service.initializeExistingStorage()
             val first = assertIs<DurableWebWorkflowAdmission.Started>(service.startDurable(job.id, version(service, job.id), DurableWebWorkflowRequest(WorkflowKind.RECONSTRUCT)))
             val old = service.reportContext(job.id, first.runId)
-            val before = renderJob(service.get(job.id), old)
+            val evidence = WebSourceEvidence(store, listOf(decompengine.project.GeneratedCMakeReconstructionProfile.descriptor), service::readArtifact)
+            val before = renderJob(service.get(job.id), old, sourceTree = evidence.read(job.id, old.artifactPrefix).view())
             assertTrue(before.contains("?runId=${first.runId}"))
-            assertTrue(before.contains("reports/runs/${first.runId}/source-tree/source.c"))
+            assertTrue(before.contains("/source/src/modules/source.c?runId=${first.runId}"))
             assertFalse(before.contains("action=\"/jobs/${job.id}/reconstruct\""))
             service.startDurable(job.id, version(service, job.id), DurableWebWorkflowRequest(WorkflowKind.RECONSTRUCT))
-            val source = service.resolveArtifact(job.id, "${old.artifactPrefix}/source-tree/source.c").readText()
+            val source = service.resolveArtifact(job.id, "${old.artifactPrefix}/source-tree/src/modules/source.c").readText()
             assertTrue(source.contains(first.runId))
-            val html = renderSourceFile(service.get(job.id), "source.c", source, old)
-            assertTrue(html.contains("reports/runs/${first.runId}/source-tree/source.c"))
+            assertEquals(source, evidence.read(job.id, old.artifactPrefix).text("src/modules/source.c"))
+            val html = renderSourceFile(service.get(job.id), "src/modules/source.c", source, old)
+            assertTrue(html.contains("reports/runs/${first.runId}/source-tree/src/modules/source.c"))
             assertEquals(job.binaryPath, service.get(job.id).binaryPath)
             val other = service.upload("other.elf", elfFixture())
-            assertFailsWith<WebJobServiceException> { service.resolveArtifact(other.id, "${old.artifactPrefix}/source-tree/source.c") }
+            assertFailsWith<WebJobServiceException> { service.resolveArtifact(other.id, "${old.artifactPrefix}/source-tree/src/modules/source.c") }
         }
     }
 

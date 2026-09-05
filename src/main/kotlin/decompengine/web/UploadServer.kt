@@ -1,5 +1,9 @@
 package decompengine.web
 
+import java.util.concurrent.ThreadPoolExecutor
+import java.util.concurrent.ScheduledThreadPoolExecutor
+import java.util.concurrent.TimeUnit
+
 import com.sun.net.httpserver.HttpExchange
 import com.sun.net.httpserver.HttpServer
 import decompengine.acp.AcpHarnessFactory
@@ -12,32 +16,26 @@ import decompengine.jobs.Job
 import decompengine.jobs.JobStore
 import decompengine.jobs.JobStoreException
 import decompengine.jobs.toJson
-import decompengine.oracle.core.OracleJson
-import decompengine.oracle.core.StrictJsonLimits
 import decompengine.project.ArchivalReconstructionService
 import decompengine.project.BoundedLlmModuleReconstructor
 import decompengine.project.EvidenceModuleReconstructor
 import decompengine.project.GhidraHeadlessProgramModelAnalyzer
 import decompengine.project.ModuleReconstructor
+import decompengine.project.GeneratedCMakeReconstructionProfile
+import decompengine.project.ReconstructionProfile
 import kotlinx.serialization.json.Json
 import kotlinx.serialization.json.JsonElement
 import kotlinx.serialization.json.JsonNull
 import kotlinx.serialization.json.JsonPrimitive
-import kotlinx.serialization.json.JsonObject
 import kotlinx.serialization.json.buildJsonObject
 import kotlinx.serialization.json.put
 import java.io.ByteArrayOutputStream
 import java.net.InetSocketAddress
 import java.net.URLDecoder
 import java.nio.charset.StandardCharsets
-import java.nio.ByteBuffer
 import java.nio.file.Path
 import java.util.concurrent.ArrayBlockingQueue
 import java.util.concurrent.Executor
-import java.util.concurrent.ThreadPoolExecutor
-import java.util.concurrent.ScheduledThreadPoolExecutor
-import java.util.concurrent.TimeUnit
-import kotlin.io.path.name
 import kotlin.io.path.pathString
 
 fun interface JobAnalyzer {
@@ -158,6 +156,7 @@ class UploadServer(
     uiMode: WebUiMode = WebUiMode.LEGACY,
     basePath: String = "/",
     devFrontendOrigin: String? = null,
+    sourceProfiles: List<ReconstructionProfile> = listOf(GeneratedCMakeReconstructionProfile.descriptor),
 ) {
     // Verify trusted application bytes before binding a listening socket.
     private val spaAssets = when (uiMode) {
@@ -178,7 +177,9 @@ class UploadServer(
         }
     }
     private val server = HttpServer.create(InetSocketAddress(host, port), 0)
-    private val jobs = WebJobService(JobStore(dataDir), analyzer, reconstructor, executor)
+    private val store = JobStore(dataDir)
+    private val jobs = WebJobService(store, analyzer, reconstructor, executor)
+    private val sourceEvidence = WebSourceEvidence(store, sourceProfiles, jobs::readArtifact)
     private val access = spaAssets?.let {
         LocalWebAccess(LocalWebAccessConfiguration(webOrigin(host, server.address.port), basePath,
             setOfNotNull(devFrontendOrigin)))
@@ -248,9 +249,7 @@ class UploadServer(
                     exchange.sendBytes(200, APP_CSS.toByteArray(), "text/css; charset=utf-8", cache = true)
                 exchange.requestMethod == "POST" && segments == listOf("jobs") -> handlePostJob(exchange)
                 exchange.requestMethod == "GET" && segments.size == 2 && segments[0] == "jobs" ->
-                    jobs.presentation(decode(segments[1])).let { view ->
-                        exchange.sendHtml(200, renderJob(view.job, view.reports, view.diagnostics))
-                    }
+                    handleJob(exchange, decode(segments[1]))
                 exchange.requestMethod == "POST" && segments.size == 3 && segments[0] == "jobs" && segments[2] == "explore" ->
                     handleExplore(exchange, decode(segments[1]))
                 exchange.requestMethod == "POST" && segments.size == 3 && segments[0] == "jobs" && segments[2] == "reconstruct" ->
@@ -353,32 +352,31 @@ class UploadServer(
         }
     }
 
+    private fun handleJob(exchange: HttpExchange, jobId: String) {
+        val view = jobs.presentation(jobId)
+        val source = runCatching { sourceEvidence.read(jobId, view.reports.artifactPrefix).view() }
+        exchange.sendHtml(200, renderJob(view.job, view.reports, view.diagnostics, source.getOrNull(), source.isFailure))
+    }
+
     private fun handleSource(exchange: HttpExchange, jobId: String, relativePath: String) {
         require(relativePath.isNotBlank()) { "source path must not be blank" }
         val normalized = relativePath.replace('\\', '/')
         require(!normalized.startsWith('/') && normalized.split('/').none { it.isBlank() || it == ".." || it == "." }) {
             "source path must remain inside the generated tree"
         }
-        require(normalized == "Makefile" || normalized.endsWith(".c") || normalized.endsWith(".h") ||
-            normalized.endsWith(".json") || normalized.endsWith(".md") || normalized.endsWith(".log")) {
-            "only generated text files may be viewed"
-        }
-        val query = exchange.requestURI.rawQuery
-        val runId = query?.let {
+        val runId = exchange.requestURI.rawQuery?.let {
             require(it.matches(Regex("runId=[A-Za-z0-9][A-Za-z0-9_-]{0,127}"))) { "Only an exact workflow attempt selection is supported" }
             it.removePrefix("runId=")
         }
         val context = jobs.reportContext(jobId, runId)
-        val source = jobs.readArtifact(jobId, "${context.artifactPrefix}/source-tree/$normalized", MAX_SOURCE_BYTES)
-        val text = try {
-            StandardCharsets.UTF_8.newDecoder().decode(ByteBuffer.wrap(source.bytes)).toString()
-        } catch (_: java.nio.charset.CharacterCodingException) {
-            throw IllegalArgumentException("source file is not valid UTF-8 text")
-        }
+        val source = sourceEvidence.read(jobId, context.artifactPrefix)
         exchange.sendHtml(200, renderSourceFile(
-            jobs.get(jobId), normalized, text, context,
-            readSourceMetadata(jobId, context, "source_tree_manifest.json"),
-            readSourceMetadata(jobId, context, "reports/confidence.json"),
+            jobs.get(jobId),
+            normalized,
+            source.text(normalized),
+            context,
+            source.manifestDocument,
+            source.confidence,
         ))
     }
 
@@ -389,11 +387,6 @@ class UploadServer(
         exchange.sendBytes(200, artifact.bytes, contentType(name))
     }
 
-    private fun readSourceMetadata(jobId: String, context: WebReportContext, relativePath: String): JsonObject? = runCatching {
-        val snapshot = jobs.readArtifact(jobId, "${context.artifactPrefix}/source-tree/$relativePath", MAX_SOURCE_METADATA_BYTES)
-        OracleJson.parse(snapshot.bytes, SOURCE_METADATA_LIMITS) as? JsonObject
-    }.getOrNull()
-
     private fun encodeJob(job: Job): String =
         Json.encodeToString(JsonElement.serializer(), job.toJson())
 
@@ -401,17 +394,7 @@ class UploadServer(
 
     private companion object {
         const val MAX_UPLOAD_BYTES = 32L * 1024 * 1024
-        const val MAX_SOURCE_BYTES = 4L * 1024 * 1024
         const val MAX_ARTIFACT_BYTES = 64L * 1024 * 1024
-        const val MAX_SOURCE_METADATA_BYTES = 1024L * 1024
-        val SOURCE_METADATA_LIMITS = StrictJsonLimits(
-            maximumInputBytes = MAX_SOURCE_METADATA_BYTES.toInt(),
-            maximumCanonicalBytes = MAX_SOURCE_METADATA_BYTES.toInt(),
-            maximumDepth = 32,
-            maximumNodes = 100_000,
-            maximumStringBytes = 64 * 1024,
-            maximumTotalStringBytes = MAX_SOURCE_METADATA_BYTES.toInt(),
-        )
     }
 }
 
