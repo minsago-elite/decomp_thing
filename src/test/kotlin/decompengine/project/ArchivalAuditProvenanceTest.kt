@@ -19,6 +19,32 @@ import kotlinx.serialization.json.jsonPrimitive
 
 class ArchivalAuditProvenanceTest {
     @Test
+    fun `accepted flags cannot hide missing or mismatched compiler evidence`() {
+        for (change in listOf("missing", "foreign-source", "failed", "foreign-command")) {
+            val project = fixture(accepted = true)
+            assertTrue(ArchivalProjectAuditor.audit(project).moduleCompilationEvidenceProblems.isEmpty())
+            val plan = Json.parseToJsonElement(project.resolve("reports/module_plan.json").readText()).jsonObject
+            val module = plan.getValue("modules").jsonArray.first().jsonObject
+            val id = module.getValue("id").jsonPrimitive.content
+            val path = "reports/modules/$id.json"
+            val checkpoint = Json.parseToJsonElement(project.resolve(path).readText()).jsonObject
+            val compilation = checkpoint.getValue("compilation").jsonObject
+            val changed = when (change) {
+                "missing" -> JsonObject(checkpoint.filterKeys { it != "compilation" })
+                "foreign-source" -> checkpoint.withField("compilation", compilation.withField("sourceSha256", JsonPrimitive("0".repeat(64))))
+                "failed" -> checkpoint.withField("compilation", compilation.withField("outcome", JsonPrimitive("failed")))
+                else -> checkpoint.withField("compilation", compilation.withField("command", JsonArray(listOf(JsonPrimitive("other-compiler")))))
+            }
+            writeBoundFile(project, path, changed.toString())
+            val audit = ArchivalProjectAuditor.audit(project)
+            assertEquals(setOf(id), audit.moduleCompilationEvidenceProblems.keys, change)
+            assertEquals(module.getValue("functionIds").jsonArray.map { it.jsonPrimitive.content }.sorted(), audit.unresolvedEntityIds, change)
+            val report = Json.parseToJsonElement(audit.toJson()).jsonObject
+            assertEquals(setOf(id), report.getValue("moduleCompilationEvidenceProblems").jsonObject.keys)
+        }
+    }
+
+    @Test
     fun `recovered model cannot hide evidence-only implementations even when unresolved list is omitted`() {
         val project = fixture()
         rewriteManifest(project) { it.withField("unresolvedImplementationIds", JsonArray(emptyList())) }
