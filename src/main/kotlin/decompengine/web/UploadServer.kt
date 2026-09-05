@@ -270,9 +270,30 @@ class UploadServer(
         }
     }
 
-    fun start() = synchronized(lifecycleLock) {
-        server.start()
-        started = true
+    fun start() {
+        var cleanupRequired = false
+        try {
+            synchronized(lifecycleLock) {
+                check(!started && !stopping) { "Web server cannot be started again" }
+                cleanupRequired = true
+                try {
+                    server.start()
+                    started = true
+                } catch (failure: Exception) {
+                    // Close admission before releasing the lock to perform failed-start cleanup.
+                    stopping = true
+                    throw failure
+                }
+            }
+        } catch (failure: Exception) {
+            // A queued handler may need lifecycleLock while the dispatcher is stopped.
+            // Unwind startup's outer lock before performing listener/worker cleanup.
+            if (cleanupRequired) {
+                try { stop() } catch (cleanup: Exception) { failure.addSuppressed(cleanup) }
+            }
+            throw failure
+        }
+    }
     }
 
     fun stop(delaySeconds: Int = 0) {
