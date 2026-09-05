@@ -11,5 +11,5 @@ class GeneratedCRepairRuntimeProvider : RepairRuntimeProfileProvider {
     override fun indexProfile(): RepairIndexProfile = GeneratedCRepairIndexProfile
 
     override fun createValidationStrategy(): RepairValidationStrategy =
-        GeneratedCRepairValidationStrategy(UnavailableGeneratedCRepairValidationBoundary)
+        GeneratedCRepairValidationStrategy(LinuxGeneratedCRepairValidationBoundary.create())
 }

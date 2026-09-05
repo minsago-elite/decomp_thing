@@ -1893,6 +1893,9 @@ private fun StringBuilder.appendSandboxLaunch(launch: AcpSandboxLaunchEvidence) 
     append(']')
     append(",\"workingDirectorySha256\":\"").append(launch.workingDirectorySha256).append('"')
     append(",\"mergeError\":").append(launch.mergeError)
+    launch.writableMountClosureSha256?.let {
+        append(",\"writableMountClosureSha256\":\"").append(it).append('"')
+    }
     append(",\"stagingRootsSha256\":\"").append(launch.stagingRootsSha256).append('"')
     append(",\"stagingRootCount\":").append(launch.stagingRootCount)
     append(",\"emptyDirectoriesSha256\":\"").append(launch.emptyDirectoriesSha256).append('"')
