@@ -1,0 +1,25 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<testsuite name="decompengine.web.LocalWebAccessTest" tests="19" skipped="0" failures="0" errors="0" timestamp="2026-09-05T17:45:27.224Z" hostname="whatsername" time="0.559">
+  <properties/>
+  <testcase name="slow session body never holds the authorization lock()" classname="decompengine.web.LocalWebAccessTest" time="0.01"/>
+  <testcase name="session parser rejects invalid Unicode and excessive nesting without consuming token()" classname="decompengine.web.LocalWebAccessTest" time="0.003"/>
+  <testcase name="session JSON escaping preserves decoded token identity()" classname="decompengine.web.LocalWebAccessTest" time="0.001"/>
+  <testcase name="cookie flags scope and secure transport are explicit()" classname="decompengine.web.LocalWebAccessTest" time="0.001"/>
+  <testcase name="bootstrap is single use and wrong origin cannot consume it()" classname="decompengine.web.LocalWebAccessTest" time="0.002"/>
+  <testcase name="concurrent bootstrap exchange admits exactly one session()" classname="decompengine.web.LocalWebAccessTest" time="0.002"/>
+  <testcase name="host origin aliases fetch metadata and forwarding combinations fail closed()" classname="decompengine.web.LocalWebAccessTest" time="0.003"/>
+  <testcase name="ambiguous cookies and noncanonical or missing tokens do not authorize()" classname="decompengine.web.LocalWebAccessTest" time="0.001"/>
+  <testcase name="private read mutation method and content type policies are distinct()" classname="decompengine.web.LocalWebAccessTest" time="0.004"/>
+  <testcase name="reload recovers stable per-session CSRF without accepting another session token()" classname="decompengine.web.LocalWebAccessTest" time="0.003"/>
+  <testcase name="valid JSON with invalid or incorrect token receives value or authentication denial()" classname="decompengine.web.LocalWebAccessTest" time="0.002"/>
+  <testcase name="transport preflight enforces boundary before methods without granting session authority()" classname="decompengine.web.LocalWebAccessTest" time="0.001"/>
+  <testcase name="real HTTP fetch reload SSE download and logout share one session boundary()" classname="decompengine.web.LocalWebAccessTest" time="0.437"/>
+  <testcase name="idle and absolute expiry use monotonic time and denied requests do not renew session()" classname="decompengine.web.LocalWebAccessTest" time="0.003"/>
+  <testcase name="reissuing bootstrap revokes old link and deadline is enforced at five minutes()" classname="decompengine.web.LocalWebAccessTest" time="0.001"/>
+  <testcase name="session quota is bounded and failed admission preserves bootstrap for explicit retry()" classname="decompengine.web.LocalWebAccessTest" time="0.003"/>
+  <testcase name="bootstrap body is bounded and duplicate unknown and malformed JSON are rejected()" classname="decompengine.web.LocalWebAccessTest" time="0.002"/>
+  <testcase name="logout explicit revocation and a new server all invalidate prior cookies()" classname="decompengine.web.LocalWebAccessTest" time="0.001"/>
+  <testcase name="configuration admits only explicitly canonical loopback origins()" classname="decompengine.web.LocalWebAccessTest" time="0.001"/>
+  <system-out><![CDATA[]]></system-out>
+  <system-err><![CDATA[]]></system-err>
+</testsuite>
