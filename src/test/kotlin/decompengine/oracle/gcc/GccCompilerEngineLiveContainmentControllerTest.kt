@@ -20,6 +20,8 @@ import java.nio.file.Path
 import java.nio.file.StandardOpenOption
 import java.nio.file.attribute.PosixFilePermissions
 import java.security.MessageDigest
+import java.time.Instant
+import java.util.concurrent.Executors
 import java.util.concurrent.TimeUnit
 import java.util.jar.JarFile
 import java.util.zip.CRC32
@@ -655,8 +657,19 @@ class GccCompilerEngineLiveContainmentControllerTest {
         withControllerRoot(useBuildFilesystem = true) { root ->
             assumeLiveBoundary()
             val fixture = createFixture(root, liveRuntime = true)
-            val owner = GccCompilerEngineLiveContainmentController.attachAtBoot(fixture.definitionPath)
+            val startedNanos = System.nanoTime()
+            val sinceEpochSeconds = Instant.now().epochSecond
+            val timings = mutableListOf<String>()
+            fun recordTiming(stage: String) {
+                timings += "$stage=${TimeUnit.NANOSECONDS.toMillis(System.nanoTime() - startedNanos)}ms"
+            }
+            var retainedOwner: GccCompilerEngineLiveAttachedAtBoot? = null
+            var primaryFailure: Throwable? = null
             try {
+                recordTiming("before attach")
+                val owner = GccCompilerEngineLiveContainmentController.attachAtBoot(fixture.definitionPath)
+                retainedOwner = owner
+                recordTiming("after attach")
                 assertEquals("kotlin-live-systemd-cgroup-boot-owner-v1", owner.authority)
                 assertFalse(owner.complete)
                 assertFalse(owner.releaseEligible)
@@ -671,7 +684,9 @@ class GccCompilerEngineLiveContainmentControllerTest {
                 // Regression for the closed-stdin bug: the keeper must still be live well after
                 // systemd-run has returned and the parent has closed the process stdin stream.
                 Thread.sleep(500L)
+                recordTiming("before first BOOT revalidation")
                 owner.requireCurrentAtBoot()
+                recordTiming("after first BOOT revalidation")
                 assertEquals(1, entryNames(fixture.analysisState).size)
                 assertFalse(findObservationCgroupsForUnit(owner.unitName).isEmpty())
 
@@ -696,7 +711,9 @@ class GccCompilerEngineLiveContainmentControllerTest {
                         genericOwner.receipt.deploymentClosureSha256,
                     )
                 }
+                recordTiming("before second BOOT revalidation")
                 owner.requireCurrentAtBoot()
+                recordTiming("after second BOOT revalidation")
 
                 // Losing the BOOT state must not revoke cleanup authority. Kill the exact
                 // descriptor-pinned keeper, prove liveness revalidation now fails, and continue
@@ -787,8 +804,30 @@ class GccCompilerEngineLiveContainmentControllerTest {
                 )
                 assertFailsWith<IllegalStateException> { owner.requireCurrentAtBoot() }
                 Unit
+            } catch (failure: Throwable) {
+                primaryFailure = failure
+                recordTiming("failure before retained-owner cleanup")
+                val journal = runCatching {
+                    boundedLiveUnitJournal(fixture.assessment.unitName, sinceEpochSeconds)
+                }.fold(
+                    onSuccess = { it },
+                    onFailure = { "journal snapshot unavailable: ${it.javaClass.name}: ${it.message.orEmpty().take(512)}" },
+                )
+                failure.addSuppressed(
+                    AssertionError(
+                        "GCC live BOOT diagnostics for ${fixture.assessment.unitName}: " +
+                            timings.joinToString(", ") + "\n$journal",
+                    ),
+                )
+                throw failure
             } finally {
-                owner.close()
+                try {
+                    retainedOwner?.close()
+                } catch (cleanupFailure: Throwable) {
+                    val primary = primaryFailure
+                    if (primary == null) throw cleanupFailure
+                    if (cleanupFailure !== primary) primary.addSuppressed(cleanupFailure)
+                }
             }
         }
 
@@ -1010,6 +1049,56 @@ class GccCompilerEngineLiveContainmentControllerTest {
             probe.waitFor(1L, TimeUnit.SECONDS)
         }
         assumeTrue(exited && probe.exitValue() == 0, "user-systemd manager is unavailable")
+    }
+
+    private fun boundedLiveUnitJournal(unitName: String, sinceEpochSeconds: Long): String {
+        require(unitName.length <= 255 && unitName.matches(Regex("decomp-gcc-[a-z0-9][a-z0-9._-]*-[0-9a-f]{32}\\.scope")))
+        check(!Thread.currentThread().isInterrupted) { "journal diagnostics cannot run on an interrupted thread" }
+        val uid = (Files.getAttribute(Path.of("/proc/self"), "unix:uid") as Number).toInt()
+        val runtime = Path.of("/run/user/$uid")
+        val process = ProcessBuilder(
+            "/usr/bin/journalctl", "--user", "--boot", "--no-pager", "--quiet",
+            "--output=short-monotonic", "--lines=80", "--since=@$sinceEpochSeconds", "--user-unit=$unitName",
+        ).redirectErrorStream(true).also { builder ->
+            builder.environment().clear()
+            builder.environment()["XDG_RUNTIME_DIR"] = runtime.toString()
+            builder.environment()["SYSTEMD_COLORS"] = "0"
+            builder.environment()["LANG"] = "C"
+        }.start()
+        val reader = Executors.newSingleThreadExecutor { action ->
+            Thread(action, "gcc-boot-journal-diagnostic").also { it.isDaemon = true }
+        }
+        var interrupted = false
+        try {
+            process.outputStream.close()
+            val deadline = System.nanoTime() + TimeUnit.SECONDS.toNanos(3L)
+            val output = reader.submit<ByteArray> {
+                process.inputStream.use { it.readNBytes(16_385) }
+            }.get(3L, TimeUnit.SECONDS)
+            val truncated = output.size > 16_384
+            if (truncated && process.isAlive) process.destroyForcibly()
+            check(process.waitFor(maxOf(0L, deadline - System.nanoTime()), TimeUnit.NANOSECONDS)) {
+                "exact-unit journal snapshot exceeded three seconds"
+            }
+            return "exact-unit journal exit=${process.exitValue()}, truncated=$truncated\n" +
+                output.copyOf(minOf(output.size, 16_384)).toString(Charsets.UTF_8)
+        } catch (failure: InterruptedException) {
+            interrupted = true
+            throw failure
+        } finally {
+            if (process.isAlive) process.destroyForcibly()
+            try {
+                process.waitFor(1L, TimeUnit.SECONDS)
+            } catch (_: InterruptedException) {
+                interrupted = true
+            } finally {
+                reader.shutdownNow()
+                runCatching { process.inputStream.close() }
+                runCatching { process.errorStream.close() }
+                runCatching { process.outputStream.close() }
+                if (interrupted) Thread.currentThread().interrupt()
+            }
+        }
     }
 
     private fun unitLoadState(unitName: String): String {

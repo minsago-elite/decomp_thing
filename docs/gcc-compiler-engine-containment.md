@@ -48,6 +48,14 @@ without group or world write permission. This provisioning is specific to the di
 runner image: a mutable toolcache JDK or an untrusted entry anywhere under `/usr/lib` cannot serve
 as the live runtime trust root. Production runtime validation keeps the same fail-closed checks.
 
+Supervisor, observer, and BOOT-keeper JVMs explicitly set both JNA and Java temporary paths to the
+existing bounded run `tmp` directory. JNA's Linux home-cache fallback is not an admitted output:
+the exact lease layout and unknown-residue rejection remain unchanged. The shared user-bus pin
+retains the runtime directory's device, inode, mount, owner, mode, and extended metadata, plus the
+exact socket identity. Ordinary runtime-directory membership changes may update its size or mtime
+without replacing the bus; those two directory-content fields are not endpoint identity. Directory
+replacement, permission/extended-metadata changes, and socket replacement still fail closed.
+
 This checkpoint does **not** prove that either compiler engine ran, resumed, or produced any
 artifact. Cooperative file locks, owner-only directories, and user-systemd naming also do not
 exclude a hostile process with the same UID (or root); those principals remain part of the trusted

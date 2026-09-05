@@ -28,6 +28,51 @@ import org.junit.jupiter.api.Assumptions.assumeTrue
 
 class FullTreeFunctionObservationIsolatedFixtureRunnerTest {
     @Test
+    fun `fresh JNA bootstrap stays inside exact temporary directory without creating home caches`() {
+        assumeTrue(System.getProperty("os.name").lowercase().contains("linux"))
+        withDiskScratch { root ->
+            val javaExecutable = Path.of(System.getProperty("java.home"), "bin", "java")
+            val jnaJar = Path.of(com.sun.jna.Native::class.java.protectionDomain.codeSource.location.toURI())
+            listOf(false, true).forEach { configuredCache ->
+                val run = privateDirectory(root.resolve("run-$configuredCache"))
+                val temporary = privateDirectory(run.resolve("tmp"))
+                val unrelated = run.resolve("unrelated.txt")
+                val unrelatedBytes = "unknown residue must remain untouched".toByteArray()
+                Files.write(unrelated, unrelatedBytes)
+                val arguments = isolatedObservationJvmTemporaryArguments(run)
+                assertEquals(
+                    listOf("-Djna.nosys=true", "-Djna.tmpdir=$temporary", "-Djava.io.tmpdir=$temporary"),
+                    arguments,
+                )
+                val child = ProcessBuilder(
+                    listOf(javaExecutable.toString(), "-Duser.home=$run") + arguments +
+                        listOf("-classpath", jnaJar.toString(), "com.sun.jna.Native"),
+                ).directory(run.toFile()).redirectErrorStream(true).also { builder ->
+                    builder.environment().clear()
+                    builder.environment()["HOME"] = run.toString()
+                    builder.environment()["TMPDIR"] = temporary.toString()
+                    if (configuredCache) builder.environment()["XDG_CACHE_HOME"] = run.resolve("xdg-cache").toString()
+                }.start()
+                try {
+                    child.outputStream.close()
+                    assertTrue(child.waitFor(30, TimeUnit.SECONDS), "fresh JNA bootstrap did not terminate")
+                    val output = child.inputStream.use { it.readNBytes(8_193) }
+                    assertTrue(output.size <= 8_192, "fresh JNA bootstrap exceeded its output bound")
+                    assertEquals(0, child.exitValue(), output.toString(Charsets.UTF_8))
+                    assertEquals(listOf("tmp", "unrelated.txt"), entryNames(run))
+                    assertTrue(entryNames(temporary).isEmpty(), "JNA retained extracted library residue")
+                    assertContentEquals(unrelatedBytes, Files.readAllBytes(unrelated))
+                } finally {
+                    if (child.isAlive) {
+                        child.destroyForcibly()
+                        assertTrue(child.waitFor(5, TimeUnit.SECONDS), "fresh JNA bootstrap resisted cleanup")
+                    }
+                }
+            }
+        }
+    }
+
+    @Test
     fun `isolation configuration has immutable canonical Kotlin owned identity`() {
         val mounts = mutableListOf(
             FullTreeFunctionObservationRuntimeMount(
@@ -551,16 +596,16 @@ class FullTreeFunctionObservationIsolatedFixtureRunnerTest {
             )
             val expectedSweep = coldTestSystemdSweep(binding.unitName)
 
-            requireColdSystemdManagerFeaturesUnfiltered("+PAM -SELINUX +SECCOMP\n")
+            requireColdSystemdManagerFeaturesUnfiltered("+PAM -SELINUX -APPARMOR -SMACK +SECCOMP\n", "255\n")
             listOf(
                 "",
-                "+PAM +SELINUX +SECCOMP\n",
+                "+PAM +SELINUX -SELINUX +APPARMOR +SMACK +SECCOMP\n",
                 "+PAM -SELINUX\n+SECCOMP\n",
                 "+PAM -SELINUX -SELINUX\n",
                 "+PAM -SELINUX malformed\n",
             ).forEach { output ->
                 assertFailsWith<FullTreeFunctionObservationIsolationException> {
-                    requireColdSystemdManagerFeaturesUnfiltered(output)
+                    requireColdSystemdManagerFeaturesUnfiltered(output, "255\n")
                 }
             }
             requireColdSystemdEnumerationEmpty("", "job inventory")
@@ -587,7 +632,7 @@ class FullTreeFunctionObservationIsolatedFixtureRunnerTest {
                         observer.requireAbsent()
                     }
                     assertTrue(collision.message.orEmpty().contains("exact-name cgroup"), collision.message)
-                    assertEquals(expectedSweep.take(3), commands.drop(commandsBeforeCgroupCollision))
+                    assertEquals(expectedSweep.take(4), commands.drop(commandsBeforeCgroupCollision))
                 } finally {
                     Files.deleteIfExists(exactCgroup)
                 }
@@ -607,6 +652,7 @@ class FullTreeFunctionObservationIsolatedFixtureRunnerTest {
                 assertTrue(collision.message.orEmpty().contains("unit inventory"), collision.message)
                 assertEquals(
                     listOf(
+                        COLD_TEST_MANAGER_VERSION_COMMAND,
                         COLD_TEST_MANAGER_FEATURES_COMMAND,
                         COLD_TEST_LIST_UNITS_COMMAND + listOf("--", binding.unitName),
                     ),
@@ -2420,11 +2466,13 @@ class FullTreeFunctionObservationIsolatedFixtureRunnerTest {
     }
 
     private fun coldTestSystemdSweep(unitName: String): List<List<String>> = listOf(
+        COLD_TEST_MANAGER_VERSION_COMMAND,
         COLD_TEST_MANAGER_FEATURES_COMMAND,
         COLD_TEST_LIST_UNITS_COMMAND + listOf("--", unitName),
         COLD_TEST_LIST_JOBS_COMMAND + listOf("--", unitName),
         COLD_TEST_LIST_JOBS_COMMAND + listOf("--", unitName),
         COLD_TEST_LIST_UNITS_COMMAND + listOf("--", unitName),
+        COLD_TEST_MANAGER_VERSION_COMMAND,
         COLD_TEST_MANAGER_FEATURES_COMMAND,
     )
 
@@ -3249,6 +3297,12 @@ class FullTreeFunctionObservationIsolatedFixtureRunnerTest {
     private companion object {
         val PREPARED_RUN_DIRECTORIES = setOf("runtime", "scratch", "tmp")
         val LIVE_FAULT_PROTOCOL_FILES = setOf("worker.boot", "worker.failure", "supervisor.failure")
+        val COLD_TEST_MANAGER_VERSION_COMMAND = listOf(
+            "--no-pager",
+            "--property=Version",
+            "--value",
+            "show",
+        )
         val COLD_TEST_MANAGER_FEATURES_COMMAND = listOf(
             "--no-pager",
             "--property=Features",

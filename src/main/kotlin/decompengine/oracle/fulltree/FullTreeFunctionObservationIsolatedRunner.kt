@@ -2988,6 +2988,12 @@ private data class IsolatedWorkerRequest(
     }
 }
 
+internal fun isolatedObservationJvmTemporaryArguments(runDirectory: Path): List<String> = listOf(
+    "-Djna.nosys=true",
+    "-Djna.tmpdir=${runDirectory.resolve(TEMP_DIRECTORY)}",
+    "-Djava.io.tmpdir=${runDirectory.resolve(TEMP_DIRECTORY)}",
+)
+
 private data class IsolatedSupervisorRequest(
     val javaExecutable: Path,
     val classPath: String,
@@ -2999,7 +3005,7 @@ private data class IsolatedSupervisorRequest(
         add("-XX:ActiveProcessorCount=1")
         add("-XX:-UsePerfData")
         add("-XX:MaxRAMPercentage=50")
-        add("-Djava.io.tmpdir=${worker.runDirectory.resolve(TEMP_DIRECTORY)}")
+        addAll(isolatedObservationJvmTemporaryArguments(worker.runDirectory))
         add("-classpath")
         add(classPath)
         add(FullTreeFunctionObservationIsolatedWorker::class.java.name)
@@ -3872,7 +3878,7 @@ private class TrustedObservationBoundary(
             add("-XX:MaxMetaspaceSize=64m")
             add("-XX:ReservedCodeCacheSize=32m")
             add("-XX:MaxDirectMemorySize=16m")
-            add("-Djava.io.tmpdir=${request.runDirectory.resolve(TEMP_DIRECTORY)}")
+            addAll(isolatedObservationJvmTemporaryArguments(request.runDirectory))
             add("-classpath")
             add(materializedClassPath.encoded)
             add(FullTreeFunctionObservationIsolatedSupervisor::class.java.name)
@@ -3926,9 +3932,7 @@ private class TrustedObservationBoundary(
             add("-XX:MaxMetaspaceSize=64m")
             add("-XX:ReservedCodeCacheSize=32m")
             add("-XX:MaxDirectMemorySize=16m")
-            add("-Djna.nosys=true")
-            add("-Djna.tmpdir=${runDirectory.resolve(TEMP_DIRECTORY)}")
-            add("-Djava.io.tmpdir=${runDirectory.resolve(TEMP_DIRECTORY)}")
+            addAll(isolatedObservationJvmTemporaryArguments(runDirectory))
             add("-classpath")
             add(materializedClassPath.encoded)
             add(KotlinSystemdCgroupBootKeeper::class.java.name)
@@ -4428,12 +4432,16 @@ internal class FullTreeFunctionObservationColdUnitAbsenceObserver private constr
     }
 
     private fun observeUnfilteredUnitInventory(): Set<String> {
+        val version = runReadOnlySystemctl(
+            COLD_SYSTEMD_MANAGER_VERSION_ARGUMENTS,
+            "manager version",
+        )
         val output = runReadOnlySystemctl(
             COLD_SYSTEMD_MANAGER_FEATURES_ARGUMENTS,
             "manager features",
         )
-        requireColdSystemdManagerFeaturesUnfiltered(output)
-        return output.dropLast(1).split(' ').toSortedSet()
+        requireColdSystemdManagerFeaturesUnfiltered(output, version)
+        return (output.dropLast(1).split(' ') + "manager-version=${version.dropLast(1)}").toSortedSet()
     }
 
     private fun observeUnitInventory(): FullTreeFunctionObservationColdSystemdUnitInventoryEntry? =
@@ -4626,22 +4634,7 @@ internal class FullTreeFunctionObservationColdUnitAbsenceObserver private constr
     }
 
     private fun requireUnfilteredUnitInventory() {
-        inspector.requireUnchanged()
-        bus.requireUnchanged()
-        commandObserver?.beforeCommand(
-            unitName,
-            java.util.List.copyOf(COLD_SYSTEMD_MANAGER_FEATURES_ARGUMENTS),
-        )
-        val result = runTrustedCommand(
-            listOf(inspector.path.toString(), "--user") + COLD_SYSTEMD_MANAGER_FEATURES_ARGUMENTS,
-            bus.controlEnvironment,
-            SYSTEMD_CONTROL_TIMEOUT,
-            "cold systemd manager features",
-        )
-        if (result.exitCode != 0) isolationFail("cold systemd manager features failed safely")
-        requireColdSystemdManagerFeaturesUnfiltered(result.output)
-        inspector.requireUnchanged()
-        bus.requireUnchanged()
+        observeUnfilteredUnitInventory()
     }
 
     private fun requireEnumerationEmpty(arguments: List<String>, label: String) {
@@ -4654,8 +4647,7 @@ internal class FullTreeFunctionObservationColdUnitAbsenceObserver private constr
             SYSTEMD_CONTROL_TIMEOUT,
             "cold systemd $label",
         )
-        if (result.exitCode != 0) isolationFail("cold systemd $label failed safely")
-        requireColdSystemdEnumerationEmpty(result.output, label)
+        requireColdSystemdEnumerationEmpty(result.output, label, result.exitCode)
         inspector.requireUnchanged()
         bus.requireUnchanged()
     }
@@ -4713,7 +4705,8 @@ internal class FullTreeFunctionObservationColdUnitAbsenceObserver private constr
     }
 }
 
-internal fun requireColdSystemdEnumerationEmpty(output: String, label: String) {
+internal fun requireColdSystemdEnumerationEmpty(output: String, label: String, exitCode: Int = 0) {
+    if (exitCode != 0) isolationFail("cold systemd $label failed safely")
     if (output.isNotEmpty()) isolationFail("cold systemd $label was not empty")
 }
 
@@ -4850,20 +4843,30 @@ private fun parseColdSystemdBusctlEnvelope(output: String, label: String): Pair<
     return type.content to envelope.getValue("data")
 }
 
-/** ListUnitsByPatterns silently filters SELinux-denied units, so such builds are inadmissible. */
-internal fun requireColdSystemdManagerFeaturesUnfiltered(output: String) {
-    if (!output.endsWith('\n')) isolationFail("cold systemd manager features were malformed")
+internal fun requireColdSystemdManagerFeaturesUnfiltered(output: String, managerVersionOutput: String) {
+    if (managerVersionOutput.length > 256 || !managerVersionOutput.endsWith('\n')) {
+        isolationFail("cold systemd manager version was malformed")
+    }
+    val managerVersion = COLD_SYSTEMD_MANAGER_VERSION.matchEntire(managerVersionOutput.dropLast(1))
+        ?: isolationFail("cold systemd manager version was malformed")
+    if (managerVersion.groupValues[1].toInt() !in 255..258) {
+        isolationFail("cold systemd manager version is outside the reviewed unfiltered inventory range 255..258")
+    }
+    if (output.length > 16 * 1024 || !output.endsWith('\n')) {
+        isolationFail("cold systemd manager features were malformed")
+    }
     val line = output.dropLast(1)
     if (line.isEmpty() || line.any { it == '\r' || it == '\n' }) {
         isolationFail("cold systemd manager features were malformed")
     }
-    val features = line.split(' ')
+    val tokens = line.split(' ')
+    val features = if (tokens.last().matches(COLD_SYSTEMD_DEFAULT_HIERARCHY)) tokens.dropLast(1) else tokens
+    val featureNames = features.map { it.drop(1) }
     if (
         features.any { !it.matches(SYSTEMD_BUILD_FEATURE) } ||
-        features.toSet().size != features.size ||
-        "-SELINUX" !in features ||
-        "+SELINUX" in features
-    ) isolationFail("cold systemd unit inventory could be access-filtered")
+        featureNames.toSet().size != features.size ||
+        !featureNames.containsAll(COLD_SYSTEMD_REQUIRED_MAC_FEATURES)
+    ) isolationFail("cold systemd manager features were malformed or incomplete")
 }
 
 private enum class ObservationUnitMutationTargetState {
@@ -6273,10 +6276,15 @@ private class ManagedObservationUnit(
         expected: IsolatedObservationResources,
         allowActivating: Boolean = false,
     ) {
-        val stateOkay = properties["LoadState"] == "loaded" && leaderIsAlive() &&
+        val localAlive = leaderIsAlive()
+        val stateOkay = properties["LoadState"] == "loaded" && localAlive &&
             if (allowActivating) properties["ActiveState"] in setOf("active", "activating")
             else properties["ActiveState"] == "active" && properties["SubState"] == "running"
-        if (!stateOkay) isolationFail("isolated systemd scope is not live during containment verification")
+        if (!stateOkay) isolationFail(
+            "isolated systemd scope is not live during containment verification " +
+                "(load=${properties["LoadState"]}, active=${properties["ActiveState"]}, " +
+                "sub=${properties["SubState"]}, localAlive=$localAlive)",
+        )
         val mismatches = buildList {
             addAll(staticPolicyMismatches(properties, expected))
         }
@@ -7299,6 +7307,9 @@ private val KERNEL_BOOT_UUID =
 private val RESERVED_SYSTEMD_ID128S = setOf("0".repeat(32), "f".repeat(32))
 private val PROC_STAT_INTEGER = Regex("-?[0-9]+")
 private val SYSTEMD_BUILD_FEATURE = Regex("[+-][A-Z0-9_]+")
+private val COLD_SYSTEMD_MANAGER_VERSION = Regex("([0-9]{3})(?:[.+~:_-][0-9A-Za-z.+~:_-]+)?")
+private val COLD_SYSTEMD_DEFAULT_HIERARCHY = Regex("default-hierarchy=(?:legacy|hybrid|unified)")
+private val COLD_SYSTEMD_REQUIRED_MAC_FEATURES = setOf("SELINUX", "APPARMOR", "SMACK")
 private const val SYSTEMD_BUS_SERVICE = "org.freedesktop.systemd1"
 private const val SYSTEMD_MANAGER_OBJECT_PATH = "/org/freedesktop/systemd1"
 private const val SYSTEMD_MANAGER_INTERFACE = "org.freedesktop.systemd1.Manager"
@@ -7359,6 +7370,12 @@ private val REQUIRED_SYSTEMD_RUN_OPTIONS = listOf(
     "--property",
     "--unit",
     "--expand-environment",
+)
+private val COLD_SYSTEMD_MANAGER_VERSION_ARGUMENTS = listOf(
+    "--no-pager",
+    "--property=Version",
+    "--value",
+    "show",
 )
 private val COLD_SYSTEMD_MANAGER_FEATURES_ARGUMENTS = listOf(
     "--no-pager",

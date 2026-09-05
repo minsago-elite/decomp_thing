@@ -3225,9 +3225,14 @@ internal class PinnedSystemdBusEndpoint private constructor(
 ) {
     fun requireUnchanged(cancellationCheck: () -> Unit = NO_SANDBOX_CHECKPOINT) {
         cancellationCheck()
-        if (readIdentity(runtimeDirectory, cancellationCheck) != runtimeIdentity ||
-            readIdentity(busPath, cancellationCheck) != busIdentity
+        val currentRuntime = readIdentity(runtimeDirectory, cancellationCheck)
+        if (currentRuntime.device != runtimeIdentity.device || currentRuntime.inode != runtimeIdentity.inode ||
+            currentRuntime.mountId != runtimeIdentity.mountId || currentRuntime.mode != runtimeIdentity.mode ||
+            currentRuntime.uid != runtimeIdentity.uid || currentRuntime.metadataSha256 != runtimeIdentity.metadataSha256
         ) {
+            throw IOException("systemd user runtime directory identity or security metadata changed")
+        }
+        if (readIdentity(busPath, cancellationCheck) != busIdentity) {
             throw IOException("systemd user bus endpoint changed")
         }
     }
