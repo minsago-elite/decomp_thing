@@ -82,3 +82,12 @@ replay, session/job/limit isolation, version expiry, empty histories and strict
 queries. Shared schema fixtures reject duplicate and cross-job rows. Component
 checks cover URL continuation and browser back navigation. Populated packaged
 multi-attempt qualification and evidence/source/artifact navigation remain open.
+
+
+The packaged upload-mode journey passed against `f4b896e`, including history client
+navigation from an attempt, direct reload and an explicit missing-job limitation,
+with no mutation requests from those views. Existing attempt and upload/recovery
+checks also passed. [Retained history report](evidence/web-attempt-history-20260905.json).
+Pinned Chrome used test-only --no-sandbox. Populated multi-page history in an actual
+packaged browser remains unqualified; bounded populated behavior is covered by the
+JVM and component fixtures described above.
