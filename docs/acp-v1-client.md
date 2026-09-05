@@ -766,7 +766,12 @@ stderr retention, resource deadlines, cancellation polling, and process-tree cle
 
 Preflight returns an invocation-local `authentication` inventory containing at most 32 advertised
 methods. IDs are exact and bounded to 256 UTF-8 bytes; duplicate or blank IDs fail admission.
-Names/descriptions are bounded before redacted previews are retained. The complete SDK-serialized
+Names/descriptions are bounded before redacted previews are retained. Truncation preserves UTF-16
+surrogate pairs. Redaction checks its 16,384-unit working-text limit after every replacement, before
+another replacement can expand inserted markers; exceeding it produces an omission marker. A single
+replacement can transiently allocate up to ten times that limit.
+
+The complete SDK-serialized
 method array, including retained variant-specific fields and extension metadata, must also fit
 64 KiB of canonical JSON, 16 levels, 4096 nodes, 16 KiB per string and 64 KiB total string bytes.
 Each number token in the SDK-serialized array is limited to 256 characters, including its sign, decimal point and exponent.
