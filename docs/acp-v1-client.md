@@ -749,3 +749,10 @@ serve as a full auth-policy commitment. Exact IDs are available only to explicit
 those consumers must not print them without redaction. This result stays outside invocation acceptance
 receipts and session/project archives. Login/logout, interactive surfaces and credential-state handling
 remain tracked by #265/#70, with fresh advertised-method validation required before any future dispatch.
+
+Use `llm_bin_patch doctor --auth-methods` to inspect advertised method previews explicitly.
+The normal doctor report retains only inventory count/digest. Inspection prints quoted, redacted
+ID/name/description previews, variant category and the current unsupported-login status; previews
+may be truncated and are not exact selection tokens. This option cannot be combined with
+`--tools-only`; selecting the legacy harness fails without a legacy connectivity probe. No login,
+logout, session or model prompt is initiated. CLI output does not imply authentication readiness.

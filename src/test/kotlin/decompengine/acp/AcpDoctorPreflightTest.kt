@@ -33,7 +33,7 @@ import org.junit.jupiter.api.Timeout
 @Timeout(value = 90, unit = TimeUnit.SECONDS)
 class AcpDoctorPreflightTest {
     @Test
-    fun `doctor defaults to a factory-selected prompt-free contained ACP preflight`() {
+    fun `doctor exposes authentication previews only through explicit prompt-free inspection`() {
         requireLiveSandboxHost()
         val temporary = createTempDirectory("doctor-acp-live-")
         val ghidra = temporary.resolve("ghidra/support").createDirectories().resolve("analyzeHeadless")
@@ -65,7 +65,10 @@ class AcpDoctorPreflightTest {
             connectivityProbe = ConnectivityProbe { _, _ -> error("ACP doctor must not use direct HTTP") },
         )
 
-        val report = doctor.inspect(DoctorOptions(temporary.resolve("output")))
+        val defaults = doctor.inspect(DoctorOptions(temporary.resolve("default-output")))
+        assertTrue(defaults.passed)
+        assertFalse(defaults.checks.any { it.name.startsWith("ACP authentication method") })
+        val report = doctor.inspect(DoctorOptions(temporary.resolve("output"), showAuthMethods = true))
 
         assertTrue(report.passed, report.checks.toString())
         val harness = report.checks.single { it.name == "ACP harness" }
@@ -79,6 +82,10 @@ class AcpDoctorPreflightTest {
         assertFalse(preflight.detail.contains("operator-login"))
         assertFalse(preflight.detail.contains("fixture-credential"))
         assertTrue(preflight.detail.contains("network-isolated-true:cleanup-verified-true"))
+        val auth = report.checks.single { it.name == "ACP authentication method 1" }
+        assertTrue(auth.detail.contains("operator-login"))
+        assertTrue(auth.detail.contains("login unsupported; no login attempted"))
+        assertFalse(auth.detail.contains("fixture-credential"))
         val rendered = report.checks.joinToString("\n") { "${it.name}: ${it.detail}" }
         assertFalse(rendered.contains(SECRET_CANARY))
         assertFalse(rendered.contains("legacy-transport-must-not-run"))

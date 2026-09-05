@@ -454,6 +454,7 @@ private fun runnerUsageError(message: String): Nothing {
 
 private fun runDoctor(args: List<String>) {
     var toolsOnly = false
+    var showAuthMethods = false
     var harnessOverride: String? = null
     var workflowOverride: AcpPreflightWorkflow? = null
     var output = Path.of(System.getenv("OUTPUT_DIR") ?: if (Files.isDirectory(Path.of("/output"))) "/output" else "output")
@@ -461,6 +462,7 @@ private fun runDoctor(args: List<String>) {
     while (index < args.size) {
         when (args[index]) {
             "--tools-only" -> { toolsOnly = true; index++ }
+            "--auth-methods" -> { showAuthMethods = true; index++ }
             "--harness" -> {
                 if (index + 1 >= args.size) doctorUsageError("--harness requires acp or legacy-openai")
                 harnessOverride = args[index + 1]; index += 2
@@ -483,6 +485,7 @@ private fun runDoctor(args: List<String>) {
             else -> doctorUsageError("unexpected argument: ${args[index]}")
         }
     }
+    if (toolsOnly && showAuthMethods) doctorUsageError("--tools-only cannot be combined with --auth-methods")
     if (toolsOnly && harnessOverride != null) {
         doctorUsageError("--tools-only cannot be combined with --harness")
     }
@@ -495,6 +498,7 @@ private fun runDoctor(args: List<String>) {
             toolsOnly = toolsOnly,
             harnessOverride = harnessOverride,
             workflowOverride = workflowOverride,
+            showAuthMethods = showAuthMethods,
         ),
     )
     report.checks.forEach { check ->
@@ -513,7 +517,7 @@ private fun runDoctor(args: List<String>) {
 private fun doctorUsageError(message: String): Nothing {
     System.err.println(message)
     System.err.println("usage: llm_bin_patch doctor --tools-only [--output <directory>]")
-    System.err.println("   or: llm_bin_patch doctor [--output <directory>] [--harness acp|legacy-openai] [--workflow all|patch|reconstruct|repair|web]")
+    System.err.println("   or: llm_bin_patch doctor [--output <directory>] [--harness acp|legacy-openai] [--workflow all|patch|reconstruct|repair|web] [--auth-methods]")
     kotlin.system.exitProcess(2)
 }
 
@@ -555,7 +559,7 @@ private fun printHelp() {
         """
         Usage:
           llm_bin_patch doctor --tools-only [--output <directory>]
-          llm_bin_patch doctor [--output <directory>] [--harness acp|legacy-openai] [--workflow all|patch|reconstruct|repair|web]
+          llm_bin_patch doctor [--output <directory>] [--harness acp|legacy-openai] [--workflow all|patch|reconstruct|repair|web] [--auth-methods]
           llm_bin_patch patch <input-elf> --output <directory> [--yes] [--harness acp|legacy-openai]
           llm_bin_patch runner [--control-dir <directory>] [--root <directory>]...
           llm_bin_patch repair <original-binary> <project-dir> [--reports <directory>] [--max-iterations <count>] [--explore] [--harness acp|legacy-openai]

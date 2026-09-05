@@ -11,6 +11,7 @@ import java.util.Collections
 class AcpAuthenticationMethod internal constructor(
     val id: String,
     val variant: String,
+    val idPreview: String,
     val namePreview: String,
     val descriptionPreview: String?,
 ) {
@@ -47,7 +48,7 @@ class AcpAuthenticationInventory private constructor(
             val digest = MessageDigest.getInstance("SHA-256").digest(OracleJson.canonicalBytes(commitment))
                 .joinToString("") { "%02x".format(it) }
             return AcpAuthenticationInventory(methods.map {
-                AcpAuthenticationMethod(it.id.value, variant(it), redactor.text(it.name, 128),
+                AcpAuthenticationMethod(it.id.value, variant(it), redactor.text(it.id.value, 128), redactor.text(it.name, 128),
                     it.description?.let { description -> redactor.text(description, 256) })
             }, digest)
         }
