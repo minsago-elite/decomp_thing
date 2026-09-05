@@ -431,13 +431,23 @@ class UploadServer(
         val source = runCatching { archiveEvidence.read(jobId, reportPrefix = view.reports.artifactPrefix).source }
             .recoverCatching { sourceEvidence.read(jobId, view.reports.artifactPrefix).view() }
         val progress = runCatching { readLegacyProgress(jobId, view.reports.runId) }.getOrNull()
-        val exploration = runCatching {
-            decompengine.oracle.core.OracleJson.parse(jobs.readArtifact(jobId,
-                "${view.reports.artifactPrefix}/exploration.json", 1_048_576).bytes) as kotlinx.serialization.json.JsonObject
-        }.getOrNull()
         exchange.sendHtml(200, renderJob(view.job, view.reports, view.diagnostics, source.getOrNull(), source.isFailure,
-            progressSnapshot = progress, explorationReport = exploration))
+            progressSnapshot = progress,
+            explorationReport = readLegacyJsonReport(jobId, view.reports, LegacyJsonReport.EXPLORATION),
+            repairHistory = readLegacyJsonReport(jobId, view.reports, LegacyJsonReport.REPAIR_HISTORY),
+            reconstructionProgress = readLegacyJsonReport(jobId, view.reports, LegacyJsonReport.RECONSTRUCTION_PROGRESS)))
     }
+
+    private enum class LegacyJsonReport(val filename: String) {
+        EXPLORATION("exploration.json"), REPAIR_HISTORY("repair_history.json"),
+        RECONSTRUCTION_PROGRESS("reconstruction_progress.json"),
+    }
+
+    private fun readLegacyJsonReport(jobId: String, context: WebReportContext, report: LegacyJsonReport): kotlinx.serialization.json.JsonObject? =
+        runCatching {
+            decompengine.oracle.core.OracleJson.parse(jobs.readArtifact(jobId,
+                "${context.artifactPrefix}/${report.filename}", 1_048_576).bytes) as kotlinx.serialization.json.JsonObject
+        }.getOrNull()
 
     private fun handleSource(exchange: HttpExchange, jobId: String, relativePath: String) {
         require(relativePath.isNotBlank()) { "source path must not be blank" }

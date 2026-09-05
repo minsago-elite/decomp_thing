@@ -65,3 +65,19 @@ and cover missing, malformed, oversized, duplicate-key and wrong-shape input wit
 report bytes. This completes the exploration-specific direct read identified above; repair
 history, reconstruction and artifact inventory reads, full privacy classification, legacy
 authorization and broader CLI/core qualification remain separate unresolved migration work.
+
+## Subsequent repair/reconstruction JSON migration
+
+Repair history and reconstruction progress now follow the same explicit-input pattern as
+exploration. The controller's fixed report-name selection reads each through the shared
+artifact service with a 1 MiB source ceiling and strict JSON decoding. Renderers no longer
+open these files; callers must supply the JSON object. Existing `renderRepairHistory` job
+and report-context parameters remain source-compatible, but omitted payload now means
+unavailable rather than an implicit disk read. Valid supported report presentation remains.
+
+HTTP regressions cover supplied versus stored values, missing/malformed/oversized/non-object
+and duplicate-key reports, and unchanged bytes. Missing or undecodable reports show an explicit
+unavailable/not-generated message. These read failures do not fail the job page or create
+report files. This is bounded input handling, not complete semantic validation or certification
+of report prose as public. Artifact inventory enumeration/metadata still performs renderer I/O;
+legacy authorization, privacy classification and broader CLI/core qualification remain open.

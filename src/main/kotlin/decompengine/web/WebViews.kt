@@ -18,7 +18,6 @@ import java.nio.file.Path
 import kotlin.io.path.exists
 import kotlin.io.path.isRegularFile
 import kotlin.io.path.name
-import kotlin.io.path.readText
 import kotlin.math.roundToInt
 
 fun renderDashboard(jobs: List<Job>, diagnostics: List<WebJobDiagnostic> = emptyList()): String = page(
@@ -71,7 +70,8 @@ fun renderDashboard(jobs: List<Job>, diagnostics: List<WebJobDiagnostic> = empty
 fun renderJob(job: Job, reportContext: WebReportContext? = null,
     diagnostics: List<decompengine.jobs.WorkflowStoreDiagnostic> = emptyList(),
     sourceTree: SourceTreeView? = null, sourceTreeUnavailable: Boolean = false,
-    progressSnapshot: JsonObject? = null, explorationReport: JsonObject? = null): String {
+    progressSnapshot: JsonObject? = null, explorationReport: JsonObject? = null,
+    repairHistory: JsonObject? = null, reconstructionProgress: JsonObject? = null): String {
     val reports = reportsFor(job, reportContext)
     val active = job.status in setOf("queued", "analyzing")
     val metadata = job.metadata.toJson().entries.joinToString("") { (key, value) ->
@@ -171,11 +171,11 @@ fun renderJob(job: Job, reportContext: WebReportContext? = null,
               </section>
             </div>
             ${runCatching { renderExploration(job, reports, explorationReport) }.getOrElse { renderExploration(job, reports, null) }}
-            ${renderReconstructionProgress(job, reports)}
+            ${runCatching { renderReconstructionProgress(reconstructionProgress) }.getOrElse { renderReconstructionProgress(null) }}
             ${renderAgentProgress(progressSnapshot)}
             ${sourceTree?.let { renderSourceTree(job, it, reports) }.orEmpty()}
             ${if (sourceTreeUnavailable) "<section class=\"panel\"><p>Source-tree evidence is unavailable or has not been generated for this revision.</p></section>" else ""}
-            ${renderRepairHistory(job, reports)}
+            ${runCatching { renderRepairHistory(job, reports, repairHistory) }.getOrElse { renderRepairHistory(job, reports, null) }}
             ${renderArtifacts(job, artifacts, reports)}
           </main>
         """.trimIndent(),
@@ -332,11 +332,8 @@ private fun renderExploration(job: Job, reports: WebReportContext, root: JsonObj
     """.trimIndent()
 }
 
-fun renderRepairHistory(job: Job, reportContext: WebReportContext? = null): String {
-    val historyPath = reportsFor(job, reportContext).reportsDirectory.resolve("repair_history.json")
-    if (!historyPath.exists()) return ""
-    val payload = runCatching { Json.parseToJsonElement(historyPath.readText()).jsonObject }.getOrNull()
-        ?: return "<section class=\"panel history-panel\"><h2>Repair history</h2><p>Repair history could not be loaded.</p></section>"
+fun renderRepairHistory(job: Job, reportContext: WebReportContext? = null, payload: JsonObject? = null): String {
+    if (payload == null) return "<section class=\"panel history-panel\"><h2>Repair history</h2><p>Repair history is unavailable or has not been generated for this attempt.</p></section>"
     val iterations = payload["iterations"] as? JsonArray ?: return ""
     if (iterations.isEmpty()) return ""
     val items = iterations.mapNotNull { it as? JsonObject }.joinToString("") { iteration ->
@@ -405,10 +402,8 @@ private fun renderSourceTree(job: Job, source: SourceTreeView, reports: WebRepor
     """.trimIndent()
 }
 
-private fun renderReconstructionProgress(job: Job, reports: WebReportContext): String {
-    val path = reports.reportsDirectory.resolve("reconstruction_progress.json")
-    if (!path.exists()) return ""
-    val progress = runCatching { Json.parseToJsonElement(path.readText()).jsonObject }.getOrNull() ?: return ""
+private fun renderReconstructionProgress(progress: JsonObject?): String {
+    if (progress == null) return "<section class=\"panel reconstruction-progress\"><h2>Source reconstruction</h2><p>Reconstruction progress is unavailable or has not been generated for this attempt.</p></section>"
     val phase = progress.text("phase")
     val completed = progress.number("completed")
     val total = progress.number("total")

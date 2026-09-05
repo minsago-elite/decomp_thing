@@ -39,6 +39,45 @@ import kotlin.test.assertTrue
 
 class UploadServerTest {
     @Test
+    fun `repair and reconstruction HTML use bounded supplied reports without renderer IO`() = withServer { server, root ->
+        val id = uploadedJobId(server)
+        val job = decompengine.jobs.JobStore(root).get(id)
+        val reports = root.resolve(id).resolve("reports").createDirectories()
+        val history = """{"iterations":[{"index":1,"failureKind":"fixture","summary":"supplied_history","succeeded":false}]}"""
+        val progress = """{"phase":"supplied_progress","completed":1,"total":2}"""
+        val paths = listOf(reports.resolve("repair_history.json"), reports.resolve("reconstruction_progress.json"))
+        paths[0].writeText(history.replace("supplied_history", "stored_history"))
+        paths[1].writeText(progress.replace("supplied_progress", "stored_progress"))
+        val before = paths.map { it.readBytes() }
+        val rendered = renderJob(job, repairHistory = Json.parseToJsonElement(history).jsonObject,
+            reconstructionProgress = Json.parseToJsonElement(progress).jsonObject)
+        assertTrue(rendered.contains("supplied_history") && rendered.contains("supplied_progress"))
+        assertTrue(!rendered.contains("stored_history") && !rendered.contains("stored_progress"))
+        val omitted = renderJob(job)
+        assertTrue(omitted.contains("Repair history is unavailable"))
+        assertTrue(omitted.contains("Reconstruction progress is unavailable"))
+        assertTrue(!omitted.contains("stored_history") && !omitted.contains("stored_progress"))
+        val loaded = request(server, "GET", "/jobs/$id")
+        assertEquals(200, loaded.status)
+        assertTrue(loaded.body.decodeToString().contains("stored_history"))
+        assertTrue(loaded.body.decodeToString().contains("stored_progress"))
+        paths.forEachIndexed { index, path -> assertContentEquals(before[index], path.readBytes()) }
+        for (invalid in listOf("PRIVATE_INVALID {", "x".repeat(1_048_577), "[]", "{\"phase\":1,\"phase\":2}")) {
+            paths.forEach { it.writeText(invalid) }
+            val response = request(server, "GET", "/jobs/$id")
+            assertEquals(200, response.status)
+            assertTrue(response.body.decodeToString().contains("Repair history is unavailable"))
+            assertTrue(response.body.decodeToString().contains("Reconstruction progress is unavailable"))
+            assertTrue(!response.body.decodeToString().contains("PRIVATE_INVALID"))
+            paths.forEach { assertEquals(invalid, it.readBytes().decodeToString()) }
+        }
+        paths.forEach { Files.delete(it) }
+        val absent = request(server, "GET", "/jobs/$id").body.decodeToString()
+        assertTrue(absent.contains("Repair history is unavailable") && absent.contains("Reconstruction progress is unavailable"))
+        paths.forEach { assertTrue(!it.exists()) }
+    }
+
+    @Test
     fun `HTML exploration uses supplied data and bounded unavailable report reads`() = withServer { server, root ->
         val id = uploadedJobId(server)
         val job = decompengine.jobs.JobStore(root).get(id)
