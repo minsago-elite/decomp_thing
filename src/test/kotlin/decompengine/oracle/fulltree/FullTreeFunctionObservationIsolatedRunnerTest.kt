@@ -1340,19 +1340,46 @@ class FullTreeFunctionObservationIsolatedFixtureRunnerTest {
 
                     val liveObservationCommands = mutableListOf<List<String>>()
                     val liveBusctlCommands = mutableListOf<List<String>>()
+                    val liveBusctlResults = mutableListOf<String>()
+                    var snapshotDiagnostics = "snapshot pair not observed"
                     val liveObserver = FullTreeFunctionObservationColdUnitAbsenceObserver.openWithTestObserver(
                         context.binding,
                         configuration,
                         FullTreeFunctionObservationSystemctlCommandObserver { unitName, arguments ->
                             if (unitName == context.binding.unitName) liveObservationCommands += arguments
                         },
-                        FullTreeFunctionObservationBusctlCommandObserver { unitName, arguments ->
-                            if (unitName == context.binding.unitName) liveBusctlCommands += arguments
+                        object : FullTreeFunctionObservationBusctlCommandObserver {
+                            override fun beforeCommand(unitName: String, arguments: List<String>) {
+                                if (unitName == context.binding.unitName) liveBusctlCommands += arguments
+                            }
+
+                            override fun afterCommand(
+                                unitName: String,
+                                label: String,
+                                exitCode: Int,
+                                boundedOutput: String,
+                            ) {
+                                if (unitName == context.binding.unitName && liveBusctlResults.size < 14) {
+                                    liveBusctlResults += "$label exit=$exitCode output=${JsonPrimitive(boundedOutput)}"
+                                }
+                            }
+                        },
+                        FullTreeFunctionObservationColdSnapshotObserver { before, after ->
+                            snapshotDiagnostics =
+                                "stable=${before.stable}/${after.stable}, " +
+                                "identityPresent=${before.systemdIdentity != null}/${after.systemdIdentity != null}, " +
+                                "cgroupCounts=${before.cgroups.size}/${after.cgroups.size}, " +
+                                "featuresChanged=${before.managerFeatures != after.managerFeatures}, " +
+                                "unitChanged=${before.unit != after.unit}, " +
+                                "jobChanged=${before.job != after.job}, " +
+                                "cgroupsChanged=${before.cgroups != after.cgroups}, " +
+                                "identityChanged=${before.systemdIdentity != after.systemdIdentity}"
                         },
                     )
                     assertEquals(
                         FullTreeFunctionObservationColdUnitAttachmentObservationOutcome.SYSTEMD_IDENTITY_CANDIDATE,
                         liveObserver.observeUnitAttachment(historical),
+                        "Cold attachment observation: $snapshotDiagnostics\n${liveBusctlResults.joinToString("\n")}",
                     )
                     val hardenedBusctlPrefix = listOf(
                         "--user",
