@@ -28,10 +28,10 @@ import java.net.InetSocketAddress
 import java.net.URLDecoder
 import java.nio.charset.StandardCharsets
 import java.nio.file.Path
-import java.util.concurrent.ConcurrentHashMap
+import java.util.concurrent.ArrayBlockingQueue
 import java.util.concurrent.Executor
-import java.util.concurrent.ExecutorService
-import java.util.concurrent.Executors
+import java.util.concurrent.ThreadPoolExecutor
+import java.util.concurrent.TimeUnit
 import kotlin.io.path.name
 import kotlin.io.path.pathString
 
@@ -146,8 +146,8 @@ class UploadServer(
     host: String,
     port: Int,
     dataDir: Path,
-    private val analyzer: JobAnalyzer = AutomaticJobAnalyzer(),
-    private val reconstructor: JobReconstructor = SourceTreeJobReconstructor(),
+    analyzer: JobAnalyzer = AutomaticJobAnalyzer(),
+    reconstructor: JobReconstructor = SourceTreeJobReconstructor(),
     executor: Executor? = null,
     uiMode: WebUiMode = WebUiMode.LEGACY,
     basePath: String = "/",
@@ -166,20 +166,17 @@ class UploadServer(
         }
     }
     private val server = HttpServer.create(InetSocketAddress(host, port), 0)
-    private val store = JobStore(dataDir)
-    private val ownedExecutor: ExecutorService? = if (executor == null) {
-        Executors.newFixedThreadPool(2) { runnable ->
-            Thread(runnable, "decomp-web-analysis").apply { isDaemon = true }
-        }
-    } else {
-        null
-    }
-    private val analysisExecutor: Executor = executor ?: ownedExecutor!!
-    private val runningJobs = ConcurrentHashMap.newKeySet<String>()
+    private val jobs = WebJobService(JobStore(dataDir), analyzer, reconstructor, executor)
+    private val requestExecutor = ThreadPoolExecutor(
+        16, 16, 0, TimeUnit.MILLISECONDS, ArrayBlockingQueue(64),
+        { task -> Thread(task, "decomp-web-http").apply { isDaemon = true } },
+        ThreadPoolExecutor.AbortPolicy(),
+    )
     val serverPort: Int get() = server.address.port
 
     init {
-        if (spaAssets == null) store.recoverInterruptedJobs()
+        if (spaAssets == null) jobs.recoverInterruptedJobs()
+        server.executor = requestExecutor
         server.createContext("/") { exchange -> route(exchange) }
     }
 
@@ -187,7 +184,8 @@ class UploadServer(
 
     fun stop(delaySeconds: Int = 0) {
         server.stop(delaySeconds)
-        ownedExecutor?.shutdownNow()
+        requestExecutor.shutdownNow()
+        jobs.close()
     }
 
     private fun route(exchange: HttpExchange) {
@@ -199,12 +197,12 @@ class UploadServer(
         try {
             when {
                 exchange.requestMethod == "GET" && segments.isEmpty() ->
-                    exchange.sendHtml(200, renderDashboard(store.list()))
+                    exchange.sendHtml(200, renderDashboard(jobs.list()))
                 exchange.requestMethod == "GET" && segments == listOf("assets", "app.css") ->
                     exchange.sendBytes(200, APP_CSS.toByteArray(), "text/css; charset=utf-8", cache = true)
                 exchange.requestMethod == "POST" && segments == listOf("jobs") -> handlePostJob(exchange)
                 exchange.requestMethod == "GET" && segments.size == 2 && segments[0] == "jobs" ->
-                    exchange.sendHtml(200, renderJob(store.get(decode(segments[1]))))
+                    exchange.sendHtml(200, renderJob(jobs.get(decode(segments[1]))))
                 exchange.requestMethod == "POST" && segments.size == 3 && segments[0] == "jobs" && segments[2] == "explore" ->
                     handleExplore(exchange, decode(segments[1]))
                 exchange.requestMethod == "POST" && segments.size == 3 && segments[0] == "jobs" && segments[2] == "reconstruct" ->
@@ -214,7 +212,7 @@ class UploadServer(
                 exchange.requestMethod == "GET" && segments.size >= 4 && segments[0] == "jobs" && segments[2] == "artifacts" ->
                     handleArtifact(exchange, decode(segments[1]), segments.drop(3).joinToString("/").let(::decode))
                 exchange.requestMethod == "GET" && segments.size == 3 && segments[0] == "api" && segments[1] == "jobs" ->
-                    exchange.sendJson(200, encodeJob(store.get(decode(segments[2]))))
+                    exchange.sendJson(200, encodeJob(jobs.get(decode(segments[2]))))
                 else -> exchange.sendHtml(404, renderErrorPage(404, "Page not found", "The requested route does not exist."))
             }
         } catch (exception: JobStoreException) {
@@ -272,7 +270,7 @@ class UploadServer(
             require(declaredLength == null || declaredLength <= MAX_UPLOAD_BYTES) { "upload exceeds the 32 MiB limit" }
             val contentType = exchange.requestHeaders.getFirst("Content-Type") ?: ""
             val upload = MultipartUpload.parse(exchange.requestBody.readLimited(MAX_UPLOAD_BYTES), contentType)
-            val job = store.createFromUpload(upload.filename, upload.content)
+            val job = jobs.upload(upload.filename, upload.content)
             if ((exchange.requestHeaders.getFirst("Accept") ?: "").contains("application/json")) {
                 exchange.sendJson(201, encodeJob(job))
             } else {
@@ -284,58 +282,28 @@ class UploadServer(
     }
 
     private fun handleExplore(exchange: HttpExchange, jobId: String) {
-        val job = store.get(jobId)
-        schedule(
-            exchange,
-            job,
-            queuedMessage = "Waiting for an exploration worker",
-            activeMessage = "Generating and executing candidate inputs",
-            completeMessage = "Exploration completed successfully",
-        ) { analyzer.analyze(it, store.reportsDirectory(it.id)) }
+        schedule(exchange, jobId, WebWorkflow.EXPLORE)
     }
 
     private fun handleReconstruct(exchange: HttpExchange, jobId: String) {
-        val job = store.get(jobId)
-        schedule(
-            exchange,
-            job,
-            queuedMessage = "Waiting for a source-tree worker",
-            activeMessage = "Recovering program structure and generating source modules",
-            completeMessage = "Archival source tree generated successfully",
-        ) { reconstructor.reconstruct(it, store.reportsDirectory(it.id)) }
+        schedule(exchange, jobId, WebWorkflow.RECONSTRUCT)
     }
 
     private fun schedule(
         exchange: HttpExchange,
-        job: Job,
-        queuedMessage: String,
-        activeMessage: String,
-        completeMessage: String,
-        operation: (Job) -> Unit,
+        jobId: String,
+        workflow: WebWorkflow,
     ) {
-        if (!runningJobs.add(job.id)) {
-            exchange.sendHtml(409, renderErrorPage(409, "Analysis already running", "This job already has an active background operation."))
-            return
-        }
-        store.updateStatus(job.id, "queued", queuedMessage)
-        try {
-            analysisExecutor.execute {
-                try {
-                    val active = store.updateStatus(job.id, "analyzing", activeMessage)
-                    operation(active)
-                    store.updateStatus(job.id, "complete", completeMessage)
-                } catch (failure: Exception) {
-                    store.updateStatus(job.id, "failed", failure.message ?: failure.javaClass.simpleName)
-                } finally {
-                    runningJobs.remove(job.id)
-                }
+        when (jobs.start(jobId, workflow)) {
+            is WebWorkflowAdmission.Started -> exchange.redirect("/jobs/$jobId")
+            WebWorkflowAdmission.AlreadyRunning -> exchange.sendHtml(
+                409, renderErrorPage(409, "Analysis already running", "This job already has an active background operation."),
+            )
+            WebWorkflowAdmission.Unavailable -> {
+                exchange.responseHeaders.set("Retry-After", "5")
+                exchange.sendHtml(503, renderErrorPage(503, "Workers unavailable", "Workflow capacity is unavailable. Retry shortly."))
             }
-        } catch (failure: Exception) {
-            runningJobs.remove(job.id)
-            store.updateStatus(job.id, "failed", "Analysis worker rejected the job")
-            throw failure
         }
-        exchange.redirect("/jobs/${job.id}")
     }
 
     private fun handleSource(exchange: HttpExchange, jobId: String, relativePath: String) {
@@ -348,12 +316,12 @@ class UploadServer(
             normalized.endsWith(".json") || normalized.endsWith(".md") || normalized.endsWith(".log")) {
             "only generated text files may be viewed"
         }
-        val source = store.resolveArtifact(jobId, "reports/source-tree/$normalized")
-        exchange.sendHtml(200, renderSourceFile(store.get(jobId), normalized, java.nio.file.Files.readString(source)))
+        val source = jobs.resolveArtifact(jobId, "reports/source-tree/$normalized")
+        exchange.sendHtml(200, renderSourceFile(jobs.get(jobId), normalized, java.nio.file.Files.readString(source)))
     }
 
     private fun handleArtifact(exchange: HttpExchange, jobId: String, relativePath: String) {
-        val artifact = store.resolveArtifact(jobId, relativePath)
+        val artifact = jobs.resolveArtifact(jobId, relativePath)
         exchange.responseHeaders.add("Content-Disposition", "attachment; filename=\"${artifact.name.replace("\"", "")}\"")
         exchange.sendBytes(200, java.nio.file.Files.readAllBytes(artifact), contentType(artifact))
     }
