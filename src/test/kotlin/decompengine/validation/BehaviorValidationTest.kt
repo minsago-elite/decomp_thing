@@ -22,6 +22,42 @@ import kotlin.test.assertTrue
 
 class BehaviorValidationTest {
     @Test
+    fun `completed programs exceeding stream or aggregate bounds preserve prior reports`() {
+        val root = createTempDirectory("validation-output-bounds-")
+        val source = """
+            #include <stdio.h>
+            #include <string.h>
+            int main(int argc, char **argv) {
+                if (argc == 1) return 0;
+                const char *bytes = "0123456789abcdef";
+                if (strcmp(argv[1], "stdout") == 0) {
+                    fputs(bytes, stdout); fputs(bytes, stdout);
+                } else if (strcmp(argv[1], "stderr") == 0) {
+                    fputs(bytes, stderr); fputs(bytes, stderr);
+                } else {
+                    fputs(bytes, stdout); fputs(bytes, stderr);
+                }
+                return 0;
+            }
+        """.trimIndent() + "\n"
+        val original = compileC(root, "original", source)
+        val rebuilt = compileC(root, "rebuilt", source)
+        val comparator = BehaviorComparator(SandboxRunner(networkIsolation = false,
+            outputLimits = SandboxOutputLimits(maximumStdoutBytes = 16, maximumStderrBytes = 16,
+                maximumAggregateBytes = 24)))
+        val report = comparator.compare("bounded", original, rebuilt,
+            listOf(ProcessInput("empty")), root.resolve("reports"))
+        val prior = java.nio.file.Files.readAllBytes(report.reportPath)
+        for (stream in listOf("stdout", "stderr", "aggregate")) {
+            assertFailsWith<BehaviorOutputLimitException> {
+                comparator.compare("bounded", original, rebuilt,
+                    listOf(ProcessInput("output", listOf(stream))), root.resolve("reports"))
+            }
+            assertTrue(prior.contentEquals(java.nio.file.Files.readAllBytes(report.reportPath)))
+        }
+    }
+
+    @Test
     fun `interrupted cleanup confirms child termination and retains cancellation`() {
         val process = ProcessBuilder("/bin/sleep", "10").start()
         val failure = java.util.concurrent.atomic.AtomicReference<Throwable?>()
