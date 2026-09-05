@@ -13,6 +13,33 @@ import kotlin.test.assertTrue
 
 class WorkspaceSnapshotLimitsTest {
     @Test
+    fun `unsupported extended attributes are rejected without reading or exposing their values`() {
+        verifyExtendedAttributeRejection("private metadata value".toByteArray())
+    }
+
+    @Test
+    fun `empty extended attributes are still unsupported metadata`() {
+        verifyExtendedAttributeRejection(byteArrayOf())
+    }
+
+    private fun verifyExtendedAttributeRejection(value: ByteArray) {
+        val root = workspace()
+        val file = root.resolve("src/data")
+        file.writeText("unchanged")
+        val attributes = Files.getFileAttributeView(file, java.nio.file.attribute.UserDefinedFileAttributeView::class.java)
+        attributes.write("private-name", java.nio.ByteBuffer.wrap(value))
+        val failure = assertFailsWith<WorkspaceSnapshotInvalidEntry> {
+            capture(request(root), WorkspaceSnapshotLimits())
+        }
+        assertEquals("unsupported-extended-attributes", failure.reason)
+        assertEquals(null, failure.message)
+        assertEquals("unchanged", Files.readString(file))
+        val retained = java.nio.ByteBuffer.allocate(attributes.size("private-name"))
+        attributes.read("private-name", retained)
+        kotlin.test.assertContentEquals(value, retained.array())
+    }
+
+    @Test
     fun `unchanged bytes cannot hide an unauthorized permission change`() {
         verifyMetadataRejection(changeContent = false)
     }

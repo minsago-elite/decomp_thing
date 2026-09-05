@@ -3059,7 +3059,12 @@ internal class WorkspaceSnapshot private constructor(
         private fun hashFile(root: Path, relative: String, budget: WorkspaceSnapshotBudget, expected: LinuxFileIdentity): FileState {
             val result = try {
                 decompengine.repair.hashStableRegularFile(root, relative,
-                    budget::declaredSize, budget::readBytes, budget::checkpoint)
+                    budget::declaredSize, budget::readBytes, budget::checkpoint,
+                    validateMetadata = { descriptor ->
+                        if (LinuxFilesystemSyscalls.extendedAttributeNames(descriptor, budget::checkpoint).isNotEmpty()) {
+                            throw WorkspaceSnapshotInvalidEntry("unsupported-extended-attributes")
+                        }
+                    })
             } catch (_: IOException) {
                 throw WorkspaceSnapshotInvalidEntry("file-binding-unavailable")
             } catch (_: IllegalArgumentException) {
