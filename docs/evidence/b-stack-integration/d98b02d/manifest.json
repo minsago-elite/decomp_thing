@@ -1,0 +1,42 @@
+{
+  "verifiedSourceCommit": "d98b02d0f3ca24d9c3a85a2ef463109b3e14531b",
+  "runBeforeCommit": true,
+  "sourceUnchangedBetweenRunAndCommit": true,
+  "suites": {
+    "decompengine.web.StreamingUploadServiceTest": {
+      "tests": 3,
+      "failures": 0,
+      "errors": 0,
+      "skipped": 0,
+      "xmlSha256": "ce1e33b563879170675372084378577538bf9fca561e5dcbce1ea1ee1d0d7f8f"
+    },
+    "decompengine.web.UploadPublicationServiceHttpTest": {
+      "tests": 1,
+      "failures": 0,
+      "errors": 0,
+      "skipped": 0,
+      "xmlSha256": "92b00913843e672e291cc5f9b61ecceb904d1db0fb2a00b801d312ac9d2f3fc6"
+    },
+    "decompengine.web.UploadUncertaintyHttpTest": {
+      "tests": 1,
+      "failures": 0,
+      "errors": 0,
+      "skipped": 0,
+      "xmlSha256": "70a6432a3c34c510d95f3837500a3aa2ea68968cd8cb5a9b5cfaf3986366a234"
+    },
+    "decompengine.web.WebApiControllerTest": {
+      "tests": 11,
+      "failures": 0,
+      "errors": 0,
+      "skipped": 0,
+      "xmlSha256": "fb386aedb49f5c407106f4f3491370cd253219a9ae3c397e829adc506e160f97"
+    },
+    "decompengine.web.WebJobServiceTest": {
+      "tests": 12,
+      "failures": 0,
+      "errors": 0,
+      "skipped": 0,
+      "xmlSha256": "371cbb6bb7a5ab89193c5c5ba71b8fcd7fc7f53ef8962574b4fb0f908f778b73"
+    }
+  }
+}
