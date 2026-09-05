@@ -872,6 +872,8 @@ private data class RepairTask(
     val before: RepairEvidence?,
 )
 
+private class RepairNoChangesException : IllegalArgumentException("repair agent completed without changing a source file")
+
 /**
  * Program/build-specific validation capability; repair core never assumes a tool or output path.
  *
@@ -1189,6 +1191,7 @@ class TraceGuidedRepairLoop private constructor(
             if (!finalized) {
                 runCatching {
                     reject(RepairEvidence(evidenceKind, "repair attempt rejected before workflow acceptance"))
+                    reconcile()
                 }.onFailure(original::addSuppressed)
             }
             runCatching(::close).onFailure(original::addSuppressed)
@@ -1364,7 +1367,6 @@ class TraceGuidedRepairLoop private constructor(
                     "repair agent returned without release-complete ACP invocation evidence"
                 }
             }
-            require(result.changes.isNotEmpty()) { "repair agent completed without changing a source file" }
             require(result.changes.map { it.path.relativePath }.distinct().size == result.changes.size) {
                 "repair agent reported a source path more than once"
             }
@@ -1389,6 +1391,7 @@ class TraceGuidedRepairLoop private constructor(
             require(actualChanged == declared.keys) {
                 "repair agent change report does not match workspace changes: actual=$actualChanged reported=${declared.keys}"
             }
+            if (actualChanged.isEmpty()) throw RepairNoChangesException()
             val applied = declared.entries.sortedBy { it.key }.map { (relative, change) ->
                 require(change.kind == AgentFileChangeKind.MODIFIED) {
                     "repair may only modify existing project files: $relative"
@@ -1418,6 +1421,7 @@ class TraceGuidedRepairLoop private constructor(
                         terminal.result.stopReason != AgentStopReason.COMPLETED ->
                             "agent-stop-${terminal.result.stopReason.name.lowercase().replace('_', '-')}"
                         executionEvidence?.releaseComplete == false -> "incomplete-acp-receipt"
+                        failure is RepairNoChangesException -> "agent-no-change"
                         else -> "candidate-error"
                     }
                 }
@@ -1437,6 +1441,8 @@ class TraceGuidedRepairLoop private constructor(
     ) {
         runCatching {
             graph.reject(attempt, RepairEvidence(evidenceKind, "repair attempt rejected before workflow acceptance"))
+            graph.synchronizeRepairHistory()
+            history.adoptCanonicalProjection(graph.derivedRepairIterations(), graph.retainedRegressionCorpus().inputs)
         }.onFailure(original::addSuppressed)
         runCatching(graph::close).onFailure(original::addSuppressed)
     }

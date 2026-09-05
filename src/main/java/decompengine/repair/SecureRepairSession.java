@@ -129,7 +129,18 @@ public final class SecureRepairSession implements AutoCloseable {
             List.copyOf(iteration.getRetainedRegressionIds()),
             before,
             after,
-            iteration.getSucceeded()
+            iteration.getSucceeded(),
+            iteration.getAgentInvocation() == null ? null : new RepairAgentInvocationBinding(
+                iteration.getAgentInvocation().getReceiptPath(),
+                iteration.getAgentInvocation().getReceiptSha256(),
+                iteration.getAgentInvocation().getReceiptSchemaVersion(),
+                iteration.getAgentInvocation().getRequestSha256(),
+                iteration.getAgentInvocation().getResultChangesSha256(),
+                iteration.getAgentInvocation().getTerminalOutcome(),
+                iteration.getAgentInvocation().getReceiptReleaseComplete(),
+                iteration.getAgentInvocation().getAssessmentStatus()
+            ),
+            iteration.getPublicationMode()
         );
     }
 

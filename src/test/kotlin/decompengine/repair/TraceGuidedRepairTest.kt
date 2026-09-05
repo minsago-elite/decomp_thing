@@ -71,6 +71,9 @@ class TraceGuidedRepairTest {
     @Test
     fun `ordinary ACP terminal outcomes persist immutable receipts before rejected repair history`() {
         val cases = listOf(
+            "returned-no-changes" to AgentExecutionOutcome.Returned(
+                AgentExecutionResult(AgentStopReason.NO_CHANGES, "peer secret no change"),
+            ),
             "returned-refused" to AgentExecutionOutcome.Returned(
                 AgentExecutionResult(AgentStopReason.REFUSED, "peer secret refusal"),
             ),
@@ -115,7 +118,43 @@ class TraceGuidedRepairTest {
                 project.resolve("reports/repair-revisions/graph.json").readText().contains("peer secret"),
                 expectedTerminal,
             )
+            assertEquals(expectedTerminal, history.all().single().agentInvocation?.terminalOutcome)
+            assertEquals(expectedTerminal,
+                RepairHistory(project.resolve("reports/repair_history.json")).all().single().agentInvocation?.terminalOutcome)
         }
+    }
+
+    @Test
+    fun `completed empty repair is distinct from an invalid edit and leaves accepted head unchanged`() {
+        val project = createProject(
+            createTempDirectory("trace-completed-no-change-").resolve("project"),
+            reconstructedSource = "int decomp_engine_main(void) {\n",
+        )
+        val source = project.resolve("src/reconstructed.c").readBytes()
+        val rootHead = ModuleRevisionGraph.open(project, GeneratedCRepairIndexProfile).use { it.snapshot.headId }
+        val harness = object : CapturedRepairAgentHarness {
+            override fun execute(request: AgentExecutionRequest, onEvent: (AgentExecutionEvent) -> Unit) =
+                error("captured repair execution required")
+
+            override fun executeCaptured(
+                request: AgentExecutionRequest,
+                initialFiles: Map<String, ByteArray>,
+                output: BoundedRepairOutput,
+                onEvent: (AgentExecutionEvent) -> Unit,
+            ) = AgentExecutionResult(AgentStopReason.COMPLETED)
+        }
+
+        assertFailsWith<IllegalArgumentException> {
+            generatedCRepairLoop(harness, RepairHistory(project.resolve("reports/repair_history.json")))
+                .repairCompileError(project, collectCompileFailure(project), emptyList())
+        }
+
+        ModuleRevisionGraph.open(project, GeneratedCRepairIndexProfile).use { graph ->
+            assertEquals(rootHead, graph.snapshot.headId)
+            assertEquals(ModuleRevisionStatus.REJECTED, graph.snapshot.nodes.last().status)
+            assertEquals("agent-no-change", graph.derivedRepairIterations().single().after?.kind)
+        }
+        assertContentEquals(source, project.resolve("src/reconstructed.c").readBytes())
     }
 
     @Test
@@ -1303,6 +1342,8 @@ class TraceGuidedRepairTest {
 
         assertTrue(observed === originalFailure)
         assertEquals(parent, target.readText())
+        assertEquals("validation-error",
+            RepairHistory(project.resolve("reports/repair_history.json")).all().single().after?.kind)
         ModuleRevisionGraph.open(project, GeneratedCRepairIndexProfile).use { graph ->
             assertEquals(null, graph.snapshot.pendingAttemptId)
             assertEquals(ModuleRevisionStatus.REJECTED, graph.snapshot.nodes.last().status)
