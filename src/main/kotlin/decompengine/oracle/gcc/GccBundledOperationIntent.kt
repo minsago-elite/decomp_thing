@@ -19,6 +19,7 @@ internal class GccBundledOperationIntent(
     val budgets: GccCompilerEngineContainmentBudgets,
     val diskPolicy: FullTreeDiskScratchPolicy,
     plannerProfile: GccRetainedCompilerEngineProfile? = null,
+    val cliInvocation: GccBundledCliInvocation? = null,
 ) {
     val artifacts: List<GccCompilerEngineContainmentArtifactIdentity>
     val environment: Map<String, String> = java.util.Map.copyOf(mapOf("LANG" to "C.UTF-8", "LC_ALL" to "C.UTF-8", "TZ" to "UTC"))
@@ -53,6 +54,17 @@ internal class GccBundledOperationIntent(
         bundledRuntime.requireArtifacts(this.artifacts)
         profilePolicy = plannerProfile?.bindInvocation(engineId, this.artifacts, budgets)
         val byRole = this.artifacts.associateBy { it.role }
+        cliInvocation?.let { invocation ->
+            val selected = invocation.options
+            require(profilePolicy != null && selected.engineId == engineId && selected.diskPolicy == diskPolicy &&
+                selected.binary == byRole.getValue(GccCompilerEngineContainmentArtifactRole.ENGINE_BINARY).path &&
+                selected.profile == byRole.getValue(GccCompilerEngineContainmentArtifactRole.BENCHMARK_PROFILE).path &&
+                selected.archive == byRole.getValue(GccCompilerEngineContainmentArtifactRole.GHIDRA_ARCHIVE).path &&
+                (selected.resumeAfterCheckpoint != null) == (runKind == GccCompilerEngineContainmentRunKind.INTERRUPTED)) {
+                "CLI selection differs from operation intent"
+            }
+            invocation.requireCurrent()
+        }
         workScopeSha256 = OracleArtifacts.sha256(OracleJson.canonicalBytes(JsonObject(mapOf(
             "provider" to JsonPrimitive("gcc-bundled-work-scope-v1"),
             "engineId" to JsonPrimitive(engineId),
@@ -86,7 +98,8 @@ internal class GccBundledOperationIntent(
                 "maximumFilesystemInodes" to JsonPrimitive(diskPolicy.maximumFilesystemInodes),
             )),
             "environment" to JsonObject(environment.mapValues { JsonPrimitive(it.value) }),
-        ) + (profilePolicy?.let { mapOf("plannerProfile" to OracleJson.parseCanonical(it)) } ?: emptyMap())), GCC_BUNDLED_INTENT_LIMITS)
+        ) + (profilePolicy?.let { mapOf("plannerProfile" to OracleJson.parseCanonical(it)) } ?: emptyMap()) +
+            (cliInvocation?.let { mapOf("cliInvocation" to OracleJson.parseCanonical(it.canonicalBytes)) } ?: emptyMap())), GCC_BUNDLED_INTENT_LIMITS)
         requestSha256 = OracleArtifacts.sha256(encoded)
     }
 

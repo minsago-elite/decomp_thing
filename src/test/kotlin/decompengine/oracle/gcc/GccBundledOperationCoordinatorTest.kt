@@ -171,6 +171,7 @@ class GccBundledOperationCoordinatorTest {
                     assertFailsWith<IllegalStateException> { owner.requireInterruptedStateCurrent() }
                     assertFailsWith<IllegalStateException> { owner.resume() }
                     assertFailsWith<IllegalStateException> { owner.plan() }
+                    assertFailsWith<IllegalStateException> { owner.publishCliResult() }
                     owner.requireCurrent()
                     assertFailsWith<FullTreeDiskScratchException> {
                         FullTreeDiskScratchAuthority.acquireDedicatedFilesystem(

@@ -13,6 +13,7 @@ internal class GccBundledOperationInputs private constructor(
     private val guards: List<Pair<String, StableControlFile>>,
     classPathEntries: List<FullTreeFunctionObservationClassPathEntry>,
     private val plannerProfile: GccRetainedCompilerEngineProfile?,
+    private val cliInvocation: GccBundledCliInvocation?,
 ) : AutoCloseable {
     val deploymentClosureSha256: String = gccBundledLiveDeploymentClosureSha256(
         deploymentReference.closureSha256,
@@ -37,6 +38,7 @@ internal class GccBundledOperationInputs private constructor(
     fun verify(label: String) {
         check(!closed) { "bundled operation inputs are closed" }
         plannerProfile?.requireCurrent()
+        cliInvocation?.requireCurrent()
         deploymentReference.verify(label)
         bundledRuntime.verify(label)
         guards.forEach { (name, guard) -> guard.verifyUnchanged("$name $label") }
@@ -99,6 +101,15 @@ internal class GccBundledOperationInputs private constructor(
                     }
                 }
                 val manifest = opened[artifacts.indexOf(manifestArtifact)].second
+                intent.cliInvocation?.let { invocation ->
+                    invocation.requireCurrent()
+                    val bytes = invocation.canonicalBytes
+                    val guard = StableControlFile.open(invocation.path, bytes.size.toLong(), "CLI invocation")
+                    opened += "CLI invocation" to guard
+                    require(guard.size == bytes.size.toLong() && guard.readExactly(0, bytes.size, "CLI invocation").contentEquals(bytes)) {
+                        "CLI invocation file differs from the operation request"
+                    }
+                }
                 val entries = parseBootClassPathManifest(
                     manifest.readExactly(0L, manifest.size.toInt(), "bundled operation BOOT manifest"),
                     excluded.first(),
@@ -124,7 +135,7 @@ internal class GccBundledOperationInputs private constructor(
                 val bundle = GccBundledGhidraRetainedRuntime.open(runtime, artifacts, excluded)
                 retained = bundle
                 val inputs = GccBundledOperationInputs(
-                    reference, bundle, Collections.unmodifiableList(opened.toList()), classPath, plannerProfile,
+                    reference, bundle, Collections.unmodifiableList(opened.toList()), classPath, plannerProfile, intent.cliInvocation,
                 )
                 inputs.verify("after prepared operation input authentication")
                 return inputs

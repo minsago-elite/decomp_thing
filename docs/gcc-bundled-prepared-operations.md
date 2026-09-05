@@ -7,8 +7,52 @@ It returns an opaque `GccBundledPreparedOperation`. Preparation alone does not
 authorize START; `complete`, `startAuthorized` and `releaseEligible` remain false.
 Its one-shot `execute()` performs contained fresh-control admission.
 `executeUntilCheckpoint(minimumCompletedFunctions)` admits a prepared INTERRUPTED
-intent through the same retained containment boundary. Neither path supports
-resume or release yet.
+intent through the same retained containment boundary. `resume()` continues under
+that same owner, and `plan()` uses only its successfully captured fresh/resumed
+export. Release and cold-restart recovery remain unqualified.
+
+## Contained CLI route
+
+The normal `gcc-engine-plan` command now requires the contained coordinator. It
+does not fall back to the diagnostic planning service when admission fails.
+Use the complete application distribution, its bundled Ghidra dependency, a
+matching compiler-engine profile/binary/provenance archive, and a provisioned
+dedicated scratch mount meeting the containment prerequisites below.
+
+```sh
+mkdir -m 700 results
+llm_bin_patch gcc-engine-plan cc1 /data/gcc-cc1.stripped \
+  --profile /data/compiler-engines.json \
+  --ghidra-archive /data/ghidra_12.1.3_PUBLIC_20260817.zip \
+  --output "$PWD/results" --scratch /mnt/gcc-scratch
+```
+
+`--output` must already exist, be empty and mode 0700, and be disjoint from
+scratch. Input files must remain outside both roots. Linked paths, duplicate
+options, unknown options and conflicting resource selections are rejected.
+The default scratch policy requires 8 GiB available and at most a 64 GiB
+filesystem, with 32768 available and at most 1000000 filesystem inodes. Override
+these integer ceilings with `--scratch-min-bytes`, `--scratch-max-bytes`,
+`--scratch-min-inodes`, and `--scratch-max-inodes`. The profile selects wall and
+memory ceilings; these limits do not establish measured benchmark compliance.
+
+`--resume-after-checkpoint 512` requests interruption at a whole planning batch
+and immediate resume within the same process. The value must be a positive
+multiple of 512 below the engine's function population. This option does not
+load a detached receipt or restore ownership after a process restart.
+
+The output directory contains `invocation.json`, immutable generated inputs,
+and the operation journal. Its directory identities and CLI selection are bound
+into the schema-2 intent and revalidated before START. After contained planning,
+`result.json` records model/plan paths on retained scratch, their digests, and
+linked journal receipt digests. Model and plan files are not copied into the
+external output directory. Result publication is bounded and checked against
+the same operation deadline. Failed attempts preserve partial files and require
+a new empty output directory; they do not silently overwrite or release scratch.
+
+Successful provisioned-host CLI fresh/resume execution and full-engine resource
+qualification are still unverified. Results remain incomplete and
+release-ineligible; issue #291 and its parent issues track that qualification.
 
 This is separate from the historical path-based GCC BOOT controller. That
 controller's caller-populated output directory and capacity checks are not
@@ -19,10 +63,12 @@ behavior are not silently promoted or rewritten.
 
 `GccBundledOperationIntent` snapshots the operation ID, cc1/lto1 work unit, fresh
 run kind, exact artifact identities, bundled runtime/classpath, fixed environment,
-process budgets and disk policy. The canonical schema-1 provider is
-`gcc-bundled-operation-intent-v1`; SHA-256 of all canonical bytes is the request
-identity. No output path, output inode, final command or systemd attachment is
-invented before allocation.
+process budgets and disk policy. Legacy intents use the schema-1 provider
+`gcc-bundled-operation-intent-v1`; retained planner profiles use schema 2 and
+`gcc-bundled-operation-intent-v2`. CLI intents additionally bind their invocation
+and external output directory identities. SHA-256 of all canonical bytes is the
+request identity. The analysis scratch output identity and final command come
+from actual lease allocation.
 
 The disk work unit uses the actual GCC engine ID. Its separate
 `gcc-bundled-work-scope-v1` commitment binds the engine, benchmark-profile and
