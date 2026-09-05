@@ -1,8 +1,8 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-if (($# > 1)) || [[ $# == 1 && "${1:-}" != --bundled-ghidra ]]; then
-  echo "usage: scripts/ci-release-oracle-ext4-scratch.sh [--bundled-ghidra]" >&2
+if (($# > 1)) || [[ $# == 1 && "${1:-}" != --bundled-ghidra && "${1:-}" != --bundled-ghidra-resume && "${1:-}" != --bundled-ghidra-resume-control ]]; then
+  echo "usage: scripts/ci-release-oracle-ext4-scratch.sh [--bundled-ghidra|--bundled-ghidra-resume|--bundled-ghidra-resume-control]" >&2
   exit 64
 fi
 
@@ -16,6 +16,18 @@ if [[ "${1:-}" == --bundled-ghidra ]]; then
   image="${DECOMP_TEST_BUNDLED_GHIDRA_EXT4_IMAGE:-}"
   expected_parent=/var/lib/decomp-bundled-ghidra-ci
   expected_image="$RUNNER_TEMP/decomp-bundled-ghidra-ext4-scratch.img"
+fi
+
+if [[ "${1:-}" == --bundled-ghidra-resume ]]; then
+  mount_path="${DECOMP_TEST_BUNDLED_GHIDRA_RESUME_EXT4_SCRATCH:-}"
+  image="${DECOMP_TEST_BUNDLED_GHIDRA_RESUME_EXT4_IMAGE:-}"
+  expected_parent=/var/lib/decomp-bundled-ghidra-resume-ci
+  expected_image="$RUNNER_TEMP/decomp-bundled-ghidra-resume-ext4-scratch.img"
+elif [[ "${1:-}" == --bundled-ghidra-resume-control ]]; then
+  mount_path="${DECOMP_TEST_BUNDLED_GHIDRA_RESUME_CONTROL_EXT4_SCRATCH:-}"
+  image="${DECOMP_TEST_BUNDLED_GHIDRA_RESUME_CONTROL_EXT4_IMAGE:-}"
+  expected_parent=/var/lib/decomp-bundled-ghidra-resume-control-ci
+  expected_image="$RUNNER_TEMP/decomp-bundled-ghidra-resume-control-ext4-scratch.img"
 fi
 
 if [[ -n "$mount_path" ]]; then

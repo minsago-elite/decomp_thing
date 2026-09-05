@@ -9,6 +9,7 @@ import decompengine.oracle.fulltree.FullTreeDiskScratchEvidence
 import decompengine.oracle.fulltree.FullTreeDiskScratchPolicy
 import decompengine.oracle.fulltree.boundedLiveOracleUnitJournal
 import decompengine.project.ProgramModelJson
+import decompengine.project.DeterministicModulePlanner
 import java.nio.file.Files
 import java.nio.file.LinkOption
 import java.nio.file.Path
@@ -23,6 +24,7 @@ import kotlin.test.assertFails
 import kotlin.test.assertFailsWith
 import kotlin.test.assertFalse
 import kotlin.test.assertNotNull
+import kotlin.test.assertNotEquals
 import kotlin.test.assertTrue
 import kotlinx.serialization.json.JsonArray
 import kotlinx.serialization.json.JsonObject
@@ -110,7 +112,8 @@ class GccBundledContainedExecutionTest {
                             .getOrElse { "exact-unit journal unavailable: ${it.javaClass.name}" }
                         failure.addSuppressed(AssertionError("Bundled contained export diagnostics:\n$diagnostic"))
                         for (name in listOf("contained-command.stdout", "contained-command.stderr")) {
-                            val log = selected.outputLease.path.resolve("reports").resolve(name)
+                            val log = selected.outputLease.path.resolve(checkNotNull(intent.bundledRuntime.freshControlDirectoryName(selected.outputLease.path)))
+                                .resolve("reports").resolve(name)
                             if (Files.isRegularFile(log, LinkOption.NOFOLLOW_LINKS)) {
                                 val captured = runCatching { boundedRead(log, MAXIMUM_LOG_BYTES).decodeToString() }
                                     .getOrElse { "bounded log unavailable: ${it.javaClass.name}" }
@@ -145,6 +148,135 @@ class GccBundledContainedExecutionTest {
             record.getValue("recordSha256").jsonPrimitive.content,
         )
     }
+
+    @Test
+    fun `authored multi-batch ELF resumes under the same owner and matches fresh model and plan`() = withRequiredProvisioning {
+        val bundle = configuredDirectory("DECOMP_TEST_BUNDLED_GHIDRA_ROOT")
+        val resumedMount = configuredDirectory("DECOMP_TEST_BUNDLED_GHIDRA_RESUME_EXT4_SCRATCH")
+        val freshMount = configuredDirectory("DECOMP_TEST_BUNDLED_GHIDRA_RESUME_CONTROL_EXT4_SCRATCH")
+        assumeLiveTools()
+        assertTrue(resumedMount != freshMount && names(resumedMount).isEmpty() && names(freshMount).isEmpty())
+        val fixture = Files.createTempDirectory("gcc-bundled-contained-resume-")
+        Files.setPosixFilePermissions(fixture, PosixFilePermissions.fromString("rwx------"))
+        var succeeded = false
+        val outputs = arrayListOf<Path>()
+        try {
+            val intent = authoredIntent(fixture, bundle, interrupted = true)
+            val artifacts = intent.artifacts.associateBy { it.role }
+            val journal = privateDirectory(fixture.resolve("journal"))
+            var resumedModel: ByteArray
+            var resumedPlan: ByteArray
+            var resumedEvidence: Path
+            var resumedReceiptSha256: String
+            GccBundledOperationCoordinator.prepareNew(intent, journal, resumedMount).use { owner ->
+                val definition = GccCompilerEngineContainmentContract.parseDefinitionForLiveController(owner.definitionBytes)
+                outputs.add(definition.outputLease.path)
+                val stopped = owner.executeUntilCheckpoint(512)
+                assertTrue(stopped.assessment.completed >= 512 && stopped.assessment.completed < stopped.assessment.functionCount)
+                val stoppedReceipt = OracleJson.parseCanonical(stopped.executionReceiptBytes).jsonObject
+                assertLinkedRecord(stoppedReceipt, intent, "gcc-bundled-command-interrupted-v1")
+                val stoppedCommand = stoppedReceipt.getValue("execution").jsonObject
+                assertEquals("kotlin-lease-contained-command-interrupted-v1", stoppedCommand.getValue("provider").jsonPrimitive.content)
+                for (field in listOf("unitAbsent", "cgroupAbsent", "processesAbsent")) assertTrue(stoppedCommand.getValue(field).jsonPrimitive.boolean)
+                val originalJournal = journal.resolve(".gcc-bundled-operation-${intent.operationId}")
+                val originalRecords = names(originalJournal).associateWith { boundedRead(originalJournal.resolve(it), MAXIMUM_METADATA_BYTES) }
+                owner.requireInterruptedStateCurrent()
+                val result = owner.resume()
+                assertEquals(stopped.assessment.completed, result.assessment.reused)
+                assertFalse(result.complete)
+                assertFalse(result.releaseEligible)
+                val receipt = OracleJson.parseCanonical(result.executionReceiptBytes).jsonObject
+                assertLinkedRecord(receipt, intent, "gcc-bundled-resume-executed-v1")
+                val exportReceipt = OracleJson.parseCanonical(result.exportAssessmentReceiptBytes).jsonObject
+                assertLinkedRecord(exportReceipt, intent, "gcc-bundled-resume-export-assessed-v1")
+                assertEquals(OracleArtifacts.sha256(result.executionReceiptBytes), exportReceipt.getValue("previousSha256").jsonPrimitive.content)
+                val command = receipt.getValue("execution").jsonObject
+                assertNotEquals(stoppedCommand.getValue("controlDirectory"), command.getValue("controlDirectory"))
+                assertExecution(command, intent)
+                assertEquals(result.assessment.programModelSha256, assertExport(definition.outputLease.path, artifacts).programModelSha256)
+                originalRecords.forEach { (name, bytes) -> assertContentEquals(bytes, boundedRead(originalJournal.resolve(name), MAXIMUM_METADATA_BYTES)) }
+                assertEquals(17, names(originalJournal).size)
+                resumedModel = boundedRead(definition.outputLease.path.resolve("reports/program_model.json"), MAXIMUM_MODEL_BYTES)
+                resumedPlan = authoredPlan(resumedModel)
+                resumedReceiptSha256 = OracleArtifacts.sha256(result.executionReceiptBytes)
+                resumedEvidence = retainFixtureEvidence(fixture, intent, definition, result.executionReceiptBytes, result.exportAssessmentReceiptBytes,
+                    result.assessment, journal, resumedPlan)
+                assertFails { owner.resume() }
+            }
+            val freshIntent = GccBundledOperationIntent("4".repeat(64), intent.engineId, GccCompilerEngineContainmentRunKind.FRESH_CONTROL,
+                intent.artifacts, intent.bundledRuntime, intent.budgets, intent.diskPolicy)
+            val freshJournal = privateDirectory(fixture.resolve("journal-fresh"))
+            GccBundledOperationCoordinator.prepareNew(freshIntent, freshJournal, freshMount).use { owner ->
+                val definition = GccCompilerEngineContainmentContract.parseDefinitionForLiveController(owner.definitionBytes)
+                outputs.add(definition.outputLease.path)
+                val result = owner.execute()
+                assertEquals(0L, result.assessment.reused)
+                val freshModel = boundedRead(definition.outputLease.path.resolve("reports/program_model.json"), MAXIMUM_MODEL_BYTES)
+                val freshPlan = authoredPlan(freshModel)
+                val destination = retainFixtureEvidence(fixture, freshIntent, definition, result.executionReceiptBytes,
+                    result.exportAssessmentReceiptBytes, result.assessment, freshJournal, freshPlan)
+                assertContentEquals(resumedModel, freshModel, "resumed model differs from normal fresh import/analysis")
+                assertContentEquals(resumedPlan, freshPlan, "planner-derived ownership differs")
+                readOnlyFile(destination.resolve("resume-comparison.json"), OracleJson.canonicalBytes(JsonObject(mapOf(
+                    "fixtureOnly" to JsonPrimitive(true), "benchmarkAccepted" to JsonPrimitive(false),
+                    "releaseEligible" to JsonPrimitive(false),
+                    "resumedEvidenceDirectory" to JsonPrimitive(resumedEvidence.fileName.toString()),
+                    "freshEvidenceDirectory" to JsonPrimitive(destination.fileName.toString()),
+                    "resumedExecutionReceiptSha256" to JsonPrimitive(resumedReceiptSha256),
+                    "freshExecutionReceiptSha256" to JsonPrimitive(OracleArtifacts.sha256(result.executionReceiptBytes)),
+                    "modelSha256" to JsonPrimitive(OracleArtifacts.sha256(freshModel)),
+                    "plannerDerivedPlanSha256" to JsonPrimitive(OracleArtifacts.sha256(freshPlan)),
+                    "functions" to JsonPrimitive(result.assessment.functionCount),
+                ))))
+            }
+            succeeded = true
+        } catch (failure: Throwable) {
+            runCatching { retainResumeFailure(fixture, outputs) }.exceptionOrNull()?.let(failure::addSuppressed)
+            throw failure
+        } finally {
+            if (succeeded) Files.walk(fixture).use { paths -> paths.sorted(Comparator.reverseOrder()).forEach(Files::delete) }
+            else println("Failed authored resume fixture retained for diagnosis: $fixture")
+        }
+    }
+
+    private fun retainResumeFailure(fixture: Path, outputs: List<Path>) {
+        val parent = Path.of("build/contained-ghidra-evidence").toAbsolutePath().normalize()
+        Files.createDirectories(parent)
+        val target = Files.createTempDirectory(parent, "failed-authored-resume-")
+        var total = 0L
+        fun copy(source: Path, relative: String, bound: Int = MAXIMUM_METADATA_BYTES) {
+            if (!Files.isRegularFile(source, LinkOption.NOFOLLOW_LINKS)) return
+            assertEquals(source.parent, source.parent.toRealPath(), "diagnostic parent must not be linked")
+            val bytes = boundedRead(source, bound)
+            total += bytes.size
+            assertTrue(total <= 64L * 1024 * 1024)
+            val destination = target.resolve(relative)
+            Files.createDirectories(destination.parent)
+            readOnlyFile(destination, bytes)
+        }
+        for (name in listOf("compiler.log", "compiler-command.json", "inputs/authored.c")) copy(fixture.resolve(name), name)
+        for (rootName in listOf("journal", "journal-fresh")) {
+            val root = fixture.resolve(rootName)
+            if (!Files.isDirectory(root, LinkOption.NOFOLLOW_LINKS)) continue
+            for (operation in names(root)) {
+                val directory = root.resolve(operation)
+                if (!Files.isDirectory(directory, LinkOption.NOFOLLOW_LINKS)) continue
+                for (name in names(directory)) copy(directory.resolve(name), "$rootName/$operation/$name", MAXIMUM_MODEL_BYTES)
+            }
+        }
+        outputs.forEachIndexed { index, output ->
+            if (Files.isDirectory(output, LinkOption.NOFOLLOW_LINKS)) for (control in names(output).filter { it.matches(Regex("control-[a-f0-9]{64}")) }) {
+                for (log in listOf("contained-command.stdout", "contained-command.stderr")) {
+                    copy(output.resolve(control).resolve("reports").resolve(log), "output-$index/$control/$log", MAXIMUM_LOG_BYTES)
+                }
+            }
+        }
+        println("Retained bounded failed resume diagnostics: $target")
+    }
+
+    private fun authoredPlan(model: ByteArray): ByteArray = DeterministicModulePlanner(
+        maximumEntities = 100_000, maximumDependencyEdges = 1_000_000, maximumWorkUnits = 10_000_000,
+    ).plan(ProgramModelJson.readCanonical(model)).toJson().toByteArray(Charsets.UTF_8)
 
     private fun assertExecution(command: JsonObject, intent: GccBundledOperationIntent) {
         assertEquals("kotlin-lease-contained-command-execution-v1", command.getValue("provider").jsonPrimitive.content)
@@ -190,19 +322,19 @@ class GccBundledContainedExecutionTest {
         val batchRoot = stateRoot.resolve("planning-batches")
         val batchNames = names(batchRoot)
         val checkpoints = batchNames.filter { it.endsWith(".checkpoint") }
-        assertEquals(1, checkpoints.size, "authored small fixture must produce one planning checkpoint")
-        val base = checkpoints.single().removeSuffix(".checkpoint")
+        assertTrue(checkpoints.size in 1..32, "authored fixture checkpoint count is outside its bound")
+        val bases = checkpoints.map { it.removeSuffix(".checkpoint") }
         assertEquals(
-            listOf(".checkpoint", ".functions.fragment", ".globals.fragment", ".types.fragment", ".failures.fragment").map { base + it }.sorted(),
+            bases.flatMap { base -> listOf(".checkpoint", ".functions.fragment", ".globals.fragment", ".types.fragment", ".failures.fragment").map { base + it } }.sorted(),
             batchNames,
         )
-        val batches = listOf(GccPlanningBatchBytes(
+        val batches = bases.map { base -> GccPlanningBatchBytes(
             boundedRead(batchRoot.resolve(base + ".checkpoint"), MAXIMUM_METADATA_BYTES),
             boundedRead(batchRoot.resolve(base + ".functions.fragment"), MAXIMUM_MODEL_BYTES),
             boundedRead(batchRoot.resolve(base + ".globals.fragment"), MAXIMUM_MODEL_BYTES),
             boundedRead(batchRoot.resolve(base + ".types.fragment"), MAXIMUM_MODEL_BYTES),
             boundedRead(batchRoot.resolve(base + ".failures.fragment"), MAXIMUM_MODEL_BYTES),
-        ))
+        ) }
         val assessed = GccCompilerEngineResumeByteValidator.assessCompletedRun(state, progress, batches, modelBytes)
         val modelDocument = OracleJson.parse(modelBytes, StrictJsonLimits(maximumInputBytes = MAXIMUM_MODEL_BYTES)).jsonObject
         assertEquals(byRole.getValue(GccCompilerEngineContainmentArtifactRole.ENGINE_BINARY).sha256, modelDocument.getValue("inputSha256").jsonPrimitive.content)
@@ -214,10 +346,47 @@ class GccBundledContainedExecutionTest {
         return assessed
     }
 
-    private fun authoredIntent(fixture: Path, bundle: Path): GccBundledOperationIntent {
+    @Test
+    fun `authored resume input contains all required defined functions`() {
+        assumeTrue(System.getProperty("os.name") == "Linux" && Files.isExecutable(Path.of("/usr/bin/cc")) && Files.isExecutable(Path.of("/usr/bin/nm")))
+        val fixture = Files.createTempDirectory("gcc-authored-resume-input-")
+        try {
+            val inputs = compileAuthoredFixture(fixture, interrupted = true)
+            assertTrue(Files.size(inputs.resolve("authored.elf")) <= 8 * 1024 * 1024)
+            val output = fixture.resolve("symbols.log")
+            val process = ProcessBuilder("/usr/bin/nm", "--defined-only", "--format=posix", inputs.resolve("authored.elf").toString())
+                .redirectErrorStream(true).redirectOutput(output.toFile()).start()
+            try {
+                assertTrue(process.waitFor(10, TimeUnit.SECONDS))
+                assertEquals(0, process.exitValue())
+                val symbols = boundedRead(output, MAXIMUM_METADATA_BYTES).decodeToString().lineSequence().map { it.substringBefore(' ') }.toSet()
+                assertEquals(4096, symbols.count { it.startsWith("fixture_step_") })
+                assertTrue(symbols.containsAll(listOf("main", "fixture_increment", "fixture_state")))
+            } finally {
+                if (process.isAlive) { process.destroyForcibly(); assertTrue(process.waitFor(5, TimeUnit.SECONDS)) }
+            }
+        } finally {
+            Files.walk(fixture).use { paths -> paths.sorted(Comparator.reverseOrder()).forEach(Files::delete) }
+        }
+    }
+
+    private fun compileAuthoredFixture(fixture: Path, interrupted: Boolean): Path {
         val inputs = privateDirectory(fixture.resolve("inputs"))
         val source = inputs.resolve("authored.c")
-        Files.writeString(source, "int fixture_increment(int value) { return value + 7; }\nint main(void) { return fixture_increment(5); }\n")
+        val sourceText = if (!interrupted) "int fixture_increment(int value) { return value + 7; }\nint main(void) { return fixture_increment(5); }\n"
+            else buildString {
+                append("int fixture_increment(int value) { return value + 7; }\n")
+                append("volatile unsigned fixture_state[64];\n")
+                for (index in 0 until 4096) {
+                    append("unsigned fixture_step_$index(unsigned value) { unsigned next = value ^ ${index + 1}u; ")
+                    append("fixture_state[${index % 64}] = next; return next + fixture_state[${(index + 1) % 64}]; }\n")
+                }
+                append("int main(void) { unsigned value = fixture_increment(5);\n")
+                for (index in 0 until 4096) append("value = fixture_step_$index(value);\n")
+                append("return (int)(value & 255u); }\n")
+            }
+        assertTrue(sourceText.toByteArray().size <= MAXIMUM_METADATA_BYTES)
+        Files.writeString(source, sourceText)
         val binary = inputs.resolve("authored.elf")
         val compilerLog = fixture.resolve("compiler.log")
         val compilerCommand = listOf(
@@ -238,6 +407,13 @@ class GccBundledContainedExecutionTest {
         }
         Files.setPosixFilePermissions(binary, PosixFilePermissions.fromString("r--------"))
         assertContentEquals(byteArrayOf(0x7f, 0x45, 0x4c, 0x46), Files.newInputStream(binary).use { it.readNBytes(4) })
+        return inputs
+    }
+
+    private fun authoredIntent(fixture: Path, bundle: Path, interrupted: Boolean = false): GccBundledOperationIntent {
+        val inputs = compileAuthoredFixture(fixture, interrupted)
+        val source = inputs.resolve("authored.c")
+        val binary = inputs.resolve("authored.elf")
         val bundleReference = GccBundledGhidraDeploymentReference.open().use { it.reference }
         val runtime = GccBundledGhidraRuntime(bundle, bundleReference.classPath.map { relative ->
             val entry = bundleReference.entries.getValue(relative)
@@ -280,8 +456,9 @@ class GccBundledContainedExecutionTest {
             GccCompilerEngineContainmentArtifactIdentity(role, path, Files.size(path), sha256(path))
         }
         return GccBundledOperationIntent(
-            OPERATION_ID, "cc1", GccCompilerEngineContainmentRunKind.FRESH_CONTROL, artifacts, runtime,
-            GccCompilerEngineContainmentBudgets(180_000, 4L * 1024 * 1024 * 1024, 128),
+            OPERATION_ID, "cc1", if (interrupted) GccCompilerEngineContainmentRunKind.INTERRUPTED else GccCompilerEngineContainmentRunKind.FRESH_CONTROL,
+            artifacts, runtime,
+            GccCompilerEngineContainmentBudgets(if (interrupted) 900_000 else 180_000, 4L * 1024 * 1024 * 1024, 128),
             FullTreeDiskScratchPolicy(256L * 1024 * 1024, 1024L * 1024 * 1024, 1024, 16384),
         )
     }
@@ -293,7 +470,9 @@ class GccBundledContainedExecutionTest {
         execution: ByteArray,
         exportAssessment: ByteArray,
         assessment: GccCompletedRunAssessment,
-    ) {
+        journalRoot: Path = fixture.resolve("journal"),
+        plan: ByteArray? = null,
+    ): Path {
         val parent = Path.of("build/contained-ghidra-evidence").toAbsolutePath().normalize()
         Files.createDirectories(parent)
         val destination = Files.createTempDirectory(parent, "authored-elf-")
@@ -310,15 +489,22 @@ class GccBundledContainedExecutionTest {
         retain("execution.json", execution)
         retain("export-assessment.json", exportAssessment)
         retain("authored.c", boundedRead(fixture.resolve("inputs/authored.c"), MAXIMUM_METADATA_BYTES))
-        retain("authored.elf", boundedRead(fixture.resolve("inputs/authored.elf"), MAXIMUM_METADATA_BYTES))
+        retain("authored.elf", boundedRead(fixture.resolve("inputs/authored.elf"), 8 * 1024 * 1024))
         retain("compiler-command.json", boundedRead(fixture.resolve("compiler-command.json"), MAXIMUM_METADATA_BYTES))
         retain("compiler.log", boundedRead(fixture.resolve("compiler.log"), MAXIMUM_METADATA_BYTES))
-        val journal = fixture.resolve("journal/.gcc-bundled-operation-${intent.operationId}")
+        val journal = journalRoot.resolve(".gcc-bundled-operation-${intent.operationId}")
         for (name in names(journal)) retain("journal/$name", boundedRead(journal.resolve(name), MAXIMUM_METADATA_BYTES))
         val reports = definition.outputLease.path.resolve("reports")
-        for (name in listOf("program_model.json", "program_model.json.progress.json", "contained-command.stdout", "contained-command.stderr")) {
+        for (name in listOf("program_model.json", "program_model.json.progress.json")) {
             retain("reports/$name", boundedRead(reports.resolve(name), if (name == "program_model.json") MAXIMUM_MODEL_BYTES else MAXIMUM_LOG_BYTES))
         }
+        val command = OracleJson.parseCanonical(execution).jsonObject.getValue("execution").jsonObject
+        val control = Path.of(command.getValue("controlDirectory").jsonPrimitive.content)
+        assertEquals(definition.outputLease.path, control.parent)
+        for (name in listOf("contained-command.stdout", "contained-command.stderr")) {
+            retain("control-reports/$name", boundedRead(control.resolve("reports").resolve(name), MAXIMUM_LOG_BYTES))
+        }
+        if (plan != null) retain("module-plan.json", plan)
         val export = reports.resolve("program_model.json.export")
         retain("reports/program_model.json.export/state.json", boundedRead(export.resolve("state.json"), MAXIMUM_METADATA_BYTES))
         val batches = export.resolve("planning-batches")
@@ -340,6 +526,7 @@ class GccBundledContainedExecutionTest {
             "diskDisposition" to JsonPrimitive("retained residue; trusted CI fixture-filesystem teardown only"),
         ))))
         println("Retained bounded authored fixture evidence: $destination")
+        return destination
     }
 
     private fun assertCopiedExportRejectsIdentityAndLinks(
