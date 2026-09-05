@@ -3328,14 +3328,14 @@ internal class PinnedSecurityExecutable private constructor(
     }
 }
 
-private data class ForbiddenRuntimeFile(
+internal data class ForbiddenRuntimeFile(
     val device: Long,
     val inode: Long,
     val size: Long,
     val sha256: String,
 )
 
-private data class RuntimeManifest(
+internal data class RuntimeManifest(
     val rootIdentity: PinnedFileIdentity,
     val manifestSha256: String,
     val recursivelyRootOwnedAndImmutable: Boolean,
@@ -3860,7 +3860,7 @@ private fun terminalAuthorityStrings(
     }
 }
 
-private fun buildRuntimeManifest(
+internal fun buildRuntimeManifest(
     source: Path,
     limits: AcpRuntimeClosureLimits,
     forbidden: Set<ForbiddenRuntimeFile>,
@@ -3944,7 +3944,10 @@ private fun buildRuntimeManifest(
             }
             if (mustHash) {
                 val fileDigest = sha256(path, cancellationCheck)
-                digest.update(fileDigest.toByteArray())
+                // Screening must not change an immutable root-owned runtime's provisioning
+                // manifest merely because an unrelated security tool has the same byte size.
+                // User-owned snapshots still commit every file's content hash.
+                if (!rootOwned) digest.update(fileDigest.toByteArray())
                 if (candidateForbidden.any { forbiddenFile ->
                     (forbiddenFile.device == identity.device && forbiddenFile.inode == identity.inode) ||
                         forbiddenFile.sha256 == fileDigest

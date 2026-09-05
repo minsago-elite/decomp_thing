@@ -10,6 +10,8 @@ import decompengine.repair.RepairBudgetExceededException
 import decompengine.repair.RepairCandidateValidationRequest
 import decompengine.repair.RepairResourceBudget
 import decompengine.repair.readStableRegularFile
+import decompengine.oracle.core.OracleJson
+import decompengine.oracle.core.StrictJsonLimits
 import java.nio.file.FileVisitResult
 import java.nio.file.Files
 import java.nio.file.LinkOption
@@ -74,7 +76,13 @@ internal class GeneratedCValidationSnapshot private constructor(
         require(revision.digest().joinToString("") { "%02x".format(it) } == request.sourceRevisionSha256) {
             "candidate revision changed during snapshot population"
         }
-        sourceManifestSha256 = sha256(JsonArray(sourceManifest).toString().toByteArray(Charsets.UTF_8))
+        check()
+        val maximumManifestBytes = minOf(budget.maximumIndexEvidenceBytes, 64L * 1024 * 1024).toInt()
+        sourceManifestSha256 = sha256(OracleJson.canonicalBytes(JsonArray(sourceManifest), StrictJsonLimits(
+            maximumInputBytes = maximumManifestBytes, maximumCanonicalBytes = maximumManifestBytes,
+            maximumNodes = 1_000_000, maximumStringBytes = 4096, maximumTotalStringBytes = maximumManifestBytes,
+        )))
+        check()
     }
 
     /** Only this application-owned link connects immutable sources to the independent writable mount. */

@@ -2,8 +2,8 @@
 
 Issue #236 owns the production validation provider for `generated-c-make-v1`.
 `GeneratedCRepairRuntimeProvider` registers the concrete Linux snapshot/build/behavior
-implementation. Its public availability check deliberately remains unavailable while the new
-candidate-validation writable-mount closure awaits successful real-boundary qualification.
+implementation. Its public availability check deliberately remains unavailable while the complete
+compiler/full-corpus path awaits separate public-factory qualification.
 Pure policy tests and successful ACP tests do not qualify the generated-C compiler/full-corpus path.
 
 ## Authority and execution
@@ -125,11 +125,16 @@ suites were `CandidateValidationMountPolicyTest`, `GeneratedCRepairValidationPro
 `AcpSandboxPolicyTest` and `AcpHarnessFactoryTest`. This is boundary-policy/configuration evidence,
 not a successful compiler/full-corpus production run.
 
-Runtime manifest reconciliation is also pending under #236. In `LinuxBubblewrapBoundary.kt`,
-`calculateAcpRuntimeManifestSha256` calls `buildRuntimeManifest` with an empty forbidden-executable
-set. Launch-time `buildRuntimeManifest` hashes otherwise immutable root-owned file contents when
-their sizes match a forbidden security executable; those additional hashes contribute to the
-manifest. A legitimate same-sized runtime file can therefore yield different provisioning and
-launch manifests. This fails closed but can prevent an otherwise valid compiler/header/runtime
-closure from launching. Positive production qualification must wait for a consistent authenticated
-manifest definition and corresponding benign regression coverage.
+Hosted run `33947259314` at `7cb96ab` passed all six `CandidateValidationMountPolicyTest` cases,
+including the real static probe and final writable-mount attestation, within 185 passing ACP tests
+and 21 suites without skips. Artifact `9963769697` has SHA-256
+`d3eac2c3f060154ee35a17d1ca644365020e703f7c56f1cd092323fad2739182`.
+This qualifies the shared mount topology, separately from the production provider.
+
+Runtime manifest reconciliation now keeps immutable root-owned manifests independent of the
+forbidden-executable screening set in `LinuxBubblewrapBoundary.kt`'s `buildRuntimeManifest`.
+Screening still hashes matching-size files and rejects forbidden content; its extra screening
+hash does not change the provisioning commitment. User-owned snapshots still commit file contents.
+Two benign `AcpRuntimeManifestConsistencyTest` cases verify both properties. The focused local
+rerun passed ten tests with the one unprovisioned live mount case skipped. Source snapshot manifests
+also use the same bounded canonical JSON encoding as the retained receipt and archive verifier.
