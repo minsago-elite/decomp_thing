@@ -62,3 +62,8 @@ an ext4 quota lease. Production all-shard containment/recovery evidence, source/
 relocation and normalized thunk/virtual evidence, recovered-model scoring and release composition
 remain separate requirements under issues #128, #136 and #138. ACP may consume resulting evidence
 read-only; it does not supply oracle facts, validation decisions, scores or release authority.
+
+The [Kotlin observability baseline](full-tree-call-baseline-kotlin.md) consumes a
+live, raw-reconciled projection through the fixed baseline hook. It rederives the
+same inputs when validating report candidates and preserves the false authority
+flags; its exact/partial counts are not recovered-model accuracy scores.

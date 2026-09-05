@@ -153,7 +153,7 @@ internal object FullTreeCallTruthSqlite {
         richArtifact, strippedArtifact, inventoryPath, elfFunctionIndex, functionObservationRoot,
         expectedFunctionObservationIndexArtifactSha256, functionTruthRoot, callObservationRoot,
         expectedCallObservationIndexArtifactSha256, scope, scratchParent, outputRoot, maximumWorkers, limits, false,
-    )
+    ) { it.publish() }
 
     fun loadAndValidate(
         candidateRoot: Path,
@@ -174,10 +174,73 @@ internal object FullTreeCallTruthSqlite {
         richArtifact, strippedArtifact, inventoryPath, elfFunctionIndex, functionObservationRoot,
         expectedFunctionObservationIndexArtifactSha256, functionTruthRoot, callObservationRoot,
         expectedCallObservationIndexArtifactSha256, scope, scratchParent, candidateRoot, maximumWorkers, limits, true,
-    )
+    ) { it.validate() }
+
+    internal fun <Result> withValidatedBaselineProjection(
+        candidateRoot: Path,
+        richArtifact: Path,
+        strippedArtifact: Path,
+        inventoryPath: Path,
+        elfFunctionIndex: Path,
+        functionObservationRoot: Path,
+        expectedFunctionObservationIndexArtifactSha256: String,
+        functionTruthRoot: Path,
+        callObservationRoot: Path,
+        expectedCallObservationIndexArtifactSha256: String,
+        scope: AuthenticatedFullTreeScope,
+        scratchParent: Path,
+        baselineRoot: Path,
+        maximumWorkers: Int,
+        limits: FullTreeCallTruthLimits,
+        consume: (FullTreeCallBaselineRawProjection) -> Result,
+    ): Result {
+        requireCallTruthDisjoint(baselineRoot, listOf(
+            candidateRoot, richArtifact, strippedArtifact, inventoryPath, elfFunctionIndex,
+            functionObservationRoot, functionTruthRoot, callObservationRoot, scratchParent,
+        ))
+        return reconcileCalls(
+            richArtifact, strippedArtifact, inventoryPath, elfFunctionIndex, functionObservationRoot,
+            expectedFunctionObservationIndexArtifactSha256, functionTruthRoot, callObservationRoot,
+            expectedCallObservationIndexArtifactSha256, scope, scratchParent, candidateRoot, maximumWorkers, limits, true,
+        ) { it.withBaseline(consume) }
+    }
 }
 
-private fun reconcileCalls(
+internal class FullTreeCallBaselineRawProjection internal constructor(
+    val root: Path,
+    val index: JsonObject,
+    val indexArtifactSha256: String,
+    val scope: AuthenticatedFullTreeScope,
+    val scratchParent: Path,
+    private val scratchCheckpoint: (String) -> Long,
+    private val runtimeCheckpoint: (String) -> Unit,
+    private val rawRecheck: (String) -> Unit,
+    private val releaseInputs: () -> Unit,
+) : AutoCloseable {
+    private var released = false
+
+    fun checkpoint(label: String): Long {
+        check(!released) { "call-baseline raw projection has been released" }
+        return scratchCheckpoint(label)
+    }
+
+    fun recheck(label: String) {
+        check(!released) { "call-baseline raw projection has been released" }
+        rawRecheck(label)
+    }
+
+    fun release() {
+        if (released) return
+        releaseInputs()
+        released = true
+    }
+
+    fun terminalCheckpoint(label: String) = runtimeCheckpoint(label)
+
+    override fun close() = release()
+}
+
+private fun <Result> reconcileCalls(
     richArtifact: Path,
     strippedArtifact: Path,
     inventoryPath: Path,
@@ -193,7 +256,8 @@ private fun reconcileCalls(
     maximumWorkers: Int,
     limits: FullTreeCallTruthLimits,
     validating: Boolean,
-): FullTreeCallTruthPublication = translateCallTruthFailure {
+    finish: (CallTruthReconciliation) -> Result,
+): Result = translateCallTruthFailure {
     if (limits.maximumScratchBytes < maxOf(limits.truth.maximumScratchBytes,
             limits.truth.elfFunctions.maximumScratchBytes, limits.callRun.maximumScratchBytes)
     ) callTruthFail("call-truth scratch ceiling does not admit its configured nested raw derivations")
@@ -279,31 +343,75 @@ private fun reconcileCalls(
                     scratch.releaseDatabase()
                     recheck("before terminal call-truth comparison")
                     stage.freeze(projection, budget)
-                    if (validating) {
-                        compareCallTruthTree(result, stage.root, projection, budget)
-                        recheck("after comparing the raw-derived call-truth candidate")
-                        compareCallTruthTree(result, stage.root, projection, budget)
-                        stage.close()
-                        scratch.close()
-                        releaseFunctions()
-                        budget.checkpoint("after releasing call-truth validation scratch")
-                    } else {
-                        scratch.close()
-                        stage.publish(result, projection, budget, { recheck("at call-truth publication") }) {
-                            releaseFunctions()
-                            budget.checkpoint("after releasing call-truth publication scratch")
-                        }
-                    }
-                    FullTreeCallTruthPublication(
-                        result, projection.index, projection.indexArtifactSha256,
-                        projection.index.controlString("indexSha256"), functions.indexArtifactSha256,
-                        expectedElfSha, callRun.indexArtifactSha256, projection.outputBytes,
-                        context.databaseHighWaterBytes, projection.counts, validating,
-                    )
+                    finish(CallTruthReconciliation(
+                        result, projection, stage, scratch, context, functions.indexArtifactSha256,
+                        expectedElfSha, callRun.indexArtifactSha256, ::recheck, releaseFunctions,
+                    ))
                 }
             }
         }
     }
+}
+
+private class CallTruthReconciliation(
+    private val result: Path,
+    private val projection: CallTruthProjection,
+    private val stage: CallTruthStage,
+    private val scratch: CallTruthScratch,
+    private val context: CallTruthContext,
+    private val functionTruthIndexSha256: String,
+    private val elfIndexSha256: String,
+    private val callIndexSha256: String,
+    private val recheckInputs: (String) -> Unit,
+    private val releaseFunctions: () -> Unit,
+) {
+    private var released = false
+
+    fun publish(): FullTreeCallTruthPublication {
+        scratch.close()
+        stage.publish(result, projection, context.budget, { recheckInputs("at call-truth publication") }) {
+            releaseFunctions()
+            context.budget.checkpoint("after releasing call-truth publication scratch")
+        }
+        return receipt(false)
+    }
+
+    fun validate(): FullTreeCallTruthPublication {
+        recheckCandidate("after comparing the raw-derived call-truth candidate")
+        release()
+        return receipt(true)
+    }
+
+    fun <Result> withBaseline(consume: (FullTreeCallBaselineRawProjection) -> Result): Result {
+        recheckCandidate("before consuming the raw call-baseline projection")
+        val live = FullTreeCallBaselineRawProjection(
+            stage.root, projection.index, projection.indexArtifactSha256, context.scope, scratch.root,
+            context::scratchBytes, context.budget::checkpoint, ::recheckCandidate, ::release,
+        )
+        return live.use(consume)
+    }
+
+    private fun recheckCandidate(label: String) {
+        check(!released) { "call-truth candidate projection has been released" }
+        compareCallTruthTree(result, stage.root, projection, context.budget)
+        recheckInputs(label)
+        compareCallTruthTree(result, stage.root, projection, context.budget)
+    }
+
+    private fun release() {
+        if (released) return
+        stage.close()
+        scratch.close()
+        releaseFunctions()
+        released = true
+        context.budget.checkpoint("after releasing call-truth validation scratch")
+    }
+
+    private fun receipt(validating: Boolean): FullTreeCallTruthPublication = FullTreeCallTruthPublication(
+        result, projection.index, projection.indexArtifactSha256, projection.index.controlString("indexSha256"),
+        functionTruthIndexSha256, elfIndexSha256, callIndexSha256, projection.outputBytes,
+        context.databaseHighWaterBytes, projection.counts, validating,
+    )
 }
 
 private class CallTruthContext(
@@ -326,6 +434,13 @@ private class CallTruthContext(
         val residentScratch = functions.checkpoint(label)
         val total = Math.addExact(Math.addExact(residentScratch, transientReservation), if (detachedOutput) outputBytes else 0L)
         if (total > limits.maximumScratchBytes) callTruthFail("call-truth aggregate scratch bound exceeded $label")
+    }
+
+    fun scratchBytes(label: String): Long {
+        budget.checkpoint(label)
+        val bytes = functions.checkpoint(label)
+        if (bytes > limits.maximumScratchBytes) callTruthFail("call-truth aggregate scratch bound exceeded $label")
+        return bytes
     }
 
     fun chargeOutput(bytes: Long) {

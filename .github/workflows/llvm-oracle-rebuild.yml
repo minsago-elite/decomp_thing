@@ -23,14 +23,7 @@ jobs:
           echo "$RUNNER_TEMP/frontend-node/bin" >> "$GITHUB_PATH"
       - name: Build the pinned LLVM toolchain image
         run: |
-          docker buildx build \
-            --no-cache \
-            --platform linux/amd64 \
-            --build-arg SOURCE_DATE_EPOCH=1779182222 \
-            --load \
-            --tag decomp-llvm-oracle-toolchain:22.1.6 \
-            --file oracle/llvm/22.1.6/build-toolchain.Dockerfile \
-            oracle/llvm/22.1.6
+          bash scripts/ci-build-llvm-toolchain.sh
           docker image inspect --format '{{.Id}}' decomp-llvm-oracle-toolchain:22.1.6 \
             | tee "$RUNNER_TEMP/image-digest.txt"
       - name: Fetch and authenticate LLVM 22.1.6

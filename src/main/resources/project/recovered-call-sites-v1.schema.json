@@ -1,0 +1,38 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://github.com/minsago-elite/decomp_thing/project/recovered-call-sites-v1.schema.json",
+  "title": "Recovered x86-64 call-site candidates, not oracle truth",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["analysisToolSha256", "calls", "exporterSha256", "imageBaseAddress", "inputSha256", "programModelSha256", "schemaVersion"],
+  "properties": {
+    "analysisToolSha256": {"$ref": "#/$defs/digest"},
+    "exporterSha256": {"$ref": "#/$defs/digest"},
+    "inputSha256": {"$ref": "#/$defs/digest"},
+    "programModelSha256": {"$ref": "#/$defs/digest"},
+    "imageBaseAddress": {"$ref": "#/$defs/address"},
+    "schemaVersion": {"const": 1},
+    "calls": {
+      "type": "array",
+      "maxItems": 10000000,
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["callerRva", "flowKind", "instructionBytes", "instructionRva", "physicalTargetRva", "recoveredTargetRvas", "returnPcRva"],
+        "properties": {
+          "callerRva": {"$ref": "#/$defs/address"},
+          "instructionRva": {"$ref": "#/$defs/address"},
+          "instructionBytes": {"type": "string", "pattern": "^(?:[0-9a-f]{2}){1,15}$"},
+          "flowKind": {"enum": ["direct-call", "indirect-call", "direct-tail-call", "indirect-jump"]},
+          "physicalTargetRva": {"anyOf": [{"type": "null"}, {"$ref": "#/$defs/address"}]},
+          "returnPcRva": {"anyOf": [{"type": "null"}, {"$ref": "#/$defs/address"}]},
+          "recoveredTargetRvas": {"type": "array", "maxItems": 16, "uniqueItems": true, "items": {"$ref": "#/$defs/address"}}
+        }
+      }
+    }
+  },
+  "$defs": {
+    "address": {"type": "string", "pattern": "^0x(?:0|[1-9a-f][0-9a-f]{0,15})$"},
+    "digest": {"type": "string", "pattern": "^[0-9a-f]{64}$"}
+  }
+}

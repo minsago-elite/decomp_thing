@@ -9,6 +9,8 @@ import decompengine.oracle.core.DescriptorBoundStateFaultPoint
 import decompengine.oracle.fulltree.KotlinSystemdCgroupBootOwner
 import decompengine.oracle.fulltree.findObservationCgroupsForUnit
 import decompengine.oracle.fulltree.StableControlFile
+import decompengine.oracle.fulltree.boundedLiveOracleUnitJournal
+import decompengine.oracle.fulltree.liveOracleUnitJournalCommand
 import java.io.ByteArrayOutputStream
 import java.lang.reflect.InvocationTargetException
 import java.lang.reflect.Modifier
@@ -21,7 +23,6 @@ import java.nio.file.StandardOpenOption
 import java.nio.file.attribute.PosixFilePermissions
 import java.security.MessageDigest
 import java.time.Instant
-import java.util.concurrent.Executors
 import java.util.concurrent.TimeUnit
 import java.util.jar.JarFile
 import java.util.zip.CRC32
@@ -53,10 +54,10 @@ class GccCompilerEngineLiveContainmentControllerTest {
                 "/usr/bin/journalctl", "--user", "--boot", "--no-pager", "--quiet", "--reverse",
                 "--output=short-monotonic", "--lines=80", "--since=@$sinceEpochSeconds", "--user-unit=$unitName",
             ),
-            liveUnitJournalCommand(unitName, sinceEpochSeconds),
+            liveOracleUnitJournalCommand(unitName, sinceEpochSeconds),
         )
         for (invalidUnit in listOf("", "*.scope", "$unitName\n", "another-$unitName")) {
-            assertFailsWith<IllegalArgumentException> { liveUnitJournalCommand(invalidUnit, sinceEpochSeconds) }
+            assertFailsWith<IllegalArgumentException> { liveOracleUnitJournalCommand(invalidUnit, sinceEpochSeconds) }
         }
     }
 
@@ -669,10 +670,29 @@ class GccCompilerEngineLiveContainmentControllerTest {
         }
 
     @Test
+    fun `long live lifecycle fixture authenticates its explicit budget without changing the default`() =
+        withControllerRoot { root ->
+            val defaultFixture = createFixture(root.resolve("default"))
+            val liveFixture = createFixture(root.resolve("long-live"), budgets = longLiveLifecycleBudgets())
+            val defaultDefinition = GccCompilerEngineContainmentContract.parseDefinitionForLiveController(
+                defaultFixture.definitionBytes,
+            )
+            val liveDefinition = GccCompilerEngineContainmentContract.parseDefinitionForLiveController(
+                liveFixture.definitionBytes,
+            )
+
+            assertEquals(60_000L, defaultDefinition.budgets.wallClockMillis)
+            assertEquals(longLiveLifecycleBudgets(), liveDefinition.budgets)
+            assertEquals(300_000L, liveDefinition.budgets.wallClockMillis)
+            assertEquals(defaultDefinition.budgets.maximumResidentBytes, liveDefinition.budgets.maximumResidentBytes)
+            assertEquals(defaultDefinition.budgets.pidsMax, liveDefinition.budgets.pidsMax)
+        }
+
+    @Test
     fun `live facade retains BOOT rejects mismatched receipt and durably proves absence`() =
         withControllerRoot(useBuildFilesystem = true) { root ->
             assumeLiveBoundary()
-            val fixture = createFixture(root, liveRuntime = true)
+            val fixture = createFixture(root, liveRuntime = true, budgets = longLiveLifecycleBudgets())
             val startedNanos = System.nanoTime()
             val sinceEpochSeconds = Instant.now().epochSecond
             val timings = mutableListOf<String>()
@@ -710,7 +730,7 @@ class GccCompilerEngineLiveContainmentControllerTest {
                 val genericOwner = retainedGenericOwner(owner)
                 assertEquals(
                     KotlinSystemdCgroupBootResources(
-                        wallClockMillis = 60_000L,
+                        wallClockMillis = 300_000L,
                         maximumResidentBytes = 512L * 1024L * 1024L,
                         pidsMax = 32L,
                     ),
@@ -824,7 +844,7 @@ class GccCompilerEngineLiveContainmentControllerTest {
                 primaryFailure = failure
                 recordTiming("failure before retained-owner cleanup")
                 val journal = runCatching {
-                    boundedLiveUnitJournal(fixture.assessment.unitName, sinceEpochSeconds)
+                    boundedLiveOracleUnitJournal(fixture.assessment.unitName, sinceEpochSeconds)
                 }.fold(
                     onSuccess = { it },
                     onFailure = { "journal snapshot unavailable: ${it.javaClass.name}: ${it.message.orEmpty().take(512)}" },
@@ -859,6 +879,12 @@ class GccCompilerEngineLiveContainmentControllerTest {
     private class SimulatedTerminalPublicationFailure : RuntimeException()
 
     private class SimulatedPreAttachmentRollbackFailure : RuntimeException()
+
+    private fun longLiveLifecycleBudgets() = GccCompilerEngineContainmentBudgets(
+        wallClockMillis = 300_000L,
+        maximumResidentBytes = 512L * 1024L * 1024L,
+        pidsMax = 32L,
+    )
 
     private fun createFixture(
         root: Path,
@@ -1065,61 +1091,6 @@ class GccCompilerEngineLiveContainmentControllerTest {
             probe.waitFor(1L, TimeUnit.SECONDS)
         }
         assumeTrue(exited && probe.exitValue() == 0, "user-systemd manager is unavailable")
-    }
-
-    private fun liveUnitJournalCommand(unitName: String, sinceEpochSeconds: Long): List<String> {
-        require(unitName.length <= 255 && unitName.matches(Regex("decomp-gcc-[a-z0-9][a-z0-9._-]*-[0-9a-f]{32}\\.scope")))
-        return listOf(
-            "/usr/bin/journalctl", "--user", "--boot", "--no-pager", "--quiet", "--reverse",
-            "--output=short-monotonic", "--lines=80", "--since=@$sinceEpochSeconds", "--user-unit=$unitName",
-        )
-    }
-
-    private fun boundedLiveUnitJournal(unitName: String, sinceEpochSeconds: Long): String {
-        val command = liveUnitJournalCommand(unitName, sinceEpochSeconds)
-        check(!Thread.currentThread().isInterrupted) { "journal diagnostics cannot run on an interrupted thread" }
-        val uid = (Files.getAttribute(Path.of("/proc/self"), "unix:uid") as Number).toInt()
-        val runtime = Path.of("/run/user/$uid")
-        val process = ProcessBuilder(command).redirectErrorStream(true).also { builder ->
-            builder.environment().clear()
-            builder.environment()["XDG_RUNTIME_DIR"] = runtime.toString()
-            builder.environment()["SYSTEMD_COLORS"] = "0"
-            builder.environment()["LANG"] = "C"
-        }.start()
-        val reader = Executors.newSingleThreadExecutor { action ->
-            Thread(action, "gcc-boot-journal-diagnostic").also { it.isDaemon = true }
-        }
-        var interrupted = false
-        try {
-            process.outputStream.close()
-            val deadline = System.nanoTime() + TimeUnit.SECONDS.toNanos(3L)
-            val output = reader.submit<ByteArray> {
-                process.inputStream.use { it.readNBytes(16_385) }
-            }.get(3L, TimeUnit.SECONDS)
-            val truncated = output.size > 16_384
-            if (truncated && process.isAlive) process.destroyForcibly()
-            check(process.waitFor(maxOf(0L, deadline - System.nanoTime()), TimeUnit.NANOSECONDS)) {
-                "exact-unit journal snapshot exceeded three seconds"
-            }
-            return "exact-unit journal exit=${process.exitValue()}, truncated=$truncated\n" +
-                output.copyOf(minOf(output.size, 16_384)).toString(Charsets.UTF_8)
-        } catch (failure: InterruptedException) {
-            interrupted = true
-            throw failure
-        } finally {
-            if (process.isAlive) process.destroyForcibly()
-            try {
-                process.waitFor(1L, TimeUnit.SECONDS)
-            } catch (_: InterruptedException) {
-                interrupted = true
-            } finally {
-                reader.shutdownNow()
-                runCatching { process.inputStream.close() }
-                runCatching { process.errorStream.close() }
-                runCatching { process.outputStream.close() }
-                if (interrupted) Thread.currentThread().interrupt()
-            }
-        }
     }
 
     private fun unitLoadState(unitName: String): String {
