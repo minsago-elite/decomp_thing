@@ -718,9 +718,9 @@ manifest is incomplete evidence. Its own lock prevents concurrent invocations of
 
 ### ACP SDK upgrades
 
-The bounded `acp/v1/wire-contract.json` corpus currently freezes 49 SDK-decoded and re-encoded
+The bounded `acp/v1/wire-contract.json` corpus currently freezes 57 SDK-decoded and re-encoded
 JSON-RPC messages. It includes the production model/mode setters, select and boolean configuration
-setters, flat and grouped session inventories, terminal token usage, session-info and configuration/mode/command/usage updates, and the original
+setters, flat and grouped session inventories, load request/responses, authentication/logout shapes, terminal token usage, session-info and configuration/mode/command/usage updates, and the original
 prompt/filesystem/terminal/permission lifecycle. `AcpV1WireContractGoldenTest` rejects missing or
 unvalidated entries and pins both Maven and SDK-reported versions. A golden update documents wire
 compatibility only; it does not implement advertised authentication, resume, or operator behavior.
@@ -829,3 +829,15 @@ Forced JVM termination still cannot establish cleanup. The preflight overload pr
 receipt in `AcpPreflightCancelledException`; cleanup failures retain their original failed outcome.
 Only that terminal cancellation is rendered as `cancelled`. Login/logout cancellation and durable
 operator authentication state are still separate unsupported work.
+
+The pinned v1 wire corpus now also freezes the agent-managed authentication advertisement,
+`authenticate` request/empty response and `logout` request/empty response. Logout advertisement
+is the distinct `agentCapabilities.auth.logout` field; the baseline fixture omits it and advertises
+no auth methods. Method selection carries the exact advertised `methodId`. These are serializer
+and JSON-RPC envelope checks against SDK 0.30.1, not enabled login/logout behavior, external identity
+verification, permission to send an unadvertised method, or draft-v2 compatibility. The operator
+implementation still reports login unsupported until its lifecycle and authority requirements pass.
+
+The auth golden includes the SDK-emitted `type: "agent"` discriminator. The SDK accepts its absence
+as the agent-managed variant, but encoding normalizes it to the explicit discriminator; the fixture
+freezes the emitted shape instead of treating omitted input defaults as byte-preserving round trips.
