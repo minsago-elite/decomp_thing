@@ -20,7 +20,6 @@ import decompengine.jobs.ProgressRedactor
 import decompengine.jobs.BestEffortProgressJournal
 import decompengine.agent.AgentWorkflowProgress
 import decompengine.agent.AgentWorkflowPhase
-import decompengine.jobs.toJson
 import decompengine.project.ArchivalReconstructionService
 import decompengine.project.BoundedLlmModuleReconstructor
 import decompengine.project.EvidenceModuleReconstructor
@@ -441,7 +440,7 @@ class UploadServer(
     }
 
     private fun encodeJob(job: Job): String =
-        Json.encodeToString(JsonElement.serializer(), job.toJson())
+        Json.encodeToString(JsonElement.serializer(), legacyJobPresentation(job))
 
     private fun decode(value: String): String = URLDecoder.decode(value, StandardCharsets.UTF_8)
 
