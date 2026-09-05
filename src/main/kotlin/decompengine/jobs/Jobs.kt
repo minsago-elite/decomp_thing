@@ -297,10 +297,10 @@ class JobStore internal constructor(
             }
         }
         checkCancellation()
-        val pending = ArrayList<String>()
+        val pending = ArrayList<Job>()
         try {
             scanJobs(maximumEntries, maximumMetadataBytes, ::checkCancellation) { job ->
-                if (job.status == "queued" || job.status == "analyzing") pending.add(job.id)
+                if (job.status == "queued" || job.status == "analyzing") pending.add(job)
             }
         } catch (cancelled: JobRecoveryCancelledException) {
             throw cancelled
@@ -308,10 +308,15 @@ class JobStore internal constructor(
             throw JobStoreException("Job recovery inspection is incomplete; no recovery statuses were changed")
         }
         checkCancellation()
-        pending.forEach { id ->
+        pending.forEach { job ->
             checkCancellation()
             statusUpdatesStarted = true
-            updateStatus(id, "failed", "Analysis was interrupted before the server restarted")
+            // Reuse the bounded inspection: updateStatus would read this metadata a second time.
+            persist(job.copy(
+                status = "failed",
+                updatedAt = Instant.now().toString(),
+                statusMessage = "Analysis was interrupted before the server restarted",
+            ))
         }
     }
 
