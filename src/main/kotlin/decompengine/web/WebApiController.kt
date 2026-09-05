@@ -22,12 +22,13 @@ internal class WebApiController(
 ) {
     private val prefix = "${assets.basePath}api/v1/"
     private val applicationBuildId = applicationBuildId()
+    private val jobPages = WebJobPages(jobs::collectionRecords)
 
     fun route(exchange: HttpExchange): Boolean {
         val path = exchange.requestURI.rawPath
         if (!path.startsWith("${assets.basePath}api/")) return false
         val resource = path.removePrefix(prefix)
-        if (!path.startsWith(prefix) || !(resource in setOf("session", "bootstrap") || resource.matches(Regex("jobs/[^/]+")))) {
+        if (!path.startsWith(prefix) || !(resource in setOf("session", "bootstrap", "jobs") || resource.matches(Regex("jobs/[^/]+")))) {
             try {
                 val policy = if (exchange.requestMethod in setOf("POST", "PUT", "PATCH", "DELETE")) {
                     WebEndpointPolicy.jsonMutation(exchange.requestMethod)
@@ -66,6 +67,12 @@ internal class WebApiController(
                 resource == "session" -> throw WebAccessDenied(
                     405, "METHOD_NOT_ALLOWED", "The session endpoint supports POST and DELETE.", setOf("POST", "DELETE"),
                 )
+                resource == "jobs" -> {
+                    val session = checkNotNull(access.authorize(exchange, WebEndpointPolicy.privateRead()))
+                    requireJsonAccept(exchange)
+                    val (query, cursor) = WebJobQuery.parse(exchange.requestURI.rawQuery)
+                    send(exchange, 200, "jobs", jobPages.page(session.sessionId, query, cursor))
+                }
                 resource == "bootstrap" -> {
                     val credentials = access.csrfForSession(exchange)
                     requireNoQuery(exchange)

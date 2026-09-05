@@ -160,6 +160,17 @@ class WebJobService(
         )
     }
 
+    /** Short per-record locks allow status reads between bounded snapshot collection steps. */
+    internal fun collectionRecords(): Sequence<kotlinx.serialization.json.JsonObject> {
+        val ids = synchronized(this) {
+            requireInitializedRead()
+            try { store.jobIds() } catch (_: decompengine.jobs.JobStoreException) {
+                throw WebJobServiceException("LISTING_UNAVAILABLE", "Job identities cannot be listed within the storage limits. Inspect storage before retrying.")
+            }
+        }
+        return ids.asSequence().map { webJob(presentation(it)) }
+    }
+
     fun presentation(jobId: String): WebJobPresentation = when (val value = inspect(jobId)) {
         is WebJobInspection.Available -> value.presentation
         is WebJobInspection.Unavailable -> throw WebJobServiceException(value.diagnostic.code, value.diagnostic.message)

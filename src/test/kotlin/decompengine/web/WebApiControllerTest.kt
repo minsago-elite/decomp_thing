@@ -2,6 +2,7 @@ package decompengine.web
 
 import decompengine.jobs.JobStore
 import decompengine.jobs.elfFixture
+import kotlinx.serialization.json.jsonArray
 import kotlinx.serialization.json.Json
 import kotlinx.serialization.json.JsonObject
 import kotlinx.serialization.json.JsonPrimitive
@@ -156,6 +157,20 @@ class WebApiControllerTest {
         assertFalse(failure.body().contains(record.toString()))
         assertEquals(200, request(server, "/workbench/api/v1/bootstrap", headers = mapOf("Cookie" to cookie)).statusCode())
         assertEquals("PRIVATE_CORRUPT_RECORD_SENTINEL {", Files.readString(record))
+    }
+
+    @Test
+    fun `private job collection enforces filters envelopes and read-only admission`() = withServer { server, _, jobId ->
+        val path = "/workbench/api/v1/jobs"
+        assertError(request(server, path), 401, "SESSION_REQUIRED")
+        val cookie = establish(server)
+        val headers = mapOf("Cookie" to cookie)
+        val result = assertEnvelope(request(server, "$path?search=SYNTHETIC&limit=1", headers = headers), 200, "jobs")
+        assertEquals(jobId, result.getValue("items").jsonArray.single().jsonObject.getValue("jobId").jsonPrimitive.content)
+        assertEquals("null", result.getValue("page").jsonObject.getValue("nextCursor").toString())
+        assertError(request(server, "$path?limit=201", headers = headers), 422, "VALIDATION_FAILED")
+        assertError(request(server, "$path?cursor=invalid", headers = headers), 400, "INVALID_CURSOR")
+        assertEquals(405, request(server, path, "POST", "{}", headers).statusCode())
     }
 
     private fun establish(server: UploadServer): String {
