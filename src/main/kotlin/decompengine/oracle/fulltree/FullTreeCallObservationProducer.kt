@@ -110,7 +110,7 @@ internal object FullTreeCallObservationProducer {
         sqliteLimits: FullTreeCallObservationSqliteLimits = FullTreeCallObservationSqliteLimits(),
         deadline: FullTreeCallObservationDeadline,
     ): FullTreeCallObservationStreamResult {
-        deadline.requireScope(scope)
+        deadline.requireShardScope(scope)
         val checkpoint = deadline::checkpoint
         checkpoint("before authenticating call-observation scope")
         FullTreeScopeControl.validate(scope, controlLimits)

@@ -797,6 +797,15 @@ class FullTreeCallObservationProducerTest {
     )
 }
 
+internal fun createNonemptyCallObservationTestArtifact(root: Path): Pair<Path, AuthenticatedFullTreeScope> {
+    val controls = createFullTreeControlFixture(root.resolve("controls"))
+    val fixture = CallObservationElfFixture.build()
+    val artifact = writeElf(root.resolve("calls.elf"), fixture.bytes)
+    return artifact to callScopeForArtifact(
+        controls.authenticatedScope(), OracleArtifacts.sha256(fixture.bytes), fixture.bytes.size.toLong(),
+    )
+}
+
 private fun callScopeForArtifact(
     original: AuthenticatedFullTreeScope,
     artifactSha256: String,

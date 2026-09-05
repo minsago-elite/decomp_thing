@@ -125,6 +125,22 @@ object BoundedShardRunPublisher {
         publishInternal(target, runId, preparedOutputs, bounds, semanticValidator, limits, probe)
     }
 
+    internal fun publishWithCheckpoint(
+        target: Path,
+        runId: String,
+        preparedOutputs: List<BoundedShardPreparedOutput>,
+        bounds: BoundedShardRunPublicationBounds,
+        semanticValidator: BoundedShardOutputSemanticValidator,
+        limits: BoundedShardRunLimits,
+        checkpoint: (String) -> Unit,
+    ): BoundedShardRunBinding = exceptionBoundary {
+        publishInternal(
+            target, runId, preparedOutputs, bounds, semanticValidator, limits,
+            BoundedShardRunPublicationProbe { stage -> checkpoint("bounded-shard publication $stage") },
+            checkpoint,
+        )
+    }
+
     private fun publishInternal(
         targetPath: Path,
         runId: String,
@@ -133,7 +149,9 @@ object BoundedShardRunPublisher {
         semanticValidator: BoundedShardOutputSemanticValidator,
         limits: BoundedShardRunLimits,
         probe: BoundedShardRunPublicationProbe,
+        checkpoint: (String) -> Unit = {},
     ): BoundedShardRunBinding {
+        checkpoint("before bounded-shard publication")
         val target = normalizeTarget(targetPath)
         validateRunId(runId)
         validateBounds(bounds, limits)
@@ -142,10 +160,11 @@ object BoundedShardRunPublisher {
 
         Publication.create(target, sources.map { it.prepared.shardId }).use { publication ->
             publication.writeRootControl(RUN_FILE, controls.runBytes)
-            val staged = sources.map { source -> publication.copyOutput(source, bounds, limits) }
+            val staged = sources.map { source -> publication.copyOutput(source, bounds, limits, checkpoint) }
             publication.freezeOutputs()
 
             staged.forEach { output ->
+                checkpoint("before bounded-shard semantic validation")
                 semanticValidator.validate(
                     BoundedShardOutputValidation(
                         runId = runId,
@@ -164,6 +183,7 @@ object BoundedShardRunPublisher {
             controls.checkpoints.forEach { checkpoint ->
                 publication.writeCheckpoint(checkpoint.shardId, checkpoint.bytes)
             }
+            checkpoint("after writing bounded-shard checkpoints")
             publication.writeRootControl(INDEX_FILE, controls.indexBytes)
             publication.freezeTree()
             probe.checkpoint(BoundedShardRunPublicationStage.BEFORE_STAGED_VERIFICATION)
@@ -174,6 +194,7 @@ object BoundedShardRunPublisher {
                 controls.indexArtifactSha256,
                 limits,
                 "staged bounded-shard run",
+                checkpoint,
             )
             requireExpectedBinding(stagedBinding, controls, sources, publication.staging, bounds)
             ensureSourcesStable(sources, "after staged verification")
@@ -184,6 +205,7 @@ object BoundedShardRunPublisher {
                 bounds = bounds,
                 limits = limits,
                 probe = probe,
+                checkpoint = checkpoint,
             )
         }
     }
@@ -442,8 +464,9 @@ object BoundedShardRunPublisher {
         indexArtifactSha256: String,
         limits: BoundedShardRunLimits,
         label: String,
+        checkpoint: (String) -> Unit,
     ): BoundedShardRunBinding = try {
-        BoundedShardRunVerifier.verify(root, indexArtifactSha256, limits)
+        BoundedShardRunVerifier.verifyWithCheckpoint(root, indexArtifactSha256, limits, checkpoint)
     } catch (failure: Exception) {
         throw BoundedShardRunPublicationException("cannot authenticate $label", failure)
     }
@@ -480,7 +503,9 @@ object BoundedShardRunPublisher {
             source: TrustedSource,
             bounds: BoundedShardRunPublicationBounds,
             limits: BoundedShardRunLimits,
+            checkpoint: (String) -> Unit,
         ): StagedOutput {
+            checkpoint("before copying bounded-shard output")
             source.ensureStable("prepared output before copy")
             val prepared = source.prepared
             val destination = staging.resolve(OUTPUTS_DIRECTORY).resolve("${prepared.shardId}.json")
@@ -497,6 +522,7 @@ object BoundedShardRunPublisher {
                     FileChannel.open(source.path, StandardOpenOption.READ, LinkOption.NOFOLLOW_LINKS).use { input ->
                         val buffer = ByteBuffer.allocate(COPY_BUFFER_BYTES)
                         while (true) {
+                            checkpoint("while copying bounded-shard output")
                             buffer.clear()
                             val read = input.read(buffer)
                             if (read < 0) break
@@ -573,6 +599,7 @@ object BoundedShardRunPublisher {
             bounds: BoundedShardRunPublicationBounds,
             limits: BoundedShardRunLimits,
             probe: BoundedShardRunPublicationProbe,
+            checkpoint: (String) -> Unit,
         ): BoundedShardRunBinding {
             probe.checkpoint(BoundedShardRunPublicationStage.BEFORE_ATOMIC_MOVE)
             ensureCompleteTree()
@@ -595,6 +622,7 @@ object BoundedShardRunPublisher {
                     controls.indexArtifactSha256,
                     limits,
                     "published bounded-shard run",
+                    checkpoint,
                 )
                 requireExpectedBinding(binding, controls, sources, target, bounds)
                 probe.checkpoint(BoundedShardRunPublicationStage.AFTER_FINAL_VERIFICATION)

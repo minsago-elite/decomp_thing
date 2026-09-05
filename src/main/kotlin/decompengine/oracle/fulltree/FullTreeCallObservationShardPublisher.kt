@@ -52,8 +52,24 @@ internal object FullTreeCallObservationShardPublisher {
         output: Path,
         limits: FullTreeCallObservationPublicationLimits = FullTreeCallObservationPublicationLimits(),
     ): FullTreeCallObservationPublication = translateCallPublicationFailure {
+        generateAndPublishWithinDeadline(
+            richArtifact, inventoryPath, scope, shardId, scratchParent, output, limits,
+            FullTreeCallObservationDeadline.start(scope, limits.control),
+        )
+    }
+
+    internal fun generateAndPublishWithinDeadline(
+        richArtifact: Path,
+        inventoryPath: Path,
+        scope: AuthenticatedFullTreeScope,
+        shardId: String,
+        scratchParent: Path,
+        output: Path,
+        limits: FullTreeCallObservationPublicationLimits,
+        deadline: FullTreeCallObservationDeadline,
+    ): FullTreeCallObservationPublication = translateCallPublicationFailure {
         requireDistinctControlOutput(output, "rich artifact" to richArtifact, "inventory" to inventoryPath)
-        withCallPublicationInputs(richArtifact, inventoryPath, scope, shardId, limits) { inputs, budget ->
+        withCallPublicationInputs(richArtifact, inventoryPath, scope, shardId, limits, deadline) { inputs, budget ->
             CallObservationOutputStage.create(output).use { stage ->
                 val generated = stage.write { stream ->
                     FullTreeCallObservationProducer.generateShardToWithinDeadline(
@@ -89,8 +105,24 @@ internal object FullTreeCallObservationShardPublisher {
         scratchParent: Path,
         limits: FullTreeCallObservationPublicationLimits = FullTreeCallObservationPublicationLimits(),
     ): FullTreeCallObservationPublication = translateCallPublicationFailure {
+        loadAndValidateWithinDeadline(
+            candidate, richArtifact, inventoryPath, scope, shardId, scratchParent, limits,
+            FullTreeCallObservationDeadline.start(scope, limits.control),
+        )
+    }
+
+    internal fun loadAndValidateWithinDeadline(
+        candidate: Path,
+        richArtifact: Path,
+        inventoryPath: Path,
+        scope: AuthenticatedFullTreeScope,
+        shardId: String,
+        scratchParent: Path,
+        limits: FullTreeCallObservationPublicationLimits,
+        deadline: FullTreeCallObservationDeadline,
+    ): FullTreeCallObservationPublication = translateCallPublicationFailure {
         requireDistinctControlOutput(candidate, "rich artifact" to richArtifact, "inventory" to inventoryPath)
-        withCallPublicationInputs(richArtifact, inventoryPath, scope, shardId, limits) { inputs, budget ->
+        withCallPublicationInputs(richArtifact, inventoryPath, scope, shardId, limits, deadline) { inputs, budget ->
             StableControlFile.open(candidate, inputs.maximumOutputBytes, "call-observation candidate").use { guard ->
                 guard.requireSingleLink("call-observation candidate")
                 requireReadOnlyCandidate(candidate)
@@ -119,11 +151,13 @@ private fun <Result> withCallPublicationInputs(
     scope: AuthenticatedFullTreeScope,
     shardId: String,
     limits: FullTreeCallObservationPublicationLimits,
+    budget: FullTreeCallObservationDeadline,
     action: (CallPublicationInputs, FullTreeCallObservationDeadline) -> Result,
 ): Result {
+    budget.requireShardScope(scope)
+    budget.checkpoint("before authenticating call-publication scope")
     FullTreeScopeControl.validate(scope, limits.control)
     val perShard = scope.document.controlObject("bounds").controlObject("perShard")
-    val budget = FullTreeCallObservationDeadline.start(scope, limits.control)
     budget.checkpoint("before authenticating call-publication inputs")
     StableControlFile.open(
         inventoryPath, limits.control.maximumInventoryBytes.toLong(), "call inventory",

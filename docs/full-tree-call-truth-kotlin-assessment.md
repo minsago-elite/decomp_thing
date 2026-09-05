@@ -55,10 +55,10 @@ This is a storage migration slice, not a contained all-shard run or a call-truth
 boundary. Publication streams to a private descriptor-retained stage, independently repeats the raw
 ELF/DWARF derivation and compares every byte, checks the generated digest, changes the output to mode
 0400, and uses descriptor-relative `RENAME_NOREPLACE` plus file/directory synchronization. Input
-guards remain open through both derivations and the final publication checks. Ordinary failure
-is bounded by one scope-bound cooperative deadline shared across both scans and publication, so
-rederivation cannot reset the operation's wall budget. Ordinary failure
-revokes only the still-matching stage or uncommitted output; existing destination files are retained.
+guards remain open through both derivations and the final publication checks. One scope-bound
+cooperative deadline covers both scans and publication, so rederivation cannot reset the operation's
+wall budget. Ordinary failure revokes only the still-matching stage or uncommitted output; existing
+destination files are retained.
 Validation independently regenerates candidate bytes, rejects writable, linked, truncated, extended,
 or schema-valid forged candidates, and never repairs the supplied file. Tests cover all fixture
 shards, stable checkpoint variations, provenance drift, output collisions, and cleanup after limits.
@@ -70,7 +70,31 @@ revoke a previously opened same-UID write descriptor, and metadata checks do not
 name replacement between a cleanup check and unlink. A contained whole-operation lease, hostile
 interruption/restart proof, and all-shard release orchestration remain separate requirements.
 
-This checkpoint cannot operate on the known historical full-tree scale: the prior call-truth tree is
+`FullTreeCallObservationRunPublisher` composes the raw publisher with the generic bounded-shard
+format. It derives the exact shard population and input hashes from the authenticated inventory,
+generates every shard from ELF/DWARF, and independently rederives the generic publisher's private
+staged copies. Its `loadAndValidate` entrypoint authenticates the complete indexed tree and repeats
+raw derivation of every shard; a self-consistent run with omitted, added, or forged observations is
+not sufficient evidence. Inputs stay pinned through final publication checks, existing targets are
+never overwritten, and the complete mode-0500 tree is published by a same-parent atomic no-replace
+rename. Leaves remain single-link mode-0400 files. Ordinary failure removes private staging and
+scratch under the cooperating-owner model.
+
+The run uses sequential execution. `maximumWorkers` is a declared upper bound, not an observed
+parallelism claim. Worker-bound changes may alter run/index metadata, but not raw observation leaves.
+One whole-run cooperative deadline spans generation, staged rederivation, copy/hash verification,
+and final publication; each shard also retains its original child deadline through revalidation,
+including time waiting for other shards. Scope declarations are admitted against implementation
+ceilings before generation, and a conservative scratch reservation accounts for the DWARF worker,
+SQLite database, accumulated prepared outputs, publication copies, and controls. This is not an
+ext4 quota or a contained process-tree resource guarantee.
+
+Run receipts fix `authoritativeReleaseEvidence`, `candidateLeaseRetained`, and
+`downstreamScoringAuthorized` to false. The generic run deliberately does not manufacture historical
+Python usage/execution artifacts or enter the historical policy-v2 assessment loader. Complete
+inventory coverage is not call-truth reconciliation, exact/partial scoring, or release completeness.
+
+The historical assessment cannot operate on the known full-tree scale: the prior call-truth tree is
 about 899 MiB, function truth about 2.5 GiB, and call observations about 1.1 GiB, while this bounded
 in-memory diagnostic intentionally caps its combined diagnostic output bytes at 64 MiB. Full authority
 still requires all of the following:

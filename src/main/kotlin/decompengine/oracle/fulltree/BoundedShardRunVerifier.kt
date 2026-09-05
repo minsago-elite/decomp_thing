@@ -122,6 +122,19 @@ object BoundedShardRunVerifier {
         verifyInternal(root, expectedIndexArtifactSha256, limits, SYSTEM_RUNTIME, emptySet())
     }
 
+    internal fun verifyWithCheckpoint(
+        root: Path,
+        expectedIndexArtifactSha256: String,
+        limits: BoundedShardRunLimits,
+        checkpoint: (String) -> Unit,
+    ): BoundedShardRunBinding = exceptionBoundary {
+        val runtime = BoundedShardVerifierRuntime { stage ->
+            checkpoint(stage)
+            SYSTEM_RUNTIME.sample(stage)
+        }
+        verifyInternal(root, expectedIndexArtifactSha256, limits, runtime, emptySet())
+    }
+
     /**
      * Authenticates an embedded bounded-shard tree whose owning format has a fixed set of sibling
      * members. The additional names are implementation-owned, not accepted from a public caller;
