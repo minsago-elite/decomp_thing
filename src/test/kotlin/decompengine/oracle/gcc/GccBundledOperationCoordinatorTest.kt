@@ -22,6 +22,7 @@ import java.security.MessageDigest
 import kotlin.test.Test
 import kotlin.test.assertContentEquals
 import kotlin.test.assertEquals
+import kotlin.test.assertFails
 import kotlin.test.assertFailsWith
 import kotlin.test.assertFalse
 import kotlin.test.assertNotEquals
@@ -503,6 +504,89 @@ class GccBundledOperationCoordinatorTest {
             }
         }
         return digest.digest().joinToString("") { "%02x".format(it) }
+    }
+
+    @Test
+    fun `version two intent binds complete planner policy and independently retains it`() {
+        val checked = Path.of(System.getProperty("user.dir")).resolve("oracle/gcc/16.2.0/compiler-engines.json")
+        val root = Files.createTempDirectory("gcc-planner-intent-")
+        GccRetainedCompilerEngineProfile.open(checked).use { original ->
+            val inputs = OracleJson.parseCanonical(original.policyBytes()).jsonObject.getValue("inputs").jsonArray
+            inputs.forEach { item ->
+                val path = Path.of(item.jsonObject.getValue("path").jsonPrimitive.content)
+                val target = root.resolve(path.fileName)
+                Files.copy(path, target)
+                Files.setPosixFilePermissions(target, PosixFilePermissions.fromString("rw-------"))
+            }
+        }
+        lateinit var bound: GccBundledOperationIntent
+        GccRetainedCompilerEngineProfile.open(root.resolve("compiler-engines.json")).use { profile ->
+            val suite = profile.suite
+            val engine = suite.engine("cc1")
+            val controls = mapOf(
+                GccCompilerEngineContainmentArtifactRole.BENCHMARK_PROFILE to suite.profilePath,
+                GccCompilerEngineContainmentArtifactRole.SOURCE_LOCK to suite.sourceLockPath,
+                GccCompilerEngineContainmentArtifactRole.BUILD_RECORD to engine.buildRecordPath,
+                GccCompilerEngineContainmentArtifactRole.ORACLE_MANIFEST to engine.oracleManifestPath,
+                GccCompilerEngineContainmentArtifactRole.TOOLCHAIN_REPRODUCTION to suite.toolchainReproductionPath,
+            )
+            val selected = artifacts().map { artifact ->
+                controls[artifact.role]?.let { path -> artifact.copy(path = path, bytes = Files.size(path),
+                    sha256 = OracleArtifacts.sha256(Files.readAllBytes(path))) } ?: when (artifact.role) {
+                    GccCompilerEngineContainmentArtifactRole.ENGINE_BINARY -> artifact.copy(bytes = engine.strippedArtifact.bytes, sha256 = engine.strippedArtifact.sha256)
+                    GccCompilerEngineContainmentArtifactRole.GHIDRA_ARCHIVE -> artifact.copy(bytes = suite.analysis.ghidraArchive.bytes, sha256 = suite.analysis.ghidraArchive.sha256)
+                    GccCompilerEngineContainmentArtifactRole.EXPORTER_SOURCE -> artifact.copy(sha256 = suite.analysis.exporterSha256)
+                    else -> artifact
+                }
+            }
+            fun build(entries: List<GccCompilerEngineContainmentArtifactIdentity> = selected,
+                limits: GccCompilerEngineContainmentBudgets = budgets()) = GccBundledOperationIntent(
+                OPERATION_ID, "cc1", GccCompilerEngineContainmentRunKind.INTERRUPTED, entries, runtime(), limits, policy(), profile)
+            bound = build()
+            val document = OracleJson.parseCanonical(bound.canonicalBytes).jsonObject
+            assertEquals("gcc-bundled-operation-intent-v2", document.getValue("provider").jsonPrimitive.content)
+            assertEquals(OracleJson.parseCanonical(profile.policyBytes()), document.getValue("plannerProfile"))
+            assertNotEquals(intent(artifacts = selected).requestSha256, bound.requestSha256)
+            assertEquals(OracleArtifacts.sha256(bound.canonicalBytes), bound.diskOperation().requestSha256)
+            for (role in controls.keys + setOf(GccCompilerEngineContainmentArtifactRole.ENGINE_BINARY,
+                GccCompilerEngineContainmentArtifactRole.GHIDRA_ARCHIVE, GccCompilerEngineContainmentArtifactRole.EXPORTER_SOURCE)) {
+                assertFails { build(selected.map { if (it.role == role) it.copy(sha256 = SHA_CHANGED) else it }) }
+            }
+            assertFails { build(limits = GccCompilerEngineContainmentBudgets(suite.budgets.exportWallClockMillis + 1000, budgets().maximumResidentBytes, 32)) }
+            assertFails { build(limits = GccCompilerEngineContainmentBudgets(60_000, suite.budgets.exportMaximumResidentBytes + 1, 32)) }
+            assertFails { bound.openPlannerProfile(listOf(root)) }
+            assertFails { GccBundledOperationIntent(OPERATION_ID, "lto1", bound.runKind, selected, runtime(), budgets(), policy(), profile) }
+            val lto = suite.engine("lto1")
+            val ltoArtifacts = selected.map { artifact ->
+                val path = when (artifact.role) {
+                    GccCompilerEngineContainmentArtifactRole.BUILD_RECORD -> lto.buildRecordPath
+                    GccCompilerEngineContainmentArtifactRole.ORACLE_MANIFEST -> lto.oracleManifestPath
+                    else -> null
+                }
+                if (path != null) artifact.copy(path = path, bytes = Files.size(path), sha256 = OracleArtifacts.sha256(Files.readAllBytes(path)))
+                else if (artifact.role == GccCompilerEngineContainmentArtifactRole.ENGINE_BINARY)
+                    artifact.copy(bytes = lto.strippedArtifact.bytes, sha256 = lto.strippedArtifact.sha256)
+                else artifact
+            }
+            val ltoIntent = GccBundledOperationIntent(OPERATION_ID, "lto1", bound.runKind, ltoArtifacts, runtime(), budgets(), policy(), profile)
+            checkNotNull(ltoIntent.openPlannerProfile(emptyList())).use { it.requireCurrent() }
+            assertNotEquals(bound.requestSha256, ltoIntent.requestSha256)
+        }
+        // The intent owns bytes, not the caller's closed descriptor handle.
+        checkNotNull(bound.openPlannerProfile(emptyList())).use { retained ->
+            retained.requireCurrent()
+            val journalRoot = Files.createDirectory(root.resolve("journal"))
+            Files.setPosixFilePermissions(journalRoot, PosixFilePermissions.fromString("rwx------"))
+            GccBundledOperationJournal.create(journalRoot, OPERATION_ID, bound.canonicalBytes).use { journal -> journal.verify("v2 planner intent test") }
+            val dependency = root.resolve("build-toolchain.Dockerfile")
+            val original = Files.readAllBytes(dependency)
+            Files.move(dependency, root.resolve("original-Dockerfile"))
+            Files.write(dependency, original)
+            assertFails { retained.requireCurrent() }
+        }
+        val path = root.resolve("compiler-engines.json")
+        Files.write(path, Files.readAllBytes(path) + byteArrayOf(32))
+        assertFails { bound.openPlannerProfile(emptyList()) }
     }
 
     private fun intent(

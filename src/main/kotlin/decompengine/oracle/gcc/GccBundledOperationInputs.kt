@@ -12,6 +12,7 @@ internal class GccBundledOperationInputs private constructor(
     private val bundledRuntime: GccBundledGhidraRetainedRuntime,
     private val guards: List<Pair<String, StableControlFile>>,
     classPathEntries: List<FullTreeFunctionObservationClassPathEntry>,
+    private val plannerProfile: GccRetainedCompilerEngineProfile?,
 ) : AutoCloseable {
     val deploymentClosureSha256: String = gccBundledLiveDeploymentClosureSha256(
         deploymentReference.closureSha256,
@@ -25,6 +26,7 @@ internal class GccBundledOperationInputs private constructor(
     @Synchronized
     fun verify(label: String) {
         check(!closed) { "bundled operation inputs are closed" }
+        plannerProfile?.requireCurrent()
         deploymentReference.verify(label)
         bundledRuntime.verify(label)
         guards.forEach { (name, guard) -> guard.verifyUnchanged("$name $label") }
@@ -35,13 +37,14 @@ internal class GccBundledOperationInputs private constructor(
         if (closed) return
         closed = true
         var failure: Throwable? = null
-        fun release(resource: AutoCloseable) {
-            runCatching { resource.close() }.exceptionOrNull()?.let { next ->
+        fun release(resource: AutoCloseable?) {
+            runCatching { resource?.close() }.exceptionOrNull()?.let { next ->
                 val previous = failure
                 if (previous == null) failure = next else if (previous !== next) previous.addSuppressed(next)
             }
         }
         guards.asReversed().forEach { (_, guard) -> release(guard) }
+        release(plannerProfile)
         release(deploymentReference)
         release(bundledRuntime)
         failure?.let { throw it }
@@ -73,7 +76,10 @@ internal class GccBundledOperationInputs private constructor(
             val opened = mutableListOf<Pair<String, StableControlFile>>()
             var deployment: GccKotlinBootClasspathReference? = null
             var retained: GccBundledGhidraRetainedRuntime? = null
+            var plannerProfile: GccRetainedCompilerEngineProfile? = null
             try {
+                plannerProfile = intent.openPlannerProfile(excluded)
+
                 for (artifact in artifacts) {
                     val label = "bundled operation artifact ${artifact.role.wireName}"
                     val guard = StableControlFile.open(artifact.path, artifact.bytes, label)
@@ -108,7 +114,7 @@ internal class GccBundledOperationInputs private constructor(
                 val bundle = GccBundledGhidraRetainedRuntime.open(runtime, artifacts, excluded)
                 retained = bundle
                 val inputs = GccBundledOperationInputs(
-                    reference, bundle, Collections.unmodifiableList(opened.toList()), classPath,
+                    reference, bundle, Collections.unmodifiableList(opened.toList()), classPath, plannerProfile,
                 )
                 inputs.verify("after prepared operation input authentication")
                 return inputs
@@ -118,6 +124,7 @@ internal class GccBundledOperationInputs private constructor(
                         ?.takeIf { it !== failure }?.let(failure::addSuppressed)
                 }
                 opened.asReversed().forEach { (_, guard) -> release(guard) }
+                release(plannerProfile)
                 release(deployment)
                 release(retained)
                 throw failure

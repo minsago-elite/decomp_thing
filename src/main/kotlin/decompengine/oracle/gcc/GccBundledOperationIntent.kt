@@ -18,12 +18,14 @@ internal class GccBundledOperationIntent(
     val bundledRuntime: GccBundledGhidraRuntime,
     val budgets: GccCompilerEngineContainmentBudgets,
     val diskPolicy: FullTreeDiskScratchPolicy,
+    plannerProfile: GccRetainedCompilerEngineProfile? = null,
 ) {
     val artifacts: List<GccCompilerEngineContainmentArtifactIdentity>
     val environment: Map<String, String> = java.util.Map.copyOf(mapOf("LANG" to "C.UTF-8", "LC_ALL" to "C.UTF-8", "TZ" to "UTC"))
     val workScopeSha256: String
     val requestSha256: String
     private val encoded: ByteArray
+    private val profilePolicy: ByteArray?
 
     val canonicalBytes: ByteArray
         get() = encoded.copyOf()
@@ -49,6 +51,7 @@ internal class GccBundledOperationIntent(
         ) { "GCC bundled intent must bind every distinct artifact role and path exactly once" }
         this.artifacts = java.util.List.copyOf(copied.sortedBy { it.role.wireName })
         bundledRuntime.requireArtifacts(this.artifacts)
+        profilePolicy = plannerProfile?.bindInvocation(engineId, this.artifacts, budgets)
         val byRole = this.artifacts.associateBy { it.role }
         workScopeSha256 = OracleArtifacts.sha256(OracleJson.canonicalBytes(JsonObject(mapOf(
             "provider" to JsonPrimitive("gcc-bundled-work-scope-v1"),
@@ -58,8 +61,8 @@ internal class GccBundledOperationIntent(
             "sourceLockSha256" to JsonPrimitive(byRole.getValue(GccCompilerEngineContainmentArtifactRole.SOURCE_LOCK).sha256),
         ))))
         encoded = OracleJson.canonicalBytes(JsonObject(mapOf(
-            "schemaVersion" to JsonPrimitive(1),
-            "provider" to JsonPrimitive("gcc-bundled-operation-intent-v1"),
+            "schemaVersion" to JsonPrimitive(if (profilePolicy == null) 1 else 2),
+            "provider" to JsonPrimitive(if (profilePolicy == null) "gcc-bundled-operation-intent-v1" else "gcc-bundled-operation-intent-v2"),
             "operationId" to JsonPrimitive(operationId),
             "engineId" to JsonPrimitive(engineId),
             "runKind" to JsonPrimitive(runKind.wireName),
@@ -83,8 +86,25 @@ internal class GccBundledOperationIntent(
                 "maximumFilesystemInodes" to JsonPrimitive(diskPolicy.maximumFilesystemInodes),
             )),
             "environment" to JsonObject(environment.mapValues { JsonPrimitive(it.value) }),
-        )), GCC_BUNDLED_INTENT_LIMITS)
+        ) + (profilePolicy?.let { mapOf("plannerProfile" to OracleJson.parseCanonical(it)) } ?: emptyMap())), GCC_BUNDLED_INTENT_LIMITS)
         requestSha256 = OracleArtifacts.sha256(encoded)
+    }
+
+    /** Reopen and retain the independently parsed closure; serialized policy is never a START token. */
+    fun openPlannerProfile(excludedRoots: List<Path>): GccRetainedCompilerEngineProfile? {
+        val expected = profilePolicy ?: return null
+        val path = artifacts.single { it.role == GccCompilerEngineContainmentArtifactRole.BENCHMARK_PROFILE }.path
+        val retained = GccRetainedCompilerEngineProfile.open(path)
+        try {
+            retained.requireDisjoint(excludedRoots + bundledRuntime.root)
+            require(retained.bindInvocation(engineId, artifacts, budgets).contentEquals(expected)) {
+                "GCC planner profile differs from its prepared operation intent"
+            }
+            return retained
+        } catch (failure: Throwable) {
+            runCatching { retained.close() }.exceptionOrNull()?.takeIf { it !== failure }?.let(failure::addSuppressed)
+            throw failure
+        }
     }
 
     fun diskOperation(): FullTreeDiskScratchOperation = FullTreeDiskScratchOperation(
@@ -102,7 +122,7 @@ internal fun requireGccBundledOperationPath(path: Path) {
 private val GCC_BUNDLED_INTENT_LIMITS = StrictJsonLimits(
     maximumInputBytes = 256 * 1024,
     maximumCanonicalBytes = 256 * 1024,
-    maximumDepth = 8,
+    maximumDepth = 16,
     maximumNodes = 8192,
     maximumStringBytes = 4096,
     maximumTotalStringBytes = 192 * 1024,
