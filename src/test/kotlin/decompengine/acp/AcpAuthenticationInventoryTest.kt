@@ -5,6 +5,24 @@ import com.agentclientprotocol.model.AuthMethodId
 import kotlin.test.*
 
 class AcpAuthenticationInventoryTest {
+    @Test fun `control normalization precedes literal and credential preview redaction`() {
+        val secret = "private-credential-fixture"
+        for (control in listOf('\u0000', '\u0001', '\r', '\u007f')) {
+            val splitSecret = secret.take(8) + control + secret.drop(8)
+            val inventory = AcpAuthenticationInventory.capture(listOf(
+                AuthMethod.AgentAuth(AuthMethodId("fixture"), splitSecret,
+                    "Bearer" + control + " credential-pattern-fixture")), listOf(secret))
+            assertFalse(inventory.methods.single().namePreview.contains(secret))
+            assertTrue(inventory.methods.single().namePreview.contains("[redacted]"))
+            assertFalse(inventory.methods.single().descriptionPreview.orEmpty().contains("credential-pattern-fixture"))
+            assertTrue(inventory.methods.single().descriptionPreview.orEmpty().contains("[redacted]"))
+            val normalizedPrivate = AcpAuthenticationInventory.capture(listOf(
+                AuthMethod.AgentAuth(AuthMethodId("fixture"), secret, null)), listOf(splitSecret))
+            assertFalse(normalizedPrivate.methods.single().namePreview.contains(secret))
+            assertTrue(normalizedPrivate.methods.single().namePreview.contains("[redacted]"))
+        }
+    }
+
     @Test fun `preview truncation preserves supplementary Unicode boundaries`() {
         val key = "\ud83d\udd11"
         for (prefixLength in listOf(126, 127, 128)) {

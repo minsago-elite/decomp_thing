@@ -412,18 +412,22 @@ class AgentProgressJournal(
 
 /** Bounded previews only; invocation artifacts continue to retain content commitments. */
 internal class ProgressRedactor(values: Collection<String>) {
-    private val secrets = values.filter { it.isNotBlank() }.distinct().sortedByDescending(String::length)
+    private val removableControls = Regex("[\\p{Cntrl}&&[^\\n\\t]]")
+    private val secrets: List<String>
     init {
-        require(secrets.size <= 4096 && secrets.sumOf { it.length.toLong() } <= 1024 * 1024) {
+        val primary = values.filter { it.isNotBlank() }.distinct()
+        require(primary.size <= 4096 && primary.sumOf { it.length.toLong() } <= 1024 * 1024) {
             "progress redaction values exceed the configured limit"
         }
+        secrets = primary.map { it.replace(removableControls, "") }.filter { it.isNotEmpty() }
+            .distinct().sortedByDescending(String::length)
     }
 
     fun text(value: String, maximumCharacters: Int = 512): String {
         require(maximumCharacters >= 0)
         // Do not take a raw prefix: that can expose a partial configured secret.
         if (value.length > 16_384) return "[oversized text omitted]"
-        var safe = value
+        var safe = value.replace(removableControls, "")
         secrets.forEach {
             safe = safe.replace(it, "[redacted]")
             if (safe.length > 16_384) return "[oversized text omitted]"
@@ -434,7 +438,6 @@ internal class ProgressRedactor(values: Collection<String>) {
         if (safe.length > 16_384) return "[oversized text omitted]"
         safe = safe.replace(Regex("(?:sk-|ghp_|github_pat_)[A-Za-z0-9_-]+"), "[redacted]")
         if (safe.length > 16_384) return "[oversized text omitted]"
-        safe = safe.replace(Regex("[\\p{Cntrl}&&[^\\n\\t]]"), "")
         if (safe.length <= maximumCharacters) return safe
         var end = maximumCharacters
         if (end > 0 && safe[end - 1].isHighSurrogate() && safe[end].isLowSurrogate()) end--

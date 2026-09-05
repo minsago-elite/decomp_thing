@@ -742,7 +742,10 @@ stderr retention, resource deadlines, cancellation polling, and process-tree cle
 
 Preflight returns an invocation-local `authentication` inventory containing at most 32 advertised
 methods. IDs are exact and bounded to 256 UTF-8 bytes; duplicate or blank IDs fail admission.
-Names/descriptions are bounded before redacted previews are retained. Truncation preserves UTF-16
+Names/descriptions are bounded before redacted previews are retained. Removable control
+characters are normalized in both preview input and private values before literal and credential-pattern
+matching, so later stripping cannot reconstruct a secret. Raw input/private-value limits still apply
+before normalization. Truncation preserves UTF-16
 surrogate pairs. Redaction checks its 16,384-unit working-text limit after every replacement, before
 another replacement can expand inserted markers; exceeding it produces an omission marker. A single
 replacement can transiently allocate up to ten times that limit. Unknown variants remain
