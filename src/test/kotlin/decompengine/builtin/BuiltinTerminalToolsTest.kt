@@ -25,6 +25,7 @@ class BuiltinTerminalToolsTest {
         val rule = AcpTerminalCommandRule(AcpSandboxReadOnlyMount(placeholder, placeholder, "a".repeat(64)), emptyList(), Path.of("/fixture/stage"))
         assertFailsWith<IllegalArgumentException> { BuiltinProcessOperation("../command", BuiltinProcessPurpose.TEST, "fixture", rule) }
         assertFalse(BuiltinProcessOperation("check", BuiltinProcessPurpose.TEST, "fixture", rule).toString().contains(placeholder.toString()))
+        assertEquals(2, terminalLimits(1024).resourceLimits.maximumCpuSeconds)
     }
 
     @Test fun `typed and direct ACP operations agree on output policy and complete terminal release`() = fixture { fixture ->
@@ -174,8 +175,7 @@ class BuiltinTerminalToolsTest {
             val rule = AcpTerminalCommandRule(AcpSandboxReadOnlyMount(probe, Path.of("/builtin-process-probe"), calculateAcpRuntimeManifestSha256(probe)),
                 listOf(mode), staging.path)
             val policy = AcpTerminalExecutionPolicy(listOf(AcpSandboxRootGrant(staging, AcpSandboxRootMode.READ_ONLY)), listOf(rule),
-                AcpTerminalLimits(maximumConcurrentTerminals = 1, maximumTerminalCreates = 4, maximumRetainedOutputBytes = retainedBytes,
-                    maximumProducedOutputBytes = 64 * 1024, maximumDuration = Duration.ofSeconds(10), terminationGrace = Duration.ofMillis(100)))
+                terminalLimits(retainedBytes))
             val helper = productionAcpGateHelper()
             val configuration = AcpLinuxSandboxConfiguration(bubblewrapExecutable = bwrap, resourceLimiterExecutable = prlimit,
                 scopeSupervisorExecutable = systemd, scopeInspectorExecutable = systemctl, environmentFdOpenerExecutable = bash,
@@ -188,4 +188,9 @@ class BuiltinTerminalToolsTest {
     }
 
     private fun hash(path: Path): String = MessageDigest.getInstance("SHA-256").digest(Files.readAllBytes(path)).joinToString("") { "%02x".format(it) }
+    private fun terminalLimits(retainedBytes: Int) = AcpTerminalLimits(
+        maximumConcurrentTerminals = 1, maximumTerminalCreates = 4, maximumRetainedOutputBytes = retainedBytes,
+        maximumProducedOutputBytes = 64 * 1024, maximumDuration = Duration.ofSeconds(10), terminationGrace = Duration.ofMillis(100),
+        resourceLimits = AcpSandboxResourceLimits(maximumCpuSeconds = 2),
+    )
 }
