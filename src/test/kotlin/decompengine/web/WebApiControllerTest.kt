@@ -463,7 +463,7 @@ class WebApiControllerTest {
             .POST(HttpRequest.BodyPublishers.ofInputStream { body.inputStream() }) // chunked; no Content-Length authority
         (mapOf("Accept" to "application/json", "Origin" to origin, "Content-Type" to "multipart/form-data; boundary=$boundary") + headers)
             .forEach { (key, value) -> builder.header(key, value) }
-        return client.send(builder.build(), HttpResponse.BodyHandlers.ofString())
+        return client.send(builder.build(), HttpResponse.BodyHandlers.ofString()).also(::assertNoWebCors)
     }
 
     private fun establish(server: UploadServer): String {
@@ -507,7 +507,7 @@ class WebApiControllerTest {
         val builder = HttpRequest.newBuilder(URI(origin + path)).method(method,
             body?.let(HttpRequest.BodyPublishers::ofString) ?: HttpRequest.BodyPublishers.noBody())
         defaults.forEach { (key, value) -> builder.header(key, value) }
-        return client.send(builder.build(), HttpResponse.BodyHandlers.ofString())
+        return client.send(builder.build(), HttpResponse.BodyHandlers.ofString()).also(::assertNoWebCors)
     }
 
     private fun withServer(block: (UploadServer, JobStore, String) -> Unit) {

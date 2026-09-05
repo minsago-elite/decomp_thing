@@ -34,7 +34,7 @@ class LegacyWebSessionTest {
             val builder = HttpRequest.newBuilder(URI(origin + path)).timeout(Duration.ofSeconds(5))
                 .method(method, HttpRequest.BodyPublishers.noBody())
             headers.forEach { (key, value) -> builder.header(key, value) }
-            return client.send(builder.build(), HttpResponse.BodyHandlers.ofString())
+            return client.send(builder.build(), HttpResponse.BodyHandlers.ofString()).also(::assertNoWebCors)
         }
         try {
             val paths = listOf("/", "/jobs/${job.id}", "/api/jobs/${job.id}", "/api/jobs/${job.id}/events",

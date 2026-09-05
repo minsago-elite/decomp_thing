@@ -1173,6 +1173,7 @@ class UploadServerTest {
             (if (method == "POST") mapOf("Origin" to origin, "Content-Type" to "application/json") else emptyMap()) + headers
         effectiveHeaders.forEach { (key, value) -> builder.header(key, value) }
         val response = (if (followRedirects) followingClient else directClient).send(builder.build(), java.net.http.HttpResponse.BodyHandlers.ofByteArray())
+        assertNoWebCors(response)
         fun header(name: String): String? = response.headers().firstValue(name).orElse(null)
         return Response(response.statusCode(), response.body(), header("Retry-After"), header("ETag"), header("Content-Type"),
             header("Cache-Control"), header("X-Request-ID"), header("Allow"))

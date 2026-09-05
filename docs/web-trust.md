@@ -1,8 +1,10 @@
 # Browser trust and deployment contract
 
 Design authority: [#149](https://github.com/minsago-elite/decomp_thing/issues/149).
-Implementation and qualification belong to D2 and D10; the legacy server does not
-yet enforce this contract. Scope and baseline gaps are in [web parity](web-parity.md).
+Implementation and qualification belong to D2 and D10. Both browser presentations now
+use the local session/request boundary; the broader contract remains partly unimplemented.
+Current access findings are in the [access audit](web-access-boundary-audit.md); historical
+scope and baseline gaps are in [web parity](web-parity.md).
 
 ## Data flow and authority
 
@@ -41,7 +43,7 @@ looking up jobs. Loopback binding alone does not authorize another website.
 
 At startup, generate a cryptographically random 256-bit single-use bootstrap
 token. Print a local URL carrying the token in the fragment, never a query or
-path. The operator opens that URL; the SPA removes the fragment with
+path. The operator opens that URL; the browser login removes the fragment with
 `history.replaceState` before fetching any content and POSTs the token to
 `/api/v1/session`. It has a five-minute expiry and is consumed atomically. Do not
 log or persist it, include it in an asset, or leave it in a copied/shareable link.
