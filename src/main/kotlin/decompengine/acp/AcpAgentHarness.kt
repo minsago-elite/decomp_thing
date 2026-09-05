@@ -1316,7 +1316,17 @@ class AcpAgentHarness(
                 "ACP SDK accepted unexpected protocol version ${agentInfo.protocolVersion}",
             )
         }
-        authenticationInventory?.set(AcpAuthenticationInventory.capture(agentInfo.authMethods, configuration.environment.values.map { it.value }))
+        authenticationInventory?.let { inventory ->
+            try {
+                inventory.set(AcpAuthenticationInventory.capture(agentInfo.authMethods, configuration.environment.values.map { it.value }))
+            } catch (_: AcpProtocolFailure) {
+                throw AgentExecutionException(AgentFailure(
+                    AgentFailureKind.PROTOCOL,
+                    "ACP agent advertised an invalid authentication inventory",
+                    details = mapOf("reason" to "invalidAuthenticationInventory"),
+                ))
+            }
+        }
         validateCapabilities(agentInfo.capabilities, requiredCapabilities)
         val agentImplementation = agentInfo.implementation
             ?: throw AcpProtocolFailure("ACP agent did not identify its implementation during initialize")

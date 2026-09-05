@@ -773,3 +773,9 @@ ID/name/description previews, variant category and the current unsupported-login
 may be truncated and are not exact selection tokens. This option cannot be combined with
 `--tools-only`; selecting the legacy harness fails without a legacy connectivity probe. No login,
 logout, session or model prompt is initiated. CLI output does not imply authentication readiness.
+
+Invalid authentication advertisements produce `PROTOCOL` with the bounded
+`invalidAuthenticationInventory` reason during preflight. A dedicated inventory-validation failure
+keeps malformed peer data distinct from unrelated configuration/redaction errors. Contained scripted
+preflight cases cover duplicate IDs, method-count overflow, blank IDs and oversized names, with
+verified cleanup and no complete execution evidence or authentication action.

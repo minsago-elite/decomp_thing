@@ -255,6 +255,19 @@ initialize_result = {
 }
 if MODE == "doctor-preflight":
     initialize_result["authMethods"] = [{"id": "operator-login", "name": "Fixture login", "description": "Bearer fixture-credential"}]
+if MODE.startswith("doctor-auth-"):
+    method = {"id": "private-method-id", "name": "Fixture login"}
+    if MODE == "doctor-auth-duplicate":
+        methods = [method, method]
+    elif MODE == "doctor-auth-count":
+        methods = [{"id": "method-" + str(i), "name": "Fixture login"} for i in range(33)]
+    elif MODE == "doctor-auth-blank":
+        methods = [{"id": " ", "name": "Fixture login"}]
+    elif MODE == "doctor-auth-text":
+        methods = [{"id": "private-method-id", "name": "x" * 513}]
+    else:
+        raise SystemExit(122)
+    initialize_result["authMethods"] = methods
 respond(initialize, initialize_result)
 
 if MODE == "duplicate-response-id":
@@ -265,7 +278,7 @@ if MODE == "duplicate-response-id":
 if MODE == "crash-after-initialize":
     raise SystemExit(17)
 
-if MODE in (
+if MODE.startswith("doctor-auth-") or MODE in (
     "doctor-preflight",
     "doctor-preflight-child-hang",
     "doctor-preflight-shutdown-burst",
