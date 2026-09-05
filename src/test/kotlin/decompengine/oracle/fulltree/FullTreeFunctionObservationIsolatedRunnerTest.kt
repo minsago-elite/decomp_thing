@@ -1292,6 +1292,37 @@ class FullTreeFunctionObservationIsolatedFixtureRunnerTest {
         }
 
     @Test
+    fun `registration-only observation assertion admits bounded exact preflight and rejects identity access`() {
+        val registration = listOf(
+            "--user", "--no-pager", "--json=short", "--auto-start=no",
+            "--allow-interactive-authorization=no", "--timeout=2",
+            "call", "org.freedesktop.DBus", "/org/freedesktop/DBus",
+            "org.freedesktop.DBus", "NameHasOwner", "s", "org.freedesktop.systemd1",
+        )
+        assertOnlyManagerRegistrationCommands(listOf(registration), "single registration")
+        assertOnlyManagerRegistrationCommands(List(81) { registration }, "maximum bounded registration")
+        val prefix = registration.take(6)
+        val forbiddenCommands = listOf(
+            prefix + listOf(
+                "call", "org.freedesktop.systemd1", "/org/freedesktop/systemd1",
+                "org.freedesktop.systemd1.Manager", "GetUnit", "s", "unrelated.scope",
+            ),
+            prefix + listOf(
+                "get-property", "org.freedesktop.systemd1", "/org/freedesktop/systemd1/unit/unrelated",
+                "org.freedesktop.systemd1.Unit", "Id",
+            ),
+            registration.map { if (it == "--auto-start=no") "--auto-start=yes" else it },
+            registration.filterNot { it == "--allow-interactive-authorization=no" },
+            registration.map { if (it == "--timeout=2") "--timeout=3" else it },
+            registration.map { if (it == "NameHasOwner") "StartServiceByName" else it },
+            registration + "unexpected",
+        )
+        for (commands in listOf(emptyList(), List(82) { registration }) + forbiddenCommands.map { listOf(registration, it) }) {
+            assertFailsWith<AssertionError> { assertOnlyManagerRegistrationCommands(commands, "invalid observation") }
+        }
+    }
+
+    @Test
     fun `cold UNIT_ATTACHED recovery re-pins BOOT without mutating the live scope`() =
         inControlTemporaryDirectory { root ->
             val mount = provisionedOracleExt4Mount()
@@ -1389,21 +1420,11 @@ class FullTreeFunctionObservationIsolatedFixtureRunnerTest {
                         "Cold attachment observation: $snapshotDiagnostics\n" +
                             "$registrationDiagnostic (queries=$registrationQueries)\n${liveBusctlResults.joinToString("\n")}",
                     )
-                    val hardenedBusctlPrefix = listOf(
-                        "--user",
-                        "--no-pager",
-                        "--json=short",
-                        "--auto-start=no",
-                        "--allow-interactive-authorization=no",
-                        "--timeout=2",
-                    )
+                    val hardenedBusctlPrefix = COLD_TEST_MANAGER_REGISTRATION_COMMAND.take(6)
                     assertTrue(registrationQueries in 1..81)
                     assertEquals(14, liveBusctlCommands.size - registrationQueries)
                     assertEquals(14, liveBusctlResults.size)
-                    val registrationArguments = listOf(
-                        "call", "org.freedesktop.DBus", "/org/freedesktop/DBus",
-                        "org.freedesktop.DBus", "NameHasOwner", "s", "org.freedesktop.systemd1",
-                    )
+                    val registrationArguments = COLD_TEST_MANAGER_REGISTRATION_COMMAND.drop(6)
                     assertEquals(
                         registrationQueries,
                         liveBusctlCommands.count { it.drop(hardenedBusctlPrefix.size) == registrationArguments },
@@ -1549,7 +1570,7 @@ class FullTreeFunctionObservationIsolatedFixtureRunnerTest {
                                     setOf("freeze", "thaw", "kill", "stop", "reset-failed")
                             },
                         )
-                        assertTrue(absentBusctlCommands.isEmpty(), "absent units must not issue identity lookups")
+                        assertOnlyManagerRegistrationCommands(absentBusctlCommands, "absent observation")
 
                         val occupied = startOccupiedObservationUnit(
                             configuration,
@@ -1557,14 +1578,19 @@ class FullTreeFunctionObservationIsolatedFixtureRunnerTest {
                             sleep,
                         )
                         foreignOccupant = occupied
+                        absentObservationCommands.clear()
+                        absentBusctlCommands.clear()
                         assertEquals(
                             FullTreeFunctionObservationColdUnitAttachmentObservationOutcome.FOREIGN_REPLACEMENT,
                             absentObserver.observeUnitAttachment(historical),
                         )
-                        assertTrue(
-                            absentBusctlCommands.isEmpty(),
-                            "foreign cgroup identities must be classified before identity lookups",
-                        )
+                        assertOnlyManagerRegistrationCommands(absentBusctlCommands, "foreign replacement observation")
+                        assertTrue(absentObservationCommands.none { arguments ->
+                            arguments.getOrNull(0) == "show" && arguments.getOrNull(1) == context.binding.unitName
+                        })
+                        assertTrue(absentObservationCommands.none { arguments ->
+                            arguments.firstOrNull() in setOf("freeze", "thaw", "kill", "stop", "reset-failed")
+                        })
                         assertOccupiedObservationUnitUnchanged(configuration, occupied)
                         stopOccupiedObservationUnit(configuration, occupied)
                         foreignOccupant = null
@@ -3069,6 +3095,15 @@ class FullTreeFunctionObservationIsolatedFixtureRunnerTest {
         }
     }
 
+    private fun assertOnlyManagerRegistrationCommands(commands: List<List<String>>, label: String) {
+        assertTrue(commands.size in 1..81, "$label must use one bounded manager registration preflight")
+        assertEquals(
+            List(commands.size) { COLD_TEST_MANAGER_REGISTRATION_COMMAND },
+            commands,
+            "$label may query only nonactivating bus registration, never unit identities or properties",
+        )
+    }
+
     private fun requireReceiptMutationTargetSameOrAbsent(
         configuration: FullTreeFunctionObservationIsolationConfiguration,
         receipt: FullTreeFunctionObservationUnitAttachmentReceipt,
@@ -3614,6 +3649,12 @@ class FullTreeFunctionObservationIsolatedFixtureRunnerTest {
             "--property=Version",
             "--value",
             "show",
+        )
+        val COLD_TEST_MANAGER_REGISTRATION_COMMAND = listOf(
+            "--user", "--no-pager", "--json=short", "--auto-start=no",
+            "--allow-interactive-authorization=no", "--timeout=2",
+            "call", "org.freedesktop.DBus", "/org/freedesktop/DBus",
+            "org.freedesktop.DBus", "NameHasOwner", "s", "org.freedesktop.systemd1",
         )
         val COLD_TEST_MANAGER_FEATURES_COMMAND = listOf(
             "--no-pager",
