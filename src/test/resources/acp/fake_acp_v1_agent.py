@@ -268,6 +268,8 @@ if MODE.startswith("doctor-auth-"):
         methods = [{"id": " ", "name": "Fixture login"}]
     elif MODE == "doctor-auth-payload":
         methods = [{"id": "private-method-id", "name": "Fixture login", "_meta": {"secret": "x" * 17000}}]
+    elif MODE == "doctor-auth-unicode":
+        methods = [{"id": "private-method-id", "name": "\ud800"}]
     elif MODE == "doctor-auth-text":
         methods = [{"id": "private-method-id", "name": "x" * 513}]
     else:
