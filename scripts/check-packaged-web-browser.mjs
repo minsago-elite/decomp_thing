@@ -210,7 +210,7 @@ async function evaluate(target, expression) {
 
 async function ready(target, expression, label) {
   return waitFor(async () => {
-    try { return await evaluate(target, expression); }
+    try { return await evaluate(target, `document.body !== null && (${expression})`); }
     catch (error) {
       if (/context|navigat|Cannot find/i.test(error.message)) return false;
       throw error;
@@ -239,6 +239,8 @@ async function prepareArchive(archivePath) {
     const executable = execFileSync('/bin/sh', ['-c', `command -v ${name}`], { encoding: 'utf8' }).trim();
     await fs.symlink(executable, join(bins, name));
   }
+  // Gradle uses xargs with its default external echo command while parsing JVM options.
+  await fs.symlink('/usr/bin/echo', join(bins, 'echo'));
   const environment = { PATH: bins, JAVA_HOME: javaHome, LANG: 'C.UTF-8' };
   for (const name of ['node', 'npm']) assert.notEqual(spawnSync('/bin/sh', ['-c', `command -v ${name}`], { env: environment }).status, 0);
   const data = join(working, 'untouched jobs');
@@ -550,7 +552,12 @@ try {
     assert.equal(localCookie.secure, false);
     assert.equal(await evaluate(authenticated, 'localStorage.length + sessionStorage.length'), 0);
     await evaluate(authenticated, `document.querySelector('a[href="/nested/runtime"]').click()`);
-    await ready(authenticated, `document.querySelector('h1')?.textContent === 'Runtime status'`, 'authenticated Runtime');
+    await ready(authenticated, `document.querySelector('h1')?.textContent === 'Runtime status' && document.querySelector('#server-runtime-title')?.textContent === 'Connected server'`, 'authenticated Runtime');
+    assert.equal((await evaluate(authenticated, 'window.__sessionTestRequests')).length, firstRequests.length,
+      'Opening Runtime issued a probe or another bootstrap request');
+    assert.ok(await evaluate(authenticated, `document.body.innerText.includes('Workflow actions are unavailable in this preview.') && document.body.innerText.includes('Uploads unavailable')`));
+    report.runtimeSnapshot = { connected: true, unavailableCapabilitiesExplained: true, navigationRequests: 0 };
+
     await cdp.call('Page.reload', {}, authenticated.sessionId);
     await ready(authenticated, `document.querySelector('h1')?.textContent === 'Runtime status' && document.body.innerText.includes('Local session connected.')`, 'cookie session restored after reload');
     assert.equal(authenticated.requests.filter((request) => request.method === 'POST').length, 1);
@@ -560,6 +567,8 @@ try {
     await evaluate(authenticated, `[...document.querySelectorAll('button')].find(button => button.textContent === 'Sign out').click()`);
     await ready(authenticated, `document.body.innerText.includes('You signed out of this browser.')`, 'explicit logout');
     assert.equal(authenticated.requests.filter((request) => request.method === 'DELETE').length, 1);
+    assert.equal(await evaluate(authenticated, `document.querySelector('#server-runtime-title') !== null`), false, 'Logout retained private runtime evidence');
+    report.runtimeSnapshot.clearedOnLogout = true;
     await cdp.call('Page.reload', {}, authenticated.sessionId);
     await ready(authenticated, `document.body.innerText.includes('To access private work, open the sign-in link')`, 'revoked session after reload');
     await cdp.call('Page.navigate', { url: bootstrapUrl }, authenticated.sessionId);
