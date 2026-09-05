@@ -55,3 +55,10 @@ dependency entries as schema 1 for identical extracted facts. Indexing does not
 grant assessment or repair acceptance. Docker archival validation expects current
 schema-2 exports and explicit unassessed fields; that script requires its separate
 container qualification environment.
+
+The legacy Python function-boundary diagnostic reader accepts both versions for its
+function projection. It requires schema-2 functions to remain unassessed and uses
+the extraction label only as retained input metadata. The authored twin fixtures
+produce identical diagnostic reports under both versions, including all metrics,
+exclusions and the non-production verification state. This reader does not validate
+global/type recovery or replace the bounded canonical production ingestion path.
