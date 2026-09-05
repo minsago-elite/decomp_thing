@@ -54,7 +54,7 @@ data class BuiltinJournalCommitment(val records: Int, val bytes: Long, val headS
 data class BuiltinJournalEvidence(val commitment: BuiltinJournalCommitment, val complete: Boolean, val indeterminate: Boolean)
 
 internal enum class BuiltinJournalKind {
-    START, STATE, CHECKPOINT, MODEL_REQUEST, MODEL_RETRY, MODEL_RESPONSE, POLICY,
+    START, STATE, CHECKPOINT, RESUME, MODEL_REQUEST, MODEL_RETRY, MODEL_RESPONSE, POLICY,
     TOOL_REQUEST, TOOL_RESULT, VALIDATION_REQUEST, VALIDATION_RESULT, TERMINAL,
 }
 
@@ -184,6 +184,7 @@ internal class BuiltinJournal private constructor(
                         var previous = "0".repeat(64)
                         var pending: BuiltinJournalKind? = null
                         var terminal = false
+                        val contentDigest = MessageDigest.getInstance("SHA-256")
                         val input = java.io.BufferedInputStream(java.nio.channels.Channels.newInputStream(channel))
                         val frame = java.io.ByteArrayOutputStream()
                         while (true) {
@@ -194,6 +195,7 @@ internal class BuiltinJournal private constructor(
                                 check(frame.size() < configuration.maximumRecordBytes); frame.write(next); continue
                             }
                             val raw = frame.toByteArray(); frame.reset()
+                            contentDigest.update(raw); contentDigest.update(10.toByte())
                             val record = parseProviderObject(raw.decodeToString(throwOnInvalidSequence = true), configuration.maximumRecordBytes)
                             check(record.keys == setOf("version", "sequence", "previous", "kind", "payload", "sha256"))
                             check(record["version"] == JsonPrimitive(1) && record["sequence"] == JsonPrimitive(records.size))
@@ -209,10 +211,47 @@ internal class BuiltinJournal private constructor(
                         }
                         check(frame.size() == 0 && records.size == expected.records && previous == expected.headSha256)
                         verifyFile(configuration.path, key)
-                        return BuiltinJournalInspection(records.toList(), terminal, pending != null)
+                        return BuiltinJournalInspection(records.toList(), terminal, pending != null,
+                            contentDigest.digest().joinToString("") { byte -> "%02x".format(byte) })
                     }
                 }
             } catch (_: Exception) { throw BuiltinJournalException() }
+        }
+
+        /** Revalidate the entire inspected file under a new exclusive lock before retaining append authority. */
+        fun reopenCheckpoint(configuration: BuiltinJournalConfiguration, request: AgentExecutionRequest,
+            expected: BuiltinJournalCommitment, secrets: List<String>): Pair<BuiltinJournal, JsonObject> {
+            var channel: FileChannel? = null
+            try {
+                val inspection = inspect(configuration, AgentExecutionRequestBinding.capture(request), expected)
+                check(inspection.endsAtCheckpoint)
+                channel = FileChannel.open(configuration.path, READ, WRITE, NOFOLLOW_LINKS)
+                val lock = channel.tryLock() ?: error("Active writer")
+                val key = Files.readAttributes(configuration.path, BasicFileAttributes::class.java, NOFOLLOW_LINKS).fileKey() ?: error("No identity")
+                verifyParent(configuration.path); verifyFile(configuration.path, key)
+                check(channel.size() == expected.bytes)
+                val digest = MessageDigest.getInstance("SHA-256")
+                val buffer = ByteBuffer.allocate(8192)
+                var read = 0L
+                while (true) {
+                    buffer.clear()
+                    val size = channel.read(buffer)
+                    if (size < 0) break
+                    check(size > 0 && size <= expected.bytes - read)
+                    read += size; digest.update(buffer.array(), 0, size)
+                }
+                check(read == expected.bytes && digest.digest().joinToString("") { "%02x".format(it) } == inspection.contentSha256)
+                verifyFile(configuration.path, key)
+                val patterns = secrets.filter { it.isNotEmpty() }.flatMap {
+                    listOf(it, JsonPrimitive(it).toString().drop(1).dropLast(1))
+                }.distinct().sortedByDescending { it.length }
+                val journal = BuiltinJournal(configuration, channel, lock, key, patterns)
+                journal.count = expected.records; journal.bytes = expected.bytes; journal.head = expected.headSha256
+                return journal to inspection.records.last().getValue("payload").jsonObject
+            } catch (_: Exception) {
+                try { channel?.close() } catch (_: Exception) { }
+                throw BuiltinJournalException()
+            }
         }
 
         private fun transition(pending: BuiltinJournalKind?, kind: BuiltinJournalKind, count: Int): BuiltinJournalKind? {
@@ -268,7 +307,7 @@ internal class BuiltinJournal private constructor(
     }
 }
 
-internal class BuiltinJournalInspection(val records: List<JsonObject>, val complete: Boolean, val indeterminate: Boolean) {
+internal class BuiltinJournalInspection(val records: List<JsonObject>, val complete: Boolean, val indeterminate: Boolean, val contentSha256: String) {
     // A checkpoint followed by any operation is not a restart authorization. Workflow restoration is a separate capability.
     val endsAtCheckpoint get() = records.lastOrNull()?.get("kind") == JsonPrimitive(BuiltinJournalKind.CHECKPOINT.name) && !indeterminate
     override fun toString() = "BuiltinJournalInspection(records=${records.size}, complete=$complete, indeterminate=$indeterminate)"
