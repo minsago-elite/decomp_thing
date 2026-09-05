@@ -152,10 +152,16 @@ fun renderSourceFile(
     source: String,
     manifest: JsonObject? = null,
     confidence: JsonObject? = null,
+    currentBuildVerified: Boolean = false,
 ): String {
     val fileEvidence = manifest?.get("files")?.jsonArray?.mapNotNull { it as? JsonObject }
         ?.firstOrNull { it.text("path") == relativePath }
     val generator = fileEvidence?.text("generator").orEmpty()
+    val implementation = when (fileEvidence?.get("acceptedImplementation")?.jsonPrimitive?.content) {
+        "true" -> "accepted"
+        "false" -> "unresolved or rejected"
+        else -> "not classified as an implementation"
+    }
     val entities = fileEvidence?.get("entityIds")?.jsonArray?.joinToString(", ") { it.jsonPrimitive.content }.orEmpty()
     val moduleId = relativePath.substringAfterLast('/').substringBeforeLast('.')
     val moduleConfidence = runCatching {
@@ -164,7 +170,7 @@ fun renderSourceFile(
             ?.get("score")?.jsonPrimitive?.doubleOrNull?.takeIf { it.isFinite() && it in 0.0..1.0 }
     }.getOrNull()
     val provenance = if (fileEvidence == null) "" else """
-        <div class="source-provenance"><span><b>Generator</b>${generator.escapeHtml()}</span><span><b>Entities</b>${entities.escapeHtml().ifBlank { "none" }}</span>${moduleConfidence?.let { "<span><b>Module confidence</b>${(it * 100).roundToInt()}%</span>" }.orEmpty()}</div>
+        <div class="source-provenance"><span><b>Generator</b>${generator.escapeHtml()}</span><span><b>Entities</b>${entities.escapeHtml().ifBlank { "none" }}</span><span><b>Implementation</b>${implementation.escapeHtml()}</span>${moduleConfidence?.let { "<span><b>Reported module confidence</b>${(it * 100).roundToInt()}%</span>" }.orEmpty()}</div>
     """.trimIndent()
     return page(
         title = relativePath,
@@ -173,6 +179,7 @@ fun renderSourceFile(
         <a class="back-link" href="/jobs/${job.id}">← ${job.filename.escapeHtml()}</a>
         <section class="source-heading"><div><p class="kicker">Generated source</p><h1>${relativePath.escapeHtml()}</h1></div><a class="button secondary" href="${artifactHref(job, "reports/source-tree/$relativePath")}">Download</a></section>
         $provenance
+        <p class="tree-note">${if (currentBuildVerified) "Current build identity verified against the archive and this source revision." else "Current build verification is unavailable for this source revision."} Compilation does not imply behavioral equivalence.</p>
         <pre class="source-view"><code>${source.escapeHtml()}</code></pre>
       </main>
         """.trimIndent(),
@@ -319,7 +326,9 @@ private fun renderSourceTree(job: Job, source: SourceTreeView): String {
         <div class="section-heading compact"><span class="step">04</span><div><p class="kicker">Reconstructed project</p><h2>Archival source tree</h2></div>${confidence?.let { "<span class=\"count\">${(it * 100).roundToInt()}%</span>" }.orEmpty()}</div>
         <p class="tree-note">${files.size} readable project files. Confidence is evidence-bounded and does not claim universal equivalence.</p>
         <ul class="source-tree">$rows</ul>
-        <p class="tree-note">Archive verification is not established by source browsing. Report downloads are not release certification.</p>
+        ${source.archiveSha256?.let { digest ->
+            "<a class=\"button primary archive-download\" href=\"${artifactHref(job, "reports/source-tree.zip")}?sha256=${digest.escapeHtml()}\">Download verified source archive ↓</a><p class=\"tree-note\">SHA-256: <code>${digest.escapeHtml()}</code>. Verified payload and current source/build identity; not behavioral equivalence or release certification.</p>"
+        } ?: "<p class=\"tree-note\">Archive verification is unavailable for the current source/build revision.</p>"}
       </section>
     """.trimIndent()
 }
