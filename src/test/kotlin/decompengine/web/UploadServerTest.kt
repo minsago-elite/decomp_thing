@@ -189,6 +189,28 @@ class UploadServerTest {
             release.countDown()
             executor.shutdownNow()
         }
+    @Test
+    fun `dashboard keeps an unreadable published job visible without leaking its contents`() {
+        val root = createTempDirectory("web-listing-admission-")
+        val server = UploadServer("127.0.0.1", 0, root)
+        server.start()
+        try {
+            val id = uploadedJobId(server)
+            val metadata = root.resolve(id).resolve("job.json")
+            val original = metadata.readBytes()
+            metadata.writeText("private-invalid-record")
+            val page = request(server, "GET", "/")
+            assertEquals(200, page.status)
+            val text = page.body.decodeToString()
+            assertTrue(text.contains("Unavailable job"))
+            assertTrue(!text.contains("private-invalid-record"))
+            assertTrue(!text.contains(root.toString()))
+            assertEquals("private-invalid-record", metadata.readBytes().decodeToString())
+            metadata.writeBytes(original)
+            assertEquals(200, request(server, "GET", "/").status)
+        } finally { server.stop() }
+    }
+
     }
 
     @Test

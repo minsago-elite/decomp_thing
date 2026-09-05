@@ -107,7 +107,6 @@ class JobRecoveryAdmissionTest {
         assertTrue(jobs.all { store.get(it.id).status == "failed" })
     }
 
-<<<<<<< HEAD
     @Test fun `cancellation during the final publication is reported without clearing interruption`() {
         for (interrupt in listOf(false, true)) {
             val root = createTempDirectory("recovery-final-cancellation-")
@@ -138,7 +137,8 @@ class JobRecoveryAdmissionTest {
             try { assertEquals("failed", store.get(job.id).status) }
             finally { root.toFile().deleteRecursively() }
         }
-=======
+    }
+
     @Test fun `unsupported schema and lossy numeric coercions cannot pass recovery inspection`() {
         val root = createTempDirectory("recovery-schema-")
         val store = JobStore(root)
@@ -172,7 +172,25 @@ class JobRecoveryAdmissionTest {
         assertNull(store.get(job.id).statusMessage)
         store.recoverInterruptedJobs()
         assertEquals("failed", store.get(job.id).status)
->>>>>>> be07aceb (Reject lossy or unsupported job metadata before recovery [skip ci])
+    }
+
+    @Test fun `listing refuses partial results on scan limits and invalid metadata without rewriting`() {
+        val root = createTempDirectory("listing-admission-")
+        val store = JobStore(root)
+        val jobs = List(2) { store.createFromUpload("fixture.elf", elfFixture()) }
+        val paths = jobs.map { root.resolve(it.id).resolve("job.json") }
+        val original = paths.map { it.readBytes() }
+        val total = original.sumOf { it.size.toLong() }
+        assertFailsWith<JobListingUnavailableException> { store.list(1, total) }
+        assertFailsWith<JobListingUnavailableException> { store.list(4096, total - 1) }
+        assertEquals(jobs.map { it.id }.toSet(), store.list(4096, total).map { it.id }.toSet())
+        paths.forEachIndexed { index, path -> assertContentEquals(original[index], path.readBytes()) }
+        paths[0].writeText("private-invalid-record")
+        val failure = assertFailsWith<JobListingUnavailableException> { store.list() }
+        assertEquals("Job listing is incomplete. Check retained records and store limits.", failure.message)
+        assertNull(failure.cause)
+        assertEquals("private-invalid-record", paths[0].readText())
+        assertContentEquals(original[1], paths[1].readBytes())
     }
 
     private fun assertIncomplete(action: () -> Unit) {
