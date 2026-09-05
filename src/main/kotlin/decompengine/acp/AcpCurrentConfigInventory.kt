@@ -29,7 +29,8 @@ internal fun requireCurrentSessionConfigPreference(
         }
     }
     if (supported) return
-    fun preview(values: Sequence<String>) = previewSessionChoices(values, sensitiveValues)
+    val privatePreferences = listOfNotNull(preference.id, (preference.value as? AcpSessionConfigValue.Select)?.valueId)
+    fun preview(values: Sequence<String>) = previewSessionChoices(values, sensitiveValues + privatePreferences)
     val optionIds = preview(options.asSequence().map { it.id.value })
     val values = when (option) {
         is SessionConfigOption.Select -> preview(when (val choices = option.options) {

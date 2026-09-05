@@ -10,6 +10,25 @@ import kotlin.test.*
 @OptIn(UnstableApi::class)
 class AcpCurrentConfigInventoryTest {
     @Test
+    fun `current choices redact configured identifiers embedded in advertised values`() {
+        val original = inventory("session-new-configured.response").first()
+        val option = Json.decodeFromString<SessionConfigOption>(Json.encodeToString(SessionConfigOption.serializer(), original)
+            .replace("reasoning", "prefix-private-option").replace("high", "prefix-private-value"))
+        for (preference in listOf(
+            AcpSessionConfigPreference("private-option", AcpSessionConfigValue.BooleanValue(false)),
+            AcpSessionConfigPreference("prefix-private-option", AcpSessionConfigValue.Select("private-value")),
+        )) {
+            val failure = assertFailsWith<AgentExecutionException> {
+                requireCurrentSessionConfigPreference(listOf(option), preference, 0)
+            }
+            assertFalse(failure.stackTraceToString().contains(preference.id))
+            if (preference.value is AcpSessionConfigValue.Select) {
+                assertFalse(failure.stackTraceToString().contains("private-value"))
+            }
+        }
+    }
+
+    @Test
     fun `flat and grouped current inventories must retain a unique configured value`() {
         val preference = AcpSessionConfigPreference("reasoning", AcpSessionConfigValue.Select("high"))
         listOf("session-new-configured.response", "session-new-grouped-config.response").forEach { name ->
