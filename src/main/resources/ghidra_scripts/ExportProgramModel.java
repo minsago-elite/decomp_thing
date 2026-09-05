@@ -412,7 +412,7 @@ final class ExporterSemanticFingerprintV1 {
 // SEMANTIC_FINGERPRINT_TEST_END
 
 public class ExportProgramModel extends GhidraScript {
-    private static final int EXPORTER_VERSION = 9;
+    private static final int EXPORTER_VERSION = 10;
     private static final int DECOMPILE_TIMEOUT_SECONDS = 60;
     private static final long MAXIMUM_FULL_FUNCTION_RECORD_BYTES = 64L * 1024 * 1024;
     private static final int PLANNING_BATCH_FUNCTIONS = 512;
@@ -977,7 +977,8 @@ public class ExportProgramModel extends GhidraScript {
         output.append("      \"name\": ").append(json(function.getName())).append(",\n");
         output.append("      \"address\": ").append(json(String.format("0x%x", function.getEntryPoint().getOffset()))).append(",\n");
         output.append("      \"prototype\": ").append(json(function.getPrototypeString(false, false))).append(",\n");
-        output.append("      \"status\": ").append(json(status)).append(",\n");
+        output.append("      \"extractionStatus\": ").append(json(status)).append(",\n");
+        output.append("      \"recoveryAssessment\": \"unassessed\",\n");
         output.append("      \"calls\": ["); appendStrings(output, callIds); output.append("],\n");
         output.append("      \"referencedGlobals\": ["); appendStrings(output, referencedGlobals); output.append("],\n");
         output.append("      \"strings\": ["); appendStrings(output, strings); output.append("],\n");
@@ -1061,7 +1062,8 @@ public class ExportProgramModel extends GhidraScript {
             "      \"address\": " + json(String.format("0x%x", global.address.getOffset())) + ",\n" +
             "      \"type\": " + json(global.type) + ",\n" +
             "      \"initializer\": " + json(global.initializer) + ",\n" +
-            "      \"status\": \"recovered\"\n" +
+            "      \"extractionStatus\": \"recovered\",\n" +
+            "      \"recoveryAssessment\": \"unassessed\"\n" +
             "    }";
     }
 
@@ -1070,7 +1072,8 @@ public class ExportProgramModel extends GhidraScript {
             "      \"id\": " + json(type.id) + ",\n" +
             "      \"declaration\": " + json(type.declaration) + ",\n" +
             "      \"sourceAddress\": " + json(String.format("0x%x", type.sourceAddress.getOffset())) + ",\n" +
-            "      \"status\": \"partial\"\n" +
+            "      \"extractionStatus\": \"partial\",\n" +
+            "      \"recoveryAssessment\": \"unassessed\"\n" +
             "    }";
     }
 
@@ -1100,10 +1103,11 @@ public class ExportProgramModel extends GhidraScript {
         ) {
             throw new IllegalStateException("accepted function record is malformed or has the wrong identity: " + record.getFileName());
         }
-        int recovered = countOccurrences(text, "\n      \"status\": \"recovered\",\n");
-        int partial = countOccurrences(text, "\n      \"status\": \"partial\",\n");
-        int failed = countOccurrences(text, "\n      \"status\": \"failed\",\n");
-        if (recovered + partial + failed != 1) {
+        int recovered = countOccurrences(text, "\n      \"extractionStatus\": \"recovered\",\n");
+        int partial = countOccurrences(text, "\n      \"extractionStatus\": \"partial\",\n");
+        int failed = countOccurrences(text, "\n      \"extractionStatus\": \"failed\",\n");
+        if (recovered + partial + failed != 1 ||
+            countOccurrences(text, "\n      \"recoveryAssessment\": \"unassessed\",\n") != 1) {
             throw new IllegalStateException("accepted function record has no unique recovery status: " + record.getFileName());
         }
         return recovered == 1 ? "recovered" : (partial == 1 ? "partial" : "failed");
@@ -1280,10 +1284,11 @@ public class ExportProgramModel extends GhidraScript {
                 throw new IllegalStateException("planning function record is truncated: " + expectedFunctionIds.get(index));
             }
             String record = fragment.substring(location, recordEnd);
-            int recordRecovered = countOccurrences(record, "\n      \"status\": \"recovered\",\n");
-            int recordPartial = countOccurrences(record, "\n      \"status\": \"partial\",\n");
-            int recordFailed = countOccurrences(record, "\n      \"status\": \"failed\",\n");
-            if (recordRecovered != 0 || recordPartial + recordFailed != 1) {
+            int recordRecovered = countOccurrences(record, "\n      \"extractionStatus\": \"recovered\",\n");
+            int recordPartial = countOccurrences(record, "\n      \"extractionStatus\": \"partial\",\n");
+            int recordFailed = countOccurrences(record, "\n      \"extractionStatus\": \"failed\",\n");
+            if (recordRecovered != 0 || recordPartial + recordFailed != 1 ||
+                countOccurrences(record, "\n      \"recoveryAssessment\": \"unassessed\",\n") != 1) {
                 throw new IllegalStateException("planning function record has an invalid recovery status: " + expectedFunctionIds.get(index));
             }
             if (countOccurrences(record, "\n      \"decompiledC\": null\n") != 1) {
@@ -1342,8 +1347,10 @@ public class ExportProgramModel extends GhidraScript {
                 }
                 String record = fragment.substring(location, recordEnd);
                 if (
-                    (evidenceKind.equals("globals") && countOccurrences(record, "\n      \"status\": \"recovered\"\n") != 1) ||
-                    (evidenceKind.equals("types") && countOccurrences(record, "\n      \"status\": \"partial\"\n") != 1) ||
+                    (evidenceKind.equals("globals") && (countOccurrences(record, "\n      \"extractionStatus\": \"recovered\",\n") != 1 ||
+                        countOccurrences(record, "\n      \"recoveryAssessment\": \"unassessed\"\n") != 1)) ||
+                    (evidenceKind.equals("types") && (countOccurrences(record, "\n      \"extractionStatus\": \"partial\",\n") != 1 ||
+                        countOccurrences(record, "\n      \"recoveryAssessment\": \"unassessed\"\n") != 1)) ||
                     (evidenceKind.equals("failures") && (
                         countOccurrences(record, "\n      \"status\": \"failed\",\n") != 1 ||
                         countOccurrences(record, "\n      \"message\": ") != 1
@@ -1644,7 +1651,7 @@ public class ExportProgramModel extends GhidraScript {
         List<BoundFragment> types,
         List<BoundFragment> auxiliaryEvidence
     ) throws Exception {
-        String prefix = "{\n  \"schemaVersion\": 1,\n  \"inputSha256\": " + json(inputSha256) + ",\n  \"functions\": [\n";
+        String prefix = "{\n  \"schemaVersion\": 2,\n  \"inputSha256\": " + json(inputSha256) + ",\n  \"functions\": [\n";
         String globalsPrefix = "  ],\n  \"globals\": [\n";
         String typesPrefix = "  ],\n  \"types\": [\n";
         String suffix = "  ]\n}\n";
