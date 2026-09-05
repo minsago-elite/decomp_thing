@@ -271,6 +271,7 @@ class UploadServer(
 
     fun stop(delaySeconds: Int = 0) {
         require(delaySeconds >= 0) { "shutdown delay must be nonnegative" }
+        val callerWasInterrupted = Thread.currentThread().isInterrupted
         val inspection = synchronized(lifecycleLock) {
             stopping = true
             authenticationInspectionCancellation.set(true)
@@ -282,14 +283,18 @@ class UploadServer(
         requestDeadlines.shutdownNow()
         access?.close()
         jobs.close()
+        var inspectionWaitInterrupted = false
         try {
-            // The inspection daemon must finish its bounded agent cleanup before the JVM exits.
-            if (inspection != null && inspection !== Thread.currentThread()) inspection.join(TimeUnit.SECONDS.toMillis(5))
-            check(inspection?.isAlive != true) {
-                "Authentication inspection did not stop within the shutdown grace period"
+            check(inspection === null || inspection !== Thread.currentThread()) { "Inspection cannot await its own shutdown" }
+            // The provider owns its cleanup deadlines. Do not truncate them with a web timeout,
+            // including when the shutdown caller is interrupted while cleanup is still running.
+            while (inspection?.isAlive == true) {
+                try { inspection.join() } catch (_: InterruptedException) { inspectionWaitInterrupted = true }
             }
         } catch (exception: Exception) {
             if (exception is InterruptedException) Thread.currentThread().interrupt()
+        }
+        if (inspectionWaitInterrupted) Thread.currentThread().interrupt()
         }
         if (!releaseOwnershipIfIdle()) throw IllegalStateException("HTTP requests remain active after server stop")
     }

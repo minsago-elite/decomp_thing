@@ -119,33 +119,46 @@ class WebAuthenticationInspectionTest {
         } finally { release.countDown(); server.stop(0) }
     }
 
-    @Test fun `shutdown retains ownership until the admitted inspection finishes`() {
+    @Test fun `shutdown waits past five seconds and preserves caller interruption and ownership`() {
         val entered = java.util.concurrent.CountDownLatch(1)
         val release = java.util.concurrent.CountDownLatch(1)
+        val interrupted = java.util.concurrent.atomic.AtomicBoolean(false)
         val root = createTempDirectory("web-auth-stop-")
         val server = UploadServer("127.0.0.1", 0, root, authenticationInspector = {
             entered.countDown()
-            check(release.await(15, java.util.concurrent.TimeUnit.SECONDS))
+            check(release.await(20, java.util.concurrent.TimeUnit.SECONDS))
             AcpAuthenticationInventory.capture(emptyList(), emptyList())
         })
+        val stopped = java.util.concurrent.FutureTask {
+            Thread.currentThread().interrupt()
+            server.stop(0)
+            interrupted.set(Thread.currentThread().isInterrupted)
+        }
+        val stopper = Thread(stopped, "web-auth-stop-test")
         server.start()
         try {
             assertEquals(202, request(server, "/api/operator/auth-methods", true).statusCode())
             assertTrue(entered.await(5, java.util.concurrent.TimeUnit.SECONDS))
-            assertEquals("Authentication inspection did not stop within the shutdown grace period",
-                assertFailsWith<IllegalStateException> { server.stop(0) }.message)
+            stopper.start()
+            assertFailsWith<java.util.concurrent.TimeoutException> {
+                stopped.get(5500, java.util.concurrent.TimeUnit.MILLISECONDS)
+            }
+            stopper.interrupt()
+            assertFailsWith<java.util.concurrent.TimeoutException> {
+                stopped.get(100, java.util.concurrent.TimeUnit.MILLISECONDS)
+            }
             assertEquals("Job store already has a live web server owner",
                 assertFailsWith<IllegalStateException> { UploadServer("127.0.0.1", 0, root) }.message)
             release.countDown()
-            val deadline = System.nanoTime() + java.util.concurrent.TimeUnit.SECONDS.toNanos(5)
-            var stopped = false
-            while (!stopped && System.nanoTime() < deadline) {
-                try { server.stop(0); stopped = true } catch (_: IllegalStateException) { Thread.sleep(20) }
-            }
-            assertTrue(stopped, "inspection did not release server ownership")
+            stopped.get(5, java.util.concurrent.TimeUnit.SECONDS)
+            assertTrue(interrupted.get(), "shutdown must restore its caller's interrupt flag")
             val replacement = UploadServer("127.0.0.1", 0, root)
             try { replacement.start() } finally { replacement.stop(0) }
-        } finally { release.countDown(); server.stop(0) }
+        } finally {
+            release.countDown()
+            stopper.join(5000)
+            server.stop(0)
+        }
     }
 
     @Test fun `shutdown waits for the running inspection to finish before returning`() {
