@@ -83,6 +83,9 @@ hash. Use the pinned Playwright Chromium, Firefox and WebKit revisions for CI;
 qualify current stable Chrome/Edge and Firefox on Linux, and current Safari on
 macOS with VoiceOver at release. Native execution remains Linux-only. Safari
 qualification is a separate browser-host check, not proof of a macOS JVM workflow.
+Manual NVDA/Firefox accessibility checks use a Windows 11 browser host accessing
+the qualified packaged Linux server; record Windows, NVDA and Firefox builds in
+#217's evidence. This does not qualify Windows as a native execution host.
 
 Desktop viewport is 1440×900 at 1× scale; narrow is 390×844, with a 320 CSS-pixel
 reflow check and 200%/400% zoom. Baseline uses same-host loopback. A constrained

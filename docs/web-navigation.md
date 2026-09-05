@@ -78,7 +78,7 @@ destination after the common denied treatment; it does not bypass access control
 | `V` — inspect provenance, validation and review relationship; job Revisions | Optional `compare` revision ID | No validation: Unknown/not run; no deltas: say so | Revision and selected comparison | Revision list | Comparison missing/incompatible: preserve primary revision and select another comparison |
 | `V/sources` — browse/search immutable source and inspect provenance; job Sources | `file`, `line`, optional `endLine`, `compare`; search explicit opt-in `q` | No files or no search matches; unresolved ownership is separate | Lazy directory page and bounded file/line window | Revision detail | Missing file returns to same revision tree; oversized/binary/invalid UTF-8 offers byte view or download |
 | `J/artifacts` — locate reports, logs and archives; job Artifacts | `run`, `revision`, `kind`, `cursor` | No artifacts for scope; clear filter or visit Activity | Catalog page | Job overview | Retry catalog; partial availability does not remove readable entries |
-| `J/artifacts/{artifactId}` — inspect identity/digest and download or review archive verification; job Artifacts | Optional `operation` verification ID | Verification not run: say so and offer explicit Verify when supported | Metadata and existing verification result | Artifact catalog | Failed integrity verification shows expected/observed findings and available diagnostics; never label archive verified |
+| `J/artifact/{artifactId}` — inspect identity/digest and download or review archive verification; job Artifacts | Optional `operation` verification ID | Verification not run: say so and offer explicit Verify when supported | Metadata and existing verification result | Artifact catalog | Failed integrity verification shows expected/observed findings and available diagnostics; never label archive verified |
 | `/runtime` — inspect readiness, versions, limits and capabilities; global Runtime | Optional `capability` | Capability unknown: explain unavailable diagnostic | Sanitized readiness/capabilities | Jobs | Unreachable/stale details with last check; explicit Retry |
 | `J/repositories` — choose or explicitly attach a managed repository; job Git | None | No repository: explain optional Git and supported attach/init action | Registered repository list | Job overview | Git unavailable leaves non-Git navigation intact |
 | `G/overview` — inspect Git identity and source mapping; Git Overview | Optional `worktree` | Unborn repository: no commits yet; accepted revision remains independently visible | Repository/worktree status | Repository list | Busy/unavailable/recovery notice with last known status |
@@ -93,6 +93,8 @@ Unsupported route capabilities show an explanatory view with a Runtime link, rat
 empty data or an execution button that cannot work. Unknown routes show **Page not found** and Jobs;
 unknown `/api/**`, asset or download routes never receive the SPA shell. Legacy route migration and
 old source/artifact links follow the parity contract and [#230](https://github.com/minsago-elite/decomp_thing/issues/230).
+The singular browser `artifact` prefix keeps detail HTML disjoint from the legacy
+`J/artifacts/{path}` attachment route. The plural catalog has no path suffix.
 
 ## Desktop and narrow-screen wireframes
 
