@@ -171,3 +171,13 @@ the public provider guard remains active, so the full procedure cannot yet claim
 procedure covers benign baseline validation and reopening; agent candidate promotion, adversarial
 input rejection, resource/cancellation outcomes and release archive qualification remain distinct
 required evidence. No skipped or incomplete run may be reported as production qualification.
+
+The current guard also covers a concrete terminal-observation gap. `SystemdScopeController`
+verifies configured controllers before launch, while `AcpSandboxedProcess` starts cleanup on exit
+and the collected scope can disappear before `runContained` captures its receipt. A later pathname
+read cannot prove final pids/memory events; a low exit status does not prove no handled limit event
+occurred. Before availability can open, a reviewed lifecycle must pin the exact observation
+authority before execution, retain it until the entire candidate tree is quiescent, and capture
+bounded final counters and exact supported terminal status before cgroup removal. Missing or
+inconsistent observations must fail closed and their evidence must survive run/archive binding.
+This checkpoint does not introduce a native supervisor change or a polling approximation.
