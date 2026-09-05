@@ -5,6 +5,69 @@ on:
   pull_request:
 
 jobs:
+  frontend:
+    name: Frontend contracts and bundle
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    permissions:
+      contents: read
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - uses: actions/checkout@v7
+      - name: Install pinned build-only frontend toolchain
+        run: |
+          bash scripts/install-frontend-node.sh "$RUNNER_TEMP/frontend-node"
+          echo "$RUNNER_TEMP/frontend-node/bin" >> "$GITHUB_PATH"
+      - uses: actions/setup-python@v7
+        with:
+          python-version: "3.12"
+      - name: Record toolchain and install locked dependencies
+        run: |
+          mkdir -p "$RUNNER_TEMP/frontend-ci"
+          {
+            printf 'Source revision: %s\n' "$GITHUB_SHA"
+            node --version
+            npm --version
+            python3 --version
+            sha256sum frontend/package-lock.json contracts/web/v1/contract.schema.json
+          } > "$RUNNER_TEMP/frontend-ci/toolchain.txt"
+          npm --prefix frontend ci --ignore-scripts --no-audit --no-fund
+          python3 -m pip install --requirement requirements/oracle-generation.txt
+      - name: Validate versioned web contract fixtures
+        run: python3 contracts/web/v1/verify.py | tee "$RUNNER_TEMP/frontend-ci/contracts.txt"
+      - name: Type-check frontend source and tests
+        run: npm --prefix frontend run typecheck
+      - name: Lint frontend source and tests
+        run: npm --prefix frontend run lint
+      - name: Run frontend component and state tests
+        run: |
+          npm --prefix frontend test -- --reporter=default --reporter=junit \
+            --outputFile.junit="$RUNNER_TEMP/frontend-ci/component-tests.xml"
+      - name: Build and verify the production asset inventory
+        run: |
+          npm --prefix frontend run build
+          frontend_version="$(node -p "require('./frontend/package.json').version")"
+          node scripts/web-asset-manifest.mjs build/frontend/dist "$frontend_version" \
+            --write "$RUNNER_TEMP/frontend-ci/asset-manifest.json"
+          node scripts/web-asset-manifest.mjs build/frontend/dist "$frontend_version" \
+            --verify "$RUNNER_TEMP/frontend-ci/asset-manifest.json"
+          node --test scripts/web-asset-manifest.test.mjs \
+            | tee "$RUNNER_TEMP/frontend-ci/manifest-tests.txt"
+          git diff --exit-code -- frontend/ contracts/web/v1/
+      - name: Retain frontend verification evidence
+        uses: actions/upload-artifact@v7
+        if: always()
+        with:
+          name: frontend-verification
+          retention-days: 14
+          if-no-files-found: warn
+          path: |
+            ${{ runner.temp }}/frontend-ci
+            build/frontend/bundle-report.json
+            build/frontend/bundle-composition.json
+
   kotlin:
     runs-on: ubuntu-24.04
     steps:
