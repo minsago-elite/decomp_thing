@@ -416,24 +416,9 @@ class UploadServer(
 
     private fun handlePostJob(exchange: HttpExchange) {
         try {
-            val declaredLength = exchange.requestHeaders.getFirst("Content-Length")?.toLongOrNull()
-            require(declaredLength == null || declaredLength <= MAX_UPLOAD_BYTES) { "upload exceeds the 32 MiB limit" }
-            val contentType = exchange.requestHeaders.getFirst("Content-Type") ?: ""
-            val job = jobs.uploadMultipart(exchange.requestBody, contentType)
-            if ((exchange.requestHeaders.getFirst("Accept") ?: "").contains("application/json")) {
-                exchange.sendJson(201, encodeJob(job))
-            } else {
-                exchange.redirect("/jobs/${job.id}")
-            }
+            handleUploadRequest(exchange, jobs)
         } catch (exception: InvalidUploadException) {
             exchange.sendHtml(400, renderErrorPage(400, "Unsupported binary", diagnostic(exception, "Upload a Linux ELF binary.")))
-        } catch (exception: UploadPublicationUncertainException) {
-            exchange.responseHeaders.set("Location", "/jobs/${exception.jobId}")
-            if ((exchange.requestHeaders.getFirst("Accept") ?: "").contains("application/json")) {
-                exchange.sendJson(409, uploadPublicationProblem(exception.jobId).toString())
-            } else {
-                exchange.sendHtml(409, renderUploadPublicationUncertainPage(exception.jobId))
-            }
         }
     }
 
@@ -516,13 +501,9 @@ class UploadServer(
         exchange.sendBytes(200, artifact.bytes, contentType(name))
     }
 
-    private fun encodeJob(job: Job): String =
-        Json.encodeToString(JsonElement.serializer(), job.toJson())
-
     private fun decode(value: String): String = URLDecoder.decode(value, StandardCharsets.UTF_8)
 
     private companion object {
-        const val MAX_UPLOAD_BYTES = 32L * 1024 * 1024
         const val MAX_ARTIFACT_BYTES = 64L * 1024 * 1024
     }
 }
@@ -530,6 +511,31 @@ class UploadServer(
 private fun webOrigin(host: String, port: Int): String {
     val authority = if (':' in host && !host.startsWith('[')) "[$host]" else host
     return "http://$authority:$port"
+}
+
+/** Shared HTTP upload handler; the server owns admission and general error redaction around it. */
+internal fun handleUploadRequest(exchange: HttpExchange, jobs: WebJobService) {
+    try {
+        val declaredLength = exchange.requestHeaders.getFirst("Content-Length")?.toLongOrNull()
+        require(declaredLength == null || declaredLength <= MAX_UPLOAD_BYTES) { "upload exceeds the 32 MiB limit" }
+        val contentType = exchange.requestHeaders.getFirst("Content-Type") ?: ""
+        val job = jobs.uploadMultipart(exchange.requestBody, contentType)
+        if ((exchange.requestHeaders.getFirst("Accept") ?: "").contains("application/json")) {
+            exchange.sendJson(201, encodeJob(job))
+        } else {
+            exchange.redirect("/jobs/${job.id}")
+        }
+    } catch (exception: WebJobServiceException) {
+        val uncertain = exception.cause as? decompengine.jobs.UploadPublicationUncertain
+        if (exception.code != "RECOVERY_REQUIRED" || uncertain == null) throw exception
+        exchange.responseHeaders.set("Location", "/jobs/${uncertain.jobId}")
+        if ((exchange.requestHeaders.getFirst("Accept") ?: "").contains("application/json")) {
+            exchange.sendJson(409, uploadPublicationProblem(uncertain.jobId).toString())
+        } else {
+            exchange.sendHtml(409, renderUploadPublicationUncertainPage(uncertain.jobId))
+        }
+    }
+}
 }
 
 /** CLI lifecycle: allow owned workers to record interruption before the JVM exits. */

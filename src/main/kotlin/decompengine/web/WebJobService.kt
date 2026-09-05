@@ -63,7 +63,9 @@ class WebJobService(
     private val active = mutableMapOf<String, OwnedTask>()
     private val uploads = mutableMapOf<Thread, CountDownLatch>()
     private val uploadStorage = WebUploadStorage(store.storageRoot, maximumRetainedStorageBytes)
-    private val uploadPublisher = decompengine.jobs.StagedJobUpload(store.storageRoot)
+
+    /** Internal seam for deterministic publication-failure fixtures; production code never reassigns this. */
+    internal var uploadPublisher = decompengine.jobs.StagedJobUpload(store.storageRoot)
     private val publicationFailures = mutableMapOf<String, WebJobDiagnostic>()
     private var attempts: WorkflowAttemptStore? = null
     private var initialized = false
