@@ -8,7 +8,7 @@ import java.nio.file.Path
 
 /** Startup-only maintenance; caller holds the exclusive job-root lease and has admitted no work. */
 internal object UploadStagingRecovery {
-    private val stageName = Regex("\\.upload-[0-9]{1,20}") // Files.createTempDirectory's existing reserved namespace
+    private val stageName = Regex("\\.upload-stream-v1-[0-9]{1,20}") // Exclusive to StagedJobUpload; legacy .upload-N stages have ambiguous provenance.
     private val files = setOf("input.elf", "job.json", "upload-receipt.json")
     private data class Stage(val name: String, val identity: LinuxFileIdentity, val entries: Map<String, LinuxFileIdentity>)
 

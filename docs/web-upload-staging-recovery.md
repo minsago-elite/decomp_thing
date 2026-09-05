@@ -5,8 +5,8 @@ reconciling upload staging, then recovers workflow records and admits requests.
 Reads never trigger or repeat staging cleanup. The root and reserved staging names
 are application-owned storage; display filenames cannot select these directories.
 
-Cleanup recognizes only `.upload-` followed by 1–20 decimal digits, the namespace
-used by the existing `Files.createTempDirectory` publisher. It scans at most 10,512
+Cleanup recognizes only `.upload-stream-v1-` followed by 1–20 decimal digits,
+the namespace reserved for new shared-service `StagedJobUpload` publications. It scans at most 10,512
 root entries and accepts at most 256 staging candidates per startup. Those limits
 fail before any deletion. Every candidate is inspected before deletion begins.
 Unrelated names and published hexadecimal job identities are outside this selection.
@@ -31,6 +31,17 @@ Startup failure closes the acquired lease and does not admit work. It does not
 silently delete unknown data or publish a reconstructed partial job. After the atomic
 publication rename, the directory is a job identity and cleanup leaves its binary,
 metadata and durable idempotency receipt intact.
+
+## Compatibility with retained B uploads (#360)
+
+Historical `.upload-N` directories were used by both `JobStore` and the older
+shared-service publisher. Their names and file sets cannot establish which
+publication protocol created them. Startup therefore preserves these directories,
+including complete-looking metadata and receipts, without automatic reclamation
+or migration. The recovery inventory continues to count them as retained upload
+stages. An operator must reconcile publication identity and retained evidence before
+removing historical files. New versioned stages retain the bounded cleanup protocol
+above; published jobs and their receipts are unchanged.
 
 ## Qualification
 

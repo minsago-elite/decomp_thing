@@ -66,7 +66,7 @@ class WebJobServiceTest {
 
     @Test
     fun `startup reconciles orphan staging under ownership and releases lease when cleanup refuses storage`() = withStore { store, root ->
-        val orphan = Files.createDirectory(root.resolve(".upload-123"), java.nio.file.attribute.PosixFilePermissions.asFileAttribute(
+        val orphan = Files.createDirectory(root.resolve(".upload-stream-v1-123"), java.nio.file.attribute.PosixFilePermissions.asFileAttribute(
             java.nio.file.attribute.PosixFilePermissions.fromString("rwx------")))
         Files.writeString(orphan.resolve("input.elf"), "incomplete")
         WebJobService(store, JobAnalyzer { _, _ -> error("Unexpected execution") }, inertReconstructor).use { service ->
