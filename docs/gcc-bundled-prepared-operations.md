@@ -285,8 +285,8 @@ fresh/resumed equivalence is established by these fixtures.
 
 ## Per-execution control-directory groundwork
 
-The command launcher has an optional `controlDirectoryName` equal to
-`control-<exact invocation nonce>`. It creates that fresh directory below the
+The command launcher has an optional `controlDirectoryName` of the form
+`control-<64 lowercase hexadecimal characters>`. It creates that fresh directory below the
 opaque lease-issued run-root borrow, using no-replace descriptor-relative
 construction. Its private `state`, `reports`, and `tmp` children hold the keeper's
 own control layout; the request and materialized classpath enter its `runtime`
@@ -300,13 +300,26 @@ lease-owned writable root while making the selected control directory's runtime
 read-only. This allows the command's project and export paths to remain at the
 original run root while its keeper protocol and logs use a fresh child directory.
 No arbitrary external writable directory is admitted: the optional directory is
-exactly one child of the retained root, named by the invocation nonce. The default
+exactly one child of the retained root. Its name is chosen before command hashing
+so a JVM temporary path can refer to it without a circular hash dependency; the
+request and runtime closure bind the chosen path. The default
 layout and its runtime commitment remain unchanged when this option is absent.
 
 This is not yet production resume. The GCC coordinator still uses its existing
 layout. Resume must explicitly select this layout, bind/revalidate the prior
 analysis state and export prefix, choose a fresh temporary directory for the
-analysis JVM, and protect retained earlier control evidence during the next
+analysis JVM, and supply retained earlier control identities for protection during the next
 execution. The directory tests establish separation, no-replace behavior and
 identity checks only; they do not qualify the new namespace layout under hosted
 systemd/ext4 execution.
+
+The launcher accepts up to 256 prior control-directory identities alongside a
+separate active control name. It verifies each prior directory against the pinned
+lease-root descriptor before launch and after process absence, commits the sorted
+identities in the runtime closure, and adds read-only subtree binds after the
+writable root bind. The execution receipt returns the selected control-directory
+identity for a later invocation. These identities attest directory bindings, not
+the contents of prior protocol files; callers still must validate retained bytes.
+Local tests cover identity replacement, permission changes, active-name exclusion,
+and immutable mount membership. Kernel mount enforcement and complete resume
+remain unqualified by these tests.
