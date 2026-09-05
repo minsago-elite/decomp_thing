@@ -16,6 +16,7 @@ import java.util.concurrent.TimeUnit
 import kotlin.test.Test
 import kotlin.test.assertContentEquals
 import kotlin.test.assertEquals
+import kotlin.test.assertNotEquals
 import kotlin.test.assertFails
 import kotlin.test.assertFailsWith
 import kotlin.test.assertFalse
@@ -134,6 +135,87 @@ class GccCompilerEngineResumeEvidenceValidationTest {
             withDescriptorExportFixture(changedLineage.resumed) { changed ->
                 assertFails { GccBundledExportCapture.captureResumed(changed.root, changed.reportsIdentity, changed.artifacts, retained) }
             }
+        }
+    }
+
+    @Test
+    fun `interrupted capture records only the first incomplete batch write sequence without reusing it`() {
+        val transition = transitionFixture(twoBatchFixture())
+        val suffixes = listOf("functions.fragment", "globals.fragment", "types.fragment", "failures.fragment", "checkpoint")
+        for (published in 0..4) for (pending in listOf(false, true)) {
+            withDescriptorExportFixture(transition.interrupted, includeModel = false) { captured ->
+                val clean = GccBundledExportCapture.captureInterruptedSnapshot(captured.root, captured.reportsIdentity, captured.artifacts)
+                val directory = captured.directory.resolve("reports/program_model.json.export/planning-batches")
+                val names = suffixes.take(published).map { "batch-00000512-00000513.$it" } +
+                    if (pending) listOf(".batch-00000512-00000513.${suffixes[published]}.pending") else emptyList()
+                for (name in names) Files.writeString(directory.resolve(name), if (name.endsWith(".pending")) "" else "unfinished")
+                val stopped = GccBundledExportCapture.captureInterruptedSnapshot(captured.root, captured.reportsIdentity, captured.artifacts)
+                assertEquals(512L, stopped.assessment.completed)
+                assertEquals(clean.planningPrefixSha256, stopped.planningPrefixSha256)
+                assertEquals(names.toSet(), OracleJson.parseCanonical(stopped.inFlightArtifacts).jsonObject.keys)
+                val trigger = GccBundledCheckpointTrigger(512)
+                trigger.observe(GccBundledExportCapture.observeProgress(captured.root, captured.reportsIdentity, captured.artifacts))
+                val recorded = OracleJson.parseCanonical(trigger.assessStoppedPrefix(stopped.assessment, stopped.planningPrefixSha256,
+                    stopped.inFlightArtifacts)).jsonObject
+                assertEquals(OracleJson.parseCanonical(stopped.inFlightArtifacts), recorded.getValue("inFlightArtifacts"))
+                assertEquals(stopped.inFlightArtifactsSha256, recorded.getValue("inFlightArtifactsSha256").jsonPrimitive.content)
+                assertContentEquals(stopped.inFlightArtifacts,
+                    GccBundledExportCapture.captureInterruptedSnapshot(captured.root, captured.reportsIdentity, captured.artifacts).inFlightArtifacts)
+                names.forEach { assertTrue(Files.exists(directory.resolve(it))) }
+                withDescriptorExportFixture(transition.resumed) { resumed ->
+                    assertEquals(512L, GccBundledExportCapture.captureResumed(resumed.root, resumed.reportsIdentity, resumed.artifacts, stopped).assessment.reused)
+                }
+            }
+        }
+    }
+
+    @Test
+    fun `interrupted residue rejects gaps future batches multiple pending files and committed-ahead checkpoints`() {
+        val prefix = transitionFixture(twoBatchFixture()).interrupted
+        for (names in listOf(
+            listOf("batch-00000512-00000513.globals.fragment"),
+            listOf(".batch-00000512-00000513.globals.fragment.pending"),
+            listOf(".batch-00000512-00000513.functions.fragment.pending", ".batch-00000512-00000513.globals.fragment.pending"),
+            listOf("batch-00001024-00001536.functions.fragment"),
+            listOf("batch-00000512-00000513.checkpoint"),
+            listOf(".batch-00000000-00000512.functions.fragment.pending"),
+        )) withDescriptorExportFixture(prefix, includeModel = false) { captured ->
+            val directory = captured.directory.resolve("reports/program_model.json.export/planning-batches")
+            names.forEach { Files.writeString(directory.resolve(it), "retained-residue") }
+            assertFails { GccBundledExportCapture.captureInterruptedSnapshot(captured.root, captured.reportsIdentity, captured.artifacts) }
+            names.forEach { assertEquals("retained-residue", Files.readString(directory.resolve(it))) }
+        }
+    }
+
+    @Test
+    fun `in-flight fragment bytes remain subject to the capture bounds`() {
+        val prefix = transitionFixture(twoBatchFixture()).interrupted
+        withDescriptorExportFixture(prefix, includeModel = false) { captured ->
+            val maximum = prefix.batches.flatMap { listOf(it.functions.size, it.globals.size, it.types.size, it.failures.size) }.max()
+            val file = captured.directory.resolve("reports/program_model.json.export/planning-batches/.batch-00000512-00000513.functions.fragment.pending")
+            Files.write(file, ByteArray(maximum + 1))
+            assertFails { GccBundledExportCapture.captureInterruptedSnapshot(captured.root, captured.reportsIdentity, captured.artifacts,
+                GccResumeByteValidationLimits(planningFragmentBytes = maximum)) }
+            assertEquals((maximum + 1).toLong(), Files.size(file))
+        }
+    }
+
+    @Test
+    fun `interrupted residue bindings detect replacement and reject links`() {
+        val prefix = transitionFixture(twoBatchFixture()).interrupted
+        withDescriptorExportFixture(prefix, includeModel = false) { captured ->
+            val file = captured.directory.resolve("reports/program_model.json.export/planning-batches/.batch-00000512-00000513.functions.fragment.pending")
+            Files.writeString(file, "retained-residue")
+            val before = GccBundledExportCapture.captureInterruptedSnapshot(captured.root, captured.reportsIdentity, captured.artifacts)
+            val saved = captured.directory.resolve("saved-residue")
+            Files.move(file, saved)
+            Files.writeString(file, "retained-residue")
+            val after = GccBundledExportCapture.captureInterruptedSnapshot(captured.root, captured.reportsIdentity, captured.artifacts)
+            assertNotEquals(before.inFlightArtifactsSha256, after.inFlightArtifactsSha256)
+            Files.delete(file)
+            Files.createSymbolicLink(file, saved)
+            assertFails { GccBundledExportCapture.captureInterruptedSnapshot(captured.root, captured.reportsIdentity, captured.artifacts) }
+            assertEquals("retained-residue", Files.readString(saved))
         }
     }
 
