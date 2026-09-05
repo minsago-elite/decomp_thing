@@ -219,7 +219,10 @@ class UploadServer(
         require(delaySeconds >= 0) { "shutdown delay must be nonnegative" }
         synchronized(lifecycleLock) { stopping = true }
         server.stop(delaySeconds)
-        val discarded = ownedExecutor?.shutdownNow().orEmpty()
+        val discarded = synchronized(lifecycleLock) {
+            // A cleanup retry must not interrupt a worker again while it persists its final status.
+            ownedExecutor?.takeUnless { it.isShutdown }?.shutdownNow().orEmpty()
+        }
         var failure: Exception? = null
         discarded.forEach { task ->
             try {
