@@ -9,6 +9,29 @@ import kotlin.test.*
 
 class AgentProgressJournalTest {
     @Test
+    fun `omission ranges preserve prefix interior and trailing gaps across legacy restart`() {
+        val root = createTempDirectory("progress-ranges-")
+        val legacy = buildJsonObject {
+            put("schemaVersion", 1); put("displayOnly", true); put("nextSequence", 7)
+            put("queueDropped", 3); put("historyDropped", 2); put("truncated", true)
+            put("events", buildJsonArray {
+                for (sequence in listOf(2, 4)) add(buildJsonObject { put("sequence", sequence) })
+            })
+        }
+        Files.writeString(root.resolve(AgentProgressJournal.FILE_NAME), legacy.toString())
+        AgentProgressJournal(root, "repair").use { }
+        val snapshot = AgentProgressJournal.read(root)!!
+        val ranges = snapshot.getValue("omittedSequenceRanges").jsonArray
+        assertEquals(listOf("0" to "2", "3" to "4", "5" to "7"), ranges.map {
+            it.jsonObject.getValue("startInclusive").jsonPrimitive.content to
+                it.jsonObject.getValue("endExclusive").jsonPrimitive.content
+        })
+        val corrupted = JsonObject(snapshot + ("omittedSequenceRanges" to JsonArray(emptyList())))
+        Files.writeString(root.resolve(AgentProgressJournal.FILE_NAME), corrupted.toString())
+        assertFailsWith<IllegalArgumentException> { AgentProgressJournal.read(root) }
+    }
+
+    @Test
     fun `persisted history rejects unexplained loss and inconsistent omission counters`() {
         val root = createTempDirectory("progress-loss-")
         AgentProgressJournal(root, "repair").use { it.phase(AgentWorkflowPhase.AGENT_RUNNING) }
@@ -239,6 +262,14 @@ class AgentProgressJournalTest {
         assertEquals(2_001, next)
         assertEquals(next, dropped + snapshot.getValue("events").jsonArray.size)
         assertTrue(snapshot.getValue("truncated").jsonPrimitive.boolean)
+        val omitted = snapshot.getValue("omittedSequenceRanges").jsonArray.flatMap {
+            val range = it.jsonObject
+            (range.getValue("startInclusive").jsonPrimitive.content.toLong() until
+                range.getValue("endExclusive").jsonPrimitive.content.toLong()).toList()
+        }
+        val retained = snapshot.getValue("events").jsonArray.map { it.jsonObject.getValue("sequence").jsonPrimitive.long }
+        assertEquals((0L until next).toList(), (omitted + retained).sorted())
+        assertTrue(snapshot.getValue("omittedSequenceRanges").jsonArray.size <= retained.size + 1)
         assertTrue(root.resolve(AgentProgressJournal.FILE_NAME).fileSize() <= 4096)
     }
 

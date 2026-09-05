@@ -301,6 +301,7 @@ class AgentProgressJournal(
         put("historyDropped", historyDropped)
         put("truncated", queueDropped > 0 || historyDropped > 0)
         put("events", JsonArray(retained.toList()))
+        put("omittedSequenceRanges", omissionRanges(retained.toList(), sequence))
     }
 
     override fun close() {
@@ -378,7 +379,30 @@ class AgentProgressJournal(
             require(retainedCount > 0 || historyDropped != 1L) {
                 "progress snapshot contains an impossible single-event history eviction"
             }
+            result["omittedSequenceRanges"]?.let { ranges ->
+                require(ranges == omissionRanges(result.getValue("events").jsonArray.map { it.jsonObject }, next)) {
+                    "progress snapshot contains inconsistent omission ranges"
+                }
+            }
             return result
+        }
+
+        // The complement of at most 1024 retained sequences has at most 1025 ranges.
+        // Decimal strings preserve exact 64-bit boundaries in browser JSON consumers.
+        private fun omissionRanges(events: List<JsonObject>, next: Long): JsonArray = buildJsonArray {
+            var cursor = 0L
+            fun gap(endExclusive: Long) {
+                if (cursor < endExclusive) add(buildJsonObject {
+                    put("startInclusive", cursor.toString())
+                    put("endExclusive", endExclusive.toString())
+                })
+            }
+            events.forEach { event ->
+                val retainedSequence = event.getValue("sequence").jsonPrimitive.long
+                gap(retainedSequence)
+                cursor = retainedSequence + 1
+            }
+            gap(next)
         }
 
         private fun digest(text: String): String = MessageDigest.getInstance("SHA-256")

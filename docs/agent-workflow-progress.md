@@ -155,3 +155,12 @@ The evidence directory must be new. A successful run records the rendered HTML d
 version, scenarios and request count, plus a screenshot and Playwright trace. This checks actual
 DOM updates, row limits, separate loss/window warnings, HTTP/network failures, subsequent recovery,
 and peer-text escaping. It does not qualify a real-agent job, server restart, or browser matrix.
+
+New snapshots persist `omittedSequenceRanges` as ordered, nonoverlapping half-open ranges with
+`startInclusive` and `endExclusive` decimal strings. They identify the exact complement of retained
+event sequences below `nextSequence`, including trailing omissions. There are at most one more
+range than retained events (1,025 at the largest configured history), and ranges share the existing
+snapshot byte cap. Reads reject inconsistent ranges when supplied. Older schema-1 snapshots without
+this field remain readable and acquire ranges on the next writer publication. Queue/history
+counters retain aggregate causes; individual ranges do not distinguish those causes. These ranges
+cannot account for events lost before an interrupted process published its snapshot.
