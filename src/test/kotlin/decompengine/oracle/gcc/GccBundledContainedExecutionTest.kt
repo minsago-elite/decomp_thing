@@ -67,6 +67,7 @@ class GccBundledContainedExecutionTest {
                     assertEquals(listOf("reports", "state", "tmp"), names(output))
                     assertFalse(prepared.startAuthorized)
                     assertFalse(prepared.releaseEligible)
+                    assertFailsWith<IllegalStateException> { prepared.plan() }
                     val executed = prepared.execute()
                     val receiptBytes = executed.executionReceiptBytes
                     val receipt = OracleJson.parseCanonical(receiptBytes).jsonObject
@@ -96,6 +97,10 @@ class GccBundledContainedExecutionTest {
                     assertContentEquals(exportBytes, executed.exportAssessmentReceiptBytes)
                     retainFixtureEvidence(fixture, intent, selectedDefinition, receiptBytes, exportBytes, assessment, executed.programModelBytes)
                     assertCopiedExportRejectsIdentityAndLinks(fixture, output, intent.artifacts, assessment)
+                    // This legacy authored intent has no retained planner profile: never synthesize one after export.
+                    val priorPlannerDenial = names(journal.resolve(".gcc-bundled-operation-${intent.operationId}"))
+                    assertFailsWith<IllegalStateException> { prepared.plan() }
+                    assertEquals(priorPlannerDenial, names(journal.resolve(".gcc-bundled-operation-${intent.operationId}")))
                     assertFailsWith<IllegalStateException> { prepared.execute() }
                     prepared.close()
                     prepared.close()
@@ -181,6 +186,7 @@ class GccBundledContainedExecutionTest {
                 val originalJournal = journal.resolve(".gcc-bundled-operation-${intent.operationId}")
                 val originalRecords = names(originalJournal).associateWith { boundedRead(originalJournal.resolve(it), MAXIMUM_METADATA_BYTES) }
                 owner.requireInterruptedStateCurrent()
+                assertFailsWith<IllegalStateException> { owner.plan() }
                 val result = owner.resume()
                 assertEquals(stopped.assessment.completed, result.assessment.reused)
                 assertFalse(result.complete)
