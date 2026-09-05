@@ -20,11 +20,11 @@ class JobStoreTest {
         val acceptedName = "界".repeat(80_000)
         val accepted = store.createFromUpload(acceptedName, elfFixture())
         assertEquals(acceptedName, JobStore(root).get(accepted.id).filename)
-        for (oversizedName in listOf("界".repeat(90_000), "\"".repeat(140_000))) {
+        for (oversizedName in listOf("界".repeat(90_000), "\"".repeat(140_000), "a".repeat(300_000))) {
             val failure = assertFailsWith<IllegalArgumentException> {
                 store.createFromUpload(oversizedName, elfFixture())
             }
-            assertEquals("job metadata exceeds the 256 KiB limit", failure.message)
+            assertTrue(failure.message.orEmpty().startsWith("job metadata exceeds the 256 KiB limit"))
             assertEquals(listOf(accepted.id), JobStore(root).list().map { it.id })
             java.nio.file.Files.list(root).use { entries ->
                 assertEquals(listOf(accepted.id), entries.map { it.fileName.toString() }.toList())
@@ -126,6 +126,10 @@ class JobStoreTest {
         assertEquals("ELF64", metadata["metadata"]!!.jsonObject["format"].toString().trim('"'))
 
         assertEquals(job, store.get(job.id))
+        // Older releases used the general serializer's pretty-printed field ordering.
+        jobDir.resolve("job.json").writeText(Json { prettyPrint = true }.encodeToString(
+            kotlinx.serialization.json.JsonElement.serializer(), job.toJson()))
+        assertEquals(job, JobStore(tempDir).get(job.id))
     }
 
     @Test

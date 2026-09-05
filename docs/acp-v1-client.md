@@ -293,6 +293,9 @@ Job metadata updates write and force a temporary file in the job directory, atom
 then force the directory. There is no non-atomic fallback. An existing reader retains its previous complete
 snapshot. Before publication, the writer enforces the same 256 KiB encoded UTF-8 JSON limit as the reader,
 including escaping overhead; oversized records fail without replacing an existing record or publishing an upload.
+The bounded canonical encoder stops at that output limit, and a filename character cap bounds its preliminary
+string-byte accounting. It no longer builds the entire encoded JSON string before checking the limit. New records
+use canonical field ordering; existing pretty-printed records remain readable without migration.
 A failure before replacement leaves the published record intact. Temporary files are removed on
 ordinary failure. A failure after replacement, including directory-force failure, may have published the new
 record and is not proof of rollback. Tests cover held readers and interruption before publication.
