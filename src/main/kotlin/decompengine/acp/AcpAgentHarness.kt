@@ -2866,7 +2866,8 @@ private class PolicyClientOperations(
     }
 }
 
-private data class FileState(val sha256: String, val size: Long)
+private data class FileMetadata(val mode: Int, val uid: Int, val gid: Int, val linkCount: Int)
+private data class FileState(val sha256: String, val size: Long, val metadata: FileMetadata)
 
 internal data class WorkspaceSnapshotLimits(
     val entries: Int = 8192,
@@ -2939,6 +2940,13 @@ internal class WorkspaceSnapshot private constructor(
                 budget.checkpoint()
                 val beforeState = files[path]
                 val afterState = after.files[path]
+                if (beforeState != null && afterState != null && beforeState.metadata != afterState.metadata) {
+                    throw AgentExecutionException(AgentFailure(
+                        AgentFailureKind.WORKSPACE_VIOLATION,
+                        "ACP workspace file metadata changed without metadata authority; changes are indeterminate",
+                        details = mapOf("reason" to "file-metadata-changed"),
+                    ))
+                }
                 if (beforeState == afterState) return@mapNotNull null
                 val kind = when {
                     beforeState == null -> AgentFileChangeKind.CREATED
@@ -3058,7 +3066,8 @@ internal class WorkspaceSnapshot private constructor(
                 throw WorkspaceSnapshotInvalidEntry("file-binding-changed")
             }
             if (result.identity != expected) throw WorkspaceSnapshotInvalidEntry("file-binding-changed")
-            return FileState(result.sha256, result.size)
+            return FileState(result.sha256, result.size, FileMetadata(
+                result.identity.mode, result.identity.uid, result.identity.gid, result.identity.linkCount))
         }
     }
 }
