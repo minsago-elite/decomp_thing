@@ -180,6 +180,7 @@ class UploadServer(
     private val diagnosticRedactor = ProgressRedactor(sensitiveValues)
     private val server = HttpServer.create(InetSocketAddress(host, port), listenBacklog)
     private val store = JobStore(dataDir)
+    private val storeRoot = dataDir.toAbsolutePath().normalize()
     private val sourceEvidence = WebSourceEvidence(store, sourceProfiles)
     private val archiveEvidence = WebArchiveEvidence(store, sourceEvidence)
     private val ownedExecutor: ExecutorService? = if (executor == null) {
@@ -193,14 +194,26 @@ class UploadServer(
     private val runningJobs = ConcurrentHashMap.newKeySet<String>()
     private val lifecycleLock = Any()
     private var stopping = false
+    private var started = false
+    private var ownership: WebJobStoreOwnership? = null
     val serverPort: Int get() = server.address.port
 
     init {
-        store.recoverInterruptedJobs()
         server.createContext("/") { exchange -> route(exchange) }
     }
 
-    fun start() = server.start()
+    fun start() = synchronized(lifecycleLock) {
+        check(!started && !stopping) { "Web server cannot be started again" }
+        try {
+            ownership = WebJobStoreOwnership.acquire(storeRoot)
+            store.recoverInterruptedJobs()
+            server.start()
+            started = true
+        } catch (failure: Exception) {
+            try { stop() } catch (cleanup: Exception) { failure.addSuppressed(cleanup) }
+            throw failure
+        }
+    }
 
     fun stop(delaySeconds: Int = 0) {
         require(delaySeconds >= 0) { "shutdown delay must be nonnegative" }
@@ -222,6 +235,16 @@ class UploadServer(
         } catch (exception: Exception) {
             if (exception is InterruptedException) Thread.currentThread().interrupt()
             if (failure == null) failure = exception else failure.addSuppressed(exception)
+        }
+        if (ownedExecutor?.isTerminated != false && runningJobs.isEmpty()) {
+            try {
+                synchronized(lifecycleLock) {
+                    ownership?.close()
+                    ownership = null
+                }
+            } catch (exception: Exception) {
+                if (failure == null) failure = exception else failure.addSuppressed(exception)
+            }
         }
         failure?.let { throw it }
     }

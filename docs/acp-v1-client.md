@@ -284,6 +284,14 @@ interruption and returns normally is recorded as failed with an explicit shutdow
 published completion remains intact. This controls the web status only, not artifact acceptance or rollback.
 Injected executors remain outside this lifecycle. SIGKILL, power loss, stalled filesystem writes, and
 durable recovery of indeterminate external work require the separate #68/#71 recovery mechanisms.
+
+Before startup recovery, a web server acquires a nonblocking exclusive `.web-owner.lock` for its job store.
+A second cooperating server fails before changing job status. Same-JVM owners are tracked by canonical store
+path to avoid opening another channel to an owned lock file (see the [JDK FileLock platform notes](https://docs.oracle.com/en/java/javase/21/docs/api/java.base/java/nio/channels/FileLock.html)).
+The lock file is never deleted. Stop releases ownership only after owned workers have terminated and no
+scheduled operations remain; an incomplete in-process shutdown retains ownership until a later successful stop
+or JVM exit. This is cooperative local-filesystem web ownership, not fencing of arbitrary JobStore callers,
+older servers, external subprocesses, lock-file replacement, or network filesystems.
 `WebShutdownTest` covers propagated interruption, a worker returning after swallowing interruption, and
 a worker that remains blocked past the grace period. The last case verifies the fixed cleanup diagnostic,
 then starts a new server and checks that unfinished jobs become interrupted failures without rerunning.

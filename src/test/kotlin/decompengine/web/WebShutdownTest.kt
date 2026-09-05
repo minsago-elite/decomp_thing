@@ -44,6 +44,14 @@ class WebShutdownTest {
                 Thread.sleep(20)
             }
             assertTrue(Files.exists(root.resolve("ready")), Files.readString(log))
+            val contender = UploadServer("127.0.0.1", 0, root.resolve("jobs"),
+                analyzer = JobAnalyzer { _, _ -> error("a second owner must not run work") })
+            val ownershipFailure = kotlin.test.assertFailsWith<IllegalStateException> { contender.start() }
+            assertEquals("Job store already has a live web server owner", ownershipFailure.message)
+            val activeIds = Files.readAllLines(root.resolve("ready"))
+            val activeStore = JobStore(root.resolve("jobs"))
+            activeIds.take(2).forEach { assertEquals("analyzing", activeStore.get(it).status) }
+            assertEquals("queued", activeStore.get(activeIds.last()).status)
             val shutdownStarted = System.nanoTime()
             process.destroy()
             assertTrue(process.waitFor(15, TimeUnit.SECONDS), "shutdown hook did not finish")
@@ -103,6 +111,9 @@ object WebShutdownFixture {
                 }
             })
         startWebServerWithShutdownHook(server)
+        val localContender = UploadServer("127.0.0.1", 0, root.resolve("jobs"))
+        val localFailure = kotlin.test.assertFailsWith<IllegalStateException> { localContender.start() }
+        check(localFailure.message == "Job store already has a live web server owner")
         val store = JobStore(root.resolve("jobs"))
         val ids = (0..2).map { store.createFromUpload("benign-$it.elf", elfFixture()).id }
         ids.forEachIndexed { index, id ->
