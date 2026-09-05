@@ -5,8 +5,10 @@ the independent BOOT deployment reference, the retained application-bundled
 Ghidra tree, an external operation journal and a genuine dedicated-ext4 lease.
 It returns an opaque `GccBundledPreparedOperation`. Preparation alone does not
 authorize START; `complete`, `startAuthorized` and `releaseEligible` remain false.
-Its one-shot `execute()` performs the additional contained fresh-run admission
-described below. It does not support interruption, resume or release.
+Its one-shot `execute()` performs contained fresh-control admission.
+`executeUntilCheckpoint(minimumCompletedFunctions)` admits a prepared INTERRUPTED
+intent through the same retained containment boundary. Neither path supports
+resume or release yet.
 
 This is separate from the historical path-based GCC BOOT controller. That
 controller's caller-populated output directory and capacity checks are not
@@ -151,8 +153,8 @@ are rejected and retained; this entrypoint does not delete or repair residue.
 
 The returned `GccInterruptedPrefixAssessment` remains a non-authoritative byte
 assessment. Calling it does not stop a process or prove absence. The contained
-coordinator still supports only fresh controls: authenticated checkpoint-triggered
-interruption, durable interruption transitions, same-owner resume and real
+coordinator now connects this capture to authenticated checkpoint-triggered
+interruption and durable interruption transitions. Same-owner resume and real
 cc1/lto1 fresh/resumed model and ownership-plan comparisons remain required by
 #137. Prefix-only fixtures do not qualify those lifecycle requirements.
 
@@ -162,8 +164,8 @@ The keeper accepts an opt-in `kotlin-contained-command-request-v2` with
 `allowInterruption=true`. Default requests retain the exact v1 field set,
 provider and canonical encoding. Neither v1 requests nor their outcome decoder
 admit interruption. The host launcher defaults to v1 fresh-control requests. Its optional retained
-interruption controller selects v2; the GCC prepared coordinator still uses the
-fresh-control default pending checkpoint-trigger integration.
+interruption controller selects v2. The GCC prepared coordinator selects v2 only
+for its explicit interrupted-intent entrypoint.
 
 For a v2 request, the host may publish a mode-0400, no-replace
 `contained-command.interrupt.json`. The `INTERRUPT` HMAC event binds the original
@@ -214,7 +216,36 @@ record commits its predecessor, payload and operation/intent bindings and retain
 branches cannot be interchanged. Missing, altered or out-of-order records poison
 the owner without removing residue.
 
-Remaining composition is explicit: the GCC coordinator must supply the bounded
-checkpoint trigger, journal callbacks, post-absence prefix validation and same-owner
-resume. Hosted systemd/ext4 interruption and real compiler equivalence have not
-been established by the local delivery/keeper/journal tests.
+The GCC coordinator supplies the bounded checkpoint trigger, journal callbacks
+and post-absence prefix validation described below. Same-owner resume remains
+unfinished. Hosted systemd/ext4 interruption and real compiler equivalence have
+not been established by the local delivery/keeper/journal tests.
+
+## Prepared GCC checkpoint-triggered interruption
+
+`executeUntilCheckpoint` requires an INTERRUPTED fresh-analysis intent and a
+positive threshold divisible by 512. It binds that threshold into the host policy
+and polls state/progress through retained run/reports descriptors under byte
+limits. Missing not-yet-published state/progress returns no trigger. Malformed,
+linked, replaced or oversized records and mismatched input/exporter/archive
+identities fail. Only fresh nonterminal planning progress at a full batch can
+trigger; a completed export cannot substitute for interruption.
+
+The exporter publishes planning progress after publishing and checking each
+batch checkpoint. This progress observation requests interruption but does not
+prove retained checkpoint completeness. Before token delivery the coordinator
+revalidates retained inputs and disk ownership and durably publishes interruption
+authorization. After the host proves the authenticated outcome and exact absence,
+the coordinator records interrupted execution and performs full descriptor-bound
+prefix validation. The resulting prefix must have the same analysis-state digest
+and total and cannot precede the trigger. Additional fully committed batches may
+have completed during token delivery. Unknown/unfinished residue or a final model
+is rejected and retained, never silently removed to manufacture a valid prefix.
+
+`GccBundledInterruptedOperation` snapshots the linked execution/prefix receipts;
+`complete` and `releaseEligible` stay false. The prepared owner remains one-shot,
+and close still abandons residue after independently proving absence. No project
+reload, cold adoption, resumed invocation or successful lease release is added.
+The focused tests cover progress admission, invocation/path/byte rejection,
+forward-only prefix lineage, journal sequencing and host delivery. Provisioned
+interruption and real compiler benchmarks still require executed evidence.
