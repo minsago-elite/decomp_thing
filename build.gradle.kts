@@ -1,9 +1,11 @@
 import java.io.File
+import java.io.ByteArrayOutputStream
 import java.nio.ByteBuffer
 import java.nio.ByteOrder
 import java.nio.file.Files
 import java.nio.file.LinkOption
 import java.nio.file.Path
+import java.nio.file.attribute.BasicFileAttributes
 import java.nio.file.attribute.PosixFilePermissions
 import java.security.MessageDigest
 import java.util.concurrent.TimeUnit
@@ -342,6 +344,9 @@ val stageOracleNativeLibraries = tasks.register("stageOracleNativeLibraries") {
 }
 val kotlinBootClasspathReference =
     layout.buildDirectory.file("generated/oracle/gcc/kotlin-boot-classpath-reference-v1.json")
+val gccBundledGhidraReference =
+    layout.buildDirectory.file("generated/oracle/gcc/gcc-bundled-ghidra-reference-v1.json")
+val gccBundledGhidraDirectory = project(":ghidra-bridge").layout.buildDirectory.dir("bundle")
 val llvmHostedWorkerClasspathReference =
     layout.buildDirectory.file(
         "generated/oracle/behavior/llvm-behavior-hosted-worker-classpath-reference-v1.json",
@@ -619,6 +624,184 @@ val generateKotlinBootClasspathReference = tasks.register("generateKotlinBootCla
         val output = kotlinBootClasspathReference.get().asFile.toPath()
         Files.createDirectories(output.parent)
         Files.writeString(output, reference)
+    }
+}
+
+val generateGccBundledGhidraReference = tasks.register("generateGccBundledGhidraReference") {
+    group = "distribution"
+    description = "Generates the independent deployment reference for the complete bundled Ghidra runtime"
+    dependsOn(":ghidra-bridge:stageBundle", tasks.named("jar"))
+    inputs.dir(gccBundledGhidraDirectory)
+    inputs.file(tasks.named<Jar>("jar").flatMap { it.archiveFile })
+    outputs.file(gccBundledGhidraReference)
+
+    doLast {
+        val maximumReferenceBytes = 8 * 1024 * 1024
+        val maximumFileBytes = 128L * 1024 * 1024
+        val maximumAggregateBytes = 2L * 1024 * 1024 * 1024
+        fun fileDigest(path: java.nio.file.Path, expectedBytes: Long): String {
+            val digest = MessageDigest.getInstance("SHA-256")
+            Files.newInputStream(path, LinkOption.NOFOLLOW_LINKS).use { input ->
+                val buffer = ByteArray(65536)
+                var observed = 0L
+                while (true) {
+                    val count = input.read(buffer)
+                    if (count < 0) break
+                    if (count == 0) continue
+                    observed = Math.addExact(observed, count.toLong())
+                    require(observed <= expectedBytes) { "Bundled Ghidra file grew while generating its reference: $path" }
+                    digest.update(buffer, 0, count)
+                }
+                require(observed == expectedBytes) { "Bundled Ghidra file changed size while generating its reference: $path" }
+            }
+            return digest.digest().joinToString("") { byte -> "%02x".format(byte) }
+        }
+        val root = gccBundledGhidraDirectory.get().asFile.toPath().toAbsolutePath().normalize()
+        require(Files.isDirectory(root, LinkOption.NOFOLLOW_LINKS) && root.toRealPath() == root) {
+            "Bundled Ghidra reference requires a canonical staged directory"
+        }
+        val paths = Files.walk(root, 33).use { stream -> stream.limit(20_002L).toList() }
+        require(paths.size in 2..20_001) { "Bundled Ghidra reference exceeds its entry bound" }
+        var aggregateBytes = 0L
+        val entries = paths.filter { it != root }.map { path ->
+            val relative = root.relativize(path)
+            val name = relative.joinToString("/")
+            val encodedName = name.toByteArray(Charsets.UTF_8)
+            require(relative.nameCount in 1..32 && encodedName.size in 1..4096 &&
+                encodedName.toString(Charsets.UTF_8) == name &&
+                name.none { it.code < 32 || it.code == 127 || it == ':' || it == '\\' } &&
+                relative.all { component ->
+                    val text = component.toString()
+                    text.isNotBlank() && text != "." && text != ".." && text.toByteArray(Charsets.UTF_8).size <= 255
+                }
+            ) { "Bundled Ghidra reference contains an unsafe or excessive relative path: $name" }
+            val attributes = Files.readAttributes(
+                path,
+                BasicFileAttributes::class.java,
+                LinkOption.NOFOLLOW_LINKS,
+            )
+            require(!attributes.isSymbolicLink && (attributes.isDirectory || attributes.isRegularFile)) {
+                "Bundled Ghidra reference contains a linked or special entry: $name"
+            }
+            if (attributes.isDirectory) {
+                mapOf<String, Any>("kind" to "directory", "mode" to 0x1ed, "path" to name)
+            } else {
+                val bytes = attributes.size()
+                require(bytes in 0L..maximumFileBytes) { "Bundled Ghidra file exceeds its byte bound: $name" }
+                aggregateBytes = Math.addExact(aggregateBytes, bytes)
+                require(aggregateBytes <= maximumAggregateBytes) {
+                    "Bundled Ghidra reference exceeds its aggregate byte bound"
+                }
+                mapOf<String, Any>(
+                    "bytes" to bytes,
+                    "kind" to "file",
+                    "mode" to if (path.toFile().canExecute()) 0x1ed else 0x1a4,
+                    "path" to name,
+                    "sha256" to fileDigest(path, bytes),
+                )
+            }
+        }.sortedBy { it.getValue("path") as String }
+        val byPath = entries.associateBy { it.getValue("path") as String }
+        require(byPath.size == entries.size) { "Bundled Ghidra reference repeats a relative path" }
+        val bridge = "decomp-ghidra-bridge.jar"
+        val guard = "scripts/RunBundledExports.class"
+        listOf(bridge, guard, "bundle.sha256").forEach { name ->
+            val entry = byPath[name]
+            require(entry != null && entry["kind"] == "file" && (entry["bytes"] as Long) > 0L) {
+                "Bundled Ghidra reference omits required application runtime bytes: $name"
+            }
+        }
+        val classPath = listOf(bridge) + entries.filter { entry ->
+            val name = entry.getValue("path") as String
+            entry["kind"] == "file" && name.startsWith("ghidra_12.1.3_PUBLIC/Ghidra/") &&
+                name.substringBeforeLast('/').substringAfterLast('/') == "lib" && name.endsWith(".jar")
+        }.map { it.getValue("path") as String }
+        require(classPath.size in 2..512 && classPath.toSet().size == classPath.size &&
+            classPath.all { (byPath.getValue(it).getValue("bytes") as Long) > 0L }
+        ) { "Bundled Ghidra reference has an invalid ordered classpath" }
+        val resourcePath = "ghidra_scripts/ExportProgramModel.java"
+        val applicationJar = tasks.named<Jar>("jar").get().archiveFile.get().asFile
+        val exporterBytes = JarFile(applicationJar, false).use { jar ->
+            val resources = jar.entries().asSequence().filter { it.name == resourcePath }.take(2).toList()
+            require(resources.size == 1 && !resources.single().isDirectory &&
+                resources.single().size in 1L..(4L * 1024 * 1024)
+            ) { "Application JAR has a missing, duplicate or excessive Ghidra exporter resource" }
+            jar.getInputStream(resources.single()).use { input ->
+                input.readNBytes(4 * 1024 * 1024 + 1).also { content ->
+                    require(content.size.toLong() == resources.single().size && content.size <= 4 * 1024 * 1024) {
+                        "Application JAR exporter resource changed length"
+                    }
+                }
+            }
+        }
+        fun digest(bytes: ByteArray): String = MessageDigest.getInstance("SHA-256").digest(bytes)
+            .joinToString("") { byte -> "%02x".format(byte) }
+        fun canonicalBytes(value: Map<String, Any>): ByteArray {
+            val output = ByteArrayOutputStream()
+            fun append(text: String) {
+                val bytes = text.toByteArray(Charsets.UTF_8)
+                require(output.size() <= maximumReferenceBytes - bytes.size) {
+                    "Bundled Ghidra deployment reference exceeds its canonical byte bound"
+                }
+                output.write(bytes)
+            }
+            fun render(element: Any?, depth: Int) {
+                require(depth <= 8) { "Bundled Ghidra deployment reference exceeds its JSON depth bound" }
+                when (element) {
+                    is Map<*, *> -> {
+                        val keys = element.keys.map { it as String }.sorted()
+                        append("{")
+                        keys.forEachIndexed { index, key ->
+                            append(if (index == 0) "\n" else ",\n")
+                            append("  ".repeat(depth + 1) + canonicalJsonString(key) + ": ")
+                            render(element[key], depth + 1)
+                        }
+                        if (keys.isNotEmpty()) append("\n" + "  ".repeat(depth))
+                        append("}")
+                    }
+                    is List<*> -> {
+                        append("[")
+                        element.forEachIndexed { index, item ->
+                            append(if (index == 0) "\n" else ",\n")
+                            append("  ".repeat(depth + 1))
+                            render(item, depth + 1)
+                        }
+                        if (element.isNotEmpty()) append("\n" + "  ".repeat(depth))
+                        append("]")
+                    }
+                    is String -> append(canonicalJsonString(element))
+                    is Int, is Long -> append(element.toString())
+                    else -> error("Unsupported bundled Ghidra deployment reference value")
+                }
+            }
+            render(value, 0)
+            append("\n")
+            return output.toByteArray()
+        }
+        val unsigned = mapOf<String, Any>(
+            "archive" to mapOf(
+                "bytes" to 569445154L,
+                "sha256" to "93a5d11a9ad510622acaaf908c556a7b9b764d338e78a7567f3689bf5081fd54",
+            ),
+            "bridgePath" to bridge,
+            "classPath" to classPath,
+            "entries" to entries,
+            "exportGuardPath" to guard,
+            "exporter" to mapOf(
+                "bytes" to exporterBytes.size.toLong(),
+                "resourcePath" to "/$resourcePath",
+                "sha256" to digest(exporterBytes),
+            ),
+            "ghidraRelease" to "PUBLIC",
+            "ghidraVersion" to "12.1.3",
+            "provider" to "gcc-bundled-ghidra-deployment-reference-v1",
+            "rootMode" to 0x1ed,
+            "schemaVersion" to 1,
+        )
+        val reference = canonicalBytes(unsigned + ("closureSha256" to digest(canonicalBytes(unsigned))))
+        val output = gccBundledGhidraReference.get().asFile.toPath()
+        Files.createDirectories(output.parent)
+        Files.write(output, reference)
     }
 }
 
@@ -1097,6 +1280,10 @@ distributions {
                 into("lib")
                 filePermissions { unix("rw-r--r--") }
             }
+            from(gccBundledGhidraReference) {
+                into("lib")
+                filePermissions { unix("rw-r--r--") }
+            }
             from(llvmHostedWorkerClasspathReference) {
                 into("lib")
                 filePermissions { unix("rw-r--r--") }
@@ -1126,12 +1313,14 @@ tasks.test {
     dependsOn(generateAcpGateHelperChecksum)
     dependsOn(generateLlvmBehaviorHelperChecksum)
     dependsOn(generateKotlinBootClasspathReference)
+    dependsOn(generateGccBundledGhidraReference)
     dependsOn(generateLlvmHostedWorkerClasspathReference)
     inputs.file(acpGateHelperBinary)
     inputs.file(acpGateHelperChecksum)
     inputs.file(llvmBehaviorHelperBinary)
     inputs.file(llvmBehaviorHelperChecksum)
     inputs.file(kotlinBootClasspathReference)
+    inputs.file(gccBundledGhidraReference)
     inputs.file(llvmHostedWorkerClasspathReference)
     inputs.dir(kotlinBootRuntimeDirectory)
     doFirst {
@@ -1139,6 +1328,11 @@ tasks.test {
         val ghidraBundle = if (testInstalledGhidra) layout.buildDirectory.dir("install/llm_bin_patch/libexec/ghidra")
             else project(":ghidra-bridge").layout.buildDirectory.dir("bundle")
         systemProperty("decompengine.ghidra.bundle", ghidraBundle.get().asFile.absolutePath)
+        val ghidraReference = if (testInstalledGhidra) {
+            layout.buildDirectory.file("install/llm_bin_patch/lib/gcc-bundled-ghidra-reference-v1.json")
+        } else gccBundledGhidraReference
+        systemProperty("decompengine.oracle.gcc.bundledGhidraReference", ghidraReference.get().asFile.absolutePath)
+        systemProperty("decompengine.oracle.gcc.bundledGhidraRoot", ghidraBundle.get().asFile.absolutePath)
         systemProperty("decompengine.ghidra.provenanceArchive", File(gradle.gradleUserHomeDir,
             "caches/decomp-ghidra/ghidra_12.1.3_PUBLIC_20260817.zip").absolutePath)
         systemProperty(
@@ -1213,6 +1407,7 @@ listOf("installDist", "distZip", "distTar").forEach { taskName ->
         dependsOn(generateAcpGateHelperChecksum)
         dependsOn(generateLlvmBehaviorHelperChecksum)
         dependsOn(generateKotlinBootClasspathReference)
+        dependsOn(generateGccBundledGhidraReference)
         dependsOn(generateLlvmHostedWorkerClasspathReference)
     }
 }
@@ -1233,7 +1428,7 @@ tasks.named<Sync>("installDist") {
 tasks.register("verifyGhidraDistributionArchives") {
     group = "verification"
     description = "Verifies complete bundled Ghidra bytes and executable modes in ZIP and TAR distributions"
-    dependsOn("distZip", "distTar")
+    dependsOn("installDist", "distZip", "distTar")
     doLast {
         fun digest(input: java.io.InputStream): String {
             val hash = MessageDigest.getInstance("SHA-256")
@@ -1252,13 +1447,28 @@ tasks.register("verifyGhidraDistributionArchives") {
         val expected = manifest.readLines().associate { it.substring(66) to it.substring(0, 64) } +
             ("bundle.sha256" to digest(manifest.inputStream()))
         val prefix = "llm_bin_patch-$version/libexec/ghidra/"
+        val reference = gccBundledGhidraReference.get().asFile
+        val referenceSha256 = digest(reference.inputStream())
+        val referencePath = "llm_bin_patch-$version/lib/${reference.name}"
+        val installedReference = layout.buildDirectory
+            .file("install/llm_bin_patch/lib/${reference.name}").get().asFile
+        require(installedReference.isFile && digest(installedReference.inputStream()) == referenceSha256) {
+            "installDist omitted or changed the bundled Ghidra deployment reference"
+        }
         val archiveTrees = listOf(
             zipTree(tasks.named<Zip>("distZip").get().archiveFile),
             tarTree(tasks.named<Tar>("distTar").get().archiveFile),
         )
         archiveTrees.forEach { tree ->
             val observed = mutableSetOf<String>()
+            var referenceObserved = false
             tree.visit {
+                if (!isDirectory && path == referencePath) {
+                    require(!referenceObserved && digest(open()) == referenceSha256 && permissions.toUnixNumeric() == 0x1a4) {
+                        "Distribution repeats or changes the bundled Ghidra deployment reference"
+                    }
+                    referenceObserved = true
+                }
                 if (!isDirectory && path.startsWith(prefix)) {
                     val relative = path.removePrefix(prefix)
                     require(observed.add(relative) && relative in expected) { "Unexpected Ghidra archive member: $relative" }
@@ -1268,6 +1478,7 @@ tasks.register("verifyGhidraDistributionArchives") {
                 }
             }
             require(observed == expected.keys) { "Distribution omits bundled Ghidra files" }
+            require(referenceObserved) { "Distribution omits the bundled Ghidra deployment reference" }
         }
     }
 }

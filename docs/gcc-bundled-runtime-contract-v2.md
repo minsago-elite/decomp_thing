@@ -59,7 +59,10 @@ declaration or bundle checksum inventory does not authenticate deployed worker
 code, the original release tree, native/data dependencies, or their lifetime.
 No Ghidra JAR is added to the existing authenticated BOOT or LLVM classpath.
 
-Issue #235 remains open for deployment-derived retained runtime authentication
+The [independent deployment reference](gcc-bundled-ghidra-deployment-reference.md)
+now supplies the expected complete bundle inventory and a retained sidecar reader.
+It does not authenticate the candidate executable tree. Issue #235 remains open
+for deployment-derived retained runtime authentication
 and actual contained analysis through export and cleanup. The existing
 archive-to-installation verifier is useful diagnostic evidence but closes its
 file handles; its returned paths are not retained execution authority. The full
