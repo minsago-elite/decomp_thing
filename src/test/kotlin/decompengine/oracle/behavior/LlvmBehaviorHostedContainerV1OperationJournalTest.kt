@@ -16,6 +16,7 @@ import kotlin.test.assertContentEquals
 import kotlin.test.assertEquals
 import kotlin.test.assertFailsWith
 import kotlin.test.assertFalse
+import kotlin.test.assertNotEquals
 import kotlin.test.assertTrue
 import kotlinx.serialization.json.JsonObject
 import kotlinx.serialization.json.JsonPrimitive
@@ -367,9 +368,17 @@ class LlvmBehaviorHostedContainerV1OperationJournalTest {
                 try {
                     val target = root.resolve(targetName)
                     val exactBytes = Files.readAllBytes(target)
-                    Files.delete(target)
-                    Files.write(target, exactBytes)
-                    Files.setPosixFilePermissions(target, PosixFilePermissions.fromString("r--------"))
+                    val originalInode = Files.getAttribute(target, "unix:ino", LinkOption.NOFOLLOW_LINKS)
+                    val replacement = Files.createTempFile(root.parent, "replacement-", ".json")
+                    Files.write(replacement, exactBytes)
+                    Files.setPosixFilePermissions(replacement, PosixFilePermissions.fromString("r--------"))
+                    assertNotEquals(
+                        originalInode,
+                        Files.getAttribute(replacement, "unix:ino", LinkOption.NOFOLLOW_LINKS),
+                    )
+                    Files.move(replacement, target, StandardCopyOption.ATOMIC_MOVE, StandardCopyOption.REPLACE_EXISTING)
+                    assertContentEquals(exactBytes, Files.readAllBytes(target))
+                    assertNotEquals(originalInode, Files.getAttribute(target, "unix:ino", LinkOption.NOFOLLOW_LINKS))
                     assertDriftPoisonsWithoutWrites(root, owner)
                 } finally {
                     owner.close()

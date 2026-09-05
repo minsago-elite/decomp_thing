@@ -1112,6 +1112,18 @@ class FullTreeFunctionObservationOperationCoordinatorTest {
                                     error("nested prepared-run borrow callback must not run")
                                 }
                             }
+                            val unexpected = expectedRunRoot.resolve("unexpected")
+                            Files.writeString(unexpected, "preserved run residue")
+                            val nonemptyFailure = assertFailsWith<FullTreeFunctionObservationIsolationException> {
+                                BorrowedObservationRunTree.initialize(borrowed).close()
+                            }
+                            assertEquals(
+                                "isolated run tree must be empty before initialization",
+                                nonemptyFailure.message,
+                            )
+                            assertEquals(listOf("unexpected"), entryNames(expectedRunRoot))
+                            assertEquals("preserved run residue", Files.readString(unexpected))
+                            Files.delete(unexpected)
                             val tree = BorrowedObservationRunTree.initialize(borrowed)
                             assertEquals(expectedRunRoot, tree.path)
                             assertEquals(listOf("runtime", "scratch", "tmp"), entryNames(expectedRunRoot))
@@ -1150,11 +1162,15 @@ class FullTreeFunctionObservationOperationCoordinatorTest {
                     val initializedModes = initializedNames.associateWith { name ->
                         Files.getPosixFilePermissions(expectedRunRoot.resolve(name), LinkOption.NOFOLLOW_LINKS)
                     }
-                    assertFailsWith<FullTreeFunctionObservationIsolationException> {
+                    val repeatedInitialization = assertFailsWith<FullTreeFunctionObservationIsolationException> {
                         run.withCurrentRunRootBeforeLaunch { borrowed ->
                             BorrowedObservationRunTree.initialize(borrowed).close()
                         }
                     }
+                    assertEquals(
+                        "isolated run tree must be empty before initialization",
+                        repeatedInitialization.message,
+                    )
                     assertEquals(initializedNames, entryNames(expectedRunRoot))
                     assertEquals(
                         initializedModes,

@@ -4,6 +4,7 @@ import decompengine.acp.AcpRuntimeClosureLimits
 import decompengine.acp.LinuxDescriptor
 import decompengine.acp.LinuxFileIdentity
 import decompengine.acp.LinuxFilesystemSyscalls
+import decompengine.acp.LinuxResourceLimitException
 import decompengine.acp.LinuxSyscallException
 import decompengine.acp.PinnedSecurityExecutable
 import decompengine.acp.PinnedSystemdBusEndpoint
@@ -3226,7 +3227,12 @@ private fun materializeObservationClassPath(
 
 private fun initializeFreshObservationRunTree(descriptor: LinuxDescriptor) {
     requirePrivateDirectory(descriptor, "isolated run tree")
-    if (LinuxFilesystemSyscalls.directoryEntryNames(descriptor, 1).isNotEmpty()) {
+    val empty = try {
+        LinuxFilesystemSyscalls.directoryEntryNames(descriptor, 1).isEmpty()
+    } catch (_: LinuxResourceLimitException) {
+        false
+    }
+    if (!empty) {
         isolationFail("isolated run tree must be empty before initialization")
     }
     descriptor.whileOpen { fd ->
