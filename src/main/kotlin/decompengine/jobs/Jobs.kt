@@ -7,11 +7,11 @@ import decompengine.acp.LinuxDescriptor
 import decompengine.acp.LinuxFileIdentity
 import decompengine.acp.LinuxFilesystemSyscalls
 import decompengine.oracle.core.OracleJson
+import decompengine.oracle.core.StrictJsonLimits
+import decompengine.oracle.core.StrictJsonException
 import decompengine.repair.StableRegularFile
 import decompengine.repair.readStableRegularFile
 import java.io.IOException
-import kotlinx.serialization.json.Json
-import kotlinx.serialization.json.JsonElement
 import kotlinx.serialization.json.JsonObject
 import kotlinx.serialization.json.JsonPrimitive
 import kotlinx.serialization.json.buildJsonObject
@@ -269,9 +269,13 @@ class JobStore(root: Path) {
     }
 
     private fun persist(job: Job, jobDir: Path = jobDirectory(job.id).createDirectories()) {
-        val bytes = (Json { prettyPrint = true }.encodeToString(JsonElement.serializer(), job.toJson()) + "\n")
-            .toByteArray(Charsets.UTF_8)
-        require(bytes.size <= MAX_METADATA_BYTES) { "job metadata exceeds the 256 KiB limit" }
+        // Bound the encoder's string-byte accounting allocation before it sees caller-provided text.
+        require(job.filename.length <= MAX_METADATA_BYTES) { "job metadata exceeds the 256 KiB limit" }
+        val bytes = try {
+            OracleJson.canonicalBytes(job.toJson(), METADATA_LIMITS)
+        } catch (_: StrictJsonException) {
+            throw IllegalArgumentException("job metadata exceeds the 256 KiB limit or contains invalid JSON text")
+        }
         val temporary = Files.createTempFile(jobDir, ".job-metadata-", ".tmp")
         try {
             FileChannel.open(temporary, WRITE, NOFOLLOW_LINKS).use { channel ->
@@ -288,6 +292,13 @@ class JobStore(root: Path) {
 
     private companion object {
         const val MAX_METADATA_BYTES = 256 * 1024
+        val METADATA_LIMITS = StrictJsonLimits(
+            maximumCanonicalBytes = MAX_METADATA_BYTES,
+            maximumStringBytes = MAX_METADATA_BYTES,
+            maximumTotalStringBytes = MAX_METADATA_BYTES,
+            maximumDepth = 8,
+            maximumNodes = 128,
+        )
         val VALID_STATUSES = setOf("uploaded", "queued", "analyzing", "complete", "failed")
     }
 }
