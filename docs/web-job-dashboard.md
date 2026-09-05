@@ -124,3 +124,53 @@ history/evidence/download checks. [Retained report](evidence/web-dashboard-audit
 Validation: 194 frontend tests passed; the nine focused dashboard tests also passed
 after a test-only lint fix. Lint, bounded JVM pagination checks and the rebuilt
 distribution passed. Pinned Chrome used test-only --no-sandbox.
+
+## Persisted 10,000-job browser workload — 2026-09-05
+
+The packaged browser driver's `--mode scale` creates 10,000 private synthetic
+job directories before starting the JVM. IDs, filenames and creation ordering
+match the D0 generator's job identity scheme; each input is an inert 64-byte ELF
+header, and every job remains uploaded with no attempt. This fixture does not
+execute a compiler, binary or model. Unlike the NDJSON workload, it exercises
+actual job-store recovery, authenticated HTTP listing and the shipped SPA.
+
+The journey checks default-page search/no-match/reset and reload, then visits all
+50 maximum-size pages (200 rows each), asserting every expected identity in
+order. Native Enter activation advances each page and the results heading must
+receive focus. An exact filename search finds an early job after traversing the
+whole library and survives reload. The report retains observed page latency and
+sampled renderer JS heap after each page; these include driver polling overhead
+and are not cold-load traces, post-GC retained heap or full D11 qualification.
+
+Reproduce with the pinned tools and a current `distZip`:
+
+```sh
+node scripts/check-packaged-web-browser.mjs --mode scale \
+  --archive /absolute/llm_bin_patch-0.1.0.zip \
+  --chrome /absolute/pinned/chrome --java-home /absolute/jdk \
+  --work-parent /absolute/scratch
+```
+
+The first development run reached page one but timed out on page two because
+the driver's synthetic Enter omitted carriage-return text. The driver was fixed
+to use the same native event sequence as the existing upload keyboard check.
+No application workaround or listing-budget increase was introduced.
+
+The corrected run passed; retained report:
+[`web-dashboard-scale-20260905.json`](evidence/web-dashboard-scale-20260905.json).
+First observed page was 1,526 ms; the 49 continuation pages were 78–114 ms
+(nearest-rank p95 111 ms). Sampled renderer heap peaked at 25,729,260 bytes
+(24.5 MiB), below the 128 MiB initial-browsing reference budget. This single warm
+journey does not prove the 20-cold-load latency budget; its first page exceeds
+1.5 seconds and needs that dedicated qualification. JVM RSS, constrained-network
+runs, concurrent clients, long-session growth and other D0 workloads remain
+unmeasured here. Pinned Chrome used test-only `--no-sandbox`; installation
+integrity, session cleanup and owned-process shutdown passed. #168 and #220
+remain open for their outstanding requirements.
+
+Verification also reran the existing packaged `history` journey successfully
+(report `build/packaged-browser-QBiM8y/report.json`) after the shared driver
+changes. Both JavaScript syntax checks and `git diff --check` passed. No
+production code changed, so JVM/frontend unit suites were not rerun for this
+test-driver checkpoint; both journeys used the previously verified distribution
+identity recorded in their reports.
