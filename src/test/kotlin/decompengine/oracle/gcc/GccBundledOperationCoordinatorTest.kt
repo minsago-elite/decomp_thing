@@ -112,6 +112,10 @@ class GccBundledOperationCoordinatorTest {
                     val definition = GccCompilerEngineContainmentContract.parseDefinitionForLiveController(definitionBytes)
                     val disk = FullTreeDiskScratchEvidence.parseCanonical(diskBytes)
                     val output = definition.outputLease.path
+                    val controlName = requireNotNull(intent.bundledRuntime.freshControlDirectoryName(output))
+                    assertEquals("-Duser.home=${output.resolve(controlName).resolve("tmp")}", definition.command[1])
+                    assertEquals("-Djava.io.tmpdir=${output.resolve(controlName).resolve("tmp")}", definition.command[2])
+                    assertFalse(Files.exists(output.resolve(controlName)))
                     val leaseRoot = output.parent
                     assertEquals(mount, leaseRoot.parent)
                     assertEquals(".decomp-oracle-lease-${intent.operationId}", leaseRoot.fileName.toString())
