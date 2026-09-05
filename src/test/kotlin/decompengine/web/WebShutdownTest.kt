@@ -73,7 +73,9 @@ class WebShutdownTest {
                             kotlinx.serialization.json.Json.parseToJsonElement(it.readBytes().decodeToString())
                         } as kotlinx.serialization.json.JsonObject
                         assertEquals(kotlinx.serialization.json.JsonPrimitive("failed"), response["status"])
-                        assertTrue(response["status_message"].toString().contains("interrupted"))
+                        // Recovery state is public; persisted/raw diagnostics and paths are not.
+                        assertTrue("status_message" !in response)
+                        assertTrue("binary_path" !in response)
                     }
                     assertEquals("Server stopped before the operation started", store.get(ids.last()).statusMessage)
                 } finally {

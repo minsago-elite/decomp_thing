@@ -320,6 +320,42 @@ class UploadServerTest {
     }
 
     @Test
+    fun `legacy progress distinguishes unavailable journals from a persisted empty journal`() = withServer { server, root ->
+        val id = uploadedJobId(server)
+        val record = root.resolve(id).resolve("job.json")
+        val original = record.readBytes()
+        val reports = root.resolve(id).resolve("reports")
+        val journal = reports.resolve(decompengine.jobs.AgentProgressJournal.FILE_NAME)
+        fun unavailable() {
+            val response = request(server, "GET", "/api/jobs/$id/events")
+            assertEquals(503, response.status)
+            assertEquals("application/json; charset=utf-8", response.contentType)
+            val body = Json.parseToJsonElement(response.body.decodeToString()).jsonObject
+            assertEquals("\"PROGRESS_UNAVAILABLE\"", body.getValue("error").jsonObject.getValue("code").toString())
+            listOf("PRIVATE_", root.toString(), "nextSequence", "events").forEach {
+                assertTrue(!response.body.decodeToString().contains(it), it)
+            }
+            assertContentEquals(original, record.readBytes())
+        }
+        unavailable()
+        assertTrue(!journal.exists())
+        reports.createDirectories()
+        for (contents in listOf("PRIVATE_DAMAGED_JOURNAL {", "x".repeat(2 * 1024 * 1024 + 1))) {
+            journal.writeText(contents)
+            val bytes = journal.readBytes()
+            unavailable()
+            assertContentEquals(bytes, journal.readBytes())
+        }
+        val empty = """{"schemaVersion":1,"displayOnly":true,"nextSequence":0,"queueDropped":0,"historyDropped":0,"truncated":false,"events":[]}"""
+        journal.writeText(empty)
+        val response = request(server, "GET", "/api/jobs/$id/events")
+        assertEquals(200, response.status)
+        assertEquals(Json.parseToJsonElement(empty), Json.parseToJsonElement(response.body.decodeToString()))
+        assertEquals(empty, journal.readBytes().decodeToString())
+        assertContentEquals(original, record.readBytes())
+    }
+
+    @Test
     fun `legacy event reads reject unknown attempt identities and extra query parameters`() = withServer { server, _ ->
         val id = uploadedJobId(server)
         assertEquals(404, request(server, "GET", "/api/jobs/$id/events?runId=run_missing").status)

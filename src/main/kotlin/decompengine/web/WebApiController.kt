@@ -136,7 +136,7 @@ internal class WebApiController(
                     if (snapshot) requireNoQuery(exchange)
                     val attempt = jobs.getAttempt(parts[1], parts[3])
                     val bytes = try {
-                        jobs.readArtifact(parts[1], "reports/runs/${attempt.runId}/agent-progress.json", decompengine.jobs.AgentProgressJournal.MAXIMUM_READ_BYTES.toLong()).bytes
+                        jobs.readProgressJournal(parts[1], attempt.runId)
                     } catch (_: Exception) {
                         throw WebAccessDenied(503, "PROGRESS_UNAVAILABLE", "The retained progress journal is unavailable. Missing data does not establish an empty history.")
                     }
