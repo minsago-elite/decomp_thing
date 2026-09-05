@@ -164,7 +164,9 @@ class OpenAiCompatibleModelProvider(private val configuration: OpenAiCompatibleC
             if (payload == "[DONE]") {
                 if (finish == null) fail(ModelFailureKind.MALFORMED_RESPONSE)
                 done = true
-            } else try {
+            } else {
+                val textDeltas = mutableListOf<String>()
+                try {
                 val chunk = parseProviderObject(payload, limits.maxEventBytes)
                 if ("error" in chunk) fail(ModelFailureKind.MALFORMED_RESPONSE)
                 chunk["usage"]?.takeUnless { it == JsonNull }?.jsonObject?.let {
@@ -181,12 +183,12 @@ class OpenAiCompatibleModelProvider(private val configuration: OpenAiCompatibleC
                     delta["content"]?.takeUnless { it == JsonNull }?.let {
                         val value = it.jsonPrimitive.also { p -> require(p.isString) }.content
                         outputBytes += value.toByteArray().size
-                        redactor.append(value)
+                        textDeltas += value
                     }
                     delta["refusal"]?.takeUnless { it == JsonNull }?.let {
                         val value = it.jsonPrimitive.also { p -> require(p.isString) }.content
                         outputBytes += value.toByteArray().size
-                        redactor.append(value)
+                        textDeltas += value
                     }
                     if ("function_call" in delta) fail(ModelFailureKind.UNSUPPORTED_FEATURE)
                     delta["tool_calls"]?.jsonArray?.forEach { element ->
@@ -217,6 +219,9 @@ class OpenAiCompatibleModelProvider(private val configuration: OpenAiCompatibleC
                 }
             } catch (failure: ModelProviderException) { throw failure }
             catch (_: Exception) { fail(ModelFailureKind.MALFORMED_RESPONSE) }
+                // Consumer cancellation/budget exceptions are not malformed provider JSON.
+                textDeltas.forEach(redactor::append)
+            }
         }
         while (!done) {
             checkActive(request, deadline)

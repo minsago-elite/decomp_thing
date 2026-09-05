@@ -323,6 +323,17 @@ class OpenAiCompatibleModelProviderTest {
         assertEquals(2, count.get())
     }
 
+    @Test fun `consumer cancellation is preserved rather than classified as malformed provider data`() = server({ exchange, _ ->
+        exchange.sse(success())
+    }) { provider, count ->
+        val stop = IllegalStateException("trusted consumer stop")
+        val failure = assertFailsWith<IllegalStateException> {
+            provider.generate(request()) { if (it is ModelEvent.TextDelta) throw stop }
+        }
+        assertSame(stop, failure)
+        assertEquals(1, count.get())
+    }
+
     private fun HttpExchange.beginSse() { responseHeaders.set("Content-Type", "text/event-stream; charset=utf-8"); sendResponseHeaders(200, 0) }
     private fun HttpExchange.sse(body: String) { beginSse(); responseBody.write(body.toByteArray()) }
     private fun HttpExchange.reply(status: Int, body: String) { sendResponseHeaders(status, body.toByteArray().size.toLong()); responseBody.write(body.toByteArray()) }
