@@ -1,6 +1,7 @@
 package decompengine.acp
 
 import com.agentclientprotocol.acp.LIB_VERSION
+import com.agentclientprotocol.annotations.UnstableApi
 import com.agentclientprotocol.model.AcpMethod
 import com.agentclientprotocol.model.AcpNotification
 import com.agentclientprotocol.model.AcpRequest
@@ -29,6 +30,7 @@ import kotlinx.serialization.json.jsonPrimitive
  * shape must therefore fail here with the exact message that drifted. The fixture contains only
  * bounded, synthetic, program-neutral values.
  */
+@OptIn(UnstableApi::class)
 class AcpV1WireContractGoldenTest {
     private val fixture: JsonObject = loadFixture()
     private val messages: JsonObject = fixture.getValue("messages").jsonObject
@@ -73,6 +75,11 @@ class AcpV1WireContractGoldenTest {
     fun `sdk serializers match every versioned v1 golden message`() {
         assertExchange("initialize", AcpMethod.AgentMethods.V1.Initialize)
         assertExchange("session-new", AcpMethod.AgentMethods.V1.SessionNew)
+        assertResponse("session-new-configured.response", "session-new.request", AcpMethod.AgentMethods.V1.SessionNew)
+        assertExchange("session-set-model", AcpMethod.AgentMethods.V1.SessionSetModel)
+        assertExchange("session-set-mode", AcpMethod.AgentMethods.V1.SessionSetMode)
+        assertExchange("session-set-config-select", AcpMethod.AgentMethods.V1.SessionSetConfigOption)
+        assertExchange("session-set-config-boolean", AcpMethod.AgentMethods.V1.SessionSetConfigOption)
         assertRequest("session-prompt.request", AcpMethod.AgentMethods.V1.SessionPrompt)
         assertResponse(
             "session-prompt-end-turn.response",
@@ -112,6 +119,10 @@ class AcpV1WireContractGoldenTest {
             AcpMethod.ClientMethods.V1.SessionUpdate,
         )
         assertNotification("session-update-plan.notification", AcpMethod.ClientMethods.V1.SessionUpdate)
+        assertNotification("session-update-config.notification", AcpMethod.ClientMethods.V1.SessionUpdate)
+        assertNotification("session-update-mode.notification", AcpMethod.ClientMethods.V1.SessionUpdate)
+        assertNotification("session-update-commands.notification", AcpMethod.ClientMethods.V1.SessionUpdate)
+        assertNotification("session-update-usage.notification", AcpMethod.ClientMethods.V1.SessionUpdate)
         assertNotification("session-update-tool-call.notification", AcpMethod.ClientMethods.V1.SessionUpdate)
         assertNotification(
             "session-update-tool-call-update.notification",
@@ -256,6 +267,15 @@ class AcpV1WireContractGoldenTest {
             "initialize.response",
             "session-new.request",
             "session-new.response",
+            "session-new-configured.response",
+            "session-set-model.request",
+            "session-set-model.response",
+            "session-set-mode.request",
+            "session-set-mode.response",
+            "session-set-config-select.request",
+            "session-set-config-select.response",
+            "session-set-config-boolean.request",
+            "session-set-config-boolean.response",
             "session-prompt.request",
             "session-prompt-end-turn.response",
             "session-prompt-max-tokens.response",
@@ -266,6 +286,10 @@ class AcpV1WireContractGoldenTest {
             "session-update-user-message.notification",
             "session-update-agent-thought.notification",
             "session-update-plan.notification",
+            "session-update-config.notification",
+            "session-update-mode.notification",
+            "session-update-commands.notification",
+            "session-update-usage.notification",
             "session-update-tool-call.notification",
             "session-update-tool-call-update.notification",
             "fs-read.request",

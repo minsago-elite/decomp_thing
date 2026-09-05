@@ -533,13 +533,21 @@ tool-call limit exactly once before terminal content can bind any terminal autho
 
 ## Upgrade policy
 
+The bounded `acp/v1/wire-contract.json` corpus currently freezes 46 SDK-decoded and re-encoded
+JSON-RPC messages. It includes the production model/mode setters, select and boolean configuration
+setters, advertised session inventories, configuration/mode/command/usage updates, and the original
+prompt/filesystem/terminal/permission lifecycle. `AcpV1WireContractGoldenTest` rejects missing or
+unvalidated entries and pins both Maven and SDK-reported versions. A golden update documents wire
+compatibility only; it does not implement advertised authentication, resume, or operator behavior.
+
 An SDK upgrade is intentional work, not an automated version-range update. A change must:
 
 1. confirm that the SDK still identifies protocol v1 as stable and keeps v2 opt-in;
 2. review the official v1 schema and release notes for wire or capability changes, including the opt-in v1
    additional-directory, usage, and message-id fields;
 3. update the Gradle coordinate and `ACP_KOTLIN_SDK_VERSION` together;
-4. run the scripted subprocess tests plus the full test suite; and
+4. review and run the versioned golden corpus, operator preference exchanges, scripted subprocess
+   tests and full test suite; and
 5. keep v2 disabled until a project issue explicitly adopts it after it becomes stable.
 
 The lifecycle wrapper remains necessary even when SDK internals change: executable selection, OS process ownership,

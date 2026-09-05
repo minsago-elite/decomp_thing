@@ -384,6 +384,245 @@
       "params": {
         "sessionId": "session-1"
       }
+    },
+    "session-new-configured.response": {
+      "jsonrpc": "2.0",
+      "id": 2,
+      "result": {
+        "sessionId": "session-1",
+        "models": {
+          "currentModelId": "model-default",
+          "availableModels": [
+            {
+              "modelId": "model-default",
+              "name": "Default"
+            },
+            {
+              "modelId": "model-safe",
+              "name": "Safe"
+            }
+          ]
+        },
+        "modes": {
+          "currentModeId": "mode-default",
+          "availableModes": [
+            {
+              "id": "mode-default",
+              "name": "Default"
+            },
+            {
+              "id": "mode-safe",
+              "name": "Safe"
+            }
+          ]
+        },
+        "configOptions": [
+          {
+            "type": "select",
+            "id": "reasoning",
+            "name": "Reasoning",
+            "currentValue": "low",
+            "options": [
+              {
+                "value": "low",
+                "name": "Low"
+              },
+              {
+                "value": "high",
+                "name": "High"
+              }
+            ]
+          },
+          {
+            "type": "boolean",
+            "id": "telemetry",
+            "name": "Telemetry",
+            "currentValue": true
+          }
+        ]
+      }
+    },
+    "session-set-model.request": {
+      "jsonrpc": "2.0",
+      "id": 20,
+      "method": "session/set_model",
+      "params": {
+        "sessionId": "session-1",
+        "modelId": "model-safe"
+      }
+    },
+    "session-set-model.response": {
+      "jsonrpc": "2.0",
+      "id": 20,
+      "result": {}
+    },
+    "session-set-mode.request": {
+      "jsonrpc": "2.0",
+      "id": 21,
+      "method": "session/set_mode",
+      "params": {
+        "sessionId": "session-1",
+        "modeId": "mode-safe"
+      }
+    },
+    "session-set-mode.response": {
+      "jsonrpc": "2.0",
+      "id": 21,
+      "result": {}
+    },
+    "session-set-config-select.request": {
+      "jsonrpc": "2.0",
+      "id": 22,
+      "method": "session/set_config_option",
+      "params": {
+        "sessionId": "session-1",
+        "configId": "reasoning",
+        "value": "high"
+      }
+    },
+    "session-set-config-select.response": {
+      "jsonrpc": "2.0",
+      "id": 22,
+      "result": {
+        "configOptions": [
+          {
+            "type": "select",
+            "id": "reasoning",
+            "name": "Reasoning",
+            "currentValue": "high",
+            "options": [
+              {
+                "value": "low",
+                "name": "Low"
+              },
+              {
+                "value": "high",
+                "name": "High"
+              }
+            ]
+          },
+          {
+            "type": "boolean",
+            "id": "telemetry",
+            "name": "Telemetry",
+            "currentValue": true
+          }
+        ]
+      }
+    },
+    "session-set-config-boolean.request": {
+      "jsonrpc": "2.0",
+      "id": 23,
+      "method": "session/set_config_option",
+      "params": {
+        "sessionId": "session-1",
+        "configId": "telemetry",
+        "type": "boolean",
+        "value": false
+      }
+    },
+    "session-set-config-boolean.response": {
+      "jsonrpc": "2.0",
+      "id": 23,
+      "result": {
+        "configOptions": [
+          {
+            "type": "select",
+            "id": "reasoning",
+            "name": "Reasoning",
+            "currentValue": "high",
+            "options": [
+              {
+                "value": "low",
+                "name": "Low"
+              },
+              {
+                "value": "high",
+                "name": "High"
+              }
+            ]
+          },
+          {
+            "type": "boolean",
+            "id": "telemetry",
+            "name": "Telemetry",
+            "currentValue": false
+          }
+        ]
+      }
+    },
+    "session-update-config.notification": {
+      "jsonrpc": "2.0",
+      "method": "session/update",
+      "params": {
+        "sessionId": "session-1",
+        "update": {
+          "sessionUpdate": "config_option_update",
+          "configOptions": [
+            {
+              "type": "select",
+              "id": "reasoning",
+              "name": "Reasoning",
+              "currentValue": "high",
+              "options": [
+                {
+                  "value": "low",
+                  "name": "Low"
+                },
+                {
+                  "value": "high",
+                  "name": "High"
+                }
+              ]
+            },
+            {
+              "type": "boolean",
+              "id": "telemetry",
+              "name": "Telemetry",
+              "currentValue": false
+            }
+          ]
+        }
+      }
+    },
+    "session-update-mode.notification": {
+      "jsonrpc": "2.0",
+      "method": "session/update",
+      "params": {
+        "sessionId": "session-1",
+        "update": {
+          "sessionUpdate": "current_mode_update",
+          "currentModeId": "mode-safe"
+        }
+      }
+    },
+    "session-update-commands.notification": {
+      "jsonrpc": "2.0",
+      "method": "session/update",
+      "params": {
+        "sessionId": "session-1",
+        "update": {
+          "sessionUpdate": "available_commands_update",
+          "availableCommands": [
+            {
+              "name": "inspect",
+              "description": "Inspect the authorized fixture workspace"
+            }
+          ]
+        }
+      }
+    },
+    "session-update-usage.notification": {
+      "jsonrpc": "2.0",
+      "method": "session/update",
+      "params": {
+        "sessionId": "session-1",
+        "update": {
+          "sessionUpdate": "usage_update",
+          "used": 128,
+          "size": 4096
+        }
+      }
     }
   }
 }
