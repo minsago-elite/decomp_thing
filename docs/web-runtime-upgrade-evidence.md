@@ -45,10 +45,10 @@ manifest-only change or an injected chunk failure.
   JVM tests. Resource URL helpers cover exact event/download identities and
   deployment prefixes in frontend tests.
 
-The D1 base-path acceptance item still needs end-to-end event/download journeys
-when those D2/D4/D6 endpoints land. URL-construction tests alone do not qualify
-those future consumers. No worker resources are currently supported. This evidence
-does not close all of D1 or the broader D-series release gates.
+At this historical checkpoint the D1 base-path item still needed end-to-end
+event/download journeys. Those consumers are now implemented and qualified in the
+[D1 completion audit](web-d1-completion.md). No browser worker resources are
+currently supported. Broader D-series release gates remain separate.
 
 The [packaged session journey](evidence/web-runtime-session-20260905.json) also
 passed with the same current ZIP/JAR/UI identities: authenticated Runtime displays
