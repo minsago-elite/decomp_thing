@@ -52,6 +52,12 @@ That result is not positive terminal containment evidence. The required-host fla
 for missing prerequisites. Positive hosted execution and retained evidence remain required before
 claiming this tool boundary qualified.
 
+The first hosted run (`33950189165`, `e54313a`) ran every required case with no skips and correctly
+failed qualification: all six live cases rejected the fixture's default CPU allowance because it
+exceeded their 10-second wall limit. The fixture now explicitly uses a 2-second CPU allowance;
+its limit construction is also checked by the host-independent metadata test. This corrects fixture
+configuration and does not weaken production limits. A new positive hosted result is still required.
+
 #74 remains open. This checkpoint does not supply production compiler profiles, writable quota-backed
 build stages, general directory inspection or structured evidence retrieval. Full terminal permissions,
 environment/credential equivalence, durable transcript/receipt archive wiring and the C1/C2 workflow
