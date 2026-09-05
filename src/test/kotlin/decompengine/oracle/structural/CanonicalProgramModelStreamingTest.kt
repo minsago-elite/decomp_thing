@@ -13,6 +13,30 @@ import kotlin.test.assertTrue
 
 class CanonicalProgramModelStreamingTest {
     @Test
+    fun `schema two keeps completed extraction and unknown types unassessed with reader parity`() {
+        val historical = ProgramModelJson.readCanonical(resourceBytes())
+        val model = historical.copy(schemaVersion = 2,
+            globals = historical.globals.map { it.copy(type = "undefined8", status = RecoveryStatus.RECOVERED) })
+        val bytes = model.toJson().toByteArray(StandardCharsets.UTF_8)
+        val snapshot = CanonicalProgramModelStreaming.readCanonical(bytes)
+        assertEquals(model, snapshot.model)
+        assertEquals(model, ProgramModelJson.readCanonical(bytes))
+        assertContentEquals(bytes, snapshot.model.toJson().toByteArray(StandardCharsets.UTF_8))
+        val text = bytes.toString(StandardCharsets.UTF_8)
+        assertTrue("\"status\":" !in text)
+        assertEquals(model.functions.size + model.globals.size + model.types.size,
+            Regex("\"recoveryAssessment\": \"unassessed\"").findAll(text).count())
+        for (claim in listOf("recovered", "exact", "abi-equivalent", "contradicted")) {
+            val changed = text.replaceFirst("\"recoveryAssessment\": \"unassessed\"",
+                "\"recoveryAssessment\": \"$claim\"").toByteArray(StandardCharsets.UTF_8)
+            kotlin.test.assertFails { ProgramModelJson.readCanonical(changed) }
+            kotlin.test.assertFails { CanonicalProgramModelStreaming.readCanonical(changed) }
+        }
+        assertContentEquals(resourceBytes(), model.copy(schemaVersion = 1, globals = historical.globals)
+            .toJson().toByteArray(StandardCharsets.UTF_8))
+    }
+
+    @Test
     fun `frozen exporter wire parses with exact typed and byte parity`() {
         val bytes = resourceBytes()
         val snapshot = CanonicalProgramModelStreaming.readCanonical(bytes)
