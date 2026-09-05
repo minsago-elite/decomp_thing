@@ -8,3 +8,8 @@ output/
 __pycache__/
 *.py[cod]
 oracle/llvm/*/artifacts/
+frontend/node_modules/
+frontend/.env*
+frontend/coverage/
+frontend/test-results/
+frontend/playwright-report/
