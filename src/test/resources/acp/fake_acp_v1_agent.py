@@ -47,6 +47,8 @@ GENERIC_CONTRACT_MODES = {
     "wait-for-cancel",
     "wrong-jsonrpc-prompt",
     "session-preferences",
+    "session-preferences-overlapping-choices",
+    "session-preferences-cross-preferences",
     "session-preferences-no-models",
     "session-preferences-no-modes",
     "session-preferences-no-config-options",
@@ -268,6 +270,8 @@ if MODE.startswith("doctor-auth-"):
         methods = [{"id": " ", "name": "Fixture login"}]
     elif MODE == "doctor-auth-payload":
         methods = [{"id": "private-method-id", "name": "Fixture login", "_meta": {"secret": "x" * 17000}}]
+    elif MODE == "doctor-auth-unicode":
+        methods = [{"id": "private-method-id", "name": "\ud800"}]
     elif MODE == "doctor-auth-text":
         methods = [{"id": "private-method-id", "name": "x" * 513}]
     else:
@@ -350,6 +354,15 @@ if MODE.startswith("session-preferences"):
         }
     if MODE != "session-preferences-no-config-options":
         session_result["configOptions"] = advertised_session_config()
+if MODE == "session-preferences-overlapping-choices":
+    session_result["models"]["availableModels"].insert(0, {"modelId": "prefix-model-secret-canary", "name": "Overlap"})
+    session_result["modes"]["availableModes"].insert(0, {"id": "prefix-mode-secret-canary", "name": "Overlap"})
+    session_result["configOptions"][0]["options"].insert(0, {"value": "prefix-value-secret-canary", "name": "Overlap"})
+    session_result["configOptions"].insert(0, {"type": "boolean", "id": "prefix-option-secret-canary", "name": "Overlap", "currentValue": False})
+if MODE == "session-preferences-cross-preferences":
+    session_result["models"]["availableModels"] = [
+        {"modelId": "prefix-" + value, "name": "Overlap"} for value in
+        ["model-secret-canary", "mode-secret-canary", "option-secret-canary", "value-secret-canary"]]
 respond(session_new, {} if expected_session_method == "session/load" else session_result)
 if MODE == "session-preferences-pipelined-update":
     update({

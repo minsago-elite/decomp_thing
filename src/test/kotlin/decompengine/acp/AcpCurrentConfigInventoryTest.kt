@@ -10,6 +10,46 @@ import kotlin.test.*
 @OptIn(UnstableApi::class)
 class AcpCurrentConfigInventoryTest {
     @Test
+    fun `full environment budget and complete preferences share redaction without exhausting limits`() {
+        val environment = List(4096) { it.toString().padStart(256, 'x') }
+        val preferences = AcpSessionPreferences("model-private", "mode-private", List(64) {
+            AcpSessionConfigPreference("option-$it", AcpSessionConfigValue.Select("value-$it"))
+        })
+        val identifiers = preferences.privateIdentifiers()
+        assertEquals(130, identifiers.size)
+        val preview = previewSessionChoices(sequenceOf("prefix-mode-private", "prefix-option-63", "prefix-value-63"),
+            environment, identifiers)
+        assertFalse(preview.contains("mode-private"))
+        assertFalse(preview.contains("option-63"))
+        assertFalse(preview.contains("value-63"))
+        assertTrue(preview.contains("[redacted]"))
+        val failure = assertFailsWith<AgentExecutionException> {
+            requireCurrentSessionConfigPreference(inventory("session-new-configured.response"),
+                preferences.configOptions.first(), 0, environment, identifiers)
+        }
+        assertEquals(AgentFailureKind.CONFIGURATION, failure.failure.kind)
+    }
+
+    @Test
+    fun `current choices redact configured identifiers embedded in advertised values`() {
+        val original = inventory("session-new-configured.response").first()
+        val option = Json.decodeFromString<SessionConfigOption>(Json.encodeToString(SessionConfigOption.serializer(), original)
+            .replace("reasoning", "prefix-private-option").replace("high", "prefix-private-value"))
+        for (preference in listOf(
+            AcpSessionConfigPreference("private-option", AcpSessionConfigValue.BooleanValue(false)),
+            AcpSessionConfigPreference("prefix-private-option", AcpSessionConfigValue.Select("private-value")),
+        )) {
+            val failure = assertFailsWith<AgentExecutionException> {
+                requireCurrentSessionConfigPreference(listOf(option), preference, 0)
+            }
+            assertFalse(failure.stackTraceToString().contains(preference.id))
+            if (preference.value is AcpSessionConfigValue.Select) {
+                assertFalse(failure.stackTraceToString().contains("private-value"))
+            }
+        }
+    }
+
+    @Test
     fun `flat and grouped current inventories must retain a unique configured value`() {
         val preference = AcpSessionConfigPreference("reasoning", AcpSessionConfigValue.Select("high"))
         listOf("session-new-configured.response", "session-new-grouped-config.response").forEach { name ->

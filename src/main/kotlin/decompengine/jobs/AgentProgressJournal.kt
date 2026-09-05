@@ -362,6 +362,13 @@ class AgentProgressJournal(
                     "progress snapshot contains inconsistent omission ranges"
                 }
             }
+            // History eviction removes a prefix of admitted events. Any later gaps
+            // must therefore be queue drops, never history drops.
+            val firstRetained = result.getValue("events").jsonArray.firstOrNull()
+                ?.jsonObject?.getValue("sequence")?.jsonPrimitive?.long ?: next
+            require(historyDropped <= firstRetained) {
+                "progress snapshot history omissions exceed the evicted prefix"
+            }
             return result
         }
 
@@ -389,12 +396,18 @@ class AgentProgressJournal(
 }
 
 /** Bounded previews only; invocation artifacts continue to retain content commitments. */
-internal class ProgressRedactor(values: Collection<String>) {
-    private val secrets = values.filter { it.isNotBlank() }.distinct().sortedByDescending(String::length)
+internal class ProgressRedactor(values: Collection<String>, additionalValues: Collection<String> = emptyList()) {
+    private val secrets: List<String>
     init {
-        require(secrets.size <= 4096 && secrets.sumOf { it.length.toLong() } <= 1024 * 1024) {
+        val primary = values.filter { it.isNotBlank() }.distinct()
+        require(primary.size <= 4096 && primary.sumOf { it.length.toLong() } <= 1024 * 1024) {
             "progress redaction values exceed the configured limit"
         }
+        // Separate space for a full bounded session preference set (model, mode, 64 ID/value pairs).
+        require(additionalValues.size <= 130 && additionalValues.all { it.length <= 256 }) {
+            "additional redaction values exceed the configured limit"
+        }
+        secrets = (primary + additionalValues.filter { it.isNotBlank() }).distinct().sortedByDescending(String::length)
     }
 
     fun text(value: String, maximumCharacters: Int = 512): String {
