@@ -112,6 +112,13 @@ def verify() -> list[dict]:
                 if match is None:
                     raise AssertionError("Packaged server did not report its listening address within 15 s")
                 origin = match.group(0)
+                conflict = subprocess.run(
+                    [str(launcher), "web", "--ui", "spa", "--port", origin.rsplit(":", 1)[1],
+                     "--data-dir", str(data)],
+                    cwd=working, env=environment, capture_output=True, text=True, timeout=15,
+                )
+                assert conflict.returncode == 2
+                assert "Cannot bind web server" in conflict.stderr and "--port" in conflict.stderr
                 for item in manifest["files"]:
                     if not item["public"]:
                         continue

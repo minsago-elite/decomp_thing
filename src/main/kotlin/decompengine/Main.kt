@@ -536,7 +536,13 @@ private fun runWeb(args: List<String>) {
             else -> error("unknown web argument: ${args[index]}")
         }
     }
-    val server = UploadServer(host, port, dataDir, uiMode = uiMode, basePath = basePath)
+    require(port in 0..65535) { "--port must be between 0 and 65535 (0 selects an available port)" }
+    val server = try {
+        UploadServer(host, port, dataDir, uiMode = uiMode, basePath = basePath)
+    } catch (_: java.net.BindException) {
+        System.err.println("Cannot bind web server to $host:$port. Check --host or choose an unused --port.")
+        kotlin.system.exitProcess(2)
+    }
     server.start()
     Runtime.getRuntime().addShutdownHook(Thread { server.stop() })
     val urlHost = if (':' in host && !host.startsWith('[')) "[$host]" else host
