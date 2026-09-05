@@ -65,8 +65,14 @@ An already running user manager can answer systemctl through its private socket
 before its well-known name is registered on the session bus. The reviewed
 [systemd v255 API setup](https://github.com/systemd/systemd/blob/v255/src/core/dbus.c)
 requests `org.freedesktop.systemd1` asynchronously. A local first busctl GetUnit
-query failed with that name absent while the next lookup succeeded. This is a
-confirmed startup condition, not yet proof of the hosted CHANGED failure cause.
+query failed with that name absent while the next lookup succeeded. Completed
+[diagnostic CI at c7cea0b](https://github.com/minsago-elite/decomp_thing/actions/runs/33948511482)
+confirms the same cause: the first GetUnit returned exit 1 with the manager name
+absent; all seven lookups/properties in the second identity observation succeeded.
+Features, unit, job and cgroup snapshots were unchanged, while identity presence
+and stability changed from false to true. The conservative CHANGED result was
+correct for that observation pair. That run contained 1,383 passing tests, 32
+skips and this single failure; it is not qualification of the registration fix.
 
 Before either attachment snapshot, the observer now asks only the bus daemon's
 `NameHasOwner` method whether that manager name is registered. Successful false
@@ -83,3 +89,10 @@ two-snapshot classifier and invocation-bound property checks are unchanged.
 The test retains only the latest registration response and its bounded query
 count, separately from the 14 identity-command results. No systemd lifetime,
 BOOT/START timeout, journal transition, receipt format or release gate changes.
+
+Local verification at `6e6e886`: all eight registration tests passed, including
+the actual user-bus method envelope and deterministic late/malformed/denied/
+interrupted/deadline/count cases. The full-tree and schema selection ran 457
+tests: 418 passed, 39 privileged/runtime prerequisite skips, zero failures or
+errors. The production cold UNIT_ATTACHED case remains among the local skips;
+these results do not replace hosted qualification of the registration fix.
