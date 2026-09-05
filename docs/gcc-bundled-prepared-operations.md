@@ -90,11 +90,19 @@ retained ext4 run. The separate historical BOOT-only keeper remains unchanged.
 `KotlinSystemdCgroupCommandLauncher` uses a distinct fixed Kotlin keeper inside
 the existing authenticated systemd/cgroup-v2, prlimit and bubblewrap boundary.
 The bundled direct-API child executes the exact definition argv and three-field
-environment. Runtime provider `bundled-ghidra-java-api-runtime-v2` explicitly
-binds `-Duser.home=<run>/tmp` and `-Djava.io.tmpdir=<run>/tmp`; provider v1 still
-parses and preserves its original command but is not accepted for execution.
-Provider v2 also binds one active JVM processor to match the single-CPU scope
-quota and disables the child's JVM attachment mechanism.
+environment. The default runtime provider `bundled-ghidra-java-api-runtime-v3`
+binds JVM home and temporary paths to `<run>/control-<digest>/tmp`, separate from
+the shared project and reports. The digest is SHA-256 of UTF-8
+`gcc-bundled-fresh-control-v1\n<absolute run path>` (with an actual newline).
+This fresh-leg name is derived before command hashing and is bound in the
+validated command, keeper request and runtime closure. The launcher creates it
+only at execution, through the opaque lease-issued borrow; preparation leaves
+it absent. A later resume leg will need a distinct name.
+
+Provider v2 preserves its exact `<run>/tmp` command and legacy launcher layout;
+provider v1 still parses unchanged but is not accepted for execution. Both v2
+and v3 bind one active JVM processor to match the single-CPU scope quota and
+disable the child's JVM attachment mechanism.
 The JDK, native libraries, bundled release, exporter and engine input are
 read-only. Project, reports and temporary writes use the dedicated filesystem;
 the journal, lease record and host systemd socket are absent from the sandbox.
@@ -305,8 +313,8 @@ so a JVM temporary path can refer to it without a circular hash dependency; the
 request and runtime closure bind the chosen path. The default
 layout and its runtime commitment remain unchanged when this option is absent.
 
-This is not yet production resume. The GCC coordinator still uses its existing
-layout. Resume must explicitly select this layout, bind/revalidate the prior
+This is not yet production resume. The GCC coordinator selects this layout for
+the default v3 fresh or interrupted leg. Resume must bind/revalidate the prior
 analysis state and export prefix, choose a fresh temporary directory for the
 analysis JVM, and supply retained earlier control identities for protection during the next
 execution. The directory tests establish separation, no-replace behavior and

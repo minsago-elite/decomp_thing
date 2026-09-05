@@ -68,7 +68,32 @@ class GccBundledGhidraRuntimeTest {
             GccCompilerEngineContainmentContract.assessDefinition(request(historical)).bindingSha256,
             GccCompilerEngineContainmentContract.assessDefinition(request(current)).bindingSha256,
         )
-        assertFailsWith<IllegalArgumentException> { GccBundledGhidraRuntime(ROOT, classPath(), invocationVersion = 3) }
+        assertFailsWith<IllegalArgumentException> { GccBundledGhidraRuntime(ROOT, classPath(), invocationVersion = 4) }
+    }
+
+    @Test
+    fun `version three binds a fresh control temp path without changing project and export paths`() {
+        val current = GccBundledGhidraRuntime(ROOT, classPath())
+        val previous = runtime()
+        assertEquals(3, current.invocationVersion)
+        val name = assertNotNull(current.freshControlDirectoryName(lease().path))
+        assertTrue(name.matches(Regex("control-[a-f0-9]{64}")))
+        assertNotEquals(name, current.freshControlDirectoryName(Path.of("/scratch/another-run")))
+        val command = current.command(artifacts(current), state(), lease())
+        val oldCommand = previous.command(artifacts(previous), state(), lease())
+        assertEquals(oldCommand.toMutableList().also {
+            it[1] = "-Duser.home=/scratch/run/$name/tmp"
+            it[2] = "-Djava.io.tmpdir=/scratch/run/$name/tmp"
+        }, command)
+        val parsed = GccBundledGhidraRuntime.parse(current.toJson())
+        assertEquals(command, parsed.command(artifacts(parsed), state(), lease()))
+        assertEquals(name, parsed.freshControlDirectoryName(lease().path))
+        assertEquals(null, previous.freshControlDirectoryName(lease().path))
+        assertNotEquals(
+            GccCompilerEngineContainmentContract.assessDefinition(request(previous)).bindingSha256,
+            GccCompilerEngineContainmentContract.assessDefinition(request(current)).bindingSha256,
+        )
+        assertFailsWith<IllegalArgumentException> { request(current, command = oldCommand) }
     }
 
     @Test
@@ -293,7 +318,7 @@ class GccBundledGhidraRuntimeTest {
         assertEquals(runtime.toJson(), assertNotNull(parsed.bundledRuntime).toJson())
         val changedRuntime = GccBundledGhidraRuntime(ROOT, classPath().mapIndexed { index, entry ->
             if (index == 1) entry.copy(sha256 = SHA_B) else entry
-        })
+        }, invocationVersion = runtime.invocationVersion)
         val changed = GccCompilerEngineContainmentContract.parseDefinitionForLiveController(
             GccCompilerEngineContainmentContract.assessDefinition(request(changedRuntime)).canonicalBytes,
         )
@@ -389,7 +414,7 @@ class GccBundledGhidraRuntimeTest {
         }
     }
 
-    private fun runtime(root: Path = ROOT): GccBundledGhidraRuntime = GccBundledGhidraRuntime(root, classPath(root))
+    private fun runtime(root: Path = ROOT): GccBundledGhidraRuntime = GccBundledGhidraRuntime(root, classPath(root), invocationVersion = 2)
 
     private fun classPath(root: Path = ROOT, libraryCount: Int = 2): List<GccBundledGhidraClassPathEntry> =
         listOf(GccBundledGhidraClassPathEntry(root.resolve("decomp-ghidra-bridge.jar"), 32, SHA_A)) +
