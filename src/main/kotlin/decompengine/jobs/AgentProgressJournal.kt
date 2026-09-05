@@ -369,6 +369,14 @@ class AgentProgressJournal(
             require(historyDropped <= firstRetained) {
                 "progress snapshot history omissions exceed the evicted prefix"
             }
+            // Sequence zero is admitted to an initially empty queue. Losing it requires eviction.
+            require(firstRetained == 0L || historyDropped > 0) {
+                "progress snapshot classifies the initial admitted event as queue loss"
+            }
+            // The small startup record fits the minimum snapshot budget and cannot alone be evicted.
+            require(retainedCount > 0 || historyDropped != 1L) {
+                "progress snapshot contains an impossible single-event history eviction"
+            }
             return result
         }
 
