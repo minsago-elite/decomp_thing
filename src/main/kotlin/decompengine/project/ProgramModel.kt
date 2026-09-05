@@ -9,6 +9,7 @@ import kotlinx.serialization.json.jsonPrimitive
 import java.security.MessageDigest
 import java.util.Locale
 
+// Historical extraction/completion labels; these are not scored recovery assessments.
 enum class RecoveryStatus { RECOVERED, PARTIAL, FAILED, SYNTHETIC }
 
 data class RecoveredFunction(
@@ -47,9 +48,16 @@ data class RecoveredProgramModel(
     val types: List<RecoveredType> = emptyList(),
 ) {
     init {
+        require(schemaVersion in 1..2) { "unsupported program model schemaVersion: $schemaVersion" }
         require(functions.map { it.id }.distinct().size == functions.size) { "function IDs must be unique" }
         require(globals.map { it.id }.distinct().size == globals.size) { "global IDs must be unique" }
         require(types.map { it.id }.distinct().size == types.size) { "type IDs must be unique" }
+    }
+
+    private fun statusFields(status: RecoveryStatus): String {
+        val value = status.name.lowercase(Locale.ROOT)
+        return if (schemaVersion == 1) "\"status\": \"$value\""
+        else "\"extractionStatus\": \"$value\",\n              \"recoveryAssessment\": \"unassessed\""
     }
 
     fun toJson(): String = buildString {
@@ -64,7 +72,7 @@ data class RecoveredProgramModel(
               "name": "${function.name.json()}",
               "address": "0x${function.address.toString(16)}",
               "prototype": "${function.prototype.json()}",
-              "status": "${function.status.name.lowercase()}",
+              ${statusFields(function.status)},
               "calls": [${function.calls.sorted().joinToString(", ") { "\"${it.json()}\"" }}],
               "referencedGlobals": [${function.referencedGlobals.sorted().joinToString(", ") { "\"${it.json()}\"" }}],
               "strings": [${function.strings.sorted().joinToString(", ") { "\"${it.json()}\"" }}],
@@ -81,7 +89,7 @@ data class RecoveredProgramModel(
               "address": "0x${global.address.toString(16)}",
               "type": "${global.type.json()}",
               "initializer": ${global.initializer?.let { "\"${it.json()}\"" } ?: "null"},
-              "status": "${global.status.name.lowercase()}"
+              ${statusFields(global.status)}
             }""".trimIndent().prependIndent("    ")
         })
         append("\n  ],\n  \"types\": [")
@@ -92,7 +100,7 @@ data class RecoveredProgramModel(
               "id": "${type.id.json()}",
               "declaration": "${type.declaration.json()}",
               "sourceAddress": ${type.sourceAddress?.let { "\"0x${it.toString(16)}\"" } ?: "null"},
-              "status": "${type.status.name.lowercase()}"
+              ${statusFields(type.status)}
             }""".trimIndent().prependIndent("    ")
         })
         append("\n  ]\n}\n")
@@ -117,7 +125,7 @@ object ProgramModelJson {
     fun read(text: String): RecoveredProgramModel {
         val root = Json.parseToJsonElement(text).jsonObject
         val schemaVersion = root.int("schemaVersion", 1)
-        require(schemaVersion == 1) { "unsupported program model schemaVersion: $schemaVersion" }
+        require(schemaVersion in 1..2) { "unsupported program model schemaVersion: $schemaVersion" }
         return RecoveredProgramModel(
             schemaVersion = schemaVersion,
             inputSha256 = root.string("inputSha256"),
@@ -132,7 +140,7 @@ object ProgramModelJson {
                     calls = item.stringSet("calls"),
                     referencedGlobals = item.stringSet("referencedGlobals"),
                     strings = item.stringSet("strings"),
-                    status = RecoveryStatus.valueOf(item.string("status").uppercase(Locale.ROOT)),
+                    status = readExtractionStatus(item, schemaVersion),
                 )
             },
             globals = root.array("globals").map { element ->
@@ -143,7 +151,7 @@ object ProgramModelJson {
                     address = item.string("address").removePrefix("0x").toULong(16),
                     type = item.string("type"),
                     initializer = item["initializer"]?.jsonPrimitive?.contentOrNull,
-                    status = RecoveryStatus.valueOf(item.string("status").uppercase(Locale.ROOT)),
+                    status = readExtractionStatus(item, schemaVersion),
                 )
             },
             types = root.array("types").map { element ->
@@ -152,10 +160,22 @@ object ProgramModelJson {
                     id = item.string("id"),
                     declaration = item.string("declaration"),
                     sourceAddress = item["sourceAddress"]?.jsonPrimitive?.contentOrNull?.removePrefix("0x")?.toULong(16),
-                    status = RecoveryStatus.valueOf(item.string("status").uppercase(Locale.ROOT)),
+                    status = readExtractionStatus(item, schemaVersion),
                 )
             },
         )
+    }
+
+    private fun readExtractionStatus(item: JsonObject, schemaVersion: Int): RecoveryStatus {
+        if (schemaVersion == 2) {
+            require("status" !in item) { "schema 2 uses extractionStatus, not historical status" }
+            val assessment = item.getValue("recoveryAssessment").jsonPrimitive
+            require(assessment.isString && assessment.content == "unassessed") {
+                "an extracted model cannot supply a scored recovery assessment"
+            }
+        }
+        val field = if (schemaVersion == 1) "status" else "extractionStatus"
+        return RecoveryStatus.valueOf(item.string(field).uppercase(Locale.ROOT))
     }
 
     private fun JsonObject.string(name: String): String = getValue(name).jsonPrimitive.content
