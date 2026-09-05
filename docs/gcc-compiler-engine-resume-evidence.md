@@ -83,3 +83,9 @@ Three host authorities remain required before real interruption acceptance work:
 - separate forced-interruption, resume, and fresh-control Ghidra runs for both `cc1` and `lto1`.
 
 Until those land, this code is reusable validation infrastructure only and is not A10 evidence.
+
+The current compiler-engine profile and its closed schema select exporter version 10
+and pin the bundled exporter source digest. Version-9 profiles and retained exporter
+state are historical inputs and cannot qualify a current run. Updating this selection
+does not requalify earlier engine results: cc1/lto1 interrupted, resumed and fresh
+legs must be regenerated under the new profile identity.
