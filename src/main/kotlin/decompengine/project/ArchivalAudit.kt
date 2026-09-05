@@ -63,15 +63,20 @@ data class ArchivalAudit(
     """.trimIndent() + "\n"
 }
 
+internal fun snapshotRequiredBehaviorCorpora(required: Set<String>): Set<String> {
+    require(required.size <= 1024) { "audit required corpus count exceeds its bound" }
+    val snapshot = required.toSet()
+    require(snapshot.all { it.matches(Regex("[0-9a-f]{64}")) }) { "audit required corpus identities must be lowercase SHA-256" }
+    return snapshot
+}
+
 object ArchivalProjectAuditor {
     fun audit(
         projectDir: Path,
         profile: ReconstructionProfile = GeneratedCMakeReconstructionProfile.descriptor,
         requiredCorpusSha256: Set<String> = emptySet(),
     ): ArchivalAudit {
-        require(requiredCorpusSha256.size <= 1024) { "audit required corpus count exceeds its bound" }
-        val requiredCorpora = requiredCorpusSha256.toSet()
-        require(requiredCorpora.all { it.matches(Regex("[0-9a-f]{64}")) }) { "audit required corpus identities must be lowercase SHA-256" }
+        val requiredCorpora = snapshotRequiredBehaviorCorpora(requiredCorpusSha256)
         val maximumFileBytes = minOf(profile.budgets.archiveMaximumFileBytes, Int.MAX_VALUE.toLong() - 1L)
         val manifestSnapshot = readStableRegularFile(projectDir, "source_tree_manifest.json", maximumFileBytes)
         val manifest = SourceTreeManifestReader.parse(manifestSnapshot.bytes.decodeToString(throwOnInvalidSequence = true), profile)

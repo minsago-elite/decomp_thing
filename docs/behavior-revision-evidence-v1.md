@@ -56,8 +56,14 @@ and unrelated reports remain visible as problems rather than disappearing. The
 audit records sorted `requiredCorpusSha256` and `observedPortableCorpusSha256`
 lists. Missing or unrelated evidence prevents an all-pass summary. An empty selection
 preserves observation-only auditing and does not imply a fixed corpus was required.
-Archive packaging currently invokes observation-only auditing; callers must reapply
-their own corpus policy when assessing the project or extracted archive.
+`ArchivalPackager.create(..., requiredCorpusSha256 = setOf(expectedDigest))`
+snapshots the selection, runs the audit under it, and requires a passing result
+before publishing the archive. A rejected selection preserves an existing archive.
+The selected policy is retained in the archived audit; creating an archive with no
+selection still uses observation-only auditing. Extraction validates payload and
+source/build lineage but does not independently apply a caller corpus selection or
+execute an archived program. Consumers must reapply their selected policy when
+qualifying the extracted project after its clean rebuild and comparison.
 
 Project capture checks the schema-3 source manifest against its selected profile
 and every declared file. The original executable digest must match the project

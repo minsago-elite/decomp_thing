@@ -3,6 +3,7 @@ package decompengine.validation
 import decompengine.oracle.core.OracleArtifacts
 import decompengine.oracle.core.OracleJson
 import decompengine.project.ArchivalProjectAuditor
+import decompengine.project.ArchivalPackager
 import decompengine.project.MakeProjectBuilder
 import decompengine.project.RecoveredCModuleReconstructor
 import decompengine.project.RecoveredFunction
@@ -21,6 +22,7 @@ import kotlin.test.assertFailsWith
 import kotlin.test.assertFalse
 import kotlin.test.assertTrue
 import kotlinx.serialization.json.JsonArray
+import kotlinx.serialization.json.Json
 import kotlinx.serialization.json.JsonObject
 import kotlinx.serialization.json.JsonPrimitive
 import kotlinx.serialization.json.jsonArray
@@ -28,6 +30,25 @@ import kotlinx.serialization.json.jsonObject
 import kotlinx.serialization.json.jsonPrimitive
 
 class BehaviorEvidenceTest {
+    @Test
+    fun `packaging enforces corpus selection and preserves prior archives on rejection`() {
+        val fixture = fixture()
+        val report = fixture.evaluate()
+        val required = BehaviorEvidence.decode(report.reportPath.readBytes()).string("corpusSha256")
+        val archive = fixture.original.parent.resolve("qualified.zip")
+        ArchivalPackager.create(fixture.project, archive, requiredCorpusSha256 = setOf(required))
+        val prior = archive.readBytes()
+        val audit = Json.parseToJsonElement(fixture.project.resolve("reports/archival_audit.json").readText()).jsonObject
+        assertEquals(listOf(required), audit.getValue("requiredCorpusSha256").jsonArray.map { it.jsonPrimitive.content })
+        for (policy in listOf(setOf("0".repeat(64)), setOf(required, "0".repeat(64)), setOf("invalid"))) {
+            assertFailsWith<IllegalArgumentException> { ArchivalPackager.create(fixture.project, archive, requiredCorpusSha256 = policy) }
+            assertTrue(prior.contentEquals(archive.readBytes()))
+        }
+        Files.delete(report.reportPath)
+        assertFailsWith<IllegalArgumentException> { ArchivalPackager.create(fixture.project, archive, requiredCorpusSha256 = setOf(required)) }
+        assertTrue(prior.contentEquals(archive.readBytes()))
+    }
+
     @Test
     fun `audit requires all selected corpora and rejects unrelated passing reports`() {
         val fixture = fixture()
