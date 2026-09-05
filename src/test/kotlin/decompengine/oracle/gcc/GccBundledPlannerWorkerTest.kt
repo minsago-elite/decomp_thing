@@ -3,6 +3,7 @@ package decompengine.oracle.gcc
 import decompengine.oracle.core.OracleArtifacts
 import decompengine.oracle.core.OracleJson
 import decompengine.project.DeterministicModulePlanner
+import decompengine.project.ModulePlanJson
 import decompengine.project.GeneratedCMakeReconstructionProfile
 import decompengine.project.RecoveredFunction
 import decompengine.project.RecoveredGlobal
@@ -64,7 +65,31 @@ class GccBundledPlannerWorkerTest {
                 maximumDependencyEdges = request.maximumDependencyEdges, maximumWorkUnits = request.maximumWorkUnits).plan(model)
             val plan = Files.readAllBytes(output.resolve("module_plan.json"))
             assertContentEquals(expected.toJson().toByteArray(), plan)
-            val metadata = OracleJson.parseCanonical(Files.readAllBytes(output.resolve("planner-output.json"))).jsonObject
+            val parsedPlan = ModulePlanJson.readCanonical(plan, request.maximumPlanBytes)
+            ModulePlanJson.requireExactOwnership(parsedPlan, model, request.layout, request.maximumFunctionsPerModule)
+            val metadataBytes = Files.readAllBytes(output.resolve("planner-output.json"))
+            val captured = GccBundledPlannerOutputAssessment.assess(request, bytes, plan, metadataBytes)
+            assertContentEquals(plan, captured.planBytes)
+            val exposed = captured.planBytes
+            exposed.fill(0)
+            assertContentEquals(plan, captured.planBytes)
+            val metadata = OracleJson.parseCanonical(metadataBytes).jsonObject
+            for (field in listOf("requestSha256", "operationRequestSha256", "profilePolicySha256", "modelSha256", "planSha256")) {
+                val changed = OracleJson.canonicalBytes(JsonObject(metadata + (field to JsonPrimitive("0".repeat(64)))))
+                assertFails { GccBundledPlannerOutputAssessment.assess(request, bytes, plan, changed) }
+            }
+            for (field in listOf("planBytes", "functionCount", "globalCount", "typeCount", "moduleCount", "sparseWorkUnits")) {
+                val changed = OracleJson.canonicalBytes(JsonObject(metadata + (field to JsonPrimitive(-1))))
+                assertFails { GccBundledPlannerOutputAssessment.assess(request, bytes, plan, changed) }
+            }
+            for (extra in listOf("complete" to JsonPrimitive(true), "releaseEligible" to JsonPrimitive(true),
+                "unknown" to JsonPrimitive(false), "sparseWorkUnits" to JsonPrimitive(request.maximumWorkUnits + 1),
+                "functionCount" to JsonPrimitive(request.functionCount.toString()))) {
+                val changed = OracleJson.canonicalBytes(JsonObject(metadata + extra))
+                assertFails { GccBundledPlannerOutputAssessment.assess(request, bytes, plan, changed) }
+            }
+            assertFails { GccBundledPlannerOutputAssessment.assess(request, bytes + 0, plan, metadataBytes) }
+            assertFails { GccBundledPlannerOutputAssessment.assess(request, bytes, plan + 0, metadataBytes) }
             assertEquals(OracleArtifacts.sha256(profile.policyBytes()), metadata.getValue("profilePolicySha256").jsonPrimitive.content)
             assertEquals(OracleArtifacts.sha256(plan), metadata.getValue("planSha256").jsonPrimitive.content)
             assertEquals("false", metadata.getValue("complete").jsonPrimitive.content)
