@@ -27,7 +27,12 @@ internal class GccBundledExportAssessment(
 internal class GccBundledInterruptedExportSnapshot(
     val assessment: GccInterruptedPrefixAssessment,
     val planningPrefixSha256: String,
-)
+    inFlightArtifacts: ByteArray = OracleJson.canonicalBytes(JsonObject(emptyMap())),
+) {
+    private val inFlight = inFlightArtifacts.copyOf()
+    val inFlightArtifacts: ByteArray get() = inFlight.copyOf()
+    val inFlightArtifactsSha256: String = OracleArtifacts.sha256(inFlight)
+}
 
 internal object GccBundledExportCapture {
     fun capture(
@@ -58,11 +63,11 @@ internal object GccBundledExportCapture {
         artifacts: List<GccCompilerEngineContainmentArtifactIdentity>,
         limits: GccResumeByteValidationLimits = GccResumeByteValidationLimits(),
     ): GccBundledInterruptedExportSnapshot = captureFiles(run, expectedReports, artifacts, limits, interrupted = true) {
-            state, progress, batches, _, reports ->
+            state, progress, batches, capture, reports ->
         requireNoFinalModel(reports)
         val assessment = GccCompilerEngineResumeByteValidator.assessInterruptedPrefix(state, progress, batches, limits)
         require(assessment.reused == 0L) { "fresh interrupted GCC execution unexpectedly reused prior records" }
-        GccBundledInterruptedExportSnapshot(assessment, planningPrefixDigest(batches))
+        GccBundledInterruptedExportSnapshot(assessment, planningPrefixDigest(batches), capture.inFlightArtifacts)
     }
 
     fun captureResumed(
@@ -157,10 +162,14 @@ internal object GccBundledExportCapture {
                             fragment("failures.fragment", limits.planningFragmentBytes),
                         )
                     }
-                    requireBatchNames(batchesDirectory, expectedNames)
+                    val capturedNames = if (interrupted) {
+                        capture.captureInFlight(batchesDirectory, expectedNames, batchCount * BATCH_FUNCTIONS,
+                            stateAssessment.functionCount, limits)
+                    } else expectedNames
+                    requireBatchNames(batchesDirectory, capturedNames)
                     val result = assess(state, progress, batches, capture, reports)
                     capture.verify()
-                    requireBatchNames(batchesDirectory, expectedNames)
+                    requireBatchNames(batchesDirectory, capturedNames)
                     requireNamedDirectory(run, "reports", reports)
                     requireNamedDirectory(reports, "program_model.json.export", export)
                     requireNamedDirectory(export, "planning-batches", batchesDirectory)
@@ -200,6 +209,36 @@ private class BoundExportFiles(private val maximumBytes: Long) {
     var bytes: Long = 0
         private set
     private val files = mutableListOf<BoundExportFile>()
+    var inFlightArtifacts: ByteArray = OracleJson.canonicalBytes(JsonObject(emptyMap()))
+        private set
+
+    fun captureInFlight(
+        directory: LinuxDescriptor,
+        committed: Set<String>,
+        start: Long,
+        total: Long,
+        limits: GccResumeByteValidationLimits,
+    ): Set<String> {
+        val actual = LinuxFilesystemSyscalls.directoryEntryNames(directory, committed.size + 6).toSet()
+        require(actual.containsAll(committed)) { "GCC interrupted export lost committed records" }
+        val extra = actual - committed
+        require(extra.size <= 5 && start < total) { "GCC interrupted export exceeds its in-flight artifact bound" }
+        val base = String.format(Locale.ROOT, "batch-%08d-%08d", start, minOf(start + BATCH_FUNCTIONS, total))
+        val suffixes = listOf("functions.fragment", "globals.fragment", "types.fragment", "failures.fragment", "checkpoint")
+        val published = suffixes.take(4).map { "$base.$it" }.takeWhile(extra::contains)
+        val pending = ".$base.${suffixes[published.size]}.pending"
+        require(extra == published.toSet() || extra == published.toSet() + pending) {
+            "GCC interrupted export has residue outside the first incomplete batch write sequence"
+        }
+        val records = extra.sorted().associateWith { name ->
+            val maximum = if (name.endsWith(".checkpoint.pending")) limits.checkpointBytes else limits.planningFragmentBytes
+            val bytes = read(directory, name, maximum)
+            JsonObject(mapOf("bytes" to JsonPrimitive(bytes.size), "sha256" to JsonPrimitive(OracleArtifacts.sha256(bytes)),
+                "binding" to files.last().bindingJson()))
+        }
+        inFlightArtifacts = OracleJson.canonicalBytes(JsonObject(records))
+        return actual
+    }
 
     fun read(directory: LinuxDescriptor, name: String, maximumFileBytes: Int): ByteArray {
         val file = requireNotNull(LinuxFilesystemSyscalls.openRegularFileAtOrNull(directory.fd, name)) { "GCC export file is missing: $name" }
@@ -234,6 +273,13 @@ private class BoundExportFile(
     private val identity: LinuxFileIdentity,
     private val metadata: Map<String, Any>,
 ) {
+    fun bindingJson() = JsonObject(mapOf(
+        "device" to JsonPrimitive(identity.key.device), "inode" to JsonPrimitive(identity.key.inode),
+        "mountId" to JsonPrimitive(identity.mountId), "uid" to JsonPrimitive(identity.uid), "gid" to JsonPrimitive(identity.gid),
+        "mode" to JsonPrimitive(identity.mode.permissions), "linkCount" to JsonPrimitive(identity.linkCount),
+        "metadata" to JsonObject(metadata.mapValues { JsonPrimitive(it.value.toString()) }),
+    ))
+
     fun verify() {
         requireNotNull(LinuxFilesystemSyscalls.openRegularFileAtOrNull(directory.fd, name)) { "GCC export file disappeared: $name" }.use { selected ->
             require(selected.identity == identity &&
