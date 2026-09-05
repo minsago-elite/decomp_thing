@@ -23,6 +23,8 @@ export function Dashboard({ basePath }: { basePath: string }) {
   const results = useRef<HTMLHeadingElement>(null);
   const moveFocus = useRef(false);
   const client = useMemo(() => createApiClient({ basePath }), [basePath]);
+  // Only one extra bounded page is retained; continuation pages stay server-backed.
+  const firstPage = useRef<{ selection: typeof selection; refresh: number; client: typeof client; data: Jobs } | null>(null);
   const cursor = cursors[pageIndex] ?? null;
   useEffect(() => {
     const restore = () => {
@@ -34,6 +36,13 @@ export function Dashboard({ basePath }: { basePath: string }) {
   }, []);
   useEffect(() => {
     if (!selection.valid) return;
+    const retained = firstPage.current;
+    if (retained && (retained.selection !== selection || retained.refresh !== refresh || retained.client !== client)) firstPage.current = null;
+    if (!cursor && firstPage.current) {
+      setData(firstPage.current.data); setPhase('ready'); setError('');
+      if (moveFocus.current) { moveFocus.current = false; results.current?.focus(); }
+      return;
+    }
     const controller = new AbortController();
     setPhase('loading'); setError('');
     const params = new URLSearchParams(filterSearch(selection.filters));
@@ -41,12 +50,14 @@ export function Dashboard({ basePath }: { basePath: string }) {
     if (cursor) params.set('cursor', cursor);
     void client.get('jobs', `/jobs?${params}`, { signal: controller.signal }).then(response => {
       if (controller.signal.aborted) return;
+      if (!cursor) firstPage.current = { selection, refresh, client, data: response.data };
       setData(response.data); setPhase('ready');
       if (moveFocus.current) { moveFocus.current = false; results.current?.focus(); }
     }).catch((failure: unknown) => {
       if (controller.signal.aborted) return;
       setPhase('error');
       if (failure instanceof ApiClientError && (failure.status === 401 || failure.status === 403)) {
+        firstPage.current = null;
         setData(null); setError('Access to this job library is unavailable. Check your local session.');
       } else if (failure instanceof ApiClientError && ['JOB_RECORD_UNAVAILABLE', 'LISTING_UNAVAILABLE', 'CORRUPT_WORKFLOW_STATE', 'CORRUPT_LEGACY_JOB', 'INVALID_STORAGE_ENTRY'].includes(failure.serverCode ?? '')) {
         setError('Stored jobs could not be listed completely. The server has not returned a partial library; inspect job storage before retrying.');
@@ -104,7 +115,7 @@ export function Dashboard({ basePath }: { basePath: string }) {
       </li>)}
     </ul>}
     <nav class="job-actions" aria-label="Job pages">
-      <button type="button" disabled={phase === 'loading' || pageIndex === 0} onClick={() => { moveFocus.current = true; setPageIndex(Math.max(0, pageIndex - 1)); }}>Previous page</button>
+      <button type="button" disabled={phase !== 'ready' || pageIndex === 0} onClick={() => { moveFocus.current = true; setPageIndex(Math.max(0, pageIndex - 1)); }}>Previous page</button>
       <span>Page {pageIndex + 1}</span>
       <button type="button" disabled={phase !== 'ready' || !data?.page.nextCursor} onClick={() => {
         if (!data?.page.nextCursor) return;

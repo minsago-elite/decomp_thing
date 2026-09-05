@@ -255,3 +255,34 @@ The extended packaged journey passed; retained report:
 Together with the combined-filter reload checks, this verifies #168's parameter
 persistence/reset criterion. Chrome used the explicit test-only `--no-sandbox`
 option; all remaining scale measurement limitations still apply.
+
+## Stable return to the first page — 2026-09-05
+
+Previously, returning from page two to page one sent a new cursorless request,
+which admitted a new snapshot and could show newly inserted jobs midway through
+navigation. The dashboard now retains its first bounded response for the current
+filter/sort/refresh selection. Previous restores those rows and the results
+heading focus without rescanning storage. Only one extra page (at most 200 rows)
+is retained; later pages still use server cursors. Refresh, changed filters/sort
+or a restored URL starts a new selection. Unmount discards the component state.
+
+Access denial clears both visible rows and the retained first page. Previous is
+disabled after a failed read, so it cannot revive private rows or hide an expired
+snapshot error; Refresh remains the deliberate recovery path. A retained page
+is historical like any displayed snapshot page, and following its next cursor
+still checks server expiry and current session authority.
+
+Tests change the mock library while page two is displayed, verify that Previous
+shows the original first page without another read, then verify Refresh reveals
+the new job. A denied-continuation case verifies private-row clearing and explicit
+recovery. 200 frontend tests, lint, typechecked bundle, asset checks and `distZip`
+passed. JVM code did not change, so JVM tests were not rerun at this checkpoint.
+
+The packaged 10,000-job regression passed and verifies that returning to the
+first oldest-first page restores its exact rows and results focus without a new
+collection request. Retained report:
+[`web-dashboard-previous-scale-20260905.json`](evidence/web-dashboard-previous-scale-20260905.json).
+The concurrent insertion is tested in the component fixture; the browser check
+uses the persisted static library. Chrome used test-only `--no-sandbox`. This
+fix strengthens snapshot navigation, but does not establish background change
+notifications or the remaining #168 accessibility/scale criteria.

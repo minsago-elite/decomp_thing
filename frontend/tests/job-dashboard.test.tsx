@@ -36,8 +36,14 @@ it('renders only a bounded page of a 10000-job library and navigates without bac
   expect(screen.getAllByRole('listitem')).toHaveLength(50);
   expect(document.activeElement).toBe(screen.getByRole('heading', { name: 'Job results' }));
   expect(transport.get.mock.calls[1]?.[1]).toContain('cursor=next_page');
+  library.unshift(job(10000));
   fireEvent.click(screen.getByRole('button', { name: 'Previous page' }));
   expect(await screen.findByText('program-0.elf')).toBeTruthy();
+  expect(screen.queryByText('program-10000.elf')).toBeNull();
+  expect(document.activeElement).toBe(screen.getByRole('heading', { name: 'Job results' }));
+  expect(transport.get).toHaveBeenCalledTimes(2);
+  fireEvent.click(screen.getByRole('button', { name: 'Refresh jobs' }));
+  expect(await screen.findByText('program-10000.elf')).toBeTruthy();
   expect(transport.get).toHaveBeenCalledTimes(3);
 });
 
@@ -225,4 +231,19 @@ it('persists and restores oldest-first sorting and resets to newest without trea
   expect(location.search).toBe('');
   expect(screen.getByLabelText('Sort by')).toHaveProperty('value', 'newest');
   expect(() => jobFilters('sort=unknown')).toThrow();
+});
+
+it('does not revive a retained first page after a continuation denies access', async () => {
+  transport.get.mockResolvedValueOnce(page([job(1)], 'next_page'))
+    .mockRejectedValueOnce(new ApiClientError('http_error', { status: 403 }))
+    .mockResolvedValueOnce(page([job(2)]));
+  render(<Dashboard basePath="" />);
+  expect(await screen.findByText('program-1.elf')).toBeTruthy();
+  fireEvent.click(screen.getByRole('button', { name: 'Next page' }));
+  expect(await screen.findByRole('alert')).toHaveProperty('textContent', 'Access to this job library is unavailable. Check your local session.');
+  expect(screen.queryByText('program-1.elf')).toBeNull();
+  expect(screen.getByRole('button', { name: 'Previous page' })).toHaveProperty('disabled', true);
+  fireEvent.click(screen.getByRole('button', { name: 'Refresh jobs' }));
+  expect(await screen.findByText('program-2.elf')).toBeTruthy();
+  expect(transport.get).toHaveBeenCalledTimes(3);
 });

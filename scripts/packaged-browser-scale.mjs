@@ -83,6 +83,12 @@ export async function qualifyScale({ fixture, makeTarget, cdp, evaluate, ready, 
   await evaluate(tab, `[...document.querySelectorAll('button')].find(b => b.textContent === 'Next page').click()`);
   await ready(tab, `(${rows})[0] === ${JSON.stringify('/nested/jobs/' + fixture.ids[200])}`, 'oldest-first continuation');
   assert.deepEqual(await evaluate(tab, rows), fixture.ids.slice(200, 400).map(id => '/nested/jobs/' + id));
+  const readsBeforePrevious = tab.requests.filter(request => request.url.includes('/api/v1/jobs?')).length;
+  await evaluate(tab, `[...document.querySelectorAll('button')].find(b => b.textContent === 'Previous page').click()`);
+  await ready(tab, `(${rows})[0] === ${JSON.stringify(oldest[0])} && document.activeElement.textContent === 'Job results'`, 'retained first snapshot page');
+  assert.deepEqual(await evaluate(tab, rows), oldest);
+  assert.equal(tab.requests.filter(request => request.url.includes('/api/v1/jobs?')).length, readsBeforePrevious);
+
   await cdp.call('Page.reload', {}, tab.sessionId);
   await ready(tab, `(${rows})[0] === ${JSON.stringify(oldest[0])}`, 'oldest-first restored after reload');
   assert.deepEqual(await evaluate(tab, rows), oldest);
@@ -93,6 +99,6 @@ export async function qualifyScale({ fixture, makeTarget, cdp, evaluate, ready, 
   assert.deepEqual(tab.exceptions, []);
   assert.ok(tab.requests.every(request => ['GET', 'HEAD'].includes(request.method)));
   return { persistedJobs: fixture.count, pages: 50, rowsPerPage: 200, reachableJobs: 10000,
-    exactOrder: true, keyboardPaginationFocus: true, searchReload: true, combinedNanosecondFiltersReload: true, oldestFirstPagesReloadReset: true, mutationRequests: 0,
+    exactOrder: true, keyboardPaginationFocus: true, searchReload: true, combinedNanosecondFiltersReload: true, oldestFirstPagesReloadReset: true, previousFirstPageRetained: true, mutationRequests: 0,
     peakBrowserHeapBytes, pageLatencyMs: timings.map(ms => Math.round(ms)), executionStarted: false };
 }
