@@ -35,12 +35,13 @@ data class ProcessInput(
     }
 }
 
-data class ProcessOutput(
+data class ProcessOutput @JvmOverloads constructor(
     val exitCode: Int,
     val stdout: ByteArray,
     val stderr: ByteArray,
     val sandboxCommand: List<String>,
     val networkIsolated: Boolean = true,
+    val completionEvidence: JsonObject? = null,
 ) {
     override fun equals(other: Any?): Boolean =
         other is ProcessOutput &&
@@ -48,7 +49,7 @@ data class ProcessOutput(
             stdout.contentEquals(other.stdout) &&
             stderr.contentEquals(other.stderr) &&
             sandboxCommand == other.sandboxCommand &&
-            networkIsolated == other.networkIsolated
+            networkIsolated == other.networkIsolated && completionEvidence == other.completionEvidence
 
     override fun hashCode(): Int {
         var result = exitCode
@@ -56,6 +57,7 @@ data class ProcessOutput(
         result = 31 * result + stderr.contentHashCode()
         result = 31 * result + sandboxCommand.hashCode()
         result = 31 * result + networkIsolated.hashCode()
+        result = 31 * result + (completionEvidence?.hashCode() ?: 0)
         return result
     }
 }
@@ -169,6 +171,7 @@ class SandboxRunner(
     private val networkIsolation: Boolean = BwrapCapability.networkIsolationSupported(bwrapPath, timeoutPath),
     private val outputLimits: SandboxOutputLimits = SandboxOutputLimits(),
 ) {
+    private val launcherPath = Path.of("/bin/sh").toRealPath()
     fun networkIsolationSupported(): Boolean = networkIsolation
 
     internal fun evidencePolicy(capture: BehaviorEvidenceCapture): JsonObject {
@@ -191,18 +194,35 @@ class SandboxRunner(
                 ("path" to JsonPrimitive(bwrapPath.toAbsolutePath().normalize().toString()))),
             "timeout" to JsonObject(capture.executable(timeoutPath) +
                 ("path" to JsonPrimitive(timeoutPath.toAbsolutePath().normalize().toString()))),
+            "completionLauncher" to JsonObject(capture.executable(launcherPath) +
+                ("path" to JsonPrimitive(launcherPath.toString()))),
+            "maximumCompletionBytes" to JsonPrimitive(MAXIMUM_BUBBLEWRAP_COMPLETION_BYTES),
         ))
     }
 
     fun run(executable: Path, input: ProcessInput): ProcessOutput = runWithFiles(executable, input, emptyMap())
 
     internal fun runWithFiles(executable: Path, input: ProcessInput, files: Map<String, Path>): ProcessOutput {
+        val deadline = runCatching { Math.addExact(System.nanoTime(), timeout.toNanos()) }.getOrDefault(Long.MAX_VALUE)
+        val directory = java.nio.file.Files.createTempDirectory("behavior-completion-")
+        val channel = directory.resolve("status.jsonl")
+        try {
+            java.nio.file.Files.createFile(channel)
+            return runWithCompletion(executable, input, files, channel, deadline)
+        } finally {
+            java.nio.file.Files.deleteIfExists(channel)
+            java.nio.file.Files.deleteIfExists(directory)
+        }
+    }
+
+    private fun runWithCompletion(executable: Path, input: ProcessInput, files: Map<String, Path>, channel: Path, deadline: Long): ProcessOutput {
         if (!bwrapPath.exists()) {
             throw SandboxUnavailableException("bubblewrap not found at ${bwrapPath.pathString}; sandboxed execution is mandatory")
         }
         val command = behaviorSandboxCommand(executable, input.args, timeout.toMillis(), bwrapPath, timeoutPath, networkIsolation, files)
 
-        val builder = ProcessBuilder(command).redirectErrorStream(false)
+        val launchCommand = completionLaunchCommand(command, launcherPath, channel)
+        val builder = ProcessBuilder(launchCommand).redirectErrorStream(false)
         builder.environment().clear()
         builder.environment()["PATH"] = "/usr/bin"
         val process = builder.start()
@@ -219,9 +239,8 @@ class SandboxRunner(
         val stdinFuture = executor.submit<Unit> { process.outputStream.use { it.write(input.stdin) } }
         var primaryFailure: Throwable? = null
         try {
-            val deadline = runCatching { Math.addExact(System.nanoTime(), timeout.toNanos()) }
-                .getOrDefault(Long.MAX_VALUE)
             while (process.isAlive || !stdoutFuture.isDone || !stderrFuture.isDone || !stdinFuture.isDone) {
+                require(java.nio.file.Files.size(channel) <= MAXIMUM_BUBBLEWRAP_COMPLETION_BYTES) { "completion channel exceeds its bound" }
                 completedFailure(stdoutFuture)?.let { throw it }
                 completedFailure(stderrFuture)?.let { throw it }
                 completedFailure(stdinFuture)?.let { throw it }
@@ -236,13 +255,24 @@ class SandboxRunner(
             val stdout = awaitIo(stdoutFuture)
             val stderr = awaitIo(stderrFuture)
             awaitIo(stdinFuture)
-            rejectReservedWrapperExit(exitCode)
+            val completionBytes = java.nio.file.Files.newInputStream(channel).use { it.readNBytes(MAXIMUM_BUBBLEWRAP_COMPLETION_BYTES + 1) }
+            try {
+                parseBubblewrapCompletion(completionBytes, exitCode)
+            } catch (failure: IllegalArgumentException) {
+                throw BehaviorExecutionOutcomeException(failure.message ?: "completion evidence is unavailable")
+            }
+            if (System.nanoTime() >= deadline) throw BehaviorExecutionTimeoutException("completion capture exceeded the behavior deadline")
             return ProcessOutput(
                 exitCode = exitCode,
                 stdout = stdout,
                 stderr = stderr,
                 sandboxCommand = command,
                 networkIsolated = networkIsolation,
+                completionEvidence = JsonObject(mapOf(
+                    "channelPath" to JsonPrimitive(channel.toString()),
+                    "statusHex" to JsonPrimitive(java.util.HexFormat.of().formatHex(completionBytes)),
+                    "launchCommand" to kotlinx.serialization.json.JsonArray(launchCommand.map(::JsonPrimitive)),
+                )),
             )
         } catch (failure: Throwable) {
             if (failure is InterruptedException) Thread.currentThread().interrupt()
@@ -466,6 +496,7 @@ private fun BehaviorCaseResult.toJson(): String = """
 
 private fun ProcessOutput.toJson(): String = """
 {
+  "completionEvidence": ${completionEvidence ?: "null"},
   "exitCode": $exitCode,
   "stdoutHex": "${stdout.toHex()}",
   "stderrHex": "${stderr.toHex()}",

@@ -265,7 +265,10 @@ object ArchivalProjectAuditor {
                 }
                 val identifier = record.string("id")
                 require(reportIds.add(identifier)) { "behavior report ID is duplicated" }
-                val portable = record.getValue("schemaVersion").jsonPrimitive.intOrNull == 3
+                require(record.getValue("schemaVersion").jsonPrimitive.intOrNull == 4) {
+                    "behavior record lacks independent local completion evidence"
+                }
+                val portable = record.getValue("schemaVersion").jsonPrimitive.intOrNull in setOf(3, 4)
                 val corpus = record.string("corpusSha256")
                 if (requiredCorpora.isNotEmpty()) {
                     require(portable && corpus in requiredCorpora) { "behavior report does not match a required portable corpus" }
