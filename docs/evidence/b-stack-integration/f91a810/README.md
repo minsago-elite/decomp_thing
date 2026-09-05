@@ -1,0 +1,5 @@
+Review integration verification at source commit `f91a81093a012b3f82e2831d7d332c20bc11bdbd`.
+
+The recovery manifest and 13 original JUnit reports record a clean-worktree 100-test run of `python3 scripts/verify-web-job-recovery.py`. The targeted manifest and 10 JUnit reports record the subsequent selected authentication, preflight, current inventory, wire serializer, snapshot, scheduler, journal, web inspection, doctor formatting and benign pre-setter rejection checks. Both runs had no failures, errors or skipped tests. Targeted Gradle execution used offline mode, non-incremental Kotlin compilation and `DECOMP_REQUIRE_LIVE_ACP_CONTRACT=1`. Individual method names are retained in JUnit XML; the entire AcpAgentHarnessTest and DoctorTest suites were not selected.
+
+This evidence verifies the B parent-chain review integration through #332. It excludes the pending #339 upload-reservation fix and integration of #241 with current master. It does not establish full CI or completion of B-series milestones. No vulnerability-reproduction lane was selected. Reports contain no captured stdout or stderr.

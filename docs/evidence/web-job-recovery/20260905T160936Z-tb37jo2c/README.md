@@ -1,0 +1,3 @@
+Clean source `80a80c7` includes the reviewed B parent chain and upload metadata reservation from c63dda2 (superseded #339, now included in #244). The original manifest and 13 byte-identical JUnit reports record 101 passing tests, with no failures, errors or skips. Reproduce this selected storage/recovery verification from that source using `python3 scripts/verify-web-job-recovery.py`.
+
+This run verifies the additional reservation integration. The prior f91a810 evidence separately records the broader targeted review-integration checks. Neither run qualifies integration with current master or completion of B-series milestones. Full CI and vulnerability-reproduction lanes were not selected.

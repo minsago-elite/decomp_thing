@@ -1,0 +1,3 @@
+Clean source `6f035c2033aaaf51692bd86257bc9350bdae5533` integrates #319 concurrent early-stop cancellation fix a62ad4b through #332. All 39 tests in UploadServerTest, WebRecoveryAdmissionTest and WebAuthenticationInspectionTest passed offline with zero failures, errors or skips. The manifest hashes the three original JUnit reports.
+
+Run these three classes with the Gradle test task and separate `--tests` selectors. These tests cover HTTP admission, failed startup, inspection cancellation, cleanup and ownership lifetime. They do not exhaustively enumerate thread interleavings, qualify current-master integration or resolve the separate inspection-generation review. Full CI and vulnerability-reproduction lanes were not selected.

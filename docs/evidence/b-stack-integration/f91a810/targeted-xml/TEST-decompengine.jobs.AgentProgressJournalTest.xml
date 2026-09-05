@@ -1,0 +1,21 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<testsuite name="decompengine.jobs.AgentProgressJournalTest" tests="15" skipped="0" failures="0" errors="0" timestamp="2026-09-05T16:06:17.802Z" hostname="whatsername" time="0.766">
+  <properties/>
+  <testcase name="completion preserves available usage including zero cache and exact elapsed duration()" classname="decompengine.jobs.AgentProgressJournalTest" time="0.017"/>
+  <testcase name="messages redact split secrets and completion remains distinct from acceptance()" classname="decompengine.jobs.AgentProgressJournalTest" time="0.011"/>
+  <testcase name="noisy stream remains bounded and records exact omission counts()" classname="decompengine.jobs.AgentProgressJournalTest" time="0.193"/>
+  <testcase name="concurrent tasks retain invocation identity and failures carry no exception text()" classname="decompengine.jobs.AgentProgressJournalTest" time="0.132"/>
+  <testcase name="redactor handles credential fields and removes terminal control codes()" classname="decompengine.jobs.AgentProgressJournalTest" time="0.002"/>
+  <testcase name="source sequence loss suppresses incomplete message previews()" classname="decompengine.jobs.AgentProgressJournalTest" time="0.132"/>
+  <testcase name="persisted history rejects unexplained loss and inconsistent omission counters()" classname="decompengine.jobs.AgentProgressJournalTest" time="0.145"/>
+  <testcase name="omission ranges preserve prefix interior and trailing gaps across legacy restart()" classname="decompengine.jobs.AgentProgressJournalTest" time="0.065"/>
+  <testcase name="message tracking overflow never admits a continuation after capacity is released()" classname="decompengine.jobs.AgentProgressJournalTest" time="0.021"/>
+  <testcase name="durable run and revision correlation survives writer restart without promoting provisional state()" classname="decompengine.jobs.AgentProgressJournalTest" time="0.013"/>
+  <testcase name="oversized messages omit the entire preview and cannot publish partial secrets()" classname="decompengine.jobs.AgentProgressJournalTest" time="0.007"/>
+  <testcase name="restart retains events and allocates a new run without repeating sequence numbers()" classname="decompengine.jobs.AgentProgressJournalTest" time="0.009"/>
+  <testcase name="nonaccepted run observations cannot carry accepted source identity()" classname="decompengine.jobs.AgentProgressJournalTest" time="0.001"/>
+  <testcase name="history eviction precedes retained events while queue loss may follow them()" classname="decompengine.jobs.AgentProgressJournalTest" time="0.005"/>
+  <testcase name="second writer is rejected and oversized persisted data fails bounded read()" classname="decompengine.jobs.AgentProgressJournalTest" time="0.008"/>
+  <system-out><![CDATA[]]></system-out>
+  <system-err><![CDATA[]]></system-err>
+</testsuite>

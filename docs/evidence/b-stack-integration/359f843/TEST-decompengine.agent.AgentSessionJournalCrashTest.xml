@@ -1,0 +1,11 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<testsuite name="decompengine.agent.AgentSessionJournalCrashTest" tests="5" skipped="0" failures="0" errors="0" timestamp="2026-09-05T17:19:04.220Z" hostname="whatsername" time="1.42">
+  <properties/>
+  <testcase name="abrupt death while streaming retains its durable cursor()" classname="decompengine.agent.AgentSessionJournalCrashTest" time="0.753"/>
+  <testcase name="acceptance acknowledgement replay is unchanged after owner death()" classname="decompengine.agent.AgentSessionJournalCrashTest" time="0.195"/>
+  <testcase name="abrupt death after edit retains unaccepted source bytes()" classname="decompengine.agent.AgentSessionJournalCrashTest" time="0.153"/>
+  <testcase name="abrupt death before prompt blocks unproved cleanup()" classname="decompengine.agent.AgentSessionJournalCrashTest" time="0.139"/>
+  <testcase name="acceptance acknowledgement recovers after owner death before publication()" classname="decompengine.agent.AgentSessionJournalCrashTest" time="0.165"/>
+  <system-out><![CDATA[]]></system-out>
+  <system-err><![CDATA[]]></system-err>
+</testsuite>
