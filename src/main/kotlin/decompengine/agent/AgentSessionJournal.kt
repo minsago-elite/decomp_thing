@@ -389,8 +389,8 @@ class AgentSessionJournal private constructor(
         private fun atomicWrite(path: Path, bytes: ByteArray) {
             val temporary = path.resolveSibling(path.fileName.toString() + ".pending")
             require(!Files.exists(temporary, NOFOLLOW_LINKS)) { "incomplete session publication requires inspection" }
-            FileChannel.open(temporary, CREATE_NEW, WRITE, NOFOLLOW_LINKS).use { channel ->
-                Files.setPosixFilePermissions(temporary, PosixFilePermissions.fromString("rw-------"))
+            FileChannel.open(temporary, setOf(CREATE_NEW, WRITE, NOFOLLOW_LINKS),
+                PosixFilePermissions.asFileAttribute(PosixFilePermissions.fromString("rw-------"))).use { channel ->
                 val buffer = ByteBuffer.wrap(bytes)
                 while (buffer.hasRemaining()) channel.write(buffer)
                 channel.force(true)
