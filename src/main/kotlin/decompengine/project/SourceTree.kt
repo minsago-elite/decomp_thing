@@ -939,7 +939,7 @@ object SourceTreeGenerator {
         projectDir.resolve(modulePlanPath).also { it.parent.createDirectories() }.writeText(plan.toJson())
         generated += evidence(profile, programModelPath, model.toJson(), "analysis", model.functions.map { it.id } + model.globals.map { it.id })
         generated += evidence(profile, modulePlanPath, plan.toJson(), "planner", model.functions.map { it.id } + model.globals.map { it.id })
-        val confidence = renderConfidence(model, plan)
+        val confidence = renderConfidence(model, plan, unresolvedImplementations)
         projectDir.resolve(confidencePath).also { it.parent.createDirectories() }.writeText(confidence)
         generated += evidence(profile, confidencePath, confidence, "evidence", model.functions.map { it.id } + model.globals.map { it.id })
         val toolchain = renderToolchain()
@@ -1700,34 +1700,48 @@ object SourceTreeGenerator {
         return ordered.map { id -> plan.modules.single { it.id == id } }
     }
 
-    private fun renderConfidence(model: RecoveredProgramModel, plan: ModulePlan): String {
+    private fun renderConfidence(model: RecoveredProgramModel, plan: ModulePlan, unresolvedImplementations: Set<String>): String {
         fun score(status: RecoveryStatus) = when (status) {
             RecoveryStatus.RECOVERED -> 1.0
             RecoveryStatus.PARTIAL -> 0.6
             RecoveryStatus.SYNTHETIC -> 0.25
             RecoveryStatus.FAILED -> 0.0
         }
+        val functionStatuses = model.functions.associate { it.id to it.status }
+        val globalStatuses = model.globals.associate { it.id to it.status }
+        val typeStatuses = model.types.associate { it.id to it.status }
         val moduleScores = plan.modules.map { module ->
-            val statuses = module.functionIds.map { id -> model.functions.single { it.id == id }.status } +
-                module.globalIds.map { id -> model.globals.single { it.id == id }.status } +
-                module.typeIds.map { id -> model.types.single { it.id == id }.status }
+            val statuses = module.functionIds.map(functionStatuses::getValue) +
+                module.globalIds.map(globalStatuses::getValue) + module.typeIds.map(typeStatuses::getValue)
             module.id to if (statuses.isEmpty()) 0.0 else statuses.map(::score).average()
         }
         val allStatuses = model.functions.map { it.status } + model.globals.map { it.status } + model.types.map { it.status }
         val projectScore = if (allStatuses.isEmpty()) 0.0 else allStatuses.map(::score).average()
+        val unresolvedRecovery = model.functions.filter { it.status != RecoveryStatus.RECOVERED }.map { it.id } +
+            model.globals.filter { it.status != RecoveryStatus.RECOVERED }.map { it.id } +
+            model.types.filter { it.status != RecoveryStatus.RECOVERED }.map { it.id }
+        fun idsJson(ids: Collection<String>) = ids.distinct().sorted().joinToString(prefix = "[", postfix = "]", separator = ",") {
+            "\"${it.jsonEscape()}\""
+        }
+        val moduleById = plan.modules.associateBy { it.id }
+        val unresolvedRecoverySet = unresolvedRecovery.toSet()
         return buildString {
-            append("{\n  \"basis\": \"recovery evidence only; behavioral equivalence is not implied\",")
+            append("{\n  \"schemaVersion\": 2,")
+            append("\n  \"basis\": \"recovery evidence only; behavioral equivalence is not implied\",")
+            append("\n  \"scoreMeaning\": \"structural recovery heuristic; not implementation acceptance or measured behavioral confidence\",")
             append("\n  \"projectScore\": ").append("%.4f".format(java.util.Locale.ROOT, projectScore)).append(',')
             append("\n  \"modules\": [")
             append(moduleScores.sortedBy { it.first }.joinToString(",") { (id, value) ->
-                "\n    {\"id\":\"$id\",\"score\":${"%.4f".format(java.util.Locale.ROOT, value)}}"
+                val module = moduleById.getValue(id)
+                val owned = (module.functionIds + module.globalIds + module.typeIds).toSet()
+                "\n    {\"id\":\"${id.jsonEscape()}\",\"score\":${"%.4f".format(java.util.Locale.ROOT, value)}," +
+                    "\"unresolvedRecoveryEntityIds\":${idsJson(owned.filter { it in unresolvedRecoverySet })}," +
+                    "\"unresolvedImplementationIds\":${idsJson(owned.filter { it in unresolvedImplementations })}}"
             })
-            append("\n  ],\n  \"unresolvedEntityIds\": [")
-            val unresolved = model.functions.filter { it.status != RecoveryStatus.RECOVERED }.map { it.id } +
-                model.globals.filter { it.status != RecoveryStatus.RECOVERED }.map { it.id } +
-                model.types.filter { it.status != RecoveryStatus.RECOVERED }.map { it.id }
-            append(unresolved.sorted().joinToString(",") { "\"$it\"" })
-            append("]\n}\n")
+            append("\n  ],\n  \"unresolvedRecoveryEntityIds\": ").append(idsJson(unresolvedRecovery))
+            append(",\n  \"unresolvedImplementationIds\": ").append(idsJson(unresolvedImplementations))
+            append(",\n  \"unresolvedEntityIds\": ").append(idsJson(unresolvedRecovery + unresolvedImplementations))
+            append("\n}\n")
         }
     }
 

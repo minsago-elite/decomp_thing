@@ -27,8 +27,75 @@ import kotlin.test.assertFailsWith
 import kotlin.test.assertNotEquals
 import kotlin.test.assertNull
 import kotlin.test.assertTrue
+import kotlinx.serialization.json.Json
+import kotlinx.serialization.json.jsonObject
+import kotlinx.serialization.json.jsonArray
+import kotlinx.serialization.json.jsonPrimitive
 
 class SourceTreeTest {
+    @Test
+    fun `accepted implementations retain unresolved recovery evidence across resume`() {
+        val recovered = model().let { original -> original.copy(
+            functions = original.functions.map { it.copy(status = RecoveryStatus.PARTIAL) },
+        ) }
+        val project = createTempDirectory("source-confidence-accepted-")
+        var calls = 0
+        val reconstructor = validReconstructor { calls++ }
+        val manifest = SourceTreeGenerator.generate(recovered, project, reconstructor = reconstructor)
+        assertTrue(manifest.unresolvedImplementationIds.isEmpty())
+        val confidence = project.resolve("reports/confidence.json").readText()
+        val report = Json.parseToJsonElement(confidence).jsonObject
+        assertTrue(report.getValue("unresolvedImplementationIds").jsonArray.isEmpty())
+        val recoveryIds = report.getValue("unresolvedRecoveryEntityIds").jsonArray.map { it.jsonPrimitive.content }
+        assertTrue(recoveryIds.containsAll(recovered.functions.map { it.id }))
+        assertEquals(recoveryIds, report.getValue("unresolvedEntityIds").jsonArray.map { it.jsonPrimitive.content })
+        assertTrue(report.getValue("modules").jsonArray.all {
+            it.jsonObject.getValue("unresolvedImplementationIds").jsonArray.isEmpty()
+        })
+        val initialCalls = calls
+        assertTrue(initialCalls > 0)
+        SourceTreeGenerator.generate(recovered, project, reconstructor = reconstructor)
+        assertEquals(initialCalls, calls)
+        assertEquals(confidence, project.resolve("reports/confidence.json").readText())
+    }
+
+    @Test
+    fun `fully recovered entities still report unresolved implementations in confidence`() {
+        val recovered = model().let { original -> original.copy(
+            functions = original.functions.map { it.copy(status = RecoveryStatus.RECOVERED) },
+            globals = original.globals.map { it.copy(status = RecoveryStatus.RECOVERED) },
+            types = original.types.map { it.copy(status = RecoveryStatus.RECOVERED) },
+        ) }
+        val project = createTempDirectory("source-confidence-implementation-")
+        val manifest = SourceTreeGenerator.generate(recovered, project)
+        assertTrue(manifest.unresolvedImplementationIds.isNotEmpty())
+        val report = Json.parseToJsonElement(project.resolve("reports/confidence.json").readText()).jsonObject
+        assertEquals("2", report.getValue("schemaVersion").jsonPrimitive.content)
+        assertEquals("1.0000", report.getValue("projectScore").jsonPrimitive.content)
+        assertTrue(report.getValue("unresolvedRecoveryEntityIds").jsonArray.isEmpty())
+        val implementationIds = report.getValue("unresolvedImplementationIds").jsonArray.map { it.jsonPrimitive.content }
+        assertEquals(manifest.unresolvedImplementationIds, implementationIds)
+        assertEquals(implementationIds, report.getValue("unresolvedEntityIds").jsonArray.map { it.jsonPrimitive.content })
+        val perModule = report.getValue("modules").jsonArray.flatMap {
+            it.jsonObject.getValue("unresolvedImplementationIds").jsonArray.map { value -> value.jsonPrimitive.content }
+        }
+        assertEquals(implementationIds, perModule.sorted())
+        assertTrue(report.getValue("scoreMeaning").jsonPrimitive.content.contains("not implementation acceptance"))
+    }
+
+    @Test
+    fun `confidence escapes entity identifiers and separates overlapping unresolved populations`() {
+        val id = "quoted\"entity"
+        val recovered = RecoveredProgramModel(inputSha256 = "input", functions = listOf(
+            RecoveredFunction(id, "entry", 1u, "int entry(void)", status = RecoveryStatus.FAILED)))
+        val project = createTempDirectory("source-confidence-identifiers-")
+        val manifest = SourceTreeGenerator.generate(recovered, project)
+        val report = Json.parseToJsonElement(project.resolve("reports/confidence.json").readText()).jsonObject
+        assertEquals(listOf(id), report.getValue("unresolvedRecoveryEntityIds").jsonArray.map { it.jsonPrimitive.content })
+        assertEquals(manifest.unresolvedImplementationIds, report.getValue("unresolvedImplementationIds").jsonArray.map { it.jsonPrimitive.content })
+        assertEquals(listOf(id), report.getValue("unresolvedEntityIds").jsonArray.map { it.jsonPrimitive.content })
+    }
+
     @Test
     fun `agent cache identity binds the complete factory provenance without exposing it`() {
         val harness = AgentHarness { _, _ -> AgentExecutionResult(AgentStopReason.NO_CHANGES) }
