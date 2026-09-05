@@ -79,7 +79,7 @@ clean interruption, unknown-cleanup refusal, unexplained source/metadata changes
 exclusive ownership, cancellation and aggregate hashing limits.
 `AcpAgentHarnessTest` uses benign scripted peers in fresh contained subprocesses
 for advertised load, unavailable-load fallback and load failure. The stable-v1
-wire corpus contains 57 messages, including the three load request/empty-response/configured-response entries and five later authentication advertisement/exchange entries. `SourceTreeTest` proves
+wire corpus contains 58 messages, including the three load request/empty-response/configured-response entries and six later authentication advertisement/exchange entries. `SourceTreeTest` proves
 that a lost acknowledgement after durable acceptance is replayed without another
 reconstruction and that recovery failures preserve source without publishing an
 unresolved checkpoint.
