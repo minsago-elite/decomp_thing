@@ -1041,6 +1041,27 @@ internal object GccCompilerEngineResumeByteValidator {
         limits,
     ).assessment
 
+    /** Validates a model published before worker absence, retaining planning progress only as a diagnostic. */
+    fun assessStoppedPublishedModel(
+        rawState: ByteArray,
+        rawProgress: ByteArray,
+        rawBatches: List<GccPlanningBatchBytes>,
+        rawProgramModel: ByteArray,
+        limits: GccResumeByteValidationLimits = GccResumeByteValidationLimits(),
+    ): GccStoppedCheckpointPrefix {
+        val run = captureRun(rawState, rawProgress, rawBatches, rawProgramModel, limits)
+        val state = parseExporterState(run.state, limits)
+        val observed = parseExportProgress(state, run.progress, limits)
+        if (observed.completed != state.functionCount || observed.reused != 0L) {
+            resumeValidationFailure("stopped published model requires all fresh checkpoints and published planning progress")
+        }
+        val complete = renderExportProgress(observed.copy(phase = "complete")).toByteArray(StandardCharsets.UTF_8)
+        validateCompletedRun(CapturedRun(run.state, complete, run.batches, run.programModel), limits)
+        val planning = renderExportProgress(observed.copy(phase = "planning")).toByteArray(StandardCharsets.UTF_8)
+        val prefix = validateInterruptedPrefix(CapturedInterruptedPrefix(run.state, planning, run.batches), limits)
+        return GccStoppedCheckpointPrefix(prefix.assessment, planning)
+    }
+
     /** Derives at most one committed batch beyond the separately validated observed progress. */
     fun assessStoppedCheckpointPrefix(
         rawState: ByteArray,

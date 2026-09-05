@@ -208,13 +208,78 @@ class GccCompilerEngineResumeEvidenceValidationTest {
                     }
                 }
             }
-            withDescriptorExportFixture(fixture.copy(progress = terminalProgress)) { captured ->
-                assertFails { GccBundledExportCapture.captureInterruptedSnapshot(captured.root, captured.reportsIdentity, captured.artifacts) }
-            }
             withDescriptorExportFixture(fixture.copy(progress = prior.progress), includeModel = false) { captured ->
                 Files.writeString(captured.directory.resolve("reports/.program_model.json.pending"), "impossible before progress publication")
                 assertFails { GccBundledExportCapture.captureInterruptedSnapshot(captured.root, captured.reportsIdentity, captured.artifacts) }
             }
+        }
+    }
+
+    @Test
+    fun `stopped published model validates both progress publication boundaries and exact resumed output`() {
+        val fixture = twoBatchFixture()
+        val prior = transitionFixture(fixture).interrupted
+        val planning = progress(phase = "planning", total = 513, completed = 513, partial = 513, failed = 0)
+        for (observed in listOf(planning, fixture.progress)) for (pending in listOf(false, true)) {
+            if (observed.contentEquals(fixture.progress) && pending) continue
+            withDescriptorExportFixture(fixture.copy(progress = observed)) { captured ->
+                if (pending) Files.writeString(captured.directory.resolve("reports/.program_model.json.progress.json.pending"), "unfinished")
+                val stopped = GccBundledExportCapture.captureInterruptedSnapshot(captured.root, captured.reportsIdentity, captured.artifacts)
+                assertEquals(513L, stopped.assessment.completed)
+                assertContentEquals(observed, stopped.capturedProgress)
+                assertContentEquals(planning, stopped.effectiveProgress)
+                assertContentEquals(observed, Files.readAllBytes(captured.directory.resolve("reports/program_model.json.progress.json")))
+                val artifact = OracleJson.parseCanonical(stopped.inFlightArtifacts).jsonObject.getValue("reports/program_model.json").jsonObject
+                assertEquals(sha(fixture.model), artifact.getValue("sha256").jsonPrimitive.content)
+                assertEquals(fixture.model.size.toString(), artifact.getValue("bytes").jsonPrimitive.content)
+                val trigger = GccBundledCheckpointTrigger(512)
+                trigger.observe(GccCompilerEngineResumeByteValidator.assessExportProgress(prior.state, prior.progress))
+                val receipt = OracleJson.parseCanonical(trigger.assessStoppedPrefix(stopped.assessment, stopped.planningPrefixSha256,
+                    stopped.inFlightArtifacts, stopped.capturedProgress, stopped.effectiveProgress)).jsonObject
+                assertEquals(!observed.contentEquals(planning), receipt.getValue("effectiveProgressDerived").jsonPrimitive.boolean)
+                val resumed = fixture.copy(progress = progress(total = 513, completed = 513, partial = 513, failed = 0, reused = 513))
+                withDescriptorExportFixture(resumed) { result ->
+                    val assessed = GccBundledExportCapture.captureResumed(result.root, result.reportsIdentity, result.artifacts, stopped)
+                    assertEquals(sha(fixture.model), assessed.assessment.programModelSha256)
+                }
+                // Equal bytes at a replacement inode must change retained descriptor evidence.
+                val model = captured.directory.resolve("reports/program_model.json")
+                Files.move(model, model.resolveSibling("original-model"))
+                Files.write(model, fixture.model)
+                val replaced = GccBundledExportCapture.captureInterruptedSnapshot(captured.root, captured.reportsIdentity, captured.artifacts)
+                assertNotEquals(stopped.inFlightArtifactsSha256, replaced.inFlightArtifactsSha256)
+            }
+        }
+    }
+
+    @Test
+    fun `stopped published model rejects invalid assembly progress lineage and residue`() {
+        val fixture = twoBatchFixture()
+        val planning = progress(phase = "planning", total = 513, completed = 513, partial = 513, failed = 0)
+        val invalid = listOf(
+            fixture.copy(model = fixture.model + byteArrayOf(32)),
+            fixture.copy(progress = transitionFixture(fixture).interrupted.progress),
+            fixture.copy(progress = progress(total = 513, completed = 513, partial = 513, failed = 0, reused = 512)),
+        )
+        invalid.forEach { run -> withDescriptorExportFixture(run) { captured ->
+            assertFails { GccBundledExportCapture.captureInterruptedSnapshot(captured.root, captured.reportsIdentity, captured.artifacts) }
+        } }
+        withDescriptorExportFixture(fixture, includeModel = false) { captured ->
+            assertFails { GccBundledExportCapture.captureInterruptedSnapshot(captured.root, captured.reportsIdentity, captured.artifacts) }
+        }
+        for (name in listOf(".program_model.json.pending", ".program_model.json.progress.json.pending")) {
+            withDescriptorExportFixture(fixture) { captured ->
+                Files.writeString(captured.directory.resolve("reports/$name"), "impossible residue")
+                assertFails { GccBundledExportCapture.captureInterruptedSnapshot(captured.root, captured.reportsIdentity, captured.artifacts) }
+            }
+        }
+        withDescriptorExportFixture(fixture.copy(progress = planning)) { captured ->
+            assertFails { GccBundledExportCapture.captureInterruptedSnapshot(captured.root, captured.reportsIdentity, captured.artifacts,
+                GccResumeByteValidationLimits(assembledModelBytes = fixture.model.size - 1)) }
+            val model = captured.directory.resolve("reports/program_model.json")
+            Files.move(model, model.resolveSibling("original-model"))
+            Files.createSymbolicLink(model, Path.of("original-model"))
+            assertFails { GccBundledExportCapture.captureInterruptedSnapshot(captured.root, captured.reportsIdentity, captured.artifacts) }
         }
     }
 
