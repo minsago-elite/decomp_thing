@@ -886,6 +886,12 @@ interface RepairValidationStrategy {
     val assurance: RepairValidationAssurance
     /** Fail before graph mutation or agent execution when the required boundary is unavailable. */
     fun requireAvailable()
+    fun validateCandidate(request: RepairCandidateValidationRequest): RepairCandidateValidationOutcome {
+        require(assurance == RepairValidationAssurance.TEST_ONLY_HOST_PROCESS) {
+            "registered production validation must implement immutable candidate validation"
+        }
+        return validateTestOnlyRepairCandidate(this, request)
+    }
     fun compile(projectDir: Path, logPath: Path, budget: RepairResourceBudget): CompileFailure?
     fun rebuiltProgram(projectDir: Path, budget: RepairResourceBudget): Path
 
