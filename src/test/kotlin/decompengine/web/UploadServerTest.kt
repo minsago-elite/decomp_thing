@@ -53,6 +53,39 @@ class UploadServerTest {
     }
 
     @Test
+    fun `dashboard shows retained recovery data without exposing private files`() = withServer { server, root ->
+        val stage = Files.createDirectory(root.resolve(".upload-private-secret"))
+        val input = stage.resolve("input.elf")
+        input.writeText("private-content")
+        val page = request(server, "GET", "/")
+        assertEquals(200, page.status)
+        val html = page.body.decodeToString()
+        assertTrue(html.contains("Retained recovery files"))
+        assertTrue(html.contains("Observed 1 upload stages and 0 metadata temporary files; 15 observed bytes."))
+        assertTrue(html.contains("Files may still belong to active work."))
+        assertTrue(html.contains("No files were deleted."))
+        assertTrue(html.contains("href=\"/api/recovery\""))
+        assertTrue(!html.contains("private-secret"))
+        assertTrue(!html.contains("private-content"))
+        assertTrue(!html.contains(root.toString()))
+        assertEquals("private-content", input.readBytes().decodeToString())
+    }
+
+    @Test
+    fun `dashboard shows incomplete recovery inspection even with zero counted candidates`() = withServer { server, root ->
+        val unknown = root.resolve(".upload-unknown")
+        unknown.writeText("unknown-layout")
+        val page = request(server, "GET", "/")
+        assertEquals(200, page.status)
+        val html = page.body.decodeToString()
+        assertTrue(html.contains("At least 0 upload stages and 0 metadata temporary files"))
+        assertTrue(html.contains("Inspection is incomplete."))
+        assertTrue(html.contains("More files or bytes may remain"))
+        assertTrue(!html.contains("The scoped scan finished."))
+        assertEquals("unknown-layout", unknown.readBytes().decodeToString())
+    }
+
+    @Test
     fun `recovery endpoint returns a read-only summary without private names or contents`() = withServer { server, root ->
         val stage = Files.createDirectory(root.resolve(".upload-private-secret-name"))
         val input = stage.resolve("input.elf")
@@ -349,6 +382,7 @@ class UploadServerTest {
             assertTrue(response.body.decodeToString().contains("name=\"binary\""))
             assertTrue(response.body.decodeToString().contains("Binary reconstruction workbench"))
             assertTrue(response.body.decodeToString().contains("/assets/app.css"))
+            assertTrue(!response.body.decodeToString().contains("Retained recovery files"))
         }
     }
 

@@ -383,6 +383,7 @@ class UploadServer(
         exchange.sendHtml(200, renderDashboard(
             inspections.filterIsInstance<WebJobInspection.Available>().map { it.presentation.job },
             inspections.filterIsInstance<WebJobInspection.Unavailable>().map { it.diagnostic },
+            store.recoveryInventory(),
         ))
     }
 

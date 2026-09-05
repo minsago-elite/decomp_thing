@@ -1,6 +1,7 @@
 package decompengine.web
 
 import decompengine.jobs.Job
+import decompengine.jobs.JobRecoveryInventory
 import decompengine.jobs.AgentProgressJournal
 import decompengine.jobs.toJson
 import kotlinx.serialization.json.Json
@@ -22,7 +23,8 @@ import kotlin.io.path.name
 import kotlin.io.path.readText
 import kotlin.math.roundToInt
 
-fun renderDashboard(jobs: List<Job>, diagnostics: List<WebJobDiagnostic> = emptyList()): String = page(
+fun renderDashboard(jobs: List<Job>, diagnostics: List<WebJobDiagnostic> = emptyList(),
+    recovery: JobRecoveryInventory = JobRecoveryInventory(0, 0, 0, 0, 0, inventoryComplete = true)): String = page(
     title = "Binary workbench",
     body = """
       <header class="hero shell">
@@ -57,6 +59,7 @@ fun renderDashboard(jobs: List<Job>, diagnostics: List<WebJobDiagnostic> = empty
           </div>
           ${renderJobList(jobs)}
           ${diagnostics.joinToString("") { diagnostic -> "<div class=\"job-row\"><span class=\"job-copy\"><strong>Unavailable job ${diagnostic.jobId.escapeHtml()}</strong><small>${diagnostic.code.escapeHtml()}: ${diagnostic.message.escapeHtml()}</small></span></div>" }}
+          ${renderRecoveryInventory(recovery)}
         </section>
       </main>
     """.trimIndent(),
@@ -68,6 +71,24 @@ fun renderDashboard(jobs: List<Job>, diagnostics: List<WebJobDiagnostic> = empty
       });
     """.trimIndent(),
 )
+
+private fun renderRecoveryInventory(inventory: JobRecoveryInventory): String {
+    if (inventory.inventoryComplete && inventory.retainedUploadStages == 0 && inventory.retainedMetadataFiles == 0) return ""
+    val qualifier = if (inventory.inventoryComplete) "Observed" else "At least"
+    val coverage = if (inventory.inventoryComplete) {
+        "The scoped scan finished. Files may still belong to active work."
+    } else {
+        "Inspection is incomplete. More files or bytes may remain beyond this summary."
+    }
+    return """
+        <section class="recovery-note" aria-labelledby="recovery-title">
+          <h3 id="recovery-title">Retained recovery files</h3>
+          <p>$qualifier ${inventory.retainedUploadStages} upload stages and ${inventory.retainedMetadataFiles} metadata temporary files; ${inventory.observedBytes} observed bytes.</p>
+          <p>$coverage No files were deleted. This summary does not establish that cleanup is safe.</p>
+          <a href="/api/recovery">View recovery summary</a>
+        </section>
+    """.trimIndent()
+}
 
 fun renderJob(job: Job, reportContext: WebReportContext? = null,
     diagnostics: List<decompengine.jobs.WorkflowStoreDiagnostic> = emptyList(),
@@ -577,6 +598,9 @@ h1 em { color: var(--acid); font-style: normal; }
 .guardrails { display: flex; flex-wrap: wrap; gap: 7px; margin-top: 18px; }
 .guardrails span, .source-tag { padding: 5px 8px; background: #222a26; border-radius: 4px; color: var(--muted); font: 700 10px ui-monospace, monospace; letter-spacing: .05em; text-transform: uppercase; }
 .job-list { margin: 0 -8px; }
+.recovery-note { margin-top: 20px; padding-top: 16px; border-top: 1px solid var(--line); font-size: 13px; }
+.recovery-note h3 { margin: 0 0 8px; }
+.recovery-note p { color: var(--muted); line-height: 1.5; }
 .job-row { display: flex; align-items: center; gap: 13px; padding: 15px 10px; text-decoration: none; border-bottom: 1px solid var(--line); border-radius: 7px; transition: .15s ease; }
 .job-row:last-child { border-bottom: 0; }
 .job-row:hover { background: #202722; }
