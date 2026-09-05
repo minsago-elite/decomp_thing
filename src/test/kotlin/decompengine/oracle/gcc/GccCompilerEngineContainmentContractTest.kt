@@ -37,6 +37,7 @@ class GccCompilerEngineContainmentContractTest {
         val canonical = assessment.canonicalBytes
         val root = OracleJson.parseCanonical(canonical).jsonObject
 
+        assertEquals("6e9603d0674e9eab27d8a253999992e51fe9e77b639e6bdcc661eb22adc51bce", OracleArtifacts.sha256(canonical))
         assertEquals("non-authoritative-caller-supplied-containment-bytes-v1", assessment.authority)
         assertFalse(assessment.releaseEligible)
         assertFalse(assessment.startAuthorized)
@@ -383,7 +384,7 @@ class GccCompilerEngineContainmentContractTest {
     )
 
     private fun artifacts(): List<GccCompilerEngineContainmentArtifactIdentity> =
-        GccCompilerEngineContainmentArtifactRole.entries.mapIndexed { index, role ->
+        GCC_LEGACY_CONTAINMENT_ARTIFACT_ROLES.mapIndexed { index, role ->
             GccCompilerEngineContainmentArtifactIdentity(
                 role,
                 when (role) {
