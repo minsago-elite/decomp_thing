@@ -388,6 +388,8 @@ class AcpAgentHarness(
                 )
             } catch (_: WorkspaceSnapshotTimedOut) {
                 throw workspaceSnapshotTimeout("initial", null)
+            } catch (limit: WorkspaceSnapshotLimitExceeded) {
+                throw workspaceSnapshotLimit("initial", null, limit)
             }
         } else {
             null
@@ -732,6 +734,8 @@ class AcpAgentHarness(
                 )
             } catch (_: WorkspaceSnapshotTimedOut) {
                 throw workspaceSnapshotTimeout("final", translator.sessionReference())
+            } catch (limit: WorkspaceSnapshotLimitExceeded) {
+                throw workspaceSnapshotLimit("final", translator.sessionReference(), limit)
             }
         }
         changes.forEach { change -> emitter.emit { sequence -> AgentFileChangeEvent(sequence, change) } }
@@ -1491,6 +1495,17 @@ class AcpAgentHarness(
             }
         }
     }
+
+    private fun workspaceSnapshotLimit(
+        phase: String,
+        session: AgentSessionReference?,
+        limit: WorkspaceSnapshotLimitExceeded,
+    ) = AgentExecutionException(AgentFailure(
+        AgentFailureKind.RESOURCE_EXHAUSTED,
+        "ACP $phase workspace snapshot exceeded its ${limit.dimension} limit; changes are indeterminate",
+        session = session,
+        details = mapOf("phase" to "$phase-workspace-snapshot", "limit" to limit.dimension),
+    ))
 
     private fun workspaceSnapshotTimeout(
         phase: String,
@@ -2838,11 +2853,52 @@ private class PolicyClientOperations(
 
 private data class FileState(val sha256: String, val size: Long)
 
-private class WorkspaceSnapshotBudget(
+internal data class WorkspaceSnapshotLimits(
+    val entries: Int = 8192,
+    val files: Int = 4096,
+    val fileBytes: Long = 8L * 1024 * 1024,
+    val totalBytes: Long = 64L * 1024 * 1024,
+) {
+    init {
+        require(entries in 1..8192 && files in 1..4096)
+        require(fileBytes in 1..8L * 1024 * 1024 && totalBytes in 1..64L * 1024 * 1024)
+    }
+}
+
+internal class WorkspaceSnapshotLimitExceeded(val dimension: String) : RuntimeException()
+
+internal class WorkspaceSnapshotBudget(
     private val cancellation: AgentCancellation,
     private val wallDeadline: MonotonicDeadline,
     private val honorCancellation: Boolean,
+    private val limits: WorkspaceSnapshotLimits = WorkspaceSnapshotLimits(),
 ) {
+    private var entries = 0
+    private var files = 0
+    private var bytes = 0L
+
+    fun entry() {
+        checkpoint()
+        if (entries == limits.entries) throw WorkspaceSnapshotLimitExceeded("entry-count")
+        entries++
+    }
+
+    fun file() {
+        if (files == limits.files) throw WorkspaceSnapshotLimitExceeded("file-count")
+        files++
+    }
+
+    fun declaredSize(size: Long) {
+        if (size < 0 || size > limits.fileBytes) throw WorkspaceSnapshotLimitExceeded("file-bytes")
+        if (size > limits.totalBytes - bytes) throw WorkspaceSnapshotLimitExceeded("total-bytes")
+    }
+
+    fun readBytes(count: Int, fileSize: Long) {
+        if (fileSize > limits.fileBytes) throw WorkspaceSnapshotLimitExceeded("file-bytes")
+        if (count > limits.totalBytes - bytes) throw WorkspaceSnapshotLimitExceeded("total-bytes")
+        bytes += count
+    }
+
     fun checkpoint() {
         if (honorCancellation && cancellation.isCancellationRequested()) throw WorkspaceSnapshotCancelled()
         if (wallDeadline.hasExpired()) throw WorkspaceSnapshotTimedOut()
@@ -2852,7 +2908,7 @@ private class WorkspaceSnapshotBudget(
 private class WorkspaceSnapshotCancelled : RuntimeException()
 private class WorkspaceSnapshotTimedOut : RuntimeException()
 
-private class WorkspaceSnapshot private constructor(
+internal class WorkspaceSnapshot private constructor(
     private val files: Map<AgentWorkspacePath, FileState>,
 ) {
     fun diff(
@@ -2911,11 +2967,19 @@ private class WorkspaceSnapshot private constructor(
                             budget.checkpoint()
                             if (!iterator.hasNext()) break
                             val candidate = iterator.next()
-                            if (candidate.isRegularFile(LinkOption.NOFOLLOW_LINKS)) tracked += root.id to candidate
+                            budget.entry()
+                            if (candidate.isRegularFile(LinkOption.NOFOLLOW_LINKS) && (root.id to candidate) !in tracked) {
+                                budget.file()
+                                tracked += root.id to candidate
+                            }
                         }
                     }
-                } else if (target.isRegularFile(LinkOption.NOFOLLOW_LINKS)) {
-                    tracked += root.id to target
+                } else {
+                    budget.entry()
+                    if (target.isRegularFile(LinkOption.NOFOLLOW_LINKS) && (root.id to target) !in tracked) {
+                        budget.file()
+                        tracked += root.id to target
+                    }
                 }
             }
             val states = LinkedHashMap<AgentWorkspacePath, FileState>()
@@ -2933,13 +2997,17 @@ private class WorkspaceSnapshot private constructor(
             val digest = MessageDigest.getInstance("SHA-256")
             val buffer = ByteArray(WORKSPACE_HASH_BUFFER_BYTES)
             var size = 0L
-            Files.newInputStream(path).use { input ->
+            val attributes = Files.readAttributes(path, java.nio.file.attribute.BasicFileAttributes::class.java, LinkOption.NOFOLLOW_LINKS)
+            check(attributes.isRegularFile) { "workspace snapshot file changed type" }
+            budget.declaredSize(attributes.size())
+            Files.newInputStream(path, LinkOption.NOFOLLOW_LINKS).use { input ->
                 while (true) {
                     budget.checkpoint()
                     val count = input.read(buffer)
                     if (count < 0) break
-                    digest.update(buffer, 0, count)
                     size += count
+                    budget.readBytes(count, size)
+                    digest.update(buffer, 0, count)
                 }
             }
             budget.checkpoint()
@@ -3236,7 +3304,7 @@ private fun Throwable.containsCleanupProofFailure(): Boolean {
     return false
 }
 
-private class MonotonicDeadline(timeout: Duration) {
+internal class MonotonicDeadline(timeout: Duration) {
     private val startedAt = System.nanoTime()
     private val timeoutNanos = try {
         timeout.toNanos()
