@@ -271,8 +271,11 @@ class UploadServer(
 
     fun stop(delaySeconds: Int = 0) {
         require(delaySeconds >= 0) { "shutdown delay must be nonnegative" }
-        synchronized(lifecycleLock) { stopping = true }
-        authenticationInspectionCancellation.set(true)
+        val inspection = synchronized(lifecycleLock) {
+            stopping = true
+            authenticationInspectionCancellation.set(true)
+            authenticationInspectionWorker.get()
+        }
         jobs.beginShutdown()
         server.stop(delaySeconds)
         requestExecutor.shutdownNow()
@@ -281,7 +284,10 @@ class UploadServer(
         jobs.close()
         try {
             // The inspection daemon must finish its bounded agent cleanup before the JVM exits.
-            authenticationInspectionWorker.get()?.join(TimeUnit.SECONDS.toMillis(5))
+            if (inspection != null && inspection !== Thread.currentThread()) inspection.join(TimeUnit.SECONDS.toMillis(5))
+            check(inspection?.isAlive != true) {
+                "Authentication inspection did not stop within the shutdown grace period"
+            }
         } catch (exception: Exception) {
             if (exception is InterruptedException) Thread.currentThread().interrupt()
         }
@@ -333,21 +339,24 @@ class UploadServer(
             exchange.sendJson(409, "{\"error\":\"Authentication inspection is already running.\"}")
             return
         }
-        authenticationInspectionCancellation.set(false)
         try {
-            val worker = Thread({
-                var result = AUTH_INSPECTION_FAILED
-                try {
-                    withActiveRequest { result = inspectAuthenticationMethods() }
-                } catch (_: Exception) {
-                    result = AUTH_INSPECTION_FAILED
-                } finally {
-                    // Publish terminal status and release admission in one atomic state change.
-                    authenticationInspectionResult.set(result)
-                }
-            }, "decomp-web-auth-inspection").apply { isDaemon = true }
-            authenticationInspectionWorker.set(worker)
-            worker.start()
+            synchronized(lifecycleLock) {
+                check(!stopping) { "Server is stopping" }
+                authenticationInspectionCancellation.set(false)
+                val worker = Thread({
+                    var result = AUTH_INSPECTION_FAILED
+                    try {
+                        withActiveRequest { result = inspectAuthenticationMethods() }
+                    } catch (_: Exception) {
+                        result = AUTH_INSPECTION_FAILED
+                    } finally {
+                        // Publish terminal status and release admission in one atomic state change.
+                        authenticationInspectionResult.set(result)
+                    }
+                }, "decomp-web-auth-inspection").apply { isDaemon = true }
+                authenticationInspectionWorker.set(worker)
+                worker.start()
+            }
         } catch (_: Exception) {
             authenticationInspectionResult.set(AUTH_INSPECTION_FAILED)
             exchange.sendJson(503, AUTH_INSPECTION_FAILED)

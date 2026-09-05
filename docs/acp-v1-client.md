@@ -808,8 +808,10 @@ files use a fresh evidence directory. It does not establish independent-agent au
 `/api/operator/auth-methods/cancel`. A request acknowledgement is not a terminal cleanup result:
 the view continues polling until inspection finishes, and late acknowledgements cannot overwrite
 a terminal result or a later inspection. The server's cancellation token reaches the preflight
-scheduler, launch and initialize waits. Shutdown requests cancellation as well, while admitted-task
-ownership remains held until completion. The preflight overload preserves a cancelled invocation's
+scheduler, launch and initialize waits. Shutdown requests cancellation as well and joins the tracked
+inspection thread for up to five seconds. Launch and shutdown share an admission lock. If the grace
+period expires, shutdown reports incomplete inspection cleanup and admitted-task ownership remains
+held until completion; this does not prove cleanup after forced JVM termination. The preflight overload preserves a cancelled invocation's
 receipt in `AcpPreflightCancelledException`; cleanup failures retain their original failed outcome.
 Only that terminal cancellation is rendered as `cancelled`. Login/logout cancellation and durable
 operator authentication state are still separate unsupported work.
