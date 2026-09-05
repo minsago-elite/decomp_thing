@@ -22,13 +22,14 @@ internal class WebApiController(
 ) {
     private val prefix = "${assets.basePath}api/v1/"
     private val applicationBuildId = applicationBuildId()
+    private val uploadProgress = WebUploadProgress()
     private val jobPages = WebJobPages(jobs::collectionRecords)
 
     fun route(exchange: HttpExchange): Boolean {
         val path = exchange.requestURI.rawPath
         if (!path.startsWith("${assets.basePath}api/")) return false
         val resource = path.removePrefix(prefix)
-        if (!path.startsWith(prefix) || !(resource in setOf("session", "bootstrap", "jobs") || resource.matches(Regex("jobs/[^/]+")))) {
+        if (!path.startsWith(prefix) || !(resource in setOf("session", "bootstrap", "jobs") || resource.matches(Regex("(?:jobs|uploads)/[^/]+")))) {
             try {
                 val policy = if (exchange.requestMethod in setOf("POST", "PUT", "PATCH", "DELETE")) {
                     WebEndpointPolicy.jsonMutation(exchange.requestMethod)
@@ -68,7 +69,7 @@ internal class WebApiController(
                     405, "METHOD_NOT_ALLOWED", "The session endpoint supports POST and DELETE.", setOf("POST", "DELETE"),
                 )
                 resource == "jobs" && exchange.requestMethod == "POST" -> {
-                    access.authorize(exchange, WebEndpointPolicy.multipartUpload())
+                    val session = checkNotNull(access.authorize(exchange, WebEndpointPolicy.multipartUpload()))
                     requireNoQuery(exchange)
                     requireJsonAccept(exchange)
                     val key = singleUploadHeader(exchange, "Idempotency-Key")
@@ -76,11 +77,28 @@ internal class WebApiController(
                     if (exchange.requestHeaders.containsKey("If-Match")) throw WebAccessDenied(400, "INVALID_HEADER", "Upload creates a new job and does not accept If-Match.")
                     val length = singleUploadHeader(exchange, "Content-Length")
                     if (length != null && (!length.matches(Regex("0|[1-9][0-9]{0,18}")) || length.toLongOrNull() == null)) throw WebAccessDenied(400, "INVALID_HEADER", "The upload Content-Length is invalid.")
-                    if (length != null && length.toLong() > StreamingMultipartUpload.MAX_REQUEST_BYTES) throw WebAccessDenied(413, "UPLOAD_TOO_LARGE", "The complete upload request exceeds 32 MiB.")
-                    val result = jobs.uploadMultipartReceipt(exchange.requestBody, checkNotNull(singleUploadHeader(exchange, "Content-Type")), key)
+                    val uploadId = singleUploadHeader(exchange, "X-Upload-ID")
+                    if (uploadId != null && !uploadId.matches(Regex("[a-f0-9]{32}"))) throw WebAccessDenied(400, "INVALID_UPLOAD_ID", "Upload progress requires one canonical transfer identity.")
+                    val progress = uploadId?.let { uploadProgress.begin(session.sessionId, it, length?.toLong()?.takeIf { size -> size <= StreamingMultipartUpload.MAX_REQUEST_BYTES }) }
+                    val result = try {
+                        jobs.uploadMultipartReceipt(exchange.requestBody, checkNotNull(singleUploadHeader(exchange, "Content-Type")), key, progress)
+                            .also { progress?.finish(it.job.id) }
+                    } finally { progress?.finish() }
                     exchange.responseHeaders.set("Location", "${assets.basePath}api/v1/jobs/${result.job.id}")
                     if (result.replayed) exchange.responseHeaders.set("Idempotency-Replayed", "true")
                     send(exchange, 201, "job", webJob(result.job))
+                }
+                resource.startsWith("uploads/") -> {
+                    val session = checkNotNull(access.authorize(exchange, WebEndpointPolicy.privateRead()))
+                    requireNoQuery(exchange); requireJsonAccept(exchange)
+                    val id = resource.removePrefix("uploads/")
+                    if (!id.matches(Regex("[a-f0-9]{32}"))) throw WebAccessDenied(404, "NOT_FOUND", "Upload progress is unavailable.")
+                    val progress = uploadProgress.read(session.sessionId, id) ?: throw WebAccessDenied(404, "NOT_FOUND", "Upload progress is unavailable or expired.")
+                    send(exchange, 200, "uploadProgress", buildJsonObject {
+                        put("uploadId", progress.uploadId); put("receivedBytes", progress.receivedBytes.toString())
+                        put("totalBytes", progress.totalBytes?.let { JsonPrimitive(it.toString()) } ?: JsonNull)
+                        put("state", progress.state); put("jobId", progress.jobId?.let { JsonPrimitive(it) } ?: JsonNull)
+                    })
                 }
                 resource == "jobs" -> {
                     val session = checkNotNull(access.authorize(exchange, WebEndpointPolicy.privateRead()))

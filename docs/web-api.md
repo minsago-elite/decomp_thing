@@ -97,6 +97,7 @@ internal storage optimization and must not merge identity, permissions or histor
 | `DELETE /api/v1/session` | `204` | Authorized CSRF-protected logout; #161 |
 | `GET /api/v1/bootstrap` | `200 bootstrap` | Sanitized capabilities/readiness/build IDs/limits; #166 |
 | `GET /api/v1/jobs` | `200 jobs` | Bounded cursor/filter query; #162 |
+| `GET /api/v1/uploads/{uploadId}` | `200 uploadProgress` | Ephemeral session-bound transfer bytes and publication phase; #169 |
 | `POST /api/v1/jobs` | `201 job`, `Location: J` | Multipart, upload limits, idempotency; #162 |
 | `GET J` | `200 job`, ETag | Snapshot read; #159/#160 |
 | `PATCH J` | `200 job` | Allowlisted label/archive metadata, If-Match and idempotency; #173 |
@@ -357,3 +358,7 @@ files stay readable through a versioned, recoverable migration; public response 
 rewrite raw report bytes. Legacy URLs redirect/map per the navigation/parity contract and never
 auto-start a workflow. Unsupported legacy automation dependencies receive a documented migration
 error, not an empty success response.
+
+The optional upload progress transport, state semantics and bounded retention are defined
+in [Server-observed upload progress](web-upload-progress.md). Progress identities are
+fresh per transfer and do not replace durable idempotency keys.

@@ -20,7 +20,7 @@ internal object StreamingMultipartUpload {
     private val mediaType = Regex("multipart/form-data[ \\t]*;[ \\t]*boundary=(?:([A-Za-z0-9'()+_,./:=?-]{1,70})|\"([A-Za-z0-9'()+_,./:=? -]{0,69}[A-Za-z0-9'()+_,./:=?-])\")", RegexOption.IGNORE_CASE)
 
     fun copy(input: InputStream, contentType: String, output: OutputStream,
-             maxRequestBytes: Long = MAX_REQUEST_BYTES, checkActive: () -> Unit = {
+             maxRequestBytes: Long = MAX_REQUEST_BYTES, onReceived: (Long) -> Unit = {}, checkActive: () -> Unit = {
                  if (Thread.currentThread().isInterrupted) throw java.io.InterruptedIOException("Upload interrupted")
              }): StreamedUpload {
         require(maxRequestBytes in 1..MAX_REQUEST_BYTES)
@@ -32,7 +32,10 @@ internal object StreamingMultipartUpload {
             override fun read(): Int {
                 checkActive()
                 val value = input.read()
-                if (value >= 0 && ++consumed > maxRequestBytes) invalid("UPLOAD_TOO_LARGE", "The upload request exceeds its byte limit.")
+                if (value >= 0) {
+                    consumed++; onReceived(consumed)
+                    if (consumed > maxRequestBytes) invalid("UPLOAD_TOO_LARGE", "The upload request exceeds its byte limit.")
+                }
                 return value
             }
             override fun read(bytes: ByteArray, offset: Int, length: Int): Int {
@@ -42,6 +45,7 @@ internal object StreamingMultipartUpload {
                 val count = input.read(bytes, offset, allowed)
                 if (count > 0) {
                     consumed += count
+                    onReceived(consumed)
                     if (consumed > maxRequestBytes) invalid("UPLOAD_TOO_LARGE", "The upload request exceeds its byte limit.")
                 }
                 return count

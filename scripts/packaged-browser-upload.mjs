@@ -122,3 +122,49 @@ export async function qualifyUploadFailures({ makeTarget, cdp, evaluate, ready, 
     advisorySizeGuidance: true, pickerFocusRestored: true, stalledTransportSimulated: true,
     stopSettled: true, jobsCreated: 0, stagingEntries: 0, browserStorageEntries: 0, requests: tab.requests };
 }
+
+export async function qualifyMeasuredUpload({ makeTarget, cdp, evaluate, ready, waitFor, browserOrigin, data }) {
+  const tab = await makeTarget();
+  const keys = [];
+  cdp.on('Network.requestWillBeSent', event => {
+    if (event.request.method === 'POST' && event.request.url.endsWith('/api/v1/jobs')) {
+      keys.push(Object.entries(event.request.headers).find(([name]) => name.toLowerCase() === 'idempotency-key')?.[1]);
+    }
+  }, tab.sessionId);
+  const before = (await fs.readdir(data)).filter(name => /^[a-f0-9]{32}$/.test(name));
+  await cdp.call('Page.navigate', { url: browserOrigin + '/nested/' }, tab.sessionId);
+  await ready(tab, `document.body.innerText.includes('Local session connected.')`, 'measured upload session');
+  await evaluate(tab, `(() => {
+    const bytes = new Uint8Array(512 * 1024); bytes.set([127, 69, 76, 70, 2, 1, 1]);
+    const view = new DataView(bytes.buffer); view.setUint16(16, 2, true); view.setUint16(18, 62, true);
+    view.setUint32(20, 1, true); view.setUint16(52, 64, true);
+    const files = new DataTransfer(); files.items.add(new File([bytes], 'measured-inert.elf'));
+    const picker = document.querySelector('#binary-file'); picker.files = files.files;
+    picker.dispatchEvent(new Event('change', { bubbles: true }));
+  })()`);
+  await cdp.call('Network.emulateNetworkConditions', {
+    offline: false, latency: 20, downloadThroughput: 1048576, uploadThroughput: 32768,
+  }, tab.sessionId);
+  await evaluate(tab, `[...document.querySelectorAll('button')].find(button => button.textContent === 'Upload binary').click()`);
+  await ready(tab, `/[1-9][0-9]* request bytes received by the server/.test(document.body.innerText) && location.pathname === '/nested/'`, 'live server-observed upload bytes before publication');
+  const observed = await evaluate(tab, `Number(document.body.innerText.match(/([0-9]+) request bytes received by the server/)[1])`);
+  assert.ok(observed > 0 && observed < 512 * 1024, 'Progress must be observed during real partial transfer');
+  assert.equal(await evaluate(tab, `document.body.innerText.includes('Received bytes do not confirm job publication.')`), true);
+  await evaluate(tab, `[...document.querySelectorAll('button')].find(button => button.textContent === 'Stop transfer').click()`);
+  await ready(tab, `document.body.innerText.includes('Transfer stopped.') && document.querySelector('progress') === null`, 'real partial upload cancelled');
+  await waitFor(async () => !(await fs.readdir(data)).some(name => name.startsWith('.upload-')), 'cancelled upload staging cleanup');
+  assert.deepEqual((await fs.readdir(data)).filter(name => /^[a-f0-9]{32}$/.test(name)), before);
+  await cdp.call('Network.emulateNetworkConditions', {
+    offline: false, latency: 0, downloadThroughput: -1, uploadThroughput: -1,
+  }, tab.sessionId);
+  await evaluate(tab, `[...document.querySelectorAll('button')].find(button => button.textContent === 'Retry this upload').click()`);
+  await ready(tab, `location.pathname.startsWith('/nested/jobs/') && document.body.innerText.includes('measured-inert.elf')`, 'measured upload publication');
+  const id = await evaluate(tab, 'location.pathname.split("/").at(-1)');
+  const record = JSON.parse(await fs.readFile(join(data, id, 'job.json'), 'utf8'));
+  assert.equal(record.status, 'uploaded');
+  assert.ok(keys.length === 2 && typeof keys[0] === 'string' && keys[0] === keys[1], 'Cancellation retry must preserve the idempotency key');
+  assert.equal(await evaluate(tab, 'localStorage.length + sessionStorage.length'), 0);
+  assert.deepEqual(tab.exceptions, []);
+  return { serverObservedBytesDuringTransfer: observed, payloadBytes: 512 * 1024,
+    browserUploadThrottleBytesPerSecond: 32768, publicationSeparate: true, realTransferCancelled: true, stagingCleaned: true, sameKeyRetry: true, executionStarted: false, requests: tab.requests };
+}

@@ -82,5 +82,6 @@ and a caller-retained idempotency key. It rejects If-Match because it creates a 
 The browser chooses the Content-Type boundary; response decoding, byte limits, redirect
 rejection and cancellation use the same bounded transport. Only `201 job` confirms upload
 publication. Upload views use a 120-second deadline, keep File bytes in memory, and retain one
-bounded key/filename/size ticket in tab sessionStorage for explicit retries after reload. Fetch provides no reliable upload-byte progress; the view reports
-an indeterminate transfer/publication wait without inventing a percentage.
+bounded key/filename/size ticket in tab sessionStorage for explicit retries after reload. The view uses a fresh X-Upload-ID and polls the session-bound uploadProgress endpoint
+for actual request bytes received, independently of its durable retry key. Unknown
+Content-Length leaves the percentage indeterminate while preserving the byte count.

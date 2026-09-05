@@ -241,7 +241,7 @@ class WebJobService(
     /** Multipart bytes are copied outside the service monitor; publication retains root ownership through completion. */
     fun uploadMultipart(input: java.io.InputStream, contentType: String): Job = uploadMultipartReceipt(input, contentType).job
 
-    internal fun uploadMultipartReceipt(input: java.io.InputStream, contentType: String, idempotencyKey: String? = null): decompengine.jobs.PublishedJobUpload {
+    internal fun uploadMultipartReceipt(input: java.io.InputStream, contentType: String, idempotencyKey: String? = null, progress: WebUploadProgress.Transfer? = null): decompengine.jobs.PublishedJobUpload {
         val worker = Thread.currentThread()
         val finished = synchronized(this) {
             writableStore()
@@ -251,7 +251,7 @@ class WebJobService(
         }
         try {
             return uploadPublisher.publish(idempotencyKey) { sink ->
-                StreamingMultipartUpload.copy(input, contentType, sink).filename
+                StreamingMultipartUpload.copy(input, contentType, sink, onReceived = { progress?.received(it) }).also { progress?.validating() }.filename
             }
         } catch (failure: decompengine.jobs.UploadPublicationUncertain) {
             synchronized(this) {

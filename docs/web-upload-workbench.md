@@ -44,11 +44,11 @@ loses a successful response after server publication, retries through the UI and
 one unchanged job identity, uploaded status, no workflow artifacts, cleared browser recovery storage,
 and successful job-route reload. This is an isolated test; the fixture is never executed.
 
-This checkpoint does not complete #169. Fetch does not expose reliable upload-byte
-progress: the current UI uses an indeterminate transfer/publication wait and explicitly
-does not claim a byte percentage. Measured transfer progress, broader accessibility and
-real stalled-network qualification remain open. The underlying API still has the #162
-crash-orphan maintenance and total storage-quota work recorded separately.
+The workbench now shows [server-observed request progress](web-upload-progress.md),
+including measured bytes without a known total for chunked bodies, and separates
+receiving from validation/publication. The #169 upload journey is qualified by the
+combined evidence below. The underlying API still has #162 crash-orphan and total
+quota work open; these checks do not establish every workbench release gate.
 
 At the initial checkpoint, all 169 frontend tests, lint, the distribution build (including type checking), and
 the [packaged upload journey](evidence/web-upload-ui-20260905.json) passed. The browser
@@ -65,7 +65,7 @@ explicit discard. This simulation does not qualify physical network interruption
 
 At the rejection checkpoint, all 175 frontend tests and lint passed, including capacity/storage/session rejection
 context, same-key retry, multiple-drop rejection and single-drop selection without
-implicit admission. The distribution build also passed. Measured progress remains unqualified, so #169 is still open.
+implicit admission. The distribution build also passed. That checkpoint preceded server-observed progress; #169 is still open.
 
 All 179 frontend tests, lint and the distribution build passed for tab recovery.
 The [packaged reload recovery journey](evidence/web-upload-recovery-20260905.json)
@@ -74,3 +74,18 @@ ticket without resubmitting, reselected the fixture, and replayed the same key i
 exactly one durable job. Success removed the ticket. Invalid/oversized rejection and
 explicit stop checks also passed. Unit tests cover deployment isolation, malformed,
 oversized, future/expired tickets, denied storage and different-file selection.
+
+The [measured transfer and cancellation journey](evidence/web-upload-progress-20260905.json)
+passed against the packaged application. With a 512 KiB inert fixture and browser
+network throughput limited to 32 KiB/s, the UI reported 8,192 actual request bytes
+received while publication was still pending. Stop transfer cancelled the real request,
+removed staging and left no job. Explicit retry retained its idempotency key, used a
+fresh progress identity and published exactly one uploaded job without execution. The
+same journey retained lost-response/reload replay and invalid/oversized rejection checks.
+
+All 133 web/jobs tests, 183 frontend tests, lint and distZip passed. The shared verifier
+accepted 32 valid fixtures and rejected 19 invalid fixtures, including progress byte
+ceilings and publication-identity consistency. Session isolation, bounded cache/expiry,
+monotonic counts and progress-poll cancellation have focused tests. This evidence closes
+#169's core picker, validation, progress, cancellation/retry and no-implicit-execution
+criteria; #162's remaining storage and process-crash requirements remain separate.

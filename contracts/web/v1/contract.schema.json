@@ -2221,6 +2221,55 @@
         "gitVersion"
       ],
       "additionalProperties": false
+    },
+    "uploadProgress": {
+      "type": "object",
+      "properties": {
+        "uploadId": {
+          "type": "string",
+          "pattern": "^[a-f0-9]{32}$"
+        },
+        "receivedBytes": {
+          "$ref": "#/definitions/uint64"
+        },
+        "totalBytes": {
+          "anyOf": [
+            {
+              "$ref": "#/definitions/uint64"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "state": {
+          "type": "string",
+          "enum": [
+            "receiving",
+            "validating",
+            "published",
+            "unconfirmed"
+          ]
+        },
+        "jobId": {
+          "anyOf": [
+            {
+              "$ref": "#/definitions/id"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        }
+      },
+      "required": [
+        "uploadId",
+        "receivedBytes",
+        "totalBytes",
+        "state",
+        "jobId"
+      ],
+      "additionalProperties": false
     }
   },
   "oneOf": [
@@ -2638,6 +2687,30 @@
     },
     {
       "$ref": "#/definitions/event"
+    },
+    {
+      "type": "object",
+      "properties": {
+        "apiVersion": {
+          "const": 1
+        },
+        "kind": {
+          "const": "uploadProgress"
+        },
+        "requestId": {
+          "$ref": "#/definitions/requestId"
+        },
+        "data": {
+          "$ref": "#/definitions/uploadProgress"
+        }
+      },
+      "required": [
+        "apiVersion",
+        "kind",
+        "requestId",
+        "data"
+      ],
+      "additionalProperties": false
     }
   ]
 }

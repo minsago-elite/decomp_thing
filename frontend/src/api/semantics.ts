@@ -13,6 +13,13 @@ export function checkSemantics(document: ContractDocument, basePath = '/'): void
     try { validateResourceHref(basePath, href, resource); } catch { throw new ApiClientError('invalid_response'); }
   }
   switch (document.kind) {
+    case 'uploadProgress': {
+      const progress = document.data;
+      requireValue(BigInt(progress.receivedBytes) <= 33554433n);
+      requireValue(progress.totalBytes === null || BigInt(progress.totalBytes) <= 33554432n);
+      requireValue((progress.state === 'published') === (progress.jobId !== null));
+      break;
+    }
     case 'jobs': {
       const { items, page } = document.data;
       requireValue(items.length <= page.limit && new Set(items.map((item) => item.jobId)).size === items.length);

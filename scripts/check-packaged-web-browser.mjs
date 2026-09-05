@@ -6,7 +6,7 @@ import { join, basename, dirname, isAbsolute, resolve } from 'node:path';
 import { createServer as createHttpServer } from 'node:http';
 import { fileURLToPath } from 'node:url';
 import { parseArgs } from 'node:util';
-import { qualifyUpload, qualifyUploadFailures } from './packaged-browser-upload.mjs';
+import { qualifyUpload, qualifyUploadFailures, qualifyMeasuredUpload } from './packaged-browser-upload.mjs';
 import { qualifyUpgrade } from './packaged-browser-upgrade.mjs';
 
 // Test driver only: the application is launched with a separate Node-free PATH.
@@ -594,6 +594,7 @@ try {
     if (values.mode === 'upload') {
       report.upload = await qualifyUpload({ makeTarget, cdp, evaluate, ready, browserOrigin, data });
       report.uploadFailures = await qualifyUploadFailures({ makeTarget, cdp, evaluate, ready, browserOrigin, data });
+      report.measuredUpload = await qualifyMeasuredUpload({ makeTarget, cdp, evaluate, ready, waitFor, browserOrigin, data });
       report.jobDataCreated = true;
     }
 

@@ -227,6 +227,32 @@ class WebApiControllerTest {
         } finally { server.stop(); root.toFile().deleteRecursively() }
     }
 
+    @Test
+    fun `upload progress reads require the initiating session and preserve publication distinction`() = withServer { server, _, _ ->
+        val cookie = establish(server)
+        val csrf = assertEnvelope(request(server, "/workbench/api/v1/bootstrap", headers = mapOf("Cookie" to cookie)), 200, "bootstrap")
+            .getValue("csrfToken").jsonPrimitive.content
+        val id = "d".repeat(32)
+        val path = "/workbench/api/v1/uploads/$id"
+        assertError(request(server, path), 401, "SESSION_REQUIRED")
+        assertError(request(server, path, headers = mapOf("Cookie" to cookie)), 404, "NOT_FOUND")
+        val headers = mapOf("Cookie" to cookie, "X-CSRF-Token" to csrf, "Idempotency-Key" to "progress_fixture_key", "X-Upload-ID" to id)
+        val job = assertEnvelope(upload(server, elfFixture(), headers), 201, "job")
+        val progress = assertEnvelope(request(server, path, headers = mapOf("Cookie" to cookie)), 200, "uploadProgress")
+        assertEquals("published", progress.getValue("state").jsonPrimitive.content)
+        assertEquals(job.getValue("jobId"), progress.getValue("jobId"))
+        assertTrue(progress.getValue("receivedBytes").jsonPrimitive.content.toLong() > elfFixture().size)
+        assertEquals("null", progress.getValue("totalBytes").toString()) // chunked request
+        assertError(upload(server, elfFixture(), headers), 409, "UPLOAD_ID_REUSED")
+        val other = establish(server)
+        assertError(request(server, path, headers = mapOf("Cookie" to other)), 404, "NOT_FOUND")
+        val badId = "e".repeat(32)
+        assertError(upload(server, byteArrayOf(1), headers + mapOf("X-Upload-ID" to badId, "Idempotency-Key" to "progress_invalid_fixture")), 422, "INVALID_ELF")
+        val rejected = assertEnvelope(request(server, "/workbench/api/v1/uploads/$badId", headers = mapOf("Cookie" to cookie)), 200, "uploadProgress")
+        assertEquals("unconfirmed", rejected.getValue("state").jsonPrimitive.content)
+        assertEquals("null", rejected.getValue("jobId").toString())
+    }
+
     private fun upload(server: UploadServer, bytes: ByteArray, headers: Map<String, String>, filename: String = "fixture.elf", boundary: String = "upload_api_fixture"): HttpResponse<String> {
         val origin = "http://127.0.0.1:${server.serverPort}"
         val body = "--$boundary\r\nContent-Disposition: form-data; name=\"binary\"; filename=\"$filename\"\r\n\r\n".toByteArray() + bytes + "\r\n--$boundary--\r\n".toByteArray()

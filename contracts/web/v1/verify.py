@@ -21,7 +21,12 @@ def check_semantics(document: dict) -> None:
     """Check relationships JSON Schema cannot express with portable draft-07."""
     kind = document["kind"]
     data = document.get("data", {})
-    if kind == "jobs":
+    if kind == "uploadProgress":
+        if int(data["receivedBytes"]) > 33554433 or (data["totalBytes"] is not None and int(data["totalBytes"]) > 33554432):
+            raise ValueError("upload progress exceeds the request ceiling")
+        if (data["state"] == "published") != (data["jobId"] is not None):
+            raise ValueError("upload publication identity is inconsistent")
+    elif kind == "jobs":
         if len(data["items"]) > data["page"]["limit"]:
             raise ValueError("page exceeds its declared record limit")
         identities = [item["jobId"] for item in data["items"]]

@@ -10,6 +10,7 @@ export interface MutationOptions extends RequestOptions {
   csrfToken?: string;
   idempotencyKey?: string;
   ifMatch?: string;
+  uploadId?: string;
 }
 interface ClientOptions {
   basePath: string;
@@ -80,6 +81,10 @@ export function createApiClient(options: ClientOptions) {
         if (!/^"[A-Za-z0-9][A-Za-z0-9_-]{0,127}"$/.test(settings.ifMatch)) throw new ApiClientError('invalid_request');
         headers.set('If-Match', settings.ifMatch);
       }
+    }
+    if (upload && settings.uploadId !== undefined) {
+      if (!/^[a-f0-9]{32}$/.test(settings.uploadId)) throw new ApiClientError('invalid_request');
+      headers.set('X-Upload-ID', settings.uploadId);
     }
     const controller = new AbortController();
     let timedOut = false;

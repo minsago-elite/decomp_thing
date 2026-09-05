@@ -3,6 +3,7 @@ import { useLocation } from 'preact-iso/router';
 import { createApiClient, ApiClientError } from '../api/client';
 import { jobPath } from '../app/paths';
 import type { BrowserSession } from '../session/session';
+import type { UploadProgress } from '../api/generated';
 import { createUploadRecovery } from './uploadRecovery';
 import type { UploadTicket } from './uploadRecovery';
 import { useSession } from '../session/useSession';
@@ -36,6 +37,7 @@ export function Upload({ basePath, session }: { basePath: string; session: Brows
   const [retained, setRetained] = useState(() => recovery.read());
   const [attempt, setAttempt] = useState<Attempt | null>(null);
   const [phase, setPhase] = useState<'idle' | 'pending' | 'retry'>(retained.kind === 'empty' ? 'idle' : 'retry');
+  const [progress, setProgress] = useState<UploadProgress | null>(null);
   const [message, setMessage] = useState('');
   const active = useRef<AbortController | null>(null);
   const input = useRef<HTMLInputElement>(null);
@@ -78,9 +80,19 @@ export function Upload({ basePath, session }: { basePath: string; session: Brows
     try { recovery.save(attempt.ticket); setRetained(recovery.read()); }
     catch { setRetained(recovery.read()); setPhase('retry'); setMessage('Retry identity could not be saved. No upload was sent. Check tab storage and the retained upload context.'); return; }
     const controller = new AbortController(); active.current = controller;
-    setPhase('pending'); setMessage('');
+    setPhase('pending'); setMessage(''); setProgress(null);
+    const uploadId = crypto.randomUUID().replaceAll('-', '');
+    let pollTimer: ReturnType<typeof setTimeout>;
+    const poll = async () => {
+      try {
+        const response = await client.get('uploadProgress', `/uploads/${uploadId}`, { signal: controller.signal });
+        if (live.current && !controller.signal.aborted && response.data.uploadId === uploadId) setProgress(response.data);
+      } catch { if (live.current && !controller.signal.aborted) setProgress(null); }
+      finally { if (live.current && !controller.signal.aborted) pollTimer = setTimeout(() => { void poll(); }, 1000); }
+    };
+    pollTimer = setTimeout(() => { void poll(); }, 500);
     try {
-      const result = await client.upload(attempt.file, { csrfToken, idempotencyKey: attempt.ticket.key, signal: controller.signal });
+      const result = await client.upload(attempt.file, { csrfToken, idempotencyKey: attempt.ticket.key, uploadId, signal: controller.signal });
       if (!live.current || controller.signal.aborted) return;
       try { recovery.clear(); } catch { /* The confirmed job remains navigable; retained ticket can replay it safely. */ }
       setMessage('Job publication confirmed. Opening the job…');
@@ -88,7 +100,7 @@ export function Upload({ basePath, session }: { basePath: string; session: Brows
     } catch (error) {
       if (!live.current) return;
       setPhase('retry'); setMessage(failureMessage(error));
-    } finally { if (active.current === controller) active.current = null; }
+    } finally { clearTimeout(pollTimer); controller.abort(); if (active.current === controller) active.current = null; }
   }
   function discard() {
     if (active.current) return;
@@ -116,8 +128,14 @@ export function Upload({ basePath, session }: { basePath: string; session: Brows
       {retained.kind === 'blocked' && <p>Retained upload context is {retained.reason}. Check Uploaded jobs before choosing another file. No automatic retry will occur.</p>}
       {attempt && <p>Selected: {attempt.file.name} ({attempt.file.size} bytes)</p>}
       {!connected && <p>Connect a local session with upload support to submit. A selected file stays in memory while this page remains open.</p>}
-      {phase === 'pending' && <div role="status"><progress aria-label="Upload awaiting publication" />
-        <p>Transferring the file and waiting for durable publication. Byte progress is unavailable; transfer completion alone does not confirm a job.</p></div>}
+      {phase === 'pending' && <div role="status">
+        <progress aria-label="Request bytes received by server" max={progress?.totalBytes ? Number(progress.totalBytes) : undefined}
+          value={progress?.totalBytes ? Math.min(Number(progress.receivedBytes), Number(progress.totalBytes)) : undefined} />
+        <p>{progress ? `${progress.receivedBytes} request bytes received by the server, including multipart overhead.` : 'Waiting for server transfer progress…'}</p>
+        <p>{progress?.state === 'published' ? 'The server reports durable publication. Waiting for the upload response.'
+          : progress?.state === 'validating' ? 'Request received. Validating the file and publishing the job…'
+          : progress?.state === 'unconfirmed' ? 'Publication is unconfirmed. Waiting for the upload response.'
+          : 'Transferring the file. Received bytes do not confirm job publication.'}</p></div>}
       <p id="upload-feedback" role="status">{message}</p>
       {phase === 'retry' && <p>Retry keeps the same job identity. Choosing another file discards that retry context; check Uploaded jobs first if the result is unknown.</p>}
       <div class="job-actions">

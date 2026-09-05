@@ -8,13 +8,13 @@ import { createBrowserSession } from '../src/session/session';
 import { ApiClientError } from '../src/api/errors';
 import { Upload } from '../src/jobs/Upload';
 
-const transport = vi.hoisted(() => ({ upload: vi.fn<(file: File, options: MutationOptions) => Promise<ResponseOf<'job'>>>(), route: vi.fn() }));
+const transport = vi.hoisted(() => ({ get: vi.fn<(kind: string, path: string, options: { signal?: AbortSignal }) => Promise<ResponseOf<'uploadProgress'>>>(), upload: vi.fn<(file: File, options: MutationOptions) => Promise<ResponseOf<'job'>>>(), route: vi.fn() }));
 vi.mock('../src/api/client', async () => ({ ...await vi.importActual('../src/api/client'), createApiClient: () => transport }));
 vi.mock('preact-iso/router', () => ({ useLocation: () => ({ route: transport.route }) }));
 const fixture = <T,>(name: string) => JSON.parse(readFileSync(resolve(process.cwd(), `../contracts/web/v1/fixtures/${name}.json`), 'utf8')) as T;
 const sessions: ReturnType<typeof createBrowserSession>[] = [];
-beforeEach(() => { sessionStorage.clear(); transport.upload.mockReset(); transport.route.mockReset(); });
-afterEach(() => { for (const session of sessions.splice(0)) session.dispose(); });
+beforeEach(() => { sessionStorage.clear(); transport.upload.mockReset(); transport.get.mockReset(); transport.route.mockReset(); });
+afterEach(() => { vi.useRealTimers(); for (const session of sessions.splice(0)) session.dispose(); });
 async function mount() {
   const data = fixture<{ data: Bootstrap }>('bootstrap').data;
   data.basePath = '/nested/'; data.sessionExpiresAt = new Date(Date.now() + 60_000).toISOString(); data.limits.maxUploadBytes = '33554432';
@@ -136,4 +136,26 @@ it('restores retry identity after view destruction and rejects a different file 
   select(); fireEvent.click(screen.getByRole('button', { name: 'Retry this upload' }));
   await waitFor(() => expect(transport.upload).toHaveBeenCalledTimes(2));
   expect(transport.upload.mock.calls[1]?.[1].idempotencyKey).toBe(key);
+});
+
+
+it('shows measured bytes separately from publication and stops progress polling with admission', async () => {
+  vi.useFakeTimers();
+  let finish: (value: ResponseOf<'job'>) => void = () => undefined;
+  transport.upload.mockImplementation(() => new Promise(resolve => { finish = resolve; }));
+  transport.get.mockImplementation((_kind, path) => Promise.resolve({
+    apiVersion: 1, kind: 'uploadProgress', requestId: 'progress_fixture',
+    data: { uploadId: path.split('/').at(-1)!, receivedBytes: '65536', totalBytes: null, state: 'receiving', jobId: null },
+  }));
+  await mount(); select(); fireEvent.click(screen.getByRole('button', { name: 'Upload binary' }));
+  await act(async () => { await vi.advanceTimersByTimeAsync(500); });
+  expect(screen.getByText(/65536 request bytes received/)).toBeTruthy();
+  expect(screen.getByText(/Received bytes do not confirm job publication/)).toBeTruthy();
+  expect(transport.route).not.toHaveBeenCalled();
+  const signal = transport.get.mock.calls[0]?.[2].signal;
+  await act(async () => { finish(fixture<ResponseOf<'job'>>('job-lossless')); await Promise.resolve(); });
+  expect(signal?.aborted).toBe(true);
+  await act(async () => { await vi.advanceTimersByTimeAsync(5000); });
+  expect(transport.get).toHaveBeenCalledOnce();
+  expect(transport.route).toHaveBeenCalledOnce();
 });

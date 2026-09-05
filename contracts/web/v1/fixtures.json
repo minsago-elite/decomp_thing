@@ -209,6 +209,18 @@
       "file": "fixtures/invalid-gap-invented-cursor.json",
       "valid": false,
       "reason": "A transport gap cannot manufacture a durable event cursor or sequence."
+    },
+    {
+      "file": "fixtures/upload-progress.json",
+      "valid": true
+    },
+    {
+      "file": "fixtures/invalid-upload-progress-publication.json",
+      "valid": false
+    },
+    {
+      "file": "fixtures/invalid-upload-progress-limit.json",
+      "valid": false
     }
   ]
 }
