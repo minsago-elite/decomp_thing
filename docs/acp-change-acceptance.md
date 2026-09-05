@@ -32,8 +32,15 @@ stream the still-owned file through its kernel descriptor with a 64 KiB buffer.
 Before returning a digest, recheck file key/size/modification time and descriptor
 identity, and reopen the named directory/file chain to verify its bindings.
 Unavailable or changed bindings fail with a bounded workspace-violation reason.
-This binds each hash read; it is not an atomic or complete descriptor-held tree
-inventory, and the initial discovery walk still uses path-based directory traversal.
+Discovery also uses directory-relative entry opens and directory listings through
+owned handles. Workspace roots stay pinned through the scan, hashes must match
+the discovered file identity, and each named root is revalidated before returning.
+At most 64 roots and 64 relative path components are admitted, bounding retained
+root and traversal handles in addition to the entry/file/byte limits. Non-default
+filesystem providers are rejected before native path resolution. Parent
+components consume entry budget too. An absent parent of an explicit authorized
+target preserves the existing creation behavior. These checks do not make the
+multi-file observation atomic or establish a complete concurrent-mutation matrix.
 Encountered symlinks (including dangling links) and special files are rejected
 instead of being omitted by a regular-file filter. A directory entry that
 disappears or cannot be inspected also fails the scan. These failures become
