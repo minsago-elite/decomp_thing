@@ -877,6 +877,8 @@ Initial model/mode ID rejection and initial configuration option/value rejection
 exact session-creation advertisement's bounded choice previews. The same formatter serves current
 configuration-inventory mismatches: at most four JSON-quoted IDs/values, with a fifth-entry lookahead
 for an omission marker, configured-environment redaction, and 48-character prefixes plus truncation
-markers. These are display hints, not exact selection tokens or additional setter authority. Capability
+markers. All configured model/mode IDs, option IDs and select values are redacted across every preview,
+including when an earlier preference fails. Their separate allowance of at most 130 identifiers of
+256 characters leaves the existing 4096-value/1 MiB environment redaction budget intact. These are display hints, not exact selection tokens or additional setter authority. Capability
 absence and type/ambiguity rejection keep their existing typed outcomes. No setter or prompt is sent
 when the requested preference fails the initial advertisement check.

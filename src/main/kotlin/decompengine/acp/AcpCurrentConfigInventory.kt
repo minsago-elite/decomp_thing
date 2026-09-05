@@ -17,6 +17,7 @@ internal fun requireCurrentSessionConfigPreference(
     preference: AcpSessionConfigPreference,
     index: Int,
     sensitiveValues: Collection<String> = emptyList(),
+    privatePreferences: Collection<String> = listOfNotNull(preference.id, (preference.value as? AcpSessionConfigValue.Select)?.valueId),
 ) {
     val option = options.singleOrNull { it.id.value == preference.id }
     val supported = when (val value = preference.value) {
@@ -29,8 +30,7 @@ internal fun requireCurrentSessionConfigPreference(
         }
     }
     if (supported) return
-    val privatePreferences = listOfNotNull(preference.id, (preference.value as? AcpSessionConfigValue.Select)?.valueId)
-    fun preview(values: Sequence<String>) = previewSessionChoices(values, sensitiveValues + privatePreferences)
+    fun preview(values: Sequence<String>) = previewSessionChoices(values, sensitiveValues, privatePreferences)
     val optionIds = preview(options.asSequence().map { it.id.value })
     val values = when (option) {
         is SessionConfigOption.Select -> preview(when (val choices = option.options) {
@@ -49,9 +49,16 @@ internal fun requireCurrentSessionConfigPreference(
     ))
 }
 
+/** Complete configured identifiers used only as additional redaction inputs. */
+internal fun AcpSessionPreferences.privateIdentifiers(): List<String> =
+    listOfNotNull(modelId, modeId) + configOptions.flatMap {
+        listOfNotNull(it.id, (it.value as? AcpSessionConfigValue.Select)?.valueId)
+    }
+
 /** Display-only previews; never selection tokens or authority for a setter. */
-internal fun previewSessionChoices(values: Sequence<String>, sensitiveValues: Collection<String>): String {
-    val redactor = ProgressRedactor(sensitiveValues)
+internal fun previewSessionChoices(values: Sequence<String>, sensitiveValues: Collection<String>,
+    privatePreferences: Collection<String> = emptyList()): String {
+    val redactor = ProgressRedactor(sensitiveValues, privatePreferences)
     val bounded = values.take(5).toList()
     val text = JsonArray(bounded.take(4).map { JsonPrimitive(redactor.text(it, 48)) }).toString()
     return text + if (bounded.size > 4) " (more choices omitted)" else ""

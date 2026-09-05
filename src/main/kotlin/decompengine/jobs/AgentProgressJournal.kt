@@ -411,7 +411,7 @@ class AgentProgressJournal(
 }
 
 /** Bounded previews only; invocation artifacts continue to retain content commitments. */
-internal class ProgressRedactor(values: Collection<String>) {
+internal class ProgressRedactor(values: Collection<String>, additionalValues: Collection<String> = emptyList()) {
     private val removableControls = Regex("[\\p{Cntrl}&&[^\\n\\t]]")
     private val secrets: List<String>
     init {
@@ -419,7 +419,12 @@ internal class ProgressRedactor(values: Collection<String>) {
         require(primary.size <= 4096 && primary.sumOf { it.length.toLong() } <= 1024 * 1024) {
             "progress redaction values exceed the configured limit"
         }
-        secrets = primary.map { it.replace(removableControls, "") }.filter { it.isNotEmpty() }
+        // Separate space for a full bounded session preference set (model, mode, 64 ID/value pairs).
+        require(additionalValues.size <= 130 && additionalValues.all { it.length <= 256 }) {
+            "additional redaction values exceed the configured limit"
+        }
+        secrets = (primary + additionalValues.filter { it.isNotBlank() })
+            .map { it.replace(removableControls, "") }.filter { it.isNotEmpty() }
             .distinct().sortedByDescending(String::length)
     }
 
