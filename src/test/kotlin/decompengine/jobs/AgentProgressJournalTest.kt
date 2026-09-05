@@ -37,6 +37,8 @@ class AgentProgressJournalTest {
         AgentProgressJournal(root, "repair").use { it.phase(AgentWorkflowPhase.AGENT_RUNNING) }
         val original = AgentProgressJournal.read(root)!!
         val corruptions = listOf(
+            mapOf("events" to JsonArray(original.getValue("events").jsonArray.take(1)),
+                "historyDropped" to JsonPrimitive(1), "truncated" to JsonPrimitive(true)),
             mapOf("events" to JsonArray(original.getValue("events").jsonArray.drop(1))),
             mapOf("queueDropped" to JsonPrimitive(1)),
             mapOf("queueDropped" to JsonPrimitive(Long.MAX_VALUE), "historyDropped" to JsonPrimitive(Long.MAX_VALUE)),
@@ -54,6 +56,25 @@ class AgentProgressJournalTest {
         Files.writeString(root.resolve(AgentProgressJournal.FILE_NAME), original.toString())
         AgentProgressJournal(root, "repair").use { it.phase(AgentWorkflowPhase.ROLLED_BACK) }
         assertEquals(4, AgentProgressJournal.read(root)!!.getValue("nextSequence").jsonPrimitive.int)
+    }
+
+    @Test
+    fun `history eviction precedes retained events while queue loss may follow them`() {
+        val root = createTempDirectory("progress-prefix-")
+        AgentProgressJournal(root, "repair").use { it.phase(AgentWorkflowPhase.AGENT_RUNNING) }
+        val original = AgentProgressJournal.read(root)!!
+        val events = original.getValue("events").jsonArray
+        assertEquals(2, events.size)
+        listOf(
+            mapOf("events" to JsonArray(events.takeLast(1)), "historyDropped" to JsonPrimitive(1)),
+            mapOf("events" to JsonArray(events.take(1)), "queueDropped" to JsonPrimitive(1)),
+            mapOf("events" to JsonArray(emptyList()), "historyDropped" to JsonPrimitive(2)),
+        ).forEach { changes ->
+            // These fixtures exercise legacy snapshots; explicit omission ranges have separate validation tests.
+            val valid = JsonObject(original - "omittedSequenceRanges" + changes + ("truncated" to JsonPrimitive(true)))
+            Files.writeString(root.resolve(AgentProgressJournal.FILE_NAME), valid.toString())
+            assertEquals(valid, AgentProgressJournal.read(root))
+        }
     }
 
     @Test
