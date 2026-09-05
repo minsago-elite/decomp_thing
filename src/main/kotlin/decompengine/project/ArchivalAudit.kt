@@ -285,9 +285,9 @@ object ArchivalProjectAuditor {
             entityCount = entities.size,
             missingModelProvenance = missingModel,
             missingSourceProvenance = missingSource,
-            unresolvedEntityIds = (model.functions.filter { it.status != RecoveryStatus.RECOVERED }.map { it.id } +
-                model.globals.filter { it.status != RecoveryStatus.RECOVERED }.map { it.id } +
-                model.types.filter { it.status != RecoveryStatus.RECOVERED }.map { it.id } +
+            unresolvedEntityIds = (model.functions.filter { model.isRecoveryUnresolved(it.status) }.map { it.id } +
+                model.globals.filter { model.isRecoveryUnresolved(it.status) }.map { it.id } +
+                model.types.filter { model.isRecoveryUnresolved(it.status) }.map { it.id } +
                 manifest.unresolvedEntityIds + manifest.unresolvedImplementationIds +
                 implementations.filter { it.acceptedImplementation != true }.flatMap { it.entityIds } +
                 missingModel + missingSource + compilationUnresolved).distinct().sorted(),
