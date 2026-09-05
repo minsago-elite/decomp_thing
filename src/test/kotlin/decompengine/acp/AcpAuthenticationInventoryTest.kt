@@ -71,6 +71,21 @@ class AcpAuthenticationInventoryTest {
         val method = inventory.methods.single()
         assertEquals("[oversized text omitted]", method.namePreview)
         assertEquals("[oversized text omitted]", method.descriptionPreview)
+    @Test fun `unpaired surrogates fail as authentication inventory errors`() {
+        for (invalid in listOf("\ud800", "\udc00", "\ud800x")) {
+            for (method in listOf(
+                AuthMethod.AgentAuth(AuthMethodId(invalid), "name", null),
+                AuthMethod.AgentAuth(AuthMethodId("id"), invalid, null),
+                AuthMethod.AgentAuth(AuthMethodId("id"), "name", invalid),
+            )) {
+                val failure = assertFailsWith<AcpProtocolFailure> {
+                    AcpAuthenticationInventory.capture(listOf(method), emptyList())
+                }
+                assertEquals("ACP authentication inventory contains invalid Unicode", failure.message)
+            }
+        }
+        val valid = AuthMethod.AgentAuth(AuthMethodId("id-\ud83d\udd11"), "name", "description")
+        assertEquals(valid.id.value, AcpAuthenticationInventory.capture(listOf(valid), emptyList()).methods.single().id)
     }
 
     @Test fun `unknown authentication variants stay unsupported`() {

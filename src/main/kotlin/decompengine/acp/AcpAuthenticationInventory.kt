@@ -41,6 +41,11 @@ class AcpAuthenticationInventory private constructor(
                     if (method.name.toByteArray().size > 512 || (method.description?.toByteArray()?.size ?: 0) > 2048) {
                         throw AcpProtocolFailure("ACP authentication inventory exceeds its text limit")
                     }
+                    listOfNotNull(method.id.value, method.name, method.description).forEach { value ->
+                        if (!Charsets.UTF_8.newEncoder().canEncode(value)) {
+                            throw AcpProtocolFailure("ACP authentication inventory contains invalid Unicode")
+                        }
+                    }
                     add(buildJsonObject {
                         put("id", method.id.value); put("variant", variant(method))
                         put("name", redactor.text(method.name, 512))
