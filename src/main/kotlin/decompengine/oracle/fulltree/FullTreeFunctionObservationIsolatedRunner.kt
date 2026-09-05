@@ -4430,6 +4430,23 @@ internal class FullTreeFunctionObservationColdUnitAbsenceObserver private constr
     ): FullTreeFunctionObservationColdUnitAttachmentObservationOutcome {
         requireReceiptBinding(receipt)
         requireUnchanged()
+        awaitColdSystemdManagerBusRegistration(query = { timeout ->
+            val result = runReadOnlyBusctl(
+                listOf(
+                    "call",
+                    "org.freedesktop.DBus",
+                    "/org/freedesktop/DBus",
+                    "org.freedesktop.DBus",
+                    "NameHasOwner",
+                    "s",
+                    SYSTEMD_BUS_SERVICE,
+                ),
+                "manager bus registration",
+                timeout,
+            )
+            if (result.exitCode != 0) isolationFail("cold systemd manager bus registration query failed safely")
+            result.output
+        })
         val featuresBefore = observeUnfilteredUnitInventory()
         val unitBefore = observeUnitInventory()
         val jobBefore = observeJobInventory()
@@ -4673,7 +4690,11 @@ internal class FullTreeFunctionObservationColdUnitAbsenceObserver private constr
         return result.output
     }
 
-    private fun runReadOnlyBusctl(arguments: List<String>, label: String): TrustedCommandResult {
+    private fun runReadOnlyBusctl(
+        arguments: List<String>,
+        label: String,
+        timeout: Duration = SYSTEMD_CONTROL_TIMEOUT,
+    ): TrustedCommandResult {
         inspector.requireUnchanged()
         busController.requireUnchanged()
         bus.requireUnchanged()
@@ -4682,7 +4703,7 @@ internal class FullTreeFunctionObservationColdUnitAbsenceObserver private constr
         val result = runTrustedCommand(
             listOf(busController.path.toString()) + hardenedArguments,
             bus.controlEnvironment,
-            SYSTEMD_CONTROL_TIMEOUT,
+            timeout,
             "cold systemd $label",
         )
         inspector.requireUnchanged()
@@ -4847,6 +4868,15 @@ internal fun parseColdSystemdBusctlStringProperty(output: String, label: String)
 internal fun parseColdSystemdBusctlBooleanProperty(output: String, label: String): Boolean {
     val (type, data) = parseColdSystemdBusctlEnvelope(output, label)
     val value = data as? JsonPrimitive
+    if (type != "b" || value == null || value.isString || value.content !in setOf("true", "false")) {
+        isolationFail("cold systemd $label was malformed")
+    }
+    return value.content == "true"
+}
+
+internal fun parseColdSystemdBusctlBooleanReply(output: String, label: String): Boolean {
+    val (type, data) = parseColdSystemdBusctlEnvelope(output, label)
+    val value = (data as? JsonArray)?.singleOrNull() as? JsonPrimitive
     if (type != "b" || value == null || value.isString || value.content !in setOf("true", "false")) {
         isolationFail("cold systemd $label was malformed")
     }
