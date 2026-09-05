@@ -12,6 +12,7 @@ import decompengine.jobs.Job
 import decompengine.jobs.JobStore
 import decompengine.jobs.JobStoreException
 import decompengine.jobs.AgentProgressJournal
+import decompengine.jobs.ProgressRedactor
 import decompengine.jobs.BestEffortProgressJournal
 import decompengine.agent.AgentWorkflowProgress
 import decompengine.agent.AgentWorkflowPhase
@@ -170,7 +171,9 @@ class UploadServer(
     private val reconstructor: JobReconstructor = SourceTreeJobReconstructor(),
     executor: Executor? = null,
     sourceProfiles: List<ReconstructionProfile> = listOf(GeneratedCMakeReconstructionProfile.descriptor),
+    sensitiveValues: Collection<String> = System.getenv().values,
 ) {
+    private val diagnosticRedactor = ProgressRedactor(sensitiveValues)
     private val server = HttpServer.create(InetSocketAddress(host, port), 0)
     private val store = JobStore(dataDir)
     private val sourceEvidence = WebSourceEvidence(store, sourceProfiles)
@@ -236,11 +239,11 @@ class UploadServer(
                 else -> exchange.sendHtml(404, renderErrorPage(404, "Page not found", "The requested route does not exist."))
             }
         } catch (exception: JobStoreException) {
-            exchange.sendHtml(404, renderErrorPage(404, "Job not found", exception.message ?: "The job does not exist."))
+            exchange.sendHtml(404, renderErrorPage(404, "Job not found", diagnostic(exception, "The job does not exist.")))
         } catch (exception: IllegalArgumentException) {
-            exchange.sendHtml(400, renderErrorPage(400, "Invalid request", exception.message ?: "The request was invalid."))
+            exchange.sendHtml(400, renderErrorPage(400, "Invalid request", diagnostic(exception, "The request was invalid.")))
         } catch (exception: Exception) {
-            exchange.sendHtml(500, renderErrorPage(500, "Unexpected error", exception.message ?: "The operation failed."))
+            exchange.sendHtml(500, renderErrorPage(500, "Unexpected error", diagnostic(exception, "The operation failed.")))
         }
     }
 
@@ -257,7 +260,7 @@ class UploadServer(
                 exchange.redirect("/jobs/${job.id}")
             }
         } catch (exception: InvalidUploadException) {
-            exchange.sendHtml(400, renderErrorPage(400, "Unsupported binary", exception.message ?: "Upload a Linux ELF binary."))
+            exchange.sendHtml(400, renderErrorPage(400, "Unsupported binary", diagnostic(exception, "Upload a Linux ELF binary.")))
         }
     }
 
@@ -303,7 +306,7 @@ class UploadServer(
                     operation(active)
                     store.updateStatus(job.id, "complete", completeMessage)
                 } catch (failure: Exception) {
-                    store.updateStatus(job.id, "failed", failure.message ?: failure.javaClass.simpleName)
+                    store.updateStatus(job.id, "failed", diagnostic(failure, "Background operation failed"))
                 } finally {
                     runningJobs.remove(job.id)
                 }
@@ -321,6 +324,9 @@ class UploadServer(
         }
         exchange.redirect("/jobs/${job.id}")
     }
+
+    private fun diagnostic(failure: Exception, fallback: String): String =
+        diagnosticRedactor.text(failure.message ?: fallback, maximumCharacters = 480)
 
     /** A queued operation can be claimed once, either by a worker or by shutdown. */
     private inner class ScheduledJob(private val jobId: String, private val operation: () -> Unit) : Runnable {

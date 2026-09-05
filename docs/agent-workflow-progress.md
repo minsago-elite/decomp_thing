@@ -72,6 +72,13 @@ its `displayOnly` flag and counters must never substitute for complete required 
 
 Focused verification:
 
+Web background failures are redacted before job status is persisted, so job JSON, API responses and
+refreshed pages consume the same sanitized diagnostic. HTTP exception responses also use the bounded
+redactor. The default sensitive values are the server environment; callers that supply credentials
+outside that environment must provide them through `UploadServer.sensitiveValues`. Oversized messages
+are omitted before taking a preview, and HTML escaping still applies after redaction. This does not
+retroactively scrub historical job records or arbitrary downloadable artifacts.
+
 Reconstruction CLI and browser jobs own their journal through a best-effort adapter. A busy
 writer, persistence failure, or phase-observer exception disables that display and emits a fixed
 diagnostic without replacing the workflow result or original exception. Closing still attempts to

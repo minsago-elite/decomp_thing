@@ -39,6 +39,42 @@ import kotlin.test.assertTrue
 
 class UploadServerTest {
     @Test
+    fun `background diagnostics redact secrets before persistence and rendering`() {
+        val dataDir = createTempDirectory("web-private-diagnostic-")
+        val configured = "configured-provider-credential"
+        val bearer = "synthetic-bearer-value"
+        val password = "synthetic-password-value"
+        val server = UploadServer("127.0.0.1", 0, dataDir,
+            analyzer = JobAnalyzer { _, _ -> error("Provider refused $configured; Bearer $bearer; password=$password <script>bad</script>") },
+            reconstructor = JobReconstructor { _, _ -> error("z".repeat(17000) + configured) },
+            executor = Executor { it.run() }, sensitiveValues = listOf(configured))
+        server.start()
+        try {
+            val invalid = request(server, "GET", "/jobs/$configured")
+            assertEquals(404, invalid.status)
+            assertTrue(!invalid.body.decodeToString().contains(configured))
+            assertTrue(invalid.body.decodeToString().contains("[redacted]"))
+            val uploaded = upload(server, "diagnostic.elf", elfFixture(), acceptJson = true)
+            val id = Json.parseToJsonElement(uploaded.body.decodeToString()).jsonObject["id"].toString().trim('"')
+            assertEquals(303, request(server, "POST", "/jobs/$id/explore", followRedirects = false).status)
+            val persisted = dataDir.resolve(id).resolve("job.json").readBytes().decodeToString()
+            val api = request(server, "GET", "/api/jobs/$id").body.decodeToString()
+            val page = request(server, "GET", "/jobs/$id").body.decodeToString()
+            listOf(persisted, api, page).forEach { text ->
+                listOf(configured, bearer, password).forEach { assertTrue(!text.contains(it)) }
+                assertTrue(text.contains("[redacted]"))
+            }
+            assertTrue(!page.contains("<script>bad</script>"))
+            assertEquals(303, request(server, "POST", "/jobs/$id/reconstruct", followRedirects = false).status)
+            val job = decompengine.jobs.JobStore(dataDir).get(id)
+            assertEquals("failed", job.status)
+            assertEquals("[oversized text omitted]", job.statusMessage)
+        } finally {
+            server.stop()
+        }
+    }
+
+    @Test
     fun `rejected admission can be retried without a stale job reservation`() {
         val reject = java.util.concurrent.atomic.AtomicBoolean(true)
         var calls = 0
