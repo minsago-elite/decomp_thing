@@ -19,6 +19,9 @@ class JobStoreTest {
             val root = createTempDirectory("jobs-uncertain-$phase-")
             val privateError = "private storage diagnostic"
             val publisher = object : UploadPublisher {
+                override fun writeAndForceInput(input: java.nio.file.Path, bytes: ByteArray) =
+                    AtomicUploadPublisher.writeAndForceInput(input, bytes)
+
                 override fun publish(staging: java.nio.file.Path, destination: java.nio.file.Path) {
                     if (phase == "before-rename") throw java.io.IOException(privateError)
                     AtomicUploadPublisher.publish(staging, destination)
