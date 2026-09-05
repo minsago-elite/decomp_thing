@@ -39,6 +39,10 @@ def check_semantics(document: dict) -> None:
         if len(identities) != len(set(identities)):
             raise ValueError("a job appears more than once in a page")
     elif kind == "bootstrap":
+        scheduler = data["runtime"].get("scheduler")
+        if scheduler is not None and scheduler["state"] == "available":
+            if int(scheduler["activeWorkers"]) > int(scheduler["workerLimit"]) or int(scheduler["queuedTasks"]) > int(scheduler["queueCapacity"]):
+                raise ValueError("scheduler sample exceeds configured capacity")
         limits = data["limits"]
         if limits["defaultPageLimit"] > limits["maxPageLimit"]:
             raise ValueError("default page size exceeds configured maximum")

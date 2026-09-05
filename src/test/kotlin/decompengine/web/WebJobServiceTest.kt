@@ -20,6 +20,27 @@ import kotlin.test.assertIs
 import kotlin.test.assertTrue
 
 class WebJobServiceTest {
+    @Test fun `scheduler reads preserve absent storage and distinguish shutdown and unknown executor metrics`() = withStore { _, root ->
+        val absent = root.resolve("absent")
+        WebJobService(JobStore(absent), JobAnalyzer { _, _ -> error("Unexpected execution") }, inertReconstructor).use { service ->
+            assertFailsWith<WebJobServiceException> { service.schedulerSnapshot() }
+            service.initializeExistingStorage()
+            val sample = assertIs<WebSchedulerSnapshot.Available>(service.schedulerSnapshot())
+            assertEquals(0, sample.activeWorkers)
+            assertEquals(0, sample.queuedTasks)
+            assertEquals(2, sample.workerLimit)
+            assertEquals(32, sample.queueCapacity)
+            service.beginShutdown()
+            assertTrue(assertIs<WebSchedulerSnapshot.Available>(service.schedulerSnapshot()).stopping)
+            assertFalse(Files.exists(absent))
+        }
+        WebJobService(JobStore(absent), JobAnalyzer { _, _ -> error("Unexpected execution") }, inertReconstructor, Executor { error("Unexpected task") }).use { service ->
+            service.initializeExistingStorage()
+            assertIs<WebSchedulerSnapshot.Unavailable>(service.schedulerSnapshot())
+            assertFalse(Files.exists(absent))
+        }
+    }
+
     @Test fun `retained report bytes deny upload before reading body and leave status readable`() = withStore { store, root ->
         val job = store.createFromUpload("quota.elf", elfFixture())
         val reports = Files.createDirectories(root.resolve(job.id).resolve("reports"))
@@ -165,6 +186,12 @@ class WebJobServiceTest {
                 assertIs<WebWorkflowAdmission.Started>(service.start(jobs[1].id, WebWorkflow.EXPLORE))
                 assertEquals(WebWorkflowAdmission.Unavailable, service.start(jobs[2].id, WebWorkflow.EXPLORE))
                 assertEquals("queued", service.get(jobs[1].id).status)
+                val sample = assertIs<WebSchedulerSnapshot.Available>(service.schedulerSnapshot())
+                assertEquals(1, sample.activeWorkers)
+                assertEquals(1, sample.workerLimit)
+                assertEquals(1, sample.queuedTasks)
+                assertEquals(1, sample.queueCapacity)
+                assertFalse(sample.stopping)
                 release.countDown()
                 await { jobs.take(2).all { service.get(it.id).status == "complete" } }
                 assertEquals(2, executed.get())

@@ -58,6 +58,7 @@ class WebJobService(
             Thread(task, "decomp-web-workflow").apply { isDaemon = true }
         }, ThreadPoolExecutor.AbortPolicy())
     } else null
+    private val configuredQueueCapacity = queueCapacity
     private val workflowExecutor = executor ?: ownedExecutor!!
     private val active = mutableMapOf<String, OwnedTask>()
     private val uploads = mutableMapOf<Thread, CountDownLatch>()
@@ -68,6 +69,16 @@ class WebJobService(
     private var initialized = false
     private var stopping = false
     private var closed = false
+
+    /** Aggregate executor telemetry only; independent readings are approximate, never admission authority. */
+    @Synchronized
+    fun schedulerSnapshot(): WebSchedulerSnapshot {
+        requireInitializedRead()
+        val sampledAt = java.time.Instant.now()
+        val pool = ownedExecutor ?: return WebSchedulerSnapshot.Unavailable(sampledAt)
+        return WebSchedulerSnapshot.Available(sampledAt, stopping, pool.activeCount, pool.maximumPoolSize,
+            pool.queue.size, configuredQueueCapacity)
+    }
 
     @Synchronized fun beginShutdown() { stopping = true }
 

@@ -1,0 +1,69 @@
+{
+  "apiVersion": 1,
+  "kind": "bootstrap",
+  "requestId": "request_example_1",
+  "data": {
+    "apiVersions": [
+      1
+    ],
+    "applicationBuildId": "app_fixture_1",
+    "uiBuildId": "ui_fixture_1",
+    "basePath": "/",
+    "readiness": "degraded",
+    "sessionExpiresAt": "2026-09-05T08:00:00Z",
+    "capabilities": [
+      {
+        "id": "harness_acp",
+        "state": "unavailable",
+        "reasonCode": "AGENT_NOT_CONFIGURED",
+        "message": "Configure an available agent before starting this workflow.",
+        "workflows": [
+          "reconstruct"
+        ],
+        "agentContractVersion": 1,
+        "limits": null
+      },
+      {
+        "id": "git_local",
+        "state": "unsupported",
+        "reasonCode": "FEATURE_NOT_IMPLEMENTED",
+        "message": "This fixture does not claim managed Git is implemented.",
+        "workflows": [],
+        "agentContractVersion": null,
+        "limits": null
+      }
+    ],
+    "limits": {
+      "requestDeadlineMs": "30000",
+      "uploadDeadlineMs": "120000",
+      "downloadIdleMs": "120000",
+      "maxJsonBytes": "1048576",
+      "maxUploadBytes": "33554432",
+      "maxSourceChunkBytes": "262144",
+      "maxLogChunkBytes": "65536",
+      "maxEventCount": "10000",
+      "maxEventBytes": "16777216",
+      "terminalEventRetentionMs": "86400000",
+      "defaultPageLimit": 50,
+      "maxPageLimit": 200
+    },
+    "runtime": {
+      "javaVersion": "21-fixture",
+      "osName": "linux",
+      "architecture": "x86_64",
+      "gitVersion": null,
+      "scheduler": {
+        "sampledAt": "2026-09-05T00:00:00Z",
+        "state": "available",
+        "source": "web-workflow-executor",
+        "approximate": true,
+        "lifecycle": "running",
+        "activeWorkers": "2",
+        "workerLimit": "2",
+        "queuedTasks": "32",
+        "queueCapacity": "32"
+      }
+    },
+    "csrfToken": "synthetic_non_secret_csrf_fixture_1234567890"
+  }
+}

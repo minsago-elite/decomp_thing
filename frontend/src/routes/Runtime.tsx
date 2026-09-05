@@ -1,5 +1,6 @@
 import { useLayoutEffect, useState } from 'preact/hooks';
 import type { BrowserSession } from '../session/session';
+import { SchedulerSummary } from '../jobs/SchedulerSummary';
 import type { BuildIdentity } from '../app/buildIdentity';
 
 export default function Runtime({ identity, session = null }: { identity: BuildIdentity; session?: BrowserSession | null }) {
@@ -37,6 +38,7 @@ export default function Runtime({ identity, session = null }: { identity: BuildI
           <dt>Git</dt><dd>{snapshot.runtime.gitVersion ?? 'Not reported'}</dd>
           <dt>Maximum upload</dt><dd>{snapshot.limits.maxUploadBytes === '0' ? 'Uploads unavailable' : `${snapshot.limits.maxUploadBytes} bytes`}</dd>
         </dl>
+        <SchedulerSummary scheduler={snapshot.runtime.scheduler} />
         <h3>Workflow capabilities</h3>
         {snapshot.capabilities.length === 0 ? <p>No capabilities reported.</p> : <ul>
           {snapshot.capabilities.map(capability => <li key={capability.id}>

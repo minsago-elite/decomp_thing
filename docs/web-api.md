@@ -373,3 +373,12 @@ from the target design above are not implemented. Snapshot `progress` metadata
 makes queue/history omissions and retained-record counts explicit. Missing
 journals fail with `PROGRESS_UNAVAILABLE`; replay gaps require a fresh snapshot
 via `PROGRESS_GAP`. See [the implemented boundary and qualification limits](web-progress-adapter.md).
+
+### Current scheduler snapshot
+
+Authenticated bootstrap responses now include optional `runtime.scheduler` for
+aggregate web workflow executor telemetry: approximate active/queued counts,
+configured limits, lifecycle, source and server sample time. Borrowed executors
+report unavailable metrics without zero values. Runtime uses the session-time
+snapshot; it neither polls these counts nor infers workflow availability from
+capacity. See [scheduler summary and verification](web-scheduler-summary.md).

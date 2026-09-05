@@ -32,6 +32,11 @@ export function checkSemantics(document: ContractDocument, basePath = '/'): void
       break;
     }
     case 'bootstrap': {
+      const scheduler = document.data.runtime.scheduler;
+      if (scheduler?.state === 'available') {
+        requireValue(BigInt(scheduler.activeWorkers) <= BigInt(scheduler.workerLimit));
+        requireValue(BigInt(scheduler.queuedTasks) <= BigInt(scheduler.queueCapacity));
+      }
       const { limits, capabilities, apiVersions } = document.data;
       requireValue(limits.defaultPageLimit <= limits.maxPageLimit);
       requireValue(new Set(capabilities.map((item) => item.id)).size === capabilities.length);

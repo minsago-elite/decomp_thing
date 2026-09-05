@@ -275,6 +275,7 @@ internal class WebApiController(
                 else -> "unknown"
             })
             put("gitVersion", JsonNull)
+            put("scheduler", webSchedulerSnapshot(jobs.schedulerSnapshot()))
         })
     }
 

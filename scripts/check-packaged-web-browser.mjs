@@ -603,7 +603,14 @@ try {
     assert.equal((await evaluate(authenticated, 'window.__sessionTestRequests')).length, firstRequests.length,
       'Opening Runtime issued a probe or another bootstrap request');
     assert.ok(await evaluate(authenticated, `document.body.innerText.includes('Workflow actions are unavailable in this preview.') && document.body.innerText.includes('33554432 bytes')`));
-    report.runtimeSnapshot = { connected: true, unavailableCapabilitiesExplained: true, navigationRequests: 0 };
+    const scheduler = await evaluate(authenticated, `(() => {
+      const section = document.querySelector('section[aria-labelledby="scheduler-title"]');
+      return { text: section.innerText, values: Array.from(section.querySelectorAll('dd')).map(node => node.textContent), sampledAt: section.querySelector('time')?.dateTime };
+    })()`);
+    assert.deepEqual(scheduler.values, ['running', '0', '2', '0', '32']);
+    assert.ok(scheduler.text.includes('approximate aggregate observations') && scheduler.text.includes('queue position and start time are not reported'));
+    assert.ok(Number.isFinite(Date.parse(scheduler.sampledAt)));
+    report.runtimeSnapshot = { connected: true, unavailableCapabilitiesExplained: true, scheduler: { approximate: true, lifecycle: 'running', activeWorkers: 0, workerLimit: 2, queuedTasks: 0, queueCapacity: 32, sampledAt: scheduler.sampledAt, queuePositionUnknown: true }, navigationRequests: 0 };
 
     await cdp.call('Page.reload', {}, authenticated.sessionId);
     await ready(authenticated, `document.querySelector('h1')?.textContent === 'Runtime status' && document.body.innerText.includes('Local session connected.')`, 'cookie session restored after reload');

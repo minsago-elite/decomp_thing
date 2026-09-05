@@ -2260,6 +2260,9 @@
               "type": "null"
             }
           ]
+        },
+        "scheduler": {
+          "$ref": "#/definitions/scheduler"
         }
       },
       "required": [
@@ -2555,6 +2558,82 @@
         "omittedFieldCount"
       ],
       "additionalProperties": false
+    },
+    "scheduler": {
+      "oneOf": [
+        {
+          "type": "object",
+          "properties": {
+            "sampledAt": {
+              "$ref": "#/definitions/instant"
+            },
+            "state": {
+              "const": "available"
+            },
+            "source": {
+              "const": "web-workflow-executor"
+            },
+            "approximate": {
+              "const": true
+            },
+            "lifecycle": {
+              "enum": [
+                "running",
+                "stopping"
+              ],
+              "type": "string"
+            },
+            "activeWorkers": {
+              "type": "string",
+              "pattern": "^[0-2]$"
+            },
+            "workerLimit": {
+              "type": "string",
+              "pattern": "^[1-2]$"
+            },
+            "queuedTasks": {
+              "type": "string",
+              "pattern": "^(0|[1-9]|[12][0-9]|3[0-2])$"
+            },
+            "queueCapacity": {
+              "type": "string",
+              "pattern": "^([1-9]|[12][0-9]|3[0-2])$"
+            }
+          },
+          "required": [
+            "sampledAt",
+            "state",
+            "source",
+            "approximate",
+            "lifecycle",
+            "activeWorkers",
+            "workerLimit",
+            "queuedTasks",
+            "queueCapacity"
+          ],
+          "additionalProperties": false
+        },
+        {
+          "type": "object",
+          "properties": {
+            "sampledAt": {
+              "$ref": "#/definitions/instant"
+            },
+            "state": {
+              "const": "unavailable"
+            },
+            "reasonCode": {
+              "const": "EXTERNAL_EXECUTOR"
+            }
+          },
+          "required": [
+            "sampledAt",
+            "state",
+            "reasonCode"
+          ],
+          "additionalProperties": false
+        }
+      ]
     }
   },
   "oneOf": [

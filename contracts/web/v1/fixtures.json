@@ -281,6 +281,26 @@
     {
       "file": "fixtures/invalid-snapshot-progress-count.json",
       "valid": false
+    },
+    {
+      "file": "fixtures/bootstrap-scheduler-saturated.json",
+      "valid": true
+    },
+    {
+      "file": "fixtures/bootstrap-scheduler-unavailable.json",
+      "valid": true
+    },
+    {
+      "file": "fixtures/invalid-scheduler-bound.json",
+      "valid": false
+    },
+    {
+      "file": "fixtures/invalid-scheduler-exact.json",
+      "valid": false
+    },
+    {
+      "file": "fixtures/invalid-scheduler-capacity.json",
+      "valid": false
     }
   ]
 }
