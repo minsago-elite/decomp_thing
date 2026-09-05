@@ -13,6 +13,53 @@ import kotlin.test.assertTrue
 
 class WorkspaceSnapshotLimitsTest {
     @Test
+    fun `recursive inventory rejects symlinks instead of silently omitting them`() {
+        val root = workspace()
+        val outside = root.resolve("outside")
+        outside.writeText("retained private content")
+        Files.createSymbolicLink(root.resolve("src/link"), outside)
+        assertEquals("symbolic-link", assertFailsWith<WorkspaceSnapshotInvalidEntry> {
+            capture(request(root), WorkspaceSnapshotLimits())
+        }.reason)
+        assertEquals("retained private content", Files.readString(outside))
+    }
+
+    @Test
+    fun `dangling links are unsupported entries rather than absent authorized paths`() {
+        val root = workspace()
+        Files.createSymbolicLink(root.resolve("src/link"), root.resolve("missing"))
+        assertEquals("symbolic-link", assertFailsWith<WorkspaceSnapshotInvalidEntry> {
+            capture(request(root), WorkspaceSnapshotLimits())
+        }.reason)
+    }
+
+    @Test
+    fun `special socket entries are rejected without opening their content`() {
+        val root = workspace()
+        val socket = root.resolve("src/socket")
+        java.nio.channels.ServerSocketChannel.open(java.net.StandardProtocolFamily.UNIX).use { server ->
+            server.bind(java.net.UnixDomainSocketAddress.of(socket))
+            assertEquals("special-file", assertFailsWith<WorkspaceSnapshotInvalidEntry> {
+                capture(request(root), WorkspaceSnapshotLimits())
+            }.reason)
+        }
+        assertTrue(Files.exists(socket))
+    }
+
+    @Test
+    fun `missing explicitly authorized target remains eligible for later creation`() {
+        val root = workspace()
+        val path = AgentWorkspacePath("project", "src/new")
+        val request = AgentExecutionRequest("creation fixture", listOf(AgentWorkspaceRoot("project", root)),
+            emptyList(), AgentAccessPolicy(listOf(AgentPathRule(path,
+                setOf(AgentOperation.READ_FILE, AgentOperation.CREATE_FILE)))))
+        val before = capture(request, WorkspaceSnapshotLimits())
+        root.resolve("src/new").writeText("new")
+        val after = capture(request, WorkspaceSnapshotLimits())
+        assertEquals(AgentFileChangeKind.CREATED, before.diff(after, request, budget(WorkspaceSnapshotLimits())).single().kind)
+    }
+
+    @Test
     fun `directory entries consume budget without any regular files`() {
         val root = workspace()
         repeat(4) { Files.createDirectory(root.resolve("src/d$it")) }
@@ -84,7 +131,7 @@ class WorkspaceSnapshotLimitsTest {
         }.dimension)
     }
 
-    private fun workspace(): Path = createTempDirectory("bounded-snapshot-").also {
+    private fun workspace(): Path = createTempDirectory("ws-").also {
         Files.createDirectory(it.resolve("src"))
     }
 
