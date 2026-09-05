@@ -1,0 +1,214 @@
+{
+  "schema": "contract.schema.json",
+  "fixtures": [
+    {
+      "file": "fixtures/session.json",
+      "valid": true
+    },
+    {
+      "file": "fixtures/bootstrap.json",
+      "valid": true
+    },
+    {
+      "file": "fixtures/job-lossless.json",
+      "valid": true
+    },
+    {
+      "file": "fixtures/jobs-page.json",
+      "valid": true
+    },
+    {
+      "file": "fixtures/run-queued.json",
+      "valid": true
+    },
+    {
+      "file": "fixtures/run-completed-unaccepted.json",
+      "valid": true
+    },
+    {
+      "file": "fixtures/artifact.json",
+      "valid": true
+    },
+    {
+      "file": "fixtures/revision-accepted.json",
+      "valid": true
+    },
+    {
+      "file": "fixtures/report-accepted.json",
+      "valid": true
+    },
+    {
+      "file": "fixtures/report-exploration.json",
+      "valid": true
+    },
+    {
+      "file": "fixtures/report-partial.json",
+      "valid": true
+    },
+    {
+      "file": "fixtures/report-missing.json",
+      "valid": true
+    },
+    {
+      "file": "fixtures/report-unsupported.json",
+      "valid": true
+    },
+    {
+      "file": "fixtures/report-unknown.json",
+      "valid": true
+    },
+    {
+      "file": "fixtures/report-invalid.json",
+      "valid": true
+    },
+    {
+      "file": "fixtures/report-incompatible.json",
+      "valid": true
+    },
+    {
+      "file": "fixtures/event-message-lossless.json",
+      "valid": true
+    },
+    {
+      "file": "fixtures/event-run-state.json",
+      "valid": true
+    },
+    {
+      "file": "fixtures/event-evidence.json",
+      "valid": true
+    },
+    {
+      "file": "fixtures/event-gap.json",
+      "valid": true
+    },
+    {
+      "file": "fixtures/snapshot.json",
+      "valid": true
+    },
+    {
+      "file": "fixtures/events-poll.json",
+      "valid": true
+    },
+    {
+      "file": "fixtures/git-workspace.json",
+      "valid": true
+    },
+    {
+      "file": "fixtures/git-operation.json",
+      "valid": true
+    },
+    {
+      "file": "fixtures/error-validation.json",
+      "valid": true
+    },
+    {
+      "file": "fixtures/error-version-conflict.json",
+      "valid": true
+    },
+    {
+      "file": "fixtures/request-workflow-start.json",
+      "valid": true
+    },
+    {
+      "file": "fixtures/request-recover.json",
+      "valid": true
+    },
+    {
+      "file": "fixtures/request-git-commit.json",
+      "valid": true
+    },
+    {
+      "file": "fixtures/request-git-push.json",
+      "valid": true
+    },
+    {
+      "file": "fixtures/request-session.json",
+      "valid": true
+    },
+    {
+      "file": "fixtures/invalid-numeric-count.json",
+      "valid": false,
+      "reason": "Byte counts must be decimal strings."
+    },
+    {
+      "file": "fixtures/invalid-count-overflow.json",
+      "valid": false,
+      "reason": "Unsigned 64-bit byte count cannot overflow."
+    },
+    {
+      "file": "fixtures/invalid-address.json",
+      "valid": false,
+      "reason": "Address exceeds unsigned 64-bit width."
+    },
+    {
+      "file": "fixtures/invalid-private-path.json",
+      "valid": false,
+      "reason": "Producer schema must reject internal path leakage."
+    },
+    {
+      "file": "fixtures/invalid-unknown-enum.json",
+      "valid": false,
+      "reason": "Unknown states cannot be accepted as known runtime state."
+    },
+    {
+      "file": "fixtures/invalid-unknown-version.json",
+      "valid": false,
+      "reason": "Unsupported API major must fail known-schema validation."
+    },
+    {
+      "file": "fixtures/invalid-partial-accepted.json",
+      "valid": false,
+      "reason": "Partial evidence cannot be accepted."
+    },
+    {
+      "file": "fixtures/invalid-root-accepted.json",
+      "valid": false,
+      "reason": "Root snapshot is not an accepted repair."
+    },
+    {
+      "file": "fixtures/invalid-test-only-accepted.json",
+      "valid": false,
+      "reason": "Test-only publication cannot be release acceptance."
+    },
+    {
+      "file": "fixtures/invalid-terminal-without-time.json",
+      "valid": false,
+      "reason": "Terminal attempts need a persisted terminal timestamp."
+    },
+    {
+      "file": "fixtures/invalid-git-sha256-abbreviation.json",
+      "valid": false,
+      "reason": "Git mutation/view identity uses a full object ID for its format."
+    },
+    {
+      "file": "fixtures/invalid-request-unknown-field.json",
+      "valid": false,
+      "reason": "Mutation requests reject unknown fields."
+    },
+    {
+      "file": "fixtures/invalid-report-artifact-binding.json",
+      "valid": false,
+      "reason": "Report evidence cannot be borrowed from another attempt."
+    },
+    {
+      "file": "fixtures/invalid-page-over-limit.json",
+      "valid": false,
+      "reason": "Record count must obey the declared page limit."
+    },
+    {
+      "file": "fixtures/invalid-snapshot-watermark.json",
+      "valid": false,
+      "reason": "A cursor without its matching snapshot sequence is inconsistent."
+    },
+    {
+      "file": "fixtures/invalid-report-failed-accepted.json",
+      "valid": false,
+      "reason": "Failed validation cannot be presented as accepted."
+    },
+    {
+      "file": "fixtures/invalid-gap-invented-cursor.json",
+      "valid": false,
+      "reason": "A transport gap cannot manufacture a durable event cursor or sequence."
+    }
+  ]
+}

@@ -1,0 +1,17 @@
+{
+  "apiVersion": 1,
+  "kind": "revision",
+  "requestId": "request_example_1",
+  "data": {
+    "revisionId": "revision_example_1",
+    "jobId": "1234567890abcdef1234567890abcdef",
+    "runId": "run_example_1",
+    "sourceSha256": "abababababababababababababababababababababababababababababababab",
+    "parentRevisionId": "revision_parent_1",
+    "graphNodeId": "accepted_node_1",
+    "graphStatus": "ACCEPTED",
+    "acceptance": "accepted",
+    "acceptanceArtifactId": "artifact_example_1",
+    "publicationMode": "release"
+  }
+}
