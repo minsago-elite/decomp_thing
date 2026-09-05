@@ -1743,6 +1743,7 @@ object SourceTreeGenerator {
             append("\n  \"basis\": \"recovery evidence only; behavioral equivalence is not implied\",")
             append("\n  \"scoreMeaning\": \"structural recovery heuristic; not implementation acceptance or measured behavioral confidence\",")
             append("\n  \"scoreInterpretation\": ").append(HeuristicScoreInterpretation.STRUCTURAL_RECOVERY.toJson()).append(',')
+            append("\n  \"recoveryAssessment\": ").append(model.unassessedRecoveryAssessment()).append(',')
             append("\n  \"projectScore\": ").append("%.4f".format(java.util.Locale.ROOT, projectScore)).append(',')
             append("\n  \"modules\": [")
             append(moduleScores.sortedBy { it.first }.joinToString(",") { (id, value) ->

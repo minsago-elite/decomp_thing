@@ -43,6 +43,16 @@ validated assessment join, historical report migration and production qualificat
 remain tracked in #363 and #42. Schema-2 unresolved accounting alone does not supply
 the authenticated assessment evidence needed to resolve an entity.
 
+New confidence and archival audit reports include a separate `recoveryAssessment`
+population for both model versions. Its closed
+[`unassessed-recovery-population.schema.json`](../oracle/unassessed-recovery-population.schema.json)
+binds the model version and exact model SHA-256, lists every model entity as
+unassessed, and has no assessed entities. The producer derives this population from
+the model rather than consuming an archived assessment claim. Existing historical
+diagnostic unresolved lists can be empty while this population remains completely
+unassessed. Neither successful compilation nor a legacy `recovered` label upgrades
+it. Previously written reports remain unchanged until regenerated or re-audited.
+
 Live benign authored programs verify bundled Java-API Ghidra full/planning export,
 canonical streaming parity and deterministic resume. Planning resume also checks
 that historical exporter state is refused and prior bytes are preserved. This is
