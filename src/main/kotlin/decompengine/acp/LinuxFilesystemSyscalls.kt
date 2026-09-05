@@ -50,9 +50,14 @@ internal object LinuxFilesystemSyscalls {
             )
             throw IOException("renameat2 safety probe unexpectedly changed a filesystem entry")
         } catch (failure: LinuxSyscallException) {
-            if (failure.errno != ENOENT) throw IOException("Linux renameat2 is unavailable", failure)
+            if (failure.errno != ENOENT) {
+                throw IOException("Linux renameat2 is unavailable (errno=${failure.errno})", failure)
+            }
         } catch (failure: UnsatisfiedLinkError) {
-            throw IOException("Linux renameat2 is unavailable", failure)
+            throw IOException(
+                "Linux renameat2 native linkage is unavailable: ${failure.message.orEmpty().take(1024)}",
+                failure,
+            )
         }
     }
 
