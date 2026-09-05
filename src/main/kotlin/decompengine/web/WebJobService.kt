@@ -312,7 +312,7 @@ class WebJobService(
             synchronized(this) {
                 publicationFailures[failure.jobId] = WebJobDiagnostic(failure.jobId, "RECOVERY_REQUIRED", "An upload may have been published. Reopen storage before admitting more work; do not retry blindly.")
             }
-            throw WebJobServiceException("RECOVERY_REQUIRED", "Upload publication is uncertain. Inspect storage before retrying.", failure)
+            throw failure
         } finally {
             reservation?.close()
             synchronized(this) { uploads.remove(worker); finished.countDown(); releaseIfQuiescent() }
