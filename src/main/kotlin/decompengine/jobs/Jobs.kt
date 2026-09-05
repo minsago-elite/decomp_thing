@@ -134,6 +134,9 @@ class JobStore internal constructor(
     }
 
     @Synchronized
+    fun recoveryInventory(): JobRecoveryInventory = inspectJobRecoveryInventory(root)
+
+    @Synchronized
     fun list(): List<Job> {
         if (!root.exists()) return emptyList()
         return Files.list(root).use { paths ->

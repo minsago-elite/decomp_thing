@@ -347,6 +347,25 @@ up the staging directory; failures after rename may leave a complete published j
 receives an error. Startup does not treat staging directory names as job IDs. Tests verify interrupted input
 writes leave no partial job and preserve prior jobs. Power-loss injection, abandoned staging/temporary-file
 reclamation, and durability of newly created store ancestors remain open requirements.
+
+`GET /api/recovery` exposes a read-only schema-v1 recovery inventory for #242. It reports retained
+upload-stage and metadata-temporary counts, scanned entries, observed bytes as a decimal string,
+uninspected entries and `inventoryComplete`, with `displayOnly: true`. It returns no paths, filenames,
+file contents or I/O exception details. Inspection charges every encountered directory entry against
+a 4,096-entry budget, counts at most 128 candidates and accumulates at most 64 MiB of regular-file
+lengths. It reads attributes rather than file contents, scans one level inside private stages and job
+directories, and does not descend into job reports. Descriptor-relative inspection does not follow child
+symlinks. Unknown candidate layouts, inspection errors, unavailable secure directory streams or exceeded
+budgets make the inventory incomplete; observed counts and bytes then give lower bounds. An oversized
+file is omitted from the byte sum rather than clamped. `uninspectedEntries` counts encountered inspection
+failures/unsupported entries, not the unknown number remaining after budget exhaustion.
+
+This is an observation, not an atomic filesystem snapshot or a wall-time bound on filesystem I/O.
+The configured root follows the existing store path contract; this does not fence raw filesystem writers.
+A complete inventory says only that the scoped scan finished, not that candidates are abandoned or safe
+to delete. No files are reclaimed or promoted. Safe reclamation and aggregate storage quotas remain
+#242/#71 requirements; #69 may display this summary without interpreting it as completed cleanup.
+
 `JobUploadCrashTest` halts a benign child JVM at fourteen controlled input/metadata write, force and
 directory-publication boundaries. Before final rename the candidate remains a private stage; afterward a
 fresh store sees a complete input and matching metadata. Existing jobs remain unchanged and recovery does

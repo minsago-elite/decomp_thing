@@ -298,6 +298,8 @@ class UploadServer(
                     exchange.sendHtml(200, renderDashboard(store.list()))
                 exchange.requestMethod == "GET" && segments == listOf("assets", "app.css") ->
                     exchange.sendBytes(200, APP_CSS.toByteArray(), "text/css; charset=utf-8", cache = true)
+                exchange.requestMethod == "GET" && segments == listOf("api", "recovery") ->
+                    exchange.sendJson(200, store.recoveryInventory().toJson().toString())
                 exchange.requestMethod == "POST" && segments == listOf("jobs") -> handlePostJob(exchange)
                 exchange.requestMethod == "GET" && segments.size == 2 && segments[0] == "jobs" ->
                     handleJob(exchange, decode(segments[1]))

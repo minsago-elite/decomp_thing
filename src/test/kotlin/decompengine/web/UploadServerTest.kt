@@ -39,6 +39,24 @@ import kotlin.test.assertTrue
 
 class UploadServerTest {
     @Test
+    fun `recovery endpoint returns a read-only summary without private names or contents`() = withServer { server, root ->
+        val stage = Files.createDirectory(root.resolve(".upload-private-secret-name"))
+        val input = stage.resolve("input.elf")
+        input.writeText("private-content")
+        val response = request(server, "GET", "/api/recovery")
+        assertEquals(200, response.status)
+        val text = response.body.decodeToString()
+        val json = Json.parseToJsonElement(text).jsonObject
+        assertEquals("true", json["displayOnly"].toString())
+        assertEquals("true", json["inventoryComplete"].toString())
+        assertEquals("1", json["retainedUploadStages"].toString())
+        assertEquals("\"15\"", json["observedBytes"].toString())
+        assertTrue(!text.contains("private"))
+        assertTrue(!text.contains(root.toString()))
+        assertEquals("private-content", input.readBytes().decodeToString())
+    }
+
+    @Test
     fun `shutdown discards caller-queued work and late delivery cannot alter a new owner state`() {
         val dataDir = createTempDirectory("web-caller-queue-")
         val queued = java.util.concurrent.CopyOnWriteArrayList<Runnable>()
