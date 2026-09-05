@@ -59,15 +59,11 @@ class OpenAiCompatibleModelProvider(private val configuration: OpenAiCompatibleC
                         .header("Content-Type", "application/json").header("Accept", "text/event-stream")
                         .timeout(minOf(limits.requestTimeout, remaining(deadline)))
                         .POST(HttpRequest.BodyPublishers.ofByteArray(body)).build()
-                    val exchange = try { client.sendAsync(wire, HttpResponse.BodyHandlers.ofPublisher()) }
-                    catch (_: Exception) { fail(ModelFailureKind.TRANSPORT) }
-                    val response = try { await(exchange, request, attemptDeadline) } finally {
-                        // Cancelling an unfinished exchange also closes any transport-owned subscription.
-                        if (!exchange.isDone) exchange.cancel(true)
-                    }
                     val stream = BoundedBody(limits.maxResponseBytes)
-                    response.body().subscribe(stream)
+                    val exchange = try { client.sendAsync(wire) { stream } }
+                    catch (_: Exception) { fail(ModelFailureKind.TRANSPORT) }
                     try {
+                        val response = await(exchange, request, attemptDeadline)
                         val status = response.statusCode()
                         if (status != 200) {
                             val kind = when (status) {
@@ -95,40 +91,58 @@ class OpenAiCompatibleModelProvider(private val configuration: OpenAiCompatibleC
                         if (response.headers().firstValue("Content-Type").orElse("").substringBefore(';').trim()
                             .lowercase() != "text/event-stream") fail(ModelFailureKind.MALFORMED_RESPONSE)
                         return decode(stream, request, attemptDeadline, body.size, secrets, attempt, onEvent)
-                    } finally { stream.close() }
+                    } finally {
+                        // Own the subscriber before headers arrive, including cancellation races.
+                        stream.close()
+                        if (!exchange.isDone) exchange.cancel(true)
+                    }
                 }
             }
         error("Unreachable provider retry state")
     }
 
-    private fun encode(request: ModelRequest): ByteArray = buildJsonObject {
-        put("model", configuration.model)
-        put("stream", true)
-        put("store", false)
-        put("max_completion_tokens", request.limits.maxOutputTokens)
-        putJsonObject("stream_options") { put("include_usage", true) }
-        putJsonArray("messages") {
-            request.messages.forEach { message -> add(buildJsonObject {
-                put("role", message.role.name.lowercase())
-                put("content", message.content)
-                message.toolCallId?.let { put("tool_call_id", it) }
-                if (message.toolCalls.isNotEmpty()) putJsonArray("tool_calls") {
-                    message.toolCalls.forEach { call -> add(buildJsonObject {
-                        put("id", call.id); put("type", "function")
-                        putJsonObject("function") { put("name", call.name); put("arguments", call.arguments.toString()) }
-                    }) }
+    private fun encode(request: ModelRequest): ByteArray = boundedProviderJson(request.limits.maxRequestBytes) { json ->
+        json.writeStartObject()
+        json.writeStringField("model", configuration.model)
+        json.writeBooleanField("stream", true)
+        json.writeBooleanField("store", false)
+        json.writeNumberField("max_completion_tokens", request.limits.maxOutputTokens)
+        json.writeObjectFieldStart("stream_options"); json.writeBooleanField("include_usage", true); json.writeEndObject()
+        json.writeArrayFieldStart("messages")
+        request.messages.forEach { message ->
+            json.writeStartObject()
+            json.writeStringField("role", message.role.name.lowercase())
+            json.writeStringField("content", message.content)
+            message.toolCallId?.let { json.writeStringField("tool_call_id", it) }
+            if (message.toolCalls.isNotEmpty()) {
+                json.writeArrayFieldStart("tool_calls")
+                message.toolCalls.forEach { call ->
+                    json.writeStartObject()
+                    json.writeStringField("id", call.id); json.writeStringField("type", "function")
+                    json.writeObjectFieldStart("function")
+                    json.writeStringField("name", call.name)
+                    val arguments = boundedProviderJson(request.limits.maxRequestBytes) { it.writeProviderValue(call.arguments) }
+                    json.writeStringField("arguments", arguments.decodeToString())
+                    json.writeEndObject(); json.writeEndObject()
                 }
-            }) }
+                json.writeEndArray()
+            }
+            json.writeEndObject()
         }
-        if (request.tools.isNotEmpty()) putJsonArray("tools") {
-            request.tools.forEach { tool -> add(buildJsonObject {
-                put("type", "function")
-                putJsonObject("function") {
-                    put("name", tool.name); put("description", tool.description); put("parameters", tool.parameters)
-                }
-            }) }
+        json.writeEndArray()
+        if (request.tools.isNotEmpty()) {
+            json.writeArrayFieldStart("tools")
+            request.tools.forEach { tool ->
+                json.writeStartObject(); json.writeStringField("type", "function")
+                json.writeObjectFieldStart("function")
+                json.writeStringField("name", tool.name); json.writeStringField("description", tool.description)
+                json.writeFieldName("parameters"); json.writeProviderValue(tool.parameters)
+                json.writeEndObject(); json.writeEndObject()
+            }
+            json.writeEndArray()
         }
-    }.toString().toByteArray(Charsets.UTF_8)
+        json.writeEndObject()
+    }
 
     private fun decode(
         stream: BoundedBody, request: ModelRequest, deadline: Long, inputBytes: Int,
@@ -151,7 +165,7 @@ class OpenAiCompatibleModelProvider(private val configuration: OpenAiCompatibleC
                 if (finish == null) fail(ModelFailureKind.MALFORMED_RESPONSE)
                 done = true
             } else try {
-                val chunk = Json.parseToJsonElement(payload).jsonObject
+                val chunk = parseProviderObject(payload, limits.maxEventBytes)
                 if ("error" in chunk) fail(ModelFailureKind.MALFORMED_RESPONSE)
                 chunk["usage"]?.takeUnless { it == JsonNull }?.jsonObject?.let {
                     if (usage != null) fail(ModelFailureKind.MALFORMED_RESPONSE)
@@ -213,7 +227,7 @@ class OpenAiCompatibleModelProvider(private val configuration: OpenAiCompatibleC
         redactor.finish()
         val calls = try { tools.values.map { tool ->
             val call = ModelToolCall(requireNotNull(tool.id), tool.name.toString(),
-                Json.parseToJsonElement(tool.arguments.toString()).jsonObject)
+                parseProviderObject(tool.arguments.toString(), limits.maxResponseBytes))
             require(request.tools.any { it.name == call.name })
             if (secrets.any { secret -> containsSecret(call.arguments, secret) || call.id.contains(secret) || call.name.contains(secret) }) {
                 fail(ModelFailureKind.SECRET_EXPOSURE)
@@ -228,8 +242,8 @@ class OpenAiCompatibleModelProvider(private val configuration: OpenAiCompatibleC
         if (measured.outputTokens > limits.maxOutputTokens) fail(ModelFailureKind.RESOURCE_EXHAUSTED)
         calls.forEach { onEvent(ModelEvent.ToolCall(it)) }
         onEvent(ModelEvent.Usage(measured))
-        onEvent(ModelEvent.Finished(finish!!))
-        return ModelResponse(text.toString(), calls, finish!!, measured, attempt)
+        onEvent(ModelEvent.Finished(finish))
+        return ModelResponse(text.toString(), calls, finish, measured, attempt)
     }
 
     private class PartialTool {
@@ -286,11 +300,12 @@ private fun retryDelay(header: String?, attempt: Int, limits: ModelCallLimits): 
 }
 
 /** One demanded body batch, plus a terminal signal; no unbounded read thread or publisher queue. */
-private class BoundedBody(private val limit: Int) : Flow.Subscriber<List<ByteBuffer>>, AutoCloseable {
+private class BoundedBody(private val limit: Int) : HttpResponse.BodySubscriber<BoundedBody>, AutoCloseable {
     private val queue = ArrayBlockingQueue<Any>(2)
     @Volatile private var subscription: Flow.Subscription? = null
     @Volatile private var closed = false
     private var total = 0L
+    override fun getBody(): CompletionStage<BoundedBody> = CompletableFuture.completedFuture(this)
     override fun onSubscribe(value: Flow.Subscription) {
         subscription = value
         if (closed) value.cancel() else value.request(1)

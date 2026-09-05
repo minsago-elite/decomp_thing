@@ -270,6 +270,59 @@ class OpenAiCompatibleModelProviderTest {
         }
     }
 
+    @Test fun `duplicate keys deep nesting and invalid UTF8 cannot become actions`() {
+        val ambiguous = "{\"choices\":[],\"choices\":[{\"index\":0,\"delta\":{},\"finish_reason\":\"stop\"}]}"
+        val deep = "{\"extra\":" + "[".repeat(100) + "0" + "]".repeat(100) + ",\"choices\":[]}"
+        for (body in listOf(events(ambiguous, "[DONE]"), events(deep, "[DONE]"),
+            events(call(args = "{\"path\":\"a\",\"path\":\"b\"}"), chunk(finish = "tool_calls"), "[DONE]"))) {
+            server({ exchange, _ -> exchange.sse(body) }) { provider, _ ->
+                assertEquals(ModelFailureKind.MALFORMED_RESPONSE, assertFailsWith<ModelProviderException> {
+                    provider.generate(request(tools = listOf(tool()))) {}
+                }.kind)
+            }
+        }
+        server({ exchange, _ -> exchange.beginSse(); exchange.responseBody.write(byteArrayOf(0xc3.toByte(), 0x28, 10)) }) { provider, _ ->
+            assertEquals(ModelFailureKind.MALFORMED_RESPONSE, assertFailsWith<ModelProviderException> { provider.generate(request()) {} }.kind)
+        }
+    }
+
+    @Test fun `escaping and tool schemas are charged during bounded serialization`() = server({ exchange, _ -> exchange.sse(success()) }) { provider, count ->
+        val escaped = ModelRequest(listOf(ModelMessage(ModelRole.USER, "\u0001".repeat(1000))), limits = ModelCallLimits(maxRequestBytes = 1200))
+        assertEquals(ModelFailureKind.RESOURCE_EXHAUSTED, assertFailsWith<ModelProviderException> { provider.generate(escaped) {} }.kind)
+        val largeSchema = ModelToolDefinition("read_file", "x".repeat(10_000), tool().parameters)
+        assertEquals(ModelFailureKind.RESOURCE_EXHAUSTED, assertFailsWith<ModelProviderException> {
+            provider.generate(request(ModelCallLimits(maxRequestBytes = 1200), listOf(largeSchema))) {}
+        }.kind)
+        assertEquals(0, count.get())
+    }
+
+    @Test fun `headers timeout and cancellation abandon the owned HTTP subscription`() {
+        for (cancelled in listOf(false, true)) {
+            val source = AgentCancellationSource()
+            val release = CountDownLatch(1)
+            server({ _, _ -> if (cancelled) source.cancel(); release.await(3, TimeUnit.SECONDS) }) { provider, _ ->
+                try {
+                    val request = ModelRequest(request().messages, limits = ModelCallLimits(requestTimeout = Duration.ofMillis(200)),
+                        cancellation = source.cancellation)
+                    assertEquals(if (cancelled) ModelFailureKind.CANCELLED else ModelFailureKind.TIMEOUT,
+                        assertFailsWith<ModelProviderException> { provider.generate(request) {} }.kind)
+                } finally { release.countDown() }
+            }
+        }
+    }
+
+    @Test fun `retry wait is cancellable and shares the overall deadline`() = server({ exchange, _ -> exchange.reply(429, key) }) { provider, count ->
+        val source = AgentCancellationSource()
+        val req = ModelRequest(request().messages, cancellation = source.cancellation)
+        assertEquals(ModelFailureKind.CANCELLED, assertFailsWith<ModelProviderException> {
+            provider.generate(req) { if (it is ModelEvent.Retrying) source.cancel() }
+        }.kind)
+        assertEquals(1, count.get())
+        val limits = ModelCallLimits(overallTimeout = Duration.ofMillis(300), retryBaseDelay = Duration.ofSeconds(1))
+        assertFailsWith<ModelProviderException> { provider.generate(request(limits)) {} }
+        assertEquals(2, count.get())
+    }
+
     private fun HttpExchange.beginSse() { responseHeaders.set("Content-Type", "text/event-stream; charset=utf-8"); sendResponseHeaders(200, 0) }
     private fun HttpExchange.sse(body: String) { beginSse(); responseBody.write(body.toByteArray()) }
     private fun HttpExchange.reply(status: Int, body: String) { sendResponseHeaders(status, body.toByteArray().size.toLong()); responseBody.write(body.toByteArray()) }
