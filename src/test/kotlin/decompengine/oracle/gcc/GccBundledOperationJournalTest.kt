@@ -4,6 +4,7 @@ import decompengine.acp.LinuxFileIdentity
 import decompengine.acp.LinuxFileKey
 import decompengine.acp.LinuxFilesystemCapacity
 import decompengine.analysis.BundledGhidra
+import decompengine.project.GeneratedCMakeReconstructionProfile
 import decompengine.oracle.core.DescriptorBoundAtomicStateFile
 import decompengine.oracle.core.OracleArtifacts
 import decompengine.oracle.core.OracleJson
@@ -125,8 +126,8 @@ class GccBundledOperationJournalTest {
         }
     }
 
-    private fun withStoppedJournal(action: (GccBundledOperationJournal, ByteArray) -> Unit) = withJournalRoot { root ->
-        val intent = intent()
+    private fun withStoppedJournal(intentBytes: ByteArray = intent(), action: (GccBundledOperationJournal, ByteArray) -> Unit) = withJournalRoot { root ->
+        val intent = intentBytes
         val payload = OracleJson.canonicalBytes(JsonObject(mapOf("fixtureOnly" to JsonPrimitive(true))))
         val originalBytes = definition(runKind = GccCompilerEngineContainmentRunKind.INTERRUPTED)
         val original = GccCompilerEngineContainmentContract.parseDefinitionForLiveController(originalBytes)
@@ -640,6 +641,138 @@ class GccBundledOperationJournalTest {
             journal.close()
         }
         assertEquals(setOf("intent.json", "lease-evidence.json", "definition.json", "prepared.json"), names(journal.path))
+    }
+
+    @Test
+    fun `planner journal extends fresh and resumed evidence with an immutable ordered chain`() {
+        for (resumed in listOf(false, true)) withPlannerReadyJournal(resumed) { journal, request ->
+            val old = names(journal.path).associateWith { Files.readAllBytes(journal.path.resolve(it)) }
+            val requestBytes = request.canonicalBytes
+            journal.recordPlannerPrepared(requestBytes)
+            requestBytes.fill(0)
+            journal.recordPlannerAttachment(intent("planner attachment"))
+            journal.recordPlannerStartAuthorization()
+            journal.recordPlannerExecution(intent("planner execution"))
+            journal.recordPlannerAssessment(plannerAssessment(request))
+            old.forEach { (name, bytes) -> assertContentEquals(bytes, Files.readAllBytes(journal.path.resolve(name))) }
+            assertContentEquals(request.canonicalBytes, Files.readAllBytes(journal.path.resolve("planner-request.json")))
+            var previous = old.getValue(if (resumed) "resume-export-assessment.json" else "export-assessment.json")
+            for (name in listOf("planner-prepared.json", "planner-attachment.json", "planner-start-authorized.json",
+                "planner-execution.json", "planner-assessment.json")) {
+                val bytes = Files.readAllBytes(journal.path.resolve(name))
+                val record = OracleJson.parseCanonical(bytes).jsonObject
+                assertEquals(OracleArtifacts.sha256(previous), record.getValue("previousSha256").jsonPrimitive.content)
+                assertEquals(JsonPrimitive(false), record["complete"])
+                assertEquals(JsonPrimitive(false), record["releaseEligible"])
+                assertEquals("r--------", permissions(journal.path.resolve(name)))
+                previous = bytes
+            }
+            assertEquals(if (resumed) 23 else 14, names(journal.path).size)
+            journal.verify("planner lifecycle")
+            assertFails { journal.recordPlannerPrepared(request.canonicalBytes) }
+        }
+    }
+
+    @Test
+    fun `planner preparation rejects request policy path and model substitutions before publication`() {
+        val mutations = mapOf(
+            "operationRequestSha256" to JsonPrimitive("f".repeat(64)),
+            "profilePolicySha256" to JsonPrimitive("f".repeat(64)),
+            "modelSha256" to JsonPrimitive("f".repeat(64)),
+            "inputSha256" to JsonPrimitive("f".repeat(64)),
+            "modelBytes" to JsonPrimitive(129), "functionCount" to JsonPrimitive(3),
+            "maximumFunctionsPerModule" to JsonPrimitive(25), "maximumWorkUnits" to JsonPrimitive(10001),
+            "maximumPlanBytes" to JsonPrimitive(8193),
+            "modelPath" to JsonPrimitive("/other/model.json"), "outputDirectory" to JsonPrimitive("/other/reports"),
+        )
+        for ((field, value) in mutations) withPlannerReadyJournal(false) { journal, request ->
+            val altered = OracleJson.canonicalBytes(JsonObject(OracleJson.parseCanonical(request.canonicalBytes).jsonObject + (field to value)))
+            assertFails { journal.recordPlannerPrepared(altered) }
+            assertFalse(Files.exists(journal.path.resolve("planner-request.json")))
+            assertFails { journal.verify("poisoned planner request") }
+        }
+    }
+
+    @Test
+    fun `planner journal denies missing predecessors changed request identity and wrong output lineage`() {
+        val outOfOrder: List<(GccBundledOperationJournal, GccBundledPlannerRequest) -> Unit> = listOf(
+            { journal, _ -> journal.recordPlannerStartAuthorization() },
+            { journal, _ -> journal.recordPlannerExecution(intent("early execution")) },
+            { journal, request -> journal.recordPlannerAssessment(plannerAssessment(request)) },
+        )
+        for (attempt in outOfOrder) withPlannerReadyJournal(false) { journal, request ->
+            journal.recordPlannerPrepared(request.canonicalBytes)
+            assertFails { attempt(journal, request) }
+            assertEquals(10, names(journal.path).size)
+        }
+        withPlannerReadyJournal(false) { journal, request ->
+            journal.recordPlannerPrepared(request.canonicalBytes)
+            val path = journal.path.resolve("planner-request.json")
+            Files.move(path, journal.path.parent.resolve("original-planner-request"))
+            immutableFile(path, request.canonicalBytes)
+            assertFails { journal.recordPlannerAttachment(intent("changed request")) }
+        }
+        for ((field, value) in mapOf("requestSha256" to JsonPrimitive("f".repeat(64)), "planBytes" to JsonPrimitive(8193),
+            "operationRequestSha256" to JsonPrimitive("f".repeat(64)), "profilePolicySha256" to JsonPrimitive("f".repeat(64)),
+            "functionCount" to JsonPrimitive(3), "planSha256" to JsonPrimitive(java.math.BigInteger("1".repeat(64))))) {
+            withPlannerReadyJournal(false) { journal, request ->
+                journal.recordPlannerPrepared(request.canonicalBytes)
+                journal.recordPlannerAttachment(intent("attachment"))
+                journal.recordPlannerStartAuthorization()
+                journal.recordPlannerExecution(intent("execution"))
+                val altered = JsonObject(OracleJson.parseCanonical(plannerAssessment(request)).jsonObject + (field to value))
+                assertFails { journal.recordPlannerAssessment(OracleJson.canonicalBytes(altered)) }
+                assertFalse(Files.exists(journal.path.resolve("planner-assessment.json")))
+            }
+        }
+    }
+
+    private fun plannerAssessment(request: GccBundledPlannerRequest) = OracleJson.canonicalBytes(JsonObject(mapOf(
+        "fixtureOnly" to JsonPrimitive(true), "requestSha256" to JsonPrimitive(OracleArtifacts.sha256(request.canonicalBytes)),
+        "modelSha256" to JsonPrimitive(request.modelSha256), "planSha256" to JsonPrimitive(DEPLOYMENT_SHA256),
+        "planBytes" to JsonPrimitive(32), "operationRequestSha256" to JsonPrimitive(request.operationRequestSha256),
+        "profilePolicySha256" to JsonPrimitive(request.profilePolicySha256), "functionCount" to JsonPrimitive(request.functionCount),
+    )))
+
+    private fun withPlannerReadyJournal(resumed: Boolean, action: (GccBundledOperationJournal, GccBundledPlannerRequest) -> Unit) {
+        val layout = GeneratedCMakeReconstructionProfile.descriptor.layout
+        val policy = JsonObject(mapOf("fixtureOnly" to JsonPrimitive(true), "reconstructionProfile" to JsonObject(mapOf(
+            "layout" to OracleJson.parse(layout.canonicalJson().toByteArray()), "budgets" to JsonObject(mapOf(
+                "maximumFunctionsPerModule" to JsonPrimitive(24), "plannerMaximumEntities" to JsonPrimitive(100),
+                "plannerMaximumDependencyEdges" to JsonPrimitive(1000), "plannerMaximumWorkUnits" to JsonPrimitive(10000),
+            )),
+        ))))
+        val intent = OracleJson.canonicalBytes(JsonObject(mapOf("schemaVersion" to JsonPrimitive(2),
+            "provider" to JsonPrimitive("gcc-bundled-operation-intent-v2"), "plannerProfile" to policy)))
+        val payload = intent("fixture execution")
+        val assessment = OracleJson.canonicalBytes(JsonObject(mapOf("programModelSha256" to JsonPrimitive(DEPLOYMENT_SHA256),
+            "programModelBytes" to JsonPrimitive(128), "functionCount" to JsonPrimitive(2))))
+        fun ready(journal: GccBundledOperationJournal) {
+            val export = if (resumed) journal.recordResumeExportAssessment(assessment) else journal.recordExportAssessment(assessment)
+            val operationSha = OracleArtifacts.sha256(intent)
+            val output = Path.of("/record-only-test/run")
+            val request = GccBundledPlannerRequest(output.resolve("reports/program_model.json"),
+                output.resolve(gccBundledPlannerControlName(operationSha, OracleArtifacts.sha256(export))).resolve("reports"),
+                128, DEPLOYMENT_SHA256, DEPLOYMENT_SHA256, 2, operationSha, OracleArtifacts.sha256(OracleJson.canonicalBytes(policy)),
+                layout, 24, 100, 1000, 10000, 8192)
+            action(journal, request)
+        }
+        if (resumed) withStoppedJournal(intent) { journal, definition ->
+            journal.recordResumePrepared(definition)
+            journal.recordResumeAttachment(payload)
+            journal.recordResumeStartAuthorization()
+            journal.recordResumeExecution(payload)
+            ready(journal)
+        } else withJournalRoot { root ->
+            GccBundledOperationJournal.create(root, OPERATION_ID, intent).use { journal ->
+                journal.recordLease(evidence(intent))
+                journal.recordPrepared(definition(), DEPLOYMENT_SHA256)
+                journal.recordAttachment(payload)
+                journal.recordStartAuthorization()
+                journal.recordExecution(payload)
+                ready(journal)
+            }
+        }
     }
 
     private fun intent(value: String = "record-only-test"): ByteArray = OracleJson.canonicalBytes(
