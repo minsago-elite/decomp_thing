@@ -164,7 +164,23 @@ object ArchivalProjectAuditor {
                     val checkpointText = snapshot.bytes.decodeToString(throwOnInvalidSequence = true)
                     UniqueJsonObjectKeyValidator(checkpointText).validate()
                     val checkpoint = Json.parseToJsonElement(checkpointText).jsonObject
+                    require(checkpoint.getValue("schemaVersion") == JsonPrimitive(5)) {
+                        "module checkpoint lacks the supported compiler acceptance schema"
+                    }
                     require(checkpoint.boolean("accepted")) { "module checkpoint does not record acceptance" }
+                    require(checkpoint.getValue("issues").jsonArray.isEmpty()) {
+                        "accepted module checkpoint retains unresolved reconstruction issues"
+                    }
+                    val acceptedEntities = checkpoint.getValue("entityStatuses").jsonArray.map { element ->
+                        val status = element.jsonObject
+                        require(status.keys == setOf("id", "status") && status.string("status") == "accepted") {
+                            "module checkpoint entity status does not record acceptance"
+                        }
+                        status.string("id")
+                    }
+                    require(acceptedEntities.size == acceptedEntities.toSet().size && acceptedEntities.toSet() == owned.toSet()) {
+                        "module checkpoint entity ownership differs from the module plan"
+                    }
                     require(checkpoint.string("sourceSha256") == hashes.getValue(source)) { "module checkpoint does not bind the current source" }
                     val compilation = checkpoint.getValue("compilation").jsonObject
                     require(compilation.string("sourceSha256") == hashes.getValue(source)) { "compiler evidence does not bind the current source" }
