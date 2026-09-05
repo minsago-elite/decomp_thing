@@ -39,6 +39,47 @@ import kotlin.test.assertTrue
 
 class UploadServerTest {
     @Test
+    fun `legacy JSON errors have fixed public messages and request identities`() {
+        withServer { server, root ->
+            val id = uploadedJobId(server)
+            val record = root.resolve(id).resolve("job.json")
+            val before = record.readBytes()
+            val cases = listOf(
+                Triple(request(server, "GET", "/api/PRIVATE_ROUTE_SENTINEL"), 404, "NOT_FOUND"),
+                Triple(request(server, "GET", "/api/jobs/PRIVATE_JOB_SENTINEL"), 404, "JOB_NOT_FOUND"),
+                Triple(request(server, "GET", "/api/jobs/$id/events?PRIVATE_QUERY_SENTINEL=x"), 400, "INVALID_REQUEST"),
+                Triple(upload(server, "PRIVATE_FILENAME_SENTINEL", byteArrayOf(1, 2, 3), true), 400, "INVALID_UPLOAD"),
+            ).toMutableList()
+            assertContentEquals(before, record.readBytes())
+            record.writeText("PRIVATE_STORAGE_SENTINEL { root=$root")
+            val corrupted = record.readBytes()
+            cases += Triple(request(server, "GET", "/api/jobs/$id"), 503, "JOB_STORAGE_UNAVAILABLE")
+            assertContentEquals(corrupted, record.readBytes())
+            val requestIds = mutableSetOf<String>()
+            cases.forEach { (response, status, code) ->
+                assertEquals(status, response.status)
+                assertEquals("application/json; charset=utf-8", response.contentType)
+                assertEquals("no-store", response.cacheControl)
+                val body = Json.parseToJsonElement(response.body.decodeToString()).jsonObject
+                assertEquals(setOf("requestId", "error"), body.keys)
+                val requestId = body.getValue("requestId").toString().trim('"')
+                assertEquals(requestId, response.requestId)
+                assertTrue(requestIds.add(requestId))
+                java.util.UUID.fromString(requestId)
+                val error = body.getValue("error").jsonObject
+                assertEquals(setOf("code", "message"), error.keys)
+                assertEquals("\"$code\"", error.getValue("code").toString())
+                listOf("PRIVATE_", root.toString(), "Exception", "<html").forEach {
+                    assertTrue(!response.body.decodeToString().contains(it), it)
+                }
+            }
+            val html = upload(server, "invalid.elf", byteArrayOf(1, 2, 3), false)
+            assertEquals(400, html.status)
+            assertEquals("text/html; charset=utf-8", html.contentType)
+        }
+    }
+
+    @Test
     fun `legacy upload and job JSON omit private storage fields without changing persistence`() {
         withServer { server, root ->
             val uploaded = upload(server, "presentation.elf", elfFixture(), acceptJson = true)
@@ -831,10 +872,10 @@ class UploadServerTest {
         }
         val status = connection.responseCode
         val stream = if (status >= 400) connection.errorStream else connection.inputStream
-        return Response(status, stream?.readBytes() ?: ByteArray(0), connection.getHeaderField("Retry-After"), connection.getHeaderField("ETag"))
+        return Response(status, stream?.readBytes() ?: ByteArray(0), connection.getHeaderField("Retry-After"), connection.getHeaderField("ETag"), connection.getHeaderField("Content-Type"), connection.getHeaderField("Cache-Control"), connection.getHeaderField("X-Request-ID"))
     }
 
-    private data class Response(val status: Int, val body: ByteArray, val retryAfter: String? = null, val etag: String? = null)
+    private data class Response(val status: Int, val body: ByteArray, val retryAfter: String? = null, val etag: String? = null, val contentType: String? = null, val cacheControl: String? = null, val requestId: String? = null)
 }
 
 private fun ByteArray.startsWith(prefix: ByteArray): Boolean =

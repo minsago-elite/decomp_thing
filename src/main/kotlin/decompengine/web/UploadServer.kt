@@ -292,17 +292,28 @@ class UploadServer(
                     val snapshot = AgentProgressJournal.read(jobs.reportContext(job.id, runId).reportsDirectory)
                     exchange.sendJson(200, snapshot?.toString() ?: "{\"schemaVersion\":1,\"displayOnly\":true,\"nextSequence\":0,\"queueDropped\":0,\"historyDropped\":0,\"truncated\":false,\"events\":[]}")
                 }
-                else -> exchange.sendHtml(404, renderErrorPage(404, "Page not found", "The requested route does not exist."))
+                else -> legacyError(exchange, 404, "NOT_FOUND", "The requested route does not exist.") {
+                    renderErrorPage(404, "Page not found", "The requested route does not exist.")
+                }
             }
         } catch (exception: WebJobServiceException) {
             val status = if (exception.code in setOf("JOB_NOT_FOUND", "RUN_NOT_FOUND")) 404 else 503
-            exchange.sendHtml(status, renderErrorPage(status, "Job storage unavailable", "${exception.code}: ${exception.message}"))
+            val code = if (status == 404) exception.code else "JOB_STORAGE_UNAVAILABLE"
+            legacyError(exchange, status, code, if (status == 404) "The requested job or attempt is unavailable." else "Job storage is unavailable. Inspect storage before retrying.") {
+                renderErrorPage(status, "Job storage unavailable", "${exception.code}: ${exception.message}")
+            }
         } catch (exception: JobStoreException) {
-            exchange.sendHtml(404, renderErrorPage(404, "Job not found", diagnostic(exception, "The job does not exist.")))
+            legacyError(exchange, 404, "JOB_NOT_FOUND", "The requested job is unavailable.") {
+                renderErrorPage(404, "Job not found", diagnostic(exception, "The job does not exist."))
+            }
         } catch (exception: IllegalArgumentException) {
-            exchange.sendHtml(400, renderErrorPage(400, "Invalid request", diagnostic(exception, "The request was invalid.")))
+            legacyError(exchange, 400, "INVALID_REQUEST", "The request was invalid.") {
+                renderErrorPage(400, "Invalid request", diagnostic(exception, "The request was invalid."))
+            }
         } catch (exception: Exception) {
-            exchange.sendHtml(500, renderErrorPage(500, "Unexpected error", diagnostic(exception, "The operation failed.")))
+            legacyError(exchange, 500, "INTERNAL_ERROR", "The operation failed.") {
+                renderErrorPage(500, "Unexpected error", diagnostic(exception, "The operation failed."))
+            }
         }
     }
 
@@ -350,13 +361,15 @@ class UploadServer(
             require(declaredLength == null || declaredLength <= MAX_UPLOAD_BYTES) { "upload exceeds the 32 MiB limit" }
             val contentType = exchange.requestHeaders.getFirst("Content-Type") ?: ""
             val job = jobs.uploadMultipart(exchange.requestBody, contentType)
-            if ((exchange.requestHeaders.getFirst("Accept") ?: "").contains("application/json")) {
+            if (exchange.requestsLegacyJson()) {
                 exchange.sendJson(201, encodeJob(job))
             } else {
                 exchange.redirect("/jobs/${job.id}")
             }
         } catch (exception: InvalidUploadException) {
-            exchange.sendHtml(400, renderErrorPage(400, "Unsupported binary", diagnostic(exception, "Upload a Linux ELF binary.")))
+            legacyError(exchange, 400, "INVALID_UPLOAD", "Upload a supported Linux ELF binary.") {
+                renderErrorPage(400, "Unsupported binary", diagnostic(exception, "Upload a Linux ELF binary."))
+            }
         }
     }
 
@@ -505,10 +518,10 @@ private fun HttpExchange.redirect(location: String) {
     close()
 }
 
-private fun HttpExchange.sendHtml(status: Int, body: String) =
+internal fun HttpExchange.sendHtml(status: Int, body: String) =
     sendBytes(status, body.toByteArray(StandardCharsets.UTF_8), "text/html; charset=utf-8")
 
-private fun HttpExchange.sendJson(status: Int, body: String) =
+internal fun HttpExchange.sendJson(status: Int, body: String) =
     sendBytes(status, body.toByteArray(StandardCharsets.UTF_8), "application/json; charset=utf-8")
 
 private fun HttpExchange.sendBytes(
