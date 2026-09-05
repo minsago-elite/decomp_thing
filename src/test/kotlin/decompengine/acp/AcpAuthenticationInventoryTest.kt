@@ -5,6 +5,23 @@ import com.agentclientprotocol.model.AuthMethodId
 import kotlin.test.*
 
 class AcpAuthenticationInventoryTest {
+    @Test fun `unpaired surrogates fail as authentication inventory errors`() {
+        for (invalid in listOf("\ud800", "\udc00", "\ud800x")) {
+            for (method in listOf(
+                AuthMethod.AgentAuth(AuthMethodId(invalid), "name", null),
+                AuthMethod.AgentAuth(AuthMethodId("id"), invalid, null),
+                AuthMethod.AgentAuth(AuthMethodId("id"), "name", invalid),
+            )) {
+                val failure = assertFailsWith<AcpAuthenticationInventoryFailure> {
+                    AcpAuthenticationInventory.capture(listOf(method), emptyList())
+                }
+                assertEquals("ACP authentication inventory contains invalid Unicode", failure.message)
+            }
+        }
+        val valid = AuthMethod.AgentAuth(AuthMethodId("id-\ud83d\udd11"), "name", "description")
+        assertEquals(valid.id.value, AcpAuthenticationInventory.capture(listOf(valid), emptyList()).methods.single().id)
+    }
+
     @Test fun `unknown authentication variants stay unsupported`() {
         val method = AuthMethod.UnknownAuthMethod(AuthMethodId("future"), "future method", null,
             "future-type", kotlinx.serialization.json.JsonObject(emptyMap()))
