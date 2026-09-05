@@ -256,6 +256,26 @@ fun renderErrorPage(status: Int, title: String, message: String): String = page(
     """.trimIndent(),
 )
 
+internal fun uploadPublicationProblem(jobId: String) = kotlinx.serialization.json.buildJsonObject {
+    put("error", kotlinx.serialization.json.JsonPrimitive("upload_publication_uncertain"))
+    put("job_id", kotlinx.serialization.json.JsonPrimitive(jobId))
+    put("job_url", kotlinx.serialization.json.JsonPrimitive("/jobs/$jobId"))
+    put("retry_upload", kotlinx.serialization.json.JsonPrimitive(false))
+}
+
+internal fun renderUploadPublicationUncertainPage(jobId: String): String = page(
+    title = "Upload requires review",
+    body = """
+      <main class="shell error-shell">
+        <p class="error-code">409</p>
+        <h1>Upload requires review</h1>
+        <p>The upload may have been saved, but its completion could not be confirmed. Check the job before uploading again.</p>
+        <a class="button primary" href="/jobs/${URLEncoder.encode(jobId, StandardCharsets.UTF_8).escapeHtml()}">Check job</a>
+        <a href="/">Return to workbench</a>
+      </main>
+    """.trimIndent(),
+)
+
 private fun renderJobList(jobs: List<Job>): String {
     if (jobs.isEmpty()) return """
         <div class="empty-state">
