@@ -287,7 +287,14 @@ durable recovery of indeterminate external work require the separate #68/#71 rec
 `WebShutdownTest` covers propagated interruption, a worker returning after swallowing interruption, and
 a worker that remains blocked past the grace period. The last case verifies the fixed cleanup diagnostic,
 then starts a new server and checks that unfinished jobs become interrupted failures without rerunning.
-This is benign JVM-worker evidence; it does not cover orphaned external processes or torn metadata writes.
+This is benign JVM-worker evidence; it does not cover orphaned external processes or power loss.
+
+Job metadata updates write and force a temporary file in the job directory, atomically replace `job.json`,
+then force the directory. There is no non-atomic fallback. An existing reader retains its previous complete
+snapshot; a failure before replacement leaves the published record intact. Temporary files are removed on
+ordinary failure. A failure after replacement, including directory-force failure, may have published the new
+record and is not proof of rollback. Tests cover held readers and interruption before publication; power-loss
+injection, abandoned temporary-file reclamation, and atomic publication of the whole uploaded job remain open.
 
 `web --listen-backlog` requests a TCP listen backlog of 64 by default and accepts values from 1 to 4096.
 Invalid values fail before the server binds or opens job storage. The underlying TCP implementation controls
