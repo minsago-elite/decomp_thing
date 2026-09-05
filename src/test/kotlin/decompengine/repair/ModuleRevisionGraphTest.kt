@@ -2273,6 +2273,49 @@ class ModuleRevisionGraphTest {
     }
 
     @Test
+    fun `archive includes provisional contributions only through a fully accepted composed revision`() {
+        val fixture = releaseRepairFixture(includeProvisional = true)
+        val bundle = ArchivalPackager.create(fixture.project, fixture.project.parent.resolve("composed-repair.zip"))
+        val extracted = fixture.project.parent.resolve("composed-repair-extracted")
+        val lineage = ArchivalBundleVerifier.extractAndVerifyCandidateLineage(bundle.archivePath, extracted)
+        val contributions = lineage.source.acceptedAcpContributions
+        assertEquals(2, contributions.size)
+        assertEquals(listOf("src/modules/beta.c", fixture.relativePath), contributions.map { it.changes.single().path })
+        assertEquals(contributions[0].resultSourceRevisionSha256, contributions[1].parentSourceRevisionSha256)
+        assertEquals(lineage.source.repairGraphHeadRevisionSha256, contributions[1].resultSourceRevisionSha256)
+        assertTrue(extracted.resolve("src/modules/beta.c").readText().contains("provisional archive improvement"))
+        assertContentEquals(fixture.after, extracted.resolve(fixture.relativePath).readBytes())
+        val manifest = Json.parseToJsonElement(extracted.resolve("source_tree_manifest.json").readText()).jsonObject
+        val touched = (manifest.getValue("files") as JsonArray).map { it.jsonObject }
+            .filter { (it.getValue("path") as JsonPrimitive).content in setOf("src/modules/beta.c", fixture.relativePath) }
+        assertEquals(2, touched.size)
+        val acceptedPrompt = sha256("revision:${contributions[1].taskId}".toByteArray())
+        touched.forEach { assertEquals(acceptedPrompt, (it.getValue("promptSha256") as JsonPrimitive).content) }
+        val graph = Json.parseToJsonElement(extracted.resolve("reports/repair-revisions/graph.json").readText()).jsonObject
+        assertEquals(listOf("root", "provisional", "accepted"), (graph.getValue("nodes") as JsonArray).map {
+            (it.jsonObject.getValue("status") as JsonPrimitive).content
+        })
+    }
+
+    @Test
+    fun `archive retains exhausted provisional evidence without accepting its abandoned source changes`() {
+        val fixture = releaseRepairFixture(includeProvisional = true, abandonProvisional = true)
+        val bundle = ArchivalPackager.create(fixture.project, fixture.project.parent.resolve("abandoned-repair.zip"))
+        val extracted = fixture.project.parent.resolve("abandoned-repair-extracted")
+        val lineage = ArchivalBundleVerifier.extractAndVerifyCandidateLineage(bundle.archivePath, extracted)
+        assertEquals(listOf(fixture.relativePath), lineage.source.acceptedAcpContributions.map { it.changes.single().path })
+        assertFalse(extracted.resolve("src/modules/beta.c").readText().contains("provisional archive improvement"))
+        assertTrue(extracted.resolve("reports/archive-provisional.validation.json").exists())
+        val graph = Json.parseToJsonElement(extracted.resolve("reports/repair-revisions/graph.json").readText()).jsonObject
+        assertEquals(listOf("iteration_exhausted", "fully_accepted"), (graph.getValue("runs") as JsonArray).map {
+            (it.jsonObject.getValue("status") as JsonPrimitive).content
+        })
+        assertEquals(listOf("root", "provisional", "accepted"), (graph.getValue("nodes") as JsonArray).map {
+            (it.jsonObject.getValue("status") as JsonPrimitive).content
+        })
+    }
+
+    @Test
     fun `archive creation rejects missing extra stale and cross-paired repair evidence`() {
         data class Mutation(val label: String, val expected: String, val apply: (ReleaseRepairFixture) -> Unit)
         val mutations = listOf(
@@ -3378,7 +3421,11 @@ class ModuleRevisionGraphTest {
         val requestSha256: String,
     )
 
-    private fun releaseRepairFixture(): ReleaseRepairFixture {
+    private fun releaseRepairFixture(
+        includeProvisional: Boolean = false,
+        abandonProvisional: Boolean = false,
+    ): ReleaseRepairFixture {
+        require(!abandonProvisional || includeProvisional)
         val project = generatedProject()
         val relative = "src/modules/alpha.c"
         val target = project.resolve(relative)
@@ -3387,11 +3434,42 @@ class ModuleRevisionGraphTest {
         lateinit var binding: RepairAgentInvocationBinding
         ModuleRevisionGraph.open(project, GeneratedCRepairIndexProfile).use { graph ->
             val corpus = graph.retainRegressionInputs(listOf(ProcessInput("archive-case", emptyList(), byteArrayOf())))
-            graph.beginRun(1, 60_000)
+            graph.beginRun(if (includeProvisional && !abandonProvisional) 2 else 1, 60_000)
+            fun bindObservations(proof: RepairValidationProof) {
+                graph.bindOriginalBinary(requireNotNull(proof.originalBinarySha256))
+                graph.bindExpectedObservations(sha256(buildString {
+                    append(proof.originalBinarySha256).append('\n')
+                    corpus.inputs.forEach { input ->
+                        append(input.id.length).append(':').append(input.id).append(":0:")
+                            .append(sha256(byteArrayOf())).append(':').append(sha256(byteArrayOf())).append('\n')
+                    }
+                }.toByteArray()))
+            }
+            if (includeProvisional) {
+                val path = "src/modules/beta.c"
+                val betaBefore = project.resolve(path).readBytes()
+                val betaAfter = betaBefore + "\n/* provisional archive improvement */\n".toByteArray()
+                val provisional = graph.beginAttempt(listOf(path), RevisionRepairMetadata(
+                    iterationIndex = 1, failureKind = "compile", prompt = "bounded failure", summary = null,
+                    retainedRegressionIds = corpus.inputs.map(ProcessInput::id), before = null,
+                    regressionCorpusSha256 = corpus.sha256))
+                graph.persistAndBindAgentInvocation(provisional,
+                    completeAcpReceiptDocument(project, provisional, path, betaBefore, betaAfter))
+                graph.installCandidate(provisional, mapOf(path to betaAfter))
+                val proof = archiveValidationProofFixture(graph, provisional, project, corpus.inputs,
+                    matched = false, receiptName = "archive-provisional.validation.json")
+                bindObservations(proof)
+                graph.recordProvisional(provisional, RepairEvidence("behavior", "synthetic retained mismatch"), proof)
+                assertContentEquals(betaBefore, project.resolve(path).readBytes())
+                if (abandonProvisional) {
+                    graph.finishRun(RepairRunStatus.ITERATION_EXHAUSTED, RepairEvidence("exhausted", "synthetic attempt budget exhausted"))
+                    graph.beginRun(1, 60_000)
+                }
+            }
             val attempt = graph.beginAttempt(
                 listOf(relative),
                 RevisionRepairMetadata(
-                    iterationIndex = 1,
+                    iterationIndex = if (includeProvisional) 2 else 1,
                     failureKind = "compile",
                     prompt = "bounded failure",
                     summary = null,
@@ -3404,14 +3482,7 @@ class ModuleRevisionGraphTest {
             graph.persistAndBindAgentInvocation(attempt, document)
             graph.installCandidate(attempt, mapOf(relative to after))
             val proof = archiveValidationProofFixture(graph, attempt, project, corpus.inputs)
-            graph.bindOriginalBinary(requireNotNull(proof.originalBinarySha256))
-            graph.bindExpectedObservations(sha256(buildString {
-                append(proof.originalBinarySha256).append('\n')
-                corpus.inputs.forEach { input ->
-                    append(input.id.length).append(':').append(input.id).append(":0:")
-                        .append(sha256(byteArrayOf())).append(':').append(sha256(byteArrayOf())).append('\n')
-                }
-            }.toByteArray()))
+            bindObservations(proof)
             val accepted = graph.accept(attempt, RepairEvidence("valid", "synthetic archive fixture observations matched"), proof)
             binding = requireNotNull(accepted.repairMetadata?.agentInvocation)
             graph.synchronizeRepairHistory()
@@ -3426,6 +3497,8 @@ class ModuleRevisionGraphTest {
         attempt: ModuleRevisionAttempt,
         project: Path,
         inputs: List<ProcessInput>,
+        matched: Boolean = true,
+        receiptName: String = "archive-fixture.validation.json",
     ): RepairValidationProof {
         fun element(value: Any?): JsonElement = when (value) {
             null -> JsonNull
@@ -3486,7 +3559,8 @@ class ModuleRevisionGraphTest {
                     .append(value.length).append(':').append(value).append(';') }
             }.toByteArray())
             return obj("role" to role, "inputId" to input?.id,
-                "output" to obj("command" to command, "exitCode" to 0, "stdoutBase64" to "", "stderrBase64" to "",
+                "output" to obj("command" to command, "exitCode" to 0, "stdoutBase64" to "",
+                    "stderrBase64" to if (!matched && role == "candidate") "ZGlmZg==" else "",
                     "networkIsolated" to true), "sandboxSha256" to sandboxDigest,
                 "sandboxFields" to fields.map { listOf(it.key, it.value) }, "writableQuota" to outputQuota,
                 "cleanupVerified" to true)
@@ -3506,10 +3580,10 @@ class ModuleRevisionGraphTest {
                 "stdinBase64" to java.util.Base64.getEncoder().encodeToString(it.stdin)) },
             "scopes" to listOf(scope("build", null, null)) + inputs.flatMap {
                 listOf(scope("reference", it, referenceManifest), scope("candidate", it, rebuiltManifest)) },
-            "outcome" to "behavior-checked", "caseCount" to inputs.size, "matches" to true,
+            "outcome" to "behavior-checked", "caseCount" to inputs.size, "matches" to matched,
             "cleanupVerified" to true, "assurance" to "strict-contained")
         val bytes = canonical(receipt)
-        project.resolve("reports/archive-fixture.validation.json").writeBytes(bytes)
+        project.resolve("reports/$receiptName").writeBytes(bytes)
         return RepairValidationProof(sourceDigest, snapshot.profileSha256, snapshot.indexSha256,
             repairRegressionCorpusSha256(inputs), referenceDigest, rebuiltDigest, runtimeDigest, sha256(bytes), true,
             RepairValidationAssurance.STRICT_CONTAINED)
