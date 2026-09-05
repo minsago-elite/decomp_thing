@@ -375,3 +375,26 @@ must revalidate retained state/control evidence, protect the original state,
 create the separate control directory, journal attachment and START, and prove
 absence/resource accounting. No v4 execution or benchmark qualification is
 claimed by command-contract tests.
+
+## Resume journal lifecycle
+
+After stopped-state capture, `recordResumePrepared` admits a v4 resumed definition
+only for an interrupted v3 original. It checks the same engine, artifact identities,
+runtime inventory, output lease, environment and original state path, and requires
+the stopped manifest hash and counts. Resume budgets cannot exceed original
+per-leg ceilings; this check alone does not establish cumulative resource use.
+
+The journal preserves all eleven stopped-run records and adds six no-replace
+files: `resume-definition.json`, `resume-prepared.json`, `resume-attachment.json`,
+`resume-start-authorized.json`, `resume-execution.json`, and
+`resume-export-assessment.json`. Preparation binds the exact new definition and
+links to stopped-state capture. Subsequent records hash-link to their predecessor.
+The intermediate definition-only stage is explicit, so partial publication remains
+preserved residue. Every stage checks exact membership and retained file identities;
+wrong order, replacement, changed bytes and repeated transitions poison the journal.
+
+These APIs record host decisions and assessments. They do not independently prove
+attachment, START delivery, process absence, valid export contents or completion.
+All records keep complete/release eligibility false. The coordinator must supply
+those live checks when integrating the second execution. Local journal fixtures
+use synthetic payloads and establish persistence/ordering only.
