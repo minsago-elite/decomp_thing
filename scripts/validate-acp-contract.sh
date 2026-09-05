@@ -27,6 +27,7 @@ expected = {
     'MvpPatchAcpIntegrationTest', 'PinnedSystemdBusEndpointTest', 'AgentExecutionContractTest',
     'AgentSessionJournalTest', 'CandidateValidationMountPolicyTest',
     'AcpThoughtProjectionTest', 'AcpContextUsageProjectionTest',
+    'AcpCurrentConfigInventoryTest',
 }
 suites = []
 for path in sorted(reports.glob('TEST-*.xml')):

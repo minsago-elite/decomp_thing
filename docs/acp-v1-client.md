@@ -229,6 +229,13 @@ that reads those fields. They do not change version negotiation: they remain v1 
 capability-gated, and usage/message identifiers are normalized rather than exposed as SDK types. The upgrade checks
 below must review these fields explicitly; removal or wire-shape changes require adapter and subprocess-test changes.
 
+Config-option setters are also checked against the current typed SDK option inventory immediately
+before each request. Removal, duplicate IDs/values or a changed option type fails with a fixed
+configuration diagnostic and preference index. The exact initial session advertisement remains a
+separate required authority check: later updates cannot authorize a choice absent from it. Existing
+post-response checks still verify the complete applied preference prefix. This does not make peer
+inventory changes atomic with an RPC or supply an interactive configuration UI.
+
 ## Process and wire boundary
 
 ### Admission, queue bounds, and cleanup capacity

@@ -1066,6 +1066,7 @@ class AcpAgentHarness(
             // race valid agents and cannot strengthen this setter's postcondition.
         }
         preferences.configOptions.forEachIndexed { index, preference ->
+            requireCurrentSessionConfigPreference(session.configOptions.value, preference, index)
             val wireValue = when (val configured = preference.value) {
                 is AcpSessionConfigValue.Select -> SessionConfigOptionValue.StringValue(configured.valueId)
                 is AcpSessionConfigValue.BooleanValue -> SessionConfigOptionValue.BoolValue(configured.value)
