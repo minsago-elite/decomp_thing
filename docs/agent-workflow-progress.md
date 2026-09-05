@@ -120,3 +120,9 @@ release the writer after a display failure and preserves the calling thread's in
   --tests decompengine.web.UploadServerTest \
   --tests decompengine.web.SourceTreeJobReconstructorTest
 ```
+
+Persisted display snapshots must account for every allocated sequence through retained events or
+queue/history omission counts. Reads and writer restart reject inconsistent counts or truncation
+markers with bounded diagnostics; counter validation avoids arithmetic overflow. Rejected history
+is retained unchanged and writer ownership is released. These consistency checks do not authenticate
+history or prove that events pending at a process crash were durable.

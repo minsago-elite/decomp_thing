@@ -337,8 +337,19 @@ class AgentProgressJournal(
             require(result.getValue("events").jsonArray.size <= 1024)
             val next = result.getValue("nextSequence").jsonPrimitive.long
             require(next >= 0 && next < Long.MAX_VALUE)
-            require(result.getValue("queueDropped").jsonPrimitive.long >= 0)
-            require(result.getValue("historyDropped").jsonPrimitive.long >= 0)
+            val queueDropped = result.getValue("queueDropped").jsonPrimitive.long
+            val historyDropped = result.getValue("historyDropped").jsonPrimitive.long
+            val retainedCount = result.getValue("events").jsonArray.size.toLong()
+            // Subtract only after checking bounds, so hostile counters cannot overflow a sum.
+            require(queueDropped in 0..next && historyDropped in 0..(next - queueDropped)) {
+                "progress snapshot contains invalid omission counts"
+            }
+            require(next - queueDropped - historyDropped == retainedCount) {
+                "progress snapshot does not account for every sequence"
+            }
+            require(result.getValue("truncated").jsonPrimitive.boolean == (queueDropped > 0 || historyDropped > 0)) {
+                "progress snapshot contains an inconsistent truncation marker"
+            }
             var previous = -1L
             result.getValue("events").jsonArray.forEach {
                 val sequence = it.jsonObject.getValue("sequence").jsonPrimitive.long
