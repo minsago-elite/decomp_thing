@@ -7,11 +7,11 @@ import decompengine.acp.LinuxDescriptor
 import decompengine.acp.LinuxFileIdentity
 import decompengine.acp.LinuxFilesystemSyscalls
 import decompengine.oracle.core.OracleJson
+import decompengine.oracle.core.StrictJsonLimits
+import decompengine.oracle.core.StrictJsonException
 import decompengine.repair.StableRegularFile
 import decompengine.repair.readStableRegularFile
 import java.io.IOException
-import kotlinx.serialization.json.Json
-import kotlinx.serialization.json.JsonElement
 import kotlinx.serialization.json.JsonObject
 import kotlinx.serialization.json.JsonPrimitive
 import kotlinx.serialization.json.buildJsonObject
@@ -21,20 +21,12 @@ import kotlinx.serialization.json.jsonPrimitive
 import kotlinx.serialization.json.put
 import java.nio.file.Path
 import java.nio.file.Files
-import java.nio.ByteBuffer
-import java.nio.channels.FileChannel
-import java.nio.file.LinkOption.NOFOLLOW_LINKS
-import java.nio.file.StandardCopyOption.ATOMIC_MOVE
-import java.nio.file.StandardCopyOption.REPLACE_EXISTING
-import java.nio.file.StandardOpenOption.READ
-import java.nio.file.StandardOpenOption.WRITE
 import java.time.Instant
 import java.util.UUID
 import kotlin.io.path.createDirectories
 import kotlin.io.path.exists
 import kotlin.io.path.name
 import kotlin.io.path.isRegularFile
-import kotlin.io.path.writeBytes
 
 class JobStoreException(message: String) : RuntimeException(message)
 class InvalidUploadException(message: String, cause: Throwable? = null) : RuntimeException(message, cause)
@@ -63,7 +55,13 @@ data class Job(
     }
 }
 
-class JobStore(root: Path) {
+class JobStore internal constructor(
+    root: Path,
+    private val uploadPublisher: UploadPublisher,
+    private val metadataPublisher: JobMetadataPublisher = AtomicJobMetadataPublisher,
+    private val storeDirectories: JobStoreDirectories = ForcedJobStoreDirectories,
+) {
+    constructor(root: Path) : this(root, AtomicUploadPublisher)
     private val root = root.toAbsolutePath().normalize()
     internal val storageRoot: Path get() = root
 
@@ -83,38 +81,55 @@ class JobStore(root: Path) {
 
     @Synchronized
     fun createFromUpload(filename: String, content: ByteArray): Job {
+        require(content.size <= MAX_INPUT_BYTES) { "upload exceeds the 32 MiB input limit" }
+        val input = content.copyOf()
         val metadata = try {
-            ElfMetadataReader.read(content)
+            ElfMetadataReader.read(input)
         } catch (exception: InvalidElfException) {
             throw InvalidUploadException(exception.message ?: "uploaded file is not an ELF binary", exception)
         }
 
-        root.createDirectories()
+        storeDirectories.prepare(root)
         val jobId = UUID.randomUUID().toString().replace("-", "")
-        val jobDir = root.resolve(jobId).createDirectories()
+        val jobDir = root.resolve(jobId)
         val binaryPath = jobDir.resolve("input.elf")
-        binaryPath.writeBytes(content)
-        check(binaryPath.toFile().setExecutable(true, true) || Files.isExecutable(binaryPath)) {
-            "could not mark uploaded ELF executable"
-        }
         val job = Job(
             id = jobId,
             filename = Path.of(filename).name.ifBlank { "input.elf" },
             status = "uploaded",
             createdAt = Instant.now().toString(),
-            sizeBytes = content.size,
+            sizeBytes = input.size,
             binaryPath = binaryPath,
             metadata = metadata,
         )
-        persist(job)
-        return job
+        val staging = Files.createTempDirectory(root, ".upload-")
+        var publicationAttempted = false
+        try {
+            val stagedInput = staging.resolve("input.elf")
+            uploadPublisher.writeAndForceInput(stagedInput, input)
+            persist(job, staging)
+            publicationAttempted = true
+            uploadPublisher.publish(staging, jobDir)
+            uploadPublisher.confirmDirectory(root)
+            return job
+        } catch (failure: Exception) {
+            try {
+                Files.deleteIfExists(staging.resolve("input.elf"))
+                Files.deleteIfExists(staging.resolve("job.json"))
+                Files.deleteIfExists(staging)
+            } catch (cleanup: Exception) {
+                failure.addSuppressed(cleanup)
+            }
+            if (publicationAttempted) throw UploadPublicationUncertainException(job.id, failure)
+            throw failure
+        }
     }
 
     @Synchronized
     fun get(jobId: String): Job {
         jobDirectory(jobId)
         val payload = try {
-            OracleJson.parse(readStableRegularFile(root, "$jobId/job.json", 256L * 1024).bytes).jsonObject
+            OracleJson.parse(readStableRegularFile(root, "$jobId/job.json", MAX_METADATA_BYTES.toLong()).bytes).jsonObject
         } catch (_: IOException) {
             throw JobStoreException("job metadata is unavailable or its path changed")
         }
@@ -138,6 +153,9 @@ class JobStore(root: Path) {
             metadata = payload.jsonObject("metadata").toElfMetadata(),
         )
     }
+
+    @Synchronized
+    fun recoveryInventory(): JobRecoveryInventory = inspectJobRecoveryInventory(root)
 
     @Synchronized
     fun list(): List<Job> {
@@ -227,7 +245,7 @@ class JobStore(root: Path) {
     internal fun readInput(jobId: String): StableRegularFile {
         jobDirectory(jobId)
         return try {
-            readStableRegularFile(root, "$jobId/input.elf", 32L * 1024 * 1024)
+            readStableRegularFile(root, "$jobId/input.elf", MAX_INPUT_BYTES.toLong())
         } catch (_: IOException) {
             throw JobStoreException("job input is unavailable or its path changed")
         }
@@ -302,25 +320,34 @@ class JobStore(root: Path) {
         return root.resolve(jobId)
     }
 
-    private fun persist(job: Job) {
-        val jobDir = jobDirectory(job.id).createDirectories()
-        val bytes = (Json { prettyPrint = true }.encodeToString(JsonElement.serializer(), job.toJson()) + "\n")
-            .toByteArray(Charsets.UTF_8)
+    private fun persist(job: Job, jobDir: Path = jobDirectory(job.id).createDirectories()) {
+        // Bound the encoder's string-byte accounting allocation before it sees caller-provided text.
+        require(job.filename.length <= MAX_METADATA_BYTES) { "job metadata exceeds the 256 KiB limit" }
+        val bytes = try {
+            OracleJson.canonicalBytes(job.toJson(), METADATA_LIMITS)
+        } catch (_: StrictJsonException) {
+            throw IllegalArgumentException("job metadata exceeds the 256 KiB limit or contains invalid JSON text")
+        }
         val temporary = Files.createTempFile(jobDir, ".job-metadata-", ".tmp")
         try {
-            FileChannel.open(temporary, WRITE, NOFOLLOW_LINKS).use { channel ->
-                val buffer = ByteBuffer.wrap(bytes)
-                while (buffer.hasRemaining()) channel.write(buffer)
-                channel.force(true)
-            }
-            Files.move(temporary, jobDir.resolve("job.json"), ATOMIC_MOVE, REPLACE_EXISTING)
-            FileChannel.open(jobDir, READ).use { it.force(true) }
+            metadataPublisher.writeAndForce(temporary, bytes)
+            metadataPublisher.replace(temporary, jobDir.resolve("job.json"))
+            metadataPublisher.confirmDirectory(jobDir)
         } finally {
             Files.deleteIfExists(temporary)
         }
     }
 
     private companion object {
+        const val MAX_INPUT_BYTES = 32 * 1024 * 1024
+        const val MAX_METADATA_BYTES = 256 * 1024
+        val METADATA_LIMITS = StrictJsonLimits(
+            maximumCanonicalBytes = MAX_METADATA_BYTES,
+            maximumStringBytes = MAX_METADATA_BYTES,
+            maximumTotalStringBytes = MAX_METADATA_BYTES,
+            maximumDepth = 8,
+            maximumNodes = 128,
+        )
         val VALID_STATUSES = setOf("uploaded", "queued", "analyzing", "complete", "failed")
     }
 }

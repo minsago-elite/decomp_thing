@@ -207,6 +207,10 @@ internal class WebApiController(
             }
         } catch (failure: WebAccessDenied) {
             access.sendDenied(exchange, failure)
+        } catch (failure: decompengine.jobs.UploadPublicationUncertain) {
+            exchange.responseHeaders.set("Location", "${prefix}jobs/${failure.jobId}")
+            access.sendDenied(exchange, WebAccessDenied(409, "RECOVERY_REQUIRED",
+                "Upload ${failure.jobId} may have been published. Inspect the job before uploading again."))
         } catch (_: decompengine.jobs.UploadIdempotencyConflict) {
             access.sendDenied(exchange, WebAccessDenied(409, "IDEMPOTENCY_CONFLICT", "The upload key was already used for different content or filename."))
         } catch (_: decompengine.jobs.UploadReceiptUnavailable) {

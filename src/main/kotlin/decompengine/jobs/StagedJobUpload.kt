@@ -35,7 +35,7 @@ internal class StagedJobUpload(
         require(idempotencyKey == null || idempotencyKey.matches(Regex("[A-Za-z0-9_-]{16,128}"))) { "Invalid upload idempotency key" }
         val keyHash = idempotencyKey?.let { hash("local-owner\u0000POST\u0000/api/v1/jobs\u0000$it".toByteArray()) }
         require(Files.isDirectory(root, java.nio.file.LinkOption.NOFOLLOW_LINKS)) { "Upload storage must already be owned and initialized" }
-        val stage = Files.createTempDirectory(root, ".upload-", PosixFilePermissions.asFileAttribute(PosixFilePermissions.fromString("rwx------")))
+        val stage = Files.createTempDirectory(root, ".upload-stream-v1-", PosixFilePermissions.asFileAttribute(PosixFilePermissions.fromString("rwx------")))
         val id = keyHash?.take(32) ?: UUID.randomUUID().toString().replace("-", "")
         val destination = root.resolve(id)
         val binary = stage.resolve("input.elf")

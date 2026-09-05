@@ -29,7 +29,12 @@ class WebShutdownTest {
         verifyShutdown(swallowInterruption = true, keepWaiting = true)
     }
 
-    private fun verifyShutdown(swallowInterruption: Boolean, keepWaiting: Boolean = false) {
+    @Test
+    fun `abrupt JVM death releases ownership and recovery marks active and queued jobs interrupted`() {
+        verifyShutdown(swallowInterruption = false, abruptExit = true)
+    }
+
+    private fun verifyShutdown(swallowInterruption: Boolean, keepWaiting: Boolean = false, abruptExit: Boolean = false) {
         val root = createTempDirectory("web-shutdown-")
         val log = root.resolve("child.log")
         val process = ProcessBuilder(
@@ -44,38 +49,55 @@ class WebShutdownTest {
                 Thread.sleep(20)
             }
             assertTrue(Files.exists(root.resolve("ready")), Files.readString(log))
+            val contender = UploadServer("127.0.0.1", 0, root.resolve("jobs"),
+                analyzer = JobAnalyzer { _, _ -> error("a second owner must not run work") })
+            val ownershipFailure = kotlin.test.assertFailsWith<IllegalStateException> { contender.start() }
+            assertEquals("Job store already has a live web server owner", ownershipFailure.message)
+            val activeIds = Files.readAllLines(root.resolve("ready"))
+            val activeStore = JobStore(root.resolve("jobs"))
+            activeIds.take(2).forEach { assertEquals("analyzing", activeStore.get(it).status) }
+            assertEquals("queued", activeStore.get(activeIds.last()).status)
             val shutdownStarted = System.nanoTime()
-            process.destroy()
-            assertTrue(process.waitFor(15, TimeUnit.SECONDS), "shutdown hook did not finish")
+            if (abruptExit) process.destroyForcibly() else process.destroy()
+            assertTrue(process.waitFor(15, TimeUnit.SECONDS), "child JVM did not terminate")
             val ids = Files.readAllLines(root.resolve("ready"))
             val store = JobStore(root.resolve("jobs"))
             ids.take(2).forEach { id ->
-                assertEquals(!keepWaiting, Files.exists(root.resolve("interrupted-$id")))
-                assertEquals(if (keepWaiting) "analyzing" else "failed", store.get(id).status)
+                assertEquals(!keepWaiting && !abruptExit, Files.exists(root.resolve("interrupted-$id")))
+                assertEquals(if (keepWaiting || abruptExit) "analyzing" else "failed", store.get(id).status)
                 if (swallowInterruption && !keepWaiting) {
                     assertEquals("Server stopped before the operation reported completion", store.get(id).statusMessage)
                 }
             }
-            assertEquals("failed", store.get(ids.last()).status)
-            assertEquals("Server stopped before the operation started", store.get(ids.last()).statusMessage)
+            assertEquals(if (abruptExit) "queued" else "failed", store.get(ids.last()).status)
+            if (!abruptExit) assertEquals("Server stopped before the operation started", store.get(ids.last()).statusMessage)
             assertTrue(!Files.exists(root.resolve("interrupted-${ids.last()}")))
             if (keepWaiting) {
                 assertTrue(System.nanoTime() - shutdownStarted >= TimeUnit.SECONDS.toNanos(5))
                 assertTrue(Files.readString(log).contains("Web shutdown did not complete cleanly; recovery is required"))
+            }
+            if (abruptExit) {
+                assertTrue(!Files.readString(log).contains("Web shutdown did not complete cleanly"))
+            }
+            if (keepWaiting || abruptExit) {
+                val interruptedIds = if (abruptExit) ids else ids.take(2)
+                val historical = interruptedIds.associateWith { id ->
+                    Files.readAllBytes(root.resolve("jobs").resolve(id).resolve("job.json"))
+                }
                 val restarted = UploadServer("127.0.0.1", 0, root.resolve("jobs"),
                     analyzer = JobAnalyzer { _, _ -> error("recovery must not rerun a job") })
                 try {
                     restarted.start()
-                    ids.take(2).forEach { id ->
+                    interruptedIds.forEach { id ->
                         // Recovery projects interruption without overwriting historical legacy metadata.
-                        assertEquals("analyzing", store.get(id).status)
+                        kotlin.test.assertContentEquals(historical.getValue(id), Files.readAllBytes(root.resolve("jobs").resolve(id).resolve("job.json")))
                         val response = URI("http://127.0.0.1:${restarted.serverPort}/api/jobs/$id").toURL().openStream().use {
                             kotlinx.serialization.json.Json.parseToJsonElement(it.readBytes().decodeToString())
                         } as kotlinx.serialization.json.JsonObject
                         assertEquals(kotlinx.serialization.json.JsonPrimitive("failed"), response["status"])
                         assertTrue(response["status_message"].toString().contains("interrupted"))
                     }
-                    assertEquals("Server stopped before the operation started", store.get(ids.last()).statusMessage)
+                    if (!abruptExit) assertEquals("Server stopped before the operation started", store.get(ids.last()).statusMessage)
                 } finally {
                     restarted.stop()
                 }
@@ -108,6 +130,9 @@ object WebShutdownFixture {
                 }
             })
         startWebServerWithShutdownHook(server)
+        val localContender = UploadServer("127.0.0.1", 0, root.resolve("jobs"))
+        val localFailure = kotlin.test.assertFailsWith<IllegalStateException> { localContender.start() }
+        check(localFailure.message == "Job store already has a live web server owner")
         val store = JobStore(root.resolve("jobs"))
         val ids = (0..2).map { store.createFromUpload("benign-$it.elf", elfFixture()).id }
         ids.forEachIndexed { index, id ->

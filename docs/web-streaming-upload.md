@@ -23,7 +23,7 @@ Cancellation and source/sink failures propagate without a successful receipt.
 ## Publication and ownership
 
 Under the service's exclusive job-root lease, each upload writes into an owner-only
-`.upload-*` directory. The publisher independently bounds and hashes the payload,
+`.upload-stream-v1-*` directory. The publisher independently bounds and hashes the payload,
 validates the ELF header through the existing metadata reader, writes final-path
 job metadata, syncs both files and the staging directory, then atomically renames
 the complete directory to a fresh job ID and syncs the parent. The uploaded binary
@@ -35,7 +35,19 @@ errors retain the complete job and report uncertain publication. The service blo
 new work until it is closed and storage is reopened; callers must inspect storage
 before retrying a legacy upload. Authenticated v1 requests can replay their retained
 receipt after storage is reopened, including after publication uncertainty.
-A process crash may leave an unpublished `.upload-*` directory; those directories
+
+Both production HTTP adapters return 409 for uncertain publication and retain the
+canonical job identity in a `Location` header. Legacy uploads link to `/jobs/{id}`;
+JSON includes `job_id`, `job_url` and `retry_upload: false`, while HTML provides a
+reconciliation link. Authenticated v1 uploads link to the base-path-aware
+`api/v1/jobs/{id}` resource and retain the existing error envelope with
+`RECOVERY_REQUIRED`, the job ID in its message and `retryable: false`. Neither
+response includes the filesystem exception or a `Retry-After` hint. The job can
+remain unavailable through the running service until storage is reopened; a link
+is reconciliation evidence, not confirmation of successful publication. Further
+uploads and workflow admission remain fenced during that uncertainty.
+
+A process crash may leave an unpublished `.upload-stream-v1-*` directory; those directories
 are excluded from job identity enumeration. [Startup staging recovery](web-upload-staging-recovery.md)
 now reconciles the reserved private namespace under the exclusive lease, after bounded
 identity/type checks. Unexpected entries are preserved and reported explicitly.

@@ -1,0 +1,13 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<testsuite name="decompengine.jobs.StagedJobUploadTest" tests="7" skipped="0" failures="0" errors="0" timestamp="2026-09-05T17:55:02.493Z" hostname="whatsername" time="7.908">
+  <properties/>
+  <testcase name="post-rename failure retains one complete job and reports uncertain publication()" classname="decompengine.jobs.StagedJobUploadTest" time="0.706"/>
+  <testcase name="invalid headers interrupted streams and pre-rename faults never expose a partial job()" classname="decompengine.jobs.StagedJobUploadTest" time="1.526"/>
+  <testcase name="post-rename retry recovers receipt and corruption cannot recreate the job()" classname="decompengine.jobs.StagedJobUploadTest" time="0.815"/>
+  <testcase name="receipt replay survives restart and later job mutation while changed intent conflicts()" classname="decompengine.jobs.StagedJobUploadTest" time="1.564"/>
+  <testcase name="complete job becomes visible only after input and metadata are durable()" classname="decompengine.jobs.StagedJobUploadTest" time="0.595"/>
+  <testcase name="concurrent identical keys publish one atomic job and one replay()" classname="decompengine.jobs.StagedJobUploadTest" time="0.742"/>
+  <testcase name="identical deliberate uploads create distinct jobs and display names cannot select paths()" classname="decompengine.jobs.StagedJobUploadTest" time="1.952"/>
+  <system-out><![CDATA[]]></system-out>
+  <system-err><![CDATA[]]></system-err>
+</testsuite>

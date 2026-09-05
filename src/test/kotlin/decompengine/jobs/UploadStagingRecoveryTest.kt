@@ -12,7 +12,7 @@ class UploadStagingRecoveryTest {
     @Test fun `cleanup removes only private staging and leaves published jobs and unrelated hidden entries`() = withRoot { root ->
         val job = StagedJobUpload(root).publish { it.write(elfFixture()); "inert.elf" }.job
         Files.createDirectory(root.resolve(".unrelated"))
-        val stage = stage(root, ".upload-123")
+        val stage = stage(root, ".upload-stream-v1-123")
         stage.resolve("input.elf").writeText("partial upload")
         stage.resolve("job.json").writeText("incomplete metadata")
         WorkflowAttemptStore.open(root).use { assertEquals(1, UploadStagingRecovery.recover(root)) }
@@ -21,9 +21,25 @@ class UploadStagingRecoveryTest {
         assertFalse(Files.exists(stage))
         WorkflowAttemptStore.open(root).use { assertEquals(0, UploadStagingRecovery.recover(root)) }
     }
+    @Test fun `ambiguous historical stages retain all bytes across repeated recovery`() = withRoot { root ->
+        val historical = stage(root, ".upload-123")
+        val retained = mapOf("input.elf" to "unconfirmed input", "job.json" to "unconfirmed metadata",
+            "upload-receipt.json" to "historical receipt")
+        retained.forEach { (name, content) -> historical.resolve(name).writeText(content) }
+        val current = stage(root, ".upload-stream-v1-456")
+        current.resolve("input.elf").writeText("unpublished current upload")
+        repeat(2) { attempt ->
+            WorkflowAttemptStore.open(root).use {
+                assertEquals(if (attempt == 0) 1 else 0, UploadStagingRecovery.recover(root))
+            }
+            retained.forEach { (name, content) -> assertEquals(content, Files.readString(historical.resolve(name))) }
+            assertEquals(1, JobStore(root).recoveryInventory().retainedUploadStages)
+        }
+        assertFalse(Files.exists(current))
+    }
     @Test fun `unexpected entries links and permissions refuse cleanup without touching retained data`() {
         for (variant in listOf("extra", "symlink", "hardlink", "directory", "permissions", "root-link")) withRoot { root ->
-            val stage = stage(root, ".upload-123")
+            val stage = stage(root, ".upload-stream-v1-123")
             val outside = root.resolve("outside").also { it.writeText("preserve") }
             when (variant) {
                 "extra" -> stage.resolve("notes.txt").writeText("preserve")
@@ -42,9 +58,9 @@ class UploadStagingRecoveryTest {
         }
     }
     @Test fun `too many orphan candidates are rejected before cleanup`() = withRoot { root ->
-        repeat(257) { stage(root, ".upload-$it") }
+        repeat(257) { stage(root, ".upload-stream-v1-$it") }
         WorkflowAttemptStore.open(root).use { assertFailsWith<WorkflowStoreException> { UploadStagingRecovery.recover(root) } }
-        assertTrue(Files.exists(root.resolve(".upload-0")))
+        assertTrue(Files.exists(root.resolve(".upload-stream-v1-0")))
     }
     @Test fun `killed publisher cleanup preserves post-rename receipt and never recovers partial jobs`() {
         for (point in listOf("DURING_BINARY", "AFTER_BINARY_SYNC", "AFTER_METADATA_SYNC", "BEFORE_RENAME", "AFTER_RENAME")) withRoot { root ->

@@ -46,6 +46,7 @@ class WebJobService(
     private val shutdownTimeoutMs: Long = 1000,
     maximumRetainedStorageBytes: Long = WebUploadStorage.DEFAULT_MAXIMUM_BYTES,
     private val failureDiagnostic: (Exception) -> String = { "Workflow failed; inspect its available diagnostics before retrying" },
+    private val lifecycleOwnerFactory: ((Path) -> AutoCloseable)? = null,
 ) : AutoCloseable {
     private data class Registration(val adapter: DurableWebWorkflowAdapter, val limits: decompengine.jobs.WorkflowExecutionLimits)
     private val registrations = durableAdapters.associate { it.workflow to Registration(it, it.limits) }.also {
@@ -66,6 +67,8 @@ class WebJobService(
     private val uploadPublisher = decompengine.jobs.StagedJobUpload(store.storageRoot)
     private val publicationFailures = mutableMapOf<String, WebJobDiagnostic>()
     private var attempts: WorkflowAttemptStore? = null
+    private var lifecycleOwner: AutoCloseable? = null
+    private var activeRequests = 0
     private var initialized = false
     private var stopping = false
     private var closed = false
@@ -80,26 +83,57 @@ class WebJobService(
             pool.queue.size, configuredQueueCapacity)
     }
 
+    /** Admission covers a whole HTTP handler, including publication and response failure cleanup. */
+    internal fun withActiveRequest(action: () -> Unit): Boolean {
+        synchronized(this) {
+            if (!initialized || stopping || closed) return false
+            activeRequests++
+        }
+        try { action(); return true }
+        finally {
+            synchronized(this) {
+                activeRequests--
+                try { releaseIfQuiescent() }
+                catch (_: Exception) {
+                    System.err.println("Web request cleanup did not release store ownership; recovery is required")
+                }
+            }
+        }
+    }
+
     @Synchronized fun beginShutdown() { stopping = true }
 
     @Synchronized
-    fun initializeExistingStorage() {
+    fun initializeExistingStorage() = initializeStorage(createRoot = false)
+
+    /** A listening server owns even an initially absent root before admitting requests. */
+    @Synchronized
+    internal fun initializeServerStorage() = initializeStorage(createRoot = true)
+
+    private fun initializeStorage(createRoot: Boolean) {
         check(!closed && active.isEmpty()) { "Storage initialization requires an idle service" }
         if (initialized) return
-        if (Files.exists(store.storageRoot, NOFOLLOW_LINKS)) acquireAndRecover()
+        if (createRoot || Files.exists(store.storageRoot, NOFOLLOW_LINKS)) acquireAndRecover()
         initialized = true
     }
 
     private fun acquireAndRecover(): WorkflowAttemptStore {
         attempts?.let { return it }
-        val acquired = attemptStoreFactory(store.storageRoot)
+        val additionalOwner = lifecycleOwnerFactory?.invoke(store.storageRoot)
+        val acquired = try { attemptStoreFactory(store.storageRoot) }
+        catch (failure: Throwable) {
+            try { additionalOwner?.close() } catch (cleanup: Throwable) { failure.addSuppressed(cleanup) }
+            throw failure
+        }
         try {
             decompengine.jobs.UploadStagingRecovery.recover(store.storageRoot)
             acquired.recoverAll() // Unavailable records remain isolated and visible through inspect/listInspections.
             attempts = acquired
+            lifecycleOwner = additionalOwner
             return acquired
         } catch (failure: Throwable) {
             try { acquired.close() } catch (cleanup: Throwable) { failure.addSuppressed(cleanup) }
+            try { additionalOwner?.close() } catch (cleanup: Throwable) { failure.addSuppressed(cleanup) }
             throw failure
         }
     }
@@ -278,7 +312,7 @@ class WebJobService(
             synchronized(this) {
                 publicationFailures[failure.jobId] = WebJobDiagnostic(failure.jobId, "RECOVERY_REQUIRED", "An upload may have been published. Reopen storage before admitting more work; do not retry blindly.")
             }
-            throw WebJobServiceException("RECOVERY_REQUIRED", "Upload publication is uncertain. Inspect storage before retrying.", failure)
+            throw failure
         } finally {
             reservation?.close()
             synchronized(this) { uploads.remove(worker); finished.countDown(); releaseIfQuiescent() }
@@ -348,18 +382,23 @@ class WebJobService(
     override fun close() {
         var problem: Throwable? = null
         val running = synchronized(this) {
-            if (closed) return
+            val firstClose = !closed
             stopping = true
             closed = true
-            ownedExecutor?.shutdownNow()
-            active.values.filter { !it.started }.toList().forEach { task ->
-                try { task.stopPending() } catch (failure: Throwable) {
-                    if (problem == null) problem = failure else problem.addSuppressed(failure)
+            if (firstClose) {
+                ownedExecutor?.shutdownNow()
+                active.values.filter { !it.started }.toList().forEach { task ->
+                    try { task.stopPending() } catch (failure: Throwable) {
+                        if (problem == null) problem = failure else problem.addSuppressed(failure)
+                    }
                 }
             }
             val runningUploads = uploads.toList()
-            runningUploads.forEach { (worker, _) -> worker.interrupt() }
-            active.values.toList().also { tasks -> if (ownedExecutor == null) tasks.forEach { it.worker?.interrupt() }; releaseIfQuiescent() } to runningUploads
+            if (firstClose) runningUploads.forEach { (worker, _) -> worker.interrupt() }
+            active.values.toList().also { tasks ->
+                if (firstClose && ownedExecutor == null) tasks.forEach { it.worker?.interrupt() }
+                releaseIfQuiescent()
+            } to runningUploads
         }
         val deadline = System.nanoTime() + TimeUnit.MILLISECONDS.toNanos(shutdownTimeoutMs)
         running.first.forEach { task ->
@@ -372,6 +411,10 @@ class WebJobService(
         }
         synchronized(this) {
             releaseIfQuiescent()
+            if (activeRequests != 0) {
+                val failure = IllegalStateException("HTTP requests remain active after server stop")
+                if (problem == null) problem = failure else problem.addSuppressed(failure)
+            }
             if (active.isNotEmpty() || uploads.isNotEmpty()) {
                 val failure = WebJobServiceException("SHUTDOWN_INCOMPLETE", "A workflow has not stopped; storage ownership is retained until it exits.")
                 if (problem == null) problem = failure else problem.addSuppressed(failure)
@@ -381,9 +424,12 @@ class WebJobService(
     }
 
     private fun releaseIfQuiescent() {
-        if (closed && active.isEmpty() && uploads.isEmpty()) {
+        if (closed && active.isEmpty() && uploads.isEmpty() && activeRequests == 0) {
             val restoreInterrupt = Thread.interrupted()
-            try { attempts?.close(); attempts = null }
+            try {
+                attempts?.close(); attempts = null
+                lifecycleOwner?.close(); lifecycleOwner = null
+            }
             finally { if (restoreInterrupt) Thread.currentThread().interrupt() }
         }
     }

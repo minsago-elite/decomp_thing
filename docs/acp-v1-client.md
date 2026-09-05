@@ -282,19 +282,134 @@ A timeout or cleanup error is reported with a fixed diagnostic; it never establi
 Shutdown and successful job-status publication share a lock: once shutdown begins, a worker that catches
 interruption and returns normally is recorded as failed with an explicit shutdown diagnostic. Previously
 published completion remains intact. This controls the web status only, not artifact acceptance or rollback.
-Injected executors remain outside this lifecycle. SIGKILL, power loss, stalled filesystem writes, and
+Injected executors are not shut down. The server tracks and discards its pending operations independently
+of executor ownership, so late or repeated callback delivery cannot start cancelled work or change a new
+owner's job status. Already-claimed work still requires its caller's cancellation/cleanup cooperation.
+SIGKILL, power loss, stalled filesystem writes, and
 durable recovery of indeterminate external work require the separate #68/#71 recovery mechanisms.
+
+Before startup recovery, a web server acquires a nonblocking exclusive `.web-owner.lock` for its job store.
+A second cooperating server fails before changing job status. Same-JVM owners are tracked by canonical store
+path to avoid opening another channel to an owned lock file (see the [JDK FileLock platform notes](https://docs.oracle.com/en/java/javase/21/docs/api/java.base/java/nio/channels/FileLock.html)).
+The lock file is never deleted. Stop releases ownership only after owned workers have terminated and no
+scheduled operations or admitted HTTP handlers remain. Request admission closes when shutdown begins; the
+lifetime includes upload publication and error handling. A handler that outlives stop causes an explicit
+incomplete-stop error and retains ownership. Its `finally` path releases ownership when all work is idle,
+including after an exception. Other incomplete in-process shutdowns retain ownership until a later successful stop
+or JVM exit. The in-process timeout regression holds a worker beyond the grace period, verifies a new server
+is still refused, then releases the worker and retries stop before verifying a fresh server can start.
+Executor cancellation is requested once; later stop attempts wait for termination without interrupting
+workers again while they persist final status.
+This is cooperative local-filesystem web ownership, not fencing of arbitrary JobStore callers,
+older servers, external subprocesses, lock-file replacement, or network filesystems.
+`WebRequestLifetimeTest` holds the production request-admission wrapper across a final store write and an
+exception, verifies competing ownership is refused and late requests are not admitted, then verifies handoff.
+This is deterministic handler-lifetime evidence, supplemented by the existing HTTP route tests; it does not
+qualify stalled kernel I/O or abrupt host failure.
 `WebShutdownTest` covers propagated interruption, a worker returning after swallowing interruption, and
 a worker that remains blocked past the grace period. The last case verifies the fixed cleanup diagnostic,
 then starts a new server and checks that unfinished jobs become interrupted failures without rerunning.
 This is benign JVM-worker evidence; it does not cover orphaned external processes or power loss.
+The abrupt-death case forcibly terminates the child JVM after two active jobs and one queued job are
+persisted. It verifies no worker completion markers appear, then starts a replacement server and checks
+that all three jobs become interrupted failures without replay. This exercises OS lock release on process
+death and recovery from complete persisted records; it is not interruption during a filesystem write.
 
 Job metadata updates write and force a temporary file in the job directory, atomically replace `job.json`,
 then force the directory. There is no non-atomic fallback. An existing reader retains its previous complete
-snapshot; a failure before replacement leaves the published record intact. Temporary files are removed on
+snapshot. Before publication, the writer enforces the same 256 KiB encoded UTF-8 JSON limit as the reader,
+including escaping overhead; oversized records fail without replacing an existing record or publishing an upload.
+The bounded canonical encoder stops at that output limit, and a filename character cap bounds its preliminary
+string-byte accounting. It no longer builds the entire encoded JSON string before checking the limit. New records
+use canonical field ordering; existing pretty-printed records remain readable without migration.
+A failure before replacement leaves the published record intact. Temporary files are removed on
 ordinary failure. A failure after replacement, including directory-force failure, may have published the new
-record and is not proof of rollback. Tests cover held readers and interruption before publication; power-loss
-injection, abandoned temporary-file reclamation, and atomic publication of the whole uploaded job remain open.
+record and is not proof of rollback. Tests cover held readers and interruption before publication.
+`JobMetadataPublicationTest` injects exceptions before writing, after a partial write, before/after file force,
+before/after replacement, and before/after directory force. A fresh store reads the exact prior record for
+pre-replacement failures and a complete new record for post-replacement failures; the input remains intact
+and ordinary cleanup removes the temporary file. These exception cases run cleanup and therefore do not
+substitute for process death during I/O, abandoned-file reclamation, or power-loss qualification.
+`JobMetadataCrashTest` separately halts a benign child JVM at the same eight application I/O boundaries,
+including after writing half a private record. It verifies terminal process state and absence of `finally`
+cleanup before opening a fresh store. The old or new published record remains complete and the input is
+unchanged. Pre-replacement temporary files remain private and are not promoted by interrupted-job recovery.
+These files are deliberately retained pending qualified reclamation. The test covers process death at controlled
+publication boundaries, not interruption inside a kernel syscall, whole-upload crash publication, or power loss.
+
+Uploads stage their input and metadata together in a private `.upload-` directory beneath the job store.
+Before parsing or staging, JobStore rejects input above its 32 MiB read limit and takes an owned byte-array
+copy. Metadata, declared size and persisted input all derive from that copy, so later caller mutation cannot
+change what is published. This bounds the retained input per upload, not aggregate request memory or storage.
+Before staging, the store creates missing directories, resolves the canonical store path, then opens and
+forces that directory and each canonical ancestor through the filesystem root, in leaf-to-root order.
+Every upload repeats confirmation, including when all directories already exist: a prior failed attempt
+may have created them without completing confirmation. Failure to open or force an ancestor stops the
+upload before private staging or final publication; existing jobs and newly created empty directories
+are retained. There is no fallback that silently accepts unsupported directory-force operations.
+The original configured path remains the metadata identity. Provisioning/durability of symlink aliases,
+concurrent path replacement and noncooperating filesystem writers remain outside this confirmation
+contract. Directory force calls on the tested local filesystem are not a power-loss qualification.
+`JobStoreDirectoriesCrashTest` halts a benign child JVM before the first directory force, after the
+store force, after its parent force, and after all ancestor forces. The parent observes the exact halt
+marker and terminal exit, verifies that ordinary cleanup did not run and that the newly created store
+contains no upload or private stage, then starts another JVM. That process must reconfirm the full
+existing canonical chain and publish one complete input/metadata record. These are application-boundary
+process-death tests; they do not interrupt directory creation or force inside a kernel syscall.
+The input and metadata are forced before the directory is atomically renamed to its final job ID; the store
+directory is then forced. Metadata records the final input path. Ordinary failures before publication clean
+up the staging directory; failures after rename may leave a complete published job even when the caller
+receives an error. Startup does not treat staging directory names as job IDs. Tests verify interrupted input
+writes leave no partial job and preserve prior jobs. Power-loss injection, abandoned staging/temporary-file
+reclamation, and the full supported-filesystem/ancestor-durability qualification remain open requirements.
+
+`GET /api/recovery` exposes a read-only schema-v1 recovery inventory for #242. It reports retained
+upload-stage and metadata-temporary counts, scanned entries, observed bytes as a decimal string,
+uninspected entries and `inventoryComplete`, with `displayOnly: true`. It returns no paths, filenames,
+file contents or I/O exception details. Inspection charges every encountered directory entry against
+a 4,096-entry budget, counts at most 128 candidates and accumulates at most 64 MiB of regular-file
+lengths. It reads attributes rather than file contents, scans one level inside private stages and job
+directories, and does not descend into job reports. Descriptor-relative inspection does not follow child
+symlinks. Unknown candidate layouts, inspection errors, unavailable secure directory streams or exceeded
+budgets make the inventory incomplete; observed counts and bytes then give lower bounds. An oversized
+file is omitted from the byte sum rather than clamped. `uninspectedEntries` counts encountered inspection
+failures/unsupported entries, not the unknown number remaining after budget exhaustion.
+
+This is an observation, not an atomic filesystem snapshot or a wall-time bound on filesystem I/O.
+The configured root follows the existing store path contract; this does not fence raw filesystem writers.
+A complete inventory says only that the scoped scan finished, not that candidates are abandoned or safe
+to delete. No files are reclaimed or promoted. Safe reclamation and aggregate storage quotas remain
+#242/#71 requirements; #69 may display this summary without interpreting it as completed cleanup.
+The web workbench now renders this summary when candidates are retained or inspection is incomplete,
+including incomplete scans with zero counted candidates. Incomplete results use an explicit lower-bound
+label and explain that additional files or bytes may remain. Complete results still state that retained
+files may belong to active work. The panel links to the JSON summary, omits private names and contents,
+and reports that no files were deleted. A complete empty scan omits the panel. Refresh performs a new
+bounded scan; the job list and recovery inventory are separate observations, not an atomic snapshot.
+The metadata and upload abrupt-exit tests also compare the inventory against the actual retained files
+after each child JVM terminates. They assert exact candidate counts and byte totals, then verify that
+interrupted-job recovery leaves the inventory and private file contents unchanged. A metadata temporary
+inside an upload stage contributes to that stage's byte total; the separate metadata-file counter covers
+temporaries within published job directories. These checks establish diagnostic coverage for those
+controlled crash layouts, without establishing abandonment or permission to reclaim them.
+
+`JobUploadCrashTest` halts a benign child JVM at fourteen controlled input/metadata write, force and
+directory-publication boundaries. Before final rename the candidate remains a private stage; afterward a
+fresh store sees a complete input and matching metadata. Existing jobs remain unchanged and recovery does
+not promote private stages. This covers application-boundary process death, not power loss, interruption
+inside kernel I/O, safe stage reclamation or uncertain-response retry deduplication.
+
+Once the final upload-directory rename is attempted, a failure is reported as
+`UploadPublicationUncertainException` with the generated job ID. This includes an exception from rename
+itself; it does not assume that an exception proves the destination is absent. The web endpoint returns
+HTTP 409 with a `Location` for inspecting that job. JSON clients receive `upload_publication_uncertain`,
+`job_id`, `job_url`, and `retry_upload: false`; the HTML response offers a Check job link. Underlying I/O
+error text is excluded. Inspect the referenced state before another upload; this is not an exactly-once
+retry protocol, and a missing record after a crash still needs recovery reconciliation.
+`UploadUncertaintyHttpTest` exercises the shared production upload handler over local HTTP with a
+directory-confirmation fault. JSON and HTML both return 409 with the same review location as the complete
+published job, no private I/O diagnostic and no `Retry-After` header. The fixture verifies each submitted
+request creates one job; it does not qualify uncertain-response retry deduplication.
 
 `web --listen-backlog` requests a TCP listen backlog of 64 by default and accepts values from 1 to 4096.
 Invalid values fail before the server binds or opens job storage. The underlying TCP implementation controls
@@ -576,6 +691,26 @@ authority outside the immutable workflow policy. Permission evidence hashes tool
 tool-call limit exactly once before terminal content can bind any terminal authority.
 
 ## Upgrade policy
+
+### Reproducing the web job recovery matrix
+
+Run `python3 scripts/verify-web-job-recovery.py` from a provisioned checkout with cached Gradle
+dependencies. This offline command selects eleven benign storage/web test classes covering upload and
+metadata publication, directory preparation, controlled JVM exits, ownership/shutdown, retained-file
+inventory and HTTP presentation. It does not select the patch reproduction lane or certify full B-series
+release readiness. Keep unrelated Gradle invocations separate while it runs.
+
+Each invocation creates a unique directory under `build/web-job-recovery-verification/` with workspace
+temporary files, isolated fresh JUnit/HTML reports, Gradle output and a JSON manifest. The manifest records
+the source commit, dirty-worktree flag and tracked-diff digest, exact command, required suites, runtime
+and test-filesystem details, totals and report digests. For reproducible source identity, run a clean
+committed checkout; the diff digest does not capture untracked source contents. JVM option environment
+variables are removed for this scoped run and temporary storage is directed into its evidence directory.
+The runner disables test output reuse and fails on a nonzero build exit, missing/unexpected/duplicate
+suites, empty or malformed reports, failures, errors or skips. An interrupted run without a terminal
+manifest is incomplete evidence. Its own lock prevents concurrent invocations of this runner.
+
+### ACP SDK upgrades
 
 The bounded `acp/v1/wire-contract.json` corpus currently freezes 49 SDK-decoded and re-encoded
 JSON-RPC messages. It includes the production model/mode setters, select and boolean configuration

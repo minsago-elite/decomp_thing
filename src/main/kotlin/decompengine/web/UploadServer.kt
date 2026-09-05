@@ -14,6 +14,7 @@ import decompengine.exploration.CandidateSource
 import decompengine.jobs.InvalidUploadException
 import decompengine.jobs.Job
 import decompengine.jobs.JobStore
+import decompengine.jobs.UploadPublicationUncertainException
 import decompengine.jobs.JobStoreException
 import decompengine.jobs.AgentProgressJournal
 import decompengine.jobs.ProgressRedactor
@@ -199,7 +200,7 @@ class UploadServer(
     }
     private val server = HttpServer.create(InetSocketAddress(host, port), listenBacklog)
     private val store = JobStore(dataDir)
-    private val jobs = WebJobService(store, analyzer, reconstructor, executor, shutdownTimeoutMs = 5000, failureDiagnostic = { diagnostic(it, "Background operation failed") })
+    private val jobs = WebJobService(store, analyzer, reconstructor, executor, shutdownTimeoutMs = 5000, lifecycleOwnerFactory = WebJobStoreOwnership::acquire, failureDiagnostic = { diagnostic(it, "Background operation failed") })
     private val sourceEvidence = WebSourceEvidence(store, sourceProfiles, jobs::readArtifact)
     private val archiveEvidence = WebArchiveEvidence(store, sourceEvidence, jobs::readArtifact)
     private val access = spaAssets?.let {
@@ -215,6 +216,9 @@ class UploadServer(
     private val requestDeadlines = ScheduledThreadPoolExecutor(1) { task ->
         Thread(task, "decomp-web-deadline").apply { isDaemon = true }
     }.apply { removeOnCancelPolicy = true }
+    private val lifecycleLock = Any()
+    private var started = false
+    private var stopping = false
     val serverPort: Int get() = server.address.port
     val browserOrigin: String = devFrontendOrigin ?: webOrigin(host, serverPort)
 
@@ -222,16 +226,6 @@ class UploadServer(
     fun issueBrowserBootstrap(): WebBootstrapToken = checkNotNull(access) { "Browser sessions require --ui spa" }.issueBootstrap()
 
     init {
-        try {
-            jobs.initializeExistingStorage()
-        } catch (failure: Throwable) {
-            server.stop(0)
-            requestExecutor.shutdownNow()
-            requestDeadlines.shutdownNow()
-            access?.close()
-            jobs.close()
-            throw failure
-        }
         server.executor = requestExecutor
         server.createContext("/") { exchange ->
             val upload = exchange.requestMethod == "POST" &&
@@ -241,19 +235,56 @@ class UploadServer(
         }
     }
 
-    fun start() = server.start()
+    fun start() {
+        var cleanupRequired = false
+        try {
+            synchronized(lifecycleLock) {
+                check(!started && !stopping) { "Web server cannot be started again" }
+                cleanupRequired = true
+                try {
+                    jobs.initializeServerStorage()
+                    server.start()
+                    started = true
+                } catch (failure: Exception) {
+                    stopping = true
+                    throw failure
+                }
+            }
+        } catch (failure: Exception) {
+            if (cleanupRequired) try { stop() } catch (cleanup: Exception) { failure.addSuppressed(cleanup) }
+            throw failure
+        }
+    }
 
     fun stop(delaySeconds: Int = 0) {
         require(delaySeconds >= 0) { "shutdown delay must be nonnegative" }
         jobs.beginShutdown()
-        server.stop(delaySeconds)
-        requestExecutor.shutdownNow()
-        requestDeadlines.shutdownNow()
-        access?.close()
-        jobs.close()
+        synchronized(lifecycleLock) {
+            stopping = true
+            // JDK HttpServer does not release a bound pre-start listener until its dispatcher runs.
+            if (!started) { server.start(); started = true }
+        }
+        var failure: Exception? = null
+        fun cleanup(action: () -> Unit) {
+            try { action() } catch (problem: Exception) {
+                if (failure == null) failure = problem else failure!!.addSuppressed(problem)
+            }
+        }
+        cleanup { server.stop(delaySeconds) }
+        cleanup { requestExecutor.shutdownNow() }
+        cleanup { requestDeadlines.shutdownNow() }
+        cleanup { access?.close() }
+        cleanup { jobs.close() }
+        failure?.let { throw it }
     }
 
+    internal fun withActiveRequest(action: () -> Unit): Boolean = jobs.withActiveRequest(action)
+
     private fun route(exchange: HttpExchange) {
+        if (!withActiveRequest { routeAdmitted(exchange) }) exchange.close()
+    }
+
+    private fun routeAdmitted(exchange: HttpExchange) {
         spaAssets?.let { assets ->
             try {
                 if (api?.route(exchange) == true) return
@@ -271,6 +302,8 @@ class UploadServer(
                     renderJobDashboard(exchange)
                 exchange.requestMethod == "GET" && segments == listOf("assets", "app.css") ->
                     exchange.sendBytes(200, APP_CSS.toByteArray(), "text/css; charset=utf-8", cache = true)
+                exchange.requestMethod == "GET" && segments == listOf("api", "recovery") ->
+                    exchange.sendJson(200, store.recoveryInventory().toJson().toString())
                 exchange.requestMethod == "POST" && segments == listOf("jobs") -> handlePostJob(exchange)
                 exchange.requestMethod == "GET" && segments.size == 2 && segments[0] == "jobs" ->
                     handleJob(exchange, decode(segments[1]))
@@ -312,6 +345,7 @@ class UploadServer(
         exchange.sendHtml(200, renderDashboard(
             inspections.filterIsInstance<WebJobInspection.Available>().map { it.presentation.job },
             inspections.filterIsInstance<WebJobInspection.Unavailable>().map { it.diagnostic },
+            store.recoveryInventory(),
         ))
     }
 
@@ -356,6 +390,8 @@ class UploadServer(
             } else {
                 exchange.redirect("/jobs/${job.id}")
             }
+        } catch (exception: decompengine.jobs.UploadPublicationUncertain) {
+            sendUploadPublicationUncertain(exchange, exception.jobId)
         } catch (exception: InvalidUploadException) {
             exchange.sendHtml(400, renderErrorPage(400, "Unsupported binary", diagnostic(exception, "Upload a Linux ELF binary.")))
         }
@@ -451,6 +487,28 @@ class UploadServer(
     }
 }
 
+private const val MAX_UPLOAD_BYTES = 32L * 1024 * 1024
+
+private fun encodeJob(job: Job): String = Json.encodeToString(JsonElement.serializer(), job.toJson())
+
+/** Shared HTTP upload handler; the server owns admission and general error redaction around it. */
+internal fun handleUploadRequest(exchange: HttpExchange, store: JobStore) {
+    try {
+        val declaredLength = exchange.requestHeaders.getFirst("Content-Length")?.toLongOrNull()
+        require(declaredLength == null || declaredLength <= MAX_UPLOAD_BYTES) { "upload exceeds the 32 MiB limit" }
+        val contentType = exchange.requestHeaders.getFirst("Content-Type") ?: ""
+        val upload = MultipartUpload.parse(exchange.requestBody.readLimited(MAX_UPLOAD_BYTES), contentType)
+        val job = store.createFromUpload(upload.filename, upload.content)
+        if ((exchange.requestHeaders.getFirst("Accept") ?: "").contains("application/json")) {
+            exchange.sendJson(201, encodeJob(job))
+        } else {
+            exchange.redirect("/jobs/${job.id}")
+        }
+    } catch (exception: UploadPublicationUncertainException) {
+        sendUploadPublicationUncertain(exchange, exception.jobId)
+    }
+}
+
 private fun webOrigin(host: String, port: Int): String {
     val authority = if (':' in host && !host.startsWith('[')) "[$host]" else host
     return "http://$authority:$port"
@@ -535,4 +593,15 @@ private fun contentType(path: Path): String = when (path.fileName.toString().sub
     "zip" -> "application/zip"
     "log", "txt", "c", "h", "md" -> "text/plain; charset=utf-8"
     else -> "application/octet-stream"
+}
+
+/** Publication identity is generated by the store and carries no filesystem diagnostics. */
+private fun sendUploadPublicationUncertain(exchange: HttpExchange, jobId: String) {
+    exchange.responseHeaders.set("Location", "/jobs/$jobId")
+    exchange.responseHeaders.set("Cache-Control", "no-store")
+    if ((exchange.requestHeaders.getFirst("Accept") ?: "").contains("application/json")) {
+        exchange.sendJson(409, uploadPublicationProblem(jobId).toString())
+    } else {
+        exchange.sendHtml(409, renderUploadPublicationUncertainPage(jobId))
+    }
 }
