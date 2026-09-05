@@ -4697,7 +4697,9 @@ internal fun readStableRegularFile(
     maximumBytes: Long,
     afterAuthorization: (() -> Unit)? = null,
     afterRead: (() -> Unit)? = null,
+    cancellationCheck: () -> Unit = {},
 ): StableRegularFile {
+    cancellationCheck()
     require(maximumBytes in 1 until Int.MAX_VALUE.toLong()) { "stable file-read limit is invalid" }
     val normalized = normalizedRelative(relative)
     val base = root.toAbsolutePath().normalize()
@@ -4710,8 +4712,10 @@ internal fun readStableRegularFile(
         var parent = openRepairRootDirectory(base)
         pinnedDirectories += parent
         parts.dropLast(1).forEach { segment ->
+            cancellationCheck()
             parent = LinuxFilesystemSyscalls.openDirectoryAt(parent.fd, segment)
             pinnedDirectories += parent
+            cancellationCheck()
         }
         authorized = requireNotNull(LinuxFilesystemSyscalls.openPathAtOrNull(parent.fd, parts.last())) {
             "stable file-read target disappeared: $relative"
@@ -4733,11 +4737,12 @@ internal fun readStableRegularFile(
             )
         }
         val bytes = try {
-            LinuxFilesystemSyscalls.read(readable, maximumBytes.toInt()) { }
+            LinuxFilesystemSyscalls.read(readable, maximumBytes.toInt(), cancellationCheck)
         } catch (_: LinuxResourceLimitException) {
             throw RepairBudgetExceededException("stable file-read target $relative grew beyond $maximumBytes bytes")
         }
         afterRead?.invoke()
+        cancellationCheck()
         val after = Files.readAttributes(descriptorPath, BasicFileAttributes::class.java)
         require(
             after.isRegularFile && before.fileKey() == after.fileKey() &&
@@ -4746,6 +4751,7 @@ internal fun readStableRegularFile(
                 LinuxFilesystemSyscalls.identity(readable.fd) == readable.identity,
         ) { "stable file-read descriptor changed while it was read: $relative" }
         revalidateDescriptorPath(base, parts, pinnedDirectories.map { it.identity }, authorized.identity)
+        cancellationCheck()
         return StableRegularFile(bytes, sha256(bytes), authorized.identity)
     } finally {
         readable?.close()
