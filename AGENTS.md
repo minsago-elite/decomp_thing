@@ -6,7 +6,6 @@
 
 ## Project Planning
 
-- Current user priority is A-series milestones only. Defer new B-, C-, and D-series work unless the user explicitly expands the scope; retain existing work in those series.
 - Ghidra is a bundled application dependency linked through its Java APIs, not a separately installed prerequisite. Production analysis must not require `GHIDRA_HOME` or delegate to an external `analyzeHeadless` installation. Preserve isolated worker execution and authenticated oracle boundaries when migrating existing adapters.
 - GitHub [milestones](https://github.com/minsago-elite/decomp_thing/milestones) and [issues](https://github.com/minsago-elite/decomp_thing/issues) are the source of truth for planned work and progress.
 - Use milestones for project phases or outcomes. Use focused issues with explicit acceptance criteria for actionable work.
