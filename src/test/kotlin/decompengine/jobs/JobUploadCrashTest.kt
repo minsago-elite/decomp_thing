@@ -61,10 +61,22 @@ class JobUploadCrashTest {
                 entries.filter { it.fileName.toString().startsWith(".upload-") }.toList()
             }
             assertEquals(if (point.published) 0 else 1, stages.size)
+            val retainedBytes = stages.flatMap { stage ->
+                Files.list(stage).use { it.toList() }
+            }.associateWith { it.readBytes() }
+            val inventory = store.recoveryInventory()
+            assertTrue(inventory.inventoryComplete)
+            assertEquals(0, inventory.uninspectedEntries)
+            assertEquals(stages.size, inventory.retainedUploadStages)
+            // Metadata within a private stage contributes bytes, not a second candidate count.
+            assertEquals(0, inventory.retainedMetadataFiles)
+            assertEquals(retainedBytes.values.sumOf { it.size.toLong() }, inventory.observedBytes)
             store.recoverInterruptedJobs()
             assertEquals((published.map { it.id } + existing.id).toSet(), store.list().map { it.id }.toSet())
             assertEquals(existing, store.get(existing.id))
             stages.forEach { assertTrue(it.exists()) }
+            assertEquals(inventory, store.recoveryInventory())
+            retainedBytes.forEach { (path, bytes) -> assertContentEquals(bytes, path.readBytes()) }
         } finally {
             if (process.isAlive) process.destroyForcibly().waitFor(5, TimeUnit.SECONDS)
         }

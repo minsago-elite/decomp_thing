@@ -365,6 +365,12 @@ The configured root follows the existing store path contract; this does not fenc
 A complete inventory says only that the scoped scan finished, not that candidates are abandoned or safe
 to delete. No files are reclaimed or promoted. Safe reclamation and aggregate storage quotas remain
 #242/#71 requirements; #69 may display this summary without interpreting it as completed cleanup.
+The metadata and upload abrupt-exit tests also compare the inventory against the actual retained files
+after each child JVM terminates. They assert exact candidate counts and byte totals, then verify that
+interrupted-job recovery leaves the inventory and private file contents unchanged. A metadata temporary
+inside an upload stage contributes to that stage's byte total; the separate metadata-file counter covers
+temporaries within published job directories. These checks establish diagnostic coverage for those
+controlled crash layouts, without establishing abandonment or permission to reclaim them.
 
 `JobUploadCrashTest` halts a benign child JVM at fourteen controlled input/metadata write, force and
 directory-publication boundaries. Before final rename the candidate remains a private stage; afterward a
