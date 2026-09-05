@@ -12,6 +12,8 @@ import decompengine.repair.RepairResourceBudget
 import decompengine.repair.CompileFailure
 import decompengine.repair.RepairValidationStrategy
 import decompengine.repair.RepairValidationAssurance
+import decompengine.repair.RepairCandidateValidationOutcome
+import decompengine.repair.RepairCandidateValidationRequest
 import decompengine.repair.readStableRegularFile
 import decompengine.repair.openRepairRootDirectory
 import decompengine.repair.repairDescriptorPath
@@ -801,6 +803,8 @@ private fun decodeGeneratedCText(bytes: ByteArray, relative: String): String = t
 interface GeneratedCRepairValidationBoundary {
     val assurance: RepairValidationAssurance
     fun requireAvailable()
+    fun validateCandidate(request: RepairCandidateValidationRequest): RepairCandidateValidationOutcome =
+        throw SandboxUnavailableException("generated-C boundary does not implement immutable candidate validation")
     fun compile(projectDir: Path, logPath: Path, budget: RepairResourceBudget): CompileFailure?
     fun rebuiltProgram(projectDir: Path, budget: RepairResourceBudget): Path
     fun evaluateBehavior(
@@ -841,6 +845,10 @@ class GeneratedCRepairValidationStrategy(
 ) : RepairValidationStrategy {
     override val assurance: RepairValidationAssurance = boundary.assurance
     override fun requireAvailable() = boundary.requireAvailable()
+
+    override fun validateCandidate(request: RepairCandidateValidationRequest): RepairCandidateValidationOutcome =
+        if (assurance == RepairValidationAssurance.STRICT_CONTAINED) boundary.validateCandidate(request)
+        else super.validateCandidate(request)
 
     override fun compile(projectDir: Path, logPath: Path, budget: RepairResourceBudget): CompileFailure? =
         boundary.compile(projectDir, logPath, budget)

@@ -40,6 +40,7 @@ data class AgentExecutionRequestBinding(
                     field("maximumOutputBytes", request.limits.maxOutputBytes.toString())
                     field("maximumInputTokens", request.limits.maxInputTokens?.toString())
                     field("maximumOutputTokens", request.limits.maxOutputTokens?.toString())
+                    request.sessionContinuation?.let { field("sessionContinuationV1", it.bindingSha256()) }
                 }.finish(),
                 accessPolicySha256 = policySha256,
             )

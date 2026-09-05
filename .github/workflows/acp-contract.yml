@@ -1,0 +1,43 @@
+name: ACP contract
+
+on:
+  push:
+  pull_request:
+  workflow_dispatch:
+
+jobs:
+  required-contract:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 25
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          submodules: recursive
+      - uses: actions/setup-java@v6
+        with:
+          distribution: temurin
+          java-version: "21"
+          cache: gradle
+      - name: Install sandbox host prerequisites
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            bubblewrap binutils build-essential dbus-user-session python3 systemd util-linux
+          sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0
+      - name: Prepare required live ACP sandbox host
+        run: scripts/ci-prepare-acp-sandbox.sh
+      - name: Prepare finite ACP quota fixture
+        run: bash scripts/ci-prepare-acp-quota.sh
+      - name: Qualify every required ACP and shared-agent suite
+        run: bash scripts/validate-acp-contract.sh
+      - name: Release finite ACP quota fixture
+        if: always()
+        run: bash scripts/ci-release-acp-quota.sh
+      - uses: actions/upload-artifact@v7
+        if: always()
+        with:
+          name: acp-required-contract
+          path: |
+            build/reports/tests/test
+            build/test-results/test
+            build/acp-contract-qualification

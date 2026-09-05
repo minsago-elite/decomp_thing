@@ -43,14 +43,7 @@ internal class GccBundledGhidraRuntime(val root: Path, classPath: List<GccBundle
         this.classPath = Collections.unmodifiableList(copied)
     }
 
-    fun command(
-        artifacts: List<GccCompilerEngineContainmentArtifactIdentity>,
-        state: GccCompilerEngineAnalysisStateIdentity,
-        lease: GccCompilerEngineOutputLeaseIdentity,
-    ): List<String> {
-        require(state.mode == GccCompilerEngineAnalysisStateMode.FRESH_EMPTY) {
-            "bundled Ghidra runtime has no authenticated saved-state resume invocation"
-        }
+    fun requireArtifacts(artifacts: List<GccCompilerEngineContainmentArtifactIdentity>) {
         val byRole = artifacts.associateBy { it.role }
         fun artifact(role: GccCompilerEngineContainmentArtifactRole) = byRole.getValue(role)
         val bridge = artifact(GccCompilerEngineContainmentArtifactRole.GHIDRA_BRIDGE_JAR)
@@ -66,20 +59,34 @@ internal class GccBundledGhidraRuntime(val root: Path, classPath: List<GccBundle
         }
         require(archive.sha256 == BundledGhidra.ARCHIVE_SHA256) { "bundled Ghidra release archive differs from the reviewed runtime" }
         require(exporter.path.fileName.toString() == "ExportProgramModel.java") { "bundled Ghidra exporter source path is invalid" }
-        require(!root.startsWith(lease.path) && !lease.path.startsWith(root)) { "bundled Ghidra runtime overlaps writable output" }
         require(artifacts.none { it.path.startsWith(root) && it.role !in BUNDLE_ROLES }) {
             "non-bundle input overlaps the bundled Ghidra runtime"
         }
+    }
+
+    fun command(
+        artifacts: List<GccCompilerEngineContainmentArtifactIdentity>,
+        state: GccCompilerEngineAnalysisStateIdentity,
+        lease: GccCompilerEngineOutputLeaseIdentity,
+    ): List<String> {
+        require(state.mode == GccCompilerEngineAnalysisStateMode.FRESH_EMPTY) {
+            "bundled Ghidra runtime has no authenticated saved-state resume invocation"
+        }
+        requireArtifacts(artifacts)
+        require(!root.startsWith(lease.path) && !lease.path.startsWith(root)) { "bundled Ghidra runtime overlaps writable output" }
+        val byRole = artifacts.associateBy { it.role }
+        val exporter = byRole.getValue(GccCompilerEngineContainmentArtifactRole.EXPORTER_SOURCE)
+        val archive = byRole.getValue(GccCompilerEngineContainmentArtifactRole.GHIDRA_ARCHIVE)
         val invocation = GhidraInvocation(
             state.path, "archival_reconstruction",
-            artifact(GccCompilerEngineContainmentArtifactRole.ENGINE_BINARY).path,
+            byRole.getValue(GccCompilerEngineContainmentArtifactRole.ENGINE_BINARY).path,
             exporter.path.parent,
             listOf(GhidraPostScript("ExportProgramModel.java", listOf(
                 exporter.sha256, archive.sha256, "planning", lease.path.resolve("reports/program_model.json").toString(),
             ))),
         )
         return GhidraWorkerCommand.prefix(
-            artifact(GccCompilerEngineContainmentArtifactRole.JAVA_EXECUTABLE).path,
+            byRole.getValue(GccCompilerEngineContainmentArtifactRole.JAVA_EXECUTABLE).path,
             release, classPath.map { it.path },
         ) + invocation.arguments()
     }

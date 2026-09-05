@@ -116,7 +116,7 @@ data class AcpProducedOutputEvidence(
     }
 }
 
-enum class AcpSandboxLaunchPurpose { OUTER_AGENT, TERMINAL, NINJA_COMPDB_QUERY }
+enum class AcpSandboxLaunchPurpose { OUTER_AGENT, TERMINAL, NINJA_COMPDB_QUERY, CANDIDATE_VALIDATION }
 
 data class AcpSandboxLaunchEvidence @JvmOverloads constructor(
     val purpose: AcpSandboxLaunchPurpose,
@@ -135,6 +135,7 @@ data class AcpSandboxLaunchEvidence @JvmOverloads constructor(
     val emptyDirectoriesSha256: String = "",
     val emptyDirectoryCount: Int = 0,
     val stdinDisposition: String = "legacy-unrecorded",
+    val writableMountClosureSha256: String? = null,
 )
 
 /** Metadata-only proof of the boundary frozen for one harness execution. */
@@ -787,6 +788,9 @@ internal class LinuxBubblewrapBoundary private constructor(
                     launchCheckpoint(AcpSandboxLaunchStage.DURING_BIND_ATTESTATION, cancellationCheck)
                 },
             )
+            var writableMountClosureSha256 = if (launch.purpose == AcpSandboxLaunchPurpose.CANDIDATE_VALIDATION) {
+                requireCandidateWritableMountClosure(setupWaiterPid, launch.stagingRoots, cancellationCheck)
+            } else null
             var effectiveRlimits = requireExactRlimits(setupWaiterPid, launch.resourceLimits) {
                 launchCheckpoint(AcpSandboxLaunchStage.DURING_RLIMIT_ATTESTATION, cancellationCheck)
             }
@@ -857,6 +861,11 @@ internal class LinuxBubblewrapBoundary private constructor(
                     launchCheckpoint(AcpSandboxLaunchStage.DURING_SETUP_ATTESTATION, cancellationCheck)
                 },
             )
+            if (launch.purpose == AcpSandboxLaunchPurpose.CANDIDATE_VALIDATION) {
+                writableMountClosureSha256 = requireCandidateWritableMountClosure(
+                    setupWaiterPid, launch.stagingRoots, cancellationCheck,
+                )
+            }
             val launchEvidence = AcpSandboxLaunchEvidence(
                 purpose = launch.purpose,
                 resourceLimits = launch.resourceLimits,
@@ -894,6 +903,7 @@ internal class LinuxBubblewrapBoundary private constructor(
                 ),
                 emptyDirectoryCount = launch.emptyDirectories.distinct().size,
                 stdinDisposition = launch.stdinDisposition.protocolArgument,
+                writableMountClosureSha256 = writableMountClosureSha256,
             )
             val authorizationStream = started.outputStream
             // Reserve bounded metadata capacity before the broker's one-way authorization
@@ -1265,6 +1275,9 @@ internal class LinuxBubblewrapBoundary private constructor(
         add("--ro-bind-fd")
         add(SANDBOX_GATE_ENVIRONMENT_FD.toString())
         add(environmentFile.sandboxPath.toString())
+        if (launch.purpose == AcpSandboxLaunchPurpose.CANDIDATE_VALIDATION) {
+            addAll(candidateValidationFilesystemSealArguments())
+        }
         add("--chdir")
         add(launch.workingDirectory.toString())
         add("--")
@@ -1492,6 +1505,7 @@ internal fun requireAcpSandboxLaunchPolicy(
         AcpSandboxLaunchPurpose.OUTER_AGENT -> configuration.agentRuntimeMounts
         AcpSandboxLaunchPurpose.TERMINAL -> emptyList()
         AcpSandboxLaunchPurpose.NINJA_COMPDB_QUERY -> configuration.ninjaCompdbRuntimeMounts
+        AcpSandboxLaunchPurpose.CANDIDATE_VALIDATION -> configuration.validationRuntimeMounts
     }
     if (launch.purpose == AcpSandboxLaunchPurpose.NINJA_COMPDB_QUERY) {
         val omitted = configuration.ninjaCompdbRuntimeMounts.firstOrNull { configured ->
@@ -3314,14 +3328,14 @@ internal class PinnedSecurityExecutable private constructor(
     }
 }
 
-private data class ForbiddenRuntimeFile(
+internal data class ForbiddenRuntimeFile(
     val device: Long,
     val inode: Long,
     val size: Long,
     val sha256: String,
 )
 
-private data class RuntimeManifest(
+internal data class RuntimeManifest(
     val rootIdentity: PinnedFileIdentity,
     val manifestSha256: String,
     val recursivelyRootOwnedAndImmutable: Boolean,
@@ -3559,6 +3573,7 @@ private data class SandboxVisibleMount(
     val mountId: Long,
     val mountPoint: Path,
     val options: Set<String>,
+    val fileSystemType: String,
 )
 
 private fun requireSandboxVisibleBindings(
@@ -3670,8 +3685,91 @@ private fun readSandboxMountInfo(
         }
         val mountId = left[0].toLongOrNull()
             ?: throw IOException("sandbox mountinfo mount identity is invalid")
-        SandboxVisibleMount(mountId, mountPoint, left[5].split(',').filter(String::isNotBlank).toSet())
+        val right = line.substring(separator + 3).split(' ')
+        if (right.size < 3 || right[0].isBlank()) throw IOException("sandbox mountinfo filesystem record is incomplete")
+        SandboxVisibleMount(mountId, mountPoint, left[5].split(',').filter(String::isNotBlank).toSet(), right[0])
     }
+
+/** The namespace root and private temporary/device directories cannot allocate ordinary files. */
+internal fun candidateValidationFilesystemSealArguments(): List<String> =
+    CANDIDATE_SEALED_MOUNTS.flatMap { listOf("--remount-ro", it.toString()) }
+
+private val CANDIDATE_SEALED_MOUNTS = listOf("/proc", "/dev/pts", "/dev", "/tmp", "/").map(Path::of)
+
+internal data class AcpCandidateMountAccess(val path: Path, val fileSystemType: String, val options: Set<String>)
+
+/** Pure policy check shared with benign mount-metadata regression tests; it creates no launch authority. */
+internal fun requireCandidateFilesystemLayout(
+    mounts: List<AcpCandidateMountAccess>,
+    writablePaths: Set<Path>,
+    characterDeviceIdentity: (Path) -> Pair<Long, Long>?,
+) {
+    require(writablePaths.isNotEmpty()) { "candidate validation requires a finite writable grant" }
+    require(mounts.map { it.path }.distinct().size == mounts.size) { "candidate mount paths are ambiguous" }
+    CANDIDATE_SEALED_MOUNTS.forEach { path ->
+        val mount = mounts.singleOrNull { it.path == path }
+            ?: throw IOException("candidate validation private mount is absent or ambiguous")
+        if ("ro" !in mount.options || "rw" in mount.options) throw IOException("candidate validation private filesystem is not read-only")
+    }
+    val devices = mapOf("/dev/null" to (1L to 3L), "/dev/zero" to (1L to 5L),
+        "/dev/full" to (1L to 7L), "/dev/random" to (1L to 8L), "/dev/urandom" to (1L to 9L),
+        "/dev/tty" to (5L to 0L))
+    writablePaths.forEach { path ->
+        val mount = mounts.singleOrNull { it.path == path }
+            ?: throw IOException("candidate writable grant is absent")
+        if (mount.fileSystemType != "tmpfs" || "rw" !in mount.options || "ro" in mount.options) {
+            throw IOException("candidate writable grant is not a writable tmpfs")
+        }
+    }
+    mounts.forEach { mount ->
+        if (("rw" in mount.options) == ("ro" in mount.options)) throw IOException("candidate mount has ambiguous access mode")
+        if ("rw" in mount.options && mount.path !in writablePaths) {
+            val expected = devices[mount.path.toString()]
+                ?: throw IOException("candidate validation has an unaccounted writable mount")
+            if (characterDeviceIdentity(mount.path) != expected) {
+                throw IOException("candidate validation writable device is not the declared standard character device")
+            }
+        }
+    }
+}
+
+/**
+ * Final host-side attestation while the authenticated static helper is still behind its gate.
+ * Only exact quota grants may allocate ordinary writable files. Individually bound standard
+ * character devices are checked by type and device number; they do not create filesystem data.
+ */
+private fun requireCandidateWritableMountClosure(
+    waiterPid: Long,
+    roots: Collection<AcpSandboxRootGrant>,
+    cancellationCheck: () -> Unit,
+): String {
+    val mounts = readSandboxMountInfo(waiterPid, cancellationCheck)
+    val writable = roots.filter { it.mode == AcpSandboxRootMode.READ_WRITE }.associateBy { it.sandboxPath }
+    require(writable.isNotEmpty()) { "candidate validation requires a finite writable grant" }
+    writable.values.forEach { grant ->
+        require(grant.stagingRoot.quotaProof != null) { "candidate validation writable grant lacks finite quota authority" }
+        grant.stagingRoot.requireCurrentIdentity(cancellationCheck)
+    }
+    requireCandidateFilesystemLayout(mounts.map { AcpCandidateMountAccess(it.mountPoint, it.fileSystemType, it.options) },
+        writable.keys) { destination ->
+        cancellationCheck()
+        val path = Path.of("/proc", waiterPid.toString(), "root").resolve(destination.toString().removePrefix("/"))
+        val identity = Files.readAttributes(path, "unix:mode,rdev", LinkOption.NOFOLLOW_LINKS)
+        val mode = (identity.getValue("mode") as Number).toInt()
+        val device = (identity.getValue("rdev") as Number).toLong()
+        if (mode and 0xf000 != 0x2000) null else linuxDeviceMajor(device) to linuxDeviceMinor(device)
+    }
+    val digest = CanonicalMetadataDigest(MAXIMUM_SANDBOX_EVIDENCE_BYTES, cancellationCheck)
+    mounts.sortedBy { it.mountPoint.toString() }.forEachIndexed { index, mount ->
+        cancellationCheck()
+        digest.field("mount[$index].path", mount.mountPoint)
+        digest.field("mount[$index].id", mount.mountId)
+        digest.field("mount[$index].type", mount.fileSystemType)
+        digest.field("mount[$index].access", if ("rw" in mount.options) "rw" else "ro")
+    }
+    digest.field("quotaGrants", canonicalStagingRootsDigest(roots, cancellationCheck))
+    return digest.finish()
+}
 
 private fun readBoundedProcLines(
     path: Path,
@@ -3762,7 +3860,7 @@ private fun terminalAuthorityStrings(
     }
 }
 
-private fun buildRuntimeManifest(
+internal fun buildRuntimeManifest(
     source: Path,
     limits: AcpRuntimeClosureLimits,
     forbidden: Set<ForbiddenRuntimeFile>,
@@ -3846,7 +3944,10 @@ private fun buildRuntimeManifest(
             }
             if (mustHash) {
                 val fileDigest = sha256(path, cancellationCheck)
-                digest.update(fileDigest.toByteArray())
+                // Screening must not change an immutable root-owned runtime's provisioning
+                // manifest merely because an unrelated security tool has the same byte size.
+                // User-owned snapshots still commit every file's content hash.
+                if (!rootOwned) digest.update(fileDigest.toByteArray())
                 if (candidateForbidden.any { forbiddenFile ->
                     (forbiddenFile.device == identity.device && forbiddenFile.inode == identity.inode) ||
                         forbiddenFile.sha256 == fileDigest
@@ -3870,9 +3971,17 @@ private fun buildRuntimeManifest(
 fun calculateAcpRuntimeManifestSha256(
     source: Path,
     limits: AcpRuntimeClosureLimits = AcpRuntimeClosureLimits(),
+): String = calculateAcpRuntimeManifestSha256(source, limits, NO_SANDBOX_CHECKPOINT)
+
+/** Application-owned captured input hashing with the enclosing invocation checkpoint. */
+internal fun calculateAcpRuntimeManifestSha256(
+    source: Path,
+    limits: AcpRuntimeClosureLimits,
+    cancellationCheck: () -> Unit,
 ): String {
+    cancellationCheck()
     LinuxFilesystemSyscalls.requireSupported(source)
-    return buildRuntimeManifest(source, limits, emptySet()).manifestSha256
+    return buildRuntimeManifest(source, limits, emptySet(), cancellationCheck = cancellationCheck).manifestSha256
 }
 
 private fun pinMounts(
@@ -4773,6 +4882,7 @@ private class BoundedCanonicalText(
 private class CanonicalMetadataDigest(
     private val maximumBytes: Long,
     private val cancellationCheck: () -> Unit,
+    private val fieldObserver: ((String, String) -> Unit)? = null,
 ) {
     private val digest = MessageDigest.getInstance("SHA-256")
     private var encodedBytes = 0L
@@ -4784,6 +4894,7 @@ private class CanonicalMetadataDigest(
         append("${text.length}:")
         append(text)
         append(";")
+        fieldObserver?.invoke(name, text)
     }
 
     fun value(value: String) {
@@ -5066,8 +5177,9 @@ private fun canonicalStagingRootsDigest(
 private fun canonicalSandboxEvidenceDigest(
     evidence: AcpSandboxEvidence,
     cancellationCheck: () -> Unit = NO_SANDBOX_CHECKPOINT,
+    fieldObserver: ((String, String) -> Unit)? = null,
 ): String {
-    val digest = CanonicalMetadataDigest(MAXIMUM_SANDBOX_EVIDENCE_BYTES, cancellationCheck)
+    val digest = CanonicalMetadataDigest(MAXIMUM_SANDBOX_EVIDENCE_BYTES, cancellationCheck, fieldObserver)
     fun field(name: String, value: Any?) = digest.field(name, value)
     fun resource(prefix: String, limits: AcpSandboxResourceLimits) {
         cancellationCheck()
@@ -5130,6 +5242,7 @@ private fun canonicalSandboxEvidenceDigest(
         field("launch[$launchIndex].emptyDirectories", launch.emptyDirectoriesSha256)
         field("launch[$launchIndex].emptyDirectoryCount", launch.emptyDirectoryCount)
         field("launch[$launchIndex].stdinDisposition", launch.stdinDisposition)
+        launch.writableMountClosureSha256?.let { field("launch[$launchIndex].writableMountClosure", it) }
         field("launch[$launchIndex].gate.descriptor", launch.startGate.descriptor)
         field("launch[$launchIndex].gate.waiter", launch.startGate.waiterExecutableSha256)
         field("launch[$launchIndex].gate.protocol", launch.startGate.helperProtocolSha256)
@@ -5215,6 +5328,17 @@ private fun canonicalSandboxEvidenceDigest(
         field("terminalAudit[$index].truncated", record.outputTruncated)
     }
     return digest.finish()
+}
+
+/** Complete bounded field record, using precisely the schema/order authenticated by evidenceSha256. */
+internal fun canonicalAcpSandboxEvidenceFields(
+    evidence: AcpSandboxEvidence,
+    cancellationCheck: () -> Unit = NO_SANDBOX_CHECKPOINT,
+): List<Pair<String, String>> {
+    val fields = ArrayList<Pair<String, String>>()
+    val actual = canonicalSandboxEvidenceDigest(evidence, cancellationCheck) { name, value -> fields += name to value }
+    require(actual == evidence.evidenceSha256) { "sandbox evidence changed before archival" }
+    return Collections.unmodifiableList(fields)
 }
 
 private fun sha256(value: String): String =

@@ -19,6 +19,10 @@ import decompengine.project.GhidraProgramModelExportLimits
 import decompengine.project.GhidraProgramModelRecoveryMode
 import decompengine.project.ModuleReconstructor
 import decompengine.agent.AgentHarness
+import decompengine.agent.AgentWorkflowProgress
+import decompengine.agent.AgentWorkflowPhase
+import decompengine.jobs.BestEffortProgressJournal
+import decompengine.jobs.ProgressRedactor
 import decompengine.oracle.gcc.GccCompilerEnginePlanningService
 import decompengine.oracle.gcc.GccCompilerEngineProfiles
 import decompengine.oracle.gcc.authenticateGhidraInstallation
@@ -146,20 +150,34 @@ private fun runReconstruct(args: List<String>) {
         }
     }
     if (binary == null || output == null) reconstructUsageError("reconstruct requires an input binary and output directory")
-    val strategy = try {
-        selectReconstructionStrategy(evidenceOnly, maximumContext, harnessOverride, System.getenv())
-    } catch (e: IllegalArgumentException) {
-        reconstructUsageError(e.message ?: "invalid harness configuration")
+    val environment = System.getenv()
+    BestEffortProgressJournal(
+        output, "reconstruction", environment.values,
+        onPhase = { System.err.println("reconstruction: ${it.name.lowercase().replace('_', ' ')}") },
+    ).use { progress ->
+        val strategy = try {
+            selectReconstructionStrategy(evidenceOnly, maximumContext, harnessOverride, environment, progress)
+        } catch (e: IllegalArgumentException) {
+            progress.phase(AgentWorkflowPhase.FAILED)
+            progress.close()
+            reconstructUsageError(e.message ?: "invalid harness configuration")
+        }
+        println(
+            strategy.harnessProvenance?.let { "harness provenance: $it" }
+                ?: "harness: none (evidence-only)",
+        )
+        val result = try {
+            ArchivalReconstructionService(
+                GhidraHeadlessProgramModelAnalyzer.bundled(), strategy.reconstructor, progress = progress,
+            ).reconstruct(binary, output)
+        } catch (failure: Exception) {
+            progress.phase(AgentWorkflowPhase.FAILED)
+            throw failure
+        }
+        println("source tree: ${result.projectDir}")
+        println("archive: ${result.bundle.archivePath}")
+        println("archive sha256: ${result.bundle.archiveSha256}")
     }
-    println(
-        strategy.harnessProvenance?.let { "harness provenance: $it" }
-            ?: "harness: none (evidence-only)",
-    )
-    val result = ArchivalReconstructionService(GhidraHeadlessProgramModelAnalyzer.bundled(), strategy.reconstructor)
-        .reconstruct(binary, output)
-    println("source tree: ${result.projectDir}")
-    println("archive: ${result.bundle.archivePath}")
-    println("archive sha256: ${result.bundle.archiveSha256}")
 }
 
 internal data class ReconstructionStrategy(
@@ -172,6 +190,7 @@ internal fun selectReconstructionStrategy(
     maximumContext: Int,
     harnessOverride: String?,
     environment: Map<String, String>,
+    progress: AgentWorkflowProgress = AgentWorkflowProgress.NONE,
 ): ReconstructionStrategy {
     require(!evidenceOnly || harnessOverride == null) {
         "--harness cannot be used with --evidence-only"
@@ -187,6 +206,7 @@ internal fun selectReconstructionStrategy(
             selection.createHarness(),
             maximumContext,
             selection.provenance.stableDescriptor,
+            progress = progress,
         ),
         selection.provenance.stableDescriptor,
     )
@@ -298,25 +318,29 @@ private fun runRepair(args: List<String>) {
     } else {
         listOf(ProcessInput("default"))
     }
-    val runtime = try {
+    val redactor = ProgressRedactor(System.getenv().values)
+    val result = try {
         SecureRepairRuntime.open(
             RepairRuntimeConfiguration(
                 profileId = "generated-c-make-v1",
                 historyPath = reportsDir.resolve("repair_history.json"),
                 harnessOverride = harnessOverride,
             ),
-        )
+        ).use { runtime ->
+            System.err.println("repair harness: ${redactor.text(runtime.harnessProvenance)}")
+            RepairCliProgress(reportsDir).use {
+                runtime.runRepair(project, original, regressionInputs, reportsDir, maxIterations)
+            }
+        }
     } catch (failure: IllegalArgumentException) {
-        repairUsageError(failure.message ?: "invalid harness configuration")
+        repairUsageError(redactor.text(failure.message ?: "invalid repair configuration"))
+    } catch (failure: Exception) {
+        System.err.println("repair unavailable or failed: ${redactor.text(failure.message ?: failure.javaClass.simpleName)}")
+        kotlin.system.exitProcess(1)
     }
-    val result = runtime.use {
-        println("harness provenance: ${it.harnessProvenance}")
-        it.repairUntilValid(project, original, regressionInputs, reportsDir, maxIterations)
-    }
-    result.iterations.forEach { iteration ->
-        println("repair iteration ${iteration.index}: ${iteration.failureKind} - ${iteration.summary}")
-    }
-    println("repair passed ${result.validation.cases.size} retained regression case(s); report: ${result.validation.reportPath}")
+    val presentation = presentRepairOutcome(result)
+    presentation.lines.forEach(::println)
+    if (presentation.exitCode != 0) kotlin.system.exitProcess(presentation.exitCode)
 }
 
 private fun repairUsageError(message: String): Nothing {
@@ -497,6 +521,7 @@ private fun doctorUsageError(message: String): Nothing {
 private fun runWeb(args: List<String>) {
     var host = "127.0.0.1"
     var port = 8000
+    var listenBacklog = 64
     var dataDir = Path.of(".decomp_engine/jobs")
     var uiMode = WebUiMode.LEGACY
     var basePath = "/"
@@ -511,6 +536,11 @@ private fun runWeb(args: List<String>) {
             }
             "--port" -> {
                 port = args[index + 1].toInt()
+                index += 2
+            }
+            "--listen-backlog" -> {
+                listenBacklog = args.getOrNull(index + 1)?.toIntOrNull()
+                    ?: error("--listen-backlog requires an integer between 1 and 4096")
                 index += 2
             }
             "--data-dir" -> {
@@ -538,13 +568,12 @@ private fun runWeb(args: List<String>) {
     }
     require(port in 0..65535) { "--port must be between 0 and 65535 (0 selects an available port)" }
     val server = try {
-        UploadServer(host, port, dataDir, uiMode = uiMode, basePath = basePath, devFrontendOrigin = devFrontendOrigin)
+        UploadServer(host, port, dataDir, uiMode = uiMode, basePath = basePath, devFrontendOrigin = devFrontendOrigin, listenBacklog = listenBacklog)
     } catch (_: java.net.BindException) {
         System.err.println("Cannot bind web server to $host:$port. Check --host or choose an unused --port.")
         kotlin.system.exitProcess(2)
     }
-    server.start()
-    Runtime.getRuntime().addShutdownHook(Thread { server.stop() })
+    decompengine.web.startWebServerWithShutdownHook(server)
     val urlHost = if (':' in host && !host.startsWith('[')) "[$host]" else host
     println("Serving decomp_engine ${uiMode.name.lowercase()} UI on http://$urlHost:${server.serverPort}$basePath")
     if (uiMode == WebUiMode.SPA) {
@@ -566,11 +595,11 @@ private fun printHelp() {
           llm_bin_patch explore <binary> --reports <directory> [--arg <value>] [--stdin <value>]
           llm_bin_patch reconstruct <binary> --output <directory> [--evidence-only] [--max-context-chars <count>] [--harness acp|legacy-openai]
           llm_bin_patch gcc-engine-plan <cc1|lto1> <stripped-binary> --profile <file> --ghidra-archive <file> --output <directory>
-          llm_bin_patch web [--host 127.0.0.1] [--port 8000] [--data-dir .decomp_engine/jobs] [--ui legacy|spa] [--base-path /] [--dev-frontend-origin http://127.0.0.1:5173]
+          llm_bin_patch web [--host 127.0.0.1] [--port 8000] [--listen-backlog 64] [--data-dir .decomp_engine/jobs] [--ui legacy|spa] [--base-path /] [--dev-frontend-origin http://127.0.0.1:5173]
 
         Agent harness selection for doctor, patch, reconstruction, and repair:
           --harness acp            use the ACP agent provisioned by ACP_CONFIG_FILE (default)
-          --harness legacy-openai  use the deprecated built-in OpenAI-compatible adapter
+          --harness legacy-openai  use the deprecated direct OpenAI-compatible adapter
           Doctor performs an initialize-only ACP v1 preflight for all workflows by default.
           Doctor's --tools-only mode is agent-free and cannot be combined with agent selectors.
           Reconstruction's --evidence-only mode is agent-free and cannot be combined with --harness.

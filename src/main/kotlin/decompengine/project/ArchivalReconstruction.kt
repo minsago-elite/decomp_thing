@@ -1,6 +1,8 @@
 package decompengine.project
 
 import decompengine.analysis.GhidraAnalysisException
+import decompengine.agent.AgentWorkflowProgress
+import decompengine.agent.AgentWorkflowPhase
 import decompengine.analysis.BundledGhidra
 import decompengine.analysis.GhidraInvocation
 import decompengine.analysis.GhidraPostScript
@@ -270,6 +272,7 @@ class ArchivalReconstructionService(
     private val reconstructor: ModuleReconstructor = EvidenceModuleReconstructor(),
     private val profile: ReconstructionProfile = GeneratedCMakeReconstructionProfile.descriptor,
     hostSafetyLimits: ReconstructionHostSafetyLimits = ReconstructionHostSafetyLimits(profile.budgets),
+    private val progress: AgentWorkflowProgress = AgentWorkflowProgress.NONE,
 ) {
     init {
         hostSafetyLimits.requireAllows(profile.budgets)
@@ -277,10 +280,12 @@ class ArchivalReconstructionService(
 
     fun reconstruct(binaryPath: Path, outputDir: Path): ArchivalReconstructionResult {
         outputDir.createDirectories()
+        progress.phase(AgentWorkflowPhase.ANALYZING)
         val model = analyzer.analyze(binaryPath, outputDir.resolve("analysis"))
         val project = outputDir.resolve("source-tree")
         val progressPath = outputDir.resolve("reconstruction_progress.json")
         progressPath.writeText("{\"phase\":\"planning\",\"completed\":0,\"total\":0}\n")
+        progress.phase(AgentWorkflowPhase.PLANNING)
         var moduleTotal = 0
         val observedBehavior = outputDir.resolve("exploration.json").takeIf { Files.isRegularFile(it) }?.readText()
         val planner = DeterministicModulePlanner(
@@ -297,10 +302,12 @@ class ArchivalReconstructionService(
             reconstructor = reconstructor,
             observedBehavior = observedBehavior,
             profile = profile,
+            progress = progress,
         ) { completed, total, module ->
             moduleTotal = total
             progressPath.writeText("{\"phase\":\"modules\",\"completed\":$completed,\"total\":$total,\"module\":\"$module\"}\n")
         }
+        progress.phase(AgentWorkflowPhase.BUILD_VALIDATING)
         val build = MakeProjectBuilder.build(
             project,
             ProjectBuildConfiguration(
@@ -322,6 +329,8 @@ class ArchivalReconstructionService(
             profile,
         )
         progressPath.writeText("{\"phase\":\"complete\",\"completed\":$moduleTotal,\"total\":$moduleTotal}\n")
+        progress.phase(if (build.returnCode == 0) AgentWorkflowPhase.COMPLETED
+            else AgentWorkflowPhase.UNRESOLVED)
         outputDir.resolve("reconstruction.json").writeText(
             """
             {

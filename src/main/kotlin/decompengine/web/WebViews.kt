@@ -1,6 +1,7 @@
 package decompengine.web
 
 import decompengine.jobs.Job
+import decompengine.jobs.AgentProgressJournal
 import decompengine.jobs.toJson
 import kotlinx.serialization.json.Json
 import kotlinx.serialization.json.JsonArray
@@ -92,10 +93,35 @@ fun renderJob(job: Job, reportContext: WebReportContext? = null,
         const initialStatus = ${jsString(job.status)};
         const poll = async () => {
           try {
+            const eventsResponse = await fetch('/api/jobs/${job.id}/events${reports.runId?.let { "?runId=$it" }.orEmpty()}', {cache: 'no-store'});
+            if (eventsResponse.ok) {
+              const snapshot = await eventsResponse.json();
+              const list = document.querySelector('#agent-event-list');
+              list.replaceChildren();
+              for (const event of snapshot.events.slice(-30)) {
+                const item = document.createElement('li');
+                item.textContent = [event.sequence, event.workflowRunId || '', event.taskId || '',
+                  event.revisionId || '', event.phase || event.kind, event.role || '',
+                  event.status || event.stopReason || event.failureKind || event.decision || '',
+                  event.acceptedRevisionSha256 ? 'accepted source ' + event.acceptedRevisionSha256 : '',
+                  event.text || '',
+                  ...[['inputTokens', 'input tokens'], ['outputTokens', 'output tokens'],
+                    ['cachedInputTokens', 'cached input tokens'], ['toolCalls', 'tool calls'],
+                    ['wallClock', 'elapsed'], ['contextUsedTokens', 'context used'],
+                    ['contextWindowTokens', 'context capacity'], ['reportedCostAmount', 'reported cost'],
+                    ['reportedCostCurrency', 'cost currency']].filter(([key]) => event[key] !== undefined && event[key] !== null)
+                    .map(([key, label]) => label + ': ' + event[key])].filter(value => value !== '').join(' · ');
+                list.append(item);
+              }
+              document.querySelector('#agent-event-gap').textContent = snapshot.truncated
+                ? 'Earlier events were omitted from this bounded view. Inspect the invocation receipts for retained evidence.' : '';
+            }
             const response = await fetch('/api/jobs/${job.id}', {cache: 'no-store'});
             if (!response.ok) return;
             const job = await response.json();
             if (job.status !== initialStatus || !['queued', 'analyzing'].includes(job.status)) location.reload();
+          } catch (error) {
+            document.querySelector('#agent-event-gap').textContent = 'Progress connection interrupted; retrying.';
           } finally {
             setTimeout(poll, 1500);
           }
@@ -143,6 +169,7 @@ fun renderJob(job: Job, reportContext: WebReportContext? = null,
             </div>
             ${renderExploration(job, reports)}
             ${renderReconstructionProgress(job, reports)}
+            ${renderAgentProgress(reports)}
             ${sourceTree?.let { renderSourceTree(job, it, reports) }.orEmpty()}
             ${if (sourceTreeUnavailable) "<section class=\"panel\"><p>Source-tree evidence is unavailable or has not been generated for this revision.</p></section>" else ""}
             ${renderRepairHistory(job, reports)}
@@ -151,6 +178,37 @@ fun renderJob(job: Job, reportContext: WebReportContext? = null,
         """.trimIndent(),
         script = script,
     )
+}
+
+private fun renderAgentProgress(reports: WebReportContext): String {
+    val snapshot = runCatching { AgentProgressJournal.read(reports.reportsDirectory) }.getOrNull()
+    val events = snapshot?.get("events")?.jsonArray.orEmpty().takeLast(30)
+    val rows = events.joinToString("") { item ->
+        val event = item.jsonObject
+        val summary = listOf(event.text("sequence"), event.text("workflowRunId"), event.text("taskId"), event.text("revisionId"),
+            event.text("phase").ifBlank { event.text("kind") }, event.text("role"),
+            event.text("status").ifBlank { event.text("stopReason") }.ifBlank { event.text("failureKind") }
+                .ifBlank { event.text("decision") },
+            event.text("acceptedRevisionSha256").let { if (it.isBlank()) "" else "accepted source $it" }, event.text("text"),
+            listOf("inputTokens" to "input tokens", "outputTokens" to "output tokens",
+                "cachedInputTokens" to "cached input tokens", "toolCalls" to "tool calls", "wallClock" to "elapsed",
+                "contextUsedTokens" to "context used", "contextWindowTokens" to "context capacity",
+                "reportedCostAmount" to "reported cost", "reportedCostCurrency" to "cost currency")
+                .mapNotNull { (key, label) -> event.text(key).takeIf { it.isNotBlank() }?.let { "$label: $it" } }
+                .joinToString(" · "))
+            .filter(String::isNotBlank).joinToString(" · ")
+        "<li>${summary.escapeHtml()}</li>"
+    }
+    val gap = if (snapshot?.get("truncated")?.toString() == "true")
+        "Earlier events were omitted from this bounded view. Inspect the invocation receipts for retained evidence." else ""
+    return """
+        <section class="panel agent-progress" aria-labelledby="agent-progress-title">
+          <h2 id="agent-progress-title">Agent progress</h2>
+          <p>Agent completion is followed by policy and validation checks. Accepted revisions are recorded separately.</p>
+          <p id="agent-event-gap" role="status">${gap.escapeHtml()}</p>
+          <ol id="agent-event-list" aria-live="polite">$rows</ol>
+        </section>
+    """.trimIndent()
 }
 
 fun renderSourceFile(

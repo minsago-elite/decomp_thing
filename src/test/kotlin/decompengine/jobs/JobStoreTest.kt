@@ -14,6 +14,52 @@ import kotlin.test.assertTrue
 
 class JobStoreTest {
     @Test
+    fun `metadata publication preserves the complete snapshot held by an existing reader`() {
+        val root = createTempDirectory("jobs-atomic-")
+        val store = JobStore(root)
+        val job = store.createFromUpload("fixture.elf", elfFixture())
+        val metadata = root.resolve(job.id).resolve("job.json")
+        val previous = metadata.readBytes()
+        java.nio.channels.FileChannel.open(metadata).use { reader ->
+            store.updateStatus(job.id, "analyzing", "replacement status")
+            val buffer = java.nio.ByteBuffer.allocate(previous.size + 1024)
+            while (reader.read(buffer) > 0) { }
+            kotlin.test.assertContentEquals(previous, buffer.array().copyOf(buffer.position()))
+        }
+        assertEquals("analyzing", JobStore(root).get(job.id).status)
+        java.nio.file.Files.list(root.resolve(job.id)).use { entries ->
+            assertTrue(entries.noneMatch { it.fileName.toString().startsWith(".job-metadata-") })
+        }
+    }
+
+    @Test
+    fun `interrupted metadata update preserves the previous readable record`() {
+        val root = createTempDirectory("jobs-interrupted-write-")
+        val store = JobStore(root)
+        val job = store.createFromUpload("fixture.elf", elfFixture())
+        val metadata = root.resolve(job.id).resolve("job.json")
+        val previous = metadata.readBytes()
+        val failure = java.util.concurrent.atomic.AtomicReference<Throwable>()
+        val worker = Thread {
+            Thread.currentThread().interrupt()
+            try {
+                store.updateStatus(job.id, "analyzing", "must not be published")
+            } catch (problem: Throwable) {
+                failure.set(problem)
+            }
+        }
+        worker.start()
+        worker.join(5000)
+        assertTrue(!worker.isAlive)
+        assertTrue(failure.get() is java.nio.channels.ClosedByInterruptException, failure.get().toString())
+        kotlin.test.assertContentEquals(previous, metadata.readBytes())
+        assertEquals("uploaded", JobStore(root).get(job.id).status)
+        java.nio.file.Files.list(root.resolve(job.id)).use { entries ->
+            assertTrue(entries.noneMatch { it.fileName.toString().startsWith(".job-metadata-") })
+        }
+    }
+
+    @Test
     fun `backend stores uploaded ELF job and metadata`() {
         val tempDir = createTempDirectory("jobs-")
         val store = JobStore(tempDir)

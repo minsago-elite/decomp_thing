@@ -15,6 +15,11 @@ import decompengine.jobs.InvalidUploadException
 import decompengine.jobs.Job
 import decompengine.jobs.JobStore
 import decompengine.jobs.JobStoreException
+import decompengine.jobs.AgentProgressJournal
+import decompengine.jobs.ProgressRedactor
+import decompengine.jobs.BestEffortProgressJournal
+import decompengine.agent.AgentWorkflowProgress
+import decompengine.agent.AgentWorkflowPhase
 import decompengine.jobs.toJson
 import decompengine.project.ArchivalReconstructionService
 import decompengine.project.BoundedLlmModuleReconstructor
@@ -61,16 +66,24 @@ class SourceTreeJobReconstructor(
     private val analyzer: decompengine.project.ProgramModelAnalyzer = GhidraHeadlessProgramModelAnalyzer.bundled(),
 ) : JobReconstructor {
     override fun reconstruct(job: Job, reportsDir: Path) {
-        val strategy = selectWebReconstructionStrategy(environment)
-        java.nio.file.Files.createDirectories(reportsDir)
-        java.nio.file.Files.writeString(
-            reportsDir.resolve(WEB_RECONSTRUCTION_HARNESS_REPORT),
-            renderWebReconstructionHarnessSelection(strategy),
-        )
-        ArchivalReconstructionService(
-            analyzer,
-            strategy.reconstructor,
-        ).reconstruct(job.binaryPath, reportsDir)
+        BestEffortProgressJournal(reportsDir, "reconstruction", environment.values).use { progress ->
+            try {
+                val strategy = selectWebReconstructionStrategy(environment, progress)
+                java.nio.file.Files.createDirectories(reportsDir)
+                java.nio.file.Files.writeString(
+                    reportsDir.resolve(WEB_RECONSTRUCTION_HARNESS_REPORT),
+                    renderWebReconstructionHarnessSelection(strategy),
+                )
+                ArchivalReconstructionService(
+                    analyzer,
+                    strategy.reconstructor,
+                    progress = progress,
+                ).reconstruct(job.binaryPath, reportsDir)
+            } catch (failure: Exception) {
+                progress.phase(AgentWorkflowPhase.FAILED)
+                throw failure
+            }
+        }
     }
 }
 
@@ -86,7 +99,10 @@ internal data class WebReconstructionStrategy(
 )
 
 /** Resolves exactly one web reconstruction mode without credential-based fallbacks. */
-internal fun selectWebReconstructionStrategy(environment: Map<String, String>): WebReconstructionStrategy {
+internal fun selectWebReconstructionStrategy(
+    environment: Map<String, String>,
+    progress: AgentWorkflowProgress = AgentWorkflowProgress.NONE,
+): WebReconstructionStrategy {
     val configuredMode = environment[WEB_RECONSTRUCTION_MODE_ENVIRONMENT] ?: WebReconstructionMode.AGENT.configurationValue
     return when (configuredMode) {
         WebReconstructionMode.AGENT.configurationValue -> {
@@ -96,6 +112,7 @@ internal fun selectWebReconstructionStrategy(environment: Map<String, String>): 
                 BoundedLlmModuleReconstructor(
                     selection.createHarness(),
                     harnessProvenanceDescriptor = selection.provenance.stableDescriptor,
+                    progress = progress,
                 ),
                 selection.provenance,
             )
@@ -157,7 +174,11 @@ class UploadServer(
     basePath: String = "/",
     devFrontendOrigin: String? = null,
     sourceProfiles: List<ReconstructionProfile> = listOf(GeneratedCMakeReconstructionProfile.descriptor),
+    sensitiveValues: Collection<String> = System.getenv().values,
+    listenBacklog: Int = 64,
 ) {
+    init { require(listenBacklog in 1..4096) { "HTTP listen backlog must be between 1 and 4096" } }
+    private val diagnosticRedactor = ProgressRedactor(sensitiveValues)
     // Verify trusted application bytes before binding a listening socket.
     private val spaAssets = when (uiMode) {
         WebUiMode.SPA -> {
@@ -176,9 +197,9 @@ class UploadServer(
             null
         }
     }
-    private val server = HttpServer.create(InetSocketAddress(host, port), 0)
+    private val server = HttpServer.create(InetSocketAddress(host, port), listenBacklog)
     private val store = JobStore(dataDir)
-    private val jobs = WebJobService(store, analyzer, reconstructor, executor)
+    private val jobs = WebJobService(store, analyzer, reconstructor, executor, shutdownTimeoutMs = 5000, failureDiagnostic = { diagnostic(it, "Background operation failed") })
     private val sourceEvidence = WebSourceEvidence(store, sourceProfiles, jobs::readArtifact)
     private val archiveEvidence = WebArchiveEvidence(store, sourceEvidence, jobs::readArtifact)
     private val access = spaAssets?.let {
@@ -223,6 +244,8 @@ class UploadServer(
     fun start() = server.start()
 
     fun stop(delaySeconds: Int = 0) {
+        require(delaySeconds >= 0) { "shutdown delay must be nonnegative" }
+        jobs.beginShutdown()
         server.stop(delaySeconds)
         requestExecutor.shutdownNow()
         requestDeadlines.shutdownNow()
@@ -261,17 +284,26 @@ class UploadServer(
                     handleArtifact(exchange, decode(segments[1]), segments.drop(3).joinToString("/").let(::decode))
                 exchange.requestMethod == "GET" && segments.size == 3 && segments[0] == "api" && segments[1] == "jobs" ->
                     exchange.sendJson(200, encodeJob(jobs.get(decode(segments[2]))))
+                exchange.requestMethod == "GET" && segments.size == 4 && segments[0] == "api" && segments[1] == "jobs" && segments[3] == "events" -> {
+                    val job = jobs.get(decode(segments[2]))
+                    val runId = exchange.requestURI.rawQuery?.let {
+                        require(it.matches(Regex("runId=[A-Za-z0-9][A-Za-z0-9_-]{0,127}"))) { "Only an exact workflow attempt selection is supported" }
+                        it.removePrefix("runId=")
+                    }
+                    val snapshot = AgentProgressJournal.read(jobs.reportContext(job.id, runId).reportsDirectory)
+                    exchange.sendJson(200, snapshot?.toString() ?: "{\"schemaVersion\":1,\"displayOnly\":true,\"nextSequence\":0,\"queueDropped\":0,\"historyDropped\":0,\"truncated\":false,\"events\":[]}")
+                }
                 else -> exchange.sendHtml(404, renderErrorPage(404, "Page not found", "The requested route does not exist."))
             }
         } catch (exception: WebJobServiceException) {
             val status = if (exception.code in setOf("JOB_NOT_FOUND", "RUN_NOT_FOUND")) 404 else 503
             exchange.sendHtml(status, renderErrorPage(status, "Job storage unavailable", "${exception.code}: ${exception.message}"))
         } catch (exception: JobStoreException) {
-            exchange.sendHtml(404, renderErrorPage(404, "Job not found", exception.message ?: "The job does not exist."))
+            exchange.sendHtml(404, renderErrorPage(404, "Job not found", diagnostic(exception, "The job does not exist.")))
         } catch (exception: IllegalArgumentException) {
-            exchange.sendHtml(400, renderErrorPage(400, "Invalid request", exception.message ?: "The request was invalid."))
+            exchange.sendHtml(400, renderErrorPage(400, "Invalid request", diagnostic(exception, "The request was invalid.")))
         } catch (exception: Exception) {
-            exchange.sendHtml(500, renderErrorPage(500, "Unexpected error", exception.message ?: "The operation failed."))
+            exchange.sendHtml(500, renderErrorPage(500, "Unexpected error", diagnostic(exception, "The operation failed.")))
         }
     }
 
@@ -324,7 +356,7 @@ class UploadServer(
                 exchange.redirect("/jobs/${job.id}")
             }
         } catch (exception: InvalidUploadException) {
-            exchange.sendHtml(400, renderErrorPage(400, "Unsupported binary", exception.message ?: "Upload a Linux ELF binary."))
+            exchange.sendHtml(400, renderErrorPage(400, "Unsupported binary", diagnostic(exception, "Upload a Linux ELF binary.")))
         }
     }
 
@@ -347,12 +379,16 @@ class UploadServer(
                 409, renderErrorPage(409, "Analysis already running", "This job already has an active background operation."),
             )
             WebWorkflowAdmission.Unavailable -> {
-                exchange.responseHeaders.set("Retry-After", "5")
+                exchange.responseHeaders.set("Retry-After", "1")
                 exchange.sendHtml(503, renderErrorPage(503, "Workers unavailable", "Workflow capacity is unavailable. Retry shortly."))
             }
         }
     }
 
+    private fun diagnostic(failure: Exception, fallback: String): String =
+        diagnosticRedactor.text(failure.message ?: fallback, maximumCharacters = 480)
+
+    /** A queued operation can be claimed once, either by a worker or by shutdown. */
     private fun handleJob(exchange: HttpExchange, jobId: String) {
         val view = jobs.presentation(jobId)
         val source = runCatching { archiveEvidence.read(jobId, reportPrefix = view.reports.artifactPrefix).source }
@@ -417,6 +453,26 @@ class UploadServer(
 private fun webOrigin(host: String, port: Int): String {
     val authority = if (':' in host && !host.startsWith('[')) "[$host]" else host
     return "http://$authority:$port"
+}
+
+/** CLI lifecycle: allow owned workers to record interruption before the JVM exits. */
+internal fun startWebServerWithShutdownHook(server: UploadServer) {
+    val runtime = Runtime.getRuntime()
+    val hook = Thread({
+        try {
+            server.stop()
+        } catch (_: Exception) {
+            System.err.println("Web shutdown did not complete cleanly; recovery is required")
+        }
+    }, "decomp-web-shutdown")
+    runtime.addShutdownHook(hook)
+    try {
+        server.start()
+    } catch (failure: Exception) {
+        try { runtime.removeShutdownHook(hook) } catch (_: IllegalStateException) { }
+        try { server.stop() } catch (cleanup: Exception) { failure.addSuppressed(cleanup) }
+        throw failure
+    }
 }
 
 data class Upload(val filename: String, val content: ByteArray)

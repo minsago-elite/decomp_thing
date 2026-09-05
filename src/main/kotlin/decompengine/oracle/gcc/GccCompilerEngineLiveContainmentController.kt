@@ -1182,13 +1182,13 @@ internal class LiveContainmentJournal private constructor(
     }
 }
 
-private data class BootClassPathManifestEntry(
+internal data class BootClassPathManifestEntry(
     val path: Path,
     val bytes: Long,
     val sha256: String,
 )
 
-private fun parseBootClassPathManifest(
+internal fun parseBootClassPathManifest(
     bytes: ByteArray,
     outputLease: Path,
     artifactPaths: Set<Path>,

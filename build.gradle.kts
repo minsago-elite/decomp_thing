@@ -196,6 +196,19 @@ fun registerOracleJavaExecTask(
     mainClass.set(entryPoint)
 }
 
+tasks.register<JavaExec>("generatedCRepairQualification") {
+    group = "verification"
+    description = "Runs the explicitly provisioned generated-C public-factory qualification driver"
+    dependsOn("testClasses", "buildAcpGateHelper")
+    classpath = sourceSets["test"].runtimeClasspath
+    mainClass.set("decompengine.project.GeneratedCRepairQualificationCli")
+    doFirst {
+        val action = requireNotNull(project.findProperty("generatedCQualificationAction") as? String)
+        val output = requireNotNull(project.findProperty("generatedCQualificationOutput") as? String)
+        args(action, output)
+    }
+}
+
 registerOracleJavaExecTask(
     taskName = "verifyFullTreeScope",
     taskDescription = "Verifies the authenticated LLVM full-tree scope with Kotlin/JVM authority",

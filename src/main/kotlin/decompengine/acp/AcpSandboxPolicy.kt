@@ -437,6 +437,7 @@ class AcpLinuxSandboxConfiguration(
     val expectedSandboxGateHelperSha256: String,
     val expectedSandboxGateHelperManifestSha256: String,
     ninjaCompdbRuntimeMounts: Collection<AcpSandboxReadOnlyMount> = emptyList(),
+    validationRuntimeMounts: Collection<AcpSandboxReadOnlyMount> = emptyList(),
 ) {
     val launcherRuntimeMounts: List<AcpSandboxReadOnlyMount> = immutableList(
         requireBoundedCollection("launcher runtime mounts", launcherRuntimeMounts, MAXIMUM_SANDBOX_MOUNTS),
@@ -451,6 +452,10 @@ class AcpLinuxSandboxConfiguration(
             ninjaCompdbRuntimeMounts,
             MAXIMUM_SANDBOX_MOUNTS,
         ),
+    )
+    /** Application-owned compiler/program validation closure; never selected by an ACP peer. */
+    val validationRuntimeMounts: List<AcpSandboxReadOnlyMount> = immutableList(
+        requireBoundedCollection("validation runtime mounts", validationRuntimeMounts, MAXIMUM_SANDBOX_MOUNTS),
     )
 
     init {
@@ -475,15 +480,18 @@ class AcpLinuxSandboxConfiguration(
         require(this.ninjaCompdbRuntimeMounts.all { it.expectedManifestSha256 != null }) {
             "every Ninja compdb runtime mount requires an expected manifest SHA-256"
         }
+        require(this.validationRuntimeMounts.all { it.expectedManifestSha256 != null }) {
+            "every validation runtime mount requires an expected manifest SHA-256"
+        }
         require(
             this.launcherRuntimeMounts.size +
                 this.agentRuntimeMounts.size +
-                this.ninjaCompdbRuntimeMounts.size <= MAXIMUM_SANDBOX_MOUNTS,
+                this.ninjaCompdbRuntimeMounts.size + this.validationRuntimeMounts.size <= MAXIMUM_SANDBOX_MOUNTS,
         ) {
             "combined launcher, agent, and Ninja compdb runtime mounts exceed the sandbox mount-count limit"
         }
         requireUniqueDestinations(
-            this.launcherRuntimeMounts + this.agentRuntimeMounts + this.ninjaCompdbRuntimeMounts,
+            this.launcherRuntimeMounts + this.agentRuntimeMounts + this.ninjaCompdbRuntimeMounts + this.validationRuntimeMounts,
         )
     }
 }

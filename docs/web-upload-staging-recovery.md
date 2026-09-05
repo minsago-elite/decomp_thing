@@ -53,3 +53,10 @@ All 138 web/jobs tests and distZip passed. The
 [retained JUnit evidence](evidence/web-upload-staging-recovery-20260905.xml) records
 the dedicated recovery suite, including all five process-kill points in its publisher
 termination test. No tests in the web/jobs run were skipped.
+
+After integrating master through 8c4b96a, the combined web/jobs and bundled-operation
+run passed 186 tests; two root-owned-runtime prerequisite checks skipped. distZip and
+the [packaged upload regression](evidence/web-staging-merge-20260905.json) also passed.
+The merge retains bounded shutdown, diagnostic redaction, atomic metadata writes and
+attempt-bound legacy progress. Shutdown tests cover interruptible, interruption-swallowing
+and uncooperative worker processes, including truthful restart projection.

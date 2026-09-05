@@ -127,7 +127,7 @@ internal object ReconstructionAcpEvidenceArchiveVerifier {
                 require(sha256(checkpointBytes) == checkpointManifest.sha256) {
                     "agent evidence checkpoint differs from its source manifest: $checkpointPath"
                 }
-                val checkpoint = parseCheckpoint(checkpointBytes, moduleId, source, repairedSource)
+                val checkpoint = parseCheckpoint(checkpointBytes, moduleId, source, repairedSource, profile)
                 val receiptSource = repairedSource?.let { lineage ->
                     GeneratedFileEvidence(
                         path = source.path,
@@ -157,7 +157,7 @@ internal object ReconstructionAcpEvidenceArchiveVerifier {
                 require(source.entityIds.none(manifest.unresolvedImplementationIds::contains)) {
                     "agent-generated module is unresolved at the archive release gate: $moduleId"
                 }
-                require(checkpoint.schemaVersion == 4L &&
+                require(checkpoint.schemaVersion in setOf(4L, 5L) &&
                     checkpoint.executionEvidenceSchemaVersion == 2L &&
                     checkpoint.executionReleaseComplete == true &&
                     checkpoint.executionTerminalOutcome == "returned-completed"
@@ -285,13 +285,17 @@ internal object ReconstructionAcpEvidenceArchiveVerifier {
         moduleId: String,
         source: GeneratedFileEvidence,
         repairedSource: ArchivedRepairSourceLineage?,
+        profile: ReconstructionProfile,
     ): ReconstructionCheckpoint {
         val root = strictObject(bytes, CHECKPOINT_JSON_LIMITS, "module checkpoint")
         val schemaVersion = root.requiredLong("schemaVersion", "module checkpoint")
-        require(schemaVersion == 4L) {
+        require(schemaVersion in setOf(4L, 5L)) {
             "unsupported module checkpoint schema for ACP archive evidence: $moduleId"
         }
-        root.requireExactKeys(CHECKPOINT_V4_FIELDS, "module checkpoint")
+        root.requireExactKeys(
+            if (schemaVersion == 5L) CHECKPOINT_V5_FIELDS else CHECKPOINT_V4_FIELDS,
+            "module checkpoint",
+        )
         root.requiredSha256("fingerprint", "module checkpoint")
         val sourceSha256 = root.requiredSha256("sourceSha256", "module checkpoint")
         val generator = root.requiredString("generator", "module checkpoint")
@@ -326,6 +330,35 @@ internal object ReconstructionAcpEvidenceArchiveVerifier {
         }
         val accepted = root.requiredBoolean("accepted", "module checkpoint")
         root.requiredBoolean("retryable", "module checkpoint")
+        if (schemaVersion == 5L) {
+            val compilationElement = root.getValue("compilation")
+            val compilation = compilationElement.takeUnless { it is JsonNull }
+                ?.requiredObject("module compilation")
+            require(!accepted || compilation != null) { "accepted module lacks compiler evidence: $moduleId" }
+            compilation?.let { value ->
+                value.requireExactKeys(COMPILATION_FIELDS, "module compilation")
+                require(value.requiredSha256("sourceSha256", "module compilation") == sourceSha256) {
+                    "module compiler evidence does not bind the checkpoint source: $moduleId"
+                }
+                val command = value.requiredArray("command", "module compilation")
+                    .map { it.requiredString("module compiler argument") }
+                require(command == GeneratedCModuleValidation.command(profile, source.path)) {
+                    "module compiler command differs from its reconstruction profile: $moduleId"
+                }
+                val outcome = value.requiredString("outcome", "module compilation")
+                require(outcome in setOf("passed", "failed", "failed-to-start", "timed-out", "source-changed", "output-limit-exceeded")) {
+                    "module compiler outcome is unsupported: $moduleId"
+                }
+                val returnCode = value.optionalNonNegativeLong("returnCode", "module compilation")
+                require(!accepted || (outcome == "passed" && returnCode == 0L)) {
+                    "accepted module did not pass its compiler gate: $moduleId"
+                }
+                value.requiredSha256("diagnosticsSha256", "module compilation")
+                require(value.requiredLong("diagnosticsBytes", "module compilation") in 0..profile.budgets.buildMaximumOutputBytes) {
+                    "module compiler diagnostics exceed the profile budget: $moduleId"
+                }
+            }
+        }
 
         val statuses = root.requiredArray("entityStatuses", "module checkpoint").map { element ->
             val status = element.requiredObject("module checkpoint entity status")
@@ -642,6 +675,25 @@ internal object ReconstructionAcpEvidenceArchiveVerifier {
         )
     }
 
+    internal fun verifyContextUsageEvent(event: JsonObject) {
+        event.requireExactKeys(setOf("sequence", "type", "usedTokens", "contextWindowTokens", "costAmount", "costCurrency"), "context usage")
+        require(event.requiredString("type", "context usage") == "context_usage")
+        event.requiredNonNegativeLong("sequence", "context usage")
+        event.requiredNonNegativeLong("usedTokens", "context usage")
+        event.requiredNonNegativeLong("contextWindowTokens", "context usage")
+        val amount = event.getValue("costAmount")
+        val currency = event.getValue("costCurrency")
+        require((amount is JsonNull) == (currency is JsonNull)) { "context cost fields must be paired" }
+        if (amount !is JsonNull) {
+            val text = amount.requiredString("context cost amount")
+            require(text.length <= 32)
+            val parsed = text.toDoubleOrNull()
+            require(parsed != null && parsed.isFinite() && parsed >= 0 && parsed.toString() == text)
+            val commitment = verifyTextCommitment(currency.requiredObject("context currency"), "context currency", requireNonEmpty = true)
+            require(commitment.encodedBytes <= 256) { "context currency exceeds its bound" }
+        }
+    }
+
     private fun verifyReceiptEvents(events: JsonObject): List<VerifiedAcpReceiptChange> {
         events.requireExactKeys(RECEIPT_EVENTS_FIELDS, "ACP receipt events")
         require(events.requiredNonNegativeLong("maximumRetainedEvents", "ACP receipt events") ==
@@ -663,6 +715,7 @@ internal object ReconstructionAcpEvidenceArchiveVerifier {
                 "ACP receipt events are missing or reorder a sequence"
             }
             when (event.requiredString("type", "ACP receipt event")) {
+                "context_usage" -> verifyContextUsageEvent(event)
                 "message" -> {
                     event.requireExactKeys(RECEIPT_MESSAGE_EVENT_FIELDS, "ACP receipt message event")
                     require(event.requiredString("role", "ACP receipt message event") in MESSAGE_ROLES) {
@@ -1432,6 +1485,10 @@ internal object ReconstructionAcpEvidenceArchiveVerifier {
     private val CHECKPOINT_V4_FIELDS = CHECKPOINT_V3_FIELDS + setOf(
         "executionEvidenceSchemaVersion", "executionRequestSha256", "executionTerminalOutcome",
         "executionReleaseComplete",
+    )
+    private val CHECKPOINT_V5_FIELDS = CHECKPOINT_V4_FIELDS + "compilation"
+    private val COMPILATION_FIELDS = setOf(
+        "sourceSha256", "command", "outcome", "returnCode", "diagnosticsSha256", "diagnosticsBytes",
     )
     private val ENTITY_STATUS_FIELDS = setOf("id", "status")
     private val CHECKPOINT_ISSUE_FIELDS = setOf("code", "message", "entityIds")

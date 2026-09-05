@@ -21,6 +21,13 @@ import kotlinx.serialization.json.jsonPrimitive
 import kotlinx.serialization.json.put
 import java.nio.file.Path
 import java.nio.file.Files
+import java.nio.ByteBuffer
+import java.nio.channels.FileChannel
+import java.nio.file.LinkOption.NOFOLLOW_LINKS
+import java.nio.file.StandardCopyOption.ATOMIC_MOVE
+import java.nio.file.StandardCopyOption.REPLACE_EXISTING
+import java.nio.file.StandardOpenOption.READ
+import java.nio.file.StandardOpenOption.WRITE
 import java.time.Instant
 import java.util.UUID
 import kotlin.io.path.createDirectories
@@ -28,7 +35,6 @@ import kotlin.io.path.exists
 import kotlin.io.path.name
 import kotlin.io.path.isRegularFile
 import kotlin.io.path.writeBytes
-import kotlin.io.path.writeText
 
 class JobStoreException(message: String) : RuntimeException(message)
 class InvalidUploadException(message: String, cause: Throwable? = null) : RuntimeException(message, cause)
@@ -298,9 +304,20 @@ class JobStore(root: Path) {
 
     private fun persist(job: Job) {
         val jobDir = jobDirectory(job.id).createDirectories()
-        jobDir.resolve("job.json").writeText(
-            Json { prettyPrint = true }.encodeToString(JsonElement.serializer(), job.toJson()) + "\n",
-        )
+        val bytes = (Json { prettyPrint = true }.encodeToString(JsonElement.serializer(), job.toJson()) + "\n")
+            .toByteArray(Charsets.UTF_8)
+        val temporary = Files.createTempFile(jobDir, ".job-metadata-", ".tmp")
+        try {
+            FileChannel.open(temporary, WRITE, NOFOLLOW_LINKS).use { channel ->
+                val buffer = ByteBuffer.wrap(bytes)
+                while (buffer.hasRemaining()) channel.write(buffer)
+                channel.force(true)
+            }
+            Files.move(temporary, jobDir.resolve("job.json"), ATOMIC_MOVE, REPLACE_EXISTING)
+            FileChannel.open(jobDir, READ).use { it.force(true) }
+        } finally {
+            Files.deleteIfExists(temporary)
+        }
     }
 
     private companion object {
