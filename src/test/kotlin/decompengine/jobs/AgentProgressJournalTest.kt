@@ -44,9 +44,16 @@ class AgentProgressJournalTest {
             mapOf("queueDropped" to JsonPrimitive(Long.MAX_VALUE), "historyDropped" to JsonPrimitive(Long.MAX_VALUE)),
             mapOf("truncated" to JsonPrimitive(true)),
             mapOf("events" to JsonArray(emptyList()), "queueDropped" to JsonPrimitive(2), "truncated" to JsonPrimitive(false)),
+            mapOf("events" to JsonArray(original.getValue("events").jsonArray.drop(1)),
+                "queueDropped" to JsonPrimitive(1), "truncated" to JsonPrimitive(true)),
+            mapOf("events" to JsonArray(emptyList()), "queueDropped" to JsonPrimitive(2),
+                "truncated" to JsonPrimitive(true)),
+            mapOf("events" to JsonArray(emptyList()), "queueDropped" to JsonPrimitive(1),
+                "historyDropped" to JsonPrimitive(1), "truncated" to JsonPrimitive(true)),
         )
         corruptions.forEach { changes ->
-            val malformed = JsonObject(original + changes).toString()
+            // Omit the optional range projection so counter checks must reject these legacy records.
+            val malformed = JsonObject(original.filterKeys { it != "omittedSequenceRanges" } + changes).toString()
             Files.writeString(root.resolve(AgentProgressJournal.FILE_NAME), malformed)
             assertFailsWith<IllegalArgumentException> { AgentProgressJournal.read(root) }
             assertFailsWith<IllegalArgumentException> { AgentProgressJournal(root, "repair") }
