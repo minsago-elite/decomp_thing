@@ -113,7 +113,7 @@ export function Activity({ jobId, runId, basePath }: { jobId: string; runId: str
         <select value={group} onChange={event => setGroup(event.currentTarget.value as 'all' | ActivityGroup)}>
           <option value="all">All observations</option><option value="stages">Stages</option>
           <option value="messages">Message metadata</option><option value="plans">Plan metadata</option>
-          <option value="tools">Tools and changes</option><option value="other">Other observations</option>
+          <option value="usage">Usage and agent outcomes</option><option value="tools">Tools and changes</option><option value="other">Other observations</option>
         </select>
       </label>
       <label>Task ID or digest contains

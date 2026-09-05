@@ -46,7 +46,9 @@ export async function seedHistory(root) {
   const progressPath = join(reportDirectory, 'agent-progress.json');
   const progress = JSON.stringify({ schemaVersion: 1, displayOnly: true, nextSequence: 205, queueDropped: 0, historyDropped: 0, truncated: false,
     events: Array.from({ length: 205 }, (_, sequence) => ({ sequence, runId: 'writer_fixture_progress', workflow: 'reconstruct', time: at,
-      taskId: sequence % 2 ? 'task_odd' : 'task_even', sessionIdSha256: 'a'.repeat(64), kind: sequence === 1 ? 'message' : 'workflow_phase', ...(sequence === 1 ? { role: 'thought' } : { phase: 'planning' }), text: `Synthetic private content ${sequence}`, inputTokens: '18446744073709551615' })) });
+      taskId: sequence % 2 ? 'task_odd' : 'task_even', sessionIdSha256: 'a'.repeat(64), kind: sequence === 1 ? 'message' : sequence === 202 ? 'context_usage' : sequence === 203 ? 'agent_finished' : 'workflow_phase',
+      ...(sequence === 202 ? { contextUsedTokens: '9007199254740993', contextWindowTokens: '18446744073709551615' } : {}),
+      ...(sequence === 203 ? { stopReason: 'limit_exhausted', wallClock: 'PT1H2M3.000000001S' } : {}), ...(sequence === 1 ? { role: 'thought' } : { phase: 'planning' }), text: `Synthetic private content ${sequence}`, inputTokens: '18446744073709551615' })) });
   await fs.writeFile(progressPath, progress, { flag: 'wx', mode: 0o600 });
   return { jobId, directory, retained, count: attempts.length, reportPath, exploration, progressPath, progress };
 }
@@ -128,7 +130,16 @@ export async function qualifyHistory({ fixture, makeTarget, cdp, evaluate, ready
   const atPause = progressRequests();
   await new Promise(resolve => setTimeout(resolve, 3000));
   assert.equal(progressRequests(), atPause, 'Pause must release the polling timer');
-  await evaluate(tab, `document.activeElement.click()`);
+  await evaluate(tab, `(() => { const control = document.querySelector('.activity-filters select'); control.value = 'usage'; control.dispatchEvent(new Event('change', { bubbles: true })); })()`);
+  await ready(tab, `(${activityRows}).length === 2`, 'usage observation filter');
+  assert.deepEqual(await evaluate(tab, activityRows), ['Sequence 202', 'Sequence 203']);
+  await evaluate(tab, `[...document.querySelectorAll('ol[aria-label="Activity observations"] summary')].filter(summary => /^(Context usage|Agent outcome and usage)/.test(summary.textContent)).forEach(summary => summary.click())`);
+  const usageText = await evaluate(tab, `document.querySelector('ol[aria-label="Activity observations"]').innerText`);
+  for (const expected of ['9007199254740993', '18446744073709551615', '3723.000000001', 'limit_exhausted', 'Provider measurement time: Not reported', 'Wall-clock duration (seconds)', 'Context window (tokens)', 'Cost estimate unavailable']) assert.ok(usageText.includes(expected), 'Missing usage evidence: ' + expected);
+  assert.equal(progressRequests(), atPause, 'Inspecting usage must not move the cursor');
+  await evaluate(tab, `(() => { const control = document.querySelector('.activity-filters select'); control.value = 'all'; control.dispatchEvent(new Event('change', { bubbles: true })); })()`);
+  await ready(tab, `(${activityRows}).length === 5`, 'usage filter reset');
+  await evaluate(tab, `(() => { const control = [...document.querySelectorAll('button')].find(button => button.textContent === 'Resume activity'); control.focus(); control.click(); })()`);
   await ready(tab, `document.activeElement.textContent === 'Pause activity'`, 'resumed activity control');
   const resumeDeadline = Date.now() + 10000;
   while (progressRequests() < atPause + 2) {
@@ -199,7 +210,7 @@ export async function qualifyHistory({ fixture, makeTarget, cdp, evaluate, ready
   assert.deepEqual(tab.exceptions, []);
   for (const [name, bytes] of Object.entries(fixture.retained)) assert.deepEqual(await fs.readFile(join(fixture.directory, name)), Buffer.from(bytes));
   assert.deepEqual((await fs.readdir(fixture.directory)).sort(), [...Object.keys(fixture.retained), 'reports'].sort());
-  return { activityUi: { backgroundSuspendsReads: true, offlineSuspendsReads: true, recoveryReconcilesSnapshot: true, recoveryPreservesRows: true, lastReceivedTime: true, categoryAndTaskFilters: true, filtersPreserveCursor: true, exactAttemptLinks: true, correlationReferences: true, narrowViewport: 320, firstPage: 200, continuationPage: 5, keyboardStart: true, focusPreserved: true, pauseStopsPolling: true, resumeWithoutDuplicates: true, navigationStopsPolling: true, privateTextWithheld: true, politeStatusOnly: true }, progressPolling: true, progressBytesUnchanged: true, fixtureAttempts: 55, firstPage: 50, secondPage: 5, exactOrder: true, cursorReload: true,
+  return { activityUi: { exactObservedUsage: true, explicitUsageUnitsAndProvenance: true, durationWithoutRounding: true, missingPricingBasis: true, backgroundSuspendsReads: true, offlineSuspendsReads: true, recoveryReconcilesSnapshot: true, recoveryPreservesRows: true, lastReceivedTime: true, categoryAndTaskFilters: true, filtersPreserveCursor: true, exactAttemptLinks: true, correlationReferences: true, narrowViewport: 320, firstPage: 200, continuationPage: 5, keyboardStart: true, focusPreserved: true, pauseStopsPolling: true, resumeWithoutDuplicates: true, navigationStopsPolling: true, privateTextWithheld: true, politeStatusOnly: true }, progressPolling: true, progressBytesUnchanged: true, fixtureAttempts: 55, firstPage: 50, secondPage: 5, exactOrder: true, cursorReload: true,
     earlierAttemptReload: true, previousInterruptedAttempt: true, exactUnsignedUsage: true,
     unacceptedCandidate: true, explorationSummary: true, nativeReportDownload: true, downloadedBytesMatch: true, reportBytesUnchanged: true, retainedBytesUnchanged: true, mutationRequests: 0, executionStarted: false };
 }

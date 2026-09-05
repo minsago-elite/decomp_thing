@@ -316,3 +316,42 @@ This is the activity observer portion of #179. A shared connection state machine
 across every private view, a distinct authenticated server-restart signal,
 conflicting multi-tab workflow controls, full restart scenarios and long-running
 qualification remain open. This checkpoint does not close #179 or D4.
+
+## Reported usage and agent outcomes
+
+The activity category **Usage and agent outcomes** selects `context_usage` and
+`agent_finished` observations. Expand a row to inspect exact context occupancy,
+input/output/cached-input tokens, tool-call counts, or its reported stop reason
+and failure classification. These values remain scoped to the individual report
+or receipt; the client does not sum them into attempt totals, derive progress
+percentages, or infer a stop/acceptance decision. Completed, cancelled,
+limit-exhausted, timeout, resource-exhausted, process-crash and transport values
+remain distinct. Unknown future classifications remain recorded text.
+
+Each panel identifies the report/receipt source and writer, journal recording
+time, and the absence of a provider measurement timestamp. Recording time is not
+substituted for measurement time. Missing counters stay **Not reported**; real
+zero remains zero. Supported nonnegative producer duration text (`PT` with hours,
+minutes and/or seconds, up to nine fractional digits) is converted to decimal
+seconds using integer arithmetic. Unsupported or truncated duration text is
+explicitly unavailable, not zero. Large token counters are rendered from their
+exact decimal strings. Attempt limits and receipt usage also carry source labels
+on the attempt page, and tool-call limits have explicit count units.
+
+No monetary estimate is shown because this observation contract supplies no
+configured pricing/version basis. Queue position and worker resource metrics are
+explicitly unavailable here. This does not implement queue/worker summaries or
+close #181; those remain planned work together with broader usage provenance and
+measurement-time support.
+
+250 frontend tests, lint, 161 targeted web/journal JVM tests and typechecked
+`distZip` passed. Tests cover absent, partial, zero and maximum unsigned counters,
+unknown and distinct outcome classifications, exact duration conversion, no
+invented percentages/totals and missing pricing information. The packaged browser
+opens two inert usage observations on the second activity page and checks exact
+large values, nanosecond precision in decimal seconds, units, source/timestamp
+limitations and cursor preservation. Existing pagination, filters, connection,
+focus and byte-preservation checks also pass. Evidence:
+[`web-observed-usage-20260905.json`](evidence/web-observed-usage-20260905.json).
+No workflow ran. Chrome used test-only `--no-sandbox`; shutdown and owned-work
+cleanup were confirmed.

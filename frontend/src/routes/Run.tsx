@@ -46,13 +46,15 @@ function Details({ jobId, runId, basePath }: { jobId: string; runId: string; bas
       <p>Completion alone does not establish accepted reconstruction. Acceptance belongs to this attempt; a job may retain an accepted result from another attempt.</p>
       {run.previousRunId && <a href={runPath(basePath, jobId, run.previousRunId)}>Open previous attempt</a>}
       <h2>Recorded limits</h2>
+      <p>Source: the persisted configuration for this attempt. Limits do not measure consumption or confer acceptance.</p>
       <dl class="job-facts">
         <dt>Wall-clock limit</dt><dd>{run.limits.wallClockMs} milliseconds</dd>
         <dt>Idle limit</dt><dd>{run.limits.idleMs} milliseconds</dd>
         <dt>Output limit</dt><dd>{run.limits.maxOutputBytes} bytes</dd>
-        <dt>Tool-call limit</dt><dd>{run.limits.maxToolCalls}</dd>
+        <dt>Tool-call limit</dt><dd>{run.limits.maxToolCalls} calls</dd>
       </dl>
       <h2>Reported usage</h2>
+      <p>Source: the persisted attempt receipt. Measurement time is not reported; the attempt end time is not a substitute. Missing counters remain unknown.</p>
       {run.usage ? <dl class="job-facts">
         <dt>Input tokens</dt><dd>{run.usage.inputTokens ?? 'Not reported'}</dd>
         <dt>Output tokens</dt><dd>{run.usage.outputTokens ?? 'Not reported'}</dd>

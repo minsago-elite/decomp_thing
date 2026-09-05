@@ -1,7 +1,8 @@
 import type { WebEvent } from '../api/generated';
+import { ObservedUsage } from './ObservedUsage';
 import { runPath } from '../app/paths';
 
-export type ActivityGroup = 'stages' | 'messages' | 'plans' | 'tools' | 'other';
+export type ActivityGroup = 'stages' | 'messages' | 'plans' | 'tools' | 'usage' | 'other';
 export function activityGroup(event: WebEvent): ActivityGroup {
   if (event.type === 'run.state') return 'stages';
   if (event.type === 'agent.message') return 'messages';
@@ -10,6 +11,7 @@ export function activityGroup(event: WebEvent): ActivityGroup {
     case 'workflow_phase': case 'workflow_run_state': return 'stages';
     case 'message': return 'messages';
     case 'plan': return 'plans';
+    case 'context_usage': case 'agent_finished': return 'usage';
     case 'tool': case 'permission': case 'file_change': return 'tools';
     default: return 'other';
   }
@@ -33,6 +35,7 @@ export function ActivityRow({ event, basePath }: { event: WebEvent; basePath: st
       <p>Writer: {event.payload.writerId}. Task: {event.payload.fields.taskId ?? 'Not recorded'}. Revision: {event.payload.fields.revisionId ?? 'Not recorded'}.</p>
       {event.payload.observationKind === 'plan' && <p>Plan entries reported: {event.payload.fields.entryCount ?? 'Not recorded'}. Retained entry metadata: {event.payload.fields.entries?.length ?? 'Not recorded'}. {event.payload.fields.entriesTruncated && 'Producer truncated plan entries.'}</p>}
       <p>Fields omitted: {event.payload.omittedFieldCount}. {event.payload.fields.sourceSequenceGap && 'Source sequence gap reported.'} {event.payload.fields.textOmitted && 'Producer omitted text.'} {event.payload.fields.messageTrackingExhausted && 'Producer message tracking limit reached.'}</p>
+      <ObservedUsage observation={event.payload} occurredAt={event.occurredAt} sequence={event.sequence} />
       <details>
         <summary>Correlation details for sequence {event.sequence}</summary>
         <p>These are recorded references. Task, session and revision evidence pages are not available from this view.</p>
