@@ -1,0 +1,7 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<testsuite name="decompengine.web.UploadUncertaintyHttpTest" tests="1" skipped="0" failures="0" errors="0" timestamp="2026-09-05T16:35:11.165Z" hostname="whatsername" time="0.113">
+  <properties/>
+  <testcase name="HTTP upload uncertainty identifies the published job in JSON and HTML without retry hints()" classname="decompengine.web.UploadUncertaintyHttpTest" time="0.113"/>
+  <system-out><![CDATA[]]></system-out>
+  <system-err><![CDATA[]]></system-err>
+</testsuite>

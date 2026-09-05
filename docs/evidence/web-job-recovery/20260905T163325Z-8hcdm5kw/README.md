@@ -1,0 +1,3 @@
+Clean source `d1db587` integrates the failed-start listener deadlock fix and bounded recovery publication through the B stack, retaining early stop signaling, recovery cancellation and shared listing inspection. The original manifest and 13 byte-identical JUnit reports record 103 passing tests, with no failures, errors or skips. Reproduce with `python3 scripts/verify-web-job-recovery.py`.
+
+This verifies the combined storage/recovery changes, including queued pre-start requests and duplicate-start rejection. It does not qualify integration with current master or close other outstanding reviews. Full CI and vulnerability-reproduction lanes were not selected.
