@@ -501,3 +501,33 @@ verifies the target query and equality with the cursor alias alongside 200/5 act
 pause/resume, recovery, metadata privacy and retained-byte checks. It identifies artifact
 hashes, an inert test-owned fixture, no workflow execution, test-only Chrome --no-sandbox,
 unchanged installation and confirmed cleanup. This does not qualify SSE or live delivery.
+
+## Dedicated stream resource prerequisite
+
+`WebStreamResources` provides the resource owner for the forthcoming SSE adapter. It admits
+at most 16 connections globally and two per authenticated session identity, independently of
+the ordinary HTTP and workflow executors. Rejection leaves the exchange with the router so
+it can return a typed error or keep using polling. The component does not authenticate a
+request itself: the endpoint must call LocalWebAccess before admission and revalidate while
+serving private events. It is not yet attached to an HTTP route or advertised as SSE support.
+
+Only admitted reservations can create virtual-thread work or cleanup tasks. There is no
+waiting-client queue or event buffer. Separate cleanup tasks prevent a blocked writer from
+preventing its connection-close attempt, and a blocked close cannot serialize other clients'
+cleanup. A reservation is released only after both the writer has exited and connection
+closure has succeeded. Interrupting a writer or cancelling its lease alone does not refund
+capacity. Failed cleanup keeps its reservation charged and makes shutdown report incomplete.
+
+Each reservation has a bounded 30-second connection lease; its deadline interrupts work and
+requests cleanup without running connection-close code on the deadline scheduler. Shutdown
+rejects new admission, requests cancellation and waits within one bounded grace period. It
+reports false if writers/cleanup remain, and late completion can be observed by another
+shutdown check without restarting work. The future stream transport must reconnect from its
+last acknowledged cursor; ending a connection is never a workflow cancellation.
+
+Nine resource tests cover global/session limits, simultaneous admissions, cancelled writers
+that ignore interruption, blocked/failed cleanup, deadlines, work failure, exact-once closure
+and bounded shutdown with late completion. The tests use controlled callbacks and latches,
+not a slow browser socket. Actual SSE framing, heartbeats, authenticated transport integration,
+slow socket behavior and server lifecycle integration remain required before #174's stream
+resource criteria are complete.
