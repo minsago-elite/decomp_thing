@@ -14,6 +14,25 @@ import kotlinx.serialization.json.JsonPrimitive
 
 class FullTreeCrossShardCallFixtureTest {
     @Test
+    fun `raw observer preserves independently declared coordinates without assuming instruction width`() {
+        for (instruction in listOf(0x105L, 0x106L)) {
+            inControlTemporaryDirectory { root ->
+                val fixture = createFullTreeCrossShardCallFixture(root.resolve("fixture"), listOf(
+                    FullTreeCrossShardFixtureCall("declared-pair", "alpha", 0x105, "direct-internal", "beta",
+                        callPcRva = instruction, returnPcRva = 0x105),
+                ))
+                val call = fixture.generateRawCallShards().values.flatMap {
+                    it.document.controlArray("calls").controlObjects("calls")
+                }.single { it["dieOffset"] == JsonPrimitive(hex(fixture.dieOffsets.getValue("declared-pair"))) }
+                assertEquals(JsonPrimitive(hex(instruction)), call["callPcRva"])
+                assertEquals(JsonPrimitive("0x105"), call["returnPcRva"])
+                assertEquals(JsonPrimitive(hex(instruction - 0x100L)), call["callerLocalCallOffset"])
+                assertEquals(JsonPrimitive("0x5"), call["callerLocalReturnOffset"])
+            }
+        }
+    }
+
+    @Test
     fun `zero adjustment thunk linkage matches its physical tail jump`() =
         inControlTemporaryDirectory { root ->
             val fixture = createFullTreeCrossShardCallFixture(root.resolve("fixture"))
@@ -80,8 +99,10 @@ class FullTreeCrossShardCallFixtureTest {
                     assertEquals("scored", call.controlString("population"))
                     assertEquals(JsonNull, call["reasonCode"])
                     assertEquals(caller.functionId, call.controlString("callerId"))
-                    assertEquals(hex(expected.addressRva), call.controlString("returnPcRva"))
-                    assertEquals(hex(expected.addressRva - caller.rva), call.controlString("callerLocalReturnOffset"))
+                    assertEquals(hex(expected.addressRva), call.controlString(if (expected.tailCall) "callPcRva" else "returnPcRva"))
+                    assertEquals(hex(expected.addressRva - caller.rva),
+                        call.controlString(if (expected.tailCall) "callerLocalCallOffset" else "callerLocalReturnOffset"))
+                    assertEquals(JsonNull, call[if (expected.tailCall) "returnPcRva" else "callPcRva"])
                 }
                 val target = call.controlObject("target")
                 assertEquals(expected.targetKind, target.controlString("kind"))

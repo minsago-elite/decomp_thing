@@ -732,10 +732,10 @@ private val CALL_BASELINE_READ_ONLY_FILE = PosixFilePermissions.fromString("r---
 private val CALL_BASELINE_TRUTH_FIELDS = listOf("calls", "counts", "oracle", "schemaVersion", "shard")
 private val CALL_BASELINE_POLICY = JsonObject(mapOf(
     "id" to JsonPrimitive("full-tree-call-baseline"),
-    "version" to JsonPrimitive(3),
+    "version" to JsonPrimitive(4),
     "exact" to JsonPrimitive("resolved-direct-semantic-external-or-independently-proven-target-set"),
     "partial" to JsonPrimitive("observed-site-with-unresolved-indirect-or-thunk-semantic-target"),
     "excluded" to JsonPrimitive("unobservable-call-site"),
-    "inputAuthority" to JsonPrimitive("kotlin-live-raw-rederived-call-truth-v3"),
+    "inputAuthority" to JsonPrimitive("kotlin-live-raw-rederived-call-truth-v4"),
     "measurement" to JsonPrimitive("observability-only-not-recovered-model-scoring"),
 ))

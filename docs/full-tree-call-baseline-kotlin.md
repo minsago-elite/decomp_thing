@@ -1,5 +1,9 @@
 # Raw-derived Kotlin call observability baseline
 
+This document records the policy-v3 checkpoint. Current generation binds
+[policy-v4 typed call coordinates](full-tree-call-coordinates-v4.md) and its new
+configuration digest; the original fixture's observability counts are unchanged.
+
 `FullTreeCallBaselineSqlite` implements the policy-v3 observability report for
 [raw-derived call truth](full-tree-call-truth-kotlin.md), tracked under
 [issue #128](https://github.com/minsago-elite/decomp_thing/issues/128) and the Kotlin

@@ -21,9 +21,67 @@ import kotlinx.serialization.json.JsonPrimitive
 
 class FullTreeCallTruthSqliteTest {
     @Test
-    fun `raw policy three configuration binds the frozen policy and both exact schemas`() {
+    fun `raw coordinate pairs merge partial observations without merging adjacent instruction and return addresses`() {
+        inControlTemporaryDirectory { root ->
+            val extra = listOf(
+                FullTreeCrossShardFixtureCall("gamma-paired", "gamma", 0x305, "direct-internal", "alpha",
+                    callPcRva = 0x300, returnPcRva = 0x305),
+                FullTreeCrossShardFixtureCall("gamma-instruction", "gamma", 0x300, "direct-internal", "alpha",
+                    callPcRva = 0x300, returnPcRva = null),
+                FullTreeCrossShardFixtureCall("alpha-neighbor-paired", "alpha", 0x10a, "direct-internal", "thunk",
+                    callPcRva = 0x105, returnPcRva = 0x10a),
+                FullTreeCrossShardFixtureCall("alpha-neighbor-instruction", "alpha", 0x105, "direct-internal", "thunk",
+                    callPcRva = 0x105, returnPcRva = null),
+            )
+            val fixture = createFullTreeCallTruthTestFixture(root.resolve("inputs"), extra)
+            val first = compose(fixture, root.resolve("first"), maximumWorkers = 3)
+            val repeated = compose(fixture, root.resolve("repeated"), maximumWorkers = 8)
+            assertEquals(11L, first.counts.edges)
+            assertEquals(16L, first.counts.observations)
+            val edges = calls(first.root)
+            val gamma = edges.single { it["callPcRva"] == JsonPrimitive("0x300") }
+            assertEquals(JsonPrimitive("0x305"), gamma["returnPcRva"])
+            assertEquals(4, gamma.controlArray("observationIds").size)
+            val previous = edges.single { it["returnPcRva"] == JsonPrimitive("0x105") }
+            val next = edges.single { it["callPcRva"] == JsonPrimitive("0x105") }
+            assertNotEquals(previous["id"], next["id"])
+            assertEquals(JsonNull, previous["callPcRva"])
+            assertEquals(JsonPrimitive("0x10a"), next["returnPcRva"])
+            assertEquals(JsonPrimitive("0x5"), next["callerLocalCallOffset"])
+            assertEquals(JsonPrimitive("0xa"), next["callerLocalReturnOffset"])
+            assertEquals(3, next.controlArray("observationIds").size)
+            assertEquals(first.indexArtifactSha256, repeated.indexArtifactSha256)
+            assertEquals(treeBytes(first.root), treeBytes(repeated.root))
+            assertEquals(first.indexArtifactSha256, validate(fixture, first.root).indexArtifactSha256)
+            assertNonAuthoritative(first)
+            assertClean(fixture)
+        }
+    }
+
+    @Test
+    fun `conflicting raw instruction to return mappings fail closed in both directions`() {
+        for ((callPc, returnPc) in listOf(0x100L to 0x106L, 0x101L to 0x105L)) {
+            inControlTemporaryDirectory { root ->
+                val fixture = createFullTreeCallTruthTestFixture(root.resolve("inputs"), listOf(
+                    FullTreeCrossShardFixtureCall("pair-first", "alpha", 0x105, "direct-internal", "beta",
+                        callPcRva = 0x100, returnPcRva = 0x105),
+                    FullTreeCrossShardFixtureCall("pair-conflict", "alpha", returnPc, "direct-internal", "beta",
+                        callPcRva = callPc, returnPcRva = returnPc),
+                ))
+                val output = root.resolve("conflicting")
+                val failure = assertFailsWith<FullTreeCallTruthException> { compose(fixture, output) }
+                assertTrue(generateSequence<Throwable>(failure) { it.cause }
+                    .any { it.message.orEmpty().contains("conflicting raw mappings") })
+                assertFalse(Files.exists(output))
+                assertClean(fixture)
+            }
+        }
+    }
+
+    @Test
+    fun `raw policy four configuration binds the frozen policy and both exact schemas`() {
         assertEquals(
-            "7e72ac1a27ebd5e0e2862b06a77d459b24e3495094de30558aff3a1049a2fec3",
+            "5a3549d94b691d70cc2ea98b919ac40127c8cd73f76b29df47c0c1b977f306f7",
             FullTreeCallTruthSqlite.configurationSha256,
         )
     }
@@ -74,9 +132,12 @@ class FullTreeCallTruthSqliteTest {
             assertEquals(JsonNull, thunk["semanticTargetId"])
             assertEquals("thunk-semantic-target-unresolved", thunk.controlString("reasonCode"))
             assertEquals("scored", thunk.controlString("population"))
-            assertEquals(JsonPrimitive(true), byAddress.getValue("0x220")["tailCall"])
-            assertEquals(JsonPrimitive(true), byAddress.getValue("0x380")["tailCall"])
-            assertEquals("0x0", byAddress.getValue("0x380").controlString("callerLocalReturnOffset"))
+            val byInstruction = calls(first.root).filter { it["callPcRva"] != JsonNull }
+                .associateBy { it.controlString("callPcRva") }
+            assertEquals(JsonPrimitive(true), byInstruction.getValue("0x220")["tailCall"])
+            assertEquals(JsonPrimitive(true), byInstruction.getValue("0x380")["tailCall"])
+            assertEquals("0x0", byInstruction.getValue("0x380").controlString("callerLocalCallOffset"))
+            assertTrue(byInstruction.values.all { it["returnPcRva"] == JsonNull && it["callerLocalReturnOffset"] == JsonNull })
 
             val external = byAddress.getValue("0x10c")
             assertEquals("external", external.controlString("targetKind"))
@@ -98,7 +159,7 @@ class FullTreeCallTruthSqliteTest {
             assertEquals("virtual-target-set-unproven", byAddress.getValue("0x207").controlString("reasonCode"))
             assertEquals("indirect-unresolved", byAddress.getValue("0x209").controlString("targetKind"))
             assertEquals("scored", byAddress.getValue("0x209").controlString("population"))
-            val addressless = calls(first.root).single { it["returnPcRva"] == JsonNull }
+            val addressless = calls(first.root).single { it["returnPcRva"] == JsonNull && it["callPcRva"] == JsonNull }
             assertEquals(JsonNull, addressless["callerId"])
             assertEquals("call-site-no-address", addressless.controlString("reasonCode"))
             assertEquals("unobservable", addressless.controlString("population"))
@@ -225,21 +286,26 @@ class FullTreeCallTruthSqliteTest {
                 assertFalse(Files.exists(output, LinkOption.NOFOLLOW_LINKS))
                 assertClean(fixture)
             }
-            val policyTwo = forgeCallRun(fixture, root.resolve("policy-two"), "policy-two") { shard ->
-                JsonObject(shard.toMutableMap().apply {
-                    this["oracle"] = JsonObject(shard.controlObject("oracle").toMutableMap().apply {
-                        this["configurationSha256"] = JsonPrimitive(FullTreeCallObservations.historicalV2ConfigurationSha256)
+            for ((version, digest) in listOf(
+                2 to FullTreeCallObservations.historicalV2ConfigurationSha256,
+                3 to FullTreeCallObservations.historicalV3ConfigurationSha256,
+            )) {
+                val historical = forgeCallRun(fixture, root.resolve("policy-$version"), "policy-$version") { shard ->
+                    JsonObject(shard.toMutableMap().apply {
+                        this["oracle"] = JsonObject(shard.controlObject("oracle").toMutableMap().apply {
+                            this["configurationSha256"] = JsonPrimitive(digest)
+                        })
                     })
-                })
+                }
+                val before = treeBytes(historical.root)
+                val output = root.resolve("policy-$version-output")
+                assertFailsWith<FullTreeCallTruthException> {
+                    compose(fixture, output, callRoot = historical.root, callIndexSha256 = historical.indexArtifactSha256)
+                }
+                assertEquals(before, treeBytes(historical.root))
+                assertFalse(Files.exists(output, LinkOption.NOFOLLOW_LINKS))
+                assertClean(fixture)
             }
-            val before = treeBytes(policyTwo.root)
-            val output = root.resolve("policy-two-output")
-            assertFailsWith<FullTreeCallTruthException> {
-                compose(fixture, output, callRoot = policyTwo.root, callIndexSha256 = policyTwo.indexArtifactSha256)
-            }
-            assertEquals(before, treeBytes(policyTwo.root))
-            assertFalse(Files.exists(output, LinkOption.NOFOLLOW_LINKS))
-            assertClean(fixture)
         }
 
     @Test
@@ -435,7 +501,7 @@ class FullTreeCallTruthSqliteTest {
             assertEquals(record.controlLong("bytes"), Files.size(output))
             assertEquals(record.controlString("sha256"), sha256(output))
             val shard = parseControlObject(output)
-            OracleSchemas.validate("full-tree-call-truth", shard)
+            OracleSchemas.validate("full-tree-call-truth-v2", shard)
             assertEquals(oracle, shard.controlObject("oracle"))
             assertContentEquals(OracleJson.canonicalBytes(shard), Files.readAllBytes(output))
             val edges = shard.controlArray("calls").controlObjects("calls")
@@ -470,7 +536,7 @@ class FullTreeCallTruthSqliteTest {
         val prepared = fixture.callRun.outputs.map { receipt ->
             val original = parseControlObject(fixture.callRun.root.resolve("outputs/${receipt.shardId}.json"))
             val forged = mutation(original)
-            OracleSchemas.validate("full-tree-call-observations", forged)
+            OracleSchemas.validate("full-tree-call-observations-v2", forged)
             val bytes = OracleJson.canonicalBytes(forged)
             val output = preparedRoot.resolve("${receipt.shardId}.json")
             Files.write(output, bytes)
@@ -483,7 +549,7 @@ class FullTreeCallTruthSqliteTest {
             preparedOutputs = prepared,
             bounds = callTruthTestRunBounds(fixture.raw),
             semanticValidator = BoundedShardOutputSemanticValidator { output ->
-                OracleSchemas.validate("full-tree-call-observations", parseControlObject(output.output))
+                OracleSchemas.validate("full-tree-call-observations-v2", parseControlObject(output.output))
             },
         )
     }
@@ -494,7 +560,7 @@ class FullTreeCallTruthSqliteTest {
     private fun mutateTruthShard(
         root: Path,
         shardId: String,
-        schemaName: String = "full-tree-call-truth",
+        schemaName: String = "full-tree-call-truth-v2",
         mutation: (JsonObject) -> JsonObject,
     ) {
         makeWritable(root)
@@ -514,7 +580,7 @@ class FullTreeCallTruthSqliteTest {
             })
         })
         val rebound = JsonObject(modified + ("indexSha256" to JsonPrimitive(OracleArtifacts.sha256(OracleJson.canonicalBytes(modified)))))
-        OracleSchemas.validate("$schemaName-index", rebound)
+        OracleSchemas.validate(if (schemaName == "full-tree-call-truth-v2") "full-tree-call-truth-index" else "$schemaName-index", rebound)
         Files.write(root.resolve("index.json"), OracleJson.canonicalBytes(rebound))
         freeze(root)
     }

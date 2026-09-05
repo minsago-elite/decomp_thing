@@ -1,0 +1,234 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://github.com/minsago-elite/decomp_thing/oracle/full-tree-call-truth-v2.schema.json",
+  "title": "Reconciled cross-shard call truth with distinct instruction and return coordinates",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schemaVersion",
+    "oracle",
+    "shard",
+    "counts",
+    "calls"
+  ],
+  "properties": {
+    "schemaVersion": {
+      "const": 2
+    },
+    "oracle": {
+      "type": "object"
+    },
+    "shard": {
+      "type": "object",
+      "required": [
+        "id"
+      ],
+      "properties": {
+        "id": {
+          "type": "string"
+        }
+      }
+    },
+    "counts": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "edges",
+        "observations",
+        "directInternal",
+        "external",
+        "indirectProven",
+        "indirectUnresolved",
+        "virtualUnresolved",
+        "tailCalls",
+        "unobservable"
+      ],
+      "properties": {
+        "edges": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "observations": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "directInternal": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "external": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "indirectProven": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "indirectUnresolved": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "virtualUnresolved": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "tailCalls": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "unobservable": {
+          "type": "integer",
+          "minimum": 0
+        }
+      }
+    },
+    "calls": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "id",
+          "population",
+          "reasonCode",
+          "callerId",
+          "callerLocalReturnOffset",
+          "returnPcRva",
+          "targetKind",
+          "dispatchKind",
+          "physicalTargetId",
+          "semanticTargetId",
+          "externalTargetIds",
+          "provenTargetIds",
+          "observationIds",
+          "tailCall",
+          "targetEvidence",
+          "callPcRva",
+          "callerLocalCallOffset"
+        ],
+        "properties": {
+          "id": {
+            "type": "string",
+            "pattern": "^call-edge-[0-9a-f]{32}$"
+          },
+          "population": {
+            "enum": [
+              "scored",
+              "unobservable"
+            ]
+          },
+          "reasonCode": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "enum": [
+              null,
+              "ambiguous-authenticated-internal-aliases",
+              "call-site-no-address",
+              "caller-no-emitted-range",
+              "external-without-elf-evidence",
+              "thunk-semantic-target-unresolved",
+              "virtual-target-set-unproven"
+            ]
+          },
+          "callerId": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "callerLocalReturnOffset": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "returnPcRva": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "targetKind": {
+            "enum": [
+              "direct-internal",
+              "external",
+              "indirect-proven",
+              "indirect-unresolved",
+              "virtual-unresolved"
+            ]
+          },
+          "dispatchKind": {
+            "enum": [
+              "direct",
+              "indirect-proven",
+              "indirect-unresolved",
+              "virtual-unresolved"
+            ]
+          },
+          "physicalTargetId": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "semanticTargetId": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "externalTargetIds": {
+            "type": "array",
+            "uniqueItems": true,
+            "items": {
+              "type": "string",
+              "pattern": "^external-function-[0-9a-f]{32}$"
+            }
+          },
+          "provenTargetIds": {
+            "type": "array",
+            "maxItems": 16,
+            "uniqueItems": true,
+            "items": {
+              "type": "string",
+              "pattern": "^function-rva-0x(?:0|[1-9a-f][0-9a-f]{0,15})$"
+            }
+          },
+          "tailCall": {
+            "type": "boolean"
+          },
+          "targetEvidence": {
+            "enum": [
+              "none",
+              "call-target-expression",
+              "call-target-clobbered-expression",
+              "call-target-and-clobbered-expressions"
+            ]
+          },
+          "observationIds": {
+            "type": "array",
+            "minItems": 1,
+            "uniqueItems": true,
+            "items": {
+              "type": "string"
+            }
+          },
+          "callPcRva": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "callerLocalCallOffset": {
+            "type": [
+              "string",
+              "null"
+            ]
+          }
+        }
+      }
+    }
+  }
+}

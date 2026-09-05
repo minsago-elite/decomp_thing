@@ -505,7 +505,7 @@ class FullTreeCallObservationProducerTest {
                 ),
                 first.document.controlObject("oracle"),
             )
-            assertEquals(JsonPrimitive(1), first.document["schemaVersion"])
+            assertEquals(JsonPrimitive(2), first.document["schemaVersion"])
             val authenticatedInput = FullTreeCallObservations.shardInputs(
                 inventory.inventory,
                 inventory.outputSha256,
@@ -553,7 +553,7 @@ class FullTreeCallObservationProducerTest {
             )
 
             val proven = byDie.getValue(callHex(fixture.provenCallDieOffset))
-            assertScoredCall(proven, localOffset = "0x10", returnRva = "0x150")
+            assertScoredCall(proven, localOffset = "0x10", returnRva = "0x150", instruction = true)
             assertTarget(
                 proven,
                 kind = "indirect-proven",
@@ -729,12 +729,14 @@ class FullTreeCallObservationProducerTest {
         localOffset: String,
         returnRva: String,
         tailCall: Boolean = false,
+        instruction: Boolean = false,
     ) {
         assertEquals("scored", call.controlString("population"))
         assertEquals(JsonNull, call["reasonCode"])
         assertEquals("function-rva-0x140", call.controlString("callerId"))
-        assertEquals(localOffset, call.controlString("callerLocalReturnOffset"))
-        assertEquals(returnRva, call.controlString("returnPcRva"))
+        assertEquals(localOffset, call.controlString(if (instruction) "callerLocalCallOffset" else "callerLocalReturnOffset"))
+        assertEquals(returnRva, call.controlString(if (instruction) "callPcRva" else "returnPcRva"))
+        assertEquals(JsonNull, call[if (instruction) "returnPcRva" else "callPcRva"])
         assertEquals(JsonPrimitive(tailCall), call["tailCall"])
     }
 

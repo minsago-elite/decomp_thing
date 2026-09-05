@@ -30,11 +30,11 @@ internal class FullTreeCallObservationShardInput internal constructor(
 }
 
 /**
- * Kotlin-owned contract for call-observation schema v1 / producer policy v3.
+ * Kotlin-owned contract for call-observation schema v2 / producer policy v4.
  *
  * This object authenticates controls, work-item identity, canonical ordering, closed target
  * classifications, counts, and resource bounds. It does not accept evidence from ACP or Python;
- * artifact truth can enter only through [FullTreeCallObservationProducer]. Historical policy-v2
+ * artifact truth can enter only through [FullTreeCallObservationProducer]. Historical policy-v2/v3
  * identities remain available solely to authenticate already-produced diagnostic evidence.
  */
 internal object FullTreeCallObservations {
@@ -43,7 +43,11 @@ internal object FullTreeCallObservations {
     }
 
     val historicalV2ConfigurationSha256: String by lazy {
-        OracleSchemas.configurationSha256(SCHEMA_NAME, HISTORICAL_V2_PRODUCER_POLICY)
+        OracleSchemas.configurationSha256("full-tree-call-observations", HISTORICAL_V2_PRODUCER_POLICY)
+    }
+
+    val historicalV3ConfigurationSha256: String by lazy {
+        OracleSchemas.configurationSha256("full-tree-call-observations", HISTORICAL_V3_PRODUCER_POLICY)
     }
 
     fun shardInputs(
@@ -330,36 +334,45 @@ internal object FullTreeCallObservations {
         val callerId = call.callNullableString("callerId")
         val local = call.callNullableString("callerLocalReturnOffset")
         val returnPc = call.callNullableString("returnPcRva")
+        val callPc = call.callNullableString("callPcRva")
+        val callLocal = call.callNullableString("callerLocalCallOffset")
+        val locations = listOfNotNull(callPc, returnPc)
         when (population) {
-            "scored" -> if (reason != null || callerId == null || local == null || returnPc == null) {
+            "scored" -> if (reason != null || callerId == null || locations.isEmpty()) {
                 callFail("scored call observation has incomplete caller identity")
             }
-            "unobservable" -> if (reason == null || callerId != null || local != null) {
+            "unobservable" -> if (reason == null || callerId != null || local != null || callLocal != null) {
                 callFail("unobservable call observation has contradictory caller identity")
             }
             else -> callFail("call observation population is unsupported")
         }
-        if (reason == "call-site-no-address" && returnPc != null) {
-            callFail("addressless call observation has a return-PC RVA")
+        if (reason == "call-site-no-address" && locations.isNotEmpty()) {
+            callFail("addressless call observation has a location")
         }
-        if (reason == "caller-no-emitted-range" && returnPc == null) {
-            callFail("callerless call observation lacks a return-PC RVA")
+        if (reason == "caller-no-emitted-range" && locations.isEmpty()) {
+            callFail("callerless call observation lacks a location")
         }
+        if ((local != null) != (callerId != null && returnPc != null) ||
+            (callLocal != null) != (callerId != null && callPc != null)
+        ) callFail("call observation local offsets differ from their coordinate kinds")
+        locations.forEach { parseCallAddress(it, "call-site coordinate") }
         if (callerId != null) {
             val caller = parseCallAddress(
                 callerId.removePrefix("function-rva-"),
                 "call observation caller RVA",
             )
-            val offset = parseCallAddress(checkNotNull(local), "caller-local return offset")
-            val returned = parseCallAddress(checkNotNull(returnPc), "return-PC RVA")
-            if (offset > ULong.MAX_VALUE - caller || caller + offset != returned) {
-                callFail("call observation caller-local return offset does not reconcile without overflow")
+            for ((coordinate, relative) in listOf(callPc to callLocal, returnPc to local)) {
+                if (coordinate == null) continue
+                val offset = parseCallAddress(checkNotNull(relative), "caller-local coordinate offset")
+                val address = parseCallAddress(coordinate, "call-site coordinate RVA")
+                if (offset > ULong.MAX_VALUE - caller || caller + offset != address) {
+                    callFail("call observation caller-local coordinate does not reconcile without overflow")
+                }
             }
-        } else {
-            returnPc?.let { parseCallAddress(it, "return-PC RVA") }
         }
         val identityPayload = JsonObject(
             mapOf(
+                "call" to (callPc?.let(::JsonPrimitive) ?: JsonNull),
                 "caller" to (callerId?.removePrefix("function-rva-")?.let(::JsonPrimitive) ?: JsonNull),
                 "die" to JsonPrimitive(dieOffset),
                 "return" to (returnPc?.let(::JsonPrimitive) ?: JsonNull),
@@ -414,7 +427,16 @@ internal object FullTreeCallObservations {
         }
     }
 
-    private val PRODUCER_POLICY = JsonObject(
+    private val PRODUCER_POLICY = JsonObject(mapOf(
+        "id" to JsonPrimitive("full-tree-call-observations"),
+        "siteIdentity" to JsonPrimitive("caller-id-typed-instruction-and-return-rvas-unit-die-offset"),
+        "siteLocator" to JsonPrimitive("distinct-dwarf-call-pc-and-call-return-pc-no-fallback"),
+        "tailCalls" to JsonPrimitive("dwarf-call-tail-call-flag"),
+        "targetPolicy" to JsonPrimitive("call-origin-subprogram-direct-object-origin-indirect-and-target-expression-closed-classification"),
+        "version" to JsonPrimitive(4),
+    ))
+
+    private val HISTORICAL_V3_PRODUCER_POLICY = JsonObject(
         mapOf(
             "id" to JsonPrimitive("full-tree-call-observations"),
             "siteIdentity" to JsonPrimitive("caller-id-return-pc-rva-or-unit-die-offset"),
@@ -520,7 +542,7 @@ private fun requireCallDigest(value: String, label: String) {
 
 private fun callFail(message: String): Nothing = throw FullTreeCallObservationException(message)
 
-private const val SCHEMA_NAME = "full-tree-call-observations"
+private const val SCHEMA_NAME = "full-tree-call-observations-v2"
 private val CALL_SHA256 = Regex("[0-9a-f]{64}")
 private val CALL_ADDRESS = Regex("0x(?:0|[1-9a-f][0-9a-f]{0,15})")
 private val CALL_JSON_LIMITS = StrictJsonLimits(

@@ -27,6 +27,8 @@ internal data class FullTreeCrossShardFixtureCall(
     val target: String? = null,
     val aliases: List<String> = emptyList(),
     val tailCall: Boolean = false,
+    val callPcRva: Long? = if (tailCall) addressRva else null,
+    val returnPcRva: Long? = if (tailCall) null else addressRva,
 )
 
 internal data class FullTreeCrossShardCallFixture(
@@ -69,12 +71,16 @@ internal data class FullTreeCrossShardCallFixture(
     }
 }
 
-internal fun createFullTreeCrossShardCallFixture(root: Path): FullTreeCrossShardCallFixture {
+internal fun createFullTreeCrossShardCallFixture(
+    root: Path,
+    additionalCalls: List<FullTreeCrossShardFixtureCall> = emptyList(),
+): FullTreeCrossShardCallFixture {
     Files.createDirectories(root)
     Files.setPosixFilePermissions(root, PosixFilePermissions.fromString("rwx------"))
     val controls = createFullTreeControlFixture(root.resolve("controls"))
     val original = controls.authenticatedScope()
-    val fixture = CrossShardCallElfBytes.build()
+    val fixtureCalls = CrossShardCallElfBytes.calls + additionalCalls
+    val fixture = CrossShardCallElfBytes.build(fixtureCalls)
     val artifact = writeElf(root.resolve("cross-shard-calls.elf"), fixture.rich)
     val stripped = writeElf(root.resolve("cross-shard-calls.stripped.elf"), fixture.stripped)
     val originalArtifacts = original.artifactManifest.controlObject("artifacts")
@@ -117,7 +123,7 @@ internal fun createFullTreeCrossShardCallFixture(root: Path): FullTreeCrossShard
         inventoryPath,
         inventory,
         CrossShardCallElfBytes.functions,
-        CrossShardCallElfBytes.calls,
+        fixtureCalls,
         fixture.dieOffsets,
     )
 }
@@ -182,8 +188,8 @@ private object CrossShardCallElfBytes {
         direct("thunk-to-beta", "thunk", 0x380, "beta", tailCall = true),
     )
 
-    fun build(): CrossShardCallArtifactBytes {
-        val dwarf = dwarfSections()
+    fun build(calls: List<FullTreeCrossShardFixtureCall>): CrossShardCallArtifactBytes {
+        val dwarf = dwarfSections(calls)
         return CrossShardCallArtifactBytes(
             elf(dwarf),
             elf(null),
@@ -207,7 +213,7 @@ private object CrossShardCallElfBytes {
         tailCall,
     )
 
-    private fun dwarfSections(): CrossShardCallDwarfBytes {
+    private fun dwarfSections(calls: List<FullTreeCrossShardFixtureCall>): CrossShardCallDwarfBytes {
         val abbreviations = ByteArrayOutputStream().apply {
             abbreviation(1, 0x11, true, listOf(
                 0x03L to FULL_TREE_DW_FORM_STRING,
@@ -250,6 +256,15 @@ private object CrossShardCallElfBytes {
                 0x7fL to FULL_TREE_DW_FORM_REF_ADDR,
             ))
             abbreviation(10, 0x48, false, emptyList())
+            abbreviation(11, 0x48, false, listOf(
+                0x81L to FULL_TREE_DW_FORM_ADDR,
+                0x7dL to FULL_TREE_DW_FORM_ADDR,
+                0x7fL to FULL_TREE_DW_FORM_REF_ADDR,
+            ))
+            abbreviation(12, 0x48, false, listOf(
+                0x81L to FULL_TREE_DW_FORM_ADDR,
+                0x7fL to FULL_TREE_DW_FORM_REF_ADDR,
+            ))
             write(0)
         }.toByteArray()
         val info = ByteArrayOutputStream()
@@ -290,6 +305,13 @@ private object CrossShardCallElfBytes {
                 dies.write(unsigned(function.size.toLong(), 4))
                 for (call in calls.filter { it.caller == function.name }) {
                     when {
+                        call.callPcRva != null -> {
+                            require(call.targetKind == "direct-internal")
+                            die(if (call.returnPcRva != null) 11 else if (call.tailCall) 7 else 12, call.name)
+                            dies.write(unsigned(IMAGE_BASE + call.callPcRva, 8))
+                            if (call.returnPcRva != null) dies.write(unsigned(IMAGE_BASE + call.returnPcRva, 8))
+                            reference(checkNotNull(call.target))
+                        }
                         call.addressRva == null -> die(10, call.name)
                         call.targetKind == "indirect-proven" -> {
                             die(8, call.name)
