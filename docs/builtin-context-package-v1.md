@@ -31,3 +31,11 @@ evidence for its own 65 cases and commit.
 request/response/tool/policy transcripts, source/checkpoint/provider identity bindings, validated
 restart, indeterminate-side-effect reconciliation and archive integration are still required.
 The current package is in-memory evidence and must not be represented as durable recovery.
+
+The subsequent [optional durable journal](builtin-journal-v1.md) records this package and execution
+payloads, but does not yet restore a stage or restart a session. Context v3 required-host run
+[33950974354](https://github.com/minsago-elite/decomp_thing/actions/runs/33950974354), at
+`79c7f547d9c8d974a06d686014d0f47d72a1a59e`, passed its 70-case inventory with no failures, errors or
+skips. Artifact `9964895617` has digest
+`sha256:8dbe0fdfcbca72b1f2f9a6c37f20104e5a1789970ea06bef9376f79b1f2e617b`.
+This dated result does not substitute for the later journal v4 qualification.
