@@ -335,6 +335,10 @@ Job metadata updates write and force a temporary file in the job directory, atom
 then force the directory. There is no non-atomic fallback. An existing reader retains its previous complete
 snapshot. Before publication, the writer enforces the same 256 KiB encoded UTF-8 JSON limit as the reader,
 including escaping overhead; oversized records fail without replacing an existing record or publishing an upload.
+Upload admission also encodes a reservation record before staging: the longest supported status, a
+40-character timestamp allowance, and a 500-character status message at worst-case JSON escaping size.
+Thus an accepted filename leaves room for later bounded status updates; existing oversized legacy
+records are not rewritten or migrated by this admission check.
 The bounded canonical encoder stops at that output limit, and a filename character cap bounds its preliminary
 string-byte accounting. It no longer builds the entire encoded JSON string before checking the limit. New records
 use canonical field ordering; existing pretty-printed records remain readable without migration.
