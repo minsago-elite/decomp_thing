@@ -146,6 +146,7 @@ internal class GccBundledPreparedOperation internal constructor(
 
     @Synchronized
     fun executeUntilCheckpoint(minimumCompletedFunctions: Long): GccBundledInterruptedOperation {
+        intent.cliInvocation?.requireCheckpointSelection(minimumCompletedFunctions)
         val trigger = GccBundledCheckpointTrigger(minimumCompletedFunctions)
         var stoppedExport: GccBundledInterruptedExportSnapshot? = null
         var stoppedControl: LinuxFileIdentity? = null

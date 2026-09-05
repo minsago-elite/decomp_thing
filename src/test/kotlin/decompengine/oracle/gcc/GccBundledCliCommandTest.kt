@@ -61,6 +61,24 @@ class GccBundledCliCommandTest {
     }
 
     @Test
+    fun `checkpoint selection must match the exact invocation threshold`() = fixture { root ->
+        val args = arguments(root)
+        val options = GccBundledCliOptions.parse(args)
+        val children = listOf(options.output, privateDirectory(options.output.resolve("inputs")), privateDirectory(options.output.resolve("journal")))
+        val identities = children.associateWith { path -> LinuxFilesystemSyscalls.openRoot(path).use { it.identity } }
+        val fresh = GccBundledCliInvocation(options, args, identities)
+        assertFails { fresh.requireCheckpointSelection(512) }
+        val resumedArgs = args + listOf("--resume-after-checkpoint", "1024")
+        val resumed = GccBundledCliInvocation(GccBundledCliOptions.parse(resumedArgs), resumedArgs, identities)
+        resumed.requireCheckpointSelection(1024)
+        for (threshold in listOf(0L, 512L, 1023L, 1536L, Long.MAX_VALUE)) {
+            assertFails { resumed.requireCheckpointSelection(threshold) }
+        }
+        resumed.requireCurrent()
+        for (path in children.drop(1)) Files.list(path).use { assertEquals(0L, it.count()) }
+    }
+
+    @Test
     fun `command records selection but refuses a mismatched binary before staging or leasing`() = fixture { root ->
         val profile = Path.of(System.getProperty("user.dir"), "oracle/gcc/16.2.0/compiler-engines.json").toRealPath()
         val args = arguments(root).map { if (it == root.resolve("profile").toString()) profile.toString() else it }
@@ -73,6 +91,20 @@ class GccBundledCliCommandTest {
         }
         assertFalse(Files.exists(options.output.resolve("result.json")))
         assertFails { GccBundledCliCommand.run(options, args) }
+    }
+
+    @Test
+    fun `command rejects an unreachable profile checkpoint before staging or leasing`() = fixture { root ->
+        val profile = Path.of(System.getProperty("user.dir"), "oracle/gcc/16.2.0/compiler-engines.json").toRealPath()
+        val args = arguments(root).map { if (it == root.resolve("profile").toString()) profile.toString() else it } +
+            listOf("--resume-after-checkpoint", "16777216")
+        val options = GccBundledCliOptions.parse(args)
+        val failure = assertFails { GccBundledCliCommand.run(options, args) }
+        assertTrue(failure.message.orEmpty().contains("cannot be reached within the profile planner entity bound"), failure.toString())
+        for (path in listOf(options.output.resolve("inputs"), options.output.resolve("journal"), options.scratch)) {
+            Files.list(path).use { assertEquals(0L, it.count()) }
+        }
+        assertFalse(Files.exists(options.output.resolve("result.json")))
     }
 
     @Test

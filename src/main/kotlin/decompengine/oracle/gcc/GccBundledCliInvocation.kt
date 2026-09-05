@@ -91,4 +91,10 @@ internal class GccBundledCliInvocation(val options: GccBundledCliOptions, argume
             }
         }
     }
+
+    fun requireCheckpointSelection(minimumCompletedFunctions: Long) {
+        require(options.resumeAfterCheckpoint == minimumCompletedFunctions) {
+            "checkpoint threshold differs from the bound CLI selection"
+        }
+    }
 }
