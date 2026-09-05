@@ -122,19 +122,30 @@ class ArchivalProjectScaleIntegrationTest {
             reconstructor = RecoveredCModuleReconstructor(),
         )
         val rebuilt = MakeProjectBuilder.build(project).projectDir.resolve("build/reconstructed")
-        original.parent.resolve("sample.txt").writeText("from-file\n")
-        rebuilt.parent.resolve("sample.txt").writeText("from-file\n")
+        val fileInput = temp.resolve("sample.txt").also { it.writeText("from-file\n") }
         val inputs = listOf(
             ProcessInput("stdin", stdin = "from-stdin\n".toByteArray()),
             ProcessInput("argv", args = listOf("from-argv")),
-            ProcessInput("file", args = listOf("--file", "sample.txt")),
+            ProcessInput("file", args = listOf("--file", "/inputs/sample.txt")),
             ProcessInput("exit", args = listOf("a", "b", "c")),
         )
         val behavior = BehaviorComparator().compare(
             "large_archival", original, rebuilt, inputs, project.resolve("reports"), BehaviorProjectContext(project),
+            fileInputs = mapOf("file" to mapOf("sample.txt" to fileInput)),
         )
+        val fileCase = behavior.cases.single { it.input.id == "file" }
+        assertEquals(0, fileCase.original.exitCode)
+        assertEquals(0, fileCase.rebuilt.exitCode)
+        assertEquals("from-file:25\n", fileCase.original.stdout.decodeToString())
+        assertEquals("from-file:25\n", fileCase.rebuilt.stdout.decodeToString())
+        val retainedCase = Json.parseToJsonElement(behavior.reportPath.readText()).jsonObject.getValue("cases").jsonArray
+            .single { it.jsonObject.getValue("id").jsonPrimitive.content == "file" }.jsonObject
+        val retainedFile = retainedCase.getValue("fileInputs").jsonArray.single().jsonObject
+        assertEquals(sha256(fileInput.readBytes()), retainedFile.getValue("sha256").jsonPrimitive.content)
+        assertEquals("66726f6d2d66696c650a", retainedFile.getValue("contentHex").jsonPrimitive.content)
         val first = ArchivalPackager.create(project, temp.resolve("large-1.zip"))
         val second = ArchivalPackager.create(project, temp.resolve("large-2.zip"))
+        java.nio.file.Files.delete(fileInput)
         val extracted = temp.resolve("extracted")
         ArchivalBundleVerifier.extractAndVerify(first.archivePath, extracted)
         val plan = DeterministicModulePlanner().plan(model)
@@ -146,6 +157,34 @@ class ArchivalProjectScaleIntegrationTest {
         assertTrue(behavior.reportPath.readText().contains("\"networkIsolated\""))
         assertEquals(first.archiveSha256, second.archiveSha256)
         assertEquals(0, MakeProjectBuilder.build(extracted).returnCode)
+        val extractedRecord = Json.parseToJsonElement(extracted.resolve("reports/large_archival.behavior.json").readText()).jsonObject
+        val extractedFile = extractedRecord.getValue("cases").jsonArray
+            .single { it.jsonObject.getValue("id").jsonPrimitive.content == "file" }.jsonObject
+            .getValue("fileInputs").jsonArray.single().jsonObject
+        assertEquals(retainedFile, extractedFile)
+        val restoredInput = temp.resolve("restored-input.txt")
+        java.nio.file.Files.write(restoredInput, java.util.HexFormat.of().parseHex(extractedFile.getValue("contentHex").jsonPrimitive.content))
+        val replay = BehaviorComparator().compare(
+            "large_archival_replay", original, extracted.resolve("build/reconstructed"), inputs,
+            extracted.resolve("reports"), BehaviorProjectContext(extracted),
+            fileInputs = mapOf("file" to mapOf("sample.txt" to restoredInput)),
+        )
+        val expectedCases = mapOf(
+            "stdin" to (0 to "from-stdin:25\n"),
+            "argv" to (0 to "from-argv:25\n"),
+            "file" to (0 to "from-file:25\n"),
+            "exit" to (3 to "a:25\n"),
+        )
+        for (comparison in listOf(behavior, replay)) {
+            comparison.cases.forEach { case ->
+                val (exit, stdout) = expectedCases.getValue(case.input.id)
+                for (output in listOf(case.original, case.rebuilt)) {
+                    assertEquals(exit, output.exitCode, case.input.id)
+                    assertEquals(stdout, output.stdout.decodeToString(), case.input.id)
+                    assertTrue(output.stderr.isEmpty(), case.input.id)
+                }
+            }
+        }
         val programModel = project.resolve("reports/program_model.json").readText()
         val modulePlan = project.resolve("reports/module_plan.json").readText()
         val sourceManifest = project.resolve("source_tree_manifest.json").readText()
