@@ -334,6 +334,14 @@ receives an error. Startup does not treat staging directory names as job IDs. Te
 writes leave no partial job and preserve prior jobs. Power-loss injection, abandoned staging/temporary-file
 reclamation, and durability of newly created store ancestors remain open requirements.
 
+Once the final upload-directory rename is attempted, a failure is reported as
+`UploadPublicationUncertainException` with the generated job ID. This includes an exception from rename
+itself; it does not assume that an exception proves the destination is absent. The web endpoint returns
+HTTP 409 with a `Location` for inspecting that job. JSON clients receive `upload_publication_uncertain`,
+`job_id`, `job_url`, and `retry_upload: false`; the HTML response offers a Check job link. Underlying I/O
+error text is excluded. Inspect the referenced state before another upload; this is not an exactly-once
+retry protocol, and a missing record after a crash still needs recovery reconciliation.
+
 `web --listen-backlog` requests a TCP listen backlog of 64 by default and accepts values from 1 to 4096.
 Invalid values fail before the server binds or opens job storage. The underlying TCP implementation controls
 overflow refusal or dropping, as described by the [JDK HttpServer contract](https://docs.oracle.com/en/java/javase/21/docs/api/jdk.httpserver/com/sun/net/httpserver/HttpServer.html).

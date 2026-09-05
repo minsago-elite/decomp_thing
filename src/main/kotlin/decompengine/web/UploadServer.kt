@@ -15,6 +15,7 @@ import decompengine.jobs.InvalidUploadException
 import decompengine.jobs.Job
 import decompengine.jobs.JobStore
 import decompengine.jobs.JobStoreException
+import decompengine.jobs.UploadPublicationUncertainException
 import decompengine.jobs.AgentProgressJournal
 import decompengine.jobs.ProgressRedactor
 import decompengine.jobs.BestEffortProgressJournal
@@ -426,6 +427,13 @@ class UploadServer(
             }
         } catch (exception: InvalidUploadException) {
             exchange.sendHtml(400, renderErrorPage(400, "Unsupported binary", diagnostic(exception, "Upload a Linux ELF binary.")))
+        } catch (exception: UploadPublicationUncertainException) {
+            exchange.responseHeaders.set("Location", "/jobs/${exception.jobId}")
+            if ((exchange.requestHeaders.getFirst("Accept") ?: "").contains("application/json")) {
+                exchange.sendJson(409, uploadPublicationProblem(exception.jobId).toString())
+            } else {
+                exchange.sendHtml(409, renderUploadPublicationUncertainPage(exception.jobId))
+            }
         }
     }
 

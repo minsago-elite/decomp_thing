@@ -14,6 +14,48 @@ import kotlin.test.assertTrue
 
 class JobStoreTest {
     @Test
+    fun `publication failures preserve a reviewable job identity without claiming rollback`() {
+        for (phase in listOf("before-rename", "after-rename", "directory-force")) {
+            val root = createTempDirectory("jobs-uncertain-$phase-")
+            val privateError = "private storage diagnostic"
+            val publisher = object : UploadPublisher {
+                override fun publish(staging: java.nio.file.Path, destination: java.nio.file.Path) {
+                    if (phase == "before-rename") throw java.io.IOException(privateError)
+                    AtomicUploadPublisher.publish(staging, destination)
+                    if (phase == "after-rename") throw java.io.IOException(privateError)
+                }
+
+                override fun confirmDirectory(root: java.nio.file.Path) {
+                    throw java.io.IOException(privateError)
+                }
+            }
+            val failure = assertFailsWith<UploadPublicationUncertainException> {
+                JobStore(root, publisher).createFromUpload("fixture.elf", elfFixture())
+            }
+            assertTrue(failure.jobId.matches(Regex("[a-f0-9]{32}")))
+            assertTrue(!failure.message.orEmpty().contains(privateError))
+            if (phase == "before-rename") {
+                assertTrue(JobStore(root).list().isEmpty())
+            } else {
+                val published = JobStore(root).get(failure.jobId)
+                assertEquals("uploaded", published.status)
+                kotlin.test.assertContentEquals(elfFixture(), published.binaryPath.readBytes())
+            }
+            java.nio.file.Files.list(root).use { entries ->
+                assertTrue(entries.noneMatch { it.fileName.toString().startsWith(".upload-") })
+            }
+            val problem = decompengine.web.uploadPublicationProblem(failure.jobId)
+            assertEquals("\"upload_publication_uncertain\"", problem["error"].toString())
+            assertEquals("false", problem["retry_upload"].toString())
+            assertEquals("\"/jobs/${failure.jobId}\"", problem["job_url"].toString())
+            val page = decompengine.web.renderUploadPublicationUncertainPage(failure.jobId)
+            assertTrue(page.contains("href=\"/jobs/${failure.jobId}\""))
+            assertTrue(page.contains("Check job"))
+            assertTrue(!page.contains(privateError))
+        }
+    }
+
+    @Test
     fun `metadata byte limit rejects unroundtrippable uploads and preserves readable jobs`() {
         val root = createTempDirectory("jobs-metadata-limit-")
         val store = JobStore(root)

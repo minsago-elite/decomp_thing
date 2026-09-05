@@ -63,7 +63,8 @@ data class Job(
     }
 }
 
-class JobStore(root: Path) {
+class JobStore internal constructor(root: Path, private val uploadPublisher: UploadPublisher) {
+    constructor(root: Path) : this(root, AtomicUploadPublisher)
     private val root = root.toAbsolutePath().normalize()
     internal val storageRoot: Path get() = root
 
@@ -103,6 +104,7 @@ class JobStore(root: Path) {
             metadata = metadata,
         )
         val staging = Files.createTempDirectory(root, ".upload-")
+        var publicationAttempted = false
         try {
             val stagedInput = staging.resolve("input.elf")
             FileChannel.open(stagedInput, CREATE_NEW, WRITE, NOFOLLOW_LINKS).use { channel ->
@@ -114,8 +116,9 @@ class JobStore(root: Path) {
                 channel.force(true)
             }
             persist(job, staging)
-            Files.move(staging, jobDir, ATOMIC_MOVE)
-            FileChannel.open(root, READ).use { it.force(true) }
+            publicationAttempted = true
+            uploadPublisher.publish(staging, jobDir)
+            uploadPublisher.confirmDirectory(root)
             return job
         } catch (failure: Exception) {
             try {
@@ -125,6 +128,7 @@ class JobStore(root: Path) {
             } catch (cleanup: Exception) {
                 failure.addSuppressed(cleanup)
             }
+            if (publicationAttempted) throw UploadPublicationUncertainException(job.id, failure)
             throw failure
         }
     }
