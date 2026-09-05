@@ -25,6 +25,73 @@ class WebApiControllerTest {
     private val client = HttpClient.newBuilder().followRedirects(HttpClient.Redirect.NEVER).build()
 
     @Test
+    fun `authenticated progress snapshots replay persisted observations and expose retention gaps`() {
+        val root = createTempDirectory("web-progress-http-")
+        val store = JobStore(root)
+        val job = store.createFromUpload("inert.elf", elfFixture())
+        val other = store.createFromUpload("other.elf", elfFixture())
+        val run = decompengine.jobs.WorkflowAttemptStore.open(root).use { owner ->
+            val original = (owner.inspect(job.id) as decompengine.jobs.WorkflowJobInspection.Available).snapshot
+            owner.create(job.id, original.version, decompengine.jobs.NewWorkflowAttempt(
+                decompengine.jobs.WorkflowKind.RECONSTRUCT,
+                decompengine.jobs.WorkflowExecutionLimits(60000u, 15000u, 1048576u, 16u),
+            )).attempt
+        }
+        val reports = Files.createDirectories(root.resolve(job.id).resolve("reports/runs/${run.runId}"))
+        val journalFile = reports.resolve(decompengine.jobs.AgentProgressJournal.FILE_NAME)
+        decompengine.jobs.AgentProgressJournal(reports, "reconstruct").use {
+            it.phase(decompengine.agent.AgentWorkflowPhase.PLANNING)
+        }
+        var executed = false
+        val server = UploadServer("127.0.0.1", 0, root, JobAnalyzer { _, _ -> executed = true },
+            JobReconstructor { _, _ -> executed = true }, uiMode = WebUiMode.SPA, basePath = "/workbench/")
+        server.start()
+        try {
+            val path = "/workbench/api/v1/jobs/${job.id}/runs/${run.runId}"
+            for (suffix in listOf("snapshot", "events")) assertError(request(server, "$path/$suffix"), 401, "SESSION_REQUIRED")
+            val cookie = establish(server); val headers = mapOf("Cookie" to cookie)
+            assertError(request(server, "$path/events", headers = headers + ("Origin" to "https://invalid.example")), 403, "ORIGIN_DENIED")
+            assertError(request(server, "$path/snapshot", "POST", "{}", headers), 405, "METHOD_NOT_ALLOWED")
+            assertError(request(server, "$path/events", headers = headers + ("Accept" to "text/html")), 406, "NOT_ACCEPTABLE")
+            assertError(request(server, "/workbench/api/v1/jobs/${other.id}/runs/${run.runId}/events", headers = headers), 404, "NOT_FOUND")
+            val before = Files.readString(journalFile)
+            val snapshot = assertEnvelope(request(server, "$path/snapshot", headers = headers), 200, "snapshot")
+            assertEquals("2", snapshot.getValue("progress").jsonObject.getValue("nextSequence").jsonPrimitive.content)
+            assertEquals("observations", snapshot.getValue("progress").jsonObject.getValue("authority").jsonPrimitive.content)
+            val first = assertEnvelope(request(server, "$path/events?limit=1&cursor=${snapshot.getValue("oldestCursor").jsonPrimitive.content}", headers = headers), 200, "events")
+            val firstCursor = first.getValue("nextCursor").jsonPrimitive.content
+            val firstEvent = first.getValue("items").jsonArray.single().jsonObject
+            assertEquals("0", firstEvent.getValue("sequence").jsonPrimitive.content)
+            assertEquals(run.runId, firstEvent.getValue("runId").jsonPrimitive.content)
+            assertEquals("workflow.observation", firstEvent.getValue("type").jsonPrimitive.content)
+            val second = assertEnvelope(request(server, "$path/events?cursor=$firstCursor", headers = headers), 200, "events")
+            assertEquals("1", second.getValue("items").jsonArray.single().jsonObject.getValue("sequence").jsonPrimitive.content)
+            val through = snapshot.getValue("throughCursor").jsonPrimitive.content
+            val idle = assertEnvelope(request(server, "$path/events?cursor=$through", headers = headers), 200, "events")
+            assertTrue(idle.getValue("items").jsonArray.isEmpty())
+            assertEquals(before, Files.readString(journalFile))
+            val otherCookie = establish(server)
+            assertError(request(server, "$path/events?cursor=$through", headers = mapOf("Cookie" to otherCookie)), 400, "INVALID_CURSOR")
+            decompengine.jobs.AgentProgressJournal(reports, "reconstruct").use { }
+            val appended = assertEnvelope(request(server, "$path/events?cursor=$through", headers = headers), 200, "events")
+            assertEquals("2", appended.getValue("items").jsonArray.single().jsonObject.getValue("sequence").jsonPrimitive.content)
+            val journal = Json.parseToJsonElement(Files.readString(journalFile)).jsonObject
+            Files.writeString(journalFile, JsonObject(journal + mapOf(
+                "historyDropped" to JsonPrimitive(1), "truncated" to JsonPrimitive(true),
+                "events" to kotlinx.serialization.json.JsonArray(journal.getValue("events").jsonArray.drop(1)),
+            )).toString())
+            assertError(request(server, "$path/events?cursor=$firstCursor", headers = headers), 410, "PROGRESS_GAP")
+            val fresh = assertEnvelope(request(server, "$path/snapshot", headers = headers), 200, "snapshot")
+            assertEquals("1", fresh.getValue("progress").jsonObject.getValue("historyDropped").jsonPrimitive.content)
+            assertEquals("2", fresh.getValue("progress").jsonObject.getValue("retainedEventCount").jsonPrimitive.content)
+            Files.delete(journalFile)
+            assertError(request(server, "$path/snapshot", headers = headers), 503, "PROGRESS_UNAVAILABLE")
+            assertError(request(server, "$path/events", headers = headers), 503, "PROGRESS_UNAVAILABLE")
+            assertFalse(executed)
+        } finally { server.stop(); root.toFile().deleteRecursively() }
+    }
+
+    @Test
     fun `startup recovery projects durable identity while bootstrap keeps production workflow capability unavailable`() {
         val root = createTempDirectory("web-durable-projection-")
         val job = JobStore(root).createFromUpload("inert.elf", elfFixture())

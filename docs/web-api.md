@@ -363,3 +363,13 @@ error, not an empty success response.
 The optional upload progress transport, state semantics and bounded retention are defined
 in [Server-observed upload progress](web-upload-progress.md). Progress identities are
 fresh per transfer and do not replace durable idempotency keys.
+
+### Current D4 JSON polling implementation
+
+The current retained-journal adapter implements `GET jobs/J/runs/R/snapshot`
+and `GET jobs/J/runs/R/events?cursor=...&limit=...` under the v1 prefix.
+This is bounded JSON polling; `transport`/`after` parameters and SSE negotiation
+from the target design above are not implemented. Snapshot `progress` metadata
+makes queue/history omissions and retained-record counts explicit. Missing
+journals fail with `PROGRESS_UNAVAILABLE`; replay gaps require a fresh snapshot
+via `PROGRESS_GAP`. See [the implemented boundary and qualification limits](web-progress-adapter.md).

@@ -12,7 +12,7 @@ internal class WebProgressPages {
     private val secret = ByteArray(32).also(SecureRandom()::nextBytes)
     private val epoch = ByteArray(8).also(SecureRandom()::nextBytes).hex()
     internal data class Boundary(val throughCursor: String?, val throughSequence: String?, val oldestCursor: String?,
-        val nextSequence: String, val queueDropped: String, val historyDropped: String)
+        val nextSequence: String, val queueDropped: String, val historyDropped: String, val retainedEventCount: String)
 
     fun boundary(owner: String, jobId: String, runId: String, bytes: ByteArray): Boundary {
         val journal = decode(bytes)
@@ -21,7 +21,7 @@ internal class WebProgressPages {
             records.lastOrNull()?.let { (journal.getValue("nextSequence").jsonPrimitive.long - 1).toString() },
             records.firstOrNull()?.let { token(owner, jobId, runId, it, "b") },
             journal.getValue("nextSequence").jsonPrimitive.content, journal.getValue("queueDropped").jsonPrimitive.content,
-            journal.getValue("historyDropped").jsonPrimitive.content)
+            journal.getValue("historyDropped").jsonPrimitive.content, records.size.toString())
     }
 
     fun page(owner: String, jobId: String, runId: String, bytes: ByteArray, rawQuery: String?): JsonObject {
@@ -72,7 +72,15 @@ internal class WebProgressPages {
         }
     }
 
-    private fun decode(bytes: ByteArray): JsonObject = try { AgentProgressJournal.decode(bytes) }
+    private fun decode(bytes: ByteArray): JsonObject = try {
+        AgentProgressJournal.decode(bytes).also { journal ->
+            val next = journal.getValue("nextSequence").jsonPrimitive.long
+            val queue = journal.getValue("queueDropped").jsonPrimitive.long
+            val history = journal.getValue("historyDropped").jsonPrimitive.long
+            val count = journal.getValue("events").jsonArray.size
+            require(queue <= next && history <= next - queue && count <= next - queue - history) { "inconsistent progress counters" }
+        }
+    }
         catch (_: Exception) { unavailable() }
     private fun token(owner: String, jobId: String, runId: String, record: JsonObject, mode: String, position: Long = record.getValue("sequence").jsonPrimitive.long): String {
         val prefix = "p1_${epoch}_${mode}_${record.getValue("sequence").jsonPrimitive.content}_${position}_${digest(record)}"

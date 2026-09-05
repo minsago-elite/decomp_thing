@@ -1601,6 +1601,34 @@
               "type": "null"
             }
           ]
+        },
+        "progress": {
+          "type": "object",
+          "properties": {
+            "authority": {
+              "const": "observations"
+            },
+            "nextSequence": {
+              "$ref": "#/definitions/uint64"
+            },
+            "queueDropped": {
+              "$ref": "#/definitions/uint64"
+            },
+            "historyDropped": {
+              "$ref": "#/definitions/uint64"
+            },
+            "retainedEventCount": {
+              "$ref": "#/definitions/uint64"
+            }
+          },
+          "required": [
+            "authority",
+            "nextSequence",
+            "queueDropped",
+            "historyDropped",
+            "retainedEventCount"
+          ],
+          "additionalProperties": false
         }
       },
       "required": [

@@ -43,7 +43,12 @@ export async function seedHistory(root) {
       newOutputSignatureCount: 1, sandboxed: true, networkIsolated: false }, candidates: [{}], observations: [] });
   const reportPath = join(reportDirectory, 'exploration.json');
   await fs.writeFile(reportPath, exploration, { flag: 'wx', mode: 0o600 });
-  return { jobId, directory, retained, count: attempts.length, reportPath, exploration };
+  const progressPath = join(reportDirectory, 'agent-progress.json');
+  const progress = JSON.stringify({ schemaVersion: 1, displayOnly: true, nextSequence: 3, queueDropped: 0, historyDropped: 0, truncated: false,
+    events: [0, 1, 2].map(sequence => ({ sequence, runId: 'writer_fixture_progress', workflow: 'reconstruct', time: at,
+      kind: 'workflow_phase', phase: 'planning', text: `Synthetic progress ${sequence}`, inputTokens: '18446744073709551615' })) });
+  await fs.writeFile(progressPath, progress, { flag: 'wx', mode: 0o600 });
+  return { jobId, directory, retained, count: attempts.length, reportPath, exploration, progressPath, progress };
 }
 
 export async function qualifyHistory({ fixture, makeTarget, cdp, evaluate, ready, browserOrigin }) {
@@ -64,6 +69,25 @@ export async function qualifyHistory({ fixture, makeTarget, cdp, evaluate, ready
   assert.equal(await evaluate(tab, 'location.pathname'), `${path}/run_fixture_3`);
   await cdp.call('Page.reload', {}, tab.sessionId);
   await ready(tab, `document.body.innerText.includes('revision_fixture_3')`, 'pinned earlier attempt reload');
+  const progressEndpoint = `/nested/api/v1/jobs/${fixture.jobId}/runs/run_fixture_3`;
+  const polling = await evaluate(tab, `(async () => {
+    const read = async path => { const response = await fetch(path); if (!response.ok) throw new Error('Progress request failed'); return (await response.json()).data; };
+    const snapshot = await read('${progressEndpoint}/snapshot');
+    const first = await read('${progressEndpoint}/events?limit=2&cursor=' + snapshot.oldestCursor);
+    const second = await read('${progressEndpoint}/events?cursor=' + first.nextCursor);
+    const idle = await read('${progressEndpoint}/events?cursor=' + snapshot.throughCursor);
+    return { snapshot, first, second, idle };
+  })()`);
+  assert.equal(polling.snapshot.run.runId, 'run_fixture_3');
+  assert.equal(polling.snapshot.progress.authority, 'observations');
+  assert.equal(polling.snapshot.progress.retainedEventCount, '3');
+  assert.deepEqual(polling.first.items.map(event => event.sequence), ['0', '1']);
+  assert.deepEqual(polling.second.items.map(event => event.sequence), ['2']);
+  assert.equal(polling.first.items[0].payload.fields.inputTokens, '18446744073709551615');
+  assert.equal(polling.first.items[0].runId, 'run_fixture_3');
+  assert.equal(polling.first.items[0].payload.writerId, 'writer_fixture_progress');
+  assert.deepEqual(polling.idle.items, []);
+  assert.equal(await fs.readFile(fixture.progressPath, 'utf8'), fixture.progress);
   await evaluate(tab, `[...document.querySelectorAll('button')].find(b => b.textContent === 'Read exploration evidence').click()`);
   await ready(tab, `document.body.innerText.includes('Report state: available. Authority: observations.') && document.body.innerText.includes('Producer confidence score')`, 'bound exploration summary');
   assert.ok(await evaluate(tab, `document.body.innerText.includes('not proof of equivalence')`));
@@ -87,7 +111,7 @@ export async function qualifyHistory({ fixture, makeTarget, cdp, evaluate, ready
   assert.deepEqual(tab.exceptions, []);
   for (const [name, bytes] of Object.entries(fixture.retained)) assert.deepEqual(await fs.readFile(join(fixture.directory, name)), Buffer.from(bytes));
   assert.deepEqual((await fs.readdir(fixture.directory)).sort(), [...Object.keys(fixture.retained), 'reports'].sort());
-  return { fixtureAttempts: 55, firstPage: 50, secondPage: 5, exactOrder: true, cursorReload: true,
+  return { progressPolling: true, progressBytesUnchanged: true, fixtureAttempts: 55, firstPage: 50, secondPage: 5, exactOrder: true, cursorReload: true,
     earlierAttemptReload: true, previousInterruptedAttempt: true, exactUnsignedUsage: true,
     unacceptedCandidate: true, explorationSummary: true, nativeReportDownload: true, downloadedBytesMatch: true, reportBytesUnchanged: true, retainedBytesUnchanged: true, mutationRequests: 0, executionStarted: false };
 }

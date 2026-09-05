@@ -269,6 +269,18 @@
     {
       "file": "fixtures/event-observation-truncated-preview.json",
       "valid": true
+    },
+    {
+      "file": "fixtures/snapshot-progress-omissions.json",
+      "valid": true
+    },
+    {
+      "file": "fixtures/invalid-snapshot-progress-boundary.json",
+      "valid": false
+    },
+    {
+      "file": "fixtures/invalid-snapshot-progress-count.json",
+      "valid": false
     }
   ]
 }

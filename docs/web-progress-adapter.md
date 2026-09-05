@@ -73,9 +73,9 @@ counts, absent omission accounting, untyped text objects and excess plan items.
 The typed client generation includes the new branch. Existing clients that do
 not know this branch retain their explicit unsupported-contract behavior.
 
-The mapper below implements the producer projection for this schema. The
-authenticated HTTP endpoint, cursor cutover/gap handling and UI activity view
-remain to be connected and qualified; no streaming capability is enabled here.
+The mapper and HTTP adapter below implement producer projection and bounded
+JSON snapshot/replay reads for this schema. The UI activity view, SSE and broader
+concurrency/retention qualification remain open.
 
 Contract verification passed 36 valid and 26 invalid fixtures. All 210 frontend
 tests, lint, generated-type drift checks and the typechecked bundle passed.
@@ -153,3 +153,49 @@ Verification passed 160 journal/web JVM tests with zero failures/errors and
 `git diff --check`. Frontend/browser suites were not rerun because the new replay
 core has no HTTP/UI connection yet. The existing typed frontend build and asset
 checks ran as part of the JVM build dependency chain.
+
+## Authenticated JSON snapshot and polling endpoints
+
+The versioned API now exposes read-only `GET /api/v1/jobs/J/runs/R/snapshot` and
+`GET /api/v1/jobs/J/runs/R/events?cursor=...&limit=...`, including nested base paths.
+Both require the existing local session/origin policy and JSON Accept rules.
+The server resolves the exact durable attempt, reads its fixed journal artifact
+through the checked descriptor boundary, and rejects a changed attempt version
+after the read with `409 PROGRESS_CHANGED`. Missing/inaccessible journal bytes
+return `503 PROGRESS_UNAVAILABLE`, never an invented empty history. The reader's
+missing-target exception needed explicit mapping; the HTTP regression caught
+and fixed an initial generic 500 response for that case.
+
+Snapshots include the authoritative run presentation and separate display
+progress metadata: next sequence, queue/history omission counts and retained
+record count. This optional v1 field preserves old snapshot fixture compatibility;
+new endpoint responses always supply it. Consumers must not interpret its absence
+as complete history. Counter/cursor consistency checks run in the typed client
+and shared verifier. Snapshot run state remains independent of journal claims.
+The version check covers a stable attempt observation around a stable journal
+file read; it is not a transaction between workflow state and journal publication.
+
+Use `oldestCursor` to explicitly read retained history and `throughCursor` to
+resume after the snapshot cutover. Gaps return `410 PROGRESS_GAP`; clients must
+read a fresh snapshot and visibly acknowledge lost history before resuming.
+Polling is ordinary bounded HTTP with no retained stream/queue. Bootstrap now
+reports the implemented source-journal read ceilings (1,024 events / 2 MiB);
+pages remain capped at 200 events / below one MiB. A zero terminal-retention
+window advertises no guaranteed time retention. These limits do not claim the
+larger D0 target workload or timed retention policy is complete.
+
+Actual HTTP tests exercise unauthenticated/foreign-origin/method/Accept denial,
+wrong-job and cross-session cursor rejection, snapshot/oldest/paged/idle reads,
+new writer continuation, explicit retention gap and omission counters, missing
+journals and byte preservation without workflow execution. 161 JVM tests,
+214 frontend tests, 38 valid/28 invalid shared fixtures, lint and typechecked
+`distZip` passed. The packaged history fixture now includes an inert progress
+journal and checks snapshot/two-page/idle reads with exact large token counts.
+
+The packaged polling journey passed with the pinned browser:
+[`web-progress-http-20260905.json`](evidence/web-progress-http-20260905.json).
+It reads the new endpoints from an authenticated browser tab, verifies the exact
+attempt/writer distinction and unsigned usage value, and confirms journal bytes
+are unchanged. Chrome used test-only `--no-sandbox`. The UI has no activity panel
+yet; these browser reads do not establish automatic reconnection, SSE, long-lived
+slow-client behavior or full #174 completion.

@@ -29,13 +29,14 @@ internal class WebApiController(
             is decompengine.jobs.WorkflowJobInspection.Unavailable -> throw WebJobServiceException(inspection.diagnostic.code, inspection.diagnostic.message)
         }
     }
+    private val progressPages = WebProgressPages()
     private val jobPages = WebJobPages(jobs::collectionRecords)
 
     fun route(exchange: HttpExchange): Boolean {
         val path = exchange.requestURI.rawPath
         if (!path.startsWith("${assets.basePath}api/")) return false
         val resource = path.removePrefix(prefix)
-        if (!path.startsWith(prefix) || !(resource in setOf("session", "bootstrap", "jobs") || resource.matches(Regex("(?:jobs|uploads)/[^/]+|jobs/[^/]+/runs(?:/[^/]+(?:/reports/exploration)?)?|jobs/[^/]+/artifacts/[^/]+/content")))) {
+        if (!path.startsWith(prefix) || !(resource in setOf("session", "bootstrap", "jobs") || resource.matches(Regex("(?:jobs|uploads)/[^/]+|jobs/[^/]+/runs(?:/[^/]+(?:/reports/exploration|/snapshot|/events)?)?|jobs/[^/]+/artifacts/[^/]+/content")))) {
             try {
                 val policy = if (exchange.requestMethod in setOf("POST", "PUT", "PATCH", "DELETE")) {
                     WebEndpointPolicy.jsonMutation(exchange.requestMethod)
@@ -126,6 +127,36 @@ internal class WebApiController(
                             exchange.responseBody.use { it.write(bytes) }
                         }
                     } finally { exchange.close() }
+                }
+                resource.matches(Regex("jobs/[^/]+/runs/[^/]+/(?:snapshot|events)")) -> {
+                    val session = checkNotNull(access.authorize(exchange, WebEndpointPolicy.privateRead()))
+                    requireJsonAccept(exchange)
+                    val parts = resource.split('/')
+                    val snapshot = parts[4] == "snapshot"
+                    if (snapshot) requireNoQuery(exchange)
+                    val attempt = jobs.getAttempt(parts[1], parts[3])
+                    val bytes = try {
+                        jobs.readArtifact(parts[1], "reports/runs/${attempt.runId}/agent-progress.json", decompengine.jobs.AgentProgressJournal.MAXIMUM_READ_BYTES.toLong()).bytes
+                    } catch (_: Exception) {
+                        throw WebAccessDenied(503, "PROGRESS_UNAVAILABLE", "The retained progress journal is unavailable. Missing data does not establish an empty history.")
+                    }
+                    if (jobs.getAttempt(parts[1], parts[3]).version != attempt.version) {
+                        throw WebAccessDenied(409, "PROGRESS_CHANGED", "The attempt changed during this read. Read a fresh snapshot.")
+                    }
+                    if (snapshot) {
+                        val boundary = progressPages.boundary(session.sessionId, parts[1], parts[3], bytes)
+                        send(exchange, 200, "snapshot", buildJsonObject {
+                            put("run", webRun(attempt))
+                            put("throughCursor", boundary.throughCursor?.let(::JsonPrimitive) ?: JsonNull)
+                            put("throughSequence", boundary.throughSequence?.let(::JsonPrimitive) ?: JsonNull)
+                            put("oldestCursor", boundary.oldestCursor?.let(::JsonPrimitive) ?: JsonNull)
+                            put("progress", buildJsonObject {
+                                put("authority", "observations"); put("nextSequence", boundary.nextSequence)
+                                put("queueDropped", boundary.queueDropped); put("historyDropped", boundary.historyDropped)
+                                put("retainedEventCount", boundary.retainedEventCount)
+                            })
+                        })
+                    } else send(exchange, 200, "events", progressPages.page(session.sessionId, parts[1], parts[3], bytes, exchange.requestURI.rawQuery))
                 }
                 resource.matches(Regex("jobs/[^/]+/runs/[^/]+/reports/exploration")) -> {
                     access.authorize(exchange, WebEndpointPolicy.privateRead())
@@ -225,8 +256,8 @@ internal class WebApiController(
             put("maxUploadBytes", StreamingMultipartUpload.MAX_REQUEST_BYTES.toString())
             put("maxSourceChunkBytes", "0")
             put("maxLogChunkBytes", "0")
-            put("maxEventCount", "0")
-            put("maxEventBytes", "0")
+            put("maxEventCount", "1024")
+            put("maxEventBytes", "2097152")
             put("terminalEventRetentionMs", "0")
             put("defaultPageLimit", 50)
             put("maxPageLimit", 200)

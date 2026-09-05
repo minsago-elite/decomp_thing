@@ -61,6 +61,15 @@ def check_semantics(document: dict) -> None:
     elif kind == "snapshot":
         if (data["throughCursor"] is None) != (data["throughSequence"] is None):
             raise ValueError("snapshot cursor and sequence must describe the same watermark")
+        if "progress" in data:
+            progress = data["progress"]
+            count, next_sequence = int(progress["retainedEventCount"]), int(progress["nextSequence"])
+            if count > 1024 or count + int(progress["queueDropped"]) + int(progress["historyDropped"]) > next_sequence:
+                raise ValueError("snapshot progress counters exceed the boundary")
+            if (count == 0) != (data["oldestCursor"] is None) or (count == 0) != (data["throughSequence"] is None):
+                raise ValueError("snapshot retained records and cursors disagree")
+            if data["throughSequence"] is not None and int(data["throughSequence"]) + 1 != next_sequence:
+                raise ValueError("snapshot progress boundary disagrees with next sequence")
     elif kind == "events":
         seen = set()
         previous = -1
