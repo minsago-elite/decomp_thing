@@ -27,6 +27,12 @@ before rejecting it. Initial and final snapshots have separate budgets. Either
 limit failure returns RESOURCE_EXHAUSTED with the snapshot phase and limit category,
 never a partial change list. Final-component symlinks are not followed when opening
 content; this is not a complete descriptor-bound inventory or path-race guarantee.
+Encountered symlinks (including dangling links) and special files are rejected
+instead of being omitted by a regular-file filter. A directory entry that
+disappears or cannot be inspected also fails the scan. These failures become
+WORKSPACE_VIOLATION with a bounded phase/reason diagnostic and no partial changes.
+A missing explicitly authorized target remains eligible for later creation;
+ordinary directory entries are counted and recursive rules traverse them.
 The final snapshot is collected after process and sandbox cleanup. Its private
 `WorkspaceSnapshot.diff` reports created, modified, or deleted files in canonical
 root/path order and checks the corresponding `CREATE_FILE`, `WRITE_FILE`, or

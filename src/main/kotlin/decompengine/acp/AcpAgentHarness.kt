@@ -390,6 +390,8 @@ class AcpAgentHarness(
                 throw workspaceSnapshotTimeout("initial", null)
             } catch (limit: WorkspaceSnapshotLimitExceeded) {
                 throw workspaceSnapshotLimit("initial", null, limit)
+            } catch (entry: WorkspaceSnapshotInvalidEntry) {
+                throw workspaceSnapshotEntry("initial", null, entry)
             }
         } else {
             null
@@ -736,6 +738,8 @@ class AcpAgentHarness(
                 throw workspaceSnapshotTimeout("final", translator.sessionReference())
             } catch (limit: WorkspaceSnapshotLimitExceeded) {
                 throw workspaceSnapshotLimit("final", translator.sessionReference(), limit)
+            } catch (entry: WorkspaceSnapshotInvalidEntry) {
+                throw workspaceSnapshotEntry("final", translator.sessionReference(), entry)
             }
         }
         changes.forEach { change -> emitter.emit { sequence -> AgentFileChangeEvent(sequence, change) } }
@@ -1495,6 +1499,17 @@ class AcpAgentHarness(
             }
         }
     }
+
+    private fun workspaceSnapshotEntry(
+        phase: String,
+        session: AgentSessionReference?,
+        entry: WorkspaceSnapshotInvalidEntry,
+    ) = AgentExecutionException(AgentFailure(
+        AgentFailureKind.WORKSPACE_VIOLATION,
+        "ACP $phase workspace snapshot encountered an unsupported or unavailable entry; changes are indeterminate",
+        session = session,
+        details = mapOf("phase" to "$phase-workspace-snapshot", "reason" to entry.reason),
+    ))
 
     private fun workspaceSnapshotLimit(
         phase: String,
@@ -2866,6 +2881,7 @@ internal data class WorkspaceSnapshotLimits(
 }
 
 internal class WorkspaceSnapshotLimitExceeded(val dimension: String) : RuntimeException()
+internal class WorkspaceSnapshotInvalidEntry(val reason: String) : RuntimeException()
 
 internal class WorkspaceSnapshotBudget(
     private val cancellation: AgentCancellation,
@@ -2968,7 +2984,7 @@ internal class WorkspaceSnapshot private constructor(
                             if (!iterator.hasNext()) break
                             val candidate = iterator.next()
                             budget.entry()
-                            if (candidate.isRegularFile(LinkOption.NOFOLLOW_LINKS) && (root.id to candidate) !in tracked) {
+                            if (regularEntry(candidate, missingAllowed = false) && (root.id to candidate) !in tracked) {
                                 budget.file()
                                 tracked += root.id to candidate
                             }
@@ -2976,7 +2992,7 @@ internal class WorkspaceSnapshot private constructor(
                     }
                 } else {
                     budget.entry()
-                    if (target.isRegularFile(LinkOption.NOFOLLOW_LINKS) && (root.id to target) !in tracked) {
+                    if (regularEntry(target, missingAllowed = true) && (root.id to target) !in tracked) {
                         budget.file()
                         tracked += root.id to target
                     }
@@ -2993,12 +3009,26 @@ internal class WorkspaceSnapshot private constructor(
             return WorkspaceSnapshot(states)
         }
 
+        private fun regularEntry(path: Path, missingAllowed: Boolean): Boolean {
+            val attributes = try {
+                Files.readAttributes(path, java.nio.file.attribute.BasicFileAttributes::class.java, LinkOption.NOFOLLOW_LINKS)
+            } catch (_: java.nio.file.NoSuchFileException) {
+                if (missingAllowed) return false
+                throw WorkspaceSnapshotInvalidEntry("entry-disappeared")
+            } catch (_: IOException) {
+                throw WorkspaceSnapshotInvalidEntry("entry-unavailable")
+            }
+            if (attributes.isSymbolicLink) throw WorkspaceSnapshotInvalidEntry("symbolic-link")
+            if (!attributes.isRegularFile && !attributes.isDirectory) throw WorkspaceSnapshotInvalidEntry("special-file")
+            return attributes.isRegularFile
+        }
+
         private fun hashFile(path: Path, budget: WorkspaceSnapshotBudget): FileState {
             val digest = MessageDigest.getInstance("SHA-256")
             val buffer = ByteArray(WORKSPACE_HASH_BUFFER_BYTES)
             var size = 0L
             val attributes = Files.readAttributes(path, java.nio.file.attribute.BasicFileAttributes::class.java, LinkOption.NOFOLLOW_LINKS)
-            check(attributes.isRegularFile) { "workspace snapshot file changed type" }
+            if (!attributes.isRegularFile) throw WorkspaceSnapshotInvalidEntry("file-type-changed")
             budget.declaredSize(attributes.size())
             Files.newInputStream(path, LinkOption.NOFOLLOW_LINKS).use { input ->
                 while (true) {
