@@ -5,6 +5,7 @@ import java.nio.file.Files
 import java.nio.file.LinkOption
 import java.nio.file.Path
 import java.nio.file.attribute.BasicFileAttributes
+import java.security.MessageDigest
 import java.time.Duration
 import java.util.concurrent.CompletableFuture
 import java.util.concurrent.TimeUnit
@@ -20,6 +21,11 @@ import kotlin.io.path.writeText
 fun interface ProgramModelAnalyzer {
     fun analyze(binaryPath: Path, workDir: Path): RecoveredProgramModel
 }
+
+data class RecoveredProgramWithCallSites(
+    val programModel: RecoveredProgramModel,
+    val callSites: RecoveredCallSiteReceipt,
+)
 
 data class GhidraProgramModelExportLimits(
     val wallClockTimeout: Duration = Duration.ofMinutes(10),
@@ -61,7 +67,20 @@ class GhidraHeadlessProgramModelAnalyzer(
         }
     }
 
-    override fun analyze(binaryPath: Path, workDir: Path): RecoveredProgramModel {
+    override fun analyze(binaryPath: Path, workDir: Path): RecoveredProgramModel =
+        analyzeInternal(binaryPath, workDir, false).first
+
+    fun analyzeWithCallSites(binaryPath: Path, workDir: Path): RecoveredProgramWithCallSites {
+        val (model, calls) = analyzeInternal(binaryPath, workDir, true)
+        return RecoveredProgramWithCallSites(model, checkNotNull(calls))
+    }
+
+    private fun analyzeInternal(
+        binaryPath: Path,
+        workDir: Path,
+        includeCallSites: Boolean,
+    ): Pair<RecoveredProgramModel, RecoveredCallSiteReceipt?> {
+        val startedNanos = System.nanoTime()
         val executable = ghidraHome.resolve("support/analyzeHeadless")
         require(executable.isExecutable()) { "GHIDRA_HOME does not contain executable support/analyzeHeadless" }
         val reports = workDir.resolve("reports").createDirectories()
@@ -71,6 +90,13 @@ class GhidraHeadlessProgramModelAnalyzer(
         scripts.resolve("ExportProgramModel.java").writeBytes(scriptBytes)
         val exporterSha256 = sha256(scriptBytes)
         val output = reports.resolve("program_model.json")
+        val callOutput = reports.resolve("program_model_calls.json")
+        val callScriptBytes = if (includeCallSites) {
+            require(!Files.exists(callOutput, LinkOption.NOFOLLOW_LINKS)) { "call-site output already exists" }
+            javaClass.getResourceAsStream("/ghidra_scripts/ExportRecoveredCallSites.java")
+                ?.use { it.readBytes() } ?: error("bundled ExportRecoveredCallSites.java is missing")
+        } else null
+        callScriptBytes?.let { scripts.resolve("ExportRecoveredCallSites.java").writeBytes(it) }
         val project = workDir.resolve("ghidra_project").createDirectories()
         val command = listOf(
             executable.pathString,
@@ -85,6 +111,9 @@ class GhidraHeadlessProgramModelAnalyzer(
             analysisToolSha256,
             recoveryMode.wireName,
             output.pathString,
+        ) + if (callScriptBytes == null) emptyList() else listOf(
+            "-postScript", "ExportRecoveredCallSites.java", sha256(callScriptBytes), analysisToolSha256,
+            output.pathString, callOutput.pathString,
         )
         val process = ProcessBuilder(command)
             .directory(workDir.toFile())
@@ -133,7 +162,38 @@ class GhidraHeadlessProgramModelAnalyzer(
         require(exitCode == 0 && Files.isRegularFile(output, LinkOption.NOFOLLOW_LINKS)) {
             "Ghidra program recovery failed with exit code $exitCode; see ${reports.resolve("ghidra_stderr.log")}"
         }
-        return ProgramModelJson.readCanonical(readStableProgramModel(output))
+        val modelBytes = readStableProgramModel(output)
+        val model = ProgramModelJson.readCanonical(modelBytes)
+        val calls = callScriptBytes?.let { script ->
+            val callLimits = RecoveredCallSiteLimits()
+            fun requireRemainingTime() {
+                check(!Thread.currentThread().isInterrupted) { "call-site export validation interrupted" }
+                check(System.nanoTime() - startedNanos < limits.wallClockTimeout.toNanos()) {
+                    "call-site export and validation exceeded the analysis wall-clock budget"
+                }
+            }
+            requireRemainingTime()
+            require(Files.isRegularFile(callOutput, LinkOption.NOFOLLOW_LINKS)) { "call-site export did not produce a regular file" }
+            val digest = MessageDigest.getInstance("SHA-256")
+            var bytes = 0L
+            Files.newInputStream(callOutput, java.nio.file.StandardOpenOption.READ, LinkOption.NOFOLLOW_LINKS).use { stream ->
+                val buffer = ByteArray(64 * 1024)
+                while (true) {
+                    requireRemainingTime()
+                    val count = stream.read(buffer)
+                    if (count < 0) break
+                    bytes = Math.addExact(bytes, count.toLong())
+                    require(bytes <= callLimits.maximumInputBytes) { "call-site export exceeds its input byte bound" }
+                    digest.update(buffer, 0, count)
+                }
+            }
+            RecoveredCallSites.read(
+                callOutput, digest.digest().joinToString("") { "%02x".format(it) },
+                RecoveredCallSiteBindings(model.inputSha256, sha256(modelBytes), sha256(script), analysisToolSha256),
+                callLimits,
+            ) { requireRemainingTime() }.also { requireRemainingTime() }
+        }
+        return model to calls
     }
 
     private fun readStableProgramModel(path: Path): ByteArray {
