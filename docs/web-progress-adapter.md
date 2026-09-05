@@ -494,3 +494,10 @@ HTTP/core tests compare both spellings and exercise ambiguity, invalid transport
 behavior. Frontend tests require `transport=poll` and continuation through `after`. This
 closes the target polling-query compatibility gap; SSE, heartbeat/resource management,
 transactional cutover and timed retention are still outstanding under #174.
+
+At source `3443883`, 179 web/journal JVM tests, 269 frontend tests, lint and distZip pass.
+The [packaged history/activity report](evidence/web-polling-query-browser-20260905.json)
+verifies the target query and equality with the cursor alias alongside 200/5 activity pages,
+pause/resume, recovery, metadata privacy and retained-byte checks. It identifies artifact
+hashes, an inert test-owned fixture, no workflow execution, test-only Chrome --no-sandbox,
+unchanged installation and confirmed cleanup. This does not qualify SSE or live delivery.
