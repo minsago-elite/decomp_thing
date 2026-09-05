@@ -54,8 +54,17 @@ provenance use the bounded redactor on stderr. The shared browser progress rende
 run and revision IDs on refresh and incremental updates, with accepted source commitments shown
 separately. Neither console output nor the browser view certifies a release.
 
+During repair, the CLI observes new project journal records every 250 milliseconds on one daemon
+thread. It prints only recognized workflow phases and a durable-run digest prefix, never peer text
+or raw identifiers. It skips preexisting history, reports sequence gaps, and emits at most 32 phase
+updates per poll with an omission marker when needed. Snapshot reads bound bytes, JSON depth, nodes
+and strings. Console backpressure affects only that observer; the journal producer and repair loop
+continue independently. Observer close waits at most 200 milliseconds. A console write that ignores
+interruption may retain the single daemon until the consumer drains or the CLI process exits. The
+final typed command result remains separate from this optional live display.
+
 The current browser job execution wiring covers reconstruction, while repair core writes the same
-persisted view. Issue #69 still owns repair job execution/live CLI delivery, patch live integration,
+persisted view. Issue #69 still owns repair job execution, public-path live CLI qualification, patch live integration,
 thought and terminal updates, complete usage projection, explicit process-crash delivery/recovery
 proof and correlation with the durable session store in #68. The display ring can omit old records;
 its `displayOnly` flag and counters must never substitute for complete required release evidence in

@@ -332,7 +332,9 @@ private fun runRepair(args: List<String>) {
             ),
         ).use { runtime ->
             System.err.println("repair harness: ${redactor.text(runtime.harnessProvenance)}")
-            runtime.runRepair(project, original, regressionInputs, reportsDir, maxIterations)
+            RepairCliProgress(reportsDir).use {
+                runtime.runRepair(project, original, regressionInputs, reportsDir, maxIterations)
+            }
         }
     } catch (failure: IllegalArgumentException) {
         repairUsageError(redactor.text(failure.message ?: "invalid repair configuration"))

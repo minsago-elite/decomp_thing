@@ -1,6 +1,8 @@
 package decompengine.jobs
 
 import decompengine.agent.*
+import decompengine.oracle.core.OracleJson
+import decompengine.oracle.core.StrictJsonLimits
 import kotlinx.serialization.json.*
 import java.nio.channels.FileChannel
 import java.nio.file.Files
@@ -300,7 +302,14 @@ class AgentProgressJournal(
             require(Files.isRegularFile(path, NOFOLLOW_LINKS)) { "progress snapshot is not a regular file" }
             val bytes = Files.newInputStream(path, NOFOLLOW_LINKS).use { it.readNBytes(MAXIMUM_READ_BYTES + 1) }
             require(bytes.size <= MAXIMUM_READ_BYTES) { "progress snapshot exceeds the read limit" }
-            val result = Json.parseToJsonElement(bytes.decodeToString(throwOnInvalidSequence = true)).jsonObject
+            val result = OracleJson.parse(bytes, StrictJsonLimits(
+                maximumInputBytes = MAXIMUM_READ_BYTES,
+                maximumCanonicalBytes = MAXIMUM_READ_BYTES,
+                maximumDepth = 32,
+                maximumNodes = 65_536,
+                maximumStringBytes = 16 * 1024,
+                maximumTotalStringBytes = MAXIMUM_READ_BYTES,
+            )).jsonObject
             require(result.getValue("schemaVersion").jsonPrimitive.int == 1)
             require(result.getValue("displayOnly").jsonPrimitive.boolean)
             require(result.getValue("events").jsonArray.size <= 1024)
