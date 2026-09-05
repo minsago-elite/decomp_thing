@@ -724,7 +724,7 @@ class AcpAgentHarness(
                     honorCancellation = finished.stopReason != AgentStopReason.CANCELLED,
                 )
                 val finalSnapshot = WorkspaceSnapshot.capture(request, finalBudget)
-                requireNotNull(before).diff(finalSnapshot, request, finalBudget)
+                requireNotNull(before).diff(finalSnapshot, request, finalBudget, translator.sessionReference())
             } catch (_: WorkspaceSnapshotCancelled) {
                 throw AgentExecutionException(
                     AgentFailure(
@@ -2932,6 +2932,7 @@ internal class WorkspaceSnapshot private constructor(
         after: WorkspaceSnapshot,
         request: AgentExecutionRequest,
         budget: WorkspaceSnapshotBudget,
+        session: AgentSessionReference? = null,
     ): List<AgentFileChange> {
         return (files.keys + after.files.keys)
             .distinct()
@@ -2944,7 +2945,8 @@ internal class WorkspaceSnapshot private constructor(
                     throw AgentExecutionException(AgentFailure(
                         AgentFailureKind.WORKSPACE_VIOLATION,
                         "ACP workspace file metadata changed without metadata authority; changes are indeterminate",
-                        details = mapOf("reason" to "file-metadata-changed"),
+                        session = session,
+                        details = mapOf("phase" to "final-workspace-snapshot", "reason" to "file-metadata-changed"),
                     ))
                 }
                 if (beforeState == afterState) return@mapNotNull null
@@ -2963,7 +2965,8 @@ internal class WorkspaceSnapshot private constructor(
                         AgentFailure(
                             AgentFailureKind.WORKSPACE_VIOLATION,
                             "ACP agent changed a path without $operation authority: ${path.rootId}:${path.relativePath}",
-                            details = mapOf("rootId" to path.rootId, "relativePath" to path.relativePath),
+                            session = session,
+                            details = mapOf("phase" to "final-workspace-snapshot", "rootId" to path.rootId, "relativePath" to path.relativePath),
                         ),
                     )
                 }

@@ -151,3 +151,5 @@ validated at the relevant acceptance boundary before a workflow exposes it.
 Current module reconstruction and captured ACP repair deliberately have narrower
 operation sets. Ordinary valid-edit checks at those existing boundaries remain
 the relevant regression tests for removal of the unused helper.
+
+Final ordinary snapshot diff failures retain the ACP session reference and the `final-workspace-snapshot` phase for both metadata-policy and path-operation rejection. A benign completed text-edit test injects a permission change at the final observation boundary and verifies `WORKSPACE_VIOLATION`, session correlation, verified cleanup and absent complete execution evidence. This is host fault injection; it does not establish agent metadata access or workflow rollback.
