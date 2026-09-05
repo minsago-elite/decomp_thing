@@ -28,6 +28,7 @@ import kotlin.test.assertNotEquals
 import kotlin.test.assertNull
 import kotlin.test.assertTrue
 import kotlinx.serialization.json.Json
+import kotlinx.serialization.json.JsonNull
 import kotlinx.serialization.json.jsonObject
 import kotlinx.serialization.json.jsonArray
 import kotlinx.serialization.json.jsonPrimitive
@@ -52,6 +53,27 @@ class SourceTreeTest {
         assertTrue(report.getValue("modules").jsonArray.all {
             it.jsonObject.getValue("unresolvedImplementationIds").jsonArray.isEmpty()
         })
+        report.getValue("modules").jsonArray.forEach { entry ->
+            val revision = entry.jsonObject.getValue("revisionEvidence").jsonObject
+            val checkpointPath = revision.getValue("checkpointPath").jsonPrimitive.content
+            val checkpointText = project.resolve(checkpointPath).readText()
+            val checkpoint = Json.parseToJsonElement(checkpointText).jsonObject
+            assertEquals(sha256(checkpointText.toByteArray()), revision.getValue("checkpointSha256").jsonPrimitive.content)
+            assertEquals(checkpoint.getValue("fingerprint"), revision.getValue("inputFingerprint"))
+            val source = project.resolve(revision.getValue("sourcePath").jsonPrimitive.content).readText()
+            assertEquals(sha256(source.toByteArray()), revision.getValue("sourceSha256").jsonPrimitive.content)
+            assertEquals("true", revision.getValue("acceptedImplementation").jsonPrimitive.content)
+            val compilation = revision.getValue("compilation").jsonObject
+            assertEquals(checkpoint.getValue("compilation"), compilation)
+            assertEquals(revision.getValue("sourceSha256"), compilation.getValue("sourceSha256"))
+            assertEquals("passed", compilation.getValue("outcome").jsonPrimitive.content)
+            assertEquals("0", compilation.getValue("returnCode").jsonPrimitive.content)
+            val behavior = revision.getValue("behavior").jsonObject
+            assertEquals("unknown", behavior.getValue("status").jsonPrimitive.content)
+            assertEquals(JsonNull, behavior.getValue("coverage"))
+            assertEquals(JsonNull, behavior.getValue("outputAgreement"))
+            assertEquals("unknown", behavior.getValue("unobservedBehavior").jsonPrimitive.content)
+        }
         val initialCalls = calls
         assertTrue(initialCalls > 0)
         SourceTreeGenerator.generate(recovered, project, reconstructor = reconstructor)
@@ -81,6 +103,12 @@ class SourceTreeTest {
         }
         assertEquals(implementationIds, perModule.sorted())
         assertTrue(report.getValue("scoreMeaning").jsonPrimitive.content.contains("not implementation acceptance"))
+        report.getValue("modules").jsonArray.forEach { entry ->
+            val revision = entry.jsonObject.getValue("revisionEvidence").jsonObject
+            assertEquals("false", revision.getValue("acceptedImplementation").jsonPrimitive.content)
+            assertEquals(JsonNull, revision.getValue("compilation"))
+            assertEquals("unknown", revision.getValue("behavior").jsonObject.getValue("status").jsonPrimitive.content)
+        }
     }
 
     @Test
@@ -379,6 +407,11 @@ class SourceTreeTest {
         assertTrue(checkpoint.contains("module-compilation-failed"))
         assertTrue(checkpoint.contains("\"outcome\":\"failed\""))
         assertTrue(checkpoint.contains("\"accepted\": false"))
+        val confidence = Json.parseToJsonElement(project.resolve("reports/confidence.json").readText()).jsonObject
+        val revision = confidence.getValue("modules").jsonArray.single().jsonObject.getValue("revisionEvidence").jsonObject
+        assertEquals("false", revision.getValue("acceptedImplementation").jsonPrimitive.content)
+        assertEquals(Json.parseToJsonElement(checkpoint).jsonObject.getValue("compilation"), revision.getValue("compilation"))
+        assertEquals("failed", revision.getValue("compilation").jsonObject.getValue("outcome").jsonPrimitive.content)
     }
 
     @Test

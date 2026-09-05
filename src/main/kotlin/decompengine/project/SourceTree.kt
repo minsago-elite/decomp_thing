@@ -672,6 +672,7 @@ object SourceTreeGenerator {
             generated += evidence(profile, path, content, "planner", plan.modules.single { it.id == id }.functionIds)
         }
         val unresolvedImplementations = sortedSetOf<String>()
+        val moduleRevisionEvidence = mutableMapOf<String, String>()
 
         generationOrder(plan, model).forEachIndexed { index, module ->
             val dependencies = dependencyModules(module, model, plan)
@@ -873,6 +874,16 @@ object SourceTreeGenerator {
             val checkpointText = checkpointPath.readText()
             val checkpointEvidencePath = profile.layout.declaration("module-evidence").materialize(mapOf("module" to module.id))
             generated += evidence(profile, checkpointEvidencePath, checkpointText, "planner", moduleEntityIds)
+            moduleRevisionEvidence[module.id] = buildString {
+                append("{\"sourcePath\":\"").append(module.sourcePath.jsonEscape()).append("\",")
+                append("\"sourceSha256\":\"").append(checkpoint.sourceSha256).append("\",")
+                append("\"inputFingerprint\":\"").append(checkpoint.fingerprint).append("\",")
+                append("\"checkpointPath\":\"").append(checkpointEvidencePath.jsonEscape()).append("\",")
+                append("\"checkpointSha256\":\"").append(sha256(checkpointText.toByteArray())).append("\",")
+                append("\"acceptedImplementation\":").append(checkpoint.accepted).append(',')
+                append("\"compilation\":").append(checkpoint.compilation?.toJson() ?: "null").append(',')
+                append("\"behavior\":{\"status\":\"unknown\",\"reason\":\"no revision-bound behavioral measurements attached\",\"coverage\":null,\"outputAgreement\":null,\"unobservedBehavior\":\"unknown\"}}")
+            }
             checkpoint.executionEvidencePath?.let { evidencePath ->
                 val evidenceText = projectDir.resolve(evidencePath).readText()
                 generated += evidence(
@@ -939,7 +950,7 @@ object SourceTreeGenerator {
         projectDir.resolve(modulePlanPath).also { it.parent.createDirectories() }.writeText(plan.toJson())
         generated += evidence(profile, programModelPath, model.toJson(), "analysis", model.functions.map { it.id } + model.globals.map { it.id })
         generated += evidence(profile, modulePlanPath, plan.toJson(), "planner", model.functions.map { it.id } + model.globals.map { it.id })
-        val confidence = renderConfidence(model, plan, unresolvedImplementations)
+        val confidence = renderConfidence(model, plan, unresolvedImplementations, moduleRevisionEvidence)
         projectDir.resolve(confidencePath).also { it.parent.createDirectories() }.writeText(confidence)
         generated += evidence(profile, confidencePath, confidence, "evidence", model.functions.map { it.id } + model.globals.map { it.id })
         val toolchain = renderToolchain()
@@ -1700,7 +1711,12 @@ object SourceTreeGenerator {
         return ordered.map { id -> plan.modules.single { it.id == id } }
     }
 
-    private fun renderConfidence(model: RecoveredProgramModel, plan: ModulePlan, unresolvedImplementations: Set<String>): String {
+    private fun renderConfidence(
+        model: RecoveredProgramModel,
+        plan: ModulePlan,
+        unresolvedImplementations: Set<String>,
+        moduleRevisionEvidence: Map<String, String>,
+    ): String {
         fun score(status: RecoveryStatus) = when (status) {
             RecoveryStatus.RECOVERED -> 1.0
             RecoveryStatus.PARTIAL -> 0.6
@@ -1736,7 +1752,8 @@ object SourceTreeGenerator {
                 val owned = (module.functionIds + module.globalIds + module.typeIds).toSet()
                 "\n    {\"id\":\"${id.jsonEscape()}\",\"score\":${"%.4f".format(java.util.Locale.ROOT, value)}," +
                     "\"unresolvedRecoveryEntityIds\":${idsJson(owned.filter { it in unresolvedRecoverySet })}," +
-                    "\"unresolvedImplementationIds\":${idsJson(owned.filter { it in unresolvedImplementations })}}"
+                    "\"unresolvedImplementationIds\":${idsJson(owned.filter { it in unresolvedImplementations })}," +
+                    "\"revisionEvidence\":${moduleRevisionEvidence.getValue(id)}}"
             })
             append("\n  ],\n  \"unresolvedRecoveryEntityIds\": ").append(idsJson(unresolvedRecovery))
             append(",\n  \"unresolvedImplementationIds\": ").append(idsJson(unresolvedImplementations))
