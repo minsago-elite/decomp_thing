@@ -11,9 +11,11 @@ internal fun interface JobStoreDirectories {
 }
 
 internal object ForcedJobStoreDirectories : JobStoreDirectories {
-    override fun prepare(root: Path) = prepareJobStoreDirectories(root) { directory ->
-        FileChannel.open(directory, READ, NOFOLLOW_LINKS).use { it.force(true) }
-    }
+    override fun prepare(root: Path) = prepareJobStoreDirectories(root, ::forceJobStoreDirectory)
+}
+
+internal fun forceJobStoreDirectory(directory: Path) {
+    FileChannel.open(directory, READ, NOFOLLOW_LINKS).use { it.force(true) }
 }
 
 /** Repeat confirmation on retries: an existing directory may come from an interrupted creation. */
