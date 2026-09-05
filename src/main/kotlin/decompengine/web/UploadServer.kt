@@ -265,6 +265,13 @@ class UploadServer(
         }
         val segments = exchange.requestURI.path.split('/').filter(String::isNotBlank)
         try {
+            val legacyJsonRead = segments.size in 3..4 && segments.take(2) == listOf("api", "jobs") &&
+                (segments.size == 3 || segments[3] == "events")
+            if (legacyJsonRead) {
+                if (exchange.requestMethod != "GET") throw WebAccessDenied(405, "METHOD_NOT_ALLOWED",
+                    "The endpoint does not support this method.", setOf("GET"))
+                requireJsonAccept(exchange)
+            }
             when {
                 exchange.requestMethod == "GET" && segments.isEmpty() ->
                     renderJobDashboard(exchange)
@@ -298,6 +305,13 @@ class UploadServer(
                 else -> legacyError(exchange, 404, "NOT_FOUND", "The requested route does not exist.") {
                     renderErrorPage(404, "Page not found", "The requested route does not exist.")
                 }
+            }
+        } catch (exception: WebAccessDenied) {
+            if (exception.allowedMethods.isNotEmpty()) {
+                exchange.responseHeaders.set("Allow", exception.allowedMethods.sorted().joinToString(", "))
+            }
+            legacyError(exchange, exception.status, exception.code, exception.message ?: "The request was invalid.") {
+                renderErrorPage(exception.status, "Invalid request", exception.message ?: "The request was invalid.")
             }
         } catch (exception: WebJobServiceException) {
             val status = if (exception.code in setOf("JOB_NOT_FOUND", "RUN_NOT_FOUND")) 404 else 503
@@ -545,8 +559,13 @@ private fun HttpExchange.sendBytes(
         "default-src 'self'; style-src 'self' 'unsafe-inline'; script-src 'self' 'unsafe-inline'; img-src 'self' data:; base-uri 'none'; frame-ancestors 'none'",
     )
     responseHeaders.add("Cache-Control", if (cache) "public, max-age=3600" else "no-store")
-    sendResponseHeaders(status, body.size.toLong())
-    responseBody.use { it.write(body) }
+    if (requestMethod == "HEAD") {
+        sendResponseHeaders(status, -1)
+        close()
+    } else {
+        sendResponseHeaders(status, body.size.toLong())
+        responseBody.use { it.write(body) }
+    }
 }
 
 private fun contentType(path: Path): String = when (path.fileName.toString().substringAfterLast('.', "")) {

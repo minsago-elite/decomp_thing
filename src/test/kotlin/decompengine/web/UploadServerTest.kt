@@ -39,6 +39,50 @@ import kotlin.test.assertTrue
 
 class UploadServerTest {
     @Test
+    fun `legacy JSON read routes negotiate methods and Accept before storage access`() = withServer { server, root ->
+        val id = uploadedJobId(server)
+        val record = root.resolve(id).resolve("job.json")
+        val reports = root.resolve(id).resolve("reports")
+        decompengine.jobs.AgentProgressJournal(reports, "reconstruct").use { }
+        val journal = reports.resolve(decompengine.jobs.AgentProgressJournal.FILE_NAME)
+        val jobBefore = record.readBytes()
+        val journalBefore = journal.readBytes()
+        for (path in listOf("/api/jobs/$id", "/api/jobs/$id/events")) {
+            for (accept in listOf("application/json", "application/*", "*/*", "text/html, application/json;q=0.5", "APPLICATION/JSON")) {
+                val response = request(server, "GET", path, headers = mapOf("Accept" to accept))
+                assertEquals(200, response.status, accept)
+                assertEquals("application/json; charset=utf-8", response.contentType)
+            }
+            for (accept in listOf("text/html", "application/json;q=0, */*;q=1", "application/*;q=0, */*;q=1", "application/json;q=2")) {
+                val response = request(server, "GET", path, headers = mapOf("Accept" to accept))
+                assertEquals(406, response.status, accept)
+                assertTrue(response.body.decodeToString().contains("NOT_ACCEPTABLE"))
+                assertEquals("application/json; charset=utf-8", response.contentType)
+            }
+            val oversized = request(server, "GET", path, headers = mapOf("Accept" to "x".repeat(513)))
+            assertEquals(400, oversized.status)
+            assertTrue(oversized.body.decodeToString().contains("INVALID_HEADER"))
+            for (method in listOf("POST", "PUT", "DELETE", "OPTIONS", "HEAD")) {
+                val response = request(server, method, path, headers = mapOf("Accept" to "text/html"))
+                assertEquals(405, response.status, method)
+                assertEquals("GET", response.allow)
+                assertEquals("application/json; charset=utf-8", response.contentType)
+                assertEquals("no-store", response.cacheControl)
+                if (method == "HEAD") assertTrue(response.body.isEmpty())
+                else assertTrue(response.body.decodeToString().contains("METHOD_NOT_ALLOWED"))
+            }
+        }
+        assertEquals(404, request(server, "POST", "/api/unknown", headers = mapOf("Accept" to "text/html")).status)
+        assertContentEquals(jobBefore, record.readBytes())
+        assertContentEquals(journalBefore, journal.readBytes())
+        // A damaged record must not turn a negotiation failure into a storage read failure.
+        record.writeText("PRIVATE_CORRUPTION {")
+        assertEquals(405, request(server, "DELETE", "/api/jobs/$id").status)
+        assertEquals(406, request(server, "GET", "/api/jobs/$id", headers = mapOf("Accept" to "text/html")).status)
+        assertEquals("PRIVATE_CORRUPTION {", record.readBytes().decodeToString())
+    }
+
+    @Test
     fun `legacy JSON errors have fixed public messages and request identities`() {
         withServer { server, root ->
             val id = uploadedJobId(server)
@@ -943,10 +987,10 @@ class UploadServerTest {
         }
         val status = connection.responseCode
         val stream = if (status >= 400) connection.errorStream else connection.inputStream
-        return Response(status, stream?.readBytes() ?: ByteArray(0), connection.getHeaderField("Retry-After"), connection.getHeaderField("ETag"), connection.getHeaderField("Content-Type"), connection.getHeaderField("Cache-Control"), connection.getHeaderField("X-Request-ID"))
+        return Response(status, stream?.readBytes() ?: ByteArray(0), connection.getHeaderField("Retry-After"), connection.getHeaderField("ETag"), connection.getHeaderField("Content-Type"), connection.getHeaderField("Cache-Control"), connection.getHeaderField("X-Request-ID"), connection.getHeaderField("Allow"))
     }
 
-    private data class Response(val status: Int, val body: ByteArray, val retryAfter: String? = null, val etag: String? = null, val contentType: String? = null, val cacheControl: String? = null, val requestId: String? = null)
+    private data class Response(val status: Int, val body: ByteArray, val retryAfter: String? = null, val etag: String? = null, val contentType: String? = null, val cacheControl: String? = null, val requestId: String? = null, val allow: String? = null)
 }
 
 private fun ByteArray.startsWith(prefix: ByteArray): Boolean =

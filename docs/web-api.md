@@ -366,7 +366,10 @@ paths, query strings, uploaded filenames, persisted diagnostics or exception mes
 
 | Legacy failure | Status | Code |
 | --- | --- | --- |
-| Unknown API route or unsupported method | 404 | `NOT_FOUND` |
+| Unknown API route | 404 | `NOT_FOUND` |
+| Unsupported method on a known legacy JSON read route | 405 | `METHOD_NOT_ALLOWED` |
+| JSON excluded by Accept | 406 | `NOT_ACCEPTABLE` |
+| Repeated or oversized Accept header | 400 | `INVALID_HEADER` |
 | Missing job / attempt | 404 | `JOB_NOT_FOUND` / `RUN_NOT_FOUND` |
 | Unavailable or damaged service storage | 503 | `JOB_STORAGE_UNAVAILABLE` |
 | Missing, unreadable, malformed or oversized progress journal | 503 | `PROGRESS_UNAVAILABLE` |
@@ -397,8 +400,17 @@ the SPA retains its activity-view restriction as well. See [the transport projec
 The HTTP tests cover missing/unknown resources, invalid query/upload, damaged storage,
 request-ID agreement, content type, cache policy and preservation of stored bytes. Unexpected
 internal failures use the same response helper but are not fault-injected by that HTTP test.
-The full method/Accept negotiation, deprecation links and shared session boundary remain
-migration work; this change preserves the existing legacy upload Accept switch and status codes.
+The two legacy JSON read routes (`/api/jobs/J` and `/api/jobs/J/events`) accept GET only.
+Other methods return 405 with `Allow: GET` before storage reads; HEAD sends the same error
+headers without a body. Unknown routes retain 404. GET shares v1's bounded Accept policy:
+a missing header allows JSON; explicit JSON, `application/*` and `*/*` ranges are supported;
+a more specific `q=0` exclusion overrides a broader wildcard. Nonmatching/malformed supported
+ranges yield 406. Repeated Accept headers or a value over 512 characters yield 400. Errors
+remain JSON even when the client excludes JSON. All these responses use no-store caching.
+HTTP tests cover both route shapes, positive/negative media ranges, methods including HEAD,
+header limits and unchanged records, including negotiation before damaged storage inspection.
+The legacy upload Accept switch, mutation-route negotiation, deprecation links and shared
+session boundary remain migration work; upload behavior is unchanged by read negotiation.
 
 D2/D13 preserve the non-sensitive legacy success fields through the first D-series release and
 at least one subsequent minor release, while documenting removal of `binary_path`, applying the
