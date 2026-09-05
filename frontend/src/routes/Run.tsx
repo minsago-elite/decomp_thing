@@ -3,6 +3,7 @@ import type { Run as RunData } from '../api/generated';
 import { ApiClientError, createApiClient } from '../api/client';
 import { jobPath, runPath } from '../app/paths';
 import type { BrowserSession } from '../session/session';
+import { Activity } from '../jobs/Activity';
 import { ExplorationEvidence } from '../jobs/ExplorationEvidence';
 import { useSession } from '../session/useSession';
 
@@ -59,6 +60,7 @@ function Details({ jobId, runId, basePath }: { jobId: string; runId: string; bas
         <dt>Tool calls</dt><dd>{run.usage.toolCalls ?? 'Not reported'}</dd>
         <dt>Wall-clock usage</dt><dd>{run.usage.wallClockMs === null ? 'Not reported' : `${run.usage.wallClockMs} milliseconds`}</dd>
       </dl> : <p>Usage was not reported for this attempt.</p>}
+      <Activity key={`activity/${jobId}/${runId}`} jobId={jobId} runId={runId} basePath={basePath} />
       <ExplorationEvidence key={`${jobId}/${runId}`} jobId={jobId} runId={runId} basePath={basePath} />
       <p>Source and artifact navigation for this attempt is not connected yet.</p>
     </>}
