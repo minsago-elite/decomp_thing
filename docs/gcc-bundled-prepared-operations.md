@@ -161,8 +161,9 @@ cc1/lto1 fresh/resumed model and ownership-plan comparisons remain required by
 The keeper accepts an opt-in `kotlin-contained-command-request-v2` with
 `allowInterruption=true`. Default requests retain the exact v1 field set,
 provider and canonical encoding. Neither v1 requests nor their outcome decoder
-admit interruption. The existing host launcher still creates v1 fresh-control
-requests; it has not yet acquired a checkpoint-triggered interruption path.
+admit interruption. The host launcher defaults to v1 fresh-control requests. Its optional retained
+interruption controller selects v2; the GCC prepared coordinator still uses the
+fresh-control default pending checkpoint-trigger integration.
 
 For a v2 request, the host may publish a mode-0400, no-replace
 `contained-command.interrupt.json`. The `INTERRUPT` HMAC event binds the original
@@ -182,3 +183,38 @@ reload, or resume equivalence. The host must compose those independent checks
 and durable journal transitions before accepting an interrupted benchmark leg.
 The local tests execute only an authored waiting JVM child, exercise valid and
 forged requests, and are explicitly not containment or real-Ghidra evidence.
+
+## Host interruption delivery and journal branch
+
+`KotlinContainedCommandInterruption` binds once to a v2 request and snapshots a
+bounded canonical policy. The launcher commits its policy digest and v2 provider
+in the runtime closure before BOOT. During outcome polling, the host polls the
+caller-owned trigger. A non-null bounded canonical trigger is committed with the
+policy, request, keeper PID and interruption-token digest in an authorization
+record. The durable-authorization callback must complete before token publication.
+The launcher revalidates executable/runtime inputs immediately before no-replace
+token publication. Authorization or delivery failure poisons the controller; it
+does not retry a possibly delivered token. Reentrant delivery is rejected.
+
+The caller supplies the trigger's semantics and durable journal owner. The
+controller checks shape, size, bindings and sequencing; a caller-supplied trigger
+is not independently authenticated Ghidra checkpoint evidence. Missing triggers,
+early normal exit, malformed outcomes and undelivered interruption cannot yield
+an interrupted result. An authenticated INTERRUPTED outcome still passes the
+existing exact keeper-population, frozen accounting and unit/cgroup/process
+absence checks before the launcher returns. The result uses the distinct
+`kotlin-lease-contained-command-interrupted-v1` provider, including the authorization
+record and digest; the ordinary execution provider and default request remain
+unchanged. This does not bypass cleanup-only retention on failure.
+
+The GCC journal now supports a separate START-authorized → interrupt-authorized →
+interrupted-execution → interrupted-prefix-assessment branch. Each immutable
+record commits its predecessor, payload and operation/intent bindings and retains
+`complete=false` and `releaseEligible=false`. Completed-execution and interrupted
+branches cannot be interchanged. Missing, altered or out-of-order records poison
+the owner without removing residue.
+
+Remaining composition is explicit: the GCC coordinator must supply the bounded
+checkpoint trigger, journal callbacks, post-absence prefix validation and same-owner
+resume. Hosted systemd/ext4 interruption and real compiler equivalence have not
+been established by the local delivery/keeper/journal tests.

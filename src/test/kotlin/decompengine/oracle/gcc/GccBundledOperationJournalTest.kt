@@ -17,6 +17,7 @@ import java.nio.file.Path
 import java.nio.file.attribute.PosixFilePermissions
 import kotlin.io.path.createTempDirectory
 import kotlin.test.Test
+import kotlin.test.assertFails
 import kotlin.test.assertContentEquals
 import kotlin.test.assertEquals
 import kotlin.test.assertFailsWith
@@ -28,6 +29,72 @@ import kotlinx.serialization.json.jsonObject
 import kotlinx.serialization.json.jsonPrimitive
 
 class GccBundledOperationJournalTest {
+    @Test
+    fun `interruption records form a separate durable chain and cannot become completed execution`() = withJournalRoot { root ->
+        val intent = intent()
+        val payload = OracleJson.canonicalBytes(JsonObject(mapOf("fixtureOnly" to JsonPrimitive(true))))
+        GccBundledOperationJournal.create(root, OPERATION_ID, intent).use { journal ->
+            journal.recordLease(evidence(intent))
+            journal.recordPrepared(definition(), DEPLOYMENT_SHA256)
+            journal.recordAttachment(payload)
+            journal.recordStartAuthorization()
+            journal.recordInterruptionAuthorization(payload)
+            journal.recordInterruptedExecution(payload)
+            val prefix = journal.recordInterruptedPrefixAssessment(payload)
+            var previous = Files.readAllBytes(journal.path.resolve("start-authorized.json"))
+            for (name in listOf("interrupt-authorized.json", "interrupted-execution.json", "interrupted-prefix-assessment.json")) {
+                val bytes = Files.readAllBytes(journal.path.resolve(name))
+                val record = OracleJson.parseCanonical(bytes).jsonObject
+                assertEquals(JsonPrimitive(OracleArtifacts.sha256(previous)), record["previousSha256"])
+                assertEquals(JsonPrimitive(OracleArtifacts.sha256(OracleJson.canonicalBytes(JsonObject(record - "recordSha256")))), record["recordSha256"])
+                assertEquals(JsonPrimitive(false), record["complete"])
+                assertEquals(JsonPrimitive(false), record["releaseEligible"])
+                assertEquals("r--------", permissions(journal.path.resolve(name)))
+                previous = bytes
+            }
+            assertContentEquals(previous, prefix)
+            assertEquals(9, names(journal.path).size)
+            journal.verify("retained interrupted chain")
+            assertFalse(Files.exists(journal.path.resolve("execution.json")))
+            assertFalse(Files.exists(journal.path.resolve("export-assessment.json")))
+            assertFailsWith<IllegalStateException> { journal.recordExecution(payload) }
+        }
+    }
+
+    @Test
+    fun `interrupted execution without durable authorization preserves START residue`() = withJournalRoot { root ->
+        val intent = intent()
+        val payload = OracleJson.canonicalBytes(JsonObject(emptyMap()))
+        GccBundledOperationJournal.create(root, OPERATION_ID, intent).use { journal ->
+            journal.recordLease(evidence(intent))
+            journal.recordPrepared(definition(), DEPLOYMENT_SHA256)
+            journal.recordAttachment(payload)
+            journal.recordStartAuthorization()
+            assertFailsWith<IllegalStateException> { journal.recordInterruptedExecution(payload) }
+            assertEquals(6, names(journal.path).size)
+            assertFalse(Files.exists(journal.path.resolve("interrupted-execution.json")))
+        }
+    }
+
+    @Test
+    fun `altered interruption authorization prevents any interrupted execution publication`() = withJournalRoot { root ->
+        val intent = intent()
+        val payload = OracleJson.canonicalBytes(JsonObject(emptyMap()))
+        GccBundledOperationJournal.create(root, OPERATION_ID, intent).use { journal ->
+            journal.recordLease(evidence(intent))
+            journal.recordPrepared(definition(), DEPLOYMENT_SHA256)
+            journal.recordAttachment(payload)
+            journal.recordStartAuthorization()
+            journal.recordInterruptionAuthorization(payload)
+            val path = journal.path.resolve("interrupt-authorized.json")
+            Files.setPosixFilePermissions(path, PosixFilePermissions.fromString("rw-------"))
+            Files.writeString(path, "{}")
+            assertFails { journal.recordInterruptedExecution(payload) }
+            assertFalse(Files.exists(journal.path.resolve("interrupted-execution.json")))
+            assertFailsWith<IllegalStateException> { journal.verify("after altered interruption authorization") }
+        }
+    }
+
     @Test
     fun `execution journal records attachment before START and chains absent execution and export assessment`() = withJournalRoot { root ->
         val intent = intent()
