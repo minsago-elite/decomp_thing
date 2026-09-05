@@ -1040,11 +1040,22 @@ class TraceGuidedRepairLoop private constructor(
 
     private var activeDeadlineNanos: Long = Long.MAX_VALUE
     private var lastRunFailure: Exception? = null
+    private var progress: RepairProgressProjection? = null
+
+    private inline fun <T> withProgress(reportsDir: Path, action: () -> T): T {
+        check(progress == null) { "repair run already owns a progress projection" }
+        val projection = RepairProgressProjection(reportsDir)
+        progress = projection
+        return try { action() } finally {
+            projection.close()
+            progress = null
+        }
+    }
 
     fun repairCompileError(projectDir: Path, failure: CompileFailure, regressionInputs: List<ProcessInput>): RepairIteration {
         checkOpen()
         validationStrategy.requireAvailable()
-        return openGraph(projectDir).use { graph ->
+        return withProgress(projectDir.resolve("reports")) { openGraph(projectDir).use { graph ->
             val corpus = prepareProjectState(graph, regressionInputs)
             graph.beginRun(1, limits.wallClockTimeout.toMillis())
             activeDeadlineNanos = System.nanoTime() + limits.wallClockTimeout.toNanos()
@@ -1079,8 +1090,9 @@ class TraceGuidedRepairLoop private constructor(
                 throw failure
             } finally {
                 activeDeadlineNanos = Long.MAX_VALUE
+                progress?.state(graph)
             }
-        }
+        } }
     }
 
     /** Compatibility single-turn behavior repair uses the complete run predicate. */
@@ -1134,7 +1146,7 @@ class TraceGuidedRepairLoop private constructor(
         require(maxIterations > 0)
         lastRunFailure = null
         validationStrategy.requireAvailable()
-        return openGraph(projectDir).use { graph ->
+        return withProgress(reportsDir) { openGraph(projectDir).use { graph ->
             val corpus = prepareProjectState(graph, inputs)
             val run = graph.beginRun(maxIterations, limits.wallClockTimeout.toMillis())
             activeDeadlineNanos = System.nanoTime() + limits.wallClockTimeout.toNanos()
@@ -1194,6 +1206,7 @@ class TraceGuidedRepairLoop private constructor(
                 finishFailedRun(graph, failure)
             } finally {
                 activeDeadlineNanos = Long.MAX_VALUE
+                progress?.state(graph)
             }
             try {
                 graph.synchronizeRepairHistory()
@@ -1204,7 +1217,7 @@ class TraceGuidedRepairLoop private constructor(
             history.adoptCanonicalProjection(graph.derivedRepairIterations(), corpus.inputs, graph.snapshot.runs)
             RepairRunOutcome(graph.derivedRepairIterations().filter { it.runId == run.id }, finalReport,
                 graph.snapshot.runs.single { it.id == run.id })
-        }
+        } }
     }
 
     private fun checkRunBudget() {
@@ -1256,19 +1269,25 @@ class TraceGuidedRepairLoop private constructor(
         val attempt: ModuleRevisionAttempt,
         val projectionHistory: RepairHistory,
         val checkAcceptance: () -> Unit,
+        val progress: RepairProgressProjection?,
     ) : AutoCloseable {
         private var finalized = false
         private var closed = false
 
         fun accept(evidence: RepairEvidence?, proof: RepairValidationProof): ModuleRevisionNode = graph.accept(attempt, evidence, proof, checkAcceptance).also {
             finalized = true
+            progress?.state(graph, decompengine.agent.AgentWorkflowPhase.ACCEPTED, it.id)
         }
 
         fun provisional(evidence: RepairEvidence, proof: RepairValidationProof): ModuleRevisionNode =
-            graph.recordProvisional(attempt, evidence, proof).also { finalized = true }
+            graph.recordProvisional(attempt, evidence, proof).also {
+                finalized = true
+                progress?.state(graph, decompengine.agent.AgentWorkflowPhase.PROVISIONAL, it.id)
+            }
 
         fun reject(evidence: RepairEvidence?): ModuleRevisionNode = graph.reject(attempt, evidence).also {
             finalized = true
+            progress?.state(graph, decompengine.agent.AgentWorkflowPhase.ROLLED_BACK, it.id)
         }
 
         /** Preserve [original] while making rollback/close failures available as suppressed detail. */
@@ -1361,6 +1380,7 @@ class TraceGuidedRepairLoop private constructor(
         val stagedBefore = baseContent
         lateinit var agentRequest: AgentExecutionRequest
         val eventRecorder = BoundedAgentExecutionEventRecorder()
+        var taskProgress = decompengine.agent.AgentTaskProgress.NONE
         val stagedExecution = try {
             stagingAuthority.executeReceipt(
                 harness = harness,
@@ -1398,10 +1418,14 @@ class TraceGuidedRepairLoop private constructor(
                         accessPolicy = AgentAccessPolicy(rules),
                         limits = limits.copy(wallClockTimeout = Duration.ofNanos(maxOf(1L, activeDeadlineNanos - System.nanoTime()))),
                         cancellation = cancellation,
-                    ).also { agentRequest = it }
+                    ).also {
+                        agentRequest = it
+                        taskProgress = progress?.task(attempt.id, it, graph) ?: decompengine.agent.AgentTaskProgress.NONE
+                    }
                 },
                 onEvent = { event ->
                     eventRecorder.record(event)
+                    taskProgress.event(event)
                     onAgentEvent(event)
                 },
             )
@@ -1412,6 +1436,8 @@ class TraceGuidedRepairLoop private constructor(
             }
             throw failure
         }
+        taskProgress.complete(stagedExecution.receipt)
+        progress?.state(graph, decompengine.agent.AgentWorkflowPhase.POLICY_CHECKING, attempt.id)
         val executionEvidence = AcpExecutionReceiptDocument.captureOrNull(
             request = agentRequest,
             promptSha256 = sha256(receiptCommitmentBytes(invocationPrompt)),
@@ -1495,7 +1521,7 @@ class TraceGuidedRepairLoop private constructor(
             val replacements = applied.associate { patch -> patch.path to patch.afterContent }
             graph.installCandidate(attempt, replacements)
             val patches = applied.map { patch -> RepairPatch(patch.path, patch.afterContent) }
-            return ExecutedRepair(result, applied, patches, graph, attempt, history, ::checkRunBudget)
+            return ExecutedRepair(result, applied, patches, graph, attempt, history, ::checkRunBudget, progress)
         } catch (failure: Throwable) {
             if (failure is Exception) {
                 val evidenceKind = when (val terminal = stagedExecution.receipt.outcome) {
@@ -1556,6 +1582,7 @@ class TraceGuidedRepairLoop private constructor(
         val request = RepairCandidateValidationRequest(projectDir, sources, repairCandidateSourceSha256(sources),
             snapshot.profileId, snapshot.profileSha256, snapshot.indexSha256, originalBinary, corpus.inputs, corpus.sha256,
             reportsDir, label, resourceBudget, activeDeadlineNanos, cancellation)
+        progress?.state(graph, decompengine.agent.AgentWorkflowPhase.BUILD_VALIDATING, attempt?.id)
         val outcome = validationStrategy.validateCandidate(request)
         checkRunBudget()
         val proof = outcome.proof
@@ -1576,6 +1603,7 @@ class TraceGuidedRepairLoop private constructor(
             is RepairCandidateValidationOutcome.CompileFailed -> RepairAssessment.CompileError(outcome.failure, logPath, proof)
             is RepairCandidateValidationOutcome.CompileValid -> RepairAssessment.CompileOnly(proof, logPath)
             is RepairCandidateValidationOutcome.BehaviorChecked -> {
+                progress?.state(graph, decompengine.agent.AgentWorkflowPhase.BEHAVIOR_VALIDATING, attempt?.id)
                 val report = outcome.report
                 require(report.cases.map { it.input } == corpus.inputs) {
                     "behavior validation omitted, changed, reordered or duplicated retained inputs"

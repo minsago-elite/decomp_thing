@@ -2,6 +2,7 @@ package decompengine.repair
 
 import decompengine.agent.*
 import decompengine.project.sha256
+import decompengine.jobs.AgentProgressJournal
 import decompengine.validation.*
 import java.nio.file.Files
 import java.nio.file.Path
@@ -36,6 +37,50 @@ class RepairRunSemanticsTest {
             assertEquals(inputs, graph.retainedRegressionCorpus().inputs)
         }
         assertEquals(result.runState, RepairHistory(fixture.root.resolve("reports/repair_history.json")).runStates().single())
+        val events = AgentProgressJournal.read(fixture.root.resolve("reports"))!!.getValue("events").jsonArray.map { it.jsonObject }
+        val states = events.filter { it["kind"]?.jsonPrimitive?.content == "workflow_run_state" }
+        assertTrue(states.all { it.getValue("workflowRunIdSha256").jsonPrimitive.content == sha256(result.runState.id.toByteArray()) })
+        val provisional = states.single { it.getValue("phase").jsonPrimitive.content == "provisional" }
+        assertEquals(sha256(requireNotNull(result.iterations.first().revisionId).toByteArray()),
+            provisional.getValue("revisionIdSha256").jsonPrimitive.content)
+        assertFalse(provisional.containsKey("acceptedRevisionSha256"))
+        assertEquals("accepted", states.last().getValue("phase").jsonPrimitive.content)
+        assertTrue(states.last().containsKey("acceptedRevisionSha256"))
+        assertEquals(2, events.count { it["kind"]?.jsonPrimitive?.content == "agent_finished" })
+        assertTrue(events.indexOfFirst { it["kind"]?.jsonPrimitive?.content == "agent_finished" } < events.indexOf(provisional))
+        assertTrue(events.filter { it["kind"]?.jsonPrimitive?.content == "task_started" }.all {
+            it.getValue("workflowRunIdSha256").jsonPrimitive.content == sha256(result.runState.id.toByteArray())
+        })
+    }
+
+    @Test
+    fun `busy progress journal cannot change accepted source or cause a repair retry`() {
+        val fixture = fixture("broken", "pass3")
+        AgentProgressJournal(fixture.root.resolve("reports"), "repair").use {
+            val result = fixture.loop.runRepair(fixture.root, fixture.original, inputs, maxIterations = 2)
+            assertEquals(RepairRunStatus.FULLY_ACCEPTED, result.runState.status)
+            assertEquals(1, result.runState.attemptedCount)
+            assertEquals(listOf("broken"), fixture.seenSources)
+            assertEquals("pass3", fixture.root.resolve("code.c").readText())
+            ModuleRevisionGraph.open(fixture.root, profile).use { graph ->
+                assertEquals(result.runState, graph.snapshot.runs.single())
+            }
+        }
+    }
+
+    @Test
+    fun `interrupted projection close preserves cancellation and releases its writer lock`() {
+        val reports = createTempDirectory("repair-progress-close-")
+        val projection = RepairProgressProjection(reports)
+        try {
+            Thread.currentThread().interrupt()
+            projection.close()
+            assertTrue(Thread.currentThread().isInterrupted)
+        } finally {
+            Thread.interrupted()
+        }
+        AgentProgressJournal(reports, "repair").use { it.phase(AgentWorkflowPhase.UNRESOLVED) }
+        assertNotNull(AgentProgressJournal.read(reports))
     }
 
     @Test
@@ -85,6 +130,9 @@ class RepairRunSemanticsTest {
         assertNull(result.runState.acceptedHeadId)
         assertNotNull(result.runState.provisionalHeadId)
         assertEquals("pass0", fixture.root.resolve("code.c").readText())
+        val display = AgentProgressJournal.read(fixture.root.resolve("reports"))!!
+        assertFalse(display.toString().contains("acceptedRevisionSha256"))
+        assertEquals("exhausted", display.getValue("events").jsonArray.last().jsonObject.getValue("phase").jsonPrimitive.content)
         ModuleRevisionGraph.open(fixture.root, profile).use { graph ->
             assertEquals(ModuleRevisionStatus.ROOT, graph.snapshot.nodes.single { it.id == graph.snapshot.headId }.status)
             assertEquals(listOf(ModuleRevisionStatus.ROOT, ModuleRevisionStatus.PROVISIONAL, ModuleRevisionStatus.PROVISIONAL), graph.snapshot.nodes.map { it.status })

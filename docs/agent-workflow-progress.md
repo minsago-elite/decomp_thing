@@ -38,7 +38,17 @@ The browser reads the same persisted snapshot at `GET /api/jobs/<job-id>/events`
 polling intervals, and uses text nodes for peer-authored previews. Refresh renders the retained history
 from disk. CLI progress phases go to stderr; source/archive result paths remain on stdout.
 
-The current integration covers reconstruction. Issue #69 still owns repair/patch live integration,
+Repair runs now own a journal for their reports directory. Captured task events and final agent
+receipts carry the durable repair run ID; policy checking precedes candidate validation. Provisional,
+rollback and accepted observations are emitted after graph transitions, and the final observation
+projects the persisted terminal outcome. An accepted source commitment comes from the fully accepted
+graph head. The build phase encloses the provider call; the behavior phase marks checking its returned
+report, not live per-case provider telemetry. A busy or failed journal is disabled with one fixed
+diagnostic and cannot change acceptance, consume another repair attempt or replace durable failure.
+Close retains the bounded journal drain and preserves thread interruption while releasing its lock.
+
+The current CLI/browser live wiring covers reconstruction, while repair core writes the same persisted
+view. Issue #69 still owns repair CLI/browser presentation, patch live integration,
 thought and terminal updates, complete usage projection, explicit process-crash delivery/recovery
 proof and correlation with the durable session store in #68. The display ring can omit old records;
 its `displayOnly` flag and counters must never substitute for complete required release evidence in
