@@ -3,6 +3,11 @@ package decompengine.oracle.gcc
 import decompengine.acp.LinuxFileIdentity
 import decompengine.acp.LinuxFilesystemSyscalls
 import decompengine.acp.permissions
+import decompengine.oracle.fulltree.ContainedCommandOperationDeadline
+import decompengine.oracle.core.OracleArtifacts
+import decompengine.oracle.core.OracleJson
+import kotlinx.serialization.json.JsonObject
+import kotlinx.serialization.json.JsonPrimitive
 import decompengine.oracle.fulltree.FullTreeDiskScratchBorrowedRunRoot
 import decompengine.oracle.fulltree.KotlinContainedCommandInterruption
 import decompengine.oracle.fulltree.FullTreeDiskScratchAuthority
@@ -71,6 +76,7 @@ internal class GccBundledPreparedOperation internal constructor(
     private var closed = false
     private var poisoned = false
     private var executionAttempted = false
+    private var operationDeadline: ContainedCommandOperationDeadline? = null
     private var retainedInterruption: GccBundledInterruptedOperation? = null
     private var resumeAttempted = false
     private var retainedExport: GccBundledInterruptedExportSnapshot? = null
@@ -114,7 +120,7 @@ internal class GccBundledPreparedOperation internal constructor(
         }
         inputs.verify("after GCC export capture")
         lease.requireCurrentOperationRunRootAfterCgroupAbsence(runRoot)
-        val exportReceipt = journal.recordExportAssessment(captured.canonicalBytes)
+        val exportReceipt = journal.recordExportAssessment(bindWallTime(captured.canonicalBytes))
         GccBundledExecutedOperation(receipt, exportReceipt, captured.assessment)
     }
 
@@ -156,6 +162,7 @@ internal class GccBundledPreparedOperation internal constructor(
     fun requireInterruptedStateCurrent() {
         check(!closed && !poisoned) { "GCC bundled prepared operation is closed or poisoned" }
         check(!resumeAttempted) { "GCC operation has already entered resume" }
+        operationDeadline?.requireCurrent()
         val retained = checkNotNull(retainedInterruption) { "GCC operation has no retained completed interruption" }
         try {
             inputs.verify("before retained GCC checkpoint revalidation")
@@ -207,7 +214,8 @@ internal class GccBundledPreparedOperation internal constructor(
             val resumedBytes = GccCompilerEngineContainmentContract.assessDefinition(GccCompilerEngineContainmentRequest(
                 original.engineId, GccCompilerEngineContainmentRunKind.RESUMED, original.artifacts, state,
                 runtime.command(original.artifacts, state, original.outputLease), original.environment,
-                original.outputLease, original.budgets, runtime,
+                original.outputLease, original.budgets.copy(wallClockMillis = checkNotNull(operationDeadline)
+                    .remainingWholeSecondsMillis(original.budgets.wallClockMillis)), runtime,
             )).canonicalBytes
             val resumed = GccCompilerEngineContainmentContract.parseDefinitionForLiveController(resumedBytes)
             val configuration = deriveRuntimeConfiguration(resumed, inputs.classPathEntries)
@@ -227,12 +235,14 @@ internal class GccBundledPreparedOperation internal constructor(
                     expectedControlGroup = resumed.expectedControlGroup, nonce = resumed.bindingSha256,
                     command = resumed.command, environment = resumed.environment, readOnlyInputs = mountedInputs,
                     runtimeMounts = listOf(runtimeMount), resources = KotlinSystemdCgroupCommandResources(
-                        resumed.budgets.wallClockMillis, resumed.budgets.maximumResidentBytes, resumed.budgets.pidsMax,
+                        checkNotNull(operationDeadline).remainingWholeSecondsMillis(resumed.budgets.wallClockMillis),
+                        resumed.budgets.maximumResidentBytes, resumed.budgets.pidsMax,
                         minOf(intent.diskPolicy.maximumFilesystemBytes, 1024L * 1024 * 1024),
                     ), deploymentClosureSha256 = inputs.deploymentClosureSha256,
                     controlDirectoryName = runtime.resumeControlDirectoryName(state, resumed.outputLease),
                     readOnlyControlDirectories = mapOf(checkNotNull(intent.bundledRuntime.freshControlDirectoryName(borrowed.path)) to oldControl),
                     readOnlyStateDirectory = stateIdentity,
+                    operationDeadline = operationDeadline,
                     beforeStart = { attachment ->
                         inputs.verify("before GCC resume START")
                         journal.verify("before GCC resume START")
@@ -255,9 +265,9 @@ internal class GccBundledPreparedOperation internal constructor(
                 }
                 inputs.verify("after resumed GCC export capture")
                 lease.requireCurrentOperationRunRootAfterCgroupAbsence(runRoot)
-                val exportReceipt = journal.recordResumeExportAssessment(captured.canonicalBytes)
+                val exportReceipt = journal.recordResumeExportAssessment(bindWallTime(captured.canonicalBytes))
                 GccBundledExecutedOperation(receipt, exportReceipt, captured.assessment)
-            }
+            }.also { checkNotNull(operationDeadline).requireCurrent() }
         } catch (failure: Throwable) {
             poisoned = true
             if (failure is KotlinSystemdCgroupCommandExecutionException) pendingCleanup = failure.cleanup
@@ -265,10 +275,17 @@ internal class GccBundledPreparedOperation internal constructor(
         }
     }
 
+    private fun bindWallTime(assessmentBytes: ByteArray): ByteArray {
+        val assessment = OracleJson.parseCanonical(assessmentBytes) as JsonObject
+        val fields = assessment - "assessmentSha256" + ("operationWallTime" to checkNotNull(operationDeadline).snapshot())
+        return OracleJson.canonicalBytes(JsonObject(fields + ("assessmentSha256" to
+            JsonPrimitive(OracleArtifacts.sha256(OracleJson.canonicalBytes(JsonObject(fields)))))))
+    }
+
     private fun analysisStateLimits() = GccAnalysisStateCaptureLimits(
         maximumEntries = minOf(intent.diskPolicy.maximumFilesystemInodes, 32768L).toInt(),
         maximumTotalBytes = intent.diskPolicy.maximumFilesystemBytes,
-        maximumWallMillis = intent.budgets.wallClockMillis,
+        maximumWallMillis = operationDeadline?.remainingMillis(intent.budgets.wallClockMillis) ?: intent.budgets.wallClockMillis,
     )
 
     private fun <T> executeRun(
@@ -280,6 +297,7 @@ internal class GccBundledPreparedOperation internal constructor(
         require(intent.runKind == kind) { "GCC bundled execution kind differs from the prepared intent" }
         require(intent.bundledRuntime.invocationVersion in 2..3) { "GCC contained execution requires explicitly bound JVM home and temporary paths" }
         executionAttempted = true
+        operationDeadline = ContainedCommandOperationDeadline(intent.budgets.wallClockMillis)
         try {
             val validated = GccCompilerEngineContainmentContract.parseDefinitionForLiveController(definition)
             val configuration = deriveRuntimeConfiguration(validated, inputs.classPathEntries)
@@ -319,11 +337,13 @@ internal class GccBundledPreparedOperation internal constructor(
                     readOnlyInputs = mountedInputs,
                     runtimeMounts = listOf(runtimeMount),
                     resources = KotlinSystemdCgroupCommandResources(
-                        intent.budgets.wallClockMillis, intent.budgets.maximumResidentBytes, intent.budgets.pidsMax,
+                        checkNotNull(operationDeadline).remainingWholeSecondsMillis(intent.budgets.wallClockMillis),
+                        intent.budgets.maximumResidentBytes, intent.budgets.pidsMax,
                         minOf(intent.diskPolicy.maximumFilesystemBytes, 1024L * 1024 * 1024),
                     ),
                     deploymentClosureSha256 = inputs.deploymentClosureSha256,
                     interruption = interruption,
+                    operationDeadline = operationDeadline,
                     controlDirectoryName = intent.bundledRuntime.freshControlDirectoryName(borrowed.path),
                     beforeStart = { attachment ->
                         inputs.verify("before GCC command START")
@@ -337,8 +357,8 @@ internal class GccBundledPreparedOperation internal constructor(
                 )
                 lease.requireCurrentOperationRunRootAfterCgroupAbsence(runRoot)
                 inputs.verify("after GCC command and cgroup absence")
-                afterAbsence(borrowed, execution)
-            }
+                afterAbsence(borrowed, execution).also { checkNotNull(operationDeadline).requireCurrent() }
+            }.also { checkNotNull(operationDeadline).requireCurrent() }
         } catch (failure: Throwable) {
             poisoned = true
             if (failure is KotlinSystemdCgroupCommandExecutionException) pendingCleanup = failure.cleanup

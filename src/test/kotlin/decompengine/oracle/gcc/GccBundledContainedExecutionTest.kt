@@ -85,6 +85,11 @@ class GccBundledContainedExecutionTest {
                     assertLinkedRecord(export, intent, "gcc-bundled-command-export-assessed-v1")
                     assertEquals(OracleArtifacts.sha256(receiptBytes), export.getValue("previousSha256").jsonPrimitive.content)
                     assertEquals(OracleArtifacts.sha256(OracleJson.canonicalBytes(export.getValue("assessment"))), export.getValue("assessmentSha256").jsonPrimitive.content)
+                    val exportTime = export.getValue("assessment").jsonObject.getValue("operationWallTime").jsonObject
+                    val executionTime = command.getValue("operationWallTime").jsonObject
+                    assertEquals(executionTime.getValue("startedMonotonicNanos"), exportTime.getValue("startedMonotonicNanos"))
+                    assertTrue(exportTime.getValue("elapsedNanos").jsonPrimitive.long >= executionTime.getValue("elapsedNanos").jsonPrimitive.long)
+                    assertTrue(exportTime.getValue("remainingNanos").jsonPrimitive.long > 0)
                     executed.exportAssessmentReceiptBytes[0] = '!'.code.toByte()
                     assertContentEquals(exportBytes, executed.exportAssessmentReceiptBytes)
                     retainFixtureEvidence(fixture, intent, selectedDefinition, receiptBytes, exportBytes, assessment)
@@ -154,6 +159,13 @@ class GccBundledContainedExecutionTest {
             command.getValue("executionSha256").jsonPrimitive.content,
         )
         assertTrue(command.getValue("derivationWallNanos").jsonPrimitive.long in 1..intent.budgets.wallClockMillis * 1_000_000L)
+        val wallTime = command.getValue("operationWallTime").jsonObject
+        assertEquals(intent.budgets.wallClockMillis, wallTime.getValue("maximumWallMillis").jsonPrimitive.long)
+        val elapsed = wallTime.getValue("elapsedNanos").jsonPrimitive.long
+        val remaining = wallTime.getValue("remainingNanos").jsonPrimitive.long
+        assertTrue(elapsed >= command.getValue("derivationWallNanos").jsonPrimitive.long)
+        assertTrue(remaining > 0)
+        assertEquals(intent.budgets.wallClockMillis * 1_000_000L, elapsed + remaining)
         val cgroup = command.getValue("cgroup").jsonObject
         assertTrue(cgroup.getValue("peakResidentBytes").jsonPrimitive.long in 1..intent.budgets.maximumResidentBytes)
         assertTrue(cgroup.getValue("cpuNanos").jsonPrimitive.long > 0)
