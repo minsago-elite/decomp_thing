@@ -800,7 +800,9 @@ DECOMP_PLAYWRIGHT_MODULE=/absolute/path/to/node_modules/playwright \
   node scripts/verify-authentication-browser.cjs build/auth-dashboard.html build/auth-browser/new-run
 ```
 
-The fixture renders the production dashboard and mocks status responses. It checks explicit-only
+The fixture renders the production dashboard and writes its exact `APP_CSS` to the adjacent
+`<dashboard.html>.css` file. The verifier serves that stylesheet, checks it loads and affects layout,
+and records both HTML and CSS hashes. It mocks status responses. It checks explicit-only
 inspection, preview rendering/escaping, failure, retry and empty inventory; trace/screenshot/result
 files use a fresh evidence directory. It does not establish independent-agent authentication.
 

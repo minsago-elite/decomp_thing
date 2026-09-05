@@ -8,6 +8,7 @@ class AuthenticationDashboardFixture {
     public static void main(String[] args) throws Exception {
         Path output = Path.of(args[0]);
         Files.createDirectories(output.toAbsolutePath().getParent());
+        Files.writeString(Path.of(args[0] + ".css"), WebViewsKt.getAPP_CSS());
         Files.writeString(output, WebViewsKt.renderDashboard(List.of(), new JobRecoveryInventory(0, 0, 0, 0L, 0, true)));
     }
 }

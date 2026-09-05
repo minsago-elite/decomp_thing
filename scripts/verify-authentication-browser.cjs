@@ -8,9 +8,42 @@ const { chromium } = require(process.env.DECOMP_PLAYWRIGHT_MODULE || 'playwright
   assert(htmlPath && output, 'usage: verify-authentication-browser.cjs <dashboard.html> <new-evidence-dir>');
   fs.mkdirSync(path.dirname(output), {recursive: true}); fs.mkdirSync(output);
   const html = fs.readFileSync(htmlPath, 'utf8');
+  const css = fs.readFileSync(htmlPath + '.css', 'utf8');
+  assert(css.length > 0, 'production stylesheet fixture is empty');
   const browser = await chromium.launch({headless: true});
+<<<<<<< HEAD
   const browserVersion = browser.version();
   let starts = 0, polls = 0, cancellations = 0, cancellationFailure = null, pollingFailure = null, admissionStatus = 202, context;
+=======
+  const context = await browser.newContext();
+  await context.tracing.start({screenshots: true, snapshots: true});
+  const page = await context.newPage();
+  const errors = []; page.on('pageerror', e => errors.push(e.message));
+  let starts = 0, polls = 0, mode = 'ready';
+  await page.route('**/*', route => {
+    const request = route.request(), url = new URL(request.url());
+    if (url.pathname === '/') return route.fulfill({contentType:'text/html', body:html});
+    if (url.pathname === '/assets/app.css') return route.fulfill({contentType:'text/css', body:css});
+    if (url.pathname !== '/api/operator/auth-methods') return route.abort();
+    if (request.method() === 'POST') {
+      starts++;
+      assert.equal(request.headers()['x-decomp-operator-action'], 'inspect-auth');
+      return route.fulfill({status:202, json:{status:'inspecting'}});
+    }
+    polls++;
+    return route.fulfill({json: mode === 'failed' ? {status:'failed'} : {
+      status:'ready', methods: mode === 'empty' ? [] : [{
+        idPreview:'method', variant:'agent', namePreview:'<img src=x> login', descriptionPreview:'[redacted]'
+      }]
+    }});
+  });
+  const click = async expected => {
+    await page.locator('#inspect-auth-methods').click();
+    await page.waitForFunction(text => document.querySelector('#auth-inspection-status').textContent === text,
+      expected, {timeout:10000});
+    assert.equal(await page.locator('#inspect-auth-methods').isEnabled(), true);
+  };
+>>>>>>> 6ad4567f (Serve production CSS in the original authentication browser verifier (#274) [skip ci])
   try {
     context = await browser.newContext();
     await context.tracing.start({screenshots: true, snapshots: true});
@@ -55,6 +88,10 @@ const { chromium } = require(process.env.DECOMP_PLAYWRIGHT_MODULE || 'playwright
       assert.equal(await page.locator('#inspect-auth-methods').isEnabled(), true);
     };
     await page.goto('http://auth.fixture/');
+    assert.equal(await page.evaluate(() => [...document.styleSheets].some(sheet =>
+      sheet.href && new URL(sheet.href).pathname === '/assets/app.css' && sheet.cssRules.length > 0)), true);
+    assert.equal(await page.evaluate(() => getComputedStyle(document.body).margin), '0px');
+    assert.equal(await page.evaluate(() => parseFloat(getComputedStyle(document.querySelector('.shell')).marginLeft) > 0), true);
     await page.waitForTimeout(500);
     assert.equal(starts, 0); assert.equal(polls, 0);
     await click('Advertised method previews. Login is unsupported; no login attempted.');
@@ -109,6 +146,7 @@ const { chromium } = require(process.env.DECOMP_PLAYWRIGHT_MODULE || 'playwright
     assert.equal(starts, 5); assert.equal(cancellations, 4);
     assert.equal(await page.locator('#cancel-auth-inspection').isEnabled(), false);
     await page.screenshot({path:path.join(output,'dashboard.png')});
+<<<<<<< HEAD
   } finally {
     try { if (context) await context.tracing.stop({path:path.join(output,'trace.zip')}); }
     finally { await browser.close(); }
@@ -116,4 +154,11 @@ const { chromium } = require(process.env.DECOMP_PLAYWRIGHT_MODULE || 'playwright
   fs.writeFileSync(path.join(output,'result.json'), JSON.stringify({passed:true,
     browser:browserVersion, starts, polls, cancellations, scenarios:['explicit action','previews','text escaping','failure','retry','empty inventory','cancellation','HTTP cancellation retry','network cancellation retry','late cancellation acknowledgement','HTTP polling recovery','network polling recovery','invalid JSON polling recovery','attach to existing inspection'],
     renderedHtmlSha256:require('node:crypto').createHash('sha256').update(html).digest('hex')},null,2)+'\n');
+=======
+    fs.writeFileSync(path.join(output,'result.json'), JSON.stringify({passed:true,
+      browser:browser.version(), starts, polls, scenarios:['production stylesheet','explicit action','previews','text escaping','failure','retry','empty inventory'],
+      renderedCssSha256:require('node:crypto').createHash('sha256').update(css).digest('hex'),
+      renderedHtmlSha256:require('node:crypto').createHash('sha256').update(html).digest('hex')},null,2)+'\n');
+  } finally { await context.tracing.stop({path:path.join(output,'trace.zip')}); await browser.close(); }
+>>>>>>> 6ad4567f (Serve production CSS in the original authentication browser verifier (#274) [skip ci])
 })().catch(error=>{console.error(error);process.exitCode=1;});
