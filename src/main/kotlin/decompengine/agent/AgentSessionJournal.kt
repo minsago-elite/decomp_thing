@@ -268,6 +268,12 @@ class AgentSessionJournal private constructor(
             }
                 catch (failure: Throwable) { channel.close(); throw failure }
             try {
+                // An interrupted publication is unresolved evidence, even if the old record reads.
+                for (name in listOf("session.json.pending", "quarantine.json.pending")) {
+                    require(!Files.exists(continuation.directory.resolve(name), NOFOLLOW_LINKS)) {
+                        "incomplete session publication requires inspection"
+                    }
+                }
                 val path = continuation.directory.resolve("session.json")
                 val state = if (Files.exists(path, NOFOLLOW_LINKS)) {
                     requirePrivate(path, directory = false)
