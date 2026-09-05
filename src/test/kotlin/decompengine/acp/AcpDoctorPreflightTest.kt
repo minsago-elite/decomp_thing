@@ -57,6 +57,23 @@ class AcpDoctorPreflightTest {
     }
 
     @Test
+    fun `contained preflight inspects environment terminal and unknown methods without executing them`() {
+        requireLiveSandboxHost()
+        val temporary = createTempDirectory("doctor-auth-variants-")
+        val harness = factoryHarness(writeProvisioning(temporary.resolve("acp.json"), mode = "doctor-auth-variants"))
+        val result = harness.preflight()
+        assertEquals(listOf("environment-login", "terminal-login", "future-login"), result.authentication.methods.map { it.id })
+        assertEquals(listOf("environment", "terminal", "unknown"), result.authentication.methods.map { it.variant })
+        assertTrue(result.authentication.methods.none { it.loginSupported })
+        assertFalse(result.authentication.logoutAdvertised)
+        assertFalse(result.authentication.logoutSupported)
+        assertTrue(result.diagnostics.sandboxCleanupVerified)
+        assertTrue(result.diagnostics.remainingProcessIds.isEmpty())
+        assertFalse(result.stableDescriptor.contains("fixture-login"))
+        assertFalse(result.stableDescriptor.contains("opaque-fixture-value"))
+    }
+
+    @Test
     fun `invalid authentication inventories fail preflight as protocol errors with cleanup`() {
         requireLiveSandboxHost()
         for (mode in listOf("doctor-auth-duplicate", "doctor-auth-count", "doctor-auth-blank", "doctor-auth-text", "doctor-auth-unicode", "doctor-auth-payload")) {

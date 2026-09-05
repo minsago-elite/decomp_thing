@@ -258,7 +258,9 @@ if MODE == "doctor-preflight":
     initialize_result["authMethods"] = [{"id": "operator-login", "name": "Fixture login", "description": "Bearer fixture-credential"}]
 if MODE.startswith("doctor-auth-"):
     method = {"id": "private-method-id", "name": "Fixture login"}
-    if MODE == "doctor-auth-duplicate":
+    if MODE == "doctor-auth-variants":
+        methods = [{'id': 'environment-login', 'name': 'Environment login', 'type': 'env_var', 'vars': [{'name': 'FIXTURE_TOKEN', 'label': 'Fixture token', 'secret': True, 'optional': False}], 'link': 'https://auth.example.invalid/setup'}, {'id': 'terminal-login', 'name': 'Terminal login', 'type': 'terminal', 'args': ['fixture-login', '--interactive'], 'env': {'FIXTURE_CONTEXT': 'operator'}}, {'id': 'future-login', 'name': 'Future login', 'type': 'future_fixture', 'fixturePayload': {'hint': 'opaque-fixture-value'}}]
+    elif MODE == "doctor-auth-duplicate":
         methods = [method, method]
     elif MODE == "doctor-auth-count":
         methods = [{"id": "method-" + str(i), "name": "Fixture login"} for i in range(33)]

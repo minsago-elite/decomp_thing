@@ -724,7 +724,7 @@ manifest is incomplete evidence. Its own lock prevents concurrent invocations of
 
 ### ACP SDK upgrades
 
-The bounded `acp/v1/wire-contract.json` corpus currently freezes 57 SDK-decoded and re-encoded
+The bounded `acp/v1/wire-contract.json` corpus currently freezes 58 SDK-decoded and re-encoded
 JSON-RPC messages. It includes the production model/mode setters, select and boolean configuration
 setters, flat and grouped session inventories, load request/responses, authentication/logout shapes, terminal token usage, session-info and configuration/mode/command/usage updates, and the original
 prompt/filesystem/terminal/permission lifecycle. `AcpV1WireContractGoldenTest` rejects missing or
@@ -864,3 +864,11 @@ qualified. An empty method list does not imply absent logout advertisement. The 
 response exposes both flags; the stable doctor descriptor names both explicitly. The existing method
 digest deliberately excludes this capability and must not be used to authorize logout. This capture
 retains no logout extension payload and sends no logout RPC.
+
+The additional `initialize-auth-variants.response` fixture freezes SDK v1 advertisements for
+`env_var`, `terminal` and an unknown type. Typed checks retain environment variable names/flags and
+setup links, terminal arguments/environment, and unknown raw extension data. All three project
+inventory variants remain `loginSupported=false`. A contained scripted preflight inspects those
+advertisements and completes cleanup without accepting any post-initialize request. This qualifies
+advertisement decoding and inspection only; it does not qualify credential handoff, terminal login,
+link handling, an authenticate exchange for those variants, or an independent external agent.
