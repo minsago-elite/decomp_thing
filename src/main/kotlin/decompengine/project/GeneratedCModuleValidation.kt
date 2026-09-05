@@ -31,6 +31,8 @@ internal data class ModuleCompilationEvidence(
 
 /** Generated-C policy is kept beside the explicit generated-C profile. */
 internal object GeneratedCModuleValidation {
+    const val POLICY_ID = "generated-c-module-validation-v2"
+
     fun command(profile: ReconstructionProfile, sourcePath: String): List<String> {
         val configuration = ProjectBuildConfiguration(
             compilerExecutable = profile.adapterConfiguration["compiler-driver"]?.singleOrNull()

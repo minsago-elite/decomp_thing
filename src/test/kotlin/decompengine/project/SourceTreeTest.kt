@@ -35,6 +35,48 @@ import kotlinx.serialization.json.jsonPrimitive
 
 class SourceTreeTest {
     @Test
+    fun `explicit byte typedef is resolved by the compiler`() {
+        val project = createTempDirectory("source-defined-byte-type-")
+        val reconstructor = ModuleReconstructor {
+            val source = "/* fn_0000000000401000 */\ntypedef unsigned char byte;\nint parse_input(void) { byte value = 17; return value; }\n"
+            ReconstructedModule(source, "scripted", sha256(source.toByteArray()))
+        }
+        val manifest = SourceTreeGenerator.generate(oneModuleModel(), project, reconstructor = reconstructor)
+        assertTrue(manifest.unresolvedImplementationIds.isEmpty())
+    }
+
+    @Test
+    fun `decompiler-like words used as identifiers are accepted by the compiler gate`() {
+        for (name in listOf("byte", "longlong", "undefined", "undefined1", "undefined2", "undefined4", "undefined8")) {
+            val project = createTempDirectory("source-valid-identifier-")
+            val reconstructor = ModuleReconstructor {
+                val source = "/* fn_0000000000401000 */\nint parse_input(void) { int $name = 17; return $name; }\n"
+                ReconstructedModule(source, "scripted", sha256(source.toByteArray()))
+            }
+            val manifest = SourceTreeGenerator.generate(oneModuleModel(), project, reconstructor = reconstructor)
+            assertTrue(manifest.unresolvedImplementationIds.isEmpty(), name)
+            val checkpoint = Json.parseToJsonElement(project.resolve("reports/modules/parse.json").readText()).jsonObject
+            assertEquals("passed", checkpoint.getValue("compilation").jsonObject.getValue("outcome").jsonPrimitive.content)
+        }
+    }
+
+    @Test
+    fun `undeclared decompiler types still fail compilation and remain unresolved`() {
+        for (type in listOf("byte", "longlong", "undefined", "undefined1", "undefined2", "undefined4", "undefined8")) {
+            val project = createTempDirectory("source-undeclared-type-")
+            val reconstructor = ModuleReconstructor {
+                val source = "/* fn_0000000000401000 */\nint parse_input(void) { $type value = 17; return value; }\n"
+                ReconstructedModule(source, "scripted", sha256(source.toByteArray()))
+            }
+            val manifest = SourceTreeGenerator.generate(oneModuleModel(), project, reconstructor = reconstructor)
+            assertEquals(oneModuleModel().functions.map { it.id }, manifest.unresolvedImplementationIds, type)
+            val checkpoint = Json.parseToJsonElement(project.resolve("reports/modules/parse.json").readText()).jsonObject
+            assertEquals("false", checkpoint.getValue("accepted").jsonPrimitive.content)
+            assertEquals("failed", checkpoint.getValue("compilation").jsonObject.getValue("outcome").jsonPrimitive.content)
+        }
+    }
+
+    @Test
     fun `global owners precede consumers and invalidate downstream interface caches`() {
         val model = RecoveredProgramModel(inputSha256 = "input", functions = listOf(
             RecoveredFunction("consumer", "consumer", 1u, "int consumer(void)", "int consumer(void) { return counter; }", referencedGlobals = setOf("counter")),
@@ -798,7 +840,7 @@ class SourceTreeTest {
     }
 
     @Test
-    fun `partial agent modules and undefined decompiler types are never accepted`() {
+    fun `partial agent modules remain unresolved before compiler validation`() {
         val project = createTempDirectory("source-tree-partial-agent-")
         val functions = listOf(
             model().functions[0].copy(name = "parse_first", calls = emptySet()),
@@ -817,7 +859,6 @@ class SourceTreeTest {
 
         assertEquals(functions.map { it.id }.sorted(), manifest.unresolvedImplementationIds.sorted())
         val checkpoint = project.resolve("reports/modules/parse.json").readText()
-        assertTrue(checkpoint.contains("undefined-decompiler-type"))
         assertTrue(checkpoint.contains("missing-function-definition"))
         assertTrue(checkpoint.contains("fn_0000000000401020"))
     }

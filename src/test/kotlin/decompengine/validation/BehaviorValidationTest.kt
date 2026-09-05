@@ -30,9 +30,9 @@ class BehaviorValidationTest {
                 if (argc != 2) return 2;
                 FILE *input = fopen(argv[1], "rb");
                 if (!input) return 3;
-                int character;
-                while ((character = fgetc(input)) != EOF) {
-                    if (fputc(character, stdout) == EOF) return 4;
+                int byte;
+                while ((byte = fgetc(input)) != EOF) {
+                    if (fputc(byte, stdout) == EOF) return 4;
                 }
                 if (ferror(input)) return 5;
                 fclose(input);

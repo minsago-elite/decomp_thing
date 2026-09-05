@@ -1423,14 +1423,8 @@ object SourceTreeGenerator {
             }
         }
         val codeOnly = codeWithoutCommentsOrLiterals(source)
-        val undefinedType = Regex("\\b(?:undefined(?:1|2|4|8)?|byte|longlong)\\b")
-        if (reconstructed.generator != "evidence-only" && undefinedType.containsMatchIn(codeOnly)) {
-            issues += ModuleReconstructionIssue(
-                "undefined-decompiler-type",
-                "candidate source retains an undefined decompiler type",
-                entityIds,
-            )
-        }
+        // The compiler gate resolves type names; spelling-only checks reject valid
+        // identifiers and explicitly defined typedefs.
         module.functionIds.forEach { id ->
             val function = model.functions.single { it.id == id }
             if (!source.contains(id)) {
@@ -1695,7 +1689,8 @@ object SourceTreeGenerator {
         return sha256(
             (
                 functions + "\n" + globals + "\n" + types + "\n" + sharedHeader + moduleHeader + privateHeader +
-                    dependencies + "\n" + observedBehavior.orEmpty() + "\n" + profileSha256
+                    dependencies + "\n" + observedBehavior.orEmpty() + "\n" + profileSha256 +
+                    "\n" + GeneratedCModuleValidation.POLICY_ID
                 ).toByteArray(),
         )
     }
