@@ -124,7 +124,7 @@ class Doctor(
                             if (result.authentication.methods.isEmpty()) authChecks += DoctorCheck(
                                 "ACP authentication methods", true, "No authentication methods advertised; no login attempted.")
                             result.authentication.methods.forEachIndexed { index, method ->
-                                fun quoted(value: String) = kotlinx.serialization.json.JsonPrimitive(value).toString()
+                                fun quoted(value: String) = quoteTerminalPreview(value)
                                 authChecks += DoctorCheck("ACP authentication method ${index + 1}", true,
                                     "id preview=${quoted(method.idPreview)}; variant=${method.variant}; " +
                                         "name=${quoted(method.namePreview)}; " +
@@ -184,7 +184,8 @@ class Doctor(
         val execution = failure as? AgentExecutionException
             ?: return "ACP preflight failed before a session was created; verify the authenticated provisioning and sandbox."
         val safeDetails = execution.failure.details.entries
-            .filter { (name, _) -> name in PREFLIGHT_DIAGNOSTIC_FIELDS }
+            .filter { (name, value) -> name in PREFLIGHT_DIAGNOSTIC_FIELDS ||
+                (name == "reason" && value == "invalidAuthenticationInventory") }
             .sortedBy { it.key }
             .joinToString(",") { (name, value) -> "$name=$value" }
         return buildString {
@@ -325,3 +326,15 @@ private val PREFLIGHT_DIAGNOSTIC_FIELDS = setOf(
     "sandboxCleanupVerified",
     "supportedVersions",
 )
+
+/** Preserve JSON quoting while making terminal-active Unicode visible as escapes. */
+internal fun quoteTerminalPreview(value: String): String = buildString {
+    kotlinx.serialization.json.JsonPrimitive(value).toString().forEach { character ->
+        when (Character.getType(character)) {
+            Character.CONTROL.toInt(), Character.FORMAT.toInt(), Character.SURROGATE.toInt(),
+            Character.LINE_SEPARATOR.toInt(), Character.PARAGRAPH_SEPARATOR.toInt() ->
+                append("\\u").append(character.code.toString(16).padStart(4, '0'))
+            else -> append(character)
+        }
+    }
+}
