@@ -11,6 +11,9 @@ import decompengine.jobs.InvalidUploadException
 import decompengine.jobs.Job
 import decompengine.jobs.JobStore
 import decompengine.jobs.JobStoreException
+import decompengine.jobs.AgentProgressJournal
+import decompengine.agent.AgentWorkflowProgress
+import decompengine.agent.AgentWorkflowPhase
 import decompengine.jobs.toJson
 import decompengine.project.ArchivalReconstructionService
 import decompengine.project.BoundedLlmModuleReconstructor
@@ -57,16 +60,24 @@ class SourceTreeJobReconstructor(
     private val environment: Map<String, String> = System.getenv(),
 ) : JobReconstructor {
     override fun reconstruct(job: Job, reportsDir: Path) {
-        val strategy = selectWebReconstructionStrategy(environment)
-        java.nio.file.Files.createDirectories(reportsDir)
-        java.nio.file.Files.writeString(
-            reportsDir.resolve(WEB_RECONSTRUCTION_HARNESS_REPORT),
-            renderWebReconstructionHarnessSelection(strategy),
-        )
-        ArchivalReconstructionService(
-            GhidraHeadlessProgramModelAnalyzer.fromEnvironment(environment),
-            strategy.reconstructor,
-        ).reconstruct(job.binaryPath, reportsDir)
+        AgentProgressJournal(reportsDir, "reconstruction", environment.values).use { progress ->
+            try {
+                val strategy = selectWebReconstructionStrategy(environment, progress)
+                java.nio.file.Files.createDirectories(reportsDir)
+                java.nio.file.Files.writeString(
+                    reportsDir.resolve(WEB_RECONSTRUCTION_HARNESS_REPORT),
+                    renderWebReconstructionHarnessSelection(strategy),
+                )
+                ArchivalReconstructionService(
+                    GhidraHeadlessProgramModelAnalyzer.fromEnvironment(environment),
+                    strategy.reconstructor,
+                    progress = progress,
+                ).reconstruct(job.binaryPath, reportsDir)
+            } catch (failure: Exception) {
+                progress.phase(AgentWorkflowPhase.FAILED)
+                throw failure
+            }
+        }
     }
 }
 
@@ -82,7 +93,10 @@ internal data class WebReconstructionStrategy(
 )
 
 /** Resolves exactly one web reconstruction mode without credential-based fallbacks. */
-internal fun selectWebReconstructionStrategy(environment: Map<String, String>): WebReconstructionStrategy {
+internal fun selectWebReconstructionStrategy(
+    environment: Map<String, String>,
+    progress: AgentWorkflowProgress = AgentWorkflowProgress.NONE,
+): WebReconstructionStrategy {
     val configuredMode = environment[WEB_RECONSTRUCTION_MODE_ENVIRONMENT] ?: WebReconstructionMode.AGENT.configurationValue
     return when (configuredMode) {
         WebReconstructionMode.AGENT.configurationValue -> {
@@ -92,6 +106,7 @@ internal fun selectWebReconstructionStrategy(environment: Map<String, String>): 
                 BoundedLlmModuleReconstructor(
                     selection.createHarness(),
                     harnessProvenanceDescriptor = selection.provenance.stableDescriptor,
+                    progress = progress,
                 ),
                 selection.provenance,
             )
@@ -194,6 +209,11 @@ class UploadServer(
                     handleArtifact(exchange, decode(segments[1]), segments.drop(3).joinToString("/").let(::decode))
                 exchange.requestMethod == "GET" && segments.size == 3 && segments[0] == "api" && segments[1] == "jobs" ->
                     exchange.sendJson(200, encodeJob(store.get(decode(segments[2]))))
+                exchange.requestMethod == "GET" && segments.size == 4 && segments[0] == "api" && segments[1] == "jobs" && segments[3] == "events" -> {
+                    val job = store.get(decode(segments[2]))
+                    val snapshot = AgentProgressJournal.read(store.reportsDirectory(job.id))
+                    exchange.sendJson(200, snapshot?.toString() ?: "{\"schemaVersion\":1,\"displayOnly\":true,\"nextSequence\":0,\"queueDropped\":0,\"historyDropped\":0,\"truncated\":false,\"events\":[]}")
+                }
                 else -> exchange.sendHtml(404, renderErrorPage(404, "Page not found", "The requested route does not exist."))
             }
         } catch (exception: JobStoreException) {

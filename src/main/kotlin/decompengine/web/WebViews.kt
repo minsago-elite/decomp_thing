@@ -1,6 +1,7 @@
 package decompengine.web
 
 import decompengine.jobs.Job
+import decompengine.jobs.AgentProgressJournal
 import decompengine.jobs.toJson
 import kotlinx.serialization.json.Json
 import kotlinx.serialization.json.JsonArray
@@ -87,10 +88,27 @@ fun renderJob(job: Job): String {
         const initialStatus = ${jsString(job.status)};
         const poll = async () => {
           try {
+            const eventsResponse = await fetch('/api/jobs/${job.id}/events', {cache: 'no-store'});
+            if (eventsResponse.ok) {
+              const snapshot = await eventsResponse.json();
+              const list = document.querySelector('#agent-event-list');
+              list.replaceChildren();
+              for (const event of snapshot.events.slice(-30)) {
+                const item = document.createElement('li');
+                item.textContent = [event.sequence, event.taskId || '', event.phase || event.kind,
+                  event.status || event.stopReason || event.failureKind || event.decision || '',
+                  event.text || ''].filter(value => value !== '').join(' · ');
+                list.append(item);
+              }
+              document.querySelector('#agent-event-gap').textContent = snapshot.truncated
+                ? 'Earlier events were omitted from this bounded view. Inspect the invocation receipts for retained evidence.' : '';
+            }
             const response = await fetch('/api/jobs/${job.id}', {cache: 'no-store'});
             if (!response.ok) return;
             const job = await response.json();
             if (job.status !== initialStatus || !['queued', 'analyzing'].includes(job.status)) location.reload();
+          } catch (error) {
+            document.querySelector('#agent-event-gap').textContent = 'Progress connection interrupted; retrying.';
           } finally {
             setTimeout(poll, 1500);
           }
@@ -136,6 +154,7 @@ fun renderJob(job: Job): String {
             </div>
             ${renderExploration(job)}
             ${renderReconstructionProgress(job)}
+            ${renderAgentProgress(job)}
             ${renderSourceTree(job)}
             ${renderRepairHistory(job)}
             ${renderArtifacts(job, artifacts)}
@@ -143,6 +162,30 @@ fun renderJob(job: Job): String {
         """.trimIndent(),
         script = script,
     )
+}
+
+private fun renderAgentProgress(job: Job): String {
+    val snapshot = runCatching { AgentProgressJournal.read(job.binaryPath.parent.resolve("reports")) }.getOrNull()
+    val events = snapshot?.get("events")?.jsonArray.orEmpty().takeLast(30)
+    val rows = events.joinToString("") { item ->
+        val event = item.jsonObject
+        val summary = listOf(event.text("sequence"), event.text("taskId"),
+            event.text("phase").ifBlank { event.text("kind") },
+            event.text("status").ifBlank { event.text("stopReason") }.ifBlank { event.text("failureKind") }
+                .ifBlank { event.text("decision") }, event.text("text"))
+            .filter(String::isNotBlank).joinToString(" · ")
+        "<li>${summary.escapeHtml()}</li>"
+    }
+    val gap = if (snapshot?.get("truncated")?.toString() == "true")
+        "Earlier events were omitted from this bounded view. Inspect the invocation receipts for retained evidence." else ""
+    return """
+        <section class="panel agent-progress" aria-labelledby="agent-progress-title">
+          <h2 id="agent-progress-title">Agent progress</h2>
+          <p>Agent completion is followed by policy and validation checks. Accepted revisions are recorded separately.</p>
+          <p id="agent-event-gap" role="status">${gap.escapeHtml()}</p>
+          <ol id="agent-event-list" aria-live="polite">$rows</ol>
+        </section>
+    """.trimIndent()
 }
 
 fun renderSourceFile(job: Job, relativePath: String, source: String): String {

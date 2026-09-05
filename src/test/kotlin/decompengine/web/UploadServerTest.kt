@@ -17,6 +17,26 @@ import kotlin.test.assertTrue
 
 class UploadServerTest {
     @Test
+    fun `job event endpoint and refresh render the persisted bounded stream`() {
+        withServer { server, dataDir ->
+            val uploaded = upload(server, "progress.elf", elfFixture(), acceptJson = true)
+            val jobId = Json.parseToJsonElement(uploaded.body.decodeToString()).jsonObject["id"].toString().trim('"')
+            val reports = dataDir.resolve(jobId).resolve("reports")
+            decompengine.jobs.AgentProgressJournal(reports, "reconstruction").use { journal ->
+                journal.phase(decompengine.agent.AgentWorkflowPhase.BUILD_VALIDATING, "module-1")
+            }
+            val response = request(server, "GET", "/api/jobs/$jobId/events")
+            assertEquals(200, response.status)
+            assertTrue(response.body.decodeToString().contains("build_validating"))
+            assertTrue(response.body.decodeToString().contains("\"displayOnly\":true"))
+            val page = request(server, "GET", "/jobs/$jobId").body.decodeToString()
+            assertTrue(page.contains("Agent progress"))
+            assertTrue(page.contains("build_validating"))
+            assertTrue(page.contains("Accepted revisions are recorded separately"))
+        }
+    }
+
+    @Test
     fun `upload page has ELF form`() {
         withServer { server, _ ->
             val response = request(server, "GET", "/")

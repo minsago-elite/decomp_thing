@@ -19,6 +19,9 @@ import decompengine.project.GhidraProgramModelExportLimits
 import decompengine.project.GhidraProgramModelRecoveryMode
 import decompengine.project.ModuleReconstructor
 import decompengine.agent.AgentHarness
+import decompengine.agent.AgentWorkflowProgress
+import decompengine.agent.AgentWorkflowPhase
+import decompengine.jobs.AgentProgressJournal
 import decompengine.oracle.gcc.GccCompilerEnginePlanningService
 import decompengine.oracle.gcc.GccCompilerEngineProfiles
 import decompengine.oracle.gcc.authenticateGhidraInstallation
@@ -150,20 +153,34 @@ private fun runReconstruct(args: List<String>) {
         }
     }
     if (binary == null || output == null) reconstructUsageError("reconstruct requires an input binary and output directory")
-    val strategy = try {
-        selectReconstructionStrategy(evidenceOnly, maximumContext, harnessOverride, System.getenv())
-    } catch (e: IllegalArgumentException) {
-        reconstructUsageError(e.message ?: "invalid harness configuration")
+    val environment = System.getenv()
+    AgentProgressJournal(
+        output, "reconstruction", environment.values,
+        onPhase = { System.err.println("reconstruction: ${it.name.lowercase().replace('_', ' ')}") },
+    ).use { progress ->
+        val strategy = try {
+            selectReconstructionStrategy(evidenceOnly, maximumContext, harnessOverride, environment, progress)
+        } catch (e: IllegalArgumentException) {
+            progress.phase(AgentWorkflowPhase.FAILED)
+            progress.close()
+            reconstructUsageError(e.message ?: "invalid harness configuration")
+        }
+        println(
+            strategy.harnessProvenance?.let { "harness provenance: $it" }
+                ?: "harness: none (evidence-only)",
+        )
+        val result = try {
+            ArchivalReconstructionService(
+                GhidraHeadlessProgramModelAnalyzer.fromEnvironment(), strategy.reconstructor, progress = progress,
+            ).reconstruct(binary, output)
+        } catch (failure: Exception) {
+            progress.phase(AgentWorkflowPhase.FAILED)
+            throw failure
+        }
+        println("source tree: ${result.projectDir}")
+        println("archive: ${result.bundle.archivePath}")
+        println("archive sha256: ${result.bundle.archiveSha256}")
     }
-    println(
-        strategy.harnessProvenance?.let { "harness provenance: $it" }
-            ?: "harness: none (evidence-only)",
-    )
-    val result = ArchivalReconstructionService(GhidraHeadlessProgramModelAnalyzer.fromEnvironment(), strategy.reconstructor)
-        .reconstruct(binary, output)
-    println("source tree: ${result.projectDir}")
-    println("archive: ${result.bundle.archivePath}")
-    println("archive sha256: ${result.bundle.archiveSha256}")
 }
 
 internal data class ReconstructionStrategy(
@@ -176,6 +193,7 @@ internal fun selectReconstructionStrategy(
     maximumContext: Int,
     harnessOverride: String?,
     environment: Map<String, String>,
+    progress: AgentWorkflowProgress = AgentWorkflowProgress.NONE,
 ): ReconstructionStrategy {
     require(!evidenceOnly || harnessOverride == null) {
         "--harness cannot be used with --evidence-only"
@@ -191,6 +209,7 @@ internal fun selectReconstructionStrategy(
             selection.createHarness(),
             maximumContext,
             selection.provenance.stableDescriptor,
+            progress = progress,
         ),
         selection.provenance.stableDescriptor,
     )
