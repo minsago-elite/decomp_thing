@@ -652,6 +652,7 @@ object SourceTreeGenerator {
             }.filter { it != module.id }.distinct().sorted()
         }
         val headerHashes = headers.mapValues { sha256(it.value.toByteArray()) }
+        val interfaceFingerprints = moduleInterfaceFingerprints(dependenciesByModule, headerHashes)
         val privateHeaders = plan.modules.associate { module -> module.id to renderPrivateHeader(module, model, plan) }
         headers.forEach { (id, content) ->
             val path = profile.layout.declaration("module-interface").materialize(mapOf("module" to id))
@@ -698,8 +699,8 @@ object SourceTreeGenerator {
                 observedBehavior,
                 profile.sha256,
             )
-            val fingerprint = sha256(("transitive-interfaces-v1\n" + localFingerprint + "\n" +
-                transitiveInterfaceFingerprint(module.id, dependenciesByModule, headerHashes)).toByteArray())
+            val fingerprint = sha256(("transitive-interfaces-v2\n" + localFingerprint + "\n" +
+                interfaceFingerprints.getValue(module.id)).toByteArray())
             val sourcePath = projectDir.resolve(module.sourcePath)
             val checkpointPath = projectDir.resolve(profile.layout.declaration("module-evidence").materialize(mapOf("module" to module.id)))
             val executionEvidenceDeclaration = runCatching {
@@ -1022,21 +1023,6 @@ object SourceTreeGenerator {
             .filterNot { it.id in externallyCalled || safeCName(it.name) in setOf("main", "decomp_engine_main") }
             .forEach { function -> append(normalizedPrototype(function)).append("; /* private ${function.id} @ 0x${function.address.toString(16)} */\n") }
         append("\n#endif\n")
-    }
-
-    private fun transitiveInterfaceFingerprint(
-        moduleId: String,
-        dependencies: Map<String, List<String>>,
-        headerHashes: Map<String, String>,
-    ): String {
-        val visited = mutableSetOf(moduleId)
-        val pending = ArrayDeque(dependencies.getValue(moduleId))
-        while (pending.isNotEmpty()) {
-            val next = pending.removeLast()
-            if (visited.add(next)) pending.addAll(dependencies.getValue(next))
-        }
-        visited.remove(moduleId)
-        return sha256(visited.sorted().joinToString("\n") { "${it.jsonEscape()}:${headerHashes.getValue(it)}" }.toByteArray())
     }
 
     private fun renderMakefile(sources: List<String>, profile: ReconstructionProfile): String {
