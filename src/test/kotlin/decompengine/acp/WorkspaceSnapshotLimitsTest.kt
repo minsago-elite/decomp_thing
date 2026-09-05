@@ -13,6 +13,53 @@ import kotlin.test.assertTrue
 
 class WorkspaceSnapshotLimitsTest {
     @Test
+    fun `non-default filesystem roots are rejected before native path resolution`() {
+        val archive = createTempDirectory("snapshot-provider-").resolve("workspace.zip")
+        java.nio.file.FileSystems.newFileSystem(archive, mapOf("create" to "true")).use { filesystem ->
+            val root = Files.createDirectory(filesystem.getPath("/workspace"))
+            assertEquals("unsupported-filesystem", assertFailsWith<WorkspaceSnapshotInvalidEntry> {
+                capture(request(root), WorkspaceSnapshotLimits())
+            }.reason)
+        }
+    }
+
+    @Test
+    fun `nested descriptor discovery preserves relative change identity`() {
+        val root = workspace()
+        val nested = Files.createDirectories(root.resolve("src/one/two"))
+        val file = nested.resolve("data")
+        file.writeText("before")
+        val request = request(root)
+        val before = capture(request, WorkspaceSnapshotLimits())
+        file.writeText("after")
+        val after = capture(request, WorkspaceSnapshotLimits())
+        val change = before.diff(after, request, budget(WorkspaceSnapshotLimits())).single()
+        assertEquals(AgentWorkspacePath("project", "src/one/two/data"), change.path)
+        assertEquals(AgentFileChangeKind.MODIFIED, change.kind)
+    }
+
+    @Test
+    fun `recursive depth is bounded before retaining an excessive handle chain`() {
+        val root = workspace()
+        var directory = root.resolve("src")
+        repeat(64) { directory = Files.createDirectory(directory.resolve("d")) }
+        assertEquals("directory-depth", assertFailsWith<WorkspaceSnapshotLimitExceeded> {
+            capture(request(root), WorkspaceSnapshotLimits())
+        }.dimension)
+    }
+
+    @Test
+    fun `root handle count is bounded even when authorized targets are absent`() {
+        val base = createTempDirectory("snapshot-roots-")
+        val roots = (0..64).map { AgentWorkspaceRoot("r$it", Files.createDirectory(base.resolve("r$it"))) }
+        val rules = roots.map { AgentPathRule(AgentWorkspacePath(it.id, "missing"), setOf(AgentOperation.READ_FILE)) }
+        val request = AgentExecutionRequest("root budget fixture", roots, emptyList(), AgentAccessPolicy(rules))
+        assertEquals("root-count", assertFailsWith<WorkspaceSnapshotLimitExceeded> {
+            capture(request, WorkspaceSnapshotLimits())
+        }.dimension)
+    }
+
+    @Test
     fun `descriptor hash streams exact bytes under the snapshot budget`() {
         val root = workspace()
         val bytes = ByteArray(150_000) { (it % 251).toByte() }

@@ -2971,59 +2971,84 @@ internal class WorkspaceSnapshot private constructor(
 
     companion object {
         fun capture(request: AgentExecutionRequest, budget: WorkspaceSnapshotBudget): WorkspaceSnapshot {
-            val tracked = LinkedHashSet<Pair<String, Path>>()
-            request.accessPolicy.pathRules.forEach { rule ->
+            val states = LinkedHashMap<AgentWorkspacePath, FileState>()
+            val roots = LinkedHashMap<String, LinuxDescriptor>()
+            fun visit(rootId: String, parent: LinuxDescriptor, name: String, relative: String,
+                      recursive: Boolean, missingAllowed: Boolean, depth: Int) {
                 budget.checkpoint()
-                val root = request.workspaceRoots.single { it.id == rule.path.rootId }
-                val target = rule.path.resolve(request.workspaceRoots)
-                if (rule.recursive && target.isDirectory(LinkOption.NOFOLLOW_LINKS)) {
-                    Files.walk(target).use { paths ->
-                        val iterator = paths.iterator()
-                        while (true) {
-                            budget.checkpoint()
-                            if (!iterator.hasNext()) break
-                            val candidate = iterator.next()
-                            budget.entry()
-                            if (regularEntry(candidate, missingAllowed = false) && (root.id to candidate) !in tracked) {
-                                budget.file()
-                                tracked += root.id to candidate
-                            }
+                if (depth > 64) throw WorkspaceSnapshotLimitExceeded("directory-depth")
+                val entry = LinuxFilesystemSyscalls.openPathAtOrNull(parent.fd, name)
+                if (entry == null) {
+                    if (missingAllowed) return
+                    throw WorkspaceSnapshotInvalidEntry("entry-disappeared")
+                }
+                entry.use {
+                    val identity = entry.identity
+                    if (identity.isSymbolicLink) throw WorkspaceSnapshotInvalidEntry("symbolic-link")
+                    if (identity.isRegularFile) {
+                        val path = AgentWorkspacePath(rootId, relative)
+                        if (path !in states) {
+                            budget.file()
+                            val anchor = Path.of("/proc/self/fd/${roots.getValue(rootId).fd}")
+                            states[path] = hashFile(anchor, relative, budget, identity)
                         }
-                    }
-                } else {
-                    budget.entry()
-                    if (regularEntry(target, missingAllowed = true) && (root.id to target) !in tracked) {
-                        budget.file()
-                        tracked += root.id to target
-                    }
+                    } else if (identity.isDirectory) {
+                        if (recursive) LinuxFilesystemSyscalls.openDirectoryAt(parent.fd, name).use { directory ->
+                            if (directory.identity != identity) throw WorkspaceSnapshotInvalidEntry("directory-binding-changed")
+                            val names = LinuxFilesystemSyscalls.directoryEntryNames(directory, 8192, budget::entry)
+                            names.forEach { child -> visit(rootId, directory, child, "$relative/$child", true, false, depth + 1) }
+                        }
+                    } else throw WorkspaceSnapshotInvalidEntry("special-file")
                 }
             }
-            val states = LinkedHashMap<AgentWorkspacePath, FileState>()
-            tracked.forEach { (rootId, absolute) ->
-                budget.checkpoint()
-                val root = request.workspaceRoots.single { it.id == rootId }
-                val relative = root.path.relativize(absolute).toString().replace(absolute.fileSystem.separator, "/")
-                val path = AgentWorkspacePath(rootId, relative)
-                states[path] = hashFile(root.path, relative, budget)
-            }
-            return WorkspaceSnapshot(states)
-        }
-
-        private fun regularEntry(path: Path, missingAllowed: Boolean): Boolean {
-            val attributes = try {
-                Files.readAttributes(path, java.nio.file.attribute.BasicFileAttributes::class.java, LinkOption.NOFOLLOW_LINKS)
-            } catch (_: java.nio.file.NoSuchFileException) {
-                if (missingAllowed) return false
-                throw WorkspaceSnapshotInvalidEntry("entry-disappeared")
+            try {
+                request.accessPolicy.pathRules.forEach { rule ->
+                    budget.entry()
+                    val root = request.workspaceRoots.single { it.id == rule.path.rootId }
+                    val pinnedRoot = roots[root.id] ?: run {
+                        if (roots.size == 64) throw WorkspaceSnapshotLimitExceeded("root-count")
+                        if (root.path.fileSystem != java.nio.file.FileSystems.getDefault()) {
+                            throw WorkspaceSnapshotInvalidEntry("unsupported-filesystem")
+                        }
+                        LinuxFilesystemSyscalls.requireSupported(root.path)
+                        LinuxFilesystemSyscalls.openRoot(root.path).also { roots[root.id] = it }
+                    }
+                    val parts = rule.path.relativePath.split('/')
+                    if (parts.size > 64) throw WorkspaceSnapshotLimitExceeded("directory-depth")
+                    val parents = mutableListOf<LinuxDescriptor>()
+                    try {
+                        var parent = pinnedRoot
+                        for (segment in parts.dropLast(1)) {
+                            budget.entry()
+                            val entry = LinuxFilesystemSyscalls.openPathAtOrNull(parent.fd, segment) ?: return@forEach
+                            entry.use {
+                                if (entry.identity.isSymbolicLink) throw WorkspaceSnapshotInvalidEntry("symbolic-link")
+                                if (!entry.identity.isDirectory) throw WorkspaceSnapshotInvalidEntry("parent-not-directory")
+                                parent = LinuxFilesystemSyscalls.openDirectoryAt(parent.fd, segment).also { parents += it }
+                                if (parent.identity != entry.identity) throw WorkspaceSnapshotInvalidEntry("directory-binding-changed")
+                            }
+                        }
+                        visit(root.id, parent, parts.last(), rule.path.relativePath, rule.recursive, true, parts.size)
+                    } finally {
+                        parents.asReversed().forEach { it.close() }
+                    }
+                }
+                roots.forEach { (id, pinned) ->
+                    budget.checkpoint()
+                    val root = request.workspaceRoots.single { it.id == id }
+                    LinuxFilesystemSyscalls.openRoot(root.path).use { current ->
+                        if (current.identity != pinned.identity) throw WorkspaceSnapshotInvalidEntry("root-binding-changed")
+                    }
+                }
+                return WorkspaceSnapshot(states)
             } catch (_: IOException) {
                 throw WorkspaceSnapshotInvalidEntry("entry-unavailable")
+            } finally {
+                roots.values.toList().asReversed().forEach { it.close() }
             }
-            if (attributes.isSymbolicLink) throw WorkspaceSnapshotInvalidEntry("symbolic-link")
-            if (!attributes.isRegularFile && !attributes.isDirectory) throw WorkspaceSnapshotInvalidEntry("special-file")
-            return attributes.isRegularFile
         }
 
-        private fun hashFile(root: Path, relative: String, budget: WorkspaceSnapshotBudget): FileState {
+        private fun hashFile(root: Path, relative: String, budget: WorkspaceSnapshotBudget, expected: LinuxFileIdentity): FileState {
             val result = try {
                 decompengine.repair.hashStableRegularFile(root, relative,
                     budget::declaredSize, budget::readBytes, budget::checkpoint)
@@ -3032,6 +3057,7 @@ internal class WorkspaceSnapshot private constructor(
             } catch (_: IllegalArgumentException) {
                 throw WorkspaceSnapshotInvalidEntry("file-binding-changed")
             }
+            if (result.identity != expected) throw WorkspaceSnapshotInvalidEntry("file-binding-changed")
             return FileState(result.sha256, result.size)
         }
     }

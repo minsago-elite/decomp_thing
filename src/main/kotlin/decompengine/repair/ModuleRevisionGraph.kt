@@ -5076,7 +5076,7 @@ internal data class StableRegularFile(
     val identity: LinuxFileIdentity,
 )
 
-internal data class StableFileDigest(val sha256: String, val size: Long)
+internal data class StableFileDigest(val sha256: String, val size: Long, val identity: LinuxFileIdentity)
 
 /** Stream a pinned regular file, then revalidate its metadata and every directory binding. */
 internal fun hashStableRegularFile(
@@ -5135,7 +5135,7 @@ internal fun hashStableRegularFile(
         }
         revalidateDescriptorPath(base, parts, directories.map { it.identity }, authorized.identity)
         cancellationCheck()
-        return StableFileDigest(digest.digest().joinToString("") { "%02x".format(it) }, size)
+        return StableFileDigest(digest.digest().joinToString("") { "%02x".format(it) }, size, authorized.identity)
     } finally {
         readable?.close()
         authorized?.close()
