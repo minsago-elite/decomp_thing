@@ -33,6 +33,24 @@ import org.junit.jupiter.api.Timeout
 @Timeout(value = 90, unit = TimeUnit.SECONDS)
 class AcpDoctorPreflightTest {
     @Test
+    fun `invalid authentication inventories fail preflight as protocol errors with cleanup`() {
+        requireLiveSandboxHost()
+        for (mode in listOf("doctor-auth-duplicate", "doctor-auth-count", "doctor-auth-blank", "doctor-auth-text")) {
+            val temporary = createTempDirectory("doctor-auth-invalid-")
+            val harness = factoryHarness(writeProvisioning(temporary.resolve("acp.json"), mode = mode))
+            val error = assertFailsWith<AgentExecutionException> { harness.preflight() }
+            assertEquals(AgentFailureKind.PROTOCOL, error.failure.kind, mode)
+            assertEquals("invalidAuthenticationInventory", error.failure.details["reason"], mode)
+            assertEquals("ACP agent advertised an invalid authentication inventory", error.failure.message)
+            val receipt = assertNotNull(error.receipt)
+            val invocation = assertIs<AcpInvocationEvidenceSnapshot>(receipt.providerEvidence)
+            assertEquals(AcpExecutionCleanupDisposition.VERIFIED, invocation.cleanupDisposition, mode)
+            assertTrue(assertNotNull(invocation.diagnostics).remainingProcessIds.isEmpty(), mode)
+            assertEquals(null, invocation.completeExecutionEvidence)
+        }
+    }
+
+    @Test
     fun `doctor exposes authentication previews only through explicit prompt-free inspection`() {
         requireLiveSandboxHost()
         val temporary = createTempDirectory("doctor-acp-live-")

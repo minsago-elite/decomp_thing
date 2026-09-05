@@ -28,15 +28,15 @@ class AcpAuthenticationInventory private constructor(
 
     companion object {
         internal fun capture(methods: List<AuthMethod>, sensitiveValues: Collection<String>): AcpAuthenticationInventory {
-            require(methods.size <= 32) { "ACP authentication inventory exceeds its method limit" }
+            requireInventory(methods.size <= 32) { "ACP authentication inventory exceeds its method limit" }
             val ids = HashSet<String>()
             val redactor = ProgressRedactor(sensitiveValues)
             val commitment = buildJsonArray {
                 methods.forEach { method ->
-                    require(method.id.value.isNotBlank() && method.id.value.toByteArray().size <= 256 && ids.add(method.id.value)) {
+                    requireInventory(method.id.value.isNotBlank() && method.id.value.toByteArray().size <= 256 && ids.add(method.id.value)) {
                         "ACP authentication inventory contains an invalid or duplicate method ID"
                     }
-                    require(method.name.toByteArray().size <= 512 && (method.description?.toByteArray()?.size ?: 0) <= 2048) {
+                    requireInventory(method.name.toByteArray().size <= 512 && (method.description?.toByteArray()?.size ?: 0) <= 2048) {
                         "ACP authentication inventory exceeds its text limit"
                     }
                     add(buildJsonObject {
@@ -53,6 +53,10 @@ class AcpAuthenticationInventory private constructor(
             }, digest)
         }
 
+        private inline fun requireInventory(condition: Boolean, message: () -> String) {
+            if (!condition) throw AcpAuthenticationInventoryFailure(message())
+        }
+
         private fun variant(method: AuthMethod): String = when (method) {
             is AuthMethod.AgentAuth -> "agent"
             is AuthMethod.EnvVarAuth -> "environment"
@@ -61,3 +65,5 @@ class AcpAuthenticationInventory private constructor(
         }
     }
 }
+
+internal class AcpAuthenticationInventoryFailure(message: String) : IllegalArgumentException(message)
