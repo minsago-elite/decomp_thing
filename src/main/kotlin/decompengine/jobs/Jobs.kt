@@ -59,6 +59,7 @@ class JobStore internal constructor(
     root: Path,
     private val uploadPublisher: UploadPublisher,
     private val metadataPublisher: JobMetadataPublisher = AtomicJobMetadataPublisher,
+    private val storeDirectories: JobStoreDirectories = ForcedJobStoreDirectories,
 ) {
     constructor(root: Path) : this(root, AtomicUploadPublisher)
     private val root = root.toAbsolutePath().normalize()
@@ -73,7 +74,7 @@ class JobStore internal constructor(
             throw InvalidUploadException(exception.message ?: "uploaded file is not an ELF binary", exception)
         }
 
-        root.createDirectories()
+        storeDirectories.prepare(root)
         val jobId = UUID.randomUUID().toString().replace("-", "")
         val jobDir = root.resolve(jobId)
         val binaryPath = jobDir.resolve("input.elf")
