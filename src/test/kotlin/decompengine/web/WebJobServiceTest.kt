@@ -21,6 +21,30 @@ import kotlin.test.assertTrue
 
 class WebJobServiceTest {
     @Test
+    fun `startup reconciles orphan staging under ownership and releases lease when cleanup refuses storage`() = withStore { store, root ->
+        val orphan = Files.createDirectory(root.resolve(".upload-123"), java.nio.file.attribute.PosixFilePermissions.asFileAttribute(
+            java.nio.file.attribute.PosixFilePermissions.fromString("rwx------")))
+        Files.writeString(orphan.resolve("input.elf"), "incomplete")
+        WebJobService(store, JobAnalyzer { _, _ -> error("Unexpected execution") }, inertReconstructor).use { service ->
+            service.initializeExistingStorage()
+            assertFalse(Files.exists(orphan))
+            assertTrue(service.list().isEmpty())
+            // Reads do not repeat maintenance after startup.
+            Files.createDirectory(orphan, java.nio.file.attribute.PosixFilePermissions.asFileAttribute(
+                java.nio.file.attribute.PosixFilePermissions.fromString("rwx------")))
+            Files.writeString(orphan.resolve("unexpected.txt"), "preserve")
+            assertTrue(service.list().isEmpty())
+            assertTrue(Files.exists(orphan))
+        }
+        WebJobService(store, JobAnalyzer { _, _ -> error("Unexpected execution") }, inertReconstructor).use { service ->
+            val failure = assertFailsWith<decompengine.jobs.WorkflowStoreException> { service.initializeExistingStorage() }
+            assertEquals("UPLOAD_STAGING_RECOVERY_REQUIRED", failure.code)
+        }
+        assertEquals("preserve", Files.readString(orphan.resolve("unexpected.txt")))
+        decompengine.jobs.WorkflowAttemptStore.open(root).use { /* failed startup did not retain ownership */ }
+    }
+
+    @Test
     fun `upload and reads stay inert and explicit adapters share the same stored job`() = withStore { store, _ ->
         val operations = mutableListOf<String>()
         WebJobService(store, JobAnalyzer { job, _ -> operations += "explore:${job.id}" },

@@ -36,8 +36,9 @@ new work until it is closed and storage is reopened; callers must inspect storag
 before retrying a legacy upload. Authenticated v1 requests can replay their retained
 receipt after storage is reopened, including after publication uncertainty.
 A process crash may leave an unpublished `.upload-*` directory; those directories
-are excluded from job identity enumeration. Crash-orphan maintenance is still
-outstanding and is not handled by deleting arbitrary hidden directories at startup.
+are excluded from job identity enumeration. [Startup staging recovery](web-upload-staging-recovery.md)
+now reconciles the reserved private namespace under the exclusive lease, after bounded
+identity/type checks. Unexpected entries are preserved and reported explicitly.
 
 At most two streaming uploads run per service. Each requires at least 64 MiB of
 reported free space at admission. This is a staging headroom check, not a reservation
@@ -75,7 +76,7 @@ receipt expiration are not implemented. Manual removal of storage is outside thi
 
 ## Evidence and remaining scope
 
-All 126 web/jobs tests pass, including multipart split/byte-preservation tests, a 4 MiB
+At the authenticated upload checkpoint, all 126 web/jobs tests passed, including multipart split/byte-preservation tests, a 4 MiB
 incremental source, actual request ceilings, invalid/multiple parts, UTF-8 display
 names, cancellation and sink failure. Publication tests cover visibility only after
 rename, invalid ELF, faults before and after rename, complete retained uncertain
@@ -88,8 +89,9 @@ original-response replay after status changes, changed-content/filename conflict
 concurrent same-key publication, corrupt receipts, post-rename retry and a real server
 restart with a fresh authenticated session.
 
-This is progress on #162, not its completion. Process-kill crash qualification,
-crash-orphan maintenance, total storage quotas and SPA upload controls remain outstanding.
+This is progress on #162, not its completion. Process-kill staging recovery is now
+qualified, and the SPA upload journey is complete under #169. Total retained-storage
+quotas remain outstanding.
 The existing legacy transport contract is preserved.
 
 The distribution build and [packaged session smoke](evidence/web-upload-receipt-session-20260905.json)

@@ -77,6 +77,7 @@ class WebJobService(
         attempts?.let { return it }
         val acquired = attemptStoreFactory(store.storageRoot)
         try {
+            decompengine.jobs.UploadStagingRecovery.recover(store.storageRoot)
             acquired.recoverAll() // Unavailable records remain isolated and visible through inspect/listInspections.
             attempts = acquired
             return acquired
