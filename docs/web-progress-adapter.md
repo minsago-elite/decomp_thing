@@ -555,3 +555,11 @@ heartbeat/lease tests verify real connection closure and unchanged fixture bytes
 UploadServer itself verifies routing and its shared guarded artifact projection. These do
 not establish arbitrary slow-socket behavior, the full client reconnect algorithm, timed
 retention or transactional snapshot/event cutover.
+
+At source `e15ba2e`, 194 web/journal tests and distZip pass. The
+[packaged SSE report](evidence/web-sse-browser-20260906.json) verifies native EventSource
+receipt with the session cookie and an event/id identical to polling, alongside the existing
+history/activity/recovery and retained-byte checks. No workflow executes. The report
+identifies archive/JAR/browser hashes, test-only --no-sandbox, unchanged installation and
+confirmed shutdown/cleanup. It proves native delivery, not full browser automatic reconnect
+or fallback behavior; the UI still chooses polling.
