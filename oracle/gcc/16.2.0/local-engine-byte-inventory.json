@@ -1,0 +1,64 @@
+{
+  "artifacts": [
+    {
+      "bytes": 374477144,
+      "engine": "cc1",
+      "manifestSha256": "dbef520c025d268f5126229ace8ad5b08a15722573d45b5e1ab934611905abb4",
+      "matchesManifest": true,
+      "path": "/home/june/gcc-engine-oci-work/artifacts/gcc-cc1.full",
+      "sha256": "ba9b2f314bfb3d92a172e67f8ce993a2e98b9bc14aabf00ff6d58e4631037621",
+      "stableDuringRead": true,
+      "variant": "full"
+    },
+    {
+      "bytes": 41935768,
+      "engine": "cc1",
+      "manifestSha256": "dbef520c025d268f5126229ace8ad5b08a15722573d45b5e1ab934611905abb4",
+      "matchesManifest": true,
+      "path": "/home/june/gcc-engine-oci-work/artifacts/gcc-cc1.stripped",
+      "sha256": "e51bf6e3f3300d31ce9713e2160c6fe5895d1e4914fb25562c3542b161427905",
+      "stableDuringRead": true,
+      "variant": "stripped"
+    },
+    {
+      "bytes": 362827816,
+      "engine": "lto1",
+      "manifestSha256": "5f7e686168d6a6e35ef3719d077b0bfb246085c2d3738835be13eeed5e0d0a41",
+      "matchesManifest": true,
+      "path": "/home/june/gcc-engine-oci-work/artifacts/gcc-lto1.full",
+      "sha256": "255246e259b194e40fb3f053eafad5a9fdada983404bdae90fc1b9fddfa585e1",
+      "stableDuringRead": true,
+      "variant": "full"
+    },
+    {
+      "bytes": 40497008,
+      "engine": "lto1",
+      "manifestSha256": "5f7e686168d6a6e35ef3719d077b0bfb246085c2d3738835be13eeed5e0d0a41",
+      "matchesManifest": true,
+      "path": "/home/june/gcc-engine-oci-work/artifacts/gcc-lto1.stripped",
+      "sha256": "35d73b94b8e33cd482095016de28ebaa4e71835720e39b7c5aa82206b562361f",
+      "stableDuringRead": true,
+      "variant": "stripped"
+    }
+  ],
+  "benchmarkAccepted": false,
+  "limitation": "Read-only local byte inventory; no authenticated process, root-owned deployment, runtime closure or benchmark execution.",
+  "observedAt": "2026-09-05T18:46:19.501203+00:00",
+  "productionVerified": false,
+  "provider": "local-engine-byte-inventory-v1",
+  "releaseEligible": false,
+  "scratchObservation": {
+    "command": [
+      "findmnt",
+      "-rn",
+      "-t",
+      "ext4",
+      "-o",
+      "TARGET,SOURCE,OPTIONS"
+    ],
+    "exitCode": 1,
+    "mountedExt4Filesystems": [],
+    "scope": "current host mount namespace only"
+  },
+  "sourceCommit": "6b6e5cd4a91654822c78e1aca37e109a685691d5"
+}
