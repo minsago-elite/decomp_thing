@@ -211,6 +211,14 @@ class UploadServer(
                 if (failure == null) failure = exception else failure.addSuppressed(exception)
             }
         }
+        try {
+            check(ownedExecutor?.awaitTermination(5, TimeUnit.SECONDS) != false) {
+                "Background workers did not stop within the shutdown grace period"
+            }
+        } catch (exception: Exception) {
+            if (exception is InterruptedException) Thread.currentThread().interrupt()
+            if (failure == null) failure = exception else failure.addSuppressed(exception)
+        }
         failure?.let { throw it }
     }
 
@@ -402,6 +410,26 @@ class UploadServer(
     private companion object {
         const val MAX_UPLOAD_BYTES = 32L * 1024 * 1024
         const val MAX_ARTIFACT_BYTES = 64L * 1024 * 1024
+    }
+}
+
+/** CLI lifecycle: allow owned workers to record interruption before the JVM exits. */
+internal fun startWebServerWithShutdownHook(server: UploadServer) {
+    val runtime = Runtime.getRuntime()
+    val hook = Thread({
+        try {
+            server.stop()
+        } catch (_: Exception) {
+            System.err.println("Web shutdown did not complete cleanly; recovery is required")
+        }
+    }, "decomp-web-shutdown")
+    runtime.addShutdownHook(hook)
+    try {
+        server.start()
+    } catch (failure: Exception) {
+        try { runtime.removeShutdownHook(hook) } catch (_: IllegalStateException) { }
+        try { server.stop() } catch (cleanup: Exception) { failure.addSuppressed(cleanup) }
+        throw failure
     }
 }
 

@@ -546,7 +546,7 @@ private fun runWeb(args: List<String>) {
         }
     }
     val server = UploadServer(host, port, dataDir, listenBacklog = listenBacklog)
-    server.start()
+    decompengine.web.startWebServerWithShutdownHook(server)
     println("Serving decomp_engine upload UI on http://$host:${server.serverPort}")
 }
 
