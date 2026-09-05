@@ -101,12 +101,12 @@ metadata never trusts its stored absolute `binary_path` for authorization. File
 services resolve IDs through an immutable manifest beneath an owned job/revision
 root, reject symbolic links and escape paths, and retain a consistent file handle
 or snapshot during reads. Concurrent rename, replacement, deletion and Git
-checkout must not rebind an authorized read to different bytes (#164/#166).
+checkout must not rebind an authorized read to different bytes (#164/#165).
 
 | Data | Browser/persistence policy | Owner |
 | --- | --- | --- |
 | Provider/Git tokens, cookies, authorization headers, SSH private material, environment secrets | Never in DTOs, UI, errors, fixtures or audit payload; redact before persistent logs as well as live output | #177 #207 |
-| Host paths and tool/agent argv | Display logical tool/capability labels; redact absolute roots, usernames and secret arguments; detailed provisioning diagnostics stay in private operator output | #158 #177 #194 |
+| Host paths and tool/agent argv | Display logical tool/capability labels; redact absolute roots, usernames and secret arguments; detailed provisioning diagnostics stay in private operator output | #166 #177 #194 |
 | Private prompts and model reasoning | Not published by default; bounded approved summaries and provenance IDs only; explicit policy needed before exposing retained content | #69 #177 #178 |
 | Security controls | Show capability availability, actionable public reason and configured resource limits; omit session material, private containment paths and internal command lines | #161 #177 #194 |
 | Git remote URLs and identity | Display normalized scheme/host/repository label with userinfo and sensitive query components removed; credential handle is opaque | #177 #207 |
@@ -126,9 +126,9 @@ review policy in [web delivery](web-delivery.md).
 | Multipart upload request | 32 MiB including framing; one binary part; filename 255 UTF-8 bytes | #162 #208; stream-limit chunked/misdeclared bodies, clean abandoned staging |
 | Ordinary JSON request / nesting | 1 MiB / depth 32; bounded field/list schemas | #158 #208; reject duplicate keys and oversized decoded content |
 | HTTP execution | 16 workers, 64 waiting requests, 8 active browser sessions | #208; reject admission with 429/503 and bounded Retry-After |
-| Request time | 30 s ordinary request; 120 s total upload; 120 s download idle | #162 #166 #208; slow request/disconnect releases resource reservation |
-| Workflow execution | 2 workers, 32 queued attempts, 1 active attempt per job | #160 #165 #208; admission atomic across tabs and scheduler rejection |
-| Pages | Default 50, maximum 200 rows; response ceiling 1 MiB | #159 #163 #202; opaque snapshot cursor, no full-store rescans per page |
+| Request time | 30 s ordinary request; 120 s total upload; 120 s download idle | #162 #165 #208; slow request/disconnect releases resource reservation |
+| Workflow execution | 2 workers, 32 queued attempts, 1 active attempt per job | #160 #163 #208; admission atomic across tabs and scheduler rejection |
+| Pages | Default 50, maximum 200 rows; response ceiling 1 MiB | #162 #165 #202; opaque snapshot cursor, no full-store rescans per page |
 | Source/log read | 256 KiB source chunk / 64 KiB log chunk; response ceiling applies | #178 #189; explicit truncation/next offset, byte-count-safe arithmetic |
 | Graph neighborhood | 200 nodes, 400 edges per expansion | #184 #220; return omitted counts or unknown, never silently omit |
 | Event connection | 16 streams total, 2 per session; heartbeat 15 s | #174 #208; slow consumers reconcile from snapshot |
