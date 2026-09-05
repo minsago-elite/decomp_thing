@@ -56,7 +56,7 @@ internal class LinuxGeneratedCRepairValidationBoundary private constructor() : G
     private val configuration by lazy { GeneratedCRepairRuntimeConfiguration.loadFromEnvironment() }
 
     override fun requireAvailable() {
-        requireWritableMountClosure()
+        requireProductionQualification()
         val deadline = GeneratedCValidationDeadline.after(Duration.ofSeconds(30), AgentCancellation.NONE)
         val config = configuration
         // Availability authenticates the compiler closure and both dedicated finite mounts through
@@ -82,7 +82,7 @@ internal class LinuxGeneratedCRepairValidationBoundary private constructor() : G
     }
 
     override fun validateCandidate(request: RepairCandidateValidationRequest): RepairCandidateValidationOutcome {
-        requireWritableMountClosure()
+        requireProductionQualification()
         val deadline = GeneratedCValidationDeadline(request.deadlineNanos, request.cancellation)
         deadline.check()
         require(request.label.matches(Regex("[A-Za-z0-9][A-Za-z0-9._-]{0,127}"))) { "validation receipt label is invalid" }
@@ -243,9 +243,9 @@ internal class LinuxGeneratedCRepairValidationBoundary private constructor() : G
     companion object {
         fun create(): GeneratedCRepairValidationBoundary = LinuxGeneratedCRepairValidationBoundary()
         private val PROGRAM_DESTINATION = Path.of("/decomp-generated-c-program")
-        private fun requireWritableMountClosure(): Nothing = throw SandboxUnavailableException(
-            "generated-C validation requires verified containment of every writable namespace mount; " +
-                "production qualification is unavailable until that boundary proof is complete",
+        private fun requireProductionQualification(): Nothing = throw SandboxUnavailableException(
+            "generated-C validation remains unavailable pending qualification of its complete " +
+                "provisioned compiler, executable runtime and public-factory validation path",
         )
     }
 }

@@ -138,3 +138,36 @@ hash does not change the provisioning commitment. User-owned snapshots still com
 Two benign `AcpRuntimeManifestConsistencyTest` cases verify both properties. The focused local
 rerun passed ten tests with the one unprovisioned live mount case skipped. Source snapshot manifests
 also use the same bounded canonical JSON encoding as the retained receipt and archive verifier.
+
+## Hosted public-factory qualification procedure
+
+`scripts/qualify-generated-c-validation.sh` assembles a separate disposable operator-style host.
+It requires an explicit GitHub Actions run identity and noninteractive operator sudo. The helper
+`ci-prepare-generated-c-validation.py` refuses existing targets, copies a bounded trusted GNU
+compiler/tool closure into root-owned link-free files under
+`/opt/decomp-generated-c-validation-ci`, and provisions distinct finite 64 MiB/4096-inode tmpfs
+mounts under `/var/lib/decomp-generated-c-validation-ci`. These are independent of the ACP quota
+test fixture. The source mount allows execution because captured ELF file binds inherit mount
+flags; the writable output mount is `noexec`. Both deny device/setuid authority.
+
+The fixture closure contains the system headers required by its fixed benign stdio program and
+the declared compiler internals, startup objects and dynamic libraries. It does not claim support
+for arbitrary headers, languages or operator installations. The reference binary is compiled from
+the script's fixed trusted fixture before any candidate validation; that operation is fixture
+construction. The production validation path has no host compiler fallback.
+
+`generatedCRepairQualification` runs a test-source CLI that first writes only data: audited runtime
+manifests, raw security-tool pins and the strict configuration document. The script installs the
+runtime/sandbox documents as root-owned immutable configuration, while the ACP factory document
+remains private to the application user. The CLI then calls `SecureRepairRuntime.open` and
+`runRepair` through the registered production provider. It checks all retained stdin/argument
+cases, stderr, an ordinary nonzero exit and complete acceptance, then starts a separate process
+to reopen the graph and validate again while preserving the first receipt. It has no private
+factory, test validation strategy, or availability/assurance override.
+
+The orchestration always attempts ordinary verified unmount and removes only its own marked
+fixture roots. Evidence remains in `build/generated-c-public-qualification`. At this checkpoint
+the public provider guard remains active, so the full procedure cannot yet claim success. This
+procedure covers benign baseline validation and reopening; agent candidate promotion, adversarial
+input rejection, resource/cancellation outcomes and release archive qualification remain distinct
+required evidence. No skipped or incomplete run may be reported as production qualification.
