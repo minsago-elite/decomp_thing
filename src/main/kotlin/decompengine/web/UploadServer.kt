@@ -295,7 +295,7 @@ class UploadServer(
         try {
             when {
                 exchange.requestMethod == "GET" && segments.isEmpty() ->
-                    exchange.sendHtml(200, renderDashboard(store.list()))
+                    exchange.sendHtml(200, renderDashboard(store.list(), store.recoveryInventory()))
                 exchange.requestMethod == "GET" && segments == listOf("assets", "app.css") ->
                     exchange.sendBytes(200, APP_CSS.toByteArray(), "text/css; charset=utf-8", cache = true)
                 exchange.requestMethod == "GET" && segments == listOf("api", "recovery") ->

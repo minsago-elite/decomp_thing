@@ -365,6 +365,12 @@ The configured root follows the existing store path contract; this does not fenc
 A complete inventory says only that the scoped scan finished, not that candidates are abandoned or safe
 to delete. No files are reclaimed or promoted. Safe reclamation and aggregate storage quotas remain
 #242/#71 requirements; #69 may display this summary without interpreting it as completed cleanup.
+The web workbench now renders this summary when candidates are retained or inspection is incomplete,
+including incomplete scans with zero counted candidates. Incomplete results use an explicit lower-bound
+label and explain that additional files or bytes may remain. Complete results still state that retained
+files may belong to active work. The panel links to the JSON summary, omits private names and contents,
+and reports that no files were deleted. A complete empty scan omits the panel. Refresh performs a new
+bounded scan; the job list and recovery inventory are separate observations, not an atomic snapshot.
 The metadata and upload abrupt-exit tests also compare the inventory against the actual retained files
 after each child JVM terminates. They assert exact candidate counts and byte totals, then verify that
 interrupted-job recovery leaves the inventory and private file contents unchanged. A metadata temporary
