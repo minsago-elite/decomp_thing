@@ -769,6 +769,7 @@ private class LiveWorkerImageDockerClient(
                     "--pull=false",
                     "--no-cache",
                     "--platform=linux/amd64",
+                    "--file=Dockerfile",
                     baseTag.buildArgument,
                     "--iidfile=$iidFile",
                     "--quiet",
