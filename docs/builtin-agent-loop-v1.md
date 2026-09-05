@@ -13,7 +13,9 @@ before the first effect. Actual authorization occurs through the trusted session
 The harness carries the original execution deadline and cancellation to the provider and tool
 session. It bounds model calls (including reported retries), tool calls, repeated canonical
 actions, context serialization, output bytes, individual tool results, trace records and aggregate
-input/output usage. Context overflow produces explicit exhaustion. Context is sorted by input ID;
+input/output usage. Initial context is packaged with explicit selection and retrieval metadata;
+overflow without supported retrieval, mandatory metadata overflow and later history overflow produce
+explicit exhaustion. Context is sorted by input ID;
 tool results retain their call IDs. Action identity sorts JSON object keys and excludes the model's
 chosen call ID, so renaming a repeated action cannot evade its limit.
 

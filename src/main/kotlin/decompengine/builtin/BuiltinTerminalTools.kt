@@ -138,6 +138,7 @@ internal class BuiltinProcessToolSession(
     private val terminals: BuiltinTerminalDispatcher,
 ) : BuiltinToolSession {
     override val definitions = Collections.unmodifiableList(workspace.definitions + terminals.definitions)
+    override val supportsContextRetrieval get() = workspace.supportsContextRetrieval
     init { require(definitions.map { it.name }.distinct().size == definitions.size) { "Duplicate composed built-in tool" } }
     override fun authorize(call: ModelToolCall, control: BuiltinExecutionControl): Boolean =
         if (call.name == "run_process") { control.checkpoint(); true } else workspace.authorize(call, control)

@@ -35,8 +35,8 @@ python3 scripts/validate-builtin-contract.py
 ```
 
 The `Built-in core contract` workflow provisions the existing ACP sandbox host and runs the second
-command. The v2 inventory freezes 65 cases across six suites: 23 provider, 14 loop, 7 filesystem,
-6 captured-context, 7 terminal and 8 shared-agent cases. It forces fresh Gradle execution, requires a clean source
+command. The v3 inventory freezes 70 cases across seven suites: 23 provider, 14 loop, 7 filesystem,
+6 captured-context, 5 context-package, 7 terminal and 8 shared-agent cases. It forces fresh Gradle execution, requires a clean source
 worktree, checks XML cases as well as suite totals, and rejects missing/changed suites, failures,
 errors or skips. `build/builtin-contract-qualification/summary.json` records the commit and XML
 hashes. It explicitly does not qualify real-provider workflows or a release.
@@ -57,6 +57,17 @@ failed qualification: all six live cases rejected the fixture's default CPU allo
 exceeded their 10-second wall limit. The fixture now explicitly uses a 2-second CPU allowance;
 its limit construction is also checked by the host-independent metadata test. This corrects fixture
 configuration and does not weaken production limits. A new positive hosted result is still required.
+
+The corrected v1 run `33950445659` and expanded v2 run
+[33950508161](https://github.com/minsago-elite/decomp_thing/actions/runs/33950508161) subsequently passed.
+The latter qualifies exactly `2d2424f` with 65 required cases, zero failures/errors/skips, a clean
+source tree and forced test execution. Its six-suite XML totals and SHA-256 values were independently
+checked against the downloaded summary. Artifact `9964728215` has archive digest
+`sha256:b244e3a754b6cf4070bafbd52fd07261fcd0167050ee740f2dab7e83f528429e`.
+This proves the versioned core fixtures, including live terminal/direct-ACP parity, feedback,
+policy denial, operation-injection rejection and detached-descendant cancellation cleanup. It does
+not qualify production compiler profiles or real-provider workflows. The new v3 context-package
+inventory requires its own exact-commit hosted result.
 
 #74 remains open. This checkpoint does not supply production compiler profiles, writable quota-backed
 build stages or general host directory inspection. Captured directory and immutable request evidence
