@@ -150,17 +150,22 @@ fun renderJob(job: Job, reportContext: WebReportContext? = null, diagnostics: Li
     )
 }
 
-fun renderSourceFile(job: Job, relativePath: String, source: String, reportContext: WebReportContext? = null): String {
+fun renderSourceFile(
+    job: Job,
+    relativePath: String,
+    source: String,
+    reportContext: WebReportContext? = null,
+    manifest: JsonObject? = null,
+    confidence: JsonObject? = null,
+): String {
     val reports = reportsFor(job, reportContext)
-    val tree = reports.reportsDirectory.resolve("source-tree")
-    val manifest = runCatching { Json.parseToJsonElement(tree.resolve("source_tree_manifest.json").readText()).jsonObject }.getOrNull()
     val fileEvidence = manifest?.get("files")?.jsonArray?.mapNotNull { it as? JsonObject }
         ?.firstOrNull { it.text("path") == relativePath }
     val generator = fileEvidence?.text("generator").orEmpty()
     val entities = fileEvidence?.get("entityIds")?.jsonArray?.joinToString(", ") { it.jsonPrimitive.content }.orEmpty()
     val moduleId = relativePath.substringAfterLast('/').substringBeforeLast('.')
     val moduleConfidence = runCatching {
-        Json.parseToJsonElement(tree.resolve("reports/confidence.json").readText()).jsonObject["modules"]?.jsonArray
+        confidence?.get("modules")?.jsonArray
             ?.mapNotNull { it as? JsonObject }?.firstOrNull { it.text("id") == moduleId }
             ?.get("score")?.jsonPrimitive?.doubleOrNull
     }.getOrNull()

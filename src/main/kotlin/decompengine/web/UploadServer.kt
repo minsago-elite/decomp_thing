@@ -12,6 +12,8 @@ import decompengine.jobs.Job
 import decompengine.jobs.JobStore
 import decompengine.jobs.JobStoreException
 import decompengine.jobs.toJson
+import decompengine.oracle.core.OracleJson
+import decompengine.oracle.core.StrictJsonLimits
 import decompengine.project.ArchivalReconstructionService
 import decompengine.project.BoundedLlmModuleReconstructor
 import decompengine.project.EvidenceModuleReconstructor
@@ -21,12 +23,14 @@ import kotlinx.serialization.json.Json
 import kotlinx.serialization.json.JsonElement
 import kotlinx.serialization.json.JsonNull
 import kotlinx.serialization.json.JsonPrimitive
+import kotlinx.serialization.json.JsonObject
 import kotlinx.serialization.json.buildJsonObject
 import kotlinx.serialization.json.put
 import java.io.ByteArrayOutputStream
 import java.net.InetSocketAddress
 import java.net.URLDecoder
 import java.nio.charset.StandardCharsets
+import java.nio.ByteBuffer
 import java.nio.file.Path
 import java.util.concurrent.ArrayBlockingQueue
 import java.util.concurrent.Executor
@@ -365,15 +369,30 @@ class UploadServer(
             it.removePrefix("runId=")
         }
         val context = jobs.reportContext(jobId, runId)
-        val source = jobs.resolveArtifact(jobId, "${context.artifactPrefix}/source-tree/$normalized")
-        exchange.sendHtml(200, renderSourceFile(jobs.get(jobId), normalized, java.nio.file.Files.readString(source), context))
+        val source = jobs.readArtifact(jobId, "${context.artifactPrefix}/source-tree/$normalized", MAX_SOURCE_BYTES)
+        val text = try {
+            StandardCharsets.UTF_8.newDecoder().decode(ByteBuffer.wrap(source.bytes)).toString()
+        } catch (_: java.nio.charset.CharacterCodingException) {
+            throw IllegalArgumentException("source file is not valid UTF-8 text")
+        }
+        exchange.sendHtml(200, renderSourceFile(
+            jobs.get(jobId), normalized, text, context,
+            readSourceMetadata(jobId, context, "source_tree_manifest.json"),
+            readSourceMetadata(jobId, context, "reports/confidence.json"),
+        ))
     }
 
     private fun handleArtifact(exchange: HttpExchange, jobId: String, relativePath: String) {
-        val artifact = jobs.resolveArtifact(jobId, relativePath)
-        exchange.responseHeaders.add("Content-Disposition", "attachment; filename=\"${artifact.name.replace("\"", "")}\"")
-        exchange.sendBytes(200, java.nio.file.Files.readAllBytes(artifact), contentType(artifact))
+        val artifact = jobs.readArtifact(jobId, relativePath, MAX_ARTIFACT_BYTES)
+        val name = Path.of(relativePath).fileName
+        exchange.responseHeaders.add("Content-Disposition", "attachment; filename=\"${name.toString().replace("\"", "")}\"")
+        exchange.sendBytes(200, artifact.bytes, contentType(name))
     }
+
+    private fun readSourceMetadata(jobId: String, context: WebReportContext, relativePath: String): JsonObject? = runCatching {
+        val snapshot = jobs.readArtifact(jobId, "${context.artifactPrefix}/source-tree/$relativePath", MAX_SOURCE_METADATA_BYTES)
+        OracleJson.parse(snapshot.bytes, SOURCE_METADATA_LIMITS) as? JsonObject
+    }.getOrNull()
 
     private fun encodeJob(job: Job): String =
         Json.encodeToString(JsonElement.serializer(), job.toJson())
@@ -382,6 +401,17 @@ class UploadServer(
 
     private companion object {
         const val MAX_UPLOAD_BYTES = 32L * 1024 * 1024
+        const val MAX_SOURCE_BYTES = 4L * 1024 * 1024
+        const val MAX_ARTIFACT_BYTES = 64L * 1024 * 1024
+        const val MAX_SOURCE_METADATA_BYTES = 1024L * 1024
+        val SOURCE_METADATA_LIMITS = StrictJsonLimits(
+            maximumInputBytes = MAX_SOURCE_METADATA_BYTES.toInt(),
+            maximumCanonicalBytes = MAX_SOURCE_METADATA_BYTES.toInt(),
+            maximumDepth = 32,
+            maximumNodes = 100_000,
+            maximumStringBytes = 64 * 1024,
+            maximumTotalStringBytes = MAX_SOURCE_METADATA_BYTES.toInt(),
+        )
     }
 }
 

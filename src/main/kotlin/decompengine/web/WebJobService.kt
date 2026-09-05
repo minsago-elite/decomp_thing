@@ -210,6 +210,15 @@ class WebJobService(
         return store.resolveArtifact(jobId, relativePath)
     }
 
+    /** Validate the report namespace and attempt ownership before a bounded retained-descriptor read. */
+    @Synchronized
+    internal fun readArtifact(jobId: String, relativePath: String, maximumBytes: Long): decompengine.repair.StableRegularFile {
+        requireInitializedRead()
+        val segments = canonicalReportSegments(relativePath)
+        if (segments[1] == "runs") getAttempt(jobId, segments[2]) else presentation(jobId)
+        return store.readArtifact(jobId, relativePath, maximumBytes)
+    }
+
     @Synchronized
     fun upload(filename: String, content: ByteArray): Job {
         writableStore()

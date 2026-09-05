@@ -168,6 +168,10 @@ class DurableWebWorkflowTest {
             assertTrue(service.getAttempt(job.id, second.runId).publicationPending)
             assertEquals(first.runId, service.resolveArtifact(job.id, "reports/runs/${first.runId}/report.txt").readText())
             assertEquals(second.runId, service.resolveArtifact(job.id, "reports/runs/${second.runId}/report.txt").readText())
+            assertEquals(first.runId, service.readArtifact(job.id, "reports/runs/${first.runId}/report.txt", 4096).bytes.toString(Charsets.UTF_8))
+            assertFailsWith<Exception> { service.readArtifact(job.id, "reports/runs/${first.runId}/report.txt", 1) }
+            assertFailsWith<WebJobServiceException> { service.readArtifact(job.id, "reports/runs/run_unknown/report.txt", 4096) }
+
             assertEquals(WebWorkflowAdmission.Unavailable, service.start(job.id, WebWorkflow.RECONSTRUCT))
             val dto = webJob(service.presentation(job.id))
             assertEquals(second.runId, dto.getValue("latestRunId").jsonPrimitive.content)

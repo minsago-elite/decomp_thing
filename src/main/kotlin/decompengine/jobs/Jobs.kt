@@ -3,6 +3,10 @@ package decompengine.jobs
 import decompengine.binary.ElfMetadata
 import decompengine.binary.ElfMetadataReader
 import decompengine.binary.InvalidElfException
+import decompengine.oracle.core.OracleJson
+import decompengine.repair.StableRegularFile
+import decompengine.repair.readStableRegularFile
+import java.io.IOException
 import kotlinx.serialization.json.Json
 import kotlinx.serialization.json.JsonElement
 import kotlinx.serialization.json.JsonObject
@@ -101,11 +105,15 @@ class JobStore(root: Path) {
 
     @Synchronized
     fun get(jobId: String): Job {
-        val metadataPath = jobDirectory(jobId).resolve("job.json")
-        if (!metadataPath.exists()) {
-            throw JobStoreException("job not found: $jobId")
+        val jobDir = jobDirectory(jobId)
+        val payload = try {
+            OracleJson.parse(readStableRegularFile(root, "$jobId/job.json", 256L * 1024).bytes).jsonObject
+        } catch (_: IOException) {
+            throw JobStoreException("job metadata is unavailable or its path changed")
         }
-        val payload = Json.parseToJsonElement(metadataPath.readText()).jsonObject
+        require(payload.string("id") == jobId &&
+            Path.of(payload.string("binary_path")) == jobDir.resolve("input.elf")
+        ) { "job metadata identity does not match its store location" }
         return Job(
             id = payload.string("id"),
             filename = payload.string("filename"),
@@ -183,6 +191,25 @@ class JobStore(root: Path) {
             throw JobStoreException("artifact not found: $relativePath")
         }
         return artifact
+    }
+
+    internal fun readArtifact(
+        jobId: String,
+        relativePath: String,
+        maximumBytes: Long,
+    ): StableRegularFile {
+        jobDirectory(jobId)
+        require(relativePath.startsWith("reports/") && relativePath.length <= 4096 &&
+            relativePath.none { it == '\\' || it.code < 32 || it.code == 127 } &&
+            relativePath.split('/').let { parts ->
+                parts.size <= 32 && parts.none { it.isBlank() || it == "." || it == ".." }
+            }
+        ) { "artifact path must be a canonical report path" }
+        return try {
+            readStableRegularFile(root, "$jobId/$relativePath", maximumBytes)
+        } catch (_: IOException) {
+            throw JobStoreException("artifact is unavailable or its path changed")
+        }
     }
 
     @Synchronized
