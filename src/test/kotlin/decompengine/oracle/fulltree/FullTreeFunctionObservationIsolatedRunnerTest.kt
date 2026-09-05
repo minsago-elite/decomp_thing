@@ -26,6 +26,8 @@ import kotlin.test.assertEquals
 import kotlin.test.assertFailsWith
 import kotlin.test.assertNotEquals
 import kotlin.test.assertTrue
+import kotlinx.serialization.json.JsonObject
+import kotlinx.serialization.json.JsonPrimitive
 import org.junit.jupiter.api.Assumptions.assumeTrue
 
 class FullTreeFunctionObservationIsolatedFixtureRunnerTest {
@@ -187,9 +189,10 @@ class FullTreeFunctionObservationIsolatedFixtureRunnerTest {
                 val unrelated = run.resolve("unrelated.txt")
                 val unrelatedBytes = "unknown residue must remain untouched".toByteArray()
                 Files.write(unrelated, unrelatedBytes)
-                val arguments = isolatedObservationJvmTemporaryArguments(run)
+                val native = Path.of(checkNotNull(System.getProperty("decompengine.oracle.nativeLibraryDirectory")))
+                val arguments = isolatedObservationJvmTemporaryArguments(run, native)
                 assertEquals(
-                    listOf("-Djna.nosys=true", "-Djna.tmpdir=$temporary", "-Djava.io.tmpdir=$temporary"),
+                    OracleNativeLibraries.jvmArguments(native) + listOf("-Djna.tmpdir=$temporary", "-Djava.io.tmpdir=$temporary"),
                     arguments,
                 )
                 val child = ProcessBuilder(
@@ -250,6 +253,18 @@ class FullTreeFunctionObservationIsolatedFixtureRunnerTest {
         assertEquals(configuration.canonicalSha256, OracleArtifacts.sha256(canonical))
         assertContentEquals(canonical, OracleJson.canonicalBytes(OracleJson.parseCanonical(canonical)))
         assertEquals(FROZEN_ISOLATION_CONFIGURATION_SHA256, configuration.canonicalSha256)
+        val current = OracleJson.parseCanonical(canonical) as JsonObject
+        assertEquals(JsonPrimitive(3), current["schemaVersion"])
+        assertEquals(JsonPrimitive(OracleNativeLibraries.policySha256), current["nativeLibraryProfileSha256"])
+        assertEquals(JsonPrimitive("2"), current["supervisorProtocolVersion"])
+        val legacy = JsonObject(current.toMutableMap().apply {
+            remove("nativeLibraryProfileSha256")
+            put("schemaVersion", JsonPrimitive(2))
+            put("provider", JsonPrimitive("kotlin-full-tree-function-observation-isolation-configuration-v2"))
+            put("supervisorProtocolVersion", JsonPrimitive("1"))
+        })
+        assertEquals(FROZEN_LEGACY_ISOLATION_CONFIGURATION_SHA256, OracleArtifacts.sha256(OracleJson.canonicalBytes(legacy)))
+        assertNotEquals(FROZEN_LEGACY_ISOLATION_CONFIGURATION_SHA256, configuration.canonicalSha256)
 
         mounts.clear()
         classPath.clear()
@@ -3528,6 +3543,8 @@ class FullTreeFunctionObservationIsolatedFixtureRunnerTest {
         const val ZERO_SHA256 =
             "0000000000000000000000000000000000000000000000000000000000000000"
         const val FROZEN_ISOLATION_CONFIGURATION_SHA256 =
+            "0feb4469bc91b6668777ddc336dd39c4d2db76db932ee4e74a729de34deff740"
+        const val FROZEN_LEGACY_ISOLATION_CONFIGURATION_SHA256 =
             "107fe58551ea95533bada45432758c1882ba3876c5681a1c43282c10433138d3"
         const val TEST_LEASE_RECORD_FILE = "lease.json"
     }

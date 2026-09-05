@@ -88,6 +88,37 @@ missing LLVM tools fail the required worker probe rather than silently passing. 
 JUnit runs report missing tools as explicit skips, unless `DECOMP_REQUIRE_LLVM_RETAINED_TOOLS=1`
 requests required-tool mode.
 
+### Docker stdin archive detection
+
+The deterministic context starts with a plain USTAR regular-file header named `Dockerfile`.
+Subsequent entries retain PAX paths/link targets, including long UTF-8 names. Every entry still
+uses the same root ownership, fixed timestamp, normalized mode, descriptor-selected bytes and
+replay digest. This changes the serialized tar size/hash, not the frozen Dockerfile, logical
+context membership, launcher arguments, runtime policy or oracle authority. Previous tar hashes
+are not reinterpreted as the new bytes.
+
+The earlier always-PAX encoding put the first logical file header at byte 1024, after a PAX
+header and its padded body. Buildx's [stdin detection](https://github.com/docker/buildx/blob/1b3aad3219b45e0c38532d0374c25858a4b08f35/build/opt.go)
+peeks only 1024 bytes; its [archive predicate](https://github.com/docker/buildx/blob/1b3aad3219b45e0c38532d0374c25858a4b08f35/build/utils.go)
+asks Go's tar reader for a logical entry. That prefix cannot supply the entry, so the code takes
+the Dockerfile-input branch instead of the tar-context branch. Full-archive parsing alone had
+missed this interoperability defect. The observed hosted `COMPRESSION_ERROR` is consistent with
+feeding the large binary context to the Dockerfile parser, but hosted success is still required
+to confirm that this fix resolves that failure.
+
+The regression checks that 512-byte and 1024-byte prefixes expose the exact regular `Dockerfile`
+header to an independent tar reader, and that a PAX-only prefix does not. Existing complete
+archive checks still compare every path, type, mode, timestamp, payload and link with an
+independent reader. The live build also specifies `--file=Dockerfile`, so an unrecognized archive
+fails instead of silently treating the whole input as an inline Dockerfile. No builder fallback,
+larger output limit, retry, extra network access or skipped required test is introduced.
+
+Local verification of this fix runs 32 tests: 24 passed, eight environment-dependent retained-tool
+or live Docker cases skipped, and zero failures. All ten build-context tests ran, including the
+new prefix regression. The first reproduction failed on the old writer with `Truncated TAR
+archive`; the corrected prefix and complete-archive checks pass. This host has no Docker daemon,
+so these results are not a successful production-staged image build or retained-tool qualification.
+
 The test Docker client accepts image absence only from the exact missing-image response for its
 requested reference. Daemon, permission, unsupported-platform/API, and unknown failures remain
 indeterminate and abort with bounded escaped diagnostics, including during derived-image cleanup.

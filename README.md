@@ -113,12 +113,13 @@ An early embedded SPA preview is available with `web --ui spa`; it serves the
 public shell and runtime view while job/workflow parity is developed. The default
 remains the existing workbench. See [packaging and preview usage](docs/web-packaging.md).
 
+Ghidra 12.1.3 is a hash-locked, bundled dependency. `installDist`, ZIP/TAR distributions and Docker include its Java libraries, processor data, native decompiler and licenses. An application-owned JVM worker links directly to the Ghidra APIs; no separate Ghidra installation, `GHIDRA_HOME`, or runtime download is used. The first build downloads the pinned 569 MB archive into the Gradle cache. See [bundled Ghidra](docs/bundled-ghidra.md) for offline builds and verification.
+
 ## Archival source-tree reconstruction
 
 Generate a buildable multi-file project and deterministic ZIP bundle with Ghidra evidence and optional bounded LLM reconstruction:
 
 ```bash
-export GHIDRA_HOME=/path/to/ghidra
 export ACP_CONFIG_FILE=/absolute/private/path/acp-v1.json
 llm_bin_patch reconstruct ./input/program --output ./output/program-source
 ```
@@ -175,10 +176,13 @@ Run the full local CI suite:
 scripts/ci.sh
 ```
 
-Run the opt-in real-Ghidra adapter test after setting `GHIDRA_HOME`:
+Run the opt-in real-Ghidra adapter tests using the bundle built by Gradle:
 
 ```bash
-RUN_REAL_GHIDRA=true ./gradlew test --tests 'decompengine.mvp.GhidraDecompilerTest'
+RUN_REAL_GHIDRA=true RUN_REAL_GHIDRA_CALL_SITES=true ./gradlew test \
+  --tests 'decompengine.mvp.GhidraDecompilerTest' \
+  --tests 'decompengine.project.GhidraProgramModelExporterTest' \
+  --tests 'decompengine.project.RecoveredCallSitesTest'
 ```
 
 This executes the Kotlin/JVM test suite. Project planning and progress are tracked in [GitHub milestones](https://github.com/minsago-elite/decomp_thing/milestones) and [issues](https://github.com/minsago-elite/decomp_thing/issues). `ROADMAP.md` is deprecated and retained only as a migration pointer.

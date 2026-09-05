@@ -6,6 +6,7 @@ import decompengine.acp.AcpHarnessSelection
 import decompengine.acp.AcpAgentHarness
 import decompengine.acp.AcpPreflightWorkflow
 import decompengine.agent.AgentExecutionException
+import decompengine.analysis.BundledGhidra
 import java.net.URI
 import java.net.http.HttpClient
 import java.net.http.HttpRequest
@@ -180,21 +181,15 @@ class Doctor(
     }
 
     private fun ghidraCheck(): DoctorCheck {
-        val home = environment["GHIDRA_HOME"]?.trim()?.takeIf(String::isNotEmpty)?.let(Path::of)
-            ?: return DoctorCheck("Ghidra", false, "Set GHIDRA_HOME to a Ghidra installation containing support/analyzeHeadless.")
-        val executable = home.resolve("support/analyzeHeadless")
-        if (!Files.isExecutable(executable)) {
-            return DoctorCheck("Ghidra", false, "No executable analyzeHeadless at ${executable.pathString}; correct GHIDRA_HOME or install Ghidra.")
-        }
-        return runCatching { commandProbe.run(listOf(executable.pathString), home) }.fold(
+        return runCatching { commandProbe.run(BundledGhidra.locate().probeCommand(), null) }.fold(
             onSuccess = { result ->
-                if (result.exitCode == 0 || result.output.contains("analyzeHeadless", ignoreCase = true)) {
-                    DoctorCheck("Ghidra", true, "analyzeHeadless launched successfully at ${executable.pathString}")
+                if (result.exitCode == 0) {
+                    DoctorCheck("Ghidra", true, "Bundled Ghidra ${BundledGhidra.VERSION} direct API initialized successfully")
                 } else {
-                    DoctorCheck("Ghidra", false, "analyzeHeadless exists but could not launch; verify Ghidra's Java configuration. ${result.output.firstLineOr("exit ${result.exitCode}")}")
+                    DoctorCheck("Ghidra", false, "Bundled Ghidra could not initialize; verify the application JDK and bundle. ${result.output.firstLineOr("exit ${result.exitCode}")}")
                 }
             },
-            onFailure = { DoctorCheck("Ghidra", false, "analyzeHeadless exists but could not launch; verify Ghidra's Java configuration. ${it.message}") },
+            onFailure = { DoctorCheck("Ghidra", false, "Bundled Ghidra is unavailable; reinstall the complete application distribution. ${it.message}") },
         )
     }
 

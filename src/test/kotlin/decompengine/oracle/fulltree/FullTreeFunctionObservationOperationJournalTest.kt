@@ -1771,16 +1771,16 @@ class FullTreeFunctionObservationOperationJournalTest {
     private class SimulatedProcessDeath : Error()
 
     private companion object {
-        const val FROZEN_BINDING_SHA256 = "0554300db9114b165715c5ed05492b1b73f18d437aaae1c89fa7d459bc458d85"
+        const val FROZEN_BINDING_SHA256 = "23611dd546112f804966f20a1f1c1d46f83a4227f6a5cdb10cf028d5c8fa0307"
         const val FROZEN_BINDING_ARTIFACT_SHA256 =
-            "4b64aa0871ea9d146b46682bdcdff613afb5b7874f82f4a7b133f9d72a4b230d"
+            "f90ac86de12f012fc7216ac73637d2206940960c036b2159312762c498022c97"
         const val FROZEN_INITIAL_TRANSITION_SHA256 =
-            "065a9d5f56530ccafa1e31a5598d05ec5f9d03f7bc2998666ba4b031761e3f81"
+            "8d5ff70f993eb29d0a4bcb67088417e059afa6ea18f5487d20e0ab66ac607093"
         const val FROZEN_ATTACHMENT_RECEIPT_SHA256 =
-            "4c21a50f1d2a45a514891d2673fc4b93e450a391817dcbf295b2d276f37e685f"
+            "32569c7e0fb3f689c0cadd94cbdab54c9f208ee160a364653753fea31cf504e8"
         const val FROZEN_ATTACHMENT_RECEIPT_ARTIFACT_SHA256 =
-            "7ab146720bacd979d5fc91d6af8535b83c061880a73b90987aeb941f4afeb5d0"
+            "4bb20d2d00e04567cc11095bd38ea298f2f4ec4eaf9399dc59d4e7513a2c867e"
         const val FROZEN_COMPLETE_TRANSITION_SHA256 =
-            "c27471d6fa2c6a29f264c06b703d14e43f893f44735d8c053dcd5725a51a19ad"
+            "bc5c9d8238104013c0ba0a97c61a7187d39bf08000767eb2943c8ecf7dc5b2de"
     }
 }

@@ -13,3 +13,4 @@ dependencyResolutionManagement {
 }
 
 rootProject.name = "llm-bin-patch"
+include("ghidra-bridge")

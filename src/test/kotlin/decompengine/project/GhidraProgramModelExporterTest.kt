@@ -1,6 +1,8 @@
 package decompengine.project
 
 import decompengine.analysis.GhidraAnalysisException
+import decompengine.analysis.GhidraInvocation
+import decompengine.analysis.fakeGhidraCommand
 import java.nio.file.Path
 import java.time.Duration
 import kotlin.io.path.createDirectories
@@ -153,8 +155,6 @@ class GhidraProgramModelExporterTest {
     @Test
     fun `opt in real Ghidra reuses accepted function records deterministically`() {
         if (System.getenv("RUN_REAL_GHIDRA") != "true") return
-        val home = System.getenv("GHIDRA_HOME")?.let(Path::of)
-            ?: error("RUN_REAL_GHIDRA=true requires GHIDRA_HOME")
         val temp = createTempDirectory("program-model-real-")
         val source = temp.resolve("program.c")
         val binary = temp.resolve("program")
@@ -169,7 +169,7 @@ class GhidraProgramModelExporterTest {
         check(compiler.waitFor() == 0) { compilerOutput }
         source.deleteExisting()
         val work = temp.resolve("analysis")
-        val analyzer = GhidraHeadlessProgramModelAnalyzer(home)
+        val analyzer = GhidraHeadlessProgramModelAnalyzer()
 
         val first = analyzer.analyze(binary, work)
         val modelPath = work.resolve("reports/program_model.json")
@@ -189,13 +189,15 @@ class GhidraProgramModelExporterTest {
         assertTrue(progress.contains("\"phase\":\"complete\""))
         assertTrue(progress.contains("\"reused\":${records.size - 1}"), progress)
         assertTrue(work.resolve("reports/ghidra_stdout.log").readText().contains("reused=${records.size - 1}"))
+        java.nio.file.Files.write(binary, byteArrayOf(0), java.nio.file.StandardOpenOption.APPEND)
+        assertFailsWith<IllegalArgumentException> { analyzer.analyze(binary, work) }
+        assertTrue(firstModel.contentEquals(modelPath.readBytes()))
+        assertTrue(work.resolve("reports/ghidra_stderr.log").readText().contains("existing output is not a successful result"))
     }
 
     @Test
     fun `opt in real Ghidra reuses authenticated planning batches deterministically`() {
         if (System.getenv("RUN_REAL_GHIDRA") != "true") return
-        val home = System.getenv("GHIDRA_HOME")?.let(Path::of)
-            ?: error("RUN_REAL_GHIDRA=true requires GHIDRA_HOME")
         val temp = createTempDirectory("program-model-planning-real-")
         val source = temp.resolve("program.c")
         val binary = temp.resolve("program")
@@ -211,7 +213,6 @@ class GhidraProgramModelExporterTest {
         source.deleteExisting()
         val work = temp.resolve("analysis")
         val analyzer = GhidraHeadlessProgramModelAnalyzer(
-            home,
             recoveryMode = GhidraProgramModelRecoveryMode.PLANNING,
         )
 
@@ -231,9 +232,9 @@ class GhidraProgramModelExporterTest {
         assertTrue(progress.contains("\"reused\":${first.functions.size}"), progress)
     }
 
-    private fun fakeGhidraHome(temp: Path, complete: Boolean): Path {
+    private fun fakeGhidraHome(temp: Path, complete: Boolean): (GhidraInvocation) -> List<String> {
         val home = temp.resolve(if (complete) "fake-ghidra" else "slow-ghidra")
-        val executable = home.resolve("support/analyzeHeadless")
+        val executable = home.resolve("fake-worker")
         executable.parent.createDirectories()
         val canonicalModel = home.resolve("canonical-program-model.json")
         if (complete) {
@@ -268,6 +269,6 @@ class GhidraProgramModelExporterTest {
             },
         )
         executable.toFile().setExecutable(true)
-        return home
+        return fakeGhidraCommand(executable)
     }
 }

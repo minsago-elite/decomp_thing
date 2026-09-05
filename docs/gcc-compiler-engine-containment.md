@@ -49,7 +49,10 @@ runner image: a mutable toolcache JDK or an untrusted entry anywhere under `/usr
 as the live runtime trust root. Production runtime validation keeps the same fail-closed checks.
 
 Supervisor, observer, and BOOT-keeper JVMs explicitly set both JNA and Java temporary paths to the
-existing bounded run `tmp` directory. JNA's Linux home-cache fallback is not an admitted output:
+existing bounded run `tmp` directory. Their JNI libraries are pre-provisioned inside the authenticated
+read-only JDK runtime, not extracted into the `noexec` scratch filesystem. The exact dependency JAR
+and native resource digests are pinned together; see [native runtime provisioning](oracle-native-runtime.md).
+JNA's system-library and unpacking fallbacks are disabled. Its Linux home-cache fallback is not an admitted output:
 the exact lease layout and unknown-residue rejection remain unchanged. The shared user-bus pin
 retains the runtime directory's device, inode, mount, owner, mode, and extended metadata, plus the
 exact socket identity. Ordinary runtime-directory membership changes may update its size or mtime
@@ -68,7 +71,8 @@ scope absent. On that evidence, only the long retained-owner live lifecycle fixt
 requests 300 seconds instead of 60 seconds. Its expected live receipt must bind exactly that budget;
 memory and PID limits are unchanged. Other fixtures retain their 60-second default, unsupported
 budgets still fail before journal creation, and no production maximum or admission rule changes.
-Hosted rerun evidence is still required to establish that the complete live lifecycle passes.
+The subsequent [CI run 33940235344](https://github.com/minsago-elite/decomp_thing/actions/runs/33940235344)
+passed all 22 GCC live-controller tests with no skips, including the retained-owner lifecycle.
 
 The shared test-only journal collector also supports exact deterministic full-tree unit names.
 Three production full-tree BOOT tests additionally sample four allowlisted protocol files through
@@ -78,8 +82,11 @@ non-read-only modes and oversized records are rejected. On failure, observed rec
 journal snapshot are attached as a suppressed diagnostic, preserving the original failure. The
 sampler never sends START, writes protocol files, changes cleanup or authorizes a transition. This
 is best-effort test diagnosis, not authenticated oracle evidence or a production lifecycle observer.
-The three full-tree failures in that CI run have no proven cause yet; their existing production
-timeouts and containment limits remain unchanged rather than assuming the GCC diagnosis applies.
+The subsequent run still failed the three full-tree BOOT tests without producing an allowlisted
+protocol record. A paired local fresh-JVM experiment reproduces JNA's extraction failure on a
+`noexec` filesystem before BOOT; the provisioned-runtime fix still needs hosted confirmation.
+Existing production timeouts, mount flags and containment limits remain unchanged rather than
+assuming the GCC timeout diagnosis applies.
 
 The seven diagnostic regressions and explicit-budget regression run without a live systemd scope:
 

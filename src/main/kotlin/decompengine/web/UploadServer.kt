@@ -56,6 +56,7 @@ class AutomaticJobAnalyzer : JobAnalyzer {
 
 class SourceTreeJobReconstructor(
     private val environment: Map<String, String> = System.getenv(),
+    private val analyzer: decompengine.project.ProgramModelAnalyzer = GhidraHeadlessProgramModelAnalyzer.bundled(),
 ) : JobReconstructor {
     override fun reconstruct(job: Job, reportsDir: Path) {
         val strategy = selectWebReconstructionStrategy(environment)
@@ -65,7 +66,7 @@ class SourceTreeJobReconstructor(
             renderWebReconstructionHarnessSelection(strategy),
         )
         ArchivalReconstructionService(
-            GhidraHeadlessProgramModelAnalyzer.fromEnvironment(environment),
+            analyzer,
             strategy.reconstructor,
         ).reconstruct(job.binaryPath, reportsDir)
     }

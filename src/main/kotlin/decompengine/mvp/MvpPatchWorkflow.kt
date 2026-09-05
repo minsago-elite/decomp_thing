@@ -50,7 +50,7 @@ class MvpPatchWorkflow(
     private val harness: AgentHarness,
     private val environment: Map<String, String> = System.getenv(),
     private val approve: (String) -> Boolean = ::promptForApproval,
-    private val decompiler: BinaryDecompiler = GhidraDecompiler(environment),
+    private val decompiler: BinaryDecompiler = GhidraDecompiler(),
     private val binaryExecution: BinaryExecutionBoundary = BinaryExecutionBoundaryFactory.fromEnvironment(environment),
     private val harnessProvenance: String? = null,
     private val resourceBudget: RepairResourceBudget = RepairResourceBudget(),
@@ -609,22 +609,24 @@ fun interface BinaryDecompiler {
     fun decompile(logger: StreamingLogger, input: Path, work: Path, raw: Path)
 }
 
-class GhidraDecompiler(private val environment: Map<String, String> = System.getenv()) : BinaryDecompiler {
+class GhidraDecompiler internal constructor(
+    private val commandFactory: (decompengine.analysis.GhidraInvocation) -> List<String>,
+) : BinaryDecompiler {
+    constructor() : this({ decompengine.analysis.BundledGhidra.locate().analysisCommand(it) })
+
     override fun decompile(logger: StreamingLogger, input: Path, work: Path, raw: Path) {
-        val ghidra = environment["GHIDRA_HOME"]?.let(Path::of)
-            ?: throw MvpPatchException("GHIDRA_HOME is required")
         val scripts = work.resolve("ghidra_scripts").createDirectories()
         javaClass.getResourceAsStream("/ghidra_scripts/ExportDecompiledC.java")?.use {
             Files.copy(it, scripts.resolve("ExportDecompiledC.java"), StandardCopyOption.REPLACE_EXISTING)
         } ?: throw MvpPatchException("bundled Ghidra script is missing")
         val projectDir = work.resolve("ghidra_project").createDirectories()
         logger.command(
-            listOf(
-                ghidra.resolve("support/analyzeHeadless").pathString,
-                projectDir.pathString, "mvp", "-import", input.pathString, "-overwrite",
-                "-scriptPath", scripts.pathString, "-postScript", "ExportDecompiledC.java", raw.pathString,
-            ), work, "Ghidra decompile",
+            commandFactory(decompengine.analysis.GhidraInvocation(
+                projectDir, "mvp", input, scripts,
+                listOf(decompengine.analysis.GhidraPostScript("ExportDecompiledC.java", listOf(raw.toAbsolutePath().normalize().pathString))),
+            )), work, "Ghidra decompile",
         )
+        require(Files.isRegularFile(raw) && Files.size(raw) > 0) { "Bundled Ghidra did not export decompiled C" }
     }
 }
 
