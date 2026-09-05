@@ -1,17 +1,17 @@
 # Frontend bundle evidence
 
-Measured for the #161 SPA-session / #159 generated-client checkpoint on
+Measured for the #154 base-path and resource-identity URL checkpoint on
 2026-09-05, Linux x86-64, Node 24.20.0, npm 11.19.0, Vite 8.2.2 and TypeScript
 6.0.3. Sizes below are bytes; gzip uses Node zlib level 9 for a repeatable
 measurement. They do not claim server compression.
 
 | Initial import closure | Raw bytes | Gzip bytes | D1 gzip ceiling |
 | --- | ---: | ---: | ---: |
-| JavaScript | 67,956 | 20,324 | 51,200 |
+| JavaScript | 70,606 | 21,198 | 51,200 |
 | CSS | 3,409 | 1,342 | 10,240 |
 
-The strict shared-schema decoder, bounded native fetch and page-local session
-state add 9,965 gzip JavaScript bytes to the earlier 10,359-byte recovery shell.
+The centralized URL and resource-identity checks add 874 gzip JavaScript bytes
+to the preceding 20,324-byte session/client checkpoint.
 No npm dependency was added. The runtime page remains a separate lazy chunk and
 the local SVG remains a file. There are no downloaded fonts or workers in this
 slice; packaged-resource tests must include them when later features add them.
@@ -23,7 +23,7 @@ no browser modules. No React compatibility, fixture, debug or test module is emi
 Shipped code notices remain in `THIRD_PARTY_NOTICES.txt` for distribution.
 
 This checkpoint passed the shared-schema generator drift check, strict typecheck,
-typed lint and 125 tests covering shell/navigation/recovery, development transport,
+typed lint and 156 tests covering shell/navigation/recovery, development transport,
 contracts/native fetch and session state/controls. The session race correction also passed deferred-response regressions and an
 independent review. The development fixture test was rerun in an isolated source
 copy with its build parent absent, fixing the initial hosted-CI regression.
@@ -32,7 +32,7 @@ installation and different-Node rejection were verified in #151; dependencies di
 not change. The #155 build, before session wiring, also proved development endpoint
 and environment sentinels absent while preserving the prior six asset hashes.
 
-The matching pre-merge session ZIP passed actual Chrome 149.0.7827.55 browser
+The earlier pre-merge session ZIP passed actual Chrome 149.0.7827.55 browser
 journeys at `/nested/`, from a relocated read-only installation, unrelated cwd
 and application PATH without Node/npm. Home/icon/CSS and lazy Runtime showed
 exact UI build `0568621730b941560737aa57653d6e5a5c2dca8d9ce8370350a7556bc8bdf039`
@@ -54,16 +54,18 @@ separately verified with the official pinned Chrome: direct session/recovery at
 `build/packaged-browser-u6h1zm/report.json`, and real proxy at
 `build/packaged-browser-elCmmT/report.json`. The packaging document records its
 new ZIP/JAR hashes and unchanged UI build identity; both runs confirmed shutdown
-and owned-work cleanup.
+and owned-work cleanup. Those browser artifacts precede this URL-helper payload;
+the current six-file UI build is
+`ac0b11282638ddd059e46c25af43bf8947c4b41d4e0e445df30689b3d33680aa`.
 
 | Output | Raw bytes | Gzip bytes | SHA-256 |
 | --- | ---: | ---: | --- |
-| `.vite/manifest.json` | 609 | 258 | `cb2a6d3b6570fdf8e36c2a256ecaf31d4f311a179d7e6a3d2b19f1e3bdfe1889` |
+| `.vite/manifest.json` | 609 | 257 | `c2b1138c95eee4638501f9ed7ed6610f77f64083eb67c1b7864ed79b4ad71468` |
 | `assets/index-CXRA2Hc9.css` | 3,409 | 1,342 | `fd73d7bfddf9749103bd04b94f39ccdb39fe57a49a8828a77d001a0bdb318acb` |
-| `assets/index-D9ex1CGJ.js` | 67,956 | 20,324 | `b297c9c1b372df3e8d77a47e032a8fda21c316e237ede501bda369d11a4c67f6` |
+| `assets/index-DDdkV_rX.js` | 70,606 | 21,198 | `61795bb2e750a67cd6615a437171ed68c1c3a09b2a222faeb36f2ae149d5ffdb` |
 | `assets/mark-DPpOXuhp.svg` | 289 | 207 | `0a7608e6061d66bfeff7515d0a300d5b31c593beee2e8cf0ff2decc7567c979c` |
-| `assets/Runtime-CL7vCQbI.js` | 1,048 | 458 | `bf59bb8fb346764db9dea5867acfc1080df40f01ab52ac1eb4fa30b283176471` |
-| `index.html` | 664 | 377 | `fbac8436570275010ea938f89cd89f25d994d5e08c19ef93f1ce49374dad5697` |
+| `assets/Runtime-D1QAqjiL.js` | 1,048 | 457 | `1b7cc2d8efe4bbb8ba7b27bbe6378cdd01809f81dc857bb3775d84cba22ad69d` |
+| `index.html` | 664 | 378 | `abdc2564552152b76492b9463b94a34d2928d580f836bd79c8894b9046a14ffe` |
 
 Recreate the report with `npm --prefix frontend run build`; generated metadata
 lives at `build/frontend/bundle-report.json` and `bundle-composition.json`, outside

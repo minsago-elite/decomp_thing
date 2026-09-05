@@ -63,6 +63,49 @@ describe('generated v1 contract pipeline', () => {
     const original = decodeResponse(fixture('bootstrap'), 'bootstrap');
     expect(() => decodeContract(JSON.stringify({ ...original, data: { ...original.data, apiVersions: [2] } }))).toThrow(expect.objectContaining({ code: 'unsupported_contract' }));
   });
+  it('checks bootstrap and download links against the caller deployment prefix', () => {
+    const artifact = decodeResponse(fixture('artifact'), 'artifact');
+    const nested = { ...artifact, data: { ...artifact.data, contentHref: `/tools/decomp${artifact.data.contentHref}` } };
+    expect(decodeContract(JSON.stringify(nested), { basePath: '/tools/decomp/' })).toEqual(nested);
+    expect(() => decodeContract(JSON.stringify(nested))).toThrow(expect.objectContaining({ code: 'invalid_response' }));
+    for (const contentHref of [
+      nested.data.contentHref.replace('/tools/decomp/', '/tools/other/'),
+      nested.data.contentHref.replace(artifact.data.binding.jobId, 'Other_Job'),
+      nested.data.contentHref.replace(artifact.data.artifactId, 'Other_Artifact'),
+      `/tools/decomp/../decomp${artifact.data.contentHref}`,
+      `/tools/%64ecomp${artifact.data.contentHref}`,
+    ]) {
+      expect(() => decodeContract(JSON.stringify({ ...nested, data: { ...nested.data, contentHref } }), { basePath: '/tools/decomp' }))
+        .toThrow(expect.objectContaining({ code: 'invalid_response' }));
+    }
+    const bootstrap = decodeResponse(fixture('bootstrap'), 'bootstrap');
+    const other = { ...bootstrap, data: { ...bootstrap.data, basePath: '/tools/decomp/' } };
+    expect(() => decodeContract(JSON.stringify(other))).toThrow(expect.objectContaining({ code: 'invalid_response' }));
+    expect(decodeContract(JSON.stringify(other), { basePath: '/tools/decomp' })).toEqual(other);
+  });
+  it('checks nested report download identities without deriving authority from its href', () => {
+    const report = decodeResponse(fixture('report-accepted'), 'report');
+    const artifact = report.data.sourceArtifact;
+    if (!artifact) throw Error('Expected report artifact fixture');
+    const nested = { ...report, data: { ...report.data, sourceArtifact: { ...artifact, contentHref: `/nested${artifact.contentHref}` } } };
+    expect(decodeContract(JSON.stringify(nested), { basePath: '/nested/' })).toEqual(nested);
+    const foreign = { ...nested, data: { ...nested.data, sourceArtifact: { ...nested.data.sourceArtifact, contentHref: nested.data.sourceArtifact.contentHref.replace(artifact.artifactId, 'Other_Artifact') } } };
+    expect(() => decodeContract(JSON.stringify(foreign), { basePath: '/nested/' })).toThrow(expect.objectContaining({ code: 'invalid_response' }));
+  });
+  it('binds retention-gap recovery to the same job, run and configured base', () => {
+    const gap = decodeContract(fixture('event-gap'));
+    if (gap.kind !== 'event' || gap.type !== 'retention.gap') throw Error('Expected gap fixture');
+    const nested = { ...gap, payload: { ...gap.payload, snapshotHref: `/nested${gap.payload.snapshotHref}` } };
+    expect(decodeContract(JSON.stringify(nested), { basePath: '/nested/' })).toEqual(nested);
+    for (const snapshotHref of [
+      gap.payload.snapshotHref,
+      nested.payload.snapshotHref.replace(gap.jobId, 'Other_Job'),
+      nested.payload.snapshotHref.replace(gap.runId, 'Other_Run'),
+    ]) {
+      expect(() => decodeContract(JSON.stringify({ ...nested, payload: { ...nested.payload, snapshotHref } }), { basePath: '/nested/' }))
+        .toThrow(expect.objectContaining({ code: 'invalid_response' }));
+    }
+  });
   it('validates full calendar dates and Unicode code point lengths', () => {
     const original = decodeResponse(fixture('session'), 'session');
     expect(() => decodeResponse(JSON.stringify({ ...original, data: { ...original.data, expiresAt: '2025-02-29T00:00:00Z' } }), 'session')).toThrow(ApiClientError);

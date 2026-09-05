@@ -14,7 +14,7 @@ for (const schema of contractSchema.oneOf ?? []) {
 variants.set('event', { $ref: '#/definitions/event' });
 
 /** Producer mode checks shared closed fixtures; response mode projects additive v1 fields. */
-export function decodeContract(text: string, options: { mode?: 'producer' | 'response'; maxBytes?: number } = {}): ContractDocument {
+export function decodeContract(text: string, options: { mode?: 'producer' | 'response'; maxBytes?: number; basePath?: string } = {}): ContractDocument {
   const value = parseBoundedJson(text, options.maxBytes ?? MAX_JSON_BYTES);
   if (!isObject(value)) throw new ApiClientError('invalid_response');
   if (value.apiVersion !== 1 || typeof value.kind !== 'string' || !variants.has(value.kind)) throw new ApiClientError('unsupported_contract');
@@ -25,12 +25,12 @@ export function decodeContract(text: string, options: { mode?: 'producer' | 'res
   if (!schema) throw new ApiClientError('unsupported_contract');
   const additive = options.mode !== 'producer' && !value.kind.endsWith('Request');
   const document = validateSchema(value, schema, additive) as ContractDocument;
-  checkSemantics(document);
+  checkSemantics(document, options.basePath ?? '/');
   return document;
 }
 
-export function decodeResponse<K extends ResponseKind>(text: string, expectedKind: K, maxBytes = MAX_JSON_BYTES): ResponseOf<K> {
-  const document = decodeContract(text, { maxBytes });
+export function decodeResponse<K extends ResponseKind>(text: string, expectedKind: K, maxBytes = MAX_JSON_BYTES, basePath = '/'): ResponseOf<K> {
+  const document = decodeContract(text, { maxBytes, basePath });
   if (document.kind !== expectedKind) throw new ApiClientError('unexpected_response');
   return document as ResponseOf<K>;
 }

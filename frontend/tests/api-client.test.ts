@@ -21,6 +21,28 @@ describe('bounded v1 fetch client', () => {
     expect(settings).toMatchObject({ method: 'GET', credentials: 'same-origin', mode: 'same-origin', redirect: 'error', cache: 'no-store' });
     expect(new Headers(settings?.headers).get('Accept')).toBe('application/json');
   });
+  it('retains encoded queries through the shared API path helper', async () => {
+    const fetcher = vi.fn<typeof fetch>().mockResolvedValue(response('jobs-page'));
+    const client = createApiClient({ basePath: '/tools/decomp/', fetch: fetcher });
+    const route = '/jobs?q=two%20words%2B%252F&cursor=Cursor_9007199254740993';
+    await client.get('jobs', route);
+    expect(fetcher.mock.calls[0]?.[0]).toBe(`/tools/decomp/api/v1${route}`);
+    await expect(client.get('jobs', '/jobs?cursor=one&cursor=two')).rejects.toMatchObject({ code: 'invalid_request' });
+    expect(fetcher).toHaveBeenCalledOnce();
+  });
+  it('passes its deployment authority into response-link decoding', async () => {
+    const decoded = decodeContract(fixture('artifact'));
+    if (decoded.kind !== 'artifact') throw Error('Expected artifact fixture');
+    const local = { ...decoded, data: { ...decoded.data, contentHref: `/nested${decoded.data.contentHref}` } };
+    const headers = { 'Content-Type': 'application/json', 'X-Request-ID': local.requestId };
+    const fetcher = vi.fn<typeof fetch>()
+      .mockResolvedValueOnce(new Response(JSON.stringify(local), { headers }))
+      .mockResolvedValueOnce(response('artifact'));
+    const client = createApiClient({ basePath: '/nested/', fetch: fetcher });
+    const route = `/jobs/${local.data.binding.jobId}/artifacts/${local.data.artifactId}`;
+    expect(await client.get('artifact', route)).toEqual(local);
+    await expect(client.get('artifact', route)).rejects.toMatchObject({ code: 'invalid_response', requestId: local.requestId, status: 200 });
+  });
   it('sends session data without fixture wrappers and logs out with in-memory CSRF', async () => {
     const fetcher = vi.fn<typeof fetch>().mockResolvedValueOnce(response()).mockResolvedValueOnce(new Response(null, { status: 204, headers: { 'X-Request-ID': 'logout_request' } }));
     const client = createApiClient({ basePath: '/', fetch: fetcher });

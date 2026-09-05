@@ -48,6 +48,30 @@ and abort/cancel pending reads at the deadline. Redirects and arbitrary origins 
 The client does not persist session material, generate mutation intent, or infer endpoint
 capabilities from its available schema types.
 
+The [shared path helpers](../app/paths.ts) implement the frontend URL portion of
+[#154](https://github.com/minsago-elite/decomp_thing/issues/154). `appPath` and `apiPath` normalize
+the configured prefix, capped at the contract's 256 characters. `apiPath(basePath, route, query)`
+takes a route relative to `/api/v1` and decoded query values. Query construction encodes values
+once; an already encoded query in `route` is validated and preserved byte for byte. Mixing both
+query forms, duplicate keys, malformed escapes, control characters, unsafe numbers and URLs over
+4,096 characters is rejected. Resource path segments use the contract's case-sensitive opaque ID
+grammar; encoded IDs, dot segments, trailing slashes and arbitrary origins are rejected.
+
+`apiResourcePath` builds identity-bound event, snapshot and artifact-content links.
+`validateResourceHref` checks a server link against the caller's configured prefix, resource kind
+and exact IDs without rewriting it. Event links allow only one `after` cursor and known polling
+options (`transport=poll`, optional `limit` 1–200); snapshot and content links allow no query.
+The helper accepts root-relative resource URLs, matching the wire contract, so consumers do not
+need to infer or trust an origin from response content. These functions construct and validate
+URLs; they do not open a stream, start a download or establish an endpoint capability.
+
+The API client passes its configured prefix into decoding. Standalone decoders default to `/`;
+use `decodeContract(text, {basePath: '/nested/'})` or the fourth `decodeResponse` argument for a
+nested deployment, including synthetic fixtures. Semantic checks enforce bootstrap prefix identity,
+artifact content links (including artifacts nested in reports), and the matching job/run snapshot
+link in retention-gap events. A schema-shaped link to another prefix or resource is a decoder
+error. Cursors and identity strings are never converted to numbers or decoded recursively.
+
 `tests/api-contract.test.ts` runs all shared positive/negative fixtures, drift and malformed input
 checks. `tests/api-client.test.ts` uses in-process synthetic responses for headers, identity,
 errors, cancellation, byte bounds and no-retry behavior. These are client tests; they do not replace

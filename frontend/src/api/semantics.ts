@@ -1,12 +1,17 @@
 import type { ContractDocument } from './generated';
 import { ApiClientError } from './errors';
+import { normalizeBasePath, validateResourceHref } from '../app/paths';
+import type { ApiResource } from '../app/paths';
 
 const requireValue = (condition: boolean): void => {
   if (!condition) throw new ApiClientError('invalid_response');
 };
 
 /** Mirrors the shared verifier's cross-field rules; fixtures exercise both implementations. */
-export function checkSemantics(document: ContractDocument): void {
+export function checkSemantics(document: ContractDocument, basePath = '/'): void {
+  function checkHref(href: string, resource: ApiResource) {
+    try { validateResourceHref(basePath, href, resource); } catch { throw new ApiClientError('invalid_response'); }
+  }
   switch (document.kind) {
     case 'jobs': {
       const { items, page } = document.data;
@@ -18,12 +23,18 @@ export function checkSemantics(document: ContractDocument): void {
       requireValue(limits.defaultPageLimit <= limits.maxPageLimit);
       requireValue(new Set(capabilities.map((item) => item.id)).size === capabilities.length);
       if (!apiVersions.includes(1)) throw new ApiClientError('unsupported_contract');
+      try {
+        requireValue(document.data.basePath === `${normalizeBasePath(basePath)}/`);
+      } catch { throw new ApiClientError('invalid_response'); }
       break;
     }
     case 'report': {
       const { sourceArtifact, binding, reportType, summary, acceptance, state, adapterVersion, producerSchemaVersion } = document.data;
       if (sourceArtifact) requireValue(sourceArtifact.binding.jobId === binding.jobId
         && sourceArtifact.binding.runId === binding.runId && sourceArtifact.binding.revisionId === binding.revisionId);
+      if (sourceArtifact) checkHref(sourceArtifact.contentHref, {
+        kind: 'artifact-content', jobId: binding.jobId, artifactId: sourceArtifact.artifactId,
+      });
       if (summary && reportType === 'exploration') requireValue('confidence' in summary);
       if (summary && reportType === 'revision-validation') requireValue('result' in summary);
       if (acceptance === 'accepted') requireValue(summary !== null && 'result' in summary && summary.result === 'passed');
@@ -35,6 +46,16 @@ export function checkSemantics(document: ContractDocument): void {
       }
       break;
     }
+    case 'artifact':
+      checkHref(document.data.contentHref, {
+        kind: 'artifact-content', jobId: document.data.binding.jobId, artifactId: document.data.artifactId,
+      });
+      break;
+    case 'event':
+      if (document.type === 'retention.gap') checkHref(document.payload.snapshotHref, {
+        kind: 'snapshot', jobId: document.jobId, runId: document.runId,
+      });
+      break;
     case 'snapshot':
       requireValue((document.data.throughCursor === null) === (document.data.throughSequence === null));
       break;

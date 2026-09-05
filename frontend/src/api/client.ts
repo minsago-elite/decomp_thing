@@ -1,4 +1,4 @@
-import { normalizeBasePath } from '../app/paths';
+import { apiPath, normalizeBasePath } from '../app/paths';
 import { decodeContract, encodeRequest } from './decode';
 import { ApiClientError } from './errors';
 import type { RequestData, RequestKind, ResponseKind, ResponseOf } from './generated';
@@ -62,8 +62,8 @@ export function createApiClient(options: ClientOptions) {
   const fetcher = options.fetch ?? globalThis.fetch.bind(globalThis);
 
   async function request<K extends ResponseKind>(kind: K | null, path: string, method: 'GET' | 'POST' | 'DELETE', body: string | undefined, settings: MutationOptions, session = false): Promise<ResponseOf<K> | undefined> {
-    // Caller supplies a relative v1 route, never an origin, path traversal or fragment.
-    if (!/^\/[A-Za-z0-9_/-]+(?:\?[^#\\\s]*)?$/.test(path) || path.includes('//') || path.includes('/../') || path.includes('/./')) throw new ApiClientError('invalid_request');
+    let url: string;
+    try { url = apiPath(basePath, path); } catch { throw new ApiClientError('invalid_request'); }
     if (session && path !== '/session') throw new ApiClientError('invalid_request');
     const headers = new Headers({ Accept: 'application/json' });
     if (method !== 'GET') headers.set('Content-Type', 'application/json');
@@ -95,7 +95,7 @@ export function createApiClient(options: ClientOptions) {
       controller.signal.addEventListener('abort', stop, { once: true });
     });
     const operation = async (): Promise<ResponseOf<K> | undefined> => {
-      response = await fetcher(`${basePath}/api/v1${path}`, {
+      response = await fetcher(url, {
         method, headers, credentials: 'same-origin', mode: 'same-origin', redirect: 'error',
         cache: 'no-store', signal: controller.signal, ...(body === undefined ? {} : { body }),
       });
@@ -108,7 +108,7 @@ export function createApiClient(options: ClientOptions) {
       requestId = headerId;
       if (kind === null && response.status === 204) return undefined;
       if (!/^application\/json(?:\s*;\s*charset=utf-8)?$/i.test(response.headers.get('Content-Type') ?? '')) throw new ApiClientError('invalid_headers');
-      const document = decodeContract(await boundedBody(response, maxBytes, controller.signal), { maxBytes });
+      const document = decodeContract(await boundedBody(response, maxBytes, controller.signal), { maxBytes, basePath });
       if (!('requestId' in document) || document.requestId !== requestId) throw new ApiClientError('invalid_headers');
       if (document.kind === 'error') throw new ApiClientError('http_error', { serverCode: document.error.code });
       if (!response.ok || document.kind !== kind) throw new ApiClientError('unexpected_response');
