@@ -81,8 +81,57 @@ the corresponding GitHub milestones.
 ZIP/TAR installations with read-only permissions and launches the normal POSIX
 script with only required launcher utilities on PATH. It checks HTTP assets and
 deep links, exact hashes, HEAD/304, private/unknown errors and bounded shutdown.
-The JVM runtime does not invoke the test driver or Node. Browser-rendered journeys
-are separate D12 checks; this HTTP smoke does not replace them.
+The JVM runtime does not invoke the test driver or Node. This HTTP smoke does not
+replace browser-rendered checks.
+
+The dependency-free [browser driver](../scripts/check-packaged-web-browser.mjs)
+uses the pinned Node as a test process, Python for ZIP inspection, a JDK and an
+explicit existing Chrome executable. It downloads no tools or packages:
+
+```sh
+/absolute/node-v24.20.0-linux-x64/bin/node scripts/check-packaged-web-browser.mjs \
+  --archive /absolute/repository/build/distributions/llm_bin_patch-0.1.0.zip \
+  --chrome /absolute/chrome --java-home /absolute/jdk
+```
+
+`--python /absolute/python3` overrides `/usr/bin/python3`. Only if the test
+environment requires it, add `--no-sandbox`; the report records this browser-only
+choice. The driver requires absolute tool/archive paths and never places its
+Node/npm on the application's curated PATH. Reports, screenshots, browser profile
+and relocated installation remain in ignored `build/packaged-browser-*`; the
+driver prints the exact directory. Browser socket temporary directories use the
+shorter `build/ct-*` prefix. The driver stops its owned JVM/browser processes on
+success and failure. These directories can be removed after retaining evidence;
+restore owner write permission recursively before removing the read-only install.
+
+On 2026-09-05, Chrome 149.0.7827.55 passed the actual ZIP journey at `/nested/`
+with application version `0.1.0`. The promoted driver reproduced that result once
+with `--no-sandbox` in this container. These identities bind that checkpoint:
+
+| Artifact | SHA-256 / build identity |
+| --- | --- |
+| `llm_bin_patch-0.1.0.zip` | `624d3cc20af3af4fcccdedc1788ae8224d5a6c193e4e039e1a764792654b0003` |
+| Embedded `llm-bin-patch-0.1.0.jar` | `9a04efa05612484209d2f329477e8610f2d54b2cb6b8d7f9ec375e15bdeb03da` |
+| UI build | `bb791a18dcf4940266028073f13469c9988fea578f6a5a10f200cbe897c02a55` |
+
+The driver extracts the ZIP, removes installation write bits, snapshots every
+installed file and starts the normal launcher from an unrelated directory. It
+verifies rendered home, local icon/CSS, lazy Runtime navigation without document
+reload, and exact UI/application identities from the embedded manifest. In a
+second uncached tab, Chrome request interception returns 404 for only the Runtime
+chunk. After five seconds there is one explicit recovery notice, no automatic
+reload/retry and no mutation request. Removing interception and clicking Reload
+application once restores Runtime with exactly one new document request. All
+captured application requests remain same-origin, installed bytes stay unchanged,
+and public browsing creates no job-data directory.
+
+The successful retained report was `build/packaged-browser-jTpgqK/report.json`,
+with `home.png`, `runtime.png` and `recovery.png` beside it. This is a D1 shell and
+asset-recovery checkpoint, not complete D12 browser coverage, an actual two-version
+server upgrade, authenticated workflow qualification or accessibility conformance.
+The recovery screenshot also showed main-focus scrolling the notice title above
+the viewport while leaving the reload button visible; broader focus/viewport
+qualification belongs to #217. Later builds require fresh artifact identities.
 
 Frontend byte reproducibility, deterministic JAR entries and native/runtime closure
 identity are separate claims. Do not infer a reconstructed source archive's

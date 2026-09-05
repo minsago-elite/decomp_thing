@@ -28,16 +28,18 @@ installation and different-Node rejection were verified in #151; this checkpoint
 does not change the dependency lock. The #151 environment-sentinel check established
 that the empty public environment prefix does not inject `VITE_*` values.
 
-Before the final metadata-grammar tightening, Chrome for Testing 149.0.7827.55
-loaded the production recovery implementation against a loopback fixture that returned 404 for the runtime lazy chunk. After five seconds
-of virtual time, the DOM had one version notice and a stable unavailable view.
-Request capture showed one document load, one failed lazy import and only GETs:
-no automatic reload, retry loop or mutation request. Component tests separately
-verify the explicit reload button fires once and handles unavailable navigation.
-The later grammar-only change passed the focused identity tests; a browser rerun
-was interrupted by temporary filesystem resource exhaustion. This static fixture
-is frontend evidence; it does not substitute for the actual
-packaged-JAR deployment/upgrade gate.
+Chrome 149.0.7827.55 passed the final packaged ZIP at `/nested/`, using a relocated
+read-only installation, unrelated working directory and application PATH without
+Node/npm. Home, local icon/CSS and lazy Runtime rendered with exact embedded
+UI/application identities. Intercepting only the Runtime chunk with a 404 yielded
+one notice and no automatic retry/reload during five seconds; removing interception
+and clicking Reload application once restored Runtime with one document request.
+No mutations or external application requests occurred, installation bytes stayed
+unchanged and no job-data directory was created. The tracked dependency-free driver
+reproduced this result once. Exact archive/JAR/build identities, command and limits
+are in [packaged browser evidence](../docs/web-packaging.md). This qualifies the
+D1 public shell/recovery path; it does not simulate a full server-version upgrade
+or establish authenticated workflow, browser performance or accessibility gates.
 
 | Output | Raw bytes | Gzip bytes | SHA-256 |
 | --- | ---: | ---: | --- |
