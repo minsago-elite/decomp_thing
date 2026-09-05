@@ -41,6 +41,13 @@ immutable definition and attachment bytes before and after writing absence. Ther
 START, compiler execution, export, scoring, output-lease release, ACP authority, Python authority,
 or cold reopen of an attached/terminal operation.
 
+The hosted CI job provisions this runtime with `scripts/ci-prepare-oracle-runtime.sh` before any
+live containment test. It copies the setup-java JDK into a separate root-owned `/opt` directory,
+sets the test JVM's `JAVA_HOME`, and makes the fixed system-library trees recursively root-owned
+without group or world write permission. This provisioning is specific to the disposable trusted
+runner image: a mutable toolcache JDK or an untrusted entry anywhere under `/usr/lib` cannot serve
+as the live runtime trust root. Production runtime validation keeps the same fail-closed checks.
+
 This checkpoint does **not** prove that either compiler engine ran, resumed, or produced any
 artifact. Cooperative file locks, owner-only directories, and user-systemd naming also do not
 exclude a hostile process with the same UID (or root); those principals remain part of the trusted

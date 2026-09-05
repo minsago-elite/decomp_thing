@@ -33,6 +33,8 @@ jobs:
             util-linux
           sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0
           bwrap --ro-bind /usr /usr --ro-bind /lib /lib --ro-bind /lib64 /lib64 /usr/bin/true
+      - name: Prepare root-owned oracle JVM and system libraries
+        run: bash scripts/ci-prepare-oracle-runtime.sh
       - name: Prepare required live ACP sandbox host
         run: scripts/ci-prepare-acp-sandbox.sh
       - name: Prepare bounded ext4 oracle scratch authority
