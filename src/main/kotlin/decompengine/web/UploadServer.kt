@@ -398,7 +398,8 @@ class UploadServer(
                 try {
                     synchronized(lifecycleLock) {
                         authenticationInspectionCancellation.set(false)
-                        check(!stopping) { "Server is stopping" }
+                        // requestStop signals outside this lock; never clear its signal after checking it.
+                        check(!stopping && !stopRequested.get()) { "Server is stopping" }
                         val worker = Thread({
                             var result = AUTH_INSPECTION_FAILED
                             try {
@@ -431,7 +432,9 @@ class UploadServer(
     }
 
     private fun inspectAuthenticationMethods(): String = try {
-        val inventory = authenticationInspector(decompengine.agent.AgentCancellation { authenticationInspectionCancellation.get() })
+        val inventory = authenticationInspector(decompengine.agent.AgentCancellation {
+            stopRequested.get() || authenticationInspectionCancellation.get()
+        })
         buildJsonObject {
             put("status", "ready")
             put("inventorySha256", inventory.sha256)
