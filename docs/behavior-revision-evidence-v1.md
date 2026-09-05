@@ -106,6 +106,15 @@ record. The focused behavior validation/evidence/file-input selection passes
 22 tests with zero failures or skips on a host with bubblewrap 0.11.2. This verifies
 these local mount behaviors, not production containment attestation.
 
+The large authored archival fixture (121 functions, at least nine modules) also
+declares its file case through `/inputs/sample.txt`. Its assertions require exit 0
+and `from-file:25` output; comparing two file-open failures is insufficient. The
+test retains the input bytes in the report, creates identical archives, removes
+the original host input, extracts and rebuilds the archive, then restores the input
+from the extracted record and repeats the corpus. Both runs check explicit expected
+stdout, stderr and exits for stdin, argv, file and exit-code cases. The focused
+large/small archive and live-file selection passes three tests with zero skips.
+
 These records describe local path-stability checks. They do not retain an
 execve-bound executable capability or an immutable runtime-library closure across
 execution, and do not prove exclusion of same-user replace-and-restore races.
