@@ -1228,7 +1228,7 @@ class AcpAgentHarness(
         preferences.configOptions.forEachIndexed { index, configured ->
             val matches = advertisedOptions.filter { it.id == configured.id }
             when (matches.size) {
-                0 -> rejectSessionPreference("configOption", index, "idNotAdvertised")
+                0 -> rejectSessionPreference("configOption", index, "idNotAdvertised", advertisedOptions.map { it.id })
                 1 -> Unit
                 else -> throw AcpProtocolFailure(
                     "ACP session/new ambiguously advertised a configured config option",
@@ -1241,7 +1241,7 @@ class AcpAgentHarness(
                         rejectSessionPreference("configOption", index, "typeNotAdvertised")
                     }
                     when (advertised.selectValueIds.count { it == value.valueId }) {
-                        0 -> rejectSessionPreference("configOption", index, "valueNotAdvertised")
+                        0 -> rejectSessionPreference("configOption", index, "valueNotAdvertised", advertised.selectValueIds)
                         1 -> Unit
                         else -> throw AcpProtocolFailure(
                             "ACP session/new ambiguously advertised a configured select value",
@@ -1264,17 +1264,23 @@ class AcpAgentHarness(
     ) {
         val values = advertised ?: rejectSessionPreference(kind, null, "capabilityAbsent")
         when (values.count { it == configured }) {
-            0 -> rejectSessionPreference(kind, null, "idNotAdvertised")
+            0 -> rejectSessionPreference(kind, null, "idNotAdvertised", values)
             1 -> Unit
             else -> throw AcpProtocolFailure("ACP session/new ambiguously advertised a configured $kind")
         }
     }
 
-    private fun rejectSessionPreference(kind: String, index: Int?, reason: String): Nothing {
+    private fun rejectSessionPreference(
+        kind: String, index: Int?, reason: String, choices: List<String>? = null,
+    ): Nothing {
+        val preview = choices?.let {
+            " Advertised choice previews: " + previewSessionChoices(it.asSequence(),
+                configuration.environment.values.map { value -> value.value })
+        }.orEmpty()
         throw AgentExecutionException(
             AgentFailure(
                 AgentFailureKind.CONFIGURATION,
-                "ACP configured session preference was not advertised by the exact session/new response",
+                "ACP configured session preference was not advertised by the exact session/new response" + preview,
                 details = buildMap {
                     put("preference", kind)
                     index?.let { put("preferenceIndex", it.toString()) }

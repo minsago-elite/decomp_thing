@@ -65,6 +65,25 @@ class AcpCurrentConfigInventoryTest {
         assertTrue(failure.message.orEmpty().length < 1024)
     }
 
+    @Test
+    fun `shared choice preview bounds enumeration and escapes redacted peer text`() {
+        val choices = sequence {
+            yield("private-value\nquoted\"choice")
+            repeat(4) { yield("x".repeat(100)) }
+            error("preview must not enumerate beyond its lookahead")
+        }
+        val preview = previewSessionChoices(choices, listOf("private-value"))
+        assertFalse(preview.contains("private-value"))
+        assertFalse(preview.contains('\n'))
+        assertTrue(preview.contains("[redacted]"))
+        assertTrue(preview.endsWith(" (more choices omitted)"))
+        val decoded = Json.parseToJsonElement(preview.removeSuffix(" (more choices omitted)")).jsonArray
+        assertEquals(4, decoded.size)
+        assertTrue(decoded.all { it.jsonPrimitive.content.length <= 48 + "… [preview truncated]".length })
+        assertTrue(decoded[1].jsonPrimitive.content.endsWith("… [preview truncated]"))
+        assertEquals("[]", previewSessionChoices(emptySequence(), emptyList()))
+    }
+
     private fun inventory(name: String): List<SessionConfigOption> {
         val fixture = javaClass.getResourceAsStream("/acp/v1/wire-contract.json")!!.use { it.readBytes().decodeToString() }
         return Json.parseToJsonElement(fixture).jsonObject.getValue("messages").jsonObject.getValue(name)

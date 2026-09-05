@@ -29,12 +29,7 @@ internal fun requireCurrentSessionConfigPreference(
         }
     }
     if (supported) return
-    val redactor = ProgressRedactor(sensitiveValues)
-    fun preview(values: Sequence<String>): String {
-        val bounded = values.take(5).toList()
-        val text = JsonArray(bounded.take(4).map { JsonPrimitive(redactor.text(it, 48)) }).toString()
-        return text + if (bounded.size > 4) " (more choices omitted)" else ""
-    }
+    fun preview(values: Sequence<String>) = previewSessionChoices(values, sensitiveValues)
     val optionIds = preview(options.asSequence().map { it.id.value })
     val values = when (option) {
         is SessionConfigOption.Select -> preview(when (val choices = option.options) {
@@ -51,4 +46,12 @@ internal fun requireCurrentSessionConfigPreference(
         details = mapOf("preference" to "configOption", "preferenceIndex" to index.toString(),
             "reason" to "currentInventoryMismatch"),
     ))
+}
+
+/** Display-only previews; never selection tokens or authority for a setter. */
+internal fun previewSessionChoices(values: Sequence<String>, sensitiveValues: Collection<String>): String {
+    val redactor = ProgressRedactor(sensitiveValues)
+    val bounded = values.take(5).toList()
+    val text = JsonArray(bounded.take(4).map { JsonPrimitive(redactor.text(it, 48)) }).toString()
+    return text + if (bounded.size > 4) " (more choices omitted)" else ""
 }
