@@ -497,3 +497,27 @@ progress before starting another batch. Pending progress without an advanced
 checkpoint, multiple advances, missing fragments and terminal checkpoints fail
 closed. Local tests cover both sides of this race and the derived/observed evidence
 separation; real hosted interruption and compiler/plan equivalence remain unproven.
+
+## One retained-owner wall deadline
+
+After initial preflight, entry into the first execution creates a same-process
+monotonic deadline using the operation's wall ceiling. The same object covers
+runtime preparation, interruption, stopped capture, time between legs, resume
+preparation/execution and export capture. It cannot be reconstructed from a receipt
+or reset by `resume()`. Expiry or clock regression permanently revokes it.
+
+Each launch receives at most the remaining whole service seconds. The launcher
+binds the deadline policy in its runtime closure, checks immediately before START,
+limits the outcome wait to remaining milliseconds and checks on every outcome
+poll. Expiry uses the existing failure cleanup and process-absence path. It never
+extends cleanup deadlines or bypasses cleanup to meet a timing target. Execution
+receipts and export assessments include the same monotonic start, maximum wall
+budget, elapsed time and remaining time; the owner rechecks after journal/lease
+post-validation before returning a successful result.
+
+This covers the retained-owner execution interval. Initial preflight/lease
+preparation, other benchmark legs, cumulative CPU/disk accounting and full A10
+publication policy still need separate integration and evidence. Local clock tests
+cover inter-leg gaps, floor rounding, expiry, monotonic wrap and regression; the
+hosted authored-ELF fixture also checks receipt timing consistency when provisioned.
+No full hosted compiler-resume qualification is inferred from clock tests.
