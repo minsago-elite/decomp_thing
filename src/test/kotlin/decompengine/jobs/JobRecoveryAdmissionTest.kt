@@ -2,6 +2,7 @@ package decompengine.jobs
 
 import kotlin.io.path.*
 import kotlin.test.*
+import kotlinx.serialization.json.*
 
 class JobRecoveryAdmissionTest {
     @Test fun `entry exhaustion leaves all statuses unchanged and retry can recover`() {
@@ -74,6 +75,40 @@ class JobRecoveryAdmissionTest {
         assertEquals(listOf("failed", "queued"), jobs.map { store.get(it.id).status }.sorted())
         store.recoverInterruptedJobs()
         assertTrue(jobs.all { store.get(it.id).status == "failed" })
+    }
+
+    @Test fun `unsupported schema and lossy numeric coercions cannot pass recovery inspection`() {
+        val root = createTempDirectory("recovery-schema-")
+        val store = JobStore(root)
+        val job = store.createFromUpload("fixture.elf", elfFixture())
+        store.updateStatus(job.id, "queued")
+        val path = root.resolve(job.id).resolve("job.json")
+        val original = path.readBytes()
+        val record = Json.parseToJsonElement(original.decodeToString()).jsonObject
+        val elf = record.getValue("metadata").jsonObject
+        val invalid = listOf(
+            record + ("future_field" to JsonPrimitive("private-value")),
+            record + ("filename" to JsonPrimitive(123)),
+            record + ("size_bytes" to JsonPrimitive(-1)),
+            record + ("size_bytes" to JsonPrimitive(32L * 1024 * 1024 + 1)),
+            record + ("size_bytes" to JsonPrimitive("64")),
+            record + ("metadata" to JsonObject(elf + ("elf_header_size" to JsonPrimitive(65536)))),
+            record + ("metadata" to JsonObject(elf + ("elf_version" to JsonPrimitive(-1)))),
+            record + ("metadata" to JsonObject(elf + ("future_field" to JsonPrimitive("private-value")))),
+        )
+        invalid.forEach { fields ->
+            path.writeText(JsonObject(fields).toString())
+            val before = path.readBytes()
+            assertFailsWith<IllegalArgumentException> { store.get(job.id) }
+            assertIncomplete { store.recoverInterruptedJobs() }
+            assertContentEquals(before, path.readBytes())
+        }
+        // Older records may omit updated_at and carry a null optional status message.
+        path.writeText(JsonObject(record - "updated_at" + ("status_message" to JsonNull)).toString())
+        assertEquals(job.createdAt, store.get(job.id).updatedAt)
+        assertNull(store.get(job.id).statusMessage)
+        store.recoverInterruptedJobs()
+        assertEquals("failed", store.get(job.id).status)
     }
 
     private fun assertIncomplete(action: () -> Unit) {
