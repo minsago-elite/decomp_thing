@@ -47,6 +47,14 @@ import decompengine.project.sha256
 import decompengine.oracle.behavior.LlvmBehaviorCandidateAcpLineageIndexV2Publisher
 import decompengine.validation.ProcessInput
 import kotlinx.serialization.json.Json
+import kotlinx.serialization.json.JsonArray
+import kotlinx.serialization.json.JsonElement
+import kotlinx.serialization.json.JsonNull
+import kotlinx.serialization.json.JsonObject
+import kotlinx.serialization.json.JsonPrimitive
+import decompengine.oracle.core.OracleJson
+import decompengine.oracle.core.StrictJsonLimits
+import decompengine.acp.acpSandboxCanonicalStringDigest
 import kotlinx.serialization.json.jsonObject
 import java.nio.file.Files
 import java.nio.file.LinkOption
@@ -2217,7 +2225,7 @@ class ModuleRevisionGraphTest {
             ArchivalPackager.create(project, archive)
         }
 
-        assertTrue(failure.message.orEmpty().contains("non-ACP repair evidence"))
+        assertTrue(failure.message.orEmpty().contains("legacy schema-v1/v2 repair evidence is non-release"))
         assertTrue(project.resolve("source_tree_manifest.json").readText().contains(sha256(repaired.toByteArray())))
     }
 
@@ -2301,9 +2309,9 @@ class ModuleRevisionGraphTest {
                     ),
                 )
             }),
-            Mutation("legacy-schema", "schema-v1 repair evidence is non-release", { fixture ->
+            Mutation("legacy-schema", "schema-v1/v2 repair evidence is non-release", { fixture ->
                 val graph = fixture.project.resolve("reports/repair-revisions/graph.json")
-                graph.writeText(graph.readText().replaceFirst("\"schemaVersion\": 2", "\"schemaVersion\": 1"))
+                graph.writeText(graph.readText().replaceFirst("\"schemaVersion\": 3", "\"schemaVersion\": 1"))
             }),
             Mutation("receipt-record-cross-pair", "records differ from the exact workflow change set", { fixture ->
                 val receipt = fixture.project.resolve(fixture.receiptPath)
@@ -2346,6 +2354,7 @@ class ModuleRevisionGraphTest {
         val fixture = releaseRepairFixture()
         ModuleRevisionGraph.open(fixture.project, GeneratedCRepairIndexProfile).use { graph ->
             val corpus = graph.retainedRegressionCorpus()
+            graph.beginRun(1, 60_000)
             graph.beginAttempt(
                 listOf(fixture.relativePath),
                 RevisionRepairMetadata(
@@ -2365,6 +2374,58 @@ class ModuleRevisionGraphTest {
             ArchivalPackager.create(fixture.project, fixture.project.parent.resolve("pending.zip"))
         }
         assertTrue(failure.message.orEmpty().contains("pending workflow assessment"), failure.message)
+    }
+
+    @Test
+    fun `archive validation recomputes source corpus runtime and behavior authority from receipt bytes`() {
+        fun JsonObject.changed(field: String, value: JsonElement) = JsonObject(toMutableMap().apply { put(field, value) })
+        fun JsonObject.scopeChanged(index: Int, change: (JsonObject) -> JsonObject): JsonObject {
+            val scopes = (getValue("scopes") as JsonArray).toMutableList()
+            scopes[index] = change(scopes[index].jsonObject)
+            return changed("scopes", JsonArray(scopes))
+        }
+        data class Mutation(val label: String, val expected: String, val change: (JsonObject) -> JsonObject)
+        val mutations = listOf(
+            Mutation("snapshot", "source manifest", { receipt -> receipt.changed("sourceSnapshot",
+                receipt.getValue("sourceSnapshot").jsonObject.changed("manifestSha256", JsonPrimitive("0".repeat(64)))) }),
+            Mutation("runtime", "runtime configuration", { it.changed("runtimeConfiguration", JsonObject(emptyMap())) }),
+            Mutation("corpus", "retained corpus", { it.changed("inputs", JsonArray(emptyList())) }),
+            Mutation("omitted-scope", "scope inventory", { it.changed("scopes", JsonArray((it.getValue("scopes") as JsonArray).dropLast(1))) }),
+            Mutation("case-count", "scope inventory", { it.changed("caseCount", JsonPrimitive(0)) }),
+            Mutation("cleanup", "contained validation authority", { it.changed("cleanupVerified", JsonPrimitive(false)) }),
+            Mutation("reference-binary", "executable identity", { receipt -> receipt.changed("originalExecutable",
+                receipt.getValue("originalExecutable").jsonObject.changed("sha256", JsonPrimitive("0".repeat(64)))) }),
+            Mutation("forged-match", "every retained observation", { receipt -> receipt.scopeChanged(2) { scope ->
+                scope.changed("output", scope.getValue("output").jsonObject.changed("stderrBase64", JsonPrimitive("YQ=="))) } }),
+            Mutation("changed-reference", "reference observations", { receipt ->
+                var changed = receipt
+                listOf(1, 2).forEach { index -> changed = changed.scopeChanged(index) { scope ->
+                    scope.changed("output", scope.getValue("output").jsonObject.changed("stdoutBase64", JsonPrimitive("YQ=="))) } }
+                changed
+            }),
+            Mutation("unbounded-quota", "finite dedicated", { receipt -> receipt.scopeChanged(0) { scope ->
+                scope.changed("writableQuota", scope.getValue("writableQuota").jsonObject.changed("maximumEntries", JsonPrimitive(0))) } }),
+        )
+        mutations.forEach { mutation ->
+            val fixture = releaseRepairFixture()
+            val receipt = fixture.project.resolve("reports/archive-fixture.validation.json")
+            val oldDigest = sha256(receipt.readBytes())
+            receipt.writeBytes(OracleJson.canonicalBytes(mutation.change(Json.parseToJsonElement(receipt.readText()).jsonObject), StrictJsonLimits()))
+            val newDigest = sha256(receipt.readBytes())
+            // Update the outer proof commitment to reach independent receipt-content admission.
+            val graph = fixture.project.resolve("reports/repair-revisions/graph.json")
+            graph.writeText(graph.readText().replace(oldDigest, newDigest))
+            val failure = assertFailsWith<IllegalArgumentException>(mutation.label) {
+                ArchivalPackager.create(fixture.project, fixture.project.parent.resolve("${mutation.label}.zip"))
+            }
+            assertTrue(failure.message.orEmpty().contains(mutation.expected), "${mutation.label}: ${failure.message}")
+        }
+        val fixture = releaseRepairFixture()
+        Files.delete(fixture.project.resolve("reports/archive-fixture.validation.json"))
+        val missing = assertFailsWith<IllegalArgumentException> {
+            ArchivalPackager.create(fixture.project, fixture.project.parent.resolve("missing-validation.zip"))
+        }
+        assertTrue(missing.message.orEmpty().contains("validation receipt is missing"), missing.message)
     }
 
     @Test
@@ -3325,7 +3386,8 @@ class ModuleRevisionGraphTest {
         val after = before + "\n/* archive release ACP repair */\n".toByteArray()
         lateinit var binding: RepairAgentInvocationBinding
         ModuleRevisionGraph.open(project, GeneratedCRepairIndexProfile).use { graph ->
-            val corpus = graph.retainedRegressionCorpus()
+            val corpus = graph.retainRegressionInputs(listOf(ProcessInput("archive-case", emptyList(), byteArrayOf())))
+            graph.beginRun(1, 60_000)
             val attempt = graph.beginAttempt(
                 listOf(relative),
                 RevisionRepairMetadata(
@@ -3341,12 +3403,116 @@ class ModuleRevisionGraphTest {
             val document = completeAcpReceiptDocument(project, attempt, relative, before, after)
             graph.persistAndBindAgentInvocation(attempt, document)
             graph.installCandidate(attempt, mapOf(relative to after))
-            val accepted = graph.accept(attempt, RepairEvidence("valid", "candidate passed release validation"))
+            val proof = archiveValidationProofFixture(graph, attempt, project, corpus.inputs)
+            graph.bindOriginalBinary(requireNotNull(proof.originalBinarySha256))
+            graph.bindExpectedObservations(sha256(buildString {
+                append(proof.originalBinarySha256).append('\n')
+                corpus.inputs.forEach { input ->
+                    append(input.id.length).append(':').append(input.id).append(":0:")
+                        .append(sha256(byteArrayOf())).append(':').append(sha256(byteArrayOf())).append('\n')
+                }
+            }.toByteArray()))
+            val accepted = graph.accept(attempt, RepairEvidence("valid", "synthetic archive fixture observations matched"), proof)
             binding = requireNotNull(accepted.repairMetadata?.agentInvocation)
             graph.synchronizeRepairHistory()
         }
         assertEquals(0, MakeProjectBuilder.build(project).returnCode)
         return ReleaseRepairFixture(project, relative, after, binding.receiptPath, binding.requestSha256)
+    }
+
+    /** Synthetic serialization fixture only; this never qualifies the real validation provider. */
+    private fun archiveValidationProofFixture(
+        graph: ModuleRevisionGraph,
+        attempt: ModuleRevisionAttempt,
+        project: Path,
+        inputs: List<ProcessInput>,
+    ): RepairValidationProof {
+        fun element(value: Any?): JsonElement = when (value) {
+            null -> JsonNull
+            is JsonElement -> value
+            is String -> JsonPrimitive(value)
+            is Boolean -> JsonPrimitive(value)
+            is Number -> JsonPrimitive(value)
+            is List<*> -> JsonArray(value.map(::element))
+            else -> error("unsupported archive fixture JSON type")
+        }
+        fun obj(vararg fields: Pair<String, Any?>) = JsonObject(fields.associate { it.first to element(it.second) })
+        fun canonical(value: JsonElement) = OracleJson.canonicalBytes(value, StrictJsonLimits())
+        val snapshot = graph.snapshot
+        val sources = graph.candidateSources(attempt)
+        val sourceDigest = repairCandidateSourceSha256(sources)
+        val referenceDigest = sha256("synthetic archive reference".toByteArray())
+        val rebuiltDigest = sha256("synthetic archive rebuilt".toByteArray())
+        val referenceManifest = sha256("synthetic reference runtime manifest".toByteArray())
+        val rebuiltManifest = sha256("synthetic rebuilt runtime manifest".toByteArray())
+        val tools = JsonObject(decompengine.project.GeneratedCRepairRuntimeConfiguration.TOOL_NAMES.mapValues { (role, name) ->
+            obj("source" to "/fixture/tools/$name", "destination" to "/decomp-generated-c-tools/$name",
+                "sha256" to sha256("synthetic tool $role".toByteArray()))
+        })
+        val runtime = obj("runtime" to obj("schemaVersion" to 1, "profileId" to GeneratedCRepairIndexProfile.profileId(),
+            "sandboxConfigurationFile" to "/fixture/sandbox.json", "tools" to tools,
+            "buildRuntimeMounts" to emptyList<JsonElement>(), "programRuntimeMounts" to emptyList<JsonElement>(),
+            "sourceTmpfs" to "/fixture/source", "outputTmpfs" to "/fixture/output"),
+            "sandboxConfigurationSha256" to sha256("synthetic sandbox configuration".toByteArray()))
+        val runtimeDigest = sha256(canonical(runtime))
+        fun quota(mount: Int, target: String) = obj("provider" to "dedicated-tmpfs-size+nr_inodes",
+            "mountId" to mount, "maximumBytes" to 1_048_576, "maximumEntries" to 512,
+            "mountPathSha256" to sha256(target.toByteArray()))
+        val outputQuota = quota(102, "/fixture/output")
+        val files = JsonArray(sources.toSortedMap().map { (path, bytes) -> obj("path" to path,
+            "role" to if (path == "Makefile") "build-file" else "source", "mode" to 292,
+            "bytes" to bytes.size, "sha256" to sha256(bytes)) })
+        fun executable(digest: String, manifest: String, role: String) = obj("sha256" to digest,
+            "runtimeManifestSha256" to manifest, "bytes" to 64, "mode" to 320, "role" to role)
+        fun scope(role: String, input: ProcessInput?, manifest: String?): JsonObject {
+            val command = listOf("/fixture/$role") + input?.args.orEmpty()
+            val fields = linkedMapOf("provider" to "bubblewrap+systemd-cgroup-v2",
+                "launch[0].purpose" to "CANDIDATE_VALIDATION", "launch[0].mergeError" to "false",
+                "launch[0].command" to acpSandboxCanonicalStringDigest(command),
+                "launch[0].writableMountClosure" to sha256("synthetic mount closure".toByteArray()),
+                "authority[0].mode" to "READ_WRITE")
+            listOf("cgroup.pids", "cgroup.memory", "cgroup.cpu", "network", "nestedUserns", "newSession",
+                "dieWithParent", "launch[0].gate.positiveByte").forEach { fields[it] = "true" }
+            mapOf("provider" to "provider", "mount" to "mountId", "bytes" to "maximumBytes",
+                "entries" to "maximumEntries", "path" to "mountPathSha256").forEach { (field, key) ->
+                fields["authority[0].quota.$field"] = (outputQuota.getValue(key) as JsonPrimitive).content
+            }
+            manifest?.let {
+                fields["launch[0].executable.manifest"] = it
+                fields["launch[0].executable.configuredManifest"] = it
+            }
+            val sandboxDigest = sha256(buildString {
+                fields.forEach { (name, value) -> append(name.length).append(':').append(name)
+                    .append(value.length).append(':').append(value).append(';') }
+            }.toByteArray())
+            return obj("role" to role, "inputId" to input?.id,
+                "output" to obj("command" to command, "exitCode" to 0, "stdoutBase64" to "", "stderrBase64" to "",
+                    "networkIsolated" to true), "sandboxSha256" to sandboxDigest,
+                "sandboxFields" to fields.map { listOf(it.key, it.value) }, "writableQuota" to outputQuota,
+                "cleanupVerified" to true)
+        }
+        val receipt = obj("schemaVersion" to 1, "provider" to "generated-c-linux-bubblewrap-cgroup-v1",
+            "profileId" to GeneratedCRepairIndexProfile.profileId(), "profileSha256" to snapshot.profileSha256,
+            "indexSha256" to snapshot.indexSha256, "sourceRevisionSha256" to sourceDigest,
+            "regressionCorpusSha256" to repairRegressionCorpusSha256(inputs), "runtimeSha256" to runtimeDigest,
+            "runtimeConfiguration" to runtime,
+            "sourceSnapshot" to obj("manifestSha256" to sha256(canonical(files)), "files" to files,
+                "quota" to quota(101, "/fixture/source")),
+            "buildOutputLink" to obj("path" to "build", "role" to "application-owned-output-link",
+                "target" to "/fixture/output/staging", "quota" to outputQuota),
+            "originalExecutable" to executable(referenceDigest, referenceManifest, "reference"),
+            "rebuiltExecutable" to executable(rebuiltDigest, rebuiltManifest, "candidate"),
+            "inputs" to inputs.map { obj("id" to it.id, "args" to it.args,
+                "stdinBase64" to java.util.Base64.getEncoder().encodeToString(it.stdin)) },
+            "scopes" to listOf(scope("build", null, null)) + inputs.flatMap {
+                listOf(scope("reference", it, referenceManifest), scope("candidate", it, rebuiltManifest)) },
+            "outcome" to "behavior-checked", "caseCount" to inputs.size, "matches" to true,
+            "cleanupVerified" to true, "assurance" to "strict-contained")
+        val bytes = canonical(receipt)
+        project.resolve("reports/archive-fixture.validation.json").writeBytes(bytes)
+        return RepairValidationProof(sourceDigest, snapshot.profileSha256, snapshot.indexSha256,
+            repairRegressionCorpusSha256(inputs), referenceDigest, rebuiltDigest, runtimeDigest, sha256(bytes), true,
+            RepairValidationAssurance.STRICT_CONTAINED)
     }
 
     private fun rewriteArchive(
