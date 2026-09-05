@@ -72,6 +72,14 @@ its `displayOnly` flag and counters must never substitute for complete required 
 
 Focused verification:
 
+Message previews track at most 16 concurrent message IDs per task. Once a new ID exceeds that bound,
+new IDs are omitted for the rest of that task, even if an earlier message completes and frees space.
+This prevents a continuation whose prefix was lost from being redacted as though it were a whole
+message. Already tracked messages can finish, later tasks start with fresh capacity, and
+`messageTrackingExhausted` explicitly marks the omission mode in subsequent message records.
+A source event sequence gap also clears all partial message content and disables new previews for
+that task: missing chunks may contain the rest of a credential, even for an already tracked ID.
+
 Web background failures are redacted before job status is persisted, so job JSON, API responses and
 refreshed pages consume the same sanitized diagnostic. HTTP exception responses also use the bounded
 redactor. The default sensitive values are the server environment; callers that supply credentials

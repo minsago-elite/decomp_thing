@@ -104,6 +104,9 @@ class AgentProgressJournal(
             // Raw chunks stay bounded and are not persisted. Whole-message redaction prevents a
             // credential split across chunks from leaking a prefix through the live projection.
             private val messages = linkedMapOf<String, StringBuilder?>()
+            // Once an untracked message has lost a prefix, later capacity must not admit its
+            // continuation as a complete message. Fail closed for new IDs for this task.
+            private var messageAdmissionExhausted = false
 
             @Synchronized
             override fun event(event: AgentExecutionEvent) {
@@ -111,6 +114,10 @@ class AgentProgressJournal(
                 require(event.sequence > previousSequence) { "progress events must be ordered" }
                 val gap = event.sequence != previousSequence + 1
                 previousSequence = event.sequence
+                if (gap) {
+                    messages.replaceAll { _, _ -> null }
+                    messageAdmissionExhausted = true
+                }
                 post(when (event) {
                     is AgentMessageEvent -> "message"
                     is AgentPlanEvent -> "plan"
@@ -128,7 +135,11 @@ class AgentProgressJournal(
                             put("completed", event.completed)
                             put("chunkCharacters", event.textDelta.length)
                             put("contentSha256", digest(event.textDelta))
-                            if (messageKey !in messages && messages.size < 16) messages[messageKey] = StringBuilder()
+                            if (messageKey !in messages && !messageAdmissionExhausted) {
+                                if (messages.size < 16) messages[messageKey] = StringBuilder()
+                                else messageAdmissionExhausted = true
+                            }
+                            put("messageTrackingExhausted", messageAdmissionExhausted)
                             messages[messageKey]?.let { buffer ->
                                 if (buffer.length.toLong() + event.textDelta.length > MAXIMUM_MESSAGE_CHARACTERS) {
                                     messages[messageKey] = null

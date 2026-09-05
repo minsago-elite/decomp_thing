@@ -9,6 +9,61 @@ import kotlin.test.*
 
 class AgentProgressJournalTest {
     @Test
+    fun `source sequence loss suppresses incomplete message previews`() {
+        val root = createTempDirectory("progress-message-loss-")
+        AgentProgressJournal(root, "reconstruction", listOf("private-credential"), maximumQueuedEvents = 1024).use { journal ->
+            val task = journal.beginTask("module", request(root))
+            task.event(AgentMessageEvent(0, "tracked", AgentMessageRole.ASSISTANT, "private-"))
+            task.event(AgentMessageEvent(2, "tracked", AgentMessageRole.ASSISTANT, " tail", true))
+            task.event(AgentMessageEvent(3, "unseen", AgentMessageRole.ASSISTANT, "credential", true))
+        }
+        val snapshot = AgentProgressJournal.read(root)!!
+        assertFalse(snapshot.toString().contains("private-"))
+        assertFalse(snapshot.toString().contains("credential"))
+        val completed = snapshot.getValue("events").jsonArray.map { it.jsonObject }.filter {
+            it["completed"]?.jsonPrimitive?.booleanOrNull == true
+        }
+        assertEquals(2, completed.size)
+        assertTrue(completed.first().getValue("sourceSequenceGap").jsonPrimitive.boolean)
+        completed.forEach {
+            assertTrue(it.getValue("textOmitted").jsonPrimitive.boolean)
+            assertFalse("text" in it)
+        }
+    }
+
+    @Test
+    fun `message tracking overflow never admits a continuation after capacity is released`() {
+        val root = createTempDirectory("progress-message-overflow-")
+        AgentProgressJournal(root, "reconstruction", listOf("private-credential"), maximumQueuedEvents = 1024).use { journal ->
+            val task = journal.beginTask("module", request(root))
+            repeat(16) { index ->
+                task.event(AgentMessageEvent(index.toLong(), "tracked-$index", AgentMessageRole.ASSISTANT, "safe"))
+            }
+            task.event(AgentMessageEvent(16, "omitted", AgentMessageRole.ASSISTANT, "private-"))
+            task.event(AgentMessageEvent(17, "tracked-0", AgentMessageRole.ASSISTANT, " complete", true))
+            task.event(AgentMessageEvent(18, "omitted", AgentMessageRole.ASSISTANT, "credential", true))
+            task.event(AgentMessageEvent(19, "later", AgentMessageRole.ASSISTANT, "new message", true))
+        }
+        val snapshot = AgentProgressJournal.read(root)!!
+        assertFalse(snapshot.toString().contains("credential"))
+        assertFalse(snapshot.toString().contains("private-"))
+        val messages = snapshot.getValue("events").jsonArray.map { it.jsonObject }.filter {
+            it["kind"]?.jsonPrimitive?.content == "message"
+        }
+        assertEquals("safe complete", messages[17].getValue("text").jsonPrimitive.content)
+        messages.takeLast(2).forEach {
+            assertTrue(it.getValue("textOmitted").jsonPrimitive.boolean)
+            assertTrue(it.getValue("messageTrackingExhausted").jsonPrimitive.boolean)
+            assertFalse("text" in it)
+        }
+        AgentProgressJournal(root, "reconstruction").use { journal ->
+            journal.beginTask("next-task", request(root)).event(
+                AgentMessageEvent(0, "new", AgentMessageRole.ASSISTANT, "next task is unaffected", true))
+        }
+        assertTrue(AgentProgressJournal.read(root).toString().contains("next task is unaffected"))
+    }
+
+    @Test
     fun `durable run and revision correlation survives writer restart without promoting provisional state`() {
         val root = createTempDirectory("progress-run-test")
         val request = request(root)
