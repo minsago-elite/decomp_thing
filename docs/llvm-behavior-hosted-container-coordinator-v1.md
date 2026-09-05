@@ -67,6 +67,11 @@ hosted execution remains necessary; local projector tests are not a Docker pass.
 The new true-valued Linux fixture failed against the old projector. After the
 correction, 50 focused projector/control/journal/live-contract tests yielded
 49 passes, one explicit missing-Docker live skip, and no failures or errors.
+Hosted run [33944212013](https://github.com/minsago-elite/decomp_thing/actions/runs/33944212013)
+at `f8cca3e` subsequently passed the required production-staged worker-image
+retained Clang/direct LLD hostile-swap step and advanced into the Kotlin inventory
+gates. This is a real required-step pass, not yet a claim that the entire workflow,
+full-tree build or authoritative hosted receipt/release composition is complete.
 
 ### Required live worker-image regression
 

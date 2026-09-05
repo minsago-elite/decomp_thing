@@ -73,6 +73,9 @@ mappings in either direction must leave no published candidate.
 Verification: 82 focused tests passed with zero failures, errors or skips using
 `./gradlew --offline test --tests 'decompengine.oracle.fulltree.FullTreeCall*' --tests decompengine.oracle.fulltree.FullTreeCrossShardCallFixtureTest --tests decompengine.oracle.core.OracleSchemasTest`.
 This includes both historical policy-v2/v3 rejection cases and the schema catalog.
+The subsequent `fc1b821` full-tree and schema regression ran 441 tests across
+62 suites: 402 passed, 39 environment-dependent cases skipped, and none failed.
+This broader local run does not qualify the unavailable hosted boundaries.
 
 These are raw-coordinate and observability checks, **not recovered-model scores**.
 The baseline remains denominator 9 / exact 7 / partial 2 / excluded 2 on the original
