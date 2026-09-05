@@ -417,3 +417,26 @@ checks pass. JVM tests were not rerun for this frontend-only change.
 This advances shared session invalidation in #179. It does not complete server
 restart signaling, unconfirmed-revocation reconciliation, cross-version tab
 qualification or conflicting workflow-command scenarios.
+
+## Public transport projection
+
+The v1 producer now withholds `text`, plan `entries` and `path` from every observation,
+regardless of message role or event kind. The journal does not certify provider-supported
+public visibility; hiding prose only in the activity component left it in browser responses.
+Known fields still undergo the existing type and size validation before projection. Each
+withheld source field increments `omittedFieldCount`, alongside unknown source fields, and
+withheld `text` sets `textOmitted: true`. Entire plan entries count as one omitted source field;
+entry counts and truncation metadata remain available. These counts do not imply retained
+event loss, and cursors still bind the original journal records, including withheld content.
+
+Supported correlation, usage, event sequence and observation authority are unchanged. The
+schema retains optional prose fields for compatibility with its design fixtures; schema validity
+alone does not certify public visibility or oblige this producer to emit a field. New public and
+plan metadata fixtures capture the implemented producer output. Legacy JSON/HTML uses its own
+metadata projection and omission count spelling, documented in the API compatibility section.
+
+Mapper tests cover all message roles, exact usage values and unknown-field accounting. The
+HTTP progress test checks authenticated response omission and unchanged journal bytes. The
+byte-page test uses large retained metadata to keep exercising response splitting after prose
+removal. Full classification of retained labels and explicit provider public-message support
+remain outstanding; this change does not claim that all possible journal data is public.

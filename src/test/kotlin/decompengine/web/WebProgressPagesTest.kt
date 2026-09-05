@@ -68,7 +68,14 @@ class WebProgressPagesTest {
     }
 
     @Test fun `large observations split below the response byte ceiling without losing reachability`() {
-        val pages = WebProgressPages(); val bytes = journal((0L..199L).toList(), text = "x".repeat(8000))
+        val pages = WebProgressPages()
+        val source = Json.parseToJsonElement(journal((0L..199L).toList()).decodeToString()).jsonObject
+        // Exercise the byte ceiling with retained metadata; private prose is now withheld.
+        val labels = listOf("taskId", "workflowRunId", "revisionId", "phase", "status", "stopReason",
+            "failureKind", "role", "decision", "change", "wallClock", "reportedCostAmount", "reportedCostCurrency")
+        val bytes = JsonObject(source + ("events" to JsonArray(source.getValue("events").jsonArray.map { item ->
+            JsonObject(item.jsonObject + labels.associateWith { JsonPrimitive("x".repeat(533)) })
+        }))).toString().toByteArray()
         val first = page(pages, bytes, "limit=200")
         assertTrue(first.toString().toByteArray().size < 1_048_576)
         assertTrue(first.getValue("hasMore").jsonPrimitive.boolean)

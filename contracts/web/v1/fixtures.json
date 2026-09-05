@@ -301,6 +301,14 @@
     {
       "file": "fixtures/invalid-scheduler-capacity.json",
       "valid": false
+    },
+    {
+      "file": "fixtures/event-observation-public-metadata.json",
+      "valid": true
+    },
+    {
+      "file": "fixtures/event-observation-plan-metadata.json",
+      "valid": true
     }
   ]
 }

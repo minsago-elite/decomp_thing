@@ -390,8 +390,9 @@ at the snapshot/event level reports excluded fields without disclosing names or 
 `text` field sets `textOmitted: true`. These presentation counts are separate from journal queue
 and retention drops; events, sequence positions and durable journal bytes are not removed.
 The legacy view labels the visibility restriction and omitted fields, including during polling.
-This projection does not certify every retained label as public or finish the v1 transport/privacy
-audit; the SPA still withholds uncertified prose in its activity view.
+This projection does not certify every retained label as public. The v1 producer also withholds
+`text`, `entries` and `path`, using its existing `omittedFieldCount` and `textOmitted` fields;
+the SPA retains its activity-view restriction as well. See [the transport projection](web-progress-adapter.md#public-transport-projection).
 
 The HTTP tests cover missing/unknown resources, invalid query/upload, damaged storage,
 request-ID agreement, content type, cache policy and preservation of stored bytes. Unexpected
