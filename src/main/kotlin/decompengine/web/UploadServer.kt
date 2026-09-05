@@ -216,6 +216,9 @@ class UploadServer(
         Thread(task, "decomp-web-deadline").apply { isDaemon = true }
     }.apply { removeOnCancelPolicy = true }
     private var ownership: WebJobStoreOwnership? = null
+    private val lifecycleLock = Any()
+    private var stopping = false
+    private var activeRequests = 0
     val serverPort: Int get() = server.address.port
     val browserOrigin: String = devFrontendOrigin ?: webOrigin(host, serverPort)
 
@@ -249,17 +252,76 @@ class UploadServer(
 
     fun stop(delaySeconds: Int = 0) {
         require(delaySeconds >= 0) { "shutdown delay must be nonnegative" }
+        synchronized(lifecycleLock) { stopping = true }
         jobs.beginShutdown()
         server.stop(delaySeconds)
         requestExecutor.shutdownNow()
         requestDeadlines.shutdownNow()
         access?.close()
         jobs.close()
-        ownership?.close()
-        ownership = null
+        if (!releaseOwnershipIfIdle()) throw IllegalStateException("HTTP requests remain active after server stop")
+    }
+
+    /** Admission covers the whole handler, including upload publication and error handling. */
+    internal fun withActiveRequest(action: () -> Unit): Boolean {
+        synchronized(lifecycleLock) {
+            if (stopping) return false
+            activeRequests++
+        }
+        try {
+            action()
+            return true
+        } finally {
+            synchronized(lifecycleLock) { activeRequests-- }
+            try {
+                releaseOwnershipIfIdle()
+            } catch (_: Exception) {
+                System.err.println("Web request cleanup did not release store ownership; recovery is required")
+            }
+        }
+    }
+
+    private fun releaseOwnershipIfIdle(): Boolean = synchronized(lifecycleLock) {
+        if (stopping && activeRequests == 0 && jobs.isIdle()) {
+            ownership?.close()
+            ownership = null
+            true
+        } else false
+    }
+    }
+
+    private fun releaseOwnershipIfIdle() = synchronized(lifecycleLock) {
+        if (stopping && activeRequests == 0 && ownedExecutor?.isTerminated != false && runningJobs.isEmpty()) {
+            ownership?.close()
+            ownership = null
+        }
+    }
+
+    /** Admission covers the whole handler, including upload publication and error handling. */
+    internal fun withActiveRequest(action: () -> Unit): Boolean {
+        synchronized(lifecycleLock) {
+            if (stopping) return false
+            activeRequests++
+        }
+        try {
+            action()
+            return true
+        } finally {
+            synchronized(lifecycleLock) { activeRequests-- }
+            try {
+                releaseOwnershipIfIdle()
+            } catch (_: Exception) {
+                System.err.println("Web request cleanup did not release store ownership; recovery is required")
+            }
+        }
     }
 
     private fun route(exchange: HttpExchange) {
+    private fun route(exchange: HttpExchange) {
+        if (!withActiveRequest { routeAdmitted(exchange) }) exchange.close()
+    }
+
+    private fun routeAdmitted(exchange: HttpExchange) {
         spaAssets?.let { assets ->
             try {
                 if (api?.route(exchange) == true) return

@@ -82,6 +82,9 @@ class WebJobService(
 
     @Synchronized fun beginShutdown() { stopping = true }
 
+    /** True when the service is closed and no workflows or uploads remain; ownership-handoff evidence. */
+    internal fun isIdle(): Boolean = synchronized(this) { closed && active.isEmpty() && uploads.isEmpty() }
+
     @Synchronized
     fun initializeExistingStorage() {
         check(!closed && active.isEmpty()) { "Storage initialization requires an idle service" }
