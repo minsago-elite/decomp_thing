@@ -97,6 +97,18 @@ internal object KotlinContainedCommandKeeper {
                                         status = "OUTPUT_LIMIT"
                                         break
                                     }
+                                    if (request.allowInterruption) {
+                                        val interrupt = readFile(root, KotlinContainedCommandProtocol.INTERRUPT_FILE,
+                                            KotlinContainedCommandProtocol.MAXIMUM_PROTOCOL_BYTES)
+                                        if (interrupt != null) {
+                                            KotlinContainedCommandProtocol.requireInterrupt(interrupt, bootstrap, request, keeperPid)
+                                            // Only report interruption after observing the exact child still live.
+                                            if (process.isAlive) {
+                                                status = "INTERRUPTED"
+                                                break
+                                            }
+                                        }
+                                    }
                                     if (System.nanoTime() - started >= TimeUnit.SECONDS.toNanos(request.maximumWallSeconds)) {
                                         status = "TIMED_OUT"
                                         break

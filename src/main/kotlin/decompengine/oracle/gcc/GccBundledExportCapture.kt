@@ -31,6 +31,63 @@ internal object GccBundledExportCapture {
         artifacts: List<GccCompilerEngineContainmentArtifactIdentity>,
         limits: GccResumeByteValidationLimits = GccResumeByteValidationLimits(),
     ): GccBundledExportAssessment {
+        return captureFiles(run, expectedReports, artifacts, limits, interrupted = false) { state, progress, batches, capture, reports ->
+            val model = capture.read(reports, "program_model.json", limits.assembledModelBytes)
+            val assessment = GccCompilerEngineResumeByteValidator.assessCompletedRun(state, progress, batches, model, limits)
+            require(assessment.reused == 0L) { "fresh GCC execution unexpectedly reused prior records" }
+            GccBundledExportAssessment(assessment, renderAssessment(assessment, capture.bytes))
+        }
+    }
+
+    /** Byte validation only: the caller must separately establish exact worker absence. */
+    fun captureInterruptedPrefix(
+        run: LinuxDescriptor,
+        expectedReports: LinuxFileIdentity,
+        artifacts: List<GccCompilerEngineContainmentArtifactIdentity>,
+        limits: GccResumeByteValidationLimits = GccResumeByteValidationLimits(),
+    ): GccInterruptedPrefixAssessment = captureFiles(run, expectedReports, artifacts, limits, interrupted = true) {
+            state, progress, batches, _, reports ->
+        requireNoFinalModel(reports)
+        GccCompilerEngineResumeByteValidator.assessInterruptedPrefix(state, progress, batches, limits).also {
+            require(it.reused == 0L) { "fresh interrupted GCC execution unexpectedly reused prior records" }
+        }
+    }
+
+    /** Live observation only. Final checkpoint validation must run after exact process absence. */
+    fun observeProgress(
+        run: LinuxDescriptor,
+        expectedReports: LinuxFileIdentity,
+        artifacts: List<GccCompilerEngineContainmentArtifactIdentity>,
+        limits: GccResumeByteValidationLimits = GccResumeByteValidationLimits(),
+    ): GccExportProgressAssessment? = LinuxFilesystemSyscalls.openDirectoryAt(run.fd, "reports").use { reports ->
+        require(reports.identity.copy(linkCount = expectedReports.linkCount) == expectedReports) {
+            "GCC progress reports directory changed identity"
+        }
+        if (!captureEntryExists(reports, "program_model.json.export") ||
+            !captureEntryExists(reports, "program_model.json.progress.json")) return@use null
+        LinuxFilesystemSyscalls.openDirectoryAt(reports.fd, "program_model.json.export").use { export ->
+            requireCaptureDirectory(export, reports.identity)
+            if (!captureEntryExists(export, "state.json")) return@use null
+            val capture = BoundExportFiles(limits.transitionAggregateBytes)
+            val state = capture.read(export, "state.json", limits.exporterStateBytes)
+            requireInvocation(state, artifacts)
+            val progress = capture.read(reports, "program_model.json.progress.json", limits.progressBytes)
+            val observation = GccCompilerEngineResumeByteValidator.assessExportProgress(state, progress, limits)
+            capture.verify()
+            requireNamedDirectory(run, "reports", reports)
+            requireNamedDirectory(reports, "program_model.json.export", export)
+            observation
+        }
+    }
+
+    private fun <T> captureFiles(
+        run: LinuxDescriptor,
+        expectedReports: LinuxFileIdentity,
+        artifacts: List<GccCompilerEngineContainmentArtifactIdentity>,
+        limits: GccResumeByteValidationLimits,
+        interrupted: Boolean,
+        assess: (ByteArray, ByteArray, List<GccPlanningBatchBytes>, BoundExportFiles, LinuxDescriptor) -> T,
+    ): T {
         return LinuxFilesystemSyscalls.openDirectoryAt(run.fd, "reports").use { reports ->
             require(reports.identity.copy(linkCount = expectedReports.linkCount) == expectedReports) {
                 "GCC export reports directory changed identity"
@@ -42,19 +99,17 @@ internal object GccBundledExportCapture {
                     val capture = BoundExportFiles(limits.transitionAggregateBytes)
                     val state = capture.read(export, "state.json", limits.exporterStateBytes)
                     val stateAssessment = GccCompilerEngineResumeByteValidator.assessExporterState(state, limits)
-                    val stateDocument = OracleJson.parse(state).jsonObject
-                    val byRole = artifacts.associateBy { it.role }
-                    for ((field, role) in mapOf(
-                        "inputSha256" to GccCompilerEngineContainmentArtifactRole.ENGINE_BINARY,
-                        "exporterSha256" to GccCompilerEngineContainmentArtifactRole.EXPORTER_SOURCE,
-                        "analysisToolSha256" to GccCompilerEngineContainmentArtifactRole.GHIDRA_ARCHIVE,
-                    )) {
-                        require(stateDocument.getValue(field).jsonPrimitive.content == byRole.getValue(role).sha256) {
-                            "GCC export $field differs from the authenticated invocation"
-                        }
-                    }
+                    requireInvocation(state, artifacts)
+                    val progress = capture.read(reports, "program_model.json.progress.json", limits.progressBytes)
+                    val batchCount = if (interrupted) {
+                        val observed = GccCompilerEngineResumeByteValidator.assessExportProgress(state, progress, limits)
+                        require(observed.phase == "planning" && observed.completed > 0 &&
+                            observed.completed < observed.total && observed.completed % BATCH_FUNCTIONS == 0L
+                        ) { "GCC interrupted capture requires a nonterminal durable planning prefix" }
+                        observed.completed / BATCH_FUNCTIONS
+                    } else stateAssessment.planningBatchCount
                     val expectedNames = linkedSetOf<String>()
-                    val batches = (0 until stateAssessment.planningBatchCount).map { index ->
+                    val batches = (0 until batchCount).map { index ->
                         val start = index * BATCH_FUNCTIONS
                         val end = minOf(start + BATCH_FUNCTIONS, stateAssessment.functionCount)
                         val base = String.format(Locale.ROOT, "batch-%08d-%08d", start, end)
@@ -72,19 +127,41 @@ internal object GccBundledExportCapture {
                         )
                     }
                     requireBatchNames(batchesDirectory, expectedNames)
-                    val progress = capture.read(reports, "program_model.json.progress.json", limits.progressBytes)
-                    val model = capture.read(reports, "program_model.json", limits.assembledModelBytes)
-                    val assessment = GccCompilerEngineResumeByteValidator.assessCompletedRun(state, progress, batches, model, limits)
-                    require(assessment.reused == 0L) { "fresh GCC execution unexpectedly reused prior records" }
+                    val result = assess(state, progress, batches, capture, reports)
                     capture.verify()
                     requireBatchNames(batchesDirectory, expectedNames)
                     requireNamedDirectory(run, "reports", reports)
                     requireNamedDirectory(reports, "program_model.json.export", export)
                     requireNamedDirectory(export, "planning-batches", batchesDirectory)
-                    GccBundledExportAssessment(assessment, renderAssessment(assessment, capture.bytes))
+                    if (interrupted) requireNoFinalModel(reports)
+                    result
                 }
             }
         }
+    }
+}
+
+private fun captureEntryExists(directory: LinuxDescriptor, name: String): Boolean =
+    LinuxFilesystemSyscalls.openPathAtOrNull(directory.fd, name)?.use { true } ?: false
+
+private fun requireInvocation(state: ByteArray, artifacts: List<GccCompilerEngineContainmentArtifactIdentity>) {
+    val document = OracleJson.parse(state).jsonObject
+    val byRole = artifacts.associateBy { it.role }
+    require(byRole.size == artifacts.size) { "GCC capture contains duplicate invocation roles" }
+    for ((field, role) in mapOf(
+        "inputSha256" to GccCompilerEngineContainmentArtifactRole.ENGINE_BINARY,
+        "exporterSha256" to GccCompilerEngineContainmentArtifactRole.EXPORTER_SOURCE,
+        "analysisToolSha256" to GccCompilerEngineContainmentArtifactRole.GHIDRA_ARCHIVE,
+    )) {
+        require(document.getValue(field).jsonPrimitive.content == byRole.getValue(role).sha256) {
+            "GCC export $field differs from the authenticated invocation"
+        }
+    }
+}
+
+private fun requireNoFinalModel(reports: LinuxDescriptor) {
+    LinuxFilesystemSyscalls.openPathAtOrNull(reports.fd, "program_model.json")?.use {
+        error("interrupted GCC prefix unexpectedly contains a final model")
     }
 }
 

@@ -5,8 +5,10 @@ the independent BOOT deployment reference, the retained application-bundled
 Ghidra tree, an external operation journal and a genuine dedicated-ext4 lease.
 It returns an opaque `GccBundledPreparedOperation`. Preparation alone does not
 authorize START; `complete`, `startAuthorized` and `releaseEligible` remain false.
-Its one-shot `execute()` performs the additional contained fresh-run admission
-described below. It does not support interruption, resume or release.
+Its one-shot `execute()` performs contained fresh-control admission.
+`executeUntilCheckpoint(minimumCompletedFunctions)` admits a prepared INTERRUPTED
+intent through the same retained containment boundary. Neither path supports
+resume or release yet.
 
 This is separate from the historical path-based GCC BOOT controller. That
 controller's caller-populated output directory and capacity checks are not
@@ -138,3 +140,173 @@ Run removal requires a separate after-absence bounded
 cleanup/quarantine handoff; only record-only lease state can reach independently
 authorized release. Ordinary recursive deletion or `abandonForRecovery` cannot
 stand in for it. The A10 fresh/resumed cc1 and lto1 proofs and #235 remain open.
+
+## Interrupted-prefix capture groundwork
+
+`GccBundledExportCapture.captureInterruptedPrefix` reads a nonterminal planning
+prefix through the retained run/reports directory descriptors, under per-file
+and aggregate byte limits. It checks input/exporter/archive identities and the
+existing Kotlin semantic/checkpoint commitments, and revalidates file identities,
+metadata and exact batch membership. It requires at least one complete 512-function
+batch, no reused records and no final model. Unfinished or extra batch members
+are rejected and retained; this entrypoint does not delete or repair residue.
+
+The returned `GccInterruptedPrefixAssessment` remains a non-authoritative byte
+assessment. Calling it does not stop a process or prove absence. The contained
+coordinator now connects this capture to authenticated checkpoint-triggered
+interruption and durable interruption transitions. Same-owner resume and real
+cc1/lto1 fresh/resumed model and ownership-plan comparisons remain required by
+#137. Prefix-only fixtures do not qualify those lifecycle requirements.
+
+## Authenticated keeper interruption primitive
+
+The keeper accepts an opt-in `kotlin-contained-command-request-v2` with
+`allowInterruption=true`. Default requests retain the exact v1 field set,
+provider and canonical encoding. Neither v1 requests nor their outcome decoder
+admit interruption. The host launcher defaults to v1 fresh-control requests. Its optional retained
+interruption controller selects v2. The GCC prepared coordinator selects v2 only
+for its explicit interrupted-intent entrypoint.
+
+For a v2 request, the host may publish a mode-0400, no-replace
+`contained-command.interrupt.json`. The `INTERRUPT` HMAC event binds the original
+request digest, nonce and keeper PID using the stdin-only key. It cannot be
+replayed as START or OUTCOME, or across another request, key or keeper. The
+keeper authenticates the bounded record while its direct child is running,
+requests forcible termination, reaps that child within five seconds and drains
+its bounded output readers before publishing an authenticated `INTERRUPTED`
+outcome. Malformed or forged control fails without an accepted outcome. Log
+failure, output overflow and failure to reap still prevent accepted interruption.
+
+`INTERRUPTED` cannot pass successful-execution validation. It records that an
+authenticated request was observed while the child was live and that the child
+was reaped; an exit racing termination does not prove which event caused death.
+It does not prove a durable checkpoint, descendant/cgroup absence, safe project
+reload, or resume equivalence. The host must compose those independent checks
+and durable journal transitions before accepting an interrupted benchmark leg.
+The local tests execute only an authored waiting JVM child, exercise valid and
+forged requests, and are explicitly not containment or real-Ghidra evidence.
+
+## Host interruption delivery and journal branch
+
+`KotlinContainedCommandInterruption` binds once to a v2 request and snapshots a
+bounded canonical policy. The launcher commits its policy digest and v2 provider
+in the runtime closure before BOOT. During outcome polling, the host polls the
+caller-owned trigger. A non-null bounded canonical trigger is committed with the
+policy, request, keeper PID and interruption-token digest in an authorization
+record. The durable-authorization callback must complete before token publication.
+The launcher revalidates executable/runtime inputs immediately before no-replace
+token publication. Authorization or delivery failure poisons the controller; it
+does not retry a possibly delivered token. Reentrant delivery is rejected.
+
+The caller supplies the trigger's semantics and durable journal owner. The
+controller checks shape, size, bindings and sequencing; a caller-supplied trigger
+is not independently authenticated Ghidra checkpoint evidence. Missing triggers,
+early normal exit, malformed outcomes and undelivered interruption cannot yield
+an interrupted result. An authenticated INTERRUPTED outcome still passes the
+existing exact keeper-population, frozen accounting and unit/cgroup/process
+absence checks before the launcher returns. The result uses the distinct
+`kotlin-lease-contained-command-interrupted-v1` provider, including the authorization
+record and digest; the ordinary execution provider and default request remain
+unchanged. This does not bypass cleanup-only retention on failure.
+
+The GCC journal now supports a separate START-authorized → interrupt-authorized →
+interrupted-execution → interrupted-prefix-assessment branch. Each immutable
+record commits its predecessor, payload and operation/intent bindings and retains
+`complete=false` and `releaseEligible=false`. Completed-execution and interrupted
+branches cannot be interchanged. Missing, altered or out-of-order records poison
+the owner without removing residue.
+
+The GCC coordinator supplies the bounded checkpoint trigger, journal callbacks
+and post-absence prefix validation described below. Same-owner resume remains
+unfinished. Hosted systemd/ext4 interruption and real compiler equivalence have
+not been established by the local delivery/keeper/journal tests.
+
+## Prepared GCC checkpoint-triggered interruption
+
+`executeUntilCheckpoint` requires an INTERRUPTED fresh-analysis intent and a
+positive threshold divisible by 512. It binds that threshold into the host policy
+and polls state/progress through retained run/reports descriptors under byte
+limits. Missing not-yet-published state/progress returns no trigger. Malformed,
+linked, replaced or oversized records and mismatched input/exporter/archive
+identities fail. Only fresh nonterminal planning progress at a full batch can
+trigger; a completed export cannot substitute for interruption.
+
+The exporter publishes planning progress after publishing and checking each
+batch checkpoint. This progress observation requests interruption but does not
+prove retained checkpoint completeness. Before token delivery the coordinator
+revalidates retained inputs and disk ownership and durably publishes interruption
+authorization. After the host proves the authenticated outcome and exact absence,
+the coordinator records interrupted execution and performs full descriptor-bound
+prefix validation. The resulting prefix must have the same analysis-state digest
+and total and cannot precede the trigger. Additional fully committed batches may
+have completed during token delivery. Unknown/unfinished residue or a final model
+is rejected and retained, never silently removed to manufacture a valid prefix.
+
+`GccBundledInterruptedOperation` snapshots the linked execution/prefix receipts;
+`complete` and `releaseEligible` stay false. The prepared owner remains one-shot,
+and close still abandons residue after independently proving absence. No project
+reload, cold adoption, resumed invocation or successful lease release is added.
+The focused tests cover progress admission, invocation/path/byte rejection,
+forward-only prefix lineage, journal sequencing and host delivery. Provisioned
+interruption and real compiler benchmarks still require executed evidence.
+
+## Stopped analysis-state manifest
+
+After an interrupted prefix is validated, `executeUntilCheckpoint` also captures
+`state` through its retained directory descriptor. Capture streams file hashes,
+commits paths, byte lengths, device/inode/mount identities, ownership, modes,
+link counts and size/mtime/ctime metadata, and includes empty directories. It
+rechecks every name, identity and metadata record before returning. Symlinks,
+special files, hardlinked files, untrusted writes, foreign mounts and replaced
+state roots fail without content changes or cleanup. Empty/no-data state cannot
+supply a resume manifest.
+
+Capture enforces entry/depth/path, logical-file-size, aggregate-byte and elapsed
+wall-clock bounds. The prepared owner supplies its disk byte/inode ceilings and
+wall budget, subject to the manifest's 32,768-entry, depth-32 and 64-MiB JSON
+ceilings. Files are read with a fixed 64-KiB buffer; an oversized sparse file is
+rejected from metadata before reading its holes. This is a bounded capture phase,
+not proof of whole-run A10 aggregate resource compliance.
+
+The external journal durably publishes `analysis-state-manifest.json` and then
+`analysis-state-captured.json`, linking the full manifest digest/length/counts to
+the interrupted-prefix record. A distinct manifest publication/read API permits
+at most 64 MiB in owner-read-only mode; ordinary journal records retain their
+one-MiB hard bound. The same no-replace, descriptor identity and residue rules
+apply. A crash between manifest and receipt leaves an explicit staged residue;
+this checkpoint provides no cold adoption of it.
+
+`GccBundledInterruptedOperation` exposes defensive copies of the manifest and
+its receipt. They describe historical captured bytes, not a live immutable-state
+capability or successful resume. Same-owner resume still must revalidate this
+manifest and establish a new durable control lifecycle while preserving prior
+protocol evidence. No saved-project reload, recovery, release or real compiler
+fresh/resumed equivalence is established by these fixtures.
+
+## Per-execution control-directory groundwork
+
+The command launcher has an optional `controlDirectoryName` equal to
+`control-<exact invocation nonce>`. It creates that fresh directory below the
+opaque lease-issued run-root borrow, using no-replace descriptor-relative
+construction. Its private `state`, `reports`, and `tmp` children hold the keeper's
+own control layout; the request and materialized classpath enter its `runtime`
+child. Closing the adapter closes its child descriptor and preserves every file.
+An existing name is never adopted or cleared, including partial construction
+residue. Parent permissions and child identity/name/mount bindings are rechecked.
+
+The request's working/control directory and the containing writable lease root
+are separately committed in the runtime closure. The namespace binds the same
+lease-owned writable root while making the selected control directory's runtime
+read-only. This allows the command's project and export paths to remain at the
+original run root while its keeper protocol and logs use a fresh child directory.
+No arbitrary external writable directory is admitted: the optional directory is
+exactly one child of the retained root, named by the invocation nonce. The default
+layout and its runtime commitment remain unchanged when this option is absent.
+
+This is not yet production resume. The GCC coordinator still uses its existing
+layout. Resume must explicitly select this layout, bind/revalidate the prior
+analysis state and export prefix, choose a fresh temporary directory for the
+analysis JVM, and protect retained earlier control evidence during the next
+execution. The directory tests establish separation, no-replace behavior and
+identity checks only; they do not qualify the new namespace layout under hosted
+systemd/ext4 execution.
