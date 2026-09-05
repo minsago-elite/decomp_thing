@@ -121,6 +121,7 @@ class AcpDoctorPreflightTest {
         assertTrue(preflight.detail.contains("client-fs-read-true:client-fs-write-true"))
         assertTrue(preflight.detail.contains("client-terminal-false"))
         assertTrue(preflight.detail.contains("auth-methods-1:auth-inventory-sha256-"))
+        assertTrue(preflight.detail.contains("auth-logout-advertised-true:auth-logout-supported-false"))
         assertFalse(preflight.detail.contains("operator-login"))
         assertFalse(preflight.detail.contains("fixture-credential"))
         assertTrue(preflight.detail.contains("network-isolated-true:cleanup-verified-true"))

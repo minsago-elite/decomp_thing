@@ -5,6 +5,18 @@ import com.agentclientprotocol.model.AuthMethodId
 import kotlin.test.*
 
 class AcpAuthenticationInventoryTest {
+    @Test fun `logout advertisement remains independent of methods and execution support`() {
+        val absent = AcpAuthenticationInventory.capture(emptyList(), emptyList())
+        val advertised = AcpAuthenticationInventory.capture(emptyList(), emptyList(), logoutAdvertised = true)
+        assertFalse(absent.logoutAdvertised)
+        assertTrue(advertised.logoutAdvertised)
+        assertFalse(absent.logoutSupported)
+        assertFalse(advertised.logoutSupported)
+        assertTrue(advertised.methods.isEmpty())
+        // The existing commitment describes method metadata, not logout authority.
+        assertEquals(absent.sha256, advertised.sha256)
+    }
+
     @Test fun `unknown authentication variants stay unsupported`() {
         val method = AuthMethod.UnknownAuthMethod(AuthMethodId("future"), "future method", null,
             "future-type", kotlinx.serialization.json.JsonObject(emptyMap()))
