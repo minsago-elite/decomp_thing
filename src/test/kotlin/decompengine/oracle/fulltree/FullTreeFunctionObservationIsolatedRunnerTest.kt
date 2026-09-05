@@ -254,10 +254,22 @@ class FullTreeFunctionObservationIsolatedFixtureRunnerTest {
         assertContentEquals(canonical, OracleJson.canonicalBytes(OracleJson.parseCanonical(canonical)))
         assertEquals(FROZEN_ISOLATION_CONFIGURATION_SHA256, configuration.canonicalSha256)
         val current = OracleJson.parseCanonical(canonical) as JsonObject
-        assertEquals(JsonPrimitive(3), current["schemaVersion"])
+        assertEquals(JsonPrimitive(4), current["schemaVersion"])
         assertEquals(JsonPrimitive(OracleNativeLibraries.policySha256), current["nativeLibraryProfileSha256"])
-        assertEquals(JsonPrimitive("2"), current["supervisorProtocolVersion"])
-        val legacy = JsonObject(current.toMutableMap().apply {
+        assertEquals(JsonPrimitive("3"), current["supervisorProtocolVersion"])
+        assertEquals(JsonPrimitive("1"), current["workerProtocolVersion"])
+        assertEquals(JsonPrimitive("2"), current["workerRequestVersion"])
+        assertEquals(JsonPrimitive("scope-derived-systemd-lifetime-upper-bound-v1"), current["workerStartWaitPolicy"])
+        val legacyV3 = JsonObject(current.toMutableMap().apply {
+            remove("workerRequestVersion")
+            remove("workerStartWaitPolicy")
+            put("schemaVersion", JsonPrimitive(3))
+            put("provider", JsonPrimitive("kotlin-full-tree-function-observation-isolation-configuration-v3"))
+            put("supervisorProtocolVersion", JsonPrimitive("2"))
+        })
+        assertEquals(FROZEN_V3_ISOLATION_CONFIGURATION_SHA256, OracleArtifacts.sha256(OracleJson.canonicalBytes(legacyV3)))
+        assertNotEquals(FROZEN_V3_ISOLATION_CONFIGURATION_SHA256, configuration.canonicalSha256)
+        val legacy = JsonObject(legacyV3.toMutableMap().apply {
             remove("nativeLibraryProfileSha256")
             put("schemaVersion", JsonPrimitive(2))
             put("provider", JsonPrimitive("kotlin-full-tree-function-observation-isolation-configuration-v2"))
@@ -3551,6 +3563,8 @@ class FullTreeFunctionObservationIsolatedFixtureRunnerTest {
         const val ZERO_SHA256 =
             "0000000000000000000000000000000000000000000000000000000000000000"
         const val FROZEN_ISOLATION_CONFIGURATION_SHA256 =
+            "4684f36bebedaba80eaedf7c7f578b66f9219d4dd1042d0f1debcab6c64d7a90"
+        const val FROZEN_V3_ISOLATION_CONFIGURATION_SHA256 =
             "0feb4469bc91b6668777ddc336dd39c4d2db76db932ee4e74a729de34deff740"
         const val FROZEN_LEGACY_ISOLATION_CONFIGURATION_SHA256 =
             "107fe58551ea95533bada45432758c1882ba3876c5681a1c43282c10433138d3"

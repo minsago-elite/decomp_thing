@@ -241,6 +241,65 @@ class FullTreeFunctionObservationOperationJournalTest {
     }
 
     @Test
+    fun `v3 isolation preserves historical journal identity without admitting the v4 runtime`() {
+        val current = binding()
+        val configuration = OracleJson.parse(isolationConfiguration("6").canonicalBytesForTest()) as JsonObject
+        val legacyConfiguration = JsonObject(configuration - setOf("workerRequestVersion", "workerStartWaitPolicy") + mapOf(
+            "schemaVersion" to JsonPrimitive(3),
+            "provider" to JsonPrimitive("kotlin-full-tree-function-observation-isolation-configuration-v3"),
+            "supervisorProtocolVersion" to JsonPrimitive("2"),
+        ))
+        val isolationHash = JsonPrimitive(OracleArtifacts.sha256(OracleJson.canonicalBytes(legacyConfiguration)))
+        val request = OracleJson.parse(current.canonicalRequestBytesForTest()) as JsonObject
+        val legacyRequest = JsonObject(request + ("isolationConfigurationSha256" to isolationHash))
+        val document = OracleJson.parse(current.canonicalBytesWithoutSelfHashForTest()) as JsonObject
+        val legacyUnsigned = JsonObject(document + mapOf(
+            "isolationConfigurationSha256" to isolationHash,
+            "requestSha256" to JsonPrimitive(OracleArtifacts.sha256(OracleJson.canonicalBytes(legacyRequest))),
+        ))
+        val legacyBytes = OracleJson.canonicalBytes(JsonObject(legacyUnsigned + (
+            "bindingSha256" to JsonPrimitive(OracleArtifacts.sha256(OracleJson.canonicalBytes(legacyUnsigned)))
+        )))
+        val legacy = FullTreeFunctionObservationOperationBinding.parseCanonical(legacyBytes)
+        assertContentEquals(legacyBytes, legacy.canonicalBytes())
+        assertTrue(legacy.isolationConfigurationSha256 != current.isolationConfigurationSha256)
+        val preparing = FullTreeFunctionObservationOperationTransition.initial(legacy)
+        val evidence = diskEvidence(legacy)
+        val leased = FullTreeFunctionObservationOperationTransition.leased(legacy, preparing, evidence)
+        val receipt = attachmentReceipt(legacy, leased)
+        val attached = FullTreeFunctionObservationOperationTransition.unitAttached(legacy, leased, receipt)
+        val absent = FullTreeFunctionObservationOperationTransition.next(
+            legacy, attached, FullTreeFunctionObservationOperationPhase.CGROUP_ABSENT,
+            outputSha256 = "7".repeat(64), outputBytes = 4096,
+        )
+        val published = FullTreeFunctionObservationOperationTransition.next(
+            legacy, absent, FullTreeFunctionObservationOperationPhase.PUBLISHED,
+        )
+        val complete = FullTreeFunctionObservationOperationTransition.next(
+            legacy, published, FullTreeFunctionObservationOperationPhase.COMPLETE,
+        )
+        val transitions = listOf(preparing, leased, attached, absent, published, complete)
+        FullTreeFunctionObservationOperationHistory.validate(legacy, transitions, evidence, receipt)
+        assertFailsWith<FullTreeFunctionObservationOperationJournalException> {
+            FullTreeFunctionObservationOperationHistory.validate(current, transitions, evidence, receipt)
+        }
+        assertEquals(
+            listOf(
+                "23611dd546112f804966f20a1f1c1d46f83a4227f6a5cdb10cf028d5c8fa0307",
+                "f90ac86de12f012fc7216ac73637d2206940960c036b2159312762c498022c97",
+                "8d5ff70f993eb29d0a4bcb67088417e059afa6ea18f5487d20e0ab66ac607093",
+                "32569c7e0fb3f689c0cadd94cbdab54c9f208ee160a364653753fea31cf504e8",
+                "4bb20d2d00e04567cc11095bd38ea298f2f4ec4eaf9399dc59d4e7513a2c867e",
+                "bc5c9d8238104013c0ba0a97c61a7187d39bf08000767eb2943c8ecf7dc5b2de",
+            ),
+            listOf(
+                legacy.bindingSha256, OracleArtifacts.sha256(legacyBytes), preparing.transitionSha256,
+                receipt.receiptSha256, OracleArtifacts.sha256(receipt.canonicalBytes()), complete.transitionSha256,
+            ),
+        )
+    }
+
+    @Test
     fun `v4 journal rejects legacy v3 binding bytes without mutation`() = withJournalRoot { root ->
         val binding = binding()
         val current = OracleJson.parse(binding.canonicalBytes()) as JsonObject
@@ -1771,16 +1830,16 @@ class FullTreeFunctionObservationOperationJournalTest {
     private class SimulatedProcessDeath : Error()
 
     private companion object {
-        const val FROZEN_BINDING_SHA256 = "23611dd546112f804966f20a1f1c1d46f83a4227f6a5cdb10cf028d5c8fa0307"
+        const val FROZEN_BINDING_SHA256 = "14cf02bfbd5a2148f587350b973f44027b48f306848517919ee700558332d70e"
         const val FROZEN_BINDING_ARTIFACT_SHA256 =
-            "f90ac86de12f012fc7216ac73637d2206940960c036b2159312762c498022c97"
+            "ed6e5d3e90dbcd1688250f6f24463f8ea026d23d714d74bbb817d6a9700064f5"
         const val FROZEN_INITIAL_TRANSITION_SHA256 =
-            "8d5ff70f993eb29d0a4bcb67088417e059afa6ea18f5487d20e0ab66ac607093"
+            "c6d5fda8fb796da54120cba7c965395c264e3025fcd9d25a94dbdf536c79cf61"
         const val FROZEN_ATTACHMENT_RECEIPT_SHA256 =
-            "32569c7e0fb3f689c0cadd94cbdab54c9f208ee160a364653753fea31cf504e8"
+            "5e13e95717c1db152a77af5016ff69b52b54e9edba3507a17d5ac1a8e2e4b05b"
         const val FROZEN_ATTACHMENT_RECEIPT_ARTIFACT_SHA256 =
-            "4bb20d2d00e04567cc11095bd38ea298f2f4ec4eaf9399dc59d4e7513a2c867e"
+            "882d829f301a7829a7a3e01aaee587f4d22dd9123d733cfb223100339ce52761"
         const val FROZEN_COMPLETE_TRANSITION_SHA256 =
-            "bc5c9d8238104013c0ba0a97c61a7187d39bf08000767eb2943c8ecf7dc5b2de"
+            "ebddc18148e4b9170eedc3615e139993d147f3a67d314e867e49fa50646e307a"
     }
 }

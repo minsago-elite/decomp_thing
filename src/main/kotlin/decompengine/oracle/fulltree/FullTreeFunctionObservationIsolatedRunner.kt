@@ -239,6 +239,8 @@ internal class FullTreeFunctionObservationIsolationConfiguration(
                 "workerEntryPoint" to
                     JsonPrimitive(FullTreeFunctionObservationIsolatedWorker::class.java.name),
                 "workerProtocolVersion" to JsonPrimitive(WORKER_PROTOCOL_VERSION),
+                "workerRequestVersion" to JsonPrimitive(WORKER_REQUEST_VERSION),
+                "workerStartWaitPolicy" to JsonPrimitive(WORKER_START_WAIT_POLICY),
             ),
         ),
         ISOLATION_CONFIGURATION_JSON_LIMITS,
@@ -1297,6 +1299,7 @@ internal class FullTreeFunctionObservationPreparedIsolation private constructor(
                 paths = paths,
                 shardId = binding.shardId,
                 runDirectory = runDirectory,
+                maximumStartWaitSeconds = resources.serviceRuntimeSeconds,
             )
             val managed = authority.withCurrentRunRootForScopeAttachment { borrowed ->
                 if (borrowed.path != runDirectory) {
@@ -2298,6 +2301,7 @@ internal object FullTreeFunctionObservationIsolatedFixtureRunner {
                         paths = paths,
                         shardId = shardId,
                         runDirectory = runTree.path,
+                        maximumStartWaitSeconds = resources.serviceRuntimeSeconds,
                     )
                     boundary.launch(request, resources).use { unit ->
                         unit.awaitBoot(request.nonce)
@@ -2408,7 +2412,12 @@ internal object FullTreeFunctionObservationIsolatedWorker {
             }
             requirePrivateDirectory(root, "isolated worker run directory")
             writeProtocolFile(root, BOOT_FILE, protocol("BOOT", request.nonce))
-            awaitWorkerProtocol(root, START_FILE, protocol("START", request.nonce), WORKER_START_TIMEOUT)
+            awaitWorkerProtocol(
+                root,
+                START_FILE,
+                protocol("START", request.nonce),
+                Duration.ofSeconds(request.maximumStartWaitSeconds),
+            )
 
             val scope = FullTreeScopeControl.load(
                 request.paths.scopeFiles.scope,
@@ -2847,17 +2856,7 @@ private data class IsolatedObservationResources(
             if (resident < MINIMUM_WORKER_MEMORY_BYTES || entities <= 0L || cpu <= 0L || wall <= 0L) {
                 isolationFail("authenticated isolated runtime bounds are not usable")
             }
-            val runtimeOverhead = listOf(
-                WORKER_START_TIMEOUT,
-                WORKER_ACK_TIMEOUT,
-                WORKER_EXIT_TIMEOUT,
-                WORKER_EXIT_TIMEOUT,
-                CGROUP_FREEZE_TIMEOUT,
-                SERVICE_CLEANUP_TIMEOUT,
-            ).fold(0L) { total, timeout ->
-                addExact(total, timeout.seconds, "systemd runtime overhead")
-            }
-            val runtime = addExact(wall, runtimeOverhead, "systemd runtime bound")
+            val runtime = isolatedObservationServiceRuntimeSeconds(wall)
             val cleanupBytes = isolatedObservationCleanupBytes(
                 maximumOutput,
                 maximumDatabase,
@@ -2937,14 +2936,39 @@ private data class IsolatedObservationResources(
     }
 }
 
+internal fun isolatedObservationServiceRuntimeSeconds(wallSeconds: Long): Long {
+    if (wallSeconds <= 0L) isolationFail("isolated derivation wall-clock bound is empty")
+    val runtimeOverhead = listOf(
+        WORKER_BOOT_TIMEOUT,
+        WORKER_ACK_TIMEOUT,
+        WORKER_EXIT_TIMEOUT,
+        WORKER_EXIT_TIMEOUT,
+        CGROUP_FREEZE_TIMEOUT,
+        SERVICE_CLEANUP_TIMEOUT,
+    ).fold(0L) { total, timeout ->
+        addExact(total, timeout.seconds, "systemd runtime overhead")
+    }
+    return addExact(wallSeconds, runtimeOverhead, "systemd runtime bound").also { seconds ->
+        secondsToNanos(seconds, "isolated service runtime")
+    }
+}
+
+internal fun parseIsolatedObservationStartWaitSeconds(value: String): Long {
+    val seconds = value.toLongOrNull()?.takeIf { parsed -> parsed > 0L && parsed.toString() == value }
+        ?: isolationFail("isolated worker START wait bound is not canonical and positive")
+    secondsToNanos(seconds, "isolated worker START wait")
+    return seconds
+}
+
 private data class IsolatedWorkerRequest(
     val nonce: String,
     val paths: IsolatedObservationPaths,
     val shardId: String,
     val runDirectory: Path,
+    val maximumStartWaitSeconds: Long,
 ) {
     fun arguments(): List<String> = listOf(
-        WORKER_PROTOCOL_VERSION,
+        WORKER_REQUEST_VERSION,
         nonce,
         paths.richArtifact.toString(),
         paths.inventory.toString(),
@@ -2953,11 +2977,12 @@ private data class IsolatedWorkerRequest(
         paths.scopeFiles.artifactManifest.toString(),
         shardId,
         runDirectory.toString(),
+        maximumStartWaitSeconds.toString(),
     )
 
     companion object {
         fun parse(arguments: Array<String>): IsolatedWorkerRequest {
-            if (arguments.size != WORKER_ARGUMENTS || arguments[0] != WORKER_PROTOCOL_VERSION) {
+            if (arguments.size != WORKER_ARGUMENTS || arguments[0] != WORKER_REQUEST_VERSION) {
                 isolationFail("isolated worker request has an unsupported shape")
             }
             val nonce = arguments[1]
@@ -2975,6 +3000,7 @@ private data class IsolatedWorkerRequest(
             if (!run.isAbsolute || run.normalize() != run) {
                 isolationFail("isolated worker run path is not absolute and normalized")
             }
+            val maximumStartWaitSeconds = parseIsolatedObservationStartWaitSeconds(arguments[9])
             return IsolatedWorkerRequest(
                 nonce,
                 IsolatedObservationPaths(
@@ -2986,6 +3012,7 @@ private data class IsolatedWorkerRequest(
                 ),
                 shardId,
                 run,
+                maximumStartWaitSeconds,
             )
         }
     }
@@ -3841,6 +3868,9 @@ private class TrustedObservationBoundary(
         request: IsolatedWorkerRequest,
         resources: IsolatedObservationResources,
     ): List<String> {
+        if (request.maximumStartWaitSeconds != resources.serviceRuntimeSeconds) {
+            isolationFail("isolated worker START wait differs from its systemd lifetime bound")
+        }
         val readOnlyInputs = listOf(
             request.paths.richArtifact,
             request.paths.inventory,
@@ -5395,7 +5425,7 @@ private class ManagedObservationUnit(
         runTree: ObservationRunTreeAccess? = null,
     ) {
         check(expectedNonce == nonce)
-        val deadline = deadlineAfter(WORKER_START_TIMEOUT, "isolated worker bootstrap")
+        val deadline = deadlineAfter(WORKER_BOOT_TIMEOUT, "isolated worker bootstrap")
         var nextStatus = 0L
         while (System.nanoTime() < deadline) {
             bootProtocolFileOrNull(runTree, BOOT_FILE)?.let { content ->
@@ -7182,12 +7212,14 @@ private inline fun <T> translateIsolationFailures(
 private fun isolationFail(message: String): Nothing =
     throw FullTreeFunctionObservationIsolationException(message)
 
-private const val ISOLATION_CONFIGURATION_SCHEMA_VERSION = 3
+private const val ISOLATION_CONFIGURATION_SCHEMA_VERSION = 4
 private const val ISOLATION_CONFIGURATION_PROVIDER =
-    "kotlin-full-tree-function-observation-isolation-configuration-v3"
+    "kotlin-full-tree-function-observation-isolation-configuration-v4"
 private const val WORKER_PROTOCOL_VERSION = "1"
-private const val WORKER_ARGUMENTS = 9
-private const val SUPERVISOR_PROTOCOL_VERSION = "2"
+private const val WORKER_REQUEST_VERSION = "2"
+private const val WORKER_START_WAIT_POLICY = "scope-derived-systemd-lifetime-upper-bound-v1"
+private const val WORKER_ARGUMENTS = 10
+private const val SUPERVISOR_PROTOCOL_VERSION = "3"
 private const val SUPERVISOR_ARGUMENTS = WORKER_ARGUMENTS + 4
 private const val KOTLIN_BOOT_PROTOCOL_VERSION = "1"
 private const val KOTLIN_BOOT_ARGUMENTS = 3
@@ -7285,7 +7317,7 @@ private const val PROTOCOL_POLL_MILLIS = 20L
 private const val SYSTEMD_POLL_MILLIS = 20L
 private const val TRUSTED_PROCESS_POLL_MILLIS = 20L
 private const val WORKER_FAILURE_OBSERVATION_MILLIS = 1_000L
-private val WORKER_START_TIMEOUT = Duration.ofSeconds(30)
+private val WORKER_BOOT_TIMEOUT = Duration.ofSeconds(30)
 private val WORKER_ACK_TIMEOUT = Duration.ofMinutes(5)
 private val WORKER_EXIT_TIMEOUT = Duration.ofSeconds(10)
 private val CGROUP_FREEZE_TIMEOUT = Duration.ofSeconds(5)
