@@ -52,6 +52,11 @@ class AcpAuthenticationInventory private constructor(
                 requireInventory(method.name.toByteArray().size <= 512 && (method.description?.toByteArray()?.size ?: 0) <= 2048) {
                     "ACP authentication inventory exceeds its text limit"
                 }
+                listOfNotNull(method.id.value, method.name, method.description).forEach { value ->
+                    requireInventory(Charsets.UTF_8.newEncoder().canEncode(value)) {
+                        "ACP authentication inventory contains invalid Unicode"
+                    }
+                }
             }
             val payload = canonicalPayload(methods)
             val hash = MessageDigest.getInstance("SHA-256")
@@ -74,6 +79,7 @@ class AcpAuthenticationInventory private constructor(
                     maximumCanonicalBytes = 64 * 1024,
                     maximumDepth = 16,
                     maximumNodes = 4096,
+                    maximumNumberCharacters = 256,
                     maximumStringBytes = 16 * 1024,
                     maximumTotalStringBytes = 64 * 1024,
                 ))

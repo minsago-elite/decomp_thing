@@ -401,7 +401,7 @@ can create another job. Job publication does not establish analysis completion o
 
 The clean-commit consolidated run at `0cd6f6a` passed 100 tests with no failures/errors/skips on
 Temurin 21.0.12+8, Linux 7.1.8 and XFS. Evidence is retained at
-`build/web-job-recovery-verification/20260905T142816Z-g5bs2nae/manifest.json` with exact commands,
+[the tracked manifest](evidence/web-job-recovery/20260905T142816Z-g5bs2nae/manifest.json) and matching JUnit XML reports with exact commands,
 suite results, XML digests and runtime/filesystem identity. `JobMetadataPublicationTest` covers eight
 exception boundaries; `JobMetadataCrashTest` covers eight abrupt-exit boundaries including a half-record;
 `JobUploadCrashTest` covers fourteen upload boundaries including partial input/metadata. Fresh readers
@@ -789,6 +789,10 @@ methods. IDs are exact and bounded to 256 UTF-8 bytes; duplicate or blank IDs fa
 Names/descriptions are bounded before redacted previews are retained. The complete SDK-serialized
 method array, including retained variant-specific fields and extension metadata, must also fit
 64 KiB of canonical JSON, 16 levels, 4096 nodes, 16 KiB per string and 64 KiB total string bytes.
+Each number token in the SDK-serialized array is limited to 256 characters, including its sign, decimal point and exponent.
+This explicit numeric admission policy also applies to extension metadata and unknown variant payloads.
+Floating-point tokens use `OracleJson` binary64 canonicalization, which rejects non-finite and nonzero
+subnormal results; inventory commitments do not preserve arbitrary-precision decimal representations.
 Excess payloads fail preflight as invalid authentication inventories with normal cleanup. The bound
 applies after the existing transport frame and SDK decoding limits; it is not a raw-input parser limit.
 Unknown variants remain
@@ -848,10 +852,16 @@ files use a fresh evidence directory. It does not establish independent-agent au
 
 **Cancel inspection** posts an explicit cancellation request to
 `/api/operator/auth-methods/cancel`. A request acknowledgement is not a terminal cleanup result:
-the view continues polling until inspection finishes, and late acknowledgements cannot overwrite
+the view continues polling until inspection finishes. HTTP, network, or malformed status-response
+failures display a retry notice and keep cancellation available without enabling a new inspection.
+A 409 start response attaches the page to the existing inspection. Late acknowledgements cannot overwrite
 a terminal result or a later inspection. The server's cancellation token reaches the preflight
-scheduler, launch and initialize waits. Shutdown requests cancellation as well, while admitted-task
-ownership remains held until completion. The preflight overload preserves a cancelled invocation's
+scheduler, launch and initialize waits. Shutdown requests cancellation and waits for the tracked
+inspection thread to finish, using the provider's own cleanup deadlines without a shorter web timeout.
+An interrupted shutdown caller continues waiting and has its interrupt flag restored afterward.
+Launch and shutdown share an admission lock, and admitted-task ownership remains held until completion.
+An injected inspector must return after its own cleanup; a stuck inspector can delay graceful shutdown.
+Forced JVM termination still cannot establish cleanup. The preflight overload preserves a cancelled invocation's
 receipt in `AcpPreflightCancelledException`; cleanup failures retain their original failed outcome.
 Only that terminal cancellation is rendered as `cancelled`. Login/logout cancellation and durable
 operator authentication state are still separate unsupported work.
@@ -887,7 +897,9 @@ Initial model/mode ID rejection and initial configuration option/value rejection
 exact session-creation advertisement's bounded choice previews. The same formatter serves current
 configuration-inventory mismatches: at most four JSON-quoted IDs/values, with a fifth-entry lookahead
 for an omission marker, configured-environment redaction, and 48-character prefixes plus truncation
-markers. These are display hints, not exact selection tokens or additional setter authority. Capability
+markers. All configured model/mode IDs, option IDs and select values are redacted across every preview,
+including when an earlier preference fails. Their separate allowance of at most 130 identifiers of
+256 characters leaves the existing 4096-value/1 MiB environment redaction budget intact. These are display hints, not exact selection tokens or additional setter authority. Capability
 absence and type/ambiguity rejection keep their existing typed outcomes. No setter or prompt is sent
 when the requested preference fails the initial advertisement check.
 
