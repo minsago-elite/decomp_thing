@@ -346,7 +346,7 @@ class AcpAgentHarnessTest {
             ),
         )
 
-        cases.forEach { case ->
+        (cases + cases.take(4).map { it.copy(mode = "session-preferences-overlapping-choices") }).forEach { case ->
             val fixture = fixture(genericContract = true)
             val harness = harness(
                 mode = case.mode,

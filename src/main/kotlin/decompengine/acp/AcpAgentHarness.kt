@@ -1228,7 +1228,7 @@ class AcpAgentHarness(
         preferences.configOptions.forEachIndexed { index, configured ->
             val matches = advertisedOptions.filter { it.id == configured.id }
             when (matches.size) {
-                0 -> rejectSessionPreference("configOption", index, "idNotAdvertised", advertisedOptions.map { it.id })
+                0 -> rejectSessionPreference("configOption", index, "idNotAdvertised", advertisedOptions.asSequence().map { it.id }, configured.id)
                 1 -> Unit
                 else -> throw AcpProtocolFailure(
                     "ACP session/new ambiguously advertised a configured config option",
@@ -1241,7 +1241,7 @@ class AcpAgentHarness(
                         rejectSessionPreference("configOption", index, "typeNotAdvertised")
                     }
                     when (advertised.selectValueIds.count { it == value.valueId }) {
-                        0 -> rejectSessionPreference("configOption", index, "valueNotAdvertised", advertised.selectValueIds)
+                        0 -> rejectSessionPreference("configOption", index, "valueNotAdvertised", advertised.selectValueIds.asSequence(), value.valueId)
                         1 -> Unit
                         else -> throw AcpProtocolFailure(
                             "ACP session/new ambiguously advertised a configured select value",
@@ -1264,18 +1264,18 @@ class AcpAgentHarness(
     ) {
         val values = advertised ?: rejectSessionPreference(kind, null, "capabilityAbsent")
         when (values.count { it == configured }) {
-            0 -> rejectSessionPreference(kind, null, "idNotAdvertised", values)
+            0 -> rejectSessionPreference(kind, null, "idNotAdvertised", values.asSequence(), configured)
             1 -> Unit
             else -> throw AcpProtocolFailure("ACP session/new ambiguously advertised a configured $kind")
         }
     }
 
     private fun rejectSessionPreference(
-        kind: String, index: Int?, reason: String, choices: List<String>? = null,
+        kind: String, index: Int?, reason: String, choices: Sequence<String>? = null, rejected: String? = null,
     ): Nothing {
         val preview = choices?.let {
-            " Advertised choice previews: " + previewSessionChoices(it.asSequence(),
-                configuration.environment.values.map { value -> value.value })
+            " Advertised choice previews: " + previewSessionChoices(it,
+                configuration.environment.values.map { value -> value.value } + listOfNotNull(rejected))
         }.orEmpty()
         throw AgentExecutionException(
             AgentFailure(
