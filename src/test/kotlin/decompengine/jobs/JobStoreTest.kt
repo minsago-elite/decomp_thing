@@ -14,6 +14,27 @@ import kotlin.test.assertTrue
 
 class JobStoreTest {
     @Test
+    fun `upload admission reserves room for every supported status message`() {
+        val root = createTempDirectory("jobs-status-reserve-")
+        val store = JobStore(root)
+        // This filename fits the initial record but not its largest later status update.
+        assertFailsWith<IllegalArgumentException> {
+            store.createFromUpload("a".repeat(256 * 1024 - 1100), elfFixture())
+        }
+        assertTrue(store.list().isEmpty())
+        java.nio.file.Files.list(root).use { assertEquals(0, it.count()) }
+        val job = store.createFromUpload("a".repeat(256 * 1024 - 4000), elfFixture())
+        for (message in listOf("\u0001".repeat(500), "界".repeat(500), "\"".repeat(500))) {
+            for (status in listOf("queued", "analyzing", "complete", "failed", "uploaded")) {
+                store.updateStatus(job.id, status, message)
+                val read = JobStore(root).get(job.id)
+                assertEquals(status, read.status)
+                assertEquals(message, read.statusMessage)
+            }
+        }
+    }
+
+    @Test
     fun `caller mutation after parsing cannot change the published input`() {
         val root = createTempDirectory("jobs-owned-input-")
         val callerBytes = elfFixture()
