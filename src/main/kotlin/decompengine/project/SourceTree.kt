@@ -685,7 +685,7 @@ object SourceTreeGenerator {
         val unresolvedImplementations = sortedSetOf<String>()
         val moduleRevisionEvidence = mutableMapOf<String, String>()
 
-        generationOrder(plan, dependenciesByModule).forEachIndexed { index, module ->
+        moduleDependencyOrder(dependenciesByModule).map(moduleById::getValue).forEachIndexed { index, module ->
             val dependencies = dependenciesByModule.getValue(module.id)
             val dependencyHeaders = dependencies.associate { dependency -> moduleById.getValue(dependency).headerPath to headers.getValue(dependency) }
             val localFingerprint = moduleFingerprint(
@@ -1712,21 +1712,6 @@ object SourceTreeGenerator {
                     dependencies + "\n" + observedBehavior.orEmpty() + "\n" + profileSha256
                 ).toByteArray(),
         )
-    }
-
-    private fun generationOrder(plan: ModulePlan, dependencies: Map<String, List<String>>): List<PlannedModule> {
-        val ordered = mutableListOf<String>()
-        val visiting = mutableSetOf<String>()
-        val visited = mutableSetOf<String>()
-        fun visit(id: String) {
-            if (id in visited || !visiting.add(id)) return
-            dependencies[id].orEmpty().sorted().forEach(::visit)
-            visiting.remove(id)
-            visited += id
-            ordered += id
-        }
-        plan.modules.map { it.id }.sorted().forEach(::visit)
-        return ordered.map { id -> plan.modules.single { it.id == id } }
     }
 
     private fun renderConfidence(
