@@ -35,7 +35,7 @@ class AcpDoctorPreflightTest {
     @Test
     fun `invalid authentication inventories fail preflight as protocol errors with cleanup`() {
         requireLiveSandboxHost()
-        for (mode in listOf("doctor-auth-duplicate", "doctor-auth-count", "doctor-auth-blank", "doctor-auth-text")) {
+        for (mode in listOf("doctor-auth-duplicate", "doctor-auth-count", "doctor-auth-blank", "doctor-auth-text", "doctor-auth-unicode")) {
             val temporary = createTempDirectory("doctor-auth-invalid-")
             val harness = factoryHarness(writeProvisioning(temporary.resolve("acp.json"), mode = mode))
             val error = assertFailsWith<AgentExecutionException> { harness.preflight() }
@@ -48,6 +48,21 @@ class AcpDoctorPreflightTest {
             assertTrue(assertNotNull(invocation.diagnostics).remainingProcessIds.isEmpty(), mode)
             assertEquals(null, invocation.completeExecutionEvidence)
         }
+    }
+
+    @Test
+    fun `doctor reports the bounded invalid authentication inventory reason`() {
+        requireLiveSandboxHost()
+        val temporary = createTempDirectory("doctor-auth-reason-")
+        val config = writeProvisioning(temporary.resolve("acp.json"), mode = "doctor-auth-duplicate")
+        val doctor = Doctor(environment = mapOf("ACP_CONFIG_FILE" to config.toString()),
+            commandProbe = CommandProbe { _, _ -> CommandProbeResult(0, "available") },
+            connectivityProbe = ConnectivityProbe { _, _ -> error("inspection must not use direct HTTP") })
+        val report = doctor.inspect(DoctorOptions(temporary.resolve("output"), showAuthMethods = true))
+        val preflight = report.checks.single { it.name == "ACP preflight" }
+        assertFalse(preflight.passed)
+        assertTrue(preflight.detail.contains("kind=protocol"), preflight.detail)
+        assertTrue(preflight.detail.contains("reason=invalidAuthenticationInventory"), preflight.detail)
     }
 
     @Test
