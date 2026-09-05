@@ -8,6 +8,24 @@ import kotlin.io.path.*
 import kotlin.test.*
 
 class WebRecoveryAdmissionTest {
+    @Test fun `stop before startup preserves pending records and releases its listener`() {
+        val root = createTempDirectory("web-stop-before-recovery-")
+        val store = JobStore(root)
+        val job = store.createFromUpload("fixture.elf", elfFixture())
+        store.updateStatus(job.id, "queued")
+        val server = UploadServer("127.0.0.1", 0, root)
+        val port = server.serverPort
+        server.stop()
+        assertFailsWith<IllegalStateException> { server.start() }
+        assertFalse(server.withActiveRequest { error("stopped server admitted work") })
+        assertEquals("queued", store.get(job.id).status)
+        val replacement = UploadServer("127.0.0.1", port, root)
+        try {
+            replacement.start()
+            assertEquals("failed", store.get(job.id).status)
+        } finally { replacement.stop() }
+    }
+
     @Test fun `incomplete startup recovery releases ownership and listener without changing statuses`() {
         val root = createTempDirectory("web-recovery-admission-")
         val store = JobStore(root)

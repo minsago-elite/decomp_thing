@@ -852,3 +852,12 @@ for an omission marker, configured-environment redaction, and 48-character prefi
 markers. These are display hints, not exact selection tokens or additional setter authority. Capability
 absence and type/ambiguity rejection keep their existing typed outcomes. No setter or prompt is sent
 when the requested preference fails the initial advertisement check.
+
+A stop request publishes startup cancellation before waiting for the server lifecycle lock. Recovery
+checks it before inspection, between entries, after inspection and before each status update; an
+interrupted recovery thread is also cancelled without clearing its interrupt flag. Cancellation before
+publication reports that recovery statuses were unchanged. Cancellation after publication begins
+reports that some statuses may have changed, and a later explicit startup can reconcile remaining
+pending jobs. Request admission also checks the cancellation flag, covering a stop request racing the
+last startup check. These cooperative checks do not interrupt a filesystem operation already blocked
+inside the kernel, and ownership remains held until startup/cleanup returns.

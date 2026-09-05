@@ -203,6 +203,7 @@ class UploadServer(
     private var started = false
     private var activeRequests = 0
     private var ownership: WebJobStoreOwnership? = null
+    private val startupCancellation = AtomicBoolean(false)
     val serverPort: Int get() = server.address.port
 
     init {
@@ -213,7 +214,8 @@ class UploadServer(
         check(!started && !stopping) { "Web server cannot be started again" }
         try {
             ownership = WebJobStoreOwnership.acquire(storeRoot)
-            store.recoverInterruptedJobs()
+            store.recoverInterruptedJobs(startupCancellation::get)
+            check(!startupCancellation.get()) { "Web server startup cancelled" }
             server.start()
             started = true
         } catch (failure: Exception) {
@@ -224,6 +226,8 @@ class UploadServer(
 
     fun stop(delaySeconds: Int = 0) {
         require(delaySeconds >= 0) { "shutdown delay must be nonnegative" }
+        // Signal recovery even while start holds lifecycleLock through filesystem operations.
+        startupCancellation.set(true)
         synchronized(lifecycleLock) {
             stopping = true
             // JDK HttpServer.stop does not release a bound listener before start. Start its
@@ -284,7 +288,7 @@ class UploadServer(
     /** Admission covers the whole handler, including upload publication and error handling. */
     internal fun withActiveRequest(action: () -> Unit): Boolean {
         synchronized(lifecycleLock) {
-            if (stopping) return false
+            if (stopping || startupCancellation.get()) return false
             activeRequests++
         }
         try {

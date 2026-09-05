@@ -29,6 +29,10 @@ import kotlin.io.path.name
 import kotlin.io.path.isRegularFile
 
 class JobStoreException(message: String) : RuntimeException(message)
+internal class JobRecoveryCancelledException(val statusUpdatesStarted: Boolean) : IllegalStateException(
+    if (statusUpdatesStarted) "Job recovery cancelled after status publication began; some statuses may have changed"
+    else "Job recovery cancelled before status publication; no recovery statuses were changed",
+)
 class InvalidUploadException(message: String, cause: Throwable? = null) : RuntimeException(message, cause)
 
 data class Job(
@@ -260,12 +264,24 @@ class JobStore internal constructor(
     }
 
     @Synchronized
-    fun recoverInterruptedJobs() = recoverInterruptedJobs(4096, 64L * 1024 * 1024)
+    fun recoverInterruptedJobs() = recoverInterruptedJobs { false }
+
+    internal fun recoverInterruptedJobs(cancellation: () -> Boolean) =
+        recoverInterruptedJobs(4096, 64L * 1024 * 1024, cancellation)
 
     /** Complete bounded inspection precedes every recovery write; errors never imply rollback. */
     @Synchronized
-    internal fun recoverInterruptedJobs(maximumEntries: Int, maximumMetadataBytes: Long) {
+    internal fun recoverInterruptedJobs(
+        maximumEntries: Int, maximumMetadataBytes: Long, cancellation: () -> Boolean = { false },
+    ) {
         require(maximumEntries in 1..4096 && maximumMetadataBytes in 1..64L * 1024 * 1024)
+        var statusUpdatesStarted = false
+        fun checkCancellation() {
+            if (Thread.currentThread().isInterrupted || cancellation()) {
+                throw JobRecoveryCancelledException(statusUpdatesStarted)
+            }
+        }
+        checkCancellation()
         if (!root.exists()) return
         val pending = ArrayList<String>()
         try {
@@ -273,6 +289,7 @@ class JobStore internal constructor(
             var remaining = maximumMetadataBytes
             Files.newDirectoryStream(root).use { entries ->
                 for (entry in entries) {
+                    checkCancellation()
                     check(++scanned <= maximumEntries)
                     val id = entry.fileName.toString()
                     if (!id.matches(Regex("[a-f0-9]{32}"))) continue
@@ -285,10 +302,15 @@ class JobStore internal constructor(
                     if (job.status == "queued" || job.status == "analyzing") pending.add(id)
                 }
             }
+        } catch (cancelled: JobRecoveryCancelledException) {
+            throw cancelled
         } catch (_: Exception) {
             throw JobStoreException("Job recovery inspection is incomplete; no recovery statuses were changed")
         }
+        checkCancellation()
         pending.forEach { id ->
+            checkCancellation()
+            statusUpdatesStarted = true
             updateStatus(id, "failed", "Analysis was interrupted before the server restarted")
         }
     }
