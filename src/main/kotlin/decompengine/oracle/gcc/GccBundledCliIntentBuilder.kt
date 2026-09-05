@@ -37,6 +37,11 @@ internal object GccBundledCliIntentBuilder {
                 profile.requireDisjoint(roots)
                 val suite = profile.suite
                 val engine = suite.engine(engineId)
+                cliInvocation?.options?.resumeAfterCheckpoint?.let { threshold ->
+                    require(threshold < suite.budgets.plannerMaximumEntities.toLong()) {
+                        "CLI checkpoint threshold cannot be reached within the profile planner entity bound"
+                    }
+                }
                 val guards = mutableListOf<StableControlFile>()
                 var primaryFailure: Throwable? = null
                 try {
