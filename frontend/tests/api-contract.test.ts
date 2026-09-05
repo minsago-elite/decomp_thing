@@ -125,3 +125,19 @@ describe('generated v1 contract pipeline', () => {
     expect(parseBoundedJson('"\\ud83d\\ude00"')).toBe('😀');
   });
 });
+
+describe('workflow observation authority', () => {
+  it('preserves display correlation and exact counts without promoting reported acceptance', () => {
+    const event = decodeContract(fixture('event-workflow-observation'));
+    if (event.kind !== 'event' || event.type !== 'workflow.observation') throw Error('Expected observation');
+    expect(event.sequence).toBe('9007199254740993');
+    expect(event.agentSequence).toBe('9007199254740992');
+    expect(event.payload.fields.inputTokens).toBe('18446744073709551615');
+    expect(event.payload.fields.phase).toBe('accepted');
+    expect(event.payload.authority).toBe('observations');
+    expect(event.payload.writerId).not.toBe(event.runId);
+    expect(event.payload.fields.workflowRunId).not.toBe(event.runId);
+    expect(event.payload).not.toHaveProperty('acceptance');
+    expect(event.payload.omittedFieldCount).toBe('0');
+  });
+});

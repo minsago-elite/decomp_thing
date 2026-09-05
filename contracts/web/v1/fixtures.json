@@ -233,6 +233,38 @@
     {
       "file": "fixtures/runs-duplicate.json",
       "valid": false
+    },
+    {
+      "file": "fixtures/event-workflow-observation.json",
+      "valid": true
+    },
+    {
+      "file": "fixtures/invalid-observation-authority.json",
+      "valid": false
+    },
+    {
+      "file": "fixtures/invalid-observation-numeric-count.json",
+      "valid": false
+    },
+    {
+      "file": "fixtures/invalid-observation-missing-omission.json",
+      "valid": false
+    },
+    {
+      "file": "fixtures/invalid-observation-raw-object.json",
+      "valid": false
+    },
+    {
+      "file": "fixtures/events-observation-poll.json",
+      "valid": true
+    },
+    {
+      "file": "fixtures/event-observation-plan.json",
+      "valid": true
+    },
+    {
+      "file": "fixtures/invalid-observation-plan-limit.json",
+      "valid": false
     }
   ]
 }

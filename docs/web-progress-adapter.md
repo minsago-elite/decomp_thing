@@ -22,8 +22,8 @@ and authenticated attempt selection remain the storage/access authority.
 The upstream journal and web event schema are not interchangeable. The journal
 has writer-restart `runId`, optional durable `workflowRunId` correlation, task and
 request commitments, observation kinds, numeric sequence/drop counters and
-bounded redacted previews. The web schema currently defines agent messages,
-run state, evidence availability and retention gaps. Journal observations cannot
+bounded redacted previews. Before the observation variant below, the web schema defined only agent
+messages, run state, evidence availability and retention gaps. Journal observations cannot
 be relabeled as authoritative run-state transitions or acceptance evidence to
 fit that schema. A versioned observation representation and exact decimal-text
 sequence projection are required before exposing those records to the typed UI.
@@ -47,3 +47,37 @@ The selected journal/decoder and JVM web suites passed 148 tests with zero
 failures/errors. Frontend tests and packaged browser qualification were not
 rerun because this extraction changes neither UI nor HTTP behavior. The broader
 #174 stream/replay criteria remain unverified and open.
+
+## Versioned observation event
+
+The shared v1 contract now defines `workflow.observation`. Its ordinary event
+binding carries the selected web job/attempt, cursor and decimal-text sequence.
+`agentSequence` may carry an exact producer sequence; `agentInvocationId` is
+null because a journal request commitment is not an invocation identity. The
+payload has fixed `authority: observations`, the separate writer ID, workflow,
+observation kind, bounded known fields and an exact omitted-field count.
+
+Known fields preserve available task/turn/workflow-run/session/tool/permission
+and revision commitments, bounded redacted display strings, boolean omission
+flags, exact usage/count strings and at most eight bounded plan entries. A
+producer's reported accepted phase or source commitment remains a display
+observation; it cannot acquire the `run.state` acceptance semantics. Fields not
+represented by this contract must be counted as omitted by the adapter. That
+count concerns payload fields, not dropped events; journal queue/history gaps
+still require the separate replay/retention protocol.
+
+Shared fixtures cover observation/poll envelopes, large exact counts, separate
+writer/attempt identities, reported acceptance without authority, bounded plans
+and explicit omissions. Negative fixtures reject alternate authority, numeric
+counts, absent omission accounting, untyped text objects and excess plan items.
+The typed client generation includes the new branch. Existing clients that do
+not know this branch retain their explicit unsupported-contract behavior.
+
+This is the schema/consumer preparation for #174. The producer projection,
+authenticated HTTP endpoint, cursor cutover/gap handling and UI activity view
+remain to be connected and qualified; no streaming capability is enabled here.
+
+Contract verification passed 36 valid and 26 invalid fixtures. All 210 frontend
+tests, lint, generated-type drift checks and the typechecked bundle passed.
+JVM and browser tests were not rerun for this schema-only checkpoint; those are
+required when the producer and HTTP/UI adapters land.

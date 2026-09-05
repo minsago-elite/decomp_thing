@@ -31,3 +31,10 @@ limits. Unknown producer fields intentionally fail this schema's drift check. A 
 may ignore additive response fields under the documented compatibility rules, while
 unknown discriminators and evidence semantics remain unsupported. Do not use fixture
 validation as a replacement for persistence, authorization, digest or runtime tests.
+
+`workflow.observation` is the bounded display-journal event variant for D4. Its
+writer identity is separate from the web attempt; numeric counts stay decimal
+strings and `authority` is fixed to `observations`. Reported phases and source
+commitments do not confer workflow acceptance. Unsupported payload fields need
+explicit omission accounting, separate from event-retention gaps. See
+[`docs/web-progress-adapter.md`](../../../docs/web-progress-adapter.md).
