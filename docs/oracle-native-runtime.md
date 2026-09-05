@@ -71,3 +71,23 @@ syntax checks also pass; both installed library hashes match the pinned resource
 These tests do not prove production full-tree BOOT, retained compiler execution,
 all-shard scoring, or release eligibility. Those still require their respective
 provisioned hosted lifecycle and evidence gates.
+
+### Hosted follow-up and failure preservation
+
+The completed `bd45cfc` CI run `33943106312` ran 1,380 tests: 1,323 passed,
+32 skipped and 25 failed. The first full-tree cold-attachment case retained
+`worker.boot`, `worker.failure`, `supervisor.failure` and a quarantined deletion
+entry; later cases failed because the ext4 slot remained occupied. This differs
+from the earlier no-protocol pre-BOOT failure, but does not prove a successful
+attachment. The fixture's final cleanup assertion replaced the original failure,
+so neither that failure nor the protocol contents could be recovered from its
+report. Do not attribute the remaining cause to JNA or claim hosted success.
+
+The fixture now retains the original exception with cleanup failures suppressed,
+and its existing bounded, pinned-root protocol sampler spans the full prepared
+action, including cold recovery rather than launch alone. Cleanup-only failures
+still fail. No residual filename is newly allowed, no unknown entry is deleted,
+and unit/cgroup absence and ext4 cleanup requirements are unchanged. Local checks
+run 39 tests: 29 pass, ten provisioned systemd/ext4 cases skip, and none fail.
+All nine diagnostic tests execute, including primary/cleanup exception identity,
+retained protocol evidence, and standalone cleanup failure regressions.

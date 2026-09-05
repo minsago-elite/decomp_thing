@@ -2417,6 +2417,7 @@ class FullTreeFunctionObservationIsolatedFixtureRunnerTest {
         var leased: FullTreeFunctionObservationLeasedOperation? = null
         var prepared: FullTreeFunctionObservationPreparedRun? = null
         var isolation: FullTreeFunctionObservationPreparedIsolation? = null
+        var primaryFailure: Throwable? = null
         try {
             FullTreeFunctionObservationJournalAuthority.open(journalRoot).use { authority ->
                 val acquired = FullTreeFunctionObservationOperationCoordinator.prepareNew(
@@ -2445,51 +2446,58 @@ class FullTreeFunctionObservationIsolatedFixtureRunnerTest {
                 isolation = ready
                 run.close()
                 prepared = null
-                action(
-                    PreparedProductionIsolationTestContext(
-                        binding,
-                        mount,
-                        runRoot,
-                        output,
-                        authority,
-                        ready,
-                    ),
-                )
-            }
-        } finally {
-            var cleanupFailure: Throwable? = null
-            listOf<() -> Unit>(
-                { closePreparedIsolationAfterTest(isolation) },
-                { prepared?.close() },
-                { leased?.close() },
-            ).forEach { cleanup ->
-                runCatching(cleanup).exceptionOrNull()?.let { failure ->
-                    val prior = cleanupFailure
-                    if (prior == null) cleanupFailure = failure else if (failure !== prior) {
-                        prior.addSuppressed(failure)
-                    }
+                withLiveOracleBootDiagnostics(binding.unitName, runRoot) {
+                    action(
+                        PreparedProductionIsolationTestContext(
+                            binding,
+                            mount,
+                            runRoot,
+                            output,
+                            authority,
+                            ready,
+                        ),
+                    )
                 }
             }
-            cleanupFailure?.let { throw it }
-            assertObservationUnitAndCgroupAbsent(configuration, binding.unitName)
-            val rootFiles = if (Files.isDirectory(runRoot, LinkOption.NOFOLLOW_LINKS)) {
-                entryNames(runRoot).filterNot { it in PREPARED_RUN_DIRECTORIES }
-            } else {
-                emptyList()
+        } catch (failure: Throwable) {
+            primaryFailure = failure
+            throw failure
+        } finally {
+            preserveLiveOracleFailureDuringCleanup(primaryFailure) {
+                var cleanupFailure: Throwable? = null
+                listOf<() -> Unit>(
+                    { closePreparedIsolationAfterTest(isolation) },
+                    { prepared?.close() },
+                    { leased?.close() },
+                ).forEach { cleanup ->
+                    runCatching(cleanup).exceptionOrNull()?.let { failure ->
+                        val prior = cleanupFailure
+                        if (prior == null) cleanupFailure = failure else if (failure !== prior) {
+                            prior.addSuppressed(failure)
+                        }
+                    }
+                }
+                cleanupFailure?.let { throw it }
+                assertObservationUnitAndCgroupAbsent(configuration, binding.unitName)
+                val rootFiles = if (Files.isDirectory(runRoot, LinkOption.NOFOLLOW_LINKS)) {
+                    entryNames(runRoot).filterNot { it in PREPARED_RUN_DIRECTORIES }
+                } else {
+                    emptyList()
+                }
+                assertTrue(
+                    rootFiles.all { it in allowedRootProtocolFiles },
+                    "faulted BOOT run retained unexpected members: $rootFiles",
+                )
+                rootFiles.forEach { name ->
+                    assertFaultProtocolFile(runRoot.resolve(name), name, binding.bindingSha256)
+                }
+                removePreparedIsolationLease(
+                    leaseRoot,
+                    binding.runDirectoryName,
+                    configuration.workerClassPath.size,
+                    rootFiles,
+                )
             }
-            assertTrue(
-                rootFiles.all { it in allowedRootProtocolFiles },
-                "faulted BOOT run retained unexpected members: $rootFiles",
-            )
-            rootFiles.forEach { name ->
-                assertFaultProtocolFile(runRoot.resolve(name), name, binding.bindingSha256)
-            }
-            removePreparedIsolationLease(
-                leaseRoot,
-                binding.runDirectoryName,
-                configuration.workerClassPath.size,
-                rootFiles,
-            )
         }
         assertTrue(entryNames(mount).isEmpty())
     }

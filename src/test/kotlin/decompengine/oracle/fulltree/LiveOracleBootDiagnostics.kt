@@ -163,5 +163,14 @@ internal fun <Result> withLiveOracleBootDiagnostics(
     }
 }
 
+internal fun preserveLiveOracleFailureDuringCleanup(primaryFailure: Throwable?, cleanup: () -> Unit) {
+    try {
+        cleanup()
+    } catch (failure: Throwable) {
+        if (primaryFailure == null) throw failure
+        if (failure !== primaryFailure) primaryFailure.addSuppressed(failure)
+    }
+}
+
 private fun diagnosticFailure(failure: Throwable): String =
     "${failure.javaClass.name}: ${failure.message.orEmpty().take(512)}"
