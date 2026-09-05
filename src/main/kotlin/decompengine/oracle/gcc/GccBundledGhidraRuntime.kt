@@ -19,11 +19,16 @@ internal data class GccBundledGhidraClassPathEntry(val path: Path, val bytes: Lo
     }
 }
 
-internal class GccBundledGhidraRuntime(val root: Path, classPath: List<GccBundledGhidraClassPathEntry>) {
+internal class GccBundledGhidraRuntime(
+    val root: Path,
+    classPath: List<GccBundledGhidraClassPathEntry>,
+    val invocationVersion: Int = 2,
+) {
     val classPath: List<GccBundledGhidraClassPathEntry>
     val release: Path
 
     init {
+        require(invocationVersion in 1..2) { "bundled Ghidra invocation version is unsupported" }
         requireRuntimePath(root)
         val copied = ArrayList<GccBundledGhidraClassPathEntry>()
         for (entry in classPath) {
@@ -85,14 +90,23 @@ internal class GccBundledGhidraRuntime(val root: Path, classPath: List<GccBundle
                 exporter.sha256, archive.sha256, "planning", lease.path.resolve("reports/program_model.json").toString(),
             ))),
         )
-        return GhidraWorkerCommand.prefix(
+        val prefix = GhidraWorkerCommand.prefix(
             byRole.getValue(GccCompilerEngineContainmentArtifactRole.JAVA_EXECUTABLE).path,
             release, classPath.map { it.path },
-        ) + invocation.arguments()
+        )
+        val isolatedPrefix = if (invocationVersion == 2) {
+            listOf(
+                prefix.first(), "-Duser.home=${lease.path.resolve("tmp")}", "-Djava.io.tmpdir=${lease.path.resolve("tmp")}",
+                "-XX:ActiveProcessorCount=1", "-XX:+DisableAttachMechanism",
+            ) + prefix.drop(1)
+        } else {
+            prefix
+        }
+        return isolatedPrefix + invocation.arguments()
     }
 
     fun toJson(): JsonObject = JsonObject(mapOf(
-        "provider" to JsonPrimitive(PROVIDER),
+        "provider" to JsonPrimitive("$PROVIDER_PREFIX$invocationVersion"),
         "root" to JsonPrimitive(root.toString()),
         "classPath" to JsonArray(classPath.map { entry -> JsonObject(mapOf(
             "path" to JsonPrimitive(entry.path.toString()),
@@ -102,7 +116,7 @@ internal class GccBundledGhidraRuntime(val root: Path, classPath: List<GccBundle
     ))
 
     companion object {
-        private const val PROVIDER = "bundled-ghidra-java-api-runtime-v1"
+        private const val PROVIDER_PREFIX = "bundled-ghidra-java-api-runtime-v"
         private val BUNDLE_ROLES = setOf(
             GccCompilerEngineContainmentArtifactRole.GHIDRA_BRIDGE_JAR,
             GccCompilerEngineContainmentArtifactRole.GHIDRA_EXPORT_GUARD,
@@ -111,7 +125,11 @@ internal class GccBundledGhidraRuntime(val root: Path, classPath: List<GccBundle
 
         fun parse(document: JsonObject): GccBundledGhidraRuntime {
             require(document.keys == setOf("provider", "root", "classPath")) { "bundled Ghidra runtime fields are invalid" }
-            require(document.strictString("provider") == PROVIDER) { "bundled Ghidra runtime provider is invalid" }
+            val version = when (document.strictString("provider")) {
+                "${PROVIDER_PREFIX}1" -> 1
+                "${PROVIDER_PREFIX}2" -> 2
+                else -> throw IllegalArgumentException("bundled Ghidra runtime provider is invalid")
+            }
             val entries = document["classPath"] as? JsonArray
                 ?: throw IllegalArgumentException("bundled Ghidra classpath must be an array")
             require(entries.size in 2..512) { "bundled Ghidra classpath count is invalid" }
@@ -123,7 +141,7 @@ internal class GccBundledGhidraRuntime(val root: Path, classPath: List<GccBundle
                 GccBundledGhidraClassPathEntry(
                     Path.of(entry.strictString("path")), requireNotNull(size.longOrNull), entry.strictString("sha256"),
                 )
-            })
+            }, version)
         }
     }
 }

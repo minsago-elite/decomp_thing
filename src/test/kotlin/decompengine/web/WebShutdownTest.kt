@@ -80,13 +80,22 @@ class WebShutdownTest {
                 assertTrue(!Files.readString(log).contains("Web shutdown did not complete cleanly"))
             }
             if (keepWaiting || abruptExit) {
+                val interruptedIds = if (abruptExit) ids else ids.take(2)
+                val historical = interruptedIds.associateWith { id ->
+                    Files.readAllBytes(root.resolve("jobs").resolve(id).resolve("job.json"))
+                }
                 val restarted = UploadServer("127.0.0.1", 0, root.resolve("jobs"),
                     analyzer = JobAnalyzer { _, _ -> error("recovery must not rerun a job") })
                 try {
                     restarted.start()
-                    (if (abruptExit) ids else ids.take(2)).forEach { id ->
-                        assertEquals("failed", store.get(id).status)
-                        assertEquals("Analysis was interrupted before the server restarted", store.get(id).statusMessage)
+                    interruptedIds.forEach { id ->
+                        // Recovery projects interruption without overwriting historical legacy metadata.
+                        kotlin.test.assertContentEquals(historical.getValue(id), Files.readAllBytes(root.resolve("jobs").resolve(id).resolve("job.json")))
+                        val response = URI("http://127.0.0.1:${restarted.serverPort}/api/jobs/$id").toURL().openStream().use {
+                            kotlinx.serialization.json.Json.parseToJsonElement(it.readBytes().decodeToString())
+                        } as kotlinx.serialization.json.JsonObject
+                        assertEquals(kotlinx.serialization.json.JsonPrimitive("failed"), response["status"])
+                        assertTrue(response["status_message"].toString().contains("interrupted"))
                     }
                     if (!abruptExit) assertEquals("Server stopped before the operation started", store.get(ids.last()).statusMessage)
                 } finally {

@@ -807,6 +807,17 @@ internal class FullTreeDiskScratchLease internal constructor(
         action = action,
     )
 
+    @Synchronized
+    fun <T> withCurrentOperationRunRootForContainedExecution(
+        expected: FullTreeDiskScratchRunRoot,
+        action: (FullTreeDiskScratchBorrowedRunRoot) -> T,
+    ): T = withCurrentOperationRunRoot(
+        expected = expected,
+        stageBefore = FullTreeDiskScratchStage.BEFORE_LAUNCH,
+        stageAfter = FullTreeDiskScratchStage.AFTER_CGROUP_ABSENCE,
+        action = action,
+    )
+
     /** Grants a non-owning revocable borrow while the caller separately retains live-unit proof. */
     @Synchronized
     fun <T> withCurrentOperationRunRootAfterScopeAttachment(

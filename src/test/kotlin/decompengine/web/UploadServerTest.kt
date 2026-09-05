@@ -142,8 +142,8 @@ class UploadServerTest {
             val id = Json.parseToJsonElement(uploaded.body.decodeToString()).jsonObject["id"].toString().trim('"')
             assertEquals(303, request(server, "POST", "/jobs/$id/explore", followRedirects = false).status)
             assertTrue(started.await(5, java.util.concurrent.TimeUnit.SECONDS))
-            val timeout = kotlin.test.assertFailsWith<IllegalStateException> { server.stop() }
-            assertEquals("Background workers did not stop within the shutdown grace period", timeout.message)
+            val timeout = kotlin.test.assertFailsWith<WebJobServiceException> { server.stop() }
+            assertEquals("SHUTDOWN_INCOMPLETE", timeout.code)
             val contender = UploadServer("127.0.0.1", 0, dataDir)
             val refused = kotlin.test.assertFailsWith<IllegalStateException> { contender.start() }
             assertEquals("Job store already has a live web server owner", refused.message)
@@ -168,6 +168,20 @@ class UploadServerTest {
     }
 
     @Test
+    fun `missing job workflow admissions return typed safe not found responses`() {
+        var executions = 0
+        withServer(JobAnalyzer { _, _ -> executions++ }, JobReconstructor { _, _ -> executions++ }) { server, root ->
+            for (workflow in listOf("explore", "reconstruct")) {
+                val response = request(server, "POST", "/jobs/${"a".repeat(32)}/$workflow", followRedirects = false)
+                assertEquals(404, response.status)
+                assertTrue(response.body.decodeToString().contains("JOB_NOT_FOUND"))
+                kotlin.test.assertFalse(response.body.decodeToString().contains(root.toString()))
+            }
+            assertEquals(0, executions)
+        }
+    }
+
+    @Test
     fun `background diagnostics redact secrets before persistence and rendering`() {
         val dataDir = createTempDirectory("web-private-diagnostic-")
         val configured = "configured-provider-credential"
@@ -182,7 +196,7 @@ class UploadServerTest {
             val invalid = request(server, "GET", "/jobs/$configured")
             assertEquals(404, invalid.status)
             assertTrue(!invalid.body.decodeToString().contains(configured))
-            assertTrue(invalid.body.decodeToString().contains("[redacted]"))
+            assertTrue(invalid.body.decodeToString().contains("JOB_NOT_FOUND"))
             val uploaded = upload(server, "diagnostic.elf", elfFixture(), acceptJson = true)
             val id = Json.parseToJsonElement(uploaded.body.decodeToString()).jsonObject["id"].toString().trim('"')
             assertEquals(303, request(server, "POST", "/jobs/$id/explore", followRedirects = false).status)
@@ -200,6 +214,24 @@ class UploadServerTest {
             assertEquals("[oversized text omitted]", job.statusMessage)
         } finally {
             server.stop()
+        }
+    }
+
+    @Test
+    fun `dashboard keeps malformed jobs visible and detail returns a safe storage diagnostic`() {
+        withServer { server, root ->
+            val created = upload(server, "damaged.elf", elfFixture(), acceptJson = true)
+            val jobId = Json.parseToJsonElement(created.body.decodeToString()).jsonObject.getValue("id").toString().trim('"')
+            root.resolve(jobId).resolve("job.json").writeText("PRIVATE_CORRUPTION_SENTINEL {")
+            val dashboard = request(server, "GET", "/")
+            val detail = request(server, "GET", "/jobs/$jobId")
+            assertEquals(200, dashboard.status)
+            assertTrue(dashboard.body.decodeToString().contains(jobId))
+            assertTrue(dashboard.body.decodeToString().contains("CORRUPT_LEGACY_JOB"))
+            assertEquals(503, detail.status)
+            assertTrue(detail.body.decodeToString().contains("verified backup"))
+            kotlin.test.assertFalse(detail.body.decodeToString().contains("PRIVATE_CORRUPTION_SENTINEL"))
+            kotlin.test.assertFalse(detail.body.decodeToString().contains(root.toString()))
         }
     }
 
@@ -332,6 +364,13 @@ class UploadServerTest {
             assertTrue(rows.contains("provisional") && rows.contains("exhausted"))
             assertTrue(!rows.contains("accepted source"))
         }
+    }
+
+    @Test
+    fun `legacy event reads reject unknown attempt identities and extra query parameters`() = withServer { server, _ ->
+        val id = uploadedJobId(server)
+        assertEquals(404, request(server, "GET", "/api/jobs/$id/events?runId=run_missing").status)
+        assertEquals(400, request(server, "GET", "/api/jobs/$id/events?runId=run_missing&other=value").status)
     }
 
     @Test
@@ -833,7 +872,7 @@ class UploadServerTest {
     ) {
         val dataDir = createTempDirectory("web-jobs-")
         val directExecutor = Executor { command -> command.run() }
-        val server = UploadServer("127.0.0.1", 0, dataDir, analyzer, reconstructor, directExecutor, profiles)
+        val server = UploadServer("127.0.0.1", 0, dataDir, analyzer, reconstructor, directExecutor, sourceProfiles = profiles)
         server.start()
         try {
             block(server, dataDir)

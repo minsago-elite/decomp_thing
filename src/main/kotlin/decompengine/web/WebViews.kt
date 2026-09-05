@@ -23,7 +23,11 @@ import kotlin.io.path.name
 import kotlin.io.path.readText
 import kotlin.math.roundToInt
 
-fun renderDashboard(jobs: List<Job>, recovery: JobRecoveryInventory): String = page(
+fun renderDashboard(jobs: List<Job>, recovery: JobRecoveryInventory): String =
+    renderDashboard(jobs, emptyList(), recovery)
+
+fun renderDashboard(jobs: List<Job>, diagnostics: List<WebJobDiagnostic> = emptyList(),
+    recovery: JobRecoveryInventory? = null): String = page(
     title = "Binary workbench",
     body = """
       <header class="hero shell">
@@ -54,10 +58,11 @@ fun renderDashboard(jobs: List<Job>, recovery: JobRecoveryInventory): String = p
           <div class="section-heading compact">
             <span class="step">02</span>
             <div><p class="kicker">Workspace</p><h2 id="jobs-title">Recent jobs</h2></div>
-            <span class="count">${jobs.size}</span>
+            <span class="count">${jobs.size + diagnostics.size}</span>
           </div>
           ${renderJobList(jobs)}
-          ${renderRecoveryInventory(recovery)}
+          ${recovery?.let(::renderRecoveryInventory).orEmpty()}
+          ${diagnostics.joinToString("") { diagnostic -> "<div class=\"job-row\"><span class=\"job-copy\"><strong>Unavailable job ${diagnostic.jobId.escapeHtml()}</strong><small>${diagnostic.code.escapeHtml()}: ${diagnostic.message.escapeHtml()}</small></span></div>" }}
         </section>
       </main>
     """.trimIndent(),
@@ -88,14 +93,18 @@ private fun renderRecoveryInventory(inventory: JobRecoveryInventory): String {
     """.trimIndent()
 }
 
-fun renderJob(job: Job, sourceTree: SourceTreeView? = null, sourceTreeUnavailable: Boolean = false): String {
+fun renderJob(job: Job, reportContext: WebReportContext? = null,
+    diagnostics: List<decompengine.jobs.WorkflowStoreDiagnostic> = emptyList(),
+    sourceTree: SourceTreeView? = null, sourceTreeUnavailable: Boolean = false): String {
+    val reports = reportsFor(job, reportContext)
     val active = job.status in setOf("queued", "analyzing")
     val metadata = job.metadata.toJson().entries.joinToString("") { (key, value) ->
         "<div class=\"datum\"><dt>${key.replace('_', ' ').title().escapeHtml()}</dt><dd>${value.toString().trim('"').escapeHtml()}</dd></div>"
     }
-    val jobDir = job.binaryPath.parent
-    val artifacts = listArtifacts(jobDir)
-    val action = if (active) {
+    val artifacts = listArtifacts(reports.reportsDirectory)
+    val action = if (reports.runId != null) {
+        "<span class=\"status-note\">Legacy workflow actions are unavailable for jobs with durable attempts.</span>"
+    } else if (active) {
         "<button class=\"button primary\" disabled>Analysis in progress <span class=\"spinner\"></span></button>"
     } else {
         val label = if (job.status == "complete") "Run exploration again" else "Start automatic exploration"
@@ -108,7 +117,7 @@ fun renderJob(job: Job, sourceTree: SourceTreeView? = null, sourceTreeUnavailabl
         const initialStatus = ${jsString(job.status)};
         const poll = async () => {
           try {
-            const eventsResponse = await fetch('/api/jobs/${job.id}/events', {cache: 'no-store'});
+            const eventsResponse = await fetch('/api/jobs/${job.id}/events${reports.runId?.let { "?runId=$it" }.orEmpty()}', {cache: 'no-store'});
             if (eventsResponse.ok) {
               const snapshot = await eventsResponse.json();
               const list = document.querySelector('#agent-event-list');
@@ -160,6 +169,8 @@ fun renderJob(job: Job, sourceTree: SourceTreeView? = null, sourceTreeUnavailabl
               </div>
             </section>
             ${job.statusMessage?.let { "<div class=\"status-note ${job.status.escapeHtml()}\"><span></span>${it.escapeHtml()}</div>" }.orEmpty()}
+            ${reports.runId?.let { "<p class=\"status-note\">Reports for workflow attempt ${it.escapeHtml()}. Completion does not establish acceptance.</p>" }.orEmpty()}
+            ${diagnostics.joinToString("") { "<p class=\"status-note\">${it.code.escapeHtml()}: ${it.message.escapeHtml()}</p>" }}
             <div class="job-grid">
               <section class="panel overview-panel">
                 <div class="section-heading compact"><span class="step">01</span><div><p class="kicker">Binary profile</p><h2>ELF metadata</h2></div></div>
@@ -180,21 +191,21 @@ fun renderJob(job: Job, sourceTree: SourceTreeView? = null, sourceTreeUnavailabl
                 </ol>
               </section>
             </div>
-            ${renderExploration(job)}
-            ${renderReconstructionProgress(job)}
-            ${renderAgentProgress(job)}
-            ${sourceTree?.let { renderSourceTree(job, it) }.orEmpty()}
+            ${renderExploration(job, reports)}
+            ${renderReconstructionProgress(job, reports)}
+            ${renderAgentProgress(reports)}
+            ${sourceTree?.let { renderSourceTree(job, it, reports) }.orEmpty()}
             ${if (sourceTreeUnavailable) "<section class=\"panel\"><p>Source-tree evidence is unavailable or has not been generated for this revision.</p></section>" else ""}
-            ${renderRepairHistory(job)}
-            ${renderArtifacts(job, artifacts)}
+            ${renderRepairHistory(job, reports)}
+            ${renderArtifacts(job, artifacts, reports)}
           </main>
         """.trimIndent(),
         script = script,
     )
 }
 
-private fun renderAgentProgress(job: Job): String {
-    val snapshot = runCatching { AgentProgressJournal.read(job.binaryPath.parent.resolve("reports")) }.getOrNull()
+private fun renderAgentProgress(reports: WebReportContext): String {
+    val snapshot = runCatching { AgentProgressJournal.read(reports.reportsDirectory) }.getOrNull()
     val events = snapshot?.get("events")?.jsonArray.orEmpty().takeLast(30)
     val rows = events.joinToString("") { item ->
         val event = item.jsonObject
@@ -228,10 +239,12 @@ fun renderSourceFile(
     job: Job,
     relativePath: String,
     source: String,
+    reportContext: WebReportContext? = null,
     manifest: JsonObject? = null,
     confidence: JsonObject? = null,
     currentBuildVerified: Boolean = false,
 ): String {
+    val reports = reportsFor(job, reportContext)
     val fileEvidence = manifest?.get("files")?.jsonArray?.mapNotNull { it as? JsonObject }
         ?.firstOrNull { it.text("path") == relativePath }
     val generator = fileEvidence?.text("generator").orEmpty()
@@ -255,7 +268,7 @@ fun renderSourceFile(
         body = """
       <main class="shell source-shell">
         <a class="back-link" href="/jobs/${job.id}">← ${job.filename.escapeHtml()}</a>
-        <section class="source-heading"><div><p class="kicker">Generated source</p><h1>${relativePath.escapeHtml()}</h1></div><a class="button secondary" href="${artifactHref(job, "reports/source-tree/$relativePath")}">Download</a></section>
+        <section class="source-heading"><div><p class="kicker">Generated source</p><h1>${relativePath.escapeHtml()}</h1></div><a class="button secondary" href="${artifactHref(job, "${reports.artifactPrefix}/source-tree/$relativePath")}">Download</a></section>
         $provenance
         <p class="tree-note">${if (currentBuildVerified) "Current build identity verified against the archive and this source revision." else "Current build verification is unavailable for this source revision."} Compilation does not imply behavioral equivalence.</p>
         <pre class="source-view"><code>${source.escapeHtml()}</code></pre>
@@ -314,8 +327,8 @@ private fun renderJobList(jobs: List<Job>): String {
     } + "</div>"
 }
 
-private fun renderExploration(job: Job): String {
-    val reportPath = job.binaryPath.parent.resolve("reports/exploration.json")
+private fun renderExploration(job: Job, reports: WebReportContext): String {
+    val reportPath = reports.reportsDirectory.resolve("exploration.json")
     if (!reportPath.exists()) return """
         <section class="panel evidence-panel pending-evidence">
           <div class="section-heading compact"><span class="step">03</span><div><p class="kicker">Evidence</p><h2>Exploration report</h2></div></div>
@@ -343,7 +356,7 @@ private fun renderExploration(job: Job): String {
     }
     return """
       <section class="panel evidence-panel">
-        <div class="section-heading compact"><span class="step">03</span><div><p class="kicker">Evidence</p><h2>Exploration report</h2></div><a class="text-link" href="${artifactHref(job, "reports/exploration.json")}">Download JSON ↓</a></div>
+        <div class="section-heading compact"><span class="step">03</span><div><p class="kicker">Evidence</p><h2>Exploration report</h2></div><a class="text-link" href="${artifactHref(job, "${reports.artifactPrefix}/exploration.json")}">Download JSON ↓</a></div>
         <div class="metric-grid">
           ${metric("Confidence", "${(score * 100).roundToInt()}%", "Evidence-bounded", score)}
           ${metric("Candidates", root.number("candidateCount"), "Generated inputs")}
@@ -358,8 +371,8 @@ private fun renderExploration(job: Job): String {
     """.trimIndent()
 }
 
-fun renderRepairHistory(job: Job): String {
-    val historyPath = job.binaryPath.parent.resolve("reports/repair_history.json")
+fun renderRepairHistory(job: Job, reportContext: WebReportContext? = null): String {
+    val historyPath = reportsFor(job, reportContext).reportsDirectory.resolve("repair_history.json")
     if (!historyPath.exists()) return ""
     val payload = runCatching { Json.parseToJsonElement(historyPath.readText()).jsonObject }.getOrNull()
         ?: return "<section class=\"panel history-panel\"><h2>Repair history</h2><p>Repair history could not be loaded.</p></section>"
@@ -393,11 +406,11 @@ private fun renderEvidence(label: String, evidence: JsonObject?): String {
     return "<p class=\"evidence-line\"><b>$label:</b><span>${kind.escapeHtml()} — ${summary.escapeHtml()}</span>${if (artifact.isBlank()) "" else "<code>${artifact.escapeHtml()}</code>"}</p>"
 }
 
-private fun renderArtifacts(job: Job, artifacts: List<Path>): String {
+private fun renderArtifacts(job: Job, artifacts: List<Path>, reports: WebReportContext): String {
     if (artifacts.isEmpty()) return ""
-    val root = job.binaryPath.parent
+    val root = reports.reportsDirectory
     val links = artifacts.joinToString("") { artifact ->
-        val relative = root.relativize(artifact).toString()
+        val relative = reports.artifactPrefix + "/" + root.relativize(artifact).toString().replace('\\', '/')
         "<a class=\"artifact-row\" href=\"${artifactHref(job, relative)}\"><span class=\"artifact-icon\">${artifact.fileName.toString().substringAfterLast('.', "FILE").uppercase().take(4)}</span><span><strong>${artifact.name.escapeHtml()}</strong><small>${relative.escapeHtml()} · ${runCatching { formatBytes(Files.size(artifact).toInt()) }.getOrDefault("unknown")}</small></span><span>↓</span></a>"
     }
     return """
@@ -408,13 +421,13 @@ private fun renderArtifacts(job: Job, artifacts: List<Path>): String {
     """.trimIndent()
 }
 
-private fun renderSourceTree(job: Job, source: SourceTreeView): String {
+private fun renderSourceTree(job: Job, source: SourceTreeView, reports: WebReportContext): String {
     val files = source.files
     val rows = files.joinToString("") { entry ->
         val relative = entry.path
         val depth = relative.count { it == '/' }
         val kind = entry.roles.first().wireName.uppercase().take(4)
-        "<li style=\"--depth:$depth\"><a href=\"/jobs/${job.id}/source/${encodePath(relative)}\"><span>$kind</span><code>${relative.escapeHtml()}</code><i>→</i></a></li>"
+        "<li style=\"--depth:$depth\"><a href=\"/jobs/${job.id}/source/${encodePath(relative)}${reports.runId?.let { "?runId=$it" }.orEmpty()}\"><span>$kind</span><code>${relative.escapeHtml()}</code><i>→</i></a></li>"
     }
     val confidence = runCatching {
         source.confidence?.get("projectScore")?.jsonPrimitive?.doubleOrNull?.takeIf { it.isFinite() && it in 0.0..1.0 }
@@ -425,14 +438,14 @@ private fun renderSourceTree(job: Job, source: SourceTreeView): String {
         <p class="tree-note">${files.size} readable project files. Confidence is evidence-bounded and does not claim universal equivalence.</p>
         <ul class="source-tree">$rows</ul>
         ${source.archiveSha256?.let { digest ->
-            "<a class=\"button primary archive-download\" href=\"${artifactHref(job, "reports/source-tree.zip")}?sha256=${digest.escapeHtml()}\">Download verified source archive ↓</a><p class=\"tree-note\">SHA-256: <code>${digest.escapeHtml()}</code>. Verified payload and current source/build identity; not behavioral equivalence or release certification.</p>"
+            "<a class=\"button primary archive-download\" href=\"${artifactHref(job, "${reports.artifactPrefix}/source-tree.zip")}?sha256=${digest.escapeHtml()}\">Download verified source archive ↓</a><p class=\"tree-note\">SHA-256: <code>${digest.escapeHtml()}</code>. Verified payload and current source/build identity; not behavioral equivalence or release certification.</p>"
         } ?: "<p class=\"tree-note\">Archive verification is unavailable for the current source/build revision.</p>"}
       </section>
     """.trimIndent()
 }
 
-private fun renderReconstructionProgress(job: Job): String {
-    val path = job.binaryPath.parent.resolve("reports/reconstruction_progress.json")
+private fun renderReconstructionProgress(job: Job, reports: WebReportContext): String {
+    val path = reports.reportsDirectory.resolve("reconstruction_progress.json")
     if (!path.exists()) return ""
     val progress = runCatching { Json.parseToJsonElement(path.readText()).jsonObject }.getOrNull() ?: return ""
     val phase = progress.text("phase")
@@ -447,6 +460,9 @@ private fun renderReconstructionProgress(job: Job): String {
     """.trimIndent()
 }
 
+private fun reportsFor(job: Job, supplied: WebReportContext?): WebReportContext =
+    supplied ?: WebReportContext(job.binaryPath.parent.resolve("reports"))
+
 private fun listArtifacts(jobDir: Path): List<Path> {
     if (!jobDir.exists()) return emptyList()
     val artifacts = mutableListOf<Path>()
@@ -456,14 +472,14 @@ private fun listArtifacts(jobDir: Path): List<Path> {
             require(++entries <= 10_000 && jobDir.relativize(directory).nameCount <= 32) {
                 "report listing exceeds its traversal bound"
             }
-            return if (directory == jobDir.resolve("reports/source-tree")) {
+            return if (directory == jobDir.resolve("source-tree") || directory == jobDir.resolve("runs")) {
                 java.nio.file.FileVisitResult.SKIP_SUBTREE
             } else java.nio.file.FileVisitResult.CONTINUE
         }
 
         override fun visitFile(file: Path, attributes: java.nio.file.attribute.BasicFileAttributes): java.nio.file.FileVisitResult {
             require(++entries <= 10_000) { "report listing exceeds its entry bound" }
-            if (attributes.isRegularFile && file.startsWith(jobDir.resolve("reports"))) artifacts.add(file)
+            if (attributes.isRegularFile) artifacts.add(file)
             return java.nio.file.FileVisitResult.CONTINUE
         }
     })
