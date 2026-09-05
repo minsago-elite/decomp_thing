@@ -36,12 +36,15 @@ requirements. No recovery/confidence value becomes a measured behavioral score.
 
 ## Verification scope and remaining behavior work
 
-The focused audit, archive, reconstruction and profile selection passes 31 tests
+The focused audit, archive, reconstruction and profile selection passes 30 tests
 without failures or skips. Ten new regressions cover evidence-only and accepted
 implementations, explicit unresolved facts, globals/types, substring false credit,
 stale/missing/indirect files, rehashed cross-pairs, duplicate plan fields, alternate
 declared source suffixes and JSON escaping. Deterministic cross-root archive and
 clean rebuild tests continue to pass.
+The `4389da3` commit message mistakenly counts 31 focused passes; its retained XML
+contains 30. The separate wider selection below includes one additional passing
+scale-integration case and two unavailable-sandbox failures.
 
 A wider local run executes 33 tests with 31 passes and two failures because
 `/usr/bin/bwrap` is unavailable. Those two existing scale-integration tests stop
