@@ -26,7 +26,14 @@ caps. A read may consume at most one fixed hash buffer beyond the remaining budg
 before rejecting it. Initial and final snapshots have separate budgets. Either
 limit failure returns RESOURCE_EXHAUSTED with the snapshot phase and limit category,
 never a partial change list. Final-component symlinks are not followed when opening
-content; this is not a complete descriptor-bound inventory or path-race guarantee.
+content. Hashing uses the shared Linux descriptor boundary: open and retain each
+directory component, authorize the regular file relative to its parent, then
+stream the still-owned file through its kernel descriptor with a 64 KiB buffer.
+Before returning a digest, recheck file key/size/modification time and descriptor
+identity, and reopen the named directory/file chain to verify its bindings.
+Unavailable or changed bindings fail with a bounded workspace-violation reason.
+This binds each hash read; it is not an atomic or complete descriptor-held tree
+inventory, and the initial discovery walk still uses path-based directory traversal.
 Encountered symlinks (including dangling links) and special files are rejected
 instead of being omitted by a regular-file filter. A directory entry that
 disappears or cannot be inspected also fails the scan. These failures become

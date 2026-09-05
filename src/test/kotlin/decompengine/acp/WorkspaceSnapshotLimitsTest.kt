@@ -13,6 +13,24 @@ import kotlin.test.assertTrue
 
 class WorkspaceSnapshotLimitsTest {
     @Test
+    fun `descriptor hash streams exact bytes under the snapshot budget`() {
+        val root = workspace()
+        val bytes = ByteArray(150_000) { (it % 251).toByte() }
+        Files.write(root.resolve("src/data"), bytes)
+        val chunks = mutableListOf<Int>()
+        var declared = -1L
+        val result = decompengine.repair.hashStableRegularFile(root, "src/data",
+            { declared = it }, { count, _ -> chunks += count }, {})
+        val expected = java.security.MessageDigest.getInstance("SHA-256").digest(bytes)
+            .joinToString("") { "%02x".format(it) }
+        assertEquals(expected, result.sha256)
+        assertEquals(bytes.size.toLong(), result.size)
+        assertEquals(result.size, declared)
+        assertEquals(bytes.size, chunks.sum())
+        assertTrue(chunks.size > 1 && chunks.all { it in 1..65536 })
+    }
+
+    @Test
     fun `recursive inventory rejects symlinks instead of silently omitting them`() {
         val root = workspace()
         val outside = root.resolve("outside")

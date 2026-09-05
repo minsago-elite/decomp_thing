@@ -5076,6 +5076,73 @@ internal data class StableRegularFile(
     val identity: LinuxFileIdentity,
 )
 
+internal data class StableFileDigest(val sha256: String, val size: Long)
+
+/** Stream a pinned regular file, then revalidate its metadata and every directory binding. */
+internal fun hashStableRegularFile(
+    root: Path,
+    relative: String,
+    declaredSize: (Long) -> Unit,
+    readBytes: (Int, Long) -> Unit,
+    cancellationCheck: () -> Unit,
+): StableFileDigest {
+    cancellationCheck()
+    val normalized = normalizedRelative(relative)
+    val base = root.toAbsolutePath().normalize()
+    RepairDescriptorReadSupport.requireSupported(base)
+    val parts = normalized.split('/')
+    val directories = mutableListOf<decompengine.acp.LinuxDescriptor>()
+    var authorized: decompengine.acp.LinuxDescriptor? = null
+    var readable: decompengine.acp.LinuxDescriptor? = null
+    try {
+        var parent = openRepairRootDirectory(base)
+        directories += parent
+        parts.dropLast(1).forEach { segment ->
+            cancellationCheck()
+            parent = LinuxFilesystemSyscalls.openDirectoryAt(parent.fd, segment)
+            directories += parent
+        }
+        authorized = requireNotNull(LinuxFilesystemSyscalls.openRegularFileAtOrNull(parent.fd, parts.last())) {
+            "stable hash target is unavailable"
+        }
+        readable = LinuxFilesystemSyscalls.openReadableFrom(authorized)
+        require(readable.identity == authorized.identity) { "stable hash descriptor identity changed" }
+        val descriptorPath = Path.of("/proc/self/fd/${readable.fd}")
+        val before = Files.readAttributes(descriptorPath, BasicFileAttributes::class.java)
+        require(before.isRegularFile) { "stable hash descriptor is not regular" }
+        declaredSize(before.size())
+        val digest = java.security.MessageDigest.getInstance("SHA-256")
+        val buffer = ByteArray(64 * 1024)
+        var size = 0L
+        // This kernel-owned proc entry references our still-owned descriptor, not the workspace name.
+        Files.newInputStream(descriptorPath).use { input ->
+            while (true) {
+                cancellationCheck()
+                val count = input.read(buffer)
+                if (count < 0) break
+                size = Math.addExact(size, count.toLong())
+                readBytes(count, size)
+                digest.update(buffer, 0, count)
+            }
+        }
+        cancellationCheck()
+        val after = Files.readAttributes(descriptorPath, BasicFileAttributes::class.java)
+        require(after.isRegularFile && before.fileKey() == after.fileKey() &&
+            before.size() == after.size() && after.size() == size &&
+            before.lastModifiedTime() == after.lastModifiedTime() &&
+            LinuxFilesystemSyscalls.identity(readable.fd) == readable.identity) {
+            "stable hash file changed during reading"
+        }
+        revalidateDescriptorPath(base, parts, directories.map { it.identity }, authorized.identity)
+        cancellationCheck()
+        return StableFileDigest(digest.digest().joinToString("") { "%02x".format(it) }, size)
+    } finally {
+        readable?.close()
+        authorized?.close()
+        directories.asReversed().forEach { it.close() }
+    }
+}
+
 internal fun readStableRegularFile(
     root: Path,
     relative: String,

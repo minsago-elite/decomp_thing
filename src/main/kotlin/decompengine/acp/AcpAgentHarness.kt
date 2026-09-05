@@ -3004,7 +3004,7 @@ internal class WorkspaceSnapshot private constructor(
                 val root = request.workspaceRoots.single { it.id == rootId }
                 val relative = root.path.relativize(absolute).toString().replace(absolute.fileSystem.separator, "/")
                 val path = AgentWorkspacePath(rootId, relative)
-                states[path] = hashFile(absolute, budget)
+                states[path] = hashFile(root.path, relative, budget)
             }
             return WorkspaceSnapshot(states)
         }
@@ -3023,25 +3023,16 @@ internal class WorkspaceSnapshot private constructor(
             return attributes.isRegularFile
         }
 
-        private fun hashFile(path: Path, budget: WorkspaceSnapshotBudget): FileState {
-            val digest = MessageDigest.getInstance("SHA-256")
-            val buffer = ByteArray(WORKSPACE_HASH_BUFFER_BYTES)
-            var size = 0L
-            val attributes = Files.readAttributes(path, java.nio.file.attribute.BasicFileAttributes::class.java, LinkOption.NOFOLLOW_LINKS)
-            if (!attributes.isRegularFile) throw WorkspaceSnapshotInvalidEntry("file-type-changed")
-            budget.declaredSize(attributes.size())
-            Files.newInputStream(path, LinkOption.NOFOLLOW_LINKS).use { input ->
-                while (true) {
-                    budget.checkpoint()
-                    val count = input.read(buffer)
-                    if (count < 0) break
-                    size += count
-                    budget.readBytes(count, size)
-                    digest.update(buffer, 0, count)
-                }
+        private fun hashFile(root: Path, relative: String, budget: WorkspaceSnapshotBudget): FileState {
+            val result = try {
+                decompengine.repair.hashStableRegularFile(root, relative,
+                    budget::declaredSize, budget::readBytes, budget::checkpoint)
+            } catch (_: IOException) {
+                throw WorkspaceSnapshotInvalidEntry("file-binding-unavailable")
+            } catch (_: IllegalArgumentException) {
+                throw WorkspaceSnapshotInvalidEntry("file-binding-changed")
             }
-            budget.checkpoint()
-            return FileState(digest.digest().toHex(), size)
+            return FileState(result.sha256, result.size)
         }
     }
 }
@@ -3359,7 +3350,6 @@ private const val NANOS_PER_MILLI = 1_000_000L
 private const val MAX_PROTOCOL_DIAGNOSTIC_CHARS = 256
 private const val SESSION_NEW_METHOD = "session/new"
 private val ACP_PREFLIGHT_WORKSPACE: Path = Path.of("/decomp-acp-preflight/workspace")
-private const val WORKSPACE_HASH_BUFFER_BYTES = 64 * 1024
 private const val SUMMARY_CHARACTER_LIMIT = 64 * 1024
 // Pinned acp-jvm 0.30.1 Client handlers whose request model carries AcpWithSessionId. Elicitation
 // create/complete and protocol cancellation are intentionally absent because they are global.
