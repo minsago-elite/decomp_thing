@@ -24,6 +24,9 @@ for command in chmod chown cp find install realpath stat sudo; do
 done
 
 trusted_java_home=/var/lib/decomp-oracle-ci-java
+project_root="$(cd "$(dirname "$0")/.." && pwd)"
+"$project_root/gradlew" --no-daemon -p "$project_root" stageOracleNativeLibraries
+native_libraries="$project_root/build/native/oracle"
 source_java_home="$(realpath -e -- "$JAVA_HOME")"
 if [[ ! -x "$source_java_home/bin/java" || ! -x "$source_java_home/bin/javac" ]]; then
   echo "setup-java did not provide a complete JDK" >&2
@@ -76,6 +79,11 @@ fi
 sudo -n install -d -o root -g root -m 0700 -- "$trusted_java_home"
 sudo -n cp --archive --no-preserve=ownership,links -- \
   "$source_java_home/." "$trusted_java_home/"
+sudo -n install -d -o root -g root -m 0755 -- "$trusted_java_home/lib/decomp-oracle-native"
+for native_library in libjnidispatch.so libsqlitejdbc.so; do
+  sudo -n install -o root -g root -m 0644 -- \
+    "$native_libraries/$native_library" "$trusted_java_home/lib/decomp-oracle-native/$native_library"
+done
 sudo -n chmod 0700 -- "$trusted_java_home"
 runtime_roots["$trusted_java_home"]=1
 

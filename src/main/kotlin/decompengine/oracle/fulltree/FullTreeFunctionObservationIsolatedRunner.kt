@@ -211,6 +211,7 @@ internal class FullTreeFunctionObservationIsolationConfiguration(
                     JsonPrimitive(expectedSystemdBusControllerSha256),
                 "javaExecutable" to JsonPrimitive(javaExecutable.toString()),
                 "javaRuntime" to javaRuntime.canonicalIdentity(),
+                "nativeLibraryProfileSha256" to JsonPrimitive(OracleNativeLibraries.policySha256),
                 "producerConfigurationSha256" to
                     JsonPrimitive(FullTreeFunctionObservations.configurationSha256),
                 "provider" to JsonPrimitive(ISOLATION_CONFIGURATION_PROVIDER),
@@ -342,6 +343,7 @@ private fun pathsOverlap(first: Path, second: Path): Boolean =
 private class AuthenticatedObservationRuntime private constructor(
     private val runtimeMounts: List<Pair<FullTreeFunctionObservationRuntimeMount, String>>,
     private val classPath: List<Pair<FullTreeFunctionObservationClassPathEntry, StableControlFile>>,
+    private val nativeDirectory: Path,
 ) : AutoCloseable {
     val classPathBytes: Long = classPath.fold(0L) { total, (_, guard) ->
         addExact(total, guard.size, "authenticated class-path byte count")
@@ -370,6 +372,7 @@ private class AuthenticatedObservationRuntime private constructor(
     fun mounts(): List<FullTreeFunctionObservationRuntimeMount> = runtimeMounts.map { it.first }
 
     fun verify(label: String) {
+        OracleNativeLibraries.requireCurrent(nativeDirectory, classPath.map { it.second.authenticatedSha256 })
         runtimeMounts.forEach { (mount, expected) ->
             if (calculateFullTreeObservationRuntimeManifestSha256(mount.source) != expected) {
                 isolationFail("isolated runtime mount changed $label: ${mount.source}")
@@ -430,8 +433,10 @@ private class AuthenticatedObservationRuntime private constructor(
                     total = addExact(total, guard.size, "authenticated class-path byte count")
                     entry to guard
                 }
+                val nativeDirectory = configuration.javaRuntime.source.resolve(OracleNativeLibraries.relativeDirectory)
+                OracleNativeLibraries.requireCurrent(nativeDirectory, classPath.map { it.second.authenticatedSha256 })
                 opened.clear()
-                return AuthenticatedObservationRuntime(verifiedMounts, classPath)
+                return AuthenticatedObservationRuntime(verifiedMounts, classPath, nativeDirectory)
             } catch (failure: Throwable) {
                 opened.forEach { guard -> runCatching { guard.close() }.exceptionOrNull()?.let(failure::addSuppressed) }
                 throw failure
@@ -1064,13 +1069,14 @@ private fun kotlinSystemdCgroupBootRuntimeClosureSha256(
                     JsonPrimitive(configuration.expectedSystemdBusControllerSha256),
                 "javaExecutable" to JsonPrimitive(configuration.javaExecutable.toString()),
                 "javaRuntime" to configuration.javaRuntime.canonicalIdentity(),
+                "nativeLibraryProfileSha256" to JsonPrimitive(OracleNativeLibraries.policySha256),
                 "keeperEntryPoint" to JsonPrimitive(KotlinSystemdCgroupBootKeeper::class.java.name),
                 "deploymentClosureSha256" to
                     JsonPrimitive(deploymentClosureSha256),
                 "provider" to JsonPrimitive(KOTLIN_BOOT_RUNTIME_PROVIDER),
                 "resourceLimiterExecutable" to
                     JsonPrimitive(configuration.resourceLimiterExecutable.toString()),
-                "schemaVersion" to JsonPrimitive(1),
+                "schemaVersion" to JsonPrimitive(2),
                 "scopeInspectorExecutable" to
                     JsonPrimitive(configuration.scopeInspectorExecutable.toString()),
                 "scopeSupervisorExecutable" to
@@ -2988,15 +2994,18 @@ private data class IsolatedWorkerRequest(
     }
 }
 
-internal fun isolatedObservationJvmTemporaryArguments(runDirectory: Path): List<String> = listOf(
-    "-Djna.nosys=true",
-    "-Djna.tmpdir=${runDirectory.resolve(TEMP_DIRECTORY)}",
-    "-Djava.io.tmpdir=${runDirectory.resolve(TEMP_DIRECTORY)}",
-)
+internal fun isolatedObservationJvmTemporaryArguments(runDirectory: Path, nativeDirectory: Path): List<String> {
+    require(!pathsOverlap(runDirectory, nativeDirectory)) { "Oracle native libraries must not come from writable scratch" }
+    return OracleNativeLibraries.jvmArguments(nativeDirectory) + listOf(
+        "-Djna.tmpdir=${runDirectory.resolve(TEMP_DIRECTORY)}",
+        "-Djava.io.tmpdir=${runDirectory.resolve(TEMP_DIRECTORY)}",
+    )
+}
 
 private data class IsolatedSupervisorRequest(
     val javaExecutable: Path,
     val classPath: String,
+    val nativeDirectory: Path,
     val worker: IsolatedWorkerRequest,
 ) {
     fun workerCommand(): List<String> = buildList {
@@ -3005,7 +3014,7 @@ private data class IsolatedSupervisorRequest(
         add("-XX:ActiveProcessorCount=1")
         add("-XX:-UsePerfData")
         add("-XX:MaxRAMPercentage=50")
-        addAll(isolatedObservationJvmTemporaryArguments(worker.runDirectory))
+        addAll(isolatedObservationJvmTemporaryArguments(worker.runDirectory, nativeDirectory))
         add("-classpath")
         add(classPath)
         add(FullTreeFunctionObservationIsolatedWorker::class.java.name)
@@ -3038,7 +3047,12 @@ private data class IsolatedSupervisorRequest(
             return IsolatedSupervisorRequest(
                 javaExecutable = javaExecutable,
                 classPath = classPath,
-                worker = IsolatedWorkerRequest.parse(arguments.copyOfRange(3, arguments.size)),
+                nativeDirectory = Path.of(arguments[3]).also { native ->
+                    if (!native.isAbsolute || native.normalize() != native) {
+                        isolationFail("isolated supervisor native directory is not canonical")
+                    }
+                },
+                worker = IsolatedWorkerRequest.parse(arguments.copyOfRange(4, arguments.size)),
             )
         }
     }
@@ -3878,13 +3892,15 @@ private class TrustedObservationBoundary(
             add("-XX:MaxMetaspaceSize=64m")
             add("-XX:ReservedCodeCacheSize=32m")
             add("-XX:MaxDirectMemorySize=16m")
-            addAll(isolatedObservationJvmTemporaryArguments(request.runDirectory))
+            addAll(isolatedObservationJvmTemporaryArguments(request.runDirectory,
+                configuration.javaRuntime.destination.resolve(OracleNativeLibraries.relativeDirectory)))
             add("-classpath")
             add(materializedClassPath.encoded)
             add(FullTreeFunctionObservationIsolatedSupervisor::class.java.name)
             add(SUPERVISOR_PROTOCOL_VERSION)
             add(sandboxJava.toString())
             add(materializedClassPath.encoded)
+            add(configuration.javaRuntime.destination.resolve(OracleNativeLibraries.relativeDirectory).toString())
             addAll(request.arguments())
         }
     }
@@ -3932,7 +3948,8 @@ private class TrustedObservationBoundary(
             add("-XX:MaxMetaspaceSize=64m")
             add("-XX:ReservedCodeCacheSize=32m")
             add("-XX:MaxDirectMemorySize=16m")
-            addAll(isolatedObservationJvmTemporaryArguments(runDirectory))
+            addAll(isolatedObservationJvmTemporaryArguments(runDirectory,
+                configuration.javaRuntime.destination.resolve(OracleNativeLibraries.relativeDirectory)))
             add("-classpath")
             add(materializedClassPath.encoded)
             add(KotlinSystemdCgroupBootKeeper::class.java.name)
@@ -7168,16 +7185,16 @@ private inline fun <T> translateIsolationFailures(
 private fun isolationFail(message: String): Nothing =
     throw FullTreeFunctionObservationIsolationException(message)
 
-private const val ISOLATION_CONFIGURATION_SCHEMA_VERSION = 2
+private const val ISOLATION_CONFIGURATION_SCHEMA_VERSION = 3
 private const val ISOLATION_CONFIGURATION_PROVIDER =
-    "kotlin-full-tree-function-observation-isolation-configuration-v2"
+    "kotlin-full-tree-function-observation-isolation-configuration-v3"
 private const val WORKER_PROTOCOL_VERSION = "1"
 private const val WORKER_ARGUMENTS = 9
-private const val SUPERVISOR_PROTOCOL_VERSION = "1"
-private const val SUPERVISOR_ARGUMENTS = WORKER_ARGUMENTS + 3
+private const val SUPERVISOR_PROTOCOL_VERSION = "2"
+private const val SUPERVISOR_ARGUMENTS = WORKER_ARGUMENTS + 4
 private const val KOTLIN_BOOT_PROTOCOL_VERSION = "1"
 private const val KOTLIN_BOOT_ARGUMENTS = 3
-private const val KOTLIN_BOOT_RUNTIME_PROVIDER = "kotlin-systemd-cgroup-boot-runtime-v1"
+private const val KOTLIN_BOOT_RUNTIME_PROVIDER = "kotlin-systemd-cgroup-boot-runtime-v2"
 private const val READY_FIELD_COUNT = 19
 private const val KEEPER_FIELD_COUNT = 4
 private const val WORKER_FAILURE_EXIT = 73

@@ -5,6 +5,8 @@ import java.nio.file.LinkOption
 import java.nio.file.attribute.PosixFilePermissions
 import java.security.MessageDigest
 import java.util.concurrent.TimeUnit
+import java.util.Properties
+import java.util.zip.ZipFile
 import java.util.jar.Attributes
 import java.util.jar.JarEntry
 import java.util.jar.JarFile
@@ -149,6 +151,41 @@ val llvmBehaviorHelperBinary = layout.buildDirectory.file("native/behavior/decom
 val llvmBehaviorHelperChecksum = layout.buildDirectory.file("native/behavior/decomp-llvm-behavior-helper.sha256")
 val llvmBehaviorHelperCompiler = providers.gradleProperty("llvmBehaviorHelperCompiler").orElse("/usr/bin/cc")
 val kotlinBootRuntimeDirectory = layout.buildDirectory.dir("oracle/gcc/kotlin-boot-runtime")
+val oracleNativeLibraryDirectory = layout.buildDirectory.dir("native/oracle")
+val oracleNativeLibraryPolicy = layout.projectDirectory.file("src/main/resources/oracle-native-libraries-v1.properties")
+val stageOracleNativeLibraries = tasks.register("stageOracleNativeLibraries") {
+    group = "build"
+    description = "Stages hash-locked Linux x86-64 JNA and SQLite resources for noexec oracle scratch"
+    inputs.file(oracleNativeLibraryPolicy)
+    inputs.files(configurations.runtimeClasspath)
+    outputs.dir(oracleNativeLibraryDirectory)
+    doLast {
+        val policy = Properties().apply { oracleNativeLibraryPolicy.asFile.inputStream().use(::load) }
+        require(policy.getProperty("schemaVersion") == "1" && policy.getProperty("platform") == "linux-x86-64")
+        val destination = oracleNativeLibraryDirectory.get().asFile.toPath()
+        Files.createDirectories(destination)
+        val posix = Files.getFileStore(destination).supportsFileAttributeView("posix")
+        if (posix) Files.setPosixFilePermissions(destination, PosixFilePermissions.fromString("rwxr-xr-x"))
+        listOf("jna", "sqlite").forEach { name ->
+            val artifact = configurations.runtimeClasspath.get().single { it.name == policy.getProperty("$name.artifact") }
+            require(sha256(artifact.toPath()) == policy.getProperty("$name.artifactSha256")) { "Oracle native dependency JAR changed: $name" }
+            ZipFile(artifact).use { archive ->
+                val resourceName = policy.getProperty("$name.resource")
+                val entries = archive.entries().asSequence().filter { it.name == resourceName }.toList()
+                require(entries.size == 1 && !entries.single().isDirectory) { "Oracle native JAR resource is missing or ambiguous: $name" }
+                val entry = entries.single()
+                val expectedBytes = policy.getProperty("$name.bytes").toLong()
+                require(expectedBytes in 1..(16L * 1024 * 1024) && entry.size == expectedBytes)
+                val bytes = archive.getInputStream(entry).use { it.readNBytes(expectedBytes.toInt() + 1) }
+                require(bytes.size.toLong() == expectedBytes)
+                val digest = MessageDigest.getInstance("SHA-256").digest(bytes).joinToString("") { byte -> "%02x".format(byte) }
+                require(digest == policy.getProperty("$name.sha256")) { "Oracle native resource digest changed: $name" }
+                val output = Files.write(destination.resolve(policy.getProperty("$name.name")), bytes)
+                if (posix) Files.setPosixFilePermissions(output, PosixFilePermissions.fromString("rw-r--r--"))
+            }
+        }
+    }
+}
 val kotlinBootClasspathReference =
     layout.buildDirectory.file("generated/oracle/gcc/kotlin-boot-classpath-reference-v1.json")
 val llvmHostedWorkerClasspathReference =
@@ -913,12 +950,17 @@ distributions {
                     permissions { unix(normalizedMode) }
                 }
             }
+            from(oracleNativeLibraryDirectory) {
+                into("libexec/oracle-native")
+                filePermissions { unix("rw-r--r--") }
+            }
         }
     }
 }
 
 tasks.test {
     useJUnitPlatform()
+    dependsOn(stageOracleNativeLibraries)
     dependsOn(":ghidra-bridge:stageBundle")
     val testInstalledGhidra = providers.environmentVariable("RUN_REAL_GHIDRA").orNull == "true" ||
         providers.environmentVariable("RUN_REAL_GHIDRA_CALL_SITES").orNull == "true"
@@ -935,6 +977,7 @@ tasks.test {
     inputs.file(llvmHostedWorkerClasspathReference)
     inputs.dir(kotlinBootRuntimeDirectory)
     doFirst {
+        systemProperty("decompengine.oracle.nativeLibraryDirectory", oracleNativeLibraryDirectory.get().asFile.absolutePath)
         val ghidraBundle = if (testInstalledGhidra) layout.buildDirectory.dir("install/llm_bin_patch/libexec/ghidra")
             else project(":ghidra-bridge").layout.buildDirectory.dir("bundle")
         systemProperty("decompengine.ghidra.bundle", ghidraBundle.get().asFile.absolutePath)
@@ -1007,6 +1050,7 @@ tasks.processResources {
 listOf("installDist", "distZip", "distTar").forEach { taskName ->
     tasks.named(taskName) {
         dependsOn(":ghidra-bridge:stageBundle")
+        dependsOn(stageOracleNativeLibraries)
         inputs.property("ghidraBundlePermissionsVersion", 2)
         dependsOn(generateAcpGateHelperChecksum)
         dependsOn(generateLlvmBehaviorHelperChecksum)
