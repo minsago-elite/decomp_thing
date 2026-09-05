@@ -1,0 +1,17 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<testsuite name="decompengine.web.WebApiControllerTest" tests="11" skipped="0" failures="0" errors="0" timestamp="2026-09-05T18:00:17.353Z" hostname="whatsername" time="5.199">
+  <properties/>
+  <testcase name="upload receipt survives server restart and a fresh authenticated session()" classname="decompengine.web.WebApiControllerTest" time="0.275"/>
+  <testcase name="private job collection enforces filters envelopes and read-only admission()" classname="decompengine.web.WebApiControllerTest" time="0.308"/>
+  <testcase name="session exchange reload and logout use consistent no-store schema envelopes()" classname="decompengine.web.WebApiControllerTest" time="0.381"/>
+  <testcase name="malformed persisted records yield safe errors while public session reads remain inert()" classname="decompengine.web.WebApiControllerTest" time="0.149"/>
+  <testcase name="authenticated streamed upload returns durable identity and replays without overwriting later status()" classname="decompengine.web.WebApiControllerTest" time="0.744"/>
+  <testcase name="API misses versions encoded paths and negotiation use authorized JSON failures()" classname="decompengine.web.WebApiControllerTest" time="0.545"/>
+  <testcase name="upload progress reads require the initiating session and preserve publication distinction()" classname="decompengine.web.WebApiControllerTest" time="0.556"/>
+  <testcase name="authenticated progress snapshots replay persisted observations and expose retention gaps()" classname="decompengine.web.WebApiControllerTest" time="0.95"/>
+  <testcase name="private job projection preserves unsigned addresses and hides internal paths and status messages()" classname="decompengine.web.WebApiControllerTest" time="0.219"/>
+  <testcase name="startup recovery projects durable identity while bootstrap keeps production workflow capability unavailable()" classname="decompengine.web.WebApiControllerTest" time="0.778"/>
+  <testcase name="origin and forwarding policy runs before route and request validation()" classname="decompengine.web.WebApiControllerTest" time="0.287"/>
+  <system-out><![CDATA[]]></system-out>
+  <system-err><![CDATA[]]></system-err>
+</testsuite>
