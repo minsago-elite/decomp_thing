@@ -95,7 +95,14 @@ class AcpAuthenticationInventoryTest {
             val process = ProcessBuilder(
                 java.nio.file.Path.of(System.getProperty("java.home"), "bin", "java").toString(),
                 "-cp", System.getProperty("java.class.path"), AuthenticationCommitmentProcessFixture::class.java.name,
-            ).redirectErrorStream(true).start()
+            ).apply {
+                // Launcher diagnostics must never become part of the commitment protocol.
+                // Exercise all supported launcher-option channels even in a clean parent JVM.
+                environment()["JAVA_TOOL_OPTIONS"] = "-Ddecomp.fixture.javaToolOptions=true"
+                environment()["JDK_JAVA_OPTIONS"] = "-Ddecomp.fixture.jdkJavaOptions=true"
+                environment()["_JAVA_OPTIONS"] = "-Ddecomp.fixture.javaOptions=true"
+                redirectError(ProcessBuilder.Redirect.DISCARD)
+            }.start()
             try {
                 assertTrue(process.waitFor(10, java.util.concurrent.TimeUnit.SECONDS))
                 assertEquals(0, process.exitValue())
