@@ -62,8 +62,14 @@ as its digest and size. If an existing file changes any of those metadata fields
 diffing fails with WORKSPACE_VIOLATION rather than reporting no change or treating
 WRITE_FILE as metadata authority. The current contract exposes no metadata-edit
 operation. Replacing a file atomically with the same bytes and metadata remains
-unchanged even though its inode differs. Creation-role metadata, extended attributes,
-timestamps and directory metadata still need their complete shared profile policy.
+unchanged even though its inode differs. Regular files carrying extended attributes
+are explicitly unsupported by ordinary snapshots, consistent with the text-write
+bridge's existing rejection policy. Attribute-name presence is checked through the
+owned descriptor before and after hashing; values are not read, removed or exposed.
+Even a zero-length attribute is rejected with a bounded reason. This conservative
+default does not implement a profile-specific allowlist for attributes. Creation-role
+metadata, timestamps, directory metadata and any supported attribute policy still
+need their complete shared profile contract and qualification.
 
 The final report is attached to the invocation-bound execution receipt. A
 successful prompt stop reason does not remove failures in cleanup, final snapshot

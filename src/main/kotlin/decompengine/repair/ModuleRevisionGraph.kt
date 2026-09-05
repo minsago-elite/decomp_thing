@@ -5085,6 +5085,7 @@ internal fun hashStableRegularFile(
     declaredSize: (Long) -> Unit,
     readBytes: (Int, Long) -> Unit,
     cancellationCheck: () -> Unit,
+    validateMetadata: (LinuxDescriptor) -> Unit = {},
 ): StableFileDigest {
     cancellationCheck()
     val normalized = normalizedRelative(relative)
@@ -5107,6 +5108,7 @@ internal fun hashStableRegularFile(
         }
         readable = LinuxFilesystemSyscalls.openReadableFrom(authorized)
         require(readable.identity == authorized.identity) { "stable hash descriptor identity changed" }
+        validateMetadata(readable)
         val descriptorPath = Path.of("/proc/self/fd/${readable.fd}")
         val before = Files.readAttributes(descriptorPath, BasicFileAttributes::class.java)
         require(before.isRegularFile) { "stable hash descriptor is not regular" }
@@ -5127,6 +5129,7 @@ internal fun hashStableRegularFile(
         }
         cancellationCheck()
         val after = Files.readAttributes(descriptorPath, BasicFileAttributes::class.java)
+        validateMetadata(readable)
         require(after.isRegularFile && before.fileKey() == after.fileKey() &&
             before.size() == after.size() && after.size() == size &&
             before.lastModifiedTime() == after.lastModifiedTime() &&
