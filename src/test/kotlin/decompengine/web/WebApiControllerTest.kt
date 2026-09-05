@@ -24,6 +24,41 @@ class WebApiControllerTest {
     private val client = HttpClient.newBuilder().followRedirects(HttpClient.Redirect.NEVER).build()
 
     @Test
+    fun `startup recovery projects durable identity while bootstrap keeps production workflow capability unavailable`() {
+        val root = createTempDirectory("web-durable-projection-")
+        val job = JobStore(root).createFromUpload("inert.elf", elfFixture())
+        val run = decompengine.jobs.WorkflowAttemptStore.open(root).use { owner ->
+            val original = (owner.inspect(job.id) as decompengine.jobs.WorkflowJobInspection.Available).snapshot
+            owner.create(job.id, original.version, decompengine.jobs.NewWorkflowAttempt(
+                decompengine.jobs.WorkflowKind.RECONSTRUCT,
+                decompengine.jobs.WorkflowExecutionLimits(60000u, 15000u, 1048576u, 16u),
+            )).attempt
+        }
+        var executed = false
+        val server = UploadServer("127.0.0.1", 0, root,
+            JobAnalyzer { _, _ -> executed = true }, JobReconstructor { _, _ -> executed = true },
+            uiMode = WebUiMode.SPA, basePath = "/workbench/")
+        server.start()
+        try {
+            val cookie = establish(server)
+            val record = root.resolve(job.id).resolve("workflow-state.json")
+            val before = Files.readString(record)
+            val response = request(server, "/workbench/api/v1/jobs/${job.id}", headers = mapOf("Cookie" to cookie))
+            val body = assertEnvelope(response, 200, "job")
+            assertEquals(run.runId, body.getValue("latestRunId").jsonPrimitive.content)
+            assertEquals("interrupted", body.getValue("status").jsonPrimitive.content)
+            assertEquals("null", body.getValue("acceptedRevisionId").toString())
+            val bootstrap = assertEnvelope(request(server, "/workbench/api/v1/bootstrap", headers = mapOf("Cookie" to cookie)), 200, "bootstrap")
+            assertTrue(bootstrap.getValue("capabilities").toString().contains("PREVIEW_UNAVAILABLE"))
+            assertError(request(server, "/workbench/api/v1/jobs/${job.id}/runs", "POST", "{}", mapOf(
+                "Cookie" to cookie, "X-CSRF-Token" to bootstrap.getValue("csrfToken").jsonPrimitive.content,
+            )), 404, "NOT_FOUND")
+            assertEquals(before, Files.readString(record))
+            assertFalse(executed)
+        } finally { server.stop(); root.toFile().deleteRecursively() }
+    }
+
+    @Test
     fun `session exchange reload and logout use consistent no-store schema envelopes`() = withServer { server, _, _ ->
         val api = "/workbench/api/v1"
         assertError(request(server, "$api/bootstrap"), 401, "SESSION_REQUIRED")
@@ -116,7 +151,7 @@ class WebApiControllerTest {
         val record = store.get(jobId).binaryPath.parent.resolve("job.json")
         Files.writeString(record, "PRIVATE_CORRUPT_RECORD_SENTINEL {")
         val failure = request(server, "/workbench/api/v1/jobs/$jobId", headers = mapOf("Cookie" to cookie))
-        assertError(failure, 500, "INTERNAL_ERROR")
+        assertError(failure, 503, "CORRUPT_LEGACY_JOB")
         assertFalse(failure.body().contains("PRIVATE_CORRUPT"))
         assertFalse(failure.body().contains(record.toString()))
         assertEquals(200, request(server, "/workbench/api/v1/bootstrap", headers = mapOf("Cookie" to cookie)).statusCode())

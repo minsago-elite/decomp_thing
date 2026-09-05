@@ -76,8 +76,7 @@ internal class WebApiController(
                     access.authorize(exchange, WebEndpointPolicy.privateRead())
                     requireNoQuery(exchange)
                     requireJsonAccept(exchange)
-                    val job = jobs.get(resource.removePrefix("jobs/"))
-                    val value = webJob(job)
+                    val value = webJob(jobs.presentation(resource.removePrefix("jobs/")))
                     val etag = "\"${value.getValue("version").let { (it as JsonPrimitive).content }}\""
                     exchange.responseHeaders.set("ETag", etag)
                     if (exchange.requestHeaders.getFirst("If-None-Match") == etag) {
@@ -89,6 +88,10 @@ internal class WebApiController(
             }
         } catch (failure: WebAccessDenied) {
             access.sendDenied(exchange, failure)
+        } catch (failure: WebJobServiceException) {
+            val status = if (failure.code in setOf("JOB_NOT_FOUND", "RUN_NOT_FOUND")) 404 else 503
+            access.sendDenied(exchange, WebAccessDenied(status, if (status == 404) "NOT_FOUND" else failure.code,
+                failure.message ?: "Job storage is unavailable."))
         } catch (_: JobStoreException) {
             access.sendDenied(exchange, WebAccessDenied(404, "NOT_FOUND", "The requested job is unavailable."))
         } catch (_: Exception) {
@@ -205,6 +208,21 @@ internal class WebApiController(
         exchange.responseHeaders.set("Referrer-Policy", "no-referrer")
         exchange.responseHeaders.set("X-Content-Type-Options", "nosniff")
     }
+}
+
+internal fun webJob(presentation: WebJobPresentation): JsonObject {
+    val fields = webJob(presentation.job).toMutableMap()
+    val snapshot = presentation.snapshot ?: return JsonObject(fields)
+    fields["version"] = JsonPrimitive(snapshot.version)
+    val latest = snapshot.latestRun
+    if (latest != null) {
+        fields["status"] = JsonPrimitive(if (latest.state == decompengine.jobs.WorkflowRunState.CANCELLING) "running" else latest.state.wireName)
+        fields["latestRunId"] = JsonPrimitive(latest.runId)
+        fields["acceptedRevisionId"] = snapshot.acceptedRevision?.revisionId?.let(::JsonPrimitive) ?: JsonNull
+    } else if (presentation.legacyInterrupted) {
+        fields["status"] = JsonPrimitive("interrupted")
+    }
+    return JsonObject(fields)
 }
 
 internal fun webJob(job: Job): JsonObject = buildJsonObject {

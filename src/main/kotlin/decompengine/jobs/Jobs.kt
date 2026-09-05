@@ -54,6 +54,21 @@ data class Job(
 
 class JobStore(root: Path) {
     private val root = root.toAbsolutePath().normalize()
+    internal val storageRoot: Path get() = root
+
+    /** Bounded identities only; malformed records are inspected separately instead of disappearing. */
+    internal fun jobIds(): List<String> {
+        if (!Files.exists(root, java.nio.file.LinkOption.NOFOLLOW_LINKS)) return emptyList()
+        if (!Files.isDirectory(root, java.nio.file.LinkOption.NOFOLLOW_LINKS)) throw JobStoreException("job storage is not a directory")
+        val ids = mutableListOf<String>()
+        Files.newDirectoryStream(root).use { entries ->
+            for (entry in entries) if (entry.fileName.toString().matches(Regex("[a-f0-9]{32}"))) {
+                if (ids.size >= 10_000) throw JobStoreException("job storage exceeds its listing limit")
+                ids += entry.fileName.toString()
+            }
+        }
+        return ids.sorted()
+    }
 
     @Synchronized
     fun createFromUpload(filename: String, content: ByteArray): Job {
@@ -129,6 +144,35 @@ class JobStore(root: Path) {
     }
 
     fun reportsDirectory(jobId: String): Path = jobDirectory(jobId).resolve("reports").createDirectories()
+
+    /** The caller first verifies run ownership through the durable attempt store. Reads never create directories. */
+    internal fun runReportsDirectory(jobId: String, runId: String, create: Boolean = false): Path {
+        require(runId.matches(Regex("[A-Za-z0-9][A-Za-z0-9_-]{0,127}"))) { "invalid workflow report identity" }
+        val job = jobDirectory(jobId)
+        if (!Files.isDirectory(job, java.nio.file.LinkOption.NOFOLLOW_LINKS)) throw JobStoreException("job storage is unavailable")
+        var current = job
+        for (segment in listOf("reports", "runs", runId)) {
+            current = current.resolve(segment)
+            if (Files.exists(current, java.nio.file.LinkOption.NOFOLLOW_LINKS)) {
+                if (!Files.isDirectory(current, java.nio.file.LinkOption.NOFOLLOW_LINKS)) throw JobStoreException("workflow report storage is invalid")
+            } else if (create) Files.createDirectory(current)
+        }
+        return current
+    }
+
+    internal fun resolveRunArtifact(jobId: String, runId: String, relativePath: String): Path {
+        require(relativePath.isNotBlank() && !relativePath.contains('\\')) { "invalid workflow artifact path" }
+        val segments = relativePath.split('/')
+        require(segments.none { it.isBlank() || it == "." || it == ".." }) { "invalid workflow artifact path" }
+        var current = runReportsDirectory(jobId, runId)
+        for ((index, segment) in segments.withIndex()) {
+            current = current.resolve(segment)
+            val valid = if (index == segments.lastIndex) Files.isRegularFile(current, java.nio.file.LinkOption.NOFOLLOW_LINKS)
+                else Files.isDirectory(current, java.nio.file.LinkOption.NOFOLLOW_LINKS)
+            if (!valid) throw JobStoreException("workflow artifact is unavailable")
+        }
+        return current
+    }
 
     fun resolveArtifact(jobId: String, relativePath: String): Path {
         require(relativePath.isNotBlank()) { "artifact path must not be blank" }

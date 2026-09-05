@@ -17,6 +17,38 @@ import kotlin.test.assertTrue
 
 class UploadServerTest {
     @Test
+    fun `missing job workflow admissions return typed safe not found responses`() {
+        var executions = 0
+        withServer(JobAnalyzer { _, _ -> executions++ }, JobReconstructor { _, _ -> executions++ }) { server, root ->
+            for (workflow in listOf("explore", "reconstruct")) {
+                val response = request(server, "POST", "/jobs/${"a".repeat(32)}/$workflow", followRedirects = false)
+                assertEquals(404, response.status)
+                assertTrue(response.body.decodeToString().contains("JOB_NOT_FOUND"))
+                kotlin.test.assertFalse(response.body.decodeToString().contains(root.toString()))
+            }
+            assertEquals(0, executions)
+        }
+    }
+
+    @Test
+    fun `dashboard keeps malformed jobs visible and detail returns a safe storage diagnostic`() {
+        withServer { server, root ->
+            val created = upload(server, "damaged.elf", elfFixture(), acceptJson = true)
+            val jobId = Json.parseToJsonElement(created.body.decodeToString()).jsonObject.getValue("id").toString().trim('"')
+            root.resolve(jobId).resolve("job.json").writeText("PRIVATE_CORRUPTION_SENTINEL {")
+            val dashboard = request(server, "GET", "/")
+            val detail = request(server, "GET", "/jobs/$jobId")
+            assertEquals(200, dashboard.status)
+            assertTrue(dashboard.body.decodeToString().contains(jobId))
+            assertTrue(dashboard.body.decodeToString().contains("CORRUPT_LEGACY_JOB"))
+            assertEquals(503, detail.status)
+            assertTrue(detail.body.decodeToString().contains("verified backup"))
+            kotlin.test.assertFalse(detail.body.decodeToString().contains("PRIVATE_CORRUPTION_SENTINEL"))
+            kotlin.test.assertFalse(detail.body.decodeToString().contains(root.toString()))
+        }
+    }
+
+    @Test
     fun `upload page has ELF form`() {
         withServer { server, _ ->
             val response = request(server, "GET", "/")

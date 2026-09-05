@@ -21,7 +21,7 @@ import kotlin.io.path.name
 import kotlin.io.path.readText
 import kotlin.math.roundToInt
 
-fun renderDashboard(jobs: List<Job>): String = page(
+fun renderDashboard(jobs: List<Job>, diagnostics: List<WebJobDiagnostic> = emptyList()): String = page(
     title = "Binary workbench",
     body = """
       <header class="hero shell">
@@ -52,9 +52,10 @@ fun renderDashboard(jobs: List<Job>): String = page(
           <div class="section-heading compact">
             <span class="step">02</span>
             <div><p class="kicker">Workspace</p><h2 id="jobs-title">Recent jobs</h2></div>
-            <span class="count">${jobs.size}</span>
+            <span class="count">${jobs.size + diagnostics.size}</span>
           </div>
           ${renderJobList(jobs)}
+          ${diagnostics.joinToString("") { diagnostic -> "<div class=\"job-row\"><span class=\"job-copy\"><strong>Unavailable job ${diagnostic.jobId.escapeHtml()}</strong><small>${diagnostic.code.escapeHtml()}: ${diagnostic.message.escapeHtml()}</small></span></div>" }}
         </section>
       </main>
     """.trimIndent(),
@@ -67,14 +68,16 @@ fun renderDashboard(jobs: List<Job>): String = page(
     """.trimIndent(),
 )
 
-fun renderJob(job: Job): String {
+fun renderJob(job: Job, reportContext: WebReportContext? = null, diagnostics: List<decompengine.jobs.WorkflowStoreDiagnostic> = emptyList()): String {
+    val reports = reportsFor(job, reportContext)
     val active = job.status in setOf("queued", "analyzing")
     val metadata = job.metadata.toJson().entries.joinToString("") { (key, value) ->
         "<div class=\"datum\"><dt>${key.replace('_', ' ').title().escapeHtml()}</dt><dd>${value.toString().trim('"').escapeHtml()}</dd></div>"
     }
-    val jobDir = job.binaryPath.parent
-    val artifacts = listArtifacts(jobDir)
-    val action = if (active) {
+    val artifacts = listArtifacts(reports.reportsDirectory)
+    val action = if (reports.runId != null) {
+        "<span class=\"status-note\">Legacy workflow actions are unavailable for jobs with durable attempts.</span>"
+    } else if (active) {
         "<button class=\"button primary\" disabled>Analysis in progress <span class=\"spinner\"></span></button>"
     } else {
         val label = if (job.status == "complete") "Run exploration again" else "Start automatic exploration"
@@ -114,6 +117,8 @@ fun renderJob(job: Job): String {
               </div>
             </section>
             ${job.statusMessage?.let { "<div class=\"status-note ${job.status.escapeHtml()}\"><span></span>${it.escapeHtml()}</div>" }.orEmpty()}
+            ${reports.runId?.let { "<p class=\"status-note\">Reports for workflow attempt ${it.escapeHtml()}. Completion does not establish acceptance.</p>" }.orEmpty()}
+            ${diagnostics.joinToString("") { "<p class=\"status-note\">${it.code.escapeHtml()}: ${it.message.escapeHtml()}</p>" }}
             <div class="job-grid">
               <section class="panel overview-panel">
                 <div class="section-heading compact"><span class="step">01</span><div><p class="kicker">Binary profile</p><h2>ELF metadata</h2></div></div>
@@ -134,19 +139,20 @@ fun renderJob(job: Job): String {
                 </ol>
               </section>
             </div>
-            ${renderExploration(job)}
-            ${renderReconstructionProgress(job)}
-            ${renderSourceTree(job)}
-            ${renderRepairHistory(job)}
-            ${renderArtifacts(job, artifacts)}
+            ${renderExploration(job, reports)}
+            ${renderReconstructionProgress(job, reports)}
+            ${renderSourceTree(job, reports)}
+            ${renderRepairHistory(job, reports)}
+            ${renderArtifacts(job, artifacts, reports)}
           </main>
         """.trimIndent(),
         script = script,
     )
 }
 
-fun renderSourceFile(job: Job, relativePath: String, source: String): String {
-    val tree = job.binaryPath.parent.resolve("reports/source-tree")
+fun renderSourceFile(job: Job, relativePath: String, source: String, reportContext: WebReportContext? = null): String {
+    val reports = reportsFor(job, reportContext)
+    val tree = reports.reportsDirectory.resolve("source-tree")
     val manifest = runCatching { Json.parseToJsonElement(tree.resolve("source_tree_manifest.json").readText()).jsonObject }.getOrNull()
     val fileEvidence = manifest?.get("files")?.jsonArray?.mapNotNull { it as? JsonObject }
         ?.firstOrNull { it.text("path") == relativePath }
@@ -166,7 +172,7 @@ fun renderSourceFile(job: Job, relativePath: String, source: String): String {
         body = """
       <main class="shell source-shell">
         <a class="back-link" href="/jobs/${job.id}">← ${job.filename.escapeHtml()}</a>
-        <section class="source-heading"><div><p class="kicker">Generated source</p><h1>${relativePath.escapeHtml()}</h1></div><a class="button secondary" href="${artifactHref(job, "reports/source-tree/$relativePath")}">Download</a></section>
+        <section class="source-heading"><div><p class="kicker">Generated source</p><h1>${relativePath.escapeHtml()}</h1></div><a class="button secondary" href="${artifactHref(job, "${reports.artifactPrefix}/source-tree/$relativePath")}">Download</a></section>
         $provenance
         <pre class="source-view"><code>${source.escapeHtml()}</code></pre>
       </main>
@@ -204,8 +210,8 @@ private fun renderJobList(jobs: List<Job>): String {
     } + "</div>"
 }
 
-private fun renderExploration(job: Job): String {
-    val reportPath = job.binaryPath.parent.resolve("reports/exploration.json")
+private fun renderExploration(job: Job, reports: WebReportContext): String {
+    val reportPath = reports.reportsDirectory.resolve("exploration.json")
     if (!reportPath.exists()) return """
         <section class="panel evidence-panel pending-evidence">
           <div class="section-heading compact"><span class="step">03</span><div><p class="kicker">Evidence</p><h2>Exploration report</h2></div></div>
@@ -233,7 +239,7 @@ private fun renderExploration(job: Job): String {
     }
     return """
       <section class="panel evidence-panel">
-        <div class="section-heading compact"><span class="step">03</span><div><p class="kicker">Evidence</p><h2>Exploration report</h2></div><a class="text-link" href="${artifactHref(job, "reports/exploration.json")}">Download JSON ↓</a></div>
+        <div class="section-heading compact"><span class="step">03</span><div><p class="kicker">Evidence</p><h2>Exploration report</h2></div><a class="text-link" href="${artifactHref(job, "${reports.artifactPrefix}/exploration.json")}">Download JSON ↓</a></div>
         <div class="metric-grid">
           ${metric("Confidence", "${(score * 100).roundToInt()}%", "Evidence-bounded", score)}
           ${metric("Candidates", root.number("candidateCount"), "Generated inputs")}
@@ -248,8 +254,8 @@ private fun renderExploration(job: Job): String {
     """.trimIndent()
 }
 
-fun renderRepairHistory(job: Job): String {
-    val historyPath = job.binaryPath.parent.resolve("reports/repair_history.json")
+fun renderRepairHistory(job: Job, reportContext: WebReportContext? = null): String {
+    val historyPath = reportsFor(job, reportContext).reportsDirectory.resolve("repair_history.json")
     if (!historyPath.exists()) return ""
     val payload = runCatching { Json.parseToJsonElement(historyPath.readText()).jsonObject }.getOrNull()
         ?: return "<section class=\"panel history-panel\"><h2>Repair history</h2><p>Repair history could not be loaded.</p></section>"
@@ -283,11 +289,11 @@ private fun renderEvidence(label: String, evidence: JsonObject?): String {
     return "<p class=\"evidence-line\"><b>$label:</b><span>${kind.escapeHtml()} — ${summary.escapeHtml()}</span>${if (artifact.isBlank()) "" else "<code>${artifact.escapeHtml()}</code>"}</p>"
 }
 
-private fun renderArtifacts(job: Job, artifacts: List<Path>): String {
+private fun renderArtifacts(job: Job, artifacts: List<Path>, reports: WebReportContext): String {
     if (artifacts.isEmpty()) return ""
-    val root = job.binaryPath.parent
+    val root = reports.reportsDirectory
     val links = artifacts.joinToString("") { artifact ->
-        val relative = root.relativize(artifact).toString()
+        val relative = reports.artifactPrefix + "/" + root.relativize(artifact).toString().replace('\\', '/')
         "<a class=\"artifact-row\" href=\"${artifactHref(job, relative)}\"><span class=\"artifact-icon\">${artifact.fileName.toString().substringAfterLast('.', "FILE").uppercase().take(4)}</span><span><strong>${artifact.name.escapeHtml()}</strong><small>${relative.escapeHtml()} · ${runCatching { formatBytes(Files.size(artifact).toInt()) }.getOrDefault("unknown")}</small></span><span>↓</span></a>"
     }
     return """
@@ -298,8 +304,8 @@ private fun renderArtifacts(job: Job, artifacts: List<Path>): String {
     """.trimIndent()
 }
 
-private fun renderSourceTree(job: Job): String {
-    val root = job.binaryPath.parent.resolve("reports/source-tree")
+private fun renderSourceTree(job: Job, reports: WebReportContext): String {
+    val root = reports.reportsDirectory.resolve("source-tree")
     val manifest = root.resolve("source_tree_manifest.json")
     if (!manifest.exists()) return ""
     val files = Files.walk(root).use { paths ->
@@ -310,25 +316,25 @@ private fun renderSourceTree(job: Job): String {
     val rows = files.joinToString("") { relative ->
         val depth = relative.count { it == '/' }
         val kind = relative.substringAfterLast('.', "file").uppercase().take(4)
-        "<li style=\"--depth:$depth\"><a href=\"/jobs/${job.id}/source/${encodePath(relative)}\"><span>$kind</span><code>${relative.escapeHtml()}</code><i>→</i></a></li>"
+        "<li style=\"--depth:$depth\"><a href=\"/jobs/${job.id}/source/${encodePath(relative)}${reports.runId?.let { "?runId=$it" }.orEmpty()}\"><span>$kind</span><code>${relative.escapeHtml()}</code><i>→</i></a></li>"
     }
     val confidencePath = root.resolve("reports/confidence.json")
     val confidence = runCatching {
         Json.parseToJsonElement(confidencePath.readText()).jsonObject["projectScore"]?.jsonPrimitive?.doubleOrNull
     }.getOrNull()
-    val bundle = job.binaryPath.parent.resolve("reports/source-tree.zip")
+    val bundle = reports.reportsDirectory.resolve("source-tree.zip")
     return """
       <section class="panel source-tree-panel">
         <div class="section-heading compact"><span class="step">04</span><div><p class="kicker">Reconstructed project</p><h2>Archival source tree</h2></div>${confidence?.let { "<span class=\"count\">${(it * 100).roundToInt()}%</span>" }.orEmpty()}</div>
         <p class="tree-note">${files.size} readable project files. Confidence is evidence-bounded and does not claim universal equivalence.</p>
         <ul class="source-tree">$rows</ul>
-        ${if (bundle.exists()) "<a class=\"button primary archive-download\" href=\"${artifactHref(job, "reports/source-tree.zip")}\">Download verified source archive ↓</a>" else ""}
+        ${if (bundle.exists()) "<a class=\"button primary archive-download\" href=\"${artifactHref(job, "${reports.artifactPrefix}/source-tree.zip")}\">Download verified source archive ↓</a>" else ""}
       </section>
     """.trimIndent()
 }
 
-private fun renderReconstructionProgress(job: Job): String {
-    val path = job.binaryPath.parent.resolve("reports/reconstruction_progress.json")
+private fun renderReconstructionProgress(job: Job, reports: WebReportContext): String {
+    val path = reports.reportsDirectory.resolve("reconstruction_progress.json")
     if (!path.exists()) return ""
     val progress = runCatching { Json.parseToJsonElement(path.readText()).jsonObject }.getOrNull() ?: return ""
     val phase = progress.text("phase")
@@ -342,6 +348,9 @@ private fun renderReconstructionProgress(job: Job): String {
       </section>
     """.trimIndent()
 }
+
+private fun reportsFor(job: Job, supplied: WebReportContext?): WebReportContext =
+    supplied ?: WebReportContext(job.binaryPath.parent.resolve("reports"))
 
 private fun listArtifacts(jobDir: Path): List<Path> {
     if (!jobDir.exists()) return emptyList()

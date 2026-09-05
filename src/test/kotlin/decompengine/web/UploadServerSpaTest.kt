@@ -2,6 +2,10 @@ package decompengine.web
 
 import decompengine.jobs.JobStore
 import decompengine.jobs.elfFixture
+import kotlinx.serialization.json.Json
+import kotlinx.serialization.json.boolean
+import kotlinx.serialization.json.jsonObject
+import kotlinx.serialization.json.jsonPrimitive
 import java.net.URI
 import java.net.http.HttpClient
 import java.net.http.HttpRequest
@@ -79,7 +83,7 @@ class UploadServerSpaTest {
     }
 
     @Test
-    fun `public SPA preview startup does not migrate or recover historical job metadata`() {
+    fun `startup records historical interruption while public reads preserve original legacy metadata`() {
         val data = createTempDirectory("web-spa-history-")
         val store = JobStore(data)
         val job = store.createFromUpload("fixture.elf", elfFixture())
@@ -89,8 +93,13 @@ class UploadServerSpaTest {
         val server = UploadServer("127.0.0.1", 0, data, uiMode = WebUiMode.SPA)
         server.start()
         try {
+            val state = data.resolve(job.id).resolve("workflow-state.json")
+            val recovered = Files.readString(state)
+            assertTrue(Json.parseToJsonElement(recovered).jsonObject.getValue("legacy")
+                .jsonObject.getValue("recoveredInterrupted").jsonPrimitive.boolean)
             assertEquals(200, request(server, "/").statusCode())
             assertEquals(before, Files.readString(metadata))
+            assertEquals(recovered, Files.readString(state))
         } finally {
             server.stop()
             data.toFile().deleteRecursively()

@@ -238,7 +238,20 @@ class WorkflowAttemptStore private constructor(
     private fun inspectLocked(jobId: String, directory: Path): WorkflowJobInspection = try {
         val (legacy, bytes) = readLegacy(jobId, directory)
         val statePath = directory.resolve(STATE_FILE)
-        val snapshot = if (Files.exists(statePath, NOFOLLOW_LINKS)) parseState(readRegular(statePath, STATE_BYTES), jobId) else {
+        val snapshot = if (Files.exists(statePath, NOFOLLOW_LINKS)) {
+            val stateBytes = readRegular(statePath, STATE_BYTES)
+            val persisted = parseState(stateBytes, jobId)
+            // Before durable migration, legacy adapters can still change job.json. Bind the read/CAS
+            // version to both files so a retained recovery sidecar cannot hide a legacy status change.
+            if (persisted.attempts.isEmpty()) {
+                val digest = MessageDigest.getInstance("SHA-256")
+                digest.update("decomp-web-legacy-version-v1\u0000".toByteArray())
+                digest.update(stateBytes)
+                digest.update(0.toByte())
+                digest.update(bytes)
+                persisted.copy(version = "legacy_" + digest.digest().joinToString("") { "%02x".format(it) })
+            } else persisted
+        } else {
             val sha = sha256(bytes)
             WorkflowJobSnapshot(jobId, "legacy_$sha", LegacyWorkflowObservation(sha, legacy.status, false), emptyList(), null)
         }

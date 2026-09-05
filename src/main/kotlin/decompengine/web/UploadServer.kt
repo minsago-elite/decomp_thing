@@ -195,7 +195,16 @@ class UploadServer(
     fun issueBrowserBootstrap(): WebBootstrapToken = checkNotNull(access) { "Browser sessions require --ui spa" }.issueBootstrap()
 
     init {
-        if (spaAssets == null) jobs.recoverInterruptedJobs()
+        try {
+            jobs.initializeExistingStorage()
+        } catch (failure: Throwable) {
+            server.stop(0)
+            requestExecutor.shutdownNow()
+            requestDeadlines.shutdownNow()
+            access?.close()
+            jobs.close()
+            throw failure
+        }
         server.executor = requestExecutor
         server.createContext("/") { exchange ->
             val upload = exchange.requestMethod == "POST" &&
@@ -230,12 +239,14 @@ class UploadServer(
         try {
             when {
                 exchange.requestMethod == "GET" && segments.isEmpty() ->
-                    exchange.sendHtml(200, renderDashboard(jobs.list()))
+                    renderJobDashboard(exchange)
                 exchange.requestMethod == "GET" && segments == listOf("assets", "app.css") ->
                     exchange.sendBytes(200, APP_CSS.toByteArray(), "text/css; charset=utf-8", cache = true)
                 exchange.requestMethod == "POST" && segments == listOf("jobs") -> handlePostJob(exchange)
                 exchange.requestMethod == "GET" && segments.size == 2 && segments[0] == "jobs" ->
-                    exchange.sendHtml(200, renderJob(jobs.get(decode(segments[1]))))
+                    jobs.presentation(decode(segments[1])).let { view ->
+                        exchange.sendHtml(200, renderJob(view.job, view.reports, view.diagnostics))
+                    }
                 exchange.requestMethod == "POST" && segments.size == 3 && segments[0] == "jobs" && segments[2] == "explore" ->
                     handleExplore(exchange, decode(segments[1]))
                 exchange.requestMethod == "POST" && segments.size == 3 && segments[0] == "jobs" && segments[2] == "reconstruct" ->
@@ -248,6 +259,9 @@ class UploadServer(
                     exchange.sendJson(200, encodeJob(jobs.get(decode(segments[2]))))
                 else -> exchange.sendHtml(404, renderErrorPage(404, "Page not found", "The requested route does not exist."))
             }
+        } catch (exception: WebJobServiceException) {
+            val status = if (exception.code in setOf("JOB_NOT_FOUND", "RUN_NOT_FOUND")) 404 else 503
+            exchange.sendHtml(status, renderErrorPage(status, "Job storage unavailable", "${exception.code}: ${exception.message}"))
         } catch (exception: JobStoreException) {
             exchange.sendHtml(404, renderErrorPage(404, "Job not found", exception.message ?: "The job does not exist."))
         } catch (exception: IllegalArgumentException) {
@@ -255,6 +269,14 @@ class UploadServer(
         } catch (exception: Exception) {
             exchange.sendHtml(500, renderErrorPage(500, "Unexpected error", exception.message ?: "The operation failed."))
         }
+    }
+
+    private fun renderJobDashboard(exchange: HttpExchange) {
+        val inspections = jobs.listInspections()
+        exchange.sendHtml(200, renderDashboard(
+            inspections.filterIsInstance<WebJobInspection.Available>().map { it.presentation.job },
+            inspections.filterIsInstance<WebJobInspection.Unavailable>().map { it.diagnostic },
+        ))
     }
 
     private fun routeSpaPreview(exchange: HttpExchange, assets: EmbeddedWebAssets) {
@@ -337,8 +359,14 @@ class UploadServer(
             normalized.endsWith(".json") || normalized.endsWith(".md") || normalized.endsWith(".log")) {
             "only generated text files may be viewed"
         }
-        val source = jobs.resolveArtifact(jobId, "reports/source-tree/$normalized")
-        exchange.sendHtml(200, renderSourceFile(jobs.get(jobId), normalized, java.nio.file.Files.readString(source)))
+        val query = exchange.requestURI.rawQuery
+        val runId = query?.let {
+            require(it.matches(Regex("runId=[A-Za-z0-9][A-Za-z0-9_-]{0,127}"))) { "Only an exact workflow attempt selection is supported" }
+            it.removePrefix("runId=")
+        }
+        val context = jobs.reportContext(jobId, runId)
+        val source = jobs.resolveArtifact(jobId, "${context.artifactPrefix}/source-tree/$normalized")
+        exchange.sendHtml(200, renderSourceFile(jobs.get(jobId), normalized, java.nio.file.Files.readString(source), context))
     }
 
     private fun handleArtifact(exchange: HttpExchange, jobId: String, relativePath: String) {
