@@ -61,5 +61,8 @@ internal fun previewSessionChoices(values: Sequence<String>, sensitiveValues: Co
     val redactor = ProgressRedactor(sensitiveValues, privatePreferences)
     val bounded = values.take(5).toList()
     val text = JsonArray(bounded.take(4).map { JsonPrimitive(redactor.text(it, 48)) }).toString()
-    return text + if (bounded.size > 4) " (more choices omitted)" else ""
+    val formatted = text + if (bounded.size > 4) " (more choices omitted)" else ""
+    // Redaction markers, JSON quoting and omission text can synthesize another private ID.
+    // No fixed replacement is safe for arbitrary identifiers; omit this display-only hint.
+    return if (privatePreferences.any { it.isNotEmpty() && formatted.contains(it) }) "" else formatted
 }

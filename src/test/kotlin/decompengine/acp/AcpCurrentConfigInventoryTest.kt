@@ -124,6 +124,32 @@ class AcpCurrentConfigInventoryTest {
         assertEquals("[]", previewSessionChoices(emptySequence(), emptyList()))
     }
 
+    @Test
+    fun `whitespace-only configured identifiers remain private in choice previews`() {
+        val preferences = AcpSessionPreferences(" ", "  ", listOf(
+            AcpSessionConfigPreference("   ", AcpSessionConfigValue.Select("    "))))
+        for (id in preferences.privateIdentifiers()) {
+            val preview = previewSessionChoices(sequenceOf("prefix" + id + "suffix"), emptyList(), preferences.privateIdentifiers())
+            assertFalse(preview.contains(id))
+            assertTrue(preview.contains("[redacted]"))
+        }
+    }
+
+    @Test
+    fun `final preview omits private identifiers synthesized by replacements and formatting`() {
+        val cases = listOf(
+            listOf("[redacted]X", "foobar") to sequenceOf("foobarX"),
+            listOf("\"model-safe\"") to sequenceOf("model-safe"),
+            listOf(" (more choices omitted)") to (1..5).asSequence().map { "choice-$it" },
+            listOf("[]") to emptySequence<String>(),
+        )
+        for ((privateIds, choices) in cases) {
+            val preview = previewSessionChoices(choices, emptyList(), privateIds)
+            assertEquals("", preview)
+            privateIds.forEach { assertFalse(preview.contains(it)) }
+        }
+    }
+
     private fun inventory(name: String): List<SessionConfigOption> {
         val fixture = javaClass.getResourceAsStream("/acp/v1/wire-contract.json")!!.use { it.readBytes().decodeToString() }
         return Json.parseToJsonElement(fixture).jsonObject.getValue("messages").jsonObject.getValue(name)
