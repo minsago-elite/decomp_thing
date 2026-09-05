@@ -30,7 +30,6 @@ import kotlin.test.assertFalse
 import kotlin.test.assertNotNull
 import kotlin.test.assertTrue
 import kotlinx.coroutines.runBlocking
-import org.junit.jupiter.api.Assumptions.assumeTrue
 
 class AcpTerminalBrokerTest {
     @Test
@@ -706,11 +705,11 @@ class AcpTerminalBrokerTest {
 
     private fun requireLiveHost() {
         val missing = SECURITY_TOOLS.filterNot(Files::isExecutable)
-        assumeTrue(missing.isEmpty(), "live ACP terminal sandbox tools unavailable: $missing")
-        assumeTrue(Files.exists(USER_RUNTIME.resolve("bus")), "systemd user bus is unavailable")
-        assumeTrue(Files.isRegularFile(Path.of("/sys/fs/cgroup/cgroup.controllers")), "cgroup v2 is unavailable")
-        assumeTrue(Files.isExecutable(PROBE), "static ACP terminal probe is unavailable")
-        assumeTrue(Files.isExecutable(GATE_HELPER), "static ACP gate helper is unavailable")
+        AcpLiveContractHost.requireCapability(missing.isEmpty(), { "live ACP terminal sandbox tools unavailable: $missing" })
+        AcpLiveContractHost.requireCapability(Files.exists(USER_RUNTIME.resolve("bus")), { "systemd user bus is unavailable" })
+        AcpLiveContractHost.requireCapability(Files.isRegularFile(Path.of("/sys/fs/cgroup/cgroup.controllers")), { "cgroup v2 is unavailable" })
+        AcpLiveContractHost.requireCapability(Files.isExecutable(PROBE), { "static ACP terminal probe is unavailable" })
+        AcpLiveContractHost.requireCapability(Files.isExecutable(GATE_HELPER), { "static ACP gate helper is unavailable" })
     }
 
     private fun liveConfiguration(): AcpLinuxSandboxConfiguration = AcpLinuxSandboxConfiguration(

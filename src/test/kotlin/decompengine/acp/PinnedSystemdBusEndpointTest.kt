@@ -18,7 +18,6 @@ import kotlin.test.Test
 import kotlin.test.assertEquals
 import kotlin.test.assertFailsWith
 import kotlin.test.assertNotEquals
-import org.junit.jupiter.api.Assumptions.assumeTrue
 
 class PinnedSystemdBusEndpointTest {
     @Test
@@ -79,7 +78,10 @@ class PinnedSystemdBusEndpointTest {
 
     @Test
     fun `runtime extended metadata changes remain inadmissible`() = withEndpoint { _, runtime, endpoint ->
-        assumeTrue(Files.getFileStore(runtime).supportsFileAttributeView(UserDefinedFileAttributeView::class.java))
+        AcpLiveContractHost.requireCapability(
+            Files.getFileStore(runtime).supportsFileAttributeView(UserDefinedFileAttributeView::class.java),
+            { "systemd endpoint tests require user-defined filesystem attributes" },
+        )
         val attributes = Files.getFileAttributeView(runtime, UserDefinedFileAttributeView::class.java)
         attributes.write("decomp-endpoint-test", ByteBuffer.wrap(byteArrayOf(1)))
         assertFailsWith<IOException> { endpoint.requireUnchanged() }
@@ -88,7 +90,7 @@ class PinnedSystemdBusEndpointTest {
     }
 
     private fun withEndpoint(action: (Path, Path, PinnedSystemdBusEndpoint) -> Unit) {
-        assumeTrue(System.getProperty("os.name") == "Linux")
+        AcpLiveContractHost.requireCapability(System.getProperty("os.name") == "Linux", { "systemd endpoint tests require Linux" })
         val root = createTempDirectory("bus-pin-")
         try {
             val runtime = Files.createDirectory(
