@@ -31,6 +31,36 @@ internal object GccBundledExportCapture {
         artifacts: List<GccCompilerEngineContainmentArtifactIdentity>,
         limits: GccResumeByteValidationLimits = GccResumeByteValidationLimits(),
     ): GccBundledExportAssessment {
+        return captureFiles(run, expectedReports, artifacts, limits, interrupted = false) { state, progress, batches, capture, reports ->
+            val model = capture.read(reports, "program_model.json", limits.assembledModelBytes)
+            val assessment = GccCompilerEngineResumeByteValidator.assessCompletedRun(state, progress, batches, model, limits)
+            require(assessment.reused == 0L) { "fresh GCC execution unexpectedly reused prior records" }
+            GccBundledExportAssessment(assessment, renderAssessment(assessment, capture.bytes))
+        }
+    }
+
+    /** Byte validation only: the caller must separately establish exact worker absence. */
+    fun captureInterruptedPrefix(
+        run: LinuxDescriptor,
+        expectedReports: LinuxFileIdentity,
+        artifacts: List<GccCompilerEngineContainmentArtifactIdentity>,
+        limits: GccResumeByteValidationLimits = GccResumeByteValidationLimits(),
+    ): GccInterruptedPrefixAssessment = captureFiles(run, expectedReports, artifacts, limits, interrupted = true) {
+            state, progress, batches, _, reports ->
+        requireNoFinalModel(reports)
+        GccCompilerEngineResumeByteValidator.assessInterruptedPrefix(state, progress, batches, limits).also {
+            require(it.reused == 0L) { "fresh interrupted GCC execution unexpectedly reused prior records" }
+        }
+    }
+
+    private fun <T> captureFiles(
+        run: LinuxDescriptor,
+        expectedReports: LinuxFileIdentity,
+        artifacts: List<GccCompilerEngineContainmentArtifactIdentity>,
+        limits: GccResumeByteValidationLimits,
+        interrupted: Boolean,
+        assess: (ByteArray, ByteArray, List<GccPlanningBatchBytes>, BoundExportFiles, LinuxDescriptor) -> T,
+    ): T {
         return LinuxFilesystemSyscalls.openDirectoryAt(run.fd, "reports").use { reports ->
             require(reports.identity.copy(linkCount = expectedReports.linkCount) == expectedReports) {
                 "GCC export reports directory changed identity"
@@ -53,8 +83,16 @@ internal object GccBundledExportCapture {
                             "GCC export $field differs from the authenticated invocation"
                         }
                     }
+                    val progress = capture.read(reports, "program_model.json.progress.json", limits.progressBytes)
+                    val batchCount = if (interrupted) {
+                        val observed = GccCompilerEngineResumeByteValidator.assessExportProgress(state, progress, limits)
+                        require(observed.phase == "planning" && observed.completed > 0 &&
+                            observed.completed < observed.total && observed.completed % BATCH_FUNCTIONS == 0L
+                        ) { "GCC interrupted capture requires a nonterminal durable planning prefix" }
+                        observed.completed / BATCH_FUNCTIONS
+                    } else stateAssessment.planningBatchCount
                     val expectedNames = linkedSetOf<String>()
-                    val batches = (0 until stateAssessment.planningBatchCount).map { index ->
+                    val batches = (0 until batchCount).map { index ->
                         val start = index * BATCH_FUNCTIONS
                         val end = minOf(start + BATCH_FUNCTIONS, stateAssessment.functionCount)
                         val base = String.format(Locale.ROOT, "batch-%08d-%08d", start, end)
@@ -72,19 +110,23 @@ internal object GccBundledExportCapture {
                         )
                     }
                     requireBatchNames(batchesDirectory, expectedNames)
-                    val progress = capture.read(reports, "program_model.json.progress.json", limits.progressBytes)
-                    val model = capture.read(reports, "program_model.json", limits.assembledModelBytes)
-                    val assessment = GccCompilerEngineResumeByteValidator.assessCompletedRun(state, progress, batches, model, limits)
-                    require(assessment.reused == 0L) { "fresh GCC execution unexpectedly reused prior records" }
+                    val result = assess(state, progress, batches, capture, reports)
                     capture.verify()
                     requireBatchNames(batchesDirectory, expectedNames)
                     requireNamedDirectory(run, "reports", reports)
                     requireNamedDirectory(reports, "program_model.json.export", export)
                     requireNamedDirectory(export, "planning-batches", batchesDirectory)
-                    GccBundledExportAssessment(assessment, renderAssessment(assessment, capture.bytes))
+                    if (interrupted) requireNoFinalModel(reports)
+                    result
                 }
             }
         }
+    }
+}
+
+private fun requireNoFinalModel(reports: LinuxDescriptor) {
+    LinuxFilesystemSyscalls.openPathAtOrNull(reports.fd, "program_model.json")?.use {
+        error("interrupted GCC prefix unexpectedly contains a final model")
     }
 }
 
