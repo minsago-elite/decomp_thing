@@ -51,6 +51,25 @@ staging, may be partial on failure, and is not atomically published by this API.
 cooperating same-UID principals; checkpoint checks do not exclude transient same-inode mutations.
 This is a storage migration slice, not a contained all-shard run or a call-truth publication receipt.
 
+`FullTreeCallObservationShardPublisher` supplies the companion raw-path publication and validation
+boundary. Publication streams to a private descriptor-retained stage, independently repeats the raw
+ELF/DWARF derivation and compares every byte, checks the generated digest, changes the output to mode
+0400, and uses descriptor-relative `RENAME_NOREPLACE` plus file/directory synchronization. Input
+guards remain open through both derivations and the final publication checks. Ordinary failure
+is bounded by one scope-bound cooperative deadline shared across both scans and publication, so
+rederivation cannot reset the operation's wall budget. Ordinary failure
+revokes only the still-matching stage or uncommitted output; existing destination files are retained.
+Validation independently regenerates candidate bytes, rejects writable, linked, truncated, extended,
+or schema-valid forged candidates, and never repairs the supplied file. Tests cover all fixture
+shards, stable checkpoint variations, provenance drift, output collisions, and cleanup after limits.
+
+The primitive publication/validation receipt fixes both `authoritativeReleaseEvidence` and
+`candidateLeaseRetained` to false. It is point-in-time migration evidence, not a capability. As with
+the existing function publisher, the output-parent owner must cooperate: the mode change does not
+revoke a previously opened same-UID write descriptor, and metadata checks do not exclude transient
+name replacement between a cleanup check and unlink. A contained whole-operation lease, hostile
+interruption/restart proof, and all-shard release orchestration remain separate requirements.
+
 This checkpoint cannot operate on the known historical full-tree scale: the prior call-truth tree is
 about 899 MiB, function truth about 2.5 GiB, and call observations about 1.1 GiB, while this bounded
 in-memory diagnostic intentionally caps its combined diagnostic output bytes at 64 MiB. Full authority

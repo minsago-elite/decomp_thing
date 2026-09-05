@@ -158,6 +158,82 @@ class FullTreeCallObservationProducerTest {
             assertNoCallScratch(root)
         }
 
+    @Test
+    fun `shared raw deadline cannot restart between derivations`() =
+        withCallFixture(mapOf("wallClockSeconds" to 2L)) { root, artifact, scope, inventory, shard ->
+            val deadline = FullTreeCallObservationDeadline.start(scope)
+            val firstOutput = ByteArrayOutputStream()
+            val first = FullTreeCallObservationProducer.generateShardToWithinDeadline(
+                artifact, inventory, scope, shard, root, firstOutput,
+                producerLimits = callProducerLimits(), deadline = deadline,
+            )
+            Thread.sleep(2100L)
+            val rejectedOutput = ByteArrayOutputStream()
+            val failure = assertFailsWith<FullTreeControlException> {
+                FullTreeCallObservationProducer.generateShardToWithinDeadline(
+                    artifact, inventory, scope, shard, root, rejectedOutput,
+                    producerLimits = callProducerLimits(), deadline = deadline,
+                )
+            }
+            assertTrue(failure.message.orEmpty().contains("wall-clock bound"))
+            assertEquals(0, rejectedOutput.size())
+            assertNoCallScratch(root)
+            val freshOutput = ByteArrayOutputStream()
+            val fresh = FullTreeCallObservationProducer.generateShardTo(
+                artifact, inventory, scope, shard, root, freshOutput, producerLimits = callProducerLimits(),
+            )
+            assertEquals(first, fresh)
+            assertContentEquals(firstOutput.toByteArray(), freshOutput.toByteArray())
+            assertNoCallScratch(root)
+        }
+
+    @Test
+    fun `raw deadline rejects a different authenticated scope`() =
+        withCallFixture { root, artifact, scope, inventory, shard ->
+            val deadline = FullTreeCallObservationDeadline.start(scope)
+            val differentScope = callScopeForArtifact(
+                scope, OracleArtifacts.sha256(Files.readAllBytes(artifact)), Files.size(artifact),
+                mapOf("wallClockSeconds" to Long.MAX_VALUE),
+            )
+            val output = ByteArrayOutputStream()
+            val failure = assertFailsWith<FullTreeControlException> {
+                FullTreeCallObservationProducer.generateShardToWithinDeadline(
+                    artifact, inventory, differentScope, shard, root, output,
+                    producerLimits = callProducerLimits(), deadline = deadline,
+                )
+            }
+            assertTrue(failure.message.orEmpty().contains("different authenticated scope"))
+            assertEquals(0, output.size())
+            assertNoCallScratch(root)
+        }
+
+    @Test
+    fun `nonempty raw call publication roundtrips all seven observed sites`() =
+        withCallFixture { root, artifact, scope, inventory, shard ->
+            val expected = FullTreeCallObservationProducer.generateShardWithLimits(
+                artifact, inventory, scope, shard, root, FullTreeControlLimits(), callProducerLimits(),
+            )
+            val output = root.resolve("published-calls.json")
+            val limits = FullTreeCallObservationPublicationLimits(producer = callProducerLimits())
+            val published = FullTreeCallObservationShardPublisher.generateAndPublish(
+                artifact, inventory, scope, shard, root, output, limits,
+            )
+            assertEquals(7L, published.entities)
+            assertEquals(19L, published.scannedDies)
+            assertEquals(expected.outputSha256, published.outputSha256)
+            assertEquals(expected.outputBytes, published.outputBytes)
+            assertContentEquals(FullTreeCallObservations.canonicalEnvelopeBytes(expected.document), Files.readAllBytes(output))
+            assertEquals(false, published.authoritativeReleaseEvidence)
+            assertEquals(false, published.candidateLeaseRetained)
+            assertEquals(
+                published,
+                FullTreeCallObservationShardPublisher.loadAndValidate(
+                    output, artifact, inventory, scope, shard, root, limits,
+                ),
+            )
+            assertNoCallScratch(root)
+        }
+
     private fun withCallFixture(
         bounds: Map<String, Long> = emptyMap(),
         action: (Path, Path, AuthenticatedFullTreeScope, Path, String) -> Unit,

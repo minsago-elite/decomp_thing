@@ -93,23 +93,28 @@ internal object FullTreeCallObservationProducer {
         controlLimits: FullTreeControlLimits = FullTreeControlLimits(),
         producerLimits: FullTreeCallObservationProducerLimits = FullTreeCallObservationProducerLimits(),
         sqliteLimits: FullTreeCallObservationSqliteLimits = FullTreeCallObservationSqliteLimits(),
+    ): FullTreeCallObservationStreamResult = generateShardToWithinDeadline(
+        richArtifact, inventoryPath, scope, shardId, scratchParent, output,
+        controlLimits, producerLimits, sqliteLimits, FullTreeCallObservationDeadline.start(scope, controlLimits),
+    )
+
+    internal fun generateShardToWithinDeadline(
+        richArtifact: Path,
+        inventoryPath: Path,
+        scope: AuthenticatedFullTreeScope,
+        shardId: String,
+        scratchParent: Path,
+        output: OutputStream,
+        controlLimits: FullTreeControlLimits = FullTreeControlLimits(),
+        producerLimits: FullTreeCallObservationProducerLimits = FullTreeCallObservationProducerLimits(),
+        sqliteLimits: FullTreeCallObservationSqliteLimits = FullTreeCallObservationSqliteLimits(),
+        deadline: FullTreeCallObservationDeadline,
     ): FullTreeCallObservationStreamResult {
-        val startedNanos = System.nanoTime()
-        if (Thread.currentThread().isInterrupted) {
-            throw FullTreeControlException("call-observation generation was interrupted before authentication")
-        }
+        deadline.requireScope(scope)
+        val checkpoint = deadline::checkpoint
+        checkpoint("before authenticating call-observation scope")
         FullTreeScopeControl.validate(scope, controlLimits)
         val bounds = scope.document.controlObject("bounds").controlObject("perShard")
-        val maximumWallClockSeconds = bounds.controlLong("wallClockSeconds")
-        val checkpoint: (String) -> Unit = { label ->
-            if (Thread.currentThread().isInterrupted) {
-                throw FullTreeControlException("call-observation generation was interrupted $label")
-            }
-            val elapsedNanos = System.nanoTime() - startedNanos
-            if (elapsedNanos < 0L || elapsedNanos / 1_000_000_000L >= maximumWallClockSeconds) {
-                throw FullTreeControlException("call-observation generation exceeds its wall-clock bound $label")
-            }
-        }
         checkpoint("after authenticating call-observation scope")
         val boundedSqlite = sqliteLimits.copy(
             maximumCalls = minOf(

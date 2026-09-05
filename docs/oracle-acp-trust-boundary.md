@@ -155,7 +155,11 @@ authority boundary. The raw observer now also feeds a bounded SQLite sink and ca
 policy-v3 bytes with independently limited database pages, cache, records, calls, and output. Raw inputs remain
 guarded through projection and ordinary exits revoke private scratch. A projection larger than 64 MiB is tested;
 the returned metadata still fixes release authority false. This storage path does not yet supply isolated runtime
-ownership, atomic observation publication, all-shard reconciliation, or call-truth/scoring authority.
+ownership, all-shard reconciliation, or call-truth/scoring authority. The companion raw-path shard publisher
+independently rederives staged output before descriptor-bound no-replace publication; its read-only validator
+also regenerates every expected candidate byte from raw artifacts. Both retain input guards throughout the
+operation and return detached, explicitly non-authoritative receipts. Output-parent ownership remains a
+cooperative trust assumption, not a kernel exclusion of same-UID writers or an aggregate operation lease.
 
 For A15 candidate behavior, Kotlin now has a descriptor-bound
 [pre-START admission](llvm-candidate-execution-prestart.md) which authenticates an opaque candidate and the exact
