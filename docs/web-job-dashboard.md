@@ -198,3 +198,33 @@ This proves the existing all-page/search/keyboard journey still works with the
 new bundle; the injected busy/limit recovery behavior is covered by component
 tests, not by the successful browser listing. Pinned Chrome again used the
 explicit test-only `--no-sandbox` option.
+
+## Exact date filter boundaries — 2026-09-05
+
+Dashboard date ranges now compare integer nanoseconds instead of JavaScript
+millisecond timestamps. Previously, a valid range whose endpoints occupied the
+same millisecond was rejected as empty even though the server's `Instant`
+comparison distinguished them. The parser preserves the submitted timezone and
+fraction strings in the URL, validates calendar days (including leap years),
+and accepts up to nine fractional digits. Impossible dates such as February 29
+in a non-leap year are rejected before a request instead of being normalized by
+`Date.parse`. Inputs use ordinary 00–23 hours and 00–59 seconds.
+
+Frontend tests cover one-nanosecond ranges, equivalent timezone endpoints,
+reversed/equal bounds, pre-epoch fractions, invalid dates and excess precision.
+A JVM collection test proves inclusive lower/exclusive upper boundaries with
+different timezone spellings at nanosecond precision. All 198 frontend tests,
+lint, `WebJobPagesTest`, the typechecked bundle and `distZip` passed.
+
+The scale driver now also submits filename, workflow status, page size and a
+one-nanosecond date range through the actual controls. It checks that all
+parameters remain in the URL and that exactly the expected stored job is
+returned before and after reload. This extends filter correctness evidence;
+selectable sort preferences and the remaining #168 requirements are still open.
+
+The extended packaged journey passed; retained report:
+[`web-dashboard-date-scale-20260905.json`](evidence/web-dashboard-date-scale-20260905.json).
+All 50 pages remain reachable in order, keyboard paging retains its focus
+handoff, and the combined date-filter case survives reload. Chrome used the
+explicit test-only `--no-sandbox` option. These remain single-run measurements,
+not the repeated cold-load or full accessibility/soak qualification.

@@ -186,3 +186,23 @@ it.each([
   expect(screen.queryByRole('alert')).toBeNull();
   expect(transport.get).toHaveBeenCalledTimes(3);
 });
+
+it('preserves nanosecond date ranges and compares timezone-equivalent boundaries exactly', () => {
+  const filters = { ...DEFAULT_FILTERS, status: 'uploaded', limit: '200',
+    createdAfter: '2026-09-05T00:00:00.000000001Z', createdBefore: '2026-09-05T09:00:00.000000002+09:00' };
+  expect(jobFilters(filterSearch(filters))).toEqual(filters);
+  expect(() => jobFilters(filterSearch({ ...filters, createdBefore: '2026-09-05T09:00:00.000000001+09:00' }))).toThrow();
+  expect(() => jobFilters(filterSearch({ ...filters, createdBefore: '2026-09-05T00:00:00Z' }))).toThrow();
+  expect(jobFilters('createdAfter=1969-12-31T23%3A59%3A59.999999998Z&createdBefore=1969-12-31T23%3A59%3A59.999999999Z').createdAfter)
+    .toBe('1969-12-31T23:59:59.999999998Z');
+});
+
+it('rejects normalized invalid calendar dates and excess timestamp precision', () => {
+  for (const value of ['2026-02-29T00:00:00Z', '2026-04-31T00:00:00Z', '1900-02-29T00:00:00Z',
+    '2026-01-01T24:00:00Z', '2026-01-01T00:00:00.1234567890Z', '2026-01-01T00:00:00+24:00']) {
+    expect(() => jobFilters(filterSearch({ ...DEFAULT_FILTERS, createdAfter: value })), value).toThrow();
+  }
+  for (const value of ['2000-02-29T00:00:00Z', '2024-02-29T00:00:00.123456789Z']) {
+    expect(jobFilters(filterSearch({ ...DEFAULT_FILTERS, createdAfter: value })).createdAfter).toBe(value);
+  }
+});

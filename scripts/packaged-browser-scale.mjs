@@ -58,9 +58,27 @@ export async function qualifyScale({ fixture, makeTarget, cdp, evaluate, ready, 
   await cdp.call('Page.reload', {}, tab.sessionId);
   await ready(tab, `(${rows}).length === 1`, 'scale search after reload');
   assert.deepEqual(await evaluate(tab, rows), ['/nested/jobs/' + fixture.ids[42]]);
+  const filters = { search: 'synthetic-project-0004', status: 'uploaded', limit: '100',
+    createdAfter: '2026-01-01T00:00:00.420000000Z', createdBefore: '2026-01-01T09:00:00.420000001+09:00' };
+  await evaluate(tab, `(() => {
+    const values = ${JSON.stringify(filters)};
+    const fields = { search: 'Filename search', status: 'Workflow state', limit: 'Jobs per page', createdAfter: 'Created at or after', createdBefore: 'Created before' };
+    for (const [key, label] of Object.entries(fields)) {
+      const field = [...document.querySelectorAll('label')].find(item => item.textContent.startsWith(label)).querySelector('input, select');
+      field.value = values[key]; field.dispatchEvent(new Event(field.tagName === 'SELECT' ? 'change' : 'input', { bubbles: true }));
+    }
+  })()`);
+  await evaluate(tab, `[...document.querySelectorAll('button')].find(b => b.textContent === 'Apply filters').click()`);
+  await ready(tab, `location.search.includes('createdBefore') && (${rows}).length === 1 && document.activeElement.textContent === 'Job results'`, 'combined nanosecond filters');
+  assert.deepEqual(await evaluate(tab, rows), ['/nested/jobs/' + fixture.ids[42]]);
+  assert.deepEqual(await evaluate(tab, 'Object.fromEntries(new URLSearchParams(location.search))'), filters);
+  await cdp.call('Page.reload', {}, tab.sessionId);
+  await ready(tab, `(${rows}).length === 1`, 'combined filters restored after reload');
+  assert.deepEqual(await evaluate(tab, rows), ['/nested/jobs/' + fixture.ids[42]]);
+  assert.deepEqual(await evaluate(tab, 'Object.fromEntries(new URLSearchParams(location.search))'), filters);
   assert.deepEqual(tab.exceptions, []);
   assert.ok(tab.requests.every(request => ['GET', 'HEAD'].includes(request.method)));
   return { persistedJobs: fixture.count, pages: 50, rowsPerPage: 200, reachableJobs: 10000,
-    exactOrder: true, keyboardPaginationFocus: true, searchReload: true, mutationRequests: 0,
+    exactOrder: true, keyboardPaginationFocus: true, searchReload: true, combinedNanosecondFiltersReload: true, mutationRequests: 0,
     peakBrowserHeapBytes, pageLatencyMs: timings.map(ms => Math.round(ms)), executionStarted: false };
 }

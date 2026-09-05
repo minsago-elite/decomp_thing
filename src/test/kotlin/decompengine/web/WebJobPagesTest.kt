@@ -51,6 +51,17 @@ class WebJobPagesTest {
             .forEach { invalid -> assertEquals(422, assertFailsWith<WebAccessDenied>(invalid) { WebJobQuery.parse(invalid) }.status) }
     }
 
+    @Test fun `nanosecond date ranges retain inclusive and exclusive boundaries across offsets`() {
+        val (query, _) = WebJobQuery.parse("createdAfter=2026-09-05T00%3A00%3A00.000000001Z&createdBefore=2026-09-05T09%3A00%3A00.000000003%2B09%3A00")
+        val pages = WebJobPages({ sequenceOf(
+            row("before", date = "2026-09-05T00:00:00Z"),
+            row("inclusive", date = "2026-09-05T00:00:00.000000001Z"),
+            row("inside", date = "2026-09-05T00:00:00.000000002Z"),
+            row("exclusive", date = "2026-09-05T00:00:00.000000003Z"),
+        ) })
+        assertEquals(listOf("inside", "inclusive"), ids(pages.page("owner", query, null)))
+    }
+
     @Test fun `ten thousand row library is bounded and evicted cursors expire explicitly`() {
         val pages = WebJobPages({ (1..10_000).asSequence().map { row(it.toString().padStart(8, '0')) } })
         val query = WebJobQuery(limit = 200)
