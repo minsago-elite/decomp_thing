@@ -275,3 +275,14 @@ rejects query parameters and requires JSON Accept. It is a legacy presentation a
 SPA restoration continues through its existing bootstrap endpoint. Expired-cookie clearing
 and denial headers are shared with the v1 error responder. Remote access remains unavailable
 until its profile is qualified; this change does not complete all #161 acceptance criteria.
+
+Qualification at source `ef068ef`: 178 web/journal tests and distZip pass. The retained
+[legacy browser report](evidence/web-legacy-session-browser-20260905.json) proves denied
+unauthenticated views, fragment removal before exchange, authenticated form upload of a
+64-byte inert ELF header, polling/reload/recovery, a session-authorized artifact read and
+logout revocation of APIs/downloads. The uploaded job stays uploaded; no workflow executes.
+The [SPA session regression](evidence/web-legacy-session-spa-regression-20260905.json) passes
+on the same archive. Both reports identify archive/JAR/browser hashes, test-only
+`--no-sandbox`, unchanged installation and confirmed shutdown/cleanup. Legacy fixture edits
+and the test-only fetch guard are disclosed. Browser expiry, peer-tab clearing and remote
+profile qualification are not established by these runs.
