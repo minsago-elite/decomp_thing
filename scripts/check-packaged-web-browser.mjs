@@ -336,7 +336,7 @@ try {
   if (legacyFixture) {
     const tab = await makeTarget();
     const bootstrapUrl = await waitFor(() => applicationOutput.split(/\s+/).find(part => part.startsWith(origin + '/login#bootstrap=')), 'legacy local bootstrap handoff');
-    report.legacy = await qualifyLegacy({ fixture: legacyFixture, origin, bootstrapUrl, tab, cdp, evaluate, ready });
+    report.legacy = await qualifyLegacy({ fixture: legacyFixture, origin, bootstrapUrl, tab, cdp, evaluate, ready, makeTarget });
     report.requests.legacy = tab.requests;
   }
   if (values.mode === 'upgrade') {

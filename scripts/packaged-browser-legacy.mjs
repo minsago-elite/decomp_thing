@@ -28,7 +28,7 @@ export async function seedLegacy(root) {
   return { id, directory, reports, input, job, jobPath, journalPath, journal, artifactPath };
 }
 
-export async function qualifyLegacy({ fixture, origin, bootstrapUrl, tab, cdp, evaluate, ready }) {
+export async function qualifyLegacy({ fixture, origin, bootstrapUrl, tab, cdp, evaluate, ready, makeTarget }) {
   await cdp.call('Page.addScriptToEvaluateOnNewDocument', { source: `(() => {
     const original = window.fetch;
     window.fetch = function(input, options) {
@@ -90,8 +90,22 @@ export async function qualifyLegacy({ fixture, origin, bootstrapUrl, tab, cdp, e
   assert.equal(uploaded.status, 'uploaded');
   assert.equal(await evaluate(tab, 'localStorage.length + sessionStorage.length'), 0);
   await ready(tab, `document.readyState === 'complete' && [...document.querySelectorAll('button')].some(button => button.textContent === 'End session')`, 'legacy session controls');
+  const idlePeer = await makeTarget();
+  await cdp.call('Page.navigate', { url: `${origin}/jobs/${uploadId}` }, idlePeer.sessionId);
+  await ready(idlePeer, `document.readyState === 'complete' && window.legacySession?.isActive() && document.body.innerText.includes('inert-legacy-upload.elf')`, 'legacy idle peer');
+  const pollingPeer = await makeTarget();
+  await cdp.call('Page.addScriptToEvaluateOnNewDocument', { source: `Object.defineProperty(window, 'BroadcastChannel', { value: undefined });` }, pollingPeer.sessionId);
+  await cdp.call('Page.navigate', { url: `${origin}/jobs/${fixture.id}` }, pollingPeer.sessionId);
+  await ready(pollingPeer, `document.readyState === 'complete' && window.legacySession?.isActive() && !!document.querySelector('#agent-event-list')`, 'legacy peer without broadcast');
   await evaluate(tab, `[...document.querySelectorAll('button')].find(button => button.textContent === 'End session').click()`);
   await ready(tab, `location.pathname === '/login' && document.body.innerText.includes('Open a local session')`, 'legacy logout');
+  for (const peer of [idlePeer, pollingPeer]) {
+    await ready(peer, `location.pathname === '/login' && document.body.innerText.includes('Open a local session')`, 'legacy peer invalidation');
+    assert.ok(!await evaluate(peer, `document.body.innerText.includes('legacy-browser.elf') || document.body.innerText.includes('inert-legacy-upload.elf')`));
+    assert.deepEqual(peer.exceptions, []);
+    assert.ok(peer.requests.every(request => ['GET', 'HEAD'].includes(request.method)));
+  }
+  assert.ok(pollingPeer.responses.some(response => response.status === 401 && new URL(response.url).pathname.startsWith('/api/jobs/')));
   assert.equal(await evaluate(tab, `fetch('/api/jobs/${fixture.id}').then(r => r.status)`), 401);
   assert.equal(await evaluate(tab, `fetch('/jobs/${fixture.id}/artifacts/reports/fixture.txt').then(r => r.status)`), 401);
   assert.deepEqual(tab.exceptions, []);
@@ -107,7 +121,9 @@ export async function qualifyLegacy({ fixture, origin, bootstrapUrl, tab, cdp, e
     restoredJournalRecovers: true, reload: true, artifactMetadata: true, pageExceptions: 0, mutationRequests: 3,
     unauthenticatedReadsDenied: true, fragmentClearedBeforeExchange: true, authenticatedDownload: true,
     authenticatedFormUpload: true, uploadedJobRemainsUnexecuted: true, browserStorageEmpty: true,
-    logoutRevokesReadsAndDownloads: true, testOnlyFetchGuard: 'reject session POST if fragment remains',
+    logoutRevokesReadsAndDownloads: true, idlePeerClearedByNotification: true,
+    pollingPeerWithoutBroadcastClearedOn401: true, peerMutationRequests: 0,
+    idlePeerRequests: idlePeer.requests, pollingPeerRequests: pollingPeer.requests, testOnlyFetchGuard: 'reject session POST if fragment remains',
     workflowAdmitted: false, testOwnedFixtureEdits: ['status set to analyzing after startup', 'journal removed, emptied and restored'],
     finalJobInputArtifactBytesUnchanged: true, finalJournalMatchesOriginal: true };
 }

@@ -86,10 +86,12 @@ fun renderJob(job: Job, reportContext: WebReportContext? = null,
     val script = if (active) """
         const initialStatus = ${jsString(job.status)};
         const poll = async () => {
+          if (!window.legacySession.isActive()) return;
           try {
-            const eventsResponse = await fetch('/api/jobs/${job.id}/events${reports.runId?.let { "?runId=$it" }.orEmpty()}', {cache: 'no-store'});
+            const eventsResponse = await window.legacySession.request('/api/jobs/${job.id}/events${reports.runId?.let { "?runId=$it" }.orEmpty()}', {cache: 'no-store'});
             if (eventsResponse.ok) {
               const snapshot = await eventsResponse.json();
+              if (!window.legacySession.isActive()) return;
               const list = document.querySelector('#agent-event-list');
               list.replaceChildren();
               for (const event of snapshot.events.slice(-30)) {
@@ -113,14 +115,15 @@ fun renderJob(job: Job, reportContext: WebReportContext? = null,
             } else {
               document.querySelector('#agent-event-gap').textContent = 'Retained progress is unavailable. Missing data does not establish an empty history.';
             }
-            const response = await fetch('/api/jobs/${job.id}', {cache: 'no-store'});
+            const response = await window.legacySession.request('/api/jobs/${job.id}', {cache: 'no-store'});
             if (!response.ok) return;
             const job = await response.json();
+            if (!window.legacySession.isActive()) return;
             if (job.status !== initialStatus || !['queued', 'analyzing'].includes(job.status)) location.reload();
           } catch (error) {
-            document.querySelector('#agent-event-gap').textContent = 'Progress connection interrupted; retrying.';
+            if (window.legacySession.isActive()) document.querySelector('#agent-event-gap').textContent = 'Progress connection interrupted; retrying.';
           } finally {
-            setTimeout(poll, 1500);
+            if (window.legacySession.isActive()) setTimeout(poll, 1500);
           }
         };
         setTimeout(poll, 900);

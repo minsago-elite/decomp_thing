@@ -286,3 +286,25 @@ on the same archive. Both reports identify archive/JAR/browser hashes, test-only
 `--no-sandbox`, unchanged installation and confirmed shutdown/cleanup. Legacy fixture edits
 and the test-only fetch guard are disclosed. Browser expiry, peer-tab clearing and remote
 profile qualification are not established by these runs.
+
+## Legacy session invalidation and private-page lifetime
+
+Legacy documents now restore session expiry on load and when visible again. The returned
+expiry schedules local invalidation; a 401 from any session-managed request invalidates
+immediately. Invalidation erases CSRF, aborts pending requests, clears private body/title
+and returns to `/login`. Polling checks document activity before rendering and scheduling
+another request, so a late successful response cannot repopulate an invalidated view.
+Page departure clears private DOM; a persisted history restoration goes to login.
+
+Confirmed logout also sends the same deployment-scoped, credential-free invalidation hint
+used by the SPA (`decomp-session-v1:/` in root-only legacy mode). A peer validates the closed
+message shape, clears its page and issues no logout request. BroadcastChannel is optional:
+without it, active polling learns revocation from 401 and an idle document rechecks when
+visible or clears at its known expiry. Notification delivery and background timer timing
+are browser-dependent; the server remains the authority for every request.
+
+Run `node --test scripts/legacy-session.test.mjs` with the pinned Node to verify the actual
+embedded script's expiry handling, late-response rejection, peer message validation,
+confirmed logout, 401 handling and history-cache lifecycle. These deterministic tests use
+a browser model and controlled responses/timers; they do not claim real elapsed server
+expiry or browser history-cache qualification.

@@ -28,22 +28,74 @@ internal val LEGACY_SESSION_SCRIPT = """
 (() => {
   let csrf;
   let pending = false;
+  let active = true;
+  let expiryTimer;
+  let channel;
+  const controller = new AbortController();
+  function clear() {
+    if (!active) return;
+    active = false;
+    csrf = undefined;
+    clearTimeout(expiryTimer);
+    controller.abort();
+    channel?.close();
+    document.title = 'Local session · decomp_engine';
+    document.body.replaceChildren();
+  }
+  function invalidate() {
+    clear();
+    location.replace('/login');
+  }
+  try {
+    if (typeof BroadcastChannel === 'function') {
+      channel = new BroadcastChannel('decomp-session-v1:/');
+      channel.addEventListener('message', event => {
+        const data = event.data;
+        if (data && typeof data === 'object' && !Array.isArray(data) && Object.keys(data).length === 2 &&
+            Object.hasOwn(data, 'version') && Object.hasOwn(data, 'type') &&
+            data.version === 1 && data.type === 'session-invalidated') invalidate();
+      });
+    }
+  } catch (_) { channel = undefined; }
+  async function request(input, options = {}) {
+    if (!active) throw new DOMException('Session ended', 'AbortError');
+    const response = await fetch(input, { ...options, credentials: 'same-origin', signal: controller.signal });
+    if (response.status === 401) invalidate();
+    if (!active) throw new DOMException('Session ended', 'AbortError');
+    return response;
+  }
+  Object.defineProperty(window, 'legacySession', { value: Object.freeze({ request, isActive: () => active }) });
+  window.addEventListener('pagehide', clear);
+  window.addEventListener('pageshow', event => { if (event.persisted) invalidate(); });
   const message = document.createElement('p');
   message.setAttribute('role', 'status');
   message.className = 'shell';
   document.querySelector('.topbar')?.after(message);
-  async function credentials() {
-    if (csrf) return csrf;
-    const response = await fetch('/api/v1/session/csrf', { credentials: 'same-origin', headers: { 'Accept': 'application/json' } });
+  async function credentials(refresh = false) {
+    if (csrf && !refresh) return csrf;
+    const response = await request('/api/v1/session/csrf', { credentials: 'same-origin', headers: { 'Accept': 'application/json' } });
     if (!response.ok) throw new Error('Session unavailable');
     const body = await response.json();
+    if (!active) throw new DOMException('Session ended', 'AbortError');
+    const remaining = Date.parse(body.data.expiresAt) - Date.now();
+    if (!Number.isFinite(remaining) || remaining <= 0) {
+      invalidate();
+      throw new DOMException('Session ended', 'AbortError');
+    }
+    clearTimeout(expiryTimer);
+    expiryTimer = setTimeout(invalidate, Math.min(remaining, 2147483647));
     csrf = body.data.csrfToken;
     return csrf;
   }
   function failed() {
+    if (!active) return;
     csrf = undefined;
     message.textContent = 'The result could not be confirmed. Your session may have expired. Open a new local session link and check job status before trying again.';
   }
+  void credentials().catch(failed);
+  document.addEventListener('visibilitychange', () => {
+    if (active && document.visibilityState === 'visible') void credentials(true).catch(failed);
+  });
   document.querySelectorAll('form[method="post"]').forEach(form => form.addEventListener('submit', async event => {
     event.preventDefault();
     if (pending) return;
@@ -54,10 +106,10 @@ internal val LEGACY_SESSION_SCRIPT = """
       const headers = { 'X-CSRF-Token': await credentials(), 'Accept': 'text/html' };
       const multipart = form.enctype === 'multipart/form-data';
       if (!multipart) headers['Content-Type'] = 'application/json';
-      const response = await fetch(form.action, { method: 'POST', credentials: 'same-origin', headers,
+      const response = await request(form.action, { method: 'POST', credentials: 'same-origin', headers,
         body: multipart ? new FormData(form) : '{}' });
       if (!response.ok || !response.redirected || new URL(response.url).origin !== location.origin) throw new Error('Request unavailable');
-      location.assign(response.url);
+      if (active) location.assign(response.url);
     } catch (_) { failed(); }
     finally { pending = false; buttons.forEach(button => { button.disabled = false; }); }
   }));
@@ -71,11 +123,11 @@ internal val LEGACY_SESSION_SCRIPT = """
     pending = true;
     logout.disabled = true;
     try {
-      const response = await fetch('/api/v1/session', { method: 'DELETE', credentials: 'same-origin',
+      const response = await request('/api/v1/session', { method: 'DELETE', credentials: 'same-origin',
         headers: { 'Content-Type': 'application/json', 'Accept': 'application/json', 'X-CSRF-Token': await credentials() } });
       if (response.status !== 204) throw new Error('Session unavailable');
-      csrf = undefined;
-      location.replace('/login');
+      try { channel?.postMessage({ version: 1, type: 'session-invalidated' }); } catch (_) { /* Logout is confirmed. */ }
+      invalidate();
     } catch (_) { failed(); }
     finally { pending = false; logout.disabled = false; }
   });
