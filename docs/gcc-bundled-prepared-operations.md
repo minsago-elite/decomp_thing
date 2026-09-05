@@ -155,3 +155,30 @@ coordinator still supports only fresh controls: authenticated checkpoint-trigger
 interruption, durable interruption transitions, same-owner resume and real
 cc1/lto1 fresh/resumed model and ownership-plan comparisons remain required by
 #137. Prefix-only fixtures do not qualify those lifecycle requirements.
+
+## Authenticated keeper interruption primitive
+
+The keeper accepts an opt-in `kotlin-contained-command-request-v2` with
+`allowInterruption=true`. Default requests retain the exact v1 field set,
+provider and canonical encoding. Neither v1 requests nor their outcome decoder
+admit interruption. The existing host launcher still creates v1 fresh-control
+requests; it has not yet acquired a checkpoint-triggered interruption path.
+
+For a v2 request, the host may publish a mode-0400, no-replace
+`contained-command.interrupt.json`. The `INTERRUPT` HMAC event binds the original
+request digest, nonce and keeper PID using the stdin-only key. It cannot be
+replayed as START or OUTCOME, or across another request, key or keeper. The
+keeper authenticates the bounded record while its direct child is running,
+requests forcible termination, reaps that child within five seconds and drains
+its bounded output readers before publishing an authenticated `INTERRUPTED`
+outcome. Malformed or forged control fails without an accepted outcome. Log
+failure, output overflow and failure to reap still prevent accepted interruption.
+
+`INTERRUPTED` cannot pass successful-execution validation. It records that an
+authenticated request was observed while the child was live and that the child
+was reaped; an exit racing termination does not prove which event caused death.
+It does not prove a durable checkpoint, descendant/cgroup absence, safe project
+reload, or resume equivalence. The host must compose those independent checks
+and durable journal transitions before accepting an interrupted benchmark leg.
+The local tests execute only an authored waiting JVM child, exercise valid and
+forged requests, and are explicitly not containment or real-Ghidra evidence.

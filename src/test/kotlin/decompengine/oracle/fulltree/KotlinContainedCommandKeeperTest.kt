@@ -25,6 +25,73 @@ import kotlinx.serialization.json.JsonPrimitive
 
 class KotlinContainedCommandKeeperTest {
     @Test
+    fun `interruption is versioned opt in and cannot be replayed as START or successful completion`() {
+        val legacy = request()
+        val admitted = request(allowInterruption = true)
+        val key = secret()
+        assertFalse(legacy.allowInterruption)
+        assertTrue(KotlinContainedCommandRequest.parse(admitted.canonicalBytes).allowInterruption)
+        assertContentEquals(legacy.canonicalBytes, KotlinContainedCommandRequest.parse(legacy.canonicalBytes).canonicalBytes)
+        assertNotEquals(legacy.sha256, admitted.sha256)
+        val wire = document(admitted.canonicalBytes)
+        assertEquals(JsonPrimitive(2), wire["schemaVersion"])
+        for (value in listOf(JsonPrimitive(false), JsonPrimitive("true"), JsonPrimitive(1))) {
+            assertFailsWith<IllegalArgumentException> { KotlinContainedCommandRequest.parse(replace(wire, "allowInterruption", value)) }
+        }
+        assertFailsWith<IllegalArgumentException> { KotlinContainedCommandRequest.parse(OracleJson.canonicalBytes(JsonObject(wire - "allowInterruption"))) }
+        assertFailsWith<IllegalArgumentException> { KotlinContainedCommandRequest.parse(replace(document(legacy.canonicalBytes), "allowInterruption", JsonPrimitive(true))) }
+        assertFailsWith<IllegalArgumentException> { KotlinContainedCommandProtocol.interrupt(key, legacy, 123L) }
+        val stop = KotlinContainedCommandProtocol.interrupt(key, admitted, 123L)
+        KotlinContainedCommandProtocol.requireInterrupt(stop, key, admitted, 123L)
+        assertFailsWith<IllegalArgumentException> { KotlinContainedCommandProtocol.requireInterrupt(stop, key, legacy, 123L) }
+        assertFailsWith<IllegalArgumentException> { KotlinContainedCommandProtocol.requireInterrupt(stop, key, admitted, 124L) }
+        assertFailsWith<IllegalArgumentException> { KotlinContainedCommandProtocol.requireInterrupt(stop, ByteArray(32), admitted, 123L) }
+        assertFailsWith<IllegalArgumentException> { KotlinContainedCommandProtocol.requireInterrupt(stop, key, request(nonce = "b".repeat(64), allowInterruption = true), 123L) }
+        assertFailsWith<IllegalArgumentException> { KotlinContainedCommandProtocol.requireStart(stop, key, admitted, 123L) }
+        assertFailsWith<IllegalArgumentException> { KotlinContainedCommandProtocol.requireOutcome(stop, key, admitted, 123L) }
+        val start = KotlinContainedCommandProtocol.start(key, admitted, 123L)
+        assertFailsWith<IllegalArgumentException> { KotlinContainedCommandProtocol.requireInterrupt(start, key, admitted, 123L) }
+        val interrupted = outcome().copy(status = "INTERRUPTED", exitCode = 137)
+        assertFailsWith<IllegalArgumentException> { KotlinContainedCommandProtocol.outcome(key, legacy, interrupted) }
+        val parsed = KotlinContainedCommandProtocol.requireOutcome(KotlinContainedCommandProtocol.outcome(key, admitted, interrupted), key, admitted, 123L)
+        assertEquals(interrupted, parsed)
+        assertFailsWith<IllegalArgumentException> { parsed.requireSuccessful() }
+    }
+
+    @Test
+    fun `local noncontainment keeper reaps an authored waiting child after authenticated interruption`() {
+        withLocalKeeper(waitingChild = true) { process, request, secret ->
+            val boot = awaitLocalProtocol(process, request.runDirectory, KotlinContainedCommandProtocol.BOOT_FILE)
+            val keeper = KotlinContainedCommandProtocol.requireBoot(boot, secret, request)
+            publishLocalStart(request, KotlinContainedCommandProtocol.start(secret, request, keeper))
+            awaitLocalProtocol(process, request.runDirectory, "reports/child-ready")
+            publishLocalStart(request, KotlinContainedCommandProtocol.interrupt(secret, request, keeper), KotlinContainedCommandProtocol.INTERRUPT_FILE)
+            val bytes = awaitLocalProtocol(process, request.runDirectory, KotlinContainedCommandProtocol.OUTCOME_FILE)
+            val outcome = KotlinContainedCommandProtocol.requireOutcome(bytes, secret, request, keeper)
+            assertEquals("INTERRUPTED", outcome.status)
+            assertFailsWith<IllegalArgumentException> { outcome.requireSuccessful() }
+            assertTrue(process.isAlive)
+            assertFalse(process.descendants().use { it.findAny().isPresent })
+        }
+    }
+
+    @Test
+    fun `local noncontainment keeper rejects a forged interruption and emits no accepted outcome`() {
+        withLocalKeeper(waitingChild = true) { process, request, secret ->
+            val boot = awaitLocalProtocol(process, request.runDirectory, KotlinContainedCommandProtocol.BOOT_FILE)
+            val keeper = KotlinContainedCommandProtocol.requireBoot(boot, secret, request)
+            publishLocalStart(request, KotlinContainedCommandProtocol.start(secret, request, keeper))
+            awaitLocalProtocol(process, request.runDirectory, "reports/child-ready")
+            val child = process.descendants().use { it.toList() }.single()
+            publishLocalStart(request, KotlinContainedCommandProtocol.interrupt(ByteArray(32), request, keeper), KotlinContainedCommandProtocol.INTERRUPT_FILE)
+            assertTrue(process.waitFor(10L, TimeUnit.SECONDS))
+            assertEquals(126, process.exitValue())
+            assertFalse(child.isAlive)
+            assertTrue(Files.notExists(request.runDirectory.resolve(KotlinContainedCommandProtocol.OUTCOME_FILE)))
+        }
+    }
+
+    @Test
     fun `local noncontainment keeper starts known Java only after authenticated START and retains after its exit`() {
         withLocalKeeper { process, request, secret ->
             val boot = awaitLocalProtocol(process, request.runDirectory, KotlinContainedCommandProtocol.BOOT_FILE)
@@ -287,9 +354,10 @@ class KotlinContainedCommandKeeperTest {
         command: List<String> = listOf("/usr/bin/java", "-version"),
         environment: Map<String, String> = mapOf("LANG" to "C.UTF-8", "LC_ALL" to "C.UTF-8", "TZ" to "UTC"),
         startSeconds: Long = 30L, wallSeconds: Long = 30L, stdoutBytes: Long = 4096L, stderrBytes: Long = 4096L,
-    ) = KotlinContainedCommandRequest(root, nonce, command, environment, startSeconds, wallSeconds, stdoutBytes, stderrBytes)
+        allowInterruption: Boolean = false,
+    ) = KotlinContainedCommandRequest(root, nonce, command, environment, startSeconds, wallSeconds, stdoutBytes, stderrBytes, allowInterruption)
 
-    private fun withLocalKeeper(action: (Process, KotlinContainedCommandRequest, ByteArray) -> Unit) {
+    private fun withLocalKeeper(waitingChild: Boolean = false, action: (Process, KotlinContainedCommandRequest, ByteArray) -> Unit) {
         val fixture = Files.createTempDirectory("contained-command-local-test-").toRealPath()
         Files.setPosixFilePermissions(fixture, PosixFilePermissions.fromString("rwx------"))
         var process: Process? = null
@@ -299,13 +367,14 @@ class KotlinContainedCommandKeeperTest {
                 Files.createDirectory(run.resolve(name), PosixFilePermissions.asFileAttribute(PosixFilePermissions.fromString("rwx------")))
             }
             val java = Path.of(System.getProperty("java.home"), "bin", "java").toRealPath()
-            val request = request(root = run, command = listOf(java.toString(), "-version"), startSeconds = 30L, wallSeconds = 30L)
+            val classPath = System.getProperty("java.class.path").split(File.pathSeparator).filter(String::isNotEmpty)
+                .joinToString(File.pathSeparator) { Path.of(it).toAbsolutePath().normalize().toString() }
+            val command = if (waitingChild) listOf(java.toString(), "-classpath", classPath, KotlinContainedCommandTestSleeper::class.java.name) else listOf(java.toString(), "-version")
+            val request = request(root = run, command = command, startSeconds = 30L, wallSeconds = 30L, allowInterruption = waitingChild)
             val requestPath = run.resolve("runtime/${KotlinContainedCommandRequest.REQUEST_FILE}")
             Files.write(requestPath, request.canonicalBytes)
             Files.setPosixFilePermissions(requestPath, PosixFilePermissions.fromString("r--------"))
             val native = Path.of(requireNotNull(System.getProperty("decompengine.oracle.nativeLibraryDirectory"))).toRealPath()
-            val classPath = System.getProperty("java.class.path").split(File.pathSeparator).filter(String::isNotEmpty)
-                .joinToString(File.pathSeparator) { Path.of(it).toAbsolutePath().normalize().toString() }
             val arguments = listOf(java.toString(), "-Xmx128m", "-XX:+DisableAttachMechanism", "-XX:-UsePerfData",
                 "-Djava.io.tmpdir=${run.resolve("tmp")}", "-Duser.home=${run.resolve("tmp")}") +
                 OracleNativeLibraries.jvmArguments(native) + listOf("-classpath", classPath,
@@ -357,11 +426,11 @@ class KotlinContainedCommandKeeperTest {
         throw AssertionError("local keeper did not publish $name within its test bound")
     }
 
-    private fun publishLocalStart(request: KotlinContainedCommandRequest, bytes: ByteArray) {
+    private fun publishLocalStart(request: KotlinContainedCommandRequest, bytes: ByteArray, name: String = KotlinContainedCommandProtocol.START_FILE) {
         val temporary = request.runDirectory.resolve(".test-start.tmp")
         Files.write(temporary, bytes)
         Files.setPosixFilePermissions(temporary, PosixFilePermissions.fromString("r--------"))
-        Files.move(temporary, request.runDirectory.resolve(KotlinContainedCommandProtocol.START_FILE), StandardCopyOption.ATOMIC_MOVE)
+        Files.move(temporary, request.runDirectory.resolve(name), StandardCopyOption.ATOMIC_MOVE)
     }
 
     private fun secret(): ByteArray = ByteArray(32) { index -> index.toByte() }
@@ -380,5 +449,14 @@ class KotlinContainedCommandKeeperTest {
         val digest = authentication.doFinal(OracleJson.canonicalBytes(unsigned))
             .joinToString("") { "%02x".format(it.toInt() and 255) }
         return OracleJson.canonicalBytes(JsonObject(unsigned + ("hmacSha256" to JsonPrimitive(digest))))
+    }
+}
+
+/** Authored bounded local fixture; never an oracle or contained execution proof. */
+object KotlinContainedCommandTestSleeper {
+    @JvmStatic
+    fun main(args: Array<String>) {
+        Files.writeString(Path.of("reports/child-ready"), "ready")
+        Thread.sleep(60_000L)
     }
 }
