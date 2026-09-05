@@ -199,6 +199,7 @@ class UploadServer(
     }
     private val server = HttpServer.create(InetSocketAddress(host, port), listenBacklog)
     private val store = JobStore(dataDir)
+<<<<<<< HEAD
     private val jobs = WebJobService(store, analyzer, reconstructor, executor, shutdownTimeoutMs = 5000, failureDiagnostic = { diagnostic(it, "Background operation failed") })
     private val sourceEvidence = WebSourceEvidence(store, sourceProfiles, jobs::readArtifact)
     private val archiveEvidence = WebArchiveEvidence(store, sourceEvidence, jobs::readArtifact)
@@ -215,6 +216,7 @@ class UploadServer(
     private val requestDeadlines = ScheduledThreadPoolExecutor(1) { task ->
         Thread(task, "decomp-web-deadline").apply { isDaemon = true }
     }.apply { removeOnCancelPolicy = true }
+    private var ownership: WebJobStoreOwnership? = null
     val serverPort: Int get() = server.address.port
     val browserOrigin: String = devFrontendOrigin ?: webOrigin(host, serverPort)
 
@@ -223,6 +225,7 @@ class UploadServer(
 
     init {
         try {
+            ownership = WebJobStoreOwnership.acquire(dataDir.toAbsolutePath().normalize())
             jobs.initializeExistingStorage()
         } catch (failure: Throwable) {
             server.stop(0)
@@ -230,6 +233,8 @@ class UploadServer(
             requestDeadlines.shutdownNow()
             access?.close()
             jobs.close()
+            ownership?.close()
+            ownership = null
             throw failure
         }
         server.executor = requestExecutor
@@ -251,6 +256,8 @@ class UploadServer(
         requestDeadlines.shutdownNow()
         access?.close()
         jobs.close()
+        ownership?.close()
+        ownership = null
     }
 
     private fun route(exchange: HttpExchange) {
