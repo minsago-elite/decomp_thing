@@ -28,13 +28,13 @@ import java.nio.file.StandardCopyOption.ATOMIC_MOVE
 import java.nio.file.StandardCopyOption.REPLACE_EXISTING
 import java.nio.file.StandardOpenOption.READ
 import java.nio.file.StandardOpenOption.WRITE
+import java.nio.file.StandardOpenOption.CREATE_NEW
 import java.time.Instant
 import java.util.UUID
 import kotlin.io.path.createDirectories
 import kotlin.io.path.exists
 import kotlin.io.path.name
 import kotlin.io.path.isRegularFile
-import kotlin.io.path.writeBytes
 
 class JobStoreException(message: String) : RuntimeException(message)
 class InvalidUploadException(message: String, cause: Throwable? = null) : RuntimeException(message, cause)
@@ -76,12 +76,8 @@ class JobStore(root: Path) {
 
         root.createDirectories()
         val jobId = UUID.randomUUID().toString().replace("-", "")
-        val jobDir = root.resolve(jobId).createDirectories()
+        val jobDir = root.resolve(jobId)
         val binaryPath = jobDir.resolve("input.elf")
-        binaryPath.writeBytes(content)
-        check(binaryPath.toFile().setExecutable(true, true) || Files.isExecutable(binaryPath)) {
-            "could not mark uploaded ELF executable"
-        }
         val job = Job(
             id = jobId,
             filename = Path.of(filename).name.ifBlank { "input.elf" },
@@ -91,8 +87,31 @@ class JobStore(root: Path) {
             binaryPath = binaryPath,
             metadata = metadata,
         )
-        persist(job)
-        return job
+        val staging = Files.createTempDirectory(root, ".upload-")
+        try {
+            val stagedInput = staging.resolve("input.elf")
+            FileChannel.open(stagedInput, CREATE_NEW, WRITE, NOFOLLOW_LINKS).use { channel ->
+                val buffer = ByteBuffer.wrap(content)
+                while (buffer.hasRemaining()) channel.write(buffer)
+                check(stagedInput.toFile().setExecutable(true, true) || Files.isExecutable(stagedInput)) {
+                    "could not mark uploaded ELF executable"
+                }
+                channel.force(true)
+            }
+            persist(job, staging)
+            Files.move(staging, jobDir, ATOMIC_MOVE)
+            FileChannel.open(root, READ).use { it.force(true) }
+            return job
+        } catch (failure: Exception) {
+            try {
+                Files.deleteIfExists(staging.resolve("input.elf"))
+                Files.deleteIfExists(staging.resolve("job.json"))
+                Files.deleteIfExists(staging)
+            } catch (cleanup: Exception) {
+                failure.addSuppressed(cleanup)
+            }
+            throw failure
+        }
     }
 
     @Synchronized
@@ -249,8 +268,7 @@ class JobStore(root: Path) {
         return root.resolve(jobId)
     }
 
-    private fun persist(job: Job) {
-        val jobDir = jobDirectory(job.id).createDirectories()
+    private fun persist(job: Job, jobDir: Path = jobDirectory(job.id).createDirectories()) {
         val bytes = (Json { prettyPrint = true }.encodeToString(JsonElement.serializer(), job.toJson()) + "\n")
             .toByteArray(Charsets.UTF_8)
         val temporary = Files.createTempFile(jobDir, ".job-metadata-", ".tmp")

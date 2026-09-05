@@ -293,8 +293,15 @@ Job metadata updates write and force a temporary file in the job directory, atom
 then force the directory. There is no non-atomic fallback. An existing reader retains its previous complete
 snapshot; a failure before replacement leaves the published record intact. Temporary files are removed on
 ordinary failure. A failure after replacement, including directory-force failure, may have published the new
-record and is not proof of rollback. Tests cover held readers and interruption before publication; power-loss
-injection, abandoned temporary-file reclamation, and atomic publication of the whole uploaded job remain open.
+record and is not proof of rollback. Tests cover held readers and interruption before publication.
+
+Uploads stage their input and metadata together in a private `.upload-` directory beneath the job store.
+The input and metadata are forced before the directory is atomically renamed to its final job ID; the store
+directory is then forced. Metadata records the final input path. Ordinary failures before publication clean
+up the staging directory; failures after rename may leave a complete published job even when the caller
+receives an error. Startup does not treat staging directory names as job IDs. Tests verify interrupted input
+writes leave no partial job and preserve prior jobs. Power-loss injection, abandoned staging/temporary-file
+reclamation, and durability of newly created store ancestors remain open requirements.
 
 `web --listen-backlog` requests a TCP listen backlog of 64 by default and accepts values from 1 to 4096.
 Invalid values fail before the server binds or opens job storage. The underlying TCP implementation controls
