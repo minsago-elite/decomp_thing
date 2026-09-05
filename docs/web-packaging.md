@@ -132,7 +132,14 @@ is test-only and adds nothing to the application distribution.
   --chrome /absolute/chrome --java-home /absolute/jdk --mode proxy \
   --work-parent /absolute/scratch
 
+# Use two separately qualified ZIPs; the driver does not generate either build.
+/absolute/node-v24.20.0-linux-x64/bin/node scripts/check-packaged-web-browser.mjs \
+  --mode upgrade --previous-archive /absolute/previous/distribution.zip \
+  --archive /absolute/current/distribution.zip --chrome /absolute/chrome \
+  --java-home /absolute/jdk --work-parent /absolute/scratch
+
 python3 scripts/test-packaged-browser-install.py
+/absolute/node-v24.20.0-linux-x64/bin/node scripts/test-packaged-browser-upgrade.mjs
 ```
 
 `--mode public` is the default and checks home, lazy Runtime and missing-chunk
@@ -140,6 +147,38 @@ recovery. `session` includes that public journey and the authenticated journey
 below. `proxy` starts Vite with the explicit backend origin and configures only
 that loopback frontend origin on the JVM; it checks session restoration/logout
 and an actual HMR connection. It does not substitute fixture responses.
+
+`upgrade` keeps one browser tab and the previous entry module alive while replacing
+the owned previous JVM with the current ZIP on exactly the same origin and
+`/nested/` base path. It loads only the previous home first, verifies its embedded
+build/application identities and confirms that Runtime has not been requested.
+After confirmed JVM shutdown and unchanged-file/job-data checks, it removes the
+previous marked extraction before preparing the current ZIP. Thus only one large
+installation exists at a time; `--keep-workdir` retains only the final extraction.
+
+The [pair gate](../scripts/packaged-browser-upgrade.mjs) requires different manifest
+build IDs, exactly one Runtime lazy chunk in each inventory, and absence of the
+previous Runtime path from the current inventory. A changed archive with the same
+lazy path cannot qualify this test. The kept tab then navigates to Runtime and
+must receive a real 404 from the replacement JVM. This mode uses no browser
+request interception. Five seconds later it requires one visible version notice,
+the previous build identity, no automatic chunk retry/document reload and no
+mutation. One explicit Reload application action must load the current Runtime
+chunk successfully and display the current build/application identities in the
+same tab, with exactly one new document request. All application requests remain
+on the original origin, both installations stay unchanged, and no job data is
+created. This journey does not authenticate or exercise native/workflow mutations.
+
+Upgrade reports bind separate `upgrade.previous` and `upgrade.current` ZIP/JAR/UI
+identities, archive paths and resource budgets, plus the actual missing/current
+lazy paths, replacement origin and cleanup state. Screenshots are
+`upgrade-previous-home.png`, `upgrade-version-notice.png` and
+`upgrade-current-runtime.png`. A passed report from a qualified pair is required
+to claim this journey; the historical intercepted-chunk/session reports below do
+not establish an actual two-version replacement. Pair-gate regressions reject
+unchanged build identities, retained lazy paths and missing/ambiguous Runtime
+inventories without generating application archives.
+
 `--python /absolute/python3` overrides `/usr/bin/python3`. Only if the test
 environment requires it, add `--no-sandbox`; the report records this browser-only
 choice. Application PATH contains only required launcher utilities and has no

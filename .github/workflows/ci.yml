@@ -102,6 +102,7 @@ jobs:
           cp scripts/web-test-browser.json build/packaged-web-ci/browser-lock.json
           "$RUNNER_TEMP/web-test-browser/chrome" --version | tee build/packaged-web-ci/browser-version.txt
           python3 scripts/test-packaged-browser-install.py
+          node scripts/test-packaged-browser-upgrade.mjs
           node --check scripts/check-packaged-web-browser.mjs
       - name: Build archives and verify JVM web contracts and distribution contents
         run: |

@@ -6,11 +6,13 @@ import { join, basename, dirname, isAbsolute, resolve } from 'node:path';
 import { createServer as createHttpServer } from 'node:http';
 import { fileURLToPath } from 'node:url';
 import { parseArgs } from 'node:util';
+import { qualifyUpgrade } from './packaged-browser-upgrade.mjs';
 
 // Test driver only: the application is launched with a separate Node-free PATH.
 const repo = resolve(dirname(fileURLToPath(import.meta.url)), '..');
 const { values } = parseArgs({ options: {
   archive: { type: 'string' },
+  'previous-archive': { type: 'string' },
   mode: { type: 'string', default: 'public' },
   'work-parent': { type: 'string', default: join(repo, 'build') },
   'keep-workdir': { type: 'boolean', default: false },
@@ -21,8 +23,9 @@ const { values } = parseArgs({ options: {
   help: { type: 'boolean', default: false },
 } });
 if (values.help) {
-  console.log('Usage: node scripts/check-packaged-web-browser.mjs --archive /absolute/distribution.zip --chrome /absolute/chrome --java-home /absolute/jdk [--mode public|session|proxy] [--work-parent /absolute/scratch] [--keep-workdir] [--python /absolute/python3] [--no-sandbox]');
-  console.log('public: packaged home/Runtime/recovery; session: public plus local session journey; proxy: real Vite HMR and session journey against packaged JVM.');
+  console.log('Usage: node scripts/check-packaged-web-browser.mjs --archive /absolute/distribution.zip --chrome /absolute/chrome --java-home /absolute/jdk [--mode public|session|proxy|upgrade] [--previous-archive /absolute/previous.zip] [--work-parent /absolute/scratch] [--keep-workdir] [--python /absolute/python3] [--no-sandbox]');
+  console.log('public: packaged home/Runtime/recovery; session: public plus local session journey; proxy: real Vite HMR and session journey against packaged JVM; upgrade: previous JVM to current JVM on one origin with an old tab.');
+  console.log('upgrade requires --previous-archive and distinct manifest builds with the old Runtime chunk absent from --archive. Its previous extraction is always removed before the current extraction, even with --keep-workdir.');
   console.log('Reports/screenshots stay in build/. Owned extraction/profile/socket directories are removed after confirmed shutdown unless --keep-workdir is set. Proxy requires npm ci --ignore-scripts under the pinned Node beforehand.');
   process.exit(0);
 }
@@ -33,7 +36,11 @@ for (const option of ['archive', 'chrome', 'java-home', 'python']) {
   assert.ok(values[option] && isAbsolute(values[option]), `--${option} must name an absolute existing path; see --help`);
   await fs.access(values[option]);
 }
-assert.ok(['public', 'session', 'proxy'].includes(values.mode), '--mode must be public, session or proxy');
+assert.ok(['public', 'session', 'proxy', 'upgrade'].includes(values.mode), '--mode must be public, session, proxy or upgrade');
+if (values.mode === 'upgrade') {
+  assert.ok(values['previous-archive'] && isAbsolute(values['previous-archive']), 'upgrade requires --previous-archive as an absolute existing ZIP path');
+  await fs.access(values['previous-archive']);
+} else assert.equal(values['previous-archive'], undefined, '--previous-archive is only supported with --mode upgrade');
 assert.ok(isAbsolute(values['work-parent']), '--work-parent must be an absolute directory');
 const archive = values.archive;
 const javaHome = values['java-home'];
@@ -61,6 +68,7 @@ const ownerToken = randomUUID();
 const installHelper = join(repo, 'scripts/packaged-browser-install.py');
 let cdp;
 let applicationError = '';
+let applicationOutput = '';
 let browserError = '';
 let viteError = '';
 const report = { status: 'running', mode: values.mode, testDirectory: root, driverNode: nodeVersion,
@@ -215,21 +223,14 @@ async function capture(target, name) {
   await fs.writeFile(join(root, name), Buffer.from(data, 'base64'));
 }
 
-try {
-  report.tools.chromeSha256 = await fileHash(chromeBinary);
-  report.archive = basename(archive);
-  report.archiveSha256 = await fileHash(archive);
+async function prepareArchive(archivePath) {
+  assert.equal(work, undefined, 'Remove the previous owned extraction before preparing another archive');
+  const archiveSha256 = await fileHash(archivePath);
   work = await fs.mkdtemp(join(values['work-parent'], 'packaged-browser-work-'));
   report.workDirectory = work;
-  const setup = JSON.parse(execFileSync(values.python, [installHelper, 'prepare', '--archive', archive,
+  const setup = JSON.parse(execFileSync(values.python, [installHelper, 'prepare', '--archive', archivePath,
     '--work', work, '--owner-token', ownerToken], { encoding: 'utf8', maxBuffer: 4 * 1024 * 1024 }));
-  report.resourceBudget = setup.resourceBudget;
-  const { app, manifest } = setup;
-  report.applicationJar = setup.jar;
-  report.applicationJarSha256 = setup.jarSha256;
-  report.buildId = manifest.buildId;
-  report.applicationVersion = manifest.applicationVersion;
-  const before = await snapshot(app);
+  const before = await snapshot(setup.app);
   const bins = join(work, 'launcher tools');
   const working = join(work, 'unrelated working directory');
   await fs.mkdir(bins);
@@ -241,6 +242,53 @@ try {
   const environment = { PATH: bins, JAVA_HOME: javaHome, LANG: 'C.UTF-8' };
   for (const name of ['node', 'npm']) assert.notEqual(spawnSync('/bin/sh', ['-c', `command -v ${name}`], { env: environment }).status, 0);
   const data = join(working, 'untouched jobs');
+  return { ...setup, archivePath, archiveSha256, work, before, working, environment, data };
+}
+
+function installationIdentity(installation) {
+  return { archive: basename(installation.archivePath), archivePath: installation.archivePath,
+    archiveSha256: installation.archiveSha256, applicationJar: installation.jar,
+    applicationJarSha256: installation.jarSha256, buildId: installation.manifest.buildId,
+    applicationVersion: installation.manifest.applicationVersion, resourceBudget: installation.resourceBudget };
+}
+
+function recordInstallation(installation) {
+  Object.assign(report, installationIdentity(installation), {
+    workDirectory: installation.work, unrelatedWorkingDirectory: installation.working,
+    basePath: '/nested/', nodeOnApplicationPath: false, npmOnApplicationPath: false, readOnlyInstallation: true,
+  });
+}
+
+async function launchApplication(installation, port = '0', frontendOrigin) {
+  applicationOutput = '';
+  applicationError = '';
+  application = startOwned(join(installation.app, 'bin/llm_bin_patch'), ['web', '--ui', 'spa', '--host', '127.0.0.1', '--port', port,
+    '--base-path', '/nested/', '--data-dir', installation.data, ...(frontendOrigin ? ['--dev-frontend-origin', frontendOrigin] : [])], {
+    cwd: installation.working, env: installation.environment, stdio: ['ignore', 'pipe', 'pipe'],
+  });
+  application.stdout.on('data', (chunk) => { applicationOutput = (applicationOutput + chunk).slice(-1048576); });
+  application.stderr.on('data', (chunk) => { applicationError = (applicationError + chunk).slice(-1048576); });
+  const origin = await waitFor(() => {
+    if (application.exitCode !== null || application.signalCode !== null) throw new Error(`Packaged application exited: ${applicationError}`);
+    return applicationOutput.match(/http:\/\/127\.0\.0\.1:\d+/)?.[0];
+  }, 'packaged application listener');
+  console.log(`Packaged application ready: ${origin}/nested/`);
+  return origin;
+}
+
+async function removeOwnedWork() {
+  if (!work) return;
+  if (await fs.stat(join(work, '.packaged-browser-owned')).then(() => true, () => false)) {
+    execFileSync(values.python, [installHelper, 'cleanup', '--work', work, '--owner-token', ownerToken]);
+  } else await fs.rmdir(work); // Only an empty directory if preparation never initialized it.
+  work = undefined;
+}
+
+try {
+  report.tools.chromeSha256 = await fileHash(chromeBinary);
+  let installation = await prepareArchive(values.mode === 'upgrade' ? values['previous-archive'] : archive);
+  recordInstallation(installation);
+  const { manifest, data } = installation;
   let developmentPort;
   let browserOrigin;
   if (values.mode === 'proxy') {
@@ -253,24 +301,9 @@ try {
     await new Promise((resolve, reject) => reservation.close((error) => error ? reject(error) : resolve()));
     browserOrigin = `http://127.0.0.1:${developmentPort}`;
   }
-  let applicationOutput = '';
-  application = startOwned(join(app, 'bin/llm_bin_patch'), ['web', '--ui', 'spa', '--host', '127.0.0.1', '--port', '0', '--base-path', '/nested/', '--data-dir', data, ...(values.mode === 'proxy' ? ['--dev-frontend-origin', browserOrigin] : [])], {
-    cwd: working, env: environment, stdio: ['ignore', 'pipe', 'pipe'],
-  });
-  application.stdout.on('data', (chunk) => { applicationOutput = (applicationOutput + chunk).slice(-1048576); });
-  application.stderr.on('data', (chunk) => { applicationError = (applicationError + chunk).slice(-1048576); });
-  const origin = await waitFor(() => {
-    if (application.exitCode !== null || application.signalCode !== null) throw new Error(`Packaged application exited: ${applicationError}`);
-    return applicationOutput.match(/http:\/\/127\.0\.0\.1:\d+/)?.[0];
-  }, 'packaged application listener');
-  console.log(`Packaged application ready: ${origin}/nested/`);
+  const origin = await launchApplication(installation, '0', values.mode === 'proxy' ? browserOrigin : undefined);
   report.origin = origin;
   browserOrigin ??= origin;
-  report.basePath = '/nested/';
-  report.nodeOnApplicationPath = false;
-  report.npmOnApplicationPath = false;
-  report.unrelatedWorkingDirectory = working;
-  report.readOnlyInstallation = true;
 
   browserTmp = await fs.mkdtemp(join(repo, 'build/ct-'));
   report.browserTempDirectory = browserTmp;
@@ -288,7 +321,104 @@ try {
   cdp = new Protocol(socket);
   report.browser = await cdp.call('Browser.getVersion');
   report.browserSandboxDisabled = values['no-sandbox'];
-  if (values.mode !== 'proxy') {
+  if (values.mode === 'upgrade') {
+    const previous = installation;
+    report.upgrade = { previous: installationIdentity(previous), phase: 'previous-home', requestInterception: false };
+    const previousRuntime = previous.manifest.files.find((entry) => /^assets\/Runtime-.+\.js$/.test(entry.path));
+    assert.ok(previousRuntime, 'Previous package must contain a Runtime lazy chunk');
+    const previousRuntimeUrl = `${origin}/nested/assets/ui/${previousRuntime.path}`;
+    const tab = await makeTarget();
+    await cdp.call('Page.navigate', { url: `${origin}/nested/` }, tab.sessionId);
+    await ready(tab, `document.querySelector('h1')?.textContent === 'Your work, with its evidence'`, 'previous packaged home');
+    assert.equal(await evaluate(tab, `document.querySelector('meta[name="decomp-ui-build"]')?.content`), previous.manifest.buildId);
+    assert.equal(await evaluate(tab, `document.querySelector('meta[name="decomp-application-version"]')?.content`), previous.manifest.applicationVersion);
+    assert.equal(tab.requests.filter((entry) => entry.url === previousRuntimeUrl).length, 0, 'Previous Runtime chunk was loaded before replacement');
+    await capture(tab, 'upgrade-previous-home.png');
+
+    // The tab and its old entry module remain alive. Only the owned JVM and its
+    // extracted install are replaced; no browser request is intercepted.
+    await stop(application);
+    report.upgrade.previousShutdownConfirmed = true;
+    assert.deepEqual(await snapshot(previous.app), previous.before, 'Previous installation bytes changed');
+    assert.equal(await fs.stat(previous.data).then(() => true, () => false), false, 'Previous public browsing created job data');
+    report.upgrade.previousInstallationUnchanged = true;
+    await removeOwnedWork();
+    report.upgrade.previousWorkCleanupConfirmed = true;
+    report.upgrade.phase = 'prepare-current';
+    installation = await prepareArchive(archive);
+    recordInstallation(installation);
+    report.upgrade.current = installationIdentity(installation);
+    const pair = qualifyUpgrade(previous.manifest, installation.manifest);
+    assert.equal(pair.previousRuntime.path, previousRuntime.path);
+    report.upgrade.previousLazyChunk = pair.previousRuntime.path;
+    report.upgrade.currentLazyChunk = pair.currentRuntime.path;
+    const replacementOrigin = await launchApplication(installation, new URL(origin).port);
+    assert.equal(replacementOrigin, origin, 'Replacement JVM did not preserve the previous origin');
+    report.upgrade.phase = 'old-tab-current-server';
+    assert.equal(await evaluate(tab, `document.querySelector('meta[name="decomp-ui-build"]')?.content`), previous.manifest.buildId);
+    assert.equal(tab.requests.filter((entry) => entry.type === 'Document').length, 1, 'Old tab reloaded during server replacement');
+    assert.equal(tab.requests.filter((entry) => entry.url === previousRuntimeUrl).length, 0, 'Old lazy chunk was requested before navigation');
+    await evaluate(tab, `document.querySelector('a[href="/nested/runtime"]').click()`);
+    await ready(tab, `document.querySelector('h1')?.textContent === 'This view is unavailable' && document.querySelector('#asset-notice-title')?.textContent === 'The application may have updated'`, 'actual old-tab version notice');
+    await delay(5000);
+    const warning = await evaluate(tab, `(() => {
+      const visibleInViewport = element => {
+        if (!element || element.getClientRects().length === 0) return false;
+        for (let ancestor = element; ancestor; ancestor = ancestor.parentElement) {
+          const style = getComputedStyle(ancestor);
+          if (style.display === 'none' || style.visibility !== 'visible' || Number(style.opacity) <= 0) return false;
+        }
+        const bounds = element.getBoundingClientRect();
+        if (bounds.width <= 0 || bounds.height <= 0 || bounds.left < 0 || bounds.top < 0 ||
+          bounds.right > document.documentElement.clientWidth || bounds.bottom > window.innerHeight) return false;
+        const hit = document.elementFromPoint(bounds.left + bounds.width / 2, bounds.top + bounds.height / 2);
+        return hit !== null && element.contains(hit);
+      };
+      const reload = [...document.querySelectorAll('button')].find(button => button.textContent === 'Reload application');
+      return { notices: document.querySelectorAll('[role="alert"]').length, text: document.body.innerText,
+        reloadEnabled: !!reload && !reload.matches(':disabled'),
+        noticeTitleWithinViewport: visibleInViewport(document.querySelector('#asset-notice-title')),
+        reloadControlWithinViewport: visibleInViewport(reload) };
+    })()`);
+    assert.equal(warning.notices, 1);
+    assert.equal(warning.reloadEnabled, true);
+    assert.equal(warning.noticeTitleWithinViewport, true);
+    assert.equal(warning.reloadControlWithinViewport, true);
+    assert.ok(warning.text.includes(previous.manifest.buildId), 'Version notice lost the old tab build identity');
+    assert.equal(tab.requests.filter((entry) => entry.url === previousRuntimeUrl).length, 1, 'Old lazy chunk was automatically retried');
+    assert.ok(tab.responses.some((entry) => entry.url === previousRuntimeUrl && entry.status === 404), 'Replacement JVM did not return the real missing-asset 404');
+    assert.equal(tab.requests.filter((entry) => entry.type === 'Document').length, 1, 'Old tab automatically reloaded');
+    assert.ok(tab.requests.every((entry) => ['GET', 'HEAD'].includes(entry.method)), 'Upgrade recovery sent a mutation');
+    assert.deepEqual(tab.exceptions, []);
+    await capture(tab, 'upgrade-version-notice.png');
+    try {
+      await evaluate(tab, `[...document.querySelectorAll('button')].find(button => button.textContent === 'Reload application').click()`);
+    } catch (error) {
+      if (!/context|navigat/i.test(error.message)) throw error;
+    }
+    const current = installation.manifest;
+    await ready(tab, `document.querySelector('h1')?.textContent === 'Runtime status' && document.body.innerText.includes(${JSON.stringify(current.buildId)}) && document.querySelectorAll('[role="alert"]').length === 0`, 'explicit reload into current packaged Runtime');
+    await delay(1000);
+    assert.equal(await evaluate(tab, `document.querySelector('meta[name="decomp-ui-build"]')?.content`), current.buildId);
+    assert.equal(await evaluate(tab, `document.querySelector('meta[name="decomp-application-version"]')?.content`), current.applicationVersion);
+    assert.equal(await evaluate(tab, 'location.pathname'), '/nested/runtime');
+    assert.ok(await evaluate(tab, `document.body.innerText.includes(${JSON.stringify(current.applicationVersion)})`));
+    assert.equal(tab.requests.filter((entry) => entry.type === 'Document').length, 2, 'Explicit upgrade reload was not exactly one document request');
+    assert.equal(tab.requests.filter((entry) => entry.url === previousRuntimeUrl).length, 1, 'Reload repeated the stale lazy import');
+    assert.ok(tab.responses.some((entry) => entry.url === `${origin}/nested/assets/ui/${pair.currentRuntime.path}` && entry.status === 200), 'Current Runtime chunk did not load successfully');
+    assert.ok(tab.requests.every((entry) => ['GET', 'HEAD'].includes(entry.method)), 'Explicit reload sent a mutation');
+    assert.ok(tab.requests.every((entry) => entry.url.startsWith(origin + '/')), 'Upgrade fetched an external dependency');
+    assert.deepEqual(tab.exceptions, []);
+    assert.equal(await fs.stat(installation.data).then(() => true, () => false), false, 'Current public browsing created job data');
+    await capture(tab, 'upgrade-current-runtime.png');
+    Object.assign(report.upgrade, { phase: 'recovered-current', sameOrigin: origin, basePath: '/nested/',
+      sameTabPreserved: true, oldLazyResponseStatus: 404, warningCount: 1, observationSeconds: 5,
+      automaticReloads: 0, automaticChunkRetries: 0, explicitReloadDocumentRequests: 1,
+      recoveredCurrentBuild: true, mutationRequests: 0, noticeTitleWithinViewport: true, reloadControlWithinViewport: true });
+    report.requests.upgrade = tab.requests;
+    report.jobDataCreated = false;
+  }
+  if (values.mode === 'public' || values.mode === 'session') {
     const identityExpression = `(() => ({ buildId: document.querySelector('meta[name="decomp-ui-build"]')?.content, applicationVersion: document.querySelector('meta[name="decomp-application-version"]')?.content, page: location.pathname, text: document.body.innerText }))()`;
     const home = await makeTarget();
     await cdp.call('Page.navigate', { url: `${origin}/nested/` }, home.sessionId);
@@ -379,7 +509,7 @@ try {
     report.requests = {};
   }
 
-  if (values.mode !== 'public') {
+  if (values.mode === 'session' || values.mode === 'proxy') {
     const bootstrapUrl = await waitFor(() => applicationOutput.split(/\s+/).find((part) => part.startsWith(browserOrigin + '/nested/#bootstrap=')), 'local bootstrap handoff');
     const token = new URL(bootstrapUrl).hash.slice('#bootstrap='.length);
     sensitiveValues.push(token);
@@ -447,7 +577,7 @@ try {
     report.requests.authenticated = authenticated.requests;
   }
 
-  assert.deepEqual(await snapshot(app), before, 'Read-only installation bytes changed');
+  assert.deepEqual(await snapshot(installation.app), installation.before, 'Read-only installation bytes changed');
   report.installationUnchanged = true;
 
   report.status = 'passed';
@@ -489,11 +619,7 @@ try {
   report.workRetained = true;
   if (report.shutdownConfirmed && !values['keep-workdir']) {
     try {
-      if (work) {
-        if (await fs.stat(join(work, '.packaged-browser-owned')).then(() => true, () => false)) {
-          execFileSync(values.python, [installHelper, 'cleanup', '--work', work, '--owner-token', ownerToken]);
-        } else await fs.rmdir(work); // Only an empty directory if preparation never initialized it.
-      }
+      await removeOwnedWork();
       await fs.rm(profile, { recursive: true, force: true });
       if (browserTmp) await fs.rm(browserTmp, { recursive: true, force: true });
       report.workRetained = false;
