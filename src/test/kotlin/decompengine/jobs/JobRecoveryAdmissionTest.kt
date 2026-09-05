@@ -5,6 +5,36 @@ import kotlin.test.*
 import kotlinx.serialization.json.*
 
 class JobRecoveryAdmissionTest {
+    @Test fun `legacy metadata that cannot encode recovery prevents every status write`() {
+        val root = createTempDirectory("recovery-rewrite-limit-")
+        val store = JobStore(root)
+        val jobs = List(2) { store.createFromUpload("fixture.elf", elfFixture()) }
+        jobs.forEach { store.updateStatus(it.id, "queued") }
+        val paths = jobs.map { root.resolve(it.id).resolve("job.json") }
+        val originals = paths.map { it.readBytes() }
+        // Exercise each possible scan position without depending on filesystem enumeration order.
+        paths.indices.forEach { oversizedIndex ->
+            paths.forEachIndexed { index, path -> path.writeBytes(originals[index]) }
+            val path = paths[oversizedIndex]
+            val record = Json.parseToJsonElement(path.readText()).jsonObject - "updated_at" - "status_message"
+            val emptyFilename = JsonObject(record + ("filename" to JsonPrimitive("")))
+            val filenameBytes = 256 * 1024 - emptyFilename.toString().toByteArray().size
+            val legacy = JsonObject(record + ("filename" to JsonPrimitive("x".repeat(filenameBytes))))
+            path.writeText(legacy.toString())
+            assertEquals(256 * 1024, path.readBytes().size)
+            assertEquals("queued", store.get(jobs[oversizedIndex].id).status)
+            val before = paths.map { it.readBytes() }
+            assertIncomplete { store.recoverInterruptedJobs() }
+            paths.forEachIndexed { index, candidate -> assertContentEquals(before[index], candidate.readBytes()) }
+            assertTrue(root.listDirectoryEntries().all { directory ->
+                directory.listDirectoryEntries().none { it.fileName.toString().startsWith(".job-metadata-") }
+            })
+        }
+        paths.forEachIndexed { index, path -> path.writeBytes(originals[index]) }
+        store.recoverInterruptedJobs()
+        assertTrue(jobs.all { store.get(it.id).status == "failed" })
+    }
+
     @Test fun `entry exhaustion leaves all statuses unchanged and retry can recover`() {
         val root = createTempDirectory("recovery-entry-limit-")
         val store = JobStore(root)
