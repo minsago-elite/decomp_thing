@@ -286,3 +286,40 @@ The concurrent insertion is tested in the component fixture; the browser check
 uses the persisted static library. Chrome used test-only `--no-sandbox`. This
 fix strengthens snapshot navigation, but does not establish background change
 notifications or the remaining #168 accessibility/scale criteria.
+
+## Dashboard accessibility tree and narrow reflow — 2026-09-05
+
+The scale journey now checks the rendered dashboard at 390 and 320 CSS pixels
+and rejects horizontal document/body overflow. Chrome's accessibility tree must
+expose one main landmark, the named Uploaded jobs list, all three text-input
+labels, all three selector labels and all five filter/pagination button names.
+These are focused automated checks, not an axe audit or manual screen-reader
+qualification, and do not establish all WCAG contrast/zoom/dialog requirements.
+
+This audit also found and corrected a verification defect in the preceding
+browser checkpoint: its request counter looked for `/api/v1/jobs?`, but the
+driver deliberately strips query strings from retained request URLs. The old
+zero-equals-zero assertion could not prove that Previous avoided a read. The
+counter now matches the retained path and requires a positive count before
+checking that Previous leaves it unchanged. The component test's independent
+mock-call assertion was valid; the earlier browser request-count claim requires
+the corrected run's evidence below.
+
+The first reflow assertion compared scroll width with `innerWidth`, which missed
+the vertical scrollbar's occupied width. Tightening it to compare against
+`document.documentElement.clientWidth` reproduced a real failure: at a 320-pixel
+viewport only 305 pixels were available, but the body and document remained 320
+pixels wide (`build/packaged-browser-VmCrIm/report.json`). The body's `20rem`
+minimum width caused this extra horizontal scrolling. Removing that minimum
+lets the existing responsive layout fit the available width. The check keeps
+the stricter available-width comparison rather than accepting the overflow.
+
+The corrected packaged run passed on the rebuilt distribution:
+[`web-dashboard-accessibility-20260905.json`](evidence/web-dashboard-accessibility-20260905.json).
+At 390 and 320 viewport pixels the available widths were 375 and 305 pixels;
+both document and body now fit those widths. Accessibility names/landmarks and
+the corrected positive request-counter check passed alongside all existing
+10,000-job paging/filter/sort checks. The typechecked bundle, `distZip`, driver
+syntax and diff checks passed. Unit suites were not rerun for this CSS/driver
+change; actual rendered-browser checks verify the layout. Chrome used test-only
+`--no-sandbox`. #168 and #217 remain open for their broader requirements.

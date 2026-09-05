@@ -83,11 +83,12 @@ export async function qualifyScale({ fixture, makeTarget, cdp, evaluate, ready, 
   await evaluate(tab, `[...document.querySelectorAll('button')].find(b => b.textContent === 'Next page').click()`);
   await ready(tab, `(${rows})[0] === ${JSON.stringify('/nested/jobs/' + fixture.ids[200])}`, 'oldest-first continuation');
   assert.deepEqual(await evaluate(tab, rows), fixture.ids.slice(200, 400).map(id => '/nested/jobs/' + id));
-  const readsBeforePrevious = tab.requests.filter(request => request.url.includes('/api/v1/jobs?')).length;
+  const readsBeforePrevious = tab.requests.filter(request => request.url.endsWith('/api/v1/jobs')).length;
+  assert.ok(readsBeforePrevious > 0, 'Collection request counter must observe actual reads');
   await evaluate(tab, `[...document.querySelectorAll('button')].find(b => b.textContent === 'Previous page').click()`);
   await ready(tab, `(${rows})[0] === ${JSON.stringify(oldest[0])} && document.activeElement.textContent === 'Job results'`, 'retained first snapshot page');
   assert.deepEqual(await evaluate(tab, rows), oldest);
-  assert.equal(tab.requests.filter(request => request.url.includes('/api/v1/jobs?')).length, readsBeforePrevious);
+  assert.equal(tab.requests.filter(request => request.url.endsWith('/api/v1/jobs')).length, readsBeforePrevious);
 
   await cdp.call('Page.reload', {}, tab.sessionId);
   await ready(tab, `(${rows})[0] === ${JSON.stringify(oldest[0])}`, 'oldest-first restored after reload');
@@ -96,9 +97,23 @@ export async function qualifyScale({ fixture, makeTarget, cdp, evaluate, ready, 
   await evaluate(tab, `[...document.querySelectorAll('button')].find(b => b.textContent === 'Reset filters').click()`);
   await ready(tab, `(${rows})[0] === ${JSON.stringify('/nested/jobs/' + fixture.ids[9999])} && (${rows}).length === 50`, 'reset oldest-first preference');
   assert.equal(await evaluate(tab, 'location.search'), '');
+  const reflow = [];
+  for (const width of [390, 320]) {
+    await cdp.call('Emulation.setDeviceMetricsOverride', { width, height: 844, deviceScaleFactor: 1, mobile: false }, tab.sessionId);
+    const dimensions = await evaluate(tab, `({ viewport: innerWidth, available: document.documentElement.clientWidth, document: document.documentElement.scrollWidth, body: document.body.scrollWidth })`);
+    assert.ok(dimensions.document <= dimensions.available && dimensions.body <= dimensions.available, `Dashboard horizontal overflow at ${width}px: ${JSON.stringify(dimensions)}`);
+    reflow.push(dimensions);
+  }
+  const ax = (await cdp.call('Accessibility.getFullAXTree', {}, tab.sessionId)).nodes.filter(node => !node.ignored);
+  const named = (role, name) => ax.filter(node => node.role?.value === role && node.name?.value === name);
+  assert.equal(ax.filter(node => node.role?.value === 'main').length, 1);
+  for (const name of ['Filename search', 'Created at or after', 'Created before']) assert.equal(named('textbox', name).length, 1);
+  for (const name of ['Workflow state', 'Sort by', 'Jobs per page']) assert.equal(named('combobox', name).length, 1);
+  for (const name of ['Apply filters', 'Reset filters', 'Refresh jobs', 'Previous page', 'Next page']) assert.equal(named('button', name).length, 1);
+  assert.equal(named('list', 'Uploaded jobs').length, 1);
   assert.deepEqual(tab.exceptions, []);
   assert.ok(tab.requests.every(request => ['GET', 'HEAD'].includes(request.method)));
   return { persistedJobs: fixture.count, pages: 50, rowsPerPage: 200, reachableJobs: 10000,
-    exactOrder: true, keyboardPaginationFocus: true, searchReload: true, combinedNanosecondFiltersReload: true, oldestFirstPagesReloadReset: true, previousFirstPageRetained: true, mutationRequests: 0,
+    exactOrder: true, keyboardPaginationFocus: true, searchReload: true, combinedNanosecondFiltersReload: true, oldestFirstPagesReloadReset: true, previousFirstPageRetained: true, narrowReflow: reflow, accessibleFilterNames: true, mutationRequests: 0,
     peakBrowserHeapBytes, pageLatencyMs: timings.map(ms => Math.round(ms)), executionStarted: false };
 }
