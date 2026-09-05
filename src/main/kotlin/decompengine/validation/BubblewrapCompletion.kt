@@ -8,6 +8,12 @@ import kotlinx.serialization.json.longOrNull
 
 internal const val MAXIMUM_BUBBLEWRAP_COMPLETION_BYTES = 4096
 
+internal fun completionLaunchCommand(command: List<String>, launcher: java.nio.file.Path, channel: java.nio.file.Path): List<String> {
+    require(command.size >= 3)
+    return listOf(launcher.toString(), "-c", "exec 3>\"${'$'}1\"; shift; exec \"${'$'}@\"", "behavior-completion", channel.toString()) +
+        command.take(3) + listOf("--json-status-fd", "3") + command.drop(3)
+}
+
 /** Parsed observations only: the caller must independently own and bound the channel. */
 internal data class BubblewrapCompletionObservation(val childPid: Int, val applicationExitCode: Int)
 
