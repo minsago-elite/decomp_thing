@@ -14,21 +14,23 @@ internal class ContainedCommandRetainedDirectories(
     activeName: String?,
     previous: Map<String, LinuxFileIdentity>,
     private val stateIdentity: LinuxFileIdentity? = null,
+    private val reportsIdentity: LinuxFileIdentity? = null,
 ) {
     private val entries = previous.toSortedMap().toMap()
     init {
         require(entries.size <= 256) { "prior contained controls exceed their count bound" }
-        require((entries.isEmpty() && stateIdentity == null) || activeName != null) { "prior controls require a separate active control directory" }
+        require((entries.isEmpty() && stateIdentity == null && reportsIdentity == null) || activeName != null) { "prior controls require a separate active control directory" }
         require(activeName == null || validContainedControlName(activeName)) { "active contained control name is invalid" }
         entries.forEach { (name, id) ->
             require(validContainedControlName(name) && name != activeName) { "prior contained control name is invalid or active" }
             require(id.isDirectory && !id.isSymbolicLink && id.mode.permissions == 448) { "prior control identity is not private" }
         }
-        stateIdentity?.let { id ->
-            require(id.isDirectory && !id.isSymbolicLink && id.mode.permissions == 448) { "retained state identity is not private" }
+        listOfNotNull(stateIdentity, reportsIdentity).forEach { id ->
+            require(id.isDirectory && !id.isSymbolicLink && id.mode.permissions == 448) { "retained data directory identity is not private" }
         }
     }
-    private val protectedEntries = entries + (stateIdentity?.let { mapOf("state" to it) } ?: emptyMap())
+    private val protectedEntries = entries + (stateIdentity?.let { mapOf("state" to it) } ?: emptyMap()) +
+        (reportsIdentity?.let { mapOf("reports" to it) } ?: emptyMap())
     val controlsAreEmpty: Boolean get() = entries.isEmpty()
 
     fun verify(parent: LinuxDescriptor) {
@@ -46,6 +48,7 @@ internal class ContainedCommandRetainedDirectories(
     }
 
     fun stateToJson(): JsonObject? = stateIdentity?.let { containedControlIdentityJson("state", it) }
+    fun reportsToJson(): JsonObject? = reportsIdentity?.let { containedControlIdentityJson("reports", it) }
 
     fun controlsToJson() = JsonArray(entries.map { (name, id) -> containedControlIdentityJson(name, id) })
 
