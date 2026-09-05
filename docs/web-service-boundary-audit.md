@@ -116,3 +116,27 @@ upload/single-job read operations on identical persisted fixtures. It does not e
 workflow/action, source/archive, error, authorization or event adapter parity, and does not
 assert every auxiliary store file is unchanged by startup ownership/recovery. Keep the full
 #158 shared-service criterion open until those remaining operation classes are audited.
+
+## CLI/core regression qualification
+
+The subsequent [combined regression record](evidence/web-cli-core-regression-20260905.json)
+qualifies #158's existing job/reconstruction and CLI/core regression-coverage criterion at
+source commit `8ae61d5`. It combines the web/journal and job/attempt-store suites with:
+
+- `PatchCliTest` and `ReconstructionCliTest`: explicit strategy selection, strict harness names,
+  provenance and evidence-only behavior without implicit provider use.
+- `RepairCliPresentationTest`: real CLI unavailable-input exit behavior, acceptance-dependent
+  presentation and bounded private-text-free console history.
+- `RepairCliProgressTest`: persisted phase delivery, cursor gaps, bounded output and blocked-console
+  isolation without blocking journal producers.
+- `ProgramModelTest` and `ReconstructionProfileTest`: deterministic provenance/planning, parser
+  contracts, ownership, profile identity/immutability and resource ceilings.
+- `ReconstructionPipelineTest`: ELF metadata, injected analysis/model capture, stable generated
+  layout, unresolved evidence and buildable output using the real project builder.
+
+All selected tests passed without failures or skips. The reconstruction pipeline compiles
+synthetic generated projects; it injects its analyzer and does not analyze a real target or
+contact a provider. This is regression coverage of the existing API contracts and supported
+fixture behavior, not qualification of every CLI command, live provider, real-target pipeline,
+archive/source scenario, browser or release gate. Criteria 1, 2 and 4 remain open for complete
+adapter parity, public-data classification and the shared legacy authorization boundary.
