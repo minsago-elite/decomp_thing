@@ -140,6 +140,8 @@ internal fun renderWebReconstructionHarnessSelection(strategy: WebReconstruction
 private const val WEB_RECONSTRUCTION_MODE_ENVIRONMENT = "WEB_RECONSTRUCTION_MODE"
 private const val WEB_RECONSTRUCTION_HARNESS_REPORT = "reconstruction_harness_selection.json"
 
+enum class WebUiMode { LEGACY, SPA }
+
 class UploadServer(
     host: String,
     port: Int,
@@ -147,7 +149,22 @@ class UploadServer(
     private val analyzer: JobAnalyzer = AutomaticJobAnalyzer(),
     private val reconstructor: JobReconstructor = SourceTreeJobReconstructor(),
     executor: Executor? = null,
+    uiMode: WebUiMode = WebUiMode.LEGACY,
+    basePath: String = "/",
 ) {
+    // Verify trusted application bytes before binding a listening socket.
+    private val spaAssets = when (uiMode) {
+        WebUiMode.SPA -> {
+            require(java.net.InetAddress.getByName(host).isLoopbackAddress) {
+                "the SPA preview currently requires a loopback host"
+            }
+            EmbeddedWebAssets.load(basePath = basePath)
+        }
+        WebUiMode.LEGACY -> {
+            require(basePath == "/") { "--base-path is supported by --ui spa" }
+            null
+        }
+    }
     private val server = HttpServer.create(InetSocketAddress(host, port), 0)
     private val store = JobStore(dataDir)
     private val ownedExecutor: ExecutorService? = if (executor == null) {
@@ -162,7 +179,7 @@ class UploadServer(
     val serverPort: Int get() = server.address.port
 
     init {
-        store.recoverInterruptedJobs()
+        if (spaAssets == null) store.recoverInterruptedJobs()
         server.createContext("/") { exchange -> route(exchange) }
     }
 
@@ -174,6 +191,10 @@ class UploadServer(
     }
 
     private fun route(exchange: HttpExchange) {
+        spaAssets?.let { assets ->
+            routeSpaPreview(exchange, assets)
+            return
+        }
         val segments = exchange.requestURI.path.split('/').filter(String::isNotBlank)
         try {
             when {
@@ -203,6 +224,46 @@ class UploadServer(
         } catch (exception: Exception) {
             exchange.sendHtml(500, renderErrorPage(500, "Unexpected error", exception.message ?: "The operation failed."))
         }
+    }
+
+    private fun routeSpaPreview(exchange: HttpExchange, assets: EmbeddedWebAssets) {
+        val path = exchange.requestURI.rawPath
+        if (path.startsWith(assets.assetPrefix)) {
+            assets.serveAsset(exchange)
+            return
+        }
+        val base = assets.basePath
+        val canonical = when (path) {
+            base, "${base}runtime" -> path
+            base.removeSuffix("/").ifEmpty { "/" } -> base
+            "${base}runtime/" -> "${base}runtime"
+            else -> null
+        }
+        if (canonical != null) {
+            if (path != canonical && exchange.requestMethod in setOf("GET", "HEAD")) {
+                val query = exchange.requestURI.rawQuery?.let { "?$it" }.orEmpty()
+                exchange.responseHeaders.set("Location", canonical + query)
+                exchange.responseHeaders.set("Cache-Control", "no-store")
+                exchange.sendResponseHeaders(308, -1)
+                exchange.close()
+            } else {
+                assets.serveShell(exchange)
+            }
+            return
+        }
+        val requestId = java.util.UUID.randomUUID().toString()
+        val body = buildJsonObject {
+            put("apiVersion", 1)
+            put("kind", "error")
+            put("requestId", requestId)
+            put("error", buildJsonObject {
+                put("code", "NOT_FOUND")
+                put("message", "The requested route is unavailable.")
+                put("retryable", false)
+            })
+        }
+        exchange.responseHeaders.set("X-Request-ID", requestId)
+        exchange.sendJson(404, Json.encodeToString(JsonElement.serializer(), body))
     }
 
     private fun handlePostJob(exchange: HttpExchange) {

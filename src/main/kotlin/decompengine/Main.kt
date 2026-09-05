@@ -26,6 +26,7 @@ import decompengine.repair.RepairRuntimeConfiguration
 import decompengine.repair.SecureRepairRuntime
 import decompengine.validation.ProcessInput
 import decompengine.web.UploadServer
+import decompengine.web.WebUiMode
 import java.nio.file.Files
 import java.nio.file.Path
 import java.util.Locale
@@ -502,8 +503,11 @@ private fun runWeb(args: List<String>) {
     var host = "127.0.0.1"
     var port = 8000
     var dataDir = Path.of(".decomp_engine/jobs")
+    var uiMode = WebUiMode.LEGACY
+    var basePath = "/"
     var index = 0
     while (index < args.size) {
+        require(index + 1 < args.size) { "${args[index]} requires a value; see llm_bin_patch --help" }
         when (args[index]) {
             "--host" -> {
                 host = args[index + 1]
@@ -517,12 +521,26 @@ private fun runWeb(args: List<String>) {
                 dataDir = Path.of(args[index + 1])
                 index += 2
             }
+            "--ui" -> {
+                uiMode = when (args[index + 1]) {
+                    "legacy" -> WebUiMode.LEGACY
+                    "spa" -> WebUiMode.SPA
+                    else -> error("--ui must be legacy or spa")
+                }
+                index += 2
+            }
+            "--base-path" -> {
+                basePath = args[index + 1]
+                index += 2
+            }
             else -> error("unknown web argument: ${args[index]}")
         }
     }
-    val server = UploadServer(host, port, dataDir)
+    val server = UploadServer(host, port, dataDir, uiMode = uiMode, basePath = basePath)
     server.start()
-    println("Serving decomp_engine upload UI on http://$host:${server.serverPort}")
+    Runtime.getRuntime().addShutdownHook(Thread { server.stop() })
+    val urlHost = if (':' in host && !host.startsWith('[')) "[$host]" else host
+    println("Serving decomp_engine ${uiMode.name.lowercase()} UI on http://$urlHost:${server.serverPort}$basePath")
 }
 
 private fun printHelp() {
@@ -537,7 +555,7 @@ private fun printHelp() {
           llm_bin_patch explore <binary> --reports <directory> [--arg <value>] [--stdin <value>]
           llm_bin_patch reconstruct <binary> --output <directory> [--evidence-only] [--max-context-chars <count>] [--harness acp|legacy-openai]
           llm_bin_patch gcc-engine-plan <cc1|lto1> <stripped-binary> --profile <file> --ghidra-archive <file> --ghidra-home <directory> --output <directory>
-          llm_bin_patch web [--host 127.0.0.1] [--port 8000] [--data-dir .decomp_engine/jobs]
+          llm_bin_patch web [--host 127.0.0.1] [--port 8000] [--data-dir .decomp_engine/jobs] [--ui legacy|spa] [--base-path /]
 
         Agent harness selection for doctor, patch, reconstruction, and repair:
           --harness acp            use the ACP agent provisioned by ACP_CONFIG_FILE (default)

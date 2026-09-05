@@ -87,6 +87,11 @@ The script uses the no-network, read-only `fixture-builder` profile with a bound
 
 ## Browser GUI
 
+Building the application now also builds its embedded Preact UI. Use the pinned
+Node/npm toolchain in [frontend/README.md](frontend/README.md), or pass
+`-PfrontendNodeHome=/absolute/path/to/node-v24.20.0-linux-x64` to Gradle. Node is
+not needed to run the installed application.
+
 Start the local workbench and open `http://127.0.0.1:8000`:
 
 ```bash
@@ -103,6 +108,10 @@ described in [docs/acp-v1-client.md](docs/acp-v1-client.md#production-gate-helpe
 The GUI provides persistent ELF uploads, recent-job navigation, metadata inspection, background automatic exploration, archival source-tree reconstruction, live status refresh, source browsing, coverage and confidence evidence, repair history, and verified archive downloads. Uploaded binaries are only executed after selecting **Start automatic exploration**, using the same mandatory sandbox as the CLI. Job data defaults to `.decomp_engine/jobs`; change it with `--data-dir`.
 
 For a non-Docker angr installation, set `ANGR_PYTHON` to the Python executable that can import angr before starting the GUI.
+
+An early embedded SPA preview is available with `web --ui spa`; it serves the
+public shell and runtime view while job/workflow parity is developed. The default
+remains the existing workbench. See [packaging and preview usage](docs/web-packaging.md).
 
 ## Archival source-tree reconstruction
 
