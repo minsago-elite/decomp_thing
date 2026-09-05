@@ -196,6 +196,52 @@ The packaged polling journey passed with the pinned browser:
 [`web-progress-http-20260905.json`](evidence/web-progress-http-20260905.json).
 It reads the new endpoints from an authenticated browser tab, verifies the exact
 attempt/writer distinction and unsigned usage value, and confirms journal bytes
-are unchanged. Chrome used test-only `--no-sandbox`. The UI has no activity panel
-yet; these browser reads do not establish automatic reconnection, SSE, long-lived
-slow-client behavior or full #174 completion.
+are unchanged. Chrome used test-only `--no-sandbox`. That checkpoint qualified endpoint reads
+only. It did not establish automatic reconnection, SSE, long-lived slow-client
+behavior or full #174 completion. The later activity UI checkpoint follows.
+
+
+## Retained activity UI and bounded continuation
+
+Attempt pages now offer opt-in polling with pause/resume. The view reads an
+identity-bound snapshot, starts at its oldest retained cursor, and follows the
+journal with one read at a time and a 2.5-second delay between reads. Attempt
+state and acceptance are explicitly labeled as values at the snapshot; observed
+phases never override them. Exact queue/history omission counts remain visible.
+Missing counts do not imply complete history, and no percentage is inferred.
+
+The display holds at most 200 observations. Reaching that bound pauses reads and
+changes the same focused control to **Continue activity on next page**. Explicit
+continuation replaces the displayed rows while retaining the cursor and last
+observation for cross-page sequence checks. It does not restart at the oldest
+record. Pause/resume keeps the current page. Conflicting replay, noncontiguous
+continuation and incorrect attempt binding fail closed. Retention gaps require
+an explicit fresh-history read; this replaces the old position and snapshot.
+Unmount cancels reads and timers; session denial clears retained activity.
+
+All message text remains withheld because the journal lacks an explicit public
+visibility guarantee. This includes thought, system, assistant and unknown
+roles. Current rows show observation metadata and available task/revision IDs;
+public messages, plans/tool summaries, durable evidence links and full stage
+presentation remain part of #175. A missing task/revision is labeled rather
+than guessed. The list is outside a live region; a short polite status reports
+following/paused state and the bounded row count.
+
+The packaged history journey uses 205 inert persisted observations, including a
+thought-role message, without starting a workflow. It proves exact 200/5 page
+ordering, native Enter activation, focus preservation, no requests during a
+three-second pause or after route departure, resumed idle polling without
+repeated rows, text withholding and a polite accessibility-tree status. Journal,
+report and installation bytes remain unchanged. Evidence:
+[`web-activity-ui-20260905.json`](evidence/web-activity-ui-20260905.json), UI build
+`f39cdd2f9270c3a4291c61e4fd2f0c743f53978e021f7cdbc6b36774893f5b9e`.
+Chrome used test-only `--no-sandbox`; the packaged application ran without Node
+or npm on its PATH. Shutdown and owned-work cleanup were confirmed.
+
+222 frontend tests, lint and typechecked `distZip` passed. Focused tests also
+cover a gap across the display boundary and activity cleanup on explicit
+session logout. The first browser attempt failed because the driver omitted
+the Enter character; correcting that input produced the retained passing run.
+Manual screen-reader behavior, live producer scenarios, restart/reconnect,
+multiple tabs and long-running qualification remain outstanding. This scoped
+evidence does not close #174 or #175.

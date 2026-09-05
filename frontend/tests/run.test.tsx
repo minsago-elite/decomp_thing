@@ -109,3 +109,23 @@ it('refuses evidence for another attempt without presenting its summary', async 
   expect(await screen.findByRole('alert')).toHaveProperty('textContent', 'The report does not belong to the requested attempt.');
   expect(screen.queryByText('Producer confidence score')).toBeNull();
 });
+
+
+it('clears activity and cancels its reads on explicit session logout', async () => {
+  const auth = await session();
+  const snapshot = JSON.parse(readFileSync(resolve(process.cwd(), '../contracts/web/v1/fixtures/snapshot-progress-omissions.json'), 'utf8')) as unknown;
+  const events = JSON.parse(readFileSync(resolve(process.cwd(), '../contracts/web/v1/fixtures/events-observation-poll.json'), 'utf8')) as unknown;
+  transport.get.mockImplementation(kind => Promise.resolve(kind === 'run' ? { data: sample } : kind === 'snapshot' ? snapshot : events));
+  history.replaceState(null, '', `/nested/jobs/${sample.jobId}/runs/${sample.runId}`);
+  try {
+    render(<App basePath="/nested" session={auth} />);
+    fireEvent.click(await screen.findByRole('button', { name: 'Follow activity' }));
+    expect(await screen.findByText('Sequence 9007199254740993')).toBeTruthy();
+    const signal = transport.get.mock.calls.find(call => call[0] === 'events')![2].signal;
+    fireEvent.click(screen.getByRole('button', { name: 'Sign out' }));
+    expect(await screen.findByText('Connect a local session to view this attempt.')).toBeTruthy();
+    expect(screen.queryByText('Sequence 9007199254740993')).toBeNull();
+    expect(screen.queryByRole('button', { name: 'Pause activity' })).toBeNull();
+    expect(signal.aborted).toBe(true);
+  } finally { auth.dispose(); }
+});

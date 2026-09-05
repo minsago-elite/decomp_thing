@@ -44,9 +44,9 @@ export async function seedHistory(root) {
   const reportPath = join(reportDirectory, 'exploration.json');
   await fs.writeFile(reportPath, exploration, { flag: 'wx', mode: 0o600 });
   const progressPath = join(reportDirectory, 'agent-progress.json');
-  const progress = JSON.stringify({ schemaVersion: 1, displayOnly: true, nextSequence: 3, queueDropped: 0, historyDropped: 0, truncated: false,
-    events: [0, 1, 2].map(sequence => ({ sequence, runId: 'writer_fixture_progress', workflow: 'reconstruct', time: at,
-      kind: 'workflow_phase', phase: 'planning', text: `Synthetic progress ${sequence}`, inputTokens: '18446744073709551615' })) });
+  const progress = JSON.stringify({ schemaVersion: 1, displayOnly: true, nextSequence: 205, queueDropped: 0, historyDropped: 0, truncated: false,
+    events: Array.from({ length: 205 }, (_, sequence) => ({ sequence, runId: 'writer_fixture_progress', workflow: 'reconstruct', time: at,
+      kind: sequence === 1 ? 'message' : 'workflow_phase', ...(sequence === 1 ? { role: 'thought' } : { phase: 'planning' }), text: `Synthetic private content ${sequence}`, inputTokens: '18446744073709551615' })) });
   await fs.writeFile(progressPath, progress, { flag: 'wx', mode: 0o600 });
   return { jobId, directory, retained, count: attempts.length, reportPath, exploration, progressPath, progress };
 }
@@ -80,14 +80,51 @@ export async function qualifyHistory({ fixture, makeTarget, cdp, evaluate, ready
   })()`);
   assert.equal(polling.snapshot.run.runId, 'run_fixture_3');
   assert.equal(polling.snapshot.progress.authority, 'observations');
-  assert.equal(polling.snapshot.progress.retainedEventCount, '3');
+  assert.equal(polling.snapshot.progress.retainedEventCount, '205');
   assert.deepEqual(polling.first.items.map(event => event.sequence), ['0', '1']);
-  assert.deepEqual(polling.second.items.map(event => event.sequence), ['2']);
+  assert.deepEqual(polling.second.items.map(event => event.sequence), Array.from({ length: 50 }, (_, index) => String(index + 2)));
+  assert.equal(polling.second.hasMore, true);
   assert.equal(polling.first.items[0].payload.fields.inputTokens, '18446744073709551615');
   assert.equal(polling.first.items[0].runId, 'run_fixture_3');
   assert.equal(polling.first.items[0].payload.writerId, 'writer_fixture_progress');
   assert.deepEqual(polling.idle.items, []);
   assert.equal(await fs.readFile(fixture.progressPath, 'utf8'), fixture.progress);
+  // Exercise the rendered UI, not only direct endpoint reads. All data is an inert fixture.
+  const activityRows = `Array.from(document.querySelectorAll('ol[aria-label="Activity observations"] li span')).map(row => row.textContent)`;
+  const progressRequests = () => tab.requests.filter(request => request.url.endsWith('/events') || request.url.endsWith('/snapshot')).length;
+  await evaluate(tab, `[...document.querySelectorAll('button')].find(b => b.textContent === 'Follow activity').focus()`);
+  await cdp.call('Input.dispatchKeyEvent', { type: 'keyDown', text: '\r', key: 'Enter', code: 'Enter', windowsVirtualKeyCode: 13 }, tab.sessionId);
+  await cdp.call('Input.dispatchKeyEvent', { type: 'keyUp', key: 'Enter', code: 'Enter', windowsVirtualKeyCode: 13 }, tab.sessionId);
+  await ready(tab, `(${activityRows}).length === 200`, 'bounded activity first page');
+  assert.deepEqual(await evaluate(tab, activityRows), Array.from({ length: 200 }, (_, index) => `Sequence ${index}`));
+  assert.equal(await evaluate(tab, 'document.activeElement.textContent'), 'Continue activity on next page');
+  assert.equal(await evaluate(tab, `document.body.innerText.includes('Synthetic private content')`), false);
+  assert.ok(await evaluate(tab, `document.body.innerText.includes('Attempt state at snapshot: completed. Acceptance at snapshot: not-evaluated.')`));
+  const atBound = progressRequests();
+  assert.ok(atBound >= 6, 'Progress request accounting must include endpoint and UI reads');
+  await new Promise(resolve => setTimeout(resolve, 3000));
+  assert.equal(progressRequests(), atBound, 'Display bound must stop polling');
+  await evaluate(tab, `document.activeElement.click()`);
+  await ready(tab, `(${activityRows}).length === 5`, 'activity continuation after display bound');
+  assert.deepEqual(await evaluate(tab, activityRows), Array.from({ length: 5 }, (_, index) => `Sequence ${index + 200}`));
+  assert.equal(await evaluate(tab, 'document.activeElement.textContent'), 'Pause activity');
+  await evaluate(tab, `document.activeElement.click()`);
+  await ready(tab, `document.activeElement.textContent === 'Resume activity'`, 'paused activity control');
+  const atPause = progressRequests();
+  await new Promise(resolve => setTimeout(resolve, 3000));
+  assert.equal(progressRequests(), atPause, 'Pause must release the polling timer');
+  await evaluate(tab, `document.activeElement.click()`);
+  await ready(tab, `document.activeElement.textContent === 'Pause activity'`, 'resumed activity control');
+  const resumeDeadline = Date.now() + 10000;
+  while (progressRequests() < atPause + 2) {
+    assert.ok(Date.now() < resumeDeadline, 'Resumed activity did not perform an idle continuation poll');
+    await new Promise(resolve => setTimeout(resolve, 50));
+  }
+  assert.deepEqual(await evaluate(tab, activityRows), Array.from({ length: 5 }, (_, index) => `Sequence ${index + 200}`));
+  assert.equal(await evaluate(tab, 'document.activeElement.textContent'), 'Pause activity');
+  const accessibility = await cdp.call('Accessibility.getFullAXTree', {}, tab.sessionId);
+  assert.ok(accessibility.nodes.some(node => node.role?.value === 'status' && node.properties?.some(property => property.name === 'live' && property.value.value === 'polite')));
+  assert.equal(await evaluate(tab, `document.querySelector('ol[aria-label="Activity observations"]').closest('[aria-live], [role="status"], [role="log"]') === null`), true);
   await evaluate(tab, `[...document.querySelectorAll('button')].find(b => b.textContent === 'Read exploration evidence').click()`);
   await ready(tab, `document.body.innerText.includes('Report state: available. Authority: observations.') && document.body.innerText.includes('Producer confidence score')`, 'bound exploration summary');
   assert.ok(await evaluate(tab, `document.body.innerText.includes('not proof of equivalence')`));
@@ -107,11 +144,15 @@ export async function qualifyHistory({ fixture, makeTarget, cdp, evaluate, ready
   await evaluate(tab, `[...document.querySelectorAll('a')].find(a => a.textContent === 'Open previous attempt').click()`);
   await ready(tab, `document.body.innerText.includes('PROCESS_INTERRUPTED')`, 'previous interrupted attempt');
   assert.equal(await evaluate(tab, 'location.pathname'), `${path}/run_fixture_2`);
+  assert.deepEqual(await evaluate(tab, activityRows), []);
+  const afterNavigation = progressRequests();
+  await new Promise(resolve => setTimeout(resolve, 3000));
+  assert.equal(progressRequests(), afterNavigation, 'Leaving an attempt must stop its activity polling');
   assert.ok(tab.requests.every(request => ['GET', 'HEAD'].includes(request.method)));
   assert.deepEqual(tab.exceptions, []);
   for (const [name, bytes] of Object.entries(fixture.retained)) assert.deepEqual(await fs.readFile(join(fixture.directory, name)), Buffer.from(bytes));
   assert.deepEqual((await fs.readdir(fixture.directory)).sort(), [...Object.keys(fixture.retained), 'reports'].sort());
-  return { progressPolling: true, progressBytesUnchanged: true, fixtureAttempts: 55, firstPage: 50, secondPage: 5, exactOrder: true, cursorReload: true,
+  return { activityUi: { firstPage: 200, continuationPage: 5, keyboardStart: true, focusPreserved: true, pauseStopsPolling: true, resumeWithoutDuplicates: true, navigationStopsPolling: true, privateTextWithheld: true, politeStatusOnly: true }, progressPolling: true, progressBytesUnchanged: true, fixtureAttempts: 55, firstPage: 50, secondPage: 5, exactOrder: true, cursorReload: true,
     earlierAttemptReload: true, previousInterruptedAttempt: true, exactUnsignedUsage: true,
     unacceptedCandidate: true, explorationSummary: true, nativeReportDownload: true, downloadedBytesMatch: true, reportBytesUnchanged: true, retainedBytesUnchanged: true, mutationRequests: 0, executionStarted: false };
 }

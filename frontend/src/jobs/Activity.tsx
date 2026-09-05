@@ -12,7 +12,7 @@ export function Activity({ jobId, runId, basePath }: { jobId: string; runId: str
   const [rows, setRows] = useState<WebEvent[]>([]);
   const [error, setError] = useState('');
   const [reset, setReset] = useState(0);
-  const position = useRef<{ initialized: boolean; cursor: string | null; rows: WebEvent[] }>({ initialized: false, cursor: null, rows: [] });
+  const position = useRef<{ initialized: boolean; cursor: string | null; rows: WebEvent[]; last: WebEvent | null }>({ initialized: false, cursor: null, rows: [], last: null });
   useEffect(() => {
     if (!following) return;
     const controller = new AbortController();
@@ -25,7 +25,7 @@ export function Activity({ jobId, runId, basePath }: { jobId: string; runId: str
           if (controller.signal.aborted) return;
           if (data.run.jobId !== jobId || data.run.runId !== runId) throw new Error('binding');
           setSnapshot(data);
-          position.current = { initialized: true, cursor: data.oldestCursor ?? data.throughCursor, rows: [] };
+          position.current = { initialized: true, cursor: data.oldestCursor ?? data.throughCursor, rows: [], last: null };
         }
         const previous = position.current;
         const query = new URLSearchParams({ limit: String(capacity - previous.rows.length) });
@@ -33,10 +33,10 @@ export function Activity({ jobId, runId, basePath }: { jobId: string; runId: str
         const { data } = await client.get('events', `${path}/events?${query}`, { signal: controller.signal });
         if (controller.signal.aborted) return;
         const added: WebEvent[] = [];
-        let last = previous.rows.at(-1);
+        let last = previous.last;
         for (const event of data.items) {
           if (event.jobId !== jobId || event.runId !== runId || event.sequence === null || event.cursor === null) throw new Error('binding');
-          const duplicate = previous.rows.find(row => row.cursor === event.cursor || row.sequence === event.sequence);
+          const duplicate = [...previous.rows, ...(previous.last ? [previous.last] : [])].find(row => row.cursor === event.cursor || row.sequence === event.sequence);
           if (duplicate) {
             if (JSON.stringify(duplicate) !== JSON.stringify(event)) throw new Error('conflicting replay');
             continue;
@@ -46,14 +46,14 @@ export function Activity({ jobId, runId, basePath }: { jobId: string; runId: str
         }
         const next = [...previous.rows, ...added];
         if (next.length > capacity) throw new Error('capacity');
-        position.current = { initialized: true, cursor: data.nextCursor ?? previous.cursor, rows: next };
+        position.current = { initialized: true, cursor: data.nextCursor ?? previous.cursor, rows: next, last };
         setRows(next);
         if (next.length === capacity) { setFollowing(false); return; }
         timer = setTimeout(() => { void poll(); }, 2500);
       } catch (failure: unknown) {
         if (controller.signal.aborted) return;
         if (failure instanceof ApiClientError && (failure.status === 401 || failure.status === 403)) {
-          position.current = { initialized: false, cursor: null, rows: [] }; setRows([]); setSnapshot(null);
+          position.current = { initialized: false, cursor: null, rows: [], last: null }; setRows([]); setSnapshot(null);
         }
         setError(failure instanceof ApiClientError && failure.serverCode === 'PROGRESS_GAP'
           ? 'Retained history has a gap. Read a fresh history to establish a new position.'
@@ -68,16 +68,20 @@ export function Activity({ jobId, runId, basePath }: { jobId: string; runId: str
   return <section aria-labelledby="activity-title">
     <h2 id="activity-title">Retained activity</h2>
     <p>Journal observations do not establish validation or acceptance. Message text is withheld because the journal does not certify public visibility.</p>
-    <button type="button" disabled={!!error || rows.length === capacity} onClick={() => setFollowing(value => !value)}>
-      {following ? 'Pause activity' : position.current.initialized ? 'Resume activity' : 'Follow activity'}
+    <button type="button" disabled={!!error} onClick={() => {
+      if (rows.length === capacity) {
+        position.current = { ...position.current, rows: [] }; setRows([]); setFollowing(true);
+      } else setFollowing(value => !value);
+    }}>
+      {rows.length === capacity ? 'Continue activity on next page' : following ? 'Pause activity' : position.current.initialized ? 'Resume activity' : 'Follow activity'}
     </button>{' '}
     <button type="button" onClick={() => {
-      position.current = { initialized: false, cursor: null, rows: [] };
+      position.current = { initialized: false, cursor: null, rows: [], last: null };
       setRows([]); setSnapshot(null); setError(''); setReset(value => value + 1); setFollowing(true);
     }}>Read fresh activity history</button>
     <p role="status">{following ? 'Following retained activity.' : 'Activity paused.'} {rows.length} of at most {capacity} observations displayed.</p>
     {error && <p role="alert">{error}</p>}
-    {rows.length === capacity && <p>Display limit reached. Your position is preserved; reading a fresh history replaces these rows.</p>}
+    {rows.length === capacity && <p>Display limit reached. Continue activity on the next page to replace these rows while preserving the cursor.</p>}
     {snapshot && <>
       <p>Attempt state at snapshot: {snapshot.run.state}. Acceptance at snapshot: {snapshot.run.acceptance}.</p>
       {snapshot.progress ? <p>Journal boundary: {snapshot.progress.nextSequence}. Queue omissions: {snapshot.progress.queueDropped}. Retention omissions: {snapshot.progress.historyDropped}. Retained at snapshot: {snapshot.progress.retainedEventCount}.</p>

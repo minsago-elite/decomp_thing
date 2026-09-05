@@ -67,7 +67,7 @@ it('refuses cross-attempt content and aborts requests when unmounted', async () 
 });
 
 
-it('stops at the display bound without discarding retained rows', async () => {
+it.each([200, 201])('preserves the display boundary and checks the next page starts contiguously (%s)', async nextSequence => {
   const page = structuredClone(events);
   const original = page.data.items[0]!;
   page.data.items = Array.from({ length: 200 }, (_, index) => ({ ...original, sequence: String(index), cursor: `cursor_${index}` }));
@@ -76,8 +76,20 @@ it('stops at the display bound without discarding retained rows', async () => {
   mount(); fireEvent.click(screen.getByRole('button', { name: 'Follow activity' }));
   expect(await screen.findByText(/Display limit reached/)).toBeTruthy();
   expect(screen.getAllByRole('listitem')).toHaveLength(200);
-  expect(screen.getByRole('button', { name: 'Resume activity' })).toHaveProperty('disabled', true);
   expect(transport.get).toHaveBeenCalledTimes(2);
+  const next = structuredClone(events);
+  next.data.items[0]!.sequence = String(nextSequence); next.data.items[0]!.cursor = 'cursor_200';
+  next.data.nextCursor = 'cursor_200'; transport.get.mockResolvedValueOnce(next);
+  const button = screen.getByRole('button', { name: 'Continue activity on next page' }); button.focus(); fireEvent.click(button);
+  if (nextSequence === 200) {
+    expect(await screen.findByText('Sequence 200')).toBeTruthy();
+    expect(screen.getAllByRole('listitem')).toHaveLength(1);
+  } else {
+    expect(await screen.findByRole('alert')).toBeTruthy();
+    expect(screen.queryAllByRole('listitem')).toHaveLength(0);
+  }
+  expect(transport.get.mock.calls[2]![1]).toContain('cursor=cursor_199');
+  if (nextSequence === 200) expect(document.activeElement).toBe(button);
 });
 
 it('rejects a discontinuous continuation without changing the displayed position', async () => {
