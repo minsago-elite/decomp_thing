@@ -68,7 +68,7 @@ class LlvmBehaviorHostedWorkerImageLiveIntegrationTest {
         assertTrue(workflow.contains("$DOCKER_EXECUTABLE_ENVIRONMENT: /usr/bin/docker"))
         assertTrue(workflow.contains("$DOCKER_HOST_ENVIRONMENT: unix:///var/run/docker.sock"))
         assertTrue(workflow.contains("$TOOLCHAIN_IMAGE_ENVIRONMENT: \${{ env.LLVM_TOOLCHAIN_IMAGE_ID }}"))
-        assertTrue(workflow.contains("$JDK_ROOT_ENVIRONMENT: /opt/decomp-llvm-hosted-worker-jdk"))
+        assertTrue(workflow.contains("$JDK_ROOT_ENVIRONMENT: /var/lib/decomp-llvm-hosted-worker-jdk"))
         assertTrue(workflow.contains("sudo cp --archive --no-preserve=ownership,links"))
         assertFalse(workflow.contains("cp --archive --dereference"))
         assertTrue(workflow.contains("test \"\$cacerts_target\" = /etc/ssl/certs/adoptium/cacerts"))

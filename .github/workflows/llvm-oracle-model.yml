@@ -81,9 +81,16 @@ jobs:
           DECOMP_LLVM_HOSTED_WORKER_DOCKER: /usr/bin/docker
           DECOMP_LLVM_HOSTED_WORKER_DOCKER_HOST: unix:///var/run/docker.sock
           DECOMP_LLVM_HOSTED_WORKER_TOOLCHAIN_IMAGE: ${{ env.LLVM_TOOLCHAIN_IMAGE_ID }}
-          DECOMP_LLVM_HOSTED_WORKER_JDK_ROOT: /opt/decomp-llvm-hosted-worker-jdk
+          DECOMP_LLVM_HOSTED_WORKER_JDK_ROOT: /var/lib/decomp-llvm-hosted-worker-jdk
         run: |
-          hosted_jdk=/opt/decomp-llvm-hosted-worker-jdk
+          hosted_jdk=/var/lib/decomp-llvm-hosted-worker-jdk
+          for jdk_ancestor in / /var /var/lib; do
+            test -d "$jdk_ancestor"
+            test ! -L "$jdk_ancestor"
+            test "$(stat -c '%u' -- "$jdk_ancestor")" = 0
+            ancestor_mode="$(stat -c '%a' -- "$jdk_ancestor")"
+            test "$((8#$ancestor_mode & 8#022))" = 0
+          done
           sudo test ! -e "$hosted_jdk"
           sudo install -d -m 0700 "$hosted_jdk"
           # Preserve links so an external target cannot silently enter the JDK copy.
@@ -170,3 +177,10 @@ jobs:
             tests.oracle.test_gcc_oracle_artifacts \
             tests.oracle.test_function_recovery_oracle_generation \
             tests.oracle.test_behavior_corpus -v
+      - uses: actions/upload-artifact@v7
+        if: always()
+        with:
+          name: llvm-oracle-test-reports
+          path: |
+            build/reports/tests/test
+            build/test-results/test

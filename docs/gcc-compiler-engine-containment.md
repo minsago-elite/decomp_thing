@@ -42,7 +42,7 @@ START, compiler execution, export, scoring, output-lease release, ACP authority,
 or cold reopen of an attached/terminal operation.
 
 The hosted CI job provisions this runtime with `scripts/ci-prepare-oracle-runtime.sh` before any
-live containment test. It copies the setup-java JDK into a separate root-owned `/opt` directory,
+live containment test. It copies the setup-java JDK into a separate root-owned `/var/lib` directory,
 sets the test JVM's `JAVA_HOME`, and makes the fixed system-library trees recursively root-owned
 without group or world write permission. This provisioning is specific to the disposable trusted
 runner image: a mutable toolcache JDK or an untrusted entry anywhere under `/usr/lib` cannot serve

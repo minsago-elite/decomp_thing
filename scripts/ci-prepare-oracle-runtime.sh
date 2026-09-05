@@ -23,7 +23,7 @@ for command in chmod chown cp find install realpath stat sudo; do
   }
 done
 
-trusted_java_home=/opt/decomp-oracle-ci-java
+trusted_java_home=/var/lib/decomp-oracle-ci-java
 source_java_home="$(realpath -e -- "$JAVA_HOME")"
 if [[ ! -x "$source_java_home/bin/java" || ! -x "$source_java_home/bin/javac" ]]; then
   echo "setup-java did not provide a complete JDK" >&2
@@ -49,7 +49,7 @@ require_trusted_directory() {
   fi
 }
 
-for ancestor in / /opt /usr; do
+for ancestor in / /var /var/lib /usr; do
   require_trusted_directory "$ancestor"
 done
 
