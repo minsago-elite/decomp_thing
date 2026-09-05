@@ -128,3 +128,24 @@ describe('bounded v1 fetch client', () => {
     expect(fetcher).not.toHaveBeenCalled();
   });
 });
+
+it('uploads browser multipart once with CSRF and retained intent but no resource precondition', async () => {
+  const fetcher = vi.fn<typeof fetch>().mockResolvedValue(response('job-lossless', 201));
+  const client = createApiClient({ basePath: '/nested', fetch: fetcher, timeoutMs: 120_000 });
+  const file = new File(['synthetic'], 'sample.elf');
+  const settings = { csrfToken: 'c'.repeat(32), idempotencyKey: 'k'.repeat(32) };
+  await client.upload(file, settings);
+  const [url, init] = fetcher.mock.calls[0]!;
+  expect(url).toBe('/nested/api/v1/jobs');
+  expect(init).toMatchObject({ method: 'POST', redirect: 'error', mode: 'same-origin', credentials: 'same-origin' });
+  const headers = new Headers(init?.headers);
+  expect(headers.get('Content-Type')).toBeNull();
+  expect(headers.get('If-Match')).toBeNull();
+  expect(headers.get('X-CSRF-Token')).toBe(settings.csrfToken);
+  expect(headers.get('Idempotency-Key')).toBe(settings.idempotencyKey);
+  expect([...(init?.body as FormData).keys()]).toEqual(['binary']);
+  expect(((init?.body as FormData).get('binary') as File).name).toBe(file.name);
+  await expect(client.upload(file, { ...settings, ifMatch: '"old"' })).rejects.toMatchObject({ code: 'invalid_request' });
+  await expect(client.upload(file, {})).rejects.toMatchObject({ code: 'invalid_request' });
+  expect(fetcher).toHaveBeenCalledOnce();
+});

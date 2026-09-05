@@ -1,5 +1,6 @@
 import type { BrowserSession } from '../session/session';
 import { useSession } from '../session/useSession';
+import { Upload } from '../jobs/Upload';
 import { Dashboard } from '../jobs/Dashboard';
 export default function Home({ basePath = '', session = null }: { basePath?: string; session?: BrowserSession | null }) {
   const state = useSession(session);
@@ -10,6 +11,7 @@ export default function Home({ basePath = '', session = null }: { basePath?: str
       <p class="lead">
         Review reconstructed source, inspect validation evidence, and follow each revision.
       </p>
+      {session && <Upload basePath={basePath} session={session} />}
       {state?.status === 'authenticated' ? <Dashboard basePath={basePath} /> : <div class="notice" aria-labelledby="availability-title">
         <h2 id="availability-title">The workbench shell is ready</h2>
         <p>

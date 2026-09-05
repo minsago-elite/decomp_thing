@@ -33,7 +33,7 @@ support; an explicit unavailable/unsupported report may carry its version withou
 These client checks validate contract consistency, not the authenticity of execution or acceptance.
 
 `createApiClient({basePath})` uses same-origin `/api/v1` URLs, credentials, JSON negotiation and
-`X-Request-ID` correlation. It exposes typed `get`, `post` and `deleteSession` calls. `get`/`post`
+`X-Request-ID` correlation. It exposes typed `get`, `post`, `upload` and `deleteSession` calls. `get`/`post`
 return the entire typed response envelope. HTTP errors expose `ApiClientError` with a local `code`,
 optional HTTP `status`, bounded `requestId` and server `serverCode`; errors omit bodies, URLs,
 server messages and tokens. Current mutation requests require explicit in-memory CSRF, an
@@ -76,3 +76,11 @@ error. Cursors and identity strings are never converted to numbers or decoded re
 checks. `tests/api-client.test.ts` uses in-process synthetic responses for headers, identity,
 errors, cancellation, byte bounds and no-retry behavior. These are client tests; they do not replace
 golden HTTP/server tests, packaged-browser checks or the remaining #159 endpoint surface.
+
+`upload(file, settings)` sends one browser-owned multipart `binary` part and requires CSRF
+and a caller-retained idempotency key. It rejects If-Match because it creates a resource.
+The browser chooses the Content-Type boundary; response decoding, byte limits, redirect
+rejection and cancellation use the same bounded transport. Only `201 job` confirms upload
+publication. Upload views use a 120-second deadline and retain their File/key in memory
+for explicit retries. Fetch provides no reliable upload-byte progress; the view reports
+an indeterminate transfer/publication wait without inventing a percentage.

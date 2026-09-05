@@ -61,20 +61,21 @@ export function createApiClient(options: ClientOptions) {
     || !Number.isSafeInteger(maxBytes) || maxBytes < 1 || maxBytes > MAX_JSON_BYTES) throw new ApiClientError('invalid_request');
   const fetcher = options.fetch ?? globalThis.fetch.bind(globalThis);
 
-  async function request<K extends ResponseKind>(kind: K | null, path: string, method: 'GET' | 'POST' | 'DELETE', body: string | undefined, settings: MutationOptions, session = false): Promise<ResponseOf<K> | undefined> {
+  async function request<K extends ResponseKind>(kind: K | null, path: string, method: 'GET' | 'POST' | 'DELETE', body: string | FormData | undefined, settings: MutationOptions, session = false, upload = false): Promise<ResponseOf<K> | undefined> {
     let url: string;
     try { url = apiPath(basePath, path); } catch { throw new ApiClientError('invalid_request'); }
     if (session && path !== '/session') throw new ApiClientError('invalid_request');
     const headers = new Headers({ Accept: 'application/json' });
-    if (method !== 'GET') headers.set('Content-Type', 'application/json');
+    if (method !== 'GET' && !upload) headers.set('Content-Type', 'application/json');
     if (method !== 'GET') {
-      if (!session && settings.ifMatch === undefined) throw new ApiClientError('invalid_request');
+      if (!session && !upload && settings.ifMatch === undefined) throw new ApiClientError('invalid_request');
       if (!session && (!settings.idempotencyKey || !/^[A-Za-z0-9_-]{16,128}$/.test(settings.idempotencyKey))) throw new ApiClientError('invalid_request');
       if ((!session || method === 'DELETE') && (!settings.csrfToken || !/^[A-Za-z0-9_-]{32,256}$/.test(settings.csrfToken))) throw new ApiClientError('invalid_request');
       if (settings.idempotencyKey !== undefined && !/^[A-Za-z0-9_-]{16,128}$/.test(settings.idempotencyKey)) throw new ApiClientError('invalid_request');
       if (settings.csrfToken !== undefined && !/^[A-Za-z0-9_-]{32,256}$/.test(settings.csrfToken)) throw new ApiClientError('invalid_request');
       if (settings.idempotencyKey) headers.set('Idempotency-Key', settings.idempotencyKey);
       if (settings.csrfToken) headers.set('X-CSRF-Token', settings.csrfToken);
+      if (upload && settings.ifMatch !== undefined) throw new ApiClientError('invalid_request');
       if (settings.ifMatch !== undefined) {
         if (!/^"[A-Za-z0-9][A-Za-z0-9_-]{0,127}"$/.test(settings.ifMatch)) throw new ApiClientError('invalid_request');
         headers.set('If-Match', settings.ifMatch);
@@ -111,7 +112,7 @@ export function createApiClient(options: ClientOptions) {
       const document = decodeContract(await boundedBody(response, maxBytes, controller.signal), { maxBytes, basePath });
       if (!('requestId' in document) || document.requestId !== requestId) throw new ApiClientError('invalid_headers');
       if (document.kind === 'error') throw new ApiClientError('http_error', { serverCode: document.error.code });
-      if (!response.ok || document.kind !== kind) throw new ApiClientError('unexpected_response');
+      if (!response.ok || (upload && response.status !== 201) || document.kind !== kind) throw new ApiClientError('unexpected_response');
       return document as ResponseOf<K>;
     };
     try {
@@ -138,6 +139,11 @@ export function createApiClient(options: ClientOptions) {
     async post<K extends ResponseKind, Q extends RequestKind>(kind: K, path: string, requestKind: Q, data: RequestData<Q>, settings: MutationOptions = {}): Promise<ResponseOf<K>> {
       const session = requestKind === 'sessionStartRequest';
       return await request(kind, path, 'POST', encodeRequest(requestKind, data), settings, session) as ResponseOf<K>;
+    },
+    async upload(file: File, settings: MutationOptions): Promise<ResponseOf<'job'>> {
+      const body = new FormData();
+      body.append('binary', file, file.name);
+      return await request('job', '/jobs', 'POST', body, settings, false, true) as ResponseOf<'job'>;
     },
     async deleteSession(settings: RequestOptions & { csrfToken: string }): Promise<void> {
       await request(null, '/session', 'DELETE', undefined, settings, true);

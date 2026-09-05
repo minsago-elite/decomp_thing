@@ -6,6 +6,7 @@ import { join, basename, dirname, isAbsolute, resolve } from 'node:path';
 import { createServer as createHttpServer } from 'node:http';
 import { fileURLToPath } from 'node:url';
 import { parseArgs } from 'node:util';
+import { qualifyUpload } from './packaged-browser-upload.mjs';
 import { qualifyUpgrade } from './packaged-browser-upgrade.mjs';
 
 // Test driver only: the application is launched with a separate Node-free PATH.
@@ -23,8 +24,8 @@ const { values } = parseArgs({ options: {
   help: { type: 'boolean', default: false },
 } });
 if (values.help) {
-  console.log('Usage: node scripts/check-packaged-web-browser.mjs --archive /absolute/distribution.zip --chrome /absolute/chrome --java-home /absolute/jdk [--mode public|session|proxy|upgrade] [--previous-archive /absolute/previous.zip] [--work-parent /absolute/scratch] [--keep-workdir] [--python /absolute/python3] [--no-sandbox]');
-  console.log('public: packaged home/Runtime/recovery; session: public plus local session journey; proxy: real Vite HMR and session journey against packaged JVM; upgrade: previous JVM to current JVM on one origin with an old tab.');
+  console.log('Usage: node scripts/check-packaged-web-browser.mjs --archive /absolute/distribution.zip --chrome /absolute/chrome --java-home /absolute/jdk [--mode public|session|upload|proxy|upgrade] [--previous-archive /absolute/previous.zip] [--work-parent /absolute/scratch] [--keep-workdir] [--python /absolute/python3] [--no-sandbox]');
+  console.log('public: packaged home/Runtime/recovery; session: public plus local session journey; upload: session plus inert upload and lost-response retry; proxy: real Vite HMR and session journey against packaged JVM; upgrade: previous JVM to current JVM on one origin with an old tab.');
   console.log('upgrade requires --previous-archive and distinct manifest builds with the old Runtime chunk absent from --archive. Its previous extraction is always removed before the current extraction, even with --keep-workdir.');
   console.log('Reports/screenshots stay in build/. Owned extraction/profile/socket directories are removed after confirmed shutdown unless --keep-workdir is set. Proxy requires npm ci --ignore-scripts under the pinned Node beforehand.');
   process.exit(0);
@@ -36,7 +37,7 @@ for (const option of ['archive', 'chrome', 'java-home', 'python']) {
   assert.ok(values[option] && isAbsolute(values[option]), `--${option} must name an absolute existing path; see --help`);
   await fs.access(values[option]);
 }
-assert.ok(['public', 'session', 'proxy', 'upgrade'].includes(values.mode), '--mode must be public, session, proxy or upgrade');
+assert.ok(['public', 'session', 'upload', 'proxy', 'upgrade'].includes(values.mode), '--mode must be public, session, upload, proxy or upgrade');
 if (values.mode === 'upgrade') {
   assert.ok(values['previous-archive'] && isAbsolute(values['previous-archive']), 'upgrade requires --previous-archive as an absolute existing ZIP path');
   await fs.access(values['previous-archive']);
@@ -420,7 +421,7 @@ try {
     report.requests.upgrade = tab.requests;
     report.jobDataCreated = false;
   }
-  if (values.mode === 'public' || values.mode === 'session') {
+  if (values.mode === 'public' || values.mode === 'session' || values.mode === 'upload') {
     const identityExpression = `(() => ({ buildId: document.querySelector('meta[name="decomp-ui-build"]')?.content, applicationVersion: document.querySelector('meta[name="decomp-application-version"]')?.content, page: location.pathname, text: document.body.innerText }))()`;
     const home = await makeTarget();
     await cdp.call('Page.navigate', { url: `${origin}/nested/` }, home.sessionId);
@@ -511,7 +512,7 @@ try {
     report.requests = {};
   }
 
-  if (values.mode === 'session' || values.mode === 'proxy') {
+  if (values.mode === 'session' || values.mode === 'upload' || values.mode === 'proxy') {
     const bootstrapUrl = await waitFor(() => applicationOutput.split(/\s+/).find((part) => part.startsWith(browserOrigin + '/nested/#bootstrap=')), 'local bootstrap handoff');
     const token = new URL(bootstrapUrl).hash.slice('#bootstrap='.length);
     sensitiveValues.push(token);
@@ -590,6 +591,11 @@ try {
     report.dashboard.missingJobExplained = true;
     report.requests.job = jobTab.requests;
 
+    if (values.mode === 'upload') {
+      report.upload = await qualifyUpload({ makeTarget, cdp, evaluate, ready, browserOrigin, data });
+      report.jobDataCreated = true;
+    }
+
     await evaluate(authenticated, `[...document.querySelectorAll('button')].find(button => button.textContent === 'Sign out').click()`);
     await ready(authenticated, `document.body.innerText.includes('You signed out of this browser.')`, 'explicit logout');
     assert.equal(authenticated.requests.filter((request) => request.method === 'DELETE').length, 1);
@@ -607,8 +613,8 @@ try {
     assert.equal(await evaluate(authenticated, 'localStorage.length + sessionStorage.length'), 0);
     assert.ok(authenticated.requests.every((request) => request.url.startsWith(browserOrigin + '/')));
     assert.ok(authenticated.requests.every((request) => ['GET', 'HEAD'].includes(request.method) || request.url === browserOrigin + '/nested/api/v1/session'));
-    assert.equal(await fs.stat(data).then(() => true, () => false), false);
-    report.session = { authenticated: true, cookie: { httpOnly: true, sameSite: 'Strict', path: '/nested/', secure: false }, fragmentRemovedBeforeFetch: true, restoredAfterReload: true, explicitLogoutRequests: 1, successfulExchangeRequests: 1, consumedLinkRequests: 1, automaticMutationRetries: 0, storageEntries: 0, installationUnchanged: true, jobDataCreated: false };
+    assert.equal(await fs.stat(data).then(() => true, () => false), values.mode === 'upload');
+    report.session = { authenticated: true, cookie: { httpOnly: true, sameSite: 'Strict', path: '/nested/', secure: false }, fragmentRemovedBeforeFetch: true, restoredAfterReload: true, explicitLogoutRequests: 1, successfulExchangeRequests: 1, consumedLinkRequests: 1, automaticMutationRetries: 0, storageEntries: 0, installationUnchanged: true, jobDataCreated: values.mode === 'upload' };
     report.requests.authenticated = authenticated.requests;
   }
 

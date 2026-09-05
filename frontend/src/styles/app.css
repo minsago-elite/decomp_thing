@@ -85,3 +85,9 @@ button:disabled { opacity: 0.65; cursor: wait; }
 .job-facts { display: grid; grid-template-columns: minmax(6rem, 1fr) minmax(0, 3fr); gap: 0.5rem 1rem; overflow-wrap: anywhere; }
 .job-facts dt { font-weight: 600; }
 .job-facts dd { margin: 0; }
+
+.upload-panel { margin-bottom: 2rem; padding: 1.25rem; border: 1px solid var(--line); border-radius: 0.5rem; overflow-wrap: anywhere; }
+.upload-drop { border: 1px dashed var(--line); padding: 1rem; }
+.upload-drop label { display: block; font-weight: 600; margin-bottom: 0.5rem; }
+.upload-drop input { max-width: 100%; }
+.upload-panel progress { width: 100%; }

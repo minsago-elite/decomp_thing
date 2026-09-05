@@ -1,0 +1,54 @@
+import assert from 'node:assert/strict';
+import { promises as fs } from 'node:fs';
+import { join } from 'node:path';
+
+/** Isolated packaged-browser fixture: valid header only, never executable behavior. */
+export async function qualifyUpload({ makeTarget, cdp, evaluate, ready, browserOrigin, data }) {
+  const tab = await makeTarget();
+  await cdp.call('Page.addScriptToEvaluateOnNewDocument', { source: `(() => {
+    const original = window.fetch; const keys = []; let hidden = false;
+    Object.defineProperty(window, '__uploadProof', { value: () => ({ requests: keys.length, sameKey: keys.length === 2 && keys[0] === keys[1], hidden }) });
+    window.fetch = async function(input, options) {
+      if (options?.method === 'POST' && String(input).endsWith('/api/v1/jobs')) {
+        keys.push(new Headers(options.headers).get('Idempotency-Key'));
+        const response = await original.apply(this, arguments);
+        if (!hidden && response.status === 201) { hidden = true; await response.text(); throw new TypeError('Isolated test loses publication response'); }
+        return response;
+      }
+      return original.apply(this, arguments);
+    };
+  })();` }, tab.sessionId);
+  await cdp.call('Page.navigate', { url: browserOrigin + '/nested/' }, tab.sessionId);
+  await ready(tab, `document.body.innerText.includes('Local session connected.')`, 'upload session');
+  await evaluate(tab, `(() => {
+    const bytes = new Uint8Array(64); bytes.set([127, 69, 76, 70, 2, 1, 1]);
+    const view = new DataView(bytes.buffer); view.setUint16(16, 2, true); view.setUint16(18, 62, true);
+    view.setUint32(20, 1, true); view.setUint16(52, 64, true);
+    const transfer = new DataTransfer(); transfer.items.add(new File([bytes], 'inert-browser-fixture.elf'));
+    const picker = document.querySelector('#binary-file'); picker.focus(); picker.files = transfer.files;
+    picker.dispatchEvent(new Event('change', { bubbles: true }));
+  })()`);
+  assert.equal(await evaluate(tab, `document.activeElement.id`), 'binary-file');
+  await evaluate(tab, `[...document.querySelectorAll('button')].find(button => button.textContent === 'Upload binary').focus()`);
+  await cdp.call('Page.bringToFront', {}, tab.sessionId);
+  await cdp.call('Input.dispatchKeyEvent', { type: 'keyDown', text: '\r', key: 'Enter', code: 'Enter', windowsVirtualKeyCode: 13 }, tab.sessionId);
+  await cdp.call('Input.dispatchKeyEvent', { type: 'keyUp', key: 'Enter', code: 'Enter', windowsVirtualKeyCode: 13 }, tab.sessionId);
+  await ready(tab, `document.body.innerText.includes('Upload was not confirmed.')`, 'lost upload response explanation');
+  const ids = (await fs.readdir(data)).filter(name => /^[a-f0-9]{32}$/.test(name));
+  assert.equal(ids.length, 1, 'First admission must publish exactly one job');
+  await evaluate(tab, `[...document.querySelectorAll('button')].find(button => button.textContent === 'Retry this upload').click()`);
+  await ready(tab, `location.pathname === '/nested/jobs/${ids[0]}' && document.body.innerText.includes('inert-browser-fixture.elf')`, 'retry recovers durable job route');
+  assert.deepEqual(await evaluate(tab, 'window.__uploadProof()'), { requests: 2, sameKey: true, hidden: true });
+  assert.deepEqual((await fs.readdir(data)).filter(name => /^[a-f0-9]{32}$/.test(name)), ids);
+  const record = JSON.parse(await fs.readFile(join(data, ids[0], 'job.json'), 'utf8'));
+  assert.equal(record.status, 'uploaded');
+  const files = await fs.readdir(join(data, ids[0]));
+  assert.deepEqual(files.sort(), ['input.elf', 'job.json', 'upload-receipt.json']);
+  assert.equal(await evaluate(tab, 'localStorage.length + sessionStorage.length'), 0);
+  assert.deepEqual(tab.exceptions, []);
+  assert.ok(tab.requests.every(request => ['GET', 'HEAD'].includes(request.method) || request.url === browserOrigin + '/nested/api/v1/jobs'));
+  await cdp.call('Page.reload', {}, tab.sessionId);
+  await ready(tab, `document.body.innerText.includes('inert-browser-fixture.elf')`, 'published job survives browser reload');
+  return { keyboardSubmit: true, publicationResponseLost: true, sameKeyRetry: true, jobsCreated: 1,
+    executionStarted: false, jobReload: true, browserStorageEntries: 0, requests: tab.requests };
+}
