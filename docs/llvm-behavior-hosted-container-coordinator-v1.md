@@ -88,6 +88,11 @@ missing LLVM tools fail the required worker probe rather than silently passing. 
 JUnit runs report missing tools as explicit skips, unless `DECOMP_REQUIRE_LLVM_RETAINED_TOOLS=1`
 requests required-tool mode.
 
+The test Docker client accepts image absence only from the exact missing-image response for its
+requested reference. Daemon, permission, unsupported-platform/API, and unknown failures remain
+indeterminate and abort with bounded escaped diagnostics, including during derived-image cleanup.
+An unsuccessful inspect command alone never proves absence.
+
 That extra probe-JAR mount, fixture shape, direct `docker run`, and entry-point override are an
 explicit test overlay. They prove that the exact production-staged image contains a working hosted
 Clang/LLD and Kotlin/JNA runtime path, but they are not the fixed inner-worker invocation, a

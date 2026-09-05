@@ -132,6 +132,83 @@ class LlvmBehaviorHostedWorkerImageLiveIntegrationTest {
     }
 
     @Test
+    fun `Docker image absence requires an exact missing-image response for the requested reference`() {
+        val imageId = "sha256:${"1".repeat(64)}"
+        val references = listOf(imageId, LiveWorkerImageTemporaryBaseTagPlan.create(imageId).reference)
+        for (reference in references) {
+            val missing = "Error response from daemon: No such image: $reference\n".toByteArray()
+            for (stdout in listOf(byteArrayOf(), byteArrayOf('\n'.code.toByte()))) {
+                assertEquals(null, parseLiveWorkerImageId(reference, LiveDockerCommandResult(1, stdout, missing)))
+            }
+            assertEquals(
+                imageId,
+                parseLiveWorkerImageId(reference, LiveDockerCommandResult(0, "$imageId\n".toByteArray(), byteArrayOf())),
+            )
+            val invalidAbsence = listOf(
+                LiveDockerCommandResult(2, byteArrayOf(), missing),
+                LiveDockerCommandResult(1, "[]\n".toByteArray(), missing),
+                LiveDockerCommandResult(1, "$imageId\n".toByteArray(), missing),
+                LiveDockerCommandResult(1, byteArrayOf(), missing + "additional failure\n".toByteArray()),
+                LiveDockerCommandResult(1, byteArrayOf(), "Error response from daemon: No such image: another-image\n".toByteArray()),
+                LiveDockerCommandResult(1, byteArrayOf(), byteArrayOf()),
+            )
+            for (result in invalidAbsence) {
+                assertFailsWith<IllegalStateException> { parseLiveWorkerImageId(reference, result) }
+            }
+        }
+    }
+
+    @Test
+    fun `Docker daemon permission and platform errors never establish image absence`() {
+        val imageId = "sha256:${"2".repeat(64)}"
+        val errors = listOf(
+            "Cannot connect to the Docker daemon at unix:///var/run/docker.sock. Is the docker daemon running?",
+            "permission denied while trying to connect to the Docker daemon socket at unix:///var/run/docker.sock",
+            "unknown flag: --platform",
+            "image inspect platform is only supported with API version 1.49 and newer",
+            "Error response from daemon: internal server error",
+            "Error response from daemon: No such container: $imageId",
+        )
+        for (diagnostic in errors) {
+            val failure = assertFailsWith<IllegalStateException> {
+                parseLiveWorkerImageId(
+                    imageId,
+                    LiveDockerCommandResult(1, byteArrayOf(), "$diagnostic\n".toByteArray()),
+                )
+            }
+            assertTrue(failure.message.orEmpty().contains(diagnostic))
+            assertTrue(failure.message.orEmpty().contains("exit=1"))
+            assertTrue(failure.message.orEmpty().contains(imageId))
+        }
+    }
+
+    @Test
+    fun `Docker image inspect rejects malformed success and bounds escaped failure diagnostics`() {
+        val imageId = "sha256:${"3".repeat(64)}"
+        val invalidResults = listOf(
+            LiveDockerCommandResult(0, byteArrayOf(), byteArrayOf()),
+            LiveDockerCommandResult(0, imageId.toByteArray(), byteArrayOf()),
+            LiveDockerCommandResult(0, "$imageId\n$imageId\n".toByteArray(), byteArrayOf()),
+            LiveDockerCommandResult(0, byteArrayOf(0xff.toByte()), byteArrayOf()),
+            LiveDockerCommandResult(0, "$imageId\n".toByteArray(), "warning\n".toByteArray()),
+        )
+        for (result in invalidResults) {
+            assertFailsWith<IllegalStateException> { parseLiveWorkerImageId(imageId, result) }
+        }
+        val oversized = ByteArray(MAXIMUM_IMAGE_INSPECT_DIAGNOSTIC_BYTES + 1) { 0x1b } +
+            "omitted diagnostic tail".toByteArray()
+        val failure = assertFailsWith<IllegalStateException> {
+            parseLiveWorkerImageId(imageId, LiveDockerCommandResult(1, oversized, oversized))
+        }
+        val message = failure.message.orEmpty()
+        assertTrue(message.contains("\\x1b"))
+        assertTrue(message.contains("[truncated; ${oversized.size} bytes total]"))
+        assertFalse(message.contains("omitted diagnostic tail"))
+        assertFalse(message.any { it.code < 0x20 || it.code == 0x7f })
+        assertTrue(message.length <= MAXIMUM_IMAGE_INSPECT_DIAGNOSTIC_BYTES * 8 + 512)
+    }
+
+    @Test
     fun `live production-staged worker image executes retained clang and direct lld`() {
         val required = System.getenv(REQUIRED_ENVIRONMENT) == "1"
         LlvmBehaviorHostedWorkerImageLiveHost.requireCapability(
@@ -733,11 +810,7 @@ private class LiveWorkerImageDockerClient(
             MAXIMUM_CLEANUP_OUTPUT_BYTES,
             requireSuccess = false,
         )
-        if (result.exitCode != 0) return null
-        check(result.stderr.isEmpty()) { "Docker image-ID inspect emitted diagnostics" }
-        val text = result.stdout.decodeUtf8()
-        check(text.matches(IMAGE_ID_LINE)) { "Docker image-ID inspect output is malformed" }
-        return text.dropLast(1)
+        return parseLiveWorkerImageId(reference, result)
     }
 
     private fun requireTagAbsent(reference: String, label: String) {
@@ -829,13 +902,9 @@ private class LiveWorkerImageDockerClient(
         check(removal.exitCode == 0) {
             "cannot remove live regression worker image $imageId: ${removal.stderr.decodeUtf8()}"
         }
-        val inspect = execute(
-            listOf("image", "inspect", imageId),
-            CLEANUP_TIMEOUT,
-            MAXIMUM_CLEANUP_OUTPUT_BYTES,
-            requireSuccess = false,
-        )
-        check(inspect.exitCode != 0) { "live regression worker image survived exact-ID cleanup: $imageId" }
+        check(inspectImageIdOrNull(imageId) == null) {
+            "live regression worker image survived exact-ID cleanup: $imageId"
+        }
         protectedBaseImageId?.let { baseImageId ->
             requireImageReferenceResolves(
                 baseImageId,
@@ -934,6 +1003,47 @@ private data class LiveDockerCommandResult(
     val stderr: ByteArray,
 )
 
+private fun parseLiveWorkerImageId(reference: String, result: LiveDockerCommandResult): String? {
+    require(reference.matches(IMAGE_ID) || reference.matches(TEMPORARY_BASE_TAG))
+    fun reject(reason: String): Nothing = throw IllegalStateException(
+        "Docker image inspect for $reference $reason; exit=${result.exitCode}; " +
+            "stdout=${result.stdout.imageInspectDiagnostic()}; stderr=${result.stderr.imageInspectDiagnostic()}",
+    )
+    if (result.exitCode != 0) {
+        val missingImage = "Error response from daemon: No such image: $reference\n".toByteArray(StandardCharsets.UTF_8)
+        val emptyTemplateOutput = result.stdout.isEmpty() ||
+            result.stdout.contentEquals(byteArrayOf('\n'.code.toByte()))
+        if (result.exitCode == 1 && emptyTemplateOutput && result.stderr.contentEquals(missingImage)) return null
+        reject("did not establish presence or absence")
+    }
+    if (result.stderr.isNotEmpty()) reject("emitted diagnostics on success")
+    val text = try {
+        result.stdout.decodeUtf8()
+    } catch (_: Exception) {
+        reject("returned invalid UTF-8")
+    }
+    if (!text.matches(IMAGE_ID_LINE)) reject("returned a malformed image ID")
+    return text.dropLast(1)
+}
+
+private fun ByteArray.imageInspectDiagnostic(): String = buildString {
+    append('"')
+    for (index in 0 until minOf(size, MAXIMUM_IMAGE_INSPECT_DIAGNOSTIC_BYTES)) {
+        val value = this@imageInspectDiagnostic[index].toInt() and 0xff
+        when (value) {
+            '\\'.code -> append("\\\\")
+            '"'.code -> append("\\\"")
+            '\n'.code -> append("\\n")
+            '\r'.code -> append("\\r")
+            '\t'.code -> append("\\t")
+            in 0x20..0x7e -> append(value.toChar())
+            else -> append("\\x").append(value.toString(16).padStart(2, '0'))
+        }
+    }
+    append('"')
+    if (size > MAXIMUM_IMAGE_INSPECT_DIAGNOSTIC_BYTES) append("[truncated; $size bytes total]")
+}
+
 private fun InputStream.readBounded(maximumBytes: Int, overflow: () -> Unit): ByteArray {
     val output = ByteArrayOutputStream(minOf(maximumBytes, 64 * 1024))
     val buffer = ByteArray(8192)
@@ -971,6 +1081,7 @@ private const val MAXIMUM_REPOSITORY_TAGS = 128
 private const val MAXIMUM_REPOSITORY_TAG_CHARACTERS = 512
 private const val IMAGE_ID_TEXT_MINIMUM_BYTES = 71L
 private const val IMAGE_ID_TEXT_MAXIMUM_BYTES = 72
+private const val MAXIMUM_IMAGE_INSPECT_DIAGNOSTIC_BYTES = 4096
 private val IMAGE_ID = Regex("sha256:[0-9a-f]{64}")
 private val IMAGE_ID_LINE = Regex("sha256:[0-9a-f]{64}\\n")
 private val TEMPORARY_BASE_TAG = Regex(
