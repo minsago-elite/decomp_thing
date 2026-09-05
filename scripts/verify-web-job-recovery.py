@@ -22,10 +22,12 @@ SUITES = tuple("decompengine." + name for name in (
     "jobs.JobMetadataCrashTest",
     "jobs.JobUploadCrashTest",
     "jobs.JobRecoveryInventoryTest",
+    "jobs.JobRecoveryAdmissionTest",
     "web.UploadServerTest",
     "web.UploadUncertaintyHttpTest",
     "web.WebShutdownTest",
     "web.WebRequestLifetimeTest",
+    "web.WebRecoveryAdmissionTest",
 ))
 
 

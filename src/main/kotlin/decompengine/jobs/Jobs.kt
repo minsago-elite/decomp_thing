@@ -112,12 +112,18 @@ class JobStore internal constructor(
 
     @Synchronized
     fun get(jobId: String): Job {
-        val jobDir = jobDirectory(jobId)
-        val payload = try {
-            OracleJson.parse(readStableRegularFile(root, "$jobId/job.json", MAX_METADATA_BYTES.toLong()).bytes).jsonObject
+        jobDirectory(jobId) // Validate the identifier before any metadata read.
+        val bytes = try {
+            readStableRegularFile(root, "$jobId/job.json", MAX_METADATA_BYTES.toLong()).bytes
         } catch (_: IOException) {
             throw JobStoreException("job metadata is unavailable or its path changed")
         }
+        return decodeJob(jobId, bytes)
+    }
+
+    private fun decodeJob(jobId: String, bytes: ByteArray): Job {
+        val jobDir = jobDirectory(jobId)
+        val payload = OracleJson.parse(bytes).jsonObject
         require(payload.string("id") == jobId &&
             Path.of(payload.string("binary_path")) == jobDir.resolve("input.elf")
         ) { "job metadata identity does not match its store location" }
@@ -254,9 +260,36 @@ class JobStore internal constructor(
     }
 
     @Synchronized
-    fun recoverInterruptedJobs() {
-        list().filter { it.status in setOf("queued", "analyzing") }.forEach { job ->
-            updateStatus(job.id, "failed", "Analysis was interrupted before the server restarted")
+    fun recoverInterruptedJobs() = recoverInterruptedJobs(4096, 64L * 1024 * 1024)
+
+    /** Complete bounded inspection precedes every recovery write; errors never imply rollback. */
+    @Synchronized
+    internal fun recoverInterruptedJobs(maximumEntries: Int, maximumMetadataBytes: Long) {
+        require(maximumEntries in 1..4096 && maximumMetadataBytes in 1..64L * 1024 * 1024)
+        if (!root.exists()) return
+        val pending = ArrayList<String>()
+        try {
+            var scanned = 0
+            var remaining = maximumMetadataBytes
+            Files.newDirectoryStream(root).use { entries ->
+                for (entry in entries) {
+                    check(++scanned <= maximumEntries)
+                    val id = entry.fileName.toString()
+                    if (!id.matches(Regex("[a-f0-9]{32}"))) continue
+                    check(remaining > 0)
+                    val bytes = readStableRegularFile(root, "$id/job.json",
+                        minOf(MAX_METADATA_BYTES.toLong(), remaining)).bytes
+                    remaining -= bytes.size
+                    val job = decodeJob(id, bytes)
+                    check(job.status in VALID_STATUSES)
+                    if (job.status == "queued" || job.status == "analyzing") pending.add(id)
+                }
+            }
+        } catch (_: Exception) {
+            throw JobStoreException("Job recovery inspection is incomplete; no recovery statuses were changed")
+        }
+        pending.forEach { id ->
+            updateStatus(id, "failed", "Analysis was interrupted before the server restarted")
         }
     }
 

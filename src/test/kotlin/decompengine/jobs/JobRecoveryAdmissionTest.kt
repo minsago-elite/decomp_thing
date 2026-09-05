@@ -1,0 +1,53 @@
+package decompengine.jobs
+
+import kotlin.io.path.*
+import kotlin.test.*
+
+class JobRecoveryAdmissionTest {
+    @Test fun `entry exhaustion leaves all statuses unchanged and retry can recover`() {
+        val root = createTempDirectory("recovery-entry-limit-")
+        val store = JobStore(root)
+        val job = store.createFromUpload("fixture.elf", elfFixture())
+        store.updateStatus(job.id, "analyzing")
+        root.resolve("retained-unknown-entry").writeText("private-content")
+        val before = root.resolve(job.id).resolve("job.json").readBytes()
+        assertIncomplete { store.recoverInterruptedJobs(1, 64L * 1024 * 1024) }
+        assertContentEquals(before, root.resolve(job.id).resolve("job.json").readBytes())
+        assertEquals("private-content", root.resolve("retained-unknown-entry").readText())
+        store.recoverInterruptedJobs()
+        assertEquals("failed", store.get(job.id).status)
+    }
+
+    @Test fun `aggregate metadata exhaustion precedes every recovery write`() {
+        val root = createTempDirectory("recovery-byte-limit-")
+        val store = JobStore(root)
+        val jobs = List(2) { store.createFromUpload("fixture.elf", elfFixture()) }
+        jobs.forEach { store.updateStatus(it.id, "queued") }
+        val paths = jobs.map { root.resolve(it.id).resolve("job.json") }
+        val before = paths.map { it.readBytes() }
+        val budget = before.sumOf { it.size.toLong() } - 1
+        assertIncomplete { store.recoverInterruptedJobs(4096, budget) }
+        paths.forEachIndexed { index, path -> assertContentEquals(before[index], path.readBytes()) }
+        store.recoverInterruptedJobs(4096, budget + 1)
+        assertTrue(jobs.all { store.get(it.id).status == "failed" })
+    }
+
+    @Test fun `unreadable candidate prevents partial reconciliation and hides diagnostic content`() {
+        val root = createTempDirectory("recovery-invalid-record-")
+        val store = JobStore(root)
+        val job = store.createFromUpload("fixture.elf", elfFixture())
+        store.updateStatus(job.id, "analyzing")
+        val before = root.resolve(job.id).resolve("job.json").readBytes()
+        val malformed = root.resolve("a".repeat(32)).createDirectory().resolve("job.json")
+        malformed.writeText("private-token invalid JSON")
+        assertIncomplete { store.recoverInterruptedJobs() }
+        assertContentEquals(before, root.resolve(job.id).resolve("job.json").readBytes())
+        assertEquals("private-token invalid JSON", malformed.readText())
+    }
+
+    private fun assertIncomplete(action: () -> Unit) {
+        val failure = assertFailsWith<JobStoreException>(block = action)
+        assertEquals("Job recovery inspection is incomplete; no recovery statuses were changed", failure.message)
+        assertNull(failure.cause)
+    }
+}

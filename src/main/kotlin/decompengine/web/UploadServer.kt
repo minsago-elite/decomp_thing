@@ -224,7 +224,16 @@ class UploadServer(
 
     fun stop(delaySeconds: Int = 0) {
         require(delaySeconds >= 0) { "shutdown delay must be nonnegative" }
-        synchronized(lifecycleLock) { stopping = true }
+        synchronized(lifecycleLock) {
+            stopping = true
+            // JDK HttpServer.stop does not release a bound listener before start. Start its
+            // dispatcher only after closing request admission, then close it below. This also
+            // covers failed ownership/recovery admission and explicit stop-before-start.
+            if (!started) {
+                server.start()
+                started = true
+            }
+        }
         authenticationInspectionCancellation.set(true)
         server.stop(delaySeconds)
         val discarded = synchronized(lifecycleLock) {
