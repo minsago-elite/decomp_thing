@@ -72,6 +72,12 @@ its `displayOnly` flag and counters must never substitute for complete required 
 
 Focused verification:
 
+ACP `agent_thought_chunk` updates use message events with the distinct `thought` role. They share
+the bounded whole-message redaction and omission rules, but do not contribute to the assistant
+result summary. Buffer identity includes both role and peer message ID, so reused IDs cannot mix
+thought and assistant content. Browser rows display the role on refresh and incremental updates.
+This projects only thought content the peer explicitly sends; it does not infer hidden reasoning.
+
 Message previews track at most 16 concurrent message IDs per task. Once a new ID exceeds that bound,
 new IDs are omitted for the rest of that task, even if an earlier message completes and frees space.
 This prevents a continuation whose prefix was lost from being redacted as though it were a whole

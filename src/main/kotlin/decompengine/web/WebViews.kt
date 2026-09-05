@@ -96,7 +96,7 @@ fun renderJob(job: Job, sourceTree: SourceTreeView? = null, sourceTreeUnavailabl
               for (const event of snapshot.events.slice(-30)) {
                 const item = document.createElement('li');
                 item.textContent = [event.sequence, event.workflowRunId || '', event.taskId || '',
-                  event.revisionId || '', event.phase || event.kind,
+                  event.revisionId || '', event.phase || event.kind, event.role || '',
                   event.status || event.stopReason || event.failureKind || event.decision || '',
                   event.acceptedRevisionSha256 ? 'accepted source ' + event.acceptedRevisionSha256 : '',
                   event.text || ''].filter(value => value !== '').join(' · ');
@@ -173,7 +173,7 @@ private fun renderAgentProgress(job: Job): String {
     val rows = events.joinToString("") { item ->
         val event = item.jsonObject
         val summary = listOf(event.text("sequence"), event.text("workflowRunId"), event.text("taskId"), event.text("revisionId"),
-            event.text("phase").ifBlank { event.text("kind") },
+            event.text("phase").ifBlank { event.text("kind") }, event.text("role"),
             event.text("status").ifBlank { event.text("stopReason") }.ifBlank { event.text("failureKind") }
                 .ifBlank { event.text("decision") },
             event.text("acceptedRevisionSha256").let { if (it.isBlank()) "" else "accepted source $it" }, event.text("text"))

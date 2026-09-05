@@ -196,7 +196,7 @@ data class AgentSessionReference(
     }
 }
 
-enum class AgentMessageRole { ASSISTANT, USER, SYSTEM }
+enum class AgentMessageRole { ASSISTANT, USER, SYSTEM, THOUGHT }
 
 sealed interface AgentExecutionEvent {
     val sequence: Long

@@ -169,6 +169,11 @@ class UploadServerTest {
                     decompengine.agent.AgentWorkflowPhase.PROVISIONAL, "revision-one"))
                 journal.runState(decompengine.agent.AgentWorkflowRunObservation("run_00000001",
                     decompengine.agent.AgentWorkflowPhase.EXHAUSTED, "revision-one"))
+                val task = journal.beginTask("thought-task", decompengine.agent.AgentExecutionRequest(
+                    "fixture", listOf(decompengine.agent.AgentWorkspaceRoot("project", reports)),
+                    accessPolicy = decompengine.agent.AgentAccessPolicy(emptyList())))
+                task.event(decompengine.agent.AgentMessageEvent(0, "thought", decompengine.agent.AgentMessageRole.THOUGHT,
+                    "checking fixture", completed = true))
             }
             val response = request(server, "GET", "/api/jobs/$jobId/events")
             assertEquals(200, response.status)
@@ -180,6 +185,7 @@ class UploadServerTest {
             assertTrue(page.contains("build_validating"))
             assertTrue(page.contains("Accepted revisions are recorded separately"))
             val rows = page.substringAfter("<ol id=\"agent-event-list\"").substringBefore("</ol>")
+            assertTrue(rows.contains("message · thought"))
             assertTrue(rows.contains("run_00000001"))
             assertTrue(rows.contains("revision-one"))
             assertTrue(rows.contains("provisional") && rows.contains("exhausted"))

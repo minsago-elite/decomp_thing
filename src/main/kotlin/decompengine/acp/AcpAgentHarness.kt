@@ -2506,7 +2506,7 @@ private class BoundedStderrCapture(
     fun truncated(): Boolean = observed > retained.size()
 }
 
-private class ProtocolActivity {
+internal class ProtocolActivity {
     val lastActivityNanos = AtomicLong(System.nanoTime())
     fun touch() {
         lastActivityNanos.set(System.nanoTime())
@@ -2521,7 +2521,7 @@ private inline fun <T> sessionRecovery(operation: () -> T): T = try {
     throw AgentSessionRecoveryException("durable ACP session recovery failed; inspect retained session evidence", failure)
 }
 
-private class SequencedEventEmitter(private val consumer: (AgentExecutionEvent) -> Unit) {
+internal class SequencedEventEmitter(private val consumer: (AgentExecutionEvent) -> Unit) {
     private val sequence = AtomicLong(0)
 
     @Synchronized
@@ -2531,7 +2531,7 @@ private class SequencedEventEmitter(private val consumer: (AgentExecutionEvent) 
 }
 
 @OptIn(UnstableApi::class)
-private class AcpEventTranslator(
+internal class AcpEventTranslator(
     private val request: AgentExecutionRequest,
     private val emitter: SequencedEventEmitter,
     private val implementationId: String,
@@ -2569,7 +2569,7 @@ private class AcpEventTranslator(
             when (update) {
                 is SessionUpdate.AgentMessageChunk -> emitMessage(AgentMessageRole.ASSISTANT, update.messageId?.value, update.content)
                 is SessionUpdate.UserMessageChunk -> emitMessage(AgentMessageRole.USER, update.messageId?.value, update.content)
-                is SessionUpdate.AgentThoughtChunk -> Unit
+                is SessionUpdate.AgentThoughtChunk -> emitMessage(AgentMessageRole.THOUGHT, update.messageId?.value, update.content)
                 is SessionUpdate.PlanUpdate -> {
                     if (update.entries.isNotEmpty()) {
                         val entries = update.entries.mapIndexed { index, entry ->

@@ -129,8 +129,9 @@ class AgentProgressJournal(
                     put("sourceSequenceGap", gap)
                     when (event) {
                         is AgentMessageEvent -> {
-                            val messageKey = digest(event.messageId)
-                            put("messageIdSha256", messageKey)
+                            val messageIdDigest = digest(event.messageId)
+                            val messageKey = event.role.name + ":" + messageIdDigest
+                            put("messageIdSha256", messageIdDigest)
                             put("role", event.role.name.lowercase())
                             put("completed", event.completed)
                             put("chunkCharacters", event.textDelta.length)
