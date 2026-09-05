@@ -141,7 +141,7 @@ fun renderJob(job: Job, reportContext: WebReportContext? = null,
                 $action
               </div>
             </section>
-            ${job.statusMessage?.let { "<div class=\"status-note ${job.status.escapeHtml()}\"><span></span>${it.escapeHtml()}</div>" }.orEmpty()}
+            ${job.statusMessage?.let { "<div class=\"status-note ${job.status.escapeHtml()}\"><span></span>Stored diagnostic details are withheld because they may contain private data.</div>" }.orEmpty()}
             ${reports.runId?.let { "<p class=\"status-note\">Reports for workflow attempt ${it.escapeHtml()}. Completion does not establish acceptance.</p>" }.orEmpty()}
             ${diagnostics.joinToString("") { "<p class=\"status-note\">${it.code.escapeHtml()}: ${it.message.escapeHtml()}</p>" }}
             <div class="job-grid">

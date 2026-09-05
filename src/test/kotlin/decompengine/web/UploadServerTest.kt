@@ -259,6 +259,12 @@ class UploadServerTest {
                     assertTrue(!response.body.decodeToString().contains(it), it)
                 }
             }
+            val failedPage = request(server, "GET", "/jobs/$id")
+            assertEquals(200, failedPage.status)
+            assertTrue(failedPage.body.decodeToString().contains("Stored diagnostic details are withheld"))
+            listOf(root.toString(), "PRIVATE_DIAGNOSTIC_SENTINEL", "PRIVATE_ENV_VALUE").forEach {
+                assertTrue(!failedPage.body.decodeToString().contains(it))
+            }
             assertTrue(failedBytes.decodeToString().contains("PRIVATE_DIAGNOSTIC_SENTINEL"))
             assertContentEquals(failedBytes, record.readBytes())
         }
@@ -279,7 +285,7 @@ class UploadServerTest {
     }
 
     @Test
-    fun `background diagnostics redact secrets before persistence and rendering`() {
+    fun `background diagnostics are redacted in storage and withheld from public rendering`() {
         val dataDir = createTempDirectory("web-private-diagnostic-")
         val configured = "configured-provider-credential"
         val bearer = "synthetic-bearer-value"
@@ -300,14 +306,17 @@ class UploadServerTest {
             val persisted = dataDir.resolve(id).resolve("job.json").readBytes().decodeToString()
             val api = request(server, "GET", "/api/jobs/$id").body.decodeToString()
             val page = request(server, "GET", "/jobs/$id").body.decodeToString()
-            listOf(persisted, page).forEach { text ->
+            listOf(persisted).forEach { text ->
                 listOf(configured, bearer, password).forEach { assertTrue(!text.contains(it)) }
                 assertTrue(text.contains("[redacted]"))
             }
             listOf(configured, bearer, password, "status_message", "binary_path").forEach {
                 assertTrue(!api.contains(it))
             }
-            assertTrue(!page.contains("<script>bad</script>"))
+            assertTrue(page.contains("Stored diagnostic details are withheld"))
+            listOf(configured, bearer, password, "Provider refused", "[redacted]", "bad</script>").forEach {
+                assertTrue(!page.contains(it))
+            }
             assertEquals(303, request(server, "POST", "/jobs/$id/reconstruct", followRedirects = false).status)
             val job = decompengine.jobs.JobStore(dataDir).get(id)
             assertEquals("failed", job.status)
@@ -999,7 +1008,7 @@ class UploadServerTest {
             archivePath.writeBytes(corrupted)
             val invalid = request(server, "GET", download)
             assertEquals(400, invalid.status)
-            assertTrue(invalid.body.decodeToString().contains("source archive ZIP is invalid"))
+            assertTrue(invalid.body.decodeToString().contains("The request was invalid or the requested source or artifact is unavailable."))
             archivePath.writeBytes(updated.body)
 
             val copy = reports.resolve("copy.zip")

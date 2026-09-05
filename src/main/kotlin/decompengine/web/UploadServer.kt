@@ -321,15 +321,15 @@ class UploadServer(
             }
         } catch (exception: JobStoreException) {
             legacyError(exchange, 404, "JOB_NOT_FOUND", "The requested job is unavailable.") {
-                renderErrorPage(404, "Job not found", diagnostic(exception, "The job does not exist."))
+                renderErrorPage(404, "Job not found", "The requested job is unavailable.")
             }
         } catch (exception: IllegalArgumentException) {
             legacyError(exchange, 400, "INVALID_REQUEST", "The request was invalid.") {
-                renderErrorPage(400, "Invalid request", diagnostic(exception, "The request was invalid."))
+                renderErrorPage(400, "Invalid request", "The request was invalid or the requested source or artifact is unavailable.")
             }
         } catch (exception: Exception) {
             legacyError(exchange, 500, "INTERNAL_ERROR", "The operation failed.") {
-                renderErrorPage(500, "Unexpected error", diagnostic(exception, "The operation failed."))
+                renderErrorPage(500, "Unexpected error", "The operation failed. Private diagnostic details are withheld.")
             }
         }
     }
@@ -385,7 +385,7 @@ class UploadServer(
             }
         } catch (exception: InvalidUploadException) {
             legacyError(exchange, 400, "INVALID_UPLOAD", "Upload a supported Linux ELF binary.") {
-                renderErrorPage(400, "Unsupported binary", diagnostic(exception, "Upload a Linux ELF binary."))
+                renderErrorPage(400, "Unsupported binary", "Upload a supported Linux ELF binary.")
             }
         }
     }

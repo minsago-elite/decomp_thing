@@ -357,6 +357,14 @@ ELF metadata keeps its existing field names and numeric types, including signed/
 The persistence serializer and stored `job.json` format are unchanged.
 The HTTP regression in `UploadServerTest` checks both responses, an old private diagnostic,
 exact public keys, retained field values and byte-for-byte preservation of stored records.
+Legacy job HTML also withholds persisted `status_message` prose and displays a fixed
+explanation when details exist. The job status itself remains visible. Generic request/storage
+exceptions and unsupported-upload exceptions no longer supply raw text to HTML error pages;
+those paths use fixed public messages. Typed service/access error messages remain available.
+This leaves stored diagnostic bytes and background redaction behavior unchanged. It is a
+privacy change for generic diagnostics, not a certification of report summaries or every
+retained metadata label as public.
+
 Legacy `/api/*` failures always return JSON, including unknown routes. POST `/jobs`
 returns JSON failures when the existing Accept switch selects `application/json`; HTML form
 requests retain HTML errors. The legacy error envelope is `{requestId, error: {code, message}}`,
