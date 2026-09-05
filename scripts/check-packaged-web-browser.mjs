@@ -658,11 +658,32 @@ try {
       report.jobDataCreated = true;
     }
 
+    const peer = await makeTarget();
+    await cdp.call('Page.navigate', { url: browserOrigin + '/nested/runtime' }, peer.sessionId);
+    await ready(peer, `document.querySelector('#server-runtime-title') !== null`, 'peer private Runtime');
+    await evaluate(peer, `(() => {
+      window.__sessionInvalidations = [];
+      window.__sessionInvalidationChannel = new BroadcastChannel('decomp-session-v1:/nested');
+      window.__sessionInvalidationChannel.onmessage = event => window.__sessionInvalidations.push(event.data);
+    })()`);
+    const peerReads = peer.requests.filter(request => request.url.includes('/api/v1/')).length;
+    assert.ok(peerReads > 0);
     await evaluate(authenticated, `[...document.querySelectorAll('button')].find(button => button.textContent === 'Sign out').click()`);
     await ready(authenticated, `document.body.innerText.includes('You signed out of this browser.')`, 'explicit logout');
     assert.equal(authenticated.requests.filter((request) => request.method === 'DELETE').length, 1);
     assert.equal(await evaluate(authenticated, `document.querySelector('#server-runtime-title') !== null`), false, 'Logout retained private runtime evidence');
     report.runtimeSnapshot.clearedOnLogout = true;
+    await ready(peer, `document.body.innerText.includes('Another tab reported a session change.') && window.__sessionInvalidations.length === 1`, 'cross-tab private data invalidation');
+    assert.equal(await evaluate(peer, `document.querySelector('#server-runtime-title') !== null`), false);
+    assert.deepEqual(await evaluate(peer, 'window.__sessionInvalidations'), [{ version: 1, type: 'session-invalidated' }]);
+    await delay(3000);
+    assert.equal(peer.requests.filter(request => request.url.includes('/api/v1/')).length, peerReads, 'Peer invalidation must not initiate requests');
+    assert.ok(peer.requests.every(request => ['GET', 'HEAD'].includes(request.method)));
+    assert.deepEqual(peer.exceptions, []);
+    assert.equal(await evaluate(peer, 'localStorage.length + sessionStorage.length'), 0);
+    await evaluate(peer, 'window.__sessionInvalidationChannel.close()');
+    report.sessionInvalidation = { privateRuntimeCleared: true, credentialFreeMessage: true, automaticPeerRequests: 0, peerMutationRequests: 0, storageEntries: 0 };
+
     await cdp.call('Page.reload', {}, authenticated.sessionId);
     await ready(authenticated, `document.body.innerText.includes('To access private work, open the sign-in link')`, 'revoked session after reload');
     await cdp.call('Page.navigate', { url: bootstrapUrl }, authenticated.sessionId);
