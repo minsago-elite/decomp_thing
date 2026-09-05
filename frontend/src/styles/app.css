@@ -95,3 +95,10 @@ button:disabled { opacity: 0.65; cursor: wait; }
 
 .breadcrumbs { display: flex; flex-wrap: wrap; gap: .5rem; padding: 0; list-style: none; }
 .breadcrumbs li + li::before { content: "/"; margin-inline-end: .5rem; }
+
+.activity-filters { min-width: 0; display: grid; grid-template-columns: repeat(auto-fit, minmax(min(100%, 14rem), 1fr)); gap: 1rem; margin: 1.5rem 0; padding: 1rem; border: 1px solid var(--control-line); }
+.activity-filters label { display: grid; gap: 0.4rem; font-weight: 600; min-width: 0; }
+.activity-filters input, .activity-filters select { min-width: 0; width: 100%; padding: 0.6rem; border: 1px solid var(--control-line); border-radius: 0.3rem; color: inherit; background: var(--surface); }
+.activity-filters p { grid-column: 1 / -1; margin: 0; }
+.activity-row { overflow-wrap: anywhere; margin-bottom: 1.5rem; }
+.activity-row summary { cursor: pointer; }

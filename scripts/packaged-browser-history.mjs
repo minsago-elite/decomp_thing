@@ -46,7 +46,7 @@ export async function seedHistory(root) {
   const progressPath = join(reportDirectory, 'agent-progress.json');
   const progress = JSON.stringify({ schemaVersion: 1, displayOnly: true, nextSequence: 205, queueDropped: 0, historyDropped: 0, truncated: false,
     events: Array.from({ length: 205 }, (_, sequence) => ({ sequence, runId: 'writer_fixture_progress', workflow: 'reconstruct', time: at,
-      kind: sequence === 1 ? 'message' : 'workflow_phase', ...(sequence === 1 ? { role: 'thought' } : { phase: 'planning' }), text: `Synthetic private content ${sequence}`, inputTokens: '18446744073709551615' })) });
+      taskId: sequence % 2 ? 'task_odd' : 'task_even', sessionIdSha256: 'a'.repeat(64), kind: sequence === 1 ? 'message' : 'workflow_phase', ...(sequence === 1 ? { role: 'thought' } : { phase: 'planning' }), text: `Synthetic private content ${sequence}`, inputTokens: '18446744073709551615' })) });
   await fs.writeFile(progressPath, progress, { flag: 'wx', mode: 0o600 });
   return { jobId, directory, retained, count: attempts.length, reportPath, exploration, progressPath, progress };
 }
@@ -104,7 +104,22 @@ export async function qualifyHistory({ fixture, makeTarget, cdp, evaluate, ready
   assert.ok(atBound >= 6, 'Progress request accounting must include endpoint and UI reads');
   await new Promise(resolve => setTimeout(resolve, 3000));
   assert.equal(progressRequests(), atBound, 'Display bound must stop polling');
-  await evaluate(tab, `document.activeElement.click()`);
+  await evaluate(tab, `(() => { const control = document.querySelector('.activity-filters select'); control.focus(); control.value = 'messages'; control.dispatchEvent(new Event('change', { bubbles: true })); })()`);
+  await ready(tab, `(${activityRows}).length === 1`, 'activity category filter');
+  assert.deepEqual(await evaluate(tab, activityRows), ['Sequence 1']);
+  assert.equal(await evaluate(tab, `document.activeElement.tagName`), 'SELECT');
+  assert.equal(await evaluate(tab, `document.querySelector('ol[aria-label="Activity observations"] a').getAttribute('href')`), `${path}/run_fixture_3`);
+  await evaluate(tab, `document.querySelector('ol[aria-label="Activity observations"] summary').click()`);
+  assert.ok(await evaluate(tab, `document.body.innerText.includes('${'a'.repeat(64)}') && document.body.innerText.includes('Task, session and revision evidence pages are not available')`));
+  await evaluate(tab, `(() => { const control = document.querySelector('.activity-filters input'); control.value = 'task_even'; control.dispatchEvent(new Event('input', { bubbles: true })); })()`);
+  await ready(tab, `(${activityRows}).length === 0 && document.body.innerText.includes('Other retained pages have not been searched.')`, 'activity task filter with no match');
+  assert.equal(progressRequests(), atBound, 'Local filters must not restart or advance polling');
+  await evaluate(tab, `[...document.querySelectorAll('button')].find(b => b.textContent === 'Clear activity filters').click()`);
+  await ready(tab, `(${activityRows}).length === 200`, 'cleared activity filters preserve page');
+  await cdp.call('Emulation.setDeviceMetricsOverride', { width: 320, height: 900, deviceScaleFactor: 1, mobile: false }, tab.sessionId);
+  assert.ok(await evaluate(tab, `document.documentElement.scrollWidth <= document.documentElement.clientWidth`), 'Activity must fit the narrow viewport');
+  await cdp.call('Emulation.setDeviceMetricsOverride', { width: 1280, height: 900, deviceScaleFactor: 1, mobile: false }, tab.sessionId);
+  await evaluate(tab, `(() => { const control = [...document.querySelectorAll('button')].find(b => b.textContent === 'Continue activity on next page'); control.focus(); control.click(); })()`);
   await ready(tab, `(${activityRows}).length === 5`, 'activity continuation after display bound');
   assert.deepEqual(await evaluate(tab, activityRows), Array.from({ length: 5 }, (_, index) => `Sequence ${index + 200}`));
   assert.equal(await evaluate(tab, 'document.activeElement.textContent'), 'Pause activity');
@@ -152,7 +167,7 @@ export async function qualifyHistory({ fixture, makeTarget, cdp, evaluate, ready
   assert.deepEqual(tab.exceptions, []);
   for (const [name, bytes] of Object.entries(fixture.retained)) assert.deepEqual(await fs.readFile(join(fixture.directory, name)), Buffer.from(bytes));
   assert.deepEqual((await fs.readdir(fixture.directory)).sort(), [...Object.keys(fixture.retained), 'reports'].sort());
-  return { activityUi: { firstPage: 200, continuationPage: 5, keyboardStart: true, focusPreserved: true, pauseStopsPolling: true, resumeWithoutDuplicates: true, navigationStopsPolling: true, privateTextWithheld: true, politeStatusOnly: true }, progressPolling: true, progressBytesUnchanged: true, fixtureAttempts: 55, firstPage: 50, secondPage: 5, exactOrder: true, cursorReload: true,
+  return { activityUi: { categoryAndTaskFilters: true, filtersPreserveCursor: true, exactAttemptLinks: true, correlationReferences: true, narrowViewport: 320, firstPage: 200, continuationPage: 5, keyboardStart: true, focusPreserved: true, pauseStopsPolling: true, resumeWithoutDuplicates: true, navigationStopsPolling: true, privateTextWithheld: true, politeStatusOnly: true }, progressPolling: true, progressBytesUnchanged: true, fixtureAttempts: 55, firstPage: 50, secondPage: 5, exactOrder: true, cursorReload: true,
     earlierAttemptReload: true, previousInterruptedAttempt: true, exactUnsignedUsage: true,
     unacceptedCandidate: true, explorationSummary: true, nativeReportDownload: true, downloadedBytesMatch: true, reportBytesUnchanged: true, retainedBytesUnchanged: true, mutationRequests: 0, executionStarted: false };
 }

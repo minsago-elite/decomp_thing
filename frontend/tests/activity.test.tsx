@@ -105,3 +105,64 @@ it('rejects a discontinuous continuation without changing the displayed position
   expect(screen.getAllByRole('listitem')).toHaveLength(1);
   expect(screen.queryByText('Sequence 9007199254740995')).toBeNull();
 });
+
+it('filters categories and task references locally without discarding rows or moving the cursor', async () => {
+  const page = structuredClone(events);
+  const original = page.data.items[0]!;
+  page.data.items = ['workflow_phase', 'message', 'plan', 'tool', 'future_kind'].map((kind, index) => ({
+    ...original, sequence: String(index), cursor: `cursor_${index}`,
+    payload: { ...original.payload, observationKind: kind, fields: { taskId: index % 2 ? 'task_odd' : 'task_even', taskIdSha256: 'a'.repeat(64), text: 'withheld_text' } },
+  }));
+  page.data.nextCursor = 'cursor_4';
+  transport.get.mockResolvedValueOnce(snapshot).mockResolvedValueOnce(page);
+  mount(); fireEvent.click(screen.getByRole('button', { name: 'Follow activity' }));
+  await waitFor(() => expect(screen.getAllByRole('listitem')).toHaveLength(5));
+  fireEvent.click(screen.getByRole('button', { name: 'Pause activity' }));
+  const select = screen.getByRole('combobox', { name: 'Observation category' }); select.focus();
+  for (const [index, category] of ['stages', 'messages', 'plans', 'tools', 'other'].entries()) {
+    fireEvent.change(select, { target: { value: category } });
+    expect(screen.getAllByRole('listitem')).toHaveLength(1);
+    expect(screen.getByText(`Sequence ${index}`)).toBeTruthy();
+  }
+  expect(document.activeElement).toBe(select);
+  const task = screen.getByRole('textbox', { name: 'Task ID or digest contains' });
+  fireEvent.input(task, { target: { value: 'task_odd' } });
+  expect(screen.queryAllByRole('listitem')).toHaveLength(0);
+  expect(screen.getByText('No matching observations on this page. Other retained pages have not been searched.')).toBeTruthy();
+  fireEvent.input(task, { target: { value: 'a'.repeat(64) } });
+  expect(screen.getAllByRole('listitem')).toHaveLength(1);
+  expect(transport.get).toHaveBeenCalledTimes(2);
+  fireEvent.click(screen.getByRole('button', { name: 'Clear activity filters' }));
+  expect(screen.getAllByRole('listitem')).toHaveLength(5);
+  expect(document.body.textContent).not.toContain('withheld_text');
+  transport.get.mockResolvedValueOnce({ data: { items: [], nextCursor: 'cursor_4', hasMore: false } });
+  fireEvent.click(screen.getByRole('button', { name: 'Resume activity' }));
+  await waitFor(() => expect(transport.get).toHaveBeenCalledTimes(3));
+  expect(transport.get.mock.calls[2]![1]).toContain('cursor=cursor_4');
+});
+
+it('links the exact attempt and exposes available correlation without inventing evidence links', async () => {
+  const page = structuredClone(events);
+  page.data.items[0]!.payload.fields.sessionIdSha256 = 'e'.repeat(64);
+  page.data.items[0]!.payload.fields.toolCallIdSha256 = 'f'.repeat(64);
+  transport.get.mockResolvedValueOnce(snapshot).mockResolvedValueOnce(page);
+  mount(); fireEvent.click(screen.getByRole('button', { name: 'Follow activity' }));
+  const link = await screen.findByRole('link', { name: `Attempt ${snapshot.data.run.runId}` });
+  expect(link.getAttribute('href')).toBe(`/nested/jobs/${snapshot.data.run.jobId}/runs/${snapshot.data.run.runId}`);
+  fireEvent.click(screen.getByText('Correlation details for sequence 9007199254740993'));
+  expect(screen.getByText('e'.repeat(64))).toBeTruthy();
+  expect(screen.getByText('f'.repeat(64))).toBeTruthy();
+  expect(screen.getByText('turn_fixture_1')).toBeTruthy();
+  expect(screen.getByText(/Task: Not recorded. Revision: Not recorded/)).toBeTruthy();
+  expect(screen.getByText(/Task, session and revision evidence pages are not available/)).toBeTruthy();
+  expect(screen.getAllByRole('link')).toHaveLength(1);
+});
+
+it('does not infer an empty plan when entry metadata is absent', async () => {
+  const page = structuredClone(events);
+  page.data.items[0]!.payload.observationKind = 'plan';
+  page.data.items[0]!.payload.fields = {};
+  transport.get.mockResolvedValueOnce(snapshot).mockResolvedValueOnce(page);
+  mount(); fireEvent.click(screen.getByRole('button', { name: 'Follow activity' }));
+  expect(await screen.findByText('Plan entries reported: Not recorded. Retained entry metadata: Not recorded.')).toBeTruthy();
+});

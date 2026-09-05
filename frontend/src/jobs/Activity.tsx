@@ -1,6 +1,8 @@
 import { useEffect, useMemo, useRef, useState } from 'preact/hooks';
 import { ApiClientError, createApiClient } from '../api/client';
 import type { Snapshot, WebEvent } from '../api/generated';
+import { ActivityRow, matchesActivity } from './ActivityRow';
+import type { ActivityGroup } from './ActivityRow';
 
 const capacity = 200;
 
@@ -11,6 +13,8 @@ export function Activity({ jobId, runId, basePath }: { jobId: string; runId: str
   const [snapshot, setSnapshot] = useState<Snapshot | null>(null);
   const [rows, setRows] = useState<WebEvent[]>([]);
   const [error, setError] = useState('');
+  const [group, setGroup] = useState<'all' | ActivityGroup>('all');
+  const [task, setTask] = useState('');
   const [reset, setReset] = useState(0);
   const position = useRef<{ initialized: boolean; cursor: string | null; rows: WebEvent[]; last: WebEvent | null }>({ initialized: false, cursor: null, rows: [], last: null });
   useEffect(() => {
@@ -65,6 +69,7 @@ export function Activity({ jobId, runId, basePath }: { jobId: string; runId: str
     return () => { controller.abort(); clearTimeout(timer); };
   }, [client, jobId, runId, following, reset]);
 
+  const visible = rows.filter(event => matchesActivity(event, group, task));
   return <section aria-labelledby="activity-title">
     <h2 id="activity-title">Retained activity</h2>
     <p>Journal observations do not establish validation or acceptance. Message text is withheld because the journal does not certify public visibility.</p>
@@ -79,7 +84,22 @@ export function Activity({ jobId, runId, basePath }: { jobId: string; runId: str
       position.current = { initialized: false, cursor: null, rows: [], last: null };
       setRows([]); setSnapshot(null); setError(''); setReset(value => value + 1); setFollowing(true);
     }}>Read fresh activity history</button>
-    <p role="status">{following ? 'Following retained activity.' : 'Activity paused.'} {rows.length} of at most {capacity} observations displayed.</p>
+    <fieldset class="activity-filters">
+      <legend>Filter this activity page</legend>
+      <label>Observation category
+        <select value={group} onChange={event => setGroup(event.currentTarget.value as 'all' | ActivityGroup)}>
+          <option value="all">All observations</option><option value="stages">Stages</option>
+          <option value="messages">Message metadata</option><option value="plans">Plan metadata</option>
+          <option value="tools">Tools and changes</option><option value="other">Other observations</option>
+        </select>
+      </label>
+      <label>Task ID or digest contains
+        <input value={task} maxLength={533} onInput={event => setTask(event.currentTarget.value)} />
+      </label>
+      <button type="button" onClick={() => { setGroup('all'); setTask(''); }}>Clear activity filters</button>
+      <p>Filters apply only to the current page and do not change the polling position.</p>
+    </fieldset>
+    <p role="status">{following ? 'Following retained activity.' : 'Activity paused.'} {visible.length} matching observations shown; {rows.length} of at most {capacity} observations retained on this page.</p>
     {error && <p role="alert">{error}</p>}
     {rows.length === capacity && <p>Display limit reached. Continue activity on the next page to replace these rows while preserving the cursor.</p>}
     {snapshot && <>
@@ -87,15 +107,9 @@ export function Activity({ jobId, runId, basePath }: { jobId: string; runId: str
       {snapshot.progress ? <p>Journal boundary: {snapshot.progress.nextSequence}. Queue omissions: {snapshot.progress.queueDropped}. Retention omissions: {snapshot.progress.historyDropped}. Retained at snapshot: {snapshot.progress.retainedEventCount}.</p>
         : <p>Omission counts were not supplied. A complete history cannot be established.</p>}
     </>}
+    {rows.length > 0 && visible.length === 0 && <p>No matching observations on this page. Other retained pages have not been searched.</p>}
     <ol aria-label="Activity observations">
-      {rows.map(event => <li key={event.cursor!}>
-        <time dateTime={event.occurredAt}>{event.occurredAt}</time>{' '}<span>Sequence {event.sequence}</span>
-        {event.type === 'workflow.observation' ? <>
-          <p>Observed {event.payload.observationKind}{event.payload.fields.phase ? `: ${event.payload.fields.phase}` : ''}</p>
-          <p>Writer: {event.payload.writerId}. Task: {event.payload.fields.taskId ?? 'Not recorded'}. Revision: {event.payload.fields.revisionId ?? 'Not recorded'}.</p>
-          <p>Fields omitted: {event.payload.omittedFieldCount}. {event.payload.fields.sourceSequenceGap && 'Source sequence gap reported.'} {event.payload.fields.textOmitted && 'Producer omitted text.'}</p>
-        </> : <p>{event.type} metadata retained; content is not displayed in this observation view.</p>}
-      </li>)}
+      {visible.map(event => <ActivityRow key={event.cursor!} event={event} basePath={basePath} />)}
     </ol>
   </section>;
 }

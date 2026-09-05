@@ -245,3 +245,33 @@ the Enter character; correcting that input produced the retained passing run.
 Manual screen-reader behavior, live producer scenarios, restart/reconnect,
 multiple tabs and long-running qualification remain outstanding. This scoped
 evidence does not close #174 or #175.
+
+## Activity filters and correlation references
+
+The activity page offers category and task-reference filters over its current
+bounded page. Categories separate stage observations, message metadata, plan
+metadata, tools/changes and other observations. Task matching is a literal,
+case-sensitive substring of the recorded task ID or digest. Filters make no
+requests, do not move the cursor, and do not discard nonmatching rows. Clearing
+filters restores those rows. A no-match result explicitly says that other
+retained pages have not been searched. Filter choices are local to the mounted
+attempt view; they are not saved across reloads.
+
+Each row links to its exact attempt under the configured deployment prefix.
+Expandable correlation details expose recorded task/session/revision digests,
+turn and request references, and a tool-call digest. Missing references are
+labeled; unavailable evidence pages are not invented. Observed status and plan
+entry counts remain observation metadata. Missing plan counts or entry metadata
+read **Not recorded**, not zero. Message and plan text remain withheld pending a
+producer public-visibility contract.
+
+The packaged history journey additionally verifies local category/task filtering,
+no additional polling requests while filtering a paused page, restoration of all
+200 rows, exact attempt links, expandable correlation references and 320-pixel
+reflow. Existing page continuation, pause/resume, focus, text withholding and
+byte-preservation checks remain in the same journey. The retained report is
+[`web-activity-filters-20260905.json`](evidence/web-activity-filters-20260905.json).
+225 frontend tests, lint and typechecked distribution build passed. This extends
+#175 fixture evidence without claiming complete stage views, public provider
+messages, durable task/session/revision evidence pages or full accessibility
+qualification.
