@@ -144,7 +144,7 @@ class JobStore internal constructor(
             filename = payload.string("filename"),
             status = payload.string("status"),
             createdAt = payload.string("created_at"),
-            updatedAt = payload.optionalString("updated_at") ?: payload.string("created_at"),
+            updatedAt = if ("updated_at" in payload) payload.string("updated_at") else payload.string("created_at"),
             statusMessage = payload.optionalString("status_message"),
             sizeBytes = payload.int("size_bytes"),
             binaryPath = Path.of(payload.string("binary_path")),
