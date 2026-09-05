@@ -13,6 +13,7 @@ from pathlib import Path
 import re
 import select
 import shutil
+import stat
 import subprocess
 import tarfile
 import tempfile
@@ -23,6 +24,55 @@ import zipfile
 
 
 REPOSITORY = Path(__file__).resolve().parent.parent
+
+
+def extract_distribution(archive: Path, unpack: Path) -> None:
+    # These archives are build-produced inputs, never uploaded project archives.
+    if archive.suffix == ".zip":
+        with zipfile.ZipFile(archive) as container:
+            entries = container.infolist()
+            if len(entries) != len({entry.filename for entry in entries}):
+                raise AssertionError("Distribution contains duplicate ZIP entries")
+            for entry in entries:
+                path = Path(container.extract(entry, unpack))
+                if not entry.is_dir():
+                    # ZipFile does not restore Unix permissions. Native helpers
+                    # outside bin/libexec need their archived execute bits too.
+                    execute = (entry.external_attr >> 16) & 0o111
+                    path.chmod(stat.S_IMODE(path.stat().st_mode) | execute)
+    else:
+        with tarfile.open(archive) as container:
+            container.extractall(unpack, filter="data")
+
+
+def make_read_only(app: Path) -> None:
+    for path in app.rglob("*"):
+        if path.is_symlink():
+            continue
+        execute = stat.S_IMODE(path.stat().st_mode) & 0o111
+        path.chmod(0o555 if path.is_dir() else 0o444 | execute)
+    app.chmod(0o555)
+
+
+def installation_digests(app: Path) -> dict[Path, str]:
+    result = {}
+    for path in app.rglob("*"):
+        if path.is_file():
+            # Bundled toolchains contain large files; hash without loading each
+            # complete archive/library into the driver's memory.
+            with path.open("rb") as source:
+                result[path.relative_to(app)] = hashlib.file_digest(source, "sha256").hexdigest()
+    return result
+
+
+def remove_tree(root: Path) -> None:
+    if not root.exists():
+        return
+    root.chmod(stat.S_IMODE(root.stat().st_mode) | 0o700)
+    for path in root.rglob("*"):
+        if not path.is_symlink() and path.is_dir():
+            path.chmod(stat.S_IMODE(path.stat().st_mode) | 0o700)
+    shutil.rmtree(root)
 
 
 def verify() -> list[dict]:
@@ -54,15 +104,7 @@ def verify() -> list[dict]:
             archive = candidates[0]
             unpack = root / f"read only {suffix}"
             unpack.mkdir()
-            # These archives are build-produced inputs, never uploaded project archives.
-            if suffix == "zip":
-                with zipfile.ZipFile(archive) as container:
-                    if len(container.namelist()) != len(set(container.namelist())):
-                        raise AssertionError("Distribution contains duplicate ZIP entries")
-                    container.extractall(unpack)
-            else:
-                with tarfile.open(archive) as container:
-                    container.extractall(unpack, filter="data")
+            extract_distribution(archive, unpack)
             installations = list(unpack.iterdir())
             if len(installations) != 1 or not installations[0].is_dir():
                 raise AssertionError("Distribution must contain one application directory")
@@ -84,12 +126,9 @@ def verify() -> list[dict]:
                     content = jar.read(namespace + item["path"])
                     if len(content) != item["sizeBytes"] or hashlib.sha256(content).hexdigest() != item["sha256"]:
                         raise AssertionError("Application JAR asset digest/length differs from inventory")
-            before = {path.relative_to(app): hashlib.sha256(path.read_bytes()).hexdigest()
-                      for path in app.rglob("*") if path.is_file()}
-            for path in app.rglob("*"):
-                executable = path.parent.name in ("bin", "libexec") and not path.name.endswith(".sha256")
-                path.chmod(0o555 if path.is_dir() or executable else 0o444)
-            app.chmod(0o555)
+            before = installation_digests(app)
+            make_read_only(app)
+            assert launcher.stat().st_mode & stat.S_IXUSR, "Distribution launcher must retain its owner execute bit"
             working = root / f"unrelated {suffix}"
             working.mkdir()
             data = working / "private jobs"
@@ -164,15 +203,14 @@ def verify() -> list[dict]:
                     process.kill()
                     process.wait()
                     raise AssertionError("Packaged server shutdown exceeded 5 s")
-            after = {path.relative_to(app): hashlib.sha256(path.read_bytes()).hexdigest()
-                     for path in app.rglob("*") if path.is_file()}
+            after = installation_digests(app)
             assert before == after, "Application installation changed during runtime smoke"
+            # Reclaim the complete distribution before extracting the next format.
+            remove_tree(unpack)
+            remove_tree(working)
         return results
     finally:
-        for path in root.rglob("*"):
-            if path.is_dir():
-                path.chmod(0o755)
-        shutil.rmtree(root)
+        remove_tree(root)
 
 
 if __name__ == "__main__":
