@@ -55,13 +55,19 @@ Run the credential-free local HTTP fixture suite with:
 ./gradlew --offline test --tests 'decompengine.builtin.provider.*' --console=plain
 ```
 
-The first checkpoint passes 19 tests with zero failures, errors or skips. It exercises incremental
+The first checkpoint passes 18 tests with zero failures, errors or skips. It exercises incremental
 text delivery before server completion, Unicode text, interleaved tool arguments and tool history,
 measured/estimated usage, configuration, error classification, retry guidance/exhaustion, malformed
 streams, secret redaction and decoded secret rejection, request/response/event ceilings, cancellation,
 idle/request/overall deadlines, redirects, length and refusal.
 
-This is local adapter evidence. #9 remains open: durable evidence redaction, full request-allocation
-bounds, strict hostile JSON validation and shared admission/release integration need additional work.
+The next checkpoint adds serialization-time byte limits (including escaped strings and tool schemas),
+duplicate-key rejection, JSON depth/token/string/number bounds, invalid UTF-8 rejection and ownership
+of the HTTP body subscriber before headers arrive. Additional fixtures cover those checks, cancellation
+during headers and retry waits, and the original retry deadline. The initial commit message's count
+of 19 was a reporting error: its JUnit XML contains 18 cases.
+
+This is local adapter evidence. #9 remains open: durable evidence redaction and shared
+admission/release integration need additional work.
 No real-provider execution, built-in loop/tool containment, reconstruction, repair, restart, scheduler
 or comparative release qualification is established by this checkpoint. C0–C2 remain open.
