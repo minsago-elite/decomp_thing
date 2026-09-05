@@ -47,6 +47,30 @@ class GccBundledAnalysisStateCaptureTest {
     }
 
     @Test
+    fun `retained manifest revalidation rejects same-size edits restored bytes and inventory changes`() {
+        for (change in listOf("content", "restored", "added", "removed", "replacement")) fixture { path, run, state ->
+            val file = path.resolve("state/database")
+            Files.writeString(file, "first-state")
+            val retained = GccBundledAnalysisStateCapture.capture(run, state)
+            GccBundledAnalysisStateCapture.requireUnchanged(run, state, retained)
+            when (change) {
+                "content" -> Files.writeString(file, "other-state")
+                "restored" -> {
+                    Files.writeString(file, "other-state")
+                    Files.writeString(file, "first-state")
+                }
+                "added" -> Files.createDirectory(path.resolve("state/new-empty-directory"))
+                "removed" -> Files.delete(file)
+                "replacement" -> {
+                    Files.move(file, path.resolve("retained-old"))
+                    Files.writeString(file, "first-state")
+                }
+            }
+            assertFails(change) { GccBundledAnalysisStateCapture.requireUnchanged(run, state, retained) }
+        }
+    }
+
+    @Test
     fun `linked files directories and hardlinks fail without modifying their targets`() {
         for (kind in listOf("file", "directory", "hardlink")) fixture { path, run, state ->
             val target = path.resolve("external")
