@@ -31,6 +31,66 @@ import kotlinx.serialization.json.jsonPrimitive
 
 class BehaviorEvidenceTest {
     @Test
+    fun `cancelled and forcibly stopped comparisons retain prior evidence and remove channels`() {
+        val fixture = fixture()
+        val report = fixture.evaluate()
+        val prior = report.reportPath.readBytes()
+        val shim = fixture.original.parent.resolve("authored-runner-shim")
+        val ready = fixture.original.parent.resolve("capture-ready")
+        val originalShim = shim.readText()
+        val header = originalShim.lines().first { "child-pid" in it }
+        // A test-owned execution owner announces readiness before waiting. No
+        // application output or namespace assertion qualifies this negative run.
+        shim.writeText("#!/bin/sh\n" + header + "\n" +
+            "printf '%s\\n' \"${'$'}${'$'}\" > \"$ready\"\n" +
+            "exec /bin/sleep 5\n")
+        for (interrupt in listOf(true, false)) {
+            Files.deleteIfExists(ready)
+            val failure = java.util.concurrent.atomic.AtomicReference<Throwable?>()
+            val retainedInterrupt = java.util.concurrent.atomic.AtomicBoolean()
+            val worker = Thread {
+                try {
+                    fixture.evaluate()
+                } catch (error: Throwable) {
+                    failure.set(error)
+                    retainedInterrupt.set(Thread.currentThread().isInterrupted)
+                }
+            }
+            var owner: ProcessHandle? = null
+            try {
+                worker.start()
+                val deadline = System.nanoTime() + java.util.concurrent.TimeUnit.SECONDS.toNanos(3)
+                var pid: Long? = null
+                while (pid == null && worker.isAlive && System.nanoTime() < deadline) {
+                    pid = if (Files.exists(ready)) ready.readText().trim().toLongOrNull() else null
+                    if (pid == null) Thread.sleep(5)
+                }
+                owner = ProcessHandle.of(requireNotNull(pid) { "authored owner did not become ready: ${failure.get()}" }).orElseThrow()
+                assertTrue(owner.isAlive)
+                val channel = Files.readSymbolicLink(Path.of("/proc/$pid/fd/3"))
+                assertTrue(Files.exists(channel))
+                if (interrupt) worker.interrupt() else assertTrue(owner.destroyForcibly())
+                worker.join(4000)
+                assertFalse(worker.isAlive, "comparison cancellation must finish within its bound")
+                if (interrupt) {
+                    assertTrue(failure.get() is InterruptedException, "unexpected failure: ${failure.get()}")
+                    assertTrue(retainedInterrupt.get())
+                } else {
+                    assertTrue(failure.get() is BehaviorExecutionOutcomeException, "unexpected failure: ${failure.get()}")
+                }
+                assertFalse(owner.isAlive)
+                assertFalse(Files.exists(channel))
+                assertFalse(Files.exists(channel.parent))
+                assertTrue(prior.contentEquals(report.reportPath.readBytes()))
+            } finally {
+                owner?.let { if (it.isAlive) it.destroyForcibly() }
+                if (worker.isAlive) worker.interrupt()
+                worker.join(4000)
+            }
+        }
+    }
+
+    @Test
     fun `completion command and terminal fields remain closed after rehashing`() {
         val fixture = fixture()
         val record = BehaviorEvidence.decode(fixture.evaluate().reportPath.readBytes())
