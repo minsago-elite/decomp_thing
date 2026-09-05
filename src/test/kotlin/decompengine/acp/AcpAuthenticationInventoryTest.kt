@@ -3,6 +3,7 @@ package decompengine.acp
 import com.agentclientprotocol.model.AuthMethod
 import com.agentclientprotocol.model.AuthMethodId
 import kotlin.test.*
+import kotlinx.serialization.json.*
 
 class AcpAuthenticationInventoryTest {
     @Test fun `logout advertisement remains independent of methods and execution support`() {
@@ -47,6 +48,32 @@ class AcpAuthenticationInventoryTest {
         assertEquals(empty.sha256, AcpAuthenticationInventory.capture(emptyList(), emptyList()).sha256)
         val method = AuthMethod.AgentAuth(AuthMethodId("id"), "name", null)
         assertNotEquals(empty.sha256, AcpAuthenticationInventory.capture(listOf(method), emptyList()).sha256)
+    }
+
+    @Test fun `complete inventory limits include metadata unsupported payloads depth and aggregate size`() {
+        fun agent(index: Int, payload: JsonElement): AuthMethod = AuthMethod.AgentAuth(
+            AuthMethodId("method-$index"), "name", null, payload)
+        val oversized = buildJsonObject { put("private-key", "private-value".repeat(1500)) }
+        var nested: JsonElement = JsonPrimitive("private-value")
+        repeat(20) { nested = buildJsonArray { add(nested) } }
+        val cases = listOf(
+            listOf(agent(0, oversized)),
+            listOf(AuthMethod.UnknownAuthMethod(AuthMethodId("future"), "name", null,
+                "future", buildJsonObject { put("type", "future"); put("payload", oversized) })),
+            listOf(agent(0, nested)),
+            List(8) { agent(it, JsonPrimitive("x".repeat(9000))) },
+            listOf(agent(0, buildJsonArray { repeat(4096) { add(0) } })),
+        )
+        for (methods in cases) {
+            val error = assertFailsWith<AcpAuthenticationInventoryFailure> {
+                AcpAuthenticationInventory.capture(methods, emptyList())
+            }
+            assertEquals("ACP authentication inventory exceeds its payload limits", error.message)
+        }
+        val accepted = AcpAuthenticationInventory.capture(listOf(agent(0,
+            buildJsonObject { put("hint", "private-value") })), listOf("private-value"))
+        assertEquals(1, accepted.methods.size)
+        assertFalse(accepted.toString().contains("private-value"))
     }
 
     @Test fun `ambiguous and excessive advertisements fail with fixed diagnostics`() {

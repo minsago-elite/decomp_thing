@@ -1,8 +1,11 @@
 package decompengine.acp
 
 import com.agentclientprotocol.model.AuthMethod
+import com.agentclientprotocol.rpc.ACPJson
 import decompengine.jobs.ProgressRedactor
 import decompengine.oracle.core.OracleJson
+import decompengine.oracle.core.StrictJsonException
+import decompengine.oracle.core.StrictJsonLimits
 import kotlinx.serialization.json.*
 import java.security.MessageDigest
 import java.util.Collections
@@ -52,12 +55,31 @@ class AcpAuthenticationInventory private constructor(
                     })
                 }
             }
+            validatePayload(methods)
             val digest = MessageDigest.getInstance("SHA-256").digest(OracleJson.canonicalBytes(commitment))
                 .joinToString("") { "%02x".format(it) }
             return AcpAuthenticationInventory(methods.map {
                 AcpAuthenticationMethod(it.id.value, variant(it), redactor.text(it.id.value, 128), redactor.text(it.name, 128),
                     it.description?.let { description -> redactor.text(description, 256) })
             }, digest, logoutAdvertised)
+        }
+
+        /** Bound all SDK-retained fields, including metadata and unsupported variant payloads. */
+        private fun validatePayload(methods: List<AuthMethod>) {
+            val payload = buildJsonArray {
+                methods.forEach { add(ACPJson.encodeToJsonElement(AuthMethod.serializer(), it)) }
+            }
+            try {
+                OracleJson.canonicalBytes(payload, StrictJsonLimits(
+                    maximumCanonicalBytes = 64 * 1024,
+                    maximumDepth = 16,
+                    maximumNodes = 4096,
+                    maximumStringBytes = 16 * 1024,
+                    maximumTotalStringBytes = 64 * 1024,
+                ))
+            } catch (_: StrictJsonException) {
+                throw AcpAuthenticationInventoryFailure("ACP authentication inventory exceeds its payload limits")
+            }
         }
 
         private inline fun requireInventory(condition: Boolean, message: () -> String) {

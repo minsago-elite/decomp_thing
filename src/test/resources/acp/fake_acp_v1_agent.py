@@ -264,6 +264,8 @@ if MODE.startswith("doctor-auth-"):
         methods = [{"id": "method-" + str(i), "name": "Fixture login"} for i in range(33)]
     elif MODE == "doctor-auth-blank":
         methods = [{"id": " ", "name": "Fixture login"}]
+    elif MODE == "doctor-auth-payload":
+        methods = [{"id": "private-method-id", "name": "Fixture login", "_meta": {"secret": "x" * 17000}}]
     elif MODE == "doctor-auth-text":
         methods = [{"id": "private-method-id", "name": "x" * 513}]
     else:

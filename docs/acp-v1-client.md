@@ -738,7 +738,12 @@ stderr retention, resource deadlines, cancellation polling, and process-tree cle
 
 Preflight returns an invocation-local `authentication` inventory containing at most 32 advertised
 methods. IDs are exact and bounded to 256 UTF-8 bytes; duplicate or blank IDs fail admission.
-Names/descriptions are bounded before redacted previews are retained. Unknown variants remain
+Names/descriptions are bounded before redacted previews are retained. The complete SDK-serialized
+method array, including retained variant-specific fields and extension metadata, must also fit
+64 KiB of canonical JSON, 16 levels, 4096 nodes, 16 KiB per string and 64 KiB total string bytes.
+Excess payloads fail preflight as invalid authentication inventories with normal cleanup. The bound
+applies after the existing transport frame and SDK decoding limits; it is not a raw-input parser limit.
+Unknown variants remain
 explicitly `unknown`, and every method currently reports `loginSupported=false`: this inventory
 is not an authentication action or grant. The printable doctor descriptor includes the count,
 normalized inventory digest and logout advertisement/support flags. Default object string representations omit method IDs and previews.
