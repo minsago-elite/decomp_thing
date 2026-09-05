@@ -38,7 +38,8 @@ that proof. Exact transitive versions belong in `frontend/package-lock.json`.
 | Bundler / preset | `vite` 8.2.2 / `@preact/preset-vite` 2.10.6 | Build and development only; MIT |
 | Type checker | `typescript` 6.0.3 | Compatible with the selected lint parser; Apache-2.0 |
 | Lint | `eslint` 10.10.0, `@eslint/js` 10.0.1, `typescript-eslint` 8.69.0 | Focused TypeScript correctness/import rules; build only |
-| Component/state tests | `vitest` 5.0.0, `jsdom` 30.0.1, `@testing-library/preact` 3.2.4 | Native Preact tests with accessible DOM queries; build only |
+| Component/state tests | `vitest` 4.1.11, `jsdom` 30.0.1, `@testing-library/preact` 3.2.4 | Native Preact tests with accessible DOM queries; build only |
+| Preset declaration types | `@types/babel__core` 7.20.5 | Required to check preset declarations without suppressing library errors; build only |
 | Node configuration types | `@types/node` 24.13.3 | Configuration/tests only; match supported Node major |
 | Packaged browser tests | `@playwright/test` 1.63.0 | D12 browser driver and its pinned browser revisions; test only |
 
@@ -46,6 +47,10 @@ Node's release policy distinguishes LTS from Current; the selected Node release
 ships npm 11.19.0. Vite requires Node 20.19+ or 22.12+, so the selected Node 24 pin
 satisfies that requirement. TypeScript 7 is deliberately not selected because
 the chosen lint tooling documents support below 6.1.
+The D1 locked-build check selected Vitest 4.1.11 after 5.0.0's published
+declarations failed strict checking; the verified pins and bundle measurements are
+recorded in [the frontend workspace](../frontend/README.md) and
+[bundle evidence](../frontend/BUNDLE.md).
 [Node release policy](https://nodejs.org/en/about/previous-releases),
 [Node 24.20.0 checksums](https://nodejs.org/download/release/v24.20.0/SHASUMS256.txt),
 [bundled npm metadata](https://github.com/nodejs/node/blob/v24.20.0/deps/npm/package.json),
