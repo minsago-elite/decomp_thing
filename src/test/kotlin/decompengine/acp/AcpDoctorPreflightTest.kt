@@ -75,6 +75,9 @@ class AcpDoctorPreflightTest {
         assertTrue(preflight.detail.startsWith("acp-preflight-v1:workflow-all:protocol-1:"), preflight.detail)
         assertTrue(preflight.detail.contains("client-fs-read-true:client-fs-write-true"))
         assertTrue(preflight.detail.contains("client-terminal-false"))
+        assertTrue(preflight.detail.contains("auth-methods-1:auth-inventory-sha256-"))
+        assertFalse(preflight.detail.contains("operator-login"))
+        assertFalse(preflight.detail.contains("fixture-credential"))
         assertTrue(preflight.detail.contains("network-isolated-true:cleanup-verified-true"))
         val rendered = report.checks.joinToString("\n") { "${it.name}: ${it.detail}" }
         assertFalse(rendered.contains(SECRET_CANARY))

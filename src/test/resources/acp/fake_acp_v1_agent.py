@@ -253,6 +253,8 @@ initialize_result = {
     "agentCapabilities": capabilities,
     "agentInfo": {"name": "scripted-fixture", "version": "1.0"},
 }
+if MODE == "doctor-preflight":
+    initialize_result["authMethods"] = [{"id": "operator-login", "name": "Fixture login", "description": "Bearer fixture-credential"}]
 respond(initialize, initialize_result)
 
 if MODE == "duplicate-response-id":

@@ -44,6 +44,7 @@ enum class AcpPreflightWorkflow(
  */
 class AcpAgentPreflightResult internal constructor(
     val workflow: AcpPreflightWorkflow,
+    val authentication: AcpAuthenticationInventory,
     val negotiatedAgent: AcpNegotiatedAgentEvidence,
     requiredAgentCapabilities: Collection<AcpRequiredAgentCapability>,
     val diagnostics: AcpProcessDiagnostics,
@@ -80,6 +81,8 @@ class AcpAgentPreflightResult internal constructor(
         "agent-identity-sha256-$negotiatedIdentitySha256",
         "required-${requiredAgentCapabilities.sortedBy { it.diagnosticName }.joinToString(",") { it.diagnosticName }.ifEmpty { "none" }}",
         "agent-capabilities-${negotiatedAgent.capabilities.stableBits()}",
+        "auth-methods-${authentication.methods.size}",
+        "auth-inventory-sha256-${authentication.sha256}",
         "client-fs-read-${workflow.filesystemRead}",
         "client-fs-write-${workflow.filesystemWrite}",
         "client-terminal-${workflow.terminal}",

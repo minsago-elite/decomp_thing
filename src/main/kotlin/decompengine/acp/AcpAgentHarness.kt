@@ -169,17 +169,20 @@ class AcpAgentHarness(
      */
     fun preflight(workflow: AcpPreflightWorkflow = AcpPreflightWorkflow.ALL): AcpAgentPreflightResult {
         val requiredCapabilities = configuration.requiredAgentCapabilities + workflow.requiredAgentCapabilities
+        val authentication = AtomicReference<AcpAuthenticationInventory?>()
         val receipt = executeInternalReceipt(
             request = preflightRequest(),
             onEvent = {},
             capturedFilesystem = null,
             preflightWorkflow = workflow,
+            authenticationInventory = authentication,
         )
         receipt.requireResult()
         val evidence = receipt.providerEvidence as? AcpInvocationEvidenceSnapshot
             ?: error("successful ACP preflight is missing invocation evidence")
         return AcpAgentPreflightResult(
             workflow = workflow,
+            authentication = requireNotNull(authentication.get()) { "successful preflight is missing authentication inventory" },
             negotiatedAgent = requireNotNull(evidence.negotiatedAgent) {
                 "successful ACP preflight is missing initialize evidence"
             },
@@ -243,6 +246,7 @@ class AcpAgentHarness(
         onEvent: (AgentExecutionEvent) -> Unit,
         capturedFilesystem: AcpCapturedRepairFilesystem?,
         preflightWorkflow: AcpPreflightWorkflow?,
+        authenticationInventory: AtomicReference<AcpAuthenticationInventory?>? = null,
     ): AgentExecutionReceipt {
         val wallDeadline = MonotonicDeadline(request.limits.wallClockTimeout)
         val binding = AgentExecutionRequestBinding.capture(request)
@@ -287,6 +291,7 @@ class AcpAgentHarness(
                     evidenceState,
                     wallDeadline,
                     sessionJournal,
+                    authenticationInventory,
                 ),
             )
         } catch (_: WorkspaceSnapshotCancelled) {
@@ -360,6 +365,7 @@ class AcpAgentHarness(
         evidenceState: AcpInvocationEvidenceState,
         wallDeadline: MonotonicDeadline,
         sessionJournal: AgentSessionJournal?,
+        authenticationInventory: AtomicReference<AcpAuthenticationInventory?>?,
     ): AgentExecutionResult {
         unresolvedCleanupFailure.get()?.let { throw it }
         if (preflightWorkflow != null) {
@@ -503,6 +509,7 @@ class AcpAgentHarness(
                         preflightWorkflow = preflightWorkflow,
                         evidenceState = evidenceState,
                         sessionJournal = sessionJournal,
+                        authenticationInventory = authenticationInventory,
                     )
                 }
             } catch (failure: Throwable) {
@@ -818,6 +825,7 @@ class AcpAgentHarness(
         preflightWorkflow: AcpPreflightWorkflow?,
         evidenceState: AcpInvocationEvidenceState,
         sessionJournal: AgentSessionJournal?,
+        authenticationInventory: AtomicReference<AcpAuthenticationInventory?>?,
     ): PromptOutcome {
         val protocolScope = CoroutineScope(SupervisorJob() + Dispatchers.Default)
         protocolScopeReference.set(protocolScope)
@@ -862,6 +870,7 @@ class AcpAgentHarness(
                     wallDeadline = wallDeadline,
                     cancellation = request.cancellation,
                     protocolScope = protocolScope,
+                    authenticationInventory = authenticationInventory,
                 ),
             )
             evidenceState.reach(AcpExecutionLifecyclePhase.INITIALIZED)
@@ -1280,6 +1289,7 @@ class AcpAgentHarness(
         wallDeadline: MonotonicDeadline,
         cancellation: AgentCancellation,
         protocolScope: CoroutineScope,
+        authenticationInventory: AtomicReference<AcpAuthenticationInventory?>? = null,
     ): AcpNegotiatedAgentEvidence {
         val agentInfo = awaitPhase(
             phase = "initialize",
@@ -1306,6 +1316,7 @@ class AcpAgentHarness(
                 "ACP SDK accepted unexpected protocol version ${agentInfo.protocolVersion}",
             )
         }
+        authenticationInventory?.set(AcpAuthenticationInventory.capture(agentInfo.authMethods, configuration.environment.values.map { it.value }))
         validateCapabilities(agentInfo.capabilities, requiredCapabilities)
         val agentImplementation = agentInfo.implementation
             ?: throw AcpProtocolFailure("ACP agent did not identify its implementation during initialize")

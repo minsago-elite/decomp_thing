@@ -733,3 +733,19 @@ An SDK upgrade is intentional work, not an automated version-range update. A cha
 
 The lifecycle wrapper remains necessary even when SDK internals change: executable selection, OS process ownership,
 stderr retention, resource deadlines, cancellation polling, and process-tree cleanup belong to the host application.
+
+### Operator authentication inventory
+
+Preflight returns an invocation-local `authentication` inventory containing at most 32 advertised
+methods. IDs are exact and bounded to 256 UTF-8 bytes; duplicate or blank IDs fail admission.
+Names/descriptions are bounded before redacted previews are retained. Unknown variants remain
+explicitly `unknown`, and every method currently reports `loginSupported=false`: this inventory
+is not an authentication action or grant. The printable doctor descriptor includes only the count
+and normalized inventory digest. Default object string representations omit method IDs and previews.
+
+The digest commits to ordered IDs, variant categories, names and descriptions. It excludes extension
+metadata and variant-specific credential/terminal payloads, so it cannot authorize a login request or
+serve as a full auth-policy commitment. Exact IDs are available only to explicit operator API consumers;
+those consumers must not print them without redaction. This result stays outside invocation acceptance
+receipts and session/project archives. Login/logout, interactive surfaces and credential-state handling
+remain tracked by #265/#70, with fresh advertised-method validation required before any future dispatch.
