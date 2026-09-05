@@ -22,6 +22,42 @@ import kotlin.test.assertTrue
 
 class BehaviorValidationTest {
     @Test
+    fun `ambiguous wrapper exits and deadline expiry cannot replace passing evidence`() {
+        val tempDir = createTempDirectory("validation-wrapper-outcomes-")
+        val source = """
+            #define _POSIX_C_SOURCE 200809L
+            #include <time.h>
+            #include <stdlib.h>
+            #include <string.h>
+            int main(int argc, char **argv) {
+                if (argc == 1) return 0;
+                if (strcmp(argv[1], "wait") == 0) {
+                    struct timespec delay = {1, 0};
+                    nanosleep(&delay, NULL);
+                    return 0;
+                }
+                return atoi(argv[1]);
+            }
+        """.trimIndent() + "\n"
+        val original = compileC(tempDir, "outcome-original", source)
+        val rebuilt = compileC(tempDir, "outcome-rebuilt", source)
+        val comparator = BehaviorComparator(SandboxRunner(timeout = java.time.Duration.ofMillis(300), networkIsolation = false))
+        val report = comparator.compare("outcome", original, rebuilt, listOf(ProcessInput("normal")), tempDir.resolve("reports"))
+        val prior = java.nio.file.Files.readAllBytes(report.reportPath)
+        for (status in listOf(124, 125, 126, 127, 137, 143, 255)) {
+            assertFailsWith<BehaviorExecutionOutcomeException> {
+                comparator.compare("outcome", original, rebuilt, listOf(ProcessInput("exit", listOf(status.toString()))), tempDir.resolve("reports"))
+            }
+            assertTrue(prior.contentEquals(java.nio.file.Files.readAllBytes(report.reportPath)))
+        }
+        val failure = kotlin.test.assertFails {
+            comparator.compare("outcome", original, rebuilt, listOf(ProcessInput("deadline", listOf("wait"))), tempDir.resolve("reports"))
+        }
+        assertTrue(failure is BehaviorExecutionTimeoutException || failure is BehaviorExecutionOutcomeException)
+        assertTrue(prior.contentEquals(java.nio.file.Files.readAllBytes(report.reportPath)))
+    }
+
+    @Test
     fun `fractional second timeout does not terminate a program at the preceding whole second`() {
         val tempDir = createTempDirectory("validation-fractional-timeout-")
         val source = """

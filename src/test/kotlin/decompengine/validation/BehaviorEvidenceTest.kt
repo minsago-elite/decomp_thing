@@ -31,6 +31,33 @@ import kotlinx.serialization.json.jsonPrimitive
 
 class BehaviorEvidenceTest {
     @Test
+    fun `matching reserved exits remain unresolved even with consistent commitments`() {
+        val fixture = fixture()
+        val report = fixture.evaluate()
+        val record = BehaviorEvidence.decode(report.reportPath.readBytes())
+        for (status in listOf(124, 125, 126, 127, 137, 143, 255)) {
+            val cases = JsonArray(record.getValue("cases").jsonArray.map { element ->
+                val case = element.jsonObject
+                JsonObject(case + listOf("original", "rebuilt").associateWith { side ->
+                    JsonObject(case.getValue(side).jsonObject + ("exitCode" to JsonPrimitive(status)))
+                })
+            })
+            val changed = JsonObject(record + mapOf("cases" to cases,
+                "observationsSha256" to JsonPrimitive(OracleArtifacts.sha256(OracleJson.canonicalBytes(cases)))))
+            val digest = OracleArtifacts.sha256(OracleJson.canonicalBytes(JsonObject(changed - "reportSha256")))
+            val bytes = OracleJson.canonicalBytes(JsonObject(changed + ("reportSha256" to JsonPrimitive(digest))))
+            assertFailsWith<BehaviorExecutionOutcomeException> { BehaviorEvidence.decode(bytes) }
+            Files.write(report.reportPath, bytes)
+            val audit = ArchivalProjectAuditor.audit(fixture.project)
+            assertEquals(null, audit.behaviorMatched)
+            assertTrue("reports/probe.behavior.json" in audit.behaviorEvidenceProblems)
+            assertTrue("reports/probe.behavior.json" in audit.unresolvedBehaviorReportIds)
+            assertTrue(audit.projectBehaviorReportIds.isEmpty())
+            assertTrue(bytes.contentEquals(report.reportPath.readBytes()))
+        }
+    }
+
+    @Test
     fun `historical rounded timeout commands remain readable but arbitrary durations fail`() {
         val fixture = fixture()
         val sandbox = SandboxRunner(timeout = java.time.Duration.ofMillis(1900),

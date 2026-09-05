@@ -95,6 +95,16 @@ cannot satisfy that assertion. Distinguishing native watchdog termination from a
 application's own exit status still requires a separate completion signal in the
 local execution contract.
 
+Until that completion channel exists, execution and record decoding conservatively
+reject wrapper statuses outside 0–123. This includes watchdog status 124, wrapper
+errors 125–127 and signal-style statuses. Genuine application exits in the same
+range also remain unqualified. Rejected runs preserve any prior report; archived
+records with these statuses remain present and appear as unresolved audit problems,
+even when both observations match and every commitment is internally consistent.
+Accepting a lower status does not independently establish application completion:
+wrapper setup failures may also use lower statuses. This guard is partial progress
+on #354, not the separate execution-owner completion signal required by that issue.
+
 The record limits are 1,024 cases, 8 MiB of stdin, 1 MiB of argument bytes and
 16 MiB of comparison output. Captured input files are limited to 64 MiB each,
 512 MiB in total and 10,000 tracked paths. Source enumeration has a 10,000-entry
