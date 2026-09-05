@@ -206,3 +206,23 @@ it('rejects normalized invalid calendar dates and excess timestamp precision', (
     expect(jobFilters(filterSearch({ ...DEFAULT_FILTERS, createdAfter: value })).createdAfter).toBe(value);
   }
 });
+
+it('persists and restores oldest-first sorting and resets to newest without treating sort as a filter', async () => {
+  transport.get.mockResolvedValue(page([]));
+  const view = render(<Dashboard basePath="" />);
+  expect(await screen.findByText('No uploaded jobs yet.')).toBeTruthy();
+  fireEvent.change(screen.getByLabelText('Sort by'), { target: { value: 'oldest' } });
+  fireEvent.click(screen.getByRole('button', { name: 'Apply filters' }));
+  await waitFor(() => expect(transport.get.mock.calls.at(-1)?.[1]).toBe('/jobs?sort=oldest&limit=50'));
+  expect(location.search).toBe('?sort=oldest');
+  expect(screen.getByText('No uploaded jobs yet.')).toBeTruthy();
+  view.unmount();
+  render(<Dashboard basePath="" />);
+  expect(await screen.findByText('No uploaded jobs yet.')).toBeTruthy();
+  expect(screen.getByLabelText('Sort by')).toHaveProperty('value', 'oldest');
+  fireEvent.click(screen.getByRole('button', { name: 'Reset filters' }));
+  await waitFor(() => expect(transport.get.mock.calls.at(-1)?.[1]).toBe('/jobs?limit=50'));
+  expect(location.search).toBe('');
+  expect(screen.getByLabelText('Sort by')).toHaveProperty('value', 'newest');
+  expect(() => jobFilters('sort=unknown')).toThrow();
+});

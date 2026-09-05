@@ -1,6 +1,6 @@
 export const JOB_STATUSES = ['uploaded', 'queued', 'running', 'completed', 'failed', 'cancelled', 'interrupted', 'unknown'] as const;
-export type JobFilters = { search: string; status: string; createdAfter: string; createdBefore: string; limit: string };
-export const DEFAULT_FILTERS: JobFilters = { search: '', status: '', createdAfter: '', createdBefore: '', limit: '50' };
+export type JobFilters = { search: string; status: string; createdAfter: string; createdBefore: string; limit: string; sort: string };
+export const DEFAULT_FILTERS: JobFilters = { search: '', status: '', createdAfter: '', createdBefore: '', limit: '50', sort: 'newest' };
 
 // Compare the same nanosecond precision accepted by the server's Instant parser.
 // Date.parse alone both truncates sub-millisecond fractions and normalizes bad days.
@@ -27,7 +27,7 @@ export function jobFilters(search: string): JobFilters {
     values[key as keyof JobFilters] = value;
   }
   if (values.search.length > 256 || [...values.search].some(character => character.charCodeAt(0) < 32 || character.charCodeAt(0) === 127 || character === '\ufffd')
-    || !['50', '100', '200'].includes(values.limit)
+    || !['50', '100', '200'].includes(values.limit) || !['newest', 'oldest'].includes(values.sort)
     || (values.status !== '' && !(JOB_STATUSES as readonly string[]).includes(values.status))) throw new Error('Invalid filters');
   const after = filterInstant(values.createdAfter);
   const before = filterInstant(values.createdBefore);

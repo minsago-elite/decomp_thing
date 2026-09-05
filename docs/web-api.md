@@ -131,12 +131,13 @@ before enabling those endpoints; this document does not claim those schemas or e
 Optional PR publication remains a separately advertised #213 provider capability.
 
 Collection defaults are 50 records, maximum 200. Invalid/out-of-range limits are `422`, not silently
-clamped. Jobs sort by `(createdAt DESC, jobId DESC)`; the opaque cursor binds the normalized
+clamped. Jobs default to `(createdAt DESC, jobId DESC)`; the opaque cursor binds the normalized
 filter, sort, admission snapshot and last key. New inserts cannot appear midway through the same
 snapshot or duplicate prior rows. Removed entries may be absent, and deletion is not repaired by
 offset shifting. Expired snapshots return `410 CURSOR_EXPIRED` with guidance to refresh. Supported
 job filters are bounded display-name search (256 characters), exact known status, inclusive
-`createdAfter` and exclusive `createdBefore` RFC3339 instants. Cursors cannot be reused across
+`createdAfter` and exclusive `createdBefore` RFC3339 instants, and `sort=newest`
+(default) or `sort=oldest` creation/identity ordering. Cursors cannot be reused across
 resources, revisions or filters. Counts are optional and explicitly exact/estimated/unknown;
 absence of a total never prevents page navigation.
 

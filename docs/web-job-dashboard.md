@@ -228,3 +228,30 @@ All 50 pages remain reachable in order, keyboard paging retains its focus
 handoff, and the combined date-filter case survives reload. Chrome used the
 explicit test-only `--no-sandbox` option. These remain single-run measurements,
 not the repeated cold-load or full accessibility/soak qualification.
+
+## Persistent creation-order preference — 2026-09-05
+
+The dashboard's Sort by control now supports Newest first (default) and Oldest
+first. Applying the preference resets pagination and saves `sort=oldest` in the
+URL. Reload restores the control and requests the first page in that order;
+Reset filters returns to newest-first and the default page size. A sort-only
+empty library is still described as empty, not as a failed filter match.
+
+The authenticated collection API accepts only `newest`/`oldest`, uses creation
+instant and job ID as deterministic tie-breakers, and binds sort to the retained
+snapshot query. Reusing a cursor under another sort is rejected. Default ordering
+is unchanged. Tests cover ascending tie order across pages, invalid/duplicate
+sort parameters, cursor mismatch, control restoration and reset.
+
+199 frontend tests, 133 JVM web tests, lint, syntax checks and the typechecked
+`distZip` passed. This supersedes the earlier note that selectable sort remains
+unavailable. The browser scale journey also checks the first two oldest-first
+pages against the 10,000-job fixture, reloads to the first page, and resets to the
+50-row newest-first default. Broader accessibility, background-update behavior
+and D11 performance qualification remain separate outstanding work.
+
+The extended packaged journey passed; retained report:
+[`web-dashboard-sort-scale-20260905.json`](evidence/web-dashboard-sort-scale-20260905.json).
+Together with the combined-filter reload checks, this verifies #168's parameter
+persistence/reset criterion. Chrome used the explicit test-only `--no-sandbox`
+option; all remaining scale measurement limitations still apply.

@@ -10,13 +10,15 @@ versioned route. It accepts these query parameters exactly once:
 | `status` | One exact public job status |
 | `createdAfter` | Inclusive RFC3339 creation instant |
 | `createdBefore` | Exclusive RFC3339 creation instant |
+| `sort` | `newest` (default) or `oldest`, by creation instant then job identity |
 | `limit` | 1–200 records, default 50 |
 | `cursor` | Opaque continuation from this collection |
 
 Unknown/duplicate filters, malformed encodings, invalid date ranges and invalid
-limits return `422 VALIDATION_FAILED`. Clients repeat the same filters and limit
+limits return `422 VALIDATION_FAILED`. Clients repeat the same filters, sort and limit
 when following a cursor. Search case and equivalent date offsets normalize to the
-same query. Jobs sort by creation instant descending, then job identity descending.
+same query. Jobs sort by creation instant and then job identity, both descending for `newest`
+and ascending for `oldest`. Sort is part of the cursor-bound query.
 
 The first read captures existing job identities and copies each job's presentation
 under a short service lock. Rows reflect their individual read time; this is not a

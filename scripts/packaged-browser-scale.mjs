@@ -76,9 +76,23 @@ export async function qualifyScale({ fixture, makeTarget, cdp, evaluate, ready, 
   await ready(tab, `(${rows}).length === 1`, 'combined filters restored after reload');
   assert.deepEqual(await evaluate(tab, rows), ['/nested/jobs/' + fixture.ids[42]]);
   assert.deepEqual(await evaluate(tab, 'Object.fromEntries(new URLSearchParams(location.search))'), filters);
+  await cdp.call('Page.navigate', { url: browserOrigin + '/nested/?sort=oldest&limit=200' }, tab.sessionId);
+  const oldest = fixture.ids.slice(0, 200).map(id => '/nested/jobs/' + id);
+  await ready(tab, `(${rows})[0] === ${JSON.stringify(oldest[0])} && (${rows}).length === 200`, 'oldest-first library');
+  assert.deepEqual(await evaluate(tab, rows), oldest);
+  await evaluate(tab, `[...document.querySelectorAll('button')].find(b => b.textContent === 'Next page').click()`);
+  await ready(tab, `(${rows})[0] === ${JSON.stringify('/nested/jobs/' + fixture.ids[200])}`, 'oldest-first continuation');
+  assert.deepEqual(await evaluate(tab, rows), fixture.ids.slice(200, 400).map(id => '/nested/jobs/' + id));
+  await cdp.call('Page.reload', {}, tab.sessionId);
+  await ready(tab, `(${rows})[0] === ${JSON.stringify(oldest[0])}`, 'oldest-first restored after reload');
+  assert.deepEqual(await evaluate(tab, rows), oldest);
+  assert.equal(await evaluate(tab, `[...document.querySelectorAll('label')].find(label => label.textContent.startsWith('Sort by')).querySelector('select').value`), 'oldest');
+  await evaluate(tab, `[...document.querySelectorAll('button')].find(b => b.textContent === 'Reset filters').click()`);
+  await ready(tab, `(${rows})[0] === ${JSON.stringify('/nested/jobs/' + fixture.ids[9999])} && (${rows}).length === 50`, 'reset oldest-first preference');
+  assert.equal(await evaluate(tab, 'location.search'), '');
   assert.deepEqual(tab.exceptions, []);
   assert.ok(tab.requests.every(request => ['GET', 'HEAD'].includes(request.method)));
   return { persistedJobs: fixture.count, pages: 50, rowsPerPage: 200, reachableJobs: 10000,
-    exactOrder: true, keyboardPaginationFocus: true, searchReload: true, combinedNanosecondFiltersReload: true, mutationRequests: 0,
+    exactOrder: true, keyboardPaginationFocus: true, searchReload: true, combinedNanosecondFiltersReload: true, oldestFirstPagesReloadReset: true, mutationRequests: 0,
     peakBrowserHeapBytes, pageLatencyMs: timings.map(ms => Math.round(ms)), executionStarted: false };
 }

@@ -34,7 +34,7 @@ class WebJobPagesTest {
         val query = WebJobQuery(limit = 1)
         val token = cursor(pages.page("owner", query, null))
         for ((owner, filter, candidate) in listOf(Triple("other", query, token), Triple("owner", query.copy(search = "other"), token),
-            Triple("owner", query.copy(limit = 2), token), Triple("owner", query, token + "x"))) {
+            Triple("owner", query.copy(sort = "oldest"), token), Triple("owner", query.copy(limit = 2), token), Triple("owner", query, token + "x"))) {
             assertEquals("INVALID_CURSOR", assertFailsWith<WebAccessDenied> { pages.page(owner, filter, candidate) }.code)
         }
         clock = 120_000_000_001
@@ -46,9 +46,17 @@ class WebJobPagesTest {
         val pages = WebJobPages({ sequenceOf(row("a"), row("b", date = "2026-09-05T02:00:00+01:00"),
             row("c", status = "failed"), row("d", name = "other.elf"), row("e", date = "2026-09-06T00:00:00Z")) })
         assertEquals(listOf("b", "a"), ids(pages.page("owner", query, null)))
-        listOf("limit=0", "limit=201", "limit=01", "limit=1&limit=2", "unknown=value", "status=bogus", "search=%FF", "search=%00",
+        listOf("sort=wrong", "sort=oldest&sort=newest", "limit=0", "limit=201", "limit=01", "limit=1&limit=2", "unknown=value", "status=bogus", "search=%FF", "search=%00",
             "createdAfter=wrong", "createdAfter=2026-09-06T00:00:00Z&createdBefore=2026-09-05T00:00:00Z", "search=" + "x".repeat(257))
             .forEach { invalid -> assertEquals(422, assertFailsWith<WebAccessDenied>(invalid) { WebJobQuery.parse(invalid) }.status) }
+    }
+
+    @Test fun `oldest first sorts by instant then identity and pages the same snapshot`() {
+        val (query, _) = WebJobQuery.parse("sort=oldest&limit=2")
+        val pages = WebJobPages({ sequenceOf(row("b"), row("a"), row("c", date = "2026-09-05T00:00:01Z")) })
+        val first = pages.page("owner", query, null)
+        assertEquals(listOf("a", "b"), ids(first))
+        assertEquals(listOf("c"), ids(pages.page("owner", query, cursor(first))))
     }
 
     @Test fun `nanosecond date ranges retain inclusive and exclusive boundaries across offsets`() {

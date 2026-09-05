@@ -15,7 +15,7 @@ import javax.crypto.spec.SecretKeySpec
 
 internal data class WebJobQuery(
     val search: String = "", val status: String? = null,
-    val after: Instant? = null, val before: Instant? = null, val limit: Int = 50,
+    val after: Instant? = null, val before: Instant? = null, val limit: Int = 50, val sort: String = "newest",
 ) {
     companion object {
         fun parse(raw: String?): Pair<WebJobQuery, String?> {
@@ -27,13 +27,15 @@ internal data class WebJobQuery(
                 val split = part.indexOf('=')
                 if (split < 1) invalid()
                 val key = part.substring(0, split)
-                if (key !in setOf("search", "status", "createdAfter", "createdBefore", "limit", "cursor") || key in fields) invalid()
+                if (key !in setOf("search", "status", "createdAfter", "createdBefore", "limit", "cursor", "sort") || key in fields) invalid()
                 val value = try { URLDecoder.decode(part.substring(split + 1), StandardCharsets.UTF_8) } catch (_: Exception) { invalid() }
                 if (value.any { it.code < 32 || it.code == 127 || it == '\uFFFD' }) invalid()
                 fields[key] = value
             }
             val limit = fields["limit"]?.let { if (!it.matches(Regex("[1-9][0-9]{0,2}"))) invalid(); it.toInt() } ?: 50
             if (limit !in 1..200) invalid()
+            val sort = fields["sort"] ?: "newest"
+            if (sort !in setOf("newest", "oldest")) invalid()
             val search = fields["search"].orEmpty()
             if (search.length > 256) invalid()
             val status = fields["status"]
@@ -47,7 +49,7 @@ internal data class WebJobQuery(
             if (after != null && before != null && after >= before) invalid()
             val cursor = fields["cursor"]
             if (cursor != null && !cursor.matches(Regex("[A-Za-z0-9_-]{1,128}"))) throw WebAccessDenied(400, "INVALID_CURSOR", "Use a cursor returned by this job collection.")
-            return WebJobQuery(search.lowercase(Locale.ROOT), status, after, before, limit) to cursor
+            return WebJobQuery(search.lowercase(Locale.ROOT), status, after, before, limit, sort) to cursor
         }
     }
 }
@@ -95,8 +97,9 @@ internal class WebJobPages(
                 if (bytes > 16L * 1024 * 1024) throw WebAccessDenied(503, "LISTING_LIMIT", "The job snapshot exceeds its byte budget. Narrow the filters.")
                 items += item
             }
-            items.sortWith(compareByDescending<JsonObject> { Instant.parse(it.getValue("createdAt").jsonPrimitive.content) }
-                .thenByDescending { it.getValue("jobId").jsonPrimitive.content })
+            val order = compareBy<JsonObject> { Instant.parse(it.getValue("createdAt").jsonPrimitive.content) }
+                .thenBy { it.getValue("jobId").jsonPrimitive.content }
+            items.sortWith(if (query.sort == "oldest") order else order.reversed())
             val snapshot = Snapshot(UUID.randomUUID().toString().replace("-", ""), owner, query, items.toList(), now() + ttl, bytes)
             return synchronized(snapshots) {
                 expire()

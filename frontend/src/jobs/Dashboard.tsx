@@ -72,7 +72,7 @@ export function Dashboard({ basePath }: { basePath: string }) {
   }
   function reload() { setCursors([null]); setPageIndex(0); setRefresh(value => value + 1); }
   function field(key: keyof JobFilters, value: string) { setDraft(previous => ({ ...previous, [key]: value })); }
-  const filtered = Object.entries(selection.filters).some(([key, value]) => key !== 'limit' && value !== '');
+  const filtered = Object.entries(selection.filters).some(([key, value]) => key !== 'limit' && key !== 'sort' && value !== '');
   return <section aria-labelledby="job-library-title">
     <h2 id="job-library-title">Uploaded jobs</h2>
     <form class="job-filters" onSubmit={event => { event.preventDefault(); apply(draft); }}>
@@ -82,6 +82,9 @@ export function Dashboard({ basePath }: { basePath: string }) {
       </select></label>
       <label>Created at or after<input value={draft.createdAfter} placeholder="2026-09-05T00:00:00Z" onInput={event => field('createdAfter', event.currentTarget.value)} /></label>
       <label>Created before<input value={draft.createdBefore} placeholder="2026-09-06T00:00:00Z" onInput={event => field('createdBefore', event.currentTarget.value)} /></label>
+      <label>Sort by<select value={draft.sort} onChange={event => field('sort', event.currentTarget.value)}>
+        <option value="newest">Newest first</option><option value="oldest">Oldest first</option>
+      </select></label>
       <label>Jobs per page<select value={draft.limit} onChange={event => field('limit', event.currentTarget.value)}>
         {[50, 100, 200].map(limit => <option key={limit}>{limit}</option>)}
       </select></label>
@@ -90,7 +93,7 @@ export function Dashboard({ basePath }: { basePath: string }) {
     {!selection.valid && <p role="alert">The saved filters are invalid. Reset filters to load jobs.</p>}
     {error && <p role="alert" class="notice notice-error">{error}{data && ' Previously loaded rows are shown below; their state may be outdated.'}</p>}
     <div class="job-actions"><button type="button" disabled={phase === 'loading' || !selection.valid} onClick={reload}>Refresh jobs</button>
-      <p>Newest jobs first. Completion does not establish validated reconstruction.</p></div>
+      <p>{selection.filters.sort === 'oldest' ? 'Oldest' : 'Newest'} jobs first. Completion does not establish validated reconstruction.</p></div>
     <h3 ref={results} tabIndex={-1}>Job results</h3>
     <p role="status">{phase === 'loading' && selection.valid ? (data ? 'Loading jobs… Previously loaded rows remain below.' : 'Loading jobs…') : data ? `${data.items.length} jobs on this page. No total count is available.` : ''}</p>
     {data?.items.length === 0 && <p>{filtered ? 'No jobs match these filters.' : 'No uploaded jobs yet.'}</p>}
