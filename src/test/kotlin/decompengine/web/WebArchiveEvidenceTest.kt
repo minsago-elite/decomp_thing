@@ -54,6 +54,36 @@ class WebArchiveEvidenceTest {
         }
     }
 
+    @Test
+    fun `verified archive reads retain the selected attempt namespace`() {
+        val root = Files.createTempDirectory("web-archive-attempt-")
+        try {
+            val store = decompengine.jobs.JobStore(root)
+            val bytes = decompengine.jobs.elfFixture()
+            val job = store.createFromUpload("inert.elf", bytes)
+            val prefix = "reports/runs/run_fixture"
+            val tree = root.resolve(job.id).resolve("$prefix/source-tree")
+            val inputHash = java.security.MessageDigest.getInstance("SHA-256").digest(bytes).joinToString("") { "%02x".format(it) }
+            decompengine.project.SourceTreeGenerator.generate(decompengine.project.RecoveredProgramModel(
+                inputSha256 = inputHash,
+                functions = listOf(decompengine.project.RecoveredFunction("fn_1000", "core", 0x1000uL, "int core(void)")),
+            ), tree)
+            kotlin.test.assertEquals(0, decompengine.project.MakeProjectBuilder.build(tree).returnCode)
+            val packed = decompengine.project.ArchivalPackager.create(tree, tree.parent.resolve("source-tree.zip"))
+            val reads = mutableListOf<String>()
+            val reader = { id: String, relative: String, limit: Long ->
+                reads += relative
+                store.readArtifact(id, relative, limit)
+            }
+            val sources = WebSourceEvidence(store, listOf(GeneratedCMakeReconstructionProfile.descriptor), reader)
+            val archives = WebArchiveEvidence(store, sources, reader)
+            kotlin.test.assertEquals(packed.archiveSha256, archives.read(job.id, reportPrefix = prefix).sha256)
+            assertTrue(reads.isNotEmpty() && reads.all { it.startsWith("$prefix/") })
+            assertFailsWith<Exception> { archives.read(job.id) }
+            assertFailsWith<Exception> { archives.read(job.id, reportPrefix = "reports/runs/run_other") }
+        } finally { root.toFile().deleteRecursively() }
+    }
+
     private fun storedArchive(entries: Map<String, ByteArray>): ByteArray {
         val bytes = ByteArrayOutputStream()
         ZipOutputStream(bytes).use { zip ->

@@ -65,6 +65,21 @@ data class Job(
 
 class JobStore(root: Path) {
     private val root = root.toAbsolutePath().normalize()
+    internal val storageRoot: Path get() = root
+
+    /** Bounded identities only; malformed records are inspected separately instead of disappearing. */
+    internal fun jobIds(): List<String> {
+        if (!Files.exists(root, java.nio.file.LinkOption.NOFOLLOW_LINKS)) return emptyList()
+        if (!Files.isDirectory(root, java.nio.file.LinkOption.NOFOLLOW_LINKS)) throw JobStoreException("job storage is not a directory")
+        val ids = mutableListOf<String>()
+        Files.newDirectoryStream(root).use { entries ->
+            for (entry in entries) if (entry.fileName.toString().matches(Regex("[a-f0-9]{32}"))) {
+                if (ids.size >= 10_000) throw JobStoreException("job storage exceeds its listing limit")
+                ids += entry.fileName.toString()
+            }
+        }
+        return ids.sorted()
+    }
 
     @Synchronized
     fun createFromUpload(filename: String, content: ByteArray): Job {
@@ -97,12 +112,17 @@ class JobStore(root: Path) {
 
     @Synchronized
     fun get(jobId: String): Job {
-        val jobDir = jobDirectory(jobId)
+        jobDirectory(jobId)
         val payload = try {
             OracleJson.parse(readStableRegularFile(root, "$jobId/job.json", 256L * 1024).bytes).jsonObject
         } catch (_: IOException) {
             throw JobStoreException("job metadata is unavailable or its path changed")
         }
+        return decodeJobRecord(jobId, payload)
+    }
+
+    internal fun decodeJobRecord(jobId: String, payload: JsonObject): Job {
+        val jobDir = jobDirectory(jobId)
         require(payload.string("id") == jobId &&
             Path.of(payload.string("binary_path")) == jobDir.resolve("input.elf")
         ) { "job metadata identity does not match its store location" }
@@ -145,6 +165,35 @@ class JobStore(root: Path) {
 
     fun reportsDirectory(jobId: String): Path = jobDirectory(jobId).resolve("reports").createDirectories()
 
+    /** The caller first verifies run ownership through the durable attempt store. Reads never create directories. */
+    internal fun runReportsDirectory(jobId: String, runId: String, create: Boolean = false): Path {
+        require(runId.matches(Regex("[A-Za-z0-9][A-Za-z0-9_-]{0,127}"))) { "invalid workflow report identity" }
+        val job = jobDirectory(jobId)
+        if (!Files.isDirectory(job, java.nio.file.LinkOption.NOFOLLOW_LINKS)) throw JobStoreException("job storage is unavailable")
+        var current = job
+        for (segment in listOf("reports", "runs", runId)) {
+            current = current.resolve(segment)
+            if (Files.exists(current, java.nio.file.LinkOption.NOFOLLOW_LINKS)) {
+                if (!Files.isDirectory(current, java.nio.file.LinkOption.NOFOLLOW_LINKS)) throw JobStoreException("workflow report storage is invalid")
+            } else if (create) Files.createDirectory(current)
+        }
+        return current
+    }
+
+    internal fun resolveRunArtifact(jobId: String, runId: String, relativePath: String): Path {
+        require(relativePath.isNotBlank() && !relativePath.contains('\\')) { "invalid workflow artifact path" }
+        val segments = relativePath.split('/')
+        require(segments.none { it.isBlank() || it == "." || it == ".." }) { "invalid workflow artifact path" }
+        var current = runReportsDirectory(jobId, runId)
+        for ((index, segment) in segments.withIndex()) {
+            current = current.resolve(segment)
+            val valid = if (index == segments.lastIndex) Files.isRegularFile(current, java.nio.file.LinkOption.NOFOLLOW_LINKS)
+                else Files.isDirectory(current, java.nio.file.LinkOption.NOFOLLOW_LINKS)
+            if (!valid) throw JobStoreException("workflow artifact is unavailable")
+        }
+        return current
+    }
+
     fun resolveArtifact(jobId: String, relativePath: String): Path {
         require(relativePath.isNotBlank()) { "artifact path must not be blank" }
         require(relativePath.replace('\\', '/').startsWith("reports/")) { "only report artifacts may be downloaded" }
@@ -184,8 +233,9 @@ class JobStore(root: Path) {
         }
     }
 
-    internal fun sourceArchiveInventory(jobId: String): Map<String, LinuxFileIdentity> {
+    internal fun sourceArchiveInventory(jobId: String, reportPrefix: String = "reports"): Map<String, LinuxFileIdentity> {
         jobDirectory(jobId)
+        require(reportPrefix == "reports" || reportPrefix.matches(Regex("reports/runs/[A-Za-z0-9][A-Za-z0-9_-]{0,127}"))) { "archive report prefix is invalid" }
         val inventory = sortedMapOf<String, LinuxFileIdentity>()
         var entries = 1
         var regularFiles = 0
@@ -224,9 +274,12 @@ class JobStore(root: Path) {
         try {
             LinuxFilesystemSyscalls.openRoot(root).use { storeRoot ->
                 LinuxFilesystemSyscalls.openDirectoryAt(storeRoot.fd, jobId).use { job ->
-                    LinuxFilesystemSyscalls.openDirectoryAt(job.fd, "reports").use { reports ->
-                        LinuxFilesystemSyscalls.openDirectoryAt(reports.fd, "source-tree").use { source -> visit(source, "", 0) }
+                    fun openSelected(parent: LinuxDescriptor, segments: List<String>) {
+                        LinuxFilesystemSyscalls.openDirectoryAt(parent.fd, segments.first()).use { child ->
+                            if (segments.size == 1) visit(child, "", 0) else openSelected(child, segments.drop(1))
+                        }
                     }
+                    openSelected(job, reportPrefix.split('/') + "source-tree")
                 }
             }
         } catch (_: IOException) {

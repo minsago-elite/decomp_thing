@@ -24,6 +24,7 @@ data class SourceTreeView(
 internal class WebSourceEvidence(
     private val store: JobStore,
     profiles: List<ReconstructionProfile>,
+    private val readArtifact: (String, String, Long) -> StableRegularFile = store::readArtifact,
 ) {
     private val profiles = profiles.associateBy(ReconstructionProfile::id)
 
@@ -33,9 +34,11 @@ internal class WebSourceEvidence(
         }
     }
 
-    fun read(jobId: String): WebSourceSnapshot {
+    fun read(jobId: String, reportPrefix: String = "reports"): WebSourceSnapshot {
+        val manifestPath = "$reportPrefix/source-tree/source_tree_manifest.json"
+        canonicalReportSegments(manifestPath)
         val input = store.readInput(jobId)
-        val manifestSnapshot = store.readArtifact(jobId, MANIFEST_PATH, MAXIMUM_MANIFEST_BYTES)
+        val manifestSnapshot = readArtifact(jobId, manifestPath, MAXIMUM_MANIFEST_BYTES)
         val manifestDocument = OracleJson.parse(manifestSnapshot.bytes, JSON_LIMITS) as? JsonObject
             ?: throw IllegalArgumentException("source manifest must be an object")
         val profileId = manifestDocument["profileId"]?.jsonPrimitive?.content
@@ -47,7 +50,7 @@ internal class WebSourceEvidence(
         val files = manifest.files.associate { entry ->
             val remaining = MAXIMUM_TOTAL_BYTES - total
             require(remaining > 0L) { "source tree exceeds its aggregate read bound" }
-            val snapshot = store.readArtifact(jobId, "reports/source-tree/${entry.path}", minOf(MAXIMUM_SOURCE_BYTES, remaining))
+            val snapshot = readArtifact(jobId, "$reportPrefix/source-tree/${entry.path}", minOf(MAXIMUM_SOURCE_BYTES, remaining))
             require(snapshot.sha256 == entry.sha256) { "source file differs from its manifest: ${entry.path}" }
             total += snapshot.bytes.size
             entry.path to snapshot
@@ -58,15 +61,14 @@ internal class WebSourceEvidence(
             }
         }
         manifest.files.forEach { entry ->
-            requireSame(files.getValue(entry.path), store.readArtifact(jobId, "reports/source-tree/${entry.path}", MAXIMUM_SOURCE_BYTES))
+            requireSame(files.getValue(entry.path), readArtifact(jobId, "$reportPrefix/source-tree/${entry.path}", MAXIMUM_SOURCE_BYTES))
         }
-        requireSame(manifestSnapshot, store.readArtifact(jobId, MANIFEST_PATH, MAXIMUM_MANIFEST_BYTES))
+        requireSame(manifestSnapshot, readArtifact(jobId, manifestPath, MAXIMUM_MANIFEST_BYTES))
         requireSame(input, store.readInput(jobId))
         return WebSourceSnapshot(manifest, manifestDocument, files, profile)
     }
 
     companion object {
-        private const val MANIFEST_PATH = "reports/source-tree/source_tree_manifest.json"
         private const val MAXIMUM_MANIFEST_BYTES = 1024L * 1024
         private const val MAXIMUM_SOURCE_BYTES = 4L * 1024 * 1024
         private const val MAXIMUM_TOTAL_BYTES = 64L * 1024 * 1024

@@ -1,0 +1,7 @@
+{
+  "apiVersion": 1,
+  "kind": "sessionStartRequest",
+  "data": {
+    "token": "synthetic_non_secret_bootstrap_fixture_1234567890"
+  }
+}

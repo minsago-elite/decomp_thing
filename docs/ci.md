@@ -14,6 +14,79 @@ That command runs:
 
 - `./gradlew --no-daemon test`
 
+Gradle also builds the embedded frontend. CI provisions the exact Node 24.20.0 /
+npm 11.19.0 distribution using `scripts/install-frontend-node.sh`; the installer
+checks the reviewed official archive digest and repository version pins. Local
+builds need the same toolchain on PATH. Node is a build dependency and is absent
+from the application Docker runtime stage.
+
+The independent **Frontend contracts and bundle** job runs on every push and pull
+request. It uses a clean locked npm install, strict type checking, lint, component
+and state tests, the versioned web schema's positive/negative fixtures, a production
+bundle with size/dependency checks, and the manifest completeness/digest tests.
+It also rejects changes to checked frontend or contract inputs produced by those
+commands. No generated bundle, `node_modules`, or frontend dependency cache is
+restored; Gradle packaging in the other jobs builds its own current bundle.
+
+Run the frontend checks locally with the pinned tools:
+
+```bash
+npm --prefix frontend ci --ignore-scripts --no-audit --no-fund
+python3 -m pip install --requirement requirements/oracle-generation.txt
+python3 contracts/web/v1/verify.py
+npm --prefix frontend run typecheck
+npm --prefix frontend run lint
+npm --prefix frontend test
+npm --prefix frontend run build
+frontend_version="$(node -p "require('./frontend/package.json').version")"
+node scripts/web-asset-manifest.mjs build/frontend/dist "$frontend_version" --write build/frontend/asset-manifest.json
+node scripts/web-asset-manifest.mjs build/frontend/dist "$frontend_version" --verify build/frontend/asset-manifest.json
+node --test scripts/web-asset-manifest.test.mjs
+```
+
+The standalone manifest check uses the frontend package version; Gradle binds the
+packaged inventory to the JVM application version. CI retains synthetic test
+results, tool/lock/schema identities and bundle/manifest metadata as
+`frontend-verification` for 14 days, including after failures. It does not upload
+environment dumps, credentials, private source maps or generated job content.
+
+The **Packaged web contracts and browser** job also runs on every push and pull
+request. It builds the archives from the current checkout, runs the web/job JVM
+contracts, verifies relocated read-only ZIP/TAR HTTP serving and Ghidra native
+permissions, and retains the existing ACP/LLVM/BOOT distribution checks. Pinned
+Chrome then checks the public shell, lazy Runtime route, explicit chunk recovery,
+session exchange/reload/logout, and the explicit Vite proxy against the same ZIP.
+The application process has no Node/npm on PATH and starts from an unrelated
+directory; these preview journeys create no jobs or workflow execution.
+
+`scripts/web-test-browser.json` pins Chrome for Testing 149.0.7827.55 for Linux
+x86-64 by exact URL, length, archive SHA-256 and expanded inventory. Its
+[official version metadata](https://googlechromelabs.github.io/chrome-for-testing/149.0.7827.55.json)
+identifies the download; the checked SHA-256 is our content lock on those bytes,
+not an upstream signature. `scripts/install-web-test-browser.py` verifies the
+archive before extracting into a fresh test-tool directory and preserves an
+existing destination. Ubuntu CI installs the archive's `deb.deps`, following the
+[upstream dependency instructions](https://github.com/GoogleChromeLabs/chrome-for-testing#how-to-install-the-system-level-dependencies-required-for-archived-linux64-binaries).
+The browser is separate from all application distributions. CI explicitly uses
+`--no-sandbox` on its disposable runner; each report records that setting and the
+actual executable digest/CDP version. It does not qualify browser sandbox behavior.
+
+The packaged lane retains JSON reports, screenshots, tool pins and JVM test
+reports as `packaged-web-verification` for 14 days even after failure. Session
+secrets and bootstrap fragments are redacted; extraction/browser working data is
+removed after confirmed process shutdown. No browser cache or frontend output
+cache supplies the release; the existing Gradle dependency cache remains enabled.
+
+These are checkpoints under [#225](https://github.com/minsago-elite/decomp_thing/issues/225)
+and [#227](https://github.com/minsago-elite/decomp_thing/issues/227). Expanded
+upload/workflow/evidence/download journeys, accessibility/scale qualification,
+Git/provider gates and hosted clean/cache/failure evidence remain open. A schema
+fixture pass does not establish an implemented endpoint. Branch-protection
+requirements are administered separately; a workflow job alone does not prove
+that GitHub requires its result for merge.
+The existing Kotlin, ACP, Clang, archival and oracle jobs retain their checks;
+the manual LLVM source rebuild remains the optional expensive lane described below.
+
 The test task first builds and verifies the same static ACP gate helper shipped by `installDist`; security-boundary
 tests do not compile private helper copies. Distribution jobs should additionally run
 `./gradlew --no-daemon verifyAcpGateHelperDistribution`.
@@ -80,6 +153,7 @@ bytes. Exact LLVM commands and benchmark boundaries are documented in
 Install these system tools before running the test suite:
 
 - JDK 21
+- Node 24.20.0 and npm 11.19.0 for frontend build tasks
 - `gcc` and `make`
 - static libc development objects for `/usr/bin/cc -static` (included by Ubuntu's `build-essential` dependency set)
 - LLVM/Clang 18 for `scripts/validate-clang.sh`
@@ -93,7 +167,10 @@ Optional local integrations:
   the named secret environment sources declared by that private configuration; they are not serialized into it.
 - `BASE_URL`, `API_KEY`, and `MODEL` are deprecated compatibility inputs and are accepted only with exact
   `ACP_HARNESS=legacy-openai` or `--harness legacy-openai`. The pinned MVP fixture retains that explicit legacy path.
-- Ghidra can be supplied through the Kotlin JVM adapter. Fast tests use a fake JVM entrypoint; the archival Docker CI job uses the pinned real Ghidra release and bundled exporter.
+- Ghidra is bundled through its Java API worker. Gradle stages the hash-locked
+  release even for focused test tasks; fake-worker tests avoid analysis execution.
+  The separate bundled-Ghidra lane enables the real installed API/provenance,
+  decompiler and source-tree tests without `GHIDRA_HOME`.
 
 ## GitHub Actions Consumer Example
 
@@ -117,6 +194,9 @@ jobs:
           distribution: temurin
           java-version: "21"
       - run: |
+          bash scripts/install-frontend-node.sh "$RUNNER_TEMP/frontend-node"
+          echo "$RUNNER_TEMP/frontend-node/bin" >> "$GITHUB_PATH"
+      - run: |
           sudo apt-get update
           sudo apt-get install -y --no-install-recommends \
             bubblewrap \
@@ -129,6 +209,8 @@ jobs:
 
 Useful artifacts to retain:
 
+- `frontend-verification` from the dedicated frontend job (component results and build/contract metadata)
+- `packaged-web-verification` (sanitized browser reports/screenshots, exact tool pins and JVM web contracts)
 - `build/reports/tests/test`
 - `build/test-results/test`
 - generated behavior reports under project `reports/`

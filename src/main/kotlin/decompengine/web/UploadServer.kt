@@ -1,5 +1,9 @@
 package decompengine.web
 
+import java.util.concurrent.ThreadPoolExecutor
+import java.util.concurrent.ScheduledThreadPoolExecutor
+import java.util.concurrent.TimeUnit
+
 import com.sun.net.httpserver.HttpExchange
 import com.sun.net.httpserver.HttpServer
 import decompengine.acp.AcpHarnessFactory
@@ -35,14 +39,8 @@ import java.net.InetSocketAddress
 import java.net.URLDecoder
 import java.nio.charset.StandardCharsets
 import java.nio.file.Path
-import java.util.concurrent.ConcurrentHashMap
-import java.util.concurrent.Executor
-import java.util.concurrent.ExecutorService
 import java.util.concurrent.ArrayBlockingQueue
-import java.util.concurrent.RejectedExecutionException
-import java.util.concurrent.ThreadPoolExecutor
-import java.util.concurrent.TimeUnit
-import java.util.concurrent.atomic.AtomicBoolean
+import java.util.concurrent.Executor
 import kotlin.io.path.pathString
 
 fun interface JobAnalyzer {
@@ -163,75 +161,114 @@ internal fun renderWebReconstructionHarnessSelection(strategy: WebReconstruction
 private const val WEB_RECONSTRUCTION_MODE_ENVIRONMENT = "WEB_RECONSTRUCTION_MODE"
 private const val WEB_RECONSTRUCTION_HARNESS_REPORT = "reconstruction_harness_selection.json"
 
+enum class WebUiMode { LEGACY, SPA }
+
 class UploadServer(
     host: String,
     port: Int,
     dataDir: Path,
-    private val analyzer: JobAnalyzer = AutomaticJobAnalyzer(),
-    private val reconstructor: JobReconstructor = SourceTreeJobReconstructor(),
+    analyzer: JobAnalyzer = AutomaticJobAnalyzer(),
+    reconstructor: JobReconstructor = SourceTreeJobReconstructor(),
     executor: Executor? = null,
+    uiMode: WebUiMode = WebUiMode.LEGACY,
+    basePath: String = "/",
+    devFrontendOrigin: String? = null,
     sourceProfiles: List<ReconstructionProfile> = listOf(GeneratedCMakeReconstructionProfile.descriptor),
     sensitiveValues: Collection<String> = System.getenv().values,
     listenBacklog: Int = 64,
 ) {
-    init {
-        require(listenBacklog in 1..4096) { "HTTP listen backlog must be between 1 and 4096" }
-    }
+    init { require(listenBacklog in 1..4096) { "HTTP listen backlog must be between 1 and 4096" } }
     private val diagnosticRedactor = ProgressRedactor(sensitiveValues)
+    // Verify trusted application bytes before binding a listening socket.
+    private val spaAssets = when (uiMode) {
+        WebUiMode.SPA -> {
+            require(java.net.InetAddress.getByName(host).isLoopbackAddress) {
+                "the SPA preview currently requires a loopback host"
+            }
+            // Validate the explicit origin spelling before binding, including
+            // when an ephemeral port is requested. No origin comes from HTTP.
+            LocalWebAccessConfiguration(webOrigin(host, port.takeIf { it != 0 } ?: 1), basePath,
+                setOfNotNull(devFrontendOrigin))
+            EmbeddedWebAssets.load(basePath = basePath)
+        }
+        WebUiMode.LEGACY -> {
+            require(basePath == "/") { "--base-path is supported by --ui spa" }
+            require(devFrontendOrigin == null) { "--dev-frontend-origin requires --ui spa" }
+            null
+        }
+    }
     private val server = HttpServer.create(InetSocketAddress(host, port), listenBacklog)
     private val store = JobStore(dataDir)
-    private val sourceEvidence = WebSourceEvidence(store, sourceProfiles)
-    private val archiveEvidence = WebArchiveEvidence(store, sourceEvidence)
-    private val ownedExecutor: ExecutorService? = if (executor == null) {
-        ThreadPoolExecutor(2, 2, 0L, TimeUnit.MILLISECONDS, ArrayBlockingQueue(32),
-            { runnable -> Thread(runnable, "decomp-web-analysis").apply { isDaemon = true } },
-            ThreadPoolExecutor.AbortPolicy())
-    } else {
-        null
+    private val jobs = WebJobService(store, analyzer, reconstructor, executor, shutdownTimeoutMs = 5000, failureDiagnostic = { diagnostic(it, "Background operation failed") })
+    private val sourceEvidence = WebSourceEvidence(store, sourceProfiles, jobs::readArtifact)
+    private val archiveEvidence = WebArchiveEvidence(store, sourceEvidence, jobs::readArtifact)
+    private val access = spaAssets?.let {
+        LocalWebAccess(LocalWebAccessConfiguration(webOrigin(host, server.address.port), basePath,
+            setOfNotNull(devFrontendOrigin)))
     }
-    private val analysisExecutor: Executor = executor ?: ownedExecutor!!
-    private val runningJobs = ConcurrentHashMap.newKeySet<String>()
-    private val lifecycleLock = Any()
-    private var stopping = false
+    private val api = access?.let { WebApiController(it, checkNotNull(spaAssets), jobs) }
+    private val requestExecutor = ThreadPoolExecutor(
+        16, 16, 0, TimeUnit.MILLISECONDS, ArrayBlockingQueue(64),
+        { task -> Thread(task, "decomp-web-http").apply { isDaemon = true } },
+        ThreadPoolExecutor.AbortPolicy(),
+    )
+    private val requestDeadlines = ScheduledThreadPoolExecutor(1) { task ->
+        Thread(task, "decomp-web-deadline").apply { isDaemon = true }
+    }.apply { removeOnCancelPolicy = true }
     val serverPort: Int get() = server.address.port
+    val browserOrigin: String = devFrontendOrigin ?: webOrigin(host, serverPort)
+
+    /** The CLI calls this explicitly; no HTTP route can issue a local link. */
+    fun issueBrowserBootstrap(): WebBootstrapToken = checkNotNull(access) { "Browser sessions require --ui spa" }.issueBootstrap()
 
     init {
-        store.recoverInterruptedJobs()
-        server.createContext("/") { exchange -> route(exchange) }
+        try {
+            jobs.initializeExistingStorage()
+        } catch (failure: Throwable) {
+            server.stop(0)
+            requestExecutor.shutdownNow()
+            requestDeadlines.shutdownNow()
+            access?.close()
+            jobs.close()
+            throw failure
+        }
+        server.executor = requestExecutor
+        server.createContext("/") { exchange ->
+            val upload = exchange.requestMethod == "POST" &&
+                exchange.requestHeaders.getFirst("Content-Type")?.startsWith("multipart/form-data", true) == true
+            val deadline = requestDeadlines.schedule({ exchange.close() }, if (upload) 120 else 30, TimeUnit.SECONDS)
+            try { route(exchange) } finally { deadline.cancel(false) }
+        }
     }
 
     fun start() = server.start()
 
     fun stop(delaySeconds: Int = 0) {
         require(delaySeconds >= 0) { "shutdown delay must be nonnegative" }
-        synchronized(lifecycleLock) { stopping = true }
+        jobs.beginShutdown()
         server.stop(delaySeconds)
-        val discarded = ownedExecutor?.shutdownNow().orEmpty()
-        var failure: Exception? = null
-        discarded.forEach { task ->
-            try {
-                (task as ScheduledJob).discard("Server stopped before the operation started")
-            } catch (exception: Exception) {
-                if (failure == null) failure = exception else failure.addSuppressed(exception)
-            }
-        }
-        try {
-            check(ownedExecutor?.awaitTermination(5, TimeUnit.SECONDS) != false) {
-                "Background workers did not stop within the shutdown grace period"
-            }
-        } catch (exception: Exception) {
-            if (exception is InterruptedException) Thread.currentThread().interrupt()
-            if (failure == null) failure = exception else failure.addSuppressed(exception)
-        }
-        failure?.let { throw it }
+        requestExecutor.shutdownNow()
+        requestDeadlines.shutdownNow()
+        access?.close()
+        jobs.close()
     }
 
     private fun route(exchange: HttpExchange) {
+        spaAssets?.let { assets ->
+            try {
+                if (api?.route(exchange) == true) return
+                checkNotNull(access).authorize(exchange, WebEndpointPolicy.publicRead())
+                routeSpaPreview(exchange, assets)
+            } catch (failure: WebAccessDenied) {
+                checkNotNull(access).sendDenied(exchange, failure)
+            }
+            return
+        }
         val segments = exchange.requestURI.path.split('/').filter(String::isNotBlank)
         try {
             when {
                 exchange.requestMethod == "GET" && segments.isEmpty() ->
-                    exchange.sendHtml(200, renderDashboard(store.list()))
+                    renderJobDashboard(exchange)
                 exchange.requestMethod == "GET" && segments == listOf("assets", "app.css") ->
                     exchange.sendBytes(200, APP_CSS.toByteArray(), "text/css; charset=utf-8", cache = true)
                 exchange.requestMethod == "POST" && segments == listOf("jobs") -> handlePostJob(exchange)
@@ -246,14 +283,21 @@ class UploadServer(
                 exchange.requestMethod == "GET" && segments.size >= 4 && segments[0] == "jobs" && segments[2] == "artifacts" ->
                     handleArtifact(exchange, decode(segments[1]), segments.drop(3).joinToString("/").let(::decode))
                 exchange.requestMethod == "GET" && segments.size == 3 && segments[0] == "api" && segments[1] == "jobs" ->
-                    exchange.sendJson(200, encodeJob(store.get(decode(segments[2]))))
+                    exchange.sendJson(200, encodeJob(jobs.get(decode(segments[2]))))
                 exchange.requestMethod == "GET" && segments.size == 4 && segments[0] == "api" && segments[1] == "jobs" && segments[3] == "events" -> {
-                    val job = store.get(decode(segments[2]))
-                    val snapshot = AgentProgressJournal.read(store.reportsDirectory(job.id))
+                    val job = jobs.get(decode(segments[2]))
+                    val runId = exchange.requestURI.rawQuery?.let {
+                        require(it.matches(Regex("runId=[A-Za-z0-9][A-Za-z0-9_-]{0,127}"))) { "Only an exact workflow attempt selection is supported" }
+                        it.removePrefix("runId=")
+                    }
+                    val snapshot = AgentProgressJournal.read(jobs.reportContext(job.id, runId).reportsDirectory)
                     exchange.sendJson(200, snapshot?.toString() ?: "{\"schemaVersion\":1,\"displayOnly\":true,\"nextSequence\":0,\"queueDropped\":0,\"historyDropped\":0,\"truncated\":false,\"events\":[]}")
                 }
                 else -> exchange.sendHtml(404, renderErrorPage(404, "Page not found", "The requested route does not exist."))
             }
+        } catch (exception: WebJobServiceException) {
+            val status = if (exception.code in setOf("JOB_NOT_FOUND", "RUN_NOT_FOUND")) 404 else 503
+            exchange.sendHtml(status, renderErrorPage(status, "Job storage unavailable", "${exception.code}: ${exception.message}"))
         } catch (exception: JobStoreException) {
             exchange.sendHtml(404, renderErrorPage(404, "Job not found", diagnostic(exception, "The job does not exist.")))
         } catch (exception: IllegalArgumentException) {
@@ -263,13 +307,50 @@ class UploadServer(
         }
     }
 
+    private fun renderJobDashboard(exchange: HttpExchange) {
+        val inspections = jobs.listInspections()
+        exchange.sendHtml(200, renderDashboard(
+            inspections.filterIsInstance<WebJobInspection.Available>().map { it.presentation.job },
+            inspections.filterIsInstance<WebJobInspection.Unavailable>().map { it.diagnostic },
+        ))
+    }
+
+    private fun routeSpaPreview(exchange: HttpExchange, assets: EmbeddedWebAssets) {
+        val path = exchange.requestURI.rawPath
+        if (path.startsWith(assets.assetPrefix)) {
+            assets.serveAsset(exchange)
+            return
+        }
+        val base = assets.basePath
+        val canonical = when (path) {
+            base, "${base}runtime", "${base}upload" -> path
+            base.removeSuffix("/").ifEmpty { "/" } -> base
+            "${base}runtime/" -> "${base}runtime"
+            "${base}upload/" -> "${base}upload"
+            else -> path.takeIf { it.startsWith("${base}jobs/") &&
+                it.removePrefix("${base}jobs/").matches(Regex("[0-9a-f]{32}(?:/runs(?:/[A-Za-z0-9][A-Za-z0-9_-]{0,127})?)?/?")) }?.removeSuffix("/")
+        }
+        if (canonical != null) {
+            if (path != canonical && exchange.requestMethod in setOf("GET", "HEAD")) {
+                val query = exchange.requestURI.rawQuery?.let { "?$it" }.orEmpty()
+                exchange.responseHeaders.set("Location", canonical + query)
+                exchange.responseHeaders.set("Cache-Control", "no-store")
+                exchange.sendResponseHeaders(308, -1)
+                exchange.close()
+            } else {
+                assets.serveShell(exchange)
+            }
+            return
+        }
+        checkNotNull(access).sendDenied(exchange, WebAccessDenied(404, "NOT_FOUND", "The requested route is unavailable."))
+    }
+
     private fun handlePostJob(exchange: HttpExchange) {
         try {
             val declaredLength = exchange.requestHeaders.getFirst("Content-Length")?.toLongOrNull()
             require(declaredLength == null || declaredLength <= MAX_UPLOAD_BYTES) { "upload exceeds the 32 MiB limit" }
             val contentType = exchange.requestHeaders.getFirst("Content-Type") ?: ""
-            val upload = MultipartUpload.parse(exchange.requestBody.readLimited(MAX_UPLOAD_BYTES), contentType)
-            val job = store.createFromUpload(upload.filename, upload.content)
+            val job = jobs.uploadMultipart(exchange.requestBody, contentType)
             if ((exchange.requestHeaders.getFirst("Accept") ?: "").contains("application/json")) {
                 exchange.sendJson(201, encodeJob(job))
             } else {
@@ -281,98 +362,39 @@ class UploadServer(
     }
 
     private fun handleExplore(exchange: HttpExchange, jobId: String) {
-        val job = store.get(jobId)
-        schedule(
-            exchange,
-            job,
-            queuedMessage = "Waiting for an exploration worker",
-            activeMessage = "Generating and executing candidate inputs",
-            completeMessage = "Exploration completed successfully",
-        ) { analyzer.analyze(it, store.reportsDirectory(it.id)) }
+        schedule(exchange, jobId, WebWorkflow.EXPLORE)
     }
 
     private fun handleReconstruct(exchange: HttpExchange, jobId: String) {
-        val job = store.get(jobId)
-        schedule(
-            exchange,
-            job,
-            queuedMessage = "Waiting for a source-tree worker",
-            activeMessage = "Recovering program structure and generating source modules",
-            completeMessage = "Archival source tree generated successfully",
-        ) { reconstructor.reconstruct(it, store.reportsDirectory(it.id)) }
+        schedule(exchange, jobId, WebWorkflow.RECONSTRUCT)
     }
 
     private fun schedule(
         exchange: HttpExchange,
-        job: Job,
-        queuedMessage: String,
-        activeMessage: String,
-        completeMessage: String,
-        operation: (Job) -> Unit,
+        jobId: String,
+        workflow: WebWorkflow,
     ) {
-        if (!runningJobs.add(job.id)) {
-            exchange.sendHtml(409, renderErrorPage(409, "Analysis already running", "This job already has an active background operation."))
-            return
+        when (jobs.start(jobId, workflow)) {
+            is WebWorkflowAdmission.Started -> exchange.redirect("/jobs/$jobId")
+            WebWorkflowAdmission.AlreadyRunning -> exchange.sendHtml(
+                409, renderErrorPage(409, "Analysis already running", "This job already has an active background operation."),
+            )
+            WebWorkflowAdmission.Unavailable -> {
+                exchange.responseHeaders.set("Retry-After", "1")
+                exchange.sendHtml(503, renderErrorPage(503, "Workers unavailable", "Workflow capacity is unavailable. Retry shortly."))
+            }
         }
-        try {
-            store.updateStatus(job.id, "queued", queuedMessage)
-            analysisExecutor.execute(ScheduledJob(job.id) {
-                try {
-                    val active = store.updateStatus(job.id, "analyzing", activeMessage)
-                    operation(active)
-                    synchronized(lifecycleLock) {
-                        if (stopping) {
-                            store.updateStatus(job.id, "failed", "Server stopped before the operation reported completion")
-                        } else {
-                            store.updateStatus(job.id, "complete", completeMessage)
-                        }
-                    }
-                } catch (failure: Exception) {
-                    store.updateStatus(job.id, "failed", diagnostic(failure, "Background operation failed"))
-                } finally {
-                    runningJobs.remove(job.id)
-                }
-            })
-        } catch (failure: RejectedExecutionException) {
-            runningJobs.remove(job.id)
-            store.updateStatus(job.id, "failed", "Background job capacity is full or the server is stopping; retry later")
-            exchange.responseHeaders.set("Retry-After", "1")
-            exchange.sendHtml(503, renderErrorPage(503, "Background workers busy", "Job capacity is full or the server is stopping. Retry later."))
-            return
-        } catch (failure: Exception) {
-            runningJobs.remove(job.id)
-            store.updateStatus(job.id, "failed", "Analysis worker rejected the job")
-            throw failure
-        }
-        exchange.redirect("/jobs/${job.id}")
     }
 
     private fun diagnostic(failure: Exception, fallback: String): String =
         diagnosticRedactor.text(failure.message ?: fallback, maximumCharacters = 480)
 
     /** A queued operation can be claimed once, either by a worker or by shutdown. */
-    private inner class ScheduledJob(private val jobId: String, private val operation: () -> Unit) : Runnable {
-        private val claimed = AtomicBoolean()
-
-        override fun run() {
-            if (claimed.compareAndSet(false, true)) operation()
-        }
-
-        fun discard(message: String) {
-            if (!claimed.compareAndSet(false, true)) return
-            try {
-                store.updateStatus(jobId, "failed", message)
-            } finally {
-                runningJobs.remove(jobId)
-            }
-        }
-    }
-
     private fun handleJob(exchange: HttpExchange, jobId: String) {
-        val job = store.get(jobId)
-        val source = runCatching { archiveEvidence.read(jobId).source }
-            .recoverCatching { sourceEvidence.read(jobId).view() }
-        exchange.sendHtml(200, renderJob(job, source.getOrNull(), source.isFailure))
+        val view = jobs.presentation(jobId)
+        val source = runCatching { archiveEvidence.read(jobId, reportPrefix = view.reports.artifactPrefix).source }
+            .recoverCatching { sourceEvidence.read(jobId, view.reports.artifactPrefix).view() }
+        exchange.sendHtml(200, renderJob(view.job, view.reports, view.diagnostics, source.getOrNull(), source.isFailure))
     }
 
     private fun handleSource(exchange: HttpExchange, jobId: String, relativePath: String) {
@@ -381,13 +403,19 @@ class UploadServer(
         require(!normalized.startsWith('/') && normalized.split('/').none { it.isBlank() || it == ".." || it == "." }) {
             "source path must remain inside the generated tree"
         }
-        val source = sourceEvidence.read(jobId)
+        val runId = exchange.requestURI.rawQuery?.let {
+            require(it.matches(Regex("runId=[A-Za-z0-9][A-Za-z0-9_-]{0,127}"))) { "Only an exact workflow attempt selection is supported" }
+            it.removePrefix("runId=")
+        }
+        val context = jobs.reportContext(jobId, runId)
+        val source = sourceEvidence.read(jobId, context.artifactPrefix)
         val text = source.text(normalized)
-        val currentBuild = runCatching { archiveEvidence.read(jobId) }.getOrNull()
+        val currentBuild = runCatching { archiveEvidence.read(jobId, reportPrefix = context.artifactPrefix) }.getOrNull()
         exchange.sendHtml(200, renderSourceFile(
-            store.get(jobId),
+            jobs.get(jobId),
             normalized,
             text,
+            context,
             source.manifestDocument,
             source.confidence,
             currentBuild?.manifestDocument == source.manifestDocument,
@@ -395,18 +423,18 @@ class UploadServer(
     }
 
     private fun handleArtifact(exchange: HttpExchange, jobId: String, relativePath: String) {
-        if (relativePath == WebArchiveEvidence.ARCHIVE_PATH) {
+        if (relativePath.endsWith("/source-tree.zip")) {
             val expected = exchange.requestURI.rawQuery?.let { query ->
                 require(query.startsWith("sha256=") && '&' !in query) { "archive query must contain only one SHA-256 digest" }
                 decode(query.removePrefix("sha256="))
             }
-            val verified = archiveEvidence.read(jobId, expected)
+            val verified = archiveEvidence.read(jobId, expected, relativePath.removeSuffix("/source-tree.zip"))
             exchange.responseHeaders.add("Content-Disposition", "attachment; filename=\"source-tree.zip\"")
             exchange.responseHeaders.add("ETag", "\"${verified.sha256}\"")
             exchange.sendBytes(200, verified.bytes, "application/zip")
             return
         }
-        val artifact = store.readArtifact(jobId, relativePath, MAX_ARTIFACT_BYTES)
+        val artifact = jobs.readArtifact(jobId, relativePath, MAX_ARTIFACT_BYTES)
         val name = Path.of(relativePath).fileName
         exchange.responseHeaders.add("Content-Disposition", "attachment; filename=\"${name.toString().replace("\"", "")}\"")
         exchange.sendBytes(200, artifact.bytes, contentType(name))
@@ -421,6 +449,11 @@ class UploadServer(
         const val MAX_UPLOAD_BYTES = 32L * 1024 * 1024
         const val MAX_ARTIFACT_BYTES = 64L * 1024 * 1024
     }
+}
+
+private fun webOrigin(host: String, port: Int): String {
+    val authority = if (':' in host && !host.startsWith('[')) "[$host]" else host
+    return "http://$authority:$port"
 }
 
 /** CLI lifecycle: allow owned workers to record interruption before the JVM exits. */
@@ -447,23 +480,9 @@ data class Upload(val filename: String, val content: ByteArray)
 
 object MultipartUpload {
     fun parse(body: ByteArray, contentType: String): Upload {
-        require(contentType.startsWith("multipart/form-data")) { "expected multipart/form-data" }
-        val boundary = contentType.substringAfter("boundary=", "").substringBefore(';').trim().trim('"')
-        require(boundary.isNotBlank()) { "missing multipart boundary" }
-        val delimiter = "--$boundary"
-        val text = body.toString(StandardCharsets.ISO_8859_1)
-        for (part in text.split(delimiter)) {
-            if (!part.contains("name=\"binary\"")) continue
-            val headerEnd = part.indexOf("\r\n\r\n")
-            require(headerEnd >= 0) { "malformed binary upload part" }
-            val headers = part.substring(0, headerEnd)
-            val filename = Regex("filename=\"([^\"]*)\"").find(headers)?.groupValues?.get(1)
-                ?.ifBlank { "input.elf" } ?: "input.elf"
-            var payload = part.substring(headerEnd + 4)
-            payload = payload.removeSuffix("\r\n").removeSuffix("--").removeSuffix("\r\n")
-            return Upload(filename, payload.toByteArray(StandardCharsets.ISO_8859_1))
-        }
-        error("missing binary upload field")
+        val bytes = ByteArrayOutputStream()
+        val upload = StreamingMultipartUpload.copy(body.inputStream(), contentType, bytes)
+        return Upload(upload.filename, bytes.toByteArray())
     }
 }
 

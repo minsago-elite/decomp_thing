@@ -5,6 +5,142 @@ on:
   pull_request:
 
 jobs:
+  frontend:
+    name: Frontend contracts and bundle
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    permissions:
+      contents: read
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - uses: actions/checkout@v7
+      - name: Install pinned build-only frontend toolchain
+        run: |
+          bash scripts/install-frontend-node.sh "$RUNNER_TEMP/frontend-node"
+          echo "$RUNNER_TEMP/frontend-node/bin" >> "$GITHUB_PATH"
+      - uses: actions/setup-python@v7
+        with:
+          python-version: "3.12"
+      - name: Record toolchain and install locked dependencies
+        run: |
+          mkdir -p "$RUNNER_TEMP/frontend-ci"
+          {
+            printf 'Source revision: %s\n' "$GITHUB_SHA"
+            node --version
+            npm --version
+            python3 --version
+            sha256sum frontend/package-lock.json contracts/web/v1/contract.schema.json
+          } > "$RUNNER_TEMP/frontend-ci/toolchain.txt"
+          npm --prefix frontend ci --ignore-scripts --no-audit --no-fund
+          python3 -m pip install --requirement requirements/oracle-generation.txt
+      - name: Validate versioned web contract fixtures
+        run: python3 contracts/web/v1/verify.py | tee "$RUNNER_TEMP/frontend-ci/contracts.txt"
+      - name: Type-check frontend source and tests
+        run: npm --prefix frontend run typecheck
+      - name: Lint frontend source and tests
+        run: npm --prefix frontend run lint
+      - name: Run frontend component and state tests
+        run: |
+          npm --prefix frontend test -- --reporter=default --reporter=junit \
+            --outputFile.junit="$RUNNER_TEMP/frontend-ci/component-tests.xml"
+      - name: Build and verify the production asset inventory
+        run: |
+          npm --prefix frontend run build
+          frontend_version="$(node -p "require('./frontend/package.json').version")"
+          node scripts/web-asset-manifest.mjs build/frontend/dist "$frontend_version" \
+            --write "$RUNNER_TEMP/frontend-ci/asset-manifest.json"
+          node scripts/web-asset-manifest.mjs build/frontend/dist "$frontend_version" \
+            --verify "$RUNNER_TEMP/frontend-ci/asset-manifest.json"
+          node --test scripts/web-asset-manifest.test.mjs \
+            | tee "$RUNNER_TEMP/frontend-ci/manifest-tests.txt"
+          git diff --exit-code -- frontend/ contracts/web/v1/
+      - name: Retain frontend verification evidence
+        uses: actions/upload-artifact@v7
+        if: always()
+        with:
+          name: frontend-verification
+          retention-days: 14
+          if-no-files-found: warn
+          path: |
+            ${{ runner.temp }}/frontend-ci
+            build/frontend/bundle-report.json
+            build/frontend/bundle-composition.json
+
+  web-packaged:
+    name: Packaged web contracts and browser
+    runs-on: ubuntu-24.04
+    timeout-minutes: 25
+    permissions:
+      contents: read
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-java@v6
+        with:
+          distribution: temurin
+          java-version: "21"
+          cache: gradle
+      - uses: actions/setup-python@v7
+        with:
+          python-version: "3.12"
+      - name: Install pinned build and browser tools
+        run: |
+          bash scripts/install-frontend-node.sh "$RUNNER_TEMP/frontend-node"
+          echo "$RUNNER_TEMP/frontend-node/bin" >> "$GITHUB_PATH"
+          python3 scripts/install-web-test-browser.py "$RUNNER_TEMP/web-test-browser"
+          sudo apt-get update
+          mapfile -t web_browser_dependencies < "$RUNNER_TEMP/web-test-browser/deb.deps"
+          sudo apt-get satisfy -y --no-install-recommends "${web_browser_dependencies[@]}"
+          python3 -m pip install --requirement requirements/oracle-generation.txt
+      - name: Record browser pin and check driver lifecycle
+        run: |
+          mkdir -p build/packaged-web-ci
+          cp scripts/web-test-browser.json build/packaged-web-ci/browser-lock.json
+          "$RUNNER_TEMP/web-test-browser/chrome" --version | tee build/packaged-web-ci/browser-version.txt
+          python3 scripts/test-packaged-browser-install.py
+          node scripts/test-packaged-browser-upgrade.mjs
+          node --check scripts/check-packaged-web-browser.mjs
+      - name: Build archives and verify JVM web contracts and distribution contents
+        run: |
+          ./gradlew --no-daemon test --tests 'decompengine.web.*' --tests 'decompengine.jobs.*' \
+            installDist distZip distTar verifyPackagedWeb verifyGhidraDistributionArchives \
+            verifyAcpGateHelperDistribution verifyLlvmBehaviorHelperDistribution \
+            verifyKotlinBootClasspathDistribution
+          web_distribution=("$GITHUB_WORKSPACE"/build/distributions/*.zip)
+          test "${#web_distribution[@]}" -eq 1
+          test -f "${web_distribution[0]}"
+          echo "WEB_TEST_ARCHIVE=${web_distribution[0]}" >> "$GITHUB_ENV"
+      - name: Exercise packaged session and recovery in pinned Chrome
+        run: |
+          node scripts/check-packaged-web-browser.mjs \
+            --archive "$WEB_TEST_ARCHIVE" \
+            --chrome "$RUNNER_TEMP/web-test-browser/chrome" --java-home "$JAVA_HOME" \
+            --python "$(command -v python3)" --work-parent "$RUNNER_TEMP" --mode session --no-sandbox
+      - name: Exercise explicit Vite proxy against the same packaged JVM
+        run: |
+          node scripts/check-packaged-web-browser.mjs \
+            --archive "$WEB_TEST_ARCHIVE" \
+            --chrome "$RUNNER_TEMP/web-test-browser/chrome" --java-home "$JAVA_HOME" \
+            --python "$(command -v python3)" --work-parent "$RUNNER_TEMP" --mode proxy --no-sandbox
+          git diff --exit-code -- frontend/ contracts/web/v1/
+      - name: Retain sanitized packaged web evidence
+        uses: actions/upload-artifact@v7
+        if: always()
+        with:
+          name: packaged-web-verification
+          retention-days: 14
+          if-no-files-found: warn
+          path: |
+            build/packaged-web-ci
+            build/packaged-browser-*/report.json
+            build/packaged-browser-*/*.png
+            build/reports/tests/test
+            build/test-results/test
+
   kotlin:
     runs-on: ubuntu-24.04
     steps:
@@ -16,6 +152,10 @@ jobs:
           distribution: temurin
           java-version: "21"
           cache: gradle
+      - name: Install pinned build-only frontend toolchain
+        run: |
+          bash scripts/install-frontend-node.sh "$RUNNER_TEMP/frontend-node"
+          echo "$RUNNER_TEMP/frontend-node/bin" >> "$GITHUB_PATH"
       - name: Install sandbox host prerequisites
         run: |
           sudo apt-get update
@@ -98,6 +238,10 @@ jobs:
           distribution: temurin
           java-version: "21"
           cache: gradle
+      - name: Install pinned build-only frontend toolchain
+        run: |
+          bash scripts/install-frontend-node.sh "$RUNNER_TEMP/frontend-node"
+          echo "$RUNNER_TEMP/frontend-node/bin" >> "$GITHUB_PATH"
       - name: Verify installed direct-API Ghidra without an external installation
         env:
           RUN_REAL_GHIDRA: "true"
@@ -141,6 +285,10 @@ jobs:
           distribution: temurin
           java-version: "21"
           cache: gradle
+      - name: Install pinned build-only frontend toolchain
+        run: |
+          bash scripts/install-frontend-node.sh "$RUNNER_TEMP/frontend-node"
+          echo "$RUNNER_TEMP/frontend-node/bin" >> "$GITHUB_PATH"
       - name: Install pinned LLVM and Clang toolchain
         run: |
           sudo apt-get update

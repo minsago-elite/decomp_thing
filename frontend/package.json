@@ -1,0 +1,43 @@
+{
+  "name": "decomp-workbench",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "engines": {
+    "node": "24.20.0",
+    "npm": "11.19.0"
+  },
+  "packageManager": "npm@11.19.0",
+  "scripts": {
+    "toolchain": "node scripts/check-toolchain.mjs",
+    "dev": "node scripts/check-toolchain.mjs && vite --host 127.0.0.1",
+    "typecheck": "node scripts/check-toolchain.mjs && node ../scripts/generate-web-api.mjs --check && tsc --noEmit",
+    "lint": "node scripts/check-toolchain.mjs && eslint . --max-warnings 0",
+    "test": "node scripts/check-toolchain.mjs && vitest run",
+    "build": "node scripts/check-toolchain.mjs && node ../scripts/generate-web-api.mjs --check && tsc --noEmit && vite build && node scripts/bundle-report.mjs",
+    "preview": "node scripts/check-toolchain.mjs && vite preview --host 127.0.0.1",
+    "dev:backend": "node scripts/check-toolchain.mjs && vite --mode backend",
+    "dev:fixtures": "node scripts/check-toolchain.mjs && vite --mode fixtures",
+    "fixtures:check": "node scripts/check-toolchain.mjs && python3 dev/generate-fixtures.py > /dev/null",
+    "api:generate": "node scripts/check-toolchain.mjs && node ../scripts/generate-web-api.mjs",
+    "api:check": "node scripts/check-toolchain.mjs && node ../scripts/generate-web-api.mjs --check"
+  },
+  "dependencies": {
+    "preact": "10.29.8",
+    "preact-iso": "2.12.2",
+    "preact-render-to-string": "6.7.0"
+  },
+  "devDependencies": {
+    "@eslint/js": "10.0.1",
+    "@preact/preset-vite": "2.10.6",
+    "@testing-library/preact": "3.2.4",
+    "@types/babel__core": "7.20.5",
+    "@types/node": "24.13.3",
+    "eslint": "10.10.0",
+    "jsdom": "30.0.1",
+    "typescript": "6.0.3",
+    "typescript-eslint": "8.69.0",
+    "vite": "8.2.2",
+    "vitest": "4.1.11"
+  }
+}
