@@ -14,32 +14,35 @@ const { chromium } = require(process.env.DECOMP_PLAYWRIGHT_MODULE || 'playwright
   const html = fs.readFileSync(htmlPath, 'utf8');
   assert(html.includes('const poll = async'), 'fixture must contain the active production polling script');
   const browser = await chromium.launch({ headless: true });
-  const context = await browser.newContext();
-  await context.tracing.start({ screenshots: true, snapshots: true });
-  const errors = [];
-  const page = await context.newPage();
-  page.on('pageerror', error => errors.push(error.message));
-  let mode = 'window';
+  let context;
+  let tracingStarted = false;
   let eventRequests = 0;
-  const events = Array.from({ length: 40 }, (_, sequence) => ({
-    sequence, kind: 'workflow_phase', phase: 'build_validating', text: '<img src=x> display text',
-  }));
-  await page.route('**/*', async route => {
-    const url = new URL(route.request().url());
-    if (url.pathname === '/jobs/fixture') return route.fulfill({ contentType: 'text/html', body: html });
-    if (url.pathname === '/api/jobs/fixture/events') {
-      eventRequests++;
-      if (mode === 'http-error') return route.fulfill({ status: 503, body: 'unavailable' });
-      if (mode === 'network-error') return route.abort('failed');
-      return route.fulfill({ json: { events: mode === 'recovered' ? events.slice(-1) : events,
-        truncated: mode === 'loss' } });
-    }
-    if (url.pathname === '/api/jobs/fixture') return route.fulfill({ json: { status: 'analyzing' } });
-    return route.abort();
-  });
-  const waitGap = text => page.waitForFunction(expected =>
-    document.querySelector('#agent-event-gap').textContent === expected, text, { timeout: 10000 });
   try {
+    context = await browser.newContext();
+    await context.tracing.start({ screenshots: true, snapshots: true });
+    tracingStarted = true;
+    const errors = [];
+    const page = await context.newPage();
+    page.on('pageerror', error => errors.push(error.message));
+    let mode = 'window';
+    const events = Array.from({ length: 40 }, (_, sequence) => ({
+      sequence, kind: 'workflow_phase', phase: 'build_validating', text: '<img src=x> display text',
+    }));
+    await page.route('**/*', async route => {
+      const url = new URL(route.request().url());
+      if (url.pathname === '/jobs/fixture') return route.fulfill({ contentType: 'text/html', body: html });
+      if (url.pathname === '/api/jobs/fixture/events') {
+        eventRequests++;
+        if (mode === 'http-error') return route.fulfill({ status: 503, body: 'unavailable' });
+        if (mode === 'network-error') return route.abort('failed');
+        return route.fulfill({ json: { events: mode === 'recovered' ? events.slice(-1) : events,
+          truncated: mode === 'loss' } });
+      }
+      if (url.pathname === '/api/jobs/fixture') return route.fulfill({ json: { status: 'analyzing' } });
+      return route.abort();
+    });
+    const waitGap = text => page.waitForFunction(expected =>
+      document.querySelector('#agent-event-gap').textContent === expected, text, { timeout: 10000 });
     await page.goto('http://progress.fixture/jobs/fixture');
     await waitGap('Showing the latest 30 of 40 retained events.');
     assert.equal(await page.locator('#agent-event-list li').count(), 30);
@@ -56,13 +59,16 @@ const { chromium } = require(process.env.DECOMP_PLAYWRIGHT_MODULE || 'playwright
     assert.equal(await page.locator('#agent-event-list li').count(), 1);
     assert.deepEqual(errors, []);
     await page.screenshot({ path: path.join(outputDirectory, 'recovered.png') });
-    fs.writeFileSync(path.join(outputDirectory, 'result.json'), JSON.stringify({
-      passed: true, browser: browser.version(), eventRequests,
-      scenarios: ['row window', 'retention loss', 'HTTP failure', 'network failure', 'recovery', 'text escaping'],
-      renderedHtmlSha256: require('node:crypto').createHash('sha256').update(html).digest('hex'),
-    }, null, 2) + '\n');
   } finally {
-    await context.tracing.stop({ path: path.join(outputDirectory, 'trace.zip') });
-    await browser.close();
+    try {
+      if (tracingStarted) await context.tracing.stop({ path: path.join(outputDirectory, 'trace.zip') });
+    } finally {
+      await browser.close();
+    }
   }
+  fs.writeFileSync(path.join(outputDirectory, 'result.json'), JSON.stringify({
+    passed: true, browser: browser.version(), eventRequests,
+    scenarios: ['row window', 'retention loss', 'HTTP failure', 'network failure', 'recovery', 'text escaping'],
+    renderedHtmlSha256: require('node:crypto').createHash('sha256').update(html).digest('hex'),
+  }, null, 2) + '\n');
 })().catch(error => { console.error(error); process.exitCode = 1; });
