@@ -787,7 +787,7 @@ Responses contain redacted previews and `loginSupported=false`, never raw method
 start returns 409. The admitted background task participates in the existing handler lifetime so
 server shutdown does not release store ownership while it is still running. Its production harness
 is retained across inspections, preserving unresolved-cleanup refusal. Configuration is selected on
-first use; restart the server to change that selection. No credentials or inspection status are
+first use, caching both a selected harness and any configuration-selection failure; restart the server to change that selection, including after correcting an initially invalid configuration. No credentials or inspection status are
 persisted in project records. This does not provide login/logout, durable operator state, or automatic
 cancellation when a browser disconnects; production preflight keeps its existing deadline/cleanup bounds.
 

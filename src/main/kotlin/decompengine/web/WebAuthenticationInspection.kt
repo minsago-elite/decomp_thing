@@ -7,11 +7,17 @@ import decompengine.acp.AcpHarnessKind
 import decompengine.acp.AcpPreflightWorkflow
 
 /** Retain the harness's unresolved-cleanup guard across repeated operator inspections. */
-internal fun defaultWebAuthenticationInspector(): (decompengine.agent.AgentCancellation) -> AcpAuthenticationInventory {
-    val harness by lazy {
+internal fun defaultWebAuthenticationInspector(
+    selectHarness: () -> AcpAgentHarness = {
         val selection = AcpHarnessFactory.fromEnvironment(System.getenv())
         require(selection.kind == AcpHarnessKind.ACP) { "authentication inspection requires ACP" }
         selection.createHarness() as AcpAgentHarness
+    },
+): (decompengine.agent.AgentCancellation) -> AcpAuthenticationInventory {
+    // Cache failures as values: lazy alone retries a throwing initializer on every click.
+    val harness by lazy {
+        try { Result.success(selectHarness()) }
+        catch (failure: Exception) { Result.failure(failure) }
     }
-    return { cancellation -> harness.preflight(AcpPreflightWorkflow.WEB, cancellation).authentication }
+    return { cancellation -> harness.getOrThrow().preflight(AcpPreflightWorkflow.WEB, cancellation).authentication }
 }
