@@ -219,3 +219,20 @@ journal recovery work without page exceptions. The report discloses test-owned f
 GET/HEAD-only browser requests, unchanged installation and confirmed shutdown/cleanup. Chrome
 used test-only `--no-sandbox`; no workflow ran. This is recorded Linux/Chrome compatibility,
 not a session/CSRF or remote-access qualification.
+
+## Legacy mutation Origin requirement
+
+Legacy POST `/jobs`, `/jobs/J/explore` and `/jobs/J/reconstruct` now require an Origin header
+before dispatch. The shared transport preflight first checks that a supplied origin exactly
+matches the configured local authority; the mutation check rejects absence with 403
+`ORIGIN_DENIED`. Browser form submissions and same-origin fetches supply this header. Existing
+non-browser legacy clients must explicitly send the configured origin to continue using these
+routes. Reads may still omit Origin for normal navigation.
+
+This closes the missing-Origin mutation gap, not the legacy session/CSRF gap: possession of
+a matching origin string is not authentication. The local session bootstrap, authenticated
+legacy reads/forms and appropriate CSRF protection remain required before #161 is complete.
+HTTP tests now use a client that sends Origin without silently filtering it; they cover absent
+and mismatched Origin denial before upload/workflow handlers, with unchanged job bytes and
+zero denied workflow invocations. Existing allowed upload/admission/shutdown cases continue
+with the exact origin and retain their previous behavior.

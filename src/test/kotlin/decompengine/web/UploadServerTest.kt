@@ -16,7 +16,6 @@ import decompengine.project.MakeProjectBuilder
 import decompengine.project.ArchivalPackager
 import kotlinx.serialization.json.Json
 import kotlinx.serialization.json.jsonObject
-import java.net.HttpURLConnection
 import java.net.URI
 import java.nio.ByteBuffer
 import java.nio.channels.FileChannel
@@ -38,6 +37,9 @@ import kotlin.test.assertNotEquals
 import kotlin.test.assertTrue
 
 class UploadServerTest {
+    private val followingClient = java.net.http.HttpClient.newBuilder().followRedirects(java.net.http.HttpClient.Redirect.NORMAL).build()
+    private val directClient = java.net.http.HttpClient.newHttpClient()
+
     @Test
     fun `legacy transport rejects foreign origins and forwarded authority before operations`() {
         var executions = 0
@@ -62,6 +64,11 @@ class UploadServerTest {
                     assertEquals(403, response.statusCode(), "$header $method $path")
                     assertTrue(!response.body().contains(value))
                 }
+            }
+            for (path in listOf("/jobs", "/jobs/$id/explore", "/jobs/$id/reconstruct")) {
+                val missing = transportRequest("POST", path)
+                assertEquals(403, missing.statusCode())
+                assertTrue(missing.body().contains("Mutations require the exact application origin."))
             }
             assertEquals(200, transportRequest("GET", "/api/jobs/$id", mapOf("Origin" to origin)).statusCode())
             assertEquals(200, transportRequest("GET", "/api/jobs/$id").statusCode())
@@ -1156,17 +1163,15 @@ class UploadServerTest {
         headers: Map<String, String> = emptyMap(),
         followRedirects: Boolean = true,
     ): Response {
-        val connection = URI("http://127.0.0.1:${server.serverPort}$path").toURL().openConnection() as HttpURLConnection
-        connection.requestMethod = method
-        connection.instanceFollowRedirects = followRedirects
-        headers.forEach { (key, value) -> connection.setRequestProperty(key, value) }
-        if (body.isNotEmpty()) {
-            connection.doOutput = true
-            connection.outputStream.use { it.write(body) }
-        }
-        val status = connection.responseCode
-        val stream = if (status >= 400) connection.errorStream else connection.inputStream
-        return Response(status, stream?.readBytes() ?: ByteArray(0), connection.getHeaderField("Retry-After"), connection.getHeaderField("ETag"), connection.getHeaderField("Content-Type"), connection.getHeaderField("Cache-Control"), connection.getHeaderField("X-Request-ID"), connection.getHeaderField("Allow"))
+        val origin = "http://127.0.0.1:${server.serverPort}"
+        val builder = java.net.http.HttpRequest.newBuilder(URI(origin + path)).method(method,
+            if (body.isEmpty()) java.net.http.HttpRequest.BodyPublishers.noBody() else java.net.http.HttpRequest.BodyPublishers.ofByteArray(body))
+        val effectiveHeaders = (if (method == "POST") mapOf("Origin" to origin) else emptyMap()) + headers
+        effectiveHeaders.forEach { (key, value) -> builder.header(key, value) }
+        val response = (if (followRedirects) followingClient else directClient).send(builder.build(), java.net.http.HttpResponse.BodyHandlers.ofByteArray())
+        fun header(name: String): String? = response.headers().firstValue(name).orElse(null)
+        return Response(response.statusCode(), response.body(), header("Retry-After"), header("ETag"), header("Content-Type"),
+            header("Cache-Control"), header("X-Request-ID"), header("Allow"))
     }
 
     private data class Response(val status: Int, val body: ByteArray, val retryAfter: String? = null, val etag: String? = null, val contentType: String? = null, val cacheControl: String? = null, val requestId: String? = null, val allow: String? = null)

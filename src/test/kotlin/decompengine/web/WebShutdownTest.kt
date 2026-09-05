@@ -2,7 +2,6 @@ package decompengine.web
 
 import decompengine.jobs.JobStore
 import decompengine.jobs.elfFixture
-import java.net.HttpURLConnection
 import java.net.URI
 import java.nio.file.Files
 import java.nio.file.Path
@@ -112,18 +111,13 @@ object WebShutdownFixture {
         startWebServerWithShutdownHook(server)
         val store = JobStore(root.resolve("jobs"))
         val ids = (0..2).map { store.createFromUpload("benign-$it.elf", elfFixture()).id }
+        val client = java.net.http.HttpClient.newHttpClient()
         ids.forEachIndexed { index, id ->
-            val connection = URI("http://127.0.0.1:${server.serverPort}/jobs/$id/explore")
-                .toURL().openConnection() as HttpURLConnection
-            try {
-                connection.requestMethod = "POST"
-                connection.instanceFollowRedirects = false
-                connection.connectTimeout = 5000
-                connection.readTimeout = 5000
-                check(connection.responseCode == 303)
-            } finally {
-                connection.disconnect()
-            }
+            val origin = "http://127.0.0.1:${server.serverPort}"
+            val request = java.net.http.HttpRequest.newBuilder(URI("$origin/jobs/$id/explore"))
+                .header("Origin", origin).timeout(java.time.Duration.ofSeconds(5))
+                .POST(java.net.http.HttpRequest.BodyPublishers.noBody()).build()
+            check(client.send(request, java.net.http.HttpResponse.BodyHandlers.discarding()).statusCode() == 303)
             if (index == 1) check(started.await(5, TimeUnit.SECONDS))
         }
         Files.write(root.resolve("ready.tmp"), ids)

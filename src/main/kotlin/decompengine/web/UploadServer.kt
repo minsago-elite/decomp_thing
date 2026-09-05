@@ -271,6 +271,12 @@ class UploadServer(
         val segments = exchange.requestURI.path.split('/').filter(String::isNotBlank)
         try {
             access.authorize(exchange, WebEndpointPolicy.transport(setOf("GET", "HEAD", "POST", "PUT", "PATCH", "DELETE", "OPTIONS")))
+            val legacyMutation = exchange.requestMethod == "POST" &&
+                (segments == listOf("jobs") || (segments.size == 3 && segments[0] == "jobs" &&
+                    segments[2] in setOf("explore", "reconstruct")))
+            if (legacyMutation && exchange.requestHeaders.getFirst("Origin") == null) {
+                throw WebAccessDenied(403, "ORIGIN_DENIED", "Mutations require the exact application origin.")
+            }
             val legacyJsonRead = segments.size in 3..4 && segments.take(2) == listOf("api", "jobs") &&
                 (segments.size == 3 || segments[3] == "events")
             if (legacyJsonRead) {
