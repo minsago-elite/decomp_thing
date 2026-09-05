@@ -316,8 +316,7 @@ class UploadServer(
             val declaredLength = exchange.requestHeaders.getFirst("Content-Length")?.toLongOrNull()
             require(declaredLength == null || declaredLength <= MAX_UPLOAD_BYTES) { "upload exceeds the 32 MiB limit" }
             val contentType = exchange.requestHeaders.getFirst("Content-Type") ?: ""
-            val upload = MultipartUpload.parse(exchange.requestBody.readLimited(MAX_UPLOAD_BYTES), contentType)
-            val job = jobs.upload(upload.filename, upload.content)
+            val job = jobs.uploadMultipart(exchange.requestBody, contentType)
             if ((exchange.requestHeaders.getFirst("Accept") ?: "").contains("application/json")) {
                 exchange.sendJson(201, encodeJob(job))
             } else {

@@ -58,6 +58,7 @@ class WebJobService(
     } else null
     private val workflowExecutor = executor ?: ownedExecutor!!
     private val active = mutableMapOf<String, OwnedTask>()
+    private val uploads = mutableMapOf<Thread, CountDownLatch>()
     private val publicationFailures = mutableMapOf<String, WebJobDiagnostic>()
     private var attempts: WorkflowAttemptStore? = null
     private var initialized = false
@@ -236,6 +237,29 @@ class WebJobService(
         return store.createFromUpload(filename, content)
     }
 
+    /** Multipart bytes are copied outside the service monitor; publication retains root ownership through completion. */
+    fun uploadMultipart(input: java.io.InputStream, contentType: String): Job {
+        val worker = Thread.currentThread()
+        val finished = synchronized(this) {
+            writableStore()
+            if (uploads.size >= 2 || worker in uploads) throw WebJobServiceException("UPLOAD_CAPACITY", "Two uploads are already in progress. Retry later.")
+            if (Files.getFileStore(store.storageRoot).usableSpace < 64L * 1024 * 1024) throw WebJobServiceException("UPLOAD_STORAGE", "Upload staging needs at least 64 MiB of free storage.")
+            CountDownLatch(1).also { uploads[worker] = it }
+        }
+        try {
+            return decompengine.jobs.StagedJobUpload(store.storageRoot).publish { sink ->
+                StreamingMultipartUpload.copy(input, contentType, sink).filename
+            }.job
+        } catch (failure: decompengine.jobs.UploadPublicationUncertain) {
+            synchronized(this) {
+                publicationFailures[failure.jobId] = WebJobDiagnostic(failure.jobId, "RECOVERY_REQUIRED", "An upload may have been published. Reopen storage before admitting more work; do not retry blindly.")
+            }
+            throw WebJobServiceException("RECOVERY_REQUIRED", "Upload publication is uncertain. Inspect storage before retrying.", failure)
+        } finally {
+            synchronized(this) { uploads.remove(worker); finished.countDown(); releaseIfQuiescent() }
+        }
+    }
+
     /** Compatibility startup entry point; recovery never rewrites historical job.json bytes. */
     fun recoverInterruptedJobs() = initializeExistingStorage()
 
@@ -306,16 +330,22 @@ class WebJobService(
                     if (problem == null) problem = failure else problem.addSuppressed(failure)
                 }
             }
-            active.values.toList().also { tasks -> tasks.forEach { it.worker?.interrupt() }; releaseIfQuiescent() }
+            val runningUploads = uploads.toList()
+            runningUploads.forEach { (worker, _) -> worker.interrupt() }
+            active.values.toList().also { tasks -> tasks.forEach { it.worker?.interrupt() }; releaseIfQuiescent() } to runningUploads
         }
         val deadline = System.nanoTime() + TimeUnit.MILLISECONDS.toNanos(shutdownTimeoutMs)
-        running.forEach { task ->
+        running.first.forEach { task ->
             val remaining = deadline - System.nanoTime()
             if (remaining > 0 && task.worker !== Thread.currentThread()) task.finished.await(remaining, TimeUnit.NANOSECONDS)
         }
+        running.second.forEach { (worker, finished) ->
+            val remaining = deadline - System.nanoTime()
+            if (remaining > 0 && worker !== Thread.currentThread()) finished.await(remaining, TimeUnit.NANOSECONDS)
+        }
         synchronized(this) {
             releaseIfQuiescent()
-            if (active.isNotEmpty()) {
+            if (active.isNotEmpty() || uploads.isNotEmpty()) {
                 val failure = WebJobServiceException("SHUTDOWN_INCOMPLETE", "A workflow has not stopped; storage ownership is retained until it exits.")
                 if (problem == null) problem = failure else problem.addSuppressed(failure)
             }
@@ -324,7 +354,7 @@ class WebJobService(
     }
 
     private fun releaseIfQuiescent() {
-        if (closed && active.isEmpty()) {
+        if (closed && active.isEmpty() && uploads.isEmpty()) {
             val restoreInterrupt = Thread.interrupted()
             try { attempts?.close(); attempts = null }
             finally { if (restoreInterrupt) Thread.currentThread().interrupt() }
