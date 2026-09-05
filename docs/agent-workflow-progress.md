@@ -137,3 +137,21 @@ history or prove that events pending at a process crash were durable.
 The browser labels its latest-30-row window separately from journal retention loss. Refresh and
 polling report unavailable progress history instead of implying an empty complete stream; polling
 continues after an HTTP failure. These display warnings do not alter job status or acceptance.
+
+Optional browser qualification uses the production renderer with an inert active-job fixture. It
+mocks event/status responses in Chromium without starting workflow execution. Supply Playwright
+and its browser installation separately (the recorded run used Playwright 1.63.0):
+
+```sh
+java -cp 'build/libs/*:build/oracle/gcc/kotlin-boot-runtime/*' \
+  scripts/fixtures/ProgressPageFixture.java build/progress-browser-fixture
+DECOMP_PLAYWRIGHT_MODULE=/absolute/path/to/node_modules/playwright \
+  node scripts/verify-progress-browser.cjs \
+  build/progress-browser-fixture/page.html build/progress-browser-evidence/new-run
+```
+
+Build the application JAR and staged runtime first using the relevant normal build/test task.
+The evidence directory must be new. A successful run records the rendered HTML digest, browser
+version, scenarios and request count, plus a screenshot and Playwright trace. This checks actual
+DOM updates, row limits, separate loss/window warnings, HTTP/network failures, subsequent recovery,
+and peer-text escaping. It does not qualify a real-agent job, server restart, or browser matrix.
