@@ -7,6 +7,7 @@ import kotlin.test.*
 import kotlinx.serialization.json.*
 
 class AcpAuthenticationInventoryTest {
+<<<<<<< HEAD
     @Test fun `long private fragments are withheld at every alignment in operator previews`() {
         val secret = "0123456789abcdefghijklmnopqrstuvwxyzABCD"
         val fragments = listOf(secret.dropLast(1), secret.drop(1)) +
@@ -32,6 +33,8 @@ class AcpAuthenticationInventoryTest {
         assertEquals("Use your account", method.descriptionPreview)
     }
 
+=======
+>>>>>>> 038f7515 (Normalize preview controls before secret matching (#267) [skip ci])
     @Test fun `control normalization precedes literal and credential preview redaction`() {
         val secret = "private-credential-fixture"
         for (control in listOf('\u0000', '\u0001', '\r', '\u007f')) {
@@ -50,6 +53,7 @@ class AcpAuthenticationInventoryTest {
         }
     }
 
+<<<<<<< HEAD
     @Test fun `preview truncation preserves supplementary Unicode boundaries`() {
         val key = "\ud83d\udd11"
         for (prefixLength in listOf(126, 127, 128)) {
@@ -90,6 +94,8 @@ class AcpAuthenticationInventoryTest {
         }
         val valid = AuthMethod.AgentAuth(AuthMethodId("id-\ud83d\udd11"), "name", "description")
         assertEquals(valid.id.value, AcpAuthenticationInventory.capture(listOf(valid), emptyList()).methods.single().id)
+=======
+>>>>>>> 038f7515 (Normalize preview controls before secret matching (#267) [skip ci])
     @Test fun `inventory commitment scope changes across JVM restarts`() {
         fun isolated(): List<String> {
             val process = ProcessBuilder(
