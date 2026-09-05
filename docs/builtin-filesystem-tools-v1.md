@@ -39,9 +39,28 @@ search, and hashes retained after refusal or provider failure. A live local test
 typed dispatcher an `AcpFilesystemBroker` and proves actual descriptor-contained reads, atomic
 writes, policy denial and symlink rejection alongside direct ACP callbacks.
 
-#74 remains open. This checkpoint does not provide directory inspection, general patch operations,
-process/build/test/behavior tools, structured evidence retrieval, terminal permission parity or
-full sandbox cancellation/cleanup qualification. Durable archive/restart integration is #75;
+#74 remains open. General host-directory inspection, general patch operations, terminal permission
+parity and full sandbox cancellation/cleanup qualification remain incomplete. Profile-bound process
+operations are documented in [the process contract](builtin-process-tools-v1.md); they still require
+positive hosted evidence and production profiles. Durable archive/restart integration is #75;
 full reconstruction/repair acceptance, factory selection and comparative release evidence remain
 C1/C2 work. The captured integration is a usable shared tool boundary, not a completed production
 repair workflow or a release verdict.
+
+## Captured directories and immutable evidence
+
+`BuiltinCapturedContextTools` adds three read-only tools to the captured harness. `list_directory`
+lists sorted direct children of the authority-supplied virtual workspace, restricted by the same
+`AgentAccessPolicy` read rules; it never walks host directories or reveals write-only/undeclared
+files. `list_evidence` pages immutable request-context IDs, media types, byte counts and hashes.
+`read_evidence` returns bounded text pages with the complete input hash and an explicit next offset;
+page boundaries preserve Unicode surrogate pairs. Unknown IDs and invalid offsets fail explicitly.
+
+These tools serialize under the existing tool-result byte ceiling and retain bounded metadata-only
+call/result-hash audits in the captured execution receipt. Source bytes, directory contents and
+evidence are read-only inputs; the tools cannot certify oracle truth or accept a revision.
+Six additional tests cover sorted/policy-restricted directories, evidence pagination and hashes,
+Unicode-safe boundaries, invalid paths/offsets, output/audit exhaustion and actual loop routing.
+The required core inventory is versioned as v2 with these six additional cases. This component is
+retrieval support for #75; deterministic context selection, durable transcript/checkpoint recording
+and validated restart still need implementation.

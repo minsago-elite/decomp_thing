@@ -90,11 +90,13 @@ class BuiltinCapturedExecutionEvidence(
     val loop: BuiltinLoopEvidence,
     audit: List<AcpFilesystemAuditRecord>,
     candidateChanges: List<AgentFileChange>,
+    contextAudit: List<BuiltinContextToolAudit> = emptyList(),
 ) : AgentExecutionProviderEvidence {
     override val providerId = "builtin"
     override val schemaVersion = 1
     val filesystemAudit: List<AcpFilesystemAuditRecord> = Collections.unmodifiableList(ArrayList(audit))
     val candidateChanges: List<AgentFileChange> = Collections.unmodifiableList(ArrayList(candidateChanges))
+    val contextAudit: List<BuiltinContextToolAudit> = Collections.unmodifiableList(ArrayList(contextAudit))
 }
 
 /**
@@ -119,6 +121,7 @@ class BuiltinCapturedRepairHarness(
         onEvent: (AgentExecutionEvent) -> Unit): AgentExecutionReceipt {
         val audit = AcpFilesystemAuditRecorder(limits.maxTraceRecords)
         var openedCapture: AcpCapturedRepairFilesystem? = null
+        var contextTools: BuiltinCapturedContextTools? = null
         val harness = BuiltinAgentHarness(provider, { invocation, control ->
             control.checkpoint()
             val captured = AcpCapturedRepairFilesystem(initialFiles, output)
@@ -127,14 +130,17 @@ class BuiltinCapturedRepairHarness(
             val session = captured.open(invocation, fileLimits, audit)
             openedCapture = captured
             val dispatcher = BuiltinFilesystemDispatcher(invocation, session, limits.maxToolResultBytes)
+            val context = BuiltinCapturedContextTools(invocation, initialFiles.keys, limits.maxToolResultBytes, limits.maxTraceRecords)
+                .also { contextTools = it }
             object : BuiltinToolSession {
-                override val definitions = dispatcher.definitions
+                override val definitions = dispatcher.definitions + context.definitions
                 override fun authorize(call: ModelToolCall, control: BuiltinExecutionControl): Boolean {
                     control.checkpoint()
                     // Filesystem path/operation authorization is delegated once to the shared callback.
                     return definitions.any { it.name == call.name }
                 }
-                override fun execute(call: ModelToolCall, control: BuiltinExecutionControl) = dispatcher.execute(call, control)
+                override fun execute(call: ModelToolCall, control: BuiltinExecutionControl) =
+                    if (context.definitions.any { it.name == call.name }) context.execute(call, control) else dispatcher.execute(call, control)
                 override fun changes(control: BuiltinExecutionControl): List<AgentFileChange> {
                     control.checkpoint(); session.close(); return captured.changes()
                 }
@@ -151,6 +157,6 @@ class BuiltinCapturedRepairHarness(
             ) }
         }
         return AgentExecutionReceipt(receipt.requestBinding, outcome,
-            BuiltinCapturedExecutionEvidence(receipt.providerEvidence as BuiltinLoopEvidence, audit.snapshot(), changes))
+            BuiltinCapturedExecutionEvidence(receipt.providerEvidence as BuiltinLoopEvidence, audit.snapshot(), changes, contextTools?.audit().orEmpty()))
     }
 }
