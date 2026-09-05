@@ -1,8 +1,9 @@
 import assert from 'node:assert/strict';
-import { createHash } from 'node:crypto';
+import { createHash, randomUUID } from 'node:crypto';
 import { execFileSync, spawn, spawnSync } from 'node:child_process';
-import { promises as fs, readFileSync } from 'node:fs';
+import { promises as fs, readFileSync, createReadStream } from 'node:fs';
 import { join, basename, dirname, isAbsolute, resolve } from 'node:path';
+import { createServer as createHttpServer } from 'node:http';
 import { fileURLToPath } from 'node:url';
 import { parseArgs } from 'node:util';
 
@@ -10,6 +11,9 @@ import { parseArgs } from 'node:util';
 const repo = resolve(dirname(fileURLToPath(import.meta.url)), '..');
 const { values } = parseArgs({ options: {
   archive: { type: 'string' },
+  mode: { type: 'string', default: 'public' },
+  'work-parent': { type: 'string', default: join(repo, 'build') },
+  'keep-workdir': { type: 'boolean', default: false },
   chrome: { type: 'string' },
   'java-home': { type: 'string' },
   python: { type: 'string', default: '/usr/bin/python3' },
@@ -17,7 +21,9 @@ const { values } = parseArgs({ options: {
   help: { type: 'boolean', default: false },
 } });
 if (values.help) {
-  console.log('Usage: node scripts/check-packaged-web-browser.mjs --archive /absolute/distribution.zip --chrome /absolute/chrome --java-home /absolute/jdk [--python /absolute/python3] [--no-sandbox]');
+  console.log('Usage: node scripts/check-packaged-web-browser.mjs --archive /absolute/distribution.zip --chrome /absolute/chrome --java-home /absolute/jdk [--mode public|session|proxy] [--work-parent /absolute/scratch] [--keep-workdir] [--python /absolute/python3] [--no-sandbox]');
+  console.log('public: packaged home/Runtime/recovery; session: public plus local session journey; proxy: real Vite HMR and session journey against packaged JVM.');
+  console.log('Reports/screenshots stay in build/. Owned extraction/profile/socket directories are removed after confirmed shutdown unless --keep-workdir is set. Proxy requires npm ci --ignore-scripts under the pinned Node beforehand.');
   process.exit(0);
 }
 const nodeVersion = process.versions.node;
@@ -27,24 +33,53 @@ for (const option of ['archive', 'chrome', 'java-home', 'python']) {
   assert.ok(values[option] && isAbsolute(values[option]), `--${option} must name an absolute existing path; see --help`);
   await fs.access(values[option]);
 }
+assert.ok(['public', 'session', 'proxy'].includes(values.mode), '--mode must be public, session or proxy');
+assert.ok(isAbsolute(values['work-parent']), '--work-parent must be an absolute directory');
 const archive = values.archive;
 const javaHome = values['java-home'];
 const chromeBinary = values.chrome;
 await fs.mkdir(join(repo, 'build'), { recursive: true });
+assert.ok((await fs.stat(values['work-parent'])).isDirectory(), '--work-parent must already exist');
+if (values.mode === 'proxy') await fs.access(join(repo, 'frontend/node_modules/vite/bin/vite.js'));
+const safeDiagnostic = (value) => String(value).replaceAll(/#bootstrap=[A-Za-z0-9_-]+/g, '#bootstrap=[redacted]');
 const delay = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
-const hash = (bytes) => createHash('sha256').update(bytes).digest('hex');
+async function fileHash(path) {
+  const digest = createHash('sha256');
+  for await (const chunk of createReadStream(path)) digest.update(chunk);
+  return digest.digest('hex');
+}
 const root = await fs.mkdtemp(join(repo, 'build/packaged-browser-'));
 let application;
 let browser;
+let vite;
+let work;
+let browserTmp;
+let lastTarget;
+const sensitiveValues = [];
+const profile = join(root, 'browser profile');
+const ownerToken = randomUUID();
+const installHelper = join(repo, 'scripts/packaged-browser-install.py');
 let cdp;
 let applicationError = '';
 let browserError = '';
-const report = { status: 'running', testDirectory: root, driverNode: nodeVersion };
+let viteError = '';
+const report = { status: 'running', mode: values.mode, testDirectory: root, driverNode: nodeVersion,
+  tools: { node: process.execPath, chrome: chromeBinary, javaHome, python: values.python }, requests: {} };
+const launchErrors = new WeakMap();
 console.log(`Evidence directory: ${root}`);
+
+function startOwned(command, args, options) {
+  const child = spawn(command, args, options);
+  child.on('error', (error) => launchErrors.set(child, error));
+  return child;
+}
 
 async function waitFor(check, label, timeout = 20000) {
   const deadline = Date.now() + timeout;
   while (Date.now() < deadline) {
+    for (const child of [application, browser, vite]) {
+      if (child && launchErrors.has(child)) throw launchErrors.get(child);
+    }
     const value = await check();
     if (value) return value;
     await delay(75);
@@ -101,13 +136,14 @@ async function snapshot(directory, relative = '') {
     const stat = await fs.stat(join(directory, name));
     assert.equal(stat.mode & 0o222, 0, `Installation entry is writable: ${name}`);
     if (entry.isDirectory()) Object.assign(result, await snapshot(directory, name));
-    else result[name] = hash(await fs.readFile(join(directory, name)));
+    else result[name] = await fileHash(join(directory, name));
   }
   return result;
 }
 
 async function stop(process) {
   if (!process || process.exitCode !== null || process.signalCode !== null) return;
+  if (!process.pid && launchErrors.has(process)) return; // Spawn failed before any process existed.
   process.kill('SIGTERM');
   const deadline = Date.now() + 5000;
   while (process.exitCode === null && process.signalCode === null && Date.now() < deadline) await delay(50);
@@ -119,12 +155,36 @@ async function stop(process) {
   if (process.exitCode === null && process.signalCode === null) throw new Error('Owned process shutdown could not be confirmed.');
 }
 
+async function connectDevTools(url, timeoutMs = 15000) {
+  const socket = new WebSocket(url);
+  try {
+    await new Promise((resolve, reject) => {
+      const finish = (error) => {
+        clearTimeout(timer);
+        socket.removeEventListener('open', opened);
+        socket.removeEventListener('error', failed);
+        error ? reject(error) : resolve();
+      };
+      const opened = () => finish();
+      const failed = () => finish(new Error('Chrome DevTools connection failed'));
+      const timer = setTimeout(() => finish(new Error('Chrome DevTools connection deadline exceeded')), timeoutMs);
+      socket.addEventListener('open', opened, { once: true });
+      socket.addEventListener('error', failed, { once: true });
+    });
+    return socket;
+  } catch (error) {
+    try { socket.close(); } catch { /* Preserve the handshake failure. */ }
+    throw error;
+  }
+}
+
 async function makeTarget() {
   const { targetId } = await cdp.call('Target.createTarget', { url: 'about:blank' });
   const { sessionId } = await cdp.call('Target.attachToTarget', { targetId, flatten: true });
   const state = { targetId, sessionId, requests: [], responses: [], exceptions: [] };
-  cdp.on('Network.requestWillBeSent', (event) => state.requests.push({ method: event.request.method, url: event.request.url, type: event.type }), sessionId);
-  cdp.on('Network.responseReceived', (event) => state.responses.push({ url: event.response.url, status: event.response.status, type: event.type }), sessionId);
+  lastTarget = state;
+  cdp.on('Network.requestWillBeSent', (event) => state.requests.push({ method: event.request.method, url: event.request.url.split('#')[0].split('?')[0], type: event.type }), sessionId);
+  cdp.on('Network.responseReceived', (event) => state.responses.push({ url: event.response.url.split('#')[0].split('?')[0], status: event.response.status, type: event.type }), sessionId);
   cdp.on('Runtime.exceptionThrown', (event) => state.exceptions.push(event.exceptionDetails.text), sessionId);
   await cdp.call('Page.enable', {}, sessionId);
   await cdp.call('Runtime.enable', {}, sessionId);
@@ -156,37 +216,22 @@ async function capture(target, name) {
 }
 
 try {
+  report.tools.chromeSha256 = await fileHash(chromeBinary);
   report.archive = basename(archive);
-  report.archiveSha256 = hash(readFileSync(archive));
-  const unpack = join(root, 'read only install');
-  await fs.mkdir(unpack);
-  const setup = JSON.parse(execFileSync(values.python, ['-c', `
-import hashlib,json,sys,zipfile
-from pathlib import Path
-archive,unpack=Path(sys.argv[1]),Path(sys.argv[2])
-with zipfile.ZipFile(archive) as z:
- assert len(z.namelist())==len(set(z.namelist()))
- assert all(not n.startswith('/') and '..' not in Path(n).parts for n in z.namelist())
- z.extractall(unpack)
-apps=list(unpack.iterdir()); assert len(apps)==1
-app=apps[0]
-jars=list((app/'lib').glob('llm-bin-patch-*.jar')); assert len(jars)==1
-with zipfile.ZipFile(jars[0]) as z:
- manifest=json.loads(z.read('decompengine/web/ui/asset-manifest.json'))
-for path in app.rglob('*'):
- executable=path.parent.name in ('bin','libexec') and not path.name.endswith('.sha256')
- path.chmod(0o555 if path.is_dir() or executable else 0o444)
-app.chmod(0o555)
-print(json.dumps({'app':str(app),'manifest':manifest,'jar':jars[0].name,'jarSha256':hashlib.sha256(jars[0].read_bytes()).hexdigest()}))
-`, archive, unpack], { encoding: 'utf8' }));
+  report.archiveSha256 = await fileHash(archive);
+  work = await fs.mkdtemp(join(values['work-parent'], 'packaged-browser-work-'));
+  report.workDirectory = work;
+  const setup = JSON.parse(execFileSync(values.python, [installHelper, 'prepare', '--archive', archive,
+    '--work', work, '--owner-token', ownerToken], { encoding: 'utf8', maxBuffer: 4 * 1024 * 1024 }));
+  report.resourceBudget = setup.resourceBudget;
   const { app, manifest } = setup;
   report.applicationJar = setup.jar;
   report.applicationJarSha256 = setup.jarSha256;
   report.buildId = manifest.buildId;
   report.applicationVersion = manifest.applicationVersion;
   const before = await snapshot(app);
-  const bins = join(root, 'launcher tools');
-  const working = join(root, 'unrelated working directory');
+  const bins = join(work, 'launcher tools');
+  const working = join(work, 'unrelated working directory');
   await fs.mkdir(bins);
   await fs.mkdir(working);
   for (const name of ['uname', 'ls', 'xargs', 'sed', 'tr']) {
@@ -196,8 +241,20 @@ print(json.dumps({'app':str(app),'manifest':manifest,'jar':jars[0].name,'jarSha2
   const environment = { PATH: bins, JAVA_HOME: javaHome, LANG: 'C.UTF-8' };
   for (const name of ['node', 'npm']) assert.notEqual(spawnSync('/bin/sh', ['-c', `command -v ${name}`], { env: environment }).status, 0);
   const data = join(working, 'untouched jobs');
+  let developmentPort;
+  let browserOrigin;
+  if (values.mode === 'proxy') {
+    const reservation = createHttpServer();
+    await new Promise((resolve, reject) => {
+      reservation.once('error', reject);
+      reservation.listen(0, '127.0.0.1', resolve);
+    });
+    developmentPort = reservation.address().port;
+    await new Promise((resolve, reject) => reservation.close((error) => error ? reject(error) : resolve()));
+    browserOrigin = `http://127.0.0.1:${developmentPort}`;
+  }
   let applicationOutput = '';
-  application = spawn(join(app, 'bin/llm_bin_patch'), ['web', '--ui', 'spa', '--host', '127.0.0.1', '--port', '0', '--base-path', '/nested/', '--data-dir', data], {
+  application = startOwned(join(app, 'bin/llm_bin_patch'), ['web', '--ui', 'spa', '--host', '127.0.0.1', '--port', '0', '--base-path', '/nested/', '--data-dir', data, ...(values.mode === 'proxy' ? ['--dev-frontend-origin', browserOrigin] : [])], {
     cwd: working, env: environment, stdio: ['ignore', 'pipe', 'pipe'],
   });
   application.stdout.on('data', (chunk) => { applicationOutput = (applicationOutput + chunk).slice(-1048576); });
@@ -208,17 +265,17 @@ print(json.dumps({'app':str(app),'manifest':manifest,'jar':jars[0].name,'jarSha2
   }, 'packaged application listener');
   console.log(`Packaged application ready: ${origin}/nested/`);
   report.origin = origin;
+  browserOrigin ??= origin;
   report.basePath = '/nested/';
   report.nodeOnApplicationPath = false;
   report.npmOnApplicationPath = false;
   report.unrelatedWorkingDirectory = working;
   report.readOnlyInstallation = true;
 
-  const profile = join(root, 'browser profile');
-  const browserTmp = await fs.mkdtemp(join(repo, 'build/ct-'));
+  browserTmp = await fs.mkdtemp(join(repo, 'build/ct-'));
   report.browserTempDirectory = browserTmp;
   await fs.mkdir(profile);
-  browser = spawn(chromeBinary, ['--headless=new', '--disable-gpu', ...(values['no-sandbox'] ? ['--no-sandbox'] : []), '--no-first-run', '--no-default-browser-check', '--disable-background-networking', '--disable-extensions', '--disable-default-apps', '--disable-sync', '--remote-debugging-port=0', '--remote-debugging-address=127.0.0.1', `--user-data-dir=${profile}`, 'about:blank'], {
+  browser = startOwned(chromeBinary, ['--headless=new', '--disable-gpu', ...(values['no-sandbox'] ? ['--no-sandbox'] : []), '--no-first-run', '--no-default-browser-check', '--disable-background-networking', '--disable-extensions', '--disable-default-apps', '--disable-sync', '--remote-debugging-port=0', '--remote-debugging-address=127.0.0.1', `--user-data-dir=${profile}`, 'about:blank'], {
     env: { ...process.env, TMPDIR: browserTmp }, stdio: ['ignore', 'ignore', 'pipe'],
   });
   browser.stderr.on('data', (chunk) => { browserError = (browserError + chunk).slice(-1048576); });
@@ -227,105 +284,226 @@ print(json.dumps({'app':str(app),'manifest':manifest,'jar':jars[0].name,'jarSha2
     try { return await fs.readFile(join(profile, 'DevToolsActivePort'), 'utf8'); } catch { return false; }
   }, 'Chrome DevTools listener');
   const [port, socketPath] = portFile.trim().split('\n');
-  const socket = new WebSocket(`ws://127.0.0.1:${port}${socketPath}`);
-  await new Promise((resolve, reject) => {
-    socket.addEventListener('open', resolve, { once: true });
-    socket.addEventListener('error', () => reject(new Error('Chrome DevTools connection failed')), { once: true });
-  });
+  const socket = await connectDevTools(`ws://127.0.0.1:${port}${socketPath}`);
   cdp = new Protocol(socket);
   report.browser = await cdp.call('Browser.getVersion');
   report.browserSandboxDisabled = values['no-sandbox'];
-  const identityExpression = `(() => ({ buildId: document.querySelector('meta[name="decomp-ui-build"]')?.content, applicationVersion: document.querySelector('meta[name="decomp-application-version"]')?.content, page: location.pathname, text: document.body.innerText }))()`;
-  const home = await makeTarget();
-  await cdp.call('Page.navigate', { url: `${origin}/nested/` }, home.sessionId);
-  await ready(home, `document.querySelector('h1')?.textContent === 'Your work, with its evidence'`, 'rendered packaged home');
-  const homeIdentity = await evaluate(home, identityExpression);
-  assert.equal(homeIdentity.buildId, manifest.buildId);
-  assert.equal(homeIdentity.applicationVersion, manifest.applicationVersion);
-  const presentation = await ready(home, `(() => { const image = document.querySelector('.brand img'); return image?.complete && image.naturalWidth > 0 ? { icon: image.currentSrc, iconWidth: image.naturalWidth, bodyMargin: getComputedStyle(document.body).margin, layout: getComputedStyle(document.querySelector('.app-layout')).display } : false; })()`, 'packaged icon');
-  assert.ok(presentation.icon.startsWith(`${origin}/nested/assets/ui/`));
-  assert.equal(presentation.bodyMargin, '0px');
-  assert.equal(presentation.layout, 'grid');
-  await capture(home, 'home.png');
-  await evaluate(home, `document.querySelector('a[href="/nested/runtime"]').click()`);
-  await ready(home, `document.querySelector('h1')?.textContent === 'Runtime status' && document.body.innerText.includes(${JSON.stringify(manifest.buildId)})`, 'lazy packaged Runtime identity');
-  const runtimeIdentity = await evaluate(home, identityExpression);
-  assert.equal(runtimeIdentity.page, '/nested/runtime');
-  assert.ok(runtimeIdentity.text.includes(manifest.applicationVersion));
-  assert.ok(runtimeIdentity.text.includes(manifest.buildId));
-  assert.ok(runtimeIdentity.text.includes('Runtime information is not connected'));
-  assert.equal(home.requests.filter((entry) => entry.type === 'Document').length, 1, 'Client route navigation reloaded the document');
-  assert.deepEqual(home.exceptions, []);
-  await capture(home, 'runtime.png');
-  const runtimeAsset = manifest.files.find((entry) => /^assets\/Runtime-.+\.js$/.test(entry.path));
-  assert.ok(runtimeAsset, 'Expected the runtime lazy chunk in the packaged manifest');
-  const runtimeUrl = `${origin}/nested/assets/ui/${runtimeAsset.path}`;
-  assert.ok(home.responses.some((entry) => entry.url === runtimeUrl && entry.status === 200));
-  assert.ok(home.responses.some((entry) => entry.type === 'Stylesheet' && entry.status === 200));
-  report.home = { heading: 'Your work, with its evidence', ...presentation, identity: homeIdentity };
-  report.runtime = { identity: runtimeIdentity, lazyChunk: runtimeAsset.path, responseStatus: 200 };
-  console.log('Packaged home, CSS/icon, lazy Runtime and exact manifest identities verified.');
+  if (values.mode !== 'proxy') {
+    const identityExpression = `(() => ({ buildId: document.querySelector('meta[name="decomp-ui-build"]')?.content, applicationVersion: document.querySelector('meta[name="decomp-application-version"]')?.content, page: location.pathname, text: document.body.innerText }))()`;
+    const home = await makeTarget();
+    await cdp.call('Page.navigate', { url: `${origin}/nested/` }, home.sessionId);
+    await ready(home, `document.querySelector('h1')?.textContent === 'Your work, with its evidence'`, 'rendered packaged home');
+    const homeIdentity = await evaluate(home, identityExpression);
+    assert.equal(homeIdentity.buildId, manifest.buildId);
+    assert.equal(homeIdentity.applicationVersion, manifest.applicationVersion);
+    const presentation = await ready(home, `(() => { const image = document.querySelector('.brand img'); return image?.complete && image.naturalWidth > 0 ? { icon: image.currentSrc, iconWidth: image.naturalWidth, bodyMargin: getComputedStyle(document.body).margin, layout: getComputedStyle(document.querySelector('.app-layout')).display } : false; })()`, 'packaged icon');
+    assert.ok(presentation.icon.startsWith(`${origin}/nested/assets/ui/`));
+    assert.equal(presentation.bodyMargin, '0px');
+    assert.equal(presentation.layout, 'grid');
+    await capture(home, 'home.png');
+    await evaluate(home, `document.querySelector('a[href="/nested/runtime"]').click()`);
+    await ready(home, `document.querySelector('h1')?.textContent === 'Runtime status' && document.body.innerText.includes(${JSON.stringify(manifest.buildId)})`, 'lazy packaged Runtime identity');
+    const runtimeIdentity = await evaluate(home, identityExpression);
+    assert.equal(runtimeIdentity.page, '/nested/runtime');
+    assert.ok(runtimeIdentity.text.includes(manifest.applicationVersion));
+    assert.ok(runtimeIdentity.text.includes(manifest.buildId));
+    assert.ok(runtimeIdentity.text.includes('Runtime information is not connected'));
+    assert.equal(home.requests.filter((entry) => entry.type === 'Document').length, 1, 'Client route navigation reloaded the document');
+    assert.deepEqual(home.exceptions, []);
+    await capture(home, 'runtime.png');
+    const runtimeAsset = manifest.files.find((entry) => /^assets\/Runtime-.+\.js$/.test(entry.path));
+    assert.ok(runtimeAsset, 'Expected the runtime lazy chunk in the packaged manifest');
+    const runtimeUrl = `${origin}/nested/assets/ui/${runtimeAsset.path}`;
+    assert.ok(home.responses.some((entry) => entry.url === runtimeUrl && entry.status === 200));
+    assert.ok(home.responses.some((entry) => entry.type === 'Stylesheet' && entry.status === 200));
+    report.home = { heading: 'Your work, with its evidence', ...presentation, identity: homeIdentity };
+    report.runtime = { identity: runtimeIdentity, lazyChunk: runtimeAsset.path, responseStatus: 200 };
+    console.log('Packaged home, CSS/icon, lazy Runtime and exact manifest identities verified.');
 
-  const recovery = await makeTarget();
-  const interceptionErrors = [];
-  let intercepted = 0;
-  cdp.on('Fetch.requestPaused', (event) => {
-    intercepted += 1;
-    cdp.call('Fetch.fulfillRequest', { requestId: event.requestId, responseCode: 404, responseHeaders: [{ name: 'Content-Type', value: 'text/plain' }], body: Buffer.from('Unavailable application chunk fixture').toString('base64') }, recovery.sessionId).catch((error) => interceptionErrors.push(error.message));
-  }, recovery.sessionId);
-  await cdp.call('Fetch.enable', { patterns: [{ urlPattern: runtimeUrl, requestStage: 'Request' }] }, recovery.sessionId);
-  await cdp.call('Page.navigate', { url: `${origin}/nested/` }, recovery.sessionId);
-  await ready(recovery, `document.querySelector('h1')?.textContent === 'Your work, with its evidence'`, 'second packaged home');
-  await evaluate(recovery, `document.querySelector('a[href="/nested/runtime"]').click()`);
-  await ready(recovery, `document.querySelector('h1')?.textContent === 'This view is unavailable' && document.querySelector('#asset-notice-title')?.textContent === 'The application may have updated'`, 'missing-chunk recovery notice');
-  await delay(5000);
-  const warning = await evaluate(recovery, `({ notices: document.querySelectorAll('[role="alert"]').length, buttons: [...document.querySelectorAll('button')].map((button) => ({text:button.textContent,disabled:button.disabled})), text: document.body.innerText })`);
-  assert.equal(warning.notices, 1);
-  assert.ok(warning.buttons.some((button) => button.text === 'Reload application' && !button.disabled));
-  assert.ok(warning.text.includes(manifest.buildId));
-  assert.equal(intercepted, 1, 'Lazy chunk was automatically retried');
-  assert.equal(recovery.requests.filter((entry) => entry.type === 'Document').length, 1, 'Page reloaded automatically');
-  assert.deepEqual(interceptionErrors, []);
-  assert.deepEqual(recovery.exceptions, []);
-  await capture(recovery, 'recovery.png');
-  await cdp.call('Fetch.disable', {}, recovery.sessionId);
-  try {
-    await evaluate(recovery, `[...document.querySelectorAll('button')].find((button) => button.textContent === 'Reload application').click()`);
-  } catch (error) {
-    if (!/context|navigat/i.test(error.message)) throw error;
+    const recovery = await makeTarget();
+    const interceptionErrors = [];
+    let intercepted = 0;
+    cdp.on('Fetch.requestPaused', (event) => {
+      intercepted += 1;
+      cdp.call('Fetch.fulfillRequest', { requestId: event.requestId, responseCode: 404, responseHeaders: [{ name: 'Content-Type', value: 'text/plain' }], body: Buffer.from('Unavailable application chunk fixture').toString('base64') }, recovery.sessionId).catch((error) => interceptionErrors.push(error.message));
+    }, recovery.sessionId);
+    await cdp.call('Fetch.enable', { patterns: [{ urlPattern: runtimeUrl, requestStage: 'Request' }] }, recovery.sessionId);
+    await cdp.call('Page.navigate', { url: `${origin}/nested/` }, recovery.sessionId);
+    await ready(recovery, `document.querySelector('h1')?.textContent === 'Your work, with its evidence'`, 'second packaged home');
+    await evaluate(recovery, `document.querySelector('a[href="/nested/runtime"]').click()`);
+    await ready(recovery, `document.querySelector('h1')?.textContent === 'This view is unavailable' && document.querySelector('#asset-notice-title')?.textContent === 'The application may have updated'`, 'missing-chunk recovery notice');
+    await delay(5000);
+    const warning = await evaluate(recovery, `({ notices: document.querySelectorAll('[role="alert"]').length, buttons: [...document.querySelectorAll('button')].map((button) => ({text:button.textContent,disabled:button.disabled})), text: document.body.innerText })`);
+    assert.equal(warning.notices, 1);
+    assert.ok(warning.buttons.some((button) => button.text === 'Reload application' && !button.disabled));
+    assert.ok(warning.text.includes(manifest.buildId));
+    assert.equal(intercepted, 1, 'Lazy chunk was automatically retried');
+    assert.equal(recovery.requests.filter((entry) => entry.type === 'Document').length, 1, 'Page reloaded automatically');
+    assert.deepEqual(interceptionErrors, []);
+    assert.deepEqual(recovery.exceptions, []);
+    assert.ok(await evaluate(recovery, `document.querySelector('#asset-notice-title').getBoundingClientRect().top >= 0`), 'Recovery title scrolled above viewport');
+    await capture(recovery, 'recovery.png');
+    await cdp.call('Fetch.disable', {}, recovery.sessionId);
+    try {
+      await evaluate(recovery, `[...document.querySelectorAll('button')].find((button) => button.textContent === 'Reload application').click()`);
+    } catch (error) {
+      if (!/context|navigat/i.test(error.message)) throw error;
+    }
+    await ready(recovery, `document.querySelector('h1')?.textContent === 'Runtime status' && document.body.innerText.includes(${JSON.stringify(manifest.buildId)}) && document.querySelectorAll('[role="alert"]').length === 0`, 'explicit reload recovery');
+    await delay(1000);
+    assert.equal(recovery.requests.filter((entry) => entry.type === 'Document').length, 2, 'Explicit reload was not exactly one document request');
+    assert.equal(intercepted, 1);
+    assert.ok(recovery.responses.some((entry) => entry.url === runtimeUrl && entry.status === 200));
+    const allRequests = [...home.requests, ...recovery.requests];
+    assert.ok(allRequests.every((entry) => ['GET', 'HEAD'].includes(entry.method)), 'Navigation/recovery sent a mutation');
+    assert.ok(allRequests.every((entry) => entry.url.startsWith(origin + '/')), 'Browser fetched an external dependency');
+    assert.deepEqual(recovery.exceptions, []);
+    assert.equal(await fs.stat(data).then(() => true, () => false), false, 'Public SPA browsing created job data');
+    report.recovery = { interceptedLazyChunk: runtimeAsset.path, simulatedStatus: 404, warningCount: warning.notices, observationSeconds: 5, automaticReloads: 0, automaticChunkRetries: 0, explicitReloadDocumentRequests: 1, recoveredRuntime: true, mutationRequests: 0, noticeTitleWithinViewport: true };
+    report.jobDataCreated = false;
+    report.requests = { normal: home.requests, recovery: recovery.requests };
   }
-  await ready(recovery, `document.querySelector('h1')?.textContent === 'Runtime status' && document.body.innerText.includes(${JSON.stringify(manifest.buildId)}) && document.querySelectorAll('[role="alert"]').length === 0`, 'explicit reload recovery');
-  await delay(1000);
-  assert.equal(recovery.requests.filter((entry) => entry.type === 'Document').length, 2, 'Explicit reload was not exactly one document request');
-  assert.equal(intercepted, 1);
-  assert.ok(recovery.responses.some((entry) => entry.url === runtimeUrl && entry.status === 200));
-  const allRequests = [...home.requests, ...recovery.requests];
-  assert.ok(allRequests.every((entry) => ['GET', 'HEAD'].includes(entry.method)), 'Navigation/recovery sent a mutation');
-  assert.ok(allRequests.every((entry) => entry.url.startsWith(origin + '/')), 'Browser fetched an external dependency');
-  assert.deepEqual(recovery.exceptions, []);
+
+  if (values.mode === 'proxy') {
+    vite = startOwned(process.execPath, [join(repo, 'frontend/node_modules/vite/bin/vite.js'), '--mode', 'backend'], {
+      cwd: join(repo, 'frontend'), env: { ...process.env, DECOMP_DEV_BACKEND_ORIGIN: origin,
+        DECOMP_DEV_BASE_PATH: '/nested/', DECOMP_DEV_PORT: String(developmentPort) },
+      stdio: ['ignore', 'ignore', 'pipe'],
+    });
+    vite.stderr.on('data', (chunk) => { viteError = (viteError + chunk).slice(-1048576); });
+    await waitFor(async () => {
+      if (vite.exitCode !== null || vite.signalCode !== null) throw new Error(`Vite exited: ${viteError}`);
+      try { return (await fetch(browserOrigin + '/nested/')).ok; } catch { return false; }
+    }, 'explicit Vite backend proxy');
+    report.frontendOrigin = browserOrigin;
+    report.requests = {};
+  }
+
+  if (values.mode !== 'public') {
+    const bootstrapUrl = await waitFor(() => applicationOutput.split(/\s+/).find((part) => part.startsWith(browserOrigin + '/nested/#bootstrap=')), 'local bootstrap handoff');
+    const token = new URL(bootstrapUrl).hash.slice('#bootstrap='.length);
+    sensitiveValues.push(token);
+    const authenticated = await makeTarget();
+    let hmrConnected = false;
+    cdp.on('Network.webSocketFrameReceived', (event) => {
+      if (event.response.payloadData.includes('"type":"connected"')) hmrConnected = true;
+    }, authenticated.sessionId);
+    await cdp.call('Page.addScriptToEvaluateOnNewDocument', { source: `(() => {
+      const requests = []; Object.defineProperty(window, '__sessionTestRequests', { value: requests });
+      const original = window.fetch;
+      window.fetch = function(input, options) {
+        requests.push({ path: new URL(typeof input === 'string' ? input : input.url, location.href).pathname, method: options?.method ?? 'GET', fragmentEmpty: location.hash === '' });
+        return original.apply(this, arguments);
+      };
+    })();` }, authenticated.sessionId);
+    await cdp.call('Page.navigate', { url: bootstrapUrl }, authenticated.sessionId);
+    await ready(authenticated, `document.body.innerText.includes('Local session connected.')`, 'authenticated packaged session');
+    if (values.mode === 'proxy') {
+      await waitFor(() => hmrConnected, 'real Vite HMR connection');
+      report.hmrConnected = true;
+      const apiProof = await evaluate(authenticated, `fetch('/nested/api/v1/bootstrap', { credentials: 'same-origin' }).then(async response => ({ status: response.status, cors: response.headers.get('access-control-allow-origin'), buildId: (await response.json()).data.uiBuildId }))`);
+      assert.equal(apiProof.status, 200);
+      assert.equal(apiProof.cors, null);
+      assert.equal(apiProof.buildId, manifest.buildId);
+      report.backendBootstrap = apiProof;
+    }
+    const firstRequests = await evaluate(authenticated, 'window.__sessionTestRequests');
+    assert.ok(firstRequests.length >= 2);
+    assert.ok(firstRequests.every((request) => request.fragmentEmpty));
+    assert.equal(firstRequests.filter((request) => request.method === 'POST').length, 1);
+    assert.equal(await evaluate(authenticated, 'location.hash'), '');
+    assert.equal(await evaluate(authenticated, `document.body.innerText.includes(${JSON.stringify(token)})`), false);
+    const cookies = (await cdp.call('Network.getCookies', { urls: [browserOrigin + '/nested/'] }, authenticated.sessionId)).cookies;
+    const localCookie = cookies.find((cookie) => cookie.path === '/nested/' && cookie.httpOnly);
+    assert.ok(localCookie, 'Expected HttpOnly local session cookie');
+    assert.equal(localCookie.sameSite, 'Strict');
+    assert.equal(localCookie.secure, false);
+    assert.equal(await evaluate(authenticated, 'localStorage.length + sessionStorage.length'), 0);
+    await evaluate(authenticated, `document.querySelector('a[href="/nested/runtime"]').click()`);
+    await ready(authenticated, `document.querySelector('h1')?.textContent === 'Runtime status'`, 'authenticated Runtime');
+    await cdp.call('Page.reload', {}, authenticated.sessionId);
+    await ready(authenticated, `document.querySelector('h1')?.textContent === 'Runtime status' && document.body.innerText.includes('Local session connected.')`, 'cookie session restored after reload');
+    assert.equal(authenticated.requests.filter((request) => request.method === 'POST').length, 1);
+    const postReload = await evaluate(authenticated, 'window.__sessionTestRequests');
+    assert.ok(postReload.every((request) => request.method === 'GET' && request.fragmentEmpty));
+    await capture(authenticated, 'authenticated-runtime.png');
+    await evaluate(authenticated, `[...document.querySelectorAll('button')].find(button => button.textContent === 'Sign out').click()`);
+    await ready(authenticated, `document.body.innerText.includes('You signed out of this browser.')`, 'explicit logout');
+    assert.equal(authenticated.requests.filter((request) => request.method === 'DELETE').length, 1);
+    await cdp.call('Page.reload', {}, authenticated.sessionId);
+    await ready(authenticated, `document.body.innerText.includes('To access private work, open the sign-in link')`, 'revoked session after reload');
+    await cdp.call('Page.navigate', { url: bootstrapUrl }, authenticated.sessionId);
+    await ready(authenticated, `document.body.innerText.includes('This sign-in link is no longer available.')`, 'consumed link denial');
+    await delay(5000);
+    assert.equal(authenticated.requests.filter((request) => request.method === 'POST').length, 2);
+    assert.equal(authenticated.requests.filter((request) => request.method === 'DELETE').length, 1);
+    assert.equal(await evaluate(authenticated, 'location.hash'), '');
+    assert.deepEqual(authenticated.exceptions, []);
+    assert.equal(await evaluate(authenticated, 'localStorage.length + sessionStorage.length'), 0);
+    assert.ok(authenticated.requests.every((request) => request.url.startsWith(browserOrigin + '/')));
+    assert.ok(authenticated.requests.every((request) => ['GET', 'HEAD'].includes(request.method) || request.url === browserOrigin + '/nested/api/v1/session'));
+    assert.equal(await fs.stat(data).then(() => true, () => false), false);
+    report.session = { authenticated: true, cookie: { httpOnly: true, sameSite: 'Strict', path: '/nested/', secure: false }, fragmentRemovedBeforeFetch: true, restoredAfterReload: true, explicitLogoutRequests: 1, successfulExchangeRequests: 1, consumedLinkRequests: 1, automaticMutationRetries: 0, storageEntries: 0, installationUnchanged: true, jobDataCreated: false };
+    report.requests.authenticated = authenticated.requests;
+  }
+
   assert.deepEqual(await snapshot(app), before, 'Read-only installation bytes changed');
-  assert.equal(await fs.stat(data).then(() => true, () => false), false, 'Public SPA browsing created job data');
-  report.recovery = { interceptedLazyChunk: runtimeAsset.path, simulatedStatus: 404, warningCount: warning.notices, observationSeconds: 5, automaticReloads: 0, automaticChunkRetries: 0, explicitReloadDocumentRequests: 1, recoveredRuntime: true, mutationRequests: 0 };
   report.installationUnchanged = true;
-  report.jobDataCreated = false;
-  report.requests = { normal: home.requests, recovery: recovery.requests };
+
   report.status = 'passed';
 
 } catch (error) {
   report.status = 'failed';
-  report.error = error.stack;
-  report.applicationError = applicationError;
-  report.browserError = browserError;
-  console.error(error.stack);
+  report.error = safeDiagnostic(error.stack);
+  report.applicationError = safeDiagnostic(applicationError);
+  report.browserError = safeDiagnostic(browserError);
+  report.viteError = safeDiagnostic(viteError);
+  console.error(safeDiagnostic(error.stack));
   process.exitCode = 1;
+  if (lastTarget && cdp) {
+    try {
+      // Fail closed if the handoff has not been scrubbed. Hide editable fields
+      // before a diagnostic capture, and never capture visible credential text.
+      const safe = await evaluate(lastTarget, `(() => {
+        if (location.hash !== '' || ${JSON.stringify(sensitiveValues)}.some(value => document.body.innerText.includes(value))) return false;
+        document.querySelectorAll('input, textarea, [contenteditable]').forEach(element => { element.style.visibility = 'hidden'; });
+        return true;
+      })()`);
+      if (safe) {
+        await capture(lastTarget, 'failure.png');
+        report.failureScreenshot = 'failure.png';
+      } else report.failureScreenshotSkipped = 'Uncleared fragment or visible handoff credential';
+    } catch {
+      report.failureScreenshotSkipped = 'Attached page unavailable within the bounded DevTools request deadline';
+    }
+  }
 } finally {
   if (cdp) await cdp.call('Browser.close').catch(() => {});
-  const cleanup = await Promise.allSettled([stop(browser), stop(application)]);
+  const cleanup = await Promise.allSettled([stop(browser), stop(application), stop(vite)]);
   report.shutdownConfirmed = cleanup.every((result) => result.status === 'fulfilled');
   if (!report.shutdownConfirmed) {
     report.status = 'failed';
-    report.cleanupErrors = cleanup.filter((result) => result.status === 'rejected').map((result) => String(result.reason));
+    report.cleanupErrors = cleanup.filter((result) => result.status === 'rejected').map((result) => safeDiagnostic(result.reason));
     process.exitCode = 1;
+  }
+  report.workRetained = true;
+  if (report.shutdownConfirmed && !values['keep-workdir']) {
+    try {
+      if (work) {
+        if (await fs.stat(join(work, '.packaged-browser-owned')).then(() => true, () => false)) {
+          execFileSync(values.python, [installHelper, 'cleanup', '--work', work, '--owner-token', ownerToken]);
+        } else await fs.rmdir(work); // Only an empty directory if preparation never initialized it.
+      }
+      await fs.rm(profile, { recursive: true, force: true });
+      if (browserTmp) await fs.rm(browserTmp, { recursive: true, force: true });
+      report.workRetained = false;
+      report.workCleanupConfirmed = true;
+    } catch (error) {
+      report.status = 'failed';
+      report.workCleanupConfirmed = false;
+      report.workCleanupError = safeDiagnostic(error.stack);
+      process.exitCode = 1;
+    }
   }
   await fs.writeFile(join(root, 'report.json'), JSON.stringify(report, null, 2) + '\n');
   console.log(JSON.stringify(report, null, 2));

@@ -129,6 +129,30 @@ The retained local report is `build/dev-browser-fAG8pe/report.json`; this is
 development-mode evidence, separate from the packaged browser gate.
 No new npm dependency is needed by either development mode.
 
+The real Vite adapter was also exercised against the packaged JVM's implemented
+session/bootstrap endpoints in Chrome, with HMR connected, fragment removal,
+cookie restoration, explicit logout and consumed-link denial. The backend's exact
+UI build came from authenticated bootstrap 200 with no CORS allowance. That
+pre-merge report is `build/proxy-browser-jroRhh/report.json`; artifact identities and
+recreation with `scripts/check-packaged-web-browser.mjs --mode proxy` are in
+[packaged browser evidence](../docs/web-packaging.md). The promoted driver also
+passed against the merged Ghidra-containing ZIP with the official pinned Chrome
+at `build/packaged-browser-elCmmT/report.json`. Proxy mode renders the checked-out
+frontend through Vite and compares the authenticated backend build identity; the
+separate `session` mode checks the packaged UI assets.
+
+The #155 acceptance evidence is scoped as follows:
+
+| Criterion | Verification |
+| --- | --- |
+| JVM + frontend HMR without manual copy | Documented explicit commands; real Vite-to-packaged-JVM session browser journey and HMR connected. |
+| Session/origin, streaming/status/download preservation | Actual JVM session/bootstrap browser journey; `tests/development.test.ts` runs the real Vite proxy against a benign synthetic HTTP upstream for incremental SSE, polling, JSON errors and attachment headers. These transport tests do not claim future JVM workflow/event/download routes exist. |
+| Explicit development boundary | Exact Host/Origin and unconfigured-mode rejection tests, CORS disabled, separate server flag, production dev-mode rejection and emitted-module/sentinel gates. |
+| Five clearly simulated scenarios | Shared-schema fixture checks and Chrome fixture catalogue, fetch/SSE/download evidence at `build/dev-browser-fAG8pe/report.json`. |
+| Schema drift fails | Shared production contract compilation plus semantic verification; regression changes a required schema property and rejects generation. |
+| No fixtures/credentials/proxy endpoints in release | Production module/byte/sentinel gate; #155 sentinel build preserved all six prior production asset hashes. Later session payload measurement is recorded separately in `BUNDLE.md`. |
+
+
 The Vite behavior used here is documented in its official
 [server options](https://vite.dev/config/server-options) and
 [plugin API](https://vite.dev/guide/api-plugin).

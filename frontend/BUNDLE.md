@@ -32,15 +32,29 @@ installation and different-Node rejection were verified in #151; dependencies di
 not change. The #155 build, before session wiring, also proved development endpoint
 and environment sentinels absent while preserving the prior six asset hashes.
 
-The earlier packaged ZIP browser checkpoint used Chrome 149.0.7827.55 at `/nested/`,
-a relocated read-only installation, unrelated cwd and application PATH without
-Node/npm. It verified home, local icon/CSS, exact identities and lazy-chunk recovery:
-one notice, no automatic reload/retry during five seconds and one successful explicit
-reload. Exact archive/JAR/build identities and the tracked recreation command are in
-[packaged browser evidence](../docs/web-packaging.md). That historical artifact
-predates this session payload; its hashes must not be attributed to this build.
-The current source also prevents route-focus scrolling while a version notice is
-active. Authenticated packaged-session journeys require the matching server build.
+The matching pre-merge session ZIP passed actual Chrome 149.0.7827.55 browser
+journeys at `/nested/`, from a relocated read-only installation, unrelated cwd
+and application PATH without Node/npm. Home/icon/CSS and lazy Runtime showed
+exact UI build `0568621730b941560737aa57653d6e5a5c2dca8d9ce8370350a7556bc8bdf039`
+and application `0.1.0`. A missing Runtime chunk produced one visible notice,
+no automatic retry/reload in five seconds and one successful explicit reload;
+the title stayed in the viewport after the focus correction.
+
+Both direct JVM and real Vite-to-JVM journeys verified fragment removal before
+fetch, cookie authentication, GET-only session restoration, explicit logout,
+consumed-link denial and empty local/session storage and no job/native action.
+The direct report is `build/packaged-browser-OgbK9x/report.json`; the actual proxy
+report is `build/proxy-browser-jroRhh/report.json` and also confirms HMR connected
+and backend bootstrap 200 without a CORS allowance. Exact pre-merge ZIP/JAR
+identities, limits and tracked `--mode session`/`--mode proxy` recreation commands
+are in [packaged browser evidence](../docs/web-packaging.md). Later distributions
+require their own verification; matching frontend assets do not establish the
+identity of a changed native/runtime closure. The subsequent merged package was
+separately verified with the official pinned Chrome: direct session/recovery at
+`build/packaged-browser-u6h1zm/report.json`, and real proxy at
+`build/packaged-browser-elCmmT/report.json`. The packaging document records its
+new ZIP/JAR hashes and unchanged UI build identity; both runs confirmed shutdown
+and owned-work cleanup.
 
 | Output | Raw bytes | Gzip bytes | SHA-256 |
 | --- | ---: | ---: | --- |

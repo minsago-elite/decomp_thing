@@ -50,12 +50,40 @@ results, tool/lock/schema identities and bundle/manifest metadata as
 `frontend-verification` for 14 days, including after failures. It does not upload
 environment dumps, credentials, private source maps or generated job content.
 
-This is the initial fast gate under [#227](https://github.com/minsago-elite/decomp_thing/issues/227),
-which remains open until the required packaged-browser journey, expanded JVM API
-contracts, browser/accessibility/scale qualification, Git integration and remote
-operation gates are wired and evidenced. A schema fixture pass does not establish
-an implemented endpoint. Branch-protection requirements are administered separately;
-adding a workflow job alone does not prove that GitHub requires its result for merge.
+The **Packaged web contracts and browser** job also runs on every push and pull
+request. It builds the archives from the current checkout, runs the web/job JVM
+contracts, verifies relocated read-only ZIP/TAR HTTP serving and Ghidra native
+permissions, and retains the existing ACP/LLVM/BOOT distribution checks. Pinned
+Chrome then checks the public shell, lazy Runtime route, explicit chunk recovery,
+session exchange/reload/logout, and the explicit Vite proxy against the same ZIP.
+The application process has no Node/npm on PATH and starts from an unrelated
+directory; these preview journeys create no jobs or workflow execution.
+
+`scripts/web-test-browser.json` pins Chrome for Testing 149.0.7827.55 for Linux
+x86-64 by exact URL, length, archive SHA-256 and expanded inventory. Its
+[official version metadata](https://googlechromelabs.github.io/chrome-for-testing/149.0.7827.55.json)
+identifies the download; the checked SHA-256 is our content lock on those bytes,
+not an upstream signature. `scripts/install-web-test-browser.py` verifies the
+archive before extracting into a fresh test-tool directory and preserves an
+existing destination. Ubuntu CI installs the archive's `deb.deps`, following the
+[upstream dependency instructions](https://github.com/GoogleChromeLabs/chrome-for-testing#how-to-install-the-system-level-dependencies-required-for-archived-linux64-binaries).
+The browser is separate from all application distributions. CI explicitly uses
+`--no-sandbox` on its disposable runner; each report records that setting and the
+actual executable digest/CDP version. It does not qualify browser sandbox behavior.
+
+The packaged lane retains JSON reports, screenshots, tool pins and JVM test
+reports as `packaged-web-verification` for 14 days even after failure. Session
+secrets and bootstrap fragments are redacted; extraction/browser working data is
+removed after confirmed process shutdown. No browser cache or frontend output
+cache supplies the release; the existing Gradle dependency cache remains enabled.
+
+These are checkpoints under [#225](https://github.com/minsago-elite/decomp_thing/issues/225)
+and [#227](https://github.com/minsago-elite/decomp_thing/issues/227). Expanded
+upload/workflow/evidence/download journeys, accessibility/scale qualification,
+Git/provider gates and hosted clean/cache/failure evidence remain open. A schema
+fixture pass does not establish an implemented endpoint. Branch-protection
+requirements are administered separately; a workflow job alone does not prove
+that GitHub requires its result for merge.
 The existing Kotlin, ACP, Clang, archival and oracle jobs retain their checks;
 the manual LLVM source rebuild remains the optional expensive lane described below.
 
@@ -125,7 +153,10 @@ Optional local integrations:
   the named secret environment sources declared by that private configuration; they are not serialized into it.
 - `BASE_URL`, `API_KEY`, and `MODEL` are deprecated compatibility inputs and are accepted only with exact
   `ACP_HARNESS=legacy-openai` or `--harness legacy-openai`. The pinned MVP fixture retains that explicit legacy path.
-- Ghidra can be supplied through the Kotlin JVM adapter. Fast tests use a fake JVM entrypoint; the archival Docker CI job uses the pinned real Ghidra release and bundled exporter.
+- Ghidra is bundled through its Java API worker. Gradle stages the hash-locked
+  release even for focused test tasks; fake-worker tests avoid analysis execution.
+  The separate bundled-Ghidra lane enables the real installed API/provenance,
+  decompiler and source-tree tests without `GHIDRA_HOME`.
 
 ## GitHub Actions Consumer Example
 
@@ -165,6 +196,7 @@ jobs:
 Useful artifacts to retain:
 
 - `frontend-verification` from the dedicated frontend job (component results and build/contract metadata)
+- `packaged-web-verification` (sanitized browser reports/screenshots, exact tool pins and JVM web contracts)
 - `build/reports/tests/test`
 - `build/test-results/test`
 - generated behavior reports under project `reports/`

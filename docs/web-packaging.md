@@ -108,53 +108,157 @@ The JVM runtime does not invoke the test driver or Node. This HTTP smoke does no
 replace browser-rendered checks.
 
 The dependency-free [browser driver](../scripts/check-packaged-web-browser.mjs)
-uses the pinned Node as a test process, Python for ZIP inspection, a JDK and an
-explicit existing Chrome executable. It downloads no tools or packages:
+uses the pinned Node as a test process, Python 3.11+ for ZIP inspection, a JDK and
+an explicit existing Chrome executable. The driver downloads no tools or packages.
+For the reviewed Linux x86-64 browser, run
+`python3 scripts/install-web-test-browser.py /absolute/absent/chrome-install`.
+The [browser lock](../scripts/web-test-browser.json) pins the official
+version-specific archive, byte count, SHA-256 and inventory; installation does not
+execute Chrome. Supply `/absolute/chrome-install/chrome` to the driver after
+installing the browser's system libraries as described by CI. Browser provisioning
+is test-only and adds nothing to the application distribution.
+
 
 ```sh
 /absolute/node-v24.20.0-linux-x64/bin/node scripts/check-packaged-web-browser.mjs \
   --archive /absolute/repository/build/distributions/llm_bin_patch-0.1.0.zip \
-  --chrome /absolute/chrome --java-home /absolute/jdk
+  --chrome /absolute/chrome --java-home /absolute/jdk --mode session \
+  --work-parent /absolute/scratch
+
+# After npm --prefix frontend ci --ignore-scripts, run the same installed JVM
+# behind the actual Vite development adapter and check browser session + HMR.
+/absolute/node-v24.20.0-linux-x64/bin/node scripts/check-packaged-web-browser.mjs \
+  --archive /absolute/repository/build/distributions/llm_bin_patch-0.1.0.zip \
+  --chrome /absolute/chrome --java-home /absolute/jdk --mode proxy \
+  --work-parent /absolute/scratch
+
+python3 scripts/test-packaged-browser-install.py
 ```
 
+`--mode public` is the default and checks home, lazy Runtime and missing-chunk
+recovery. `session` includes that public journey and the authenticated journey
+below. `proxy` starts Vite with the explicit backend origin and configures only
+that loopback frontend origin on the JVM; it checks session restoration/logout
+and an actual HMR connection. It does not substitute fixture responses.
 `--python /absolute/python3` overrides `/usr/bin/python3`. Only if the test
 environment requires it, add `--no-sandbox`; the report records this browser-only
-choice. The driver requires absolute tool/archive paths and never places its
-Node/npm on the application's curated PATH. Reports, screenshots, browser profile
-and relocated installation remain in ignored `build/packaged-browser-*`; the
-driver prints the exact directory. Browser socket temporary directories use the
-shorter `build/ct-*` prefix. The driver stops its owned JVM/browser processes on
-success and failure. These directories can be removed after retaining evidence;
-restore owner write permission recursively before removing the read-only install.
+choice. Application PATH contains only required launcher utilities and has no
+Node/npm, even when the separate driver and Vite use Node.
 
-On 2026-09-05, Chrome 149.0.7827.55 passed the actual ZIP journey at `/nested/`
-with application version `0.1.0`. The promoted driver reproduced that result once
-with `--no-sandbox` in this container. These identities bind that checkpoint:
+The driver prints an ignored `build/packaged-browser-*` evidence directory with
+`report.json` and screenshots. Requests in the report omit fragments and query
+strings; no bootstrap token, cookie value or CSRF credential is recorded. Browser
+profiles stay on the repository filesystem, with short `build/ct-*` socket paths.
+The separate unique installation directory uses `--work-parent` (default
+`build/`). Before extraction the [stdlib helper](../scripts/packaged-browser-install.py)
+requires the ZIP's expanded bytes plus 64 MiB and its distinct paths/implicit
+directories plus 1,024 free inodes. Choose a filesystem with that capacity and run
+modes sequentially when only one large Ghidra extraction fits. It streams hashes
+and retains archive execute bits on every regular file, including nested native
+tools, while removing installation write bits; it does not guess from filenames.
+
+After confirmed shutdown of its owned JVM, browser and optional Vite processes,
+the driver removes its marked extraction, working directory, profile and sockets.
+Reports and screenshots remain. `--keep-workdir` explicitly retains diagnostic
+work. If shutdown or cleanup cannot be confirmed, the report fails and identifies
+the remaining work; it never reports successful cleanup merely after sending a
+signal. Cleanup checks the invocation's ownership marker and does not follow
+external symlinks. DevTools connection setup and each request have a 15-second
+deadline. On failure, the driver attempts `failure.png` only for an attached page
+with an empty fragment and no visible handoff token; editable fields are hidden.
+An unavailable or unsafe capture is skipped without replacing the primary failure.
+Tiny helper regressions cover nested execute bits, cleanup ownership/symlinks and
+resource rejection before extraction. A focused lifecycle check also verified an
+actual nonresponding WebSocket handshake times out and a failed executable launch
+has no process left to stop; these failure-path checks require no application build.
+
+On 2026-09-05, Chrome 149.0.7827.55 passed both authenticated journeys against the
+following **pre-merge session checkpoint**, application `0.1.0`, at `/nested/`:
 
 | Artifact | SHA-256 / build identity |
 | --- | --- |
-| `llm_bin_patch-0.1.0.zip` | `624d3cc20af3af4fcccdedc1788ae8224d5a6c193e4e039e1a764792654b0003` |
-| Embedded `llm-bin-patch-0.1.0.jar` | `9a04efa05612484209d2f329477e8610f2d54b2cb6b8d7f9ec375e15bdeb03da` |
-| UI build | `bb791a18dcf4940266028073f13469c9988fea578f6a5a10f200cbe897c02a55` |
+| `llm_bin_patch-0.1.0.zip` | `b5813a85f7cb224e45d03a35b0893080456a425019e47365d282e035f3b608da` |
+| Embedded `llm-bin-patch-0.1.0.jar` | `3a91968a94601a6aa38bca612cd2eeef8240e8bf2351138103020fbe46455d95` |
+| UI build | `0568621730b941560737aa57653d6e5a5c2dca8d9ce8370350a7556bc8bdf039` |
 
-The driver extracts the ZIP, removes installation write bits, snapshots every
-installed file and starts the normal launcher from an unrelated directory. It
-verifies rendered home, local icon/CSS, lazy Runtime navigation without document
-reload, and exact UI/application identities from the embedded manifest. In a
-second uncached tab, Chrome request interception returns 404 for only the Runtime
-chunk. After five seconds there is one explicit recovery notice, no automatic
-reload/retry and no mutation request. Removing interception and clicking Reload
-application once restores Runtime with exactly one new document request. All
-captured application requests remain same-origin, installed bytes stay unchanged,
-and public browsing creates no job-data directory.
+The retained direct report is `build/packaged-browser-OgbK9x/report.json`, with
+`home.png`, `runtime.png`, `recovery.png` and `authenticated-runtime.png`.
+The real Vite report is `build/proxy-browser-jroRhh/report.json`, with its
+`authenticated-runtime.png`; frontend port 44007 proxied JVM port 36507. Both
+process sets stopped successfully. These runs used the temporary drivers whose
+journeys are now available as tracked `session` and `proxy` modes above.
 
-The successful retained report was `build/packaged-browser-jTpgqK/report.json`,
-with `home.png`, `runtime.png` and `recovery.png` beside it. This is a D1 shell and
-asset-recovery checkpoint, not complete D12 browser coverage, an actual two-version
-server upgrade, authenticated workflow qualification or accessibility conformance.
-The recovery screenshot also showed main-focus scrolling the notice title above
-the viewport while leaving the reload button visible; broader focus/viewport
-qualification belongs to #217. Later builds require fresh artifact identities.
+The direct journey snapshots a relocated read-only install and launches from an
+unrelated cwd. Home renders its local icon/CSS; Runtime loads lazily without a
+document reload and shows the manifest's exact UI/application identities. Chrome
+intercepts only the Runtime chunk with 404. Five seconds later there is one
+recovery notice, no automatic reload/chunk retry, and no mutation. One explicit
+reload after removing interception restores Runtime with one document request.
+The notice title remains inside the viewport, resolving the earlier public-only
+checkpoint's focus-scroll observation; broader accessibility qualification remains
+in #217. Startup without a token makes the expected unauthenticated bootstrap
+read, and does not read private jobs or invoke native workflows.
+
+The authenticated journey instruments fetch before application startup and proves
+the fragment is empty before every first-page request. It checks one successful
+session exchange, HttpOnly/SameSite=Strict/base-path cookie attributes, a GET-only
+reload restoring the session, one explicit logout and subsequent denial after
+reload. Reopening the consumed sign-in link is denied, with no automatic mutation
+retry during five seconds. Browser local/session storage stays empty. Only the
+explicit session exchanges/logout mutate anything; installed bytes are unchanged
+and no job-data directory is created. Proxy mode repeats this against the real
+JVM, observes HMR connected, and confirms authenticated bootstrap 200 with the
+exact backend UI build and no Access-Control-Allow-Origin response header.
+
+The Chrome executable was explicitly supplied from the preexisting local cache
+`/home/june/.cache/ms-playwright/chromium-1228/chrome-linux64/chrome`, SHA-256
+`2d18db9d8608b052b6a552ee00ec1e830f93692e928b65ecc67d693bd33fe801`.
+CDP reported Chrome/149.0.7827.55. Test-driver Node was 24.20.0, JDK came from
+`/opt/openjdk-bin-21`, Python from `/usr/bin/python3`, and this container required
+`--no-sandbox`. These facts describe an existing browser executable, not verified
+provenance for a newly downloaded browser archive.
+
+The earlier public-only report `build/packaged-browser-jTpgqK/report.json` binds
+UI `bb791a18dcf4940266028073f13469c9988fea578f6a5a10f200cbe897c02a55`,
+ZIP `624d3cc20af3af4fcccdedc1788ae8224d5a6c193e4e039e1a764792654b0003`
+and JAR `9a04efa05612484209d2f329477e8610f2d54b2cb6b8d7f9ec375e15bdeb03da`;
+those hashes are historical and do not identify the session checkpoint.
+Later package builds need their own identities and reports. Browser evidence here
+covers the D1 shell/recovery and local session boundary. It does not establish
+D12 browser coverage, an actual two-version server upgrade, native workflow
+qualification, the complete #161 legacy migration or accessibility conformance.
+
+After the master/Ghidra merge, the promoted driver was run sequentially against a
+new ZIP. These identities describe that merged package, with unchanged UI assets:
+
+| Artifact | SHA-256 / build identity |
+| --- | --- |
+| `llm_bin_patch-0.1.0.zip` | `9479c0e4c13b5101651b28c1acfd5faf139eae1e66b29889695c3ebf6b9fc7e0` |
+| Embedded `llm-bin-patch-0.1.0.jar` | `9e498290e7013a9552123eeccfd846efa342b29a7b513e16c59892f5415048e2` |
+| UI build | `0568621730b941560737aa57653d6e5a5c2dca8d9ce8370350a7556bc8bdf039` |
+
+The cached-browser `session` run passed at
+`build/packaged-browser-fMiPZG/report.json`. The subsequent official pinned Chrome
+`proxy` run passed at `build/packaged-browser-elCmmT/report.json` with real HMR,
+authenticated bootstrap and the full session journey. The same pinned browser's
+`session` run passed at `build/packaged-browser-u6h1zm/report.json`, including the
+recovery title's viewport assertion. All runs confirmed process shutdown and
+automatic cleanup, including the Ghidra-containing extraction on `/tmp`.
+The expanded ZIP occupied 954,198,998 bytes; preflight required 1,021,307,862 bytes
+and 7,767 free inodes, and the sequential runs fit without retaining duplicate
+installations. The pinned browser's lock selects Chrome for Testing 149.0.7827.55,
+revision `1625079`, archive size 185,646,494 bytes and SHA-256
+`13113b963ac22fffdad898a677591028e4397c46c1daa9e61811258eed6e35b5`.
+The actual binary was `/tmp/decomp-web-browser-pin-yp1jzpiy/installed/chrome`;
+reports record its CDP version separately from the earlier cache provenance.
+
+The merged archive checks also passed exact ZIP/TAR Ghidra bytes/execute modes
+and ACP, LLVM and BOOT closure verification; the HTTP ZIP/TAR smoke passed.
+The focused merged suite collected 121 tests: 118 passed and three skipped
+(two opt-in Ghidra cases and one unavailable writable-noexec prerequisite).
+A separate opt-in live Ghidra run passed all 33 tests across six CI classes with
+zero skips. Those checks establish their respective packaging/runtime claims;
+they do not turn browser session tests into native workflow qualification.
 
 Frontend byte reproducibility, deterministic JAR entries and native/runtime closure
 identity are separate claims. Do not infer a reconstructed source archive's
