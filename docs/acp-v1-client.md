@@ -290,7 +290,11 @@ A second cooperating server fails before changing job status. Same-JVM owners ar
 path to avoid opening another channel to an owned lock file (see the [JDK FileLock platform notes](https://docs.oracle.com/en/java/javase/21/docs/api/java.base/java/nio/channels/FileLock.html)).
 The lock file is never deleted. Stop releases ownership only after owned workers have terminated and no
 scheduled operations remain; an incomplete in-process shutdown retains ownership until a later successful stop
-or JVM exit. This is cooperative local-filesystem web ownership, not fencing of arbitrary JobStore callers,
+or JVM exit. The in-process timeout regression holds a worker beyond the grace period, verifies a new server
+is still refused, then releases the worker and retries stop before verifying a fresh server can start.
+Executor cancellation is requested once; later stop attempts wait for termination without interrupting
+workers again while they persist final status.
+This is cooperative local-filesystem web ownership, not fencing of arbitrary JobStore callers,
 older servers, external subprocesses, lock-file replacement, or network filesystems.
 `WebShutdownTest` covers propagated interruption, a worker returning after swallowing interruption, and
 a worker that remains blocked past the grace period. The last case verifies the fixed cleanup diagnostic,

@@ -53,6 +53,47 @@ class UploadServerTest {
     }
 
     @Test
+    fun `shutdown timeout retains store ownership until the worker exits and cleanup is retried`() {
+        val dataDir = createTempDirectory("web-retained-owner-")
+        val started = java.util.concurrent.CountDownLatch(1)
+        val release = java.util.concurrent.CountDownLatch(1)
+        val server = UploadServer("127.0.0.1", 0, dataDir, analyzer = JobAnalyzer { _, _ ->
+            started.countDown()
+            while (release.count != 0L) {
+                try { release.await() } catch (_: InterruptedException) { }
+            }
+        })
+        server.start()
+        try {
+            val uploaded = upload(server, "waiting.elf", elfFixture(), acceptJson = true)
+            val id = Json.parseToJsonElement(uploaded.body.decodeToString()).jsonObject["id"].toString().trim('"')
+            assertEquals(303, request(server, "POST", "/jobs/$id/explore", followRedirects = false).status)
+            assertTrue(started.await(5, java.util.concurrent.TimeUnit.SECONDS))
+            val timeout = kotlin.test.assertFailsWith<WebJobServiceException> { server.stop() }
+            assertEquals("SHUTDOWN_INCOMPLETE", timeout.code)
+            val refused = kotlin.test.assertFailsWith<IllegalStateException> { UploadServer("127.0.0.1", 0, dataDir) }
+            assertEquals("Job store already has a live web server owner", refused.message)
+            val store = decompengine.jobs.JobStore(dataDir)
+            assertEquals("analyzing", store.get(id).status)
+
+            release.countDown()
+            server.stop()
+            assertEquals("failed", store.get(id).status)
+            assertEquals("Server stopped before the operation reported completion", store.get(id).statusMessage)
+            val restarted = UploadServer("127.0.0.1", 0, dataDir)
+            try {
+                restarted.start()
+                assertEquals("Server stopped before the operation reported completion", store.get(id).statusMessage)
+            } finally {
+                restarted.stop()
+            }
+        } finally {
+            release.countDown()
+            server.stop()
+        }
+    }
+
+    @Test
     fun `background diagnostics redact secrets before persistence and rendering`() {
         val dataDir = createTempDirectory("web-private-diagnostic-")
         val configured = "configured-provider-credential"
