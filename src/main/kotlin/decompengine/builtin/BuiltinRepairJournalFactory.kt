@@ -17,11 +17,12 @@ class BuiltinRepairJournalFactory(
     private val maximumBytes: Long = 64L * 1024 * 1024,
     private val maximumRecordBytes: Int = 8 * 1024 * 1024,
     private val maximumRecords: Int = 10_000,
+    internal val factoryProvenance: BuiltinHarnessProvenance? = null,
 ) {
     init {
         // Reuse the journal's configuration grammar and limits without accessing the filesystem.
         configuration("0".repeat(64), BuiltinJournalIdentity(provider, model,
-            "0".repeat(64), "0".repeat(64), "0".repeat(64)))
+            "0".repeat(64), "0".repeat(64), "0".repeat(64), factoryProvenance))
     }
 
     internal fun create(request: AgentExecutionRequest, files: Map<String, ByteArray>,
@@ -33,7 +34,7 @@ class BuiltinRepairJournalFactory(
         val stage = builtinCapturedStageSha256(request, source.sha256)
         // Name by the durable task, not the request: changing a request cannot restart the same task.
         val task = checkpointHash("builtin-repair-task-v1\n${workflow.taskId}".toByteArray(Charsets.UTF_8))
-        return configuration(task, BuiltinJournalIdentity(provider, model, source.sha256, stage, workflow.acceptedRevisionSha256))
+        return configuration(task, BuiltinJournalIdentity(provider, model, source.sha256, stage, workflow.acceptedRevisionSha256, factoryProvenance))
     }
 
     private fun configuration(task: String, identity: BuiltinJournalIdentity) = BuiltinJournalConfiguration(

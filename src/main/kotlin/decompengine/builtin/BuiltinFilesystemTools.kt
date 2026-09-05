@@ -95,6 +95,7 @@ class BuiltinCapturedExecutionEvidence(
     val workflowIdentity: AgentWorkflowIdentity? = null,
     val journalIdentity: BuiltinJournalIdentity? = null,
     internal val invocationArchive: BuiltinInvocationArchiveDocument? = null,
+    val factoryProvenance: BuiltinHarnessProvenance? = null,
 ) : AgentExecutionProviderEvidence {
     override val providerId = "builtin"
     override val schemaVersion = 1
@@ -119,6 +120,21 @@ class BuiltinCapturedRepairHarness(
     private val journalFactory: BuiltinRepairJournalFactory? = null,
 ) : CapturedRepairAgentHarness {
     private val secrets = secrets.toList()
+    private var configuredFactoryProvenance: BuiltinHarnessProvenance? = null
+    private var invoked = false
+
+    @Synchronized
+    internal fun bindFactoryProvenance(provenance: BuiltinHarnessProvenance): BuiltinCapturedRepairHarness {
+        check(!invoked && configuredFactoryProvenance == null)
+        require(provenance.implementationId == implementationIdentifier() && journalFactory?.factoryProvenance == provenance)
+        configuredFactoryProvenance = provenance
+        return this
+    }
+    @Synchronized
+    private fun invocationProvenance(): BuiltinHarnessProvenance? {
+        invoked = true
+        return configuredFactoryProvenance
+    }
     init {
         require(checkpointConfiguration == null || journalConfiguration != null)
         require(resume == null || checkpointConfiguration != null)
@@ -130,17 +146,22 @@ class BuiltinCapturedRepairHarness(
     override fun implementationIdentifier() = "builtin-captured-repair-v1"
     override fun execute(request: AgentExecutionRequest, onEvent: (AgentExecutionEvent) -> Unit) =
         executeReceipt(request, onEvent).requireResult()
-    override fun executeReceipt(request: AgentExecutionRequest, onEvent: (AgentExecutionEvent) -> Unit) = AgentExecutionReceipt(
+    override fun executeReceipt(request: AgentExecutionRequest, onEvent: (AgentExecutionEvent) -> Unit): AgentExecutionReceipt {
+        invocationProvenance()
+        return AgentExecutionReceipt(
         AgentExecutionRequestBinding.capture(request), AgentExecutionOutcome.Failed(AgentFailure(AgentFailureKind.CONFIGURATION,
             "Built-in captured repair requires the shared captured staging authority")),
-    )
+        )
+    }
     override fun executeCaptured(request: AgentExecutionRequest, initialFiles: Map<String, ByteArray>, output: BoundedRepairOutput,
         onEvent: (AgentExecutionEvent) -> Unit) = executeCapturedReceipt(request, initialFiles, output, onEvent).requireResult()
 
     override fun executeCapturedReceipt(request: AgentExecutionRequest, initialFiles: Map<String, ByteArray>, output: BoundedRepairOutput,
         onEvent: (AgentExecutionEvent) -> Unit): AgentExecutionReceipt {
+        val factoryProvenance = invocationProvenance()
         val journalConfiguration = try {
             (journalFactory?.create(request, initialFiles, limits.maximumEvidenceBytes) ?: this.journalConfiguration).also { journal ->
+                require(journal?.identity?.factoryProvenance == factoryProvenance)
                 if (journal != null && request.workflowIdentity != null) {
                     require(request.workflowIdentity.workflow == AgentWorkflow.REPAIR)
                     require(journal.identity.acceptedRevisionSha256 == request.workflowIdentity.acceptedRevisionSha256)
@@ -263,7 +284,8 @@ class BuiltinCapturedRepairHarness(
         val records = audit.snapshot()
         val capturedReceipt = AgentExecutionReceipt(receipt.requestBinding, outcome,
             BuiltinCapturedExecutionEvidence(receipt.providerEvidence as BuiltinLoopEvidence, records.drop(restorationRecords), changes,
-                contextTools?.audit().orEmpty(), records.take(restorationRecords), request.workflowIdentity, journalConfiguration?.identity))
+                contextTools?.audit().orEmpty(), records.take(restorationRecords), request.workflowIdentity, journalConfiguration?.identity,
+                factoryProvenance = factoryProvenance))
         val evidence = capturedReceipt.providerEvidence as BuiltinCapturedExecutionEvidence
         val workflow = request.workflowIdentity
         if (workflow == null || journalConfiguration == null || evidence.loop.journal?.complete != true) return capturedReceipt
@@ -273,7 +295,7 @@ class BuiltinCapturedRepairHarness(
             val archive = BuiltinInvocationArchiveDocument.capture(identity, request, capturedReceipt, journalConfiguration)
             AgentExecutionReceipt(capturedReceipt.requestBinding, outcome, BuiltinCapturedExecutionEvidence(evidence.loop,
                 evidence.filesystemAudit, changes, evidence.contextAudit, evidence.restorationAudit, workflow,
-                journalConfiguration.identity, archive))
+                journalConfiguration.identity, archive, factoryProvenance))
         } catch (_: Exception) {
             AgentExecutionReceipt(capturedReceipt.requestBinding, AgentExecutionOutcome.Failed(AgentFailure(
                 AgentFailureKind.INTERNAL, "Built-in invocation archive capture failed")), evidence)

@@ -58,7 +58,8 @@ The six live-terminal skips require `/usr/bin/bwrap`, absent on this host. Core 
 with 122 local passes and those six skips; the hosted required-boundary run must pass without skips.
 
 This implements durable rejected invocation evidence for #75/#77. It does not close either issue.
-Factory provenance, operator selection, per-attempt checkpoint provisioning, suspended/torn-prefix
+The internal [captured factory provisioning](builtin-harness-provisioning-v1.md) now binds configured
+provider/limit identity into the persisted reference. Operator selection, per-attempt checkpoint provisioning, suspended/torn-prefix
 workflow artifacts, built-in acceptance through external compilation and every retained regression,
 and comparative release qualification remain outstanding. Built-in `releaseComplete` remains false;
 the existing acceptance gates have not been relaxed.

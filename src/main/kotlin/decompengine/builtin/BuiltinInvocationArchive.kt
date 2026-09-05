@@ -53,6 +53,7 @@ internal class BuiltinInvocationArchiveIdentity(
         require(workflow in setOf("repair", "reconstruction"))
         require(taskId.matches(Regex("[A-Za-z0-9_][A-Za-z0-9_.-]{0,127}")))
         require(promptSha256.matches(Regex("[a-f0-9]{64}")))
+        require(journal.factoryProvenance == null || workflow == "repair") { "configured captured factory requires repair workflow" }
     }
     fun json() = buildJsonObject {
         put("workflow", workflow); put("taskId", taskId); put("promptSha256", promptSha256)
@@ -92,6 +93,8 @@ class BuiltinInvocationArchiveDocument private constructor(raw: ByteArray, inter
                 check(identity.journal.stageSha256 == builtinCapturedStageSha256(request, identity.journal.sourceSha256))
             }
             val provider = receipt.providerEvidence
+            if (identity.journal.factoryProvenance != null) check(provider is BuiltinCapturedExecutionEvidence)
+            if (provider is BuiltinCapturedExecutionEvidence) check(provider.factoryProvenance == identity.journal.factoryProvenance)
             if (provider is BuiltinCapturedExecutionEvidence && request.workflowIdentity != null) {
                 check(provider.workflowIdentity == request.workflowIdentity)
                 check(BuiltinJournal.identity(checkNotNull(provider.journalIdentity), identity.binding) ==
@@ -176,7 +179,8 @@ internal fun parseBuiltinInvocationArchiveReference(value: JsonElement): Builtin
         AgentExecutionRequestBinding(invocation.getValue("contractVersion").jsonPrimitive.int,
             invocation.text("requestSha256"), invocation.text("accessPolicySha256")),
         BuiltinJournalIdentity(invocation.text("provider"), invocation.text("model"), invocation.text("sourceSha256"),
-            invocation.text("stageSha256"), invocation.text("acceptedRevisionSha256"))),
+            invocation.text("stageSha256"), invocation.text("acceptedRevisionSha256"),
+            invocation["factoryProvenance"]?.let(::parseBuiltinHarnessProvenance))),
         BuiltinJournalCommitment(commitment.getValue("records").jsonPrimitive.int, commitment.getValue("bytes").jsonPrimitive.long,
             commitment.text("headSha256")))
     require(reference.json() == root) { "built-in invocation reference has invalid or extra fields" }
@@ -233,6 +237,7 @@ internal fun verifyBuiltinInvocationArchive(bytes: ByteArray, identity: BuiltinI
         }
     }
     val receipt = root.getValue("receipt").jsonObject
+    check(identity.journal.factoryProvenance == null || receipt["toolAudit"] is JsonObject)
     check(receipt.keys == setOf("outcome", "stop", "cleanupComplete", "modelCalls", "toolCalls", "inputTokens", "outputTokens",
         "estimated", "candidateChanges", "toolAudit", "resultChangesSha256", "journalComplete", "indeterminate"))
     val stop = BuiltinStop.valueOf(receipt.getValue("stop").jsonPrimitive.content)

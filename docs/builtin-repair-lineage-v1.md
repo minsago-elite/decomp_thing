@@ -52,7 +52,7 @@ The wider run of all 36 `TraceGuidedRepairTest` cases plus the 15 lineage/contra
 43 passes and eight failures because `/usr/bin/bwrap` is absent on this host. Those behavior tests
 remain unqualified locally; the required hosted lane must run with the configured sandbox boundary.
 
-This is invocation binding, not completed #77 acceptance. Accepted archive lineage, factory provenance,
-operator selection, per-attempt checkpoint provisioning and comparative
+The internal [captured harness provisioning](builtin-harness-provisioning-v1.md) supplies configured
+factory provenance for this path. Accepted archive lineage, operator selection, per-attempt checkpoint provisioning and comparative
 compile/retained-regression qualification remain incomplete. Built-in invocation artifacts still report
 `releaseComplete = false`; the workflow's acceptance gates remain in force.

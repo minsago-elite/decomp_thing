@@ -24,11 +24,13 @@ class BuiltinJournalIdentity(
     val sourceSha256: String,
     val stageSha256: String,
     val acceptedRevisionSha256: String,
+    val factoryProvenance: BuiltinHarnessProvenance? = null,
 ) {
     init {
         require(provider.matches(Regex("[A-Za-z0-9._/-]{1,128}")))
         require(model.matches(Regex("[A-Za-z0-9._/:-]{1,256}")))
         listOf(sourceSha256, stageSha256, acceptedRevisionSha256).forEach { require(it.matches(Regex("[a-f0-9]{64}"))) }
+        factoryProvenance?.let { require(it.provider == provider && it.model == model) }
     }
     override fun toString() = "BuiltinJournalIdentity(redacted)"
 }
@@ -274,6 +276,7 @@ internal class BuiltinJournal private constructor(
             put("accessPolicySha256", binding.accessPolicySha256); put("provider", value.provider); put("model", value.model)
             put("sourceSha256", value.sourceSha256); put("stageSha256", value.stageSha256)
             put("acceptedRevisionSha256", value.acceptedRevisionSha256)
+            value.factoryProvenance?.let { put("factoryProvenance", it.json()) }
         }
 
         /** Pure archive inspection: no path lookup, lock acquisition, truncation or recovery effect. */
@@ -308,7 +311,7 @@ internal class BuiltinJournal private constructor(
             BuiltinJournalInspection(verified, terminal, pending != null, contentDigest.digest().joinToString("") { "%02x".format(it) })
         }
 
-        private fun verifyParent(path: Path) {
+        internal fun verifyParent(path: Path) {
             val parent = path.parent
             check(parent.toRealPath() == parent)
             check(Files.getPosixFilePermissions(parent, NOFOLLOW_LINKS) == PosixFilePermissions.fromString("rwx------"))
