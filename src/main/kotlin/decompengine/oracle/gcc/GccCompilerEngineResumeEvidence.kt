@@ -772,14 +772,14 @@ private fun validateInterruptedPrefix(
     val state = parseExporterState(run.state, limits)
     val progress = parseExportProgress(state, run.progress, limits)
     if (progress.phase != "planning" || progress.completed < PLANNING_BATCH_FUNCTIONS ||
-        progress.completed >= progress.total || progress.reused != 0L
+        progress.completed > progress.total || progress.reused != 0L
     ) {
         resumeValidationFailure(
-            "interrupted prefix must be an incomplete planning leg with at least one full checkpoint and no reuse",
+            "interrupted prefix must be a planning leg with at least one full checkpoint and no reuse",
         )
     }
-    val observedBatchCount = progress.completed / PLANNING_BATCH_FUNCTIONS
-    if (run.batches.size.toLong() != observedBatchCount || observedBatchCount >= state.planningBatchCount) {
+    val observedBatchCount = (progress.completed + PLANNING_BATCH_FUNCTIONS - 1) / PLANNING_BATCH_FUNCTIONS
+    if (run.batches.size.toLong() != observedBatchCount || observedBatchCount > state.planningBatchCount) {
         resumeValidationFailure("interrupted prefix batch count differs from its completed position")
     }
 
@@ -794,8 +794,8 @@ private fun validateInterruptedPrefix(
     val batches = ArrayList<ParsedPlanningBatch>(run.batches.size)
     run.batches.forEach { captured ->
         val batch = parsePlanningBatch(state, captured, limits)
-        if (batch.startIndex != nextStart || batch.endExclusive - batch.startIndex != PLANNING_BATCH_FUNCTIONS) {
-            resumeValidationFailure("interrupted planning batches are not an exact contiguous full-checkpoint prefix")
+        if (batch.startIndex != nextStart || batch.endExclusive != minOf(batch.startIndex + PLANNING_BATCH_FUNCTIONS, state.functionCount)) {
+            resumeValidationFailure("interrupted planning batches are not an exact contiguous checkpoint prefix")
         }
         nextStart = batch.endExclusive
         if (inventorySha256 != null && inventorySha256 != batch.inventorySha256) {
@@ -820,6 +820,18 @@ private fun validateInterruptedPrefix(
         exactAdd("interrupted-prefix progress counts", partial, failed) != progress.completed
     ) {
         resumeValidationFailure("interrupted progress differs from the exact observed planning prefix")
+    }
+    if (progress.completed == state.functionCount) {
+        val functions = batches.flatMap { batch ->
+            batch.functionIds.zip(batch.functions.records).map { (id, record) -> BoundRecord(id, record) }
+        }
+        if (inventorySha256 != inventorySha256(functions.map { it.id }) ||
+            batchCommitmentSha256(batches, run.batches) != state.batchCommitmentSha256
+        ) resumeValidationFailure("terminal planning prefix commitments are not reproducible")
+        val semantic = semanticFingerprint(functions, failures, globals, types)
+        if (semantic.canonicalBytes != state.canonicalBytes || semantic.sha256 != state.semanticSha256) {
+            resumeValidationFailure("terminal planning prefix semantic fingerprint is not reproducible")
+        }
     }
     val declaredInventory = inventorySha256
         ?: resumeValidationFailure("interrupted prefix has no inventory binding")
@@ -1029,7 +1041,7 @@ internal object GccCompilerEngineResumeByteValidator {
         limits,
     ).assessment
 
-    /** Derives at most one nonterminal committed batch beyond the separately validated observed progress. */
+    /** Derives at most one committed batch beyond the separately validated observed progress. */
     fun assessStoppedCheckpointPrefix(
         rawState: ByteArray,
         rawProgress: ByteArray,
@@ -1039,7 +1051,7 @@ internal object GccCompilerEngineResumeByteValidator {
         val run = captureInterruptedPrefix(rawState, rawProgress, rawBatches, limits)
         val state = parseExporterState(run.state, limits)
         val observed = parseExportProgress(state, run.progress, limits)
-        val count = observed.completed / PLANNING_BATCH_FUNCTIONS
+        val count = (observed.completed + PLANNING_BATCH_FUNCTIONS - 1) / PLANNING_BATCH_FUNCTIONS
         if (run.batches.size.toLong() == count) {
             return GccStoppedCheckpointPrefix(validateInterruptedPrefix(run, limits).assessment, run.progress)
         }
@@ -1048,9 +1060,9 @@ internal object GccCompilerEngineResumeByteValidator {
         }
         validateInterruptedPrefix(CapturedInterruptedPrefix(run.state, run.progress, run.batches.take(count.toInt())), limits)
         val next = parsePlanningBatch(state, run.batches.last(), limits)
-        if (next.startIndex != observed.completed || next.endExclusive != observed.completed + PLANNING_BATCH_FUNCTIONS ||
-            next.endExclusive >= observed.total) {
-            resumeValidationFailure("advanced stopped checkpoint must be the next nonterminal full batch")
+        if (next.startIndex != observed.completed || next.endExclusive != minOf(observed.completed + PLANNING_BATCH_FUNCTIONS, observed.total) ||
+            observed.completed >= observed.total) {
+            resumeValidationFailure("advanced stopped checkpoint must be the next complete batch")
         }
         val effective = renderExportProgress(observed.copy(
             completed = next.endExclusive,

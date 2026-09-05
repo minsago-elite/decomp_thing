@@ -169,13 +169,90 @@ class GccCompilerEngineResumeEvidenceValidationTest {
     }
 
     @Test
-    fun `stopped progress derivation rejects multiple advances terminal batches and impossible pending layouts`() {
+    fun `terminal stopped checkpoints retain partial assembly and resume every committed record`() {
+        val partial = twoBatchFixture()
+        val full = buildFixture(listOf(partial.specs.first(), BatchSpec(
+            (512 until 1024).map { function(functionId(it), "function_$it", "partial") },
+        )))
+        for (fixture in listOf(partial, full)) {
+            val prior = transitionFixture(fixture).interrupted
+            val total = fixture.specs.sumOf { it.functions.size }.toLong()
+            val terminalProgress = progress(phase = "planning", total = total, completed = total, partial = total, failed = 0)
+            for (advanced in listOf(false, true)) for (pending in listOf(false, true)) {
+                val stoppedRun = fixture.copy(progress = if (advanced) prior.progress else terminalProgress)
+                withDescriptorExportFixture(stoppedRun, includeModel = false) { captured ->
+                    val pendingName = if (advanced) ".program_model.json.progress.json.pending" else ".program_model.json.pending"
+                    val pendingPath = captured.directory.resolve("reports/$pendingName")
+                    if (pending) Files.writeString(pendingPath, "unfinished")
+                    val stopped = GccBundledExportCapture.captureInterruptedSnapshot(captured.root, captured.reportsIdentity, captured.artifacts)
+                    assertEquals(total, stopped.assessment.completed)
+                    assertEquals(2L, stopped.assessment.observedBatchCount)
+                    assertContentEquals(terminalProgress, stopped.effectiveProgress)
+                    assertContentEquals(stoppedRun.progress, stopped.capturedProgress)
+                    if (pending) {
+                        assertEquals("unfinished", Files.readString(pendingPath))
+                        assertEquals(setOf("reports/$pendingName"), OracleJson.parseCanonical(stopped.inFlightArtifacts).jsonObject.keys)
+                    }
+                    val trigger = GccBundledCheckpointTrigger(512)
+                    trigger.observe(GccCompilerEngineResumeByteValidator.assessExportProgress(prior.state, prior.progress))
+                    trigger.assessStoppedPrefix(stopped.assessment, stopped.planningPrefixSha256, stopped.inFlightArtifacts,
+                        stopped.capturedProgress, stopped.effectiveProgress)
+                    val resumed = fixture.copy(progress = progress(total = total, completed = total, partial = total, failed = 0, reused = total))
+                    withDescriptorExportFixture(resumed) { result ->
+                        assertEquals(total, GccBundledExportCapture.captureResumed(result.root, result.reportsIdentity, result.artifacts, stopped).assessment.reused)
+                    }
+                    if (!advanced) {
+                        Files.writeString(pendingPath, "changed")
+                        val changed = GccBundledExportCapture.captureInterruptedSnapshot(captured.root, captured.reportsIdentity, captured.artifacts)
+                        assertNotEquals(stopped.inFlightArtifactsSha256, changed.inFlightArtifactsSha256)
+                    }
+                }
+            }
+            withDescriptorExportFixture(fixture.copy(progress = terminalProgress)) { captured ->
+                assertFails { GccBundledExportCapture.captureInterruptedSnapshot(captured.root, captured.reportsIdentity, captured.artifacts) }
+            }
+            withDescriptorExportFixture(fixture.copy(progress = prior.progress), includeModel = false) { captured ->
+                Files.writeString(captured.directory.resolve("reports/.program_model.json.pending"), "impossible before progress publication")
+                assertFails { GccBundledExportCapture.captureInterruptedSnapshot(captured.root, captured.reportsIdentity, captured.artifacts) }
+            }
+        }
+    }
+
+    @Test
+    fun `terminal checkpoint capture recomputes whole inventory and semantic commitments`() {
+        val specs = twoBatchFixture().specs
+        val invalid = listOf(
+            buildFixture(specs, inventoryOverride = "a".repeat(64)),
+            buildFixture(specs, batchCommitmentOverride = "b".repeat(64)),
+            buildFixture(specs, semanticShaOverride = "c".repeat(64)),
+            buildFixture(specs, semanticBytesOverride = 1),
+        )
+        val terminal = progress(phase = "planning", total = 513, completed = 513, partial = 513, failed = 0)
+        invalid.forEach { fixture ->
+            assertFailsWith<GccCompilerEngineResumeEvidenceException> {
+                GccCompilerEngineResumeByteValidator.assessStoppedCheckpointPrefix(fixture.state, terminal, fixture.batches)
+            }
+        }
+        val fixture = twoBatchFixture().copy(progress = terminal)
+        withDescriptorExportFixture(fixture, includeModel = false) { captured ->
+            val pending = captured.directory.resolve("reports/.program_model.json.pending")
+            Files.writeString(pending, "oversized")
+            assertFails {
+                GccBundledExportCapture.captureInterruptedSnapshot(captured.root, captured.reportsIdentity, captured.artifacts,
+                    GccResumeByteValidationLimits(assembledModelBytes = 1))
+            }
+            Files.delete(pending)
+            Files.createSymbolicLink(pending, Path.of("program_model.json.progress.json"))
+            assertFails { GccBundledExportCapture.captureInterruptedSnapshot(captured.root, captured.reportsIdentity, captured.artifacts) }
+        }
+    }
+
+    @Test
+    fun `stopped progress derivation rejects multiple advances and impossible pending layouts`() {
         val full = threeBatchFixture()
         val first = transitionFixture(full, interruptedBatchCount = 1)
         val second = transitionFixture(full, interruptedBatchCount = 2)
         assertFails { GccCompilerEngineResumeByteValidator.assessStoppedCheckpointPrefix(full.state, first.interrupted.progress, full.batches) }
-        val two = transitionFixture(twoBatchFixture())
-        assertFails { GccCompilerEngineResumeByteValidator.assessStoppedCheckpointPrefix(two.resumed.state, two.interrupted.progress, two.resumed.batches) }
         withDescriptorExportFixture(first.interrupted, includeModel = false) { captured ->
             Files.writeString(captured.directory.resolve("reports/.program_model.json.progress.json.pending"), "unexpected")
             assertFails { GccBundledExportCapture.captureInterruptedSnapshot(captured.root, captured.reportsIdentity, captured.artifacts) }

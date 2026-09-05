@@ -52,7 +52,7 @@ internal class GccBundledCheckpointTrigger(val minimumCompletedFunctions: Long) 
         }
         val trigger = checkNotNull(observed) { "GCC interruption lacks its selected planning trigger" }
         require(prefix.stateSha256 == trigger.stateSha256 && prefix.functionCount == trigger.total &&
-            prefix.completed >= trigger.completed && prefix.completed < prefix.functionCount && prefix.reused == 0L
+            prefix.completed >= trigger.completed && prefix.completed <= prefix.functionCount && prefix.reused == 0L
         ) { "GCC stopped prefix does not extend the observed fresh planning checkpoint" }
         val unsigned = JsonObject(mapOf(
             "provider" to JsonPrimitive("gcc-bundled-stopped-prefix-assessment-v1"),
