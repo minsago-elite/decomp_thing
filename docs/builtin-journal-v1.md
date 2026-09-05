@@ -3,7 +3,8 @@
 `BuiltinAgentHarness` accepts an optional trusted `BuiltinJournalConfiguration`. A configured
 invocation requires a fresh journal file and writes its execution evidence before returning a
 receipt. A storage, serialization, integrity or close failure cannot produce a successful receipt.
-The default factory and captured-repair wrapper do not configure journals yet.
+The default factory does not configure journals yet. The captured-repair wrapper accepts explicit
+trusted configuration as described in [captured recovery](builtin-captured-recovery-v1.md).
 
 The caller supplies provider/model names and SHA-256 identities for the initial source snapshot,
 staged workspace and last accepted revision. START binds those identities to the shared immutable

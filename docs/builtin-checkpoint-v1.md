@@ -52,7 +52,7 @@ If it happened during an effect, that commitment fails the exact-tail check.
 
 This is a continuation API for a workflow that can reopen verified staged bytes. It does not recover
 missing source files from hashes, reconstruct redacted inputs, restore an absent process sandbox,
-or reconcile an uncertain publication. Factory/captured-repair wiring, archived source rehydration,
+or reconcile an uncertain publication. Factory selection, archived source rehydration,
 accepted/rejected revision events and archive verification remain required under #75 and C1/C2.
 Private directory ancestors must be protected by the workflow, as for the journal boundary.
 Clock fields are operational values; full live checkpoints are not claimed byte-identical across runs.
@@ -67,3 +67,9 @@ zero failures/errors. The hosted v5 result must be qualified separately.
 ```sh
 ./gradlew --offline test --tests 'decompengine.builtin.*' --tests 'decompengine.agent.*' --console=plain
 ```
+
+The subsequent [captured-repair integration](builtin-captured-recovery-v1.md) now rehydrates supplied
+candidate bytes through the shared bounded callbacks while preserving the original accepted base.
+Checkpoint state schema 2 binds the trusted tool session's additional authority digest, including
+captured repair quotas and effective sink paths. Schema-1 checkpoint states lack this binding and
+are rejected. Durable archived source retrieval and workflow acceptance remain separate requirements.
