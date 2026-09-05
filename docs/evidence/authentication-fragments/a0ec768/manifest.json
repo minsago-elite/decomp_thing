@@ -1,0 +1,29 @@
+{
+  "parentSourceCommit": "a0ec768",
+  "tipSourceCommit": "5a5a4c2",
+  "runsBeforeCommit": true,
+  "propagatedTip": "000e9e80",
+  "tipTreeUnchanged": true,
+  "minimumGuaranteedFragmentUtf16Units": 15,
+  "maximumIndexedBlocks": 131072,
+  "groups": {
+    "parent": {
+      "tests": 24,
+      "failures": 0,
+      "errors": 0,
+      "skipped": 0
+    },
+    "tip": {
+      "tests": 23,
+      "failures": 0,
+      "errors": 0,
+      "skipped": 0
+    }
+  },
+  "files": {
+    "parent/TEST-decompengine.acp.AcpAuthenticationInventoryTest.xml": "6ef156980551299b9eb8c201a63bc6a17e7160ea1a4e0d7f1504dc0219e0781f",
+    "parent/TEST-decompengine.jobs.AgentProgressJournalTest.xml": "61b3ee395e226eb735402071f904cb7b339f2ab908afd67e81186c83aa6393b0",
+    "tip/TEST-decompengine.acp.AcpAuthenticationInventoryTest.xml": "e47f0ceda1781c2b0f57d11ac2c7cd903553b8209ffe7fa6a1aea7ee3916c7f4",
+    "tip/TEST-decompengine.web.WebAuthenticationInspectionTest.xml": "befb10c38a8ec1339ae31d076af40f3f20bfdfe7e1302d368a1bf90fcc9b8886"
+  }
+}
