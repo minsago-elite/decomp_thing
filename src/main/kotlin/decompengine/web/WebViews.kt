@@ -134,8 +134,12 @@ fun renderJob(job: Job, reportContext: WebReportContext? = null,
                     .map(([key, label]) => label + ': ' + event[key])].filter(value => value !== '').join(' · ');
                 list.append(item);
               }
-              document.querySelector('#agent-event-gap').textContent = snapshot.truncated
-                ? 'Earlier events were omitted from this bounded view. Inspect the invocation receipts for retained evidence.' : '';
+              document.querySelector('#agent-event-gap').textContent = [
+                snapshot.truncated ? 'Some progress events were not retained.' : '',
+                snapshot.events.length > 30 ? 'Showing the latest 30 of ' + snapshot.events.length + ' retained events.' : ''
+              ].filter(Boolean).join(' ');
+            } else {
+              document.querySelector('#agent-event-gap').textContent = 'Progress history is unavailable; retrying.';
             }
             const response = await fetch('/api/jobs/${job.id}', {cache: 'no-store'});
             if (!response.ok) return;
@@ -202,8 +206,10 @@ fun renderJob(job: Job, reportContext: WebReportContext? = null,
 }
 
 private fun renderAgentProgress(reports: WebReportContext): String {
-    val snapshot = runCatching { AgentProgressJournal.read(reports.reportsDirectory) }.getOrNull()
-    val events = snapshot?.get("events")?.jsonArray.orEmpty().takeLast(30)
+    val loaded = runCatching { AgentProgressJournal.read(reports.reportsDirectory) }
+    val snapshot = loaded.getOrNull()
+    val retained = snapshot?.get("events")?.jsonArray.orEmpty()
+    val events = retained.takeLast(30)
     val rows = events.joinToString("") { item ->
         val event = item.jsonObject
         val summary = listOf(event.text("sequence"), event.text("workflowRunId"), event.text("taskId"), event.text("revisionId"),
@@ -220,8 +226,10 @@ private fun renderAgentProgress(reports: WebReportContext): String {
             .filter(String::isNotBlank).joinToString(" · ")
         "<li>${summary.escapeHtml()}</li>"
     }
-    val gap = if (snapshot?.get("truncated")?.toString() == "true")
-        "Earlier events were omitted from this bounded view. Inspect the invocation receipts for retained evidence." else ""
+    val gap = if (loaded.isFailure) "Progress history is unavailable." else listOfNotNull(
+        "Some progress events were not retained.".takeIf { snapshot?.get("truncated")?.toString() == "true" },
+        "Showing the latest 30 of ${retained.size} retained events.".takeIf { retained.size > 30 },
+    ).joinToString(" ")
     return """
         <section class="panel agent-progress" aria-labelledby="agent-progress-title">
           <h2 id="agent-progress-title">Agent progress</h2>

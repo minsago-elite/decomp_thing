@@ -370,6 +370,28 @@ class UploadServerTest {
     }
 
     @Test
+    fun `progress refresh distinguishes hidden rows lost history and unreadable snapshots`() {
+        withServer { server, dataDir ->
+            val uploaded = upload(server, "progress-view.elf", elfFixture(), acceptJson = true)
+            val jobId = Json.parseToJsonElement(uploaded.body.decodeToString()).jsonObject["id"].toString().trim('"')
+            val reports = dataDir.resolve(jobId).resolve("reports")
+            decompengine.jobs.AgentProgressJournal(reports, "reconstruction", maximumEvents = 40,
+                maximumQueuedEvents = 128).use { journal ->
+                repeat(50) { journal.phase(decompengine.agent.AgentWorkflowPhase.BUILD_VALIDATING, "module-$it") }
+            }
+            val page = request(server, "GET", "/jobs/$jobId").body.decodeToString()
+            assertTrue(page.contains("Some progress events were not retained."))
+            assertTrue(page.contains("Showing the latest 30 of 40 retained events."))
+            val rows = page.substringAfter("<ol id=\"agent-event-list\"").substringBefore("</ol>")
+            assertEquals(30, Regex("<li>").findAll(rows).count())
+            reports.resolve(decompengine.jobs.AgentProgressJournal.FILE_NAME).writeText("private broken journal")
+            val unavailable = request(server, "GET", "/jobs/$jobId").body.decodeToString()
+            assertTrue(unavailable.contains("Progress history is unavailable."))
+            assertTrue(!unavailable.contains("private broken journal"))
+        }
+    }
+
+    @Test
     fun `job event endpoint and refresh render the persisted bounded stream`() {
         withServer { server, dataDir ->
             val uploaded = upload(server, "progress.elf", elfFixture(), acceptJson = true)
