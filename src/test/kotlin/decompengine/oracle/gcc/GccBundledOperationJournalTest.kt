@@ -668,6 +668,15 @@ class GccBundledOperationJournalTest {
                 previous = bytes
             }
             assertEquals(if (resumed) 23 else 14, names(journal.path).size)
+            val allRecords = names(journal.path).associateWith { Files.readAllBytes(journal.path.resolve(it)) }
+            val hashes = allRecords.values.map(OracleArtifacts::sha256).toSet()
+            val rawFiles = setOf("intent.json", "lease-evidence.json", "definition.json", "prepared.json",
+                "analysis-state-manifest.json", "resume-definition.json", "planner-request.json")
+            allRecords.filterKeys { it !in rawFiles }.forEach { (name, bytes) ->
+                val previousHash = OracleJson.parseCanonical(bytes).jsonObject.getValue("previousSha256").jsonPrimitive.content
+                assertTrue(previousHash in hashes)
+                requireGccCliLinkedRecord(bytes, name, OPERATION_ID, request.operationRequestSha256, previousHash)
+            }
             journal.verify("planner lifecycle")
             assertFails { journal.recordPlannerPrepared(request.canonicalBytes) }
         }

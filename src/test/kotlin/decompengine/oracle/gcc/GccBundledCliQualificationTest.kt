@@ -104,17 +104,6 @@ class GccBundledCliQualificationTest {
         GccRetainedCompilerEngineProfile.open(profile).use { retained ->
             assertEquals(OracleJson.parseCanonical(retained.policyBytes()), intent.getValue("plannerProfile"))
         }
-        records.filterKeys { it != "analysis-state-manifest.json" }.forEach { (_, bytes) ->
-            val record = OracleJson.parseCanonical(bytes).jsonObject
-            record["recordSha256"]?.let { digest ->
-                assertEquals(JsonPrimitive(OracleArtifacts.sha256(OracleJson.canonicalBytes(JsonObject(record - "recordSha256")))), digest)
-                assertEquals(JsonPrimitive(text("requestSha256")), record.getValue("intentSha256"))
-                assertEquals(JsonPrimitive(text("operationId")), record.getValue("operationId"))
-                assertTrue(record.getValue("previousSha256").jsonPrimitive.content in hashes.values)
-                assertEquals(JsonPrimitive(false), record.getValue("complete"))
-                assertEquals(JsonPrimitive(false), record.getValue("releaseEligible"))
-            }
-        }
         val exportedName = if (resumed) "resume-export-assessment.json" else "export-assessment.json"
         val chain = listOf("prepared.json", "attachment.json", "start-authorized.json") +
             (if (resumed) listOf("interrupt-authorized.json", "interrupted-execution.json", "interrupted-prefix-assessment.json",
@@ -122,7 +111,7 @@ class GccBundledCliQualificationTest {
                 "resume-execution.json", "resume-export-assessment.json") else listOf("execution.json", "export-assessment.json")) +
             listOf("planner-prepared.json", "planner-attachment.json", "planner-start-authorized.json", "planner-execution.json", "planner-assessment.json")
         chain.zipWithNext().forEach { (previous, current) ->
-            assertEquals(JsonPrimitive(hashes.getValue(previous)), OracleJson.parseCanonical(records.getValue(current)).jsonObject.getValue("previousSha256"))
+            requireGccCliLinkedRecord(records.getValue(current), current, text("operationId"), text("requestSha256"), hashes.getValue(previous))
         }
         assertEquals(hashes.getValue(exportedName), text("exportReceiptSha256"))
         assertEquals(hashes.getValue("planner-execution.json"), text("plannerExecutionReceiptSha256"))
