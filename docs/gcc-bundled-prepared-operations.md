@@ -54,6 +54,50 @@ Successful provisioned-host CLI fresh/resume execution and full-engine resource
 qualification are still unverified. Results remain incomplete and
 release-ineligible; issue #291 and its parent issues track that qualification.
 
+### Real-engine CLI qualification runner
+
+`bash scripts/ci-qualify-gcc-engine-cli.sh` runs only
+`GccBundledCliQualificationTest`. It sets required mode, disables test caching,
+and fails on missing inputs or prerequisites. Ordinary test runs skip its two
+real-engine cases unless `DECOMP_REQUIRE_GCC_ENGINE_CLI=true` is selected.
+The runner does not invoke the broad CI script or vulnerability-reproduction tests.
+
+Supply canonical paths in these environment variables:
+
+- `DECOMP_GCC_CLI_PROFILE` and `DECOMP_GCC_CLI_ARCHIVE`: the retained compiler-engine
+  profile and matching Ghidra provenance archive.
+- `DECOMP_GCC_CLI_CC1_BINARY` and `DECOMP_GCC_CLI_LTO1_BINARY`: genuine stripped
+  binaries matching that profile. `scripts/rebuild-gcc-compiler-engines.py` is the
+  existing authenticated rebuild path; an authored substitute does not qualify.
+- `DECOMP_GCC_CLI_CC1_FRESH_SCRATCH`, `DECOMP_GCC_CLI_CC1_RESUME_SCRATCH`,
+  `DECOMP_GCC_CLI_LTO1_FRESH_SCRATCH`, `DECOMP_GCC_CLI_LTO1_RESUME_SCRATCH`: four
+  distinct, empty dedicated mounts satisfying the CLI's default scratch policy.
+- `DECOMP_GCC_CLI_EVIDENCE_ROOT`: an existing private evidence directory disjoint
+  from all inputs and scratch mounts, with capacity for four captured model/plan pairs.
+
+Provision the reviewed root-owned JVM/system libraries, native helpers and bundled
+Ghidra runtime required by the existing contained tests. The qualification invokes
+the real `MainKt.main` CLI entry point in the Gradle test JVM, using its independently
+configured development deployment references. It does not qualify the installed
+shell launcher. Required mode assigns that host JVM an 8 GiB heap; the worker still
+uses profile-bound limits. This setting is not a measurement or enforcement of
+aggregate host-plus-worker RSS, so provide adequate host memory and keep whole-operation
+resource acceptance separate.
+
+Each engine gets fresh and same-owner resume runs. The runner checks the exact CLI
+invocation, profile policy, journal membership and predecessor hashes, export/plan
+bindings, process-absence records and shared deadline origin. It requires resumed
+reuse to equal the stopped checkpoint prefix, independently checks plan ownership,
+and compares retained model/plan bytes. Only then does it write `comparison.json`,
+which still reports benchmark acceptance and release eligibility as false.
+All CLI output directories, journals, generated controls and captured model/plan
+bytes remain in the evidence directory; scratch remains retained for trusted
+cleanup. Preserve the original profile/reference files, binaries and archive with
+these results for replay. Missing `comparison.json` is not successful qualification.
+
+The runner has not yet completed on a provisioned host. Local checks establish
+compilation and required-mode rejection only, not actual engine equivalence.
+
 This is separate from the historical path-based GCC BOOT controller. That
 controller's caller-populated output directory and capacity checks are not
 substitutes for dedicated disk authority. Its frozen definitions and BOOT-only
