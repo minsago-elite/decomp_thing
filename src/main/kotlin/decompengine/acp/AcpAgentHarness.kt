@@ -1088,7 +1088,7 @@ class AcpAgentHarness(
         }
         preferences.configOptions.forEachIndexed { index, preference ->
             requireCurrentSessionConfigPreference(session.configOptions.value, preference, index,
-                configuration.environment.values.map { it.value })
+                configuration.environment.values.map { it.value }, preferences.privateIdentifiers())
             val wireValue = when (val configured = preference.value) {
                 is AcpSessionConfigValue.Select -> SessionConfigOptionValue.StringValue(configured.valueId)
                 is AcpSessionConfigValue.BooleanValue -> SessionConfigOptionValue.BoolValue(configured.value)
@@ -1228,7 +1228,7 @@ class AcpAgentHarness(
         preferences.configOptions.forEachIndexed { index, configured ->
             val matches = advertisedOptions.filter { it.id == configured.id }
             when (matches.size) {
-                0 -> rejectSessionPreference("configOption", index, "idNotAdvertised", advertisedOptions.asSequence().map { it.id }, configured.id)
+                0 -> rejectSessionPreference("configOption", index, "idNotAdvertised", advertisedOptions.asSequence().map { it.id })
                 1 -> Unit
                 else -> throw AcpProtocolFailure(
                     "ACP session/new ambiguously advertised a configured config option",
@@ -1241,7 +1241,7 @@ class AcpAgentHarness(
                         rejectSessionPreference("configOption", index, "typeNotAdvertised")
                     }
                     when (advertised.selectValueIds.count { it == value.valueId }) {
-                        0 -> rejectSessionPreference("configOption", index, "valueNotAdvertised", advertised.selectValueIds.asSequence(), value.valueId)
+                        0 -> rejectSessionPreference("configOption", index, "valueNotAdvertised", advertised.selectValueIds.asSequence())
                         1 -> Unit
                         else -> throw AcpProtocolFailure(
                             "ACP session/new ambiguously advertised a configured select value",
@@ -1264,18 +1264,18 @@ class AcpAgentHarness(
     ) {
         val values = advertised ?: rejectSessionPreference(kind, null, "capabilityAbsent")
         when (values.count { it == configured }) {
-            0 -> rejectSessionPreference(kind, null, "idNotAdvertised", values.asSequence(), configured)
+            0 -> rejectSessionPreference(kind, null, "idNotAdvertised", values.asSequence())
             1 -> Unit
             else -> throw AcpProtocolFailure("ACP session/new ambiguously advertised a configured $kind")
         }
     }
 
     private fun rejectSessionPreference(
-        kind: String, index: Int?, reason: String, choices: Sequence<String>? = null, rejected: String? = null,
+        kind: String, index: Int?, reason: String, choices: Sequence<String>? = null,
     ): Nothing {
         val preview = choices?.let {
             " Advertised choice previews: " + previewSessionChoices(it,
-                configuration.environment.values.map { value -> value.value } + listOfNotNull(rejected))
+                configuration.environment.values.map { value -> value.value }, configuration.sessionPreferences.privateIdentifiers())
         }.orEmpty()
         throw AgentExecutionException(
             AgentFailure(

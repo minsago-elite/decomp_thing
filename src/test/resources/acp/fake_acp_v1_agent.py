@@ -48,6 +48,7 @@ GENERIC_CONTRACT_MODES = {
     "wrong-jsonrpc-prompt",
     "session-preferences",
     "session-preferences-overlapping-choices",
+    "session-preferences-cross-preferences",
     "session-preferences-no-models",
     "session-preferences-no-modes",
     "session-preferences-no-config-options",
@@ -356,6 +357,10 @@ if MODE == "session-preferences-overlapping-choices":
     session_result["modes"]["availableModes"].insert(0, {"id": "prefix-mode-secret-canary", "name": "Overlap"})
     session_result["configOptions"][0]["options"].insert(0, {"value": "prefix-value-secret-canary", "name": "Overlap"})
     session_result["configOptions"].insert(0, {"type": "boolean", "id": "prefix-option-secret-canary", "name": "Overlap", "currentValue": False})
+if MODE == "session-preferences-cross-preferences":
+    session_result["models"]["availableModels"] = [
+        {"modelId": "prefix-" + value, "name": "Overlap"} for value in
+        ["model-secret-canary", "mode-secret-canary", "option-secret-canary", "value-secret-canary"]]
 respond(session_new, {} if expected_session_method == "session/load" else session_result)
 if MODE == "session-preferences-pipelined-update":
     update({

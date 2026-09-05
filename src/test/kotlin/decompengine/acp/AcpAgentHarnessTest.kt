@@ -268,6 +268,10 @@ class AcpAgentHarnessTest {
         )
 
         val cases = listOf(
+            RejectedPreference("cross preference overlap", "session-preferences-cross-preferences",
+                AcpSessionPreferences(modelId = "model-secret-canary", modeId = "mode-secret-canary", configOptions = listOf(
+                    AcpSessionConfigPreference("option-secret-canary", AcpSessionConfigValue.Select("value-secret-canary")))),
+                "secret-canary"),
             RejectedPreference(
                 "unknown model",
                 "session-preferences",
@@ -346,7 +350,7 @@ class AcpAgentHarnessTest {
             ),
         )
 
-        (cases + cases.take(4).map { it.copy(mode = "session-preferences-overlapping-choices") }).forEach { case ->
+        (cases + cases.drop(1).take(4).map { it.copy(mode = "session-preferences-overlapping-choices") }).forEach { case ->
             val fixture = fixture(genericContract = true)
             val harness = harness(
                 mode = case.mode,
