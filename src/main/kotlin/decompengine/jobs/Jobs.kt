@@ -92,6 +92,9 @@ class JobStore internal constructor(
             binaryPath = binaryPath,
             metadata = metadata,
         )
+        // Reserve the largest supported later status record before any input is staged.
+        encodeMetadata(job.copy(status = "analyzing", updatedAt = "0".repeat(40),
+            statusMessage = "\u0001".repeat(MAX_STATUS_MESSAGE_CHARACTERS)))
         val staging = Files.createTempDirectory(root, ".upload-")
         var publicationAttempted = false
         try {
@@ -170,7 +173,7 @@ class JobStore internal constructor(
         val updated = get(jobId).copy(
             status = status,
             updatedAt = Instant.now().toString(),
-            statusMessage = message?.replace(Regex("[\\r\\n]+"), " ")?.take(500),
+            statusMessage = message?.replace(Regex("[\\r\\n]+"), " ")?.take(MAX_STATUS_MESSAGE_CHARACTERS),
         )
         persist(updated)
         return updated
@@ -328,13 +331,7 @@ class JobStore internal constructor(
     }
 
     private fun persist(job: Job, jobDir: Path = jobDirectory(job.id).createDirectories()) {
-        // Bound the encoder's string-byte accounting allocation before it sees caller-provided text.
-        require(job.filename.length <= MAX_METADATA_BYTES) { "job metadata exceeds the 256 KiB limit" }
-        val bytes = try {
-            OracleJson.canonicalBytes(job.toJson(), METADATA_LIMITS)
-        } catch (_: StrictJsonException) {
-            throw IllegalArgumentException("job metadata exceeds the 256 KiB limit or contains invalid JSON text")
-        }
+        val bytes = encodeMetadata(job)
         val temporary = Files.createTempFile(jobDir, ".job-metadata-", ".tmp")
         try {
             metadataPublisher.writeAndForce(temporary, bytes)
@@ -345,7 +342,18 @@ class JobStore internal constructor(
         }
     }
 
+    private fun encodeMetadata(job: Job): ByteArray {
+        // Bound the encoder's string-byte accounting allocation before it sees caller-provided text.
+        require(job.filename.length <= MAX_METADATA_BYTES) { "job metadata exceeds the 256 KiB limit" }
+        return try {
+            OracleJson.canonicalBytes(job.toJson(), METADATA_LIMITS)
+        } catch (_: StrictJsonException) {
+            throw IllegalArgumentException("job metadata exceeds the 256 KiB limit or contains invalid JSON text")
+        }
+    }
+
     private companion object {
+        const val MAX_STATUS_MESSAGE_CHARACTERS = 500
         const val MAX_INPUT_BYTES = 32 * 1024 * 1024
         const val MAX_METADATA_BYTES = 256 * 1024
         val METADATA_LIMITS = StrictJsonLimits(
