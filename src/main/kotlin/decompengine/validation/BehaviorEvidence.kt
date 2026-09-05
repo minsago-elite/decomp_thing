@@ -186,11 +186,16 @@ internal object BehaviorEvidence {
         rebuilt: JsonObject,
         policy: JsonObject,
         project: JsonObject?,
+        fileInputs: Map<String, JsonArray> = emptyMap(),
     ): String {
-        val cases = legacy.getValue("cases").jsonArray
+        val cases = JsonArray(legacy.getValue("cases").jsonArray.map { element ->
+            val case = element.jsonObject
+            JsonObject(case + ("fileInputs" to (fileInputs[case.string("id")] ?: JsonArray(emptyList()))))
+        })
         val body = JsonObject(legacy + mapOf(
-            "schemaVersion" to JsonPrimitive(1),
-            "provider" to JsonPrimitive(PROVIDER),
+            "cases" to cases,
+            "schemaVersion" to JsonPrimitive(2),
+            "provider" to JsonPrimitive("local-revision-bound-behavior-v2"),
             "originalIdentity" to original,
             "rebuiltIdentity" to rebuilt,
             "executionPolicy" to policy,
@@ -226,7 +231,9 @@ internal object BehaviorEvidence {
             "matches", "cases", "originalIdentity", "rebuiltIdentity", "executionPolicy", "projectRevision",
             "corpusSha256", "observationsSha256", "reportSha256",
         )) { "behavior report has missing or unknown fields" }
-        require(root.integer("schemaVersion") == 1 && root.string("provider") == PROVIDER) { "unsupported behavior report" }
+        val schemaVersion = root.integer("schemaVersion")
+        require((schemaVersion == 1 && root.string("provider") == PROVIDER) ||
+            (schemaVersion == 2 && root.string("provider") == "local-revision-bound-behavior-v2")) { "unsupported behavior report" }
         require(root.string("id").matches(Regex("[A-Za-z0-9][A-Za-z0-9_.-]{0,127}"))) { "invalid behavior report ID" }
         require(root.string("sandbox") == "bubblewrap") { "unsupported behavior sandbox request" }
         val originalPath = absolutePath(root.string("originalBinary"))
@@ -266,10 +273,29 @@ internal object BehaviorEvidence {
         var observedOutputBytes = 0L
         var stdinBytes = 0L
         var argumentBytes = 0L
+        var fileBytes = 0L
+        var fileCount = 0L
         val matches = cases.map { element ->
             val case = element.jsonObject
             require(case.keys == setOf("id", "args", "stdinHex", "matches", "exitCodeMatches", "stdoutMatches",
-                "stderrMatches", "original", "rebuilt")) { "behavior case fields are not closed" }
+                "stderrMatches", "original", "rebuilt") + if (schemaVersion == 2) setOf("fileInputs") else emptySet<String>()) { "behavior case fields are not closed" }
+            val inputFiles = if (schemaVersion == 2) case.getValue("fileInputs").jsonArray.map { element ->
+                val file = element.jsonObject
+                require(file.keys == setOf("name", "sourcePath", "bytes", "sha256", "contentHex")) { "behavior input file fields are not closed" }
+                val name = file.string("name")
+                val source = absolutePath(file.string("sourcePath"))
+                identity(JsonObject(file.filterKeys { it in setOf("bytes", "sha256") }))
+                val hex = file.string("contentHex")
+                requireHex(hex)
+                require(file.count("bytes") == hex.length / 2L) { "behavior input file length differs from retained bytes" }
+                fileBytes = Math.addExact(fileBytes, file.count("bytes"))
+                fileCount++
+                require(fileBytes <= MAXIMUM_BEHAVIOR_FILE_BYTES && fileCount <= MAXIMUM_BEHAVIOR_INPUT_FILES) { "behavior file corpus exceeds its bound" }
+                require(OracleArtifacts.sha256(java.util.HexFormat.of().parseHex(hex)) == file.string("sha256")) { "behavior input file digest differs from retained bytes" }
+                name to source
+            } else emptyList()
+            require(inputFiles.map { it.first } == inputFiles.map { it.first }.distinct().sorted()) { "behavior input files must be unique and sorted" }
+            requireBehaviorFileNames(inputFiles.map { it.first })
             val identifier = case.string("id")
             require(identifier.isNotEmpty() && identifier.length <= 256 && identifiers.add(identifier)) { "behavior case IDs are invalid or duplicated" }
             val arguments = case.getValue("args").jsonArray.map { argument ->
@@ -290,7 +316,7 @@ internal object BehaviorEvidence {
                     stdoutBytes + stderrBytes <= policy.count("maximumAggregateBytes")) { "behavior output exceeds its recorded policy" }
                 observedOutputBytes += stdoutBytes + stderrBytes
                 require(observedOutputBytes <= policy.count("maximumComparisonOutputBytes"))
-                val expectedCommand = behaviorSandboxCommand(path, arguments, policy.count("timeoutMillis"), bubblewrap, timeout, network)
+                val expectedCommand = behaviorSandboxCommand(path, arguments, policy.count("timeoutMillis"), bubblewrap, timeout, network, inputFiles.toMap())
                 require(observation.getValue("sandboxCommand") == JsonArray(expectedCommand.map(::JsonPrimitive))) {
                     "behavior sandbox command contradicts its inputs or execution policy"
                 }
@@ -350,7 +376,7 @@ internal object BehaviorEvidence {
     }
 
     private fun corpus(cases: JsonArray) = JsonArray(cases.map { element ->
-        JsonObject(element.jsonObject.filterKeys { it in setOf("id", "args", "stdinHex") })
+        JsonObject(element.jsonObject.filterKeys { it in setOf("id", "args", "stdinHex", "fileInputs") })
     })
 
     private fun hash(value: JsonElement): String = OracleArtifacts.sha256(OracleJson.canonicalBytes(value, BEHAVIOR_JSON_LIMITS))
@@ -385,14 +411,28 @@ internal fun behaviorSandboxCommand(
     bubblewrap: Path,
     timeout: Path,
     networkRequested: Boolean,
+    files: Map<String, Path> = emptyMap(),
 ): List<String> = buildList {
+    requireBehaviorFileNames(files.keys)
     addAll(listOf(timeout.toAbsolutePath().normalize().toString(), "${maxOf(1L, timeoutMillis / 1000L)}s",
         bubblewrap.toAbsolutePath().normalize().toString()))
     if (networkRequested) add("--unshare-net")
     addAll(listOf("--unshare-pid", "--new-session", "--die-with-parent",
         "--ro-bind", "/usr", "/usr", "--ro-bind", "/lib", "/lib", "--ro-bind", "/lib64", "/lib64",
         "--dir", "/tmp", "--dir", "/program", "--ro-bind", executable.toAbsolutePath().normalize().toString(),
-        "/program/executable", "--chdir", "/tmp", "/program/executable"))
+        "/program/executable"))
+    if (files.isNotEmpty()) {
+        addAll(listOf("--dir", "/inputs"))
+        val parents = files.keys.flatMap { name ->
+            val parts = name.split('/')
+            (1 until parts.size).map { parts.take(it).joinToString("/") }
+        }.distinct().sortedWith(compareBy<String> { it.count { char -> char == '/' } }.thenBy { it })
+        parents.forEach { addAll(listOf("--dir", "/inputs/$it")) }
+        files.toSortedMap().forEach { (name, path) ->
+            addAll(listOf("--ro-bind", path.toAbsolutePath().normalize().toString(), "/inputs/$name"))
+        }
+    }
+    addAll(listOf("--chdir", "/tmp", "/program/executable"))
     addAll(arguments)
 }
 

@@ -1,7 +1,8 @@
 # Local behavior records and archival revision attribution
 
-`BehaviorComparator` writes schema-1 records with provider
-`local-revision-bound-behavior-v1`. An archival comparison supplies an explicit
+`BehaviorComparator` writes schema-2 records with provider
+`local-revision-bound-behavior-v2`. The decoder also accepts historical schema-1
+records, which do not commit file inputs. An archival comparison supplies an explicit
 `BehaviorProjectContext(projectDir, profile)`. Comparisons without a project
 context retain their observations, but cannot validate an archival revision.
 
@@ -11,6 +12,22 @@ executables, including their locators. File identity and content are checked
 before and after each execution and again before atomic report publication.
 Case arguments and stdin bytes are copied before execution. A detected input
 change aborts publication and preserves an existing report.
+
+The optional `fileInputs` argument maps case IDs to maps of relative input names
+and host file paths. For example, `mapOf("file-case" to mapOf("data/input.bin" to
+inputPath))` requests a read-only mount at `/inputs/data/input.bin` for that case;
+the caller supplies that sandbox path in argv when needed. Names must be normalized,
+at most 256 characters and 16 components, and cannot conflict with parent directories.
+Only declared files are admitted; directory trees are not implicitly enumerated.
+The comparator copies the declarations, retains exact file bytes as lowercase hex,
+and records their names, host locators, lengths and SHA-256 digests. It includes these
+records in the corpus and observation commitments. A maximum of 1,024 file declarations
+and 8 MiB of retained content applies across the complete case sequence, counting
+repeated declarations. Missing, linked, special or oversized files fail before execution.
+Declared files participate in the same pre/post execution stability checks as binaries.
+The decoder recomputes content digests and read-only mount argv without reopening host
+locators. Retained file bytes remain auditable after the host input files are removed.
+Declarations and mount requests do not prove that a program read every declared file.
 
 Project capture checks the schema-3 source manifest against its selected profile
 and every declared file. The original executable digest must match the project
@@ -85,8 +102,9 @@ These records describe local path-stability checks. They do not retain an
 execve-bound executable capability or an immutable runtime-library closure across
 execution, and do not prove exclusion of same-user replace-and-restore races.
 The C/Make build record is locally checked evidence, not an independent build
-attestation. File-input trees and externally fixed benchmark-corpus admission
-still need their own commitments. Production execution, recovery and release
+attestation. Implicit file-input trees and externally fixed benchmark-corpus admission
+remain unimplemented. File mounts still use host paths, so retained contents and local
+pre/post checks do not prove immutable mounted bytes throughout execution. Production execution, recovery and release
 authority remain governed by the oracle and repair boundaries.
 
 Consequently this checkpoint advances #36/#37 without completing their execution

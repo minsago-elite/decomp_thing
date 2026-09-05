@@ -184,11 +184,13 @@ class SandboxRunner(
         ))
     }
 
-    fun run(executable: Path, input: ProcessInput): ProcessOutput {
+    fun run(executable: Path, input: ProcessInput): ProcessOutput = runWithFiles(executable, input, emptyMap())
+
+    internal fun runWithFiles(executable: Path, input: ProcessInput, files: Map<String, Path>): ProcessOutput {
         if (!bwrapPath.exists()) {
             throw SandboxUnavailableException("bubblewrap not found at ${bwrapPath.pathString}; sandboxed execution is mandatory")
         }
-        val command = behaviorSandboxCommand(executable, input.args, timeout.toMillis(), bwrapPath, timeoutPath, networkIsolation)
+        val command = behaviorSandboxCommand(executable, input.args, timeout.toMillis(), bwrapPath, timeoutPath, networkIsolation, files)
 
         val builder = ProcessBuilder(command).redirectErrorStream(false)
         builder.environment().clear()
@@ -329,8 +331,9 @@ class BehaviorComparator(
         cases: List<ProcessInput>,
         reportsDir: Path,
         project: BehaviorProjectContext? = null,
+        fileInputs: Map<String, Map<String, Path>> = emptyMap(),
     ): BehaviorComparisonReport {
-        val report = evaluate(id, originalBinary, rebuiltBinary, cases, reportsDir, project)
+        val report = evaluate(id, originalBinary, rebuiltBinary, cases, reportsDir, project, fileInputs)
         if (!report.matches) {
             throw BehaviorMismatchException("behavior comparison failed for $id; see ${report.reportPath.pathString}")
         }
@@ -344,6 +347,7 @@ class BehaviorComparator(
         cases: List<ProcessInput>,
         reportsDir: Path,
         project: BehaviorProjectContext? = null,
+        fileInputs: Map<String, Map<String, Path>> = emptyMap(),
     ): BehaviorComparisonReport {
         require(id.matches(Regex("[A-Za-z0-9][A-Za-z0-9_.-]{0,127}"))) { "behavior report ID must be a safe filename component" }
         require(cases.size in 1..1024) { "between one and 1024 behavior cases are required" }
@@ -354,8 +358,11 @@ class BehaviorComparator(
             cases.sumOf { input -> input.args.sumOf { it.toByteArray().size.toLong() } } <= 1024L * 1024
         ) { "behavior corpus exceeds its byte bound" }
         val inputs = cases.map { ProcessInput(it.id, it.args.toList(), it.stdin.clone()) }
+        require(fileInputs.keys.all { id -> inputs.any { it.id == id } }) { "file inputs reference an unknown behavior case" }
+        val boundFiles = fileInputs.mapValues { it.value.toMap() }
         reportsDir.createDirectories()
         val capture = BehaviorEvidenceCapture()
+        val fileRecords = captureBehaviorFileInputs(boundFiles, capture)
         val originalIdentity = capture.executable(originalBinary)
         val rebuiltIdentity = capture.executable(rebuiltBinary)
         val comparisonLimit = minOf(maximumAggregateOutputBytes, 16L * 1024 * 1024)
@@ -366,7 +373,7 @@ class BehaviorComparator(
         var aggregateOutputBytes = 0L
         fun runBounded(binary: Path, input: ProcessInput): ProcessOutput {
             capture.requireCurrent()
-            val output = sandbox.run(binary, input)
+            val output = sandbox.runWithFiles(binary, input, boundFiles[input.id].orEmpty())
             capture.requireCurrent()
             aggregateOutputBytes = Math.addExact(
                 aggregateOutputBytes,
@@ -400,7 +407,7 @@ class BehaviorComparator(
         }
         capture.requireCurrent()
         val encoded = BehaviorEvidence.encode(Json.parseToJsonElement(report.toJson()).jsonObject,
-            originalIdentity, rebuiltIdentity, policy, projectRevision)
+            originalIdentity, rebuiltIdentity, policy, projectRevision, fileRecords)
         require(encoded.toByteArray().size <= BehaviorEvidence.MAXIMUM_REPORT_BYTES) { "behavior report exceeds its byte bound" }
         capture.requireCurrent()
         writeProjectEvidenceAtomically(report.reportPath, encoded)

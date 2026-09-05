@@ -24,8 +24,82 @@ import kotlinx.serialization.json.JsonObject
 import kotlinx.serialization.json.JsonPrimitive
 import kotlinx.serialization.json.jsonArray
 import kotlinx.serialization.json.jsonObject
+import kotlinx.serialization.json.jsonPrimitive
 
 class BehaviorEvidenceTest {
+    @Test
+    fun `historical schema one records remain readable without file declarations`() {
+        val fixture = fixture()
+        val current = BehaviorEvidence.decode(fixture.evaluate().reportPath.readBytes())
+        val cases = JsonArray(current.getValue("cases").jsonArray.map { JsonObject(it.jsonObject - "fileInputs") })
+        val corpus = JsonArray(cases.map { JsonObject(it.jsonObject.filterKeys { key -> key in setOf("id", "args", "stdinHex") }) })
+        val legacy = JsonObject(current + mapOf(
+            "schemaVersion" to JsonPrimitive(1),
+            "provider" to JsonPrimitive("local-revision-bound-behavior-v1"),
+            "cases" to cases,
+            "corpusSha256" to JsonPrimitive(OracleArtifacts.sha256(OracleJson.canonicalBytes(corpus))),
+            "observationsSha256" to JsonPrimitive(OracleArtifacts.sha256(OracleJson.canonicalBytes(cases))),
+        ))
+        val record = JsonObject(legacy + ("reportSha256" to JsonPrimitive(OracleArtifacts.sha256(OracleJson.canonicalBytes(JsonObject(legacy - "reportSha256"))))))
+        assertEquals(1, BehaviorEvidence.decode(record.toString().toByteArray()).integer("schemaVersion"))
+    }
+
+    @Test
+    fun `declared file inputs retain exact bytes and commit read-only sandbox mappings`() {
+        val fixture = fixture()
+        val input = fixture.original.parent.resolve("case-input.bin")
+        val bytes = byteArrayOf(0, 1, 127, -1)
+        Files.write(input, bytes)
+        val report = BehaviorComparator(fixture.sandbox).evaluate(
+            "files", fixture.original, fixture.rebuilt, listOf(ProcessInput("file", listOf("/inputs/nested/input.bin"))),
+            fixture.project.resolve("reports"), BehaviorProjectContext(fixture.project),
+            fileInputs = mapOf("file" to mapOf("nested/input.bin" to input)),
+        )
+        val record = BehaviorEvidence.decode(report.reportPath.readBytes())
+        assertEquals(2, record.integer("schemaVersion"))
+        val case = record.getValue("cases").jsonArray.single().jsonObject
+        val retained = case.getValue("fileInputs").jsonArray.single().jsonObject
+        assertEquals("00017fff", retained.string("contentHex"))
+        assertEquals(OracleArtifacts.sha256(bytes), retained.string("sha256"))
+        assertEquals(4L, retained.count("bytes"))
+        val command = case.getValue("original").jsonObject.getValue("sandboxCommand").jsonArray.map { it.jsonPrimitive.content }
+        assertTrue(command.windowed(3).any { it == listOf("--ro-bind", input.toString(), "/inputs/nested/input.bin") })
+        assertTrue(command.windowed(2).any { it == listOf("--dir", "/inputs/nested") })
+        Files.delete(input)
+        BehaviorEvidence.requireProjectCurrent(record, BehaviorProjectContext(fixture.project))
+        assertEquals(true, ArchivalProjectAuditor.audit(fixture.project).behaviorMatched)
+
+        val changedFile = JsonObject(retained + ("contentHex" to JsonPrimitive("00017ffe")))
+        val changedCase = JsonObject(case + ("fileInputs" to JsonArray(listOf(changedFile))))
+        val changedCases = JsonArray(listOf(changedCase))
+        val corpus = JsonArray(listOf(JsonObject(changedCase.filterKeys { it in setOf("id", "args", "stdinHex", "fileInputs") })))
+        val changed = JsonObject(record + mapOf(
+            "cases" to changedCases,
+            "corpusSha256" to JsonPrimitive(OracleArtifacts.sha256(OracleJson.canonicalBytes(corpus))),
+            "observationsSha256" to JsonPrimitive(OracleArtifacts.sha256(OracleJson.canonicalBytes(changedCases))),
+        ))
+        val rehashed = JsonObject(changed + ("reportSha256" to JsonPrimitive(OracleArtifacts.sha256(OracleJson.canonicalBytes(JsonObject(changed - "reportSha256"))))))
+        assertFails { BehaviorEvidence.decode(rehashed.toString().toByteArray()) }
+    }
+
+    @Test
+    fun `file mutation during execution preserves earlier behavior evidence`() {
+        val fixture = fixture()
+        val input = fixture.original.parent.resolve("case-input")
+        input.writeText("retained")
+        fun evaluate() = BehaviorComparator(fixture.sandbox).evaluate("files", fixture.original, fixture.rebuilt,
+            listOf(ProcessInput("file")), fixture.project.resolve("reports"), BehaviorProjectContext(fixture.project),
+            fileInputs = mapOf("file" to mapOf("input" to input)))
+        val prior = evaluate().reportPath.readBytes()
+        val shim = fixture.original.parent.resolve("authored-runner-shim")
+        val command = "shift; exec \"${'$'}program\" \"${'$'}@\""
+        val mutation = "shift; printf x >> '${input}'; exec \"${'$'}program\" \"${'$'}@\""
+        check(command in shim.readText())
+        shim.writeText(shim.readText().replace(command, mutation))
+        assertFails { evaluate() }
+        assertTrue(prior.contentEquals(fixture.project.resolve("reports/files.behavior.json").readBytes()))
+    }
+
     @Test
     fun `current source build executable and corpus have closed independently checked commitments`() {
         val fixture = fixture()
