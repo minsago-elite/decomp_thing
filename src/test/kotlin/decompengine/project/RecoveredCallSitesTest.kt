@@ -50,7 +50,7 @@ class RecoveredCallSitesTest {
     }
 
     @Test
-    fun `candidate ordering is unsigned and image address arithmetic cannot wrap`() = withTemporaryRoot { root ->
+    fun `candidate ordering is unsigned and image address arithmetic cannot wrap`(): Unit = withTemporaryRoot { root ->
         val ordered = document(listOf(
             site("0x7ffffffffffffffe", "0x7ffffffffffffffe", bytes = "ffd0", returnPc = "0x8000000000000000"),
             site("0x8000000000000000", "0x8000000000000000", bytes = "ffd0", returnPc = "0x8000000000000002"),
@@ -65,7 +65,7 @@ class RecoveredCallSitesTest {
     }
 
     @Test
-    fun `closed candidate grammar rejects contradictory fields duplicate sites and target overflow`() = withTemporaryRoot { root ->
+    fun `closed candidate grammar rejects contradictory fields duplicate sites and target overflow`(): Unit = withTemporaryRoot { root ->
         val valid = site("0x100", "0x100")
         val mutations = listOf(
             JsonObject(valid + ("extra" to JsonNull)),
@@ -118,7 +118,7 @@ class RecoveredCallSitesTest {
     }
 
     @Test
-    fun `artifact digest unsafe paths and caller lowered target limits fail closed`() = withTemporaryRoot { root ->
+    fun `artifact digest unsafe paths and caller lowered target limits fail closed`(): Unit = withTemporaryRoot { root ->
         val value = document(listOf(site("0x100", "0x100", targets = listOf("0x200", "0x300"))))
         val bytes = OracleJson.canonicalBytes(value)
         val path = root.resolve("candidate.json")
@@ -156,7 +156,6 @@ class RecoveredCallSitesTest {
     fun `real static Ghidra export preserves repeated direct indirect and tail sites beside schema one model`() =
         withTemporaryRoot { root ->
             assumeTrue(System.getenv("RUN_REAL_GHIDRA_CALL_SITES") == "true", "real Ghidra call-site fixture is opt-in")
-            val home = Path.of(checkNotNull(System.getenv("GHIDRA_HOME")))
             val source = root.resolve("calls.s")
             Files.writeString(source, """
                 .text
@@ -181,7 +180,7 @@ class RecoveredCallSitesTest {
             """.trimIndent() + "\n")
             val binary = root.resolve("calls")
             runTool(root, listOf("cc", "-nostdlib", "-no-pie", "-Wl,--build-id=none", "-o", binary.toString(), source.toString()))
-            val analyzer = GhidraHeadlessProgramModelAnalyzer(home, recoveryMode = GhidraProgramModelRecoveryMode.PLANNING)
+            val analyzer = GhidraHeadlessProgramModelAnalyzer(recoveryMode = GhidraProgramModelRecoveryMode.PLANNING)
             val first = analyzer.analyzeWithCallSites(binary, root.resolve("first"))
             val second = analyzer.analyzeWithCallSites(binary, root.resolve("second"))
             assertEquals(1, first.programModel.schemaVersion)

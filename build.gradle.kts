@@ -906,12 +906,23 @@ distributions {
                 into("lib")
                 filePermissions { unix("rw-r--r--") }
             }
+            from(project(":ghidra-bridge").layout.buildDirectory.dir("bundle")) {
+                into("libexec/ghidra")
+                eachFile {
+                    val normalizedMode = if (file.canExecute()) 0x1ed else 0x1a4
+                    permissions { unix(normalizedMode) }
+                }
+            }
         }
     }
 }
 
 tasks.test {
     useJUnitPlatform()
+    dependsOn(":ghidra-bridge:stageBundle")
+    val testInstalledGhidra = providers.environmentVariable("RUN_REAL_GHIDRA").orNull == "true" ||
+        providers.environmentVariable("RUN_REAL_GHIDRA_CALL_SITES").orNull == "true"
+    if (testInstalledGhidra) dependsOn("installDist")
     dependsOn(generateAcpGateHelperChecksum)
     dependsOn(generateLlvmBehaviorHelperChecksum)
     dependsOn(generateKotlinBootClasspathReference)
@@ -924,6 +935,11 @@ tasks.test {
     inputs.file(llvmHostedWorkerClasspathReference)
     inputs.dir(kotlinBootRuntimeDirectory)
     doFirst {
+        val ghidraBundle = if (testInstalledGhidra) layout.buildDirectory.dir("install/llm_bin_patch/libexec/ghidra")
+            else project(":ghidra-bridge").layout.buildDirectory.dir("bundle")
+        systemProperty("decompengine.ghidra.bundle", ghidraBundle.get().asFile.absolutePath)
+        systemProperty("decompengine.ghidra.provenanceArchive", File(gradle.gradleUserHomeDir,
+            "caches/decomp-ghidra/ghidra_12.1.3_PUBLIC_20260817.zip").absolutePath)
         systemProperty(
             "decompengine.acp.gateHelperExecutable",
             acpGateHelperBinary.get().asFile.absolutePath,
@@ -990,10 +1006,67 @@ tasks.processResources {
 
 listOf("installDist", "distZip", "distTar").forEach { taskName ->
     tasks.named(taskName) {
+        dependsOn(":ghidra-bridge:stageBundle")
+        inputs.property("ghidraBundlePermissionsVersion", 2)
         dependsOn(generateAcpGateHelperChecksum)
         dependsOn(generateLlvmBehaviorHelperChecksum)
         dependsOn(generateKotlinBootClasspathReference)
         dependsOn(generateLlvmHostedWorkerClasspathReference)
+    }
+}
+
+tasks.named<JavaExec>("run") {
+    dependsOn(":ghidra-bridge:stageBundle")
+    systemProperty("decompengine.ghidra.bundle", project(":ghidra-bridge").layout.buildDirectory.dir("bundle").get().asFile.absolutePath)
+}
+
+tasks.named<Sync>("installDist") {
+    doLast {
+        destinationDir.resolve("libexec/ghidra").walkTopDown().filter { it.isFile }.forEach { file ->
+            check(file.setLastModified(315532800000L)) { "Could not normalize installed Ghidra timestamp: $file" }
+        }
+    }
+}
+
+tasks.register("verifyGhidraDistributionArchives") {
+    group = "verification"
+    description = "Verifies complete bundled Ghidra bytes and executable modes in ZIP and TAR distributions"
+    dependsOn("distZip", "distTar")
+    doLast {
+        fun digest(input: java.io.InputStream): String {
+            val hash = MessageDigest.getInstance("SHA-256")
+            input.use { stream ->
+                val buffer = ByteArray(65536)
+                while (true) {
+                    val count = stream.read(buffer)
+                    if (count < 0) break
+                    hash.update(buffer, 0, count)
+                }
+            }
+            return hash.digest().joinToString("") { byte -> "%02x".format(byte) }
+        }
+        val staged = project(":ghidra-bridge").layout.buildDirectory.dir("bundle").get().asFile
+        val manifest = staged.resolve("bundle.sha256")
+        val expected = manifest.readLines().associate { it.substring(66) to it.substring(0, 64) } +
+            ("bundle.sha256" to digest(manifest.inputStream()))
+        val prefix = "llm_bin_patch-$version/libexec/ghidra/"
+        val archiveTrees = listOf(
+            zipTree(tasks.named<Zip>("distZip").get().archiveFile),
+            tarTree(tasks.named<Tar>("distTar").get().archiveFile),
+        )
+        archiveTrees.forEach { tree ->
+            val observed = mutableSetOf<String>()
+            tree.visit {
+                if (!isDirectory && path.startsWith(prefix)) {
+                    val relative = path.removePrefix(prefix)
+                    require(observed.add(relative) && relative in expected) { "Unexpected Ghidra archive member: $relative" }
+                    require(digest(open()) == expected.getValue(relative)) { "Changed Ghidra archive member: $relative" }
+                    val expectedMode = if (staged.resolve(relative).canExecute()) 0x1ed else 0x1a4
+                    require(permissions.toUnixNumeric() == expectedMode) { "Lost Ghidra archive permissions: $relative" }
+                }
+            }
+            require(observed == expected.keys) { "Distribution omits bundled Ghidra files" }
+        }
     }
 }
 

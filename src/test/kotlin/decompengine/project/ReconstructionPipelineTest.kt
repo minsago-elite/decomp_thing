@@ -1,11 +1,12 @@
 package decompengine.project
 
 import decompengine.analysis.GhidraJvmAnalyzer
-import decompengine.analysis.GhidraJvmConfig
 import decompengine.binary.ElfMetadataReader
 import kotlin.io.path.ExperimentalPathApi
 import kotlin.io.path.Path
 import kotlin.io.path.createTempDirectory
+import kotlin.io.path.createDirectories
+import kotlin.io.path.writeText
 import kotlin.io.path.exists
 import kotlin.io.path.isExecutable
 import kotlin.io.path.listDirectoryEntries
@@ -33,7 +34,7 @@ class ReconstructionPipelineTest {
     }
 
     @Test
-    fun `Ghidra analysis runs through JVM main call and captures report`() {
+    fun `Ghidra analysis delegates to the program model adapter and captures report`() {
         val tempDir = createTempDirectory("reconstruction-ghidra-")
         val binary = tempDir.resolve("hello").also { it.writeBytes(elfFixture()) }
         val analyzer = testAnalyzer()
@@ -42,7 +43,6 @@ class ReconstructionPipelineTest {
 
         assertEquals(0, analysis.returnCode)
         assertEquals("x86-64", analysis.metadata.machine)
-        assertTrue(tempDir.resolve("analysis/ghidra_project/analysis.marker").exists())
         assertTrue(analysis.reportPath.readText().contains("\"tool\": \"ghidra-jvm\""))
         assertTrue(analysis.reportsDir.resolve("ghidra_stdout.log").readText().startsWith("fake ghidra analyzed"))
     }
@@ -128,15 +128,18 @@ class ReconstructionPipelineTest {
     }
 
     private fun testAnalyzer(): GhidraJvmAnalyzer =
-        GhidraJvmAnalyzer(
-            GhidraJvmConfig(
-                classpath = System.getProperty("java.class.path")
-                    .split(System.getProperty("path.separator"))
-                    .filter { it.isNotBlank() }
-                    .map { Path(it) },
-                mainClass = "decompengine.analysis.FakeAnalyzeHeadless",
-            ),
-        )
+        GhidraJvmAnalyzer { binary, output ->
+            val reports = output.resolve("reports").createDirectories()
+            reports.resolve("ghidra_stdout.log").writeText("fake ghidra analyzed test fixture\n")
+            reports.resolve("ghidra_stderr.log").writeText("")
+            RecoveredProgramModel(
+                inputSha256 = sha256(java.nio.file.Files.readAllBytes(binary)),
+                functions = listOf(RecoveredFunction(
+                    id = stableFunctionId(0x401000UL), name = "decomp_engine_main", address = 0x401000UL,
+                    prototype = "int decomp_engine_main(void)", status = RecoveryStatus.SYNTHETIC,
+                )),
+            ).also { reports.resolve("program_model.json").writeText(it.toJson()) }
+        }
 
     private fun elfFixture(): ByteArray {
         val bytes = ByteArray(64)

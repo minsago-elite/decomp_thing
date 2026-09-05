@@ -1,6 +1,9 @@
 package decompengine.project
 
 import decompengine.analysis.GhidraAnalysisException
+import decompengine.analysis.BundledGhidra
+import decompengine.analysis.GhidraInvocation
+import decompengine.analysis.GhidraPostScript
 import java.nio.file.Files
 import java.nio.file.LinkOption
 import java.nio.file.Path
@@ -12,7 +15,6 @@ import java.util.concurrent.TimeUnit
 import java.util.concurrent.atomic.AtomicBoolean
 import java.util.concurrent.atomic.AtomicLong
 import kotlin.io.path.createDirectories
-import kotlin.io.path.isExecutable
 import kotlin.io.path.pathString
 import kotlin.io.path.readText
 import kotlin.io.path.writeBytes
@@ -55,12 +57,18 @@ data class GhidraProgramModelExportLimits(
     }
 }
 
-class GhidraHeadlessProgramModelAnalyzer(
-    private val ghidraHome: Path,
+class GhidraHeadlessProgramModelAnalyzer internal constructor(
+    private val commandFactory: (GhidraInvocation) -> List<String>,
     private val limits: GhidraProgramModelExportLimits = GhidraProgramModelExportLimits(),
     private val analysisToolSha256: String = UNAUTHENTICATED_ANALYSIS_TOOL_SHA256,
     private val recoveryMode: GhidraProgramModelRecoveryMode = GhidraProgramModelRecoveryMode.FULL,
 ) : ProgramModelAnalyzer {
+    constructor(
+        limits: GhidraProgramModelExportLimits = GhidraProgramModelExportLimits(),
+        analysisToolSha256: String = BundledGhidra.ARCHIVE_SHA256,
+        recoveryMode: GhidraProgramModelRecoveryMode = GhidraProgramModelRecoveryMode.FULL,
+    ) : this({ BundledGhidra.locate().analysisCommand(it) }, limits, analysisToolSha256, recoveryMode)
+
     init {
         require(analysisToolSha256.matches(Regex("[0-9a-f]{64}"))) {
             "Ghidra analysis-tool identity must be a lowercase SHA-256 digest"
@@ -81,8 +89,6 @@ class GhidraHeadlessProgramModelAnalyzer(
         includeCallSites: Boolean,
     ): Pair<RecoveredProgramModel, RecoveredCallSiteReceipt?> {
         val startedNanos = System.nanoTime()
-        val executable = ghidraHome.resolve("support/analyzeHeadless")
-        require(executable.isExecutable()) { "GHIDRA_HOME does not contain executable support/analyzeHeadless" }
         val reports = workDir.resolve("reports").createDirectories()
         val scripts = workDir.resolve("scripts").createDirectories()
         val scriptBytes = javaClass.getResourceAsStream("/ghidra_scripts/ExportProgramModel.java")
@@ -98,23 +104,15 @@ class GhidraHeadlessProgramModelAnalyzer(
         } else null
         callScriptBytes?.let { scripts.resolve("ExportRecoveredCallSites.java").writeBytes(it) }
         val project = workDir.resolve("ghidra_project").createDirectories()
-        val command = listOf(
-            executable.pathString,
-            project.pathString,
-            "archival_reconstruction",
-            "-import", binaryPath.toAbsolutePath().normalize().pathString,
-            "-overwrite",
-            "-scriptPath", scripts.pathString,
-            "-postScript",
-            "ExportProgramModel.java",
-            exporterSha256,
-            analysisToolSha256,
-            recoveryMode.wireName,
-            output.pathString,
-        ) + if (callScriptBytes == null) emptyList() else listOf(
-            "-postScript", "ExportRecoveredCallSites.java", sha256(callScriptBytes), analysisToolSha256,
-            output.pathString, callOutput.pathString,
+        val postScripts = listOf(GhidraPostScript("ExportProgramModel.java", listOf(
+            exporterSha256, analysisToolSha256, recoveryMode.wireName, output.toAbsolutePath().normalize().pathString,
+        ))) + if (callScriptBytes == null) emptyList() else listOf(
+            GhidraPostScript("ExportRecoveredCallSites.java", listOf(
+                sha256(callScriptBytes), analysisToolSha256, output.toAbsolutePath().normalize().pathString,
+                callOutput.toAbsolutePath().normalize().pathString,
+            )),
         )
+        val command = commandFactory(GhidraInvocation(project, "archival_reconstruction", binaryPath, scripts, postScripts))
         val process = ProcessBuilder(command)
             .directory(workDir.toFile())
             .start()
@@ -244,14 +242,9 @@ class GhidraHeadlessProgramModelAnalyzer(
         internal const val UNAUTHENTICATED_ANALYSIS_TOOL_SHA256 =
             "0000000000000000000000000000000000000000000000000000000000000000"
 
-        fun fromEnvironment(
-            environment: Map<String, String> = System.getenv(),
+        fun bundled(
             profile: ReconstructionProfile = GeneratedCMakeReconstructionProfile.descriptor,
-        ): GhidraHeadlessProgramModelAnalyzer {
-            val home = environment["GHIDRA_HOME"]?.takeIf(String::isNotBlank)
-                ?: error("GHIDRA_HOME is required for source-tree reconstruction")
-            return GhidraHeadlessProgramModelAnalyzer(Path.of(home), GhidraProgramModelExportLimits.from(profile))
-        }
+        ): GhidraHeadlessProgramModelAnalyzer = GhidraHeadlessProgramModelAnalyzer(GhidraProgramModelExportLimits.from(profile))
     }
 }
 

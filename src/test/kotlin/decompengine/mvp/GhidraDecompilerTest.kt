@@ -1,5 +1,6 @@
 package decompengine.mvp
 
+import decompengine.analysis.fakeGhidraCommand
 import java.nio.file.Path
 import kotlin.io.path.createDirectories
 import kotlin.io.path.createTempDirectory
@@ -17,7 +18,7 @@ class GhidraDecompilerTest {
     fun `adapter invokes headless Ghidra with only the ELF and bundled script`() {
         val temp = createTempDirectory("ghidra-adapter-")
         val home = temp.resolve("ghidra")
-        val executable = home.resolve("support/analyzeHeadless")
+        val executable = home.resolve("fake-worker")
         executable.parent.createDirectories()
         executable.writeText(
             """
@@ -39,7 +40,7 @@ class GhidraDecompilerTest {
         log.parent.createDirectories()
 
         StreamingLogger(log).use { logger ->
-            GhidraDecompiler(mapOf("GHIDRA_HOME" to home.pathString)).decompile(logger, input, work, raw)
+            GhidraDecompiler(fakeGhidraCommand(executable)).decompile(logger, input, work, raw)
         }
 
         val invocation = work.resolve("invocation.txt").readText()
@@ -56,8 +57,6 @@ class GhidraDecompilerTest {
     @Test
     fun `opt in real Ghidra exports symbol type string and control flow context`() {
         if (System.getenv("RUN_REAL_GHIDRA") != "true") return
-        val home = System.getenv("GHIDRA_HOME")?.let(Path::of)
-            ?: error("RUN_REAL_GHIDRA=true requires GHIDRA_HOME")
         val temp = createTempDirectory("ghidra-real-")
         val source = temp.resolve("program.c")
         val binary = temp.resolve("program")
@@ -71,7 +70,7 @@ class GhidraDecompilerTest {
         val raw = work.resolve("decompiled.c")
 
         StreamingLogger(temp.resolve("ghidra.log")).use { logger ->
-            GhidraDecompiler(mapOf("GHIDRA_HOME" to home.pathString)).decompile(logger, binary, work, raw)
+            GhidraDecompiler().decompile(logger, binary, work, raw)
         }
 
         val result = raw.readText()

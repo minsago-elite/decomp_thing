@@ -85,14 +85,14 @@ Export plus adapter validation retains the original analysis wall-clock deadline
 ## Verification and remaining integration
 
 ```bash
-RUN_REAL_GHIDRA_CALL_SITES=true GHIDRA_HOME=/path/to/ghidra \
+RUN_REAL_GHIDRA_CALL_SITES=true \
   ./gradlew test --tests decompengine.project.RecoveredCallSitesTest \
     --tests decompengine.project.ProgramModelTest \
     --tests decompengine.project.GhidraProgramModelExporterTest
 ```
 
 The opt-in real test compiles a supplied assembly fixture and statically analyzes
-it twice with Ghidra. It never executes the fixture binary. It checks byte-identical
+it twice with the bundled direct-API Ghidra worker. No `GHIDRA_HOME` is used. It never executes the fixture binary. It checks byte-identical
 models and sidecars, repeated direct calls, indirect calls, physical targets,
 tail-call return-PC absence, input binding, and occupied-destination rejection.
 Without the explicit environment, this real-tool test is reported as skipped.

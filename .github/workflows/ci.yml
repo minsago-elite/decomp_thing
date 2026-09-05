@@ -90,6 +90,38 @@ jobs:
           name: acp-codex-authentication-evidence
           path: build/acp-codex-compatibility/results
 
+  bundled-ghidra:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-java@v6
+        with:
+          distribution: temurin
+          java-version: "21"
+          cache: gradle
+      - name: Verify installed direct-API Ghidra without an external installation
+        env:
+          RUN_REAL_GHIDRA: "true"
+          RUN_REAL_GHIDRA_CALL_SITES: "true"
+        run: |
+          unset GHIDRA_HOME
+          ./gradlew --no-daemon test \
+            --tests decompengine.analysis.BundledGhidraTest \
+            --tests decompengine.project.GhidraProgramModelExporterTest \
+            --tests decompengine.project.RecoveredCallSitesTest \
+            --tests decompengine.mvp.GhidraDecompilerTest \
+            --tests decompengine.project.ReconstructionPipelineTest \
+            --tests decompengine.web.SourceTreeJobReconstructorTest
+      - name: Verify ZIP and TAR bundle contents and native executable modes
+        run: ./gradlew --no-daemon --offline verifyGhidraDistributionArchives
+      - uses: actions/upload-artifact@v7
+        if: always()
+        with:
+          name: bundled-ghidra-test-reports
+          path: |
+            build/reports/tests/test
+            build/test-results/test
+
   archival-ghidra:
     runs-on: ubuntu-24.04
     steps:
