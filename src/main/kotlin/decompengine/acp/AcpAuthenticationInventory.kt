@@ -27,12 +27,16 @@ class AcpAuthenticationInventory private constructor(
     val sha256: String,
     val logoutAdvertised: Boolean,
 ) {
+    val commitmentFormat: String = COMMITMENT_FORMAT
+
     /** Advertisement does not grant permission or establish an executable logout lifecycle. */
     val logoutSupported: Boolean = false
     val methods: List<AcpAuthenticationMethod> = Collections.unmodifiableList(methods.toList())
     override fun toString(): String = "AcpAuthenticationInventory(count=${methods.size}, sha256=$sha256)"
 
     companion object {
+        private const val COMMITMENT_FORMAT = "sdk-auth-methods-v1"
+
         internal fun capture(
             methods: List<AuthMethod>,
             sensitiveValues: Collection<String>,
@@ -43,29 +47,24 @@ class AcpAuthenticationInventory private constructor(
             val redactor = ProgressRedactor(sensitiveValues)
             val fragments = AuthenticationPreviewFragments(sensitiveValues)
             fun preview(text: String, limit: Int) = fragments.conceal(redactor.text(text, limit))
-            val commitment = buildJsonArray {
-                methods.forEach { method ->
-                    if (method.id.value.isBlank() || method.id.value.toByteArray().size > 256 || !ids.add(method.id.value)) {
-                        throw AcpProtocolFailure("ACP authentication inventory contains an invalid or duplicate method ID")
+            methods.forEach { method ->
+                if (method.id.value.isBlank() || method.id.value.toByteArray().size > 256 || !ids.add(method.id.value)) {
+                    throw AcpProtocolFailure("ACP authentication inventory contains an invalid or duplicate method ID")
+                }
+                if (method.name.toByteArray().size > 512 || (method.description?.toByteArray()?.size ?: 0) > 2048) {
+                    throw AcpProtocolFailure("ACP authentication inventory exceeds its text limit")
+                }
+                listOfNotNull(method.id.value, method.name, method.description).forEach { value ->
+                    if (!Charsets.UTF_8.newEncoder().canEncode(value)) {
+                        throw AcpProtocolFailure("ACP authentication inventory contains invalid Unicode")
                     }
-                    if (method.name.toByteArray().size > 512 || (method.description?.toByteArray()?.size ?: 0) > 2048) {
-                        throw AcpProtocolFailure("ACP authentication inventory exceeds its text limit")
-                    }
-                    listOfNotNull(method.id.value, method.name, method.description).forEach { value ->
-                        if (!Charsets.UTF_8.newEncoder().canEncode(value)) {
-                            throw AcpProtocolFailure("ACP authentication inventory contains invalid Unicode")
-                        }
-                    }
-                    add(buildJsonObject {
-                        put("id", method.id.value); put("variant", variant(method))
-                        put("name", redactor.text(method.name, 512))
-                        put("description", method.description?.let { JsonPrimitive(redactor.text(it, 2048)) } ?: JsonNull)
-                    })
                 }
             }
-            validatePayload(methods)
-            val digest = MessageDigest.getInstance("SHA-256").digest(OracleJson.canonicalBytes(commitment))
-                .joinToString("") { "%02x".format(it) }
+            val payload = canonicalPayload(methods)
+            val hash = MessageDigest.getInstance("SHA-256")
+            hash.update(COMMITMENT_FORMAT.toByteArray(Charsets.UTF_8))
+            hash.update(0.toByte())
+            val digest = hash.digest(payload).joinToString("") { "%02x".format(it) }
             return AcpAuthenticationInventory(methods.map {
                 AcpAuthenticationMethod(it.id.value, variant(it), preview(it.id.value, 128), preview(it.name, 128),
                     it.description?.let { description -> preview(description, 256) })
@@ -73,11 +72,11 @@ class AcpAuthenticationInventory private constructor(
         }
 
         /** Bound all SDK-retained fields, including metadata and unsupported variant payloads. */
-        private fun validatePayload(methods: List<AuthMethod>) {
+        private fun canonicalPayload(methods: List<AuthMethod>): ByteArray {
             val payload = buildJsonArray {
                 methods.forEach { add(ACPJson.encodeToJsonElement(AuthMethod.serializer(), it)) }
             }
-            try {
+            return try {
                 OracleJson.canonicalBytes(payload, StrictJsonLimits(
                     maximumCanonicalBytes = 64 * 1024,
                     maximumDepth = 16,

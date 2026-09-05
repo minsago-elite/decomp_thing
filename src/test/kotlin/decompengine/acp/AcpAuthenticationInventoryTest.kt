@@ -128,6 +128,32 @@ class AcpAuthenticationInventoryTest {
         assertEquals(absent.sha256, advertised.sha256)
     }
 
+    @Test fun `commitment covers variant payloads metadata and unknown raw fields`() {
+        fun capture(method: AuthMethod) = AcpAuthenticationInventory.capture(listOf(method), emptyList())
+        val environment = mutableMapOf("FIXTURE_CONTEXT" to "one")
+        val terminal = AuthMethod.TerminalAuth(AuthMethodId("id"), "name", null, listOf("fixture"), environment)
+        val initial = capture(terminal)
+        assertEquals("sdk-auth-methods-v1", initial.commitmentFormat)
+        assertNotEquals(initial.sha256, capture(terminal.copy(args = listOf("changed"))).sha256)
+        environment["FIXTURE_CONTEXT"] = "two"
+        assertNotEquals(initial.sha256, capture(terminal).sha256)
+        assertEquals(capture(terminal).sha256,
+            AcpAuthenticationInventory.capture(listOf(terminal), listOf("two")).sha256)
+        val agent = AuthMethod.AgentAuth(AuthMethodId("id"), "name", null,
+            buildJsonObject { put("a", 1); put("b", 2) })
+        assertEquals(capture(agent).sha256, capture(agent.copy(_meta =
+            buildJsonObject { put("b", 2); put("a", 1) })).sha256)
+        assertNotEquals(capture(agent).sha256, capture(agent.copy(_meta =
+            buildJsonObject { put("a", 2); put("b", 2) })).sha256)
+        fun unknown(type: String, hint: String): AuthMethod = com.agentclientprotocol.rpc.ACPJson
+            .decodeFromJsonElement(AuthMethod.serializer(), buildJsonObject {
+                put("id", "id"); put("name", "name"); put("type", type); put("hint", hint)
+            })
+        assertNotEquals(capture(unknown("future-a", "one")).sha256, capture(unknown("future-b", "one")).sha256)
+        assertNotEquals(capture(unknown("future-a", "one")).sha256, capture(unknown("future-a", "two")).sha256)
+        assertFalse(initial.toString().contains("FIXTURE_CONTEXT"))
+    }
+
     @Test fun `unknown authentication variants stay unsupported`() {
         val method = AuthMethod.UnknownAuthMethod(AuthMethodId("future"), "future method", null,
             "future-type", kotlinx.serialization.json.JsonObject(emptyMap()))

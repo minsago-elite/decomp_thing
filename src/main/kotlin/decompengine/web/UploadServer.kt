@@ -451,6 +451,7 @@ class UploadServer(
         buildJsonObject {
             put("status", "ready")
             put("inventorySha256", inventory.sha256)
+            put("inventoryFormat", inventory.commitmentFormat)
             put("logoutAdvertised", inventory.logoutAdvertised)
             put("logoutSupported", inventory.logoutSupported)
             put("loginSupported", false)

@@ -83,6 +83,7 @@ class AcpAgentPreflightResult internal constructor(
         "agent-capabilities-${negotiatedAgent.capabilities.stableBits()}",
         "auth-methods-${authentication.methods.size}",
         "auth-inventory-sha256-${authentication.sha256}",
+        "auth-inventory-format-${authentication.commitmentFormat}",
         "auth-logout-advertised-${authentication.logoutAdvertised}",
         "auth-logout-supported-${authentication.logoutSupported}",
         "client-fs-read-${workflow.filesystemRead}",

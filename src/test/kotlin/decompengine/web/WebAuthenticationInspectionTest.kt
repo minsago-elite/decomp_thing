@@ -77,6 +77,7 @@ class WebAuthenticationInspectionTest {
             assertTrue(response.body().contains("\"loginSupported\":false"))
             assertTrue(response.body().contains("\"logoutAdvertised\":true"))
             assertTrue(response.body().contains("\"logoutSupported\":false"))
+            assertTrue(response.body().contains("\"inventoryFormat\":\"sdk-auth-methods-v1\""))
             assertTrue(response.body().contains("[redacted]"))
         } finally { server.stop(0) }
     }
