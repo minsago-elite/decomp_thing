@@ -5088,7 +5088,14 @@ internal fun hashStableRegularFile(
     validateMetadata: (LinuxDescriptor) -> Unit = {},
 ): StableFileDigest {
     cancellationCheck()
-    val normalized = normalizedRelative(relative)
+    // Snapshot paths use Linux filename semantics, independently of repair manifest grammar.
+    require(relative.isNotEmpty() && !relative.startsWith('/') && '\u0000' !in relative) {
+        "stable hash path is not a contained relative path"
+    }
+    val normalized = relative
+    require(normalized.split('/').none { it.isEmpty() || it == "." || it == ".." }) {
+        "stable hash path contains an invalid segment"
+    }
     val base = root.toAbsolutePath().normalize()
     RepairDescriptorReadSupport.requireSupported(base)
     val parts = normalized.split('/')

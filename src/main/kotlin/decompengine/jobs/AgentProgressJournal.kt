@@ -362,6 +362,13 @@ class AgentProgressJournal(
                     "progress snapshot contains inconsistent omission ranges"
                 }
             }
+            // History eviction removes a prefix of admitted events. Any later gaps
+            // must therefore be queue drops, never history drops.
+            val firstRetained = result.getValue("events").jsonArray.firstOrNull()
+                ?.jsonObject?.getValue("sequence")?.jsonPrimitive?.long ?: next
+            require(historyDropped <= firstRetained) {
+                "progress snapshot history omissions exceed the evicted prefix"
+            }
             return result
         }
 
