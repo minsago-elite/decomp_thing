@@ -341,6 +341,10 @@ HTTP 409 with a `Location` for inspecting that job. JSON clients receive `upload
 `job_id`, `job_url`, and `retry_upload: false`; the HTML response offers a Check job link. Underlying I/O
 error text is excluded. Inspect the referenced state before another upload; this is not an exactly-once
 retry protocol, and a missing record after a crash still needs recovery reconciliation.
+`UploadUncertaintyHttpTest` exercises the shared production upload handler over local HTTP with a
+directory-confirmation fault. JSON and HTML both return 409 with the same review location as the complete
+published job, no private I/O diagnostic and no `Retry-After` header. The fixture verifies each submitted
+request creates one job; it does not qualify uncertain-response retry deduplication.
 
 `web --listen-backlog` requests a TCP listen backlog of 64 by default and accepts values from 1 to 4096.
 Invalid values fail before the server binds or opens job storage. The underlying TCP implementation controls
