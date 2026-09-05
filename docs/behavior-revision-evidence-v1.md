@@ -156,6 +156,12 @@ Both initial execution and replay use the fixed authored corpus digest
 `d916ad4bd5f3aeb8a039cfc9a5a8d6c4d63ad1afd44af43d078589bb671ffc74`
 for pre-execution admission, rather than deriving the required identity from the
 newly produced report.
+After clean rebuild and replay, the consumer independently audits the extracted
+project under that same fixed policy and requires the replay report to be recognized.
+A negative check then changes the stored audit to claim unsupported corpus coverage:
+the consumer audit recomputes coverage from behavior records, reports the missing
+corpus, and refuses repackaging under the unsupported selection. Archived audit
+claims do not supply the consumer's policy or replace current revision checks.
 
 These records describe local path-stability checks. They do not retain an
 execve-bound executable capability or an immutable runtime-library closure across
