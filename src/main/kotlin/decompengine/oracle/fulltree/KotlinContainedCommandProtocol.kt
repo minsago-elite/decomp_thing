@@ -21,6 +21,7 @@ internal class KotlinContainedCommandRequest(
     val maximumWallSeconds: Long,
     val maximumStdoutBytes: Long,
     val maximumStderrBytes: Long,
+    val allowInterruption: Boolean = false,
 ) {
     val command: List<String>
     val environment: Map<String, String>
@@ -63,9 +64,9 @@ internal class KotlinContainedCommandRequest(
         require(maximumStdoutBytes in 1L..MAXIMUM_LOG_BYTES && maximumStderrBytes in 1L..MAXIMUM_LOG_BYTES) {
             "contained command log budget is outside its bound"
         }
-        encoded = OracleJson.canonicalBytes(JsonObject(mapOf(
-            "schemaVersion" to JsonPrimitive(1),
-            "provider" to JsonPrimitive("kotlin-contained-command-request-v1"),
+        val fields = mapOf(
+            "schemaVersion" to JsonPrimitive(if (allowInterruption) 2 else 1),
+            "provider" to JsonPrimitive(if (allowInterruption) "kotlin-contained-command-request-v2" else "kotlin-contained-command-request-v1"),
             "runDirectory" to JsonPrimitive(runDirectory.toString()),
             "nonce" to JsonPrimitive(nonce),
             "command" to JsonArray(this.command.map(::JsonPrimitive)),
@@ -74,7 +75,9 @@ internal class KotlinContainedCommandRequest(
             "maximumWallSeconds" to JsonPrimitive(maximumWallSeconds),
             "maximumStdoutBytes" to JsonPrimitive(maximumStdoutBytes),
             "maximumStderrBytes" to JsonPrimitive(maximumStderrBytes),
-        )), CONTAINED_REQUEST_LIMITS)
+        )
+        encoded = OracleJson.canonicalBytes(JsonObject(fields +
+            if (allowInterruption) mapOf("allowInterruption" to JsonPrimitive(true)) else emptyMap()), CONTAINED_REQUEST_LIMITS)
         sha256 = OracleArtifacts.sha256(encoded)
     }
 
@@ -87,12 +90,18 @@ internal class KotlinContainedCommandRequest(
         fun parse(bytes: ByteArray): KotlinContainedCommandRequest {
             val document = OracleJson.parseCanonical(bytes, CONTAINED_REQUEST_LIMITS) as? JsonObject
                 ?: throw IllegalArgumentException("contained command request must be an object")
+            val version = document.number("schemaVersion")
+            require(version in 1L..2L) { "contained command request version is unsupported" }
+            val allowInterruption = version == 2L
+            require(!allowInterruption || document["allowInterruption"] == JsonPrimitive(true)) {
+                "contained command v2 requires explicit interruption admission"
+            }
             require(document.keys == setOf("schemaVersion", "provider", "runDirectory", "nonce", "command",
-                "environment", "maximumStartWaitSeconds", "maximumWallSeconds", "maximumStdoutBytes", "maximumStderrBytes")) {
+                "environment", "maximumStartWaitSeconds", "maximumWallSeconds", "maximumStdoutBytes", "maximumStderrBytes") +
+                if (allowInterruption) setOf("allowInterruption") else emptySet()) {
                 "contained command request fields differ from its closed contract"
             }
-            require(document.number("schemaVersion") == 1L &&
-                document.string("provider") == "kotlin-contained-command-request-v1") {
+            require(document.string("provider") == "kotlin-contained-command-request-v$version") {
                 "contained command request version is unsupported"
             }
             val command = document["command"] as? JsonArray
@@ -103,7 +112,7 @@ internal class KotlinContainedCommandRequest(
                 Path.of(document.string("runDirectory")), document.string("nonce"),
                 command.map { it.requireString() }, environment.mapValues { it.value.requireString() },
                 document.number("maximumStartWaitSeconds"), document.number("maximumWallSeconds"),
-                document.number("maximumStdoutBytes"), document.number("maximumStderrBytes"),
+                document.number("maximumStdoutBytes"), document.number("maximumStderrBytes"), allowInterruption,
             ).also { require(it.canonicalBytes.contentEquals(bytes)) { "contained command request changed during parsing" } }
         }
     }
@@ -127,6 +136,7 @@ internal object KotlinContainedCommandProtocol {
     const val VERSION = "contained-command-v1"
     const val BOOT_FILE = "contained-command.boot.json"
     const val START_FILE = "contained-command.start.json"
+    const val INTERRUPT_FILE = "contained-command.interrupt.json"
     const val OUTCOME_FILE = "contained-command.outcome.json"
     const val STDOUT_FILE = "contained-command.stdout"
     const val STDERR_FILE = "contained-command.stderr"
@@ -144,6 +154,13 @@ internal object KotlinContainedCommandProtocol {
 
     fun requireStart(bytes: ByteArray, secret: ByteArray, request: KotlinContainedCommandRequest, keeperPid: Long) {
         decode(bytes, secret, request, "START", keeperPid)
+    }
+
+    fun interrupt(secret: ByteArray, request: KotlinContainedCommandRequest, keeperPid: Long): ByteArray =
+        encode(secret, request, "INTERRUPT", emptyOutcome(keeperPid, "INTERRUPT"))
+
+    fun requireInterrupt(bytes: ByteArray, secret: ByteArray, request: KotlinContainedCommandRequest, keeperPid: Long) {
+        decode(bytes, secret, request, "INTERRUPT", keeperPid)
     }
 
     fun outcome(secret: ByteArray, request: KotlinContainedCommandRequest, outcome: KotlinContainedCommandOutcome): ByteArray =
@@ -220,8 +237,11 @@ internal object KotlinContainedCommandProtocol {
 
     private fun requireOutcomeFields(request: KotlinContainedCommandRequest, event: String, outcome: KotlinContainedCommandOutcome) {
         require(outcome.keeperPid in 1L..Int.MAX_VALUE.toLong()) { "contained command keeper PID is invalid" }
+        require(event != "INTERRUPT" && outcome.status != "INTERRUPTED" || request.allowInterruption) {
+            "contained command request does not authorize interruption"
+        }
         if (event != "OUTCOME") {
-            require(event in setOf("BOOT", "START") && outcome == emptyOutcome(outcome.keeperPid, event)) {
+            require(event in setOf("BOOT", "START", "INTERRUPT") && outcome == emptyOutcome(outcome.keeperPid, event)) {
                 "contained command pre-execution event contains an outcome"
             }
             return
@@ -229,7 +249,7 @@ internal object KotlinContainedCommandProtocol {
         require(outcome.childPid in 1L..Int.MAX_VALUE.toLong() && outcome.childPid != outcome.keeperPid &&
             outcome.exitCode in 0..255 && outcome.elapsedMillis in 0L..(request.maximumWallSeconds * 1000L + 15000L) &&
             outcome.stdoutBytes in 0L..request.maximumStdoutBytes && outcome.stderrBytes in 0L..request.maximumStderrBytes &&
-            outcome.status in setOf("EXITED", "TIMED_OUT", "OUTPUT_LIMIT")) { "contained command outcome is outside its bounds" }
+            outcome.status in setOf("EXITED", "TIMED_OUT", "OUTPUT_LIMIT", "INTERRUPTED")) { "contained command outcome is outside its bounds" }
     }
 
     private fun emptyOutcome(keeperPid: Long, event: String) = KotlinContainedCommandOutcome(keeperPid, 0L, 0, 0L, 0L, 0L, event)
