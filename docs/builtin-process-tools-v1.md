@@ -35,8 +35,8 @@ python3 scripts/validate-builtin-contract.py
 ```
 
 The `Built-in core contract` workflow provisions the existing ACP sandbox host and runs the second
-command. The inventory freezes 59 cases across five suites: 23 provider, 14 loop, 7 filesystem,
-7 terminal and 8 shared-agent cases. It forces fresh Gradle execution, requires a clean source
+command. The v2 inventory freezes 65 cases across six suites: 23 provider, 14 loop, 7 filesystem,
+6 captured-context, 7 terminal and 8 shared-agent cases. It forces fresh Gradle execution, requires a clean source
 worktree, checks XML cases as well as suite totals, and rejects missing/changed suites, failures,
 errors or skips. `build/builtin-contract-qualification/summary.json` records the commit and XML
 hashes. It explicitly does not qualify real-provider workflows or a release.
@@ -59,6 +59,7 @@ its limit construction is also checked by the host-independent metadata test. Th
 configuration and does not weaken production limits. A new positive hosted result is still required.
 
 #74 remains open. This checkpoint does not supply production compiler profiles, writable quota-backed
-build stages, general directory inspection or structured evidence retrieval. Full terminal permissions,
+build stages or general host directory inspection. Captured directory and immutable request evidence
+tools are documented in [the filesystem contract](builtin-filesystem-tools-v1.md). Full terminal permissions,
 environment/credential equivalence, durable transcript/receipt archive wiring and the C1/C2 workflow
 and real-provider release gates still need requirement-by-requirement evidence.
