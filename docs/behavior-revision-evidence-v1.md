@@ -148,6 +148,17 @@ acceptance requires reconstruction again; a newly validated replacement can then
 reused normally. Historical checkpoints without compiler acceptance schema 5 do not
 supply accepted rollback evidence.
 
+The authored four-module resume fixture generates actual C calls along a
+leaf/middle/root dependency chain, plus an unrelated module. After initial build
+and audit, changing the leaf interface regenerates its consumers. An interruption
+at the root preserves completed leaf/middle checkpoints; resume invokes only the
+root and keeps the unrelated checkpoint unchanged. The final audit checks source
+hashes independently of confidence records. Packaging, extraction, a clean rebuild
+and a fresh consumer audit reproduce the same module revisions and successful
+compiler evidence while leaving behavior and coverage explicitly unknown. This
+tests a local scripted reconstructor, not authenticated external-agent restart or
+behavior-driven repair convergence.
+
 `sandboxReported` describes a checked execution request. The audit leaves
 `networkIsolationObserved` empty and states the assurance scope explicitly.
 The record's legacy `networkIsolated` fields retain the requested configuration;

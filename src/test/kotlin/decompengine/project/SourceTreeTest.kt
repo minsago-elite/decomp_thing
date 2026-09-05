@@ -118,7 +118,7 @@ class SourceTreeTest {
             RecoveredFunction("root", "root", 3u, "int root(void)", calls = setOf("middle")),
             RecoveredFunction("unrelated", "unrelated", 4u, "int unrelated(void)"),
         )
-        val model = RecoveredProgramModel(inputSha256 = "input", functions = functions)
+        val model = RecoveredProgramModel(inputSha256 = sha256("authored dependency resume fixture".toByteArray()), functions = functions)
         val overrides = functions.associate { it.id to it.id }
         val project = createTempDirectory("source-transitive-resume-")
         val calls = mutableListOf<String>()
@@ -131,12 +131,24 @@ class SourceTreeTest {
                     throw ModuleReconstructionInterruptedException("root", AgentStopReason.CANCELLED, "test checkpoint interruption")
                 }
                 val function = request.model.functions.single { it.id == request.module.functionIds.single() }
-                val source = "#include \"modules/${request.module.id}.h\"\n/* ${function.id} */\n${function.prototype} { return 1; }\n"
+                val source = buildString {
+                    append("#include \"modules/${request.module.id}.h\"\n")
+                    request.dependencyHeaders.keys.sorted().forEach { header ->
+                        append("#include \"${header.removePrefix("include/")}\"\n")
+                    }
+                    val result = function.calls.sorted().joinToString(" + ") { callee ->
+                        request.model.functions.single { it.id == callee }.name + "()"
+                    }.ifEmpty { "1" }
+                    append("/* ${function.id} */\n${function.prototype} { return $result; }\n")
+                }
                 return ReconstructedModule(source, "scripted", sha256(source.toByteArray()))
             }
         }
         SourceTreeGenerator.generate(model, project, reconstructor = reconstructor, overrides = overrides)
         assertEquals(setOf("leaf", "middle", "root", "unrelated"), calls.toSet())
+        assertEquals(0, MakeProjectBuilder.build(project).returnCode)
+        val initialAudit = ArchivalProjectAuditor.audit(project)
+        assertTrue(initialAudit.moduleCompilationEvidenceProblems.isEmpty())
         val unrelatedCheckpoint = project.resolve("reports/modules/unrelated.json").readText()
         val changed = model.copy(functions = functions.map { if (it.id == "leaf") it.copy(prototype = "long leaf(void)") else it })
         calls.clear()
@@ -162,6 +174,35 @@ class SourceTreeTest {
             }
         }
         assertEquals(0, MakeProjectBuilder.build(project).returnCode)
+        val plan = Json.parseToJsonElement(project.resolve("reports/module_plan.json").readText()).jsonObject
+        val expectedRevisions = plan.getValue("modules").jsonArray.associate { element ->
+            val module = element.jsonObject
+            module.getValue("id").jsonPrimitive.content to
+                sha256(project.resolve(module.getValue("sourcePath").jsonPrimitive.content).readBytes())
+        }
+        assertNotEquals(initialAudit.moduleRevisionSha256.getValue("leaf"), expectedRevisions.getValue("leaf"))
+        for (id in listOf("middle", "root", "unrelated")) {
+            assertEquals(initialAudit.moduleRevisionSha256.getValue(id), expectedRevisions.getValue(id))
+        }
+        fun verifyAudit(directory: Path) {
+            val audit = ArchivalProjectAuditor.audit(directory)
+            assertTrue(audit.provenanceComplete)
+            assertTrue(audit.moduleCompilationEvidenceProblems.isEmpty())
+            assertEquals(expectedRevisions, audit.moduleRevisionSha256)
+            assertTrue(audit.unresolvedEntityIds.isEmpty())
+            assertNull(audit.behaviorMatched)
+            assertTrue("no-behavior-evidence" in audit.behaviorEvidenceProblems)
+            val document = Json.parseToJsonElement(audit.toJson()).jsonObject
+            assertEquals("not-observed", document.getValue("moduleExecutionCoverage").jsonPrimitive.content)
+            assertTrue(document.getValue("moduleBehaviorEvidence").jsonArray.isEmpty())
+        }
+        verifyAudit(project)
+        val archive = project.parent.resolve(project.fileName.toString() + ".zip")
+        ArchivalPackager.create(project, archive)
+        val extracted = project.parent.resolve(project.fileName.toString() + "-extracted")
+        ArchivalBundleVerifier.extractAndVerify(archive, extracted)
+        assertEquals(0, MakeProjectBuilder.build(extracted).returnCode)
+        verifyAudit(extracted)
     }
 
     @Test
