@@ -420,14 +420,24 @@ internal class ProgressRedactor(values: Collection<String>) {
     }
 
     fun text(value: String, maximumCharacters: Int = 512): String {
+        require(maximumCharacters >= 0)
         // Do not take a raw prefix: that can expose a partial configured secret.
         if (value.length > 16_384) return "[oversized text omitted]"
         var safe = value
-        secrets.forEach { safe = safe.replace(it, "[redacted]") }
+        secrets.forEach {
+            safe = safe.replace(it, "[redacted]")
+            if (safe.length > 16_384) return "[oversized text omitted]"
+        }
         safe = safe.replace(Regex("(?i)(bearer\\s+)[^\\s,;]+"), "$1[redacted]")
-            .replace(Regex("(?i)((?:api[_-]?key|access[_-]?token|password|secret|authorization)\\s*[:=]\\s*)[^\\s,;]+"), "$1[redacted]")
-            .replace(Regex("(?:sk-|ghp_|github_pat_)[A-Za-z0-9_-]+"), "[redacted]")
-            .replace(Regex("[\\p{Cntrl}&&[^\\n\\t]]"), "")
-        return if (safe.length <= maximumCharacters) safe else safe.take(maximumCharacters) + "… [preview truncated]"
+        if (safe.length > 16_384) return "[oversized text omitted]"
+        safe = safe.replace(Regex("(?i)((?:api[_-]?key|access[_-]?token|password|secret|authorization)\\s*[:=]\\s*)[^\\s,;]+"), "$1[redacted]")
+        if (safe.length > 16_384) return "[oversized text omitted]"
+        safe = safe.replace(Regex("(?:sk-|ghp_|github_pat_)[A-Za-z0-9_-]+"), "[redacted]")
+        if (safe.length > 16_384) return "[oversized text omitted]"
+        safe = safe.replace(Regex("[\\p{Cntrl}&&[^\\n\\t]]"), "")
+        if (safe.length <= maximumCharacters) return safe
+        var end = maximumCharacters
+        if (end > 0 && safe[end - 1].isHighSurrogate() && safe[end].isLowSurrogate()) end--
+        return safe.take(end) + "… [preview truncated]"
     }
 }
