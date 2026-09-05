@@ -73,7 +73,7 @@ class AcpAgentPreflightResult internal constructor(
         }
     }
 
-    /** Stable, bounded, and safe to print without exposing agent environment values or peer text. */
+    /** Stable within the inventory commitment's JVM scope; excludes environment values and peer text. */
     val stableDescriptor: String = listOf(
         "acp-preflight-v1",
         "workflow-${workflow.cliName}",
@@ -82,8 +82,9 @@ class AcpAgentPreflightResult internal constructor(
         "required-${requiredAgentCapabilities.sortedBy { it.diagnosticName }.joinToString(",") { it.diagnosticName }.ifEmpty { "none" }}",
         "agent-capabilities-${negotiatedAgent.capabilities.stableBits()}",
         "auth-methods-${authentication.methods.size}",
-        "auth-inventory-sha256-${authentication.sha256}",
+        "auth-inventory-commitment-${authentication.commitment}",
         "auth-inventory-format-${authentication.commitmentFormat}",
+        "auth-inventory-scope-${authentication.commitmentScope}",
         "auth-logout-advertised-${authentication.logoutAdvertised}",
         "auth-logout-supported-${authentication.logoutSupported}",
         "client-fs-read-${workflow.filesystemRead}",

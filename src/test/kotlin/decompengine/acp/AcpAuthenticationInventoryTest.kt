@@ -90,6 +90,61 @@ class AcpAuthenticationInventoryTest {
         }
         val valid = AuthMethod.AgentAuth(AuthMethodId("id-\ud83d\udd11"), "name", "description")
         assertEquals(valid.id.value, AcpAuthenticationInventory.capture(listOf(valid), emptyList()).methods.single().id)
+    @Test fun `inventory commitment scope changes across JVM restarts`() {
+        fun isolated(): List<String> {
+            val process = ProcessBuilder(
+                java.nio.file.Path.of(System.getProperty("java.home"), "bin", "java").toString(),
+                "-cp", System.getProperty("java.class.path"), AuthenticationCommitmentProcessFixture::class.java.name,
+            ).redirectErrorStream(true).start()
+            try {
+                assertTrue(process.waitFor(10, java.util.concurrent.TimeUnit.SECONDS))
+                assertEquals(0, process.exitValue())
+                val lines = process.inputStream.bufferedReader().readLines()
+                assertEquals(2, lines.size)
+                java.util.UUID.fromString(lines[0])
+                assertTrue(lines[1].matches(Regex("[a-f0-9]{64}")))
+                return lines
+            } finally {
+                if (process.isAlive) process.destroyForcibly()
+                process.waitFor(5, java.util.concurrent.TimeUnit.SECONDS)
+            }
+        }
+        val first = isolated()
+        val second = isolated()
+        assertNotEquals(first[0], second[0])
+        assertNotEquals(first[1], second[1])
+    }
+
+    @Test fun `public commitments hide sensitive text while preserving same-scope comparisons`() {
+        val marker = "private-fixture-value"
+        val methods = listOf(
+            AuthMethod.AgentAuth(AuthMethodId("agent"), "Name $marker", "Description $marker"),
+            AuthMethod.TerminalAuth(AuthMethodId("terminal"), "Terminal", null,
+                listOf("fixture"), mapOf("FIXTURE_VALUE" to marker)),
+            AuthMethod.UnknownAuthMethod(AuthMethodId("future"), "Future", null, "future",
+                buildJsonObject { put("retained_field", marker) }),
+        )
+        val inventory = AcpAuthenticationInventory.capture(methods, listOf(marker))
+        val repeated = AcpAuthenticationInventory.capture(methods, listOf(marker))
+        assertEquals(inventory.commitment, repeated.commitment)
+        assertEquals(inventory.commitmentScope, repeated.commitmentScope)
+        java.util.UUID.fromString(inventory.commitmentScope)
+        assertTrue(inventory.commitment.matches(Regex("[a-f0-9]{64}")))
+        val payload = decompengine.oracle.core.OracleJson.canonicalBytes(buildJsonArray {
+            methods.forEach { add(com.agentclientprotocol.rpc.ACPJson.encodeToJsonElement(AuthMethod.serializer(), it)) }
+        })
+        for (format in listOf("sdk-auth-methods-v1", inventory.commitmentFormat)) {
+            val unkeyed = java.security.MessageDigest.getInstance("SHA-256").apply {
+                update(format.toByteArray()); update(0.toByte())
+            }.digest(payload).joinToString("") { "%02x".format(it) }
+            assertNotEquals(unkeyed, inventory.commitment)
+            assertFalse(inventory.toString().contains(unkeyed))
+        }
+        assertFalse(inventory.toString().contains(marker))
+        inventory.methods.forEach {
+            assertFalse(it.namePreview.contains(marker))
+            assertFalse(it.descriptionPreview.orEmpty().contains(marker))
+        }
     }
 
     @Test fun `numeric payload policy applies at the exact limit to metadata and unknown variants`() {
@@ -125,7 +180,7 @@ class AcpAuthenticationInventoryTest {
         assertFalse(advertised.logoutSupported)
         assertTrue(advertised.methods.isEmpty())
         // The existing commitment describes method metadata, not logout authority.
-        assertEquals(absent.sha256, advertised.sha256)
+        assertEquals(absent.commitment, advertised.commitment)
     }
 
     @Test fun `commitment covers variant payloads metadata and unknown raw fields`() {
@@ -133,24 +188,24 @@ class AcpAuthenticationInventoryTest {
         val environment = mutableMapOf("FIXTURE_CONTEXT" to "one")
         val terminal = AuthMethod.TerminalAuth(AuthMethodId("id"), "name", null, listOf("fixture"), environment)
         val initial = capture(terminal)
-        assertEquals("sdk-auth-methods-v1", initial.commitmentFormat)
-        assertNotEquals(initial.sha256, capture(terminal.copy(args = listOf("changed"))).sha256)
+        assertEquals("sdk-auth-methods-hmac-sha256-v2", initial.commitmentFormat)
+        assertNotEquals(initial.commitment, capture(terminal.copy(args = listOf("changed"))).commitment)
         environment["FIXTURE_CONTEXT"] = "two"
-        assertNotEquals(initial.sha256, capture(terminal).sha256)
-        assertEquals(capture(terminal).sha256,
-            AcpAuthenticationInventory.capture(listOf(terminal), listOf("two")).sha256)
+        assertNotEquals(initial.commitment, capture(terminal).commitment)
+        assertEquals(capture(terminal).commitment,
+            AcpAuthenticationInventory.capture(listOf(terminal), listOf("two")).commitment)
         val agent = AuthMethod.AgentAuth(AuthMethodId("id"), "name", null,
             buildJsonObject { put("a", 1); put("b", 2) })
-        assertEquals(capture(agent).sha256, capture(agent.copy(_meta =
-            buildJsonObject { put("b", 2); put("a", 1) })).sha256)
-        assertNotEquals(capture(agent).sha256, capture(agent.copy(_meta =
-            buildJsonObject { put("a", 2); put("b", 2) })).sha256)
+        assertEquals(capture(agent).commitment, capture(agent.copy(_meta =
+            buildJsonObject { put("b", 2); put("a", 1) })).commitment)
+        assertNotEquals(capture(agent).commitment, capture(agent.copy(_meta =
+            buildJsonObject { put("a", 2); put("b", 2) })).commitment)
         fun unknown(type: String, hint: String): AuthMethod = com.agentclientprotocol.rpc.ACPJson
             .decodeFromJsonElement(AuthMethod.serializer(), buildJsonObject {
                 put("id", "id"); put("name", "name"); put("type", type); put("hint", hint)
             })
-        assertNotEquals(capture(unknown("future-a", "one")).sha256, capture(unknown("future-b", "one")).sha256)
-        assertNotEquals(capture(unknown("future-a", "one")).sha256, capture(unknown("future-a", "two")).sha256)
+        assertNotEquals(capture(unknown("future-a", "one")).commitment, capture(unknown("future-b", "one")).commitment)
+        assertNotEquals(capture(unknown("future-a", "one")).commitment, capture(unknown("future-a", "two")).commitment)
         assertFalse(initial.toString().contains("FIXTURE_CONTEXT"))
     }
 
@@ -181,9 +236,9 @@ class AcpAuthenticationInventoryTest {
     @Test fun `empty and changed inventories have deterministic commitments`() {
         val empty = AcpAuthenticationInventory.capture(emptyList(), emptyList())
         assertTrue(empty.methods.isEmpty())
-        assertEquals(empty.sha256, AcpAuthenticationInventory.capture(emptyList(), emptyList()).sha256)
+        assertEquals(empty.commitment, AcpAuthenticationInventory.capture(emptyList(), emptyList()).commitment)
         val method = AuthMethod.AgentAuth(AuthMethodId("id"), "name", null)
-        assertNotEquals(empty.sha256, AcpAuthenticationInventory.capture(listOf(method), emptyList()).sha256)
+        assertNotEquals(empty.commitment, AcpAuthenticationInventory.capture(listOf(method), emptyList()).commitment)
     }
 
     @Test fun `commitments derive from redacted advertisement text instead of raw credentials`() {
@@ -259,5 +314,14 @@ class AcpAuthenticationInventoryTest {
             val error = assertFailsWith<AcpProtocolFailure> { AcpAuthenticationInventory.capture(methods, emptyList()) }
             assertFalse(error.message!!.contains("secret-id"))
         }
+    }
+}
+
+/** A fresh JVM captures only an empty inventory; no ACP agent or authentication action runs. */
+object AuthenticationCommitmentProcessFixture {
+    @JvmStatic fun main(args: Array<String>) {
+        val inventory = AcpAuthenticationInventory.capture(emptyList(), emptyList())
+        println(inventory.commitmentScope)
+        println(inventory.commitment)
     }
 }

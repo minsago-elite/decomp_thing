@@ -77,7 +77,10 @@ class WebAuthenticationInspectionTest {
             assertTrue(response.body().contains("\"loginSupported\":false"))
             assertTrue(response.body().contains("\"logoutAdvertised\":true"))
             assertTrue(response.body().contains("\"logoutSupported\":false"))
-            assertTrue(response.body().contains("\"inventoryFormat\":\"sdk-auth-methods-v1\""))
+            assertTrue(response.body().contains("\"inventoryFormat\":\"sdk-auth-methods-hmac-sha256-v2\""))
+            assertTrue(response.body().contains("\"inventoryCommitment\":\"${inventory.commitment}\""))
+            assertTrue(response.body().contains("\"inventoryScope\":\"${inventory.commitmentScope}\""))
+            assertFalse(response.body().contains("inventorySha256"))
             assertTrue(response.body().contains("[redacted]"))
         } finally { server.stop(0) }
     }

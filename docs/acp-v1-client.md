@@ -824,14 +824,18 @@ Unknown variants remain
 Unknown variants remain
 explicitly `unknown`, and every method currently reports `loginSupported=false`: this inventory
 is not an authentication action or grant. The printable doctor descriptor includes the count,
-normalized inventory digest and logout advertisement/support flags. Default object string representations omit method IDs and previews.
+scoped inventory commitment and logout advertisement/support flags. Default object string representations omit method IDs and previews.
 
-The `sdk-auth-methods-v1` digest commits to the ordered, complete SDK-serialized method array,
-including retained extension metadata and variant-specific fields. It hashes the UTF-8 format name,
-a zero byte and the bounded canonical JSON array. JSON object key order is normalized; array order
-remains significant. The format is returned as `inventoryFormat` in ready web inspection and named in
-the doctor descriptor. This replaces the earlier unversioned core-field digest; consumers must not
-compare hashes across formats. Raw variant payloads are not retained in the operator projection.
+The `sdk-auth-methods-hmac-sha256-v2` commitment covers the ordered, complete SDK-serialized method
+array, including retained extension metadata and variant-specific fields. HMAC-SHA-256 authenticates
+the UTF-8 format name, a zero byte and the bounded canonical JSON array using a private random
+256-bit key generated once per JVM. The key is never persisted or exposed. This replaces the public
+unkeyed digest, which could reveal low-entropy secret values through offline guess checking.
+JSON object key order is normalized; array order remains significant. Ready web inspection returns
+`inventoryCommitment`, `inventoryFormat` and `inventoryScope`; the doctor descriptor carries the same
+information. Compare commitments only within the same format and scope. The random scope ID and
+key change after JVM restart, requiring fresh inspection rather than cross-process digest comparison.
+The public scope ID does not expose the key. Raw variant payloads are not retained in the operator projection.
 The commitment covers SDK-retained fields, not unknown fields discarded by SDK decoding, configured
 identity, credential validity or logout authority. It cannot authorize login by itself. Exact IDs are
 available only to explicit operator API consumers;
@@ -840,7 +844,7 @@ receipts and session/project archives. Login/logout, interactive surfaces and cr
 remain tracked by #265/#70, with fresh advertised-method validation required before any future dispatch.
 
 Use `llm_bin_patch doctor --auth-methods` to inspect advertised method previews explicitly.
-The normal doctor report retains inventory count/digest and logout advertisement/support flags. Inspection prints quoted, redacted
+The normal doctor report retains inventory count/scoped commitment and logout advertisement/support flags. Inspection prints quoted, redacted
 ID/name/description previews, variant category and the current unsupported-login status; previews
 may be truncated and are not exact selection tokens. This option cannot be combined with
 `--tools-only`; selecting the legacy harness fails without a legacy connectivity probe. No login,
