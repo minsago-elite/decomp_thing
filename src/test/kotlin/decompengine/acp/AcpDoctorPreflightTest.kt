@@ -51,6 +51,21 @@ class AcpDoctorPreflightTest {
     }
 
     @Test
+    fun `doctor reports the bounded invalid authentication inventory reason`() {
+        requireLiveSandboxHost()
+        val temporary = createTempDirectory("doctor-auth-reason-")
+        val config = writeProvisioning(temporary.resolve("acp.json"), mode = "doctor-auth-duplicate")
+        val doctor = Doctor(environment = mapOf("ACP_CONFIG_FILE" to config.toString()),
+            commandProbe = CommandProbe { _, _ -> CommandProbeResult(0, "available") },
+            connectivityProbe = ConnectivityProbe { _, _ -> error("inspection must not use direct HTTP") })
+        val report = doctor.inspect(DoctorOptions(temporary.resolve("output"), showAuthMethods = true))
+        val preflight = report.checks.single { it.name == "ACP preflight" }
+        assertFalse(preflight.passed)
+        assertTrue(preflight.detail.contains("kind=protocol"), preflight.detail)
+        assertTrue(preflight.detail.contains("reason=invalidAuthenticationInventory"), preflight.detail)
+    }
+
+    @Test
     fun `doctor exposes authentication previews only through explicit prompt-free inspection`() {
         requireLiveSandboxHost()
         val temporary = createTempDirectory("doctor-acp-live-")
