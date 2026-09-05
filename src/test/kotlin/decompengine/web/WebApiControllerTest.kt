@@ -157,6 +157,20 @@ class WebApiControllerTest {
             val first = assertEnvelope(request(server, "$path/events?limit=1&cursor=${snapshot.getValue("oldestCursor").jsonPrimitive.content}", headers = headers), 200, "events")
             val target = assertEnvelope(request(server, "$path/events?transport=poll&limit=1&after=${snapshot.getValue("oldestCursor").jsonPrimitive.content}", headers = headers), 200, "events")
             assertEquals(first, target)
+            val stream = client.send(HttpRequest.newBuilder(URI("http://127.0.0.1:${server.serverPort}$path/events?after=${snapshot.getValue("oldestCursor").jsonPrimitive.content}&limit=1"))
+                .timeout(java.time.Duration.ofSeconds(3)).header("Cookie", cookie).header("Accept", "text/event-stream").build(),
+                HttpResponse.BodyHandlers.ofInputStream())
+            assertEquals(200, stream.statusCode())
+            assertNoWebCors(stream)
+            assertTrue(stream.headers().firstValue("Content-Type").orElseThrow().startsWith("text/event-stream"))
+            val streamed = stream.body().bufferedReader().use { reader ->
+                java.util.concurrent.CompletableFuture.supplyAsync {
+                    var line = reader.readLine()
+                    while (line != null && !line.startsWith("data: ")) line = reader.readLine()
+                    Json.parseToJsonElement(checkNotNull(line).removePrefix("data: "))
+                }.get(3, java.util.concurrent.TimeUnit.SECONDS)
+            }
+            assertEquals(first.getValue("items").jsonArray.single(), streamed)
             assertError(request(server, "$path/events?after=a&cursor=a", headers = headers), 422, "VALIDATION_FAILED")
             assertFalse(first.toString().contains("PRIVATE_HTTP_"))
             val fields = first.getValue("items").jsonArray.single().jsonObject.getValue("payload").jsonObject

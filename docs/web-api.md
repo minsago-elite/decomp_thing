@@ -442,7 +442,8 @@ The activity client uses this target polling spelling. The existing `cursor` par
 remains an alias for `after`; specifying both, duplicates, unknown fields or a transport
 other than `poll` is rejected. Omitting transport retains JSON polling compatibility.
 `Last-Event-ID` is rejected on polling rather than silently losing its resume position.
-This is bounded JSON polling; SSE negotiation from the target design is not implemented. Snapshot `progress` metadata
+JSON polling remains the activity client transport. An explicit positive `Accept: text/event-stream`
+on the same endpoint now selects SSE when `transport=poll` is absent. Snapshot `progress` metadata
 makes queue/history omissions and retained-record counts explicit. Missing
 journals fail with `PROGRESS_UNAVAILABLE`; replay gaps require a fresh snapshot
 via `PROGRESS_GAP`. See [the implemented boundary and qualification limits](web-progress-adapter.md).
@@ -470,3 +471,32 @@ addition to exact Origin. Upload is multipart; explore/reconstruct are JSON POST
 forms supply these through their session adapter. There is no automatic mutation retry.
 This supersedes earlier descriptions of unauthenticated legacy routes; it does not change
 their existing unversioned job/event payloads or add durable workflow capabilities.
+
+## Current retained-journal SSE transport
+
+An explicit `Accept: text/event-stream` selects SSE on `GET jobs/J/runs/R/events`.
+Resume with one of `Last-Event-ID`, `after` or the retained `cursor` alias; mixed positions
+are rejected. The response uses the same observational event documents and signed cursors
+as polling: `id` is the cursor, `event` is `workflow.observation`, and `data` is the JSON
+event. No cookie/CSRF/access credential appears in the URL. Wildcard/default requests remain
+JSON, and explicit `transport=poll` continues to require an acceptable JSON response type.
+
+The server authorizes before admission, each checked journal read and every frame/heartbeat.
+Streams run outside the HTTP/workflow executors with at most 16 reservations globally and
+two per session. There is no per-client event queue; each replay page retains its existing
+200-record/sub-MiB ceiling. Connections have 30-second leases and heartbeat comments every
+15 seconds. A disconnected idle client is detected on a write or at the lease deadline;
+connection termination does not change workflow state. Admission failures use 429 and
+Retry-After; clients can keep using bounded polling.
+
+Before headers, the current adapter preserves polling's 410 `PROGRESS_GAP` response rather
+than the target design's `EVENT_GAP` spelling. After headers, loss of a non-null acknowledged
+cursor produces a `retention.gap` control event with no SSE id, null cursor/sequence and
+requested/oldest/latest positions plus snapshotHref, then closes. A missing journal, lost
+session or other post-header failure closes the transport; it is not a workflow verdict.
+If no cursor has ever existed, the connection closes and the subsequent initial request
+reports the gap rather than inventing an anchor.
+
+The production UI still uses polling; automatic SSE selection/reconnect/fallback in that
+client is not implemented. Full slow-socket qualification, transactional snapshot cutover,
+timed retention and target gap-error detail convergence remain outstanding under #174.

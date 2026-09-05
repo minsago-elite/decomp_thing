@@ -531,3 +531,27 @@ and bounded shutdown with late completion. The tests use controlled callbacks an
 not a slow browser socket. Actual SSE framing, heartbeats, authenticated transport integration,
 slow socket behavior and server lifecycle integration remain required before #174's stream
 resource criteria are complete.
+
+## SSE transport integration
+
+The v1 events route now negotiates explicit text/event-stream and hands the exchange to
+WebStreamResources. UploadServer owns and shuts down that resource pool. WebEventStream
+uses the same WebProgressPages instance as polling, so session/job/attempt cursor binding
+and replay positions are interchangeable. Snapshot, polling and SSE share readWebProgress's
+fixed journal path and attempt-version guard; this remains a guarded read, not a transaction
+with journal publication.
+
+Frames contain the existing workflow.observation projection. Resume headers are bounded
+and mutually exclusive with query positions; heartbeat comments carry no cursor. Retention
+loss after delivery emits the existing retention.gap schema without an SSE id and closes.
+Authentication is rechecked before source reads and writes. The activity UI remains on
+bounded polling; this endpoint does not enable any unfinished production workflow adapter.
+
+HTTP tests use an actual single-worker HttpServer to prove two open streams do not occupy
+its only HTTP worker, quota rejection leaves ordinary requests responsive, logout closes
+streams, Last-Event-ID replays after the acknowledged record, polling/SSE documents match,
+retention loss emits an unnumbered gap and reconnect receives a pre-header 410. Accelerated
+heartbeat/lease tests verify real connection closure and unchanged fixture bytes. A test on
+UploadServer itself verifies routing and its shared guarded artifact projection. These do
+not establish arbitrary slow-socket behavior, the full client reconnect algorithm, timed
+retention or transactional snapshot/event cutover.

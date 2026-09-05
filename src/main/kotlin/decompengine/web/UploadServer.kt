@@ -208,7 +208,8 @@ class UploadServer(
     private val access = LocalWebAccess(LocalWebAccessConfiguration(webOrigin(host, server.address.port), basePath,
         setOfNotNull(devFrontendOrigin)))
     private val legacySessions = WebSessionController(access)
-    private val api = spaAssets?.let { WebApiController(access, it, jobs) }
+    internal val streamResources = WebStreamResources()
+    private val api = spaAssets?.let { WebApiController(access, it, jobs, streamResources) }
     private val requestExecutor = ThreadPoolExecutor(
         16, 16, 0, TimeUnit.MILLISECONDS, ArrayBlockingQueue(64),
         { task -> Thread(task, "decomp-web-http").apply { isDaemon = true } },
@@ -232,6 +233,7 @@ class UploadServer(
             server.stop(0)
             requestExecutor.shutdownNow()
             requestDeadlines.shutdownNow()
+            streamResources.shutdown()
             access.close()
             jobs.close()
             throw failure
@@ -250,7 +252,9 @@ class UploadServer(
     fun stop(delaySeconds: Int = 0) {
         require(delaySeconds >= 0) { "shutdown delay must be nonnegative" }
         jobs.beginShutdown()
+        val streamsClosed = streamResources.shutdown()
         server.stop(delaySeconds)
+        if (!streamsClosed && !streamResources.shutdown()) System.err.println("Event stream shutdown did not complete cleanly.")
         requestExecutor.shutdownNow()
         requestDeadlines.shutdownNow()
         access.close()

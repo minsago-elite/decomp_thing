@@ -18,6 +18,7 @@ internal class WebApiController(
     private val access: LocalWebAccess,
     private val assets: EmbeddedWebAssets,
     private val jobs: WebJobService,
+    streamResources: WebStreamResources,
 ) {
     private val prefix = "${assets.basePath}api/v1/"
     private val applicationBuildId = applicationBuildId()
@@ -30,6 +31,9 @@ internal class WebApiController(
         }
     }
     private val progressPages = WebProgressPages()
+    private val eventStream = WebEventStream(access, streamResources, progressPages, read = { jobId, runId ->
+        readWebProgress(jobs, jobId, runId).second
+    })
     private val jobPages = WebJobPages(jobs::collectionRecords)
 
     fun route(exchange: HttpExchange): Boolean {
@@ -106,25 +110,22 @@ internal class WebApiController(
                 }
                 resource.matches(Regex("jobs/[^/]+/runs/[^/]+/(?:snapshot|events)")) -> {
                     val session = checkNotNull(access.authorize(exchange, WebEndpointPolicy.privateRead()))
-                    requireJsonAccept(exchange)
                     val parts = resource.split('/')
                     val snapshot = parts[4] == "snapshot"
+                    if (!snapshot) WebProgressQuery.parse(exchange.requestURI.rawQuery)
+                    val explicitPoll = exchange.requestURI.rawQuery?.split('&')?.any { it.substringBefore('=') == "transport" } == true
+                    if (!snapshot && !explicitPoll && acceptsWebMediaType(exchange, "text/event-stream", explicit = true)) {
+                        eventStream.open(exchange, session, parts[1], parts[3], "${prefix}jobs/${parts[1]}/runs/${parts[3]}/snapshot")
+                        return true
+                    }
+                    requireJsonAccept(exchange)
                     if (snapshot) requireNoWebApiQuery(exchange)
                     else {
                         if (exchange.requestHeaders.containsKey("Last-Event-ID")) throw WebAccessDenied(
                             400, "UNSUPPORTED_HEADER", "Polling resumes with after or cursor; Last-Event-ID is reserved for streams.",
                         )
-                        WebProgressQuery.parse(exchange.requestURI.rawQuery)
                     }
-                    val attempt = jobs.getAttempt(parts[1], parts[3])
-                    val bytes = try {
-                        jobs.readProgressJournal(parts[1], attempt.runId)
-                    } catch (_: Exception) {
-                        throw WebAccessDenied(503, "PROGRESS_UNAVAILABLE", "The retained progress journal is unavailable. Missing data does not establish an empty history.")
-                    }
-                    if (jobs.getAttempt(parts[1], parts[3]).version != attempt.version) {
-                        throw WebAccessDenied(409, "PROGRESS_CHANGED", "The attempt changed during this read. Read a fresh snapshot.")
-                    }
+                    val (attempt, bytes) = readWebProgress(jobs, parts[1], parts[3])
                     if (snapshot) {
                         val boundary = progressPages.boundary(session.sessionId, parts[1], parts[3], bytes)
                         sendWebApiResponse(exchange, 200, "snapshot", buildJsonObject {
