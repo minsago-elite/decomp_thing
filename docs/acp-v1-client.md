@@ -549,9 +549,11 @@ sandbox evidence is published only after a verified gated launch returns; a fail
 Initial and final workspace digests are computed with a fixed-size streaming buffer. Traversal, hashing, and diffing
 check the execution wall deadline, and initial snapshotting also observes cancellation before any process is launched.
 When prompt cancellation has already been accepted, the final snapshot deliberately finishes under the wall deadline
-so the cancelled result still accounts for changes. `AgentExecutionLimits` has no staged-workspace byte/file-count
-field, so aggregate snapshot size limits and stress coverage remain #71 work; streaming bounds per-file memory, not the
-number of tracked paths or total staged bytes.
+so the cancelled result still accounts for changes. Each snapshot now enforces fixed implementation caps of 8,192
+visited entries, 4,096 unique regular files, 8 MiB per file and 64 MiB total hashed bytes. Oversized snapshots fail with
+RESOURCE_EXHAUSTED and a bounded phase/limit diagnostic; no partial change set is returned. These observation limits
+do not establish aggregate staged-storage/inode quotas, descriptor-bound inventory completeness or concurrent-workflow
+resource accounting. Those broader #63/#71 requirements and stress qualification remain open.
 
 Event consumers are trusted in-process callbacks and must be non-blocking and return promptly. Prompt-update callbacks
 are isolated from lifecycle polling, but post-response message-completion and file-change callbacks run synchronously

@@ -1468,6 +1468,22 @@ class AcpAgentHarnessTest {
     }
 
     @Test
+    fun `workspace snapshot limit rejects oversized input before launching an agent`() {
+        val fixture = fixture()
+        fixture.source.writeText("x".repeat(8 * 1024 * 1024 + 1))
+        val receipt = harness("success").executeReceipt(fixture.request)
+        val failure = assertIs<AgentExecutionOutcome.Failed>(receipt.outcome).failure
+        assertEquals(AgentFailureKind.RESOURCE_EXHAUSTED, failure.kind)
+        assertEquals("initial-workspace-snapshot", failure.details["phase"])
+        assertEquals("file-bytes", failure.details["limit"])
+        val evidence = assertIs<AcpInvocationEvidenceSnapshot>(receipt.providerEvidence)
+        assertEquals(AcpExecutionLifecyclePhase.WORKSPACE_SNAPSHOT, evidence.phaseReached)
+        assertEquals(AcpExecutionCleanupDisposition.NOT_REQUIRED, evidence.cleanupDisposition)
+        assertNull(evidence.diagnostics)
+        assertNull(evidence.completeExecutionEvidence)
+    }
+
+    @Test
     fun `workspace snapshots stream large files and observe prelaunch cancellation and wall time`() {
         val largeFixture = fixture()
         largeFixture.source.writeText("x".repeat(2 * 1024 * 1024))

@@ -17,6 +17,16 @@ than recreate an independent validator that is not connected to acceptance.
 For an ordinary workspace invocation, `AcpAgentHarness` takes initial and final
 regular-file snapshots for the request's declared path rules. It hashes file
 contents incrementally and checks the request's cancellation and wall deadline.
+Each snapshot has fixed implementation caps of 8,192 visited entries, 4,096 unique
+regular files, 8 MiB per file and 64 MiB of total hashed content. Directory entries
+and repeated rule traversal consume the entry budget; overlapping rules retain and
+hash a regular file once. Declared sizes are checked before opening content, and
+streamed bytes are charged before hashing so file growth cannot evade the byte
+caps. A read may consume at most one fixed hash buffer beyond the remaining budget
+before rejecting it. Initial and final snapshots have separate budgets. Either
+limit failure returns RESOURCE_EXHAUSTED with the snapshot phase and limit category,
+never a partial change list. Final-component symlinks are not followed when opening
+content; this is not a complete descriptor-bound inventory or path-race guarantee.
 The final snapshot is collected after process and sandbox cleanup. Its private
 `WorkspaceSnapshot.diff` reports created, modified, or deleted files in canonical
 root/path order and checks the corresponding `CREATE_FILE`, `WRITE_FILE`, or
@@ -89,9 +99,10 @@ consistent treatment of immutable evidence and source roles across entry points.
 
 Ordinary workspace snapshotting currently visits regular files selected by the
 path rules. It is not a complete independent inventory of every filesystem entry
-or an authenticated descriptor snapshot of all workspace state. Its streaming
-hash and deadline checks do not supply explicit aggregate file-count, byte, or
-inode limits for that inventory. The separate filesystem/terminal containment
+or an authenticated descriptor snapshot of all workspace state. The snapshot's
+entry/file/byte caps bound this observation, not aggregate writable storage, inode
+allocation, all concurrent workflows or entries outside the declared rules.
+The separate filesystem/terminal containment
 controls must not be presented as proof that these snapshot requirements are
 complete. Any consolidation must retain the stricter captured-repair behavior
 and preserve exact path, operation, revision, and evidence authority.
