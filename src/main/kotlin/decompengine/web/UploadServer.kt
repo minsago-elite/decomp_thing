@@ -196,6 +196,7 @@ class UploadServer(
     private val lifecycleLock = Any()
     private var stopping = false
     private var started = false
+    private var activeRequests = 0
     private var ownership: WebJobStoreOwnership? = null
     val serverPort: Int get() = server.address.port
 
@@ -247,20 +248,48 @@ class UploadServer(
             if (exception is InterruptedException) Thread.currentThread().interrupt()
             if (failure == null) failure = exception else failure.addSuppressed(exception)
         }
-        if (ownedExecutor?.isTerminated != false && runningJobs.isEmpty()) {
-            try {
-                synchronized(lifecycleLock) {
-                    ownership?.close()
-                    ownership = null
-                }
-            } catch (exception: Exception) {
-                if (failure == null) failure = exception else failure.addSuppressed(exception)
+        try {
+            releaseOwnershipIfIdle()
+            synchronized(lifecycleLock) {
+                check(activeRequests == 0) { "HTTP requests remain active after server stop" }
             }
+        } catch (exception: Exception) {
+            if (failure == null) failure = exception else failure.addSuppressed(exception)
         }
         failure?.let { throw it }
     }
 
+    private fun releaseOwnershipIfIdle() = synchronized(lifecycleLock) {
+        if (stopping && activeRequests == 0 && ownedExecutor?.isTerminated != false && runningJobs.isEmpty()) {
+            ownership?.close()
+            ownership = null
+        }
+    }
+
+    /** Admission covers the whole handler, including upload publication and error handling. */
+    internal fun withActiveRequest(action: () -> Unit): Boolean {
+        synchronized(lifecycleLock) {
+            if (stopping) return false
+            activeRequests++
+        }
+        try {
+            action()
+            return true
+        } finally {
+            synchronized(lifecycleLock) { activeRequests-- }
+            try {
+                releaseOwnershipIfIdle()
+            } catch (_: Exception) {
+                System.err.println("Web request cleanup did not release store ownership; recovery is required")
+            }
+        }
+    }
+
     private fun route(exchange: HttpExchange) {
+        if (!withActiveRequest { routeAdmitted(exchange) }) exchange.close()
+    }
+
+    private fun routeAdmitted(exchange: HttpExchange) {
         val segments = exchange.requestURI.path.split('/').filter(String::isNotBlank)
         try {
             when {

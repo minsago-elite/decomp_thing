@@ -292,13 +292,20 @@ Before startup recovery, a web server acquires a nonblocking exclusive `.web-own
 A second cooperating server fails before changing job status. Same-JVM owners are tracked by canonical store
 path to avoid opening another channel to an owned lock file (see the [JDK FileLock platform notes](https://docs.oracle.com/en/java/javase/21/docs/api/java.base/java/nio/channels/FileLock.html)).
 The lock file is never deleted. Stop releases ownership only after owned workers have terminated and no
-scheduled operations remain; an incomplete in-process shutdown retains ownership until a later successful stop
+scheduled operations or admitted HTTP handlers remain. Request admission closes when shutdown begins; the
+lifetime includes upload publication and error handling. A handler that outlives stop causes an explicit
+incomplete-stop error and retains ownership. Its `finally` path releases ownership when all work is idle,
+including after an exception. Other incomplete in-process shutdowns retain ownership until a later successful stop
 or JVM exit. The in-process timeout regression holds a worker beyond the grace period, verifies a new server
 is still refused, then releases the worker and retries stop before verifying a fresh server can start.
 Executor cancellation is requested once; later stop attempts wait for termination without interrupting
 workers again while they persist final status.
 This is cooperative local-filesystem web ownership, not fencing of arbitrary JobStore callers,
 older servers, external subprocesses, lock-file replacement, or network filesystems.
+`WebRequestLifetimeTest` holds the production request-admission wrapper across a final store write and an
+exception, verifies competing ownership is refused and late requests are not admitted, then verifies handoff.
+This is deterministic handler-lifetime evidence, supplemented by the existing HTTP route tests; it does not
+qualify stalled kernel I/O or abrupt host failure.
 `WebShutdownTest` covers propagated interruption, a worker returning after swallowing interruption, and
 a worker that remains blocked past the grace period. The last case verifies the fixed cleanup diagnostic,
 then starts a new server and checks that unfinished jobs become interrupted failures without rerunning.
