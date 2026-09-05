@@ -201,9 +201,11 @@ class ArchivalProjectScaleIntegrationTest {
         }
         assertTrue(project.resolve("reports/confidence.json").readText().contains("opaque_context"))
         assertTrue(sourceManifest.contains("opaque_context"))
-        val audit = ArchivalProjectAuditor.audit(project)
+        val audit = ArchivalProjectAuditor.audit(project, requiredCorpusSha256 = setOf(requiredCorpus))
         assertTrue(audit.provenanceComplete)
         assertEquals(true, audit.behaviorMatched)
+        assertEquals(listOf(requiredCorpus), audit.requiredCorpusSha256)
+        assertEquals(listOf(requiredCorpus), audit.observedPortableCorpusSha256)
         assertTrue(audit.sandboxReported)
         assertFalse(audit.universalEquivalenceClaim)
         assertEquals(listOf("opaque_context"), audit.unresolvedEntityIds)

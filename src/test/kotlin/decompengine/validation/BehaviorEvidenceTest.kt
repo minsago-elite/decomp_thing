@@ -29,6 +29,48 @@ import kotlinx.serialization.json.jsonPrimitive
 
 class BehaviorEvidenceTest {
     @Test
+    fun `audit requires all selected corpora and rejects unrelated passing reports`() {
+        val fixture = fixture()
+        val record = BehaviorEvidence.decode(fixture.evaluate().reportPath.readBytes())
+        val required = record.string("corpusSha256")
+        val matched = ArchivalProjectAuditor.audit(fixture.project, requiredCorpusSha256 = setOf(required))
+        assertEquals(true, matched.behaviorMatched)
+        assertEquals(listOf(required), matched.requiredCorpusSha256)
+        assertEquals(listOf(required), matched.observedPortableCorpusSha256)
+        val missing = "0".repeat(64)
+        val incomplete = ArchivalProjectAuditor.audit(fixture.project, requiredCorpusSha256 = setOf(required, missing))
+        assertEquals(null, incomplete.behaviorMatched)
+        assertTrue("missing-corpus:$missing" in incomplete.behaviorEvidenceProblems)
+        val foreign = ArchivalProjectAuditor.audit(fixture.project, requiredCorpusSha256 = setOf(missing))
+        assertEquals(null, foreign.behaviorMatched)
+        assertTrue("reports/probe.behavior.json" in foreign.behaviorEvidenceProblems)
+        assertTrue(foreign.projectBehaviorReportIds.isEmpty())
+        BehaviorComparator(fixture.sandbox).evaluate("subset", fixture.original, fixture.rebuilt,
+            listOf(ProcessInput("empty")), fixture.project.resolve("reports"), BehaviorProjectContext(fixture.project))
+        val mixed = ArchivalProjectAuditor.audit(fixture.project, requiredCorpusSha256 = setOf(required))
+        assertEquals(null, mixed.behaviorMatched)
+        assertEquals(listOf("reports/probe.behavior.json"), mixed.projectBehaviorReportIds)
+        assertTrue("reports/subset.behavior.json" in mixed.behaviorEvidenceProblems)
+        val prior = fixture.project.resolve("reports/archival_audit.json").readBytes()
+        assertFailsWith<IllegalArgumentException> { ArchivalProjectAuditor.audit(fixture.project, requiredCorpusSha256 = setOf("invalid")) }
+        assertTrue(prior.contentEquals(fixture.project.resolve("reports/archival_audit.json").readBytes()))
+        Files.delete(fixture.project.resolve("reports/subset.behavior.json"))
+        // With no declared files, v2 and v3 corpus digests happen to agree, but only v3
+        // establishes the portable-corpus contract required by this audit policy.
+        val legacy = JsonObject(record + mapOf("schemaVersion" to JsonPrimitive(2),
+            "provider" to JsonPrimitive("local-revision-bound-behavior-v2")))
+        val rehashed = JsonObject(legacy + ("reportSha256" to JsonPrimitive(
+            OracleArtifacts.sha256(OracleJson.canonicalBytes(JsonObject(legacy - "reportSha256"))),
+        )))
+        BehaviorEvidence.decode(rehashed.toString().toByteArray())
+        fixture.project.resolve("reports/probe.behavior.json").writeText(rehashed.toString())
+        val historical = ArchivalProjectAuditor.audit(fixture.project, requiredCorpusSha256 = setOf(required))
+        assertEquals(null, historical.behaviorMatched)
+        assertTrue("missing-corpus:$required" in historical.behaviorEvidenceProblems)
+        assertTrue(historical.observedPortableCorpusSha256.isEmpty())
+    }
+
+    @Test
     fun `required corpus rejects omissions and changes before executing either binary`() {
         val fixture = fixture()
         val input = fixture.original.parent.resolve("admitted-input").also { it.writeText("data") }
