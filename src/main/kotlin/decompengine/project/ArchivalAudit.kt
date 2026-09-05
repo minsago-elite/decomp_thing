@@ -30,6 +30,8 @@ data class ArchivalAudit(
     val behaviorEvidenceProblems: Map<String, String> = emptyMap(),
     val projectBehaviorReportIds: List<String> = emptyList(),
     val moduleCompilationEvidenceProblems: Map<String, String> = emptyMap(),
+    val requiredCorpusSha256: List<String> = emptyList(),
+    val observedPortableCorpusSha256: List<String> = emptyList(),
 ) {
     val provenanceComplete: Boolean get() = missingModelProvenance.isEmpty() && missingSourceProvenance.isEmpty()
     val universalEquivalenceClaim: Boolean = false
@@ -42,6 +44,8 @@ data class ArchivalAudit(
           "missingSourceProvenance": [${missingSourceProvenance.sorted().joinToString(",") { JsonPrimitive(it).toString() }}],
           "unresolvedEntityIds": [${unresolvedEntityIds.sorted().joinToString(",") { JsonPrimitive(it).toString() }}],
           "behaviorReportCount": $behaviorReportCount,
+          "requiredCorpusSha256": [${requiredCorpusSha256.joinToString(",") { JsonPrimitive(it).toString() }}],
+          "observedPortableCorpusSha256": [${observedPortableCorpusSha256.joinToString(",") { JsonPrimitive(it).toString() }}],
           "behaviorMatched": ${behaviorMatched ?: "null"},
           "sandboxReported": $sandboxReported,
           "networkIsolationObserved": [${networkIsolation.sorted().joinToString(",")}],
@@ -63,7 +67,11 @@ object ArchivalProjectAuditor {
     fun audit(
         projectDir: Path,
         profile: ReconstructionProfile = GeneratedCMakeReconstructionProfile.descriptor,
+        requiredCorpusSha256: Set<String> = emptySet(),
     ): ArchivalAudit {
+        require(requiredCorpusSha256.size <= 1024) { "audit required corpus count exceeds its bound" }
+        val requiredCorpora = requiredCorpusSha256.toSet()
+        require(requiredCorpora.all { it.matches(Regex("[0-9a-f]{64}")) }) { "audit required corpus identities must be lowercase SHA-256" }
         val maximumFileBytes = minOf(profile.budgets.archiveMaximumFileBytes, Int.MAX_VALUE.toLong() - 1L)
         val manifestSnapshot = readStableRegularFile(projectDir, "source_tree_manifest.json", maximumFileBytes)
         val manifest = SourceTreeManifestReader.parse(manifestSnapshot.bytes.decodeToString(throwOnInvalidSequence = true), profile)
@@ -211,6 +219,7 @@ object ArchivalProjectAuditor {
         val verifiedBehavior = linkedMapOf<String, Boolean>()
         val behaviorHashes = linkedMapOf<String, String>()
         val reportIds = hashSetOf<String>()
+        val observedCorpora = sortedSetOf<String>()
         var currentProjectRecord: JsonObject? = null
         var behaviorBytes = 0L
         for (path in behaviorPaths) {
@@ -233,14 +242,23 @@ object ArchivalProjectAuditor {
                 }
                 val identifier = record.string("id")
                 require(reportIds.add(identifier)) { "behavior report ID is duplicated" }
+                val portable = record.getValue("schemaVersion").jsonPrimitive.intOrNull == 3
+                val corpus = record.string("corpusSha256")
+                if (requiredCorpora.isNotEmpty()) {
+                    require(portable && corpus in requiredCorpora) { "behavior report does not match a required portable corpus" }
+                }
                 verifiedBehavior[relative] = record.boolean("matches")
                 behaviorHashes[relative] = snapshot.sha256
+                if (portable) observedCorpora += corpus
             } catch (failure: Exception) {
                 if (failure is InterruptedException) throw failure
                 problems[relative] = failure.message.orEmpty().take(512).ifEmpty { failure.javaClass.simpleName }
             }
         }
         if (behaviorPaths.isEmpty()) problems["no-behavior-evidence"] = "No revision-bound behavior record is available"
+        for (missing in (requiredCorpora - observedCorpora).sorted()) {
+            problems["missing-corpus:$missing"] = "No current revision-bound report covers the required corpus"
+        }
         val unresolvedBehavior = problems.keys + verifiedBehavior.filterValues { !it }.keys
         val audit = ArchivalAudit(
             entityCount = entities.size,
@@ -265,6 +283,8 @@ object ArchivalProjectAuditor {
             behaviorEvidenceProblems = problems,
             projectBehaviorReportIds = verifiedBehavior.keys.sorted(),
             moduleCompilationEvidenceProblems = compilationProblems,
+            requiredCorpusSha256 = requiredCorpora.sorted(),
+            observedPortableCorpusSha256 = observedCorpora.toList(),
         )
         require(readStableRegularFile(projectDir, "source_tree_manifest.json", maximumFileBytes).sha256 == manifestSnapshot.sha256) {
             "audit manifest changed during verification"

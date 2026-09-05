@@ -48,6 +48,17 @@ it keeps observation-only comparison available; a report's self-computed digest 
 not establish that an external corpus policy was approved. Audit consumers must
 independently apply their expected-corpus policy.
 
+`ArchivalProjectAuditor.audit(..., requiredCorpusSha256 = setOf(expectedDigest))`
+applies that policy independently to current revision-bound reports. Every selected
+digest must have a schema-3 report; unrelated corpora and historical schemas cannot
+satisfy the selection. Missing corpora appear as `missing-corpus:<digest>` problems,
+and unrelated reports remain visible as problems rather than disappearing. The
+audit records sorted `requiredCorpusSha256` and `observedPortableCorpusSha256`
+lists. Missing or unrelated evidence prevents an all-pass summary. An empty selection
+preserves observation-only auditing and does not imply a fixed corpus was required.
+Archive packaging currently invokes observation-only auditing; callers must reapply
+their own corpus policy when assessing the project or extracted archive.
+
 Project capture checks the schema-3 source manifest against its selected profile
 and every declared file. The original executable digest must match the project
 input. The successful schema-2 C/Make build contract must identify the current
