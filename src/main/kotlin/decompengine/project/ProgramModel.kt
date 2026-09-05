@@ -60,6 +60,10 @@ data class RecoveredProgramModel(
         else "\"extractionStatus\": \"$value\",\n              \"recoveryAssessment\": \"unassessed\""
     }
 
+    /** Schema 2 extraction labels never establish a scored recovery assessment. */
+    fun isRecoveryUnresolved(status: RecoveryStatus): Boolean =
+        schemaVersion == 2 || status != RecoveryStatus.RECOVERED
+
     fun toJson(): String = buildString {
         append("{\n  \"schemaVersion\": ").append(schemaVersion)
         append(",\n  \"inputSha256\": \"").append(inputSha256.json()).append("\",")

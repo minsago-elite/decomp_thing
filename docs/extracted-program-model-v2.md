@@ -26,7 +26,15 @@ This checkpoint adds reader and wire-contract support. The exporter continues to
 emit schema 1. Its retained fragments, resume configuration, semantic commitments
 and production replay must migrate together before switching the producer. Typed
 entity `status` properties remain historical extraction labels for compatibility.
-Downstream unresolved accounting still needs the separate validated assessment
-dimension; accepting schema 2 does not complete that migration. Historical schema-1
-records likewise contain no independently scored assessment. These remaining steps
-are tracked in #363 and #42.
+For schema 2, the source manifest, project/module confidence report, human unresolved
+report and archival audit include every extracted entity in the unresolved recovery
+population. Successful compilation can accept an implementation without changing
+that population. Human reports retain the extraction label alongside `unassessed`.
+The authored regression covers functions, globals and types, including packaging,
+extraction and consumer re-audit.
+
+Historical schema-1 reports retain their extraction-based unresolved accounting for
+compatibility; their labels still contain no independently scored assessment. A
+validated assessment join, historical report migration and producer/replay migration
+remain tracked in #363 and #42. Schema-2 unresolved accounting alone does not supply
+the authenticated assessment evidence needed to resolve an entity.
