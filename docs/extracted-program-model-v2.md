@@ -48,3 +48,10 @@ canonical streaming parity and deterministic resume. Planning resume also checks
 that historical exporter state is refused and prior bytes are preserved. This is
 local exporter qualification; existing authenticated production profiles and their
 GCC/LLVM artifacts must be regenerated and qualified for the new exporter identity.
+
+The generated-C dependency index accepts both model versions with their exact entity
+fields. Schema 2 requires unassessed recovery and retains the same ownership and
+dependency entries as schema 1 for identical extracted facts. Indexing does not
+grant assessment or repair acceptance. Docker archival validation expects current
+schema-2 exports and explicit unassessed fields; that script requires its separate
+container qualification environment.
