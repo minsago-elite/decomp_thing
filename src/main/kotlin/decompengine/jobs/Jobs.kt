@@ -65,8 +65,10 @@ class JobStore internal constructor(
 
     @Synchronized
     fun createFromUpload(filename: String, content: ByteArray): Job {
+        require(content.size <= MAX_INPUT_BYTES) { "upload exceeds the 32 MiB input limit" }
+        val input = content.copyOf()
         val metadata = try {
-            ElfMetadataReader.read(content)
+            ElfMetadataReader.read(input)
         } catch (exception: InvalidElfException) {
             throw InvalidUploadException(exception.message ?: "uploaded file is not an ELF binary", exception)
         }
@@ -80,7 +82,7 @@ class JobStore internal constructor(
             filename = Path.of(filename).name.ifBlank { "input.elf" },
             status = "uploaded",
             createdAt = Instant.now().toString(),
-            sizeBytes = content.size,
+            sizeBytes = input.size,
             binaryPath = binaryPath,
             metadata = metadata,
         )
@@ -88,7 +90,7 @@ class JobStore internal constructor(
         var publicationAttempted = false
         try {
             val stagedInput = staging.resolve("input.elf")
-            uploadPublisher.writeAndForceInput(stagedInput, content)
+            uploadPublisher.writeAndForceInput(stagedInput, input)
             persist(job, staging)
             publicationAttempted = true
             uploadPublisher.publish(staging, jobDir)
@@ -190,7 +192,7 @@ class JobStore internal constructor(
     internal fun readInput(jobId: String): StableRegularFile {
         jobDirectory(jobId)
         return try {
-            readStableRegularFile(root, "$jobId/input.elf", 32L * 1024 * 1024)
+            readStableRegularFile(root, "$jobId/input.elf", MAX_INPUT_BYTES.toLong())
         } catch (_: IOException) {
             throw JobStoreException("job input is unavailable or its path changed")
         }
@@ -280,6 +282,7 @@ class JobStore internal constructor(
     }
 
     private companion object {
+        const val MAX_INPUT_BYTES = 32 * 1024 * 1024
         const val MAX_METADATA_BYTES = 256 * 1024
         val METADATA_LIMITS = StrictJsonLimits(
             maximumCanonicalBytes = MAX_METADATA_BYTES,

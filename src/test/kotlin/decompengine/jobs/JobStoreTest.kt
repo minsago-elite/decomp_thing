@@ -14,6 +14,34 @@ import kotlin.test.assertTrue
 
 class JobStoreTest {
     @Test
+    fun `caller mutation after parsing cannot change the published input`() {
+        val root = createTempDirectory("jobs-owned-input-")
+        val callerBytes = elfFixture()
+        val expected = callerBytes.copyOf()
+        val publisher = object : UploadPublisher by AtomicUploadPublisher {
+            override fun writeAndForceInput(input: java.nio.file.Path, bytes: ByteArray) {
+                callerBytes.fill(0)
+                AtomicUploadPublisher.writeAndForceInput(input, bytes)
+            }
+        }
+        val job = JobStore(root, publisher).createFromUpload("snapshot.elf", callerBytes)
+        assertTrue(callerBytes.all { it == 0.toByte() })
+        kotlin.test.assertContentEquals(expected, job.binaryPath.readBytes())
+        assertEquals(decompengine.binary.ElfMetadataReader.read(expected), JobStore(root).get(job.id).metadata)
+        assertEquals(expected.size, job.sizeBytes)
+    }
+
+    @Test
+    fun `oversized input is rejected before storage is created`() {
+        val root = createTempDirectory("jobs-input-limit-").resolve("uncreated-store")
+        val failure = assertFailsWith<IllegalArgumentException> {
+            JobStore(root).createFromUpload("too-large.elf", ByteArray(32 * 1024 * 1024 + 1))
+        }
+        assertEquals("upload exceeds the 32 MiB input limit", failure.message)
+        assertTrue(!root.exists())
+    }
+
+    @Test
     fun `publication failures preserve a reviewable job identity without claiming rollback`() {
         for (phase in listOf("before-rename", "after-rename", "directory-force")) {
             val root = createTempDirectory("jobs-uncertain-$phase-")
