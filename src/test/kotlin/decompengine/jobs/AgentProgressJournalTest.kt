@@ -9,6 +9,31 @@ import kotlin.test.*
 
 class AgentProgressJournalTest {
     @Test
+    fun `persisted history rejects unexplained loss and inconsistent omission counters`() {
+        val root = createTempDirectory("progress-loss-")
+        AgentProgressJournal(root, "repair").use { it.phase(AgentWorkflowPhase.AGENT_RUNNING) }
+        val original = AgentProgressJournal.read(root)!!
+        val corruptions = listOf(
+            mapOf("events" to JsonArray(original.getValue("events").jsonArray.drop(1))),
+            mapOf("queueDropped" to JsonPrimitive(1)),
+            mapOf("queueDropped" to JsonPrimitive(Long.MAX_VALUE), "historyDropped" to JsonPrimitive(Long.MAX_VALUE)),
+            mapOf("truncated" to JsonPrimitive(true)),
+            mapOf("events" to JsonArray(emptyList()), "queueDropped" to JsonPrimitive(2), "truncated" to JsonPrimitive(false)),
+        )
+        corruptions.forEach { changes ->
+            val malformed = JsonObject(original + changes).toString()
+            Files.writeString(root.resolve(AgentProgressJournal.FILE_NAME), malformed)
+            assertFailsWith<IllegalArgumentException> { AgentProgressJournal.read(root) }
+            assertFailsWith<IllegalArgumentException> { AgentProgressJournal(root, "repair") }
+            assertEquals(malformed, Files.readString(root.resolve(AgentProgressJournal.FILE_NAME)))
+        }
+        // Failed restart validation releases ownership and never overwrites the rejected history.
+        Files.writeString(root.resolve(AgentProgressJournal.FILE_NAME), original.toString())
+        AgentProgressJournal(root, "repair").use { it.phase(AgentWorkflowPhase.ROLLED_BACK) }
+        assertEquals(4, AgentProgressJournal.read(root)!!.getValue("nextSequence").jsonPrimitive.int)
+    }
+
+    @Test
     fun `completion preserves available usage including zero cache and exact elapsed duration`() {
         val root = createTempDirectory("progress-usage-")
         val request = request(root)
