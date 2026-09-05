@@ -76,18 +76,20 @@ fun renderDashboard(jobs: List<Job>, recovery: JobRecoveryInventory): String = p
       cancelAuthButton.addEventListener('click', async () => {
         cancelAuthButton.disabled = true;
         const generation = authInspectionGeneration;
-        const showCancellationStatus = text => {
-          if (generation === authInspectionGeneration && authButton.disabled)
+        const showCancellationStatus = (text, retry = false) => {
+          if (generation === authInspectionGeneration && authButton.disabled) {
             document.querySelector('#auth-inspection-status').textContent = text;
+            if (retry) cancelAuthButton.disabled = false;
+          }
         };
         try {
           const response = await fetch('/api/operator/auth-methods/cancel', {
             method: 'POST', headers: {'X-Decomp-Operator-Action': 'cancel-auth-inspection'}
           });
           showCancellationStatus(response.ok ? 'Cancellation requested; waiting for cleanup.'
-            : 'Cancellation request failed; inspection status is still being checked.');
+            : 'Cancellation request failed; inspection status is still being checked.', !response.ok);
         } catch (_) {
-          showCancellationStatus('Cancellation request failed; inspection status is still being checked.');
+          showCancellationStatus('Cancellation request failed; inspection status is still being checked.', true);
         }
       });
       authButton.addEventListener('click', async () => {
@@ -101,14 +103,26 @@ fun renderDashboard(jobs: List<Job>, recovery: JobRecoveryInventory): String = p
           const response = await fetch('/api/operator/auth-methods', {
             method: 'POST', cache: 'no-store', headers: {'X-Decomp-Operator-Action': 'inspect-auth'}
           });
-          if (!response.ok) throw new Error('unavailable');
-          let inventory = await response.json();
+          if (response.status !== 202 && response.status !== 409) throw new Error('unavailable');
+          // A 409 attaches to the existing inspection; an accepted start needs no body to poll.
+          let inventory = {status: 'inspecting'};
           cancelAuthButton.disabled = false;
           while (inventory.status === 'inspecting') {
             await new Promise(resolve => setTimeout(resolve, 300));
-            const update = await fetch('/api/operator/auth-methods', {cache: 'no-store'});
-            if (!update.ok) throw new Error('unavailable');
-            inventory = await update.json();
+            try {
+              const update = await fetch('/api/operator/auth-methods', {cache: 'no-store'});
+              if (!update.ok) throw new Error('unavailable');
+              const observed = await update.json();
+              if (!observed || !['idle', 'inspecting', 'ready', 'failed', 'cancelled'].includes(observed.status))
+                throw new Error('unavailable');
+              inventory = observed;
+              if (inventory.status === 'inspecting' && status.textContent ===
+                  'Inspection status is unavailable; retrying. Cancellation remains available.')
+                status.textContent = 'Inspecting advertised methods…';
+            } catch (_) {
+              status.textContent = 'Inspection status is unavailable; retrying. Cancellation remains available.';
+              cancelAuthButton.disabled = false;
+            }
           }
           if (inventory.status === 'cancelled') {
             status.textContent = 'Inspection cancelled; no login attempted.';
