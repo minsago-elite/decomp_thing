@@ -150,6 +150,24 @@ internal class GccBundledOperationJournal private constructor(
         snapshots.getValue(PREFIX_FILE).bytes
     }
 
+    @Synchronized
+    fun recordInterruptedAnalysisState(snapshot: GccBundledAnalysisStateSnapshot): ByteArray = boundOperation("recording stopped GCC analysis state") {
+        check(stage == JournalStage.PREFIX_ASSESSED) { "GCC stopped analysis state requires a validated interrupted prefix" }
+        val manifest = snapshot.canonicalBytes
+        publish(STATE_MANIFEST_FILE, manifest)
+        stage = JournalStage.STATE_MANIFEST_STAGED
+        requireCurrent("after GCC state manifest publication")
+        val summary = OracleJson.canonicalBytes(JsonObject(mapOf(
+            "manifestSha256" to JsonPrimitive(snapshot.sha256),
+            "manifestBytes" to JsonPrimitive(manifest.size),
+            "entryCount" to JsonPrimitive(snapshot.entryCount),
+            "totalBytes" to JsonPrimitive(snapshot.totalBytes),
+        )))
+        publishLinkedRecord(STATE_CAPTURED_FILE, "gcc-bundled-interrupted-state-captured-v1", PREFIX_FILE, "analysisState", summary)
+        stage = JournalStage.STATE_CAPTURED
+        snapshots.getValue(STATE_CAPTURED_FILE).bytes
+    }
+
     private fun publishLinkedRecord(name: String, provider: String, previous: String, payloadName: String?, payloadBytes: ByteArray?) {
         val fields = linkedMapOf<String, JsonElement>(
             "provider" to JsonPrimitive(provider),
@@ -173,12 +191,11 @@ internal class GccBundledOperationJournal private constructor(
 
     private fun publish(name: String, bytes: ByteArray) {
         requireDirectoryBindings()
-        snapshots[name] = DescriptorBoundAtomicStateFile.publishNoReplace(
-            directory,
-            name,
-            bytes,
-            maximumFileBytes(name),
-        )
+        snapshots[name] = if (name == STATE_MANIFEST_FILE) {
+            DescriptorBoundAtomicStateFile.publishManifestNoReplace(directory, name, bytes, maximumFileBytes(name))
+        } else {
+            DescriptorBoundAtomicStateFile.publishNoReplace(directory, name, bytes, maximumFileBytes(name))
+        }
         requireDirectoryBindings()
     }
 
@@ -196,11 +213,15 @@ internal class GccBundledOperationJournal private constructor(
             JournalStage.INTERRUPT_AUTHORIZED -> setOf(INTENT_FILE, LEASE_FILE, DEFINITION_FILE, PREPARED_FILE, ATTACHMENT_FILE, START_FILE, INTERRUPT_FILE)
             JournalStage.INTERRUPTED -> setOf(INTENT_FILE, LEASE_FILE, DEFINITION_FILE, PREPARED_FILE, ATTACHMENT_FILE, START_FILE, INTERRUPT_FILE, INTERRUPTED_FILE)
             JournalStage.PREFIX_ASSESSED -> setOf(INTENT_FILE, LEASE_FILE, DEFINITION_FILE, PREPARED_FILE, ATTACHMENT_FILE, START_FILE, INTERRUPT_FILE, INTERRUPTED_FILE, PREFIX_FILE)
+            JournalStage.STATE_MANIFEST_STAGED -> setOf(INTENT_FILE, LEASE_FILE, DEFINITION_FILE, PREPARED_FILE, ATTACHMENT_FILE, START_FILE, INTERRUPT_FILE, INTERRUPTED_FILE, PREFIX_FILE, STATE_MANIFEST_FILE)
+            JournalStage.STATE_CAPTURED -> setOf(INTENT_FILE, LEASE_FILE, DEFINITION_FILE, PREPARED_FILE, ATTACHMENT_FILE, START_FILE, INTERRUPT_FILE, INTERRUPTED_FILE, PREFIX_FILE, STATE_MANIFEST_FILE, STATE_CAPTURED_FILE)
         }
         if (snapshots.keys != expectedNames) journalFail("GCC bundled journal has inconsistent retained state")
         requireExactNames(expectedNames, label)
         snapshots.forEach { (name, expected) ->
-            val actual = DescriptorBoundAtomicStateFile.readOrNull(directory, name, maximumFileBytes(name))
+            val actual = (if (name == STATE_MANIFEST_FILE) {
+                DescriptorBoundAtomicStateFile.readManifestOrNull(directory, name, maximumFileBytes(name))
+            } else DescriptorBoundAtomicStateFile.readOrNull(directory, name, maximumFileBytes(name)))
                 ?: journalFail("GCC bundled journal file disappeared $label: $name")
             if (actual.identity != expected.identity || !MessageDigest.isEqual(actual.bytes, expected.bytes)) {
                 journalFail("GCC bundled journal file changed $label: $name")
@@ -370,7 +391,11 @@ private fun boundedCopy(bytes: ByteArray, maximumBytes: Int, label: String): Byt
 }
 
 private fun maximumFileBytes(name: String): Int =
-    if (name == DEFINITION_FILE) MAXIMUM_DEFINITION_BYTES else MAXIMUM_INTENT_BYTES
+    when (name) {
+        DEFINITION_FILE -> MAXIMUM_DEFINITION_BYTES
+        STATE_MANIFEST_FILE -> GccBundledAnalysisStateCapture.JSON_LIMITS.maximumCanonicalBytes
+        else -> MAXIMUM_INTENT_BYTES
+    }
 
 private fun closeJournalDescriptors(
     directory: LinuxDescriptor?,
@@ -400,7 +425,7 @@ private fun closeJournalDescriptors(
 
 private fun journalFail(message: String): Nothing = throw IllegalArgumentException(message)
 
-private enum class JournalStage { INTENT, LEASED, DEFINITION_STAGED, PREPARED, ATTACHED, START_AUTHORIZED, EXECUTED, EXPORT_ASSESSED, INTERRUPT_AUTHORIZED, INTERRUPTED, PREFIX_ASSESSED }
+private enum class JournalStage { INTENT, LEASED, DEFINITION_STAGED, PREPARED, ATTACHED, START_AUTHORIZED, EXECUTED, EXPORT_ASSESSED, INTERRUPT_AUTHORIZED, INTERRUPTED, PREFIX_ASSESSED, STATE_MANIFEST_STAGED, STATE_CAPTURED }
 private const val INTENT_FILE = "intent.json"
 private const val LEASE_FILE = "lease-evidence.json"
 private const val DEFINITION_FILE = "definition.json"
@@ -412,9 +437,11 @@ private const val EXPORT_FILE = "export-assessment.json"
 private const val INTERRUPT_FILE = "interrupt-authorized.json"
 private const val INTERRUPTED_FILE = "interrupted-execution.json"
 private const val PREFIX_FILE = "interrupted-prefix-assessment.json"
+private const val STATE_MANIFEST_FILE = "analysis-state-manifest.json"
+private const val STATE_CAPTURED_FILE = "analysis-state-captured.json"
 private const val OWNER_DIRECTORY_MODE = 0x1c0
 private const val GROUP_OR_OTHER_WRITE_MODE = 0x12
-private const val MAXIMUM_JOURNAL_ENTRIES = 9
+private const val MAXIMUM_JOURNAL_ENTRIES = 11
 private const val MAXIMUM_INTENT_BYTES = 256 * 1024
 private const val MAXIMUM_DEFINITION_BYTES = 1024 * 1024
 private val JOURNAL_JSON_LIMITS = StrictJsonLimits(

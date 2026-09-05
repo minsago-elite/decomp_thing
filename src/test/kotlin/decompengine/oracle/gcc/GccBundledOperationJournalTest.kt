@@ -30,6 +30,46 @@ import kotlinx.serialization.json.jsonPrimitive
 
 class GccBundledOperationJournalTest {
     @Test
+    fun `stopped state manifest is durably named and linked only after prefix assessment`() = withJournalRoot { root ->
+        val intent = intent()
+        val payload = OracleJson.canonicalBytes(JsonObject(mapOf("fixtureOnly" to JsonPrimitive(true))))
+        GccBundledOperationJournal.create(root, OPERATION_ID, intent).use { journal ->
+            journal.recordLease(evidence(intent))
+            journal.recordPrepared(definition(), DEPLOYMENT_SHA256)
+            journal.recordAttachment(payload)
+            journal.recordStartAuthorization()
+            journal.recordInterruptionAuthorization(payload)
+            journal.recordInterruptedExecution(payload)
+            val prefix = journal.recordInterruptedPrefixAssessment(payload)
+            val snapshot = GccBundledAnalysisStateSnapshot(1, 3, payload)
+            val receipt = journal.recordInterruptedAnalysisState(snapshot)
+            val document = OracleJson.parseCanonical(receipt).jsonObject
+            assertEquals(JsonPrimitive(OracleArtifacts.sha256(prefix)), document["previousSha256"])
+            assertEquals(JsonPrimitive(snapshot.sha256), document.getValue("analysisState").jsonObject["manifestSha256"])
+            assertContentEquals(payload, Files.readAllBytes(journal.path.resolve("analysis-state-manifest.json")))
+            assertEquals(11, names(journal.path).size)
+            assertEquals("r--------", permissions(journal.path.resolve("analysis-state-manifest.json")))
+            journal.verify("after stopped-state publication")
+            val manifest = journal.path.resolve("analysis-state-manifest.json")
+            Files.setPosixFilePermissions(manifest, PosixFilePermissions.fromString("rw-------"))
+            Files.writeString(manifest, "changed")
+            assertFails { journal.verify("after altered state manifest") }
+        }
+    }
+
+    @Test
+    fun `state manifest without an interrupted prefix never publishes`() = withJournalRoot { root ->
+        val intent = intent()
+        val payload = OracleJson.canonicalBytes(JsonObject(emptyMap()))
+        GccBundledOperationJournal.create(root, OPERATION_ID, intent).use { journal ->
+            journal.recordLease(evidence(intent))
+            journal.recordPrepared(definition(), DEPLOYMENT_SHA256)
+            assertFails { journal.recordInterruptedAnalysisState(GccBundledAnalysisStateSnapshot(1, 3, payload)) }
+            assertFalse(Files.exists(journal.path.resolve("analysis-state-manifest.json")))
+        }
+    }
+
+    @Test
     fun `interruption records form a separate durable chain and cannot become completed execution`() = withJournalRoot { root ->
         val intent = intent()
         val payload = OracleJson.canonicalBytes(JsonObject(mapOf("fixtureOnly" to JsonPrimitive(true))))
