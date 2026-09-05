@@ -78,18 +78,20 @@ fun renderDashboard(jobs: List<Job>, diagnostics: List<WebJobDiagnostic> = empty
       cancelAuthButton.addEventListener('click', async () => {
         cancelAuthButton.disabled = true;
         const generation = authInspectionGeneration;
-        const showCancellationStatus = text => {
-          if (generation === authInspectionGeneration && authButton.disabled)
+        const showCancellationStatus = (text, retry = false) => {
+          if (generation === authInspectionGeneration && authButton.disabled) {
             document.querySelector('#auth-inspection-status').textContent = text;
+            if (retry) cancelAuthButton.disabled = false;
+          }
         };
         try {
           const response = await fetch('/api/operator/auth-methods/cancel', {
             method: 'POST', headers: {'X-Decomp-Operator-Action': 'cancel-auth-inspection'}
           });
           showCancellationStatus(response.ok ? 'Cancellation requested; waiting for cleanup.'
-            : 'Cancellation request failed; inspection status is still being checked.');
+            : 'Cancellation request failed; inspection status is still being checked.', !response.ok);
         } catch (_) {
-          showCancellationStatus('Cancellation request failed; inspection status is still being checked.');
+          showCancellationStatus('Cancellation request failed; inspection status is still being checked.', true);
         }
       });
       authButton.addEventListener('click', async () => {

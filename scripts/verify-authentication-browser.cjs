@@ -10,7 +10,7 @@ const { chromium } = require(process.env.DECOMP_PLAYWRIGHT_MODULE || 'playwright
   const html = fs.readFileSync(htmlPath, 'utf8');
   const browser = await chromium.launch({headless: true});
   const browserVersion = browser.version();
-  let starts = 0, polls = 0, cancellations = 0, context;
+  let starts = 0, polls = 0, cancellations = 0, cancellationFailure = null, context;
   try {
     context = await browser.newContext();
     await context.tracing.start({screenshots: true, snapshots: true});
@@ -22,7 +22,10 @@ const { chromium } = require(process.env.DECOMP_PLAYWRIGHT_MODULE || 'playwright
       if (url.pathname === '/') return route.fulfill({contentType:'text/html', body:html});
       if (url.pathname === '/api/operator/auth-methods/cancel') {
         assert.equal(request.headers()['x-decomp-operator-action'], 'cancel-auth-inspection');
-        cancellations++; mode = 'cancelled';
+        cancellations++;
+        if (cancellationFailure === 'http') return route.fulfill({status:503, body:'unavailable'});
+        if (cancellationFailure === 'network') return route.abort('failed');
+        mode = 'cancelled';
         // Let polling publish the terminal result before the cancellation acknowledgement arrives.
         return new Promise(resolve => setTimeout(resolve, 600)).then(() =>
           route.fulfill({status:202, json:{status:'cancellation-requested'}}));
@@ -63,6 +66,15 @@ const { chromium } = require(process.env.DECOMP_PLAYWRIGHT_MODULE || 'playwright
     mode = 'waiting';
     await page.locator('#inspect-auth-methods').click();
     await page.waitForFunction(() => !document.querySelector('#cancel-auth-inspection').disabled);
+    for (const failure of ['http', 'network']) {
+      cancellationFailure = failure;
+      await page.locator('#cancel-auth-inspection').click();
+      await page.waitForFunction(() => !document.querySelector('#cancel-auth-inspection').disabled &&
+        document.querySelector('#auth-inspection-status').textContent ===
+          'Cancellation request failed; inspection status is still being checked.');
+      assert.equal(await page.locator('#inspect-auth-methods').isEnabled(), false);
+    }
+    cancellationFailure = null;
     await page.locator('#cancel-auth-inspection').click();
     await page.waitForFunction(() => document.querySelector('#auth-inspection-status').textContent ===
       'Inspection cancelled; no login attempted.');
@@ -70,7 +82,7 @@ const { chromium } = require(process.env.DECOMP_PLAYWRIGHT_MODULE || 'playwright
     assert.equal(await page.locator('#auth-inspection-status').textContent(), 'Inspection cancelled; no login attempted.');
     assert.equal(await page.locator('#inspect-auth-methods').isEnabled(), true);
     assert.equal(await page.locator('#cancel-auth-inspection').isEnabled(), false);
-    assert.equal(cancellations, 1); assert.equal(starts, 4); assert.deepEqual(errors, []);
+    assert.equal(cancellations, 3); assert.equal(starts, 4); assert.deepEqual(errors, []);
     await page.screenshot({path:path.join(output,'dashboard.png')});
   } finally {
     try { if (context) await context.tracing.stop({path:path.join(output,'trace.zip')}); }
