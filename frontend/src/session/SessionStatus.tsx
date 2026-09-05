@@ -4,6 +4,7 @@ import type { BrowserSession, SessionState } from './session';
 function explanation(state: SessionState): string {
   if (state.status === 'required') {
     switch (state.reason) {
+      case 'session-changed': return 'Another tab reported a session change. Private data was cleared. Check the session to reconnect.';
       case 'signed-out': return 'You signed out of this browser. Public pages remain available.';
       case 'expired': return 'Your local session expired. Open a fresh sign-in link from the application terminal.';
       case 'bootstrap-expired': return 'This sign-in link expired. Open a fresh link from the application terminal.';

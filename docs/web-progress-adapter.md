@@ -381,3 +381,39 @@ No workflow ran; Chrome used test-only `--no-sandbox`. Shutdown and owned-work
 cleanup were confirmed. JVM tests were not rerun for this frontend-only change.
 This advances #179's stale-data presentation; shared recovery across other views,
 explicit restart signaling and full multi-tab workflow qualification remain open.
+
+## Session invalidation across tabs
+
+After a server-confirmed sign-out, the initiating tab sends a credential-free
+invalidation hint through an origin- and deployment-scoped `BroadcastChannel`.
+The complete payload is `{version: 1, type: "session-invalidated"}`. It includes
+no session/CSRF token, sign-in link, job identity, path or diagnostic content.
+Other initialized authenticated/checking tabs discard private session evidence,
+forget credentials, abort pending session operations and drop queued sign-in
+intents. Their UI explains that another tab reported a session change and offers
+an explicit session check. Receiving a hint never authenticates, fetches a new
+session, signs out on the server or starts/replays a workflow mutation.
+
+The hint is a reason to clear UI state, not proof of server authorization or
+revocation. Unknown message shapes are ignored, disposed sessions detach/close
+the channel, and another deployment prefix is isolated. An unconfirmed logout
+does not announce confirmed revocation. If the browser disables the channel,
+server-confirmed local logout still works; peer tabs rely on their own session
+checks/expiry and server authorization. Delivery is best effort and is not an
+authorization boundary.
+
+267 frontend tests, lint and typechecked `distZip` pass. Six focused tests cover
+credential-free payloads, prefix isolation, peer read cancellation and late
+completion, queued sign-in cancellation, ignored messages, disposal, unavailable
+channels and unconfirmed logout. The packaged browser opens a second authenticated
+Runtime tab and verifies that confirmed logout clears its private Runtime state,
+delivers only the fixed payload, creates no storage entries and makes no peer
+requests or mutations during a three-second observation window. Evidence:
+[`web-session-tabs-20260905.json`](evidence/web-session-tabs-20260905.json).
+Existing history/activity/scheduler checks pass; no workflow ran. Chrome used
+test-only `--no-sandbox`; installation bytes, shutdown and owned-work cleanup
+checks pass. JVM tests were not rerun for this frontend-only change.
+
+This advances shared session invalidation in #179. It does not complete server
+restart signaling, unconfirmed-revocation reconciliation, cross-version tab
+qualification or conflicting workflow-command scenarios.
