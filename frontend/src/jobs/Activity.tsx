@@ -1,6 +1,8 @@
 import { useEffect, useMemo, useRef, useState } from 'preact/hooks';
 import { ApiClientError, createApiClient } from '../api/client';
 import type { Snapshot, WebEvent } from '../api/generated';
+import { ActivityReceiptAge } from './ActivityReceiptAge';
+import type { ActivityReceiptTime } from './ActivityReceiptAge';
 import { ActivityRow, matchesActivity } from './ActivityRow';
 import type { ActivityGroup } from './ActivityRow';
 import { useBrowserAvailability } from '../session/useBrowserAvailability';
@@ -14,7 +16,7 @@ export function Activity({ jobId, runId, basePath }: { jobId: string; runId: str
   const [retry, setRetry] = useState(0);
   const failures = useRef(0);
   const reconcile = useRef(true);
-  const [lastRead, setLastRead] = useState<string | null>(null);
+  const [lastRead, setLastRead] = useState<ActivityReceiptTime | null>(null);
   const [following, setFollowing] = useState(false);
   const [snapshot, setSnapshot] = useState<Snapshot | null>(null);
   const [rows, setRows] = useState<WebEvent[]>([]);
@@ -62,7 +64,7 @@ export function Activity({ jobId, runId, basePath }: { jobId: string; runId: str
         const next = [...previous.rows, ...added];
         if (next.length > capacity) throw new Error('capacity');
         position.current = { initialized: true, cursor: data.nextCursor ?? previous.cursor, rows: next, last };
-        setRows(next); setLastRead(new Date().toISOString()); setRetry(0); failures.current = 0;
+        setRows(next); setLastRead({ at: new Date().toISOString(), monotonicMs: performance.now() }); setRetry(0); failures.current = 0;
         if (next.length === capacity) { setFollowing(false); return; }
         timer = setTimeout(() => { void poll(); }, 2500);
       } catch (failure: unknown) {
@@ -123,7 +125,7 @@ export function Activity({ jobId, runId, basePath }: { jobId: string; runId: str
       <p>Filters apply only to the current page and do not change the polling position.</p>
     </fieldset>
     <p role="status">{!following ? 'Activity paused.' : !availability.online ? 'Browser reports offline. Activity reads are suspended.' : !availability.visible ? 'Background tab: activity reads are suspended.' : retry > 0 ? `Reconnecting activity: retry ${retry} of 4. Displayed observations may be stale.` : 'Following retained activity.'} {visible.length} matching observations shown; {rows.length} of at most {capacity} observations retained on this page.</p>
-    <p>{lastRead ? <>Last activity received: <time dateTime={lastRead}>{lastRead}</time>.</> : 'No verified activity page has been received.'} Pausing or losing this connection does not stop server work.</p>
+    <p>{lastRead ? <ActivityReceiptAge receipt={lastRead} visible={availability.visible} /> : 'No verified activity page has been received.'} Pausing or losing this connection does not stop server work.</p>
     {error && <p role="alert">{error}</p>}
     {rows.length === capacity && <p>Display limit reached. Continue activity on the next page to replace these rows while preserving the cursor.</p>}
     {snapshot && <>

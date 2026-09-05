@@ -128,8 +128,12 @@ export async function qualifyHistory({ fixture, makeTarget, cdp, evaluate, ready
   await evaluate(tab, `document.activeElement.click()`);
   await ready(tab, `document.activeElement.textContent === 'Resume activity'`, 'paused activity control');
   const atPause = progressRequests();
-  await new Promise(resolve => setTimeout(resolve, 3000));
+  await new Promise(resolve => setTimeout(resolve, 11000));
   assert.equal(progressRequests(), atPause, 'Pause must release the polling timer');
+  assert.ok(await evaluate(tab, `(() => {
+    const receipt = [...document.querySelectorAll('p')].find(node => node.textContent.startsWith('Last activity received:'));
+    return /about [0-9]+ (seconds|minutes?|hours?|days?) ago in this tab/.test(receipt?.textContent ?? '') && receipt.textContent.includes('not the age of the source observations');
+  })()`), 'Paused activity must show advancing receipt age separately from source age');
   await evaluate(tab, `(() => { const control = document.querySelector('.activity-filters select'); control.value = 'usage'; control.dispatchEvent(new Event('change', { bubbles: true })); })()`);
   await ready(tab, `(${activityRows}).length === 2`, 'usage observation filter');
   assert.deepEqual(await evaluate(tab, activityRows), ['Sequence 202', 'Sequence 203']);
@@ -210,7 +214,7 @@ export async function qualifyHistory({ fixture, makeTarget, cdp, evaluate, ready
   assert.deepEqual(tab.exceptions, []);
   for (const [name, bytes] of Object.entries(fixture.retained)) assert.deepEqual(await fs.readFile(join(fixture.directory, name)), Buffer.from(bytes));
   assert.deepEqual((await fs.readdir(fixture.directory)).sort(), [...Object.keys(fixture.retained), 'reports'].sort());
-  return { activityUi: { exactObservedUsage: true, explicitUsageUnitsAndProvenance: true, durationWithoutRounding: true, missingPricingBasis: true, backgroundSuspendsReads: true, offlineSuspendsReads: true, recoveryReconcilesSnapshot: true, recoveryPreservesRows: true, lastReceivedTime: true, categoryAndTaskFilters: true, filtersPreserveCursor: true, exactAttemptLinks: true, correlationReferences: true, narrowViewport: 320, firstPage: 200, continuationPage: 5, keyboardStart: true, focusPreserved: true, pauseStopsPolling: true, resumeWithoutDuplicates: true, navigationStopsPolling: true, privateTextWithheld: true, politeStatusOnly: true }, progressPolling: true, progressBytesUnchanged: true, fixtureAttempts: 55, firstPage: 50, secondPage: 5, exactOrder: true, cursorReload: true,
+  return { activityUi: { pausedReceiptAgeAdvances: true, receiptAgeIsNotSourceAge: true, exactObservedUsage: true, explicitUsageUnitsAndProvenance: true, durationWithoutRounding: true, missingPricingBasis: true, backgroundSuspendsReads: true, offlineSuspendsReads: true, recoveryReconcilesSnapshot: true, recoveryPreservesRows: true, lastReceivedTime: true, categoryAndTaskFilters: true, filtersPreserveCursor: true, exactAttemptLinks: true, correlationReferences: true, narrowViewport: 320, firstPage: 200, continuationPage: 5, keyboardStart: true, focusPreserved: true, pauseStopsPolling: true, resumeWithoutDuplicates: true, navigationStopsPolling: true, privateTextWithheld: true, politeStatusOnly: true }, progressPolling: true, progressBytesUnchanged: true, fixtureAttempts: 55, firstPage: 50, secondPage: 5, exactOrder: true, cursorReload: true,
     earlierAttemptReload: true, previousInterruptedAttempt: true, exactUnsignedUsage: true,
     unacceptedCandidate: true, explorationSummary: true, nativeReportDownload: true, downloadedBytesMatch: true, reportBytesUnchanged: true, retainedBytesUnchanged: true, mutationRequests: 0, executionStarted: false };
 }
