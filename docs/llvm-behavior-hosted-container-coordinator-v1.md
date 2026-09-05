@@ -44,6 +44,30 @@ Live inspection requires the inherited image configuration to be exactly the rev
 entry point, and an empty command. Inherited volumes, healthchecks, hooks, shell configuration,
 loader/JVM environment, or extra labels fail closed.
 
+### Linux image legacy escaping metadata
+
+Image `Config.ArgsEscaped` may be absent or a JSON boolean. BuildKit's
+[`dispatchCmd`](https://github.com/moby/buildkit/blob/703866e5f2e4af295b485b181b447a7755d5099c/frontend/dockerfile/dockerfile2llb/convert.go#L1500)
+sets it true even for the reviewed `CMD []`, without an operating-system condition.
+It is not evidence that the Linux entry point invokes a shell. Docker's
+[Linux OCI process construction](https://github.com/moby/moby/blob/v28.0.4/daemon/oci_linux.go#L659)
+uses the container path and argument array directly. The image projector still
+requires `linux/amd64`, the exact two-element Java entry point, an empty command
+and all existing environment/hook restrictions. Null, strings, numbers and
+structured values for this metadata are rejected. The stopped-container projector
+still requires absent/false `ArgsEscaped`, exact `Path`/`Args` and every existing
+runtime restriction. Execution projections and recipe bytes are unchanged.
+
+The `c962a04` hosted run built the production-staged image, then rejected this
+field before the retained-tool probe. Its exception did not record the actual
+value; the BuildKit behavior above identifies an independently reproducible
+incorrect assumption, not a recovered value from that run. The live test now
+attaches bounded, escaped inspect diagnostics on projection failure. Required
+hosted execution remains necessary; local projector tests are not a Docker pass.
+The new true-valued Linux fixture failed against the old projector. After the
+correction, 50 focused projector/control/journal/live-contract tests yielded
+49 passes, one explicit missing-Docker live skip, and no failures or errors.
+
 ### Required live worker-image regression
 
 The LLVM oracle workflow sets `DECOMP_REQUIRE_LLVM_HOSTED_WORKER_IMAGE=1` and runs the opt-in
