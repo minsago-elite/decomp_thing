@@ -4,6 +4,8 @@ import decompengine.acp.AcpRuntimeClosureLimits
 import decompengine.acp.LinuxDescriptor
 import decompengine.acp.LinuxFilesystemSyscalls
 import decompengine.acp.LinuxProcessDescriptor
+import decompengine.acp.LinuxResourceLimitException
+import decompengine.acp.deletePrivateTreeContents
 import decompengine.oracle.core.OracleArtifacts
 import decompengine.oracle.core.OracleJson
 import java.io.File
@@ -27,6 +29,152 @@ import kotlin.test.assertTrue
 import org.junit.jupiter.api.Assumptions.assumeTrue
 
 class FullTreeFunctionObservationIsolatedFixtureRunnerTest {
+    @Test
+    fun `prepared fixture cleanup removes bounded nested JVM-like temporary residue`() {
+        assumeTrue(System.getProperty("os.name").lowercase().contains("linux"))
+        inControlTemporaryDirectory { root ->
+            val leaseRoot = root.resolve("lease")
+            val runRoot = preparedCleanupFixture(leaseRoot)
+            val temporary = runRoot.resolve("tmp")
+            val performanceData = privateDirectory(temporary.resolve("hsperfdata_fixture"))
+            Files.write(performanceData.resolve("12345"), ByteArray(64) { 42 })
+            val nativeCache = privateDirectory(privateDirectory(temporary.resolve("native")).resolve("cache"))
+            Files.write(nativeCache.resolve("library.tmp"), ByteArray(128) { 24 })
+            val outside = root.resolve("outside.txt")
+            val outsideBytes = "unrelated bytes must survive".toByteArray()
+            Files.write(outside, outsideBytes)
+
+            removePreparedIsolationLease(leaseRoot, runRoot.fileName.toString(), 1)
+
+            assertEquals(listOf("outside.txt"), entryNames(root))
+            assertContentEquals(outsideBytes, Files.readAllBytes(outside))
+        }
+    }
+
+    @Test
+    fun `prepared fixture cleanup preserves unknown run root members`() {
+        assumeTrue(System.getProperty("os.name").lowercase().contains("linux"))
+        inControlTemporaryDirectory { root ->
+            val leaseRoot = root.resolve("lease")
+            val runRoot = preparedCleanupFixture(leaseRoot)
+            val unknown = runRoot.resolve("unknown.txt")
+            val unknownBytes = "unexpected root evidence".toByteArray()
+            Files.write(unknown, unknownBytes)
+            Files.write(runRoot.resolve("tmp").resolve("temporary.txt"), byteArrayOf(1))
+
+            assertFailsWith<java.nio.file.DirectoryNotEmptyException> {
+                removePreparedIsolationLease(leaseRoot, runRoot.fileName.toString(), 1)
+            }
+
+            assertEquals(listOf("unknown.txt"), entryNames(runRoot))
+            assertContentEquals(unknownBytes, Files.readAllBytes(unknown))
+            assertTrue(Files.exists(leaseRoot.resolve(TEST_LEASE_RECORD_FILE), LinkOption.NOFOLLOW_LINKS))
+        }
+    }
+
+    @Test
+    fun `prepared fixture cleanup does not recurse into runtime or scratch residue`() {
+        assumeTrue(System.getProperty("os.name").lowercase().contains("linux"))
+        inControlTemporaryDirectory { root ->
+            listOf("runtime", "scratch").forEach { directoryName ->
+                val leaseRoot = root.resolve("lease-$directoryName")
+                val runRoot = preparedCleanupFixture(leaseRoot)
+                val unknown = runRoot.resolve(directoryName).resolve("unknown.txt")
+                val unknownBytes = "unexpected $directoryName evidence".toByteArray()
+                Files.write(unknown, unknownBytes)
+
+                assertFailsWith<java.nio.file.DirectoryNotEmptyException> {
+                    removePreparedIsolationLease(leaseRoot, runRoot.fileName.toString(), 1)
+                }
+
+                assertContentEquals(unknownBytes, Files.readAllBytes(unknown))
+                assertTrue(Files.exists(runRoot.resolve("tmp"), LinkOption.NOFOLLOW_LINKS))
+                assertTrue(Files.exists(leaseRoot.resolve(TEST_LEASE_RECORD_FILE), LinkOption.NOFOLLOW_LINKS))
+            }
+        }
+    }
+
+    @Test
+    fun `prepared fixture temporary cleanup rejects links without touching outside bytes`() {
+        assumeTrue(System.getProperty("os.name").lowercase().contains("linux"))
+        inControlTemporaryDirectory { root ->
+            listOf("symbolic", "hard").forEach { linkKind ->
+                val leaseRoot = root.resolve("lease-$linkKind")
+                val runRoot = preparedCleanupFixture(leaseRoot)
+                val temporary = runRoot.resolve("tmp")
+                val outside = root.resolve("outside-$linkKind.txt")
+                val outsideBytes = "outside $linkKind link bytes".toByteArray()
+                Files.write(outside, outsideBytes)
+                val link = temporary.resolve("outside-link")
+                if (linkKind == "symbolic") Files.createSymbolicLink(link, outside) else Files.createLink(link, outside)
+
+                assertFailsWith<java.io.IOException> {
+                    removePreparedIsolationLease(leaseRoot, runRoot.fileName.toString(), 1)
+                }
+
+                assertContentEquals(outsideBytes, Files.readAllBytes(outside))
+                assertTrue(entryNames(temporary).isNotEmpty())
+                assertTrue(Files.exists(leaseRoot.resolve(TEST_LEASE_RECORD_FILE), LinkOption.NOFOLLOW_LINKS))
+            }
+        }
+    }
+
+    @Test
+    fun `prepared fixture cleanup rejects a substituted temporary directory symlink`() {
+        assumeTrue(System.getProperty("os.name").lowercase().contains("linux"))
+        inControlTemporaryDirectory { root ->
+            val leaseRoot = root.resolve("lease")
+            val runRoot = preparedCleanupFixture(leaseRoot)
+            val outside = privateDirectory(root.resolve("outside"))
+            val outsideFile = outside.resolve("preserved.txt")
+            val outsideBytes = "outside temporary directory bytes".toByteArray()
+            Files.write(outsideFile, outsideBytes)
+            val temporary = runRoot.resolve("tmp")
+            Files.delete(temporary)
+            Files.createSymbolicLink(temporary, outside)
+
+            assertFailsWith<java.io.IOException> {
+                removePreparedIsolationLease(leaseRoot, runRoot.fileName.toString(), 1)
+            }
+
+            assertTrue(Files.isSymbolicLink(temporary))
+            assertEquals(listOf("preserved.txt"), entryNames(outside))
+            assertContentEquals(outsideBytes, Files.readAllBytes(outsideFile))
+            assertTrue(Files.exists(leaseRoot.resolve(TEST_LEASE_RECORD_FILE), LinkOption.NOFOLLOW_LINKS))
+        }
+    }
+
+    @Test
+    fun `prepared fixture temporary cleanup fails closed on entry byte and depth excess`() {
+        assumeTrue(System.getProperty("os.name").lowercase().contains("linux"))
+        inControlTemporaryDirectory { root ->
+            val limitsByResource = listOf(
+                "entries" to PREPARED_TEMPORARY_CLEANUP_LIMITS.copy(maximumEntries = 1),
+                "bytes" to PREPARED_TEMPORARY_CLEANUP_LIMITS.copy(maximumUserOwnedFileBytes = 128),
+                "depth" to PREPARED_TEMPORARY_CLEANUP_LIMITS.copy(maximumDepth = 1),
+            )
+            limitsByResource.forEach { (resource, limits) ->
+                val leaseRoot = root.resolve("lease-$resource")
+                val runRoot = preparedCleanupFixture(leaseRoot)
+                val temporary = runRoot.resolve("tmp")
+                val nested = privateDirectory(privateDirectory(temporary.resolve("first")).resolve("second"))
+                Files.write(nested.resolve("payload"), ByteArray(256) { 42 })
+
+                assertFailsWith<LinuxResourceLimitException> {
+                    removePreparedIsolationLease(
+                        leaseRoot,
+                        runRoot.fileName.toString(),
+                        1,
+                        temporaryLimits = limits,
+                    )
+                }
+
+                assertTrue(entryNames(temporary).isNotEmpty())
+                assertTrue(Files.exists(leaseRoot.resolve(TEST_LEASE_RECORD_FILE), LinkOption.NOFOLLOW_LINKS))
+            }
+        }
+    }
+
     @Test
     fun `fresh JNA bootstrap stays inside exact temporary directory without creating home caches`() {
         assumeTrue(System.getProperty("os.name").lowercase().contains("linux"))
@@ -3252,6 +3400,7 @@ class FullTreeFunctionObservationIsolatedFixtureRunnerTest {
         runDirectoryName: String,
         classPathEntries: Int,
         rootFiles: List<String> = emptyList(),
+        temporaryLimits: AcpRuntimeClosureLimits = PREPARED_TEMPORARY_CLEANUP_LIMITS,
     ) {
         val runRoot = leaseRoot.resolve(runDirectoryName)
         val runtime = runRoot.resolve("runtime")
@@ -3261,10 +3410,39 @@ class FullTreeFunctionObservationIsolatedFixtureRunnerTest {
         rootFiles.forEach { name -> Files.deleteIfExists(runRoot.resolve(name)) }
         Files.deleteIfExists(runtime)
         Files.deleteIfExists(runRoot.resolve("scratch"))
-        Files.deleteIfExists(runRoot.resolve("tmp"))
+        if (Files.exists(runRoot.resolve("tmp"), LinkOption.NOFOLLOW_LINKS)) {
+            LinuxFilesystemSyscalls.openRoot(runRoot).use { parent ->
+                LinuxFilesystemSyscalls.openDirectoryAt(parent.fd, "tmp").use { temporary ->
+                    if (temporary.identity.uid != parent.identity.uid || temporary.identity.mode and 0x3f != 0 ||
+                        temporary.identity.mountId != parent.identity.mountId
+                    ) throw java.io.IOException("prepared fixture temporary directory is not privately owned on its run mount")
+                    deletePrivateTreeContents(temporary, temporaryLimits)
+                    LinuxFilesystemSyscalls.openPathAtOrNull(parent.fd, "tmp").use { selected ->
+                        if (selected == null || selected.identity.key != temporary.identity.key ||
+                            selected.identity.mountId != temporary.identity.mountId
+                        ) throw java.io.IOException("prepared fixture temporary directory changed during cleanup")
+                    }
+                    LinuxFilesystemSyscalls.removeDirectory(parent.fd, "tmp")
+                    if (LinuxFilesystemSyscalls.identity(temporary.fd).linkCount != 0) {
+                        throw java.io.IOException("prepared fixture temporary directory remains linked after cleanup")
+                    }
+                }
+            }
+        }
         Files.deleteIfExists(runRoot)
         Files.deleteIfExists(leaseRoot.resolve(TEST_LEASE_RECORD_FILE))
         Files.deleteIfExists(leaseRoot)
+    }
+
+    private fun preparedCleanupFixture(leaseRoot: Path): Path {
+        privateDirectory(leaseRoot)
+        Files.writeString(leaseRoot.resolve(TEST_LEASE_RECORD_FILE), "fixture lease record")
+        val runRoot = privateDirectory(leaseRoot.resolve("run"))
+        val runtime = privateDirectory(runRoot.resolve("runtime"))
+        Files.write(runtime.resolve("classpath-0.jar"), byteArrayOf(1))
+        privateDirectory(runRoot.resolve("scratch"))
+        privateDirectory(runRoot.resolve("tmp"))
+        return runRoot
     }
 
     private fun entryNames(directory: Path): List<String> =
@@ -3295,6 +3473,11 @@ class FullTreeFunctionObservationIsolatedFixtureRunnerTest {
     }
 
     private companion object {
+        val PREPARED_TEMPORARY_CLEANUP_LIMITS = AcpRuntimeClosureLimits(
+            maximumEntries = 128,
+            maximumUserOwnedFileBytes = 64L * 1024 * 1024,
+            maximumDepth = 8,
+        )
         val PREPARED_RUN_DIRECTORIES = setOf("runtime", "scratch", "tmp")
         val LIVE_FAULT_PROTOCOL_FILES = setOf("worker.boot", "worker.failure", "supervisor.failure")
         val COLD_TEST_MANAGER_VERSION_COMMAND = listOf(

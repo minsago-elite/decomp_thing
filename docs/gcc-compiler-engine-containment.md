@@ -56,6 +56,13 @@ exact socket identity. Ordinary runtime-directory membership changes may update 
 without replacing the bus; those two directory-content fields are not endpoint identity. Directory
 replacement, permission/extended-metadata changes, and socket replacement still fail closed.
 
+The live test captures failure-only journal diagnostics before retained-owner cleanup. Its exact
+user-unit, current-boot, and start-time filters select at most 80 events in newest-first order, so
+a long startup command cannot consume the 16 KiB capture before a later termination message.
+The existing three-second collection limit and one-second forced-exit grace remain unchanged.
+These diagnostics grant no lifecycle authority, and the fixture's 60-second runtime budget is not
+increased based on elapsed attachment time alone.
+
 This checkpoint does **not** prove that either compiler engine ran, resumed, or produced any
 artifact. Cooperative file locks, owner-only directories, and user-systemd naming also do not
 exclude a hostile process with the same UID (or root); those principals remain part of the trusted

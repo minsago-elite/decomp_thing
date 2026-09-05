@@ -45,6 +45,22 @@ import kotlinx.serialization.json.jsonPrimitive
 
 class GccCompilerEngineLiveContainmentControllerTest {
     @Test
+    fun `live journal diagnostics request newest exact-unit events within existing bounds`() {
+        val unitName = "decomp-gcc-cc1-${"1".repeat(32)}.scope"
+        val sinceEpochSeconds = 1_788_572_160L
+        assertEquals(
+            listOf(
+                "/usr/bin/journalctl", "--user", "--boot", "--no-pager", "--quiet", "--reverse",
+                "--output=short-monotonic", "--lines=80", "--since=@$sinceEpochSeconds", "--user-unit=$unitName",
+            ),
+            liveUnitJournalCommand(unitName, sinceEpochSeconds),
+        )
+        for (invalidUnit in listOf("", "*.scope", "$unitName\n", "another-$unitName")) {
+            assertFailsWith<IllegalArgumentException> { liveUnitJournalCommand(invalidUnit, sinceEpochSeconds) }
+        }
+    }
+
+    @Test
     fun `BOOT launch file ceiling admits authenticated JNA bootstrap and stays cleanup bounded`() {
         val jnaJar = Path.of(
             com.sun.jna.Native::class.java.protectionDomain.codeSource.location.toURI(),
@@ -1051,15 +1067,20 @@ class GccCompilerEngineLiveContainmentControllerTest {
         assumeTrue(exited && probe.exitValue() == 0, "user-systemd manager is unavailable")
     }
 
-    private fun boundedLiveUnitJournal(unitName: String, sinceEpochSeconds: Long): String {
+    private fun liveUnitJournalCommand(unitName: String, sinceEpochSeconds: Long): List<String> {
         require(unitName.length <= 255 && unitName.matches(Regex("decomp-gcc-[a-z0-9][a-z0-9._-]*-[0-9a-f]{32}\\.scope")))
+        return listOf(
+            "/usr/bin/journalctl", "--user", "--boot", "--no-pager", "--quiet", "--reverse",
+            "--output=short-monotonic", "--lines=80", "--since=@$sinceEpochSeconds", "--user-unit=$unitName",
+        )
+    }
+
+    private fun boundedLiveUnitJournal(unitName: String, sinceEpochSeconds: Long): String {
+        val command = liveUnitJournalCommand(unitName, sinceEpochSeconds)
         check(!Thread.currentThread().isInterrupted) { "journal diagnostics cannot run on an interrupted thread" }
         val uid = (Files.getAttribute(Path.of("/proc/self"), "unix:uid") as Number).toInt()
         val runtime = Path.of("/run/user/$uid")
-        val process = ProcessBuilder(
-            "/usr/bin/journalctl", "--user", "--boot", "--no-pager", "--quiet",
-            "--output=short-monotonic", "--lines=80", "--since=@$sinceEpochSeconds", "--user-unit=$unitName",
-        ).redirectErrorStream(true).also { builder ->
+        val process = ProcessBuilder(command).redirectErrorStream(true).also { builder ->
             builder.environment().clear()
             builder.environment()["XDG_RUNTIME_DIR"] = runtime.toString()
             builder.environment()["SYSTEMD_COLORS"] = "0"
