@@ -1,7 +1,9 @@
+import java.io.File
 import java.nio.ByteBuffer
 import java.nio.ByteOrder
 import java.nio.file.Files
 import java.nio.file.LinkOption
+import java.nio.file.Path
 import java.nio.file.attribute.PosixFilePermissions
 import java.security.MessageDigest
 import java.util.concurrent.TimeUnit
@@ -25,6 +27,142 @@ kotlin {
 application {
     mainClass.set("decompengine.MainKt")
     applicationName = "llm_bin_patch"
+}
+
+val frontendDirectory = layout.projectDirectory.dir("frontend")
+val frontendOutput = layout.buildDirectory.dir("frontend/dist")
+val frontendAssetManifest = layout.buildDirectory.file("frontend/asset-manifest.json")
+val frontendResources = layout.buildDirectory.dir("generated/frontend-resources")
+val frontendNodeHome = providers.gradleProperty("frontendNodeHome")
+val frontendApplicationVersion = project.version.toString()
+
+fun Exec.frontendNpm(vararg arguments: String) {
+    workingDir(frontendDirectory)
+    doFirst {
+        val nodeHome = frontendNodeHome.orNull?.let { configured ->
+            val homePath = Path.of(configured)
+            require(homePath.isAbsolute && Files.isExecutable(homePath.resolve("bin/node")) &&
+                Files.isRegularFile(homePath.resolve("bin/npm"))) {
+                "-PfrontendNodeHome must name an absolute pinned Node installation with bin/node and bin/npm; see frontend/README.md"
+            }
+            homePath
+        }
+        if (nodeHome != null) {
+            environment("PATH", "${nodeHome.resolve("bin")}${File.pathSeparator}${System.getenv("PATH").orEmpty()}")
+        }
+        commandLine(nodeHome?.resolve("bin/npm")?.toString() ?: "npm", *arguments)
+    }
+}
+
+val verifyFrontendToolchain = tasks.register<Exec>("verifyFrontendToolchain") {
+    group = "verification"
+    description = "Checks the exact frontend Node/npm pins before install or build"
+    inputs.files(frontendDirectory.file("package.json"), layout.projectDirectory.file(".node-version"))
+    inputs.property("frontendNodeHome", frontendNodeHome.orElse("PATH"))
+    frontendNpm("run", "toolchain")
+}
+
+val frontendInstall = tasks.register<Exec>("frontendInstall") {
+    group = "build"
+    description = "Installs the locked build-only frontend dependencies without package lifecycle scripts"
+    dependsOn(verifyFrontendToolchain)
+    inputs.files(frontendDirectory.file("package.json"), frontendDirectory.file("package-lock.json"))
+    inputs.files(fileTree(frontendDirectory) { include(".npmrc", "scripts/check-toolchain.mjs") })
+    inputs.property("frontendNodeHome", frontendNodeHome.orElse("PATH"))
+    outputs.dir(frontendDirectory.dir("node_modules"))
+    frontendNpm("ci", "--ignore-scripts", "--no-audit", "--no-fund")
+}
+
+val frontendBuild = tasks.register<Exec>("frontendBuild") {
+    group = "build"
+    description = "Type-checks and builds the pinned Preact application from current frontend inputs"
+    dependsOn(frontendInstall)
+    inputs.files(fileTree(frontendDirectory) {
+        include("src/**", "public/**", "scripts/**", "index.html", "*config.*", "package*.json", ".npmrc")
+        exclude("node_modules/**")
+    })
+    inputs.property("frontendNodeHome", frontendNodeHome.orElse("PATH"))
+    outputs.dir(frontendOutput)
+    outputs.files(layout.buildDirectory.file("frontend/bundle-report.json"),
+        layout.buildDirectory.file("frontend/bundle-composition.json"))
+    frontendNpm("run", "build")
+}
+
+val generateFrontendAssetManifest = tasks.register<Exec>("generateFrontendAssetManifest") {
+    group = "build"
+    description = "Inventories every emitted UI resource and binds its exact bytes to the application version"
+    dependsOn(frontendBuild)
+    inputs.dir(frontendOutput)
+    inputs.file(layout.projectDirectory.file("scripts/web-asset-manifest.mjs"))
+    inputs.property("applicationVersion", frontendApplicationVersion)
+    outputs.file(frontendAssetManifest)
+    doFirst {
+        commandLine(
+            frontendNodeHome.orNull?.let { "$it/bin/node" } ?: "node",
+            layout.projectDirectory.file("scripts/web-asset-manifest.mjs").asFile.absolutePath,
+            frontendOutput.get().asFile.absolutePath,
+            frontendApplicationVersion,
+            "--write",
+            frontendAssetManifest.get().asFile.absolutePath,
+        )
+    }
+}
+
+val verifyFrontendAssets = tasks.register<Exec>("verifyFrontendAssets") {
+    group = "verification"
+    description = "Rejects incomplete, stale or changed UI resource inventories before packaging"
+    dependsOn(generateFrontendAssetManifest)
+    doFirst {
+        commandLine(
+            frontendNodeHome.orNull?.let { "$it/bin/node" } ?: "node",
+            layout.projectDirectory.file("scripts/web-asset-manifest.mjs").asFile.absolutePath,
+            frontendOutput.get().asFile.absolutePath,
+            frontendApplicationVersion,
+            "--verify",
+            frontendAssetManifest.get().asFile.absolutePath,
+        )
+    }
+}
+
+val stageFrontend = tasks.register<Sync>("stageFrontend") {
+    group = "build"
+    description = "Stages only the current UI asset closure into its reserved classpath namespace"
+    dependsOn(verifyFrontendAssets)
+    from(frontendOutput) { into("decompengine/web/ui") }
+    from(frontendAssetManifest) { into("decompengine/web/ui") }
+    into(frontendResources)
+    duplicatesStrategy = DuplicatesStrategy.FAIL
+}
+
+sourceSets.main { resources.srcDir(stageFrontend) }
+tasks.processResources {
+    duplicatesStrategy = DuplicatesStrategy.FAIL
+    // Copy does not provide Sync's deletion semantics. Remove only our generated
+    // namespace so renamed chunks cannot survive in later JARs.
+    doFirst {
+        val previous = destinationDir.resolve("decompengine/web/ui")
+        check(!previous.exists() || previous.deleteRecursively()) {
+            "Could not remove the previous generated UI resources; refusing to package stale assets"
+        }
+    }
+}
+tasks.withType<AbstractArchiveTask>().configureEach {
+    isPreserveFileTimestamps = false
+    isReproducibleFileOrder = true
+}
+
+val testFrontendAssetManifest = tasks.register<Exec>("testFrontendAssetManifest") {
+    group = "verification"
+    description = "Checks split UI bundles and rejection of omitted, duplicate, stale or changed resources"
+    dependsOn(verifyFrontendToolchain)
+    inputs.files(layout.projectDirectory.file("scripts/web-asset-manifest.mjs"),
+        layout.projectDirectory.file("scripts/web-asset-manifest.test.mjs"))
+    doFirst {
+        commandLine(
+            frontendNodeHome.orNull?.let { "$it/bin/node" } ?: "node",
+            "--test", layout.projectDirectory.file("scripts/web-asset-manifest.test.mjs").asFile.absolutePath,
+        )
+    }
 }
 
 fun registerOracleJavaExecTask(
@@ -882,6 +1020,10 @@ val generateLlvmBehaviorHelperChecksum = tasks.register("generateLlvmBehaviorHel
 distributions {
     main {
         contents {
+            from(frontendDirectory.file("THIRD_PARTY_NOTICES.txt")) {
+                into("docs")
+                rename { "frontend-THIRD_PARTY_NOTICES.txt" }
+            }
             from(acpGateHelperBinary) {
                 into("libexec")
                 filePermissions { unix("rwxr-xr-x") }
@@ -1088,6 +1230,7 @@ val verifyKotlinBootClasspathDistribution = tasks.register("verifyKotlinBootClas
 }
 
 tasks.named("check") {
+    dependsOn(testFrontendAssetManifest)
     dependsOn(verifyAcpGateHelperDistribution)
     dependsOn(verifyLlvmBehaviorHelperDistribution)
     dependsOn(verifyKotlinBootClasspathDistribution)
