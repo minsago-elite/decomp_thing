@@ -11,6 +11,7 @@ import java.util.Collections
 class AcpAuthenticationMethod internal constructor(
     val id: String,
     val variant: String,
+    val idPreview: String,
     val namePreview: String,
     val descriptionPreview: String?,
 ) {

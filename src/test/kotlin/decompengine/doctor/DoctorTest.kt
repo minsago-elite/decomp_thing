@@ -89,6 +89,9 @@ class DoctorTest {
         val output = createTempDirectory("doctor-tools-contract-")
 
         assertFailsWith<IllegalArgumentException> {
+            DoctorOptions(output, toolsOnly = true, showAuthMethods = true)
+        }
+        assertFailsWith<IllegalArgumentException> {
             DoctorOptions(output, toolsOnly = true, harnessOverride = "acp")
         }
         assertFailsWith<IllegalArgumentException> {
@@ -98,6 +101,17 @@ class DoctorTest {
                 workflowOverride = decompengine.acp.AcpPreflightWorkflow.PATCH,
             )
         }
+    }
+
+    @Test
+    fun `authentication inspection rejects legacy without provider connectivity`() {
+        val output = createTempDirectory("doctor-auth-legacy-")
+        val doctor = Doctor(environment = emptyMap(),
+            commandProbe = CommandProbe { _, _ -> CommandProbeResult(0, "available") },
+            connectivityProbe = ConnectivityProbe { _, _ -> error("auth inspection must not connect to legacy provider") })
+        val report = doctor.inspect(DoctorOptions(output, harnessOverride = "legacy-openai", showAuthMethods = true))
+        assertTrue(report.checks.any { it.name == "ACP authentication methods" && !it.passed })
+        assertFalse(report.checks.any { it.name.startsWith("LLM") })
     }
 
     @Test
