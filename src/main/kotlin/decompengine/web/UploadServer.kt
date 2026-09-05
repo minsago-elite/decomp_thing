@@ -203,7 +203,7 @@ class UploadServer(
     private var started = false
     private var activeRequests = 0
     private var ownership: WebJobStoreOwnership? = null
-    private val startupCancellation = AtomicBoolean(false)
+    private val stopRequested = AtomicBoolean(false)
     val serverPort: Int get() = server.address.port
 
     init {
@@ -214,8 +214,8 @@ class UploadServer(
         check(!started && !stopping) { "Web server cannot be started again" }
         try {
             ownership = WebJobStoreOwnership.acquire(storeRoot)
-            store.recoverInterruptedJobs(startupCancellation::get)
-            check(!startupCancellation.get()) { "Web server startup cancelled" }
+            store.recoverInterruptedJobs(stopRequested::get)
+            check(!stopRequested.get()) { "Web server startup cancelled" }
             server.start()
             started = true
         } catch (failure: Exception) {
@@ -224,10 +224,16 @@ class UploadServer(
         }
     }
 
+    /** Publish cancellation before waiting for lifecycle work; stop completes resource cleanup. */
+    internal fun requestStop() {
+        stopRequested.set(true)
+        authenticationInspectionCancellation.set(true)
+    }
+
     fun stop(delaySeconds: Int = 0) {
         require(delaySeconds >= 0) { "shutdown delay must be nonnegative" }
         // Signal recovery even while start holds lifecycleLock through filesystem operations.
-        startupCancellation.set(true)
+        requestStop()
         synchronized(lifecycleLock) {
             stopping = true
             // JDK HttpServer.stop does not release a bound listener before start. Start its
@@ -238,7 +244,6 @@ class UploadServer(
                 started = true
             }
         }
-        authenticationInspectionCancellation.set(true)
         server.stop(delaySeconds)
         val discarded = synchronized(lifecycleLock) {
             // A cleanup retry must not interrupt a worker again while it persists its final status.
@@ -288,7 +293,7 @@ class UploadServer(
     /** Admission covers the whole handler, including upload publication and error handling. */
     internal fun withActiveRequest(action: () -> Unit): Boolean {
         synchronized(lifecycleLock) {
-            if (stopping || startupCancellation.get()) return false
+            if (stopping || stopRequested.get()) return false
             activeRequests++
         }
         try {
@@ -467,7 +472,7 @@ class UploadServer(
                     val active = store.updateStatus(job.id, "analyzing", activeMessage)
                     operation(active)
                     synchronized(lifecycleLock) {
-                        if (stopping) {
+                        if (stopping || stopRequested.get()) {
                             store.updateStatus(job.id, "failed", "Server stopped before the operation reported completion")
                         } else {
                             store.updateStatus(job.id, "complete", completeMessage)
@@ -480,7 +485,7 @@ class UploadServer(
                 }
             }
             synchronized(lifecycleLock) {
-                if (stopping) throw RejectedExecutionException()
+                if (stopping || stopRequested.get()) throw RejectedExecutionException()
                 store.updateStatus(job.id, "queued", queuedMessage)
                 pendingJobs[job.id] = scheduled
             }
@@ -510,7 +515,7 @@ class UploadServer(
 
         override fun run() {
             val run = synchronized(lifecycleLock) {
-                if (stopping) {
+                if (stopping || stopRequested.get()) {
                     discard("Server stopped before the operation started")
                     false
                 } else if (claimed.compareAndSet(false, true)) {
