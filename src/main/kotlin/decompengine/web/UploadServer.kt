@@ -225,6 +225,7 @@ class UploadServer(
 
     fun stop(delaySeconds: Int = 0) {
         require(delaySeconds >= 0) { "shutdown delay must be nonnegative" }
+        val callerWasInterrupted = Thread.currentThread().isInterrupted
         val inspection = synchronized(lifecycleLock) {
             stopping = true
             authenticationInspectionCancellation.set(true)
@@ -250,13 +251,15 @@ class UploadServer(
                 if (failure == null) failure = exception else failure.addSuppressed(exception)
             }
         }
+        var inspectionWaitInterrupted = callerWasInterrupted
         try {
-            if (inspection != null && inspection !== Thread.currentThread()) inspection.join(5_000)
-            check(inspection?.isAlive != true) {
-                "Authentication inspection did not stop within the shutdown grace period"
+            check(inspection !== Thread.currentThread()) { "Inspection cannot await its own shutdown" }
+            // The provider owns its cleanup deadlines. Do not truncate them with a web timeout,
+            // including when the shutdown caller is interrupted while cleanup is still running.
+            while (inspection?.isAlive == true) {
+                try { inspection.join() } catch (_: InterruptedException) { inspectionWaitInterrupted = true }
             }
         } catch (exception: Exception) {
-            if (exception is InterruptedException) Thread.currentThread().interrupt()
             if (failure == null) failure = exception else failure.addSuppressed(exception)
         }
         try {
@@ -275,6 +278,7 @@ class UploadServer(
         } catch (exception: Exception) {
             if (failure == null) failure = exception else failure.addSuppressed(exception)
         }
+        if (inspectionWaitInterrupted) Thread.currentThread().interrupt()
         failure?.let { throw it }
     }
 
