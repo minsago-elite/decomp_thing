@@ -12,31 +12,28 @@ import decompengine.jobs.Job
 import decompengine.jobs.JobStore
 import decompengine.jobs.JobStoreException
 import decompengine.jobs.toJson
-import decompengine.oracle.core.OracleJson
-import decompengine.oracle.core.StrictJsonLimits
 import decompengine.project.ArchivalReconstructionService
 import decompengine.project.BoundedLlmModuleReconstructor
 import decompengine.project.EvidenceModuleReconstructor
 import decompengine.project.GhidraHeadlessProgramModelAnalyzer
 import decompengine.project.ModuleReconstructor
+import decompengine.project.GeneratedCMakeReconstructionProfile
+import decompengine.project.ReconstructionProfile
 import kotlinx.serialization.json.Json
 import kotlinx.serialization.json.JsonElement
 import kotlinx.serialization.json.JsonNull
 import kotlinx.serialization.json.JsonPrimitive
-import kotlinx.serialization.json.JsonObject
 import kotlinx.serialization.json.buildJsonObject
 import kotlinx.serialization.json.put
 import java.io.ByteArrayOutputStream
 import java.net.InetSocketAddress
 import java.net.URLDecoder
 import java.nio.charset.StandardCharsets
-import java.nio.ByteBuffer
 import java.nio.file.Path
 import java.util.concurrent.ConcurrentHashMap
 import java.util.concurrent.Executor
 import java.util.concurrent.ExecutorService
 import java.util.concurrent.Executors
-import kotlin.io.path.name
 import kotlin.io.path.pathString
 
 fun interface JobAnalyzer {
@@ -152,9 +149,11 @@ class UploadServer(
     private val analyzer: JobAnalyzer = AutomaticJobAnalyzer(),
     private val reconstructor: JobReconstructor = SourceTreeJobReconstructor(),
     executor: Executor? = null,
+    sourceProfiles: List<ReconstructionProfile> = listOf(GeneratedCMakeReconstructionProfile.descriptor),
 ) {
     private val server = HttpServer.create(InetSocketAddress(host, port), 0)
     private val store = JobStore(dataDir)
+    private val sourceEvidence = WebSourceEvidence(store, sourceProfiles)
     private val ownedExecutor: ExecutorService? = if (executor == null) {
         Executors.newFixedThreadPool(2) { runnable ->
             Thread(runnable, "decomp-web-analysis").apply { isDaemon = true }
@@ -188,7 +187,7 @@ class UploadServer(
                     exchange.sendBytes(200, APP_CSS.toByteArray(), "text/css; charset=utf-8", cache = true)
                 exchange.requestMethod == "POST" && segments == listOf("jobs") -> handlePostJob(exchange)
                 exchange.requestMethod == "GET" && segments.size == 2 && segments[0] == "jobs" ->
-                    exchange.sendHtml(200, renderJob(store.get(decode(segments[1]))))
+                    handleJob(exchange, decode(segments[1]))
                 exchange.requestMethod == "POST" && segments.size == 3 && segments[0] == "jobs" && segments[2] == "explore" ->
                     handleExplore(exchange, decode(segments[1]))
                 exchange.requestMethod == "POST" && segments.size == 3 && segments[0] == "jobs" && segments[2] == "reconstruct" ->
@@ -282,28 +281,25 @@ class UploadServer(
         exchange.redirect("/jobs/${job.id}")
     }
 
+    private fun handleJob(exchange: HttpExchange, jobId: String) {
+        val job = store.get(jobId)
+        val source = runCatching { sourceEvidence.read(jobId).view() }
+        exchange.sendHtml(200, renderJob(job, source.getOrNull(), source.isFailure))
+    }
+
     private fun handleSource(exchange: HttpExchange, jobId: String, relativePath: String) {
         require(relativePath.isNotBlank()) { "source path must not be blank" }
         val normalized = relativePath.replace('\\', '/')
         require(!normalized.startsWith('/') && normalized.split('/').none { it.isBlank() || it == ".." || it == "." }) {
             "source path must remain inside the generated tree"
         }
-        require(normalized == "Makefile" || normalized.endsWith(".c") || normalized.endsWith(".h") ||
-            normalized.endsWith(".json") || normalized.endsWith(".md") || normalized.endsWith(".log")) {
-            "only generated text files may be viewed"
-        }
-        val source = store.readArtifact(jobId, "reports/source-tree/$normalized", MAX_SOURCE_BYTES)
-        val text = try {
-            StandardCharsets.UTF_8.newDecoder().decode(ByteBuffer.wrap(source.bytes)).toString()
-        } catch (_: java.nio.charset.CharacterCodingException) {
-            throw IllegalArgumentException("source file is not valid UTF-8 text")
-        }
+        val source = sourceEvidence.read(jobId)
         exchange.sendHtml(200, renderSourceFile(
             store.get(jobId),
             normalized,
-            text,
-            readSourceMetadata(jobId, "source_tree_manifest.json"),
-            readSourceMetadata(jobId, "reports/confidence.json"),
+            source.text(normalized),
+            source.manifestDocument,
+            source.confidence,
         ))
     }
 
@@ -314,11 +310,6 @@ class UploadServer(
         exchange.sendBytes(200, artifact.bytes, contentType(name))
     }
 
-    private fun readSourceMetadata(jobId: String, relativePath: String): JsonObject? = runCatching {
-        val snapshot = store.readArtifact(jobId, "reports/source-tree/$relativePath", MAX_SOURCE_METADATA_BYTES)
-        OracleJson.parse(snapshot.bytes, SOURCE_METADATA_LIMITS) as? JsonObject
-    }.getOrNull()
-
     private fun encodeJob(job: Job): String =
         Json.encodeToString(JsonElement.serializer(), job.toJson())
 
@@ -326,17 +317,7 @@ class UploadServer(
 
     private companion object {
         const val MAX_UPLOAD_BYTES = 32L * 1024 * 1024
-        const val MAX_SOURCE_BYTES = 4L * 1024 * 1024
         const val MAX_ARTIFACT_BYTES = 64L * 1024 * 1024
-        const val MAX_SOURCE_METADATA_BYTES = 1024L * 1024
-        val SOURCE_METADATA_LIMITS = StrictJsonLimits(
-            maximumInputBytes = MAX_SOURCE_METADATA_BYTES.toInt(),
-            maximumCanonicalBytes = MAX_SOURCE_METADATA_BYTES.toInt(),
-            maximumDepth = 32,
-            maximumNodes = 100_000,
-            maximumStringBytes = 64 * 1024,
-            maximumTotalStringBytes = MAX_SOURCE_METADATA_BYTES.toInt(),
-        )
     }
 }
 
