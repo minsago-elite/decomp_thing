@@ -115,3 +115,8 @@ private fun negotiatedIdentitySha256(agent: AcpNegotiatedAgentEvidence): String 
     }
     return digest.digest().joinToString("") { byte -> "%02x".format(byte) }
 }
+
+/** Returned only for a terminal cancelled result; cleanup failures retain their original failure. */
+class AcpPreflightCancelledException internal constructor(
+    val receipt: decompengine.agent.AgentExecutionReceipt,
+) : IllegalStateException("ACP preflight cancelled")

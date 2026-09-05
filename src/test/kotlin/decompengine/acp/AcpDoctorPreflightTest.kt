@@ -33,6 +33,30 @@ import org.junit.jupiter.api.Timeout
 @Timeout(value = 90, unit = TimeUnit.SECONDS)
 class AcpDoctorPreflightTest {
     @Test
+    fun `cancelled preflight retains terminal receipt before launch and during initialize`() {
+        requireLiveSandboxHost()
+        for (duringInitialize in listOf(false, true)) {
+            val temporary = createTempDirectory("doctor-cancel-")
+            val harness = factoryHarness(writeProvisioning(temporary.resolve("acp.json"), mode = "no-initialize"))
+            val cancellation = decompengine.agent.AgentCancellation {
+                !duringInitialize || Thread.currentThread().stackTrace.any {
+                    it.className.contains("AcpAgentHarness") && it.methodName.startsWith("awaitPhase")
+                }
+            }
+            val cancelled = assertFailsWith<AcpPreflightCancelledException> {
+                harness.preflight(AcpPreflightWorkflow.WEB, cancellation)
+            }
+            val result = assertIs<AgentExecutionOutcome.Returned>(cancelled.receipt.outcome).result
+            assertEquals(decompengine.agent.AgentStopReason.CANCELLED, result.stopReason)
+            val evidence = assertIs<AcpInvocationEvidenceSnapshot>(cancelled.receipt.providerEvidence)
+            assertEquals(if (duringInitialize) AcpExecutionCleanupDisposition.VERIFIED else AcpExecutionCleanupDisposition.NOT_REQUIRED,
+                evidence.cleanupDisposition)
+            if (duringInitialize) assertTrue(assertNotNull(evidence.diagnostics).remainingProcessIds.isEmpty())
+            assertEquals(null, evidence.completeExecutionEvidence)
+        }
+    }
+
+    @Test
     fun `invalid authentication inventories fail preflight as protocol errors with cleanup`() {
         requireLiveSandboxHost()
         for (mode in listOf("doctor-auth-duplicate", "doctor-auth-count", "doctor-auth-blank", "doctor-auth-text")) {

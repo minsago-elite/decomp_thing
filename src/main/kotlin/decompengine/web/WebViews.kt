@@ -62,6 +62,7 @@ fun renderDashboard(jobs: List<Job>, recovery: JobRecoveryInventory): String = p
             <h3 id="auth-inspection-title">Agent authentication</h3>
             <p>Inspect advertised methods. Login is not yet supported.</p>
             <button class="button secondary" type="button" id="inspect-auth-methods">Inspect authentication methods</button>
+            <button class="button secondary" type="button" id="cancel-auth-inspection" disabled>Cancel inspection</button>
             <p id="auth-inspection-status" role="status"></p>
             <ol id="auth-method-list"></ol>
           </section>
@@ -70,7 +71,27 @@ fun renderDashboard(jobs: List<Job>, recovery: JobRecoveryInventory): String = p
     """.trimIndent(),
     script = """
       const authButton = document.querySelector('#inspect-auth-methods');
+      const cancelAuthButton = document.querySelector('#cancel-auth-inspection');
+      let authInspectionGeneration = 0;
+      cancelAuthButton.addEventListener('click', async () => {
+        cancelAuthButton.disabled = true;
+        const generation = authInspectionGeneration;
+        const showCancellationStatus = text => {
+          if (generation === authInspectionGeneration && authButton.disabled)
+            document.querySelector('#auth-inspection-status').textContent = text;
+        };
+        try {
+          const response = await fetch('/api/operator/auth-methods/cancel', {
+            method: 'POST', headers: {'X-Decomp-Operator-Action': 'cancel-auth-inspection'}
+          });
+          showCancellationStatus(response.ok ? 'Cancellation requested; waiting for cleanup.'
+            : 'Cancellation request failed; inspection status is still being checked.');
+        } catch (_) {
+          showCancellationStatus('Cancellation request failed; inspection status is still being checked.');
+        }
+      });
       authButton.addEventListener('click', async () => {
+        authInspectionGeneration++;
         authButton.disabled = true;
         const status = document.querySelector('#auth-inspection-status');
         const list = document.querySelector('#auth-method-list');
@@ -82,11 +103,16 @@ fun renderDashboard(jobs: List<Job>, recovery: JobRecoveryInventory): String = p
           });
           if (!response.ok) throw new Error('unavailable');
           let inventory = await response.json();
+          cancelAuthButton.disabled = false;
           while (inventory.status === 'inspecting') {
             await new Promise(resolve => setTimeout(resolve, 300));
             const update = await fetch('/api/operator/auth-methods', {cache: 'no-store'});
             if (!update.ok) throw new Error('unavailable');
             inventory = await update.json();
+          }
+          if (inventory.status === 'cancelled') {
+            status.textContent = 'Inspection cancelled; no login attempted.';
+            return;
           }
           if (inventory.status !== 'ready') throw new Error('unavailable');
           for (const method of inventory.methods) {
@@ -102,6 +128,7 @@ fun renderDashboard(jobs: List<Job>, recovery: JobRecoveryInventory): String = p
           status.textContent = 'Authentication inspection is unavailable. Check ACP configuration and cleanup.';
         } finally {
           authButton.disabled = false;
+          cancelAuthButton.disabled = true;
         }
       });
       const input = document.querySelector('#binary');
