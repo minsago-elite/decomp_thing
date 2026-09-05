@@ -53,3 +53,8 @@ rehydration, repair-history transcript references, compile/full retained-regress
 publication/rollback lineage, factory selection and comparative ACP qualification are still required.
 The caller currently obtains candidate bytes from trusted workflow storage or the prior captured
 execution; the adapter does not recover missing source from hashes or redacted transcript text.
+
+The subsequent [checkpoint source store](builtin-source-store-v1.md) can persist exact candidates
+before checkpoint publication and load them by a verified snapshot identity. A configured fresh
+adapter may use `BuiltinCapturedResume.fromStore(reference)`. Project archive export/verification
+and full repair acceptance remain separate requirements.
