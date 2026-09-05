@@ -304,8 +304,11 @@ retained; their entries count toward the scan limit. Once status writes begin, a
 leave some records reconciled and does not imply rollback. These are work/byte bounds, not deadlines
 for stalled filesystem calls or fencing of concurrent direct writers.
 Failed startup and explicit stop-before-start also close the bound HTTP listener. Shutdown closes
-request admission before starting the JDK dispatcher needed to release an unstarted bound listener;
-no admitted handler can mutate the store during that cleanup. Same-JVM owners are tracked by canonical store
+request admission before starting the JDK dispatcher needed to release an unstarted bound listener.
+Failed startup marks stopping while still holding the lifecycle lock, then releases that lock before
+running dispatcher cleanup, so a queued request cannot deadlock cleanup and another start cannot
+slip into the failure interval. A duplicate start rejection leaves an already-running server intact.
+No admitted handler can mutate the store during failed-start cleanup. Same-JVM owners are tracked by canonical store
 path to avoid opening another channel to an owned lock file (see the [JDK FileLock platform notes](https://docs.oracle.com/en/java/javase/21/docs/api/java.base/java/nio/channels/FileLock.html)).
 The lock file is never deleted. Stop releases ownership only after owned workers have terminated and no
 scheduled operations or admitted HTTP handlers remain. Request admission closes when shutdown begins; the
