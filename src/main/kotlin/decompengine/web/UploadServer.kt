@@ -174,11 +174,14 @@ class UploadServer(
     sourceProfiles: List<ReconstructionProfile> = listOf(GeneratedCMakeReconstructionProfile.descriptor),
     sensitiveValues: Collection<String> = System.getenv().values,
     listenBacklog: Int = 64,
+    private val authenticationInspector: () -> decompengine.acp.AcpAuthenticationInventory = defaultWebAuthenticationInspector(),
 ) {
     init {
         require(listenBacklog in 1..4096) { "HTTP listen backlog must be between 1 and 4096" }
     }
     private val diagnosticRedactor = ProgressRedactor(sensitiveValues)
+    private val authenticationInspectionResult = java.util.concurrent.atomic.AtomicReference(
+        "{\"status\":\"idle\",\"loginSupported\":false}")
     private val server = HttpServer.create(InetSocketAddress(host, port), listenBacklog)
     private val store = JobStore(dataDir)
     private val storeRoot = dataDir.toAbsolutePath().normalize()
@@ -290,6 +293,55 @@ class UploadServer(
         if (!withActiveRequest { routeAdmitted(exchange) }) exchange.close()
     }
 
+    private fun handleAuthenticationInspection(exchange: HttpExchange) {
+        if (exchange.requestHeaders.getFirst("X-Decomp-Operator-Action") != "inspect-auth") {
+            exchange.sendJson(400, "{\"error\":\"Explicit operator inspection is required.\"}")
+            return
+        }
+        val previous = authenticationInspectionResult.get()
+        if (previous == AUTH_INSPECTION_RUNNING ||
+            !authenticationInspectionResult.compareAndSet(previous, AUTH_INSPECTION_RUNNING)) {
+            exchange.sendJson(409, "{\"error\":\"Authentication inspection is already running.\"}")
+            return
+        }
+        try {
+            Thread({
+                var result = AUTH_INSPECTION_FAILED
+                try {
+                    withActiveRequest { result = inspectAuthenticationMethods() }
+                } catch (_: Exception) {
+                    result = AUTH_INSPECTION_FAILED
+                } finally {
+                    // Publish terminal status and release admission in one atomic state change.
+                    authenticationInspectionResult.set(result)
+                }
+            }, "decomp-web-auth-inspection").apply { isDaemon = true; start() }
+        } catch (_: Exception) {
+            authenticationInspectionResult.set(AUTH_INSPECTION_FAILED)
+            exchange.sendJson(503, AUTH_INSPECTION_FAILED)
+            return
+        }
+        exchange.sendJson(202, AUTH_INSPECTION_RUNNING)
+    }
+
+    private fun inspectAuthenticationMethods(): String = try {
+        val inventory = authenticationInspector()
+        buildJsonObject {
+            put("status", "ready")
+            put("inventorySha256", inventory.sha256)
+            put("loginSupported", false)
+            put("methods", kotlinx.serialization.json.buildJsonArray {
+                inventory.methods.forEach { method -> add(buildJsonObject {
+                    put("idPreview", diagnosticRedactor.text(method.idPreview, 128))
+                    put("namePreview", diagnosticRedactor.text(method.namePreview, 128))
+                    put("descriptionPreview", diagnosticRedactor.text(method.descriptionPreview.orEmpty(), 256))
+                    put("variant", method.variant)
+                    put("loginSupported", false)
+                }) }
+            })
+        }.toString()
+    } catch (_: Exception) { AUTH_INSPECTION_FAILED }
+
     private fun routeAdmitted(exchange: HttpExchange) {
         val segments = exchange.requestURI.path.split('/').filter(String::isNotBlank)
         try {
@@ -300,6 +352,10 @@ class UploadServer(
                     exchange.sendBytes(200, APP_CSS.toByteArray(), "text/css; charset=utf-8", cache = true)
                 exchange.requestMethod == "GET" && segments == listOf("api", "recovery") ->
                     exchange.sendJson(200, store.recoveryInventory().toJson().toString())
+                exchange.requestMethod == "GET" && segments == listOf("api", "operator", "auth-methods") ->
+                    exchange.sendJson(200, authenticationInspectionResult.get())
+                exchange.requestMethod == "POST" && segments == listOf("api", "operator", "auth-methods") ->
+                    handleAuthenticationInspection(exchange)
                 exchange.requestMethod == "POST" && segments == listOf("jobs") -> handlePostJob(exchange)
                 exchange.requestMethod == "GET" && segments.size == 2 && segments[0] == "jobs" ->
                     handleJob(exchange, decode(segments[1]))
@@ -614,3 +670,7 @@ private fun contentType(path: Path): String = when (path.fileName.toString().sub
     "log", "txt", "c", "h", "md" -> "text/plain; charset=utf-8"
     else -> "application/octet-stream"
 }
+
+private const val AUTH_INSPECTION_FAILED = "{\"status\":\"failed\",\"loginSupported\":false,\"error\":\"Authentication inspection is unavailable. Check ACP configuration and cleanup.\"}"
+
+private const val AUTH_INSPECTION_RUNNING = "{\"status\":\"inspecting\",\"loginSupported\":false}"

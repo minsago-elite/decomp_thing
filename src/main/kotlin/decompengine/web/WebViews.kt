@@ -58,10 +58,52 @@ fun renderDashboard(jobs: List<Job>, recovery: JobRecoveryInventory): String = p
           </div>
           ${renderJobList(jobs)}
           ${renderRecoveryInventory(recovery)}
+          <section aria-labelledby="auth-inspection-title">
+            <h3 id="auth-inspection-title">Agent authentication</h3>
+            <p>Inspect advertised methods. Login is not yet supported.</p>
+            <button class="button secondary" type="button" id="inspect-auth-methods">Inspect authentication methods</button>
+            <p id="auth-inspection-status" role="status"></p>
+            <ol id="auth-method-list"></ol>
+          </section>
         </section>
       </main>
     """.trimIndent(),
     script = """
+      const authButton = document.querySelector('#inspect-auth-methods');
+      authButton.addEventListener('click', async () => {
+        authButton.disabled = true;
+        const status = document.querySelector('#auth-inspection-status');
+        const list = document.querySelector('#auth-method-list');
+        list.replaceChildren();
+        status.textContent = 'Inspecting advertised methods…';
+        try {
+          const response = await fetch('/api/operator/auth-methods', {
+            method: 'POST', cache: 'no-store', headers: {'X-Decomp-Operator-Action': 'inspect-auth'}
+          });
+          if (!response.ok) throw new Error('unavailable');
+          let inventory = await response.json();
+          while (inventory.status === 'inspecting') {
+            await new Promise(resolve => setTimeout(resolve, 300));
+            const update = await fetch('/api/operator/auth-methods', {cache: 'no-store'});
+            if (!update.ok) throw new Error('unavailable');
+            inventory = await update.json();
+          }
+          if (inventory.status !== 'ready') throw new Error('unavailable');
+          for (const method of inventory.methods) {
+            const item = document.createElement('li');
+            item.textContent = [method.idPreview, method.variant, method.namePreview, method.descriptionPreview]
+              .filter(Boolean).join(' · ');
+            list.append(item);
+          }
+          status.textContent = inventory.methods.length
+            ? 'Advertised method previews. Login is unsupported; no login attempted.'
+            : 'No authentication methods advertised; no login attempted.';
+        } catch (_) {
+          status.textContent = 'Authentication inspection is unavailable. Check ACP configuration and cleanup.';
+        } finally {
+          authButton.disabled = false;
+        }
+      });
       const input = document.querySelector('#binary');
       const name = document.querySelector('#file-name');
       input?.addEventListener('change', () => {

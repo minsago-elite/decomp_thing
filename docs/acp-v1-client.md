@@ -762,3 +762,27 @@ Invalid authentication advertisements produce `PROTOCOL` with the bounded
 keeps malformed peer data distinct from unrelated configuration/redaction errors. Contained scripted
 preflight cases cover duplicate IDs, method-count overflow, blank IDs and oversized names, with
 verified cleanup and no complete execution evidence or authentication action.
+
+The web dashboard also has an explicit **Inspect authentication methods** button. It starts one
+asynchronous inspection per server via `POST /api/operator/auth-methods` with the operator-action
+header; `GET` on the same path reads idle/inspecting/ready/failed status without launching work.
+Responses contain redacted previews and `loginSupported=false`, never raw method IDs. A concurrent
+start returns 409. The admitted background task participates in the existing handler lifetime so
+server shutdown does not release store ownership while it is still running. Its production harness
+is retained across inspections, preserving unresolved-cleanup refusal. Configuration is selected on
+first use; restart the server to change that selection. No credentials or inspection status are
+persisted in project records. This does not provide login/logout, durable operator state, or automatic
+cancellation when a browser disconnects; production preflight keeps its existing deadline/cleanup bounds.
+
+Optional Chromium check (with the Playwright dependency described for progress verification):
+
+```sh
+java -cp 'build/libs/*:build/oracle/gcc/kotlin-boot-runtime/*' \
+  scripts/fixtures/AuthenticationDashboardFixture.java build/auth-dashboard.html
+DECOMP_PLAYWRIGHT_MODULE=/absolute/path/to/node_modules/playwright \
+  node scripts/verify-authentication-browser.cjs build/auth-dashboard.html build/auth-browser/new-run
+```
+
+The fixture renders the production dashboard and mocks status responses. It checks explicit-only
+inspection, preview rendering/escaping, failure, retry and empty inventory; trace/screenshot/result
+files use a fresh evidence directory. It does not establish independent-agent authentication.
