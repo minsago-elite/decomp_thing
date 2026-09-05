@@ -104,7 +104,7 @@ fun renderJob(job: Job, reportContext: WebReportContext? = null,
                   event.revisionId || '', event.phase || event.kind, event.role || '',
                   event.status || event.stopReason || event.failureKind || event.decision || '',
                   event.acceptedRevisionSha256 ? 'accepted source ' + event.acceptedRevisionSha256 : '',
-                  event.text || '',
+                  event.presentationOmittedFields ? 'Some event fields withheld' : '',
                   ...[['inputTokens', 'input tokens'], ['outputTokens', 'output tokens'],
                     ['cachedInputTokens', 'cached input tokens'], ['toolCalls', 'tool calls'],
                     ['wallClock', 'elapsed'], ['contextUsedTokens', 'context used'],
@@ -181,7 +181,7 @@ fun renderJob(job: Job, reportContext: WebReportContext? = null,
 }
 
 private fun renderAgentProgress(reports: WebReportContext): String {
-    val snapshot = runCatching { AgentProgressJournal.read(reports.reportsDirectory) }.getOrNull()
+    val snapshot = runCatching { AgentProgressJournal.read(reports.reportsDirectory)?.let(::legacyProgressPresentation) }.getOrNull()
     val events = snapshot?.get("events")?.jsonArray.orEmpty().takeLast(30)
     val rows = events.joinToString("") { item ->
         val event = item.jsonObject
@@ -189,7 +189,8 @@ private fun renderAgentProgress(reports: WebReportContext): String {
             event.text("phase").ifBlank { event.text("kind") }, event.text("role"),
             event.text("status").ifBlank { event.text("stopReason") }.ifBlank { event.text("failureKind") }
                 .ifBlank { event.text("decision") },
-            event.text("acceptedRevisionSha256").let { if (it.isBlank()) "" else "accepted source $it" }, event.text("text"),
+            event.text("acceptedRevisionSha256").let { if (it.isBlank()) "" else "accepted source $it" },
+            if ("presentationOmittedFields" in event) "Some event fields withheld" else "",
             listOf("inputTokens" to "input tokens", "outputTokens" to "output tokens",
                 "cachedInputTokens" to "cached input tokens", "toolCalls" to "tool calls", "wallClock" to "elapsed",
                 "contextUsedTokens" to "context used", "contextWindowTokens" to "context capacity",
@@ -204,6 +205,7 @@ private fun renderAgentProgress(reports: WebReportContext): String {
     return """
         <section class="panel agent-progress" aria-labelledby="agent-progress-title">
           <h2 id="agent-progress-title">Agent progress</h2>
+          <p>Message, plan and tool text is withheld because this journal does not certify public visibility.</p>
           <p>Agent completion is followed by policy and validation checks. Accepted revisions are recorded separately.</p>
           <p id="agent-event-gap" role="status">${gap.escapeHtml()}</p>
           <ol id="agent-event-list" aria-live="polite">$rows</ol>

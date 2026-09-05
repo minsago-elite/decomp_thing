@@ -290,7 +290,7 @@ class UploadServer(
                         it.removePrefix("runId=")
                     }
                     val bytes = jobs.readProgressJournal(job.id, runId)
-                    val snapshot = try { AgentProgressJournal.decode(bytes) } catch (_: Exception) {
+                    val snapshot = try { legacyProgressPresentation(AgentProgressJournal.decode(bytes)) } catch (_: Exception) {
                         throw WebJobServiceException("PROGRESS_UNAVAILABLE", "The retained progress journal is unavailable.")
                     }
                     exchange.sendJson(200, snapshot.toString())
