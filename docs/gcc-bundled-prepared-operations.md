@@ -351,3 +351,27 @@ its separate control lifecycle and revalidate evidence before authorization.
 Local tests exercise state content, metadata, membership and inode changes and
 prefix advancement/regression; retained-owner execution still needs the hosted
 systemd/ext4 environment.
+
+## Explicit resume reanalysis definition
+
+Runtime provider `bundled-ghidra-java-api-runtime-v4` is opt-in and resume-only.
+It accepts a manifest-bound `RESUMED` definition whose original state path is
+`<run>/state`. Its control name is SHA-256 of UTF-8
+`gcc-bundled-resume-control-v1\n<absolute run path>\n<stopped manifest SHA-256>`
+(with actual newlines), prefixed by `control-`. JVM home/temp use that control's
+`tmp` directory, and the bundled worker imports the original binary into a new
+project under that control's `state` directory. The exporter still targets
+`<run>/reports/program_model.json` and its existing checkpoint inventory.
+
+This chooses normal import/analysis before exporter reuse, avoiding reliance on
+the historically different saved-project reload path. Whole-program exporter
+semantic validation must still reject incompatible checkpoints before reuse.
+The command definition binds the stopped manifest and derived fresh paths; it
+does not authenticate the manifest or prove that repeated analysis is identical.
+
+The default remains v3. Fresh operation intents reject v4 before acquiring a
+lease, and the existing execution path accepts only v2/v3. A resume controller
+must revalidate retained state/control evidence, protect the original state,
+create the separate control directory, journal attachment and START, and prove
+absence/resource accounting. No v4 execution or benchmark qualification is
+claimed by command-contract tests.
