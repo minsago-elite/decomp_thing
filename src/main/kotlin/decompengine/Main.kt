@@ -520,6 +520,7 @@ private fun doctorUsageError(message: String): Nothing {
 private fun runWeb(args: List<String>) {
     var host = "127.0.0.1"
     var port = 8000
+    var listenBacklog = 64
     var dataDir = Path.of(".decomp_engine/jobs")
     var index = 0
     while (index < args.size) {
@@ -532,6 +533,11 @@ private fun runWeb(args: List<String>) {
                 port = args[index + 1].toInt()
                 index += 2
             }
+            "--listen-backlog" -> {
+                listenBacklog = args.getOrNull(index + 1)?.toIntOrNull()
+                    ?: error("--listen-backlog requires an integer between 1 and 4096")
+                index += 2
+            }
             "--data-dir" -> {
                 dataDir = Path.of(args[index + 1])
                 index += 2
@@ -539,7 +545,7 @@ private fun runWeb(args: List<String>) {
             else -> error("unknown web argument: ${args[index]}")
         }
     }
-    val server = UploadServer(host, port, dataDir)
+    val server = UploadServer(host, port, dataDir, listenBacklog = listenBacklog)
     server.start()
     println("Serving decomp_engine upload UI on http://$host:${server.serverPort}")
 }
@@ -556,7 +562,7 @@ private fun printHelp() {
           llm_bin_patch explore <binary> --reports <directory> [--arg <value>] [--stdin <value>]
           llm_bin_patch reconstruct <binary> --output <directory> [--evidence-only] [--max-context-chars <count>] [--harness acp|legacy-openai]
           llm_bin_patch gcc-engine-plan <cc1|lto1> <stripped-binary> --profile <file> --ghidra-archive <file> --output <directory>
-          llm_bin_patch web [--host 127.0.0.1] [--port 8000] [--data-dir .decomp_engine/jobs]
+          llm_bin_patch web [--host 127.0.0.1] [--port 8000] [--listen-backlog 64] [--data-dir .decomp_engine/jobs]
 
         Agent harness selection for doctor, patch, reconstruction, and repair:
           --harness acp            use the ACP agent provisioned by ACP_CONFIG_FILE (default)

@@ -172,9 +172,13 @@ class UploadServer(
     executor: Executor? = null,
     sourceProfiles: List<ReconstructionProfile> = listOf(GeneratedCMakeReconstructionProfile.descriptor),
     sensitiveValues: Collection<String> = System.getenv().values,
+    listenBacklog: Int = 64,
 ) {
+    init {
+        require(listenBacklog in 1..4096) { "HTTP listen backlog must be between 1 and 4096" }
+    }
     private val diagnosticRedactor = ProgressRedactor(sensitiveValues)
-    private val server = HttpServer.create(InetSocketAddress(host, port), 0)
+    private val server = HttpServer.create(InetSocketAddress(host, port), listenBacklog)
     private val store = JobStore(dataDir)
     private val sourceEvidence = WebSourceEvidence(store, sourceProfiles)
     private val archiveEvidence = WebArchiveEvidence(store, sourceEvidence)

@@ -275,6 +275,12 @@ active workers and marks discarded pending jobs failed with an explicit never-st
 job admission, not a bound on network connections, uploaded job storage, or cross-process resources. Injected
 executors remain caller-owned. Interrupting active workers is not proof of validation subprocess cleanup.
 
+`web --listen-backlog` requests a TCP listen backlog of 64 by default and accepts values from 1 to 4096.
+Invalid values fail before the server binds or opens job storage. The underlying TCP implementation controls
+overflow refusal or dropping, as described by the [JDK HttpServer contract](https://docs.oracle.com/en/java/javase/21/docs/api/jdk.httpserver/com/sun/net/httpserver/HttpServer.html).
+This setting covers connections waiting to be accepted; it does not cap already accepted connections,
+idle keep-alive connections, request duration, or stored uploads. Those bounds remain required under #71.
+
 The public `AcpAgentHarness` has no uncontained production mode. Before it starts an ACP agent it verifies an explicit
 Linux boundary made from digest-pinned, canonical, root-owned `bubblewrap`, `prlimit`, `systemd-run`, `systemctl`, and
 `bash` executables plus a digest/manifest-pinned static gate helper. Absence, replacement, an unsupported platform, a missing user systemd bus, or inability to create and
