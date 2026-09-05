@@ -1031,6 +1031,7 @@ internal object KotlinSystemdCgroupCommandLauncher {
         interruption: KotlinContainedCommandInterruption? = null,
         controlDirectoryName: String? = null,
         readOnlyControlDirectories: Map<String, LinuxFileIdentity> = emptyMap(),
+        readOnlyStateDirectory: LinuxFileIdentity? = null,
     ): KotlinSystemdCgroupCommandExecution {
         val cleanup = ContainedCommandCleanup()
         val secret = ByteArray(32).also(SECURE_RANDOM::nextBytes)
@@ -1040,8 +1041,8 @@ internal object KotlinSystemdCgroupCommandLauncher {
             require(controlDirectoryName == null || validContainedControlName(controlDirectoryName)) {
                 "contained command control directory must have a canonical execution name"
             }
-            val priorControls = ContainedCommandPriorControls(controlDirectoryName, readOnlyControlDirectories)
-            borrowed.withPinnedDescriptor(priorControls::verify)
+            val retainedDirectories = ContainedCommandRetainedDirectories(controlDirectoryName, readOnlyControlDirectories, readOnlyStateDirectory)
+            borrowed.withPinnedDescriptor(retainedDirectories::verify)
             val writableRoot = borrowed.path
             val controlPath = controlDirectoryName?.let(writableRoot::resolve) ?: writableRoot
             require(expectedControlGroup.startsWith('/') && expectedControlGroup.substringAfterLast('/') == unitName)
@@ -1069,9 +1070,9 @@ internal object KotlinSystemdCgroupCommandLauncher {
             )) + (if (controlDirectoryName == null) emptyMap() else mapOf(
                 "controlDirectory" to JsonPrimitive(controlPath.toString()),
                 "writableRoot" to JsonPrimitive(writableRoot.toString()),
-            )) + (if (priorControls.isEmpty) emptyMap() else mapOf(
-                "readOnlyControlDirectories" to priorControls.toJson(),
-            )))))
+            )) + (if (retainedDirectories.controlsAreEmpty) emptyMap() else mapOf(
+                "readOnlyControlDirectories" to retainedDirectories.controlsToJson(),
+            )) + (retainedDirectories.stateToJson()?.let { mapOf("readOnlyStateDirectory" to it) } ?: emptyMap()))))
             val runtime = AuthenticatedObservationRuntime.open(configuration)
             cleanup.runtime = runtime
             for (input in additionalInputs) {
@@ -1083,7 +1084,7 @@ internal object KotlinSystemdCgroupCommandLauncher {
                 }
             }
             fun verifyInputs(label: String) {
-                borrowed.withPinnedDescriptor(priorControls::verify)
+                borrowed.withPinnedDescriptor(retainedDirectories::verify)
                 runtime.verify(label)
                 additionalMounts.forEach { mount ->
                     require(calculateFullTreeObservationRuntimeManifestSha256(mount.source) == mount.expectedManifestSha256) {
@@ -1162,7 +1163,7 @@ internal object KotlinSystemdCgroupCommandLauncher {
                 cleanup.boundary = boundary
                 val unit = boundary.launchContainedCommandKeeper(
                     unitName, nonce, request.sha256, runTree, effectiveResources,
-                    additionalInputs.map { it.path }, additionalMounts, secret, writableRoot, priorControls,
+                    additionalInputs.map { it.path }, additionalMounts, secret, writableRoot, retainedDirectories,
                 ) {
                     verifyInputs("immediately before contained keeper launch")
                     requirePrepared(false)
@@ -1221,7 +1222,7 @@ internal object KotlinSystemdCgroupCommandLauncher {
                 unit.killFrozenKeeperAndProveRemoved(effectiveResources, live)
                 unit.stopAndProveRemoved()
                 cleanup.closeAndProveAbsent()
-                borrowed.withPinnedDescriptor(priorControls::verify)
+                borrowed.withPinnedDescriptor(retainedDirectories::verify)
                 val controlIdentity = if (controlDirectoryName == null) null else runTree.withPinnedDescriptor { LinuxFilesystemSyscalls.identity(it.fd) }
                 val result = JsonObject(mapOf(
                     "schemaVersion" to JsonPrimitive(1),
@@ -4070,12 +4071,12 @@ private class TrustedObservationBoundary(
         runtimeMounts: List<FullTreeFunctionObservationRuntimeMount>,
         secret: ByteArray,
         writableRoot: Path,
-        priorControls: ContainedCommandPriorControls,
+        retainedDirectories: ContainedCommandRetainedDirectories,
         beforeLaunch: () -> Unit,
     ): ManagedObservationUnit {
         require(unitName.matches(PRODUCTION_KOTLIN_BOOT_UNIT_NAME) && nonce.matches(SHA256))
         require(requestSha256.matches(SHA256) && secret.size == 32)
-        val worker = buildContainedCommandKeeperCommand(runTree.path, nonce, requestSha256, readOnlyInputs, runtimeMounts, writableRoot, priorControls)
+        val worker = buildContainedCommandKeeperCommand(runTree.path, nonce, requestSha256, readOnlyInputs, runtimeMounts, writableRoot, retainedDirectories)
         return launchPrebuilt(
             unitName, runTree.path, nonce, resources, worker,
             ObservationBootProcessTopology.SINGLE_KOTLIN_COMMAND_KEEPER, null, beforeLaunch,
@@ -4412,7 +4413,7 @@ private class TrustedObservationBoundary(
         readOnlyInputs: List<Path>,
         additionalMounts: List<FullTreeFunctionObservationRuntimeMount>,
         writableRoot: Path,
-        priorControls: ContainedCommandPriorControls,
+        retainedDirectories: ContainedCommandRetainedDirectories,
     ): List<String> {
         require(runDirectory == writableRoot || runDirectory.parent == writableRoot) {
             "contained command control directory must belong to its retained writable root"
@@ -4460,7 +4461,7 @@ private class TrustedObservationBoundary(
             mounts.forEach { addAll(listOf("--ro-bind", it.source.toString(), it.destination.toString())) }
             mountedInputs.forEach { addAll(listOf("--ro-bind", it.toString(), it.toString())) }
             addAll(listOf("--bind", writableRoot.toString(), writableRoot.toString()))
-            addAll(priorControls.mountArguments(writableRoot))
+            addAll(retainedDirectories.mountArguments(writableRoot))
             val privateRuntime = runDirectory.resolve(RUNTIME_DIRECTORY).toString()
             addAll(listOf("--ro-bind", privateRuntime, privateRuntime))
             addAll(listOf("--proc", "/proc", "--dev", "/dev", "--remount-ro", "/"))

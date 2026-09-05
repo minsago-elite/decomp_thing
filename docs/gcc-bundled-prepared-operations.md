@@ -398,3 +398,22 @@ attachment, START delivery, process absence, valid export contents or completion
 All records keep complete/release eligibility false. The coordinator must supply
 those live checks when integrating the second execution. Local journal fixtures
 use synthetic payloads and establish persistence/ordering only.
+
+## Retained original project mount
+
+The contained command launcher accepts an optional `readOnlyStateDirectory`
+identity for the original `<run>/state` directory. It requires a separate active
+control directory, verifies the original state and prior controls against the
+pinned lease-root descriptor before launch and after absence, and commits the
+state identity separately in the runtime closure. After binding the writable
+run root, it applies read-only binds for the retained state and controls. The
+active control's new project and the shared reports remain writable.
+
+The option accepts an identity for the fixed `state` child; it does not accept
+an arbitrary mount path or change the allowed prior-control names. Directory
+identity is not a content manifest, so the resume coordinator must still run
+stopped-state revalidation. Existing runtime commitments remain unchanged when
+the option is absent. Descriptor fixtures exercise replacement and permission
+changes. A local bubblewrap fixture tests retained write rejection and successful
+writes to the new project/reports, without claiming authenticated runtime,
+systemd/cgroup, dedicated ext4 or live compiler qualification.
