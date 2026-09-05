@@ -12,7 +12,7 @@ class WebExplorationReportTest {
         assertEquals("18446744073709551615", result.getValue("summary").jsonObject.getValue("confidence").jsonObject.getValue("inputCount").jsonPrimitive.content)
         assertEquals("observations", result.getValue("authority").jsonPrimitive.content)
         assertEquals("not-evaluated", result.getValue("acceptance").jsonPrimitive.content)
-        assertEquals(JsonNull, result.getValue("sourceArtifact"))
+        assertEquals("raw-evidence", result.getValue("sourceArtifact").jsonObject.getValue("role").jsonPrimitive.content)
         assertEquals(result, report(valid))
         assertNotEquals(result.getValue("reportId"), report(valid.replace("0.5", "0.4")).getValue("reportId"))
     }

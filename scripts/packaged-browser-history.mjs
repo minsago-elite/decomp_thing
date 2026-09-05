@@ -68,6 +68,18 @@ export async function qualifyHistory({ fixture, makeTarget, cdp, evaluate, ready
   await ready(tab, `document.body.innerText.includes('Report state: available. Authority: observations.') && document.body.innerText.includes('Producer confidence score')`, 'bound exploration summary');
   assert.ok(await evaluate(tab, `document.body.innerText.includes('not proof of equivalence')`));
   assert.equal(await fs.readFile(fixture.reportPath, 'utf8'), fixture.exploration);
+  const downloads = join(fixture.directory, '..', '..', 'browser downloads');
+  await fs.mkdir(downloads, { mode: 0o700 });
+  await cdp.call('Browser.setDownloadBehavior', { behavior: 'allow', downloadPath: downloads });
+  await evaluate(tab, `document.querySelector('a[download="exploration.json"]').click()`);
+  const downloaded = join(downloads, 'exploration.json');
+  const deadline = Date.now() + 15000;
+  while (!(await fs.stat(downloaded).then(() => true, () => false))) {
+    assert.ok(Date.now() < deadline, 'Native report download did not complete');
+    await new Promise(resolve => setTimeout(resolve, 50));
+  }
+  assert.equal(await fs.readFile(downloaded, 'utf8'), fixture.exploration);
+  assert.equal(await evaluate(tab, 'location.pathname'), `${path}/run_fixture_3`);
   await evaluate(tab, `[...document.querySelectorAll('a')].find(a => a.textContent === 'Open previous attempt').click()`);
   await ready(tab, `document.body.innerText.includes('PROCESS_INTERRUPTED')`, 'previous interrupted attempt');
   assert.equal(await evaluate(tab, 'location.pathname'), `${path}/run_fixture_2`);
@@ -77,5 +89,5 @@ export async function qualifyHistory({ fixture, makeTarget, cdp, evaluate, ready
   assert.deepEqual((await fs.readdir(fixture.directory)).sort(), [...Object.keys(fixture.retained), 'reports'].sort());
   return { fixtureAttempts: 55, firstPage: 50, secondPage: 5, exactOrder: true, cursorReload: true,
     earlierAttemptReload: true, previousInterruptedAttempt: true, exactUnsignedUsage: true,
-    unacceptedCandidate: true, explorationSummary: true, reportBytesUnchanged: true, retainedBytesUnchanged: true, mutationRequests: 0, executionStarted: false };
+    unacceptedCandidate: true, explorationSummary: true, nativeReportDownload: true, downloadedBytesMatch: true, reportBytesUnchanged: true, retainedBytesUnchanged: true, mutationRequests: 0, executionStarted: false };
 }

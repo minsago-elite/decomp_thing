@@ -92,6 +92,8 @@ it('reads exploration evidence only on request and preserves producer limitation
   fireEvent.click(screen.getByRole('button', { name: 'Read exploration evidence' }));
   expect(await screen.findByText('Observed sample breadth is not a proof of equivalence.')).toBeTruthy();
   expect(screen.getByText('Producer reports network isolation')).toBeTruthy();
+  expect(screen.getByRole('link', { name: 'Download observed exploration JSON' }).getAttribute('href')).toBe(data.data.sourceArtifact!.contentHref);
+  expect(screen.getByRole('link', { name: 'Download observed exploration JSON' }).getAttribute('download')).toBe('exploration.json');
   expect(screen.getByText('Exploration observations do not establish accepted reconstruction.')).toBeTruthy();
   expect(transport.get.mock.calls[0]?.[1]).toBe(`/jobs/${data.data.binding.jobId}/runs/${data.data.binding.runId}/reports/exploration`);
   const signal = transport.get.mock.calls[0]![2].signal;

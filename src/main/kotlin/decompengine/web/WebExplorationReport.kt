@@ -5,7 +5,7 @@ import kotlinx.serialization.json.*
 import java.security.MessageDigest
 
 /** Version-one presentation of the existing unversioned exploration producer; never acceptance evidence. */
-internal fun webExplorationReport(jobId: String, runId: String, bytes: ByteArray?): JsonObject {
+internal fun webExplorationReport(jobId: String, runId: String, bytes: ByteArray?, basePath: String = "/"): JsonObject {
     var state = "unknown"
     var summary: JsonObject? = null
     var limitation = "Report bytes are missing, inaccessible or changed during the bounded read."
@@ -51,9 +51,9 @@ internal fun webExplorationReport(jobId: String, runId: String, bytes: ByteArray
         put("reportId", "exploration_${digest ?: "unavailable"}")
         put("binding", buildJsonObject { put("jobId", jobId); put("runId", runId); put("revisionId", JsonNull) })
         put("reportType", "exploration"); put("adapterVersion", 1); put("producerSchemaVersion", JsonNull)
-        put("state", state); put("authority", "observations"); put("sourceArtifact", JsonNull)
+        put("state", state); put("authority", "observations"); put("sourceArtifact", bytes?.let { WebExplorationArtifact.descriptor(jobId, runId, it, basePath) } ?: JsonNull)
         put("acceptance", "not-evaluated"); put("acceptanceArtifactId", JsonNull)
-        put("limitations", JsonArray(listOf(JsonPrimitive(limitation), JsonPrimitive("Raw artifact download is not connected to this report view."))))
+        put("limitations", JsonArray(listOf(JsonPrimitive(limitation))))
         put("summary", summary ?: JsonNull)
     }
 }

@@ -58,6 +58,24 @@ class WebApiControllerTest {
             assertEquals("unknown", report.getValue("state").jsonPrimitive.content)
             assertEquals("null", report.getValue("summary").toString())
             assertEquals(run.runId, report.getValue("binding").jsonObject.getValue("runId").jsonPrimitive.content)
+            val reportFile = Files.createDirectories(root.resolve(job.id).resolve("reports/runs/${run.runId}")).resolve("exploration.json")
+            val raw = "{\"fixture\":\"<script>inert</script>\"}"
+            Files.writeString(reportFile, raw)
+            val descriptor = assertEnvelope(request(server, "/workbench/api/v1/jobs/${job.id}/runs/${run.runId}/reports/exploration", headers = mapOf("Cookie" to cookie)), 200, "report").getValue("sourceArtifact").jsonObject
+            val href = descriptor.getValue("contentHref").jsonPrimitive.content
+            assertError(request(server, href), 401, "SESSION_REQUIRED")
+            val download = request(server, href, headers = mapOf("Cookie" to cookie))
+            assertEquals(200, download.statusCode()); assertEquals(raw, download.body())
+            assertEquals("application/octet-stream", download.headers().firstValue("Content-Type").orElseThrow())
+            assertTrue(download.headers().firstValue("Content-Disposition").orElseThrow().startsWith("attachment;"))
+            assertEquals("nosniff", download.headers().firstValue("X-Content-Type-Options").orElseThrow())
+            assertEquals("sandbox; default-src 'none'", download.headers().firstValue("Content-Security-Policy").orElseThrow())
+            val head = request(server, href, "HEAD", headers = mapOf("Cookie" to cookie))
+            assertEquals(200, head.statusCode()); assertEquals("", head.body())
+            assertEquals(raw.toByteArray().size.toString(), head.headers().firstValue("Content-Length").orElseThrow())
+            assertError(request(server, href, headers = mapOf("Cookie" to cookie, "Range" to "bytes=0-2")), 400, "UNSUPPORTED_HEADER")
+            Files.writeString(reportFile, "changed")
+            assertError(request(server, href, headers = mapOf("Cookie" to cookie)), 409, "ARTIFACT_CHANGED")
             val runPath = "/workbench/api/v1/jobs/${job.id}/runs/${run.runId}"
             assertError(request(server, runPath), 401, "SESSION_REQUIRED")
             val attempt = assertEnvelope(request(server, runPath, headers = mapOf("Cookie" to cookie)), 200, "run")

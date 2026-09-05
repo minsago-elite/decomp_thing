@@ -30,8 +30,7 @@ All counts remain decimal strings. The report identity includes a digest of the
 observed bytes and is interpreted with its job/run binding. Revision binding is
 null because this producer does not attest a source revision. Acceptance is always
 `not-evaluated`; confidence and observation breadth never imply equivalence or an
-accepted reconstruction. Raw artifact download and its separate identity resolver
-remain unconnected, so sourceArtifact is null and the limitation is visible.
+accepted reconstruction. Observed report bytes now have a [digest-bound artifact descriptor and download](web-exploration-artifacts.md). Unreadable bytes retain a null sourceArtifact.
 
 The pinned attempt page offers an explicit Read exploration evidence action.
 Opening the attempt does not fetch the report automatically. Each response must
@@ -44,7 +43,7 @@ unsigned counts, malformed/partial/future/duplicate JSON, invalid score/counts,
 missing-byte projection, HTTP identity binding and no read-triggered workflow
 writes. Component tests verify deliberate reads, response identity rejection,
 limitations and abort behavior. The production bundle and distZip passed. Canonical
-validation reports, raw artifact resolution, proven missing-vs-inaccessible states
+validation reports, general artifact resolution, proven missing-vs-inaccessible states
 and complete evidence navigation remain outstanding.
 
 

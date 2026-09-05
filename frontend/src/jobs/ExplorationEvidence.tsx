@@ -43,6 +43,11 @@ export function ExplorationEvidence({ jobId, runId, basePath }: { jobId: string;
         <dt>Producer reports sandboxing</dt><dd>{summary.confidence.sandboxed ? 'Yes' : 'No'}</dd>
         <dt>Producer reports network isolation</dt><dd>{summary.confidence.networkIsolated ? 'Yes' : 'No'}</dd>
       </dl> : <p>No summary is available from these report bytes.</p>}
+      {report.sourceArtifact && <>
+        <p>Observed artifact: {report.sourceArtifact.sizeBytes} bytes. SHA-256: <code>{report.sourceArtifact.sha256}</code></p>
+        <p>The digest identifies the observed bytes; it does not validate the producer's claims. Changed bytes require a refreshed report.</p>
+        <a href={report.sourceArtifact.contentHref} download="exploration.json">Download observed exploration JSON</a>
+      </>}
       <p>Exploration observations do not establish accepted reconstruction.</p>
     </>}
   </section>;

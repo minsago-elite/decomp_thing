@@ -35,7 +35,7 @@ internal class WebApiController(
         val path = exchange.requestURI.rawPath
         if (!path.startsWith("${assets.basePath}api/")) return false
         val resource = path.removePrefix(prefix)
-        if (!path.startsWith(prefix) || !(resource in setOf("session", "bootstrap", "jobs") || resource.matches(Regex("(?:jobs|uploads)/[^/]+|jobs/[^/]+/runs(?:/[^/]+(?:/reports/exploration)?)?")))) {
+        if (!path.startsWith(prefix) || !(resource in setOf("session", "bootstrap", "jobs") || resource.matches(Regex("(?:jobs|uploads)/[^/]+|jobs/[^/]+/runs(?:/[^/]+(?:/reports/exploration)?)?|jobs/[^/]+/artifacts/[^/]+/content")))) {
             try {
                 val policy = if (exchange.requestMethod in setOf("POST", "PUT", "PATCH", "DELETE")) {
                     WebEndpointPolicy.jsonMutation(exchange.requestMethod)
@@ -106,6 +106,27 @@ internal class WebApiController(
                         put("state", progress.state); put("jobId", progress.jobId?.let { JsonPrimitive(it) } ?: JsonNull)
                     })
                 }
+                resource.matches(Regex("jobs/[^/]+/artifacts/[^/]+/content")) -> {
+                    access.authorize(exchange, WebEndpointPolicy.privateRead(allowHead = true))
+                    requireNoQuery(exchange)
+                    if (exchange.requestHeaders.keys.any { it.equals("Range", true) || it.startsWith("If-", true) }) {
+                        throw WebAccessDenied(400, "UNSUPPORTED_HEADER", "This bounded artifact endpoint does not support Range or conditional requests.")
+                    }
+                    val parts = resource.split('/')
+                    val bytes = WebExplorationArtifact.read(jobs, parts[1], parts[3])
+                    commonHeaders(exchange, UUID.randomUUID().toString())
+                    exchange.responseHeaders.set("Content-Type", "application/octet-stream")
+                    exchange.responseHeaders.set("Content-Disposition", "attachment; filename=\"exploration.json\"")
+                    exchange.responseHeaders.set("Content-Security-Policy", "sandbox; default-src 'none'")
+                    exchange.responseHeaders.set("Content-Length", bytes.size.toString())
+                    try {
+                        if (exchange.requestMethod == "HEAD" || bytes.isEmpty()) exchange.sendResponseHeaders(200, -1)
+                        else {
+                            exchange.sendResponseHeaders(200, bytes.size.toLong())
+                            exchange.responseBody.use { it.write(bytes) }
+                        }
+                    } finally { exchange.close() }
+                }
                 resource.matches(Regex("jobs/[^/]+/runs/[^/]+/reports/exploration")) -> {
                     access.authorize(exchange, WebEndpointPolicy.privateRead())
                     requireNoQuery(exchange); requireJsonAccept(exchange)
@@ -114,7 +135,7 @@ internal class WebApiController(
                     val bytes = try { jobs.readArtifact(parts[1], "reports/runs/${attempt.runId}/exploration.json", 1_048_576).bytes }
                         catch (_: JobStoreException) { null }
                     if (jobs.getAttempt(parts[1], parts[3]).version != attempt.version) throw WebJobServiceException("REPORT_CHANGED", "The attempt changed during this read. Refresh its evidence.")
-                    send(exchange, 200, "report", webExplorationReport(parts[1], parts[3], bytes))
+                    send(exchange, 200, "report", webExplorationReport(parts[1], parts[3], bytes, assets.basePath))
                 }
                 resource.matches(Regex("jobs/[^/]+/runs")) -> {
                     val session = checkNotNull(access.authorize(exchange, WebEndpointPolicy.privateRead()))
@@ -165,7 +186,7 @@ internal class WebApiController(
         } catch (_: decompengine.jobs.InvalidUploadException) {
             access.sendDenied(exchange, WebAccessDenied(422, "INVALID_ELF", "Upload a supported ELF binary with a complete header."))
         } catch (failure: WebJobServiceException) {
-            val status = if (failure.code in setOf("JOB_NOT_FOUND", "RUN_NOT_FOUND")) 404 else 503
+            val status = if (failure.code in setOf("JOB_NOT_FOUND", "RUN_NOT_FOUND")) 404 else if (failure.code == "ARTIFACT_CHANGED") 409 else 503
             access.sendDenied(exchange, WebAccessDenied(status, if (status == 404) "NOT_FOUND" else failure.code,
                 failure.message ?: "Job storage is unavailable."))
         } catch (_: JobStoreException) {
