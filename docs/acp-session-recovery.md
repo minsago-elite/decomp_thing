@@ -97,3 +97,10 @@ matrix coverage, and independently qualified external-agent persistence remain
 outstanding. #62 wire/runtime checks and #67 external-agent qualification are
 prerequisites for broader claims; this local session journal does not establish
 #72 production release eligibility.
+
+Separate-JVM journal-owner tests now halt without running `finally` before a prompt, after a
+persisted streaming event, and after a plain-text edit. On restart, the journal lock can be acquired,
+but missing cleanup proof blocks workspace reconciliation and no completed turn or accepted revision
+is inferred. Repeated reopen attempts preserve source bytes and the recorded event cursor. These
+fixtures do not launch an ACP peer or prove cleanup of surviving descendants; automatic host-death
+recovery and exactly-once workflow acceptance still require their separate lifecycle qualification.
