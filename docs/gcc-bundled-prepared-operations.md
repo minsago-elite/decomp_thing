@@ -249,3 +249,36 @@ reload, cold adoption, resumed invocation or successful lease release is added.
 The focused tests cover progress admission, invocation/path/byte rejection,
 forward-only prefix lineage, journal sequencing and host delivery. Provisioned
 interruption and real compiler benchmarks still require executed evidence.
+
+## Stopped analysis-state manifest
+
+After an interrupted prefix is validated, `executeUntilCheckpoint` also captures
+`state` through its retained directory descriptor. Capture streams file hashes,
+commits paths, byte lengths, device/inode/mount identities, ownership, modes,
+link counts and size/mtime/ctime metadata, and includes empty directories. It
+rechecks every name, identity and metadata record before returning. Symlinks,
+special files, hardlinked files, untrusted writes, foreign mounts and replaced
+state roots fail without content changes or cleanup. Empty/no-data state cannot
+supply a resume manifest.
+
+Capture enforces entry/depth/path, logical-file-size, aggregate-byte and elapsed
+wall-clock bounds. The prepared owner supplies its disk byte/inode ceilings and
+wall budget, subject to the manifest's 32,768-entry, depth-32 and 64-MiB JSON
+ceilings. Files are read with a fixed 64-KiB buffer; an oversized sparse file is
+rejected from metadata before reading its holes. This is a bounded capture phase,
+not proof of whole-run A10 aggregate resource compliance.
+
+The external journal durably publishes `analysis-state-manifest.json` and then
+`analysis-state-captured.json`, linking the full manifest digest/length/counts to
+the interrupted-prefix record. A distinct manifest publication/read API permits
+at most 64 MiB in owner-read-only mode; ordinary journal records retain their
+one-MiB hard bound. The same no-replace, descriptor identity and residue rules
+apply. A crash between manifest and receipt leaves an explicit staged residue;
+this checkpoint provides no cold adoption of it.
+
+`GccBundledInterruptedOperation` exposes defensive copies of the manifest and
+its receipt. They describe historical captured bytes, not a live immutable-state
+capability or successful resume. Same-owner resume still must revalidate this
+manifest and establish a new durable control lifecycle while preserving prior
+protocol evidence. No saved-project reload, recovery, release or real compiler
+fresh/resumed equivalence is established by these fixtures.

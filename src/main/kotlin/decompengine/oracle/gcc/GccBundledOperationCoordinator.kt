@@ -37,11 +37,15 @@ internal class GccBundledInterruptedOperation(
     executionReceiptBytes: ByteArray,
     prefixAssessmentReceiptBytes: ByteArray,
     val assessment: GccInterruptedPrefixAssessment,
+    val analysisState: GccBundledAnalysisStateSnapshot,
+    analysisStateReceiptBytes: ByteArray,
 ) {
     val complete: Boolean = false
     val releaseEligible: Boolean = false
     private val execution = executionReceiptBytes.copyOf()
     private val prefix = prefixAssessmentReceiptBytes.copyOf()
+    private val state = analysisStateReceiptBytes.copyOf()
+    val analysisStateReceiptBytes: ByteArray get() = state.copyOf()
     val executionReceiptBytes: ByteArray get() = execution.copyOf()
     val prefixAssessmentReceiptBytes: ByteArray get() = prefix.copyOf()
 }
@@ -120,7 +124,17 @@ internal class GccBundledPreparedOperation internal constructor(
             inputs.verify("after GCC interrupted prefix capture")
             lease.requireCurrentOperationRunRootAfterCgroupAbsence(runRoot)
             val prefixReceipt = journal.recordInterruptedPrefixAssessment(assessment)
-            GccBundledInterruptedOperation(receipt, prefixReceipt, prefix)
+            val state = borrowed.withPinnedDescriptor { descriptor ->
+                GccBundledAnalysisStateCapture.capture(descriptor, directories.getValue("state"), GccAnalysisStateCaptureLimits(
+                    maximumEntries = minOf(intent.diskPolicy.maximumFilesystemInodes, 32768L).toInt(),
+                    maximumTotalBytes = intent.diskPolicy.maximumFilesystemBytes,
+                    maximumWallMillis = intent.budgets.wallClockMillis,
+                ))
+            }
+            inputs.verify("after stopped GCC analysis-state capture")
+            lease.requireCurrentOperationRunRootAfterCgroupAbsence(runRoot)
+            val stateReceipt = journal.recordInterruptedAnalysisState(state)
+            GccBundledInterruptedOperation(receipt, prefixReceipt, prefix, state, stateReceipt)
         }
     }
 
