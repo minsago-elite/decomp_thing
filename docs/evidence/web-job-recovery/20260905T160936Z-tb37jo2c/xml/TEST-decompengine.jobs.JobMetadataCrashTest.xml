@@ -1,0 +1,14 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<testsuite name="decompengine.jobs.JobMetadataCrashTest" tests="8" skipped="0" failures="0" errors="0" timestamp="2026-09-05T16:10:48.305Z" hostname="whatsername" time="1.763">
+  <properties/>
+  <testcase name="death before file force preserves the old record()" classname="decompengine.jobs.JobMetadataCrashTest" time="0.305"/>
+  <testcase name="death before directory force preserves the new record()" classname="decompengine.jobs.JobMetadataCrashTest" time="0.213"/>
+  <testcase name="death after directory force preserves the new record()" classname="decompengine.jobs.JobMetadataCrashTest" time="0.236"/>
+  <testcase name="death after partial metadata write preserves the old record()" classname="decompengine.jobs.JobMetadataCrashTest" time="0.2"/>
+  <testcase name="death before replacement preserves the old record()" classname="decompengine.jobs.JobMetadataCrashTest" time="0.178"/>
+  <testcase name="death after replacement preserves the new record()" classname="decompengine.jobs.JobMetadataCrashTest" time="0.228"/>
+  <testcase name="death before metadata write preserves the old record()" classname="decompengine.jobs.JobMetadataCrashTest" time="0.183"/>
+  <testcase name="death after file force preserves the old record()" classname="decompengine.jobs.JobMetadataCrashTest" time="0.202"/>
+  <system-out><![CDATA[]]></system-out>
+  <system-err><![CDATA[]]></system-err>
+</testsuite>
