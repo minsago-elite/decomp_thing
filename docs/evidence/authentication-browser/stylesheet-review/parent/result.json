@@ -1,0 +1,17 @@
+{
+  "passed": true,
+  "browser": "153.0.8010.12",
+  "starts": 3,
+  "polls": 3,
+  "scenarios": [
+    "production stylesheet",
+    "explicit action",
+    "previews",
+    "text escaping",
+    "failure",
+    "retry",
+    "empty inventory"
+  ],
+  "renderedCssSha256": "288df7270cf65aacd9ab7351236ea1d6e89e0d7e7aebe9dc81bb8d045240a8ec",
+  "renderedHtmlSha256": "19dbe30e680df244cd96224663747e475222d83058a9358d67198996d9c2dd08"
+}

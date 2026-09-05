@@ -1,0 +1,14 @@
+{
+  "parentSourceCommit": "6ad4567",
+  "tipSourceCommit": "4594862",
+  "propagatedTip": "48de788",
+  "tipTreeUnchanged": true,
+  "files": {
+    "parent/dashboard.png": "94443b5a42f7a814be22a3aaf06c6b734a1cbe09c8df9040e8c0d53919cbc9eb",
+    "parent/result.json": "6ea267b7eedfdda1d371e5011968838d5ff11f63e6a29ca2b6be6ae760193c2f",
+    "parent/trace.zip": "4fe33078ab06ea10c961f5a67f2f2bb9ad156dd43ccb3ca0313fdb90459ae105",
+    "tip/dashboard.png": "ce5d6f8f5485332b46ede309cb7e88f71ffb896736f96c4a67ca60ff7bce322a",
+    "tip/trace.zip": "cfb666fc80e327773080b96092e8934834a92679c713ca70fd8e4588be1cbaf3",
+    "tip/result.json": "0f9dbffdb86068b923ea96902d5a73b773f6b7f6fd6fcb3c83fa40f37e57a76e"
+  }
+}
