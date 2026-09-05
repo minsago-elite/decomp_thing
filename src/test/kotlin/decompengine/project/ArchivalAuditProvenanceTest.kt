@@ -173,7 +173,8 @@ class ArchivalAuditProvenanceTest {
         for (field in listOf("missingModelProvenance", "missingSourceProvenance", "unresolvedEntityIds", "unresolvedBehaviorReportIds")) {
             assertEquals(identifier, document.getValue(field).jsonArray.single().jsonPrimitive.content)
         }
-        assertEquals(identifier, document.getValue("moduleBehaviorEvidence").jsonArray.single().jsonObject.getValue("moduleId").jsonPrimitive.content)
+        assertEquals(identifier, document.getValue("moduleSourceRevisions").jsonArray.single().jsonObject.getValue("moduleId").jsonPrimitive.content)
+        assertTrue(document.getValue("moduleBehaviorEvidence").jsonArray.isEmpty())
     }
 
     private fun fixture(accepted: Boolean = false): Path {

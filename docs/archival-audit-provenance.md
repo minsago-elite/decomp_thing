@@ -50,8 +50,10 @@ A wider local run executes 33 tests with 31 passes and two failures because
 `/usr/bin/bwrap` is unavailable. Those two existing scale-integration tests stop
 at behavioral execution; their runtime/audit assertions are not claimed verified.
 
-This checkpoint addresses the source/implementation-accounting slice of #37.
-The existing behavior-report loader still needs #36's closed, execution- and
-revision-bound record before it can attribute results to these module hashes.
-Malformed/stale/foreign behavior handling and evidence-scoped isolation claims
-remain incomplete. This change does not close #36, #37 or the A5 milestone.
+The `4389da3` checkpoint addresses the source/implementation-accounting slice of
+#37. The subsequent [local behavior-record implementation](behavior-revision-evidence-v1.md)
+binds comparisons to current source/build/executable observations and keeps
+malformed, stale, unbound and missing evidence unresolved. Module source revisions
+are presented separately from project behavior observations. The linked contract
+describes its local execution limits and the remaining retained-execution,
+runtime-library and file-corpus commitments. #36, #37 and A5 remain open.

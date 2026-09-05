@@ -1,5 +1,10 @@
 package decompengine.validation
 
+import decompengine.project.writeProjectEvidenceAtomically
+import kotlinx.serialization.json.Json
+import kotlinx.serialization.json.JsonObject
+import kotlinx.serialization.json.JsonPrimitive
+import kotlinx.serialization.json.jsonObject
 import java.io.ByteArrayOutputStream
 import java.io.InputStream
 import java.nio.file.Path
@@ -13,7 +18,6 @@ import java.util.concurrent.atomic.AtomicLong
 import kotlin.io.path.createDirectories
 import kotlin.io.path.exists
 import kotlin.io.path.pathString
-import kotlin.io.path.writeText
 
 data class ProcessInput(
     val id: String,
@@ -157,44 +161,34 @@ class SandboxRunner(
 ) {
     fun networkIsolationSupported(): Boolean = networkIsolation
 
+    internal fun evidencePolicy(capture: BehaviorEvidenceCapture): JsonObject {
+        require(timeout.toMillis() > 0L && Duration.ofMillis(timeout.toMillis()) == timeout) {
+            "behavior evidence requires a positive whole-millisecond timeout"
+        }
+        if (!bwrapPath.exists()) {
+            throw SandboxUnavailableException("bubblewrap not found at ${bwrapPath.pathString}; sandboxed execution is mandatory")
+        }
+        return JsonObject(mapOf(
+            "assurance" to JsonPrimitive("local-path-stability-checks-not-production-authority"),
+            "environment" to JsonObject(mapOf("PATH" to JsonPrimitive("/usr/bin"))),
+            "workingDirectory" to JsonPrimitive("/tmp"),
+            "networkIsolationRequested" to JsonPrimitive(networkIsolation),
+            "timeoutMillis" to JsonPrimitive(timeout.toMillis()),
+            "maximumStdoutBytes" to JsonPrimitive(outputLimits.maximumStdoutBytes),
+            "maximumStderrBytes" to JsonPrimitive(outputLimits.maximumStderrBytes),
+            "maximumAggregateBytes" to JsonPrimitive(outputLimits.maximumAggregateBytes),
+            "bubblewrap" to JsonObject(capture.executable(bwrapPath) +
+                ("path" to JsonPrimitive(bwrapPath.toAbsolutePath().normalize().toString()))),
+            "timeout" to JsonObject(capture.executable(timeoutPath) +
+                ("path" to JsonPrimitive(timeoutPath.toAbsolutePath().normalize().toString()))),
+        ))
+    }
+
     fun run(executable: Path, input: ProcessInput): ProcessOutput {
         if (!bwrapPath.exists()) {
             throw SandboxUnavailableException("bubblewrap not found at ${bwrapPath.pathString}; sandboxed execution is mandatory")
         }
-        val absoluteExecutable = executable.toAbsolutePath().normalize()
-        val command = mutableListOf(
-            timeoutPath.pathString,
-            "${maxOf(1L, timeout.toSeconds())}s",
-            bwrapPath.pathString,
-        )
-        if (networkIsolation) {
-            command += "--unshare-net"
-        }
-        command += listOf(
-            "--unshare-pid",
-            "--new-session",
-            "--die-with-parent",
-            "--ro-bind",
-            "/usr",
-            "/usr",
-            "--ro-bind",
-            "/lib",
-            "/lib",
-            "--ro-bind",
-            "/lib64",
-            "/lib64",
-            "--dir",
-            "/tmp",
-            "--dir",
-            "/program",
-            "--ro-bind",
-            absoluteExecutable.pathString,
-            "/program/executable",
-            "--chdir",
-            "/tmp",
-            "/program/executable",
-        )
-        command += input.args
+        val command = behaviorSandboxCommand(executable, input.args, timeout.toMillis(), bwrapPath, timeoutPath, networkIsolation)
 
         val builder = ProcessBuilder(command).redirectErrorStream(false)
         builder.environment().clear()
@@ -326,7 +320,7 @@ class SandboxRunner(
 
 class BehaviorComparator(
     private val sandbox: SandboxRunner = SandboxRunner(),
-    private val maximumAggregateOutputBytes: Long = Long.MAX_VALUE,
+    private val maximumAggregateOutputBytes: Long = 16L * 1024 * 1024,
 ) {
     fun compare(
         id: String,
@@ -334,8 +328,9 @@ class BehaviorComparator(
         rebuiltBinary: Path,
         cases: List<ProcessInput>,
         reportsDir: Path,
+        project: BehaviorProjectContext? = null,
     ): BehaviorComparisonReport {
-        val report = evaluate(id, originalBinary, rebuiltBinary, cases, reportsDir)
+        val report = evaluate(id, originalBinary, rebuiltBinary, cases, reportsDir, project)
         if (!report.matches) {
             throw BehaviorMismatchException("behavior comparison failed for $id; see ${report.reportPath.pathString}")
         }
@@ -348,24 +343,43 @@ class BehaviorComparator(
         rebuiltBinary: Path,
         cases: List<ProcessInput>,
         reportsDir: Path,
+        project: BehaviorProjectContext? = null,
     ): BehaviorComparisonReport {
-        require(cases.isNotEmpty()) { "at least one behavior case is required" }
+        require(id.matches(Regex("[A-Za-z0-9][A-Za-z0-9_.-]{0,127}"))) { "behavior report ID must be a safe filename component" }
+        require(cases.size in 1..1024) { "between one and 1024 behavior cases are required" }
+        require(cases.map { it.id }.distinct().size == cases.size) { "behavior case IDs must be unique" }
+        require(cases.all { input -> input.id.isNotEmpty() && input.id.length <= 256 && input.args.size <= 256 &&
+            input.args.all { it.length <= 64 * 1024 && '\u0000' !in it } }) { "behavior case fields exceed their bounds" }
+        require(cases.sumOf { it.stdin.size.toLong() } <= 8L * 1024 * 1024 &&
+            cases.sumOf { input -> input.args.sumOf { it.toByteArray().size.toLong() } } <= 1024L * 1024
+        ) { "behavior corpus exceeds its byte bound" }
+        val inputs = cases.map { ProcessInput(it.id, it.args.toList(), it.stdin.clone()) }
         reportsDir.createDirectories()
+        val capture = BehaviorEvidenceCapture()
+        val originalIdentity = capture.executable(originalBinary)
+        val rebuiltIdentity = capture.executable(rebuiltBinary)
+        val comparisonLimit = minOf(maximumAggregateOutputBytes, 16L * 1024 * 1024)
+        require(comparisonLimit > 0L) { "behavior comparison output bound must be positive" }
+        val policy = JsonObject(sandbox.evidencePolicy(capture) +
+            ("maximumComparisonOutputBytes" to JsonPrimitive(comparisonLimit)))
+        val projectRevision = project?.let { capture.project(it, originalIdentity, rebuiltBinary) }
         var aggregateOutputBytes = 0L
         fun runBounded(binary: Path, input: ProcessInput): ProcessOutput {
+            capture.requireCurrent()
             val output = sandbox.run(binary, input)
+            capture.requireCurrent()
             aggregateOutputBytes = Math.addExact(
                 aggregateOutputBytes,
                 Math.addExact(output.stdout.size.toLong(), output.stderr.size.toLong()),
             )
-            if (aggregateOutputBytes > maximumAggregateOutputBytes) {
+            if (aggregateOutputBytes > comparisonLimit) {
                 throw BehaviorOutputLimitException(
-                    "behavior comparison output exceeds $maximumAggregateOutputBytes aggregate bytes",
+                    "behavior comparison output exceeds $comparisonLimit aggregate bytes",
                 )
             }
             return output
         }
-        val results = cases.map { input ->
+        val results = inputs.map { input ->
             BehaviorCaseResult(
                 input = input,
                 original = runBounded(originalBinary, input),
@@ -374,12 +388,22 @@ class BehaviorComparator(
         }
         val report = BehaviorComparisonReport(
             id = id,
-            originalBinary = originalBinary,
-            rebuiltBinary = rebuiltBinary,
+            originalBinary = originalBinary.toAbsolutePath().normalize(),
+            rebuiltBinary = rebuiltBinary.toAbsolutePath().normalize(),
             cases = results,
             reportPath = reportsDir.resolve("$id.behavior.json"),
         )
-        report.reportPath.writeText(report.toJson())
+        if (project != null) {
+            require(capture.project(project, originalIdentity, rebuiltBinary) == projectRevision) {
+                "behavior project changed during execution"
+            }
+        }
+        capture.requireCurrent()
+        val encoded = BehaviorEvidence.encode(Json.parseToJsonElement(report.toJson()).jsonObject,
+            originalIdentity, rebuiltIdentity, policy, projectRevision)
+        require(encoded.toByteArray().size <= BehaviorEvidence.MAXIMUM_REPORT_BYTES) { "behavior report exceeds its byte bound" }
+        capture.requireCurrent()
+        writeProjectEvidenceAtomically(report.reportPath, encoded)
         return report
     }
 }
@@ -424,16 +448,4 @@ private fun ProcessOutput.toJson(): String = """
 
 private fun ByteArray.toHex(): String = joinToString("") { "%02x".format(it) }
 
-private fun String.escapeJson(): String =
-    buildString {
-        for (char in this@escapeJson) {
-            when (char) {
-                '\\' -> append("\\\\")
-                '"' -> append("\\\"")
-                '\n' -> append("\\n")
-                '\r' -> append("\\r")
-                '\t' -> append("\\t")
-                else -> append(char)
-            }
-        }
-    }
+private fun String.escapeJson(): String = JsonPrimitive(this).toString().removeSurrounding("\"")
