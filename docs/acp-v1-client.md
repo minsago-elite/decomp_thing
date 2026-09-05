@@ -330,6 +330,12 @@ before/after replacement, and before/after directory force. A fresh store reads 
 pre-replacement failures and a complete new record for post-replacement failures; the input remains intact
 and ordinary cleanup removes the temporary file. These exception cases run cleanup and therefore do not
 substitute for process death during I/O, abandoned-file reclamation, or power-loss qualification.
+`JobMetadataCrashTest` separately halts a benign child JVM at the same eight application I/O boundaries,
+including after writing half a private record. It verifies terminal process state and absence of `finally`
+cleanup before opening a fresh store. The old or new published record remains complete and the input is
+unchanged. Pre-replacement temporary files remain private and are not promoted by interrupted-job recovery.
+These files are deliberately retained pending qualified reclamation. The test covers process death at controlled
+publication boundaries, not interruption inside a kernel syscall, whole-upload crash publication, or power loss.
 
 Uploads stage their input and metadata together in a private `.upload-` directory beneath the job store.
 The input and metadata are forced before the directory is atomically renamed to its final job ID; the store
