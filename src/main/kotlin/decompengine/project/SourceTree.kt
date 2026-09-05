@@ -1793,7 +1793,12 @@ object SourceTreeGenerator {
         return buildString {
             append("# Unresolved reconstruction evidence\n\n")
             append("This list is evidence-bounded. The generated project does not claim universal behavioral equivalence.\n\n")
-            if (rows.isEmpty()) append("No structurally unresolved entities were identified. Untested behavior remains unresolved.\n")
+            val entityCount = model.functions.size + model.globals.size + model.types.size
+            append("Recovery assessment: unassessed for $entityCount entities ")
+            append("(${model.functions.size} functions, ${model.globals.size} globals, ${model.types.size} types). ")
+            append("Extraction labels and implementation acceptance do not establish recovery accuracy. ")
+            append("The confidence report retains the complete model-bound unassessed population.\n\n")
+            if (rows.isEmpty()) append("The historical extraction-status list has no unresolved entries. Recovery accuracy and untested behavior remain unassessed.\n")
             else {
                 append("| Kind | Stable ID | Status | Provenance |\n|---|---|---|---|\n")
                 rows.sortedBy { it.second.first }.forEach { (kind, details) ->

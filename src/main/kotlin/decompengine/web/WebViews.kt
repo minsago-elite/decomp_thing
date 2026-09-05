@@ -228,7 +228,7 @@ fun renderSourceFile(
             ?.get("score")?.jsonPrimitive?.doubleOrNull?.takeIf { it.isFinite() && it in 0.0..1.0 }
     }.getOrNull()
     val provenance = if (fileEvidence == null) "" else """
-        <div class="source-provenance"><span><b>Generator</b>${generator.escapeHtml()}</span><span><b>Entities</b>${entities.escapeHtml().ifBlank { "none" }}</span><span><b>Implementation</b>${implementation.escapeHtml()}</span>${moduleConfidence?.let { "<span><b>Reported structural heuristic</b>${"%.3f".format(java.util.Locale.ROOT, it)} · uncalibrated</span>" }.orEmpty()}</div>
+        <div class="source-provenance"><span><b>Generator</b>${generator.escapeHtml()}</span><span><b>Entities</b>${entities.escapeHtml().ifBlank { "none" }}</span><span><b>Implementation</b>${implementation.escapeHtml()}</span><span><b>Scored recovery evidence</b>Not available in this view</span>${moduleConfidence?.let { "<span><b>Reported structural heuristic</b>${"%.3f".format(java.util.Locale.ROOT, it)} · uncalibrated</span>" }.orEmpty()}</div>
     """.trimIndent()
     return page(
         title = relativePath,
