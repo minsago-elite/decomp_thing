@@ -165,6 +165,14 @@ class BuiltinCapturedRepairHarness(
                 override fun changes(control: BuiltinExecutionControl): List<AgentFileChange> {
                     control.checkpoint(); session.close(); return captured.changes()
                 }
+                override fun finalChanges() = captured.changes()
+                override fun finalToolAudit(): JsonObject {
+                    val records = audit.snapshot()
+                    return builtinCapturedAuditJson(records.drop(restorationRecords), records.take(restorationRecords), context.audit())
+                }
+                override fun checkpointToolAudit(control: BuiltinExecutionControl): JsonObject {
+                    control.checkpoint(); return finalToolAudit()
+                }
                 override fun checkpointSnapshot(control: BuiltinExecutionControl): BuiltinWorkspaceSnapshot {
                     control.checkpoint(); return snapshot(captured.snapshot())
                 }

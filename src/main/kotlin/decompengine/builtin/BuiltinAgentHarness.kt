@@ -71,6 +71,10 @@ interface BuiltinToolSession : AutoCloseable {
     fun restoreCheckpointStage(expectedSourceSha256: String, control: BuiltinExecutionControl) = Unit
     /** Persist exact stage evidence before the journal and its externally visible checkpoint commitment. */
     fun persistCheckpointSource(snapshot: BuiltinWorkspaceSnapshot, control: BuiltinExecutionControl) = Unit
+    /** Bounded final metadata after cleanup, including interrupted candidate edits; no new tool effects. */
+    fun finalChanges(): List<AgentFileChange>? = null
+    fun finalToolAudit(): JsonObject? = null
+    fun checkpointToolAudit(control: BuiltinExecutionControl): JsonObject? = null
 }
 
 data class BuiltinTraceRecord(val sequence: Int, val state: BuiltinLoopState, val evidenceSha256: String? = null)
@@ -186,10 +190,18 @@ class BuiltinAgentHarness(
                 try { session?.close(); cleanup = true } catch (_: Exception) { /* Never claim cleaned-up success. */ }
             }
             if (!cleanup) stop = BuiltinStop.TOOL_FAILED
+            var finalAudit: JsonObject? = null
+            try { session?.finalChanges()?.let { changes = it.toList() } } catch (_: Exception) { stop = BuiltinStop.TOOL_FAILED }
+            try { finalAudit = session?.finalToolAudit() } catch (_: Exception) { stop = BuiltinStop.TOOL_FAILED }
             try {
                 if (stop != BuiltinStop.SUSPENDED && resumeAdmitted) journal?.append(BuiltinJournalKind.TERMINAL, buildJsonObject {
                     put("stop", stop.name); put("cleanupComplete", cleanup); put("usage", usage())
                     put("state", BuiltinLoopState.TERMINATED.name)
+                    put("candidateChanges", builtinChangeJson(changes))
+                    put("toolAudit", finalAudit ?: JsonNull)
+                    val returnedChanges = if (stop in setOf(BuiltinStop.COMPLETED, BuiltinStop.NO_CHANGE, BuiltinStop.VALIDATION_REQUIRED,
+                            BuiltinStop.REFUSED, BuiltinStop.CANCELLED, BuiltinStop.EXHAUSTED)) changes else emptyList()
+                    put("resultChangesSha256", decompengine.project.agentFileChangeSetSha256(returnedChanges))
                 })
             } catch (_: Exception) { stop = BuiltinStop.TOOL_FAILED }
             try { journal?.close() } catch (_: Exception) { stop = BuiltinStop.TOOL_FAILED }
@@ -438,6 +450,7 @@ class BuiltinAgentHarness(
                 val authority = tools.checkpointAuthoritySha256(control)
                 check(authority == null || authority.matches(Regex("[a-f0-9]{64}")))
                 put("toolAuthoritySha256", authority)
+                put("toolAudit", tools.checkpointToolAudit(control) ?: JsonNull)
                 put("usage", usage()); put("eventSequence", eventSequence)
                 put("remainingWallClockNanos", remainingNanos)
                 put("deadlineEpochMillis", checkpointConfiguration!!.clock.millis() + remainingNanos / 1_000_000)
@@ -465,8 +478,9 @@ class BuiltinAgentHarness(
             val value = payload.getValue("resumeState").jsonObject
             // A redacted checkpoint is evidence only. Never feed replacement text back as original context/source.
             check(payload["stateSha256"] == JsonPrimitive(checkpointStateHash(value, journalConfiguration!!.maximumRecordBytes)))
-            check(value.keys == setOf("version", "state", "loopLimitsSha256", "context", "contextSha256", "sourceSha256", "toolAuthoritySha256", "usage",
-                "eventSequence", "remainingWallClockNanos", "deadlineEpochMillis", "elapsedWallClockNanos", "usedCallIds", "repeated", "records", "contextEntries"))
+            val required = setOf("version", "state", "loopLimitsSha256", "context", "contextSha256", "sourceSha256", "toolAuthoritySha256", "usage",
+                "eventSequence", "remainingWallClockNanos", "deadlineEpochMillis", "elapsedWallClockNanos", "usedCallIds", "repeated", "records", "contextEntries")
+            check(value.keys == required || value.keys == required + "toolAudit")
             check(value["version"] == JsonPrimitive(2) && value["state"] == JsonPrimitive("READY_FOR_MODEL"))
             check(value["loopLimitsSha256"] == JsonPrimitive(digest(limits.toString().toByteArray())))
             fun number(key: String) = value.getValue(key).jsonPrimitive.long
