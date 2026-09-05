@@ -191,6 +191,10 @@ class UploadServer(
             EmbeddedWebAssets.load(basePath = basePath)
         }
         WebUiMode.LEGACY -> {
+            require(java.net.InetAddress.getByName(host).isLoopbackAddress) {
+                "legacy browser access requires a loopback host until a remote access profile is qualified"
+            }
+            LocalWebAccessConfiguration(webOrigin(host, port.takeIf { it != 0 } ?: 1), basePath)
             require(basePath == "/") { "--base-path is supported by --ui spa" }
             require(devFrontendOrigin == null) { "--dev-frontend-origin requires --ui spa" }
             null
@@ -201,11 +205,9 @@ class UploadServer(
     private val jobs = WebJobService(store, analyzer, reconstructor, executor, shutdownTimeoutMs = 5000, failureDiagnostic = { diagnostic(it, "Background operation failed") })
     private val sourceEvidence = WebSourceEvidence(store, sourceProfiles, jobs::readArtifact)
     private val archiveEvidence = WebArchiveEvidence(store, sourceEvidence, jobs::readArtifact)
-    private val access = spaAssets?.let {
-        LocalWebAccess(LocalWebAccessConfiguration(webOrigin(host, server.address.port), basePath,
-            setOfNotNull(devFrontendOrigin)))
-    }
-    private val api = access?.let { WebApiController(it, checkNotNull(spaAssets), jobs) }
+    private val access = LocalWebAccess(LocalWebAccessConfiguration(webOrigin(host, server.address.port), basePath,
+        setOfNotNull(devFrontendOrigin)))
+    private val api = spaAssets?.let { WebApiController(access, it, jobs) }
     private val requestExecutor = ThreadPoolExecutor(
         16, 16, 0, TimeUnit.MILLISECONDS, ArrayBlockingQueue(64),
         { task -> Thread(task, "decomp-web-http").apply { isDaemon = true } },
@@ -218,7 +220,10 @@ class UploadServer(
     val browserOrigin: String = devFrontendOrigin ?: webOrigin(host, serverPort)
 
     /** The CLI calls this explicitly; no HTTP route can issue a local link. */
-    fun issueBrowserBootstrap(): WebBootstrapToken = checkNotNull(access) { "Browser sessions require --ui spa" }.issueBootstrap()
+    fun issueBrowserBootstrap(): WebBootstrapToken {
+        check(spaAssets != null) { "Browser sessions require --ui spa" }
+        return access.issueBootstrap()
+    }
 
     init {
         try {
@@ -227,7 +232,7 @@ class UploadServer(
             server.stop(0)
             requestExecutor.shutdownNow()
             requestDeadlines.shutdownNow()
-            access?.close()
+            access.close()
             jobs.close()
             throw failure
         }
@@ -248,7 +253,7 @@ class UploadServer(
         server.stop(delaySeconds)
         requestExecutor.shutdownNow()
         requestDeadlines.shutdownNow()
-        access?.close()
+        access.close()
         jobs.close()
     }
 
@@ -265,6 +270,7 @@ class UploadServer(
         }
         val segments = exchange.requestURI.path.split('/').filter(String::isNotBlank)
         try {
+            access.authorize(exchange, WebEndpointPolicy.transport(setOf("GET", "HEAD", "POST", "PUT", "PATCH", "DELETE", "OPTIONS")))
             val legacyJsonRead = segments.size in 3..4 && segments.take(2) == listOf("api", "jobs") &&
                 (segments.size == 3 || segments[3] == "events")
             if (legacyJsonRead) {

@@ -191,3 +191,31 @@ slow consumers and imported disabled Git config. Assertions inspect denied
 operations and unchanged owned state; fixtures never execute uploaded binaries
 or imported hooks. Review the actual packaged server, not only a fixture handler
 (#161/#164/#176/#177/#208/#216/#224/#225).
+
+## Legacy transport checkpoint
+
+Both UI modes now require loopback binding. Legacy startup rejects non-loopback configuration
+before opening the server socket or acquiring job storage; a remotely exposed legacy profile
+is not qualified. Legacy requests pass through the same `LocalWebAccess` transport preflight
+as v1 routing: exact configured Host/Origin pairing, bounded headers, forwarded-header rejection
+and same-origin/none Fetch Metadata when present. This covers pages, JSON, downloads and
+mutation routes before their handlers run. No permissive CORS headers are added.
+
+This preflight is not session authorization. Legacy requests still do not require the SPA
+session/CSRF token, and absent Origin remains accepted by the transport-only policy, including
+non-browser requests. Legacy bootstrap/session and form/automation migration remain open.
+The existing SPA private/mutation policy continues to enforce its stronger session and CSRF
+requirements after transport validation. Do not describe legacy mode as authenticated.
+
+HTTP regression cases use benign read and empty mutation requests with foreign Origin,
+cross-site Fetch Metadata and forwarding headers, checking denial across routes, unchanged job
+bytes and zero workflow callback executions. Matching/absent Origin reads remain compatible.
+Non-loopback startup is tested against an absent storage root. Host parsing/alias behavior is
+shared with the existing access-policy suite; this checkpoint does not add a remote proxy profile.
+
+The [packaged legacy browser report](evidence/web-legacy-transport-browser-20260905.json)
+passes with this preflight enabled: local navigation/reload/polling and missing/empty/restored
+journal recovery work without page exceptions. The report discloses test-owned fixture edits,
+GET/HEAD-only browser requests, unchanged installation and confirmed shutdown/cleanup. Chrome
+used test-only `--no-sandbox`; no workflow ran. This is recorded Linux/Chrome compatibility,
+not a session/CSRF or remote-access qualification.

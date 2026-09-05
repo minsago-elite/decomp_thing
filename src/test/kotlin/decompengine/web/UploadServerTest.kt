@@ -39,6 +39,48 @@ import kotlin.test.assertTrue
 
 class UploadServerTest {
     @Test
+    fun `legacy transport rejects foreign origins and forwarded authority before operations`() {
+        var executions = 0
+        withServer(JobAnalyzer { _, _ -> executions++ }, JobReconstructor { _, _ -> executions++ }) { server, root ->
+            val id = uploadedJobId(server)
+            val record = root.resolve(id).resolve("job.json")
+            val original = record.readBytes()
+            val origin = "http://127.0.0.1:${server.serverPort}"
+            val client = java.net.http.HttpClient.newHttpClient()
+            fun transportRequest(method: String, path: String, headers: Map<String, String> = emptyMap()): java.net.http.HttpResponse<String> {
+                val builder = java.net.http.HttpRequest.newBuilder(URI(origin + path))
+                    .method(method, java.net.http.HttpRequest.BodyPublishers.noBody())
+                headers.forEach { (key, value) -> builder.header(key, value) }
+                return client.send(builder.build(), java.net.http.HttpResponse.BodyHandlers.ofString())
+            }
+            for ((header, value) in listOf("Origin" to "https://unconfigured.invalid", "Sec-Fetch-Site" to "cross-site",
+                "X-Forwarded-Host" to "unconfigured.invalid")) {
+                for ((method, path) in listOf("GET" to "/", "GET" to "/jobs/$id", "GET" to "/api/jobs/$id",
+                    "GET" to "/api/jobs/$id/events", "GET" to "/jobs/$id/artifacts/reports/missing.json",
+                    "POST" to "/jobs/$id/explore", "POST" to "/jobs/$id/reconstruct", "POST" to "/jobs")) {
+                    val response = transportRequest(method, path, mapOf(header to value))
+                    assertEquals(403, response.statusCode(), "$header $method $path")
+                    assertTrue(!response.body().contains(value))
+                }
+            }
+            assertEquals(200, transportRequest("GET", "/api/jobs/$id", mapOf("Origin" to origin)).statusCode())
+            assertEquals(200, transportRequest("GET", "/api/jobs/$id").statusCode())
+            assertContentEquals(original, record.readBytes())
+            assertEquals(0, executions)
+        }
+    }
+
+    @Test
+    fun `legacy nonloopback binding is unavailable without a qualified access profile`() {
+        val root = createTempDirectory("web-legacy-binding-").resolve("absent")
+        val failure = kotlin.test.assertFailsWith<IllegalArgumentException> {
+            UploadServer("0.0.0.0", 0, root)
+        }
+        assertTrue(failure.message.orEmpty().contains("loopback host"))
+        assertTrue(!root.exists())
+    }
+
+    @Test
     fun `artifact display uses supplied metadata and service listing stays bounded`() = withServer { server, root ->
         val id = uploadedJobId(server)
         val job = decompengine.jobs.JobStore(root).get(id)
