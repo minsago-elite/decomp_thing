@@ -118,7 +118,7 @@ class JobStore(root: Path) {
     fun get(jobId: String): Job {
         val jobDir = jobDirectory(jobId)
         val payload = try {
-            OracleJson.parse(readStableRegularFile(root, "$jobId/job.json", 256L * 1024).bytes).jsonObject
+            OracleJson.parse(readStableRegularFile(root, "$jobId/job.json", MAX_METADATA_BYTES.toLong()).bytes).jsonObject
         } catch (_: IOException) {
             throw JobStoreException("job metadata is unavailable or its path changed")
         }
@@ -271,6 +271,7 @@ class JobStore(root: Path) {
     private fun persist(job: Job, jobDir: Path = jobDirectory(job.id).createDirectories()) {
         val bytes = (Json { prettyPrint = true }.encodeToString(JsonElement.serializer(), job.toJson()) + "\n")
             .toByteArray(Charsets.UTF_8)
+        require(bytes.size <= MAX_METADATA_BYTES) { "job metadata exceeds the 256 KiB limit" }
         val temporary = Files.createTempFile(jobDir, ".job-metadata-", ".tmp")
         try {
             FileChannel.open(temporary, WRITE, NOFOLLOW_LINKS).use { channel ->
@@ -286,6 +287,7 @@ class JobStore(root: Path) {
     }
 
     private companion object {
+        const val MAX_METADATA_BYTES = 256 * 1024
         val VALID_STATUSES = setOf("uploaded", "queued", "analyzing", "complete", "failed")
     }
 }

@@ -291,7 +291,9 @@ This is benign JVM-worker evidence; it does not cover orphaned external processe
 
 Job metadata updates write and force a temporary file in the job directory, atomically replace `job.json`,
 then force the directory. There is no non-atomic fallback. An existing reader retains its previous complete
-snapshot; a failure before replacement leaves the published record intact. Temporary files are removed on
+snapshot. Before publication, the writer enforces the same 256 KiB encoded UTF-8 JSON limit as the reader,
+including escaping overhead; oversized records fail without replacing an existing record or publishing an upload.
+A failure before replacement leaves the published record intact. Temporary files are removed on
 ordinary failure. A failure after replacement, including directory-force failure, may have published the new
 record and is not proof of rollback. Tests cover held readers and interruption before publication.
 
