@@ -299,6 +299,18 @@ internal object FullTreeCallObservations {
         }
     }
 
+    internal fun recordValidator(
+        inventory: JsonObject,
+        shard: FullTreeCallObservationShardInput,
+    ): (JsonObject) -> String {
+        val unitBounds = callUnitBounds(inventory)
+        val unitIds = shard.units.mapTo(hashSetOf()) { it.controlString("id") }
+        if (unitIds.size != shard.units.size || !unitBounds.keys.containsAll(unitIds)) {
+            callFail("call-observation shard owners are inconsistent with its inventory")
+        }
+        return { call -> validateCall(call, unitIds, unitBounds) }
+    }
+
     private fun validateCall(
         call: JsonObject,
         unitIds: Set<String>,

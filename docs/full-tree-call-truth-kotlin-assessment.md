@@ -28,6 +28,26 @@ closed. The historical assessment continues to authenticate the frozen policy-v2
 input hashes, so corrected v3 semantics never reuse a legacy producer identity. The new producer's
 structural envelope validator does not rederive facts and cannot confer authority by itself.
 
+`FullTreeCallObservationProducer.generateShardTo` now connects that same raw scan to a private
+SQLite sink. The sink holds one bounded canonical call at a time, indexes stable call IDs and
+unsigned DIE offsets, rejects duplicate DIEs even when their call IDs differ, and projects calls in
+indexed canonical order. Page count, page cache, record bytes, entity count, scanned DIEs, and output
+bytes have independent limits; raw generation also caps them against the authenticated scope and
+accounts for the sink in its resident-memory model. SQLite journaling and memory mapping are disabled,
+and projection rejects temporary sorting. Every ordinary success or failure closes the connection
+and removes its private scratch, with identity, permission, membership, and link-count rechecks.
+
+This path preserves the policy-v3 configuration and exact diagnostic bytes. Tests exercise raw
+ELF parity across commit intervals, reversed arrival order, empty shards, duplicate and contradictory
+records, poisoned terminal states, cancellation, failing output, and each resource bound. A synthetic
+4,500-call projection exceeds the old 64 MiB envelope ceiling while using a 64 KiB SQLite page cache;
+its streamed digest is independently checked without materializing the output in memory.
+
+The stream result explicitly fixes `authoritativeReleaseEvidence=false`. Output is caller-owned
+staging, may be partial on failure, and is not atomically published by this API. Scratch owners remain
+cooperating same-UID principals; checkpoint checks do not exclude transient same-inode mutations.
+This is a storage migration slice, not a contained all-shard run or a call-truth publication receipt.
+
 This checkpoint cannot operate on the known historical full-tree scale: the prior call-truth tree is
 about 899 MiB, function truth about 2.5 GiB, and call observations about 1.1 GiB, while this bounded
 in-memory diagnostic intentionally caps its combined diagnostic output bytes at 64 MiB. Full authority
@@ -35,7 +55,7 @@ still requires all of the following:
 
 - production integration of the Kotlin-owned raw function/call producers with the call composer;
 - a Kotlin-owned contained whole-process-tree runtime and durable absence receipt for that scan;
-- a scalable SQLite-backed call-observation sink plus sharded Kotlin call-truth publication protocol;
+- isolated integration of the SQLite call sink plus sharded Kotlin call-truth publication protocol;
 - real full-tree parity and hostile interruption/restart evidence for those authorities.
 
 The Python producer remains migration/differential compatibility input only. Its usage and execution

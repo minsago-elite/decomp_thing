@@ -3,7 +3,11 @@ package decompengine.oracle.fulltree
 import decompengine.oracle.core.OracleArtifacts
 import decompengine.oracle.core.OracleJson
 import java.io.ByteArrayOutputStream
+import java.io.IOException
+import java.io.OutputStream
+import java.nio.file.Files
 import java.nio.file.Path
+import kotlin.test.assertContentEquals
 import kotlin.test.Test
 import kotlin.test.assertEquals
 import kotlin.test.assertFailsWith
@@ -13,6 +17,257 @@ import kotlinx.serialization.json.JsonObject
 import kotlinx.serialization.json.JsonPrimitive
 
 class FullTreeCallObservationProducerTest {
+    @Test
+    fun `raw SQLite call projection matches the diagnostic producer exactly`() = withCallFixture { root, artifact, scope, inventory, shard ->
+        val expected = FullTreeCallObservationProducer.generateShardWithLimits(
+            artifact, inventory, scope, shard, root, FullTreeControlLimits(), callProducerLimits(),
+        )
+        listOf(1, 4, 4096).forEach { checkpointRows ->
+            val output = ByteArrayOutputStream()
+            val actual = FullTreeCallObservationProducer.generateShardTo(
+                artifact, inventory, scope, shard, root, output,
+                producerLimits = callProducerLimits(),
+                sqliteLimits = FullTreeCallObservationSqliteLimits(databaseCheckpointRows = checkpointRows),
+            )
+            assertContentEquals(FullTreeCallObservations.canonicalEnvelopeBytes(expected.document), output.toByteArray())
+            assertEquals(expected.outputSha256, actual.outputSha256)
+            assertEquals(expected.outputBytes, actual.outputBytes)
+            assertEquals(expected.entities, actual.entities)
+            assertEquals(expected.scannedDies, actual.scannedDies)
+            assertEquals(5L, actual.scored)
+            assertTrue(actual.databaseHighWaterBytes > 0L)
+            assertEquals(false, actual.authoritativeReleaseEvidence)
+            assertNoCallScratch(root)
+        }
+    }
+
+    @Test
+    fun `raw SQLite call projection enforces record entity database and output limits`() =
+        withCallFixture { root, artifact, scope, inventory, shard ->
+            listOf(
+                FullTreeCallObservationSqliteLimits(maximumRecordBytes = 32),
+                FullTreeCallObservationSqliteLimits(maximumCalls = 1),
+                FullTreeCallObservationSqliteLimits(maximumDatabaseBytes = 4096),
+                FullTreeCallObservationSqliteLimits(maximumOutputBytes = 32),
+            ).forEach { limits ->
+                assertFailsWith<Exception> {
+                    FullTreeCallObservationProducer.generateShardTo(
+                        artifact, inventory, scope, shard, root, OutputStream.nullOutputStream(),
+                        producerLimits = callProducerLimits(), sqliteLimits = limits,
+                    )
+                }
+                assertNoCallScratch(root)
+            }
+        }
+
+    @Test
+    fun `raw SQLite call projection revokes scratch when the output fails`() =
+        withCallFixture { root, artifact, scope, inventory, shard ->
+            val output = object : OutputStream() {
+                override fun write(value: Int) = throw IOException("injected output failure")
+            }
+            val failure = assertFailsWith<IOException> {
+                FullTreeCallObservationProducer.generateShardTo(
+                    artifact, inventory, scope, shard, root, output, producerLimits = callProducerLimits(),
+                )
+            }
+            assertEquals("injected output failure", failure.message)
+            assertNoCallScratch(root)
+        }
+
+    private fun withCallFixture(action: (Path, Path, AuthenticatedFullTreeScope, Path, String) -> Unit) =
+        inControlTemporaryDirectory { root ->
+            val controls = createFullTreeControlFixture(root.resolve("controls"))
+            val fixture = CallObservationElfFixture.build()
+            val artifact = writeElf(root.resolve("calls.elf"), fixture.bytes)
+            val scope = callScopeForArtifact(
+                controls.authenticatedScope(), OracleArtifacts.sha256(fixture.bytes), fixture.bytes.size.toLong(),
+            )
+            val inventoryPath = root.resolve("calls-inventory.json")
+            val inventory = FullTreeInventoryControl.generateAndPublish(artifact, scope, inventoryPath, maximumWorkers = 1)
+            val shard = (inventory.inventory.controlArray("shards").single() as JsonObject).controlString("id")
+            action(root, artifact, scope, inventoryPath, shard)
+        }
+
+    private fun assertNoCallScratch(root: Path) {
+        Files.newDirectoryStream(root).use { children ->
+            assertTrue(children.none { it.fileName.toString().startsWith(".call-observation-sqlite-") })
+        }
+    }
+
+    @Test
+    fun `SQLite call sink orders records independently of arrival and handles empty shards`() =
+        withCallSinkFixture { root, inputs, scope, observations ->
+            val outputs = listOf(observations, observations.reversed()).map { ordered ->
+                val output = ByteArrayOutputStream()
+                FullTreeCallObservationSqlite.open(root, inputs, scope, callSqliteLimits(), {}).use { sink ->
+                    sink.recordScannedDies(19)
+                    ordered.forEach(sink::accept)
+                    sink.finishTo(output)
+                    assertFailsWith<IllegalArgumentException> { sink.finishTo(output) }
+                    assertFailsWith<IllegalArgumentException> { sink.recordScannedDies(1) }
+                }
+                assertNoCallScratch(root)
+                output.toByteArray()
+            }
+            assertContentEquals(outputs[0], outputs[1])
+            val output = ByteArrayOutputStream()
+            FullTreeCallObservationSqlite.open(root, inputs, scope, callSqliteLimits(), {}).use { sink ->
+                sink.recordScannedDies(1)
+                val result = sink.finishTo(output)
+                assertEquals(0L, result.entities)
+            }
+            FullTreeCallObservations.validateEnvelope(
+                OracleJson.parseCanonical(output.toByteArray()) as JsonObject,
+                scope.document, scope.sha256, inputs.inventory, inputs.inventoryArtifactSha256, inputs.shard,
+            )
+            assertNoCallScratch(root)
+        }
+
+    @Test
+    fun `SQLite call sink rejects repeated DIEs even with different call identities`() =
+        withCallSinkFixture { root, inputs, scope, observations ->
+            val first = observations.first { it.population == "scored" }
+            listOf(first, first.copy(returnPcRva = first.returnPcRva!! + 1UL,
+                callerLocalReturnOffset = first.callerLocalReturnOffset!! + 1UL)).forEach { duplicate ->
+                FullTreeCallObservationSqlite.open(root, inputs, scope, callSqliteLimits(), {}).use { sink ->
+                    sink.recordScannedDies(19)
+                    sink.accept(first)
+                    assertFailsWith<java.sql.SQLException> { sink.accept(duplicate) }
+                    assertFailsWith<IllegalArgumentException> { sink.finishTo(OutputStream.nullOutputStream()) }
+                }
+                assertNoCallScratch(root)
+            }
+        }
+
+    @Test
+    fun `SQLite call sink rejects contradictory targets owners offsets and resource counts`() =
+        withCallSinkFixture { root, inputs, scope, observations ->
+            val first = observations.first { it.population == "scored" }
+            listOf(
+                first.copy(unitId = "foreign-unit"),
+                first.copy(callerLocalReturnOffset = ULong.MAX_VALUE),
+                first.copy(population = "unobservable"),
+                first.copy(target = first.target.copy(kind = "indirect-proven")),
+            ).forEach { invalid ->
+                FullTreeCallObservationSqlite.open(root, inputs, scope, callSqliteLimits(), {}).use { sink ->
+                    sink.recordScannedDies(19)
+                    assertFailsWith<IllegalArgumentException> { sink.accept(invalid) }
+                    assertFailsWith<IllegalArgumentException> { sink.accept(first) }
+                    assertFailsWith<IllegalArgumentException> { sink.finishTo(OutputStream.nullOutputStream()) }
+                }
+                assertNoCallScratch(root)
+            }
+            FullTreeCallObservationSqlite.open(root, inputs, scope, callSqliteLimits(), {}).use { sink ->
+                assertFailsWith<IllegalArgumentException> { sink.recordScannedDies(0) }
+            }
+            FullTreeCallObservationSqlite.open(root, inputs, scope, callSqliteLimits(), {}).use { sink ->
+                sink.recordScannedDies(1)
+                sink.accept(first)
+                assertFailsWith<IllegalArgumentException> { sink.finishTo(OutputStream.nullOutputStream()) }
+            }
+            FullTreeCallObservationSqlite.open(
+                root, inputs, scope, callSqliteLimits().copy(maximumScannedDies = 1), {},
+            ).use { sink ->
+                assertFailsWith<IllegalArgumentException> { sink.recordScannedDies(2) }
+            }
+            assertNoCallScratch(root)
+        }
+
+    @Test
+    fun `SQLite call sink cancellation poisons partial state and cleans private storage`() =
+        withCallSinkFixture { root, inputs, scope, observations ->
+            listOf(
+                "after opening call-observation SQLite state",
+                "after committing SQLite call observations",
+                "while projecting a SQLite call observation",
+                "while writing call-observation canonical bytes",
+            ).forEach { stopAt ->
+                val failure = assertFailsWith<IOException> {
+                    FullTreeCallObservationSqlite.open(
+                        root, inputs, scope, callSqliteLimits().copy(databaseCheckpointRows = 1),
+                        { label -> if (label == stopAt) throw IOException("injected cancellation") },
+                    ).use { sink ->
+                        sink.recordScannedDies(19)
+                        observations.forEach(sink::accept)
+                        sink.finishTo(OutputStream.nullOutputStream())
+                    }
+                }
+                assertEquals("injected cancellation", failure.message)
+                assertNoCallScratch(root)
+            }
+        }
+
+    private fun callSqliteLimits() = FullTreeCallObservationSqliteLimits(
+        maximumOutputBytes = 1024 * 1024, maximumCalls = 1000,
+    )
+
+    @Test
+    fun `SQLite call sink streams beyond the diagnostic envelope ceiling`() =
+        withCallFixture { root, artifact, originalScope, _, shard ->
+            val bounds = originalScope.document.controlObject("bounds")
+            val expandedBounds = JsonObject(bounds.mapValues { (_, value) ->
+                JsonObject((value as JsonObject).toMutableMap().apply {
+                    this["serializedBytes"] = JsonPrimitive(128L * 1024L * 1024L)
+                })
+            })
+            val expandedScope = JsonObject(originalScope.document.toMutableMap().apply {
+                this["bounds"] = expandedBounds
+            })
+            val scope = AuthenticatedFullTreeScope(
+                document = expandedScope, sha256 = OracleArtifacts.sha256(OracleJson.canonicalBytes(expandedScope)),
+                sourceLock = originalScope.sourceLock, sourceLockSha256 = originalScope.sourceLockSha256,
+                artifactManifest = originalScope.artifactManifest,
+                artifactManifestSha256 = originalScope.artifactManifestSha256,
+            )
+            val inventory = root.resolve("large-inventory.json")
+            FullTreeInventoryControl.generateAndPublish(artifact, scope, inventory, maximumWorkers = 1)
+            val inputs = FullTreeCallObservationProducer.authenticateShardInputs(inventory, scope, shard)
+            val observation = FullTreeObservedCallSite(
+                callerId = "function-rva-0x140", callerLocalReturnOffset = 8UL, dieOffset = 0UL,
+                population = "scored", reasonCode = null, returnPcRva = 0x148UL,
+                target = FullTreeObservedCallTarget(
+                    "external-unresolved", "direct", null, listOf("symbol_" + "a".repeat(16_000)),
+                    0x40UL, emptyList(), "none",
+                ),
+                tailCall = false, unitId = inputs.shard.units.single().controlString("id"),
+            )
+            val digest = java.security.MessageDigest.getInstance("SHA-256")
+            val output = java.security.DigestOutputStream(OutputStream.nullOutputStream(), digest)
+            val limits = FullTreeCallObservationSqliteLimits(
+                maximumDatabaseBytes = 128L * 1024L * 1024L,
+                maximumOutputBytes = 128L * 1024L * 1024L,
+                maximumCalls = 4500, maximumRecordBytes = 32 * 1024, maximumCacheBytes = 64 * 1024,
+                databaseCheckpointRows = 127,
+            )
+            FullTreeCallObservationSqlite.open(root, inputs, scope, limits, {}).use { sink ->
+                sink.recordScannedDies(4501)
+                repeat(4500) { index -> sink.accept(observation.copy(dieOffset = (index + 0x1000).toULong())) }
+                val result = sink.finishTo(output)
+                assertTrue(result.outputBytes > 64L * 1024L * 1024L)
+                assertTrue(result.databaseHighWaterBytes <= limits.maximumDatabaseBytes)
+                assertEquals(4500L, result.entities)
+                assertEquals(
+                    digest.digest().joinToString("") { (it.toInt() and 0xff).toString(16).padStart(2, '0') },
+                    result.outputSha256,
+                )
+            }
+            assertNoCallScratch(root)
+        }
+
+    private fun withCallSinkFixture(
+        action: (Path, FullTreeCallObservationAuthenticatedInputs, AuthenticatedFullTreeScope,
+            List<FullTreeObservedCallSite>) -> Unit,
+    ) = withCallFixture { root, artifact, scope, inventory, shard ->
+        val inputs = FullTreeCallObservationProducer.authenticateShardInputs(inventory, scope, shard)
+        val observations = mutableListOf<FullTreeObservedCallSite>()
+        FullTreeCallObservationProducer.scanAuthenticatedShard(
+            artifact, scope, inputs, root, FullTreeControlLimits(), callProducerLimits(),
+            recordScannedDies = {}, accept = observations::add,
+        )
+        action(root, inputs, scope, observations)
+    }
+
     @Test
     fun `handcrafted ELF observes call sites and target classifications deterministically`() =
         inControlTemporaryDirectory { root ->

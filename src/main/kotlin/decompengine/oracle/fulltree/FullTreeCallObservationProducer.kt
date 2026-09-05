@@ -2,6 +2,7 @@ package decompengine.oracle.fulltree
 
 import decompengine.oracle.core.OracleArtifacts
 import decompengine.oracle.core.OracleJson
+import java.io.OutputStream
 import java.nio.file.Path
 import java.util.Collections
 import java.util.TreeMap
@@ -78,11 +79,64 @@ internal data class FullTreeObservedCallSite(
 /**
  * Raw Kotlin/JVM call observer over authenticated ELF/DWARF bytes.
  *
- * This first sink is intentionally in-memory and capped at 64 MiB. The traversal exposes a typed
- * accept callback internally so a release-sized SQLite projection can replace the collector
- * without changing raw-evidence semantics. Python and ACP have no entry point into the scan.
+ * The bounded diagnostic collector and streaming SQLite sink share the same traversal and
+ * policy-v3 record projection. Python and ACP have no entry point into the scan.
  */
 internal object FullTreeCallObservationProducer {
+    fun generateShardTo(
+        richArtifact: Path,
+        inventoryPath: Path,
+        scope: AuthenticatedFullTreeScope,
+        shardId: String,
+        scratchParent: Path,
+        output: OutputStream,
+        controlLimits: FullTreeControlLimits = FullTreeControlLimits(),
+        producerLimits: FullTreeCallObservationProducerLimits = FullTreeCallObservationProducerLimits(),
+        sqliteLimits: FullTreeCallObservationSqliteLimits = FullTreeCallObservationSqliteLimits(),
+    ): FullTreeCallObservationStreamResult {
+        FullTreeScopeControl.validate(scope, controlLimits)
+        val bounds = scope.document.controlObject("bounds").controlObject("perShard")
+        val boundedSqlite = sqliteLimits.copy(
+            maximumCalls = minOf(
+                sqliteLimits.maximumCalls.toLong(), producerLimits.maximumCalls.toLong(), bounds.controlLong("entities"),
+            ).toInt(),
+            maximumDatabaseBytes = minOf(
+                sqliteLimits.maximumDatabaseBytes, maxOf(4096L, bounds.controlLong("serializedBytes") * 4L),
+            ),
+            maximumOutputBytes = minOf(sqliteLimits.maximumOutputBytes, bounds.controlLong("serializedBytes")),
+            maximumScannedDies = minOf(sqliteLimits.maximumScannedDies, producerLimits.maximumScannedDies),
+        )
+        val modeledSinkBytes = boundedSqlite.maximumCacheBytes.toLong() +
+            boundedSqlite.maximumRecordBytes.toLong() * 8L + 16L * 1024L * 1024L
+        val boundedProducer = producerLimits.copy(
+            maximumRetainedBytes = maxOf(producerLimits.maximumRetainedBytes, modeledSinkBytes),
+        )
+        requireResidentBudget(scope.document, boundedProducer)
+        StableControlFile.open(inventoryPath, controlLimits.maximumInventoryBytes.toLong(), "call inventory").use { inventory ->
+            StableControlFile.open(richArtifact, controlLimits.maximumRichArtifactBytes, "call artifact").use { artifact ->
+                val inputs = authenticateShardInputs(inventoryPath, scope, shardId, controlLimits)
+                require(inputs.inventoryArtifactSha256 == inventory.authenticatedSha256) {
+                    "call-observation inventory changed during authentication"
+                }
+                val expectedArtifact = scope.document.controlObject("oracle").controlString("richArtifactSha256")
+                require(artifact.authenticatedSha256 == expectedArtifact) { "call-observation artifact differs from scope" }
+                FullTreeCallObservationSqlite.open(scratchParent, inputs, scope, boundedSqlite, {}).use { sink ->
+                    scanAuthenticatedShard(
+                        richArtifact, scope, inputs, scratchParent, controlLimits, boundedProducer,
+                        recordScannedDies = sink::recordScannedDies, accept = sink::accept,
+                    )
+                    inventory.verifyUnchanged("inventory before call projection")
+                    artifact.verifyUnchanged("artifact before call projection")
+                    val result = sink.finishTo(output)
+                    FullTreeScopeControl.validate(scope, controlLimits)
+                    inventory.verifyUnchanged("inventory after call projection")
+                    artifact.verifyUnchanged("artifact after call projection")
+                    return result
+                }
+            }
+        }
+    }
+
     fun generateShard(
         richArtifact: Path,
         inventoryPath: Path,
@@ -636,32 +690,8 @@ private class CallObservationAccumulator(
         if (calls.size >= limits.maximumCalls) {
             throw FullTreeControlException("call-observation population exceeds its bound")
         }
-        val callerRva = observation.callerId?.removePrefix("function-rva-")
-        val identity = JsonObject(
-            mapOf(
-                "caller" to (callerRva?.let(::JsonPrimitive) ?: JsonNull),
-                "die" to JsonPrimitive(callHex(observation.dieOffset)),
-                "return" to (observation.returnPcRva?.let { JsonPrimitive(callHex(it)) } ?: JsonNull),
-                "unit" to JsonPrimitive(observation.unitId),
-            ),
-        )
-        val id = "call-" + OracleArtifacts.sha256(OracleJson.canonicalBytes(identity)).take(32)
-        val document = JsonObject(
-            mapOf(
-                "callerId" to (observation.callerId?.let(::JsonPrimitive) ?: JsonNull),
-                "callerLocalReturnOffset" to (
-                    observation.callerLocalReturnOffset?.let { JsonPrimitive(callHex(it)) } ?: JsonNull
-                ),
-                "dieOffset" to JsonPrimitive(callHex(observation.dieOffset)),
-                "id" to JsonPrimitive(id),
-                "population" to JsonPrimitive(observation.population),
-                "reasonCode" to (observation.reasonCode?.let(::JsonPrimitive) ?: JsonNull),
-                "returnPcRva" to (observation.returnPcRva?.let { JsonPrimitive(callHex(it)) } ?: JsonNull),
-                "target" to targetDocument(observation.target),
-                "tailCall" to JsonPrimitive(observation.tailCall),
-                "unitId" to JsonPrimitive(observation.unitId),
-            ),
-        )
+        val document = callObservationDocument(observation)
+        val id = document.controlString("id")
         val encoded = OracleJson.canonicalBytes(document)
         val encodedModel = Math.multiplyExact(encoded.size.toLong(), 2L)
         retainedBytes = Math.addExact(retainedBytes, Math.addExact(encodedModel, MODELED_CALL_BYTES))
@@ -685,53 +715,98 @@ private class CallObservationAccumulator(
         finished = true
         val documents = calls.values.toList()
         val scored = documents.count { it.controlString("population") == "scored" }.toLong()
-        return JsonObject(
-            mapOf(
-                "calls" to JsonArray(documents),
-                "counts" to JsonObject(
-                    mapOf(
-                        "observedCallSites" to JsonPrimitive(documents.size.toLong()),
-                        "scannedDies" to JsonPrimitive(scannedDies),
-                        "scored" to JsonPrimitive(scored),
-                        "units" to JsonPrimitive(shard.units.size.toLong()),
-                        "unobservable" to JsonPrimitive(documents.size.toLong() - scored),
-                    ),
-                ),
-                "oracle" to JsonObject(
-                    mapOf(
-                        "configurationSha256" to JsonPrimitive(FullTreeCallObservations.configurationSha256),
-                        "inventoryIndexSha256" to JsonPrimitive(inventoryIndexSha256),
-                        "richArtifactSha256" to JsonPrimitive(richArtifactSha256),
-                        "scopeSha256" to JsonPrimitive(scopeSha256),
-                    ),
-                ),
-                "schemaVersion" to JsonPrimitive(1),
-                "shard" to JsonObject(
-                    mapOf(
-                        "id" to JsonPrimitive(shard.identifier),
-                        "inputSha256" to JsonPrimitive(shard.inputSha256),
-                    ),
-                ),
-            ),
+        return callObservationEnvelope(
+            shard, inventoryIndexSha256, richArtifactSha256, scopeSha256,
+            documents, documents.size.toLong(), scored, scannedDies,
         )
     }
-
-    private fun targetDocument(target: FullTreeObservedCallTarget): JsonObject = JsonObject(
-        mapOf(
-            "aliases" to JsonArray(target.aliases.map(::JsonPrimitive)),
-            "dispatchKind" to JsonPrimitive(target.dispatchKind),
-            "functionId" to (target.functionId?.let(::JsonPrimitive) ?: JsonNull),
-            "kind" to JsonPrimitive(target.kind),
-            "originDieOffset" to (target.originDieOffset?.let { JsonPrimitive(callHex(it)) } ?: JsonNull),
-            "provenFunctionIds" to JsonArray(target.provenFunctionIds.map(::JsonPrimitive)),
-            "targetEvidence" to JsonPrimitive(target.targetEvidence),
-        ),
-    )
 
     private fun requireMutable() {
         if (finished) throw FullTreeControlException("call-observation accumulator is already finished")
     }
 }
+
+internal fun callObservationDocument(observation: FullTreeObservedCallSite): JsonObject {
+    val callerRva = observation.callerId?.removePrefix("function-rva-")
+    val identity = JsonObject(
+        mapOf(
+            "caller" to (callerRva?.let(::JsonPrimitive) ?: JsonNull),
+            "die" to JsonPrimitive(callHex(observation.dieOffset)),
+            "return" to (observation.returnPcRva?.let { JsonPrimitive(callHex(it)) } ?: JsonNull),
+            "unit" to JsonPrimitive(observation.unitId),
+        ),
+    )
+    val id = "call-" + OracleArtifacts.sha256(OracleJson.canonicalBytes(identity)).take(32)
+    return JsonObject(
+        mapOf(
+            "callerId" to (observation.callerId?.let(::JsonPrimitive) ?: JsonNull),
+            "callerLocalReturnOffset" to (
+                observation.callerLocalReturnOffset?.let { JsonPrimitive(callHex(it)) } ?: JsonNull
+            ),
+            "dieOffset" to JsonPrimitive(callHex(observation.dieOffset)),
+            "id" to JsonPrimitive(id),
+            "population" to JsonPrimitive(observation.population),
+            "reasonCode" to (observation.reasonCode?.let(::JsonPrimitive) ?: JsonNull),
+            "returnPcRva" to (observation.returnPcRva?.let { JsonPrimitive(callHex(it)) } ?: JsonNull),
+            "target" to callTargetDocument(observation.target),
+            "tailCall" to JsonPrimitive(observation.tailCall),
+            "unitId" to JsonPrimitive(observation.unitId),
+        ),
+    )
+}
+
+internal fun callObservationEnvelope(
+    shard: FullTreeCallObservationShardInput,
+    inventoryIndexSha256: String,
+    richArtifactSha256: String,
+    scopeSha256: String,
+    documents: List<JsonObject>,
+    observedCallSites: Long,
+    scored: Long,
+    scannedDies: Long,
+): JsonObject {
+    return JsonObject(
+        mapOf(
+            "calls" to JsonArray(documents),
+            "counts" to JsonObject(
+                mapOf(
+                    "observedCallSites" to JsonPrimitive(observedCallSites),
+                    "scannedDies" to JsonPrimitive(scannedDies),
+                    "scored" to JsonPrimitive(scored),
+                    "units" to JsonPrimitive(shard.units.size.toLong()),
+                    "unobservable" to JsonPrimitive(observedCallSites - scored),
+                ),
+            ),
+            "oracle" to JsonObject(
+                mapOf(
+                    "configurationSha256" to JsonPrimitive(FullTreeCallObservations.configurationSha256),
+                    "inventoryIndexSha256" to JsonPrimitive(inventoryIndexSha256),
+                    "richArtifactSha256" to JsonPrimitive(richArtifactSha256),
+                    "scopeSha256" to JsonPrimitive(scopeSha256),
+                ),
+            ),
+            "schemaVersion" to JsonPrimitive(1),
+            "shard" to JsonObject(
+                mapOf(
+                    "id" to JsonPrimitive(shard.identifier),
+                    "inputSha256" to JsonPrimitive(shard.inputSha256),
+                ),
+            ),
+        ),
+    )
+}
+
+private fun callTargetDocument(target: FullTreeObservedCallTarget): JsonObject = JsonObject(
+    mapOf(
+        "aliases" to JsonArray(target.aliases.map(::JsonPrimitive)),
+        "dispatchKind" to JsonPrimitive(target.dispatchKind),
+        "functionId" to (target.functionId?.let(::JsonPrimitive) ?: JsonNull),
+        "kind" to JsonPrimitive(target.kind),
+        "originDieOffset" to (target.originDieOffset?.let { JsonPrimitive(callHex(it)) } ?: JsonNull),
+        "provenFunctionIds" to JsonArray(target.provenFunctionIds.map(::JsonPrimitive)),
+        "targetEvidence" to JsonPrimitive(target.targetEvidence),
+    ),
+)
 
 private fun callAttributeContext(attribute: FullTreeDwarfAbbreviationAttribute): FullTreeDwarfFormContext =
     when (attribute.name) {

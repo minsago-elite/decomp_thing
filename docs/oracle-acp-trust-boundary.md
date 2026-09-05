@@ -148,10 +148,14 @@ and rich ELF bytes; parses bounded DWARF call sites and expressions; derives sta
 closed direct, virtual, proven-indirect, and unresolved classifications without Python or ACP input. Only subprogram
 origins can identify direct or virtual callees. Object origins remain indirect, and incompatible reference-chain
 kinds fail closed. Policy v3 has a distinct configuration digest; the bounded historical assessment retains explicit
-policy-v2 digest derivation only for migration evidence. This slice is still an in-memory fixture-scale producer with
-no contained runtime, durable absence receipt, SQLite sink, production call-truth composition, or release authority.
+policy-v2 digest derivation only for migration evidence. The diagnostic API retains its in-memory ceiling; neither
+producer path has a contained runtime, durable absence receipt, production call-truth composition, or release authority.
 Its structural envelope validator checks canonical bindings but does not rederive artifact facts and is never an
-authority boundary.
+authority boundary. The raw observer now also feeds a bounded SQLite sink and canonical output stream, preserving
+policy-v3 bytes with independently limited database pages, cache, records, calls, and output. Raw inputs remain
+guarded through projection and ordinary exits revoke private scratch. A projection larger than 64 MiB is tested;
+the returned metadata still fixes release authority false. This storage path does not yet supply isolated runtime
+ownership, atomic observation publication, all-shard reconciliation, or call-truth/scoring authority.
 
 For A15 candidate behavior, Kotlin now has a descriptor-bound
 [pre-START admission](llvm-candidate-execution-prestart.md) which authenticates an opaque candidate and the exact
