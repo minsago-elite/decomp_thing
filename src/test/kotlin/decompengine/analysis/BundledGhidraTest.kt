@@ -20,6 +20,16 @@ import org.junit.jupiter.api.Assumptions.assumeTrue
 
 class BundledGhidraTest {
     @Test
+    fun `shared worker command rejects empty duplicate and ambiguous classpaths`() {
+        val java = Path.of("/runtime/bin/java")
+        val release = Path.of("/application/ghidra")
+        val bridge = Path.of("/application/bridge.jar")
+        for (entries in listOf(emptyList(), listOf(bridge, bridge), listOf(Path.of("/application/part:other.jar")))) {
+            assertFailsWith<IllegalArgumentException> { GhidraWorkerCommand.prefix(java, release, entries) }
+        }
+    }
+
+    @Test
     fun `all call site regressions have JUnit discoverable void signatures`() {
         val methods = RecoveredCallSitesTest::class.java.declaredMethods.filter {
             it.isAnnotationPresent(org.junit.jupiter.api.Test::class.java)

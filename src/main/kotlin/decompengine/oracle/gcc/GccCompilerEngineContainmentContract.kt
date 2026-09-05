@@ -51,7 +51,39 @@ internal enum class GccCompilerEngineContainmentArtifactRole(val wireName: Strin
     SYSTEMCTL_EXECUTABLE("systemctl-executable"),
     SYSTEMD_BUSCTL_EXECUTABLE("systemd-busctl-executable"),
     BOOT_KEEPER_CLASSPATH("boot-keeper-classpath"),
+    GHIDRA_BRIDGE_JAR("ghidra-bridge-jar"),
+    GHIDRA_EXPORT_GUARD("ghidra-export-guard"),
+    EXPORTER_SOURCE("exporter-source"),
 }
+
+internal val GCC_LEGACY_CONTAINMENT_ARTIFACT_ROLES: Set<GccCompilerEngineContainmentArtifactRole> = Collections.unmodifiableSet(setOf(
+    GccCompilerEngineContainmentArtifactRole.ENGINE_BINARY,
+    GccCompilerEngineContainmentArtifactRole.BENCHMARK_PROFILE,
+    GccCompilerEngineContainmentArtifactRole.SOURCE_LOCK,
+    GccCompilerEngineContainmentArtifactRole.BUILD_RECORD,
+    GccCompilerEngineContainmentArtifactRole.ORACLE_MANIFEST,
+    GccCompilerEngineContainmentArtifactRole.TOOLCHAIN_REPRODUCTION,
+    GccCompilerEngineContainmentArtifactRole.GHIDRA_ARCHIVE,
+    GccCompilerEngineContainmentArtifactRole.GHIDRA_RUNTIME_MANIFEST,
+    GccCompilerEngineContainmentArtifactRole.GHIDRA_ANALYZE_HEADLESS,
+    GccCompilerEngineContainmentArtifactRole.EXPORTER_CLASSFILE,
+    GccCompilerEngineContainmentArtifactRole.JAVA_EXECUTABLE,
+    GccCompilerEngineContainmentArtifactRole.BUBBLEWRAP_EXECUTABLE,
+    GccCompilerEngineContainmentArtifactRole.RESOURCE_LIMITER_EXECUTABLE,
+    GccCompilerEngineContainmentArtifactRole.SYSTEMD_RUN_EXECUTABLE,
+    GccCompilerEngineContainmentArtifactRole.SYSTEMCTL_EXECUTABLE,
+    GccCompilerEngineContainmentArtifactRole.SYSTEMD_BUSCTL_EXECUTABLE,
+    GccCompilerEngineContainmentArtifactRole.BOOT_KEEPER_CLASSPATH,
+))
+
+internal val GCC_BUNDLED_CONTAINMENT_ARTIFACT_ROLES: Set<GccCompilerEngineContainmentArtifactRole> = Collections.unmodifiableSet(GCC_LEGACY_CONTAINMENT_ARTIFACT_ROLES - setOf(
+    GccCompilerEngineContainmentArtifactRole.GHIDRA_ANALYZE_HEADLESS,
+    GccCompilerEngineContainmentArtifactRole.EXPORTER_CLASSFILE,
+) + setOf(
+    GccCompilerEngineContainmentArtifactRole.GHIDRA_BRIDGE_JAR,
+    GccCompilerEngineContainmentArtifactRole.GHIDRA_EXPORT_GUARD,
+    GccCompilerEngineContainmentArtifactRole.EXPORTER_SOURCE,
+))
 
 internal data class GccCompilerEngineContainmentArtifactIdentity(
     val role: GccCompilerEngineContainmentArtifactRole,
@@ -145,9 +177,13 @@ internal class GccCompilerEngineContainmentRequest(
     environment: Map<String, String>,
     val outputLease: GccCompilerEngineOutputLeaseIdentity,
     val budgets: GccCompilerEngineContainmentBudgets,
+    val bundledRuntime: GccBundledGhidraRuntime? = null,
 ) {
     val artifacts: List<GccCompilerEngineContainmentArtifactIdentity> = boundedArtifactCopy(artifacts)
-    val command: List<String> = boundedStringCopy(command, MAXIMUM_COMMAND_ARGUMENTS, "command")
+    val command: List<String> = boundedStringCopy(
+        command, MAXIMUM_COMMAND_ARGUMENTS, "command",
+        if (bundledRuntime == null) MAXIMUM_COMMAND_COMPONENT_CHARS else MAXIMUM_COMMAND_TOTAL_CHARS,
+    )
     val environment: Map<String, String> = boundedEnvironmentCopy(environment)
 
     init {
@@ -165,7 +201,8 @@ internal class GccCompilerEngineContainmentRequest(
                 }
         }
         val byRole = this.artifacts.associateBy(GccCompilerEngineContainmentArtifactIdentity::role)
-        require(byRole.size == this.artifacts.size && byRole.keys == REQUIRED_ARTIFACT_ROLES) {
+        val requiredRoles = if (bundledRuntime == null) GCC_LEGACY_CONTAINMENT_ARTIFACT_ROLES else GCC_BUNDLED_CONTAINMENT_ARTIFACT_ROLES
+        require(byRole.size == this.artifacts.size && byRole.keys == requiredRoles) {
             "containment definition must bind every exact artifact role once"
         }
         require(this.artifacts.map { it.path }.toSet().size == this.artifacts.size) {
@@ -178,17 +215,23 @@ internal class GccCompilerEngineContainmentRequest(
             "read-only containment inputs must not overlap the output lease"
         }
         require(this.command.isNotEmpty())
-        require(this.command.first() == byRole.getValue(
-            GccCompilerEngineContainmentArtifactRole.GHIDRA_ANALYZE_HEADLESS,
-        ).path.toString()) { "command must start with the bound analyzeHeadless executable" }
-        val requiredArguments = setOf(
-            byRole.getValue(GccCompilerEngineContainmentArtifactRole.ENGINE_BINARY).path.toString(),
-            byRole.getValue(GccCompilerEngineContainmentArtifactRole.EXPORTER_CLASSFILE).path.toString(),
-            analysisState.path.toString(),
-            outputLease.path.toString(),
-        )
-        require(requiredArguments.all(this.command::contains)) {
-            "command must explicitly bind the engine, analysis state, and output lease paths"
+        if (bundledRuntime != null) {
+            require(this.command == bundledRuntime.command(this.artifacts, analysisState, outputLease)) {
+                "command differs from the exact bundled direct-API worker invocation"
+            }
+        } else {
+            require(this.command.first() == byRole.getValue(
+                GccCompilerEngineContainmentArtifactRole.GHIDRA_ANALYZE_HEADLESS,
+            ).path.toString()) { "command must start with the bound analyzeHeadless executable" }
+            val requiredArguments = setOf(
+                byRole.getValue(GccCompilerEngineContainmentArtifactRole.ENGINE_BINARY).path.toString(),
+                byRole.getValue(GccCompilerEngineContainmentArtifactRole.EXPORTER_CLASSFILE).path.toString(),
+                analysisState.path.toString(),
+                outputLease.path.toString(),
+            )
+            require(requiredArguments.all(this.command::contains)) {
+                "command must explicitly bind the engine, analysis state, and output lease paths"
+            }
         }
     }
 }
@@ -239,6 +282,7 @@ internal class GccCompilerEngineValidatedContainmentDefinition private construct
     val runtimeSha256: String,
     val inputSetSha256: String,
     val outputLeaseSha256: String,
+    val bundledRuntime: GccBundledGhidraRuntime?,
 ) {
     private val bytes = canonicalBytes.copyOf()
     val canonicalBytes: ByteArray
@@ -269,6 +313,7 @@ internal class GccCompilerEngineValidatedContainmentDefinition private construct
                 facts.runtimeSha256,
                 facts.inputSetSha256,
                 facts.outputLeaseSha256,
+                request.bundledRuntime,
             )
         }
 
@@ -624,7 +669,9 @@ private fun renderDefinition(request: GccCompilerEngineContainmentRequest): Defi
     val leaseWithoutHash = outputLeaseJson(request.outputLease)
     val outputLeaseSha256 = sha256(leaseWithoutHash)
     val outputLease = JsonObject(leaseWithoutHash + ("leaseSha256" to JsonPrimitive(outputLeaseSha256)))
-    val runtimeSha256 = sha256(runtimeArtifacts)
+    val runtimeSha256 = sha256(request.bundledRuntime?.let {
+        JsonObject(mapOf("artifacts" to runtimeArtifacts, "bundledRuntime" to it.toJson()))
+    } ?: runtimeArtifacts)
     val inputSetSha256 = sha256(
         JsonObject(mapOf("analysisState" to analysisState, "artifacts" to inputArtifacts)),
     )
@@ -639,14 +686,14 @@ private fun renderDefinition(request: GccCompilerEngineContainmentRequest): Defi
             "budgets" to budgetsJson(request.budgets),
             "runtimeSha256" to JsonPrimitive(runtimeSha256),
             "inputSetSha256" to JsonPrimitive(inputSetSha256),
-        ),
+        ) + (request.bundledRuntime?.let { mapOf("bundledRuntime" to it.toJson()) } ?: emptyMap()),
     )
     val requestSha256 = sha256(requestObject)
     val unitName = "decomp-gcc-${request.engineId}-${requestSha256.take(32)}.scope"
     val unsigned = JsonObject(
         linkedMapOf(
-            "schemaVersion" to JsonPrimitive(1),
-            "provider" to JsonPrimitive(DEFINITION_PROVIDER),
+            "schemaVersion" to JsonPrimitive(if (request.bundledRuntime == null) 1 else 2),
+            "provider" to JsonPrimitive(if (request.bundledRuntime == null) DEFINITION_PROVIDER else BUNDLED_DEFINITION_PROVIDER),
             "authority" to JsonPrimitive(ASSESSMENT_AUTHORITY),
             "releaseEligible" to JsonPrimitive(false),
             "startAuthorized" to JsonPrimitive(false),
@@ -680,13 +727,14 @@ private fun renderDefinition(request: GccCompilerEngineContainmentRequest): Defi
 private fun parseDefinition(bytes: ByteArray): DefinitionFacts {
     val root = parseCanonicalObject(bytes, "containment definition")
     root.requireKeys(DEFINITION_FIELDS, "containment definition")
-    root.requireInt("schemaVersion", 1, "containment definition")
-    root.requireString("provider", DEFINITION_PROVIDER, "containment definition")
+    val version = root.intField("schemaVersion", "containment definition")
+    require(version == 1 || version == 2) { "containment definition schema version is unsupported" }
+    root.requireString("provider", if (version == 1) DEFINITION_PROVIDER else BUNDLED_DEFINITION_PROVIDER, "containment definition")
     root.requireString("authority", ASSESSMENT_AUTHORITY, "containment definition")
     root.requireBoolean("releaseEligible", false, "containment definition")
     root.requireBoolean("startAuthorized", false, "containment definition")
     val requestObject = root.objectField("request", "containment definition")
-    requestObject.requireKeys(REQUEST_FIELDS, "containment request")
+    requestObject.requireKeys(if (version == 1) REQUEST_FIELDS else REQUEST_FIELDS + "bundledRuntime", "containment request")
     val artifacts = requestObject.arrayField("artifacts", "containment request").map { element ->
         val artifact = element as? JsonObject ?: containmentFail("containment artifact must be an object")
         artifact.requireKeys(ARTIFACT_FIELDS, "containment artifact")
@@ -757,6 +805,9 @@ private fun parseDefinition(bytes: ByteArray): DefinitionFacts {
         environment = environment,
         outputLease = outputLease,
         budgets = budgets,
+        bundledRuntime = if (version == 1) null else GccBundledGhidraRuntime.parse(
+            requestObject.objectField("bundledRuntime", "containment request"),
+        ),
     )
     val expected = renderDefinition(reconstructed)
     if (!MessageDigest.isEqual(bytes, expected.canonicalBytes)) {
@@ -1150,7 +1201,7 @@ private fun snapshot(bytes: ByteArray, maximum: Int, label: String): ByteArray {
 private fun boundedArtifactCopy(
     source: List<GccCompilerEngineContainmentArtifactIdentity>,
 ): List<GccCompilerEngineContainmentArtifactIdentity> {
-    val copied = ArrayList<GccCompilerEngineContainmentArtifactIdentity>(REQUIRED_ARTIFACT_ROLES.size)
+    val copied = ArrayList<GccCompilerEngineContainmentArtifactIdentity>(GCC_BUNDLED_CONTAINMENT_ARTIFACT_ROLES.size)
     val iterator = source.iterator()
     var total = 0L
     while (iterator.hasNext()) {
@@ -1169,7 +1220,12 @@ private fun boundedArtifactCopy(
     return Collections.unmodifiableList(copied)
 }
 
-private fun boundedStringCopy(source: List<String>, maximum: Int, label: String): List<String> {
+private fun boundedStringCopy(
+    source: List<String>,
+    maximum: Int,
+    label: String,
+    maximumComponentCharacters: Int = MAXIMUM_COMMAND_COMPONENT_CHARS,
+): List<String> {
     val copied = ArrayList<String>(maximum)
     val iterator = source.iterator()
     var characters = 0
@@ -1177,7 +1233,7 @@ private fun boundedStringCopy(source: List<String>, maximum: Int, label: String)
         if (copied.size == maximum) throw IllegalArgumentException("$label exceeds its entry bound")
         val value = iterator.next()
         require(
-            value.isNotEmpty() && value.length <= MAXIMUM_COMMAND_COMPONENT_CHARS &&
+            value.isNotEmpty() && value.length <= maximumComponentCharacters &&
                 value.none { character -> character.code < 0x20 || character.code == 0x7f },
         )
         characters = Math.addExact(characters, value.length)
@@ -1303,6 +1359,7 @@ private fun containmentFail(message: String): Nothing =
     throw GccCompilerEngineContainmentContractException(message)
 
 private const val DEFINITION_PROVIDER = "gcc-compiler-engine-containment-definition-v1"
+private const val BUNDLED_DEFINITION_PROVIDER = "gcc-compiler-engine-containment-definition-v2"
 private const val ATTACHED_RECEIPT_PROVIDER = "gcc-compiler-engine-unit-attached-at-boot-receipt-v2"
 private const val ABSENCE_RECEIPT_PROVIDER = "gcc-compiler-engine-terminal-absence-receipt-v2"
 private const val ASSESSMENT_AUTHORITY = "non-authoritative-caller-supplied-containment-bytes-v1"
@@ -1339,7 +1396,6 @@ private val REQUIRED_ENVIRONMENT = sortedMapOf(
     "LC_ALL" to "C.UTF-8",
     "TZ" to "UTC",
 )
-private val REQUIRED_ARTIFACT_ROLES = GccCompilerEngineContainmentArtifactRole.entries.toSet()
 private val RUNTIME_ARTIFACT_ROLES = setOf(
     GccCompilerEngineContainmentArtifactRole.GHIDRA_ARCHIVE,
     GccCompilerEngineContainmentArtifactRole.GHIDRA_RUNTIME_MANIFEST,
@@ -1352,8 +1408,11 @@ private val RUNTIME_ARTIFACT_ROLES = setOf(
     GccCompilerEngineContainmentArtifactRole.SYSTEMCTL_EXECUTABLE,
     GccCompilerEngineContainmentArtifactRole.SYSTEMD_BUSCTL_EXECUTABLE,
     GccCompilerEngineContainmentArtifactRole.BOOT_KEEPER_CLASSPATH,
+    GccCompilerEngineContainmentArtifactRole.GHIDRA_BRIDGE_JAR,
+    GccCompilerEngineContainmentArtifactRole.GHIDRA_EXPORT_GUARD,
+    GccCompilerEngineContainmentArtifactRole.EXPORTER_SOURCE,
 )
-private val ANALYSIS_INPUT_ROLES = REQUIRED_ARTIFACT_ROLES - RUNTIME_ARTIFACT_ROLES
+private val ANALYSIS_INPUT_ROLES = GCC_LEGACY_CONTAINMENT_ARTIFACT_ROLES - RUNTIME_ARTIFACT_ROLES
 private val DEFINITION_FIELDS = setOf(
     "schemaVersion", "provider", "authority", "releaseEligible", "startAuthorized", "request",
     "requestSha256", "unitName", "containment", "bindingSha256",

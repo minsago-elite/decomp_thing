@@ -1309,6 +1309,9 @@ private fun deriveRuntimeConfiguration(
 private fun requireSupportedCheckpoint(
     definition: GccCompilerEngineValidatedContainmentDefinition,
 ): KotlinSystemdCgroupBootResources {
+    if (definition.bundledRuntime != null) {
+        liveContainmentFail("bundled Ghidra v2 requires retained runtime authentication before BOOT or START")
+    }
     if (
         definition.runKind == GccCompilerEngineContainmentRunKind.RESUMED ||
         definition.analysisState.mode != GccCompilerEngineAnalysisStateMode.FRESH_EMPTY

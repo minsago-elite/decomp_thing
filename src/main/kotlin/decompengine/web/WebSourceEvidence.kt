@@ -18,6 +18,7 @@ import kotlinx.serialization.json.jsonPrimitive
 data class SourceTreeView(
     val files: List<GeneratedFileEvidence>,
     val confidence: JsonObject?,
+    val archiveSha256: String? = null,
 )
 
 internal class WebSourceEvidence(
@@ -64,7 +65,7 @@ internal class WebSourceEvidence(
         }
         requireSame(manifestSnapshot, readArtifact(jobId, manifestPath, MAXIMUM_MANIFEST_BYTES))
         requireSame(input, store.readInput(jobId))
-        return WebSourceSnapshot(manifest, manifestDocument, files)
+        return WebSourceSnapshot(manifest, manifestDocument, files, profile)
     }
 
     companion object {
@@ -86,6 +87,7 @@ internal class WebSourceSnapshot(
     private val manifest: SourceTreeManifest,
     val manifestDocument: JsonObject,
     private val files: Map<String, StableRegularFile>,
+    val profile: ReconstructionProfile,
 ) {
     private val viewable = manifest.files.filter {
         ProjectFileRole.VIEWABLE in it.roles && it.contentKind == ProjectContentKind.UTF8_TEXT
@@ -97,6 +99,8 @@ internal class WebSourceSnapshot(
 
     fun view(): SourceTreeView = SourceTreeView(viewable, confidence)
 
+    fun revision(): WebSourceRevision = WebSourceRevision(profile, manifestDocument, view())
+
     fun text(relative: String): String {
         require(viewable.any { it.path == relative }) { "source file is not declared as viewable UTF-8 text" }
         return try {
@@ -106,3 +110,9 @@ internal class WebSourceSnapshot(
         }
     }
 }
+
+internal data class WebSourceRevision(
+    val profile: ReconstructionProfile,
+    val manifestDocument: JsonObject,
+    val view: SourceTreeView,
+)

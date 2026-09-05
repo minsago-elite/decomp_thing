@@ -36,12 +36,48 @@ confidence paths. Confidence is shown only from a hash-matched declared file, an
 is not interpreted as measured behavioral equivalence. An unavailable or changed
 source snapshot is explicitly shown as unavailable on the job page.
 
-## Archive status still requiring completion
+## Verified archive downloads
 
-A bounded download snapshot proves which bytes are served, not that its ZIP
-payload passes ArchivalBundleVerifier or matches the current source/build tree.
-Accordingly the source panel does not label an existing ZIP as a verified archive.
-The existing report-download link remains a raw, bounded artifact download.
-Issue #33 remains open for independently verifying the exact downloaded archive
-and binding the displayed verified state to the current archive/source identity.
-These local read checks are not production oracle, execution or release authority.
+The canonical `reports/source-tree.zip` route verifies the exact captured bytes
+through ArchivalBundleVerifier, including its stored ZIP/hash-manifest, successful
+source-bound build contract, source profile and candidate lineage checks. Its
+private extraction has a 2,048-file, 4 MiB per-file, 64 MiB expanded-payload and
+30-component path bound. Control JSON is also strictly parsed before legacy
+semantic readers run. Depth is rejected before creating deep directories, and
+partial extraction and successful verification both clean up before any response.
+The separate cleanup byte budget includes the 64 MiB payload plus bounded UTF-8
+path-name accounting (2,048 paths of at most 4,096 characters, at most four bytes
+per character, plus 4 KiB for staging names); it does not enlarge extraction limits.
+
+A descriptor-relative inventory of the complete current source tree, excluding
+the packager's excluded `build` subtree, must have exactly the archived file set.
+Every archived payload, including manifest, build contract and other evidence,
+must match the current file bytes and selected identity. The current rebuilt
+executable is separately checked against the contract under a 64 MiB read bound.
+Inventory traversal is limited to 100,000 entries and 30 directory levels. Source,
+input, payload, executable and archive bindings are rechecked before serving the
+same captured ZIP bytes. Only compact file identities are retained for payload
+rechecks, rather than another full in-memory copy of the source tree.
+
+The job page displays a verified archive link only from this verification result,
+with its exact SHA-256 in both the displayed digest and download URL. A later
+request with that digest rejects even a different otherwise valid archive. A
+direct request without a digest still performs full current-tree verification.
+An ETag identifies the served bytes; merely finding a ZIP never grants verified
+status. Other report downloads remain bounded raw artifacts, not certificates.
+The source page separately reports current build verification only when this
+archive verification succeeds for the exact manifest used to render that source;
+otherwise its build status remains explicitly unavailable. Implementation
+acceptance is displayed separately from successful compilation.
+
+Verification is a local point-in-time observation, not an immutable cross-file
+transaction or exclusion of same-UID replace-and-restore interference. It does not
+establish behavioral equivalence, retained execution or runtime-library closure,
+production oracle authority, or release eligibility.
+
+The durable web service also applies archive verification within a selected
+`reports/runs/<runId>` namespace. Source manifests, the complete descriptor-bound
+inventory, payload files, build contract, executable and archive rechecks all use the
+same prefix. Service-mediated reads validate attempt ownership. Archive links retain
+that prefix and pin the verified digest; a later attempt does not redirect an older
+attempt's archive request into the root reports directory.
