@@ -75,13 +75,100 @@ class FullTreeCallObservationProducerTest {
             assertNoCallScratch(root)
         }
 
-    private fun withCallFixture(action: (Path, Path, AuthenticatedFullTreeScope, Path, String) -> Unit) =
+    @Test
+    fun `raw SQLite call projection accepts maximum signed scope ceilings without overflow`() =
+        withCallFixture(mapOf("serializedBytes" to Long.MAX_VALUE, "wallClockSeconds" to Long.MAX_VALUE)) {
+                root, artifact, scope, inventory, shard ->
+            val expected = FullTreeCallObservationProducer.generateShardWithLimits(
+                artifact, inventory, scope, shard, root, FullTreeControlLimits(), callProducerLimits(),
+            )
+            val output = ByteArrayOutputStream()
+            val actual = FullTreeCallObservationProducer.generateShardTo(
+                artifact, inventory, scope, shard, root, output, producerLimits = callProducerLimits(),
+            )
+            assertContentEquals(FullTreeCallObservations.canonicalEnvelopeBytes(expected.document), output.toByteArray())
+            assertEquals(expected.outputSha256, actual.outputSha256)
+            assertTrue(actual.databaseHighWaterBytes > 4096L)
+            assertNoCallScratch(root)
+        }
+
+    @Test
+    fun `raw SQLite call projection preserves preexisting interruption without writing output`() =
+        withCallFixture { root, artifact, scope, inventory, shard ->
+            val output = ByteArrayOutputStream()
+            try {
+                Thread.currentThread().interrupt()
+                val failure = assertFailsWith<FullTreeControlException> {
+                    FullTreeCallObservationProducer.generateShardTo(
+                        artifact, inventory, scope, shard, root, output, producerLimits = callProducerLimits(),
+                    )
+                }
+                assertTrue(failure.message.orEmpty().contains("interrupted"))
+                assertTrue(Thread.currentThread().isInterrupted)
+            } finally {
+                Thread.interrupted()
+            }
+            assertEquals(0, output.size())
+            assertNoCallScratch(root)
+        }
+
+    @Test
+    fun `raw SQLite call projection preserves interruption during output and cleans scratch`() =
+        withCallFixture { root, artifact, scope, inventory, shard ->
+            var outputStarted = false
+            val output = object : OutputStream() {
+                override fun write(value: Int) {
+                    outputStarted = true
+                    Thread.currentThread().interrupt()
+                }
+            }
+            try {
+                val failure = assertFailsWith<FullTreeControlException> {
+                    FullTreeCallObservationProducer.generateShardTo(
+                        artifact, inventory, scope, shard, root, output, producerLimits = callProducerLimits(),
+                    )
+                }
+                assertTrue(failure.message.orEmpty().contains("interrupted"))
+                assertTrue(Thread.currentThread().isInterrupted)
+                assertTrue(outputStarted)
+            } finally {
+                Thread.interrupted()
+            }
+            assertNoCallScratch(root)
+        }
+
+    @Test
+    fun `raw SQLite call projection enforces its authenticated wall deadline and cleans scratch`() =
+        withCallFixture(mapOf("wallClockSeconds" to 1L)) { root, artifact, scope, inventory, shard ->
+            var delayed = false
+            val output = object : OutputStream() {
+                override fun write(value: Int) {
+                    if (!delayed) {
+                        delayed = true
+                        Thread.sleep(1100L)
+                    }
+                }
+            }
+            val failure = assertFailsWith<FullTreeControlException> {
+                FullTreeCallObservationProducer.generateShardTo(
+                    artifact, inventory, scope, shard, root, output, producerLimits = callProducerLimits(),
+                )
+            }
+            assertTrue(failure.message.orEmpty().contains("wall-clock bound"))
+            assertNoCallScratch(root)
+        }
+
+    private fun withCallFixture(
+        bounds: Map<String, Long> = emptyMap(),
+        action: (Path, Path, AuthenticatedFullTreeScope, Path, String) -> Unit,
+    ) =
         inControlTemporaryDirectory { root ->
             val controls = createFullTreeControlFixture(root.resolve("controls"))
             val fixture = CallObservationElfFixture.build()
             val artifact = writeElf(root.resolve("calls.elf"), fixture.bytes)
             val scope = callScopeForArtifact(
                 controls.authenticatedScope(), OracleArtifacts.sha256(fixture.bytes), fixture.bytes.size.toLong(),
+                bounds,
             )
             val inventoryPath = root.resolve("calls-inventory.json")
             val inventory = FullTreeInventoryControl.generateAndPublish(artifact, scope, inventoryPath, maximumWorkers = 1)
@@ -638,6 +725,7 @@ private fun callScopeForArtifact(
     original: AuthenticatedFullTreeScope,
     artifactSha256: String,
     artifactBytes: Long,
+    bounds: Map<String, Long> = emptyMap(),
 ): AuthenticatedFullTreeScope {
     val originalArtifacts = original.artifactManifest.controlObject("artifacts")
     val full = JsonObject(originalArtifacts.controlObject("full").toMutableMap().apply {
@@ -652,6 +740,11 @@ private fun callScopeForArtifact(
     val manifestSha256 = OracleArtifacts.sha256(OracleJson.canonicalBytes(manifest))
     val oracle = original.document.controlObject("oracle")
     val document = JsonObject(original.document.toMutableMap().apply {
+        this["bounds"] = JsonObject(original.document.controlObject("bounds").mapValues { (_, value) ->
+            JsonObject((value as JsonObject).toMutableMap().apply {
+                bounds.forEach { (name, bound) -> this[name] = JsonPrimitive(bound) }
+            })
+        })
         this["oracle"] = JsonObject(oracle.toMutableMap().apply {
             this["artifactManifestSha256"] = JsonPrimitive(manifestSha256)
             this["richArtifactSha256"] = JsonPrimitive(artifactSha256)

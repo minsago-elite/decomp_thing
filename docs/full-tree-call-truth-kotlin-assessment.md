@@ -36,6 +36,9 @@ bytes have independent limits; raw generation also caps them against the authent
 accounts for the sink in its resident-memory model. SQLite journaling and memory mapping are disabled,
 and projection rejects temporary sorting. Every ordinary success or failure closes the connection
 and removes its private scratch, with identity, permission, membership, and link-count rechecks.
+The raw path also checks thread interruption and the authenticated wall deadline throughout scanning
+and projection, preserves interrupt status, and caps byte ceilings before arithmetic expansion.
+These cooperative checks do not replace the separately required contained-process runtime.
 
 This path preserves the policy-v3 configuration and exact diagnostic bytes. Tests exercise raw
 ELF parity across commit intervals, reversed arrival order, empty shards, duplicate and contradictory

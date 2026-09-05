@@ -94,14 +94,30 @@ internal object FullTreeCallObservationProducer {
         producerLimits: FullTreeCallObservationProducerLimits = FullTreeCallObservationProducerLimits(),
         sqliteLimits: FullTreeCallObservationSqliteLimits = FullTreeCallObservationSqliteLimits(),
     ): FullTreeCallObservationStreamResult {
+        val startedNanos = System.nanoTime()
+        if (Thread.currentThread().isInterrupted) {
+            throw FullTreeControlException("call-observation generation was interrupted before authentication")
+        }
         FullTreeScopeControl.validate(scope, controlLimits)
         val bounds = scope.document.controlObject("bounds").controlObject("perShard")
+        val maximumWallClockSeconds = bounds.controlLong("wallClockSeconds")
+        val checkpoint: (String) -> Unit = { label ->
+            if (Thread.currentThread().isInterrupted) {
+                throw FullTreeControlException("call-observation generation was interrupted $label")
+            }
+            val elapsedNanos = System.nanoTime() - startedNanos
+            if (elapsedNanos < 0L || elapsedNanos / 1_000_000_000L >= maximumWallClockSeconds) {
+                throw FullTreeControlException("call-observation generation exceeds its wall-clock bound $label")
+            }
+        }
+        checkpoint("after authenticating call-observation scope")
         val boundedSqlite = sqliteLimits.copy(
             maximumCalls = minOf(
                 sqliteLimits.maximumCalls.toLong(), producerLimits.maximumCalls.toLong(), bounds.controlLong("entities"),
             ).toInt(),
             maximumDatabaseBytes = minOf(
-                sqliteLimits.maximumDatabaseBytes, maxOf(4096L, bounds.controlLong("serializedBytes") * 4L),
+                sqliteLimits.maximumDatabaseBytes,
+                maxOf(4096L, minOf(bounds.controlLong("serializedBytes"), sqliteLimits.maximumDatabaseBytes) * 4L),
             ),
             maximumOutputBytes = minOf(sqliteLimits.maximumOutputBytes, bounds.controlLong("serializedBytes")),
             maximumScannedDies = minOf(sqliteLimits.maximumScannedDies, producerLimits.maximumScannedDies),
@@ -112,25 +128,35 @@ internal object FullTreeCallObservationProducer {
             maximumRetainedBytes = maxOf(producerLimits.maximumRetainedBytes, modeledSinkBytes),
         )
         requireResidentBudget(scope.document, boundedProducer)
+        checkpoint("before opening call-observation inputs")
         StableControlFile.open(inventoryPath, controlLimits.maximumInventoryBytes.toLong(), "call inventory").use { inventory ->
+            checkpoint("after opening call-observation inventory")
             StableControlFile.open(richArtifact, controlLimits.maximumRichArtifactBytes, "call artifact").use { artifact ->
-                val inputs = authenticateShardInputs(inventoryPath, scope, shardId, controlLimits)
+                checkpoint("after opening call-observation artifact")
+                val inputs = authenticateShardInputs(inventoryPath, scope, shardId, controlLimits, checkpoint)
                 require(inputs.inventoryArtifactSha256 == inventory.authenticatedSha256) {
                     "call-observation inventory changed during authentication"
                 }
                 val expectedArtifact = scope.document.controlObject("oracle").controlString("richArtifactSha256")
                 require(artifact.authenticatedSha256 == expectedArtifact) { "call-observation artifact differs from scope" }
-                FullTreeCallObservationSqlite.open(scratchParent, inputs, scope, boundedSqlite, {}).use { sink ->
+                FullTreeCallObservationSqlite.open(scratchParent, inputs, scope, boundedSqlite, checkpoint).use { sink ->
                     scanAuthenticatedShard(
                         richArtifact, scope, inputs, scratchParent, controlLimits, boundedProducer,
+                        checkpoint = checkpoint,
                         recordScannedDies = sink::recordScannedDies, accept = sink::accept,
                     )
+                    checkpoint("before authenticating call-observation projection inputs")
                     inventory.verifyUnchanged("inventory before call projection")
+                    checkpoint("after authenticating inventory before call projection")
                     artifact.verifyUnchanged("artifact before call projection")
+                    checkpoint("after authenticating artifact before call projection")
                     val result = sink.finishTo(output)
                     FullTreeScopeControl.validate(scope, controlLimits)
+                    checkpoint("after authenticating scope after call projection")
                     inventory.verifyUnchanged("inventory after call projection")
+                    checkpoint("after authenticating inventory after call projection")
                     artifact.verifyUnchanged("artifact after call projection")
+                    checkpoint("after authenticating artifact after call projection")
                     return result
                 }
             }
