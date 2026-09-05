@@ -350,6 +350,12 @@ are retained. There is no fallback that silently accepts unsupported directory-f
 The original configured path remains the metadata identity. Provisioning/durability of symlink aliases,
 concurrent path replacement and noncooperating filesystem writers remain outside this confirmation
 contract. Directory force calls on the tested local filesystem are not a power-loss qualification.
+`JobStoreDirectoriesCrashTest` halts a benign child JVM before the first directory force, after the
+store force, after its parent force, and after all ancestor forces. The parent observes the exact halt
+marker and terminal exit, verifies that ordinary cleanup did not run and that the newly created store
+contains no upload or private stage, then starts another JVM. That process must reconfirm the full
+existing canonical chain and publish one complete input/metadata record. These are application-boundary
+process-death tests; they do not interrupt directory creation or force inside a kernel syscall.
 The input and metadata are forced before the directory is atomically renamed to its final job ID; the store
 directory is then forced. Metadata records the final input path. Ordinary failures before publication clean
 up the staging directory; failures after rename may leave a complete published job even when the caller
