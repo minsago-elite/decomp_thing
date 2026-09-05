@@ -300,7 +300,17 @@ class JobStore internal constructor(
         val pending = ArrayList<Job>()
         try {
             scanJobs(maximumEntries, maximumMetadataBytes, ::checkCancellation) { job ->
-                if (job.status == "queued" || job.status == "analyzing") pending.add(job)
+                if (job.status == "queued" || job.status == "analyzing") {
+                    val recovered = job.copy(
+                        status = "failed",
+                        updatedAt = Instant.now().toString(),
+                        statusMessage = "Analysis was interrupted before the server restarted",
+                    )
+                    // Legacy records may parse within the read limit but exceed the rewrite limit.
+                    // Freeze the entire replacement, including its timestamp, before validating it.
+                    encodeMetadata(recovered)
+                    pending.add(recovered)
+                }
             }
         } catch (cancelled: JobRecoveryCancelledException) {
             throw cancelled
@@ -312,11 +322,7 @@ class JobStore internal constructor(
             checkCancellation()
             statusUpdatesStarted = true
             // Reuse the bounded inspection: updateStatus would read this metadata a second time.
-            persist(job.copy(
-                status = "failed",
-                updatedAt = Instant.now().toString(),
-                statusMessage = "Analysis was interrupted before the server restarted",
-            ))
+            persist(job)
         }
     }
 
