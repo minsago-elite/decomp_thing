@@ -1,3 +1,4 @@
+import { qualifyFilterContrast } from './packaged-browser-contrast.mjs';
 import assert from 'node:assert/strict';
 import { promises as fs } from 'node:fs';
 import { join } from 'node:path';
@@ -123,9 +124,10 @@ export async function qualifyScale({ fixture, makeTarget, cdp, evaluate, ready, 
   assert.equal(await evaluate(tab, 'location.search'), '');
   await evaluate(tab, `[...document.querySelectorAll('button')].find(b => b.textContent === 'Reset filters').click()`);
   await ready(tab, `!document.querySelector('#job-filter-error') && document.activeElement.textContent === 'Job results'`, 'invalid date reset recovery');
+  const filterContrast = await qualifyFilterContrast({ tab, cdp, evaluate });
   assert.deepEqual(tab.exceptions, []);
   assert.ok(tab.requests.every(request => ['GET', 'HEAD'].includes(request.method)));
   return { persistedJobs: fixture.count, pages: 50, rowsPerPage: 200, reachableJobs: 10000,
-    exactOrder: true, keyboardPaginationFocus: true, searchReload: true, combinedNanosecondFiltersReload: true, oldestFirstPagesReloadReset: true, previousFirstPageRetained: true, narrowReflow: reflow, accessibleFilterNames: true, invalidDateDescriptionFocusRecovery: true, mutationRequests: 0,
+    exactOrder: true, keyboardPaginationFocus: true, searchReload: true, combinedNanosecondFiltersReload: true, oldestFirstPagesReloadReset: true, previousFirstPageRetained: true, narrowReflow: reflow, accessibleFilterNames: true, invalidDateDescriptionFocusRecovery: true, filterContrast, mutationRequests: 0,
     peakBrowserHeapBytes, pageLatencyMs: timings.map(ms => Math.round(ms)), executionStarted: false };
 }

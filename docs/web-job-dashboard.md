@@ -348,3 +348,31 @@ field focus, unchanged collection-read count, retained rows and reset recovery:
 Existing 10,000-job ordering/filter/sort and narrow reflow checks also pass.
 Chrome used explicit test-only `--no-sandbox`. This remains focused automated
 coverage, not manual assistive-technology or complete #217 qualification.
+
+## Filter boundary and focus contrast — 2026-09-05
+
+Dashboard input/select borders previously used the decorative divider color
+`#d9e0d9`, only 1.2507:1 against the page's `#f6f7f4` background. A separate
+control-border color (`#6d7a73`) raises that contrast to 4.1714:1. Decorative
+separators retain their existing color. The existing outside focus outline
+(`#955c08`) has 5.1227:1 contrast against that background.
+
+The threshold follows [W3C's non-text contrast guidance](https://www.w3.org/WAI/WCAG22/Understanding/non-text-contrast.html):
+required control/state indicators need at least 3:1 against adjacent colors.
+The browser helper measures actual computed opaque sRGB colors and refuses
+unsupported/transparent color formats rather than guessing compositing. It
+follows native Tab order through all six filter controls, checking the expected
+control name, focus-visible state, an outline of at least two pixels, and
+unrounded border/outline contrast against the ancestor background. This is a
+focused light-theme check, not a full contrast or focus-obscuration audit.
+
+The typechecked bundle, `distZip`, driver syntax and diff checks passed. Unit
+suites were not rerun for this CSS/driver change; the packaged browser check
+covers its actual rendered colors and keyboard behavior.
+
+The packaged run passed for all six controls, measuring 4.1714:1 border contrast
+and 5.1227:1 focus contrast, with native Tab order and visible outlines intact:
+[`web-dashboard-contrast-20260905.json`](evidence/web-dashboard-contrast-20260905.json).
+The existing 10,000-job, filter-error, semantic and narrow-reflow checks also
+passed. Chrome used explicit test-only `--no-sandbox`. #217 remains open for
+other routes, visual states, manual assistive-technology checks and full audit.
