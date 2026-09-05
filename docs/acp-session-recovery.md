@@ -112,3 +112,9 @@ is completed; replay after publication preserves journal bytes and modification 
 completed turn, and reconciles the unchanged text. This tests the journal's idempotent acknowledgement,
 not source checkpoint durability, compiler/behavior validation, or exactly-once workflow dispatch.
 The fixture releases the journal lock for the public API before these two halt points.
+
+Admission checks for `session.json.pending` and `quarantine.json.pending` while holding the journal
+lock, before loading or creating session state. Either remnant blocks opening with a fixed inspection
+message, even when an older session record is readable. Admission preserves the remnant, old journal
+and workspace bytes, and releases ownership on failure. It does not promote or delete a candidate,
+or automatically decide whether an interrupted write is safe to retry.
