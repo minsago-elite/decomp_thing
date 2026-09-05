@@ -379,6 +379,38 @@ receives an error. Startup does not treat staging directory names as job IDs. Te
 writes leave no partial job and preserve prior jobs. Power-loss injection, abandoned staging/temporary-file
 reclamation, and the full supported-filesystem/ancestor-durability qualification remain open requirements.
 
+The publication outcomes below apply to the existing atomic local-store protocol. “Visible” describes
+process-observable state, not proof of power-loss durability.
+
+| Boundary | Published state and failure handling |
+| --- | --- |
+| Store/ancestor preparation, before private staging | No candidate job is published. A preparation failure retains existing jobs and any newly created empty directories; retry repeats all confirmations. |
+| Metadata before/during write, before/after file force, before replacement | The old published record remains complete. The candidate is private. Ordinary cleanup removes its temporary file; abrupt exit leaves it retained. |
+| Metadata atomic replacement attempt | An exception does not prove whether replacement occurred. Re-read the published record before deciding its state; no non-atomic fallback or rollback is claimed. |
+| Metadata after replacement, before/after directory force | The complete new record is visible. A force/confirmation error does not restore the old record or confirm durability. |
+| Upload input/metadata writes and forces, before/after private-stage force | No final candidate job is visible. Existing jobs remain intact. Ordinary cleanup removes private staging where possible; abrupt exit retains it without promotion. |
+| Upload atomic rename attempt | Any rename exception is an uncertain-publication outcome carrying the generated job ID, even if the destination is absent when checked. |
+| Upload after rename, before/after store-directory force | The complete input and matching metadata are visible together. A confirmation error returns uncertainty and does not delete the published destination. |
+| Upload after successful confirmation | Return the published job. This is one submitted upload's result, not deduplication of independently repeated submissions. |
+
+For an uncertain upload, HTTP returns 409 with `Location` and a “Check job” link; JSON also supplies
+`job_id`, `job_url` and `retry_upload:false`. Inspect that same job rather than automatically submitting
+another upload. A missing or unreadable result leaves the outcome unresolved and requires operator
+investigation; it does not establish rollback or authorize a duplicate-free retry. Explicit resubmission
+can create another job. Job publication does not establish analysis completion or an accepted source revision.
+
+The clean-commit consolidated run at `0cd6f6a` passed 100 tests with no failures/errors/skips on
+Temurin 21.0.12+8, Linux 7.1.8 and XFS. Evidence is retained at
+`build/web-job-recovery-verification/20260905T142816Z-g5bs2nae/manifest.json` with exact commands,
+suite results, XML digests and runtime/filesystem identity. `JobMetadataPublicationTest` covers eight
+exception boundaries; `JobMetadataCrashTest` covers eight abrupt-exit boundaries including a half-record;
+`JobUploadCrashTest` covers fourteen upload boundaries including partial input/metadata. Fresh readers
+verify complete old/new metadata, complete published inputs and matching metadata, unchanged existing
+jobs, terminal child state and absence of ordinary cleanup after abrupt exit. HTTP uncertainty tests
+verify the reconciliation response and exclude private I/O diagnostics. These prove #242's publication
+outcome and complete-record criteria at the tested application boundaries. They do not close writer
+ownership, safe reclamation, power-loss/kernel-I/O qualification or the entire recovery milestone.
+
 `GET /api/recovery` exposes a read-only schema-v1 recovery inventory for #242. It reports retained
 upload-stage and metadata-temporary counts, scanned entries, observed bytes as a decimal string,
 uninspected entries and `inventoryComplete`, with `displayOnly: true`. It returns no paths, filenames,
