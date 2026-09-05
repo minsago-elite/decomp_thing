@@ -413,7 +413,7 @@ can create another job. Job publication does not establish analysis completion o
 
 The clean-commit consolidated run at `0cd6f6a` passed 100 tests with no failures/errors/skips on
 Temurin 21.0.12+8, Linux 7.1.8 and XFS. Evidence is retained at
-`build/web-job-recovery-verification/20260905T142816Z-g5bs2nae/manifest.json` with exact commands,
+[the tracked manifest](evidence/web-job-recovery/20260905T142816Z-g5bs2nae/manifest.json) and matching JUnit XML reports with exact commands,
 suite results, XML digests and runtime/filesystem identity. `JobMetadataPublicationTest` covers eight
 exception boundaries; `JobMetadataCrashTest` covers eight abrupt-exit boundaries including a half-record;
 `JobUploadCrashTest` covers fourteen upload boundaries including partial input/metadata. Fresh readers
