@@ -26,6 +26,59 @@ import kotlinx.serialization.json.boolean
 
 class GccCompilerEngineResumeEvidenceValidationTest {
     @Test
+    fun `interrupted descriptor capture validates the committed prefix without a final model`() {
+        val prefix = transitionFixture(twoBatchFixture()).interrupted
+        withDescriptorExportFixture(prefix, includeModel = false) { captured ->
+            val result = GccBundledExportCapture.captureInterruptedPrefix(captured.root, captured.reportsIdentity, captured.artifacts)
+            assertEquals("non-authoritative-byte-assessment", result.authority)
+            assertEquals(513L, result.functionCount)
+            assertEquals(512L, result.completed)
+            assertEquals(1L, result.observedBatchCount)
+            assertEquals(sha(prefix.state), result.stateSha256)
+            assertEquals(sha(prefix.progress), result.progressSha256)
+            assertFails { GccBundledExportCapture.capture(captured.root, captured.reportsIdentity, captured.artifacts) }
+        }
+    }
+
+    @Test
+    fun `interrupted descriptor capture rejects final models and unfinished batch residue without removing it`() {
+        val prefix = transitionFixture(twoBatchFixture()).interrupted
+        withDescriptorExportFixture(prefix) { captured ->
+            assertFails { GccBundledExportCapture.captureInterruptedPrefix(captured.root, captured.reportsIdentity, captured.artifacts) }
+            assertContentEquals(prefix.model, Files.readAllBytes(captured.directory.resolve("reports/program_model.json")))
+        }
+        withDescriptorExportFixture(prefix, includeModel = false) { captured ->
+            val residue = captured.directory.resolve("reports/program_model.json.export/planning-batches/batch-00000512-00000513.checkpoint.tmp")
+            Files.writeString(residue, "unfinished")
+            assertFails { GccBundledExportCapture.captureInterruptedPrefix(captured.root, captured.reportsIdentity, captured.artifacts) }
+            assertEquals("unfinished", Files.readString(residue))
+        }
+        withDescriptorExportFixture(includeModel = false) { captured ->
+            assertFails { GccBundledExportCapture.captureInterruptedPrefix(captured.root, captured.reportsIdentity, captured.artifacts) }
+        }
+    }
+
+    @Test
+    fun `interrupted descriptor capture enforces invocation commitments and aggregate bounds`() {
+        val prefix = transitionFixture(twoBatchFixture()).interrupted
+        withDescriptorExportFixture(prefix, includeModel = false) { captured ->
+            for (role in captured.artifacts.map { it.role }) {
+                val changed = captured.artifacts.map { if (it.role == role) it.copy(sha256 = SHA_F) else it }
+                assertFails { GccBundledExportCapture.captureInterruptedPrefix(captured.root, captured.reportsIdentity, changed) }
+            }
+            val total = prefix.state.size.toLong() + prefix.progress.size + prefix.batches.sumOf {
+                it.checkpoint.size.toLong() + it.functions.size + it.globals.size + it.types.size + it.failures.size
+            }
+            assertFails {
+                GccBundledExportCapture.captureInterruptedPrefix(captured.root, captured.reportsIdentity, captured.artifacts,
+                    GccResumeByteValidationLimits(transitionAggregateBytes = total - 1))
+            }
+            assertEquals(512L, GccBundledExportCapture.captureInterruptedPrefix(captured.root, captured.reportsIdentity, captured.artifacts,
+                GccResumeByteValidationLimits(transitionAggregateBytes = total)).completed)
+        }
+    }
+
+    @Test
     fun `descriptor capture preserves report inode admission across legitimate child directory creation`() {
         withDescriptorExportFixture { captured ->
             LinuxFilesystemSyscalls.openDirectoryAt(captured.root.fd, "reports").use { current ->
@@ -657,8 +710,11 @@ class GccCompilerEngineResumeEvidenceValidationTest {
         assertTrue(framingFailure.message?.contains("framing exceeds") == true)
     }
 
-    private fun withDescriptorExportFixture(action: (DescriptorExportFixture) -> Unit) {
-        val fixture = oneBatchFixture()
+    private fun withDescriptorExportFixture(
+        fixture: RunFixture = oneBatchFixture(),
+        includeModel: Boolean = true,
+        action: (DescriptorExportFixture) -> Unit,
+    ) {
         val directory = Files.createTempDirectory("gcc-descriptor-export-")
         Files.setPosixFilePermissions(directory, PosixFilePermissions.fromString("rwx------"))
         try {
@@ -673,16 +729,19 @@ class GccCompilerEngineResumeEvidenceValidationTest {
             val expectedReports = LinuxFilesystemSyscalls.openRoot(reports).use { it.identity }
             val export = privateDirectory(reports.resolve("program_model.json.export"))
             val batches = privateDirectory(export.resolve("planning-batches"))
-            write(reports.resolve("program_model.json"), fixture.model)
+            if (includeModel) write(reports.resolve("program_model.json"), fixture.model)
             write(reports.resolve("program_model.json.progress.json"), fixture.progress)
             write(export.resolve("state.json"), fixture.state)
-            val batch = fixture.batches.single()
-            val base = "batch-00000000-00000002"
-            for ((suffix, bytes) in mapOf(
+            for ((index, batch) in fixture.batches.withIndex()) {
+                val start = index * 512
+                val end = start + fixture.specs[index].functions.size
+                val base = String.format(java.util.Locale.ROOT, "batch-%08d-%08d", start, end)
+                for ((suffix, bytes) in mapOf(
                 "checkpoint" to batch.checkpoint, "functions.fragment" to batch.functions,
                 "globals.fragment" to batch.globals, "types.fragment" to batch.types,
                 "failures.fragment" to batch.failures,
-            )) write(batches.resolve("$base.$suffix"), bytes)
+                )) write(batches.resolve("$base.$suffix"), bytes)
+            }
             val artifacts = listOf(
                 GccCompilerEngineContainmentArtifactRole.ENGINE_BINARY to SHA_A,
                 GccCompilerEngineContainmentArtifactRole.EXPORTER_SOURCE to SHA_B,
