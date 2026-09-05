@@ -35,6 +35,37 @@ import kotlinx.serialization.json.jsonPrimitive
 
 class SourceTreeTest {
     @Test
+    fun `global owners precede consumers and invalidate downstream interface caches`() {
+        val model = RecoveredProgramModel(inputSha256 = "input", functions = listOf(
+            RecoveredFunction("consumer", "consumer", 1u, "int consumer(void)", "int consumer(void) { return counter; }", referencedGlobals = setOf("counter")),
+            RecoveredFunction("root", "root", 2u, "int root(void)", "int root(void) { return consumer(); }", calls = setOf("consumer")),
+            RecoveredFunction("unrelated", "unrelated", 3u, "int unrelated(void)", "int unrelated(void) { return 0; }"),
+        ), globals = listOf(RecoveredGlobal("counter", "counter", 4u, "int", "1")))
+        val overrides = mapOf("consumer" to "consumer", "root" to "root", "unrelated" to "unrelated", "counter" to "zz_data")
+        val project = createTempDirectory("source-global-dependencies-")
+        val calls = mutableListOf<String>()
+        val reconstructor = ModuleReconstructor { request ->
+            calls += request.module.id
+            if (request.module.id == "consumer") assertTrue("include/modules/zz_data.h" in request.dependencyHeaders)
+            EvidenceModuleReconstructor(true).reconstruct(request)
+        }
+        val initial = SourceTreeGenerator.generate(model, project, reconstructor = reconstructor, overrides = overrides)
+        assertTrue(initial.unresolvedImplementationIds.isEmpty())
+        assertEquals(listOf("zz_data", "consumer", "root", "unrelated"), calls)
+        val unrelated = project.resolve("reports/modules/unrelated.json").readText()
+        calls.clear()
+        val changed = model.copy(globals = model.globals.map { it.copy(type = "long") })
+        val revised = SourceTreeGenerator.generate(changed, project, reconstructor = reconstructor, overrides = overrides)
+        assertTrue(revised.unresolvedImplementationIds.isEmpty())
+        assertEquals(listOf("zz_data", "consumer", "root"), calls)
+        assertEquals(unrelated, project.resolve("reports/modules/unrelated.json").readText())
+        assertEquals(0, MakeProjectBuilder.build(project).returnCode)
+        calls.clear()
+        SourceTreeGenerator.generate(changed, project, reconstructor = reconstructor, overrides = overrides)
+        assertTrue(calls.isEmpty())
+    }
+
+    @Test
     fun `interface changes invalidate transitive consumers and resume preserves completed revisions`() {
         val functions = listOf(
             RecoveredFunction("leaf", "leaf", 1u, "int leaf(void)"),

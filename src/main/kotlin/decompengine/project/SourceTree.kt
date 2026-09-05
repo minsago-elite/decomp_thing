@@ -644,9 +644,12 @@ object SourceTreeGenerator {
         val moduleById = plan.modules.associateBy { it.id }
         val functionById = model.functions.associateBy { it.id }
         val functionOwners = plan.modules.flatMap { module -> module.functionIds.map { it to module.id } }.toMap()
+        val globalOwners = plan.modules.flatMap { module -> module.globalIds.map { it to module.id } }.toMap()
         val dependenciesByModule = plan.modules.associate { module -> module.id to
-            module.functionIds.flatMap { functionById.getValue(it).calls }.mapNotNull(functionOwners::get)
-                .filter { it != module.id }.distinct().sorted()
+            module.functionIds.flatMap { id ->
+                val function = functionById.getValue(id)
+                function.calls.mapNotNull(functionOwners::get) + function.referencedGlobals.mapNotNull(globalOwners::get)
+            }.filter { it != module.id }.distinct().sorted()
         }
         val headerHashes = headers.mapValues { sha256(it.value.toByteArray()) }
         val privateHeaders = plan.modules.associate { module -> module.id to renderPrivateHeader(module, model, plan) }
@@ -682,7 +685,7 @@ object SourceTreeGenerator {
         val unresolvedImplementations = sortedSetOf<String>()
         val moduleRevisionEvidence = mutableMapOf<String, String>()
 
-        generationOrder(plan, model).forEachIndexed { index, module ->
+        generationOrder(plan, dependenciesByModule).forEachIndexed { index, module ->
             val dependencies = dependenciesByModule.getValue(module.id)
             val dependencyHeaders = dependencies.associate { dependency -> moduleById.getValue(dependency).headerPath to headers.getValue(dependency) }
             val localFingerprint = moduleFingerprint(
@@ -1711,11 +1714,7 @@ object SourceTreeGenerator {
         )
     }
 
-    private fun generationOrder(plan: ModulePlan, model: RecoveredProgramModel): List<PlannedModule> {
-        val owner = plan.modules.flatMap { module -> module.functionIds.map { it to module.id } }.toMap()
-        val dependencies = plan.modules.associate { module -> module.id to module.functionIds.flatMap { id ->
-            model.functions.single { it.id == id }.calls.mapNotNull(owner::get)
-        }.filter { it != module.id }.toSet() }
+    private fun generationOrder(plan: ModulePlan, dependencies: Map<String, List<String>>): List<PlannedModule> {
         val ordered = mutableListOf<String>()
         val visiting = mutableSetOf<String>()
         val visited = mutableSetOf<String>()
