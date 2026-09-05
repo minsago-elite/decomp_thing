@@ -68,3 +68,9 @@ all application writes; #162 remains open for that integration and qualification
 Verification adds reservation overlap/release, exact free-space boundaries,
 accounting-error recovery, retained-report refusal before body reads, status reads
 during blocked transfers, and mutual exclusion between uploads and workflows.
+
+The packaged upload browser qualification passed against `51ff358`, using the
+pinned Chrome driver with test-only `--no-sandbox`. It covered session restoration,
+lost-response reload/retry, invalid and oversized request rejection, and a real
+throttled transfer cancelled after server-observed bytes followed by same-key retry.
+No fixture execution occurred. [Retained report](evidence/web-upload-storage-reservations-20260905.json).
