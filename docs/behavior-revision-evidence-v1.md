@@ -1,8 +1,9 @@
 # Local behavior records and archival revision attribution
 
-`BehaviorComparator` writes schema-2 records with provider
-`local-revision-bound-behavior-v2`. The decoder also accepts historical schema-1
-records, which do not commit file inputs. An archival comparison supplies an explicit
+`BehaviorComparator` writes schema-3 records with provider
+`local-revision-bound-behavior-v3`. The decoder also accepts historical schema-1
+records, which do not commit file inputs, and schema-2 records, whose corpus digest
+includes host file locators. An archival comparison supplies an explicit
 `BehaviorProjectContext(projectDir, profile)`. Comparisons without a project
 context retain their observations, but cannot validate an archival revision.
 
@@ -28,6 +29,14 @@ Declared files participate in the same pre/post execution stability checks as bi
 The decoder recomputes content digests and read-only mount argv without reopening host
 locators. Retained file bytes remain auditable after the host input files are removed.
 Declarations and mount requests do not prove that a program read every declared file.
+
+Schema 3's corpus digest commits the ordered case IDs, argv, stdin and declared
+file names, lengths, digests and retained bytes. It excludes only each file's host
+`sourcePath`, so restoring the same corpus at another host path preserves its
+identity. Observations and the full report still commit the exact host locators
+and sandbox mount arguments. Changing retained file contents changes the corpus
+digest, even when the programs produce identical outputs. Environment and
+executable identities remain separately bound by the full report commitment.
 
 Project capture checks the schema-3 source manifest against its selected profile
 and every declared file. The original executable digest must match the project
@@ -102,7 +111,7 @@ report failed attempts to open the mounted files for writing, and observe an
 undeclared file as absent in the next case. Assertions check expected exit codes
 and exact bytes independently of original/rebuilt equality. The project audit
 then verifies the current source/build/executable attribution of the retained
-record. The focused behavior validation/evidence/file-input selection passes
+record. At the live-mount checkpoint, the focused behavior validation/evidence/file-input selection passed
 22 tests with zero failures or skips on a host with bubblewrap 0.11.2. This verifies
 these local mount behaviors, not production containment attestation.
 
@@ -114,6 +123,8 @@ the original host input, extracts and rebuilds the archive, then restores the in
 from the extracted record and repeats the corpus. Both runs check explicit expected
 stdout, stderr and exits for stdin, argv, file and exit-code cases. The focused
 large/small archive and live-file selection passes three tests with zero skips.
+The archive replay also requires an identical schema-3 corpus digest after host
+input relocation; execution observations retain their distinct mount locators.
 
 These records describe local path-stability checks. They do not retain an
 execve-bound executable capability or an immutable runtime-library closure across

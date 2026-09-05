@@ -194,13 +194,13 @@ internal object BehaviorEvidence {
         })
         val body = JsonObject(legacy + mapOf(
             "cases" to cases,
-            "schemaVersion" to JsonPrimitive(2),
-            "provider" to JsonPrimitive("local-revision-bound-behavior-v2"),
+            "schemaVersion" to JsonPrimitive(3),
+            "provider" to JsonPrimitive("local-revision-bound-behavior-v3"),
             "originalIdentity" to original,
             "rebuiltIdentity" to rebuilt,
             "executionPolicy" to policy,
             "projectRevision" to (project ?: JsonNull),
-            "corpusSha256" to JsonPrimitive(hash(corpus(cases))),
+            "corpusSha256" to JsonPrimitive(hash(corpus(cases, includeFileLocators = false))),
             "observationsSha256" to JsonPrimitive(hash(cases)),
         ))
         val record = JsonObject(body + ("reportSha256" to JsonPrimitive(hash(body))))
@@ -233,7 +233,8 @@ internal object BehaviorEvidence {
         )) { "behavior report has missing or unknown fields" }
         val schemaVersion = root.integer("schemaVersion")
         require((schemaVersion == 1 && root.string("provider") == PROVIDER) ||
-            (schemaVersion == 2 && root.string("provider") == "local-revision-bound-behavior-v2")) { "unsupported behavior report" }
+            (schemaVersion == 2 && root.string("provider") == "local-revision-bound-behavior-v2") ||
+            (schemaVersion == 3 && root.string("provider") == "local-revision-bound-behavior-v3")) { "unsupported behavior report" }
         require(root.string("id").matches(Regex("[A-Za-z0-9][A-Za-z0-9_.-]{0,127}"))) { "invalid behavior report ID" }
         require(root.string("sandbox") == "bubblewrap") { "unsupported behavior sandbox request" }
         val originalPath = absolutePath(root.string("originalBinary"))
@@ -278,8 +279,8 @@ internal object BehaviorEvidence {
         val matches = cases.map { element ->
             val case = element.jsonObject
             require(case.keys == setOf("id", "args", "stdinHex", "matches", "exitCodeMatches", "stdoutMatches",
-                "stderrMatches", "original", "rebuilt") + if (schemaVersion == 2) setOf("fileInputs") else emptySet<String>()) { "behavior case fields are not closed" }
-            val inputFiles = if (schemaVersion == 2) case.getValue("fileInputs").jsonArray.map { element ->
+                "stderrMatches", "original", "rebuilt") + if (schemaVersion >= 2) setOf("fileInputs") else emptySet<String>()) { "behavior case fields are not closed" }
+            val inputFiles = if (schemaVersion >= 2) case.getValue("fileInputs").jsonArray.map { element ->
                 val file = element.jsonObject
                 require(file.keys == setOf("name", "sourcePath", "bytes", "sha256", "contentHex")) { "behavior input file fields are not closed" }
                 val name = file.string("name")
@@ -360,7 +361,7 @@ internal object BehaviorEvidence {
             require(JsonObject(artifact - "path") == root.getValue("rebuiltIdentity"))
             require(revision.string("inputSha256") == root.getValue("originalIdentity").jsonObject.string("sha256"))
         }
-        require(root.string("corpusSha256") == hash(corpus(cases)) && root.string("observationsSha256") == hash(cases) &&
+        require(root.string("corpusSha256") == hash(corpus(cases, includeFileLocators = schemaVersion < 3)) && root.string("observationsSha256") == hash(cases) &&
             root.string("reportSha256") == hash(JsonObject(root - "reportSha256"))) { "behavior commitments do not match their records" }
     }
 
@@ -375,8 +376,12 @@ internal object BehaviorEvidence {
         return output
     }
 
-    private fun corpus(cases: JsonArray) = JsonArray(cases.map { element ->
-        JsonObject(element.jsonObject.filterKeys { it in setOf("id", "args", "stdinHex", "fileInputs") })
+    private fun corpus(cases: JsonArray, includeFileLocators: Boolean) = JsonArray(cases.map { element ->
+        val inputs = element.jsonObject.filterKeys { it in setOf("id", "args", "stdinHex", "fileInputs") }
+        if (includeFileLocators || "fileInputs" !in inputs) JsonObject(inputs)
+        else JsonObject(inputs + ("fileInputs" to JsonArray(inputs.getValue("fileInputs").jsonArray.map { file ->
+            JsonObject(file.jsonObject - "sourcePath")
+        })))
     })
 
     private fun hash(value: JsonElement): String = OracleArtifacts.sha256(OracleJson.canonicalBytes(value, BEHAVIOR_JSON_LIMITS))
