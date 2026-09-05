@@ -2,10 +2,10 @@ import { cleanup } from '@testing-library/preact';
 import { afterEach, beforeEach, vi } from 'vitest';
 
 beforeEach(() => {
-  window.history.replaceState(null, '', '/');
+  if (typeof window !== 'undefined') window.history.replaceState(null, '', '/');
 });
 
 afterEach(() => {
-  cleanup();
+  if (typeof window !== 'undefined') cleanup();
   vi.unstubAllGlobals();
 });

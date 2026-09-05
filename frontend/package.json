@@ -11,11 +11,16 @@
   "scripts": {
     "toolchain": "node scripts/check-toolchain.mjs",
     "dev": "node scripts/check-toolchain.mjs && vite --host 127.0.0.1",
-    "typecheck": "node scripts/check-toolchain.mjs && tsc --noEmit",
+    "typecheck": "node scripts/check-toolchain.mjs && node ../scripts/generate-web-api.mjs --check && tsc --noEmit",
     "lint": "node scripts/check-toolchain.mjs && eslint . --max-warnings 0",
     "test": "node scripts/check-toolchain.mjs && vitest run",
-    "build": "node scripts/check-toolchain.mjs && tsc --noEmit && vite build && node scripts/bundle-report.mjs",
-    "preview": "node scripts/check-toolchain.mjs && vite preview --host 127.0.0.1"
+    "build": "node scripts/check-toolchain.mjs && node ../scripts/generate-web-api.mjs --check && tsc --noEmit && vite build && node scripts/bundle-report.mjs",
+    "preview": "node scripts/check-toolchain.mjs && vite preview --host 127.0.0.1",
+    "dev:backend": "node scripts/check-toolchain.mjs && vite --mode backend",
+    "dev:fixtures": "node scripts/check-toolchain.mjs && vite --mode fixtures",
+    "fixtures:check": "node scripts/check-toolchain.mjs && python3 dev/generate-fixtures.py > /dev/null",
+    "api:generate": "node scripts/check-toolchain.mjs && node ../scripts/generate-web-api.mjs",
+    "api:check": "node scripts/check-toolchain.mjs && node ../scripts/generate-web-api.mjs --check"
   },
   "dependencies": {
     "preact": "10.29.8",

@@ -2,7 +2,7 @@ import { mkdir, writeFile } from 'node:fs/promises';
 import { fileURLToPath } from 'node:url';
 import preact from '@preact/preset-vite';
 import { defineConfig } from 'vite';
-import type { Plugin } from 'vite';
+import type { Plugin, UserConfig } from 'vite';
 
 const outputRoot = fileURLToPath(new URL('../build/frontend/', import.meta.url));
 
@@ -17,7 +17,7 @@ function bundleComposition(): Plugin {
         .flatMap((entry) => Object.entries(entry.modules).map(([id, module]) => {
           const normalized = id.replaceAll('\\', '/');
           if (module.renderedLength > 0 && (
-            /\/(?:tests|__tests__|fixtures)\//.test(normalized) ||
+            /\/(?:tests|__tests__|fixtures|dev)\//.test(normalized) ||
             /\/preact\/(?:compat|debug|devtools)\//.test(normalized)
           )) {
             throw new Error('Production bundle includes a test, fixture, debug or compatibility module.');
@@ -38,20 +38,30 @@ function bundleComposition(): Plugin {
   };
 }
 
-export default defineConfig({
-  plugins: [preact({ reactAliasesEnabled: false }), bundleComposition()],
-  base: './',
-  publicDir: false,
-  envPrefix: [],
-  build: {
-    outDir: `${outputRoot}dist`,
-    emptyOutDir: true,
-    assetsDir: 'assets',
-    assetsInlineLimit: 0,
-    manifest: true,
-    sourcemap: false,
-    target: 'es2022',
-  },
-  server: { host: '127.0.0.1', strictPort: true },
-  preview: { host: '127.0.0.1', strictPort: true },
+export default defineConfig(async ({ command, mode, isPreview }): Promise<UserConfig> => {
+  const dev = command === 'serve' && !isPreview;
+  if (!dev && ['backend', 'fixtures'].includes(mode)) {
+    throw new Error('Backend and fixture modes are development-only; use the ordinary production build.');
+  }
+  const development = dev ? await import('./dev/configuration.ts').then(({ developmentConfiguration, developmentSettings }) => {
+    const settings = developmentSettings(mode, process.env);
+    return { settings, ...developmentConfiguration(settings) };
+  }) : null;
+  return {
+    plugins: [preact({ reactAliasesEnabled: false }), bundleComposition(), ...(development ? [development.plugin] : [])],
+    base: development?.settings.basePath ?? './',
+    publicDir: false,
+    envPrefix: [],
+    build: {
+      outDir: `${outputRoot}dist`,
+      emptyOutDir: true,
+      assetsDir: 'assets',
+      assetsInlineLimit: 0,
+      manifest: true,
+      sourcemap: false,
+      target: 'es2022',
+    },
+    server: development?.server ?? { host: '127.0.0.1', strictPort: true },
+    preview: { host: '127.0.0.1', strictPort: true },
+  };
 });

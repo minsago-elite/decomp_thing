@@ -78,9 +78,11 @@ val frontendBuild = tasks.register<Exec>("frontendBuild") {
     description = "Type-checks and builds the pinned Preact application from current frontend inputs"
     dependsOn(frontendInstall)
     inputs.files(fileTree(frontendDirectory) {
-        include("src/**", "public/**", "scripts/**", "index.html", "*config.*", "package*.json", ".npmrc")
+        include("src/**", "tests/**", "dev/**", "public/**", "scripts/**", "index.html", "*config.*", "package*.json", ".npmrc")
         exclude("node_modules/**")
     })
+    inputs.files(layout.projectDirectory.file("scripts/generate-web-api.mjs"),
+        layout.projectDirectory.file("contracts/web/v1/contract.schema.json"))
     inputs.property("frontendNodeHome", frontendNodeHome.orElse("PATH"))
     outputs.dir(frontendOutput)
     outputs.files(layout.buildDirectory.file("frontend/bundle-report.json"),

@@ -33,15 +33,104 @@ npm --prefix frontend run dev
 
 The development server listens on `http://127.0.0.1:5173`. `npm --prefix frontend
 run preview` serves the built shell on loopback for inspection. Neither server is
-the production distribution or evidence that packaged JVM serving works. API
-proxy/session integration belongs to #155; this shell does not have a proxy or
-fixtures that could accidentally contact a live server.
+the production distribution or evidence that packaged JVM serving works. The default development command has no API backend. The explicit backend and
+fixture modes below are the #155 development adapter; neither is enabled by a
+production build.
 
 Installation enforces exact engines and the lockfile. `.npmrc` disables package
 lifecycle scripts: the reviewed Vite native dependency is supplied by its locked
 platform package and needs no install script on the supported Linux x86-64 host.
 All developer commands explicitly check the toolchain in their command body,
 because `ignore-scripts` also suppresses npm's automatic pre/post hooks.
+
+## Explicit API development modes
+
+Use the same normalized base path on Vite and the JVM. These commands use a fixed
+loopback frontend origin; changing ports uses `DECOMP_DEV_PORT`, not a Vite CLI
+host/port override. Backend configuration is an explicit process environment value,
+never a browser-exposed `VITE_*` variable or an environment-file credential.
+
+```sh
+# Terminal 1: normal JVM task, with the explicit development browser origin.
+./gradlew -PfrontendNodeHome=/absolute/node-v24.20.0-linux-x64 run \
+  --args='web --ui spa --host 127.0.0.1 --port 8000 --base-path /nested/ --dev-frontend-origin http://127.0.0.1:5173'
+
+# Terminal 2: Preact HMR, same base path; no manual asset copy or rebuild per edit.
+DECOMP_DEV_BACKEND_ORIGIN=http://127.0.0.1:8000 \
+DECOMP_DEV_BASE_PATH=/nested/ npm --prefix frontend run dev:backend
+```
+
+Open `http://127.0.0.1:5173/nested/`. The JVM flag adds only the exact explicitly
+configured loopback browser origin to its local access policy. Vite proxies
+`/nested/api/**`, which contains API JSON, SSE/polling and artifact downloads.
+It keeps request Host and Origin, cookies, CSRF/idempotency/conditional headers,
+methods and bodies unchanged; it adds no forwarded authority headers. Responses
+retain status, Set-Cookie, attachment/range/cache headers and streaming behavior.
+Both processes enforce the expected Host/Origin pair. Vite has CORS disabled and
+an exact fixed loopback listener; production does not accept a Vite origin unless
+that separate server option is deliberately configured. Do not enable wildcard
+CORS, rewrite Origin, or copy cookies/tokens into this configuration.
+
+The proxy cannot create unimplemented endpoints. At the local-session checkpoint,
+only session exchange/logout and authenticated bootstrap exist; job/event/download
+services remain owned by their D2/D4 issues. Synthetic upstream integration tests
+verify those transport behaviors without claiming the JVM services already exist.
+Application credentials and the session UI follow #161; this adapter does not
+invent a session, bypass backend authorization or retry a mutation.
+
+For development without a JVM, native tools or models:
+
+```sh
+# Existing repository development dependency; use your Python virtual environment.
+python3 -m pip install -r requirements/oracle-generation.txt
+npm --prefix frontend run fixtures:check
+DECOMP_DEV_BASE_PATH=/nested/ npm --prefix frontend run dev:fixtures
+```
+
+Open `http://127.0.0.1:5173/nested/__fixtures/` for the catalogue, or `/nested/`
+for the shell. Every fixture page visibly says **SIMULATED DEVELOPMENT DATA**.
+The catalogue loads job/run/report/poll responses on demand, reads one SSE event
+and offers a harmless synthetic attachment. Nothing performs native analysis,
+model calls, managed Git actions or real mutations. Fixture mode is read-only and
+has no backend target; attempts to configure both modes fail.
+
+The five scenarios cover running, failed, interrupted, unsupported report adapter
+and partially populated evidence. Unsupported is a report/capability state, not an
+invented job-status enum. Missing usage, result revisions and accepted evidence
+remain unavailable. Counts preserve decimal strings beyond JavaScript's safe range.
+
+At fixture startup, `dev/generate-fixtures.py` builds deterministic records from
+`contracts/web/v1/fixtures/`, compiles the shared `contract.schema.json` with the
+existing pinned `fastjsonschema==2.22.2` tool and applies `verify.py` invariants to
+every response/event/error. It emits a schema digest and fails immediately on drift;
+records are server memory, not checked-in generated client assets. A focused test
+changes a required schema field and proves generation fails. This shared design
+schema is also the source for the D2 DTO/client work; fixture validation alone does
+not establish production DTO conformance.
+
+Fixture transport deliberately implements one deterministic event per attempt and
+no resumable journal: plain `/events` streams that event plus heartbeats until the
+client disconnects; `?transport=poll` returns its matching page. Unknown query
+parameters fail explicitly. Full cursor retention/reconnect behavior belongs to
+D4. Fixture sessions are not a security model: bootstrap contains labeled synthetic
+values, and all fixture mutation methods return 405.
+
+`npm test` starts isolated real Vite and benign HTTP fixture servers to check
+fetch/session headers, preserved JSON errors, incremental SSE, polling and download
+headers. Strict Host/Origin failures stop before the backend. The production build
+refuses `--mode backend`/`--mode fixtures`, never loads the development adapter,
+and rejects dev/fixture modules and known development sentinels in emitted assets.
+A sentinel build preserved the six prior production asset hashes and bundle sizes.
+Chrome 149.0.7827.55 also loaded the actual `dev:fixtures` command at `/nested/`,
+confirmed a Vite HMR connection and all five scenarios, and exercised fixture
+fetch, one SSE event and the synthetic download without a runtime exception.
+The retained local report is `build/dev-browser-fAG8pe/report.json`; this is
+development-mode evidence, separate from the packaged browser gate.
+No new npm dependency is needed by either development mode.
+
+The Vite behavior used here is documented in its official
+[server options](https://vite.dev/config/server-options) and
+[plugin API](https://vite.dev/guide/api-plugin).
 
 ## Source and build boundaries
 
@@ -51,6 +140,8 @@ because `ignore-scripts` also suppresses npm's automatic pre/post hooks.
 - `src/shared/` contains the native Preact render-error boundary and async wrapper.
 - `src/styles/` contains local CSS; typography uses system fonts.
 - `tests/` contains isolated component/state fixtures and never enters production.
+- `dev/` contains the explicit server-only proxy configuration, shared-schema fixture
+  generator and a development-only catalogue; production never imports these modules.
 - `scripts/` checks tools and produces a deterministic bundle report.
 
 Vite writes to `build/frontend/dist/`, with hashed resources in `assets/` and the

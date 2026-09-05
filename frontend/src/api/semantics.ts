@@ -1,0 +1,71 @@
+import type { ContractDocument } from './generated';
+import { ApiClientError } from './errors';
+
+const requireValue = (condition: boolean): void => {
+  if (!condition) throw new ApiClientError('invalid_response');
+};
+
+/** Mirrors the shared verifier's cross-field rules; fixtures exercise both implementations. */
+export function checkSemantics(document: ContractDocument): void {
+  switch (document.kind) {
+    case 'jobs': {
+      const { items, page } = document.data;
+      requireValue(items.length <= page.limit && new Set(items.map((item) => item.jobId)).size === items.length);
+      break;
+    }
+    case 'bootstrap': {
+      const { limits, capabilities, apiVersions } = document.data;
+      requireValue(limits.defaultPageLimit <= limits.maxPageLimit);
+      requireValue(new Set(capabilities.map((item) => item.id)).size === capabilities.length);
+      if (!apiVersions.includes(1)) throw new ApiClientError('unsupported_contract');
+      break;
+    }
+    case 'report': {
+      const { sourceArtifact, binding, reportType, summary, acceptance, state, adapterVersion, producerSchemaVersion } = document.data;
+      if (sourceArtifact) requireValue(sourceArtifact.binding.jobId === binding.jobId
+        && sourceArtifact.binding.runId === binding.runId && sourceArtifact.binding.revisionId === binding.revisionId);
+      if (summary && reportType === 'exploration') requireValue('confidence' in summary);
+      if (summary && reportType === 'revision-validation') requireValue('result' in summary);
+      if (acceptance === 'accepted') requireValue(summary !== null && 'result' in summary && summary.result === 'passed');
+      // Unknown producer bytes may have an explicit unsupported adapter result, never an available summary.
+      const recognizedProducer = (reportType === 'exploration' && producerSchemaVersion === null)
+        || (reportType === 'revision-validation' && producerSchemaVersion === 2);
+      if (adapterVersion !== 1 || ((state === 'available' || state === 'partial') && !recognizedProducer)) {
+        throw new ApiClientError('unsupported_contract');
+      }
+      break;
+    }
+    case 'snapshot':
+      requireValue((document.data.throughCursor === null) === (document.data.throughSequence === null));
+      break;
+    case 'events': {
+      const { items, nextCursor } = document.data;
+      const seen = new Set<string>();
+      let previous = -1n;
+      let binding: string | undefined;
+      for (const event of items) {
+        if (event.type === 'retention.gap' || event.cursor === null || event.sequence === null) throw new ApiClientError('invalid_response');
+        const current = `${event.jobId}/${event.runId}`;
+        requireValue(binding === undefined || binding === current);
+        binding = current;
+        const sequence = BigInt(event.sequence);
+        requireValue(!seen.has(event.cursor) && sequence > previous);
+        seen.add(event.cursor); previous = sequence;
+      }
+      if (items.length) requireValue(nextCursor === items.at(-1)?.cursor);
+      break;
+    }
+    case 'gitWorkspace': {
+      const { objectFormat, headObjectId, refs, mapping, repositoryId } = document.data;
+      const length = objectFormat === 'sha1' ? 40 : objectFormat === 'sha256' ? 64 : undefined;
+      const ids = [headObjectId, ...refs.map((ref) => ref.objectId)];
+      if (mapping) {
+        ids.push(mapping.objectId);
+        requireValue(mapping.repositoryId === repositoryId && mapping.objectId === headObjectId);
+        if (mapping.acceptance === 'accepted') requireValue(mapping.acceptanceArtifactId !== null);
+      }
+      if (length !== undefined) requireValue(ids.every((id) => id === null || id.length === length));
+      break;
+    }
+  }
+}
