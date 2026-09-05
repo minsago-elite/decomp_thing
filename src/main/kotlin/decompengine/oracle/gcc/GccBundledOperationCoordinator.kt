@@ -145,7 +145,7 @@ internal class GccBundledPreparedOperation internal constructor(
     ): T {
         requireCurrent()
         require(intent.runKind == kind) { "GCC bundled execution kind differs from the prepared intent" }
-        require(intent.bundledRuntime.invocationVersion == 2) { "GCC contained execution requires explicitly bound JVM home and temporary paths" }
+        require(intent.bundledRuntime.invocationVersion >= 2) { "GCC contained execution requires explicitly bound JVM home and temporary paths" }
         executionAttempted = true
         try {
             val validated = GccCompilerEngineContainmentContract.parseDefinitionForLiveController(definition)
@@ -191,6 +191,7 @@ internal class GccBundledPreparedOperation internal constructor(
                     ),
                     deploymentClosureSha256 = inputs.deploymentClosureSha256,
                     interruption = interruption,
+                    controlDirectoryName = intent.bundledRuntime.freshControlDirectoryName(borrowed.path),
                     beforeStart = { attachment ->
                         inputs.verify("before GCC command START")
                         lease.requireCurrentOperationRunRootAfterScopeAttachment(runRoot)
