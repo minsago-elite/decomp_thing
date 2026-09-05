@@ -67,6 +67,21 @@ internal class WebApiController(
                 resource == "session" -> throw WebAccessDenied(
                     405, "METHOD_NOT_ALLOWED", "The session endpoint supports POST and DELETE.", setOf("POST", "DELETE"),
                 )
+                resource == "jobs" && exchange.requestMethod == "POST" -> {
+                    access.authorize(exchange, WebEndpointPolicy.multipartUpload())
+                    requireNoQuery(exchange)
+                    requireJsonAccept(exchange)
+                    val key = singleUploadHeader(exchange, "Idempotency-Key")
+                    if (key == null || !key.matches(Regex("[A-Za-z0-9_-]{16,128}"))) throw WebAccessDenied(400, "INVALID_IDEMPOTENCY_KEY", "Upload requires one 16–128 character idempotency key.")
+                    if (exchange.requestHeaders.containsKey("If-Match")) throw WebAccessDenied(400, "INVALID_HEADER", "Upload creates a new job and does not accept If-Match.")
+                    val length = singleUploadHeader(exchange, "Content-Length")
+                    if (length != null && (!length.matches(Regex("0|[1-9][0-9]{0,18}")) || length.toLongOrNull() == null)) throw WebAccessDenied(400, "INVALID_HEADER", "The upload Content-Length is invalid.")
+                    if (length != null && length.toLong() > StreamingMultipartUpload.MAX_REQUEST_BYTES) throw WebAccessDenied(413, "UPLOAD_TOO_LARGE", "The complete upload request exceeds 32 MiB.")
+                    val result = jobs.uploadMultipartReceipt(exchange.requestBody, checkNotNull(singleUploadHeader(exchange, "Content-Type")), key)
+                    exchange.responseHeaders.set("Location", "${assets.basePath}api/v1/jobs/${result.job.id}")
+                    if (result.replayed) exchange.responseHeaders.set("Idempotency-Replayed", "true")
+                    send(exchange, 201, "job", webJob(result.job))
+                }
                 resource == "jobs" -> {
                     val session = checkNotNull(access.authorize(exchange, WebEndpointPolicy.privateRead()))
                     requireJsonAccept(exchange)
@@ -95,6 +110,15 @@ internal class WebApiController(
             }
         } catch (failure: WebAccessDenied) {
             access.sendDenied(exchange, failure)
+        } catch (_: decompengine.jobs.UploadIdempotencyConflict) {
+            access.sendDenied(exchange, WebAccessDenied(409, "IDEMPOTENCY_CONFLICT", "The upload key was already used for different content or filename."))
+        } catch (_: decompengine.jobs.UploadReceiptUnavailable) {
+            access.sendDenied(exchange, WebAccessDenied(503, "UPLOAD_RECEIPT_UNAVAILABLE", "The retained upload receipt is unavailable. Inspect storage before retrying."))
+        } catch (failure: UploadBodyException) {
+            val status = when (failure.reasonCode) { "UPLOAD_TOO_LARGE" -> 413; "UNSUPPORTED_MEDIA_TYPE" -> 415; else -> 400 }
+            access.sendDenied(exchange, WebAccessDenied(status, failure.reasonCode, failure.message ?: "The upload body is invalid."))
+        } catch (_: decompengine.jobs.InvalidUploadException) {
+            access.sendDenied(exchange, WebAccessDenied(422, "INVALID_ELF", "Upload a supported ELF binary with a complete header."))
         } catch (failure: WebJobServiceException) {
             val status = if (failure.code in setOf("JOB_NOT_FOUND", "RUN_NOT_FOUND")) 404 else 503
             access.sendDenied(exchange, WebAccessDenied(status, if (status == 404) "NOT_FOUND" else failure.code,
@@ -132,7 +156,7 @@ internal class WebApiController(
             put("uploadDeadlineMs", "120000")
             put("downloadIdleMs", "120000")
             put("maxJsonBytes", "1048576")
-            put("maxUploadBytes", "0")
+            put("maxUploadBytes", StreamingMultipartUpload.MAX_REQUEST_BYTES.toString())
             put("maxSourceChunkBytes", "0")
             put("maxLogChunkBytes", "0")
             put("maxEventCount", "0")
@@ -155,6 +179,12 @@ internal class WebApiController(
             })
             put("gitVersion", JsonNull)
         })
+    }
+
+    private fun singleUploadHeader(exchange: HttpExchange, name: String): String? {
+        val values = exchange.requestHeaders[name] ?: return null
+        if (values.size != 1 || values.single().length > 256) throw WebAccessDenied(400, "INVALID_HEADER", "An upload header is duplicated or too long.")
+        return values.single()
     }
 
     private fun requireNoQuery(exchange: HttpExchange) {

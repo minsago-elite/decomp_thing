@@ -569,7 +569,7 @@ try {
     await ready(authenticated, `document.querySelector('h1')?.textContent === 'Runtime status' && document.querySelector('#server-runtime-title')?.textContent === 'Connected server'`, 'authenticated Runtime');
     assert.equal((await evaluate(authenticated, 'window.__sessionTestRequests')).length, firstRequests.length,
       'Opening Runtime issued a probe or another bootstrap request');
-    assert.ok(await evaluate(authenticated, `document.body.innerText.includes('Workflow actions are unavailable in this preview.') && document.body.innerText.includes('Uploads unavailable')`));
+    assert.ok(await evaluate(authenticated, `document.body.innerText.includes('Workflow actions are unavailable in this preview.') && document.body.innerText.includes('33554432 bytes')`));
     report.runtimeSnapshot = { connected: true, unavailableCapabilitiesExplained: true, navigationRequests: 0 };
 
     await cdp.call('Page.reload', {}, authenticated.sessionId);

@@ -170,7 +170,71 @@ class WebApiControllerTest {
         assertEquals("null", result.getValue("page").jsonObject.getValue("nextCursor").toString())
         assertError(request(server, "$path?limit=201", headers = headers), 422, "VALIDATION_FAILED")
         assertError(request(server, "$path?cursor=invalid", headers = headers), 400, "INVALID_CURSOR")
-        assertEquals(405, request(server, path, "POST", "{}", headers).statusCode())
+        assertEquals(415, request(server, path, "POST", "{}", headers).statusCode())
+    }
+
+    @Test
+    fun `authenticated streamed upload returns durable identity and replays without overwriting later status`() = withServer { server, store, _ ->
+        val cookie = establish(server)
+        val csrf = assertEnvelope(request(server, "/workbench/api/v1/bootstrap", headers = mapOf("Cookie" to cookie)), 200, "bootstrap")
+            .getValue("csrfToken").jsonPrimitive.content
+        val key = "fixture_upload_api_key"
+        val headers = mapOf("Cookie" to cookie, "X-CSRF-Token" to csrf, "Idempotency-Key" to key)
+        assertError(upload(server, elfFixture(), emptyMap()), 401, "SESSION_REQUIRED")
+        assertError(upload(server, elfFixture(), headers - "X-CSRF-Token"), 403, "CSRF_DENIED")
+        assertError(upload(server, elfFixture(), headers - "Idempotency-Key"), 400, "INVALID_IDEMPOTENCY_KEY")
+        assertError(upload(server, elfFixture(), headers + ("Origin" to "http://invalid.example")), 403, "ORIGIN_DENIED")
+        assertError(upload(server, byteArrayOf(1, 2, 3), headers), 422, "INVALID_ELF")
+        val created = upload(server, elfFixture(), headers)
+        val original = assertEnvelope(created, 201, "job")
+        val id = original.getValue("jobId").jsonPrimitive.content
+        assertEquals("/workbench/api/v1/jobs/$id", created.headers().firstValue("Location").orElseThrow())
+        assertEquals("uploaded", original.getValue("status").jsonPrimitive.content)
+        assertEquals(2, store.jobIds().size)
+        store.updateStatus(id, "complete", "later status")
+        val repeated = upload(server, elfFixture(), headers, boundary = "different_boundary")
+        assertEquals(original, assertEnvelope(repeated, 201, "job"))
+        assertEquals("true", repeated.headers().firstValue("Idempotency-Replayed").orElseThrow())
+        assertEquals("complete", store.get(id).status)
+        assertError(upload(server, byteArrayOf(9), headers), 409, "IDEMPOTENCY_CONFLICT")
+        assertError(upload(server, elfFixture(), headers, filename = "renamed.elf"), 409, "IDEMPOTENCY_CONFLICT")
+        assertEnvelope(upload(server, elfFixture(), headers + ("Idempotency-Key" to "fixture_different_key")), 201, "job")
+        assertEquals(3, store.jobIds().size)
+    }
+
+    @Test
+    fun `upload receipt survives server restart and a fresh authenticated session`() {
+        val root = createTempDirectory("web-upload-restart-")
+        fun start() = UploadServer("127.0.0.1", 0, root,
+            JobAnalyzer { _, _ -> error("Unexpected analysis") },
+            JobReconstructor { _, _ -> error("Unexpected reconstruction") },
+            uiMode = WebUiMode.SPA, basePath = "/workbench/").also { it.start() }
+        fun headers(server: UploadServer): Map<String, String> {
+            val cookie = establish(server)
+            val bootstrap = assertEnvelope(request(server, "/workbench/api/v1/bootstrap", headers = mapOf("Cookie" to cookie)), 200, "bootstrap")
+            return mapOf("Cookie" to cookie, "X-CSRF-Token" to bootstrap.getValue("csrfToken").jsonPrimitive.content,
+                "Idempotency-Key" to "restart_upload_fixture_key")
+        }
+        var server = start()
+        try {
+            val original = assertEnvelope(upload(server, elfFixture(), headers(server)), 201, "job")
+            server.stop()
+            server = start()
+            val repeated = upload(server, elfFixture(), headers(server))
+            assertEquals(original, assertEnvelope(repeated, 201, "job"))
+            assertEquals("true", repeated.headers().firstValue("Idempotency-Replayed").orElseThrow())
+            assertEquals(1, JobStore(root).jobIds().size)
+        } finally { server.stop(); root.toFile().deleteRecursively() }
+    }
+
+    private fun upload(server: UploadServer, bytes: ByteArray, headers: Map<String, String>, filename: String = "fixture.elf", boundary: String = "upload_api_fixture"): HttpResponse<String> {
+        val origin = "http://127.0.0.1:${server.serverPort}"
+        val body = "--$boundary\r\nContent-Disposition: form-data; name=\"binary\"; filename=\"$filename\"\r\n\r\n".toByteArray() + bytes + "\r\n--$boundary--\r\n".toByteArray()
+        val builder = HttpRequest.newBuilder(URI("$origin/workbench/api/v1/jobs"))
+            .POST(HttpRequest.BodyPublishers.ofInputStream { body.inputStream() }) // chunked; no Content-Length authority
+        (mapOf("Accept" to "application/json", "Origin" to origin, "Content-Type" to "multipart/form-data; boundary=$boundary") + headers)
+            .forEach { (key, value) -> builder.header(key, value) }
+        return client.send(builder.build(), HttpResponse.BodyHandlers.ofString())
     }
 
     private fun establish(server: UploadServer): String {

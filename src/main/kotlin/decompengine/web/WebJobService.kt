@@ -59,6 +59,7 @@ class WebJobService(
     private val workflowExecutor = executor ?: ownedExecutor!!
     private val active = mutableMapOf<String, OwnedTask>()
     private val uploads = mutableMapOf<Thread, CountDownLatch>()
+    private val uploadPublisher = decompengine.jobs.StagedJobUpload(store.storageRoot)
     private val publicationFailures = mutableMapOf<String, WebJobDiagnostic>()
     private var attempts: WorkflowAttemptStore? = null
     private var initialized = false
@@ -238,7 +239,9 @@ class WebJobService(
     }
 
     /** Multipart bytes are copied outside the service monitor; publication retains root ownership through completion. */
-    fun uploadMultipart(input: java.io.InputStream, contentType: String): Job {
+    fun uploadMultipart(input: java.io.InputStream, contentType: String): Job = uploadMultipartReceipt(input, contentType).job
+
+    internal fun uploadMultipartReceipt(input: java.io.InputStream, contentType: String, idempotencyKey: String? = null): decompengine.jobs.PublishedJobUpload {
         val worker = Thread.currentThread()
         val finished = synchronized(this) {
             writableStore()
@@ -247,9 +250,9 @@ class WebJobService(
             CountDownLatch(1).also { uploads[worker] = it }
         }
         try {
-            return decompengine.jobs.StagedJobUpload(store.storageRoot).publish { sink ->
+            return uploadPublisher.publish(idempotencyKey) { sink ->
                 StreamingMultipartUpload.copy(input, contentType, sink).filename
-            }.job
+            }
         } catch (failure: decompengine.jobs.UploadPublicationUncertain) {
             synchronized(this) {
                 publicationFailures[failure.jobId] = WebJobDiagnostic(failure.jobId, "RECOVERY_REQUIRED", "An upload may have been published. Reopen storage before admitting more work; do not retry blindly.")

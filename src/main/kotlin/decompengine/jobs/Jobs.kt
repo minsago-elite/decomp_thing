@@ -103,12 +103,17 @@ class JobStore(root: Path) {
 
     @Synchronized
     fun get(jobId: String): Job {
-        val jobDir = jobDirectory(jobId)
+        jobDirectory(jobId)
         val payload = try {
             OracleJson.parse(readStableRegularFile(root, "$jobId/job.json", 256L * 1024).bytes).jsonObject
         } catch (_: IOException) {
             throw JobStoreException("job metadata is unavailable or its path changed")
         }
+        return decodeJobRecord(jobId, payload)
+    }
+
+    internal fun decodeJobRecord(jobId: String, payload: JsonObject): Job {
+        val jobDir = jobDirectory(jobId)
         require(payload.string("id") == jobId &&
             Path.of(payload.string("binary_path")) == jobDir.resolve("input.elf")
         ) { "job metadata identity does not match its store location" }

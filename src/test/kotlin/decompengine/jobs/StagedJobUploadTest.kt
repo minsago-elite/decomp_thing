@@ -57,6 +57,46 @@ class StagedJobUploadTest {
         assertEquals(setOf(first.job.id, second.job.id), names(root).toSet())
     }
 
+    @Test fun `receipt replay survives restart and later job mutation while changed intent conflicts`() = withRoot { root ->
+        val key = "fixture_upload_key_0001"
+        val first = StagedJobUpload(root).publish(key) { it.write(elfFixture()); "original.elf" }
+        JobStore(root).updateStatus(first.job.id, "complete", "later outcome")
+        val replay = StagedJobUpload(root).publish(key) { it.write(elfFixture()); "original.elf" }
+        assertTrue(replay.replayed)
+        assertEquals(first.job, replay.job)
+        assertEquals("complete", JobStore(root).get(first.job.id).status)
+        assertFailsWith<UploadIdempotencyConflict> { StagedJobUpload(root).publish(key) { it.write(elfFixture()); "different.elf" } }
+        assertFailsWith<UploadIdempotencyConflict> { StagedJobUpload(root).publish(key) { it.write(byteArrayOf(1)); "original.elf" } }
+        assertEquals(listOf(first.job.id), names(root))
+    }
+
+    @Test fun `concurrent identical keys publish one atomic job and one replay`() = withRoot { root ->
+        val publisher = StagedJobUpload(root)
+        val barrier = java.util.concurrent.CyclicBarrier(2)
+        val pool = java.util.concurrent.Executors.newFixedThreadPool(2)
+        try {
+            val results = (1..2).map { pool.submit<PublishedJobUpload> {
+                publisher.publish("fixture_concurrent_key") { it.write(elfFixture()); barrier.await(5, java.util.concurrent.TimeUnit.SECONDS); "same.elf" }
+            } }.map { it.get(5, java.util.concurrent.TimeUnit.SECONDS) }
+            assertEquals(1, results.map { it.job.id }.toSet().size)
+            assertEquals(1, results.count { it.replayed })
+            assertEquals(listOf(results.first().job.id), names(root))
+        } finally { pool.shutdownNow() }
+    }
+
+    @Test fun `post-rename retry recovers receipt and corruption cannot recreate the job`() = withRoot { root ->
+        val key = "fixture_uncertain_key"
+        val failed = assertFailsWith<UploadPublicationUncertain> {
+            StagedJobUpload(root) { if (it == UploadPublishPoint.AFTER_RENAME) throw IOException("inert fault") }
+                .publish(key) { it.write(elfFixture()); "saved.elf" }
+        }
+        val replay = StagedJobUpload(root).publish(key) { it.write(elfFixture()); "saved.elf" }
+        assertEquals(failed.jobId, replay.job.id); assertTrue(replay.replayed)
+        Files.writeString(root.resolve(failed.jobId).resolve("upload-receipt.json"), "corrupt fixture")
+        assertFailsWith<UploadReceiptUnavailable> { StagedJobUpload(root).publish(key) { it.write(elfFixture()); "saved.elf" } }
+        assertEquals(listOf(failed.jobId), names(root))
+    }
+
     private fun names(root: java.nio.file.Path) = Files.list(root).use { entries -> entries.map { it.fileName.toString() }.sorted().toList() }
     private fun withRoot(block: (java.nio.file.Path) -> Unit) {
         val root = createTempDirectory("staged-upload-")
