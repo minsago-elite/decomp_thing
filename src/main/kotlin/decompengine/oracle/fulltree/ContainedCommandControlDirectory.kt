@@ -6,7 +6,7 @@ import decompengine.acp.permissions
 
 /** Filesystem construction only. This does not issue a lease, borrow or execution capability. */
 internal fun createContainedCommandControlDirectory(parent: LinuxDescriptor, name: String): LinuxDescriptor {
-    require(name.matches(Regex("control-[a-f0-9]{64}"))) { "contained control directory name is not request-bound" }
+    require(validContainedControlName(name)) { "contained control directory name is not a canonical execution name" }
     requireCurrentControlParent(parent)
     LinuxFilesystemSyscalls.createDirectory(parent.fd, name, 448)
     val child = LinuxFilesystemSyscalls.openDirectoryAt(parent.fd, name)
