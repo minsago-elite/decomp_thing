@@ -31,6 +31,38 @@ import kotlinx.serialization.json.jsonPrimitive
 
 class BehaviorEvidenceTest {
     @Test
+    fun `completion command and terminal fields remain closed after rehashing`() {
+        val fixture = fixture()
+        val record = BehaviorEvidence.decode(fixture.evaluate().reportPath.readBytes())
+        val sample = record.getValue("cases").jsonArray.first().jsonObject
+            .getValue("original").jsonObject.getValue("completionEvidence").jsonObject
+        val command = sample.getValue("launchCommand").jsonArray
+        val variants = listOf(
+            JsonObject(sample - "statusHex"),
+            JsonObject(sample + ("extra" to JsonPrimitive(true))),
+            JsonObject(sample + ("statusHex" to JsonPrimitive(""))),
+            JsonObject(sample + ("channelPath" to JsonPrimitive("relative/status"))),
+            JsonObject(sample + ("channelPath" to JsonPrimitive("/different/status"))),
+            JsonObject(sample + ("launchCommand" to JsonArray(command.dropLast(1)))),
+            JsonObject(sample + ("launchCommand" to JsonArray(command.mapIndexed { index, value ->
+                if (index == 2) JsonPrimitive("exit 0") else value
+            }))),
+        )
+        for (completion in variants) {
+            val cases = JsonArray(record.getValue("cases").jsonArray.map { element ->
+                val case = element.jsonObject
+                JsonObject(case + ("original" to JsonObject(case.getValue("original").jsonObject +
+                    ("completionEvidence" to completion))))
+            })
+            val changed = JsonObject(record + mapOf("cases" to cases,
+                "observationsSha256" to JsonPrimitive(OracleArtifacts.sha256(OracleJson.canonicalBytes(cases)))))
+            val digest = OracleArtifacts.sha256(OracleJson.canonicalBytes(JsonObject(changed - "reportSha256")))
+            val bytes = OracleJson.canonicalBytes(JsonObject(changed + ("reportSha256" to JsonPrimitive(digest))))
+            assertFails { BehaviorEvidence.decode(bytes) }
+        }
+    }
+
+    @Test
     fun `historical completion uncertainty remains visible without rewriting evidence`() {
         val fixture = fixture()
         val report = fixture.evaluate()

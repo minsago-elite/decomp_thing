@@ -204,14 +204,8 @@ class SandboxRunner(
 
     internal fun runWithFiles(executable: Path, input: ProcessInput, files: Map<String, Path>): ProcessOutput {
         val deadline = runCatching { Math.addExact(System.nanoTime(), timeout.toNanos()) }.getOrDefault(Long.MAX_VALUE)
-        val directory = java.nio.file.Files.createTempDirectory("behavior-completion-")
-        val channel = directory.resolve("status.jsonl")
-        try {
-            java.nio.file.Files.createFile(channel)
-            return runWithCompletion(executable, input, files, channel, deadline)
-        } finally {
-            java.nio.file.Files.deleteIfExists(channel)
-            java.nio.file.Files.deleteIfExists(directory)
+        return withCompletionChannel { channel ->
+            runWithCompletion(executable, input, files, channel, deadline)
         }
     }
 
