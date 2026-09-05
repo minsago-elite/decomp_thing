@@ -789,7 +789,9 @@ files use a fresh evidence directory. It does not establish independent-agent au
 
 **Cancel inspection** posts an explicit cancellation request to
 `/api/operator/auth-methods/cancel`. A request acknowledgement is not a terminal cleanup result:
-the view continues polling until inspection finishes, and late acknowledgements cannot overwrite
+the view continues polling until inspection finishes. HTTP, network, or malformed status-response
+failures display a retry notice and keep cancellation available without enabling a new inspection.
+A 409 start response attaches the page to the existing inspection. Late acknowledgements cannot overwrite
 a terminal result or a later inspection. The server's cancellation token reaches the preflight
 scheduler, launch and initialize waits. Shutdown requests cancellation and waits for the tracked
 inspection thread to finish, using the provider's own cleanup deadlines without a shorter web timeout.
