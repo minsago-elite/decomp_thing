@@ -325,6 +325,11 @@ use canonical field ordering; existing pretty-printed records remain readable wi
 A failure before replacement leaves the published record intact. Temporary files are removed on
 ordinary failure. A failure after replacement, including directory-force failure, may have published the new
 record and is not proof of rollback. Tests cover held readers and interruption before publication.
+`JobMetadataPublicationTest` injects exceptions before writing, after a partial write, before/after file force,
+before/after replacement, and before/after directory force. A fresh store reads the exact prior record for
+pre-replacement failures and a complete new record for post-replacement failures; the input remains intact
+and ordinary cleanup removes the temporary file. These exception cases run cleanup and therefore do not
+substitute for process death during I/O, abandoned-file reclamation, or power-loss qualification.
 
 Uploads stage their input and metadata together in a private `.upload-` directory beneath the job store.
 The input and metadata are forced before the directory is atomically renamed to its final job ID; the store
