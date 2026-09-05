@@ -69,4 +69,7 @@ contracts and proving their new contained direct-API runtime is tracked in #235.
 The [versioned bundled-runtime definition](gcc-bundled-runtime-contract-v2.md)
 now binds the direct-API command and ordered classpath without reinterpreting
 those historical receipts. It remains non-authoritative; the live BOOT controller
-rejects it pending retained runtime authentication. This does not close A10/A13.
+rejects it pending retained runtime authentication. The distribution also carries
+an [independent full-bundle deployment reference](gcc-bundled-ghidra-deployment-reference.md)
+beside the application JAR; this reference alone cannot grant execution authority.
+This does not close A10/A13.
