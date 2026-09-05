@@ -65,6 +65,10 @@ interface BuiltinToolSession : AutoCloseable {
     fun validateCompletion(control: BuiltinExecutionControl): BuiltinCompletion = BuiltinCompletion.REQUIRED
     /** Opt-in snapshot of actual staged bytes. Recovery never derives source authority from model text. */
     fun checkpointSnapshot(control: BuiltinExecutionControl): BuiltinWorkspaceSnapshot? = null
+    /** Trusted quotas/profiles not already represented by the shared request or tool schemas. */
+    fun checkpointAuthoritySha256(control: BuiltinExecutionControl): String? = null
+    /** Rehydrate only a fresh workflow-owned stage; default sessions must already contain the exact bytes. */
+    fun restoreCheckpointStage(expectedSourceSha256: String, control: BuiltinExecutionControl) = Unit
 }
 
 data class BuiltinTraceRecord(val sequence: Int, val state: BuiltinLoopState, val evidenceSha256: String? = null)
@@ -133,6 +137,7 @@ class BuiltinAgentHarness(
         var checkpoint: BuiltinCheckpointReference? = null
         var restoredContext: JsonObject? = null
         var restoredSourceSha256: String? = null
+        var restoredAuthoritySha256: String? = null
         var resumeAdmitted = resume == null
         val checkpointStore get() = BuiltinCheckpointStore(checkNotNull(checkpointConfiguration), checkNotNull(journalConfiguration), request)
         var changes = emptyList<AgentFileChange>()
@@ -239,6 +244,8 @@ class BuiltinAgentHarness(
                 contextEntries = context.entries
             } else {
                 check(journalContext(definitions) == restoredContext)
+                check(tools.checkpointAuthoritySha256(control) == restoredAuthoritySha256)
+                tools.restoreCheckpointStage(checkNotNull(restoredSourceSha256), control)
                 check(tools.checkpointSnapshot(control)?.sha256 == restoredSourceSha256)
                 journal!!.append(BuiltinJournalKind.RESUME, buildJsonObject {
                     put("checkpointHeadSha256", resume.headSha256); put("checkpointRecords", resume.records)
@@ -422,9 +429,12 @@ class BuiltinAgentHarness(
             val context = contextBytes(definitions)
             val remainingNanos = control.remaining().toNanos()
             val value = buildJsonObject {
-                put("version", 1); put("state", "READY_FOR_MODEL")
+                put("version", 2); put("state", "READY_FOR_MODEL")
                 put("loopLimitsSha256", digest(limits.toString().toByteArray()))
                 put("context", journalContext(definitions)); put("contextSha256", digest(context)); put("sourceSha256", snapshot.sha256)
+                val authority = tools.checkpointAuthoritySha256(control)
+                check(authority == null || authority.matches(Regex("[a-f0-9]{64}")))
+                put("toolAuthoritySha256", authority)
                 put("usage", usage()); put("eventSequence", eventSequence)
                 put("remainingWallClockNanos", remainingNanos)
                 put("deadlineEpochMillis", checkpointConfiguration!!.clock.millis() + remainingNanos / 1_000_000)
@@ -452,9 +462,9 @@ class BuiltinAgentHarness(
             val value = payload.getValue("resumeState").jsonObject
             // A redacted checkpoint is evidence only. Never feed replacement text back as original context/source.
             check(payload["stateSha256"] == JsonPrimitive(checkpointStateHash(value, journalConfiguration!!.maximumRecordBytes)))
-            check(value.keys == setOf("version", "state", "loopLimitsSha256", "context", "contextSha256", "sourceSha256", "usage",
+            check(value.keys == setOf("version", "state", "loopLimitsSha256", "context", "contextSha256", "sourceSha256", "toolAuthoritySha256", "usage",
                 "eventSequence", "remainingWallClockNanos", "deadlineEpochMillis", "elapsedWallClockNanos", "usedCallIds", "repeated", "records", "contextEntries"))
-            check(value["version"] == JsonPrimitive(1) && value["state"] == JsonPrimitive("READY_FOR_MODEL"))
+            check(value["version"] == JsonPrimitive(2) && value["state"] == JsonPrimitive("READY_FOR_MODEL"))
             check(value["loopLimitsSha256"] == JsonPrimitive(digest(limits.toString().toByteArray())))
             fun number(key: String) = value.getValue(key).jsonPrimitive.long
             val remainingNanos = number("remainingWallClockNanos")
@@ -520,6 +530,8 @@ class BuiltinAgentHarness(
             check(value["contextSha256"] == JsonPrimitive(digest(contextBytes(definitions))))
             restoredSourceSha256 = value.getValue("sourceSha256").jsonPrimitive.content
             check(restoredSourceSha256!!.matches(Regex("[a-f0-9]{64}")))
+            restoredAuthoritySha256 = value.getValue("toolAuthoritySha256").jsonPrimitive.contentOrNull
+            check(restoredAuthoritySha256 == null || restoredAuthoritySha256!!.matches(Regex("[a-f0-9]{64}")))
         }
 
         fun journalCall(call: ModelToolCall) = buildJsonObject {

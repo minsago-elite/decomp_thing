@@ -91,12 +91,14 @@ class BuiltinCapturedExecutionEvidence(
     audit: List<AcpFilesystemAuditRecord>,
     candidateChanges: List<AgentFileChange>,
     contextAudit: List<BuiltinContextToolAudit> = emptyList(),
+    restorationAudit: List<AcpFilesystemAuditRecord> = emptyList(),
 ) : AgentExecutionProviderEvidence {
     override val providerId = "builtin"
     override val schemaVersion = 1
     val filesystemAudit: List<AcpFilesystemAuditRecord> = Collections.unmodifiableList(ArrayList(audit))
     val candidateChanges: List<AgentFileChange> = Collections.unmodifiableList(ArrayList(candidateChanges))
     val contextAudit: List<BuiltinContextToolAudit> = Collections.unmodifiableList(ArrayList(contextAudit))
+    val restorationAudit: List<AcpFilesystemAuditRecord> = Collections.unmodifiableList(ArrayList(restorationAudit))
 }
 
 /**
@@ -106,7 +108,16 @@ class BuiltinCapturedExecutionEvidence(
 class BuiltinCapturedRepairHarness(
     private val provider: ModelProvider,
     private val limits: BuiltinLoopLimits = BuiltinLoopLimits(),
+    private val journalConfiguration: BuiltinJournalConfiguration? = null,
+    private val checkpointConfiguration: BuiltinCheckpointConfiguration? = null,
+    private val resume: BuiltinCapturedResume? = null,
+    secrets: Collection<String> = emptyList(),
 ) : CapturedRepairAgentHarness {
+    private val secrets = secrets.toList()
+    init {
+        require(checkpointConfiguration == null || journalConfiguration != null)
+        require(resume == null || checkpointConfiguration != null)
+    }
     override fun implementationIdentifier() = "builtin-captured-repair-v1"
     override fun execute(request: AgentExecutionRequest, onEvent: (AgentExecutionEvent) -> Unit) =
         executeReceipt(request, onEvent).requireResult()
@@ -122,16 +133,21 @@ class BuiltinCapturedRepairHarness(
         val audit = AcpFilesystemAuditRecorder(limits.maxTraceRecords)
         var openedCapture: AcpCapturedRepairFilesystem? = null
         var contextTools: BuiltinCapturedContextTools? = null
+        var restorationRecords = 0
         val harness = BuiltinAgentHarness(provider, { invocation, control ->
             control.checkpoint()
+            fun snapshot(files: Map<String, ByteArray>) = BuiltinWorkspaceSnapshot.capture(
+                files.mapKeys { AgentWorkspacePath(invocation.workspaceRoots.single().id, it.key) }, limits.maximumEvidenceBytes)
+            // The authority's initial files remain the accepted baseline even when candidates are rehydrated.
+            if (journalConfiguration != null) check(snapshot(initialFiles).sha256 == journalConfiguration.identity.sourceSha256)
             val captured = AcpCapturedRepairFilesystem(initialFiles, output)
             val fileLimits = AcpFilesystemLimits(limits.maxToolResultBytes, limits.maxToolResultBytes)
             captured.preflight(invocation, fileLimits)
+            val context = BuiltinCapturedContextTools(invocation, initialFiles.keys, limits.maxToolResultBytes, limits.maxTraceRecords)
+                .also { contextTools = it }
             val session = captured.open(invocation, fileLimits, audit)
             openedCapture = captured
             val dispatcher = BuiltinFilesystemDispatcher(invocation, session, limits.maxToolResultBytes)
-            val context = BuiltinCapturedContextTools(invocation, initialFiles.keys, limits.maxToolResultBytes, limits.maxTraceRecords)
-                .also { contextTools = it }
             object : BuiltinToolSession {
                 override val definitions = dispatcher.definitions + context.definitions
                 override val supportsContextRetrieval = true
@@ -145,10 +161,56 @@ class BuiltinCapturedRepairHarness(
                 override fun changes(control: BuiltinExecutionControl): List<AgentFileChange> {
                     control.checkpoint(); session.close(); return captured.changes()
                 }
+                override fun checkpointSnapshot(control: BuiltinExecutionControl): BuiltinWorkspaceSnapshot {
+                    control.checkpoint(); return snapshot(captured.snapshot())
+                }
+                override fun checkpointAuthoritySha256(control: BuiltinExecutionControl): String {
+                    control.checkpoint()
+                    return checkpointHash(boundedProviderJson(limits.maxContextBytes) { out ->
+                        out.writeStartObject(); out.writeStringField("repairBudget", output.resourceBudget.toString())
+                        out.writeArrayFieldStart("replacementPaths")
+                        output.allowedReplacementPaths().sorted().forEach(out::writeString)
+                        out.writeEndArray(); out.writeEndObject()
+                    })
+                }
+                override fun restoreCheckpointStage(expectedSourceSha256: String, control: BuiltinExecutionControl) {
+                    control.checkpoint()
+                    val restored = checkNotNull(resume).files()
+                    check(restored.keys == initialFiles.keys)
+                    check(snapshot(restored).sha256 == expectedSourceSha256)
+                    val changed = restored.keys.filter { !restored.getValue(it).contentEquals(initialFiles.getValue(it)) }
+                    val budget = output.resourceBudget
+                    check(changed.size <= budget.maximumPatchFiles)
+                    check(changed.sumOf { restored.getValue(it).size.toLong() } <= budget.maximumPatchBytes)
+                    check(restored.values.sumOf { it.size.toLong() } <= budget.maximumStagingBytes)
+                    val text = restored.mapValues { (path, bytes) ->
+                        control.checkpoint()
+                        check(bytes.size <= limits.maxToolResultBytes)
+                        if (path in changed) {
+                            check(bytes.size <= budget.maximumSourceFileBytes)
+                            check(invocation.accessPolicy.allows(
+                                AgentWorkspacePath(invocation.workspaceRoots.single().id, path), AgentOperation.WRITE_FILE))
+                        }
+                        bytes.decodeToString(throwOnInvalidSequence = true)
+                    }
+                    // Shrink first so a valid final stage cannot exceed the original staging quota mid-restore.
+                    try {
+                        changed.sortedWith(compareBy<String> { restored.getValue(it).size.toLong() - initialFiles.getValue(it).size }
+                            .thenBy { it }).forEachIndexed { index, path ->
+                            val result = dispatcher.execute(ModelToolCall("builtin_restore_$index", "write_text", buildJsonObject {
+                                put("root", invocation.workspaceRoots.single().id); put("path", path); put("content", text.getValue(path))
+                            }), control)
+                            check(!result.failed)
+                        }
+                    } finally {
+                        restorationRecords = audit.snapshot().size
+                    }
+                }
                 override fun close() = session.close()
             }
-        }, limits)
-        val receipt = harness.executeReceipt(request, onEvent)
+        }, limits, secrets, journalConfiguration, checkpointConfiguration)
+        val receipt = if (resume == null) harness.executeReceipt(request, onEvent)
+            else harness.resumeReceipt(request, resume.checkpoint, onEvent)
         val changes = openedCapture?.changes() ?: emptyList()
         // Interrupted or refused turns can still have staged edits. Retain them without accepting them.
         val outcome = when (val terminal = receipt.outcome) {
@@ -157,7 +219,9 @@ class BuiltinCapturedRepairHarness(
                 AgentExecutionResult(original.stopReason, original.summary, changes, original.session, original.usage),
             ) }
         }
+        val records = audit.snapshot()
         return AgentExecutionReceipt(receipt.requestBinding, outcome,
-            BuiltinCapturedExecutionEvidence(receipt.providerEvidence as BuiltinLoopEvidence, audit.snapshot(), changes, contextTools?.audit().orEmpty()))
+            BuiltinCapturedExecutionEvidence(receipt.providerEvidence as BuiltinLoopEvidence, records.drop(restorationRecords), changes,
+                contextTools?.audit().orEmpty(), records.take(restorationRecords)))
     }
 }
