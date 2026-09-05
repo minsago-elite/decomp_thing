@@ -345,6 +345,39 @@ internal object FullTreeFunctionTruthSqlite {
         )
     }
 
+    internal fun <T> withValidatedCallProjection(
+        candidateRoot: Path,
+        richArtifact: Path,
+        strippedArtifact: Path,
+        inventoryPath: Path,
+        elfFunctionIndex: Path,
+        observationRoot: Path,
+        expectedObservationIndexArtifactSha256: String,
+        scope: AuthenticatedFullTreeScope,
+        scratchParent: Path,
+        outputRoot: Path,
+        maximumWorkers: Int,
+        limits: FullTreeFunctionTruthLimits,
+        checkpoint: (String) -> Unit,
+        consume: (FullTreeCallTruthFunctionProjection, (String) -> Unit, () -> Unit) -> T,
+    ): T {
+        requireFunctionBaselineOutputDisjoint(outputRoot, listOf(
+            candidateRoot, richArtifact, strippedArtifact, inventoryPath, elfFunctionIndex, observationRoot, scratchParent,
+        ))
+        return reconcile(
+            richArtifact = richArtifact, strippedArtifact = strippedArtifact, inventoryPath = inventoryPath,
+            elfFunctionIndex = elfFunctionIndex, observationRoot = observationRoot,
+            expectedObservationIndexArtifactSha256 = expectedObservationIndexArtifactSha256, scope = scope,
+            scratchParent = scratchParent, resultRoot = candidateRoot, maximumWorkers = maximumWorkers,
+            limits = limits, checkpoint = checkpoint,
+            finish = { reconciliation ->
+                withValidatedFunctionTruthCandidate(reconciliation) { validation ->
+                    consume(validation.callProjection(), validation::recheck, validation::release)
+                }
+            },
+        )
+    }
+
     private fun <T> reconcile(
         richArtifact: Path,
         strippedArtifact: Path,
@@ -358,6 +391,7 @@ internal object FullTreeFunctionTruthSqlite {
         maximumWorkers: Int,
         limits: FullTreeFunctionTruthLimits,
         finish: (FunctionTruthReconciliation) -> T,
+        checkpoint: (String) -> Unit = {},
     ): T = translateTruthFailures {
         requireSha256(expectedObservationIndexArtifactSha256, "function-observation index artifact")
         if (maximumWorkers !in 1..min(limits.maximumWorkers, limits.control.maximumWorkers)) {
@@ -368,7 +402,7 @@ internal object FullTreeFunctionTruthSqlite {
         if (limits.modeledResidentBytes > wholeRun.truthLong("maximumResidentBytes")) {
             truthFail("function-truth modeled resident set exceeds the authenticated whole-run bound")
         }
-        val budget = FunctionTruthBudget(scope)
+        val budget = FunctionTruthBudget(scope, checkpoint)
         budget.checkpoint("after authenticating function-truth scope")
 
         val paths = FunctionTruthPaths.authenticate(
@@ -712,6 +746,14 @@ private class FunctionTruthCandidateValidation(
                 runtimeCheckpoint = budget::checkpoint,
             )
         }
+
+    fun callProjection(): FullTreeCallTruthFunctionProjection = with(reconciliation) {
+        if (released) truthFail("function-truth candidate validation was already released")
+        FullTreeCallTruthFunctionProjection(
+            root = derived, index = projection.index, indexArtifactSha256 = projection.indexArtifactSha256,
+            scratchParent = scratch.validation, scratchCheckpoint = scratch::checkBound, runtimeCheckpoint = budget::checkpoint,
+        )
+    }
 
     fun release() = with(reconciliation) {
         if (released) return@with
@@ -1217,7 +1259,10 @@ private class FunctionTruthScratch private constructor(
     }
 }
 
-private class FunctionTruthBudget(scope: AuthenticatedFullTreeScope) {
+private class FunctionTruthBudget(
+    scope: AuthenticatedFullTreeScope,
+    private val outerCheckpoint: (String) -> Unit = {},
+) {
     private val startedWallNanos = System.nanoTime()
     private val startedCpuNanos = processCpuNanos()
     private val whole = scope.document.truthObject("bounds").truthObject("wholeRun")
@@ -1226,6 +1271,7 @@ private class FunctionTruthBudget(scope: AuthenticatedFullTreeScope) {
     private val maximumResidentBytes = whole.truthLong("maximumResidentBytes")
 
     fun checkpoint(label: String) {
+        outerCheckpoint(label)
         val wall = System.nanoTime() - startedWallNanos
         val cpu = processCpuNanos() - startedCpuNanos
         if (wall < 0L || wall > maximumWallNanos) {

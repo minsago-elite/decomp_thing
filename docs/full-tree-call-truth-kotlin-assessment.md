@@ -104,6 +104,12 @@ still requires all of the following:
 - isolated integration of the SQLite call sink plus sharded Kotlin call-truth publication protocol;
 - real full-tree parity and hostile interruption/restart evidence for those authorities.
 
+The separate [raw-derived Kotlin call composer](full-tree-call-truth-kotlin.md) now provides the
+bounded SQLite migration path and independent raw candidate comparison. It has a new policy-v3
+configuration rather than widening this historical assessment. Its publication receipt remains
+non-authoritative; the containment, complete target evidence, scoring and release requirements
+above are not discharged by producing a complete shard index.
+
 The Python producer remains migration/differential compatibility input only. Its usage and execution
 records are integrity-checked, but they cannot authorize Kotlin truth or release. ACP may read the
 resulting non-authoritative diagnostic for planning; ACP does not supply observations, identities,
