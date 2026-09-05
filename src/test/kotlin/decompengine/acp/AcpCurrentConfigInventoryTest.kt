@@ -44,6 +44,25 @@ class AcpCurrentConfigInventoryTest {
         val failure = assertFailsWith<AgentExecutionException> { requireCurrentSessionConfigPreference(options, preference, 0) }
         assertFalse(failure.message.orEmpty().contains("private-configured-value"))
         assertFalse(failure.failure.details.toString().contains("private-configured-value"))
+        assertTrue(failure.message.orEmpty().contains("[false,true]"))
+    }
+
+    @Test
+    fun `choice previews redact configured secrets and bound long inventories`() {
+        val original = inventory("session-new-configured.response").first()
+        val options = (0 until 20).map { index ->
+            Json.decodeFromString<SessionConfigOption>(Json.encodeToString(SessionConfigOption.serializer(), original)
+                .replace("\"reasoning\"", "\"private-inventory-$index\""))
+        }
+        val failure = assertFailsWith<AgentExecutionException> {
+            requireCurrentSessionConfigPreference(options,
+                AcpSessionConfigPreference("missing", AcpSessionConfigValue.BooleanValue(false)), 0,
+                listOf("private-inventory"))
+        }
+        assertFalse(failure.message.orEmpty().contains("private-inventory"))
+        assertTrue(failure.message.orEmpty().contains("[redacted]"))
+        assertTrue(failure.message.orEmpty().contains("more choices omitted"))
+        assertTrue(failure.message.orEmpty().length < 1024)
     }
 
     private fun inventory(name: String): List<SessionConfigOption> {
