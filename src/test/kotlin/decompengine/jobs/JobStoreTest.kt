@@ -14,6 +14,27 @@ import kotlin.test.assertTrue
 
 class JobStoreTest {
     @Test
+    fun `metadata byte limit rejects unroundtrippable uploads and preserves readable jobs`() {
+        val root = createTempDirectory("jobs-metadata-limit-")
+        val store = JobStore(root)
+        val acceptedName = "界".repeat(80_000)
+        val accepted = store.createFromUpload(acceptedName, elfFixture())
+        assertEquals(acceptedName, JobStore(root).get(accepted.id).filename)
+        for (oversizedName in listOf("界".repeat(90_000), "\"".repeat(140_000))) {
+            val failure = assertFailsWith<IllegalArgumentException> {
+                store.createFromUpload(oversizedName, elfFixture())
+            }
+            assertEquals("job metadata exceeds the 256 KiB limit", failure.message)
+            assertEquals(listOf(accepted.id), JobStore(root).list().map { it.id })
+            java.nio.file.Files.list(root).use { entries ->
+                assertEquals(listOf(accepted.id), entries.map { it.fileName.toString() }.toList())
+            }
+        }
+        assertEquals("analyzing", store.updateStatus(accepted.id, "analyzing", "still readable").status)
+        assertEquals("still readable", JobStore(root).get(accepted.id).statusMessage)
+    }
+
+    @Test
     fun `interrupted upload leaves no discoverable partial job or staging directory`() {
         val root = createTempDirectory("jobs-interrupted-upload-")
         val store = JobStore(root)
