@@ -1253,7 +1253,7 @@ internal fun parseBootClassPathManifest(
     })
 }
 
-private fun deriveRuntimeConfiguration(
+internal fun deriveRuntimeConfiguration(
     definition: GccCompilerEngineValidatedContainmentDefinition,
     classPath: List<FullTreeFunctionObservationClassPathEntry>,
 ): FullTreeFunctionObservationIsolationConfiguration {

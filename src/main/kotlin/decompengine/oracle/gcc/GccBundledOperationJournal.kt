@@ -16,6 +16,7 @@ import java.nio.file.Path
 import java.security.MessageDigest
 import kotlinx.serialization.json.JsonObject
 import kotlinx.serialization.json.JsonPrimitive
+import kotlinx.serialization.json.JsonElement
 
 internal class GccBundledOperationJournal private constructor(
     val path: Path,
@@ -36,7 +37,7 @@ internal class GccBundledOperationJournal private constructor(
     val preparedBytes: ByteArray
         @Synchronized get() {
             checkOpen()
-            check(stage == JournalStage.PREPARED) { "GCC bundled operation is not prepared" }
+            check(stage >= JournalStage.PREPARED) { "GCC bundled operation is not prepared" }
             return snapshots.getValue(PREPARED_FILE).bytes
         }
 
@@ -96,6 +97,57 @@ internal class GccBundledOperationJournal private constructor(
     @Synchronized
     fun verify(label: String) = boundOperation(label) { }
 
+    @Synchronized
+    fun recordAttachment(attachmentBytes: ByteArray) = boundOperation("recording GCC command attachment") {
+        check(stage == JournalStage.PREPARED) { "GCC command attachment requires a prepared operation" }
+        publishLinkedRecord(ATTACHMENT_FILE, "gcc-bundled-command-attached-v1", PREPARED_FILE, "attachment", attachmentBytes)
+        stage = JournalStage.ATTACHED
+    }
+
+    @Synchronized
+    fun recordStartAuthorization() = boundOperation("authorizing GCC command START") {
+        check(stage == JournalStage.ATTACHED) { "GCC command START requires a retained attachment" }
+        publishLinkedRecord(START_FILE, "gcc-bundled-command-start-authorized-v1", ATTACHMENT_FILE, null, null)
+        stage = JournalStage.START_AUTHORIZED
+    }
+
+    @Synchronized
+    fun recordExecution(executionBytes: ByteArray): ByteArray = boundOperation("recording GCC command execution") {
+        check(stage == JournalStage.START_AUTHORIZED) { "GCC command execution requires durable START authorization" }
+        publishLinkedRecord(EXECUTION_FILE, "gcc-bundled-command-executed-v1", START_FILE, "execution", executionBytes)
+        stage = JournalStage.EXECUTED
+        snapshots.getValue(EXECUTION_FILE).bytes
+    }
+
+    @Synchronized
+    fun recordExportAssessment(assessmentBytes: ByteArray): ByteArray = boundOperation("recording GCC export assessment") {
+        check(stage == JournalStage.EXECUTED) { "GCC export assessment requires recorded contained execution" }
+        publishLinkedRecord(EXPORT_FILE, "gcc-bundled-command-export-assessed-v1", EXECUTION_FILE, "assessment", assessmentBytes)
+        stage = JournalStage.EXPORT_ASSESSED
+        snapshots.getValue(EXPORT_FILE).bytes
+    }
+
+    private fun publishLinkedRecord(name: String, provider: String, previous: String, payloadName: String?, payloadBytes: ByteArray?) {
+        val fields = linkedMapOf<String, JsonElement>(
+            "provider" to JsonPrimitive(provider),
+            "schemaVersion" to JsonPrimitive(1),
+            "operationId" to JsonPrimitive(operationId),
+            "intentSha256" to JsonPrimitive(intentSha256),
+            "previousSha256" to JsonPrimitive(OracleArtifacts.sha256(snapshots.getValue(previous).bytes)),
+            "complete" to JsonPrimitive(false),
+            "releaseEligible" to JsonPrimitive(false),
+        )
+        if (payloadName != null) {
+            val bytes = boundedCopy(requireNotNull(payloadBytes), MAXIMUM_INTENT_BYTES, "GCC command record")
+            val payload = OracleJson.parseCanonical(bytes, JOURNAL_JSON_LIMITS)
+            require(payload is JsonObject) { "GCC command payload must be a canonical object" }
+            fields[payloadName] = payload
+            fields["${payloadName}Sha256"] = JsonPrimitive(OracleArtifacts.sha256(bytes))
+        }
+        fields["recordSha256"] = JsonPrimitive(OracleArtifacts.sha256(OracleJson.canonicalBytes(JsonObject(fields), JOURNAL_JSON_LIMITS)))
+        publish(name, OracleJson.canonicalBytes(JsonObject(fields), JOURNAL_JSON_LIMITS))
+    }
+
     private fun publish(name: String, bytes: ByteArray) {
         requireDirectoryBindings()
         snapshots[name] = DescriptorBoundAtomicStateFile.publishNoReplace(
@@ -114,6 +166,10 @@ internal class GccBundledOperationJournal private constructor(
             JournalStage.LEASED -> setOf(INTENT_FILE, LEASE_FILE)
             JournalStage.DEFINITION_STAGED -> setOf(INTENT_FILE, LEASE_FILE, DEFINITION_FILE)
             JournalStage.PREPARED -> setOf(INTENT_FILE, LEASE_FILE, DEFINITION_FILE, PREPARED_FILE)
+            JournalStage.ATTACHED -> setOf(INTENT_FILE, LEASE_FILE, DEFINITION_FILE, PREPARED_FILE, ATTACHMENT_FILE)
+            JournalStage.START_AUTHORIZED -> setOf(INTENT_FILE, LEASE_FILE, DEFINITION_FILE, PREPARED_FILE, ATTACHMENT_FILE, START_FILE)
+            JournalStage.EXECUTED -> setOf(INTENT_FILE, LEASE_FILE, DEFINITION_FILE, PREPARED_FILE, ATTACHMENT_FILE, START_FILE, EXECUTION_FILE)
+            JournalStage.EXPORT_ASSESSED -> setOf(INTENT_FILE, LEASE_FILE, DEFINITION_FILE, PREPARED_FILE, ATTACHMENT_FILE, START_FILE, EXECUTION_FILE, EXPORT_FILE)
         }
         if (snapshots.keys != expectedNames) journalFail("GCC bundled journal has inconsistent retained state")
         requireExactNames(expectedNames, label)
@@ -318,14 +374,18 @@ private fun closeJournalDescriptors(
 
 private fun journalFail(message: String): Nothing = throw IllegalArgumentException(message)
 
-private enum class JournalStage { INTENT, LEASED, DEFINITION_STAGED, PREPARED }
+private enum class JournalStage { INTENT, LEASED, DEFINITION_STAGED, PREPARED, ATTACHED, START_AUTHORIZED, EXECUTED, EXPORT_ASSESSED }
 private const val INTENT_FILE = "intent.json"
 private const val LEASE_FILE = "lease-evidence.json"
 private const val DEFINITION_FILE = "definition.json"
 private const val PREPARED_FILE = "prepared.json"
+private const val ATTACHMENT_FILE = "attachment.json"
+private const val START_FILE = "start-authorized.json"
+private const val EXECUTION_FILE = "execution.json"
+private const val EXPORT_FILE = "export-assessment.json"
 private const val OWNER_DIRECTORY_MODE = 0x1c0
 private const val GROUP_OR_OTHER_WRITE_MODE = 0x12
-private const val MAXIMUM_JOURNAL_ENTRIES = 4
+private const val MAXIMUM_JOURNAL_ENTRIES = 8
 private const val MAXIMUM_INTENT_BYTES = 256 * 1024
 private const val MAXIMUM_DEFINITION_BYTES = 1024 * 1024
 private val JOURNAL_JSON_LIMITS = StrictJsonLimits(

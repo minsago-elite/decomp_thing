@@ -1,19 +1,135 @@
 package decompengine.oracle.gcc
 
+import decompengine.acp.LinuxDescriptor
+import decompengine.acp.LinuxFileIdentity
+import decompengine.acp.LinuxFilesystemSyscalls
 import decompengine.oracle.core.OracleArtifacts
+import decompengine.oracle.core.OracleJson
 import java.lang.reflect.Modifier
 import java.nio.charset.StandardCharsets
+import java.nio.file.Files
 import java.nio.file.Path
+import java.nio.file.attribute.PosixFilePermissions
 import java.security.MessageDigest
 import java.util.TreeMap
 import java.util.concurrent.TimeUnit
 import kotlin.test.Test
+import kotlin.test.assertContentEquals
 import kotlin.test.assertEquals
+import kotlin.test.assertFails
 import kotlin.test.assertFailsWith
 import kotlin.test.assertFalse
 import kotlin.test.assertTrue
+import kotlinx.serialization.json.jsonObject
+import kotlinx.serialization.json.jsonPrimitive
+import kotlinx.serialization.json.boolean
 
 class GccCompilerEngineResumeEvidenceValidationTest {
+    @Test
+    fun `descriptor capture preserves report inode admission across legitimate child directory creation`() {
+        withDescriptorExportFixture { captured ->
+            LinuxFilesystemSyscalls.openDirectoryAt(captured.root.fd, "reports").use { current ->
+                assertTrue(current.identity.linkCount > captured.reportsIdentity.linkCount)
+                assertEquals(captured.reportsIdentity.key, current.identity.key)
+            }
+            val result = GccBundledExportCapture.capture(captured.root, captured.reportsIdentity, captured.artifacts)
+            assertEquals(sha(captured.fixture.model), result.assessment.programModelSha256)
+            assertEquals("non-authoritative-byte-assessment", result.assessment.authority)
+            val original = result.canonicalBytes
+            result.canonicalBytes[0] = '!'.code.toByte()
+            assertContentEquals(original, result.canonicalBytes)
+            val receipt = OracleJson.parseCanonical(original).jsonObject
+            assertFalse(receipt.getValue("complete").jsonPrimitive.boolean)
+            assertFalse(receipt.getValue("releaseEligible").jsonPrimitive.boolean)
+        }
+    }
+
+    @Test
+    fun `descriptor export capture rejects changed declared input exporter and archive identities`() {
+        withDescriptorExportFixture { captured ->
+            for (role in captured.artifacts.map { it.role }) {
+                val changed = captured.artifacts.map { artifact -> if (artifact.role == role) artifact.copy(sha256 = SHA_F) else artifact }
+                val failure = assertFailsWith<IllegalArgumentException> {
+                    GccBundledExportCapture.capture(captured.root, captured.reportsIdentity, changed)
+                }
+                assertTrue(failure.message.orEmpty().contains("authenticated invocation"))
+            }
+            assertEquals(sha(captured.fixture.model), GccBundledExportCapture.capture(captured.root, captured.reportsIdentity, captured.artifacts).assessment.programModelSha256)
+        }
+    }
+
+    @Test
+    fun `descriptor export capture rejects hardlinked and symbolic file substitutions`() {
+        for (symbolic in listOf(false, true)) {
+            withDescriptorExportFixture { captured ->
+                val model = captured.directory.resolve("reports/program_model.json")
+                val alias = captured.directory.resolve("model-alias.json")
+                if (symbolic) {
+                    Files.move(model, alias)
+                    Files.createSymbolicLink(model, alias)
+                } else {
+                    Files.createLink(alias, model)
+                }
+                assertFails { GccBundledExportCapture.capture(captured.root, captured.reportsIdentity, captured.artifacts) }
+                assertContentEquals(captured.fixture.model, Files.readAllBytes(alias))
+            }
+        }
+    }
+
+    @Test
+    fun `descriptor export capture rejects linked directories and changed report inode bindings`() {
+        for (relative in listOf("reports", "reports/program_model.json.export", "reports/program_model.json.export/planning-batches")) {
+            withDescriptorExportFixture { captured ->
+                val selected = captured.directory.resolve(relative)
+                val moved = captured.directory.resolve("moved-directory")
+                Files.move(selected, moved)
+                Files.createSymbolicLink(selected, moved)
+                assertFails { GccBundledExportCapture.capture(captured.root, captured.reportsIdentity, captured.artifacts) }
+                assertTrue(Files.isDirectory(moved))
+            }
+        }
+        withDescriptorExportFixture { captured ->
+            Files.move(captured.directory.resolve("reports"), captured.directory.resolve("original-reports"))
+            Files.createDirectory(captured.directory.resolve("reports"))
+            assertFailsWith<IllegalArgumentException> {
+                GccBundledExportCapture.capture(captured.root, captured.reportsIdentity, captured.artifacts)
+            }
+        }
+    }
+
+    @Test
+    fun `descriptor export capture rejects unexpected planning batch files without deleting residue`() {
+        withDescriptorExportFixture { captured ->
+            val residue = captured.directory.resolve("reports/program_model.json.export/planning-batches/unexpected.checkpoint")
+            Files.writeString(residue, "retained-unexpected-residue")
+            assertFailsWith<IllegalArgumentException> {
+                GccBundledExportCapture.capture(captured.root, captured.reportsIdentity, captured.artifacts)
+            }
+            assertEquals("retained-unexpected-residue", Files.readString(residue))
+        }
+    }
+
+    @Test
+    fun `descriptor export capture enforces metadata model and aggregate byte bounds`() {
+        withDescriptorExportFixture { captured ->
+            val fixture = captured.fixture
+            val total = fixture.state.size.toLong() + fixture.progress.size + fixture.model.size + fixture.batches.sumOf { batch ->
+                batch.checkpoint.size.toLong() + batch.functions.size + batch.globals.size + batch.types.size + batch.failures.size
+            }
+            for (limits in listOf(
+                GccResumeByteValidationLimits(exporterStateBytes = fixture.state.size - 1),
+                GccResumeByteValidationLimits(assembledModelBytes = fixture.model.size - 1),
+                GccResumeByteValidationLimits(transitionAggregateBytes = total - 1),
+            )) {
+                val failure = assertFailsWith<IllegalArgumentException> {
+                    GccBundledExportCapture.capture(captured.root, captured.reportsIdentity, captured.artifacts, limits)
+                }
+                assertTrue(failure.message.orEmpty().contains("byte bound"))
+            }
+            assertEquals(sha(fixture.model), GccBundledExportCapture.capture(captured.root, captured.reportsIdentity, captured.artifacts).assessment.programModelSha256)
+        }
+    }
+
     @Test
     fun `state-bound progress retains raw digest and rejects impossible prefix positions`() {
         val fixture = oneBatchFixture()
@@ -540,6 +656,55 @@ class GccCompilerEngineResumeEvidenceValidationTest {
         }
         assertTrue(framingFailure.message?.contains("framing exceeds") == true)
     }
+
+    private fun withDescriptorExportFixture(action: (DescriptorExportFixture) -> Unit) {
+        val fixture = oneBatchFixture()
+        val directory = Files.createTempDirectory("gcc-descriptor-export-")
+        Files.setPosixFilePermissions(directory, PosixFilePermissions.fromString("rwx------"))
+        try {
+            fun privateDirectory(path: Path): Path = Files.createDirectory(path).also {
+                Files.setPosixFilePermissions(it, PosixFilePermissions.fromString("rwx------"))
+            }
+            fun write(path: Path, bytes: ByteArray) {
+                Files.write(path, bytes)
+                Files.setPosixFilePermissions(path, PosixFilePermissions.fromString("r--------"))
+            }
+            val reports = privateDirectory(directory.resolve("reports"))
+            val expectedReports = LinuxFilesystemSyscalls.openRoot(reports).use { it.identity }
+            val export = privateDirectory(reports.resolve("program_model.json.export"))
+            val batches = privateDirectory(export.resolve("planning-batches"))
+            write(reports.resolve("program_model.json"), fixture.model)
+            write(reports.resolve("program_model.json.progress.json"), fixture.progress)
+            write(export.resolve("state.json"), fixture.state)
+            val batch = fixture.batches.single()
+            val base = "batch-00000000-00000002"
+            for ((suffix, bytes) in mapOf(
+                "checkpoint" to batch.checkpoint, "functions.fragment" to batch.functions,
+                "globals.fragment" to batch.globals, "types.fragment" to batch.types,
+                "failures.fragment" to batch.failures,
+            )) write(batches.resolve("$base.$suffix"), bytes)
+            val artifacts = listOf(
+                GccCompilerEngineContainmentArtifactRole.ENGINE_BINARY to SHA_A,
+                GccCompilerEngineContainmentArtifactRole.EXPORTER_SOURCE to SHA_B,
+                GccCompilerEngineContainmentArtifactRole.GHIDRA_ARCHIVE to SHA_C,
+            ).map { (role, digest) ->
+                GccCompilerEngineContainmentArtifactIdentity(role, directory.resolve("declared-${role.wireName}"), 1, digest)
+            }
+            LinuxFilesystemSyscalls.openRoot(directory).use { root ->
+                action(DescriptorExportFixture(directory, root, expectedReports, artifacts, fixture))
+            }
+        } finally {
+            Files.walk(directory).use { paths -> paths.sorted(Comparator.reverseOrder()).forEach(Files::delete) }
+        }
+    }
+
+    private data class DescriptorExportFixture(
+        val directory: Path,
+        val root: LinuxDescriptor,
+        val reportsIdentity: LinuxFileIdentity,
+        val artifacts: List<GccCompilerEngineContainmentArtifactIdentity>,
+        val fixture: RunFixture,
+    )
 
     private fun assess(
         fixture: RunFixture,

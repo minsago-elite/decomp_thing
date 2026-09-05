@@ -29,6 +29,73 @@ import kotlinx.serialization.json.jsonPrimitive
 
 class GccBundledOperationJournalTest {
     @Test
+    fun `execution journal records attachment before START and chains absent execution and export assessment`() = withJournalRoot { root ->
+        val intent = intent()
+        GccBundledOperationJournal.create(root, OPERATION_ID, intent).use { journal ->
+            journal.recordLease(evidence(intent))
+            journal.recordPrepared(definition(), DEPLOYMENT_SHA256)
+            val prepared = journal.preparedBytes
+            val attachment = OracleJson.canonicalBytes(JsonObject(mapOf("fixtureAttachment" to JsonPrimitive(true))))
+            journal.recordAttachment(attachment)
+            assertFalse(Files.exists(journal.path.resolve("start-authorized.json")))
+            journal.recordStartAuthorization()
+            val execution = OracleJson.canonicalBytes(JsonObject(mapOf("fixtureExecution" to JsonPrimitive(true))))
+            val receipt = journal.recordExecution(execution)
+            execution.fill(0)
+            val assessment = OracleJson.canonicalBytes(JsonObject(mapOf("fixtureAssessment" to JsonPrimitive(true))))
+            val assessed = journal.recordExportAssessment(assessment)
+            assessment.fill(0)
+            assertContentEquals(prepared, journal.preparedBytes)
+            assertContentEquals(receipt, Files.readAllBytes(journal.path.resolve("execution.json")))
+            assertContentEquals(assessed, Files.readAllBytes(journal.path.resolve("export-assessment.json")))
+            var previous = prepared
+            for (name in listOf("attachment.json", "start-authorized.json", "execution.json", "export-assessment.json")) {
+                val bytes = Files.readAllBytes(journal.path.resolve(name))
+                val document = OracleJson.parseCanonical(bytes).jsonObject
+                assertEquals(OracleArtifacts.sha256(previous), document.getValue("previousSha256").jsonPrimitive.content)
+                assertEquals(OracleArtifacts.sha256(OracleJson.canonicalBytes(JsonObject(document - "recordSha256"))),
+                    document.getValue("recordSha256").jsonPrimitive.content)
+                assertEquals(JsonPrimitive(false), document["complete"])
+                assertEquals(JsonPrimitive(false), document["releaseEligible"])
+                assertEquals("r--------", permissions(journal.path.resolve(name)))
+                previous = bytes
+            }
+            assertEquals(8, names(journal.path).size)
+            journal.verify("after fixture-only record lifecycle")
+        }
+    }
+
+    @Test
+    fun `START without attachment poisons the prepared journal and preserves all residue`() = withJournalRoot { root ->
+        val intent = intent()
+        GccBundledOperationJournal.create(root, OPERATION_ID, intent).use { journal ->
+            journal.recordLease(evidence(intent))
+            journal.recordPrepared(definition(), DEPLOYMENT_SHA256)
+            assertFailsWith<IllegalStateException> { journal.recordStartAuthorization() }
+            assertEquals(setOf("intent.json", "lease-evidence.json", "definition.json", "prepared.json"), names(journal.path))
+            assertFailsWith<IllegalStateException> { journal.verify("after out-of-order START") }
+        }
+    }
+
+    @Test
+    fun `altered durable START cannot acquire an execution record`() = withJournalRoot { root ->
+        val intent = intent()
+        GccBundledOperationJournal.create(root, OPERATION_ID, intent).use { journal ->
+            journal.recordLease(evidence(intent))
+            journal.recordPrepared(definition(), DEPLOYMENT_SHA256)
+            val payload = OracleJson.canonicalBytes(JsonObject(mapOf("fixture" to JsonPrimitive(true))))
+            journal.recordAttachment(payload)
+            journal.recordStartAuthorization()
+            val start = journal.path.resolve("start-authorized.json")
+            Files.setPosixFilePermissions(start, PosixFilePermissions.fromString("rw-------"))
+            Files.writeString(start, "{}")
+            assertFailsWith<java.io.IOException> { journal.recordExecution(payload) }
+            assertFalse(Files.exists(journal.path.resolve("execution.json")))
+            assertFailsWith<IllegalStateException> { journal.verify("after altered START") }
+        }
+    }
+
+    @Test
     fun `new journal retains private canonical intent and close preserves its residue`() = withJournalRoot { root ->
         val original = intent()
         val supplied = original.copyOf()

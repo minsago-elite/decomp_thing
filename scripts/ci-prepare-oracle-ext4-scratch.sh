@@ -1,8 +1,8 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-if (($# != 0)); then
-  echo "usage: scripts/ci-prepare-oracle-ext4-scratch.sh" >&2
+if (($# > 1)) || [[ $# == 1 && "${1:-}" != --bundled-ghidra ]]; then
+  echo "usage: scripts/ci-prepare-oracle-ext4-scratch.sh [--bundled-ghidra]" >&2
   exit 64
 fi
 
@@ -24,6 +24,16 @@ user_id="$(id -u)"
 group_id="$(id -g)"
 image="$RUNNER_TEMP/decomp-oracle-ext4-scratch.img"
 mount_parent="/var/lib/decomp-oracle-ci"
+image_size=64M
+inode_count=4096
+environment_prefix=DECOMP_TEST_ORACLE_EXT4
+if [[ "${1:-}" == --bundled-ghidra ]]; then
+  image="$RUNNER_TEMP/decomp-bundled-ghidra-ext4-scratch.img"
+  mount_parent="/var/lib/decomp-bundled-ghidra-ci"
+  image_size=1G
+  inode_count=16384
+  environment_prefix=DECOMP_TEST_BUNDLED_GHIDRA_EXT4
+fi
 mount_path="$mount_parent/scratch"
 
 if [[ -e "$image" || -L "$image" || -e "$mount_parent" || -L "$mount_parent" ]]; then
@@ -45,8 +55,8 @@ cleanup_failed_provisioning() {
 }
 trap cleanup_failed_provisioning EXIT
 
-truncate --size=64M "$image"
-mkfs.ext4 -q -F -N 4096 -m 0 "$image"
+truncate --size="$image_size" "$image"
+mkfs.ext4 -q -F -N "$inode_count" -m 0 "$image"
 sudo -n mkdir "$mount_parent"
 sudo -n chown 0:0 "$mount_parent"
 sudo -n chmod 0755 "$mount_parent"
@@ -69,8 +79,8 @@ if [[ "$(stat --format='%u:%a' "$mount_path")" != "$user_id:700" ]]; then
 fi
 
 {
-  printf 'DECOMP_TEST_ORACLE_EXT4_SCRATCH=%s\n' "$mount_path"
-  printf 'DECOMP_TEST_ORACLE_EXT4_IMAGE=%s\n' "$image"
+  printf '%s_SCRATCH=%s\n' "$environment_prefix" "$mount_path"
+  printf '%s_IMAGE=%s\n' "$environment_prefix" "$image"
 } >>"$GITHUB_ENV"
 complete=true
 trap - EXIT
