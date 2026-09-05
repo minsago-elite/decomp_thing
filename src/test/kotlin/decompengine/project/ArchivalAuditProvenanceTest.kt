@@ -19,6 +19,25 @@ import kotlinx.serialization.json.jsonPrimitive
 
 class ArchivalAuditProvenanceTest {
     @Test
+    fun `historical recovered labels retain complete unassessed population bound to actual model bytes`() {
+        val project = fixture(accepted = true)
+        val modelPath = project.resolve("reports/program_model.json")
+        val audit = ArchivalProjectAuditor.audit(project)
+        val assessment = requireNotNull(audit.recoveryAssessment)
+        assertEquals("unassessed", assessment.getValue("state").jsonPrimitive.content)
+        assertEquals("1", assessment.getValue("modelSchemaVersion").jsonPrimitive.content)
+        assertEquals(sha256(Files.readAllBytes(modelPath)), assessment.getValue("modelSha256").jsonPrimitive.content)
+        assertEquals(listOf("fn_10", "fn_100"), assessment.getValue("unassessedEntityIds").jsonArray.map { it.jsonPrimitive.content })
+        assertTrue(assessment.getValue("assessedEntityIds").jsonArray.isEmpty())
+        val confidence = Json.parseToJsonElement(project.resolve("reports/confidence.json").readText()).jsonObject
+        assertEquals(assessment, confidence.getValue("recoveryAssessment"))
+        // Historical diagnostic populations remain readable; they cannot stand in
+        // for the separate scored-assessment population.
+        assertTrue(audit.unresolvedEntityIds.isEmpty())
+        assertTrue(audit.moduleCompilationEvidenceProblems.isEmpty())
+    }
+
+    @Test
     fun `schema two compiled entities remain unassessed in every reconstruction report`() {
         val project = Files.createTempDirectory("unassessed-model-reports-")
         val model = RecoveredProgramModel(
@@ -43,6 +62,8 @@ class ArchivalAuditProvenanceTest {
         assertTrue(audit.moduleCompilationEvidenceProblems.isEmpty())
         assertEquals(expected, audit.unresolvedEntityIds)
         assertEquals(null, audit.behaviorMatched)
+        assertEquals(confidence.getValue("recoveryAssessment").jsonObject, requireNotNull(audit.recoveryAssessment))
+        assertEquals(expected, requireNotNull(audit.recoveryAssessment).getValue("unassessedEntityIds").jsonArray.map { it.jsonPrimitive.content })
         assertEquals(0, MakeProjectBuilder.build(project).returnCode)
         val archive = project.parent.resolve(project.fileName.toString() + ".zip")
         ArchivalPackager.create(project, archive)
