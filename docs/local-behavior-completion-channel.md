@@ -41,3 +41,12 @@ is a local observation, not hosted/native authority. Application stdout/stderr d
 not serve as completion evidence. A matching terminal status does not override a
 local deadline failure. Production executable/runtime identity remains a separate
 requirement, including protection against same-user replacement between checks.
+
+The focused acceptance tests include the complete comparator path. An authored
+execution owner announces readiness, then the test either interrupts the caller
+or forcibly stops that owned process. Both cases must fail, preserve prior report
+bytes, confirm owner termination and remove the channel and its directory. This
+negative fixture supplies no containment authority. Separate real Bubblewrap tests
+exercise genuine application exits, deadline expiry and small stdout/stderr outputs
+that exceed deliberately small per-stream or aggregate limits; completion cannot
+override those limits or permit failed publication to replace prior evidence.
