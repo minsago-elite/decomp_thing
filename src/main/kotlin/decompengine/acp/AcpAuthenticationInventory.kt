@@ -7,8 +7,10 @@ import decompengine.oracle.core.OracleJson
 import decompengine.oracle.core.StrictJsonException
 import decompengine.oracle.core.StrictJsonLimits
 import kotlinx.serialization.json.*
-import java.security.MessageDigest
 import java.util.Collections
+import java.util.UUID
+import javax.crypto.KeyGenerator
+import javax.crypto.Mac
 
 /** Operator-only advertisement; no method is executable merely because it appears here. */
 class AcpAuthenticationMethod internal constructor(
@@ -24,18 +26,22 @@ class AcpAuthenticationMethod internal constructor(
 
 class AcpAuthenticationInventory private constructor(
     methods: List<AcpAuthenticationMethod>,
-    val sha256: String,
+    val commitment: String,
     val logoutAdvertised: Boolean,
 ) {
     val commitmentFormat: String = COMMITMENT_FORMAT
+    val commitmentScope: String = COMMITMENT_SCOPE
 
     /** Advertisement does not grant permission or establish an executable logout lifecycle. */
     val logoutSupported: Boolean = false
     val methods: List<AcpAuthenticationMethod> = Collections.unmodifiableList(methods.toList())
-    override fun toString(): String = "AcpAuthenticationInventory(count=${methods.size}, sha256=$sha256)"
+    override fun toString(): String = "AcpAuthenticationInventory(count=${methods.size}, commitment=$commitment, scope=$commitmentScope)"
 
     companion object {
-        private const val COMMITMENT_FORMAT = "sdk-auth-methods-v1"
+        private const val COMMITMENT_FORMAT = "sdk-auth-methods-hmac-sha256-v2"
+        // Never persist or expose this key. Comparisons are valid only within this JVM's scope.
+        private val COMMITMENT_KEY = KeyGenerator.getInstance("HmacSHA256").apply { init(256) }.generateKey()
+        private val COMMITMENT_SCOPE = UUID.randomUUID().toString()
 
         internal fun capture(
             methods: List<AuthMethod>,
@@ -59,10 +65,10 @@ class AcpAuthenticationInventory private constructor(
                 }
             }
             val payload = canonicalPayload(methods)
-            val hash = MessageDigest.getInstance("SHA-256")
+            val hash = Mac.getInstance("HmacSHA256").apply { init(COMMITMENT_KEY) }
             hash.update(COMMITMENT_FORMAT.toByteArray(Charsets.UTF_8))
             hash.update(0.toByte())
-            val digest = hash.digest(payload).joinToString("") { "%02x".format(it) }
+            val digest = hash.doFinal(payload).joinToString("") { "%02x".format(it) }
             return AcpAuthenticationInventory(methods.map {
                 AcpAuthenticationMethod(it.id.value, variant(it), redactor.text(it.id.value, 128), redactor.text(it.name, 128),
                     it.description?.let { description -> redactor.text(description, 256) })
