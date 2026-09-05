@@ -52,8 +52,12 @@ A successful exchange returns a fresh opaque session cookie and an independent
 CSRF token. Cookie attributes: HttpOnly, SameSite=Strict, path equal to the
 configured application base path; Secure is required with HTTPS and omitted only
 for the explicit local HTTP profile. Avoid a `Domain` attribute. The server
-enforces an eight-hour absolute and thirty-minute idle expiry, revokes sessions
-on restart/logout, stores only token digests and uses constant-time comparisons.
+enforces an eight-hour absolute and thirty-minute idle expiry with monotonic time,
+revokes sessions on restart/logout, stores only domain-separated SHA-256 token
+digests and uses constant-time comparisons. A process-only random HMAC key derives
+the opaque CSRF token from `decomp-web-csrf-v1`, a zero-byte separator and the
+authenticated session cookie. This keeps the CSRF token stable across reloads and
+tabs without retaining its plaintext; neither the key nor session state is persisted.
 The SPA keeps the CSRF token in memory. Reload obtains it from an authenticated
 same-origin bootstrap response with `Cache-Control: no-store`, not localStorage.
 
