@@ -440,3 +440,23 @@ HTTP progress test checks authenticated response omission and unchanged journal 
 byte-page test uses large retained metadata to keep exercising response splitting after prose
 removal. Full classification of retained labels and explicit provider public-message support
 remain outstanding; this change does not claim that all possible journal data is public.
+
+### Packaged privacy qualification
+
+The retained [packaged browser report](evidence/web-progress-privacy-browser-20260905.json)
+qualifies the current v1 omission behavior with inert data. The fixture contains 205 observations
+with private prose/paths and one private plan. Actual browser reads inspect the first two and
+next 50 events, requiring absence of prose, plan entries and paths, `textOmitted: true`, and
+exact omission counts (three for the plan-bearing record, two otherwise). The UI separately
+traverses all 205 observations as 200/5 pages and retains its text-withholding behavior.
+
+The full history journey also passed exact usage rendering, keyboard/focus continuation,
+pause/age updates, background/offline recovery, native report download, cross-tab session
+invalidation and unchanged journal/report/installation bytes. The archive was built from
+application commit `253a0b6`; its SHA-256 is
+`92daaa7adfda05238421fb2b3f1f4eb28ac9327d1369c6ae42966a03f6c7c882`.
+The report records the JAR/UI/Chrome identities, read-only installation, absent Node/npm on
+the application PATH and confirmed cleanup. Chrome used test-only `--no-sandbox`.
+No uploaded binary, native analysis or live agent ran. This covers the embedded SPA on the
+recorded Linux/Chrome environment; legacy-browser automation, other browsers, certified public
+messages and complete classification of retained metadata remain outside this evidence.
