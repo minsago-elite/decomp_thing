@@ -126,7 +126,7 @@ internal object GccBundledExportCapture {
         LinuxFilesystemSyscalls.openDirectoryAt(reports.fd, "program_model.json.export").use { export ->
             requireCaptureDirectory(export, reports.identity)
             if (!captureEntryExists(export, "state.json")) return@use null
-            val capture = BoundExportFiles(limits.transitionAggregateBytes)
+            val capture = GccBoundExportFiles(limits.transitionAggregateBytes)
             val state = capture.read(export, "state.json", limits.exporterStateBytes)
             requireInvocation(state, artifacts)
             val progress = capture.read(reports, "program_model.json.progress.json", limits.progressBytes)
@@ -144,7 +144,7 @@ internal object GccBundledExportCapture {
         artifacts: List<GccCompilerEngineContainmentArtifactIdentity>,
         limits: GccResumeByteValidationLimits,
         interrupted: Boolean,
-        assess: (ByteArray, ByteArray, List<GccPlanningBatchBytes>, BoundExportFiles, LinuxDescriptor) -> T,
+        assess: (ByteArray, ByteArray, List<GccPlanningBatchBytes>, GccBoundExportFiles, LinuxDescriptor) -> T,
     ): T {
         return LinuxFilesystemSyscalls.openDirectoryAt(run.fd, "reports").use { reports ->
             require(reports.identity.copy(linkCount = expectedReports.linkCount) == expectedReports) {
@@ -154,7 +154,7 @@ internal object GccBundledExportCapture {
                 requireCaptureDirectory(export, reports.identity)
                 LinuxFilesystemSyscalls.openDirectoryAt(export.fd, "planning-batches").use { batchesDirectory ->
                     requireCaptureDirectory(batchesDirectory, reports.identity)
-                    val capture = BoundExportFiles(limits.transitionAggregateBytes)
+                    val capture = GccBoundExportFiles(limits.transitionAggregateBytes)
                     val state = capture.read(export, "state.json", limits.exporterStateBytes)
                     val stateAssessment = GccCompilerEngineResumeByteValidator.assessExporterState(state, limits)
                     requireInvocation(state, artifacts)
@@ -234,7 +234,7 @@ private fun requireInvocation(state: ByteArray, artifacts: List<GccCompilerEngin
     }
 }
 
-private class BoundExportFiles(private val maximumBytes: Long) {
+internal class GccBoundExportFiles(private val maximumBytes: Long) {
     var bytes: Long = 0
         private set
     private val files = mutableListOf<BoundExportFile>()
