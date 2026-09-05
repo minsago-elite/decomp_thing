@@ -167,6 +167,7 @@ class GccBundledOperationCoordinatorTest {
                     assertContentEquals(preparedBytes, owner.preparedReceiptBytes)
                     assertContentEquals(diskBytes, owner.diskEvidenceBytes)
                     owner.requireCurrent()
+                    assertFailsWith<IllegalStateException> { owner.requireInterruptedStateCurrent() }
                     owner.requireCurrent()
                     assertFailsWith<FullTreeDiskScratchException> {
                         FullTreeDiskScratchAuthority.acquireDedicatedFilesystem(
