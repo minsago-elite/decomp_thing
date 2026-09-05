@@ -66,4 +66,7 @@ archive input proves bytes and is not a separate runtime installation. This
 diagnostic remains non-authoritative. Existing frozen A10 contained-launch
 contracts still describe their historical authenticated launcher; migrating those
 contracts and proving their new contained direct-API runtime is tracked in #235.
-This change does not silently reinterpret those receipts or close A10/A13.
+The [versioned bundled-runtime definition](gcc-bundled-runtime-contract-v2.md)
+now binds the direct-API command and ordered classpath without reinterpreting
+those historical receipts. It remains non-authoritative; the live BOOT controller
+rejects it pending retained runtime authentication. This does not close A10/A13.

@@ -934,7 +934,7 @@ class GccCompilerEngineLiveContainmentControllerTest {
             OracleJson.canonicalBytes(manifestObject),
         )
         val liveExecutables = if (liveRuntime) liveExecutables() else emptyMap()
-        val artifacts = GccCompilerEngineContainmentArtifactRole.entries.mapIndexed { index, role ->
+        val artifacts = GCC_LEGACY_CONTAINMENT_ARTIFACT_ROLES.mapIndexed { index, role ->
             val path = artifactPathOverrides[role] ?: when (role) {
                 GccCompilerEngineContainmentArtifactRole.BOOT_KEEPER_CLASSPATH -> manifest
                 else -> liveExecutables[role] ?: writeReadOnly(

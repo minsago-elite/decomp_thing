@@ -38,15 +38,7 @@ class BundledGhidra private constructor(val root: Path) {
         require(jars.isNotEmpty()) { "Bundled Ghidra libraries are missing; rebuild installDist" }
         val java = Path.of(System.getProperty("java.home"), "bin", if (File.separatorChar == '\\') "java.exe" else "java")
         require(Files.isExecutable(java)) { "The application JDK has no executable Java worker: $java" }
-        return listOf(
-            java.absolute(), "-Xmx2G", "-Xshare:off", "-Djava.awt.headless=true",
-            "-Djava.system.class.loader=ghidra.GhidraClassLoader", "-Dfile.encoding=UTF-8",
-            "-Duser.language=en", "-Duser.country=US", "-Duser.variant=",
-            "-Djavax.xml.accessExternalDTD=", "-Djavax.xml.accessExternalSchema=",
-            "-Djavax.xml.accessExternalStylesheet=", "--enable-native-access=ALL-UNNAMED",
-            "-cp", (listOf(bridge) + jars).joinToString(File.pathSeparator) { it.absolute() },
-            WORKER_CLASS, release.absolute(),
-        )
+        return GhidraWorkerCommand.prefix(java, release, listOf(bridge) + jars)
     }
 
     internal fun verify() {
