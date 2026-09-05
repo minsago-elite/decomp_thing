@@ -37,6 +37,12 @@ internal class GccBundledCheckpointTrigger(val minimumCompletedFunctions: Long) 
         )))
     }
 
+    fun requireUnchangedStoppedPrefix(expected: GccInterruptedPrefixAssessment, current: GccInterruptedPrefixAssessment) {
+        require(assessStoppedPrefix(current).contentEquals(assessStoppedPrefix(expected))) {
+            "GCC retained export prefix differs from its stopped assessment"
+        }
+    }
+
     fun assessStoppedPrefix(prefix: GccInterruptedPrefixAssessment): ByteArray {
         val trigger = checkNotNull(observed) { "GCC interruption lacks its selected planning trigger" }
         require(prefix.stateSha256 == trigger.stateSha256 && prefix.functionCount == trigger.total &&
