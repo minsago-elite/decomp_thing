@@ -1,10 +1,12 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-if (($# > 1)) || [[ $# == 1 && "${1:-}" != --bundled-ghidra && "${1:-}" != --bundled-ghidra-resume && "${1:-}" != --bundled-ghidra-resume-control ]]; then
-  echo "usage: scripts/ci-prepare-oracle-ext4-scratch.sh [--bundled-ghidra|--bundled-ghidra-resume|--bundled-ghidra-resume-control]" >&2
+if (($# > 1)); then
+  echo "usage: $0 [--bundled-ghidra|--bundled-ghidra-resume|--bundled-ghidra-resume-control|--gcc-engine-{cc1,lto1}-{fresh,resume}]" >&2
   exit 64
 fi
+source "$(cd "$(dirname "$0")" && pwd -P)/oracle-ext4-scratch-profile.sh"
+oracle_ext4_scratch_profile "${1:-}"
 
 : "${GITHUB_ENV:?GITHUB_ENV must name the GitHub Actions environment file}"
 : "${RUNNER_TEMP:?RUNNER_TEMP must name the GitHub Actions temporary directory}"
@@ -22,31 +24,7 @@ done
 
 user_id="$(id -u)"
 group_id="$(id -g)"
-image="$RUNNER_TEMP/decomp-oracle-ext4-scratch.img"
-mount_parent="/var/lib/decomp-oracle-ci"
-image_size=64M
-inode_count=4096
-environment_prefix=DECOMP_TEST_ORACLE_EXT4
-if [[ "${1:-}" == --bundled-ghidra ]]; then
-  image="$RUNNER_TEMP/decomp-bundled-ghidra-ext4-scratch.img"
-  mount_parent="/var/lib/decomp-bundled-ghidra-ci"
-  image_size=1G
-  inode_count=16384
-  environment_prefix=DECOMP_TEST_BUNDLED_GHIDRA_EXT4
-fi
-if [[ "${1:-}" == --bundled-ghidra-resume || "${1:-}" == --bundled-ghidra-resume-control ]]; then
-  image_size=1G
-  inode_count=16384
-  if [[ "$1" == --bundled-ghidra-resume ]]; then
-    image="$RUNNER_TEMP/decomp-bundled-ghidra-resume-ext4-scratch.img"
-    mount_parent="/var/lib/decomp-bundled-ghidra-resume-ci"
-    environment_prefix=DECOMP_TEST_BUNDLED_GHIDRA_RESUME_EXT4
-  else
-    image="$RUNNER_TEMP/decomp-bundled-ghidra-resume-control-ext4-scratch.img"
-    mount_parent="/var/lib/decomp-bundled-ghidra-resume-control-ci"
-    environment_prefix=DECOMP_TEST_BUNDLED_GHIDRA_RESUME_CONTROL_EXT4
-  fi
-fi
+image="$RUNNER_TEMP/$image_basename"
 mount_path="$mount_parent/scratch"
 
 if [[ -e "$image" || -L "$image" || -e "$mount_parent" || -L "$mount_parent" ]]; then
