@@ -236,6 +236,7 @@ class UploadServer(
     private var stopping = false
     private var started = false
     private var activeRequests = 0
+    private val startupCancellation = java.util.concurrent.atomic.AtomicBoolean(false)
     val serverPort: Int get() = server.address.port
     val browserOrigin: String = devFrontendOrigin ?: webOrigin(host, serverPort)
 
@@ -294,12 +295,14 @@ class UploadServer(
             throw failure
         }
     }
-    }
 
     fun stop(delaySeconds: Int = 0) {
         require(delaySeconds >= 0) { "shutdown delay must be nonnegative" }
+        // Signal recovery even while start holds lifecycleLock through filesystem operations.
+        startupCancellation.set(true)
         val callerWasInterrupted = Thread.currentThread().isInterrupted
         val inspection = synchronized(lifecycleLock) {
+>>>>>>> fe706797 (Propagate shutdown cancellation into web startup recovery [skip ci])
             stopping = true
             // JDK HttpServer.stop does not release a bound listener before start. Start its
             // dispatcher only after closing request admission, then close it below. This also
@@ -335,7 +338,7 @@ class UploadServer(
     /** Admission covers the whole handler, including upload publication and error handling. */
     internal fun withActiveRequest(action: () -> Unit): Boolean {
         synchronized(lifecycleLock) {
-            if (stopping) return false
+            if (stopping || startupCancellation.get()) return false
             activeRequests++
         }
         try {

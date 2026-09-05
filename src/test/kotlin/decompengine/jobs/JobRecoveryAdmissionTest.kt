@@ -45,6 +45,37 @@ class JobRecoveryAdmissionTest {
         assertEquals("private-token invalid JSON", malformed.readText())
     }
 
+    @Test fun `cancellation before or during inspection leaves every record unchanged`() {
+        for (cancelOnCall in listOf(1, 2)) {
+            val root = createTempDirectory("recovery-cancel-scan-")
+            val store = JobStore(root)
+            val job = store.createFromUpload("fixture.elf", elfFixture())
+            store.updateStatus(job.id, "queued")
+            val path = root.resolve(job.id).resolve("job.json")
+            val before = path.readBytes()
+            var calls = 0
+            val failure = assertFailsWith<JobRecoveryCancelledException> {
+                store.recoverInterruptedJobs { ++calls == cancelOnCall }
+            }
+            assertFalse(failure.statusUpdatesStarted)
+            assertContentEquals(before, path.readBytes())
+        }
+    }
+
+    @Test fun `cancellation between status writes retains completed reconciliation and leaves later jobs pending`() {
+        val root = createTempDirectory("recovery-cancel-write-")
+        val store = JobStore(root)
+        val jobs = List(2) { store.createFromUpload("fixture.elf", elfFixture()) }
+        jobs.forEach { store.updateStatus(it.id, "queued") }
+        val failure = assertFailsWith<JobRecoveryCancelledException> {
+            store.recoverInterruptedJobs { jobs.any { store.get(it.id).status == "failed" } }
+        }
+        assertTrue(failure.statusUpdatesStarted)
+        assertEquals(listOf("failed", "queued"), jobs.map { store.get(it.id).status }.sorted())
+        store.recoverInterruptedJobs()
+        assertTrue(jobs.all { store.get(it.id).status == "failed" })
+    }
+
     private fun assertIncomplete(action: () -> Unit) {
         val failure = assertFailsWith<JobStoreException>(block = action)
         assertEquals("Job recovery inspection is incomplete; no recovery statuses were changed", failure.message)
