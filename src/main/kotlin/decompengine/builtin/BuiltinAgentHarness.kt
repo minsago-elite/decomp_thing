@@ -69,6 +69,8 @@ interface BuiltinToolSession : AutoCloseable {
     fun checkpointAuthoritySha256(control: BuiltinExecutionControl): String? = null
     /** Rehydrate only a fresh workflow-owned stage; default sessions must already contain the exact bytes. */
     fun restoreCheckpointStage(expectedSourceSha256: String, control: BuiltinExecutionControl) = Unit
+    /** Persist exact stage evidence before the journal and its externally visible checkpoint commitment. */
+    fun persistCheckpointSource(snapshot: BuiltinWorkspaceSnapshot, control: BuiltinExecutionControl) = Unit
 }
 
 data class BuiltinTraceRecord(val sequence: Int, val state: BuiltinLoopState, val evidenceSha256: String? = null)
@@ -426,6 +428,7 @@ class BuiltinAgentHarness(
         fun saveCheckpoint(tools: BuiltinToolSession, definitions: List<ModelToolDefinition>): Boolean {
             val snapshot = checkNotNull(tools.checkpointSnapshot(control))
             if (modelCalls == 0 && toolCalls == 0) check(snapshot.sha256 == journalConfiguration!!.identity.sourceSha256)
+            tools.persistCheckpointSource(snapshot, control)
             val context = contextBytes(definitions)
             val remainingNanos = control.remaining().toNanos()
             val value = buildJsonObject {

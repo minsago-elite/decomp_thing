@@ -112,11 +112,13 @@ class BuiltinCapturedRepairHarness(
     private val checkpointConfiguration: BuiltinCheckpointConfiguration? = null,
     private val resume: BuiltinCapturedResume? = null,
     secrets: Collection<String> = emptyList(),
+    private val sourceStoreConfiguration: BuiltinSourceStoreConfiguration? = null,
 ) : CapturedRepairAgentHarness {
     private val secrets = secrets.toList()
     init {
         require(checkpointConfiguration == null || journalConfiguration != null)
         require(resume == null || checkpointConfiguration != null)
+        require(sourceStoreConfiguration == null || checkpointConfiguration != null)
     }
     override fun implementationIdentifier() = "builtin-captured-repair-v1"
     override fun execute(request: AgentExecutionRequest, onEvent: (AgentExecutionEvent) -> Unit) =
@@ -138,6 +140,8 @@ class BuiltinCapturedRepairHarness(
             control.checkpoint()
             fun snapshot(files: Map<String, ByteArray>) = BuiltinWorkspaceSnapshot.capture(
                 files.mapKeys { AgentWorkspacePath(invocation.workspaceRoots.single().id, it.key) }, limits.maximumEvidenceBytes)
+            fun sourceStore(): BuiltinSourceStore = BuiltinSourceStore(checkNotNull(sourceStoreConfiguration), invocation,
+                setOf(checkNotNull(journalConfiguration).path.parent, checkNotNull(checkpointConfiguration).directory), secrets)
             // The authority's initial files remain the accepted baseline even when candidates are rehydrated.
             if (journalConfiguration != null) check(snapshot(initialFiles).sha256 == journalConfiguration.identity.sourceSha256)
             val captured = AcpCapturedRepairFilesystem(initialFiles, output)
@@ -170,12 +174,22 @@ class BuiltinCapturedRepairHarness(
                         out.writeStartObject(); out.writeStringField("repairBudget", output.resourceBudget.toString())
                         out.writeArrayFieldStart("replacementPaths")
                         output.allowedReplacementPaths().sorted().forEach(out::writeString)
-                        out.writeEndArray(); out.writeEndObject()
+                        out.writeEndArray()
+                        sourceStoreConfiguration?.let { out.writeStringField("sourceStoreLimits", it.limitBinding()) }
+                        out.writeEndObject()
                     })
+                }
+                override fun persistCheckpointSource(snapshot: BuiltinWorkspaceSnapshot, control: BuiltinExecutionControl) {
+                    if (sourceStoreConfiguration != null) sourceStore().save(captured.snapshot().mapKeys {
+                        AgentWorkspacePath(invocation.workspaceRoots.single().id, it.key)
+                    }, snapshot.sha256, control)
                 }
                 override fun restoreCheckpointStage(expectedSourceSha256: String, control: BuiltinExecutionControl) {
                     control.checkpoint()
-                    val restored = checkNotNull(resume).files()
+                    val restored = checkNotNull(resume).files() ?: sourceStore().load(expectedSourceSha256, control).let { files ->
+                        check(files.keys.all { it.rootId == invocation.workspaceRoots.single().id })
+                        files.mapKeys { it.key.relativePath }
+                    }
                     check(restored.keys == initialFiles.keys)
                     check(snapshot(restored).sha256 == expectedSourceSha256)
                     val changed = restored.keys.filter { !restored.getValue(it).contentEquals(initialFiles.getValue(it)) }
