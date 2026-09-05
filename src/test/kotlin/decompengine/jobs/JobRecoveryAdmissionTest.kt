@@ -119,6 +119,7 @@ class JobRecoveryAdmissionTest {
         val record = Json.parseToJsonElement(original.decodeToString()).jsonObject
         val elf = record.getValue("metadata").jsonObject
         val invalid = listOf(
+            record + ("updated_at" to JsonNull),
             record + ("future_field" to JsonPrimitive("private-value")),
             record + ("filename" to JsonPrimitive(123)),
             record + ("size_bytes" to JsonPrimitive(-1)),
