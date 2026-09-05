@@ -539,10 +539,24 @@ try {
       assert.equal(apiProof.buildId, manifest.buildId);
       report.backendBootstrap = apiProof;
     }
+    await ready(authenticated, `document.body.innerText.includes('No uploaded jobs yet.')`, 'empty persistent job library');
+    await evaluate(authenticated, `(() => {
+      const field = [...document.querySelectorAll('label')].find(label => label.textContent.startsWith('Filename search')).querySelector('input');
+      field.value = 'absent fixture'; field.dispatchEvent(new Event('input', { bubbles: true }));
+    })()`);
+    await evaluate(authenticated, `[...document.querySelectorAll('button')].find(button => button.textContent === 'Apply filters').click()`);
+    await ready(authenticated, `document.body.innerText.includes('No jobs match these filters.')`, 'filtered empty job library');
+    assert.equal(await evaluate(authenticated, 'location.search'), '?search=absent+fixture');
+    await cdp.call('Page.reload', {}, authenticated.sessionId);
+    await ready(authenticated, `document.body.innerText.includes('Local session connected.') && document.body.innerText.includes('No jobs match these filters.')`, 'saved job filters after reload');
+    await evaluate(authenticated, `[...document.querySelectorAll('button')].find(button => button.textContent === 'Reset filters').click()`);
+    await ready(authenticated, `document.body.innerText.includes('No uploaded jobs yet.')`, 'reset job library');
+    assert.equal(await evaluate(authenticated, 'location.search'), '');
+    report.dashboard = { emptyLibrary: true, noMatches: true, filtersSurviveReload: true, resetFilters: true };
     const firstRequests = await evaluate(authenticated, 'window.__sessionTestRequests');
     assert.ok(firstRequests.length >= 2);
     assert.ok(firstRequests.every((request) => request.fragmentEmpty));
-    assert.equal(firstRequests.filter((request) => request.method === 'POST').length, 1);
+    assert.equal(authenticated.requests.filter((request) => request.method === 'POST').length, 1);
     assert.equal(await evaluate(authenticated, 'location.hash'), '');
     assert.equal(await evaluate(authenticated, `document.body.innerText.includes(${JSON.stringify(token)})`), false);
     const cookies = (await cdp.call('Network.getCookies', { urls: [browserOrigin + '/nested/'] }, authenticated.sessionId)).cookies;
@@ -564,6 +578,18 @@ try {
     const postReload = await evaluate(authenticated, 'window.__sessionTestRequests');
     assert.ok(postReload.every((request) => request.method === 'GET' && request.fragmentEmpty));
     await capture(authenticated, 'authenticated-runtime.png');
+    const jobTab = await makeTarget();
+    const absentJobPath = '/nested/jobs/' + 'a'.repeat(32);
+    await cdp.call('Page.navigate', { url: browserOrigin + absentJobPath }, jobTab.sessionId);
+    await ready(jobTab, `document.querySelector('h1')?.textContent === 'Job overview' && document.body.innerText.includes('This job is unavailable. It may have been removed.')`, 'durable job deep link');
+    await cdp.call('Page.reload', {}, jobTab.sessionId);
+    await ready(jobTab, `document.querySelector('h1')?.textContent === 'Job overview' && document.body.innerText.includes('This job is unavailable. It may have been removed.')`, 'durable job refresh');
+    assert.ok(jobTab.requests.every(request => ['GET', 'HEAD'].includes(request.method)));
+    assert.deepEqual(jobTab.exceptions, []);
+    report.dashboard.jobDeepLinkAndRefresh = true;
+    report.dashboard.missingJobExplained = true;
+    report.requests.job = jobTab.requests;
+
     await evaluate(authenticated, `[...document.querySelectorAll('button')].find(button => button.textContent === 'Sign out').click()`);
     await ready(authenticated, `document.body.innerText.includes('You signed out of this browser.')`, 'explicit logout');
     assert.equal(authenticated.requests.filter((request) => request.method === 'DELETE').length, 1);

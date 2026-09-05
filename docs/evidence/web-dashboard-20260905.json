@@ -1,0 +1,52 @@
+{
+  "status": "passed",
+  "mode": "session",
+  "driverNode": "24.20.0",
+  "browser": {
+    "protocolVersion": "1.3",
+    "product": "Chrome/149.0.7827.55",
+    "revision": "@3188f8a607ae7e067593be8aab7f02d2451fec07",
+    "userAgent": "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) HeadlessChrome/149.0.0.0 Safari/537.36",
+    "jsVersion": "14.9.207.21"
+  },
+  "browserSandboxDisabled": true,
+  "archiveSha256": "135ecd7195bd89f7371518e63ea1dfd1c1ea7744e6472c817985d3babf152b05",
+  "applicationJarSha256": "f956bc32a462f680e2c87d6d275aad62c6c36f3b20a025305d1c8547d795df40",
+  "buildId": "fc1b497ae8530a94e7796ea5b4c54963da5d7738fd7a57b564e9aeaf6447942b",
+  "dashboard": {
+    "emptyLibrary": true,
+    "noMatches": true,
+    "filtersSurviveReload": true,
+    "resetFilters": true,
+    "jobDeepLinkAndRefresh": true,
+    "missingJobExplained": true
+  },
+  "runtimeSnapshot": {
+    "connected": true,
+    "unavailableCapabilitiesExplained": true,
+    "navigationRequests": 0,
+    "clearedOnLogout": true
+  },
+  "session": {
+    "authenticated": true,
+    "cookie": {
+      "httpOnly": true,
+      "sameSite": "Strict",
+      "path": "/nested/",
+      "secure": false
+    },
+    "fragmentRemovedBeforeFetch": true,
+    "restoredAfterReload": true,
+    "explicitLogoutRequests": 1,
+    "successfulExchangeRequests": 1,
+    "consumedLinkRequests": 1,
+    "automaticMutationRetries": 0,
+    "storageEntries": 0,
+    "installationUnchanged": true,
+    "jobDataCreated": false
+  },
+  "shutdownConfirmed": true,
+  "workCleanupConfirmed": true,
+  "applicationCommit": "3c9df92",
+  "sourceReportSha256": "a69bde21864a2fd07afa4013cfa36af097af08e2e4230614f5afd3699c023292"
+}
