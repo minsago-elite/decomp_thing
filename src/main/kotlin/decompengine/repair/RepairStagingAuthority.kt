@@ -104,6 +104,9 @@ class BoundedRepairOutput internal constructor(
     private val writablePaths: Set<String>,
     internal val resourceBudget: RepairResourceBudget,
 ) {
+    /** Detached trusted metadata for adapters binding the effective sink authority across continuation. */
+    internal fun allowedReplacementPaths(): Set<String> = Collections.unmodifiableSet(TreeSet(writablePaths))
+
     private val replacements = TreeMap<String, ByteArray?>()
     private val currentFiles = TreeMap<String, ByteArray>().apply {
         initialFiles.forEach { (path, bytes) -> put(path, bytes.copyOf()) }
