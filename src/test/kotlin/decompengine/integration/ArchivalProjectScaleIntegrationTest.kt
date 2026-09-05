@@ -146,11 +146,13 @@ class ArchivalProjectScaleIntegrationTest {
         val retainedFile = retainedCase.getValue("fileInputs").jsonArray.single().jsonObject
         assertEquals(sha256(fileInput.readBytes()), retainedFile.getValue("sha256").jsonPrimitive.content)
         assertEquals("66726f6d2d66696c650a", retainedFile.getValue("contentHex").jsonPrimitive.content)
-        val first = ArchivalPackager.create(project, temp.resolve("large-1.zip"))
-        val second = ArchivalPackager.create(project, temp.resolve("large-2.zip"))
+        val first = ArchivalPackager.create(project, temp.resolve("large-1.zip"), requiredCorpusSha256 = setOf(requiredCorpus))
+        val second = ArchivalPackager.create(project, temp.resolve("large-2.zip"), requiredCorpusSha256 = setOf(requiredCorpus))
         java.nio.file.Files.delete(fileInput)
         val extracted = temp.resolve("extracted")
         ArchivalBundleVerifier.extractAndVerify(first.archivePath, extracted)
+        val archivedAudit = Json.parseToJsonElement(extracted.resolve("reports/archival_audit.json").readText()).jsonObject
+        assertEquals(listOf(requiredCorpus), archivedAudit.getValue("requiredCorpusSha256").jsonArray.map { it.jsonPrimitive.content })
         val plan = DeterministicModulePlanner().plan(model)
 
         assertTrue(model.functions.size > 100)
