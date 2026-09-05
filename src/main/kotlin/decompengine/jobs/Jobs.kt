@@ -15,7 +15,8 @@ import java.io.IOException
 import kotlinx.serialization.json.JsonObject
 import kotlinx.serialization.json.JsonPrimitive
 import kotlinx.serialization.json.buildJsonObject
-import kotlinx.serialization.json.int
+import kotlinx.serialization.json.JsonNull
+import kotlinx.serialization.json.longOrNull
 import kotlinx.serialization.json.jsonObject
 import kotlinx.serialization.json.jsonPrimitive
 import kotlinx.serialization.json.put
@@ -145,6 +146,10 @@ class JobStore internal constructor(
 
     internal fun decodeJobRecord(jobId: String, payload: JsonObject): Job {
         val jobDir = jobDirectory(jobId)
+        require(payload.keys.all { it in setOf("id", "filename", "status", "created_at", "updated_at",
+            "status_message", "size_bytes", "binary_path", "metadata") }) { "job metadata has unsupported fields" }
+        require(payload.string("status") in VALID_STATUSES) { "job metadata has an invalid status" }
+        require(payload.int("size_bytes") in 0..MAX_INPUT_BYTES) { "job metadata has an invalid input size" }
         require(payload.string("id") == jobId &&
             Path.of(payload.string("binary_path")) == jobDir.resolve("input.elf")
         ) { "job metadata identity does not match its store location" }
@@ -447,22 +452,43 @@ fun ElfMetadata.toJson(): JsonObject = buildJsonObject {
     put("section_name_table_index", sectionNameTableIndex.toInt())
 }
 
-private fun JsonObject.toElfMetadata(): ElfMetadata = ElfMetadata(
-    format = string("format"),
-    endianness = string("endianness"),
-    elfVersion = long("elf_version").toUInt(),
-    osAbi = string("os_abi"),
-    objectType = string("object_type"),
-    machine = string("machine"),
-    entryPoint = long("entry_point").toULong(),
-    elfHeaderSize = int("elf_header_size").toUShort(),
-    programHeaderCount = int("program_header_count").toUShort(),
-    sectionHeaderCount = int("section_header_count").toUShort(),
-    sectionNameTableIndex = int("section_name_table_index").toUShort(),
-)
+private fun JsonObject.toElfMetadata(): ElfMetadata {
+    require(keys == setOf("format", "endianness", "elf_version", "os_abi", "object_type", "machine",
+        "entry_point", "elf_header_size", "program_header_count", "section_header_count", "section_name_table_index")) {
+        "job ELF metadata has missing or unsupported fields"
+    }
+    fun unsignedShort(name: String): UShort = long(name).also {
+        require(it in 0..65535) { "job ELF metadata integer is out of range" }
+    }.toUShort()
+    return ElfMetadata(
+        format = string("format"),
+        endianness = string("endianness"),
+        elfVersion = long("elf_version").also {
+            require(it in 0..UInt.MAX_VALUE.toLong()) { "job ELF metadata version is out of range" }
+        }.toUInt(),
+        osAbi = string("os_abi"),
+        objectType = string("object_type"),
+        machine = string("machine"),
+        // Existing metadata encodes this ULong using its signed Long bit representation.
+        entryPoint = long("entry_point").toULong(),
+        elfHeaderSize = unsignedShort("elf_header_size"),
+        programHeaderCount = unsignedShort("program_header_count"),
+        sectionHeaderCount = unsignedShort("section_header_count"),
+        sectionNameTableIndex = unsignedShort("section_name_table_index"),
+    )
+}
 
-private fun JsonObject.string(name: String): String = getValue(name).jsonPrimitive.content
-private fun JsonObject.optionalString(name: String): String? = get(name)?.jsonPrimitive?.content
-private fun JsonObject.int(name: String): Int = getValue(name).jsonPrimitive.int
-private fun JsonObject.long(name: String): Long = getValue(name).jsonPrimitive.content.toLong()
+private fun JsonObject.string(name: String): String = getValue(name).jsonPrimitive.let {
+    require(it.isString) { "job metadata requires a JSON string" }
+    it.content
+}
+private fun JsonObject.optionalString(name: String): String? =
+    if (get(name) == null || get(name) == JsonNull) null else string(name)
+private fun JsonObject.int(name: String): Int = long(name).also {
+    require(it in Int.MIN_VALUE.toLong()..Int.MAX_VALUE.toLong()) { "job metadata integer is out of range" }
+}.toInt()
+private fun JsonObject.long(name: String): Long = getValue(name).jsonPrimitive.let {
+    require(!it.isString) { "job metadata requires a JSON integer" }
+    requireNotNull(it.longOrNull) { "job metadata requires a JSON integer" }
+}
 private fun JsonObject.jsonObject(name: String): JsonObject = getValue(name).jsonObject

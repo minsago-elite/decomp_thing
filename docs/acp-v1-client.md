@@ -916,3 +916,11 @@ signal is discarded with the existing never-started outcome; an active operation
 signal is recorded as failed rather than complete. The signal also requests authentication-inspection
 cancellation before cleanup waits on the lifecycle lock. Signalling alone does not release ownership
 or prove resource cleanup; `stop` still closes the listener and waits for the existing lifetime rules.
+
+Job metadata decoding now enforces the writer's depth/node/string limits and supported top-level/ELF
+field sets. Text must be JSON strings, numeric fields must be JSON integers, input size must fit
+0–32 MiB, and unsigned ELF version/header/count fields must fit their declared widths. Unknown fields
+are rejected rather than silently dropped by a recovery rewrite. Older records may still omit
+`updated_at` or omit/null `status_message`. The existing signed-Long wire representation of the unsigned
+ELF entry point is preserved. Invalid records remain retained and cause startup inspection to fail
+before recovery status publication; this validates metadata structure, not the uploaded file's identity.
