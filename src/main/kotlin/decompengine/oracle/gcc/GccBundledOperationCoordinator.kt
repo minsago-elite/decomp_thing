@@ -29,8 +29,11 @@ private object GCC_BUNDLED_PREPARED_OPERATION_PERMIT
 internal class GccBundledExecutedOperation(
     executionReceiptBytes: ByteArray,
     exportAssessmentReceiptBytes: ByteArray,
-    val assessment: GccCompletedRunAssessment,
+    private val captured: GccBundledExportAssessment,
 ) {
+    val assessment: GccCompletedRunAssessment get() = captured.assessment
+    /** Exact bytes captured and validated before the execution result was returned. */
+    val programModelBytes: ByteArray get() = captured.programModelBytes
     val complete: Boolean = false
     val releaseEligible: Boolean = false
     private val execution = executionReceiptBytes.copyOf()
@@ -121,7 +124,7 @@ internal class GccBundledPreparedOperation internal constructor(
         inputs.verify("after GCC export capture")
         lease.requireCurrentOperationRunRootAfterCgroupAbsence(runRoot)
         val exportReceipt = journal.recordExportAssessment(bindWallTime(captured.canonicalBytes))
-        GccBundledExecutedOperation(receipt, exportReceipt, captured.assessment)
+        GccBundledExecutedOperation(receipt, exportReceipt, captured)
     }
 
     @Synchronized
@@ -266,7 +269,7 @@ internal class GccBundledPreparedOperation internal constructor(
                 inputs.verify("after resumed GCC export capture")
                 lease.requireCurrentOperationRunRootAfterCgroupAbsence(runRoot)
                 val exportReceipt = journal.recordResumeExportAssessment(bindWallTime(captured.canonicalBytes))
-                GccBundledExecutedOperation(receipt, exportReceipt, captured.assessment)
+                GccBundledExecutedOperation(receipt, exportReceipt, captured)
             }.also { checkNotNull(operationDeadline).requireCurrent() }
         } catch (failure: Throwable) {
             poisoned = true

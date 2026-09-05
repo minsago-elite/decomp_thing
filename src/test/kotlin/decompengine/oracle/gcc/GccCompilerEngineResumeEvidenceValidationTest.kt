@@ -5,6 +5,8 @@ import decompengine.acp.LinuxFileIdentity
 import decompengine.acp.LinuxFilesystemSyscalls
 import decompengine.oracle.core.OracleArtifacts
 import decompengine.oracle.core.OracleJson
+import decompengine.project.DeterministicModulePlanner
+import decompengine.project.ProgramModelJson
 import java.lang.reflect.Modifier
 import java.nio.charset.StandardCharsets
 import java.nio.file.Files
@@ -97,6 +99,44 @@ class GccCompilerEngineResumeEvidenceValidationTest {
             Files.createSymbolicLink(progress, original)
             assertFails { GccBundledExportCapture.observeProgress(captured.root, captured.reportsIdentity, captured.artifacts) }
             assertContentEquals(fixture.progress, Files.readAllBytes(original))
+        }
+    }
+
+    @Test
+    fun `captured model handoff survives filesystem replacement and caller mutation for both execution legs`() {
+        val transition = transitionFixture(twoBatchFixture())
+        withDescriptorExportFixture(transition.interrupted, includeModel = false) { interrupted ->
+            val retained = GccBundledExportCapture.captureInterruptedSnapshot(interrupted.root, interrupted.reportsIdentity, interrupted.artifacts)
+            for (resumed in listOf(false, true)) {
+                val fixture = if (resumed) transition.resumed else transition.fresh
+                withDescriptorExportFixture(fixture) { export ->
+                    fun capture() = if (resumed) {
+                        GccBundledExportCapture.captureResumed(export.root, export.reportsIdentity, export.artifacts, retained)
+                    } else GccBundledExportCapture.capture(export.root, export.reportsIdentity, export.artifacts)
+                    val captured = capture()
+                    // Synthetic receipts exercise the immutable result handoff, not live authority.
+                    val result = GccBundledExecutedOperation(byteArrayOf(1), byteArrayOf(2), captured)
+                    assertFalse(result.complete)
+                    assertFalse(result.releaseEligible)
+                    assertContentEquals(fixture.model, result.programModelBytes)
+                    captured.programModelBytes.fill(0)
+                    result.programModelBytes.fill(0)
+                    assertContentEquals(fixture.model, result.programModelBytes)
+                    val path = export.directory.resolve("reports/program_model.json")
+                    Files.move(path, path.resolveSibling("original-model"))
+                    Files.writeString(path, "invalid replacement")
+                    assertFails { capture() }
+                    assertContentEquals(fixture.model, result.programModelBytes)
+                    assertEquals(result.assessment.programModelSha256, sha(result.programModelBytes))
+                    fun plan(bytes: ByteArray) = DeterministicModulePlanner(
+                        maximumEntities = 100_000, maximumDependencyEdges = 1_000_000, maximumWorkUnits = 10_000_000,
+                    ).plan(ProgramModelJson.readCanonical(bytes)).toJson()
+                    assertEquals(plan(fixture.model), plan(result.programModelBytes))
+                    assertFails { GccBundledExportAssessment(captured.assessment, captured.canonicalBytes, fixture.model + byteArrayOf(32)) }
+                    val changed = fixture.model.copyOf().also { it[0] = 32 }
+                    assertFails { GccBundledExportAssessment(captured.assessment, captured.canonicalBytes, changed) }
+                }
+            }
         }
     }
 

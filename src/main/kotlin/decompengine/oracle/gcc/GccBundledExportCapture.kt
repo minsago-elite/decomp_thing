@@ -19,9 +19,18 @@ import kotlinx.serialization.json.jsonPrimitive
 internal class GccBundledExportAssessment(
     val assessment: GccCompletedRunAssessment,
     canonicalBytes: ByteArray,
+    programModelBytes: ByteArray,
 ) {
     private val encoded = canonicalBytes.copyOf()
+    private val model = programModelBytes.copyOf()
     val canonicalBytes: ByteArray get() = encoded.copyOf()
+    val programModelBytes: ByteArray get() = model.copyOf()
+
+    init {
+        require(model.size == assessment.programModelBytes && OracleArtifacts.sha256(model) == assessment.programModelSha256) {
+            "GCC captured model bytes differ from the validated export assessment"
+        }
+    }
 }
 
 internal class GccBundledInterruptedExportSnapshot(
@@ -51,7 +60,7 @@ internal object GccBundledExportCapture {
             val model = capture.read(reports, "program_model.json", limits.assembledModelBytes)
             val assessment = GccCompilerEngineResumeByteValidator.assessCompletedRun(state, progress, batches, model, limits)
             require(assessment.reused == 0L) { "fresh GCC execution unexpectedly reused prior records" }
-            GccBundledExportAssessment(assessment, renderAssessment(assessment, capture.bytes))
+            GccBundledExportAssessment(assessment, renderAssessment(assessment, capture.bytes), model)
         }
     }
 
@@ -99,7 +108,7 @@ internal object GccBundledExportCapture {
                 "GCC resumed model differs from its validated stopped published model"
             }
         }
-        GccBundledExportAssessment(assessment, renderAssessment(assessment, capture.bytes, prefixDigest))
+        GccBundledExportAssessment(assessment, renderAssessment(assessment, capture.bytes, prefixDigest), model)
     }
 
     /** Live observation only. Final checkpoint validation must run after exact process absence. */
