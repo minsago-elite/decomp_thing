@@ -21,11 +21,6 @@ import kotlinx.serialization.json.jsonPrimitive
 import kotlinx.serialization.json.put
 import java.nio.file.Path
 import java.nio.file.Files
-import java.nio.ByteBuffer
-import java.nio.channels.FileChannel
-import java.nio.file.LinkOption.NOFOLLOW_LINKS
-import java.nio.file.StandardOpenOption.WRITE
-import java.nio.file.StandardOpenOption.CREATE_NEW
 import java.time.Instant
 import java.util.UUID
 import kotlin.io.path.createDirectories
@@ -108,14 +103,7 @@ class JobStore internal constructor(
         var publicationAttempted = false
         try {
             val stagedInput = staging.resolve("input.elf")
-            FileChannel.open(stagedInput, CREATE_NEW, WRITE, NOFOLLOW_LINKS).use { channel ->
-                val buffer = ByteBuffer.wrap(content)
-                while (buffer.hasRemaining()) channel.write(buffer)
-                check(stagedInput.toFile().setExecutable(true, true) || Files.isExecutable(stagedInput)) {
-                    "could not mark uploaded ELF executable"
-                }
-                channel.force(true)
-            }
+            uploadPublisher.writeAndForceInput(stagedInput, content)
             persist(job, staging)
             publicationAttempted = true
             uploadPublisher.publish(staging, jobDir)

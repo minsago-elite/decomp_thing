@@ -344,6 +344,11 @@ up the staging directory; failures after rename may leave a complete published j
 receives an error. Startup does not treat staging directory names as job IDs. Tests verify interrupted input
 writes leave no partial job and preserve prior jobs. Power-loss injection, abandoned staging/temporary-file
 reclamation, and durability of newly created store ancestors remain open requirements.
+`JobUploadCrashTest` halts a benign child JVM at fourteen controlled input/metadata write, force and
+directory-publication boundaries. Before final rename the candidate remains a private stage; afterward a
+fresh store sees a complete input and matching metadata. Existing jobs remain unchanged and recovery does
+not promote private stages. This covers application-boundary process death, not power loss, interruption
+inside kernel I/O, safe stage reclamation or uncertain-response retry deduplication.
 
 Once the final upload-directory rename is attempted, a failure is reported as
 `UploadPublicationUncertainException` with the generated job ID. This includes an exception from rename
