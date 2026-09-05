@@ -39,6 +39,173 @@ import kotlin.test.assertTrue
 
 class UploadServerTest {
     @Test
+    fun `background diagnostics redact secrets before persistence and rendering`() {
+        val dataDir = createTempDirectory("web-private-diagnostic-")
+        val configured = "configured-provider-credential"
+        val bearer = "synthetic-bearer-value"
+        val password = "synthetic-password-value"
+        val server = UploadServer("127.0.0.1", 0, dataDir,
+            analyzer = JobAnalyzer { _, _ -> error("Provider refused $configured; Bearer $bearer; password=$password <script>bad</script>") },
+            reconstructor = JobReconstructor { _, _ -> error("z".repeat(17000) + configured) },
+            executor = Executor { it.run() }, sensitiveValues = listOf(configured))
+        server.start()
+        try {
+            val invalid = request(server, "GET", "/jobs/$configured")
+            assertEquals(404, invalid.status)
+            assertTrue(!invalid.body.decodeToString().contains(configured))
+            assertTrue(invalid.body.decodeToString().contains("[redacted]"))
+            val uploaded = upload(server, "diagnostic.elf", elfFixture(), acceptJson = true)
+            val id = Json.parseToJsonElement(uploaded.body.decodeToString()).jsonObject["id"].toString().trim('"')
+            assertEquals(303, request(server, "POST", "/jobs/$id/explore", followRedirects = false).status)
+            val persisted = dataDir.resolve(id).resolve("job.json").readBytes().decodeToString()
+            val api = request(server, "GET", "/api/jobs/$id").body.decodeToString()
+            val page = request(server, "GET", "/jobs/$id").body.decodeToString()
+            listOf(persisted, api, page).forEach { text ->
+                listOf(configured, bearer, password).forEach { assertTrue(!text.contains(it)) }
+                assertTrue(text.contains("[redacted]"))
+            }
+            assertTrue(!page.contains("<script>bad</script>"))
+            assertEquals(303, request(server, "POST", "/jobs/$id/reconstruct", followRedirects = false).status)
+            val job = decompengine.jobs.JobStore(dataDir).get(id)
+            assertEquals("failed", job.status)
+            assertEquals("[oversized text omitted]", job.statusMessage)
+        } finally {
+            server.stop()
+        }
+    }
+
+    @Test
+    fun `rejected admission can be retried without a stale job reservation`() {
+        val reject = java.util.concurrent.atomic.AtomicBoolean(true)
+        var calls = 0
+        val server = UploadServer("127.0.0.1", 0, createTempDirectory("web-admission-retry-"),
+            analyzer = JobAnalyzer { _, _ -> calls++ },
+            executor = Executor { task ->
+                if (reject.getAndSet(false)) throw java.util.concurrent.RejectedExecutionException("private worker detail")
+                task.run()
+            })
+        server.start()
+        try {
+            val uploaded = upload(server, "retry.elf", elfFixture(), acceptJson = true)
+            val id = Json.parseToJsonElement(uploaded.body.decodeToString()).jsonObject["id"].toString().trim('"')
+            val rejected = request(server, "POST", "/jobs/$id/explore", followRedirects = false)
+            assertEquals(503, rejected.status)
+            assertTrue(!rejected.body.decodeToString().contains("private worker detail"))
+            assertEquals(0, calls)
+            assertEquals(303, request(server, "POST", "/jobs/$id/explore", followRedirects = false).status)
+            assertEquals(1, calls)
+            val job = Json.parseToJsonElement(request(server, "GET", "/api/jobs/$id").body.decodeToString()).jsonObject
+            assertEquals("complete", job["status"].toString().trim('"'))
+        } finally {
+            server.stop()
+        }
+    }
+
+    @Test
+    fun `owned workers bound pending jobs reject overflow and discard queued work at shutdown`() {
+        val dataDir = createTempDirectory("web-bounded-jobs-")
+        val started = java.util.concurrent.CountDownLatch(2)
+        val stopped = java.util.concurrent.CountDownLatch(2)
+        val release = java.util.concurrent.CountDownLatch(1)
+        val invocations = java.util.concurrent.atomic.AtomicInteger()
+        val server = UploadServer("127.0.0.1", 0, dataDir, analyzer = JobAnalyzer { _, _ ->
+            invocations.incrementAndGet()
+            started.countDown()
+            try {
+                release.await()
+            } finally {
+                stopped.countDown()
+            }
+        })
+        server.start()
+        val ids = mutableListOf<String>()
+        var closed = false
+        try {
+            repeat(35) { index ->
+                val uploaded = upload(server, "queued-$index.elf", elfFixture(), acceptJson = true)
+                ids += Json.parseToJsonElement(uploaded.body.decodeToString()).jsonObject["id"].toString().trim('"')
+            }
+            ids.take(2).forEach { id ->
+                assertEquals(303, request(server, "POST", "/jobs/$id/explore", followRedirects = false).status)
+            }
+            assertTrue(started.await(5, java.util.concurrent.TimeUnit.SECONDS))
+            ids.subList(2, 34).forEach { id ->
+                assertEquals(303, request(server, "POST", "/jobs/$id/explore", followRedirects = false).status)
+            }
+            assertEquals(409, request(server, "POST", "/jobs/${ids[2]}/reconstruct", followRedirects = false).status)
+            repeat(2) {
+                val overflow = request(server, "POST", "/jobs/${ids.last()}/explore", followRedirects = false)
+                assertEquals(503, overflow.status)
+                assertEquals("1", overflow.retryAfter)
+            }
+            assertEquals(200, request(server, "GET", "/api/jobs/${ids[0]}").status)
+            assertEquals(2, invocations.get())
+            server.stop()
+            closed = true
+            assertTrue(stopped.await(5, java.util.concurrent.TimeUnit.SECONDS))
+            val store = decompengine.jobs.JobStore(dataDir)
+            ids.subList(2, 34).forEach { id ->
+                val job = store.get(id)
+                assertEquals("failed", job.status)
+                assertEquals("Server stopped before the operation started", job.statusMessage)
+            }
+            assertEquals("failed", store.get(ids.last()).status)
+            assertEquals(2, invocations.get())
+        } finally {
+            release.countDown()
+            if (!closed) server.stop()
+        }
+    }
+
+    @Test
+    fun `job event endpoint and refresh render the persisted bounded stream`() {
+        withServer { server, dataDir ->
+            val uploaded = upload(server, "progress.elf", elfFixture(), acceptJson = true)
+            val jobId = Json.parseToJsonElement(uploaded.body.decodeToString()).jsonObject["id"].toString().trim('"')
+            val reports = dataDir.resolve(jobId).resolve("reports")
+            decompengine.jobs.AgentProgressJournal(reports, "reconstruction").use { journal ->
+                journal.phase(decompengine.agent.AgentWorkflowPhase.BUILD_VALIDATING, "module-1")
+                journal.runState(decompengine.agent.AgentWorkflowRunObservation("run_00000001",
+                    decompengine.agent.AgentWorkflowPhase.PROVISIONAL, "revision-one"))
+                journal.runState(decompengine.agent.AgentWorkflowRunObservation("run_00000001",
+                    decompengine.agent.AgentWorkflowPhase.EXHAUSTED, "revision-one"))
+                val task = journal.beginTask("thought-task", decompengine.agent.AgentExecutionRequest(
+                    "fixture", listOf(decompengine.agent.AgentWorkspaceRoot("project", reports)),
+                    accessPolicy = decompengine.agent.AgentAccessPolicy(emptyList())))
+                task.event(decompengine.agent.AgentMessageEvent(0, "thought", decompengine.agent.AgentMessageRole.THOUGHT,
+                    "checking fixture", completed = true))
+                task.event(decompengine.agent.AgentContextUsageEvent(1, Long.MAX_VALUE, Long.MAX_VALUE, 0.125, "USD"))
+                task.complete(decompengine.agent.AgentExecutionReceipt(
+                    decompengine.agent.AgentExecutionRequestBinding.capture(decompengine.agent.AgentExecutionRequest(
+                        "fixture", listOf(decompengine.agent.AgentWorkspaceRoot("project", reports)),
+                        accessPolicy = decompengine.agent.AgentAccessPolicy(emptyList()))),
+                    decompengine.agent.AgentExecutionOutcome.Returned(decompengine.agent.AgentExecutionResult(
+                        decompengine.agent.AgentStopReason.COMPLETED,
+                        usage = decompengine.agent.AgentUsage(cachedInputTokens = 0, wallClock = java.time.Duration.ofMillis(125))))))
+            }
+            val response = request(server, "GET", "/api/jobs/$jobId/events")
+            assertEquals(200, response.status)
+            assertTrue(response.body.decodeToString().contains("build_validating"))
+            assertTrue(response.body.decodeToString().contains("\"displayOnly\":true"))
+            assertTrue(response.body.decodeToString().contains("\"workflowRunId\":\"run_00000001\""))
+            val page = request(server, "GET", "/jobs/$jobId").body.decodeToString()
+            assertTrue(page.contains("Agent progress"))
+            assertTrue(page.contains("build_validating"))
+            assertTrue(page.contains("Accepted revisions are recorded separately"))
+            val rows = page.substringAfter("<ol id=\"agent-event-list\"").substringBefore("</ol>")
+            assertTrue(rows.contains("message · thought"))
+            assertTrue(rows.contains("cached input tokens: 0"))
+            assertTrue(rows.contains("elapsed: PT0.125S"))
+            assertTrue(rows.contains("context used: 9223372036854775807"))
+            assertTrue(rows.contains("reported cost: 0.125"))
+            assertTrue(rows.contains("run_00000001"))
+            assertTrue(rows.contains("revision-one"))
+            assertTrue(rows.contains("provisional") && rows.contains("exhausted"))
+            assertTrue(!rows.contains("accepted source"))
+        }
+    }
+
+    @Test
     fun `upload page has ELF form`() {
         withServer { server, _ ->
             val response = request(server, "GET", "/")
@@ -584,10 +751,10 @@ class UploadServerTest {
         }
         val status = connection.responseCode
         val stream = if (status >= 400) connection.errorStream else connection.inputStream
-        return Response(status, stream?.readBytes() ?: ByteArray(0), connection.getHeaderField("ETag"))
+        return Response(status, stream?.readBytes() ?: ByteArray(0), connection.getHeaderField("Retry-After"), connection.getHeaderField("ETag"))
     }
 
-    private data class Response(val status: Int, val body: ByteArray, val etag: String?)
+    private data class Response(val status: Int, val body: ByteArray, val retryAfter: String? = null, val etag: String? = null)
 }
 
 private fun ByteArray.startsWith(prefix: ByteArray): Boolean =

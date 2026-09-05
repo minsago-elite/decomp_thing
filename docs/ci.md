@@ -18,6 +18,20 @@ The test task first builds and verifies the same static ACP gate helper shipped 
 tests do not compile private helper copies. Distribution jobs should additionally run
 `./gradlew --no-daemon verifyAcpGateHelperDistribution`.
 
+The independent `ACP contract` workflow runs every ACP and shared-agent regression suite
+with `DECOMP_REQUIRE_LIVE_ACP_CONTRACT=1`. Missing host capabilities fail this lane.
+It provisions an empty, user-owned mode-0700 dedicated tmpfs with 64 MiB and 4,096
+inodes for `DECOMP_TEST_ACP_QUOTA_TMPFS`, and unmounts it in an unconditional cleanup
+step. The main Kotlin job provisions the same fixture. An existing mount is never
+adopted, and cleanup does not use a lazy unmount.
+
+On an already provisioned supported host, run `bash scripts/validate-acp-contract.sh`.
+The gate rejects missing required suites, failures and skipped tests, and retains
+JUnit XML plus `build/acp-contract-qualification/summary.json`. This qualifies the
+scripted contract boundary; independent authenticated agents and full release
+acceptance have their separate issue #67/#72 requirements. Ordinary local tests may
+skip unavailable host integrations when the required-host flag is unset.
+
 Run the independent generated-C compatibility lane with LLVM/Clang:
 
 ```bash

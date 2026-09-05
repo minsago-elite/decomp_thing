@@ -155,6 +155,7 @@ class AgentExecutionRequest(
     val accessPolicy: AgentAccessPolicy,
     val limits: AgentExecutionLimits = AgentExecutionLimits(),
     val cancellation: AgentCancellation = AgentCancellation.NONE,
+    val sessionContinuation: AgentSessionContinuation? = null,
 ) {
     val schemaVersion: Int = AGENT_EXECUTION_CONTRACT_VERSION
     val workspaceRoots: List<AgentWorkspaceRoot> = immutableList(workspaceRoots)
@@ -170,6 +171,14 @@ class AgentExecutionRequest(
             "context input ids must be unique"
         }
         val rootIds = this.workspaceRoots.mapTo(mutableSetOf()) { it.id }
+        sessionContinuation?.let { continuation ->
+            require(continuation.workspaceFiles.keys.all { accessPolicy.allows(it, AgentOperation.READ_FILE) }) {
+                "session inventory requires explicit workspace read authority"
+            }
+            require(this.workspaceRoots.none { continuation.directory.startsWith(it.path) }) {
+                "session journal must be outside agent workspace roots"
+            }
+        }
         require(accessPolicy.pathRules.all { it.path.rootId in rootIds }) {
             "access policy references an unknown workspace root"
         }
@@ -187,7 +196,7 @@ data class AgentSessionReference(
     }
 }
 
-enum class AgentMessageRole { ASSISTANT, USER, SYSTEM }
+enum class AgentMessageRole { ASSISTANT, USER, SYSTEM, THOUGHT }
 
 sealed interface AgentExecutionEvent {
     val sequence: Long
@@ -301,6 +310,22 @@ data class AgentFileChangeEvent(
 }
 
 enum class AgentStopReason { COMPLETED, NO_CHANGES, REFUSED, CANCELLED, LIMIT_EXHAUSTED }
+
+/** Peer-reported context occupancy and optional cost, never budget or acceptance authority. */
+data class AgentContextUsageEvent(
+    override val sequence: Long,
+    val usedTokens: Long,
+    val contextWindowTokens: Long,
+    val costAmount: Double? = null,
+    val costCurrency: String? = null,
+) : AgentExecutionEvent {
+    init {
+        require(sequence >= 0 && usedTokens >= 0 && contextWindowTokens >= 0)
+        require((costAmount == null) == (costCurrency == null))
+        require(costAmount == null || (costAmount.isFinite() && costAmount >= 0))
+        require(costCurrency == null || (costCurrency.isNotBlank() && costCurrency.length <= 64))
+    }
+}
 
 data class AgentUsage(
     val inputTokens: Long? = null,

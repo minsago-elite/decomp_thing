@@ -272,3 +272,32 @@ The mechanism is program-agnostic. A large compiler recovery is a useful benchma
 specific fixtures, compiler names, flags, commands, paths, or expected behavior do not belong in the
 revision or transaction API. Real-toolchain benchmark evidence is external acceptance evidence for a
 profile/strategy combination, not a prerequisite for the generic graph invariants above.
+
+## ACP repair integration verification
+
+`TraceGuidedRepairAcpIntegrationTest` runs the same compile repair, behavior repair, compile-breaking
+candidate, and retained-case regression through both a deterministic fake client and a benign ACP v1
+agent. The scripted agent uses the production contained process boundary and bounded captured
+filesystem callbacks, verifies dependency-relevant context and exact retained stdin, and produces
+receipt-bound edits. The tests reopen canonical state, compare all source preimages after rejection,
+and inspect receipt digests, provider/version/session commitments, request limits, streamed events,
+filesystem audits, changes, and acceptance assessments. Separate terminal cases cover no-change,
+refusal, limits, and process crash without advancing the accepted head. Ordinary terminal and
+validation exceptions reconcile their rejected history before returning when projection storage is
+available; the canonical graph remains authoritative if projection persistence fails.
+
+The public session facade preserves invocation bindings and publication mode in detached returned
+iterations. A completed result with a verified unchanged workspace is distinct from an invalid edit.
+
+Run the focused gate with:
+
+```sh
+DECOMP_REQUIRE_LIVE_ACP_CONTRACT=1 ./gradlew test \
+  --tests decompengine.repair.TraceGuidedRepairTest \
+  --tests decompengine.repair.TraceGuidedRepairAcpIntegrationTest \
+  --tests decompengine.repair.SecureRepairSessionProjectionTest
+```
+
+The C compiler/behavior strategy in these fixtures remains explicitly test-only and non-release.
+This gate does not supply the missing production C validation provider, replace independent-agent
+interoperability evidence, or certify behavior-invalid intermediate revisions as accepted repairs.

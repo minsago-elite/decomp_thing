@@ -410,7 +410,7 @@ class AgentExecutionEvidenceTest {
         assertFalse(text.contains("stderr peer output"))
 
         val checkpoint = project.resolve("reports/modules/parse.json").readText()
-        assertTrue(checkpoint.contains("\"schemaVersion\": 4"))
+        assertTrue(checkpoint.contains("\"schemaVersion\": 5"))
         assertTrue(checkpoint.contains("\"executionEvidencePath\": \"$evidencePath\""))
         assertTrue(checkpoint.contains(sha256(evidenceFile.readBytes())))
         val manifestEntry = manifest.files.single { it.path == evidencePath }
