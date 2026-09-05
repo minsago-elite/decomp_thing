@@ -50,6 +50,10 @@ export function Dashboard({ basePath }: { basePath: string }) {
         setData(null); setError('Access to this job library is unavailable. Check your local session.');
       } else if (failure instanceof ApiClientError && ['JOB_RECORD_UNAVAILABLE', 'LISTING_UNAVAILABLE', 'CORRUPT_WORKFLOW_STATE', 'CORRUPT_LEGACY_JOB', 'INVALID_STORAGE_ENTRY'].includes(failure.serverCode ?? '')) {
         setError('Stored jobs could not be listed completely. The server has not returned a partial library; inspect job storage before retrying.');
+      } else if (failure instanceof ApiClientError && failure.serverCode === 'LISTING_BUSY') {
+        setError('Another job listing is in progress. Wait a moment, then refresh jobs to retry.');
+      } else if (failure instanceof ApiClientError && failure.serverCode === 'LISTING_LIMIT') {
+        setError('This library exceeds a listing limit. No partial results were returned. Narrowing filters may help; if the limit persists, the stored library needs attention.');
       } else if (failure instanceof ApiClientError && ['CURSOR_EXPIRED', 'INVALID_CURSOR'].includes(failure.serverCode ?? '')) {
         setError('This page snapshot expired. Refresh jobs to start a new snapshot.');
       } else setError('Jobs could not be loaded. The server may be unavailable or a stored job may need attention.');

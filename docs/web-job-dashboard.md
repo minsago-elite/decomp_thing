@@ -174,3 +174,27 @@ changes. Both JavaScript syntax checks and `git diff --check` passed. No
 production code changed, so JVM/frontend unit suites were not rerun for this
 test-driver checkpoint; both journeys used the previously verified distribution
 identity recorded in their reports.
+
+## Listing admission and budget feedback — 2026-09-05
+
+The dashboard now distinguishes `LISTING_BUSY` (another collection is being
+scanned; retry deliberately) from `LISTING_LIMIT` (no partial results returned;
+filters may help, but a persistent limit requires storage attention). Narrowing
+filters can reduce snapshot bytes; it cannot guarantee success when the scan
+itself exceeds its time or record ceiling. Neither response triggers automatic
+retry or silently substitutes an incomplete library.
+
+Two component cases start with visible rows, fail a refresh with each code,
+assert the specific guidance and stale-data notice, keep forward pagination
+disabled, and recover only after another explicit refresh. All 196 frontend
+tests, lint, typechecked bundle, asset checks and `distZip` passed. JVM behavior
+is unchanged; existing `WebJobPagesTest` covers busy admission and over-budget
+scan rejection. These cases do not establish full D11 over-budget handling for
+other views.
+
+The packaged 10,000-job scale regression also passed on the new distribution:
+[`web-dashboard-limit-scale-20260905.json`](evidence/web-dashboard-limit-scale-20260905.json).
+This proves the existing all-page/search/keyboard journey still works with the
+new bundle; the injected busy/limit recovery behavior is covered by component
+tests, not by the successful browser listing. Pinned Chrome again used the
+explicit test-only `--no-sandbox` option.

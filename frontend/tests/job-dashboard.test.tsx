@@ -163,3 +163,26 @@ it('distinguishes a partial storage failure from server unavailability', async (
   fireEvent.click(screen.getByRole('button', { name: 'Refresh jobs' }));
   await waitFor(() => expect(screen.getByRole('alert').textContent).toContain('The server may be unavailable'));
 });
+
+it.each([
+  ['LISTING_BUSY', 'Another job listing is in progress. Wait a moment, then refresh jobs to retry.'],
+  ['LISTING_LIMIT', 'This library exceeds a listing limit. No partial results were returned. Narrowing filters may help; if the limit persists, the stored library needs attention.'],
+])('explains %s while retaining stale rows and allowing deliberate recovery', async (serverCode, message) => {
+  transport.get.mockResolvedValueOnce(page([job(1)]))
+    .mockRejectedValueOnce(new ApiClientError('http_error', { status: 503, serverCode }))
+    .mockResolvedValueOnce(page([job(2)]));
+  render(<Dashboard basePath="" />);
+  expect(await screen.findByText('program-1.elf')).toBeTruthy();
+  fireEvent.click(screen.getByRole('button', { name: 'Refresh jobs' }));
+  const alert = await screen.findByRole('alert');
+  expect(alert.textContent).toContain(message);
+  expect(alert.textContent).toContain('Previously loaded rows are shown below; their state may be outdated.');
+  expect(screen.getByText('program-1.elf')).toBeTruthy();
+  expect(screen.getByRole('button', { name: 'Next page' })).toHaveProperty('disabled', true);
+  expect(transport.get).toHaveBeenCalledTimes(2);
+  fireEvent.click(screen.getByRole('button', { name: 'Refresh jobs' }));
+  expect(await screen.findByText('program-2.elf')).toBeTruthy();
+  expect(screen.queryByText('program-1.elf')).toBeNull();
+  expect(screen.queryByRole('alert')).toBeNull();
+  expect(transport.get).toHaveBeenCalledTimes(3);
+});
