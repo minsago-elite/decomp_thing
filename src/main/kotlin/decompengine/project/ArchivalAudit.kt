@@ -1,17 +1,20 @@
 package decompengine.project
 
 import decompengine.repair.readStableRegularFile
+import decompengine.validation.BehaviorEvidence
+import decompengine.validation.BehaviorProjectContext
+import decompengine.validation.boolean
+import decompengine.validation.string
 import kotlinx.serialization.json.Json
+import kotlinx.serialization.json.JsonObject
 import kotlinx.serialization.json.JsonPrimitive
-import kotlinx.serialization.json.booleanOrNull
 import kotlinx.serialization.json.intOrNull
 import kotlinx.serialization.json.jsonArray
 import kotlinx.serialization.json.jsonObject
 import kotlinx.serialization.json.jsonPrimitive
 import java.nio.file.Files
+import java.nio.file.LinkOption
 import java.nio.file.Path
-import kotlin.io.path.isRegularFile
-import kotlin.io.path.readText
 
 data class ArchivalAudit(
     val entityCount: Int,
@@ -24,6 +27,8 @@ data class ArchivalAudit(
     val networkIsolation: Set<Boolean>,
     val moduleRevisionSha256: Map<String, String>,
     val unresolvedBehaviorReportIds: List<String>,
+    val behaviorEvidenceProblems: Map<String, String> = emptyMap(),
+    val projectBehaviorReportIds: List<String> = emptyList(),
 ) {
     val provenanceComplete: Boolean get() = missingModelProvenance.isEmpty() && missingSourceProvenance.isEmpty()
     val universalEquivalenceClaim: Boolean = false
@@ -39,7 +44,12 @@ data class ArchivalAudit(
           "behaviorMatched": ${behaviorMatched ?: "null"},
           "sandboxReported": $sandboxReported,
           "networkIsolationObserved": [${networkIsolation.sorted().joinToString(",")}],
-          "moduleBehaviorEvidence": [${moduleRevisionSha256.toSortedMap().entries.joinToString(",") { (id, hash) -> "{\"moduleId\":${JsonPrimitive(id)},\"sourceRevisionSha256\":${JsonPrimitive(hash)},\"scope\":\"project-observed behavior\"}" }}],
+          "moduleSourceRevisions": [${moduleRevisionSha256.toSortedMap().entries.joinToString(",") { (id, hash) -> "{\"moduleId\":${JsonPrimitive(id)},\"sourceRevisionSha256\":${JsonPrimitive(hash)}}" }}],
+          "moduleBehaviorEvidence": [],
+          "moduleExecutionCoverage": "not-observed",
+          "projectBehaviorReportIds": [${projectBehaviorReportIds.sorted().joinToString(",") { JsonPrimitive(it).toString() }}],
+          "isolationAssurance": "local requests only; no retained production containment evidence",
+          "behaviorEvidenceProblems": {${behaviorEvidenceProblems.toSortedMap().entries.joinToString(",") { (path, problem) -> "${JsonPrimitive(path)}:${JsonPrimitive(problem)}" }}},
           "unresolvedBehaviorReportIds": [${unresolvedBehaviorReportIds.sorted().joinToString(",") { JsonPrimitive(it).toString() }}],
           "universalEquivalenceClaim": false,
           "limitation": "Confidence is bounded by recovered structure and observed behavior; untested behavior remains unresolved."
@@ -145,14 +155,62 @@ object ArchivalProjectAuditor {
         val missingSource = (model.functions.map { it.id }.filter { it !in implementedIds } +
             model.globals.map { it.id }.filter { it !in implementedIds && it !in interfaceIds } +
             model.types.map { it.id }.filter { it !in interfaceIds }).distinct()
-        val behavior = Files.walk(projectDir.resolve("reports")).use { paths ->
-            paths.filter { it.isRegularFile() && it.fileName.toString().endsWith(".behavior.json") }
-                .toList().mapNotNull { path -> runCatching { Json.parseToJsonElement(path.readText()).jsonObject }.getOrNull() }
+        fun discoverBehaviorReports(): List<Path> {
+            val reports = projectDir.resolve("reports")
+            if (!Files.exists(reports, LinkOption.NOFOLLOW_LINKS)) return emptyList()
+            require(!Files.isSymbolicLink(reports)) { "behavior reports directory is a symbolic link" }
+            return Files.walk(reports, 32).use { stream ->
+                val entries = stream.limit(profile.budgets.archiveMaximumEntries.toLong() + 1L).toList()
+                require(entries.size <= profile.budgets.archiveMaximumEntries) { "behavior report inventory exceeds its bound" }
+                for (entry in entries) {
+                    require(!Files.isSymbolicLink(entry) || entry.fileName.toString().endsWith(".behavior.json")) {
+                        "behavior report inventory contains a link: $entry"
+                    }
+                    if (Files.isDirectory(entry, LinkOption.NOFOLLOW_LINKS) && reports.relativize(entry).nameCount >= 32) {
+                        require(Files.newDirectoryStream(entry).use { !it.iterator().hasNext() }) {
+                            "behavior report inventory exceeds its depth bound"
+                        }
+                    }
+                }
+                entries.filter { it.fileName.toString().endsWith(".behavior.json") }.sorted()
+            }
         }
-        val matches = behavior.mapNotNull { it["matches"]?.jsonPrimitive?.booleanOrNull }
-        val networks = behavior.mapNotNull { it["networkIsolated"]?.jsonPrimitive?.booleanOrNull }.toSet()
-        val unresolvedBehavior = behavior.filter { it["matches"]?.jsonPrimitive?.booleanOrNull == false }
-            .mapNotNull { it["id"]?.jsonPrimitive?.content }
+        val behaviorPaths = discoverBehaviorReports()
+        val problems = linkedMapOf<String, String>()
+        val verifiedBehavior = linkedMapOf<String, Boolean>()
+        val behaviorHashes = linkedMapOf<String, String>()
+        val reportIds = hashSetOf<String>()
+        var currentProjectRecord: JsonObject? = null
+        var behaviorBytes = 0L
+        for (path in behaviorPaths) {
+            val relative = projectDir.relativize(path).toString()
+            try {
+                val snapshot = readStableRegularFile(projectDir, relative, minOf(maximumFileBytes, BehaviorEvidence.MAXIMUM_REPORT_BYTES))
+                behaviorBytes = Math.addExact(behaviorBytes, snapshot.bytes.size.toLong())
+                require(behaviorBytes <= profile.budgets.archiveMaximumTotalBytes - totalBytes) {
+                    "behavior report bytes exceed the remaining aggregate bound"
+                }
+                val record = BehaviorEvidence.decode(snapshot.bytes)
+                val current = currentProjectRecord
+                if (current == null) {
+                    BehaviorEvidence.requireProjectCurrent(record, BehaviorProjectContext(projectDir, profile))
+                    currentProjectRecord = record
+                } else {
+                    require(record.getValue("projectRevision") == current.getValue("projectRevision")) {
+                        "behavior evidence refers to a stale or foreign project revision"
+                    }
+                }
+                val identifier = record.string("id")
+                require(reportIds.add(identifier)) { "behavior report ID is duplicated" }
+                verifiedBehavior[relative] = record.boolean("matches")
+                behaviorHashes[relative] = snapshot.sha256
+            } catch (failure: Exception) {
+                if (failure is InterruptedException) throw failure
+                problems[relative] = failure.message.orEmpty().take(512).ifEmpty { failure.javaClass.simpleName }
+            }
+        }
+        if (behaviorPaths.isEmpty()) problems["no-behavior-evidence"] = "No revision-bound behavior record is available"
+        val unresolvedBehavior = problems.keys + verifiedBehavior.filterValues { !it }.keys
         val audit = ArchivalAudit(
             entityCount = entities.size,
             missingModelProvenance = missingModel,
@@ -163,12 +221,18 @@ object ArchivalProjectAuditor {
                 manifest.unresolvedEntityIds + manifest.unresolvedImplementationIds +
                 implementations.filter { it.acceptedImplementation != true }.flatMap { it.entityIds } +
                 missingModel + missingSource).distinct().sorted(),
-            behaviorReportCount = behavior.size,
-            behaviorMatched = matches.takeIf { it.isNotEmpty() }?.all { it },
-            sandboxReported = behavior.isNotEmpty() && behavior.all { it["sandbox"]?.jsonPrimitive?.content == "bubblewrap" },
-            networkIsolation = networks,
+            behaviorReportCount = behaviorPaths.size,
+            behaviorMatched = when {
+                verifiedBehavior.values.any { !it } -> false
+                problems.isNotEmpty() || verifiedBehavior.isEmpty() -> null
+                else -> true
+            },
+            sandboxReported = verifiedBehavior.isNotEmpty() && problems.isEmpty(),
+            networkIsolation = emptySet(),
             moduleRevisionSha256 = moduleRevisions,
-            unresolvedBehaviorReportIds = unresolvedBehavior,
+            unresolvedBehaviorReportIds = unresolvedBehavior.sorted(),
+            behaviorEvidenceProblems = problems,
+            projectBehaviorReportIds = verifiedBehavior.keys.sorted(),
         )
         require(readStableRegularFile(projectDir, "source_tree_manifest.json", maximumFileBytes).sha256 == manifestSnapshot.sha256) {
             "audit manifest changed during verification"
@@ -178,6 +242,12 @@ object ArchivalProjectAuditor {
                 "audit input changed before publication: $relative"
             }
         }
+        require(discoverBehaviorReports() == behaviorPaths) { "behavior report inventory changed during audit" }
+        for ((relative, expectedHash) in behaviorHashes) {
+            val snapshot = readStableRegularFile(projectDir, relative, minOf(maximumFileBytes, BehaviorEvidence.MAXIMUM_REPORT_BYTES))
+            require(snapshot.sha256 == expectedHash) { "behavior report changed before audit publication" }
+        }
+        currentProjectRecord?.let { BehaviorEvidence.requireProjectCurrent(it, BehaviorProjectContext(projectDir, profile)) }
         writeProjectEvidenceAtomically(projectDir.resolve("reports/archival_audit.json"), audit.toJson())
         return audit
     }

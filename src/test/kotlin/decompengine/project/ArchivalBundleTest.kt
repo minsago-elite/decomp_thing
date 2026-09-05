@@ -263,7 +263,7 @@ class ArchivalBundleTest {
     }
 
     @Test
-    fun `audit keeps mismatched behavior unresolved per source revision`() {
+    fun `audit does not attribute an unbound legacy mismatch to the current source revision`() {
         val temp = createTempDirectory("archive-audit-")
         val project = temp.resolve("project")
         SourceTreeGenerator.generate(model(4), project)
@@ -273,8 +273,8 @@ class ArchivalBundleTest {
 
         val audit = ArchivalProjectAuditor.audit(project)
 
-        assertEquals(false, audit.behaviorMatched)
-        assertEquals(listOf("mismatch"), audit.unresolvedBehaviorReportIds)
+        assertEquals(null, audit.behaviorMatched)
+        assertEquals(listOf("reports/mismatch.behavior.json"), audit.unresolvedBehaviorReportIds)
         assertTrue(audit.moduleRevisionSha256.isNotEmpty())
         assertTrue(project.resolve("reports/archival_audit.json").readText().contains("sourceRevisionSha256"))
     }
