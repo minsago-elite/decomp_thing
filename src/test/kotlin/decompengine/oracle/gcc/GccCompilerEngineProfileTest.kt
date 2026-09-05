@@ -14,10 +14,69 @@ import kotlin.io.path.readBytes
 import kotlin.io.path.writeBytes
 import kotlin.test.Test
 import kotlin.test.assertEquals
+import kotlin.test.assertContentEquals
+import kotlin.test.assertFails
+import decompengine.oracle.core.OracleJson
+import kotlinx.serialization.json.jsonObject
+import kotlinx.serialization.json.jsonArray
+import kotlinx.serialization.json.jsonPrimitive
 import kotlin.test.assertFailsWith
 import kotlin.test.assertTrue
 
 class GccCompilerEngineProfileTest {
+    @Test
+    fun `retained planner profile binds all parsed files and derived policy`() {
+        val root = copyControlPlane(checkedProfile().parent)
+        val retained = GccRetainedCompilerEngineProfile.open(root.resolve("compiler-engines.json"))
+        retained.use {
+            val bytes = retained.policyBytes()
+            val policy = OracleJson.parseCanonical(bytes).jsonObject
+            val inputs = policy.getValue("inputs").jsonArray.map { it.jsonObject }
+            assertEquals(CONTROL_FILES.sorted(), inputs.map { Path.of(it.getValue("path").jsonPrimitive.content).fileName.toString() }.sorted())
+            inputs.forEach { input ->
+                val path = Path.of(input.getValue("path").jsonPrimitive.content)
+                assertEquals(OracleArtifacts.sha256(path.readBytes()), input.getValue("sha256").jsonPrimitive.content)
+                assertEquals(Files.size(path).toString(), input.getValue("bytes").jsonPrimitive.content)
+            }
+            assertEquals(retained.suite.reconstructionProfile().sha256, policy.getValue("reconstructionProfileSha256").jsonPrimitive.content)
+            assertEquals(OracleJson.parse(retained.suite.reconstructionProfile().canonicalJson().toByteArray()), policy.getValue("reconstructionProfile"))
+            retained.policyBytes().fill(0)
+            assertContentEquals(bytes, retained.policyBytes())
+            retained.requireCurrent()
+        }
+        assertFails { retained.policyBytes() }
+        retained.close()
+    }
+
+    @Test
+    fun `retained profile rejects replacement of every dependency even with identical bytes`() {
+        for (name in CONTROL_FILES) {
+            val root = copyControlPlane(checkedProfile().parent)
+            GccRetainedCompilerEngineProfile.open(root.resolve("compiler-engines.json")).use { retained ->
+                val path = root.resolve(name)
+                val original = path.readBytes()
+                Files.move(path, path.resolveSibling("saved-$name"))
+                path.writeBytes(original)
+                assertFails { retained.requireCurrent() }
+                assertFails { retained.policyBytes() }
+            }
+        }
+    }
+
+    @Test
+    fun `failed retained profile parse closes inputs and rejects symlink dependencies`() {
+        val root = copyControlPlane(checkedProfile().parent)
+        val source = root.resolve("source-lock.json")
+        val original = source.readBytes()
+        source.writeBytes(original + byteArrayOf(32))
+        assertFails { GccRetainedCompilerEngineProfile.open(root.resolve("compiler-engines.json")) }
+        source.writeBytes(original)
+        GccRetainedCompilerEngineProfile.open(root.resolve("compiler-engines.json")).use { it.requireCurrent() }
+        Files.move(source, root.resolve("saved-source-lock.json"))
+        source.createSymbolicLinkPointingTo(root.resolve("saved-source-lock.json"))
+        assertFails { GccRetainedCompilerEngineProfile.open(root.resolve("compiler-engines.json")) }
+    }
+
     @Test
     fun `checked compiler-engine control plane is authenticated entirely in Kotlin`() {
         val suite = GccCompilerEngineProfiles.load(checkedProfile())
