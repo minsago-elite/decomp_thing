@@ -192,6 +192,7 @@ class UploadServer(
     }
     private val analysisExecutor: Executor = executor ?: ownedExecutor!!
     private val runningJobs = ConcurrentHashMap.newKeySet<String>()
+    private val pendingJobs = ConcurrentHashMap<String, ScheduledJob>()
     private val lifecycleLock = Any()
     private var stopping = false
     private var started = false
@@ -227,6 +228,13 @@ class UploadServer(
         discarded.forEach { task ->
             try {
                 (task as ScheduledJob).discard("Server stopped before the operation started")
+            } catch (exception: Exception) {
+                if (failure == null) failure = exception else failure.addSuppressed(exception)
+            }
+        }
+        pendingJobs.values.forEach { task ->
+            try {
+                task.discard("Server stopped before the operation started")
             } catch (exception: Exception) {
                 if (failure == null) failure = exception else failure.addSuppressed(exception)
             }
@@ -341,8 +349,7 @@ class UploadServer(
             return
         }
         try {
-            store.updateStatus(job.id, "queued", queuedMessage)
-            analysisExecutor.execute(ScheduledJob(job.id) {
+            val scheduled = ScheduledJob(job.id) {
                 try {
                     val active = store.updateStatus(job.id, "analyzing", activeMessage)
                     operation(active)
@@ -358,14 +365,22 @@ class UploadServer(
                 } finally {
                     runningJobs.remove(job.id)
                 }
-            })
+            }
+            synchronized(lifecycleLock) {
+                if (stopping) throw RejectedExecutionException()
+                store.updateStatus(job.id, "queued", queuedMessage)
+                pendingJobs[job.id] = scheduled
+            }
+            analysisExecutor.execute(scheduled)
         } catch (failure: RejectedExecutionException) {
+            pendingJobs.remove(job.id)
             runningJobs.remove(job.id)
             store.updateStatus(job.id, "failed", "Background job capacity is full or the server is stopping; retry later")
             exchange.responseHeaders.set("Retry-After", "1")
             exchange.sendHtml(503, renderErrorPage(503, "Background workers busy", "Job capacity is full or the server is stopping. Retry later."))
             return
         } catch (failure: Exception) {
+            pendingJobs.remove(job.id)
             runningJobs.remove(job.id)
             store.updateStatus(job.id, "failed", "Analysis worker rejected the job")
             throw failure
@@ -381,7 +396,16 @@ class UploadServer(
         private val claimed = AtomicBoolean()
 
         override fun run() {
-            if (claimed.compareAndSet(false, true)) operation()
+            val run = synchronized(lifecycleLock) {
+                if (stopping) {
+                    discard("Server stopped before the operation started")
+                    false
+                } else if (claimed.compareAndSet(false, true)) {
+                    pendingJobs.remove(jobId, this)
+                    true
+                } else false
+            }
+            if (run) operation()
         }
 
         fun discard(message: String) {
@@ -389,6 +413,7 @@ class UploadServer(
             try {
                 store.updateStatus(jobId, "failed", message)
             } finally {
+                pendingJobs.remove(jobId, this)
                 runningJobs.remove(jobId)
             }
         }
