@@ -17,6 +17,7 @@ import kotlin.io.path.writeText
 import kotlin.test.Test
 import kotlin.test.assertEquals
 import kotlin.test.assertFails
+import kotlin.test.assertFailsWith
 import kotlin.test.assertFalse
 import kotlin.test.assertTrue
 import kotlinx.serialization.json.JsonArray
@@ -27,6 +28,54 @@ import kotlinx.serialization.json.jsonObject
 import kotlinx.serialization.json.jsonPrimitive
 
 class BehaviorEvidenceTest {
+    @Test
+    fun `required corpus rejects omissions and changes before executing either binary`() {
+        val fixture = fixture()
+        val input = fixture.original.parent.resolve("admitted-input").also { it.writeText("data") }
+        val marker = fixture.original.parent.resolve("execution-marker")
+        val shim = fixture.original.parent.resolve("authored-runner-shim")
+        val command = "shift; exec \"${'$'}program\" \"${'$'}@\""
+        check(command in shim.readText())
+        shim.writeText(shim.readText().replace(command, "shift; printf ran > '$marker'; exec \"${'$'}program\" \"${'$'}@\""))
+        val cases = listOf(ProcessInput("file", listOf("/inputs/input"), byteArrayOf(0)), ProcessInput("plain"))
+        val declarations = mapOf("file" to mapOf("input" to input))
+        // Authored input contract, independent of a produced report and host file locators.
+        val contract = OracleJson.parse("""[
+            {"id":"file","args":["/inputs/input"],"stdinHex":"00","fileInputs":[
+                {"name":"input","bytes":4,"sha256":"${OracleArtifacts.sha256("data".toByteArray())}","contentHex":"64617461"}]},
+            {"id":"plain","args":[],"stdinHex":"","fileInputs":[]}
+        ]""".toByteArray())
+        val required = OracleArtifacts.sha256(OracleJson.canonicalBytes(contract))
+        fun evaluate(selected: List<ProcessInput> = cases, files: Map<String, Map<String, Path>> = declarations) =
+            BehaviorComparator(fixture.sandbox).compare("admission", fixture.original, fixture.rebuilt, selected,
+                fixture.project.resolve("reports"), BehaviorProjectContext(fixture.project), files, required)
+        val report = evaluate()
+        val prior = report.reportPath.readBytes()
+        assertTrue(Files.exists(marker))
+        Files.delete(marker)
+        assertEquals(required, BehaviorEvidence.decode(prior).string("corpusSha256"))
+        val variants = listOf(
+            cases.take(1), cases.reversed(),
+            listOf(cases[0].copy(args = listOf("changed")), cases[1]),
+            listOf(cases[0].copy(stdin = byteArrayOf(1)), cases[1]),
+        )
+        for (variant in variants) {
+            val failure = assertFailsWith<IllegalArgumentException> { evaluate(variant) }
+            assertTrue(failure.message.orEmpty().contains("required corpus digest"))
+            assertFalse(Files.exists(marker))
+            assertTrue(prior.contentEquals(report.reportPath.readBytes()))
+        }
+        for (files in listOf(emptyMap(), mapOf("file" to mapOf("renamed" to input)))) {
+            assertFailsWith<IllegalArgumentException> { evaluate(files = files) }
+            assertFalse(Files.exists(marker))
+            assertTrue(prior.contentEquals(report.reportPath.readBytes()))
+        }
+        input.writeText("different")
+        assertFailsWith<IllegalArgumentException> { evaluate() }
+        assertFalse(Files.exists(marker))
+        assertTrue(prior.contentEquals(report.reportPath.readBytes()))
+    }
+
     @Test
     fun `file corpus identity survives relocation but changes with retained contents`() {
         val fixture = fixture()

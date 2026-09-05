@@ -332,8 +332,9 @@ class BehaviorComparator(
         reportsDir: Path,
         project: BehaviorProjectContext? = null,
         fileInputs: Map<String, Map<String, Path>> = emptyMap(),
+        expectedCorpusSha256: String? = null,
     ): BehaviorComparisonReport {
-        val report = evaluate(id, originalBinary, rebuiltBinary, cases, reportsDir, project, fileInputs)
+        val report = evaluate(id, originalBinary, rebuiltBinary, cases, reportsDir, project, fileInputs, expectedCorpusSha256)
         if (!report.matches) {
             throw BehaviorMismatchException("behavior comparison failed for $id; see ${report.reportPath.pathString}")
         }
@@ -348,7 +349,11 @@ class BehaviorComparator(
         reportsDir: Path,
         project: BehaviorProjectContext? = null,
         fileInputs: Map<String, Map<String, Path>> = emptyMap(),
+        expectedCorpusSha256: String? = null,
     ): BehaviorComparisonReport {
+        require(expectedCorpusSha256 == null || expectedCorpusSha256.matches(Regex("[0-9a-f]{64}"))) {
+            "expected behavior corpus digest must be a lowercase SHA-256"
+        }
         require(id.matches(Regex("[A-Za-z0-9][A-Za-z0-9_.-]{0,127}"))) { "behavior report ID must be a safe filename component" }
         require(cases.size in 1..1024) { "between one and 1024 behavior cases are required" }
         require(cases.map { it.id }.distinct().size == cases.size) { "behavior case IDs must be unique" }
@@ -363,6 +368,11 @@ class BehaviorComparator(
         reportsDir.createDirectories()
         val capture = BehaviorEvidenceCapture()
         val fileRecords = captureBehaviorFileInputs(boundFiles, capture)
+        if (expectedCorpusSha256 != null) {
+            require(BehaviorEvidence.inputCorpusSha256(inputs, fileRecords) == expectedCorpusSha256) {
+                "behavior corpus differs from the required corpus digest"
+            }
+        }
         val originalIdentity = capture.executable(originalBinary)
         val rebuiltIdentity = capture.executable(rebuiltBinary)
         val comparisonLimit = minOf(maximumAggregateOutputBytes, 16L * 1024 * 1024)

@@ -180,6 +180,16 @@ internal object BehaviorEvidence {
     const val MAXIMUM_REPORT_BYTES = 64L * 1024 * 1024
     private const val PROVIDER = "local-revision-bound-behavior-v1"
 
+    fun inputCorpusSha256(inputs: List<ProcessInput>, fileInputs: Map<String, JsonArray>): String {
+        val cases = JsonArray(inputs.map { input -> JsonObject(mapOf(
+            "id" to JsonPrimitive(input.id),
+            "args" to JsonArray(input.args.map(::JsonPrimitive)),
+            "stdinHex" to JsonPrimitive(java.util.HexFormat.of().formatHex(input.stdin)),
+            "fileInputs" to (fileInputs[input.id] ?: JsonArray(emptyList())),
+        )) })
+        return hash(corpus(cases, includeFileLocators = false))
+    }
+
     fun encode(
         legacy: JsonObject,
         original: JsonObject,

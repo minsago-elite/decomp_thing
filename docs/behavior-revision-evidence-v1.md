@@ -38,6 +38,16 @@ and sandbox mount arguments. Changing retained file contents changes the corpus
 digest, even when the programs produce identical outputs. Environment and
 executable identities remain separately bound by the full report commitment.
 
+Callers may supply `expectedCorpusSha256` to `compare` or `evaluate` to require a
+previously selected schema-3 corpus identity. The comparator copies cases and file
+declarations, captures declared file contents, and checks the complete corpus digest
+before executing either original or rebuilt program. A missing, reordered or changed
+case, argv, stdin, logical file name or file content fails admission and leaves an
+existing report unchanged. The expected digest must be lowercase SHA-256. Omitting
+it keeps observation-only comparison available; a report's self-computed digest does
+not establish that an external corpus policy was approved. Audit consumers must
+independently apply their expected-corpus policy.
+
 Project capture checks the schema-3 source manifest against its selected profile
 and every declared file. The original executable digest must match the project
 input. The successful schema-2 C/Make build contract must identify the current
@@ -125,6 +135,10 @@ stdout, stderr and exits for stdin, argv, file and exit-code cases. The focused
 large/small archive and live-file selection passes three tests with zero skips.
 The archive replay also requires an identical schema-3 corpus digest after host
 input relocation; execution observations retain their distinct mount locators.
+Both initial execution and replay use the fixed authored corpus digest
+`d916ad4bd5f3aeb8a039cfc9a5a8d6c4d63ad1afd44af43d078589bb671ffc74`
+for pre-execution admission, rather than deriving the required identity from the
+newly produced report.
 
 These records describe local path-stability checks. They do not retain an
 execve-bound executable capability or an immutable runtime-library closure across
