@@ -34,6 +34,7 @@ class AgentSessionJournalCrashTest {
             val continuation = crashContinuation(directory, accepted = true)
             val journalFile = continuation.directory.resolve("session.json")
             val before = Files.readAllBytes(journalFile)
+            val beforeModified = Files.getLastModifiedTime(journalFile)
             AgentSessionJournal.open(continuation).use { journal ->
                 assertEquals(1, journal.completedTurns)
                 assertEquals(if (point == "after-acceptance") continuation.acceptedRevisionSha256 else null,
@@ -43,7 +44,10 @@ class AgentSessionJournalCrashTest {
             AgentSessionJournal.recordAcceptance(continuation, listOf(root), requestSha, "c".repeat(64),
                 continuation.acceptedRevisionSha256!!)
             val acknowledged = Files.readAllBytes(journalFile)
-            if (point == "after-acceptance") assertContentEquals(before, acknowledged)
+            if (point == "after-acceptance") {
+                assertContentEquals(before, acknowledged)
+                assertEquals(beforeModified, Files.getLastModifiedTime(journalFile))
+            }
             val modified = Files.getLastModifiedTime(journalFile)
             AgentSessionJournal.recordAcceptance(continuation, listOf(root), requestSha, "c".repeat(64),
                 continuation.acceptedRevisionSha256!!)
@@ -84,6 +88,7 @@ class AgentSessionJournalCrashTest {
             repeat(2) {
                 AgentSessionJournal.open(continuation).use { journal ->
                     assertFailsWith<IllegalStateException> { journal.reconcileWorkspace(listOf(root)) }
+                    assertEquals("previous-process-cleanup-unverified", journal.decision)
                     assertEquals(0, journal.completedTurns)
                     assertNull(journal.acceptedRevisionSha256)
                     if (point != "before-prompt") assertEquals(0L, journal.lastDurableEventSequence)
