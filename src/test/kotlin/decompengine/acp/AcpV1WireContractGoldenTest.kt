@@ -76,6 +76,7 @@ class AcpV1WireContractGoldenTest {
         assertExchange("initialize", AcpMethod.AgentMethods.V1.Initialize)
         assertExchange("session-new", AcpMethod.AgentMethods.V1.SessionNew)
         assertResponse("session-new-configured.response", "session-new.request", AcpMethod.AgentMethods.V1.SessionNew)
+        assertResponse("session-new-grouped-config.response", "session-new.request", AcpMethod.AgentMethods.V1.SessionNew)
         assertExchange("session-set-model", AcpMethod.AgentMethods.V1.SessionSetModel)
         assertExchange("session-set-mode", AcpMethod.AgentMethods.V1.SessionSetMode)
         assertExchange("session-set-config-select", AcpMethod.AgentMethods.V1.SessionSetConfigOption)
@@ -86,6 +87,7 @@ class AcpV1WireContractGoldenTest {
             "session-prompt.request",
             AcpMethod.AgentMethods.V1.SessionPrompt,
         )
+        assertResponse("session-prompt-usage.response", "session-prompt.request", AcpMethod.AgentMethods.V1.SessionPrompt)
         assertResponse(
             "session-prompt-max-tokens.response",
             "session-prompt.request",
@@ -123,6 +125,7 @@ class AcpV1WireContractGoldenTest {
         assertNotification("session-update-mode.notification", AcpMethod.ClientMethods.V1.SessionUpdate)
         assertNotification("session-update-commands.notification", AcpMethod.ClientMethods.V1.SessionUpdate)
         assertNotification("session-update-usage.notification", AcpMethod.ClientMethods.V1.SessionUpdate)
+        assertNotification("session-update-info.notification", AcpMethod.ClientMethods.V1.SessionUpdate)
         assertNotification("session-update-tool-call.notification", AcpMethod.ClientMethods.V1.SessionUpdate)
         assertNotification(
             "session-update-tool-call-update.notification",
@@ -268,6 +271,7 @@ class AcpV1WireContractGoldenTest {
             "session-new.request",
             "session-new.response",
             "session-new-configured.response",
+            "session-new-grouped-config.response",
             "session-set-model.request",
             "session-set-model.response",
             "session-set-mode.request",
@@ -278,6 +282,7 @@ class AcpV1WireContractGoldenTest {
             "session-set-config-boolean.response",
             "session-prompt.request",
             "session-prompt-end-turn.response",
+            "session-prompt-usage.response",
             "session-prompt-max-tokens.response",
             "session-prompt-max-turn-requests.response",
             "session-prompt-refusal.response",
@@ -290,6 +295,7 @@ class AcpV1WireContractGoldenTest {
             "session-update-mode.notification",
             "session-update-commands.notification",
             "session-update-usage.notification",
+            "session-update-info.notification",
             "session-update-tool-call.notification",
             "session-update-tool-call-update.notification",
             "fs-read.request",

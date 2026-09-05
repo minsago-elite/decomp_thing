@@ -533,9 +533,9 @@ tool-call limit exactly once before terminal content can bind any terminal autho
 
 ## Upgrade policy
 
-The bounded `acp/v1/wire-contract.json` corpus currently freezes 46 SDK-decoded and re-encoded
+The bounded `acp/v1/wire-contract.json` corpus currently freezes 49 SDK-decoded and re-encoded
 JSON-RPC messages. It includes the production model/mode setters, select and boolean configuration
-setters, advertised session inventories, configuration/mode/command/usage updates, and the original
+setters, flat and grouped session inventories, terminal token usage, session-info and configuration/mode/command/usage updates, and the original
 prompt/filesystem/terminal/permission lifecycle. `AcpV1WireContractGoldenTest` rejects missing or
 unvalidated entries and pins both Maven and SDK-reported versions. A golden update documents wire
 compatibility only; it does not implement advertised authentication, resume, or operator behavior.

@@ -623,6 +623,97 @@
           "size": 4096
         }
       }
+    },
+    "session-new-grouped-config.response": {
+      "jsonrpc": "2.0",
+      "id": 2,
+      "result": {
+        "sessionId": "session-1",
+        "models": {
+          "currentModelId": "model-default",
+          "availableModels": [
+            {
+              "modelId": "model-default",
+              "name": "Default"
+            },
+            {
+              "modelId": "model-safe",
+              "name": "Safe"
+            }
+          ]
+        },
+        "modes": {
+          "currentModeId": "mode-default",
+          "availableModes": [
+            {
+              "id": "mode-default",
+              "name": "Default"
+            },
+            {
+              "id": "mode-safe",
+              "name": "Safe"
+            }
+          ]
+        },
+        "configOptions": [
+          {
+            "type": "select",
+            "id": "reasoning",
+            "name": "Reasoning",
+            "currentValue": "low",
+            "options": [
+              {
+                "group": "reasoning-levels",
+                "name": "Reasoning levels",
+                "options": [
+                  {
+                    "value": "low",
+                    "name": "Low"
+                  },
+                  {
+                    "value": "high",
+                    "name": "High"
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "type": "boolean",
+            "id": "telemetry",
+            "name": "Telemetry",
+            "currentValue": true
+          }
+        ]
+      }
+    },
+    "session-update-info.notification": {
+      "jsonrpc": "2.0",
+      "method": "session/update",
+      "params": {
+        "sessionId": "session-1",
+        "update": {
+          "sessionUpdate": "session_info_update",
+          "title": "Fixture reconstruction",
+          "updatedAt": "2026-09-05T00:00:00Z"
+        }
+      }
+    },
+    "session-prompt-usage.response": {
+      "jsonrpc": "2.0",
+      "id": 3,
+      "result": {
+        "stopReason": "end_turn",
+        "userMessageId": "user-message-1",
+        "usage": {
+          "inputTokens": 128,
+          "outputTokens": 32,
+          "totalTokens": 160,
+          "thoughtTokens": 16,
+          "cachedReadTokens": 64,
+          "cachedWriteTokens": 32
+        }
+      }
     }
   }
 }
