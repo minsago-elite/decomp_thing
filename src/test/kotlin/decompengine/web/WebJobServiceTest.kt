@@ -20,6 +20,29 @@ import kotlin.test.assertIs
 import kotlin.test.assertTrue
 
 class WebJobServiceTest {
+    @Test fun `retained report bytes deny upload before reading body and leave status readable`() = withStore { store, root ->
+        val job = store.createFromUpload("quota.elf", elfFixture())
+        val reports = Files.createDirectories(root.resolve(job.id).resolve("reports"))
+        val retained = Files.createFile(reports.resolve("large-report"))
+        java.nio.channels.FileChannel.open(retained, java.nio.file.StandardOpenOption.WRITE).use {
+            it.position(WebUploadStorage.RESERVATION_BYTES)
+            it.write(java.nio.ByteBuffer.wrap(byteArrayOf(0)))
+        }
+        WebJobService(store, JobAnalyzer { _, _ -> error("Unexpected execution") }, inertReconstructor,
+            maximumRetainedStorageBytes = WebUploadStorage.RESERVATION_BYTES).use { service ->
+            service.initializeExistingStorage()
+            val unread = object : java.io.InputStream() {
+                override fun read(): Int = error("Quota refusal must precede request consumption")
+            }
+            assertEquals("UPLOAD_STORAGE", assertFailsWith<WebJobServiceException> {
+                service.uploadMultipart(unread, "multipart/form-data; boundary=test")
+            }.code)
+            assertEquals(job.id, service.get(job.id).id)
+            assertEquals(listOf(job.id), service.list().map { it.id })
+            assertTrue(Files.exists(retained))
+        }
+    }
+
     @Test
     fun `startup reconciles orphan staging under ownership and releases lease when cleanup refuses storage`() = withStore { store, root ->
         val orphan = Files.createDirectory(root.resolve(".upload-123"), java.nio.file.attribute.PosixFilePermissions.asFileAttribute(

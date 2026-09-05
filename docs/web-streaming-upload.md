@@ -98,3 +98,6 @@ The distribution build and [packaged session smoke](evidence/web-upload-receipt-
 passed with pinned Node 24.20.0, JDK 21 and the isolated test browser run with
 `--no-sandbox`. This smoke checks session/dashboard/Runtime behavior and the advertised
 upload ceiling; upload/replay itself is verified by the HTTP and storage tests above.
+
+
+Retained-storage upload admission now uses [bounded accounting and reservations](web-retained-storage-accounting.md). This supersedes the initial free-space-only admission described above; workflow report-growth enforcement is still outstanding.

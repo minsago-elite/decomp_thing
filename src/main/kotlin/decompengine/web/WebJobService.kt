@@ -44,6 +44,7 @@ class WebJobService(
     durableAdapters: List<DurableWebWorkflowAdapter> = emptyList(),
     private val attemptStoreFactory: (Path) -> WorkflowAttemptStore = { WorkflowAttemptStore.open(it) },
     private val shutdownTimeoutMs: Long = 1000,
+    maximumRetainedStorageBytes: Long = WebUploadStorage.DEFAULT_MAXIMUM_BYTES,
     private val failureDiagnostic: (Exception) -> String = { "Workflow failed; inspect its available diagnostics before retrying" },
 ) : AutoCloseable {
     private data class Registration(val adapter: DurableWebWorkflowAdapter, val limits: decompengine.jobs.WorkflowExecutionLimits)
@@ -60,6 +61,7 @@ class WebJobService(
     private val workflowExecutor = executor ?: ownedExecutor!!
     private val active = mutableMapOf<String, OwnedTask>()
     private val uploads = mutableMapOf<Thread, CountDownLatch>()
+    private val uploadStorage = WebUploadStorage(store.storageRoot, maximumRetainedStorageBytes)
     private val uploadPublisher = decompengine.jobs.StagedJobUpload(store.storageRoot)
     private val publicationFailures = mutableMapOf<String, WebJobDiagnostic>()
     private var attempts: WorkflowAttemptStore? = null
@@ -240,6 +242,7 @@ class WebJobService(
     @Synchronized
     fun upload(filename: String, content: ByteArray): Job {
         writableStore()
+        if (uploads.isNotEmpty()) throw WebJobServiceException("UPLOAD_CAPACITY", "Upload storage is reserved by another transfer.")
         return store.createFromUpload(filename, content)
     }
 
@@ -251,10 +254,12 @@ class WebJobService(
         val finished = synchronized(this) {
             writableStore()
             if (uploads.size >= 2 || worker in uploads) throw WebJobServiceException("UPLOAD_CAPACITY", "Two uploads are already in progress. Retry later.")
-            if (Files.getFileStore(store.storageRoot).usableSpace < 64L * 1024 * 1024) throw WebJobServiceException("UPLOAD_STORAGE", "Upload staging needs at least 64 MiB of free storage.")
+            if (active.isNotEmpty()) throw WebJobServiceException("UPLOAD_CAPACITY", "Wait for active workflows before uploading.")
             CountDownLatch(1).also { uploads[worker] = it }
         }
+        var reservation: AutoCloseable? = null
         try {
+            reservation = uploadStorage.reserve()
             return uploadPublisher.publish(idempotencyKey) { sink ->
                 StreamingMultipartUpload.copy(input, contentType, sink, onReceived = { progress?.received(it) }).also { progress?.validating() }.filename
             }
@@ -264,6 +269,7 @@ class WebJobService(
             }
             throw WebJobServiceException("RECOVERY_REQUIRED", "Upload publication is uncertain. Inspect storage before retrying.", failure)
         } finally {
+            reservation?.close()
             synchronized(this) { uploads.remove(worker); finished.countDown(); releaseIfQuiescent() }
         }
     }
@@ -273,7 +279,7 @@ class WebJobService(
 
     @Synchronized
     fun start(jobId: String, workflow: WebWorkflow): WebWorkflowAdmission {
-        if (closed || stopping) return WebWorkflowAdmission.Unavailable
+        if (closed || stopping || uploads.isNotEmpty()) return WebWorkflowAdmission.Unavailable
         if (publicationFailures.isNotEmpty()) return WebWorkflowAdmission.Unavailable
         val owner = writableStore()
         val record = inspectStoredJob(owner, jobId) as? WorkflowJobInspection.Available ?: return WebWorkflowAdmission.Unavailable
@@ -299,6 +305,7 @@ class WebJobService(
 
     @Synchronized
     fun startDurable(jobId: String, expectedJobVersion: String, request: DurableWebWorkflowRequest): DurableWebWorkflowAdmission {
+        if (uploads.isNotEmpty()) return DurableWebWorkflowAdmission.Unavailable("UPLOAD_CAPACITY")
         if (closed || stopping) return DurableWebWorkflowAdmission.Unavailable("SERVICE_STOPPED")
         if (publicationFailures.isNotEmpty()) return DurableWebWorkflowAdmission.Unavailable("RECOVERY_REQUIRED")
         val registration = registrations[request.workflow] ?: return DurableWebWorkflowAdmission.Unsupported(request.workflow)

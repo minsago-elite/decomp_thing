@@ -39,6 +39,8 @@ class StreamingUploadServiceTest {
             assertTrue(entered.await(5, TimeUnit.SECONDS))
             assertEquals(existing.id, service.get(existing.id).id)
             assertEquals(listOf(existing.id), store.jobIds())
+            assertEquals(WebWorkflowAdmission.Unavailable, service.start(existing.id, WebWorkflow.EXPLORE))
+            assertEquals("UPLOAD_CAPACITY", assertFailsWith<WebJobServiceException> { service.upload("blocked.elf", elfFixture()) }.code)
             assertEquals("UPLOAD_CAPACITY", assertFailsWith<WebJobServiceException> { service.uploadMultipart(body().inputStream(), type) }.code)
             release.countDown()
             val jobs = tasks.map { it.get(5, TimeUnit.SECONDS) }
@@ -47,6 +49,23 @@ class StreamingUploadServiceTest {
             assertEquals(3, store.jobIds().size)
             assertFalse(Files.list(root).use { it.anyMatch { path -> path.fileName.toString().startsWith(".upload-") } })
         } finally { release.countDown(); pool.shutdownNow(); service.close(); root.toFile().deleteRecursively() }
+    }
+
+    @Test fun `active workflow denies upload before consuming bytes`() {
+        val root = createTempDirectory("stream-upload-writer-")
+        val store = JobStore(root)
+        val existing = store.createFromUpload("existing.elf", elfFixture())
+        val release = CountDownLatch(1)
+        val entered = CountDownLatch(1)
+        val service = WebJobService(store, JobAnalyzer { _, _ -> entered.countDown(); release.await() }, JobReconstructor { _, _ -> })
+        try {
+            service.initializeExistingStorage()
+            assertIs<WebWorkflowAdmission.Started>(service.start(existing.id, WebWorkflow.EXPLORE))
+            assertTrue(entered.await(5, TimeUnit.SECONDS))
+            val unread = object : java.io.InputStream() { override fun read(): Int = error("Must not consume denied upload") }
+            assertEquals("UPLOAD_CAPACITY", assertFailsWith<WebJobServiceException> { service.uploadMultipart(unread, type) }.code)
+            assertEquals(existing.id, service.get(existing.id).id)
+        } finally { release.countDown(); service.close(); root.toFile().deleteRecursively() }
     }
 
     @Test fun `shutdown retains root ownership until an unresponsive upload stream actually exits`() {

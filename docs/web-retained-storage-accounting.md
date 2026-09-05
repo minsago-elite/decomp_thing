@@ -3,8 +3,8 @@
 Issue: [#162](https://github.com/minsago-elite/decomp_thing/issues/162).
 
 `RetainedStorageUsage.measure` supplies a bounded, read-only snapshot for future
-storage admission. It is not yet called by HTTP admission and does not establish
-the outstanding quota acceptance criterion.
+storage admission. Streaming HTTP uploads use it through `WebUploadStorage`;
+workflow report-growth enforcement remains outstanding under the quota criterion.
 
 The caller must hold exclusive root ownership and coordinate writers so the tree
 is quiescent. The scan uses pinned Linux directory and entry descriptors, rejects
@@ -33,3 +33,38 @@ exact byte and entry boundaries, sparse files, hard links, dangling symlink
 rejection, depth and deadline limits, preserved interrupt status, and unchanged
 file contents. This checkpoint does not qualify concurrent writer reservations,
 upload admission, report-growth enforcement or status-request responsiveness.
+
+## Upload admission reservations
+
+Streaming upload admission has an 8 GiB logical retained-data ceiling. Embedders
+can set `maximumRetainedStorageBytes` on `WebJobService`; the packaged server uses
+the default. Each admitted transfer reserves 33 MiB: its 32 MiB maximum request
+plus one MiB for the fixed publication metadata and directory entries. A new
+reservation must fit both the logical ceiling and current free filesystem space,
+with 64 MiB of additional recovery headroom. Denials return `UPLOAD_STORAGE` (HTTP
+503) before the service reads multipart bytes. Data is never deleted to make room.
+
+The first upload in an overlapping group measures the whole retained tree.
+Subsequent uploads share that snapshot and charge separate reservations. Completed
+reservations remain charged until every upload in the group has exited; the next
+group measures actual retained bytes again. This deliberately conservative policy
+can deny a request even if a completed transfer used less than its reservation.
+Failed and replayed uploads release reservations through the same path.
+
+The service registers upload ownership before measuring and releases it after
+reservation cleanup. Accounting and streaming run outside the service monitor.
+During this interval, new legacy/durable workflows and the compatibility byte-array
+upload helper are refused; active workflows also prevent new streamed uploads.
+This prevents service-owned report writers from changing the scan. Read-only status
+and collection requests remain available. The existing two-transfer ceiling and
+bounded HTTP executor still apply. Direct external changes to an owned job root
+are unsupported. The byte-array helper is not an HTTP route and has not acquired
+the streaming quota contract.
+
+This admission ceiling includes existing reports, but does not yet constrain new
+report growth while workflows run. It is therefore not a complete hard quota for
+all application writes; #162 remains open for that integration and qualification.
+
+Verification adds reservation overlap/release, exact free-space boundaries,
+accounting-error recovery, retained-report refusal before body reads, status reads
+during blocked transfers, and mutual exclusion between uploads and workflows.
