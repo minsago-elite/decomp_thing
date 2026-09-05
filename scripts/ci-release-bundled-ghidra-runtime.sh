@@ -129,55 +129,58 @@ def remove_contents(directory, relative=""):
 
 require(os.geteuid() == 0, "explicit CI runtime release requires root")
 require(target == f"/var/lib/decomp-ci-ghidra-{run_id}-{attempt}", "runtime cleanup target differs")
-ancestors = []
+filesystem_root = os.open("/", directory_flags)
 try:
-    parent = os.open("/", directory_flags)
-    ancestors.append(parent)
-    require_trusted_directory(parent)
-    for component in ("var", "lib"):
-        parent = os.open(component, directory_flags, dir_fd=parent)
-        ancestors.append(parent)
-        require_trusted_directory(parent)
-    target_name = os.path.basename(target)
+    require_trusted_directory(filesystem_root)
+    var = os.open("var", directory_flags, dir_fd=filesystem_root)
     try:
-        descriptor = os.open(target_name, directory_flags, dir_fd=parent)
-    except FileNotFoundError:
-        print("No provisioned bundled Ghidra runtime remains")
-        sys.exit(0)
-    try:
-        original = require_trusted_directory(descriptor)
-        require(stat.S_IMODE(original.st_mode) in (0o700, 0o755), "runtime cleanup target mode differs")
-        marker_descriptor = os.open(marker_name, os.O_RDONLY | os.O_NOFOLLOW |
-                                    os.O_NONBLOCK | os.O_CLOEXEC, dir_fd=descriptor)
+        require_trusted_directory(var)
+        runtime_parent = os.open("lib", directory_flags, dir_fd=var)
         try:
-            marker_attributes = os.fstat(marker_descriptor)
-            require(stat.S_ISREG(marker_attributes.st_mode) and marker_attributes.st_uid == 0 and
-                    marker_attributes.st_gid == 0 and marker_attributes.st_nlink == 1 and
-                    stat.S_IMODE(marker_attributes.st_mode) == 0o444 and marker_attributes.st_size <= 1024,
-                    "runtime cleanup ownership marker has an invalid identity")
-            expected = ("decomp-ci-bundled-ghidra-runtime-v1\n"
-                        f"run_id={run_id}\nrun_attempt={attempt}\npath={target}\n"
-                        f"identity={original.st_dev}:{original.st_ino}\n").encode("ascii")
-            require(os.read(marker_descriptor, 1025) == expected, "runtime cleanup ownership marker differs")
+            require_trusted_directory(runtime_parent)
+            target_name = os.path.basename(target)
+            try:
+                descriptor = os.open(target_name, directory_flags, dir_fd=runtime_parent)
+            except FileNotFoundError:
+                print("No provisioned bundled Ghidra runtime remains")
+                sys.exit(0)
+            try:
+                original = require_trusted_directory(descriptor)
+                require(stat.S_IMODE(original.st_mode) in (0o700, 0o755), "runtime cleanup target mode differs")
+                marker_descriptor = os.open(marker_name, os.O_RDONLY | os.O_NOFOLLOW |
+                                            os.O_NONBLOCK | os.O_CLOEXEC, dir_fd=descriptor)
+                try:
+                    marker_attributes = os.fstat(marker_descriptor)
+                    require(stat.S_ISREG(marker_attributes.st_mode) and marker_attributes.st_uid == 0 and
+                            marker_attributes.st_gid == 0 and marker_attributes.st_nlink == 1 and
+                            stat.S_IMODE(marker_attributes.st_mode) == 0o444 and marker_attributes.st_size <= 1024,
+                            "runtime cleanup ownership marker has an invalid identity")
+                    expected = ("decomp-ci-bundled-ghidra-runtime-v1\n"
+                                f"run_id={run_id}\nrun_attempt={attempt}\npath={target}\n"
+                                f"identity={original.st_dev}:{original.st_ino}\n").encode("ascii")
+                    require(os.read(marker_descriptor, 1025) == expected, "runtime cleanup ownership marker differs")
+                finally:
+                    os.close(marker_descriptor)
+                require_no_mounts()
+                inspect(descriptor)
+                require_no_mounts()
+                remove_contents(descriptor)
+                require(names(descriptor) == [marker_name] and
+                        identity(os.stat(marker_name, dir_fd=descriptor, follow_symlinks=False)) == records[marker_name],
+                        "runtime cleanup marker changed before final removal")
+                require(identity(os.stat(target_name, dir_fd=runtime_parent, follow_symlinks=False)) == identity(original),
+                        "runtime cleanup target name was replaced")
+                os.unlink(marker_name, dir_fd=descriptor)
+                os.fsync(descriptor)
+                os.rmdir(target_name, dir_fd=runtime_parent)
+                os.fsync(runtime_parent)
+                print(f"Released provisioned application-bundled Ghidra: {target}")
+            finally:
+                os.close(descriptor)
         finally:
-            os.close(marker_descriptor)
-        require_no_mounts()
-        inspect(descriptor)
-        require_no_mounts()
-        remove_contents(descriptor)
-        require(names(descriptor) == [marker_name] and
-                identity(os.stat(marker_name, dir_fd=descriptor, follow_symlinks=False)) == records[marker_name],
-                "runtime cleanup marker changed before final removal")
-        require(identity(os.stat(target_name, dir_fd=parent, follow_symlinks=False)) == identity(original),
-                "runtime cleanup target name was replaced")
-        os.unlink(marker_name, dir_fd=descriptor)
-        os.fsync(descriptor)
-        os.rmdir(target_name, dir_fd=parent)
-        os.fsync(parent)
-        print(f"Released provisioned application-bundled Ghidra: {target}")
+            os.close(runtime_parent)
     finally:
-        os.close(descriptor)
+        os.close(var)
 finally:
-    for ancestor in reversed(ancestors):
-        os.close(ancestor)
+    os.close(filesystem_root)
 PY
