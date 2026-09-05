@@ -384,7 +384,7 @@ internal object BehaviorEvidence {
 
     private fun output(output: JsonObject, network: Boolean): JsonObject {
         require(output.keys == setOf("exitCode", "stdoutHex", "stderrHex", "networkIsolated", "sandboxCommand"))
-        output.integer("exitCode")
+        rejectReservedWrapperExit(output.integer("exitCode"))
         requireHex(output.string("stdoutHex"))
         requireHex(output.string("stderrHex"))
         require(output.boolean("networkIsolated") == network)
