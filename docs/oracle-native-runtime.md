@@ -91,3 +91,34 @@ and unit/cgroup absence and ext4 cleanup requirements are unchanged. Local check
 run 39 tests: 29 pass, ten provisioned systemd/ext4 cases skip, and none fail.
 All nine diagnostic tests execute, including primary/cleanup exception identity,
 retained protocol evidence, and standalone cleanup failure regressions.
+
+### Parent-owned failure cleanup
+
+Completed [CI run 33944269759](https://github.com/minsago-elite/decomp_thing/actions/runs/33944269759)
+at `fc1b821` ran 1,388 tests: 1,331 passed, 32 skipped and 25 failed. The preserved
+first failure is `cannot open materialized class-path entry 0 through its pinned
+descriptor`. Its bounded trace observes BOOT at 28,982 ms, a worker
+`parent.start timed out` failure at 59,059 ms, and supervisor failure at 60,062 ms.
+Cleanup then finds `.decomp-acp-entry-delete-...` instead of the original runtime
+layout. The worker's failure handler attempted whole-run deletion, renaming the
+parent-owned runtime before failing against its nested read-only mounts. Later
+tests encounter the occupied ext4 slot. The journal collector's exit 137 is not
+a worker exit or evidence of OOM.
+
+The failed worker now publishes its bounded failure protocol, closes its own run
+descriptor and exits without deleting the run tree. Runtime, scratch and protocol
+evidence remain owned by the parent. Existing parent cleanup still requires its
+retained authority, exact unit/cgroup absence and bounded deletion; an abandoned
+lease remains fail-closed residue, not permission to delete an unknown tree.
+No filename allowance, mount permission, START authority, timeout or resource
+limit changes.
+
+A fresh-JVM regression first reproduced the old runtime deletion as
+`NoSuchFileException`. Two independent cases now pass: rejected START and an
+invalid scope after valid START. Both require unchanged runtime bytes, inode and
+read-only mode, preserved scratch, exact root membership and retained BOOT/failure
+protocols. The focused ownership/native/diagnostic/isolation/disk/journal selection
+runs 79 tests: 63 pass, 16 provisioned systemd/ext4 cases skip, none fail or error.
+This proves failure ownership, not hosted lifecycle success. The separate
+30-second BOOT-to-START window and complete production recovery/terminal release
+remain unresolved under #136/#138.

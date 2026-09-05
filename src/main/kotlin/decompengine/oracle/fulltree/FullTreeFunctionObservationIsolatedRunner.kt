@@ -2444,9 +2444,6 @@ internal object FullTreeFunctionObservationIsolatedWorker {
                 }
                 runCatching { Thread.sleep(WORKER_FAILURE_OBSERVATION_MILLIS) }
             }
-            if (descriptor != null) {
-                runCatching { deletePrivateTreeContents(descriptor, WORKER_FAILURE_CLEANUP_LIMITS) }
-            }
             runCatching { descriptor?.close() }
             System.err.println("isolated function-observation worker failed safely")
             exitProcess(WORKER_FAILURE_EXIT)
@@ -7300,20 +7297,6 @@ private val PROBE_READER_JOIN_TIMEOUT = Duration.ofSeconds(1)
 private val STATUS_POLL_INTERVAL = Duration.ofSeconds(2)
 private val ISOLATED_PUBLISHER_LIMITS = FullTreeFunctionObservationShardPublisherLimits()
 private val DEFAULT_CONTROL_LIMITS = ISOLATED_PUBLISHER_LIMITS.control
-private val WORKER_FAILURE_CLEANUP_LIMITS = AcpRuntimeClosureLimits(
-    maximumEntries = MAXIMUM_PRIVATE_ENTRIES,
-    maximumUserOwnedFileBytes = isolatedObservationCleanupBytes(
-        ISOLATED_PUBLISHER_LIMITS.maximumOutputBytes,
-        ISOLATED_PUBLISHER_LIMITS.maximumDatabaseBytes,
-        DEFAULT_CONTROL_LIMITS.maximumDwarfScratchBytes,
-        addExact(
-            PROTOCOL_CLEANUP_ALLOWANCE_BYTES,
-            MAXIMUM_AUTHENTICATED_CLASSPATH_BYTES,
-            "worker-failure cleanup runtime allowance",
-        ),
-    ),
-    maximumDepth = MAXIMUM_PRIVATE_DEPTH,
-)
 private val CGROUP_ROOT = Path.of("/sys/fs/cgroup")
 private val KERNEL_BOOT_ID_PATH = Path.of("/proc/sys/kernel/random/boot_id")
 private val SECURE_RANDOM = SecureRandom()
