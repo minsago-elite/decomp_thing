@@ -202,6 +202,7 @@ class UploadServer(
     private var stopping = false
     private var started = false
     private var activeRequests = 0
+    private var authenticationInspectionThread: Thread? = null
     private var ownership: WebJobStoreOwnership? = null
     val serverPort: Int get() = server.address.port
 
@@ -224,8 +225,11 @@ class UploadServer(
 
     fun stop(delaySeconds: Int = 0) {
         require(delaySeconds >= 0) { "shutdown delay must be nonnegative" }
-        synchronized(lifecycleLock) { stopping = true }
-        authenticationInspectionCancellation.set(true)
+        val inspection = synchronized(lifecycleLock) {
+            stopping = true
+            authenticationInspectionCancellation.set(true)
+            authenticationInspectionThread
+        }
         server.stop(delaySeconds)
         val discarded = synchronized(lifecycleLock) {
             // A cleanup retry must not interrupt a worker again while it persists its final status.
@@ -245,6 +249,15 @@ class UploadServer(
             } catch (exception: Exception) {
                 if (failure == null) failure = exception else failure.addSuppressed(exception)
             }
+        }
+        try {
+            if (inspection != null && inspection !== Thread.currentThread()) inspection.join(5_000)
+            check(inspection?.isAlive != true) {
+                "Authentication inspection did not stop within the shutdown grace period"
+            }
+        } catch (exception: Exception) {
+            if (exception is InterruptedException) Thread.currentThread().interrupt()
+            if (failure == null) failure = exception else failure.addSuppressed(exception)
         }
         try {
             check(ownedExecutor?.awaitTermination(5, TimeUnit.SECONDS) != false) {
@@ -306,19 +319,24 @@ class UploadServer(
             exchange.sendJson(409, "{\"error\":\"Authentication inspection is already running.\"}")
             return
         }
-        authenticationInspectionCancellation.set(false)
         try {
-            Thread({
-                var result = AUTH_INSPECTION_FAILED
-                try {
-                    withActiveRequest { result = inspectAuthenticationMethods() }
-                } catch (_: Exception) {
-                    result = AUTH_INSPECTION_FAILED
-                } finally {
-                    // Publish terminal status and release admission in one atomic state change.
-                    authenticationInspectionResult.set(result)
-                }
-            }, "decomp-web-auth-inspection").apply { isDaemon = true; start() }
+            synchronized(lifecycleLock) {
+                check(!stopping) { "Server is stopping" }
+                authenticationInspectionCancellation.set(false)
+                val inspection = Thread({
+                    var result = AUTH_INSPECTION_FAILED
+                    try {
+                        withActiveRequest { result = inspectAuthenticationMethods() }
+                    } catch (_: Exception) {
+                        result = AUTH_INSPECTION_FAILED
+                    } finally {
+                        // Publish terminal status and release admission in one atomic state change.
+                        authenticationInspectionResult.set(result)
+                    }
+                }, "decomp-web-auth-inspection").apply { isDaemon = true }
+                authenticationInspectionThread = inspection
+                inspection.start()
+            }
         } catch (_: Exception) {
             authenticationInspectionResult.set(AUTH_INSPECTION_FAILED)
             exchange.sendJson(503, AUTH_INSPECTION_FAILED)

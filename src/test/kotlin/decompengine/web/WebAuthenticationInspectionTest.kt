@@ -12,6 +12,45 @@ import kotlin.io.path.createTempDirectory
 import kotlin.test.*
 
 class WebAuthenticationInspectionTest {
+    @Test fun `shutdown waits for cancelled inspection cleanup before returning`() {
+        val entered = java.util.concurrent.CountDownLatch(1)
+        val cancelled = java.util.concurrent.CountDownLatch(1)
+        val finish = java.util.concurrent.CountDownLatch(1)
+        val cleaned = java.util.concurrent.atomic.AtomicBoolean(false)
+        val root = createTempDirectory("web-auth-join-")
+        val server = UploadServer("127.0.0.1", 0, root, authenticationInspector = { cancellation ->
+            entered.countDown()
+            val deadline = System.nanoTime() + java.util.concurrent.TimeUnit.SECONDS.toNanos(10)
+            while (!cancellation.isCancellationRequested() && System.nanoTime() < deadline) Thread.sleep(5)
+            check(cancellation.isCancellationRequested())
+            cancelled.countDown()
+            check(finish.await(10, java.util.concurrent.TimeUnit.SECONDS))
+            cleaned.set(true)
+            AcpAuthenticationInventory.capture(emptyList(), emptyList())
+        })
+        val stopper = java.util.concurrent.Executors.newSingleThreadExecutor()
+        server.start()
+        try {
+            assertEquals(202, request(server, "/api/operator/auth-methods", true).statusCode())
+            assertTrue(entered.await(5, java.util.concurrent.TimeUnit.SECONDS))
+            val stopped = stopper.submit { server.stop(0) }
+            assertTrue(cancelled.await(5, java.util.concurrent.TimeUnit.SECONDS))
+            assertFailsWith<java.util.concurrent.TimeoutException> {
+                stopped.get(100, java.util.concurrent.TimeUnit.MILLISECONDS)
+            }
+            assertFalse(cleaned.get())
+            finish.countDown()
+            stopped.get(5, java.util.concurrent.TimeUnit.SECONDS)
+            assertTrue(cleaned.get())
+            val replacement = UploadServer("127.0.0.1", 0, root)
+            try { replacement.start() } finally { replacement.stop(0) }
+        } finally {
+            finish.countDown()
+            stopper.shutdownNow()
+            server.stop(0)
+        }
+    }
+
     @Test fun `web inspection is explicit and returns only redacted previews`() {
         val calls = AtomicInteger()
         val inventory = AcpAuthenticationInventory.capture(listOf(AuthMethod.AgentAuth(
@@ -93,7 +132,7 @@ class WebAuthenticationInspectionTest {
         try {
             assertEquals(202, request(server, "/api/operator/auth-methods", true).statusCode())
             assertTrue(entered.await(5, java.util.concurrent.TimeUnit.SECONDS))
-            assertEquals("HTTP requests remain active after server stop",
+            assertEquals("Authentication inspection did not stop within the shutdown grace period",
                 assertFailsWith<IllegalStateException> { server.stop(0) }.message)
             val contender = UploadServer("127.0.0.1", 0, root)
             try {
