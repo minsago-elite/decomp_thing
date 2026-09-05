@@ -5,12 +5,18 @@ import kotlinx.serialization.json.Json
 import kotlinx.serialization.json.jsonObject
 import java.net.HttpURLConnection
 import java.net.URI
+import java.nio.ByteBuffer
+import java.nio.channels.FileChannel
+import java.nio.file.Files
+import java.nio.file.Path
+import java.nio.file.StandardOpenOption
 import java.util.concurrent.Executor
 import kotlin.io.path.createDirectories
 import kotlin.io.path.createTempDirectory
 import kotlin.io.path.exists
 import kotlin.io.path.readBytes
 import kotlin.io.path.writeText
+import kotlin.io.path.writeBytes
 import kotlin.test.Test
 import kotlin.test.assertEquals
 import kotlin.test.assertTrue
@@ -208,6 +214,110 @@ class UploadServerTest {
             assertTrue(source.body.decodeToString().contains("80%"))
             assertEquals("archive", archive.body.decodeToString())
             assertEquals(400, traversal.status)
+        }
+    }
+
+    @Test
+    fun `artifact and source routes reject final file and parent directory indirection`() {
+        withServer { server, dataDir ->
+            val jobId = uploadedJobId(server)
+            val reports = dataDir.resolve("$jobId/reports").createDirectories()
+            val external = dataDir.resolve("outside").createDirectories()
+            external.resolve("secret.c").writeText("outside-boundary-marker")
+            Files.createSymbolicLink(reports.resolve("source-tree.zip"), external.resolve("secret.c"))
+            Files.createSymbolicLink(reports.resolve("source-tree"), external)
+            assertRejectedWithoutMarker(request(server, "GET", "/jobs/$jobId/artifacts/reports/source-tree.zip"))
+            assertRejectedWithoutMarker(request(server, "GET", "/jobs/$jobId/source/secret.c"))
+            Files.delete(reports.resolve("source-tree"))
+            val tree = reports.resolve("source-tree").createDirectories()
+            Files.createSymbolicLink(tree.resolve("secret.c"), external.resolve("secret.c"))
+            assertRejectedWithoutMarker(request(server, "GET", "/jobs/$jobId/source/secret.c"))
+        }
+    }
+
+    @Test
+    fun `routes reject a substituted job directory instead of following its reports`() {
+        withServer { server, dataDir ->
+            val jobId = uploadedJobId(server)
+            val original = dataDir.resolve(jobId)
+            original.resolve("reports/source-tree").createDirectories()
+            original.resolve("reports/source-tree/source.c").writeText("outside-boundary-marker")
+            val moved = dataDir.resolve("moved-job")
+            Files.move(original, moved)
+            Files.createSymbolicLink(original, moved)
+            assertRejectedWithoutMarker(request(server, "GET", "/jobs/$jobId/source/source.c"))
+            assertRejectedWithoutMarker(request(server, "GET", "/jobs/$jobId/artifacts/reports/source-tree/source.c"))
+            assertRejectedWithoutMarker(request(server, "GET", "/jobs/$jobId"))
+        }
+    }
+
+    @Test
+    fun `source and archive response reads reject oversized sparse files`() {
+        withServer { server, dataDir ->
+            val jobId = uploadedJobId(server)
+            val reports = dataDir.resolve("$jobId/reports").createDirectories()
+            val source = reports.resolve("source-tree").createDirectories().resolve("large.c")
+            val archive = reports.resolve("source-tree.zip")
+            sparseFile(source, 4L * 1024 * 1024 + 1)
+            sparseFile(archive, 64L * 1024 * 1024 + 1)
+            assertEquals(400, request(server, "GET", "/jobs/$jobId/source/large.c").status)
+            assertEquals(400, request(server, "GET", "/jobs/$jobId/artifacts/reports/source-tree.zip").status)
+        }
+    }
+
+    @Test
+    fun `source rendering never reads linked or oversized provenance metadata`() {
+        withServer { server, dataDir ->
+            val jobId = uploadedJobId(server)
+            val tree = dataDir.resolve("$jobId/reports/source-tree").createDirectories()
+            tree.resolve("source.c").writeText("int source(void) { return 0; }\n")
+            val external = dataDir.resolve("outside.json")
+            external.writeText("""{"files":[{"path":"source.c","generator":"outside-boundary-marker","entityIds":[]}]}""")
+            Files.createSymbolicLink(tree.resolve("source_tree_manifest.json"), external)
+            val linked = request(server, "GET", "/jobs/$jobId/source/source.c")
+            assertEquals(200, linked.status)
+            assertTrue(!linked.body.decodeToString().contains("outside-boundary-marker"))
+            Files.delete(tree.resolve("source_tree_manifest.json"))
+            sparseFile(tree.resolve("source_tree_manifest.json"), 1024L * 1024 + 1)
+            assertEquals(200, request(server, "GET", "/jobs/$jobId/source/source.c").status)
+        }
+    }
+
+    @Test
+    fun `source responses reject malformed UTF8 without replacement decoding`() {
+        withServer { server, dataDir ->
+            val jobId = uploadedJobId(server)
+            val tree = dataDir.resolve("$jobId/reports/source-tree").createDirectories()
+            tree.resolve("invalid.c").writeBytes(byteArrayOf(0xc3.toByte(), 0x28))
+            assertEquals(400, request(server, "GET", "/jobs/$jobId/source/invalid.c").status)
+        }
+    }
+
+    @Test
+    fun `artifact routes reject noncanonical paths and nonregular targets`() {
+        withServer { server, dataDir ->
+            val jobId = uploadedJobId(server)
+            dataDir.resolve("$jobId/reports/directory.json").createDirectories()
+            for (relative in listOf("reports/directory.json", "reports/%2e%2e%2fjob.json", "reports%5cfile.json", "reports/file%0a.json")) {
+                val response = request(server, "GET", "/jobs/$jobId/artifacts/$relative")
+                assertTrue(response.status in 400..499, "unsafe artifact path returned ${response.status}: $relative")
+            }
+        }
+    }
+
+    private fun uploadedJobId(server: UploadServer): String =
+        Json.parseToJsonElement(upload(server, "boundary.elf", elfFixture(), acceptJson = true).body.decodeToString())
+            .jsonObject.getValue("id").toString().trim('"')
+
+    private fun assertRejectedWithoutMarker(response: Response) {
+        assertTrue(response.status in 400..499, "unsafe path returned ${response.status}")
+        assertTrue(!response.body.decodeToString().contains("outside-boundary-marker"))
+    }
+
+    private fun sparseFile(path: Path, size: Long) {
+        FileChannel.open(path, StandardOpenOption.CREATE_NEW, StandardOpenOption.WRITE).use { channel ->
+            channel.position(size - 1)
+            channel.write(ByteBuffer.wrap(byteArrayOf(0)))
         }
     }
 
