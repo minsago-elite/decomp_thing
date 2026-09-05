@@ -51,6 +51,10 @@ authority.
 
 ## Locked toolchain and inspect artifact
 
+The existing LLVM CI workflows use a [bounded build-attempt wrapper](llvm-toolchain-ci-build.md)
+without changing the frozen recipe or provenance bindings. Build-command timeouts are failures,
+not retained-container cleanup evidence, and never trigger a second build attempt.
+
 The receipt fixes the exact reviewed LLVM 22.1.6 build environment through the SHA-256 identities
 of:
 

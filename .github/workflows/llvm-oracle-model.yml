@@ -35,14 +35,7 @@ jobs:
       - name: Reproduce and verify the recorded LLVM toolchain image
         run: |
           ./gradlew --no-daemon installDist
-          docker buildx build \
-            --no-cache \
-            --platform linux/amd64 \
-            --build-arg SOURCE_DATE_EPOCH=1779182222 \
-            --load \
-            --tag decomp-llvm-oracle-toolchain:22.1.6 \
-            --file oracle/llvm/22.1.6/build-toolchain.Dockerfile \
-            oracle/llvm/22.1.6
+          bash scripts/ci-build-llvm-toolchain.sh
           observed="$(docker image inspect --format '{{.Id}}' \
             decomp-llvm-oracle-toolchain:22.1.6)"
           echo "LLVM_TOOLCHAIN_IMAGE_ID=$observed" >> "$GITHUB_ENV"
