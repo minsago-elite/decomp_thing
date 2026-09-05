@@ -12,6 +12,19 @@ import kotlin.test.assertTrue
 
 class DoctorTest {
     @Test
+    fun `authentication previews escape terminal controls and Unicode formatting`() {
+        val text = "login\u009b31m\u202ePASS\u2066\u2028\u2029\u001b\n\"\\"
+        val quoted = quoteTerminalPreview(text)
+        kotlin.test.assertEquals(text, kotlinx.serialization.json.Json.parseToJsonElement(quoted)
+            .let { it as kotlinx.serialization.json.JsonPrimitive }.content)
+        for (character in listOf('\u009b', '\u202e', '\u2066', '\u2028', '\u2029', '\u001b', '\n')) {
+            assertFalse(character in quoted)
+        }
+        assertTrue(quoted.contains("\\u202ePASS"))
+        kotlin.test.assertEquals("\"ordinary login\"", quoteTerminalPreview("ordinary login"))
+    }
+
+    @Test
     fun `reports all tools output and authenticated connectivity independently`() {
         val temp = createTempDirectory("doctor-ok-")
         val ghidra = temp.resolve("ghidra")
