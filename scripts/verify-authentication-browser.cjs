@@ -10,7 +10,7 @@ const { chromium } = require(process.env.DECOMP_PLAYWRIGHT_MODULE || 'playwright
   const html = fs.readFileSync(htmlPath, 'utf8');
   const browser = await chromium.launch({headless: true});
   const browserVersion = browser.version();
-  let starts = 0, polls = 0, context;
+  let starts = 0, polls = 0, cancellations = 0, context;
   try {
     context = await browser.newContext();
     await context.tracing.start({screenshots: true, snapshots: true});
@@ -20,6 +20,13 @@ const { chromium } = require(process.env.DECOMP_PLAYWRIGHT_MODULE || 'playwright
     await page.route('**/*', route => {
       const request = route.request(), url = new URL(request.url());
       if (url.pathname === '/') return route.fulfill({contentType:'text/html', body:html});
+      if (url.pathname === '/api/operator/auth-methods/cancel') {
+        assert.equal(request.headers()['x-decomp-operator-action'], 'cancel-auth-inspection');
+        cancellations++; mode = 'cancelled';
+        // Let polling publish the terminal result before the cancellation acknowledgement arrives.
+        return new Promise(resolve => setTimeout(resolve, 600)).then(() =>
+          route.fulfill({status:202, json:{status:'cancellation-requested'}}));
+      }
       if (url.pathname !== '/api/operator/auth-methods') return route.abort();
       if (request.method() === 'POST') {
         starts++;
@@ -27,6 +34,8 @@ const { chromium } = require(process.env.DECOMP_PLAYWRIGHT_MODULE || 'playwright
         return route.fulfill({status:202, json:{status:'inspecting'}});
       }
       polls++;
+      if (mode === 'waiting' || mode === 'cancelled')
+        return route.fulfill({json:{status:mode === 'waiting' ? 'inspecting' : 'cancelled'}});
       return route.fulfill({json: mode === 'failed' ? {status:'failed'} : {
         status:'ready', methods: mode === 'empty' ? [] : [{
           idPreview:'method', variant:'agent', namePreview:'<img src=x> login', descriptionPreview:'[redacted]'
@@ -50,13 +59,24 @@ const { chromium } = require(process.env.DECOMP_PLAYWRIGHT_MODULE || 'playwright
     assert.equal(await page.locator('#auth-method-list li').count(), 0);
     mode='empty';
     await click('No authentication methods advertised; no login attempted.');
-    assert.equal(starts, 3); assert.equal(polls, 3); assert.deepEqual(errors, []);
+    assert.equal(starts, 3); assert.equal(polls, 3);
+    mode = 'waiting';
+    await page.locator('#inspect-auth-methods').click();
+    await page.waitForFunction(() => !document.querySelector('#cancel-auth-inspection').disabled);
+    await page.locator('#cancel-auth-inspection').click();
+    await page.waitForFunction(() => document.querySelector('#auth-inspection-status').textContent ===
+      'Inspection cancelled; no login attempted.');
+    await page.waitForTimeout(800);
+    assert.equal(await page.locator('#auth-inspection-status').textContent(), 'Inspection cancelled; no login attempted.');
+    assert.equal(await page.locator('#inspect-auth-methods').isEnabled(), true);
+    assert.equal(await page.locator('#cancel-auth-inspection').isEnabled(), false);
+    assert.equal(cancellations, 1); assert.equal(starts, 4); assert.deepEqual(errors, []);
     await page.screenshot({path:path.join(output,'dashboard.png')});
   } finally {
     try { if (context) await context.tracing.stop({path:path.join(output,'trace.zip')}); }
     finally { await browser.close(); }
   }
   fs.writeFileSync(path.join(output,'result.json'), JSON.stringify({passed:true,
-    browser:browserVersion, starts, polls, scenarios:['explicit action','previews','text escaping','failure','retry','empty inventory'],
+    browser:browserVersion, starts, polls, cancellations, scenarios:['explicit action','previews','text escaping','failure','retry','empty inventory','cancellation','late cancellation acknowledgement'],
     renderedHtmlSha256:require('node:crypto').createHash('sha256').update(html).digest('hex')},null,2)+'\n');
 })().catch(error=>{console.error(error);process.exitCode=1;});

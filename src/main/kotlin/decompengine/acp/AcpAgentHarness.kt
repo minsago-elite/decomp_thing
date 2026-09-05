@@ -167,17 +167,20 @@ class AcpAgentHarness(
      * Launches the production-contained agent, negotiates stable ACP v1, and tears it down without
      * creating a session or sending a model prompt.
      */
-    fun preflight(workflow: AcpPreflightWorkflow = AcpPreflightWorkflow.ALL): AcpAgentPreflightResult {
+    fun preflight(workflow: AcpPreflightWorkflow = AcpPreflightWorkflow.ALL): AcpAgentPreflightResult =
+        preflight(workflow, AgentCancellation.NONE)
+
+    fun preflight(workflow: AcpPreflightWorkflow, cancellation: AgentCancellation): AcpAgentPreflightResult {
         val requiredCapabilities = configuration.requiredAgentCapabilities + workflow.requiredAgentCapabilities
         val authentication = AtomicReference<AcpAuthenticationInventory?>()
         val receipt = executeInternalReceipt(
-            request = preflightRequest(),
+            request = preflightRequest(cancellation),
             onEvent = {},
             capturedFilesystem = null,
             preflightWorkflow = workflow,
             authenticationInventory = authentication,
         )
-        receipt.requireResult()
+        if (receipt.requireResult().stopReason == AgentStopReason.CANCELLED) throw AcpPreflightCancelledException(receipt)
         val evidence = receipt.providerEvidence as? AcpInvocationEvidenceSnapshot
             ?: error("successful ACP preflight is missing invocation evidence")
         return AcpAgentPreflightResult(
@@ -791,8 +794,9 @@ class AcpAgentHarness(
         return result
     }
 
-    private fun preflightRequest(): AgentExecutionRequest = AgentExecutionRequest(
+    private fun preflightRequest(cancellation: AgentCancellation): AgentExecutionRequest = AgentExecutionRequest(
         objective = "negotiate the configured ACP agent without opening a session",
+        cancellation = cancellation,
         workspaceRoots = listOf(AgentWorkspaceRoot("preflight", ACP_PREFLIGHT_WORKSPACE)),
         accessPolicy = AgentAccessPolicy(emptyList(), emptySet()),
         limits = AgentExecutionLimits(

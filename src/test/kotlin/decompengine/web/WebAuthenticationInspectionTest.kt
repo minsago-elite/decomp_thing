@@ -139,6 +139,41 @@ class WebAuthenticationInspectionTest {
             val replacement = UploadServer("127.0.0.1", 0, root)
             try { replacement.start() } finally { replacement.stop(0) }
         } finally { release.countDown(); server.stop(0) }
+    @Test fun `explicit cancellation reaches the current inspector and publishes only its terminal result`() {
+        val entered = java.util.concurrent.CountDownLatch(1)
+        val cancellationObserved = java.util.concurrent.CountDownLatch(1)
+        val cleanupReleased = java.util.concurrent.CountDownLatch(1)
+        val root = createTempDirectory("web-auth-cancel-")
+        val request = decompengine.agent.AgentExecutionRequest("cancel fixture",
+            listOf(decompengine.agent.AgentWorkspaceRoot("fixture", root)),
+            accessPolicy = decompengine.agent.AgentAccessPolicy(emptyList()))
+        val receipt = decompengine.agent.AgentExecutionReceipt(
+            decompengine.agent.AgentExecutionRequestBinding.capture(request),
+            decompengine.agent.AgentExecutionOutcome.Returned(decompengine.agent.AgentExecutionResult(
+                decompengine.agent.AgentStopReason.CANCELLED)))
+        val server = UploadServer("127.0.0.1", 0, root, authenticationInspector = { cancellation ->
+            entered.countDown()
+            val deadline = System.nanoTime() + java.util.concurrent.TimeUnit.SECONDS.toNanos(5)
+            while (!cancellation.isCancellationRequested() && System.nanoTime() < deadline) Thread.sleep(10)
+            check(cancellation.isCancellationRequested())
+            cancellationObserved.countDown()
+            check(cleanupReleased.await(5, java.util.concurrent.TimeUnit.SECONDS))
+            throw decompengine.acp.AcpPreflightCancelledException(receipt)
+        })
+        server.start()
+        try {
+            val cancelPath = "/api/operator/auth-methods/cancel"
+            assertEquals(409, request(server, cancelPath, true, action = "cancel-auth-inspection").statusCode())
+            assertEquals(202, request(server, "/api/operator/auth-methods", true).statusCode())
+            assertTrue(entered.await(5, java.util.concurrent.TimeUnit.SECONDS))
+            assertEquals(400, request(server, cancelPath, true, explicit = false).statusCode())
+            assertEquals(202, request(server, cancelPath, true, action = "cancel-auth-inspection").statusCode())
+            assertTrue(cancellationObserved.await(5, java.util.concurrent.TimeUnit.SECONDS))
+            assertTrue(request(server, "/api/operator/auth-methods", false).body().contains("inspecting"))
+            assertEquals(409, request(server, "/api/operator/auth-methods", true).statusCode())
+            cleanupReleased.countDown()
+            assertTrue(awaitResult(server).body().contains("\"status\":\"cancelled\""))
+        } finally { cleanupReleased.countDown(); server.stop(0) }
     }
 
     private fun awaitResult(server: UploadServer): HttpResponse<String> {
@@ -151,11 +186,11 @@ class WebAuthenticationInspectionTest {
         error("inspection did not finish")
     }
 
-    private fun request(server: UploadServer, path: String, post: Boolean, explicit: Boolean = true): HttpResponse<String> {
+    private fun request(server: UploadServer, path: String, post: Boolean, explicit: Boolean = true, action: String = "inspect-auth"): HttpResponse<String> {
         val request = HttpRequest.newBuilder(URI("http://127.0.0.1:${server.serverPort}$path"))
             .timeout(java.time.Duration.ofSeconds(5))
         if (post) request.POST(HttpRequest.BodyPublishers.noBody()) else request.GET()
-        if (explicit) request.header("X-Decomp-Operator-Action", "inspect-auth")
+        if (explicit) request.header("X-Decomp-Operator-Action", action)
         return HttpClient.newHttpClient().send(request.build(), HttpResponse.BodyHandlers.ofString())
     }
 }

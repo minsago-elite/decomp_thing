@@ -803,3 +803,13 @@ DECOMP_PLAYWRIGHT_MODULE=/absolute/path/to/node_modules/playwright \
 The fixture renders the production dashboard and mocks status responses. It checks explicit-only
 inspection, preview rendering/escaping, failure, retry and empty inventory; trace/screenshot/result
 files use a fresh evidence directory. It does not establish independent-agent authentication.
+
+**Cancel inspection** posts an explicit cancellation request to
+`/api/operator/auth-methods/cancel`. A request acknowledgement is not a terminal cleanup result:
+the view continues polling until inspection finishes, and late acknowledgements cannot overwrite
+a terminal result or a later inspection. The server's cancellation token reaches the preflight
+scheduler, launch and initialize waits. Shutdown requests cancellation as well, while admitted-task
+ownership remains held until completion. The preflight overload preserves a cancelled invocation's
+receipt in `AcpPreflightCancelledException`; cleanup failures retain their original failed outcome.
+Only that terminal cancellation is rendered as `cancelled`. Login/logout cancellation and durable
+operator authentication state are still separate unsupported work.

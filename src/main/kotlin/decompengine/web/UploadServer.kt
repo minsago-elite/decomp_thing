@@ -178,10 +178,11 @@ class UploadServer(
     sourceProfiles: List<ReconstructionProfile> = listOf(GeneratedCMakeReconstructionProfile.descriptor),
     sensitiveValues: Collection<String> = System.getenv().values,
     private val listenBacklog: Int = 64,
-    private val authenticationInspector: () -> decompengine.acp.AcpAuthenticationInventory = defaultWebAuthenticationInspector(),
+    private val authenticationInspector: (decompengine.agent.AgentCancellation) -> decompengine.acp.AcpAuthenticationInventory = defaultWebAuthenticationInspector(),
 ) {
     init { require(listenBacklog in 1..4096) { "HTTP listen backlog must be between 1 and 4096" } }
     private val diagnosticRedactor = ProgressRedactor(sensitiveValues)
+    private val authenticationInspectionCancellation = AtomicBoolean(false)
     private val authenticationInspectionResult = java.util.concurrent.atomic.AtomicReference(
         "{\"status\":\"idle\",\"loginSupported\":false}")
     private val authenticationInspectionWorker = java.util.concurrent.atomic.AtomicReference<Thread>()
@@ -271,6 +272,7 @@ class UploadServer(
     fun stop(delaySeconds: Int = 0) {
         require(delaySeconds >= 0) { "shutdown delay must be nonnegative" }
         synchronized(lifecycleLock) { stopping = true }
+        authenticationInspectionCancellation.set(true)
         jobs.beginShutdown()
         server.stop(delaySeconds)
         requestExecutor.shutdownNow()
@@ -331,6 +333,7 @@ class UploadServer(
             exchange.sendJson(409, "{\"error\":\"Authentication inspection is already running.\"}")
             return
         }
+        authenticationInspectionCancellation.set(false)
         try {
             val worker = Thread({
                 var result = AUTH_INSPECTION_FAILED
@@ -354,7 +357,7 @@ class UploadServer(
     }
 
     private fun inspectAuthenticationMethods(): String = try {
-        val inventory = authenticationInspector()
+        val inventory = authenticationInspector(decompengine.agent.AgentCancellation { authenticationInspectionCancellation.get() })
         buildJsonObject {
             put("status", "ready")
             put("inventorySha256", inventory.sha256)
@@ -369,7 +372,21 @@ class UploadServer(
                 }) }
             })
         }.toString()
-    } catch (_: Exception) { AUTH_INSPECTION_FAILED }
+    } catch (_: decompengine.acp.AcpPreflightCancelledException) { AUTH_INSPECTION_CANCELLED }
+      catch (_: Exception) { AUTH_INSPECTION_FAILED }
+
+    private fun handleAuthenticationCancellation(exchange: HttpExchange) {
+        if (exchange.requestHeaders.getFirst("X-Decomp-Operator-Action") != "cancel-auth-inspection") {
+            exchange.sendJson(400, "{\"error\":\"Explicit operator cancellation is required.\"}")
+            return
+        }
+        if (authenticationInspectionResult.get() != AUTH_INSPECTION_RUNNING) {
+            exchange.sendJson(409, "{\"error\":\"No authentication inspection is running.\"}")
+            return
+        }
+        authenticationInspectionCancellation.set(true)
+        exchange.sendJson(202, "{\"status\":\"cancellation-requested\",\"loginSupported\":false}")
+    }
 
     private fun routeAdmitted(exchange: HttpExchange) {
         spaAssets?.let { assets ->
@@ -391,6 +408,8 @@ class UploadServer(
                     exchange.sendBytes(200, APP_CSS.toByteArray(), "text/css; charset=utf-8", cache = true)
                 exchange.requestMethod == "GET" && segments == listOf("api", "recovery") ->
                     exchange.sendJson(200, store.recoveryInventory().toJson().toString())
+                exchange.requestMethod == "POST" && segments == listOf("api", "operator", "auth-methods", "cancel") ->
+                    handleAuthenticationCancellation(exchange)
                 exchange.requestMethod == "GET" && segments == listOf("api", "operator", "auth-methods") ->
                     exchange.sendJson(200, authenticationInspectionResult.get())
                 exchange.requestMethod == "POST" && segments == listOf("api", "operator", "auth-methods") ->
@@ -681,3 +700,5 @@ private fun contentType(path: Path): String = when (path.fileName.toString().sub
 private const val AUTH_INSPECTION_FAILED = "{\"status\":\"failed\",\"loginSupported\":false,\"error\":\"Authentication inspection is unavailable. Check ACP configuration and cleanup.\"}"
 
 private const val AUTH_INSPECTION_RUNNING = "{\"status\":\"inspecting\",\"loginSupported\":false}"
+
+private const val AUTH_INSPECTION_CANCELLED = "{\"status\":\"cancelled\",\"loginSupported\":false}"
