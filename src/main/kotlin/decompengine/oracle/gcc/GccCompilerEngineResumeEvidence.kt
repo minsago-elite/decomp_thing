@@ -624,7 +624,7 @@ private fun verifyAssembledModel(
     requireSha256(inputSha256, "assembled program-model input")
     val verifier = ExactByteVerifier(actual, "completed program model", limits.assembledModelBytes)
     verifier.accept(
-        "{\n  \"schemaVersion\": 1,\n  \"inputSha256\": \"$inputSha256\",\n  \"functions\": [\n",
+        "{\n  \"schemaVersion\": 2,\n  \"inputSha256\": \"$inputSha256\",\n  \"functions\": [\n",
     )
     verifier.acceptRecordArray(functions.map { it.bytes })
     verifier.accept("  ],\n  \"globals\": [\n")
@@ -1217,8 +1217,11 @@ private fun parseFunctionFragment(
     val failedIds = ArrayList<String>()
     records.forEachIndexed { index, record ->
         val root = record.document
+        if (root.stringValue("recoveryAssessment", "extracted record") != "unassessed") {
+            resumeValidationFailure("extracted record cannot supply a scored recovery assessment")
+        }
         root.requireExactKeys(
-            setOf("id", "name", "address", "prototype", "status", "calls", "referencedGlobals", "strings", "decompiledC"),
+            setOf("id", "name", "address", "prototype", "extractionStatus", "recoveryAssessment", "calls", "referencedGlobals", "strings", "decompiledC"),
             "function record",
         )
         val id = root.stringValue("id", "function record")
@@ -1227,7 +1230,7 @@ private fun parseFunctionFragment(
         val address = root.stringValue("address", "function record")
         requireAddressIdentity(address, id, "fn_", "function")
         val prototype = root.recordString("prototype", "function prototype", MAXIMUM_PLANNING_BATCH_FRAGMENT_BYTES)
-        val status = root.stringValue("status", "function record")
+        val status = root.stringValue("extractionStatus", "function record")
         when (status) {
             "recovered" -> resumeValidationFailure("planning function fragment contains a recovered record")
             "partial" -> partial++
@@ -1276,7 +1279,10 @@ private fun parseGlobalFragment(bytes: ByteArray, expectedIds: List<String>): Pa
     val ids = ArrayList<String>()
     records.forEachIndexed { index, record ->
         val root = record.document
-        root.requireExactKeys(setOf("id", "name", "address", "type", "initializer", "status"), "global record")
+        if (root.stringValue("recoveryAssessment", "extracted record") != "unassessed") {
+            resumeValidationFailure("extracted record cannot supply a scored recovery assessment")
+        }
+        root.requireExactKeys(setOf("id", "name", "address", "type", "initializer", "extractionStatus", "recoveryAssessment"), "global record")
         val id = root.stringValue("id", "global record")
         if (!id.matches(GLOBAL_ID)) resumeValidationFailure("global record has an invalid identity")
         if (id != expectedIds[index]) resumeValidationFailure("global fragment embedded identity differs from checkpoint")
@@ -1295,7 +1301,7 @@ private fun parseGlobalFragment(bytes: ByteArray, expectedIds: List<String>): Pa
         if (initializer != null && initializer.toByteArray(StandardCharsets.UTF_8).size > MAXIMUM_PLANNING_EVIDENCE_RECORD_BYTES) {
             resumeValidationFailure("global initializer exceeds its record bound")
         }
-        if (root.stringValue("status", "global record") != "recovered") {
+        if (root.stringValue("extractionStatus", "global record") != "recovered") {
             resumeValidationFailure("global record status is not recovered")
         }
         requireExactBytes(record.bytes, renderGlobalRecord(id, name, address, type, initializer), "global record")
@@ -1317,7 +1323,10 @@ private fun parseTypeFragment(bytes: ByteArray, expectedIds: List<String>): Pars
     val ids = ArrayList<String>()
     records.forEachIndexed { index, record ->
         val root = record.document
-        root.requireExactKeys(setOf("id", "declaration", "sourceAddress", "status"), "type record")
+        if (root.stringValue("recoveryAssessment", "extracted record") != "unassessed") {
+            resumeValidationFailure("extracted record cannot supply a scored recovery assessment")
+        }
+        root.requireExactKeys(setOf("id", "declaration", "sourceAddress", "extractionStatus", "recoveryAssessment"), "type record")
         val id = root.stringValue("id", "type record")
         if (!id.matches(TYPE_ID)) resumeValidationFailure("type record has an invalid identity")
         if (id != expectedIds[index]) resumeValidationFailure("type fragment embedded identity differs from checkpoint")
@@ -1328,7 +1337,7 @@ private fun parseTypeFragment(bytes: ByteArray, expectedIds: List<String>): Pars
         )
         val sourceAddress = root.stringValue("sourceAddress", "type record")
         requireHexAddress(sourceAddress, "type source address")
-        if (root.stringValue("status", "type record") != "partial") {
+        if (root.stringValue("extractionStatus", "type record") != "partial") {
             resumeValidationFailure("type record status is not partial")
         }
         requireExactBytes(record.bytes, renderTypeRecord(id, declaration, sourceAddress), "type record")
@@ -1459,7 +1468,8 @@ private fun renderFunctionRecord(
     append("      \"name\": ").append(exporterJsonString(name)).append(",\n")
     append("      \"address\": ").append(exporterJsonString(address)).append(",\n")
     append("      \"prototype\": ").append(exporterJsonString(prototype)).append(",\n")
-    append("      \"status\": ").append(exporterJsonString(status)).append(",\n")
+    append("      \"extractionStatus\": ").append(exporterJsonString(status)).append(",\n")
+    append("      \"recoveryAssessment\": \"unassessed\",\n")
     append("      \"calls\": [").append(renderStringArray(calls)).append("],\n")
     append("      \"referencedGlobals\": [").append(renderStringArray(referencedGlobals)).append("],\n")
     append("      \"strings\": [").append(renderStringArray(strings)).append("],\n")
@@ -1475,7 +1485,8 @@ private fun renderGlobalRecord(id: String, name: String, address: String, type: 
         append("      \"address\": ").append(exporterJsonString(address)).append(",\n")
         append("      \"type\": ").append(exporterJsonString(type)).append(",\n")
         append("      \"initializer\": ").append(initializer?.let(::exporterJsonString) ?: "null").append(",\n")
-        append("      \"status\": \"recovered\"\n")
+        append("      \"extractionStatus\": \"recovered\",\n")
+        append("      \"recoveryAssessment\": \"unassessed\"\n")
         append("    }")
     }
 
@@ -1484,7 +1495,8 @@ private fun renderTypeRecord(id: String, declaration: String, sourceAddress: Str
     append("      \"id\": ").append(exporterJsonString(id)).append(",\n")
     append("      \"declaration\": ").append(exporterJsonString(declaration)).append(",\n")
     append("      \"sourceAddress\": ").append(exporterJsonString(sourceAddress)).append(",\n")
-    append("      \"status\": \"partial\"\n")
+    append("      \"extractionStatus\": \"partial\",\n")
+    append("      \"recoveryAssessment\": \"unassessed\"\n")
     append("    }")
 }
 
@@ -1784,7 +1796,7 @@ private const val MAXIMUM_RECORD_STRING_BYTES = 1024 * 1024
 private const val MAXIMUM_RECORD_JSON_NODES = 1_000_000
 private const val MAXIMUM_RECORD_ARRAY_ENTRIES = 1_000_000
 private const val MAXIMUM_IDENTITY_CHARACTERS = 256
-private const val SUPPORTED_EXPORTER_VERSION = 9
+private const val SUPPORTED_EXPORTER_VERSION = 10
 private const val FUNCTION_RECORD_TAG: Byte = 1
 private const val GLOBAL_RECORD_TAG: Byte = 2
 private const val TYPE_RECORD_TAG: Byte = 3

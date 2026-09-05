@@ -1432,7 +1432,7 @@ class GccCompilerEngineResumeEvidenceValidationTest {
         val partial = spec.functions.count { it.status == "partial" }
         val failed = spec.functions.count { it.status == "failed" }
         append("schemaVersion=1\n")
-        append("exporterVersion=9\n")
+        append("exporterVersion=10\n")
         append("recoveryMode=planning\n")
         append("stateSha256=$stateSha\n")
         append("inventorySha256=$inventorySha\n")
@@ -1461,7 +1461,7 @@ class GccCompilerEngineResumeEvidenceValidationTest {
         semanticSha256: String,
         batchCommitmentSha256: String,
     ): ByteArray = (
-        "{\"schemaVersion\":2,\"exporterVersion\":9,\"exporterSha256\":\"$SHA_B\"," +
+        "{\"schemaVersion\":2,\"exporterVersion\":10,\"exporterSha256\":\"$SHA_B\"," +
             "\"analysisToolSha256\":\"$SHA_C\",\"recoveryMode\":\"planning\"," +
             "\"inputSha256\":\"$SHA_A\",\"language\":\"x86:LE:64:default\",\"compilerSpec\":\"gcc\"," +
             "\"semanticStateBinding\":{\"schemaVersion\":1,\"scope\":\"planning-exporter-visible-program\"," +
@@ -1549,7 +1549,8 @@ class GccCompilerEngineResumeEvidenceValidationTest {
             append("      \"name\": \"$name\",\n")
             append("      \"address\": \"${addressForId(id)}\",\n")
             append("      \"prototype\": \"void $name(void)\",\n")
-            append("      \"status\": \"$status\",\n")
+            append("      \"extractionStatus\": \"$status\",\n")
+            append("      \"recoveryAssessment\": \"unassessed\",\n")
             append("      \"calls\": [],\n")
             append("      \"referencedGlobals\": [${quoted(referencedGlobals)}],\n")
             append("      \"strings\": [],\n")
@@ -1565,7 +1566,8 @@ class GccCompilerEngineResumeEvidenceValidationTest {
         append("      \"address\": \"${addressForId(id)}\",\n")
         append("      \"type\": \"int\",\n")
         append("      \"initializer\": null,\n")
-        append("      \"status\": \"recovered\"\n")
+        append("      \"extractionStatus\": \"recovered\",\n")
+        append("      \"recoveryAssessment\": \"unassessed\"\n")
         append("    }")
     }.toByteArray()
 
@@ -1574,7 +1576,8 @@ class GccCompilerEngineResumeEvidenceValidationTest {
         append("      \"id\": \"$id\",\n")
         append("      \"declaration\": \"$declaration\",\n")
         append("      \"sourceAddress\": \"0x1\",\n")
-        append("      \"status\": \"partial\"\n")
+        append("      \"extractionStatus\": \"partial\",\n")
+        append("      \"recoveryAssessment\": \"unassessed\"\n")
         append("    }")
     }.toByteArray()
 
@@ -1588,7 +1591,7 @@ class GccCompilerEngineResumeEvidenceValidationTest {
 
     private fun model(functions: List<ByteArray>, globals: List<ByteArray>, types: List<ByteArray>): ByteArray =
         buildString {
-            append("{\n  \"schemaVersion\": 1,\n  \"inputSha256\": \"$SHA_A\",\n  \"functions\": [\n")
+            append("{\n  \"schemaVersion\": 2,\n  \"inputSha256\": \"$SHA_A\",\n  \"functions\": [\n")
             append(modelRecords(functions))
             append("  ],\n  \"globals\": [\n")
             append(modelRecords(globals))

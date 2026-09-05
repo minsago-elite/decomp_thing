@@ -22,9 +22,13 @@ the extracted model; rejecting an assessment claim in this input format does not
 authorize dropping a discrepancy from the oracle. No calibrated probability can
 be derived from the extraction status.
 
-This checkpoint adds reader and wire-contract support. The exporter continues to
-emit schema 1. Its retained fragments, resume configuration, semantic commitments
-and production replay must migrate together before switching the producer. Typed
+Exporter version 10 emits schema 2 in full and planning modes. Its function/global/type
+fragments explicitly retain unassessed recovery, and fragment validation requires
+those fields. Resume state and GCC profile admission pin exporter version 10;
+version-9 state is rejected without rewriting it or replacing the previous model.
+The Kotlin resume verifier reconstructs schema-2 bytes from the retained fragments.
+Existing byte commitments cover the new fields, while the exporter version and
+script digest distinguish the producer contract. Typed
 entity `status` properties remain historical extraction labels for compatibility.
 For schema 2, the source manifest, project/module confidence report, human unresolved
 report and archival audit include every extracted entity in the unresolved recovery
@@ -35,6 +39,12 @@ extraction and consumer re-audit.
 
 Historical schema-1 reports retain their extraction-based unresolved accounting for
 compatibility; their labels still contain no independently scored assessment. A
-validated assessment join, historical report migration and producer/replay migration
+validated assessment join, historical report migration and production qualification
 remain tracked in #363 and #42. Schema-2 unresolved accounting alone does not supply
 the authenticated assessment evidence needed to resolve an entity.
+
+Live benign authored programs verify bundled Java-API Ghidra full/planning export,
+canonical streaming parity and deterministic resume. Planning resume also checks
+that historical exporter state is refused and prior bytes are preserved. This is
+local exporter qualification; existing authenticated production profiles and their
+GCC/LLVM artifacts must be regenerated and qualified for the new exporter identity.
