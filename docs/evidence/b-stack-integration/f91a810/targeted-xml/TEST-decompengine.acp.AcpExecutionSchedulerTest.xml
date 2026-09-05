@@ -1,0 +1,20 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<testsuite name="decompengine.acp.AcpExecutionSchedulerTest" tests="14" skipped="0" failures="0" errors="0" timestamp="2026-09-05T16:06:17.327Z" hostname="whatsername" time="0.395">
+  <properties/>
+  <testcase name="production harness records queue timeout before filesystem or process authority()" classname="decompengine.acp.AcpExecutionSchedulerTest" time="0.077"/>
+  <testcase name="original execution deadline expires while queued()" classname="decompengine.acp.AcpExecutionSchedulerTest" time="0.027"/>
+  <testcase name="unverified cleanup reserves its slot and prevents reuse of its workspace()" classname="decompengine.acp.AcpExecutionSchedulerTest" time="0.001"/>
+  <testcase name="workspace and global queues reject overload without growing()" classname="decompengine.acp.AcpExecutionSchedulerTest" time="0.026"/>
+  <testcase name="queue wait has a finite deadline independent of request timeout()" classname="decompengine.acp.AcpExecutionSchedulerTest" time="0.076"/>
+  <testcase name="blocked caller observers cannot hold scheduler capacity or block other work()" classname="decompengine.acp.AcpExecutionSchedulerTest" time="0.054"/>
+  <testcase name="busy workspace cannot block a different workspace from spare global capacity()" classname="decompengine.acp.AcpExecutionSchedulerTest" time="0.003"/>
+  <testcase name="interruption cancels queued admission and preserves interrupt status()" classname="decompengine.acp.AcpExecutionSchedulerTest" time="0.003"/>
+  <testcase name="eligible waiters are admitted in arrival order()" classname="decompengine.acp.AcpExecutionSchedulerTest" time="0.005"/>
+  <testcase name="queue observer failure releases queue capacity()" classname="decompengine.acp.AcpExecutionSchedulerTest" time="0.026"/>
+  <testcase name="observer time consumes queue deadline even with spare capacity()" classname="decompengine.acp.AcpExecutionSchedulerTest" time="0.04"/>
+  <testcase name="pre-cancelled requests never acquire capacity()" classname="decompengine.acp.AcpExecutionSchedulerTest" time="0.0"/>
+  <testcase name="concurrent success and failures reclaim every permit within both caps()" classname="decompengine.acp.AcpExecutionSchedulerTest" time="0.028"/>
+  <testcase name="queued cancellation removes only that waiter and preserves eligible successor()" classname="decompengine.acp.AcpExecutionSchedulerTest" time="0.026"/>
+  <system-out><![CDATA[]]></system-out>
+  <system-err><![CDATA[]]></system-err>
+</testsuite>
