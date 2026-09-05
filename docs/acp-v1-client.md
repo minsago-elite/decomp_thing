@@ -758,6 +758,10 @@ another replacement can expand inserted markers; exceeding it produces an omissi
 replacement can transiently allocate up to ten times that limit. The complete SDK-serialized
 method array, including retained variant-specific fields and extension metadata, must also fit
 64 KiB of canonical JSON, 16 levels, 4096 nodes, 16 KiB per string and 64 KiB total string bytes.
+Each number token in the SDK-serialized array is limited to 256 characters, including its sign, decimal point and exponent.
+This explicit numeric admission policy also applies to extension metadata and unknown variant payloads.
+Floating-point tokens use `OracleJson` binary64 canonicalization, which rejects non-finite and nonzero
+subnormal results; inventory commitments do not preserve arbitrary-precision decimal representations.
 Excess payloads fail preflight as invalid authentication inventories with normal cleanup. The bound
 applies after the existing transport frame and SDK decoding limits; it is not a raw-input parser limit.
 Unknown variants remain

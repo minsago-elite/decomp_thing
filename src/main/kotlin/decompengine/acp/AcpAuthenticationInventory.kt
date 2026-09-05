@@ -82,6 +82,7 @@ class AcpAuthenticationInventory private constructor(
                     maximumCanonicalBytes = 64 * 1024,
                     maximumDepth = 16,
                     maximumNodes = 4096,
+                    maximumNumberCharacters = 256,
                     maximumStringBytes = 16 * 1024,
                     maximumTotalStringBytes = 64 * 1024,
                 ))
