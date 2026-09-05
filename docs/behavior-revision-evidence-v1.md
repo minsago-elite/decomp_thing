@@ -159,6 +159,14 @@ compiler evidence while leaving behavior and coverage explicitly unknown. This
 tests a local scripted reconstructor, not authenticated external-agent restart or
 behavior-driven repair convergence.
 
+The web views present source-tree scores as reported structural heuristics and
+exploration scores as exploration heuristics, explicitly uncalibrated. They use
+decimal scores rather than confidence percentages; a missing or out-of-range
+exploration score is unavailable. CLI exploration summaries use the same
+uncalibrated terminology. Stored `confidence` fields remain compatible with the
+existing report formats. These labels do not supply the empirical calibration,
+validated assessment contract or evidence-gated equivalence required by #42.
+
 `sandboxReported` describes a checked execution request. The audit leaves
 `networkIsolationObserved` empty and states the assurance scope explicitly.
 The record's legacy `networkIsolated` fields retain the requested configuration;
