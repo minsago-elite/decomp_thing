@@ -521,3 +521,29 @@ publication policy still need separate integration and evidence. Local clock tes
 cover inter-leg gaps, floor rounding, expiry, monotonic wrap and regression; the
 hosted authored-ELF fixture also checks receipt timing consistency when provisioned.
 No full hosted compiler-resume qualification is inferred from clock tests.
+
+## Required hosted authored resume fixture
+
+CI provisions two additional independent 1 GiB ext4 images: one for the authored
+interruption/resume owner and one for its uninterrupted fresh control. Their
+prepare/release selectors are `--bundled-ghidra-resume` and
+`--bundled-ghidra-resume-control`; each has a fixed mount parent and environment
+prefix. The existing required-provisioning flag makes missing hosted prerequisites
+fail the fixture rather than silently skip. Local unprovisioned runs skip the two
+contained Ghidra fixtures, while a separate local test compiles the generated ELF
+and checks its 4,096 defined functions.
+
+The hosted resume test observes a checkpoint, resumes under the same owner,
+checks preserved journal records and expected reuse, then compares complete model
+bytes against fresh normal import/analysis on the other filesystem. Both module
+plans are derived by the deterministic planner from the respective captured
+models. Retained artifacts include the two plans, model/checkpoint evidence,
+receipts and a comparison record linking both evidence directories and receipt
+hashes. Control logs are read from the execution's actual control directory.
+Failures preserve bounded compiler, journal and control-log diagnostics.
+
+This is an authored integration gate, not cc1/lto1 benchmark acceptance. It has
+been compiled but requires the hosted runtime, user-systemd and dedicated-ext4
+setup to qualify. Real compiler equivalence, the normal CLI and complete A10
+resource/publication evidence remain separate requirements. Trusted CI fixture
+teardown does not imply production scratch-release authority.
