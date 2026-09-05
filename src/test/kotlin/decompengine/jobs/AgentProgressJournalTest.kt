@@ -9,6 +9,50 @@ import kotlin.test.*
 
 class AgentProgressJournalTest {
     @Test
+    fun `durable run and revision correlation survives writer restart without promoting provisional state`() {
+        val root = createTempDirectory("progress-run-test")
+        val request = request(root)
+        AgentProgressJournal(root, "repair", listOf("private-run"), maximumQueuedEvents = 1024).use { journal ->
+            val task = journal.beginTask("attempt-1", request, "private-run")
+            task.event(AgentPlanEvent(0, listOf(AgentPlanEntry("step-1", "continue repair", AgentPlanStatus.IN_PROGRESS))))
+            task.complete(AgentExecutionReceipt(AgentExecutionRequestBinding.capture(request), AgentExecutionOutcome.Returned(
+                AgentExecutionResult(AgentStopReason.COMPLETED))))
+            journal.runState(AgentWorkflowRunObservation("private-run", AgentWorkflowPhase.PROVISIONAL, "revision-1", "attempt-1"))
+            journal.runState(AgentWorkflowRunObservation("private-run", AgentWorkflowPhase.EXHAUSTED, "revision-1"))
+        }
+        val before = AgentProgressJournal.read(root)!!
+        assertFalse(before.toString().contains("private-run"))
+        assertFalse(before.toString().contains("acceptedRevisionSha256"))
+        AgentProgressJournal(root, "repair", listOf("private-run")).use { journal ->
+            journal.runState(AgentWorkflowRunObservation("next-run", AgentWorkflowPhase.ACCEPTED,
+                "revision-2", "attempt-2", "a".repeat(64)))
+        }
+        val events = AgentProgressJournal.read(root)!!.getValue("events").jsonArray.map { it.jsonObject }
+        val firstRun = events.filter { it["workflowRunId"]?.jsonPrimitive?.content == "[redacted]" }
+        assertEquals(1, firstRun.map { it.getValue("workflowRunIdSha256") }.distinct().size)
+        assertEquals(setOf("task_started", "plan", "agent_finished", "workflow_run_state"), firstRun.map { it.getValue("kind").jsonPrimitive.content }.toSet())
+        assertEquals(listOf("provisional", "exhausted", "accepted"), events.filter {
+            it["kind"]?.jsonPrimitive?.content == "workflow_run_state"
+        }.map { it.getValue("phase").jsonPrimitive.content })
+        assertEquals(2, events.map { it.getValue("runId") }.distinct().size)
+        assertEquals("a".repeat(64), events.last().getValue("acceptedRevisionSha256").jsonPrimitive.content)
+        assertEquals("revision-2", events.last().getValue("revisionId").jsonPrimitive.content)
+    }
+
+    @Test
+    fun `nonaccepted run observations cannot carry accepted source identity`() {
+        assertFailsWith<IllegalArgumentException> {
+            AgentWorkflowRunObservation("run", AgentWorkflowPhase.PROVISIONAL, acceptedRevisionSha256 = "a".repeat(64))
+        }
+        assertFailsWith<IllegalArgumentException> {
+            AgentWorkflowRunObservation("run", AgentWorkflowPhase.ACCEPTED)
+        }
+        assertFailsWith<IllegalArgumentException> {
+            AgentWorkflowRunObservation("x".repeat(4097), AgentWorkflowPhase.CANCELLED)
+        }
+    }
+
+    @Test
     fun `messages redact split secrets and completion remains distinct from acceptance`() {
         val root = createTempDirectory("progress-test")
         val request = request(root)

@@ -75,7 +75,15 @@ class AgentProgressJournal(
         }
     }
 
-    override fun beginTask(taskId: String, request: AgentExecutionRequest): AgentTaskProgress {
+    override fun beginTask(taskId: String, request: AgentExecutionRequest): AgentTaskProgress =
+        beginCorrelatedTask(taskId, request, null)
+
+    override fun beginTask(taskId: String, request: AgentExecutionRequest, workflowRunId: String): AgentTaskProgress {
+        require(workflowRunId.isNotBlank() && workflowRunId.length <= 4096)
+        return beginCorrelatedTask(taskId, request, workflowRunId)
+    }
+
+    private fun beginCorrelatedTask(taskId: String, request: AgentExecutionRequest, workflowRunId: String?): AgentTaskProgress {
         val safeTaskId = redactor.text(taskId)
         val binding = AgentExecutionRequestBinding.capture(request)
         val turnId = UUID.randomUUID().toString()
@@ -84,6 +92,7 @@ class AgentProgressJournal(
             put("taskIdSha256", digest(taskId))
             put("turnId", turnId)
             put("requestSha256", binding.requestSha256)
+            workflowRunId?.let { put("workflowRunId", redactor.text(it)); put("workflowRunIdSha256", digest(it)) }
             body()
         }
         post("task_started") { put("phase", "agent_running") }
@@ -197,6 +206,18 @@ class AgentProgressJournal(
             acceptedRevisionSha256?.let { put("acceptedRevisionSha256", it) }
         }
         onPhase(phase)
+    }
+
+    override fun runState(observation: AgentWorkflowRunObservation) {
+        enqueue("workflow_run_state") {
+            put("phase", observation.phase.name.lowercase())
+            put("workflowRunId", redactor.text(observation.workflowRunId))
+            put("workflowRunIdSha256", digest(observation.workflowRunId))
+            observation.revisionId?.let { put("revisionId", redactor.text(it)); put("revisionIdSha256", digest(it)) }
+            observation.taskId?.let { put("taskId", redactor.text(it)); put("taskIdSha256", digest(it)) }
+            observation.acceptedRevisionSha256?.let { put("acceptedRevisionSha256", it) }
+        }
+        onPhase(observation.phase)
     }
 
     private fun enqueue(kind: String, body: JsonObjectBuilder.() -> Unit) = synchronized(monitor) {
