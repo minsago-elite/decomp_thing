@@ -282,3 +282,31 @@ capability or successful resume. Same-owner resume still must revalidate this
 manifest and establish a new durable control lifecycle while preserving prior
 protocol evidence. No saved-project reload, recovery, release or real compiler
 fresh/resumed equivalence is established by these fixtures.
+
+## Per-execution control-directory groundwork
+
+The command launcher has an optional `controlDirectoryName` equal to
+`control-<exact invocation nonce>`. It creates that fresh directory below the
+opaque lease-issued run-root borrow, using no-replace descriptor-relative
+construction. Its private `state`, `reports`, and `tmp` children hold the keeper's
+own control layout; the request and materialized classpath enter its `runtime`
+child. Closing the adapter closes its child descriptor and preserves every file.
+An existing name is never adopted or cleared, including partial construction
+residue. Parent permissions and child identity/name/mount bindings are rechecked.
+
+The request's working/control directory and the containing writable lease root
+are separately committed in the runtime closure. The namespace binds the same
+lease-owned writable root while making the selected control directory's runtime
+read-only. This allows the command's project and export paths to remain at the
+original run root while its keeper protocol and logs use a fresh child directory.
+No arbitrary external writable directory is admitted: the optional directory is
+exactly one child of the retained root, named by the invocation nonce. The default
+layout and its runtime commitment remain unchanged when this option is absent.
+
+This is not yet production resume. The GCC coordinator still uses its existing
+layout. Resume must explicitly select this layout, bind/revalidate the prior
+analysis state and export prefix, choose a fresh temporary directory for the
+analysis JVM, and protect retained earlier control evidence during the next
+execution. The directory tests establish separation, no-replace behavior and
+identity checks only; they do not qualify the new namespace layout under hosted
+systemd/ext4 execution.
