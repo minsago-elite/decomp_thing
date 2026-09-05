@@ -13,7 +13,7 @@ vi.mock('../src/api/client', async () => ({ ...await vi.importActual('../src/api
 vi.mock('preact-iso/router', () => ({ useLocation: () => ({ route: transport.route }) }));
 const fixture = <T,>(name: string) => JSON.parse(readFileSync(resolve(process.cwd(), `../contracts/web/v1/fixtures/${name}.json`), 'utf8')) as T;
 const sessions: ReturnType<typeof createBrowserSession>[] = [];
-beforeEach(() => { transport.upload.mockReset(); transport.route.mockReset(); });
+beforeEach(() => { sessionStorage.clear(); transport.upload.mockReset(); transport.route.mockReset(); });
 afterEach(() => { for (const session of sessions.splice(0)) session.dispose(); });
 async function mount() {
   const data = fixture<{ data: Bootstrap }>('bootstrap').data;
@@ -120,4 +120,20 @@ it('accepts one dropped file and rejects multiple files without implicit admissi
   fireEvent.drop(drop, { dataTransfer: { files: [first] } });
   expect(await screen.findByText(/Selected: first.elf/)).toBeTruthy();
   expect(transport.upload).not.toHaveBeenCalled();
+});
+
+it('restores retry identity after view destruction and rejects a different file selection', async () => {
+  transport.upload.mockRejectedValue(new ApiClientError('network_error'));
+  const { view } = await mount(); select(); fireEvent.click(screen.getByRole('button', { name: 'Upload binary' }));
+  expect(await screen.findByText(/Upload was not confirmed/)).toBeTruthy();
+  const key = transport.upload.mock.calls[0]?.[1].idempotencyKey;
+  view.unmount(); await mount();
+  expect(await screen.findByText(/An unconfirmed upload is retained/)).toBeTruthy();
+  expect(transport.upload).toHaveBeenCalledOnce();
+  fireEvent.change(screen.getByLabelText('Binary file'), { target: { files: [new File(['different'], 'other.elf')] } });
+  expect(await screen.findByText(/Choose the original filename and size/)).toBeTruthy();
+  expect(screen.getByRole<HTMLButtonElement>('button', { name: 'Retry this upload' }).disabled).toBe(true);
+  select(); fireEvent.click(screen.getByRole('button', { name: 'Retry this upload' }));
+  await waitFor(() => expect(transport.upload).toHaveBeenCalledTimes(2));
+  expect(transport.upload.mock.calls[1]?.[1].idempotencyKey).toBe(key);
 });

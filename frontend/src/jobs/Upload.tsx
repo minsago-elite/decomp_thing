@@ -3,9 +3,11 @@ import { useLocation } from 'preact-iso/router';
 import { createApiClient, ApiClientError } from '../api/client';
 import { jobPath } from '../app/paths';
 import type { BrowserSession } from '../session/session';
+import { createUploadRecovery } from './uploadRecovery';
+import type { UploadTicket } from './uploadRecovery';
 import { useSession } from '../session/useSession';
 
-type Attempt = { file: File; key: string };
+type Attempt = { file: File; ticket: UploadTicket };
 
 function failureMessage(error: unknown): string {
   if (!(error instanceof ApiClientError)) return 'The result is unknown. Retry this file to recover its job.';
@@ -26,12 +28,14 @@ function failureMessage(error: unknown): string {
   }
 }
 
-/** Files and retry keys live only in this mounted view; no binary enters browser storage. */
+/** File bytes stay in memory; one tab-scoped retry ticket survives view destruction. */
 export function Upload({ basePath, session }: { basePath: string; session: BrowserSession }) {
   const state = useSession(session);
   const location = useLocation();
+  const recovery = useMemo(() => createUploadRecovery(basePath), [basePath]);
+  const [retained, setRetained] = useState(() => recovery.read());
   const [attempt, setAttempt] = useState<Attempt | null>(null);
-  const [phase, setPhase] = useState<'idle' | 'pending' | 'retry'>('idle');
+  const [phase, setPhase] = useState<'idle' | 'pending' | 'retry'>(retained.kind === 'empty' ? 'idle' : 'retry');
   const [message, setMessage] = useState('');
   const active = useRef<AbortController | null>(null);
   const input = useRef<HTMLInputElement>(null);
@@ -57,22 +61,28 @@ export function Upload({ basePath, session }: { basePath: string; session: Brows
   }, [phase]);
 
   function select(files: FileList | null) {
-    if (active.current || phase === 'retry') return;
+    if (active.current || (phase === 'retry' && attempt) || retained.kind === 'blocked') return;
     if (!files || files.length !== 1) { setMessage('Choose one binary at a time.'); return; }
     const file = files[0];
     if (!file) return;
-    setAttempt({ file, key: crypto.randomUUID().replaceAll('-', '') });
+    if (retained.kind === 'pending' && (retained.ticket.filename !== file.name || retained.ticket.size !== file.size)) {
+      setMessage('Choose the original filename and size to retry this upload, or explicitly discard its recovery context.'); return;
+    }
+    setAttempt({ file, ticket: retained.kind === 'pending' ? retained.ticket : recovery.ticket(file, crypto.randomUUID().replaceAll('-', '')) });
     setMessage(BigInt(file.size) >= maxBytes && maxBytes > 0n
       ? 'This file leaves no room for multipart overhead within the server limit. Choose a smaller file.' : '');
   }
   async function submit() {
     const csrfToken = session.csrf();
     if (!attempt || active.current || !csrfToken || !connected) return;
+    try { recovery.save(attempt.ticket); setRetained(recovery.read()); }
+    catch { setRetained(recovery.read()); setPhase('retry'); setMessage('Retry identity could not be saved. No upload was sent. Check tab storage and the retained upload context.'); return; }
     const controller = new AbortController(); active.current = controller;
     setPhase('pending'); setMessage('');
     try {
-      const result = await client.upload(attempt.file, { csrfToken, idempotencyKey: attempt.key, signal: controller.signal });
+      const result = await client.upload(attempt.file, { csrfToken, idempotencyKey: attempt.ticket.key, signal: controller.signal });
       if (!live.current || controller.signal.aborted) return;
+      try { recovery.clear(); } catch { /* The confirmed job remains navigable; retained ticket can replay it safely. */ }
       setMessage('Job publication confirmed. Opening the job…');
       location.route(jobPath(basePath, result.data.jobId));
     } catch (error) {
@@ -82,6 +92,8 @@ export function Upload({ basePath, session }: { basePath: string; session: Brows
   }
   function discard() {
     if (active.current) return;
+    try { recovery.clear(); setRetained({ kind: 'empty' }); }
+    catch { setMessage('Retry context could not be cleared. Check tab storage before starting another upload.'); return; }
     focusPicker.current = true;
     setAttempt(null); setPhase('idle'); setMessage('');
     if (input.current) input.current.value = '';
@@ -97,9 +109,11 @@ export function Upload({ basePath, session }: { basePath: string; session: Brows
       }}>
         <label htmlFor="binary-file">Binary file</label>
         <input ref={input} id="binary-file" type="file" aria-describedby="upload-guidance upload-feedback"
-          disabled={phase !== 'idle'} onChange={event => select(event.currentTarget.files)} />
+          disabled={phase === 'pending' || (phase === 'retry' && attempt !== null) || retained.kind === 'blocked'} onChange={event => select(event.currentTarget.files)} />
         <p>Use the file picker or drop one file here.</p>
       </div>
+      {retained.kind === 'pending' && !attempt && <p>An unconfirmed upload is retained in this tab. Reselect {retained.ticket.filename} ({retained.ticket.size} bytes) to retry the same job.</p>}
+      {retained.kind === 'blocked' && <p>Retained upload context is {retained.reason}. Check Uploaded jobs before choosing another file. No automatic retry will occur.</p>}
       {attempt && <p>Selected: {attempt.file.name} ({attempt.file.size} bytes)</p>}
       {!connected && <p>Connect a local session with upload support to submit. A selected file stays in memory while this page remains open.</p>}
       {phase === 'pending' && <div role="status"><progress aria-label="Upload awaiting publication" />
@@ -112,6 +126,6 @@ export function Upload({ basePath, session }: { basePath: string; session: Brows
         {phase === 'retry' && <button type="button" onClick={discard}>Choose another file</button>}
       </div>
     </form>
-    <p>Keep this page open to retain retry context. Reloading or leaving this view discards the selected file and retry key; check Uploaded jobs before submitting it again.</p>
+    <p>This tab retains the retry key and filename/size for up to 24 hours, without storing the binary. After reload or navigation, reselect the original file to retry. Closing the tab can discard recovery context; check Uploaded jobs before submitting again.</p>
   </section>;
 }

@@ -6,8 +6,10 @@ import { join } from 'node:path';
 export async function qualifyUpload({ makeTarget, cdp, evaluate, ready, browserOrigin, data }) {
   const tab = await makeTarget();
   await cdp.call('Page.addScriptToEvaluateOnNewDocument', { source: `(() => {
-    const original = window.fetch; const keys = []; let hidden = false;
-    Object.defineProperty(window, '__uploadProof', { value: () => ({ requests: keys.length, sameKey: keys.length === 2 && keys[0] === keys[1], hidden }) });
+    const original = window.fetch; const keys = [];
+    const retained = JSON.parse(sessionStorage.getItem('decomp.upload.v1:/nested') ?? 'null');
+    let hidden = retained !== null;
+    Object.defineProperty(window, '__uploadProof', { value: () => ({ requests: keys.length, sameKey: (keys.length === 2 && keys[0] === keys[1]) || (keys.length === 1 && retained?.key === keys[0]), hidden }) });
     window.fetch = async function(input, options) {
       if (options?.method === 'POST' && String(input).endsWith('/api/v1/jobs')) {
         keys.push(new Headers(options.headers).get('Idempotency-Key'));
@@ -20,7 +22,7 @@ export async function qualifyUpload({ makeTarget, cdp, evaluate, ready, browserO
   })();` }, tab.sessionId);
   await cdp.call('Page.navigate', { url: browserOrigin + '/nested/' }, tab.sessionId);
   await ready(tab, `document.body.innerText.includes('Local session connected.')`, 'upload session');
-  await evaluate(tab, `(() => {
+  const selectFixture = () => evaluate(tab, `(() => {
     const bytes = new Uint8Array(64); bytes.set([127, 69, 76, 70, 2, 1, 1]);
     const view = new DataView(bytes.buffer); view.setUint16(16, 2, true); view.setUint16(18, 62, true);
     view.setUint32(20, 1, true); view.setUint16(52, 64, true);
@@ -28,6 +30,7 @@ export async function qualifyUpload({ makeTarget, cdp, evaluate, ready, browserO
     const picker = document.querySelector('#binary-file'); picker.focus(); picker.files = transfer.files;
     picker.dispatchEvent(new Event('change', { bubbles: true }));
   })()`);
+  await selectFixture();
   assert.equal(await evaluate(tab, `document.activeElement.id`), 'binary-file');
   await evaluate(tab, `[...document.querySelectorAll('button')].find(button => button.textContent === 'Upload binary').focus()`);
   await cdp.call('Page.bringToFront', {}, tab.sessionId);
@@ -36,9 +39,17 @@ export async function qualifyUpload({ makeTarget, cdp, evaluate, ready, browserO
   await ready(tab, `document.body.innerText.includes('Upload was not confirmed.')`, 'lost upload response explanation');
   const ids = (await fs.readdir(data)).filter(name => /^[a-f0-9]{32}$/.test(name));
   assert.equal(ids.length, 1, 'First admission must publish exactly one job');
+  assert.equal(await evaluate(tab, 'sessionStorage.length'), 1);
+  cdp.on('Page.javascriptDialogOpening', () => {
+    void cdp.call('Page.handleJavaScriptDialog', { accept: true }, tab.sessionId);
+  }, tab.sessionId);
+  await cdp.call('Page.reload', {}, tab.sessionId);
+  await ready(tab, `document.body.innerText.includes('An unconfirmed upload is retained') && document.body.innerText.includes('Local session connected.')`, 'retry ticket and session restored after reload');
+  assert.equal(await evaluate(tab, 'window.__uploadProof().requests'), 0, 'Reload must not retry automatically');
+  await selectFixture();
   await evaluate(tab, `[...document.querySelectorAll('button')].find(button => button.textContent === 'Retry this upload').click()`);
   await ready(tab, `location.pathname === '/nested/jobs/${ids[0]}' && document.body.innerText.includes('inert-browser-fixture.elf')`, 'retry recovers durable job route');
-  assert.deepEqual(await evaluate(tab, 'window.__uploadProof()'), { requests: 2, sameKey: true, hidden: true });
+  assert.deepEqual(await evaluate(tab, 'window.__uploadProof()'), { requests: 1, sameKey: true, hidden: true });
   assert.deepEqual((await fs.readdir(data)).filter(name => /^[a-f0-9]{32}$/.test(name)), ids);
   const record = JSON.parse(await fs.readFile(join(data, ids[0], 'job.json'), 'utf8'));
   assert.equal(record.status, 'uploaded');
@@ -49,7 +60,7 @@ export async function qualifyUpload({ makeTarget, cdp, evaluate, ready, browserO
   assert.ok(tab.requests.every(request => ['GET', 'HEAD'].includes(request.method) || request.url === browserOrigin + '/nested/api/v1/jobs'));
   await cdp.call('Page.reload', {}, tab.sessionId);
   await ready(tab, `document.body.innerText.includes('inert-browser-fixture.elf')`, 'published job survives browser reload');
-  return { keyboardSubmit: true, publicationResponseLost: true, sameKeyRetry: true, jobsCreated: 1,
+  return { keyboardSubmit: true, publicationResponseLost: true, reloadRecovery: true, sameKeyRetry: true, jobsCreated: 1,
     executionStarted: false, jobReload: true, browserStorageEntries: 0, requests: tab.requests };
 }
 

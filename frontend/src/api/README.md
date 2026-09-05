@@ -81,6 +81,6 @@ golden HTTP/server tests, packaged-browser checks or the remaining #159 endpoint
 and a caller-retained idempotency key. It rejects If-Match because it creates a resource.
 The browser chooses the Content-Type boundary; response decoding, byte limits, redirect
 rejection and cancellation use the same bounded transport. Only `201 job` confirms upload
-publication. Upload views use a 120-second deadline and retain their File/key in memory
-for explicit retries. Fetch provides no reliable upload-byte progress; the view reports
+publication. Upload views use a 120-second deadline, keep File bytes in memory, and retain one
+bounded key/filename/size ticket in tab sessionStorage for explicit retries after reload. Fetch provides no reliable upload-byte progress; the view reports
 an indeterminate transfer/publication wait without inventing a percentage.
