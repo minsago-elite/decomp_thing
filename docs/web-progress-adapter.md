@@ -116,3 +116,40 @@ Final verification passed 153 journal/web JVM tests, 211 frontend tests,
 37 valid and 26 invalid contract fixtures, lint and the typechecked bundle.
 Browser qualification was not rerun because this mapper is not yet attached to
 an HTTP route or UI view.
+
+## Bounded replay core
+
+`WebProgressPages` now provides bounded polling and snapshot-boundary calculation
+from checked journal bytes. It retains only a process-local signing key/epoch,
+not per-client queues or event caches. A page decodes at most 2 MiB / 1,024 source
+records and returns at most 200 observations, splitting below the one-MiB
+response ceiling. Byte-driven splits retain the exact last returned cursor.
+
+Opaque cursors bind session/job/attempt, process epoch, an exact retained record
+fingerprint and position. An ordinary cursor resumes after that record; the
+oldest boundary permits explicit selection before the first retained record.
+A fresh snapshot cutover cursor additionally acknowledges the journal's observed
+next-sequence boundary, including trailing omissions. This avoids repeatedly
+resetting at a terminal queue drop while preserving the omission counters for
+the snapshot response. It does not certify that omitted events were delivered.
+
+Missing/changed anchors, sequence holes, trailing omissions and process restart
+return `410 PROGRESS_GAP`; malformed/tampered/cross-binding cursors return
+`400 INVALID_CURSOR`. Invalid journals return a bounded `503 PROGRESS_UNAVAILABLE`
+message. A gap discards the prospective page rather than returning silently
+partial history. Snapshot-boundary results retain next-sequence and queue/history
+omission counters for the forthcoming HTTP snapshot adapter. A journal with no
+retained records has no anchor cursor; its counters must still be shown, and no
+resume proof may be invented for that empty retained history.
+
+Tests cover append/replay/idle polls, cross-binding/tamper/restart rejection,
+missing/changed/interior/trailing gaps, explicit oldest-history selection,
+snapshot cutover across trailing omissions, near-maximum sequence cursor length,
+byte-limited page reachability and malformed inputs. This core does not perform
+HTTP authorization, read storage paths, connect workflow snapshots atomically,
+or provide SSE. Those integration boundaries remain open under #174.
+
+Verification passed 160 journal/web JVM tests with zero failures/errors and
+`git diff --check`. Frontend/browser suites were not rerun because the new replay
+core has no HTTP/UI connection yet. The existing typed frontend build and asset
+checks ran as part of the JVM build dependency chain.
