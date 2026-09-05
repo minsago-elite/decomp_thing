@@ -75,9 +75,13 @@ fun renderDashboard(jobs: List<Job>, diagnostics: List<WebJobDiagnostic> = empty
       const authButton = document.querySelector('#inspect-auth-methods');
       const cancelAuthButton = document.querySelector('#cancel-auth-inspection');
       let authInspectionGeneration = 0;
+      let authInspectionId = null;
+      const validInspectionId = id => typeof id === 'string' && /^[a-f0-9]{8}(-[a-f0-9]{4}){3}-[a-f0-9]{12}$/.test(id);
       cancelAuthButton.addEventListener('click', async () => {
         cancelAuthButton.disabled = true;
         const generation = authInspectionGeneration;
+        const inspectionId = authInspectionId;
+        if (!validInspectionId(inspectionId)) return;
         const showCancellationStatus = (text, retry = false) => {
           if (generation === authInspectionGeneration && authButton.disabled) {
             document.querySelector('#auth-inspection-status').textContent = text;
@@ -86,7 +90,7 @@ fun renderDashboard(jobs: List<Job>, diagnostics: List<WebJobDiagnostic> = empty
         };
         try {
           const response = await fetch('/api/operator/auth-methods/cancel', {
-            method: 'POST', headers: {'X-Decomp-Operator-Action': 'cancel-auth-inspection'}
+            method: 'POST', headers: {'X-Decomp-Operator-Action': 'cancel-auth-inspection', 'X-Decomp-Inspection-Id': inspectionId}
           });
           showCancellationStatus(response.ok ? 'Cancellation requested; waiting for cleanup.'
             : 'Cancellation request failed; inspection status is still being checked.', !response.ok);
@@ -96,6 +100,7 @@ fun renderDashboard(jobs: List<Job>, diagnostics: List<WebJobDiagnostic> = empty
       });
       authButton.addEventListener('click', async () => {
         authInspectionGeneration++;
+        authInspectionId = null;
         authButton.disabled = true;
         const status = document.querySelector('#auth-inspection-status');
         const list = document.querySelector('#auth-method-list');
@@ -106,9 +111,13 @@ fun renderDashboard(jobs: List<Job>, diagnostics: List<WebJobDiagnostic> = empty
             method: 'POST', cache: 'no-store', headers: {'X-Decomp-Operator-Action': 'inspect-auth'}
           });
           if (response.status !== 202 && response.status !== 409) throw new Error('unavailable');
-          // A 409 attaches to the existing inspection; an accepted start needs no body to poll.
+          // A 409 attaches to the current inspection. Polling can recover a missing acknowledgement.
+          try {
+            const admitted = await response.json();
+            if (validInspectionId(admitted.inspectionId)) authInspectionId = admitted.inspectionId;
+          } catch (_) { }
           let inventory = {status: 'inspecting'};
-          cancelAuthButton.disabled = false;
+          cancelAuthButton.disabled = !validInspectionId(authInspectionId);
           while (inventory.status === 'inspecting') {
             await new Promise(resolve => setTimeout(resolve, 300));
             try {
@@ -117,13 +126,20 @@ fun renderDashboard(jobs: List<Job>, diagnostics: List<WebJobDiagnostic> = empty
               const observed = await update.json();
               if (!observed || !['idle', 'inspecting', 'ready', 'failed', 'cancelled'].includes(observed.status))
                 throw new Error('unavailable');
+              if (observed.status === 'inspecting') {
+                if (!validInspectionId(observed.inspectionId)) throw new Error('unavailable');
+                authInspectionId = observed.inspectionId;
+                cancelAuthButton.disabled = false;
+              }
               inventory = observed;
-              if (inventory.status === 'inspecting' && status.textContent ===
-                  'Inspection status is unavailable; retrying. Cancellation remains available.')
+              if (inventory.status === 'inspecting' && status.textContent.startsWith(
+                  'Inspection status is unavailable; retrying.'))
                 status.textContent = 'Inspecting advertised methods…';
             } catch (_) {
-              status.textContent = 'Inspection status is unavailable; retrying. Cancellation remains available.';
-              cancelAuthButton.disabled = false;
+              status.textContent = validInspectionId(authInspectionId)
+                ? 'Inspection status is unavailable; retrying. Cancellation remains available.'
+                : 'Inspection status is unavailable; retrying.';
+              cancelAuthButton.disabled = !validInspectionId(authInspectionId);
             }
           }
           if (inventory.status === 'cancelled') {

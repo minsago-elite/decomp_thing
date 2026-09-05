@@ -182,6 +182,8 @@ class UploadServer(
 ) {
     init { require(listenBacklog in 1..4096) { "HTTP listen backlog must be between 1 and 4096" } }
     private val diagnosticRedactor = ProgressRedactor(sensitiveValues)
+    private val authenticationInspectionLock = Any()
+    private var authenticationInspectionId: String? = null
     private val authenticationInspectionCancellation = AtomicBoolean(false)
     private val authenticationInspectionResult = java.util.concurrent.atomic.AtomicReference(
         "{\"status\":\"idle\",\"loginSupported\":false}")
@@ -338,36 +340,45 @@ class UploadServer(
             exchange.sendJson(400, "{\"error\":\"Explicit operator inspection is required.\"}")
             return
         }
-        val previous = authenticationInspectionResult.get()
-        if (previous == AUTH_INSPECTION_RUNNING ||
-            !authenticationInspectionResult.compareAndSet(previous, AUTH_INSPECTION_RUNNING)) {
-            exchange.sendJson(409, "{\"error\":\"Authentication inspection is already running.\"}")
-            return
-        }
-        try {
-            synchronized(lifecycleLock) {
-                check(!stopping) { "Server is stopping" }
-                authenticationInspectionCancellation.set(false)
-                val worker = Thread({
-                    var result = AUTH_INSPECTION_FAILED
-                    try {
-                        withActiveRequest { result = inspectAuthenticationMethods() }
-                    } catch (_: Exception) {
-                        result = AUTH_INSPECTION_FAILED
-                    } finally {
-                        // Publish terminal status and release admission in one atomic state change.
-                        authenticationInspectionResult.set(result)
+        val admission = synchronized(authenticationInspectionLock) {
+            if (authenticationInspectionResult.get() == AUTH_INSPECTION_RUNNING) {
+                409 to authenticationInspectionSnapshot()
+            } else {
+                authenticationInspectionId = java.util.UUID.randomUUID().toString()
+                authenticationInspectionResult.set(AUTH_INSPECTION_RUNNING)
+                try {
+                    synchronized(lifecycleLock) {
+                        authenticationInspectionCancellation.set(false)
+                        check(!stopping) { "Server is stopping" }
+                        val worker = Thread({
+                            var result = AUTH_INSPECTION_FAILED
+                            try {
+                                withActiveRequest { result = inspectAuthenticationMethods() }
+                            } catch (_: Exception) {
+                                result = AUTH_INSPECTION_FAILED
+                            } finally {
+                                synchronized(authenticationInspectionLock) {
+                                    authenticationInspectionResult.set(result)
+                                }
+                            }
+                        }, "decomp-web-auth-inspection").apply { isDaemon = true }
+                        authenticationInspectionWorker.set(worker)
+                        worker.start()
                     }
-                }, "decomp-web-auth-inspection").apply { isDaemon = true }
-                authenticationInspectionWorker.set(worker)
-                worker.start()
+                    202 to authenticationInspectionSnapshot(AUTH_INSPECTION_RUNNING)
+                } catch (_: Exception) {
+                    authenticationInspectionResult.set(AUTH_INSPECTION_FAILED)
+                    503 to authenticationInspectionSnapshot()
+                }
             }
-        } catch (_: Exception) {
-            authenticationInspectionResult.set(AUTH_INSPECTION_FAILED)
-            exchange.sendJson(503, AUTH_INSPECTION_FAILED)
-            return
         }
-        exchange.sendJson(202, AUTH_INSPECTION_RUNNING)
+        exchange.sendJson(admission.first, admission.second)
+    }
+
+    private fun authenticationInspectionSnapshot(result: String? = null): String = synchronized(authenticationInspectionLock) {
+        // Every payload here is an internally serialized object; identity is an application-generated UUID.
+        (result ?: authenticationInspectionResult.get()).dropLast(1) +
+            ",\"inspectionId\":" + (authenticationInspectionId?.let { "\"$it\"" } ?: "null") + "}"
     }
 
     private fun inspectAuthenticationMethods(): String = try {
@@ -394,12 +405,22 @@ class UploadServer(
             exchange.sendJson(400, "{\"error\":\"Explicit operator cancellation is required.\"}")
             return
         }
-        if (authenticationInspectionResult.get() != AUTH_INSPECTION_RUNNING) {
-            exchange.sendJson(409, "{\"error\":\"No authentication inspection is running.\"}")
-            return
+        val requestedId = exchange.requestHeaders["X-Decomp-Inspection-Id"]?.singleOrNull()
+        val response = synchronized(authenticationInspectionLock) {
+            when {
+                authenticationInspectionResult.get() != AUTH_INSPECTION_RUNNING ->
+                    409 to "{\"error\":\"No authentication inspection is running.\"}"
+                requestedId == null ->
+                    400 to "{\"error\":\"An exact inspection identity is required.\"}"
+                requestedId != authenticationInspectionId ->
+                    409 to "{\"error\":\"The selected inspection is no longer running.\"}"
+                else -> {
+                    authenticationInspectionCancellation.set(true)
+                    202 to authenticationInspectionSnapshot("{\"status\":\"cancellation-requested\",\"loginSupported\":false}")
+                }
+            }
         }
-        authenticationInspectionCancellation.set(true)
-        exchange.sendJson(202, "{\"status\":\"cancellation-requested\",\"loginSupported\":false}")
+        exchange.sendJson(response.first, response.second)
     }
 
     private fun routeAdmitted(exchange: HttpExchange) {
@@ -425,7 +446,7 @@ class UploadServer(
                 exchange.requestMethod == "POST" && segments == listOf("api", "operator", "auth-methods", "cancel") ->
                     handleAuthenticationCancellation(exchange)
                 exchange.requestMethod == "GET" && segments == listOf("api", "operator", "auth-methods") ->
-                    exchange.sendJson(200, authenticationInspectionResult.get())
+                    exchange.sendJson(200, authenticationInspectionSnapshot())
                 exchange.requestMethod == "POST" && segments == listOf("api", "operator", "auth-methods") ->
                     handleAuthenticationInspection(exchange)
                 exchange.requestMethod == "POST" && segments == listOf("jobs") -> handlePostJob(exchange)

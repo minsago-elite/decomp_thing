@@ -10,6 +10,7 @@ import java.net.http.HttpResponse
 import java.util.concurrent.atomic.AtomicInteger
 import kotlin.io.path.createTempDirectory
 import kotlin.test.*
+import kotlinx.serialization.json.*
 
 class WebAuthenticationInspectionTest {
     @Test fun `shutdown waits for cancelled inspection cleanup before returning`() {
@@ -228,6 +229,56 @@ class WebAuthenticationInspectionTest {
         } finally { cleanupReleased.countDown(); server.stop(0) }
     }
 
+    @Test fun `delayed cancellation cannot cancel a replacement inspection`() {
+        val entered = Array(2) { java.util.concurrent.CountDownLatch(1) }
+        val release = Array(2) { java.util.concurrent.CountDownLatch(1) }
+        val calls = AtomicInteger()
+        val cancellations = java.util.concurrent.atomic.AtomicReferenceArray<decompengine.agent.AgentCancellation>(2)
+        val root = createTempDirectory("web-auth-generation-")
+        val server = UploadServer("127.0.0.1", 0, root, authenticationInspector = { cancellation ->
+            val index = calls.getAndIncrement()
+            cancellations.set(index, cancellation)
+            entered[index].countDown()
+            check(release[index].await(10, java.util.concurrent.TimeUnit.SECONDS))
+            AcpAuthenticationInventory.capture(emptyList(), emptyList())
+        })
+        fun id(response: HttpResponse<String>) = Json.parseToJsonElement(response.body()).jsonObject.getValue("inspectionId").jsonPrimitive.content
+        server.start()
+        try {
+            val first = request(server, "/api/operator/auth-methods", true)
+            assertEquals(202, first.statusCode())
+            assertTrue(entered[0].await(5, java.util.concurrent.TimeUnit.SECONDS))
+            val firstId = id(first)
+            release[0].countDown()
+            assertEquals(firstId, id(awaitResult(server)))
+            val second = request(server, "/api/operator/auth-methods", true)
+            assertEquals(202, second.statusCode())
+            assertTrue(entered[1].await(5, java.util.concurrent.TimeUnit.SECONDS))
+            val secondId = id(second)
+            assertNotEquals(firstId, secondId)
+            assertEquals(400, request(server, "/api/operator/auth-methods/cancel", true,
+                action = "cancel-auth-inspection", includeInspectionId = false).statusCode())
+            assertFalse(cancellations.get(1).isCancellationRequested())
+            val attached = request(server, "/api/operator/auth-methods", true)
+            assertEquals(409, attached.statusCode())
+            assertEquals(secondId, id(attached))
+            repeat(2) {
+                assertEquals(409, request(server, "/api/operator/auth-methods/cancel", true,
+                    action = "cancel-auth-inspection", inspectionId = firstId).statusCode())
+                assertFalse(cancellations.get(1).isCancellationRequested())
+            }
+            assertEquals(202, request(server, "/api/operator/auth-methods/cancel", true,
+                action = "cancel-auth-inspection", inspectionId = secondId).statusCode())
+            assertTrue(cancellations.get(1).isCancellationRequested())
+            release[1].countDown()
+            assertEquals(secondId, id(awaitResult(server)))
+        } finally {
+            release.forEach { it.countDown() }
+            server.stop()
+            root.toFile().deleteRecursively()
+        }
+    }
+
     private fun awaitResult(server: UploadServer): HttpResponse<String> {
         val deadline = System.nanoTime() + java.util.concurrent.TimeUnit.SECONDS.toNanos(5)
         while (System.nanoTime() < deadline) {
@@ -238,11 +289,16 @@ class WebAuthenticationInspectionTest {
         error("inspection did not finish")
     }
 
-    private fun request(server: UploadServer, path: String, post: Boolean, explicit: Boolean = true, action: String = "inspect-auth"): HttpResponse<String> {
+    private fun request(server: UploadServer, path: String, post: Boolean, explicit: Boolean = true, action: String = "inspect-auth", inspectionId: String? = null, includeInspectionId: Boolean = true): HttpResponse<String> {
         val request = HttpRequest.newBuilder(URI("http://127.0.0.1:${server.serverPort}$path"))
             .timeout(java.time.Duration.ofSeconds(5))
         if (post) request.POST(HttpRequest.BodyPublishers.noBody()) else request.GET()
         if (explicit) request.header("X-Decomp-Operator-Action", action)
+        if (explicit && action == "cancel-auth-inspection" && includeInspectionId) {
+            val selected = inspectionId ?: Json.parseToJsonElement(
+                request(server, "/api/operator/auth-methods", false).body()).jsonObject["inspectionId"]?.jsonPrimitive?.contentOrNull
+            if (selected != null) request.header("X-Decomp-Inspection-Id", selected)
+        }
         return HttpClient.newHttpClient().send(request.build(), HttpResponse.BodyHandlers.ofString())
     }
 }

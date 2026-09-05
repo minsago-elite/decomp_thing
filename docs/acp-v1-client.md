@@ -807,9 +807,17 @@ inspection, preview rendering/escaping, failure, retry and empty inventory; trac
 files use a fresh evidence directory. It does not establish independent-agent authentication.
 
 **Cancel inspection** posts an explicit cancellation request to
-`/api/operator/auth-methods/cancel`. A request acknowledgement is not a terminal cleanup result:
+`/api/operator/auth-methods/cancel`. Status and admission responses include an
+application-generated `inspectionId`; cancellation must include that exact value in
+`X-Decomp-Inspection-Id`. Missing identity during an active inspection returns 400,
+and an old identity returns 409 without changing the current cancellation signal.
+Identity matching, setting the signal, terminal publication and new admission share
+one lock. The browser captures the ID for each cancellation request and only enables
+cancellation after learning it from admission or a status response. A request acknowledgement is not a terminal cleanup result:
 the view continues polling until inspection finishes. HTTP, network, or malformed status-response
-failures display a retry notice and keep cancellation available without enabling a new inspection.
+failures display a retry notice and keep cancellation available once an inspection ID is known,
+without enabling a new inspection. If admission omitted the ID, cancellation remains disabled
+until a successful status response supplies it.
 A 409 start response attaches the page to the existing inspection. Late acknowledgements cannot overwrite
 a terminal result or a later inspection. The server's cancellation token reaches the preflight
 scheduler, launch and initialize waits. Shutdown requests cancellation and waits for the tracked
