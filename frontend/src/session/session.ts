@@ -9,9 +9,11 @@ export type SessionGateway = {
   logout: (csrfToken: string, signal: AbortSignal) => Promise<void>;
 };
 
+export type RuntimeSnapshot = Pick<Bootstrap, 'applicationBuildId' | 'uiBuildId' | 'readiness' | 'capabilities' | 'limits' | 'runtime'>;
+
 export type SessionState =
   | { status: 'public' | 'checking' | 'signing-out' }
-  | { status: 'authenticated'; expiresAt: string }
+  | { status: 'authenticated'; expiresAt: string; runtime: RuntimeSnapshot }
   | { status: 'required'; reason: 'missing' | 'expired' | 'bootstrap-required' | 'bootstrap-expired' | 'invalid-link' | 'signed-out' }
   | { status: 'unavailable'; reason: 'connection' | 'configuration' | 'logout-unconfirmed' | 'removal-failed' };
 
@@ -65,7 +67,13 @@ export function createBrowserSession(gateway: SessionGateway, basePath: string) 
     } else {
       forget();
       csrfToken = bootstrap.csrfToken;
-      publish({ status: 'authenticated', expiresAt: bootstrap.sessionExpiresAt });
+      // Explicit projection prevents session credentials from entering observable UI state.
+      const runtime: RuntimeSnapshot = {
+        applicationBuildId: bootstrap.applicationBuildId, uiBuildId: bootstrap.uiBuildId,
+        readiness: bootstrap.readiness, capabilities: structuredClone(bootstrap.capabilities),
+        limits: { ...bootstrap.limits }, runtime: { ...bootstrap.runtime },
+      };
+      publish({ status: 'authenticated', expiresAt: bootstrap.sessionExpiresAt, runtime });
       expiry = setTimeout(() => {
         forget();
         publish({ status: 'required', reason: 'expired' });

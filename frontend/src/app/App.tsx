@@ -60,7 +60,7 @@ function Shell({ basePath, identity, recovery, reload, session }: ShellProps) {
           <ViewBoundary key={location.path}>
             <Router onLoadStart={() => setLoading(true)} onLoadEnd={viewReady} onRouteChange={viewReady}>
               <Route path={homePath} component={Home} />
-              <Route path={runtimePath} component={Runtime} identity={identity} />
+              <Route path={runtimePath} component={Runtime} identity={identity} session={session} />
               <Route default component={NotFound} homePath={homePath} />
             </Router>
           </ViewBoundary>
