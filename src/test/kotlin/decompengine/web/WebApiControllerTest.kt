@@ -54,6 +54,10 @@ class WebApiControllerTest {
             val history = assertEnvelope(request(server, "/workbench/api/v1/jobs/${job.id}/runs?limit=1", headers = mapOf("Cookie" to cookie)), 200, "runs")
             assertEquals(job.id, history.getValue("jobId").jsonPrimitive.content)
             assertEquals(run.runId, history.getValue("items").jsonArray.single().jsonObject.getValue("runId").jsonPrimitive.content)
+            val report = assertEnvelope(request(server, "/workbench/api/v1/jobs/${job.id}/runs/${run.runId}/reports/exploration", headers = mapOf("Cookie" to cookie)), 200, "report")
+            assertEquals("unknown", report.getValue("state").jsonPrimitive.content)
+            assertEquals("null", report.getValue("summary").toString())
+            assertEquals(run.runId, report.getValue("binding").jsonObject.getValue("runId").jsonPrimitive.content)
             val runPath = "/workbench/api/v1/jobs/${job.id}/runs/${run.runId}"
             assertError(request(server, runPath), 401, "SESSION_REQUIRED")
             val attempt = assertEnvelope(request(server, runPath, headers = mapOf("Cookie" to cookie)), 200, "run")

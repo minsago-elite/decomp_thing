@@ -35,7 +35,7 @@ internal class WebApiController(
         val path = exchange.requestURI.rawPath
         if (!path.startsWith("${assets.basePath}api/")) return false
         val resource = path.removePrefix(prefix)
-        if (!path.startsWith(prefix) || !(resource in setOf("session", "bootstrap", "jobs") || resource.matches(Regex("(?:jobs|uploads)/[^/]+|jobs/[^/]+/runs(?:/[^/]+)?")))) {
+        if (!path.startsWith(prefix) || !(resource in setOf("session", "bootstrap", "jobs") || resource.matches(Regex("(?:jobs|uploads)/[^/]+|jobs/[^/]+/runs(?:/[^/]+(?:/reports/exploration)?)?")))) {
             try {
                 val policy = if (exchange.requestMethod in setOf("POST", "PUT", "PATCH", "DELETE")) {
                     WebEndpointPolicy.jsonMutation(exchange.requestMethod)
@@ -105,6 +105,16 @@ internal class WebApiController(
                         put("totalBytes", progress.totalBytes?.let { JsonPrimitive(it.toString()) } ?: JsonNull)
                         put("state", progress.state); put("jobId", progress.jobId?.let { JsonPrimitive(it) } ?: JsonNull)
                     })
+                }
+                resource.matches(Regex("jobs/[^/]+/runs/[^/]+/reports/exploration")) -> {
+                    access.authorize(exchange, WebEndpointPolicy.privateRead())
+                    requireNoQuery(exchange); requireJsonAccept(exchange)
+                    val parts = resource.split('/')
+                    val attempt = jobs.getAttempt(parts[1], parts[3])
+                    val bytes = try { jobs.readArtifact(parts[1], "reports/runs/${attempt.runId}/exploration.json", 1_048_576).bytes }
+                        catch (_: JobStoreException) { null }
+                    if (jobs.getAttempt(parts[1], parts[3]).version != attempt.version) throw WebJobServiceException("REPORT_CHANGED", "The attempt changed during this read. Refresh its evidence.")
+                    send(exchange, 200, "report", webExplorationReport(parts[1], parts[3], bytes))
                 }
                 resource.matches(Regex("jobs/[^/]+/runs")) -> {
                     val session = checkNotNull(access.authorize(exchange, WebEndpointPolicy.privateRead()))

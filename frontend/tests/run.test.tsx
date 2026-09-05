@@ -3,7 +3,7 @@ import { resolve } from 'node:path';
 import { act, fireEvent, render, screen, waitFor } from '@testing-library/preact';
 import { beforeEach, expect, it, vi } from 'vitest';
 import type * as ClientModule from '../src/api/client';
-import type { Bootstrap, Run } from '../src/api/generated';
+import type { Bootstrap, Run, Report } from '../src/api/generated';
 import { App } from '../src/app/App';
 import { createBrowserSession } from '../src/session/session';
 
@@ -81,4 +81,29 @@ it('pages history with URL continuation and restores the first page through brow
     expect(await screen.findByRole('link', { name: 'reconstruct: run_latest' })).toBeTruthy();
     expect(location.search).toBe('');
   } finally { auth.dispose(); }
+});
+
+it('reads exploration evidence only on request and preserves producer limitations', async () => {
+  const { ExplorationEvidence } = await import('../src/jobs/ExplorationEvidence');
+  const data = JSON.parse(readFileSync(resolve(process.cwd(), '../contracts/web/v1/fixtures/report-exploration.json'), 'utf8')) as { data: Report };
+  transport.get.mockResolvedValue(data);
+  const view = render(<ExplorationEvidence jobId={data.data.binding.jobId} runId={data.data.binding.runId!} basePath="/nested" />);
+  expect(transport.get).not.toHaveBeenCalled();
+  fireEvent.click(screen.getByRole('button', { name: 'Read exploration evidence' }));
+  expect(await screen.findByText('Observed sample breadth is not a proof of equivalence.')).toBeTruthy();
+  expect(screen.getByText('Producer reports network isolation')).toBeTruthy();
+  expect(screen.getByText('Exploration observations do not establish accepted reconstruction.')).toBeTruthy();
+  expect(transport.get.mock.calls[0]?.[1]).toBe(`/jobs/${data.data.binding.jobId}/runs/${data.data.binding.runId}/reports/exploration`);
+  const signal = transport.get.mock.calls[0]![2].signal;
+  view.unmount(); expect(signal.aborted).toBe(true);
+});
+
+it('refuses evidence for another attempt without presenting its summary', async () => {
+  const { ExplorationEvidence } = await import('../src/jobs/ExplorationEvidence');
+  const data = JSON.parse(readFileSync(resolve(process.cwd(), '../contracts/web/v1/fixtures/report-exploration.json'), 'utf8')) as { data: Report };
+  transport.get.mockResolvedValue(data);
+  render(<ExplorationEvidence jobId={data.data.binding.jobId} runId="run_other" basePath="/nested" />);
+  fireEvent.click(screen.getByRole('button', { name: 'Read exploration evidence' }));
+  expect(await screen.findByRole('alert')).toHaveProperty('textContent', 'The report does not belong to the requested attempt.');
+  expect(screen.queryByText('Producer confidence score')).toBeNull();
 });

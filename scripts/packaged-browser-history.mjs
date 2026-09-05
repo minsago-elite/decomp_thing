@@ -35,7 +35,15 @@ export async function seedHistory(root) {
     attempts, acceptedRevision: null };
   const retained = { 'input.elf': input, 'job.json': jobBytes, 'workflow-state.json': JSON.stringify(state) };
   for (const [name, bytes] of Object.entries(retained)) await fs.writeFile(join(directory, name), bytes, { flag: 'wx', mode: 0o600 });
-  return { jobId, directory, retained, count: attempts.length };
+  const reportDirectory = join(directory, 'reports', 'runs', 'run_fixture_3');
+  await fs.mkdir(reportDirectory, { recursive: true, mode: 0o700 });
+  const exploration = JSON.stringify({ candidateCount: 1, coverageIncreased: true, baselineOutputSignatures: 0,
+    expandedOutputSignatures: 1, newOutputSignatures: ['synthetic'], angr: null,
+    confidence: { score: 0.5, inputCount: 1, sourceCount: 1, outputSignatureCount: 1,
+      newOutputSignatureCount: 1, sandboxed: true, networkIsolated: false }, candidates: [{}], observations: [] });
+  const reportPath = join(reportDirectory, 'exploration.json');
+  await fs.writeFile(reportPath, exploration, { flag: 'wx', mode: 0o600 });
+  return { jobId, directory, retained, count: attempts.length, reportPath, exploration };
 }
 
 export async function qualifyHistory({ fixture, makeTarget, cdp, evaluate, ready, browserOrigin }) {
@@ -56,14 +64,18 @@ export async function qualifyHistory({ fixture, makeTarget, cdp, evaluate, ready
   assert.equal(await evaluate(tab, 'location.pathname'), `${path}/run_fixture_3`);
   await cdp.call('Page.reload', {}, tab.sessionId);
   await ready(tab, `document.body.innerText.includes('revision_fixture_3')`, 'pinned earlier attempt reload');
+  await evaluate(tab, `[...document.querySelectorAll('button')].find(b => b.textContent === 'Read exploration evidence').click()`);
+  await ready(tab, `document.body.innerText.includes('Report state: available. Authority: observations.') && document.body.innerText.includes('Producer confidence score')`, 'bound exploration summary');
+  assert.ok(await evaluate(tab, `document.body.innerText.includes('not proof of equivalence')`));
+  assert.equal(await fs.readFile(fixture.reportPath, 'utf8'), fixture.exploration);
   await evaluate(tab, `[...document.querySelectorAll('a')].find(a => a.textContent === 'Open previous attempt').click()`);
   await ready(tab, `document.body.innerText.includes('PROCESS_INTERRUPTED')`, 'previous interrupted attempt');
   assert.equal(await evaluate(tab, 'location.pathname'), `${path}/run_fixture_2`);
   assert.ok(tab.requests.every(request => ['GET', 'HEAD'].includes(request.method)));
   assert.deepEqual(tab.exceptions, []);
   for (const [name, bytes] of Object.entries(fixture.retained)) assert.deepEqual(await fs.readFile(join(fixture.directory, name)), Buffer.from(bytes));
-  assert.deepEqual((await fs.readdir(fixture.directory)).sort(), Object.keys(fixture.retained).sort());
+  assert.deepEqual((await fs.readdir(fixture.directory)).sort(), [...Object.keys(fixture.retained), 'reports'].sort());
   return { fixtureAttempts: 55, firstPage: 50, secondPage: 5, exactOrder: true, cursorReload: true,
     earlierAttemptReload: true, previousInterruptedAttempt: true, exactUnsignedUsage: true,
-    unacceptedCandidate: true, retainedBytesUnchanged: true, mutationRequests: 0, executionStarted: false };
+    unacceptedCandidate: true, explorationSummary: true, reportBytesUnchanged: true, retainedBytesUnchanged: true, mutationRequests: 0, executionStarted: false };
 }
