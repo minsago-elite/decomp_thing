@@ -675,6 +675,25 @@ internal object ReconstructionAcpEvidenceArchiveVerifier {
         )
     }
 
+    internal fun verifyContextUsageEvent(event: JsonObject) {
+        event.requireExactKeys(setOf("sequence", "type", "usedTokens", "contextWindowTokens", "costAmount", "costCurrency"), "context usage")
+        require(event.requiredString("type", "context usage") == "context_usage")
+        event.requiredNonNegativeLong("sequence", "context usage")
+        event.requiredNonNegativeLong("usedTokens", "context usage")
+        event.requiredNonNegativeLong("contextWindowTokens", "context usage")
+        val amount = event.getValue("costAmount")
+        val currency = event.getValue("costCurrency")
+        require((amount is JsonNull) == (currency is JsonNull)) { "context cost fields must be paired" }
+        if (amount !is JsonNull) {
+            val text = amount.requiredString("context cost amount")
+            require(text.length <= 32)
+            val parsed = text.toDoubleOrNull()
+            require(parsed != null && parsed.isFinite() && parsed >= 0 && parsed.toString() == text)
+            val commitment = verifyTextCommitment(currency.requiredObject("context currency"), "context currency", requireNonEmpty = true)
+            require(commitment.encodedBytes <= 256) { "context currency exceeds its bound" }
+        }
+    }
+
     private fun verifyReceiptEvents(events: JsonObject): List<VerifiedAcpReceiptChange> {
         events.requireExactKeys(RECEIPT_EVENTS_FIELDS, "ACP receipt events")
         require(events.requiredNonNegativeLong("maximumRetainedEvents", "ACP receipt events") ==
@@ -696,6 +715,7 @@ internal object ReconstructionAcpEvidenceArchiveVerifier {
                 "ACP receipt events are missing or reorder a sequence"
             }
             when (event.requiredString("type", "ACP receipt event")) {
+                "context_usage" -> verifyContextUsageEvent(event)
                 "message" -> {
                     event.requireExactKeys(RECEIPT_MESSAGE_EVENT_FIELDS, "ACP receipt message event")
                     require(event.requiredString("role", "ACP receipt message event") in MESSAGE_ROLES) {

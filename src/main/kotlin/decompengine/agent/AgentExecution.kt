@@ -311,6 +311,22 @@ data class AgentFileChangeEvent(
 
 enum class AgentStopReason { COMPLETED, NO_CHANGES, REFUSED, CANCELLED, LIMIT_EXHAUSTED }
 
+/** Peer-reported context occupancy and optional cost, never budget or acceptance authority. */
+data class AgentContextUsageEvent(
+    override val sequence: Long,
+    val usedTokens: Long,
+    val contextWindowTokens: Long,
+    val costAmount: Double? = null,
+    val costCurrency: String? = null,
+) : AgentExecutionEvent {
+    init {
+        require(sequence >= 0 && usedTokens >= 0 && contextWindowTokens >= 0)
+        require((costAmount == null) == (costCurrency == null))
+        require(costAmount == null || (costAmount.isFinite() && costAmount >= 0))
+        require(costCurrency == null || (costCurrency.isNotBlank() && costCurrency.length <= 64))
+    }
+}
+
 data class AgentUsage(
     val inputTokens: Long? = null,
     val outputTokens: Long? = null,

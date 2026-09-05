@@ -398,7 +398,8 @@ class ReconstructionAcpEvidenceArchiveVerifierTest {
                 sizeBytes = bytes.size.toLong(),
             )
             onEvent(AgentMessageEvent(0, "message", AgentMessageRole.ASSISTANT, "working", true))
-            onEvent(AgentFileChangeEvent(1, change))
+            onEvent(decompengine.agent.AgentContextUsageEvent(1, 1024, 8192, 0.125, "USD"))
+            onEvent(AgentFileChangeEvent(2, change))
             evidence = snapshot()
             return AgentExecutionResult(
                 AgentStopReason.COMPLETED,

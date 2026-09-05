@@ -174,6 +174,7 @@ class UploadServerTest {
                     accessPolicy = decompengine.agent.AgentAccessPolicy(emptyList())))
                 task.event(decompengine.agent.AgentMessageEvent(0, "thought", decompengine.agent.AgentMessageRole.THOUGHT,
                     "checking fixture", completed = true))
+                task.event(decompengine.agent.AgentContextUsageEvent(1, Long.MAX_VALUE, Long.MAX_VALUE, 0.125, "USD"))
                 task.complete(decompengine.agent.AgentExecutionReceipt(
                     decompengine.agent.AgentExecutionRequestBinding.capture(decompengine.agent.AgentExecutionRequest(
                         "fixture", listOf(decompengine.agent.AgentWorkspaceRoot("project", reports)),
@@ -195,6 +196,8 @@ class UploadServerTest {
             assertTrue(rows.contains("message · thought"))
             assertTrue(rows.contains("cached input tokens: 0"))
             assertTrue(rows.contains("elapsed: PT0.125S"))
+            assertTrue(rows.contains("context used: 9223372036854775807"))
+            assertTrue(rows.contains("reported cost: 0.125"))
             assertTrue(rows.contains("run_00000001"))
             assertTrue(rows.contains("revision-one"))
             assertTrue(rows.contains("provisional") && rows.contains("exhausted"))

@@ -102,7 +102,9 @@ fun renderJob(job: Job, sourceTree: SourceTreeView? = null, sourceTreeUnavailabl
                   event.text || '',
                   ...[['inputTokens', 'input tokens'], ['outputTokens', 'output tokens'],
                     ['cachedInputTokens', 'cached input tokens'], ['toolCalls', 'tool calls'],
-                    ['wallClock', 'elapsed']].filter(([key]) => event[key] !== undefined && event[key] !== null)
+                    ['wallClock', 'elapsed'], ['contextUsedTokens', 'context used'],
+                    ['contextWindowTokens', 'context capacity'], ['reportedCostAmount', 'reported cost'],
+                    ['reportedCostCurrency', 'cost currency']].filter(([key]) => event[key] !== undefined && event[key] !== null)
                     .map(([key, label]) => label + ': ' + event[key])].filter(value => value !== '').join(' · ');
                 list.append(item);
               }
@@ -182,7 +184,9 @@ private fun renderAgentProgress(job: Job): String {
                 .ifBlank { event.text("decision") },
             event.text("acceptedRevisionSha256").let { if (it.isBlank()) "" else "accepted source $it" }, event.text("text"),
             listOf("inputTokens" to "input tokens", "outputTokens" to "output tokens",
-                "cachedInputTokens" to "cached input tokens", "toolCalls" to "tool calls", "wallClock" to "elapsed")
+                "cachedInputTokens" to "cached input tokens", "toolCalls" to "tool calls", "wallClock" to "elapsed",
+                "contextUsedTokens" to "context used", "contextWindowTokens" to "context capacity",
+                "reportedCostAmount" to "reported cost", "reportedCostCurrency" to "cost currency")
                 .mapNotNull { (key, label) -> event.text(key).takeIf { it.isNotBlank() }?.let { "$label: $it" } }
                 .joinToString(" · "))
             .filter(String::isNotBlank).joinToString(" · ")

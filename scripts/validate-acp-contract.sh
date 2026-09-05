@@ -26,6 +26,7 @@ expected = {
     'LinuxBubblewrapBoundaryTest', 'LinuxFilesystemSyscallsTest',
     'MvpPatchAcpIntegrationTest', 'PinnedSystemdBusEndpointTest', 'AgentExecutionContractTest',
     'AgentSessionJournalTest', 'CandidateValidationMountPolicyTest',
+    'AcpThoughtProjectionTest', 'AcpContextUsageProjectionTest',
 }
 suites = []
 for path in sorted(reports.glob('TEST-*.xml')):

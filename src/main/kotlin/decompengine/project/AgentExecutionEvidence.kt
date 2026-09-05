@@ -16,6 +16,7 @@ import decompengine.acp.AcpSandboxMountEvidence
 import decompengine.acp.AcpSandboxResourceLimits
 import decompengine.acp.AcpTerminalAuditRecord
 import decompengine.agent.AgentExecutionEvent
+import decompengine.agent.AgentContextUsageEvent
 import decompengine.agent.AGENT_EXECUTION_CONTRACT_VERSION
 import decompengine.agent.AgentExecutionOutcome
 import decompengine.agent.AgentExecutionRequest
@@ -680,6 +681,11 @@ internal class BoundedAgentExecutionEventRecorder(
                 "agent event evidence exceeds the $maximumEvents-record limit"
             }
             val archived = when (event) {
+                is AgentContextUsageEvent -> {
+                    consume(1, event.costCurrency.orEmpty())
+                    ArchivedContextUsageEvent(event.sequence, event.usedTokens, event.contextWindowTokens,
+                        event.costAmount?.toString(), event.costCurrency?.let(ArchivedTextCommitment::capture))
+                }
                 is AgentMessageEvent -> {
                     consume(1, event.messageId, event.textDelta)
                     ArchivedMessageEvent(
@@ -814,6 +820,26 @@ internal sealed interface ArchivedAgentEvent {
     val receiptTextUtf8: Boolean
     fun appendJson(output: StringBuilder)
     fun appendReceiptJson(output: StringBuilder)
+}
+
+private data class ArchivedContextUsageEvent(
+    override val sequence: Long,
+    val usedTokens: Long,
+    val contextWindowTokens: Long,
+    val costAmount: String?,
+    val costCurrency: ArchivedTextCommitment?,
+) : ArchivedAgentEvent {
+    override val receiptTextUtf8 = costCurrency == null || costCurrency.encoding == "utf-8"
+    override fun appendJson(output: StringBuilder) = appendReceiptJson(output)
+    override fun appendReceiptJson(output: StringBuilder) {
+        output.append("{\"sequence\":").append(sequence)
+        output.append(",\"type\":\"context_usage\",\"usedTokens\":").append(usedTokens)
+        output.append(",\"contextWindowTokens\":").append(contextWindowTokens)
+        output.append(",\"costAmount\":").append(costAmount?.jsonString() ?: "null")
+        output.append(",\"costCurrency\":")
+        if (costCurrency == null) output.append("null") else output.appendTextCommitment(costCurrency)
+        output.append('}')
+    }
 }
 
 private data class ArchivedMessageEvent(

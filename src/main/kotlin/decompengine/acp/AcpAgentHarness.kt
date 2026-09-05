@@ -76,6 +76,7 @@ import decompengine.agent.AgentStopReason
 import decompengine.agent.AgentToolEvent
 import decompengine.agent.AgentToolStatus
 import decompengine.agent.AgentUsage
+import decompengine.agent.AgentContextUsageEvent
 import decompengine.agent.AgentWorkspacePath
 import decompengine.agent.AgentWorkspaceRoot
 import decompengine.repair.BoundedRepairOutput
@@ -2572,6 +2573,14 @@ internal class AcpEventTranslator(
                 is SessionUpdate.AgentMessageChunk -> emitMessage(AgentMessageRole.ASSISTANT, update.messageId?.value, update.content)
                 is SessionUpdate.UserMessageChunk -> emitMessage(AgentMessageRole.USER, update.messageId?.value, update.content)
                 is SessionUpdate.AgentThoughtChunk -> emitMessage(AgentMessageRole.THOUGHT, update.messageId?.value, update.content)
+                is SessionUpdate.UsageUpdate -> {
+                    val observation = try {
+                        AgentContextUsageEvent(0, update.used, update.size, update.cost?.amount, update.cost?.currency)
+                    } catch (_: IllegalArgumentException) {
+                        throw AcpProtocolFailure("ACP agent returned invalid context usage")
+                    }
+                    emitter.emit { sequence -> observation.copy(sequence = sequence) }
+                }
                 is SessionUpdate.PlanUpdate -> {
                     if (update.entries.isNotEmpty()) {
                         val entries = update.entries.mapIndexed { index, entry ->

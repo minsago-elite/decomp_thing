@@ -82,7 +82,11 @@ input tokens, tool calls and wall-clock duration. Missing fields remain absent r
 zero. Durations use ISO-8601 text, preserving subsecond precision without overflowing a millisecond
 conversion. Browser rows label these observations on refresh and incremental updates. They remain
 invocation observations, not aggregate budget accounting, provider billing or validation evidence.
-Live ACP context occupancy and cost updates are separate measurements and are not yet projected.
+Live ACP context occupancy and optional peer-reported cost use separate `context_usage` records.
+Context counts use decimal text to preserve 64-bit values in browser JSON consumers; currency text
+is bounded and redacted. Receipt records retain a currency commitment, and the archive gate checks
+the closed event shape, nonnegative counts, finite nonnegative cost and paired cost/currency fields.
+No live observation substitutes for final prompt token usage, enforced ceilings or provider billing.
 
 ACP `agent_thought_chunk` updates use message events with the distinct `thought` role. They share
 the bounded whole-message redaction and omission rules, but do not contribute to the assistant

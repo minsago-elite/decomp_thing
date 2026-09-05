@@ -22,7 +22,10 @@ implementations remain responsible for enforcing the request for the complete se
 
 `AgentHarness.executeReceipt` streams monotonically sequenced events to its caller. The event union represents assistant
 message chunks (including explicitly emitted peer thoughts with the separate `THOUGHT` role), plan snapshots,
-tool-call progress, permission decisions, and digest-backed file changes. Thought text does not enter the assistant
+tool-call progress, permission decisions, context-usage observations, and digest-backed file changes.
+Context observations preserve peer-reported occupancy/capacity and optional bounded cost/currency;
+they are distinct from final prompt token usage and cannot authorize acceptance or budget changes.
+Thought text does not enter the assistant
 result summary. Receipt events retain the role and text commitments; display buffers are keyed by role and message ID. A final
 `AgentExecutionResult` carries a transport-neutral stop reason, optional session/resume reference, optional usage,
 summary text, and the complete set of workspace changes.

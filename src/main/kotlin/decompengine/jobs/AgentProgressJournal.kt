@@ -120,6 +120,7 @@ class AgentProgressJournal(
                 }
                 post(when (event) {
                     is AgentMessageEvent -> "message"
+                    is AgentContextUsageEvent -> "context_usage"
                     is AgentPlanEvent -> "plan"
                     is AgentToolEvent -> "tool"
                     is AgentPermissionEvent -> "permission"
@@ -128,6 +129,13 @@ class AgentProgressJournal(
                     put("agentSequence", event.sequence)
                     put("sourceSequenceGap", gap)
                     when (event) {
+                        is AgentContextUsageEvent -> {
+                            // Decimal text preserves 64-bit counts in browser JSON consumers.
+                            put("contextUsedTokens", event.usedTokens.toString())
+                            put("contextWindowTokens", event.contextWindowTokens.toString())
+                            event.costAmount?.let { put("reportedCostAmount", it.toString()) }
+                            event.costCurrency?.let { put("reportedCostCurrency", redactor.text(it)) }
+                        }
                         is AgentMessageEvent -> {
                             val messageIdDigest = digest(event.messageId)
                             val messageKey = event.role.name + ":" + messageIdDigest
