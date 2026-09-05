@@ -13,13 +13,16 @@ const { chromium } = require(process.env.DECOMP_PLAYWRIGHT_MODULE || 'playwright
   await context.tracing.start({screenshots: true, snapshots: true});
   const page = await context.newPage();
   const errors = []; page.on('pageerror', e => errors.push(e.message));
-  let starts = 0, polls = 0, cancellations = 0, mode = 'ready';
+  let starts = 0, polls = 0, cancellations = 0, mode = 'ready', cancellationFailure = null;
   await page.route('**/*', route => {
     const request = route.request(), url = new URL(request.url());
     if (url.pathname === '/') return route.fulfill({contentType:'text/html', body:html});
     if (url.pathname === '/api/operator/auth-methods/cancel') {
       assert.equal(request.headers()['x-decomp-operator-action'], 'cancel-auth-inspection');
-      cancellations++; mode = 'cancelled';
+      cancellations++;
+      if (cancellationFailure === 'http') return route.fulfill({status:503, body:'unavailable'});
+      if (cancellationFailure === 'network') return route.abort('failed');
+      mode = 'cancelled';
       // Let polling publish the terminal result before the cancellation acknowledgement arrives.
       return new Promise(resolve => setTimeout(resolve, 600)).then(() =>
         route.fulfill({status:202, json:{status:'cancellation-requested'}}));
@@ -61,6 +64,15 @@ const { chromium } = require(process.env.DECOMP_PLAYWRIGHT_MODULE || 'playwright
     mode = 'waiting';
     await page.locator('#inspect-auth-methods').click();
     await page.waitForFunction(() => !document.querySelector('#cancel-auth-inspection').disabled);
+    for (const failure of ['http', 'network']) {
+      cancellationFailure = failure;
+      await page.locator('#cancel-auth-inspection').click();
+      await page.waitForFunction(() => !document.querySelector('#cancel-auth-inspection').disabled &&
+        document.querySelector('#auth-inspection-status').textContent ===
+          'Cancellation request failed; inspection status is still being checked.');
+      assert.equal(await page.locator('#inspect-auth-methods').isEnabled(), false);
+    }
+    cancellationFailure = null;
     await page.locator('#cancel-auth-inspection').click();
     await page.waitForFunction(() => document.querySelector('#auth-inspection-status').textContent ===
       'Inspection cancelled; no login attempted.');
@@ -68,10 +80,14 @@ const { chromium } = require(process.env.DECOMP_PLAYWRIGHT_MODULE || 'playwright
     assert.equal(await page.locator('#auth-inspection-status').textContent(), 'Inspection cancelled; no login attempted.');
     assert.equal(await page.locator('#inspect-auth-methods').isEnabled(), true);
     assert.equal(await page.locator('#cancel-auth-inspection').isEnabled(), false);
-    assert.equal(cancellations, 1); assert.equal(starts, 4); assert.deepEqual(errors, []);
+    assert.equal(cancellations, 3); assert.equal(starts, 4); assert.deepEqual(errors, []);
     await page.screenshot({path:path.join(output,'dashboard.png')});
-    fs.writeFileSync(path.join(output,'result.json'), JSON.stringify({passed:true,
-      browser:browser.version(), starts, polls, cancellations, scenarios:['explicit action','previews','text escaping','failure','retry','empty inventory','cancellation','late cancellation acknowledgement'],
-      renderedHtmlSha256:require('node:crypto').createHash('sha256').update(html).digest('hex')},null,2)+'\n');
-  } finally { await context.tracing.stop({path:path.join(output,'trace.zip')}); await browser.close(); }
+
+  } finally {
+    try { await context.tracing.stop({path:path.join(output,'trace.zip')}); }
+    finally { await browser.close(); }
+  }
+  fs.writeFileSync(path.join(output,'result.json'), JSON.stringify({passed:true,
+    browser:browser.version(), starts, polls, cancellations, scenarios:['explicit action','previews','text escaping','failure','retry','empty inventory','cancellation','HTTP cancellation retry','network cancellation retry','late cancellation acknowledgement'],
+    renderedHtmlSha256:require('node:crypto').createHash('sha256').update(html).digest('hex')},null,2)+'\n');
 })().catch(error=>{console.error(error);process.exitCode=1;});
