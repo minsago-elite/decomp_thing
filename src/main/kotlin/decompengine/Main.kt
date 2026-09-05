@@ -22,6 +22,7 @@ import decompengine.agent.AgentHarness
 import decompengine.agent.AgentWorkflowProgress
 import decompengine.agent.AgentWorkflowPhase
 import decompengine.jobs.AgentProgressJournal
+import decompengine.jobs.ProgressRedactor
 import decompengine.oracle.gcc.GccCompilerEnginePlanningService
 import decompengine.oracle.gcc.GccCompilerEngineProfiles
 import decompengine.oracle.gcc.authenticateGhidraInstallation
@@ -321,25 +322,27 @@ private fun runRepair(args: List<String>) {
     } else {
         listOf(ProcessInput("default"))
     }
-    val runtime = try {
+    val redactor = ProgressRedactor(System.getenv().values)
+    val result = try {
         SecureRepairRuntime.open(
             RepairRuntimeConfiguration(
                 profileId = "generated-c-make-v1",
                 historyPath = reportsDir.resolve("repair_history.json"),
                 harnessOverride = harnessOverride,
             ),
-        )
+        ).use { runtime ->
+            System.err.println("repair harness: ${redactor.text(runtime.harnessProvenance)}")
+            runtime.runRepair(project, original, regressionInputs, reportsDir, maxIterations)
+        }
     } catch (failure: IllegalArgumentException) {
-        repairUsageError(failure.message ?: "invalid harness configuration")
+        repairUsageError(redactor.text(failure.message ?: "invalid repair configuration"))
+    } catch (failure: Exception) {
+        System.err.println("repair unavailable or failed: ${redactor.text(failure.message ?: failure.javaClass.simpleName)}")
+        kotlin.system.exitProcess(1)
     }
-    val result = runtime.use {
-        println("harness provenance: ${it.harnessProvenance}")
-        it.repairUntilValid(project, original, regressionInputs, reportsDir, maxIterations)
-    }
-    result.iterations.forEach { iteration ->
-        println("repair iteration ${iteration.index}: ${iteration.failureKind} - ${iteration.summary}")
-    }
-    println("repair passed ${result.validation.cases.size} retained regression case(s); report: ${result.validation.reportPath}")
+    val presentation = presentRepairOutcome(result)
+    presentation.lines.forEach(::println)
+    if (presentation.exitCode != 0) kotlin.system.exitProcess(presentation.exitCode)
 }
 
 private fun repairUsageError(message: String): Nothing {

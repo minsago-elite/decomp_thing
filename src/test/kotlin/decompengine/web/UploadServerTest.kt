@@ -24,15 +24,25 @@ class UploadServerTest {
             val reports = dataDir.resolve(jobId).resolve("reports")
             decompengine.jobs.AgentProgressJournal(reports, "reconstruction").use { journal ->
                 journal.phase(decompengine.agent.AgentWorkflowPhase.BUILD_VALIDATING, "module-1")
+                journal.runState(decompengine.agent.AgentWorkflowRunObservation("run_00000001",
+                    decompengine.agent.AgentWorkflowPhase.PROVISIONAL, "revision-one"))
+                journal.runState(decompengine.agent.AgentWorkflowRunObservation("run_00000001",
+                    decompengine.agent.AgentWorkflowPhase.EXHAUSTED, "revision-one"))
             }
             val response = request(server, "GET", "/api/jobs/$jobId/events")
             assertEquals(200, response.status)
             assertTrue(response.body.decodeToString().contains("build_validating"))
             assertTrue(response.body.decodeToString().contains("\"displayOnly\":true"))
+            assertTrue(response.body.decodeToString().contains("\"workflowRunId\":\"run_00000001\""))
             val page = request(server, "GET", "/jobs/$jobId").body.decodeToString()
             assertTrue(page.contains("Agent progress"))
             assertTrue(page.contains("build_validating"))
             assertTrue(page.contains("Accepted revisions are recorded separately"))
+            val rows = page.substringAfter("<ol id=\"agent-event-list\"").substringBefore("</ol>")
+            assertTrue(rows.contains("run_00000001"))
+            assertTrue(rows.contains("revision-one"))
+            assertTrue(rows.contains("provisional") && rows.contains("exhausted"))
+            assertTrue(!rows.contains("accepted source"))
         }
     }
 

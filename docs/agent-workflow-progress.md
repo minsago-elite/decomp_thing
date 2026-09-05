@@ -47,8 +47,15 @@ report, not live per-case provider telemetry. A busy or failed journal is disabl
 diagnostic and cannot change acceptance, consume another repair attempt or replace durable failure.
 Close retains the bounded journal drain and preserves thread interruption while releasing its lock.
 
-The current CLI/browser live wiring covers reconstruction, while repair core writes the same persisted
-view. Issue #69 still owns repair CLI/browser presentation, patch live integration,
+The repair CLI consumes the whole-run outcome, prints at most 20 typed iteration dispositions, and
+returns a nonzero exit for unsuccessful or incomplete validation. It omits peer summaries, prompts
+and diagnostic streams from those result lines; configuration/failure diagnostics and harness
+provenance use the bounded redactor on stderr. The shared browser progress renderer includes durable
+run and revision IDs on refresh and incremental updates, with accepted source commitments shown
+separately. Neither console output nor the browser view certifies a release.
+
+The current browser job execution wiring covers reconstruction, while repair core writes the same
+persisted view. Issue #69 still owns repair job execution/live CLI delivery, patch live integration,
 thought and terminal updates, complete usage projection, explicit process-crash delivery/recovery
 proof and correlation with the durable session store in #68. The display ring can omit old records;
 its `displayOnly` flag and counters must never substitute for complete required release evidence in

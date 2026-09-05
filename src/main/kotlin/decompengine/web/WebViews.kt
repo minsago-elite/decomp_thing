@@ -95,8 +95,10 @@ fun renderJob(job: Job): String {
               list.replaceChildren();
               for (const event of snapshot.events.slice(-30)) {
                 const item = document.createElement('li');
-                item.textContent = [event.sequence, event.taskId || '', event.phase || event.kind,
+                item.textContent = [event.sequence, event.workflowRunId || '', event.taskId || '',
+                  event.revisionId || '', event.phase || event.kind,
                   event.status || event.stopReason || event.failureKind || event.decision || '',
+                  event.acceptedRevisionSha256 ? 'accepted source ' + event.acceptedRevisionSha256 : '',
                   event.text || ''].filter(value => value !== '').join(' · ');
                 list.append(item);
               }
@@ -169,10 +171,11 @@ private fun renderAgentProgress(job: Job): String {
     val events = snapshot?.get("events")?.jsonArray.orEmpty().takeLast(30)
     val rows = events.joinToString("") { item ->
         val event = item.jsonObject
-        val summary = listOf(event.text("sequence"), event.text("taskId"),
+        val summary = listOf(event.text("sequence"), event.text("workflowRunId"), event.text("taskId"), event.text("revisionId"),
             event.text("phase").ifBlank { event.text("kind") },
             event.text("status").ifBlank { event.text("stopReason") }.ifBlank { event.text("failureKind") }
-                .ifBlank { event.text("decision") }, event.text("text"))
+                .ifBlank { event.text("decision") },
+            event.text("acceptedRevisionSha256").let { if (it.isBlank()) "" else "accepted source $it" }, event.text("text"))
             .filter(String::isNotBlank).joinToString(" · ")
         "<li>${summary.escapeHtml()}</li>"
     }
