@@ -20,11 +20,19 @@ with an internal setup/exec signal. The local probe recorded in #354 distinguish
 genuine exits 1 and 124 from exec failure and watchdog termination even when their
 wrapper exits matched.
 
-Parsing does not authenticate a channel. This layer is not yet wired into
-`SandboxRunner`; its existing reserved-status guard remains active. Integration
-must separately own and bound the channel, bind the launcher/tool and command,
-start the local deadline before launch, retain complete I/O and cleanup, and
-version behavior evidence so historical missing completion remains unresolved.
-Application stdout/stderr and caller-provided JSON cannot serve as completion
-authority. A matching terminal status does not override a local deadline failure.
-Production executable/runtime identity remains a separate requirement.
+`SandboxRunner` opens a private temporary status file through a fixed shell launcher
+and supplies descriptor 3 to Bubblewrap. Dynamic arguments remain separate argv
+values. The application child does not retain that descriptor. The local deadline
+starts before launch; capture is bounded to 4 KiB and the temporary file and directory
+are removed on success or failure. Existing stream bounds and process cleanup apply.
+
+Schema-4 behavior records bind the launcher's identity and retain the exact launcher
+argv, channel locator and status bytes alongside the logical sandbox request.
+Closed validation checks both command recipes and the launch/terminal pair.
+Historical schemas remain readable but unresolved in archival audit.
+
+Parsing does not authenticate a channel or caller-provided JSON. The retained record
+is a local observation, not hosted/native authority. Application stdout/stderr do
+not serve as completion evidence. A matching terminal status does not override a
+local deadline failure. Production executable/runtime identity remains a separate
+requirement, including protection against same-user replacement between checks.

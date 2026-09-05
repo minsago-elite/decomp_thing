@@ -1,14 +1,16 @@
 # Local behavior records and archival revision attribution
 
-`BehaviorComparator` writes schema-3 records with provider
-`local-revision-bound-behavior-v3`. The decoder also accepts historical schema-1
+`BehaviorComparator` writes schema-4 records with provider
+`local-revision-bound-behavior-v4`. The decoder also accepts historical schema-1
 records, which do not commit file inputs, and schema-2 records, whose corpus digest
-includes host file locators. An archival comparison supplies an explicit
+includes host file locators. Schema-3 records retain portable corpus identities but
+lack independent completion evidence. Historical schemas remain readable, but audit
+reports their completion uncertainty and cannot qualify them as passing. An archival comparison supplies an explicit
 `BehaviorProjectContext(projectDir, profile)`. Comparisons without a project
 context retain their observations, but cannot validate an archival revision.
 
 The producer captures the original and rebuilt executable sizes and SHA-256
-digests before execution. It also captures the selected bubblewrap and timeout
+digests before execution. It also captures the selected bubblewrap, timeout and completion-launcher
 executables, including their locators. File identity and content are checked
 before and after each execution and again before atomic report publication.
 Case arguments and stdin bytes are copied before execution. A detected input
@@ -30,7 +32,7 @@ The decoder recomputes content digests and read-only mount argv without reopenin
 locators. Retained file bytes remain auditable after the host input files are removed.
 Declarations and mount requests do not prove that a program read every declared file.
 
-Schema 3's corpus digest commits the ordered case IDs, argv, stdin and declared
+The schema-3/4 corpus digest commits the ordered case IDs, argv, stdin and declared
 file names, lengths, digests and retained bytes. It excludes only each file's host
 `sourcePath`, so restoring the same corpus at another host path preserves its
 identity. Observations and the full report still commit the exact host locators
@@ -50,7 +52,7 @@ independently apply their expected-corpus policy.
 
 `ArchivalProjectAuditor.audit(..., requiredCorpusSha256 = setOf(expectedDigest))`
 applies that policy independently to current revision-bound reports. Every selected
-digest must have a schema-3 report; unrelated corpora and historical schemas cannot
+digest must have a schema-4 report; unrelated corpora and historical schemas cannot
 satisfy the selection. Missing corpora appear as `missing-corpus:<digest>` problems,
 and unrelated reports remain visible as problems rather than disappearing. The
 audit records sorted `requiredCorpusSha256` and `observedPortableCorpusSha256`
@@ -91,19 +93,22 @@ Native timeout arguments preserve the selected milliseconds (`1900` becomes
 remain readable, but arbitrary durations do not satisfy the recorded policy.
 The live timing regression requires a 1.2-second authored program to finish within
 a 1.9-second policy with its expected output and exit status; equal timeout exits
-cannot satisfy that assertion. Distinguishing native watchdog termination from an
-application's own exit status still requires a separate completion signal in the
-local execution contract.
+cannot satisfy that assertion.
 
-Until that completion channel exists, execution and record decoding conservatively
-reject wrapper statuses outside 0–123. This includes watchdog status 124, wrapper
-errors 125–127 and signal-style statuses. Genuine application exits in the same
-range also remain unqualified. Rejected runs preserve any prior report; archived
-records with these statuses remain present and appear as unresolved audit problems,
-even when both observations match and every commitment is internally consistent.
-Accepting a lower status does not independently establish application completion:
-wrapper setup failures may also use lower statuses. This guard is partial progress
-on #354, not the separate execution-owner completion signal required by that issue.
+Schema 4 requires a separate Bubblewrap JSON status descriptor, closed in the
+application child. The runner owns a private temporary channel, starts the local
+deadline before launch, bounds capture to 4 KiB, and removes the channel on exit.
+The record retains the status bytes, channel locator, and exact launcher argv in
+addition to the logical sandbox request. Validation reconstructs both commands and
+requires a complete launch/terminal pair agreeing with the wrapper exit.
+
+Genuine application exits 0–127, including 124, can qualify locally. Missing,
+truncated or contradictory completion evidence and deadline/capture failures abort
+publication and preserve prior reports. Signal-style statuses 128 and above remain
+unqualified because Bubblewrap does not retain raw wait status. Historical decoding
+retains its conservative 0–123 status restriction; archival audit marks all older
+schemas unresolved because they lack the completion channel. These observations do
+not establish production containment or immutable executable/runtime identity.
 
 The record limits are 1,024 cases, 8 MiB of stdin, 1 MiB of argument bytes and
 16 MiB of comparison output. Captured input files are limited to 64 MiB each,

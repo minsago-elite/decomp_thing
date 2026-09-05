@@ -204,8 +204,8 @@ internal object BehaviorEvidence {
         })
         val body = JsonObject(legacy + mapOf(
             "cases" to cases,
-            "schemaVersion" to JsonPrimitive(3),
-            "provider" to JsonPrimitive("local-revision-bound-behavior-v3"),
+            "schemaVersion" to JsonPrimitive(4),
+            "provider" to JsonPrimitive("local-revision-bound-behavior-v4"),
             "originalIdentity" to original,
             "rebuiltIdentity" to rebuilt,
             "executionPolicy" to policy,
@@ -244,7 +244,8 @@ internal object BehaviorEvidence {
         val schemaVersion = root.integer("schemaVersion")
         require((schemaVersion == 1 && root.string("provider") == PROVIDER) ||
             (schemaVersion == 2 && root.string("provider") == "local-revision-bound-behavior-v2") ||
-            (schemaVersion == 3 && root.string("provider") == "local-revision-bound-behavior-v3")) { "unsupported behavior report" }
+            (schemaVersion == 3 && root.string("provider") == "local-revision-bound-behavior-v3") ||
+            (schemaVersion == 4 && root.string("provider") == "local-revision-bound-behavior-v4")) { "unsupported behavior report" }
         require(root.string("id").matches(Regex("[A-Za-z0-9][A-Za-z0-9_.-]{0,127}"))) { "invalid behavior report ID" }
         require(root.string("sandbox") == "bubblewrap") { "unsupported behavior sandbox request" }
         val originalPath = absolutePath(root.string("originalBinary"))
@@ -256,7 +257,8 @@ internal object BehaviorEvidence {
         val policy = root.getValue("executionPolicy").jsonObject
         require(policy.keys == setOf("assurance", "environment", "workingDirectory", "networkIsolationRequested",
             "timeoutMillis", "maximumStdoutBytes", "maximumStderrBytes", "maximumAggregateBytes",
-            "maximumComparisonOutputBytes", "bubblewrap", "timeout")) {
+            "maximumComparisonOutputBytes", "bubblewrap", "timeout") +
+            if (schemaVersion == 4) setOf("completionLauncher", "maximumCompletionBytes") else emptySet<String>()) {
             "behavior execution policy is not closed"
         }
         require(policy.string("assurance") == "local-path-stability-checks-not-production-authority" &&
@@ -276,6 +278,8 @@ internal object BehaviorEvidence {
         }
         val bubblewrap = executable("bubblewrap")
         val timeout = executable("timeout")
+        val launcher = if (schemaVersion == 4) executable("completionLauncher") else null
+        if (schemaVersion == 4) require(policy.count("maximumCompletionBytes") == MAXIMUM_BUBBLEWRAP_COMPLETION_BYTES.toLong())
         val network = policy.boolean("networkIsolationRequested")
         require(root.boolean("networkIsolated") == network) { "behavior network request is contradictory" }
         val cases = root.getValue("cases").jsonArray
@@ -318,8 +322,8 @@ internal object BehaviorEvidence {
             stdinBytes += case.string("stdinHex").length / 2
             argumentBytes += arguments.sumOf { it.toByteArray().size.toLong() }
             require(stdinBytes <= 8L * 1024 * 1024 && argumentBytes <= 1024L * 1024)
-            val original = output(case.getValue("original").jsonObject, network)
-            val rebuilt = output(case.getValue("rebuilt").jsonObject, network)
+            val original = output(case.getValue("original").jsonObject, network, schemaVersion)
+            val rebuilt = output(case.getValue("rebuilt").jsonObject, network, schemaVersion)
             for ((observation, path) in listOf(original to originalPath, rebuilt to rebuiltPath)) {
                 val stdoutBytes = observation.string("stdoutHex").length.toLong() / 2
                 val stderrBytes = observation.string("stderrHex").length.toLong() / 2
@@ -335,8 +339,22 @@ internal object BehaviorEvidence {
                 }
                 val recordedCommand = observation.getValue("sandboxCommand")
                 require(recordedCommand == JsonArray(expectedCommand.map(::JsonPrimitive)) ||
-                    recordedCommand == JsonArray(historicalCommand.map(::JsonPrimitive))) {
+                    (schemaVersion < 4 && recordedCommand == JsonArray(historicalCommand.map(::JsonPrimitive)))) {
                     "behavior sandbox command contradicts its inputs or execution policy"
+                }
+                if (schemaVersion == 4) {
+                    val completion = observation.getValue("completionEvidence").jsonObject
+                    require(completion.keys == setOf("channelPath", "statusHex", "launchCommand"))
+                    require(completion.string("channelPath").length <= 4096)
+                    val channel = absolutePath(completion.string("channelPath"))
+                    val hex = completion.string("statusHex")
+                    require(hex.length <= MAXIMUM_BUBBLEWRAP_COMPLETION_BYTES * 2)
+                    requireHex(hex)
+                    parseBubblewrapCompletion(java.util.HexFormat.of().parseHex(hex), observation.integer("exitCode"))
+                    require(completion.getValue("launchCommand") == JsonArray(
+                        completionLaunchCommand(expectedCommand, requireNotNull(launcher), channel).map(::JsonPrimitive))) {
+                        "completion launcher command contradicts the sandbox request"
+                    }
                 }
             }
             val exit = original.integer("exitCode") == rebuilt.integer("exitCode")
@@ -382,9 +400,10 @@ internal object BehaviorEvidence {
             root.string("reportSha256") == hash(JsonObject(root - "reportSha256"))) { "behavior commitments do not match their records" }
     }
 
-    private fun output(output: JsonObject, network: Boolean): JsonObject {
-        require(output.keys == setOf("exitCode", "stdoutHex", "stderrHex", "networkIsolated", "sandboxCommand"))
-        rejectReservedWrapperExit(output.integer("exitCode"))
+    private fun output(output: JsonObject, network: Boolean, schemaVersion: Int): JsonObject {
+        require(output.keys == setOf("exitCode", "stdoutHex", "stderrHex", "networkIsolated", "sandboxCommand") +
+            if (schemaVersion == 4) setOf("completionEvidence") else emptySet<String>())
+        if (schemaVersion < 4) rejectReservedWrapperExit(output.integer("exitCode"))
         requireHex(output.string("stdoutHex"))
         requireHex(output.string("stderrHex"))
         require(output.boolean("networkIsolated") == network)

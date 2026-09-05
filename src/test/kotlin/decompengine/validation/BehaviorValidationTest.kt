@@ -44,7 +44,13 @@ class BehaviorValidationTest {
         val comparator = BehaviorComparator(SandboxRunner(timeout = java.time.Duration.ofMillis(300), networkIsolation = false))
         val report = comparator.compare("outcome", original, rebuilt, listOf(ProcessInput("normal")), tempDir.resolve("reports"))
         val prior = java.nio.file.Files.readAllBytes(report.reportPath)
-        for (status in listOf(124, 125, 126, 127, 137, 143, 255)) {
+        for (status in listOf(124, 125, 126, 127)) {
+            val completed = comparator.compare("application_$status", original, rebuilt,
+                listOf(ProcessInput("exit", listOf(status.toString()))), tempDir.resolve("reports"))
+            assertEquals(status, completed.cases.single().original.exitCode)
+            assertEquals(status, completed.cases.single().rebuilt.exitCode)
+        }
+        for (status in listOf(128, 137, 143, 255)) {
             assertFailsWith<BehaviorExecutionOutcomeException> {
                 comparator.compare("outcome", original, rebuilt, listOf(ProcessInput("exit", listOf(status.toString()))), tempDir.resolve("reports"))
             }
