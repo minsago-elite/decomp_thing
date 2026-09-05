@@ -140,3 +140,30 @@ contact a provider. This is regression coverage of the existing API contracts an
 fixture behavior, not qualification of every CLI command, live provider, real-target pipeline,
 archive/source scenario, browser or release gate. Criteria 1, 2 and 4 remain open for complete
 adapter parity, public-data classification and the shared legacy authorization boundary.
+
+## Packaged legacy browser qualification
+
+The [retained legacy browser report](evidence/web-legacy-browser-20260905.json) exercises the
+packaged application's actual legacy HTML and polling script on Linux/Chrome. It checks initial
+rendering, exact large usage, artifact metadata, diagnostic/prose/path withholding, automatic
+polling, missing-journal row preservation, valid-empty row clearing, restored-journal recovery
+and reload without page exceptions. All observed browser requests are GET/HEAD; no workflow is
+admitted or executed. The fixed input, artifact and simulated-active job bytes are unchanged
+at journey completion, and the journal matches its original fixture after restoration.
+
+The driver deliberately changes its own fixture: it sets status to analyzing after startup
+recovery, then removes, empties and restores the journal. These are test-owned state edits,
+not evidence of application write operations or transactional storage consistency. The new
+`--mode legacy` reuses owned read-only extraction, Node-free application PATH, browser/process
+cleanup and archive/JAR identity capture. Chrome uses test-only `--no-sandbox`. This qualifies
+legacy presentation/polling, not legacy session authorization or live workflow execution.
+
+The archive was built from application commit `e4df2e9`; SHA-256 is
+`8f90e08b2d16ce11788d7aba94a85b47ca2c433e38773963ef420557a839ec51`.
+The report confirms unchanged installation bytes and completed shutdown/cleanup. Other browser
+engines, accessibility qualification and the remaining D2 privacy/parity/authorization criteria
+remain open.
+
+The existing [public SPA journey](evidence/web-legacy-driver-public-20260905.json) also passed
+against the same archive after the launcher change, including packaged home/Runtime and
+explicit chunk-error recovery. The upgrade-driver unit tests and script syntax checks passed.
