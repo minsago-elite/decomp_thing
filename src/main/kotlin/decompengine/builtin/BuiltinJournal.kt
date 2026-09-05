@@ -269,11 +269,43 @@ internal class BuiltinJournal private constructor(
             }
         }
 
-        private fun identity(value: BuiltinJournalIdentity, binding: AgentExecutionRequestBinding) = buildJsonObject {
+        internal fun identity(value: BuiltinJournalIdentity, binding: AgentExecutionRequestBinding) = buildJsonObject {
             put("contractVersion", binding.contractVersion); put("requestSha256", binding.requestSha256)
             put("accessPolicySha256", binding.accessPolicySha256); put("provider", value.provider); put("model", value.model)
             put("sourceSha256", value.sourceSha256); put("stageSha256", value.stageSha256)
             put("acceptedRevisionSha256", value.acceptedRevisionSha256)
+        }
+
+        /** Pure archive inspection: no path lookup, lock acquisition, truncation or recovery effect. */
+        internal fun inspectRecords(records: JsonArray, expectedIdentity: JsonObject, expected: BuiltinJournalCommitment,
+            maximumRecordBytes: Int, maximumBytes: Long, maximumRecords: Int): BuiltinJournalInspection = guarded {
+            check(records.size == expected.records && expected.records in 1..maximumRecords && expected.bytes in 1..maximumBytes)
+            var previous = "0".repeat(64)
+            var pending: BuiltinJournalKind? = null
+            var terminal = false
+            var bytes = 0L
+            val contentDigest = MessageDigest.getInstance("SHA-256")
+            val verified = records.mapIndexed { index, element ->
+                check(!terminal)
+                val record = element.jsonObject
+                check(record.keys == setOf("version", "sequence", "previous", "kind", "payload", "sha256"))
+                check(record["version"] == JsonPrimitive(1) && record["sequence"] == JsonPrimitive(index))
+                check(record["previous"] == JsonPrimitive(previous))
+                val checksum = hash(encode(JsonObject(record - "sha256"), maximumRecordBytes))
+                check(record["sha256"] == JsonPrimitive(checksum))
+                val kind = BuiltinJournalKind.valueOf(record.getValue("kind").jsonPrimitive.content)
+                pending = transition(pending, kind, index)
+                record.getValue("payload").jsonObject
+                if (index == 0) check(record["payload"] == expectedIdentity)
+                val raw = encode(record, maximumRecordBytes)
+                check(raw.size.toLong() + 1 <= maximumBytes - bytes)
+                bytes += raw.size + 1
+                contentDigest.update(raw); contentDigest.update(10.toByte())
+                previous = checksum; terminal = kind == BuiltinJournalKind.TERMINAL
+                record
+            }
+            check(bytes == expected.bytes && previous == expected.headSha256)
+            BuiltinJournalInspection(verified, terminal, pending != null, contentDigest.digest().joinToString("") { "%02x".format(it) })
         }
 
         private fun verifyParent(path: Path) {

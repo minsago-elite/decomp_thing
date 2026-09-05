@@ -69,6 +69,16 @@ class BuiltinCapturedResumeTest {
         assertEquals(listOf("read2"), evidence(continued).filesystemAudit.map { it.sessionId })
         assertTrue(evidence(continued).restorationAudit.all { it.reason == AcpFilesystemAuditReason.COMPLETED })
         assertEquals(namespaceExists, Files.exists(ACP_CAPTURED_REPAIR_WORKSPACE))
+        val req = request(AgentWorkspaceRoot("project", ACP_CAPTURED_REPAIR_WORKSPACE), initial())
+        val identity = BuiltinInvocationArchiveIdentity("repair", "resumed-attempt", "d".repeat(64),
+            AgentExecutionRequestBinding.capture(req), config.first.identity)
+        val archived = BuiltinInvocationArchiveDocument.capture(identity, req, continued.receipt, config.first)
+        assertTrue(archived.verified.candidateEvidenceComplete)
+        val records = Json.parseToJsonElement(archived.bytes.decodeToString()).jsonObject.getValue("records").jsonArray
+        assertTrue(records.filter { it.jsonObject["kind"] == JsonPrimitive("CHECKPOINT") }.any {
+            it.jsonObject.getValue("payload").jsonObject["resumeState"]?.jsonObject?.get("toolAudit")?.jsonObject
+                ?.get("filesystem")?.jsonArray?.isNotEmpty() == true
+        })
     }
 
     @Test fun `resumed reversion removes prior patches against the original accepted bytes`() {
