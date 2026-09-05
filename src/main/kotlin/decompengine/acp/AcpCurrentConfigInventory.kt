@@ -64,5 +64,9 @@ internal fun previewSessionChoices(values: Sequence<String>, sensitiveValues: Co
     val formatted = text + if (bounded.size > 4) " (more choices omitted)" else ""
     // Redaction markers, JSON quoting and omission text can synthesize another private ID.
     // No fixed replacement is safe for arbitrary identifiers; omit this display-only hint.
+<<<<<<< HEAD
     return if (redactor.leaks(formatted)) "" else formatted
+=======
+    return if (privatePreferences.any { it.isNotEmpty() && formatted.contains(it) }) "" else formatted
+>>>>>>> 69127282 (Keep private preference identifiers out of final formatted previews (#310) [skip ci])
 }
