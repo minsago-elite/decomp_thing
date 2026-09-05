@@ -239,17 +239,29 @@ class AcpAgentHarness(
         capturedFilesystem: AcpCapturedRepairFilesystem?,
         preflightWorkflow: AcpPreflightWorkflow?,
     ): AgentExecutionReceipt {
+        val wallDeadline = MonotonicDeadline(request.limits.wallClockTimeout)
         val binding = AgentExecutionRequestBinding.capture(request)
         val evidenceState = AcpInvocationEvidenceState(factoryProvenance.get())
+        var schedulingPermit: AcpExecutionScheduler.Permit? = null
         var cause: Throwable? = null
         val outcome = try {
+            unresolvedCleanupFailure.get()?.let { throw it }
+            schedulingPermit = productionAcpExecutionScheduler.acquire(
+                request.workspaceRoots.first().path.toString(),
+                request.cancellation,
+                wallDeadline::hasExpired,
+            )
             AgentExecutionOutcome.Returned(
-                executeInternalResult(
+                if (schedulingPermit == null) AgentExecutionResult(
+                    AgentStopReason.CANCELLED,
+                    "cancelled before ACP scheduler admission",
+                ) else executeInternalResult(
                     request,
                     onEvent,
                     capturedFilesystem,
                     preflightWorkflow,
                     evidenceState,
+                    wallDeadline,
                 ),
             )
         } catch (failure: Error) {
@@ -276,6 +288,8 @@ class AcpAgentHarness(
                     details = mapOf("exception" to failure.javaClass.name),
                 ),
             )
+        } finally {
+            schedulingPermit?.finish(cleanupUnverified = evidenceState.requiresRetainedAdmission())
         }
         val evidence = evidenceState.snapshot(
             includeCompleteExecution = preflightWorkflow == null && outcome is AgentExecutionOutcome.Returned,
@@ -305,6 +319,7 @@ class AcpAgentHarness(
         capturedFilesystem: AcpCapturedRepairFilesystem?,
         preflightWorkflow: AcpPreflightWorkflow?,
         evidenceState: AcpInvocationEvidenceState,
+        wallDeadline: MonotonicDeadline,
     ): AgentExecutionResult {
         unresolvedCleanupFailure.get()?.let { throw it }
         if (preflightWorkflow != null) {
@@ -319,7 +334,6 @@ class AcpAgentHarness(
         }
 
         val startedAt = System.nanoTime()
-        val wallDeadline = MonotonicDeadline(request.limits.wallClockTimeout)
         val before = if (capturedFilesystem == null && preflightWorkflow == null) {
             evidenceState.reach(AcpExecutionLifecyclePhase.WORKSPACE_SNAPSHOT)
             try {
@@ -401,6 +415,7 @@ class AcpAgentHarness(
             )
         } catch (failure: AgentExecutionException) {
             if (failure.containsCleanupProofFailure()) {
+                evidenceState.finishCleanup(clean = false)
                 unresolvedCleanupFailure.compareAndSet(null, failure)
                 throw requireNotNull(unresolvedCleanupFailure.get())
             }
@@ -1571,6 +1586,7 @@ private class AcpInvocationEvidenceState(
 ) {
     private val phase = AtomicReference(AcpExecutionLifecyclePhase.REQUEST_BOUND)
     private val cleanup = AtomicReference(AcpExecutionCleanupDisposition.NOT_REQUIRED)
+    private val retainedAdmission = AtomicBoolean(false)
     private val negotiatedAgent = AtomicReference<AcpNegotiatedAgentEvidence?>()
     private val wirePromptSha256 = AtomicReference<String?>()
     private val diagnostics = AtomicReference<AcpProcessDiagnostics?>()
@@ -1640,17 +1656,16 @@ private class AcpInvocationEvidenceState(
     }
 
     fun finishCleanup(clean: Boolean) {
-        cleanup.set(
-            if (clean && diagnostics.get()?.let {
-                    it.remainingProcessIds.isEmpty() && it.sandboxCleanupVerified
-                } == true
-            ) {
-                AcpExecutionCleanupDisposition.VERIFIED
-            } else {
-                AcpExecutionCleanupDisposition.UNVERIFIED
-            },
-        )
+        val verified = clean && diagnostics.get()?.let {
+            it.remainingProcessIds.isEmpty() && it.sandboxCleanupVerified
+        } == true
+        cleanup.set(if (verified) AcpExecutionCleanupDisposition.VERIFIED else AcpExecutionCleanupDisposition.UNVERIFIED)
+        if (!verified) retainedAdmission.set(true)
     }
+
+    // Quarantine only this invocation's unresolved cleanup. A different concurrent invocation
+    // can make the harness sticky without consuming this invocation's independently clean slot.
+    fun requiresRetainedAdmission(): Boolean = retainedAdmission.get()
 
     fun snapshot(includeCompleteExecution: Boolean): AcpInvocationEvidenceSnapshot {
         val phaseSnapshot = phase.get()

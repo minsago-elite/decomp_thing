@@ -1454,9 +1454,12 @@ class AcpAgentHarnessTest {
         assertEquals(AgentFileChangeKind.MODIFIED, largeResult.changes.single().kind)
         assertNotNull(largeResult.changes.single().beforeSha256)
 
-        val cancellationPolls = AtomicInteger()
         val cancellation = AgentCancellation {
-            cancellationPolls.incrementAndGet() >= 2
+            // Admission also polls cancellation. Target the actual snapshot boundary rather
+            // than depending on how many cancellation checks precede workspace traversal.
+            Thread.currentThread().stackTrace.any { frame ->
+                frame.className == "decompengine.acp.WorkspaceSnapshotBudget" && frame.methodName == "checkpoint"
+            }
         }
         val cancelledFixture = fixture()
         val cancelledHarness = harness("success")
@@ -1533,9 +1536,9 @@ class AcpAgentHarnessTest {
             timeoutHarness.execute(timeoutFixture.request.withWallClockTimeout(Duration.ofNanos(1)))
         }
         assertEquals(AgentFailureKind.TIMEOUT, timeout.failure.kind)
-        assertTrue(timeout.message.orEmpty().contains("initial workspace snapshot"))
+        assertEquals(mapOf("phase" to "scheduler", "reason" to "requestDeadline"), timeout.failure.details)
         val timeoutEvidence = assertIs<AcpInvocationEvidenceSnapshot>(assertNotNull(timeout.receipt).providerEvidence)
-        assertEquals(AcpExecutionLifecyclePhase.WORKSPACE_SNAPSHOT, timeoutEvidence.phaseReached)
+        assertEquals(AcpExecutionLifecyclePhase.REQUEST_BOUND, timeoutEvidence.phaseReached)
         assertEquals(AcpExecutionCleanupDisposition.NOT_REQUIRED, timeoutEvidence.cleanupDisposition)
         assertNull(timeoutEvidence.completeExecutionEvidence)
         assertEquals(null, timeoutHarness.latestDiagnostics())

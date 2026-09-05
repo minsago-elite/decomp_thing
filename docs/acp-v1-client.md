@@ -231,6 +231,33 @@ below must review these fields explicitly; removal or wire-shape changes require
 
 ## Process and wire boundary
 
+### Admission, queue bounds, and cleanup capacity
+
+Every production `AcpAgentHarness` invocation, including directly constructed harnesses, captured repairs, and
+doctor preflights, shares one application-process scheduler. Admission occurs before filesystem snapshots or agent
+launch. At most four invocations run at once, with one active invocation per primary workspace path. The scheduler
+holds at most 64 waiting invocations overall and eight per workspace. Eligible waiters run in FIFO order; a waiter
+whose workspace is already active cannot prevent another workspace from using a free global slot.
+
+Waiting consumes the original execution wall-clock budget and has a separate 30-second maximum. Cancellation and
+thread interruption remove a queued invocation without launching a process. Queue overflow, elapsed deadlines,
+and unavailable cleanup capacity return typed invocation-bound receipts with scheduler phase/reason metadata.
+The scheduler creates no threads or secondary executor queue and does not retry work automatically. Active turns
+continue using the existing ACP cancellation, terminal teardown, and process containment boundary.
+
+The admission slot covers the full contained invocation through cleanup and final change capture. A failed process
+cleanup proof retains its slot and workspace reservation for the application process lifetime; another harness
+instance cannot turn an unresolved process into fresh capacity. Such a workspace is unavailable for further turns,
+and no new invocation is admitted when all global slots are retained. Operators must resolve the process/cgroup
+failure before restarting the application; this mechanism does not certify cleanup merely because a JVM exits.
+
+Workspace grouping uses the exact normalized primary path already present in the request. Captured repairs use a
+shared synthetic primary path and therefore conservatively share one active repair slot across projects. Separate
+JVMs have separate schedulers. This checkpoint does not provide application-wide project identity, bounded HTTP
+submission queues, cancellation of validation subprocesses, or persistent restart scheduling; those remain part of
+issue #71. Captured repair also defensively copies its caller-supplied source map before admission; admission does
+not yet reserve that input memory. Per-invocation output, terminal, memory, and workspace limits still apply independently.
+
 The public `AcpAgentHarness` has no uncontained production mode. Before it starts an ACP agent it verifies an explicit
 Linux boundary made from digest-pinned, canonical, root-owned `bubblewrap`, `prlimit`, `systemd-run`, `systemctl`, and
 `bash` executables plus a digest/manifest-pinned static gate helper. Absence, replacement, an unsupported platform, a missing user systemd bus, or inability to create and
