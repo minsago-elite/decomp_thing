@@ -1307,6 +1307,7 @@ class TraceGuidedRepairLoop private constructor(
                         accessPolicy = AgentAccessPolicy(rules),
                         limits = limits,
                         cancellation = cancellation,
+                        workflowIdentity = graph.invocationIdentity(attempt),
                     ).also { agentRequest = it }
                 },
                 onEvent = { event ->
@@ -1322,15 +1323,24 @@ class TraceGuidedRepairLoop private constructor(
             }
             throw failure
         }
-        val executionEvidence = AcpExecutionReceiptDocument.captureOrNull(
-            request = agentRequest,
-            promptSha256 = sha256(receiptCommitmentBytes(invocationPrompt)),
-            receipt = stagedExecution.receipt,
-            events = eventRecorder.receiptSnapshot(),
-            evidenceKind = TRACE_REPAIR_ACP_RECEIPT_KIND,
-            taskIdentityField = TRACE_REPAIR_ACP_TASK_FIELD,
-            taskId = attempt.id,
-        )
+        val executionEvidence = try {
+            AcpExecutionReceiptDocument.captureOrNull(
+                request = agentRequest,
+                promptSha256 = sha256(receiptCommitmentBytes(invocationPrompt)),
+                receipt = stagedExecution.receipt,
+                events = eventRecorder.receiptSnapshot(),
+                evidenceKind = TRACE_REPAIR_ACP_RECEIPT_KIND,
+                taskIdentityField = TRACE_REPAIR_ACP_TASK_FIELD,
+                taskId = attempt.id,
+            )
+        } catch (failure: Throwable) {
+            if (failure is Exception) {
+                abortPendingGraph(graph, attempt, failure, "invalid-agent-receipt")
+            } else {
+                runCatching(graph::close).onFailure(failure::addSuppressed)
+            }
+            throw failure
+        }
         if (executionEvidence == null && !allowTestOnlyValidation) {
             val failure = IllegalStateException(
                 "repair agent invocation lacks schema-v2 ACP provider evidence",

@@ -148,6 +148,25 @@ class AgentCancellationSource {
     fun cancel(): Boolean = cancelled.compareAndSet(false, true)
 }
 
+enum class AgentWorkflow { REPAIR, RECONSTRUCTION }
+
+/** Workflow-owned lineage. A captured subset of source files is not an accepted project revision. */
+data class AgentWorkflowIdentity(
+    val workflow: AgentWorkflow,
+    val taskId: String,
+    val acceptedRevisionSha256: String,
+    val promptSha256: String,
+) {
+    val schemaVersion: Int = 1
+
+    init {
+        require(taskId.matches(Regex("[A-Za-z0-9_][A-Za-z0-9_.-]{0,127}"))) { "invalid workflow task identity" }
+        require(listOf(acceptedRevisionSha256, promptSha256).all { it.matches(Regex("[a-f0-9]{64}")) }) {
+            "invalid workflow lineage digest"
+        }
+    }
+}
+
 class AgentExecutionRequest(
     val objective: String,
     workspaceRoots: Collection<AgentWorkspaceRoot>,
@@ -155,6 +174,7 @@ class AgentExecutionRequest(
     val accessPolicy: AgentAccessPolicy,
     val limits: AgentExecutionLimits = AgentExecutionLimits(),
     val cancellation: AgentCancellation = AgentCancellation.NONE,
+    val workflowIdentity: AgentWorkflowIdentity? = null,
 ) {
     val schemaVersion: Int = AGENT_EXECUTION_CONTRACT_VERSION
     val workspaceRoots: List<AgentWorkspaceRoot> = immutableList(workspaceRoots)

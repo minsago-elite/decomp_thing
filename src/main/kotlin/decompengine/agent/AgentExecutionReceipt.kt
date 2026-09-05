@@ -40,6 +40,14 @@ data class AgentExecutionRequestBinding(
                     field("maximumOutputBytes", request.limits.maxOutputBytes.toString())
                     field("maximumInputTokens", request.limits.maxInputTokens?.toString())
                     field("maximumOutputTokens", request.limits.maxOutputTokens?.toString())
+                    // Absent lineage preserves the original version-1 request commitment exactly.
+                    request.workflowIdentity?.let { identity ->
+                        field("workflowIdentity.version", identity.schemaVersion.toString())
+                        field("workflowIdentity.workflow", identity.workflow.name)
+                        field("workflowIdentity.taskId", identity.taskId)
+                        field("workflowIdentity.acceptedRevisionSha256", identity.acceptedRevisionSha256)
+                        field("workflowIdentity.promptSha256", identity.promptSha256)
+                    }
                 }.finish(),
                 accessPolicySha256 = policySha256,
             )

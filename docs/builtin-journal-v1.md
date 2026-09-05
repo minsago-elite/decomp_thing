@@ -5,6 +5,8 @@ invocation requires a fresh journal file and writes its execution evidence befor
 receipt. A storage, serialization, integrity or close failure cannot produce a successful receipt.
 The default factory does not configure journals yet. The captured-repair wrapper accepts explicit
 trusted configuration as described in [captured recovery](builtin-captured-recovery-v1.md).
+For fresh graph-owned repair attempts, [repair lineage provisioning](builtin-repair-lineage-v1.md)
+derives the journal identity from the shared request and captured bytes instead of caller placeholders.
 
 The caller supplies provider/model names and SHA-256 identities for the initial source snapshot,
 staged workspace and last accepted revision. START binds those identities to the shared immutable

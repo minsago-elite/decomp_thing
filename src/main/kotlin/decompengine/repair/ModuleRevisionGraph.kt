@@ -14,6 +14,8 @@ import decompengine.agent.receiptCommitmentBytes
 import decompengine.agent.AgentFileChange
 import decompengine.agent.AgentFileChangeKind
 import decompengine.agent.AgentWorkspacePath
+import decompengine.agent.AgentWorkflow
+import decompengine.agent.AgentWorkflowIdentity
 import decompengine.validation.ProcessInput
 import kotlinx.serialization.json.Json
 import kotlinx.serialization.json.JsonElement
@@ -1924,6 +1926,18 @@ internal class ModuleRevisionGraph private constructor(
         requireRecoverablePendingState(pendingState)
         persist(pendingState)
         return ModuleRevisionAttempt(attemptId)
+    }
+
+    /** Read lineage from the durable pending attempt, never from provider context or a staged subset. */
+    @Synchronized
+    internal fun invocationIdentity(attempt: ModuleRevisionAttempt): AgentWorkflowIdentity = graphOperation {
+        val pending = requirePending(attempt)
+        val metadata = requireNotNull(pending.repairMetadata) { "repair attempt has no iteration metadata" }
+        require(metadata.agentInvocation == null) { "repair attempt already has invocation evidence" }
+        require(revisionSha256(requireCurrentHead()) == pending.parentSourceRevisionSha256) {
+            "accepted sources changed before repair invocation"
+        }
+        AgentWorkflowIdentity(AgentWorkflow.REPAIR, pending.id, pending.parentSourceRevisionSha256, metadata.prompt)
     }
 
     @Synchronized

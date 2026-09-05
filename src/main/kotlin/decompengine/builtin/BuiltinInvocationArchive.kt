@@ -85,7 +85,17 @@ internal class BuiltinInvocationArchiveDocument private constructor(raw: ByteArr
             configuration: BuiltinJournalConfiguration, limits: BuiltinInvocationArchiveLimits = BuiltinInvocationArchiveLimits()): BuiltinInvocationArchiveDocument = guarded {
             check(identity.binding == receipt.requestBinding && identity.binding == AgentExecutionRequestBinding.capture(request))
             check(BuiltinJournal.identity(configuration.identity, identity.binding) == BuiltinJournal.identity(identity.journal, identity.binding))
+            request.workflowIdentity?.let { workflow ->
+                check(identity.workflow == workflow.workflow.name.lowercase() && identity.taskId == workflow.taskId)
+                check(identity.promptSha256 == workflow.promptSha256 && identity.journal.acceptedRevisionSha256 == workflow.acceptedRevisionSha256)
+                check(identity.journal.stageSha256 == builtinCapturedStageSha256(request, identity.journal.sourceSha256))
+            }
             val provider = receipt.providerEvidence
+            if (provider is BuiltinCapturedExecutionEvidence && request.workflowIdentity != null) {
+                check(provider.workflowIdentity == request.workflowIdentity)
+                check(BuiltinJournal.identity(checkNotNull(provider.journalIdentity), identity.binding) ==
+                    BuiltinJournal.identity(identity.journal, identity.binding))
+            }
             val loop = when (provider) {
                 is BuiltinLoopEvidence -> provider
                 is BuiltinCapturedExecutionEvidence -> provider.loop

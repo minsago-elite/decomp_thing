@@ -12,7 +12,14 @@ An `AgentExecutionRequest` contains:
 - immutable text context inputs, separate from writable workspace files;
 - exact or recursive path rules and a global operation allowlist;
 - wall-clock, idle, turn, tool-call, output-byte, and optional token limits; and
-- a cancellation token that can change state while an execution is active.
+- a cancellation token that can change state while an execution is active; and
+- optional versioned workflow lineage identifying the workflow, durable task, accepted revision, and prompt digest.
+
+`AgentWorkflowIdentity` is supplied by the owning workflow. Trace-guided repair reads it from the durable pending
+revision-graph attempt after checking the current accepted source tree. It is separate from model-visible context
+and does not grant operations or file access. Each identity field enters the immutable request commitment;
+requests without lineage retain their original version-1 digest. A captured context subset has its own source hash
+and must never substitute for the accepted project revision. See [built-in repair lineage](builtin-repair-lineage-v1.md).
 
 Workspace paths are root-qualified, normalized relative paths. A path rule cannot grant command execution, network
 access, or permission escalation implicitly; those operations must be present in the global allowlist. Transport

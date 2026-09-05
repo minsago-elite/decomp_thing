@@ -18,6 +18,40 @@ import kotlin.test.assertTrue
 
 class AgentExecutionContractTest {
     @Test
+    fun `workflow lineage binds every identity independently without expanding path authority`() {
+        val original = fixture("unchanged\n").request
+        val identity = AgentWorkflowIdentity(AgentWorkflow.REPAIR, "revision_1", "a".repeat(64), "b".repeat(64))
+        fun binding(value: AgentWorkflowIdentity?) = AgentExecutionRequestBinding.capture(AgentExecutionRequest(
+            original.objective, original.workspaceRoots, original.contextInputs, original.accessPolicy,
+            original.limits, original.cancellation, value,
+        ))
+        val variations = listOf(null, identity, identity.copy(workflow = AgentWorkflow.RECONSTRUCTION),
+            identity.copy(taskId = "revision_2"), identity.copy(acceptedRevisionSha256 = "c".repeat(64)),
+            identity.copy(promptSha256 = "d".repeat(64)))
+        assertEquals(variations.size, variations.map { binding(it).requestSha256 }.distinct().size)
+        assertEquals(1, variations.map { binding(it).accessPolicySha256 }.distinct().size)
+        assertEquals(binding(identity), binding(identity.copy()))
+        assertEquals(AgentExecutionRequestBinding.capture(original), binding(null))
+    }
+
+    @Test
+    fun `workflow identities reject nonportable tasks and invalid revision commitments`() {
+        for (task in listOf("", "../attempt", "/attempt", "a\\b", "a\nb", "a".repeat(129))) {
+            assertFailsWith<IllegalArgumentException> {
+                AgentWorkflowIdentity(AgentWorkflow.REPAIR, task, "a".repeat(64), "b".repeat(64))
+            }
+        }
+        for (digest in listOf("", "a".repeat(63), "A".repeat(64), "g".repeat(64))) {
+            assertFailsWith<IllegalArgumentException> {
+                AgentWorkflowIdentity(AgentWorkflow.REPAIR, "attempt", digest, "b".repeat(64))
+            }
+            assertFailsWith<IllegalArgumentException> {
+                AgentWorkflowIdentity(AgentWorkflow.REPAIR, "attempt", "a".repeat(64), digest)
+            }
+        }
+    }
+
+    @Test
     fun `request snapshots absolute workspaces immutable context access and execution limits`() {
         val workspace = createTempDirectory("agent-contract-request-").toAbsolutePath().normalize()
         val roots = mutableListOf(AgentWorkspaceRoot("project", workspace))

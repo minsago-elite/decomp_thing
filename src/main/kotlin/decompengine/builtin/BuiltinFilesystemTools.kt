@@ -92,6 +92,8 @@ class BuiltinCapturedExecutionEvidence(
     candidateChanges: List<AgentFileChange>,
     contextAudit: List<BuiltinContextToolAudit> = emptyList(),
     restorationAudit: List<AcpFilesystemAuditRecord> = emptyList(),
+    val workflowIdentity: AgentWorkflowIdentity? = null,
+    val journalIdentity: BuiltinJournalIdentity? = null,
 ) : AgentExecutionProviderEvidence {
     override val providerId = "builtin"
     override val schemaVersion = 1
@@ -113,12 +115,16 @@ class BuiltinCapturedRepairHarness(
     private val resume: BuiltinCapturedResume? = null,
     secrets: Collection<String> = emptyList(),
     private val sourceStoreConfiguration: BuiltinSourceStoreConfiguration? = null,
+    private val journalFactory: BuiltinRepairJournalFactory? = null,
 ) : CapturedRepairAgentHarness {
     private val secrets = secrets.toList()
     init {
         require(checkpointConfiguration == null || journalConfiguration != null)
         require(resume == null || checkpointConfiguration != null)
         require(sourceStoreConfiguration == null || checkpointConfiguration != null)
+        require(journalFactory == null || (journalConfiguration == null && checkpointConfiguration == null && resume == null)) {
+            "per-attempt journal provisioning cannot use a caller-owned journal or checkpoint"
+        }
     }
     override fun implementationIdentifier() = "builtin-captured-repair-v1"
     override fun execute(request: AgentExecutionRequest, onEvent: (AgentExecutionEvent) -> Unit) =
@@ -132,6 +138,18 @@ class BuiltinCapturedRepairHarness(
 
     override fun executeCapturedReceipt(request: AgentExecutionRequest, initialFiles: Map<String, ByteArray>, output: BoundedRepairOutput,
         onEvent: (AgentExecutionEvent) -> Unit): AgentExecutionReceipt {
+        val journalConfiguration = try {
+            (journalFactory?.create(request, initialFiles, limits.maximumEvidenceBytes) ?: this.journalConfiguration).also { journal ->
+                if (journal != null && request.workflowIdentity != null) {
+                    require(request.workflowIdentity.workflow == AgentWorkflow.REPAIR)
+                    require(journal.identity.acceptedRevisionSha256 == request.workflowIdentity.acceptedRevisionSha256)
+                    require(journal.identity.stageSha256 == builtinCapturedStageSha256(request, journal.identity.sourceSha256))
+                }
+            }
+        } catch (_: Exception) {
+            return AgentExecutionReceipt(AgentExecutionRequestBinding.capture(request), AgentExecutionOutcome.Failed(
+                AgentFailure(AgentFailureKind.INVALID_REQUEST, "Built-in repair journal lineage is invalid")))
+        }
         val audit = AcpFilesystemAuditRecorder(limits.maxTraceRecords)
         var openedCapture: AcpCapturedRepairFilesystem? = null
         var contextTools: BuiltinCapturedContextTools? = null
@@ -244,6 +262,6 @@ class BuiltinCapturedRepairHarness(
         val records = audit.snapshot()
         return AgentExecutionReceipt(receipt.requestBinding, outcome,
             BuiltinCapturedExecutionEvidence(receipt.providerEvidence as BuiltinLoopEvidence, records.drop(restorationRecords), changes,
-                contextTools?.audit().orEmpty(), records.take(restorationRecords)))
+                contextTools?.audit().orEmpty(), records.take(restorationRecords), request.workflowIdentity, journalConfiguration?.identity))
     }
 }

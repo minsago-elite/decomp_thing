@@ -21,6 +21,17 @@ import decompengine.agent.AgentOperation
 import decompengine.agent.AgentPathRule
 import decompengine.agent.AgentStopReason
 import decompengine.agent.AgentWorkspacePath
+import decompengine.agent.AgentWorkflow
+import decompengine.builtin.BuiltinCapturedRepairHarness
+import decompengine.builtin.BuiltinCapturedExecutionEvidence
+import decompengine.builtin.BuiltinRepairJournalFactory
+import decompengine.builtin.BuiltinInvocationArchiveIdentity
+import decompengine.builtin.BuiltinInvocationArchiveDocument
+import decompengine.builtin.provider.ModelProvider
+import decompengine.builtin.provider.ModelResponse
+import decompengine.builtin.provider.ModelToolCall
+import decompengine.builtin.provider.ModelFinishReason
+import decompengine.builtin.provider.ModelUsage
 import decompengine.acp.AcpExecutionCleanupDisposition
 import decompengine.acp.AcpExecutionEvidenceCompleteness
 import decompengine.acp.AcpExecutionLifecyclePhase
@@ -38,6 +49,8 @@ import decompengine.validation.ProcessOutput
 import com.sun.net.httpserver.HttpServer
 import kotlinx.serialization.json.Json
 import kotlinx.serialization.json.JsonPrimitive
+import kotlinx.serialization.json.buildJsonObject
+import kotlinx.serialization.json.put
 import kotlinx.serialization.json.jsonArray
 import kotlinx.serialization.json.jsonObject
 import kotlinx.serialization.json.jsonPrimitive
@@ -45,6 +58,7 @@ import java.net.InetSocketAddress
 import java.net.URI
 import java.nio.file.Files
 import java.nio.file.Path
+import java.nio.file.attribute.PosixFilePermissions
 import java.time.Duration
 import java.util.concurrent.CountDownLatch
 import java.util.concurrent.Executors
@@ -66,8 +80,62 @@ import kotlin.test.assertFailsWith
 import kotlin.test.assertFalse
 import kotlin.test.assertNotNull
 import kotlin.test.assertTrue
+import kotlin.test.assertIs
 
 class TraceGuidedRepairTest {
+    @Test
+    fun `built-in stage receives graph lineage and unsupported receipt rejection releases the graph`() {
+        val broken = "int decomp_engine_main(void) {\n"
+        val project = createProject(createTempDirectory("trace-builtin-lineage-").resolve("project"), broken)
+        val journals = createTempDirectory("trace-builtin-journals-")
+        Files.setPosixFilePermissions(journals, PosixFilePermissions.fromString("rwx------"))
+        val factory = BuiltinRepairJournalFactory(journals, "fixture", "scripted-v1")
+        var turns = 0
+        val builtin = BuiltinCapturedRepairHarness(ModelProvider { _, _ ->
+            val calls = if (turns++ == 0) listOf(ModelToolCall("write1", "write_text", buildJsonObject {
+                put("root", "project"); put("path", "src/reconstructed.c")
+                put("content", "int decomp_engine_main(void) { return 0; }\n")
+            })) else emptyList()
+            ModelResponse("", calls, if (calls.isEmpty()) ModelFinishReason.STOP else ModelFinishReason.TOOL_CALLS,
+                ModelUsage(100, 10, false), 1)
+        }, journalFactory = factory)
+        lateinit var observed: AgentExecutionRequest
+        lateinit var archived: BuiltinInvocationArchiveDocument
+        val harness = object : CapturedRepairAgentHarness by builtin {
+            override fun executeCapturedReceipt(request: AgentExecutionRequest, initialFiles: Map<String, ByteArray>,
+                output: BoundedRepairOutput, onEvent: (AgentExecutionEvent) -> Unit): AgentExecutionReceipt {
+                observed = request
+                val receipt = builtin.executeCapturedReceipt(request, initialFiles, output, onEvent)
+                assertEquals(AgentStopReason.COMPLETED, receipt.requireResult().stopReason)
+                val evidence = assertIs<BuiltinCapturedExecutionEvidence>(receipt.providerEvidence)
+                val workflow = assertNotNull(request.workflowIdentity)
+                val journal = assertNotNull(evidence.journalIdentity)
+                archived = BuiltinInvocationArchiveDocument.capture(BuiltinInvocationArchiveIdentity("repair", workflow.taskId,
+                    workflow.promptSha256, receipt.requestBinding, journal), request, receipt, factory.create(request, initialFiles, 32L * 1024 * 1024))
+                return receipt
+            }
+        }
+        val history = RepairHistory(project.resolve("reports/repair_history.json"))
+        // Acceptance remains unavailable until the graph can verify and persist built-in receipts.
+        assertFailsWith<IllegalArgumentException> {
+            generatedCRepairLoop(harness, history).repairCompileError(project, collectCompileFailure(project), emptyList())
+        }
+        assertEquals(2, turns)
+        assertTrue(archived.verified.candidateEvidenceComplete)
+        assertFalse(archived.verified.releaseComplete)
+        assertEquals(broken, project.resolve("src/reconstructed.c").readText())
+        ModuleRevisionGraph.open(project, GeneratedCRepairIndexProfile).use { graph ->
+            val node = graph.snapshot.nodes.last()
+            val identity = assertNotNull(observed.workflowIdentity)
+            assertEquals(AgentWorkflow.REPAIR, identity.workflow)
+            assertEquals(node.id, identity.taskId)
+            assertEquals(graph.snapshot.nodes.first().sourceRevisionSha256, identity.acceptedRevisionSha256)
+            assertEquals(node.repairMetadata!!.prompt, identity.promptSha256)
+            assertEquals(ModuleRevisionStatus.REJECTED, node.status)
+            assertEquals("invalid-agent-receipt", node.evidenceKind)
+        }
+    }
+
     @Test
     fun `ordinary ACP terminal outcomes persist immutable receipts before rejected repair history`() {
         val cases = listOf(
