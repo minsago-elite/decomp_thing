@@ -5,7 +5,6 @@ import decompengine.jobs.Job
 import decompengine.jobs.JobStoreException
 import decompengine.jobs.toJson
 import kotlinx.serialization.json.JsonArray
-import kotlinx.serialization.json.JsonElement
 import kotlinx.serialization.json.JsonNull
 import kotlinx.serialization.json.JsonObject
 import kotlinx.serialization.json.JsonPrimitive
@@ -22,6 +21,7 @@ internal class WebApiController(
 ) {
     private val prefix = "${assets.basePath}api/v1/"
     private val applicationBuildId = applicationBuildId()
+    private val sessions = WebSessionController(access)
     private val uploadProgress = WebUploadProgress()
     private val runPages = WebRunPages { jobId ->
         when (val inspection = jobs.inspectDurableJob(jobId)) {
@@ -49,35 +49,11 @@ internal class WebApiController(
             return true
         }
         try {
-            if (resource == "session") {
-                access.authorize(exchange, WebEndpointPolicy.transport(setOf("POST", "DELETE")))
-            }
             when {
-                resource == "session" && exchange.requestMethod == "POST" -> {
-                    requireNoQuery(exchange)
-                    requireJsonAccept(exchange)
-                    val credentials = access.establishSession(exchange)
-                    exchange.responseHeaders.add("Set-Cookie", checkNotNull(credentials.setCookie))
-                    send(exchange, 200, "session", buildJsonObject {
-                        put("csrfToken", credentials.csrfToken)
-                        put("expiresAt", credentials.session.expiresAt.toString())
-                    })
-                }
-                resource == "session" && exchange.requestMethod == "DELETE" -> {
-                    requireNoQuery(exchange)
-                    requireJsonAccept(exchange)
-                    val cookie = access.logout(exchange)
-                    exchange.responseHeaders.add("Set-Cookie", cookie)
-                    commonHeaders(exchange, UUID.randomUUID().toString())
-                    exchange.sendResponseHeaders(204, -1)
-                    exchange.close()
-                }
-                resource == "session" -> throw WebAccessDenied(
-                    405, "METHOD_NOT_ALLOWED", "The session endpoint supports POST and DELETE.", setOf("POST", "DELETE"),
-                )
+                resource == "session" -> sessions.handle(exchange)
                 resource == "jobs" && exchange.requestMethod == "POST" -> {
                     val session = checkNotNull(access.authorize(exchange, WebEndpointPolicy.multipartUpload()))
-                    requireNoQuery(exchange)
+                    requireNoWebApiQuery(exchange)
                     requireJsonAccept(exchange)
                     val key = singleUploadHeader(exchange, "Idempotency-Key")
                     if (key == null || !key.matches(Regex("[A-Za-z0-9_-]{16,128}"))) throw WebAccessDenied(400, "INVALID_IDEMPOTENCY_KEY", "Upload requires one 16–128 character idempotency key.")
@@ -93,15 +69,15 @@ internal class WebApiController(
                     } finally { progress?.finish() }
                     exchange.responseHeaders.set("Location", "${assets.basePath}api/v1/jobs/${result.job.id}")
                     if (result.replayed) exchange.responseHeaders.set("Idempotency-Replayed", "true")
-                    send(exchange, 201, "job", webJob(result.job))
+                    sendWebApiResponse(exchange, 201, "job", webJob(result.job))
                 }
                 resource.startsWith("uploads/") -> {
                     val session = checkNotNull(access.authorize(exchange, WebEndpointPolicy.privateRead()))
-                    requireNoQuery(exchange); requireJsonAccept(exchange)
+                    requireNoWebApiQuery(exchange); requireJsonAccept(exchange)
                     val id = resource.removePrefix("uploads/")
                     if (!id.matches(Regex("[a-f0-9]{32}"))) throw WebAccessDenied(404, "NOT_FOUND", "Upload progress is unavailable.")
                     val progress = uploadProgress.read(session.sessionId, id) ?: throw WebAccessDenied(404, "NOT_FOUND", "Upload progress is unavailable or expired.")
-                    send(exchange, 200, "uploadProgress", buildJsonObject {
+                    sendWebApiResponse(exchange, 200, "uploadProgress", buildJsonObject {
                         put("uploadId", progress.uploadId); put("receivedBytes", progress.receivedBytes.toString())
                         put("totalBytes", progress.totalBytes?.let { JsonPrimitive(it.toString()) } ?: JsonNull)
                         put("state", progress.state); put("jobId", progress.jobId?.let { JsonPrimitive(it) } ?: JsonNull)
@@ -109,13 +85,13 @@ internal class WebApiController(
                 }
                 resource.matches(Regex("jobs/[^/]+/artifacts/[^/]+/content")) -> {
                     access.authorize(exchange, WebEndpointPolicy.privateRead(allowHead = true))
-                    requireNoQuery(exchange)
+                    requireNoWebApiQuery(exchange)
                     if (exchange.requestHeaders.keys.any { it.equals("Range", true) || it.startsWith("If-", true) }) {
                         throw WebAccessDenied(400, "UNSUPPORTED_HEADER", "This bounded artifact endpoint does not support Range or conditional requests.")
                     }
                     val parts = resource.split('/')
                     val bytes = WebExplorationArtifact.read(jobs, parts[1], parts[3])
-                    commonHeaders(exchange, UUID.randomUUID().toString())
+                    webApiHeaders(exchange, UUID.randomUUID().toString())
                     exchange.responseHeaders.set("Content-Type", "application/octet-stream")
                     exchange.responseHeaders.set("Content-Disposition", "attachment; filename=\"exploration.json\"")
                     exchange.responseHeaders.set("Content-Security-Policy", "sandbox; default-src 'none'")
@@ -133,7 +109,7 @@ internal class WebApiController(
                     requireJsonAccept(exchange)
                     val parts = resource.split('/')
                     val snapshot = parts[4] == "snapshot"
-                    if (snapshot) requireNoQuery(exchange)
+                    if (snapshot) requireNoWebApiQuery(exchange)
                     val attempt = jobs.getAttempt(parts[1], parts[3])
                     val bytes = try {
                         jobs.readProgressJournal(parts[1], attempt.runId)
@@ -145,7 +121,7 @@ internal class WebApiController(
                     }
                     if (snapshot) {
                         val boundary = progressPages.boundary(session.sessionId, parts[1], parts[3], bytes)
-                        send(exchange, 200, "snapshot", buildJsonObject {
+                        sendWebApiResponse(exchange, 200, "snapshot", buildJsonObject {
                             put("run", webRun(attempt))
                             put("throughCursor", boundary.throughCursor?.let(::JsonPrimitive) ?: JsonNull)
                             put("throughSequence", boundary.throughSequence?.let(::JsonPrimitive) ?: JsonNull)
@@ -156,53 +132,53 @@ internal class WebApiController(
                                 put("retainedEventCount", boundary.retainedEventCount)
                             })
                         })
-                    } else send(exchange, 200, "events", progressPages.page(session.sessionId, parts[1], parts[3], bytes, exchange.requestURI.rawQuery))
+                    } else sendWebApiResponse(exchange, 200, "events", progressPages.page(session.sessionId, parts[1], parts[3], bytes, exchange.requestURI.rawQuery))
                 }
                 resource.matches(Regex("jobs/[^/]+/runs/[^/]+/reports/exploration")) -> {
                     access.authorize(exchange, WebEndpointPolicy.privateRead())
-                    requireNoQuery(exchange); requireJsonAccept(exchange)
+                    requireNoWebApiQuery(exchange); requireJsonAccept(exchange)
                     val parts = resource.split('/')
                     val attempt = jobs.getAttempt(parts[1], parts[3])
                     val bytes = try { jobs.readArtifact(parts[1], "reports/runs/${attempt.runId}/exploration.json", 1_048_576).bytes }
                         catch (_: JobStoreException) { null }
                     if (jobs.getAttempt(parts[1], parts[3]).version != attempt.version) throw WebJobServiceException("REPORT_CHANGED", "The attempt changed during this read. Refresh its evidence.")
-                    send(exchange, 200, "report", webExplorationReport(parts[1], parts[3], bytes, assets.basePath))
+                    sendWebApiResponse(exchange, 200, "report", webExplorationReport(parts[1], parts[3], bytes, assets.basePath))
                 }
                 resource.matches(Regex("jobs/[^/]+/runs")) -> {
                     val session = checkNotNull(access.authorize(exchange, WebEndpointPolicy.privateRead()))
                     requireJsonAccept(exchange)
-                    send(exchange, 200, "runs", runPages.page(session.sessionId, resource.split('/')[1], exchange.requestURI.rawQuery))
+                    sendWebApiResponse(exchange, 200, "runs", runPages.page(session.sessionId, resource.split('/')[1], exchange.requestURI.rawQuery))
                 }
                 resource.matches(Regex("jobs/[^/]+/runs/[^/]+")) -> {
                     access.authorize(exchange, WebEndpointPolicy.privateRead())
-                    requireNoQuery(exchange); requireJsonAccept(exchange)
+                    requireNoWebApiQuery(exchange); requireJsonAccept(exchange)
                     val parts = resource.split('/')
-                    send(exchange, 200, "run", webRun(jobs.getAttempt(parts[1], parts[3])))
+                    sendWebApiResponse(exchange, 200, "run", webRun(jobs.getAttempt(parts[1], parts[3])))
                 }
                 resource == "jobs" -> {
                     val session = checkNotNull(access.authorize(exchange, WebEndpointPolicy.privateRead()))
                     requireJsonAccept(exchange)
                     val (query, cursor) = WebJobQuery.parse(exchange.requestURI.rawQuery)
-                    send(exchange, 200, "jobs", jobPages.page(session.sessionId, query, cursor))
+                    sendWebApiResponse(exchange, 200, "jobs", jobPages.page(session.sessionId, query, cursor))
                 }
                 resource == "bootstrap" -> {
                     val credentials = access.csrfForSession(exchange)
-                    requireNoQuery(exchange)
+                    requireNoWebApiQuery(exchange)
                     requireJsonAccept(exchange)
-                    send(exchange, 200, "bootstrap", bootstrap(credentials))
+                    sendWebApiResponse(exchange, 200, "bootstrap", bootstrap(credentials))
                 }
                 else -> {
                     access.authorize(exchange, WebEndpointPolicy.privateRead())
-                    requireNoQuery(exchange)
+                    requireNoWebApiQuery(exchange)
                     requireJsonAccept(exchange)
                     val value = webJob(jobs.presentation(resource.removePrefix("jobs/")))
                     val etag = "\"${value.getValue("version").let { (it as JsonPrimitive).content }}\""
                     exchange.responseHeaders.set("ETag", etag)
                     if (exchange.requestHeaders.getFirst("If-None-Match") == etag) {
-                        commonHeaders(exchange, UUID.randomUUID().toString())
+                        webApiHeaders(exchange, UUID.randomUUID().toString())
                         exchange.sendResponseHeaders(304, -1)
                         exchange.close()
-                    } else send(exchange, 200, "job", value)
+                    } else sendWebApiResponse(exchange, 200, "job", value)
                 }
             }
         } catch (failure: WebAccessDenied) {
@@ -283,40 +259,6 @@ internal class WebApiController(
         val values = exchange.requestHeaders[name] ?: return null
         if (values.size != 1 || values.single().length > 256) throw WebAccessDenied(400, "INVALID_HEADER", "An upload header is duplicated or too long.")
         return values.single()
-    }
-
-    private fun requireNoQuery(exchange: HttpExchange) {
-        if (!exchange.requestURI.rawQuery.isNullOrEmpty()) {
-            throw WebAccessDenied(400, "VALIDATION_FAILED", "This endpoint does not accept query parameters.")
-        }
-    }
-
-    private fun send(exchange: HttpExchange, status: Int, kind: String, data: JsonElement) {
-        val requestId = UUID.randomUUID().toString()
-        val body = buildJsonObject {
-            put("apiVersion", 1)
-            put("kind", kind)
-            put("requestId", requestId)
-            put("data", data)
-        }.toString().toByteArray(Charsets.UTF_8)
-        check(body.size <= 1024 * 1024) { "The API response exceeds its byte ceiling" }
-        commonHeaders(exchange, requestId)
-        exchange.responseHeaders.set("Content-Type", "application/json; charset=utf-8")
-        exchange.responseHeaders.set("Content-Length", body.size.toString())
-        try {
-            if (exchange.requestMethod == "HEAD") exchange.sendResponseHeaders(status, -1)
-            else {
-                exchange.sendResponseHeaders(status, body.size.toLong())
-                exchange.responseBody.use { it.write(body) }
-            }
-        } finally { exchange.close() }
-    }
-
-    private fun commonHeaders(exchange: HttpExchange, requestId: String) {
-        exchange.responseHeaders.set("X-Request-ID", requestId)
-        exchange.responseHeaders.set("Cache-Control", "no-store")
-        exchange.responseHeaders.set("Referrer-Policy", "no-referrer")
-        exchange.responseHeaders.set("X-Content-Type-Options", "nosniff")
     }
 }
 

@@ -236,3 +236,18 @@ HTTP tests now use a client that sends Origin without silently filtering it; the
 and mismatched Origin denial before upload/workflow handlers, with unchanged job bytes and
 zero denied workflow invocations. Existing allowed upload/admission/shutdown cases continue
 with the exact origin and retain their previous behavior.
+
+## Shared session controller prerequisite
+
+Session POST/DELETE handling now lives in `WebSessionController`, which depends only on
+`LocalWebAccess`. The SPA router delegates to it; the versioned response envelope, bounded
+serialization, request IDs and no-store headers are shared with other API responses. This
+allows the legacy router to adopt the same session exchange/logout implementation without
+loading SPA assets or introducing a second cookie/CSRF implementation.
+
+The standalone HTTP regression uses no assets or job service. It verifies that invalid
+method/origin/query/Accept requests do not consume the bootstrap token, a created session
+authorizes reads through the same access instance, logout requires CSRF, and successful logout
+revokes access. The existing SPA and legacy web/journal regression suite also passes.
+This extraction does not yet expose session routes or enforce session/CSRF in legacy mode;
+legacy form, CLI bootstrap and packaged-browser migration remain outstanding under #161.
