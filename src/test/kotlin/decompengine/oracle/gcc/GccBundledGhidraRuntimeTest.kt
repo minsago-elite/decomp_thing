@@ -339,11 +339,14 @@ class GccBundledGhidraRuntimeTest {
     }
 
     @Test
-    fun `raw controller rejects v2 before opening artifacts or publishing BOOT state`() {
+    fun `raw controller rejects an unreferenced v2 runtime before opening artifacts or publishing BOOT state`() {
         val directory = Files.createTempDirectory("gcc-bundled-definition-")
         Files.setPosixFilePermissions(directory, PosixFilePermissions.fromString("rwx------"))
         val definitionPath = directory.resolve("definition.json")
-        val bytes = OracleJson.canonicalBytes(definition())
+        val uid = (Files.getAttribute(Path.of("/proc/self"), "unix:uid") as Number).toInt()
+        val bytes = GccCompilerEngineContainmentContract.assessDefinition(
+            request(outputLease = lease().copy(uid = uid, gid = uid)),
+        ).canonicalBytes
         try {
             Files.write(definitionPath, bytes)
             Files.setPosixFilePermissions(definitionPath, PosixFilePermissions.fromString("r--------"))
@@ -352,7 +355,7 @@ class GccBundledGhidraRuntimeTest {
                     error("bundled runtime reached BOOT before retained authentication")
                 }
             }
-            assertTrue(failure.message.orEmpty().contains("bundled Ghidra v2 requires retained runtime authentication"))
+            assertTrue(failure.message.orEmpty().contains("independent deployment reference"), failure.message)
             assertContentEquals(bytes, Files.readAllBytes(definitionPath))
             assertEquals(listOf("definition.json"), Files.list(directory).use { paths -> paths.map { it.fileName.toString() }.toList() })
         } finally {
@@ -406,6 +409,7 @@ class GccBundledGhidraRuntimeTest {
         artifacts: List<GccCompilerEngineContainmentArtifactIdentity> = artifacts(requireNotNull(runtime)),
         command: List<String> = requireNotNull(runtime).command(artifacts, state(), lease()),
         environment: Map<String, String> = ENVIRONMENT,
+        outputLease: GccCompilerEngineOutputLeaseIdentity = lease(),
     ) = GccCompilerEngineContainmentRequest(
         engineId = "cc1",
         runKind = GccCompilerEngineContainmentRunKind.INTERRUPTED,
@@ -413,7 +417,7 @@ class GccBundledGhidraRuntimeTest {
         analysisState = state(),
         command = command,
         environment = environment,
-        outputLease = lease(),
+        outputLease = outputLease,
         budgets = GccCompilerEngineContainmentBudgets(1_800_000, 16L * 1024 * 1024 * 1024, 256),
         bundledRuntime = runtime,
     )

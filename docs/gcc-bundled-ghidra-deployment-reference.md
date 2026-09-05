@@ -44,19 +44,86 @@ JAR and reads the exact unique exporter resource directly from that JAR, so an
 earlier classpath resource cannot shadow its provenance. The class-directory
 development seam retains the Gradle classloader as its explicit resource TCB.
 
-## Remaining executable-runtime boundary
+## Retained executable tree
 
-This is a retained deployment **reference**, not a retained executable bundle.
-The reader does not yet authenticate all files in the candidate native/data tree
-or grant an executable mount, BOOT, START, output acceptance or release authority.
-The live controller still rejects v2 definitions. Existing BOOT deployment
-authentication remains independently required when composing the capabilities.
+`GccBundledGhidraRetainedRuntime.open()` composes that retained reference with the
+exact candidate bundle. A root-owned bundled directory already shipped inside a
+trusted installed distribution is usable directly; a separately installed Ghidra
+version is neither required nor accepted. An explicit trusted provisioner may
+instead create a matching root-owned copy of the application's bundled bytes.
 
-The next retained runtime must prefer the root-owned bundled directory already
-shipped in a trusted installed distribution. If needed, a trusted provisioner may
-copy those exact bundled bytes; this is not a separate Ghidra installation or
-version. No automatic privilege escalation, mounting or quota changes are added.
-Native code cannot be executed from the required noexec output lease. Complete
-tree/root/executable-mount authentication and the eventual contained
-START/export/absence handoff remain required by #235, with normal engine
-interruption/resume fidelity still required by #137.
+Authentication opens the absolute ancestor chain one component at a time without
+following links. Every ancestor must be a root-owned real directory without
+group/world write permission. The retained bundle root must have its declared
+0755 mode and remain disjoint from writable output. Its descriptor mount identity
+must select one executable backing mount; `noexec`, nested and shadowing mounts
+are rejected.
+
+The complete tree is traversed through directory descriptors against the
+independent reference, including native executables, processor/data files, empty
+files and empty directories. Missing or extra entries, symbolic links, special
+files, hard-linked files, non-root ownership, different modes and different
+mounts are rejected. Every regular file's exact size and SHA-256 are checked with
+bounded streaming reads. The reference's entry, depth and byte limits remain in
+force; no full-tree byte buffer or per-file lifetime descriptor set is required.
+
+The capability retains the root descriptor, deployment reference, mount facts and
+an immutable per-entry metadata snapshot. Verification reopens the trusted root
+chain, checks its retained identity and backing mount, and recaptures exact
+membership, inode/owner/mode/mount identity, sizes, mtime and ctime. Contents are
+hashed during initial admission rather than rehashed at every BOOT check.
+
+This is the existing **root-administrator trust boundary**, not protection from
+a hostile root administrator or privileged mount mutation. The provisioner owns
+the integrity and provenance of the root-owned runtime, including exclusion of
+previous untrusted writable handles; changing ownership alone is not such a
+proof. The CI provisioner creates new root-owned files while copying rather than
+chowning caller-owned inodes. User-owned or group/world-writable candidate trees
+do not receive this root-trusted metadata-only lifetime treatment.
+
+## Fresh BOOT integration
+
+The live GCC controller acquires the retained bundle before opening remaining
+declared artifacts or creating the journal. Its independently authenticated
+Kotlin BOOT deployment remains required. The Ghidra reference commitment and
+retained runtime identity are combined with that BOOT commitment under a distinct
+v2 deployment-closure domain. Schema 1 keeps its original deployment digest.
+No Ghidra JAR is added to the BOOT or LLVM classpath, and this checkpoint does not
+mount or execute the declared Ghidra command inside the keeper namespace.
+
+Existing input-verification checkpoints revalidate the retained bundle before
+and after BOOT attachment. Cleanup instead uses the already captured immutable
+closure and retained systemd/cgroup owner: a later runtime-verification failure
+must not make whole-scope cleanup unreachable. Closing inputs independently
+attempts every descriptor/reference release without first requiring a valid
+runtime tree.
+
+Fresh v2 BOOT admission and terminal absence do not grant START, execute Ghidra,
+accept an export, restore saved analysis state, release an output lease or make a
+result release-eligible. The BOOT owner remains cleanup-only. Actual contained
+START/export/absence evidence remains required by #235, with normal engine
+forced-interruption/resume fidelity still required by #137.
+
+## Explicit CI provisioning
+
+The Kotlin CI lane runs `scripts/ci-prepare-bundled-ghidra-runtime.sh` before JVM
+checks. It builds `installDist` and makes a bounded descriptor-relative copy of
+`build/install/llm_bin_patch/libexec/ghidra` into the unoccupied executable path
+`/opt/decomp-ci-ghidra-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}/bundle`. This uses the
+application build's already bundled dependency, not an external Ghidra installer
+or runtime download. It exports `DECOMP_TEST_BUNDLED_GHIDRA_ROOT` and sets
+`DECOMP_REQUIRE_BUNDLED_GHIDRA_RUNTIME=true`, so the hosted qualification cannot
+silently skip a missing required runtime.
+
+The always-run `scripts/ci-release-bundled-ghidra-runtime.sh` independently derives
+that exact run/attempt path and verifies a root-owned marker bound to its device
+and inode. Before recursive removal it validates bounded membership, ownership,
+types and modes and rejects mounts under the target. Legitimate interrupted-copy
+0600/0700 residue is supported; an unexpected, replaced or unmarked target is
+refused rather than inferred to be disposable.
+
+Privilege use is confined to these explicit CI provisioning/cleanup scripts.
+The production application does not run sudo, provision copies, create mounts,
+change quotas or make the mandatory noexec output lease executable. Passing
+structural tests or a non-authoritative packaged Ghidra probe is not evidence
+that the required hosted BOOT lifecycle or later contained analysis has passed.

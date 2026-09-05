@@ -53,18 +53,40 @@ Readers reject cross-version fields, providers, role sets and commands rather
 than silently reinterpreting an old receipt. Existing BOOT/absence receipt
 formats remain unchanged and remain bound to their exact definition digest.
 
-The live BOOT-only controller explicitly rejects schema 2 before opening its
-declared runtime artifacts or contacting systemd. A self-consistent classpath
-declaration or bundle checksum inventory does not authenticate deployed worker
-code, the original release tree, native/data dependencies, or their lifetime.
-No Ghidra JAR is added to the existing authenticated BOOT or LLVM classpath.
+Fresh schema-2 definitions may reach the live BOOT-only controller only after
+independent retained runtime authentication. A self-consistent classpath
+declaration or bundle checksum inventory remains insufficient. The
+[deployment reference and retained tree](gcc-bundled-ghidra-deployment-reference.md)
+bind the application-JAR exporter, original release identity, exact bridge/guard,
+complete library/native/data inventory, executable mount and retained root.
+Every ancestor and tree member must satisfy the explicit root-administrator
+trust boundary; user-owned trees, links, special files, altered modes, writable
+overlap and noexec or nested mounts are rejected.
 
-The [independent deployment reference](gcc-bundled-ghidra-deployment-reference.md)
-now supplies the expected complete bundle inventory and a retained sidecar reader.
-It does not authenticate the candidate executable tree. Issue #235 remains open
-for deployment-derived retained runtime authentication
-and actual contained analysis through export and cleanup. The existing
-archive-to-installation verifier is useful diagnostic evidence but closes its
-file handles; its returned paths are not retained execution authority. The full
-cc1/lto1 forced-interruption/resume equivalence proof remains separately required
-by #137. This versioned definition does not complete either requirement.
+The already bundled directory inside a trusted root-owned installation can be
+used directly. An explicit trusted deployment copy of those same application
+bytes is also supported; this is not a separate Ghidra installation or version.
+CI makes that bounded copy through its dedicated prepare script and supplies
+`DECOMP_TEST_BUNDLED_GHIDRA_ROOT` together with
+`DECOMP_REQUIRE_BUNDLED_GHIDRA_RUNTIME=true`. Production does not escalate
+privileges, provision mounts or quotas, or extract native code into the mandatory
+noexec output lease.
+
+Ghidra authentication remains separate from the existing BOOT deployment
+reference. No Ghidra JAR is added to the authenticated BOOT or LLVM classpath,
+and no Ghidra mount or execution is added to the keeper namespace. Only v2's live
+deployment-closure commitment combines the BOOT reference, Ghidra reference and
+retained runtime identity; v1's original digest remains unchanged. This combined
+digest is captured before attachment, not recomputed from mutable inputs during
+cleanup. Runtime verification failure therefore cannot prevent the retained
+owner's terminal cleanup solely because those runtime bytes changed.
+
+The exposed live owner still has no START, command execution, export, saved-state
+resume, output-lease release or release-eligibility transition. BOOT attachment
+and terminal absence do not prove that either compiler engine was analyzed.
+Issue #235 remains open for actual contained analysis through export and cleanup.
+The older archive-to-installation verifier remains useful diagnostic evidence
+but closes its file handles; its returned paths are not retained execution
+authority. The full cc1/lto1 forced-interruption/resume equivalence proof remains
+separately required by #137. These implementation boundaries do not substitute
+for passing required provisioned lifecycle tests or complete either issue.

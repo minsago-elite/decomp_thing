@@ -39,6 +39,8 @@ jobs:
         run: scripts/ci-prepare-acp-sandbox.sh
       - name: Prepare bounded ext4 oracle scratch authority
         run: bash scripts/ci-prepare-oracle-ext4-scratch.sh
+      - name: Prepare executable root-owned application-bundled Ghidra
+        run: bash scripts/ci-prepare-bundled-ghidra-runtime.sh
       - name: Run JVM and Kotlin checks
         env:
           DECOMP_REQUIRE_ORACLE_EXT4_SCRATCH: "true"
@@ -47,6 +49,9 @@ jobs:
         run: scripts/ci-qualify-goose-acp.sh
       - name: Qualify pinned credential-free codex-acp authentication boundary
         run: scripts/ci-qualify-codex-acp.sh
+      - name: Release root-owned application-bundled Ghidra
+        if: always()
+        run: bash scripts/ci-release-bundled-ghidra-runtime.sh
       - name: Release bounded ext4 oracle scratch authority
         if: always()
         run: |
