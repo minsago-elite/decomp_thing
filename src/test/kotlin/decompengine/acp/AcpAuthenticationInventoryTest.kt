@@ -33,8 +33,6 @@ class AcpAuthenticationInventoryTest {
         assertEquals("Use your account", method.descriptionPreview)
     }
 
-=======
->>>>>>> 038f7515 (Normalize preview controls before secret matching (#267) [skip ci])
     @Test fun `control normalization precedes literal and credential preview redaction`() {
         val secret = "private-credential-fixture"
         for (control in listOf('\u0000', '\u0001', '\r', '\u007f')) {
