@@ -56,13 +56,16 @@ const { chromium } = require(process.env.DECOMP_PLAYWRIGHT_MODULE || 'playwright
     assert.equal(await page.locator('#agent-event-list li').count(), 1);
     assert.deepEqual(errors, []);
     await page.screenshot({ path: path.join(outputDirectory, 'recovered.png') });
-    fs.writeFileSync(path.join(outputDirectory, 'result.json'), JSON.stringify({
-      passed: true, browser: browser.version(), eventRequests,
-      scenarios: ['row window', 'retention loss', 'HTTP failure', 'network failure', 'recovery', 'text escaping'],
-      renderedHtmlSha256: require('node:crypto').createHash('sha256').update(html).digest('hex'),
-    }, null, 2) + '\n');
   } finally {
-    await context.tracing.stop({ path: path.join(outputDirectory, 'trace.zip') });
-    await browser.close();
+    try {
+      await context.tracing.stop({ path: path.join(outputDirectory, 'trace.zip') });
+    } finally {
+      await browser.close();
+    }
   }
+  fs.writeFileSync(path.join(outputDirectory, 'result.json'), JSON.stringify({
+    passed: true, browser: browser.version(), eventRequests,
+    scenarios: ['row window', 'retention loss', 'HTTP failure', 'network failure', 'recovery', 'text escaping'],
+    renderedHtmlSha256: require('node:crypto').createHash('sha256').update(html).digest('hex'),
+  }, null, 2) + '\n');
 })().catch(error => { console.error(error); process.exitCode = 1; });
