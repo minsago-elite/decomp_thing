@@ -45,8 +45,8 @@ export function Activity({ jobId, runId, basePath }: { jobId: string; runId: str
           reconcile.current = false;
         }
         const previous = position.current;
-        const query = new URLSearchParams({ limit: String(capacity - previous.rows.length) });
-        if (previous.cursor) query.set('cursor', previous.cursor);
+        const query = new URLSearchParams({ transport: 'poll', limit: String(capacity - previous.rows.length) });
+        if (previous.cursor) query.set('after', previous.cursor);
         const { data } = await client.get('events', `${path}/events?${query}`, { signal: controller.signal });
         if (controller.signal.aborted) return;
         const added: WebEvent[] = [];

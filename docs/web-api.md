@@ -437,9 +437,12 @@ fresh per transfer and do not replace durable idempotency keys.
 ### Current D4 JSON polling implementation
 
 The current retained-journal adapter implements `GET jobs/J/runs/R/snapshot`
-and `GET jobs/J/runs/R/events?cursor=...&limit=...` under the v1 prefix.
-This is bounded JSON polling; `transport`/`after` parameters and SSE negotiation
-from the target design above are not implemented. Snapshot `progress` metadata
+and `GET jobs/J/runs/R/events?transport=poll&after=...&limit=...` under the v1 prefix.
+The activity client uses this target polling spelling. The existing `cursor` parameter
+remains an alias for `after`; specifying both, duplicates, unknown fields or a transport
+other than `poll` is rejected. Omitting transport retains JSON polling compatibility.
+`Last-Event-ID` is rejected on polling rather than silently losing its resume position.
+This is bounded JSON polling; SSE negotiation from the target design is not implemented. Snapshot `progress` metadata
 makes queue/history omissions and retained-record counts explicit. Missing
 journals fail with `PROGRESS_UNAVAILABLE`; replay gaps require a fresh snapshot
 via `PROGRESS_GAP`. See [the implemented boundary and qualification limits](web-progress-adapter.md).

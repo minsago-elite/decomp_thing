@@ -110,6 +110,12 @@ internal class WebApiController(
                     val parts = resource.split('/')
                     val snapshot = parts[4] == "snapshot"
                     if (snapshot) requireNoWebApiQuery(exchange)
+                    else {
+                        if (exchange.requestHeaders.containsKey("Last-Event-ID")) throw WebAccessDenied(
+                            400, "UNSUPPORTED_HEADER", "Polling resumes with after or cursor; Last-Event-ID is reserved for streams.",
+                        )
+                        WebProgressQuery.parse(exchange.requestURI.rawQuery)
+                    }
                     val attempt = jobs.getAttempt(parts[1], parts[3])
                     val bytes = try {
                         jobs.readProgressJournal(parts[1], attempt.runId)

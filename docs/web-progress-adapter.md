@@ -478,3 +478,19 @@ the supplied data appears; an omitted snapshot does not trigger an implicit read
 the progress-specific direct-read gap from the D2 audit. Other legacy exploration/repair HTML
 report reads and the legacy session boundary remain migration work. Browser execution of the
 legacy polling script is not covered by this JVM verification.
+
+## Target polling query compatibility
+
+The retained-journal endpoint now accepts the planned fallback query
+`events?transport=poll&after=...&limit=...`, and the activity client sends that spelling.
+Existing `cursor` requests use the same replay implementation and produce identical pages.
+Transport may be omitted; `after` and `cursor` are mutually exclusive even when equal.
+Duplicate/unknown fields, other transport values and oversized queries fail validation.
+The same 1–200 page limit, bounded source reads, HMAC cursor binding and explicit gap behavior
+remain in force. Polling rejects Last-Event-ID; that header is reserved for future streaming
+and cannot silently reset a polling client to the beginning of history.
+
+HTTP/core tests compare both spellings and exercise ambiguity, invalid transport and gap
+behavior. Frontend tests require `transport=poll` and continuation through `after`. This
+closes the target polling-query compatibility gap; SSE, heartbeat/resource management,
+transactional cutover and timed retention are still outstanding under #174.
