@@ -343,15 +343,35 @@ class SandboxRunner(
         throw failure.cause ?: failure
     }
 
-    private fun terminateProcessTree(process: Process) {
+}
+
+/** Cancellation must not skip the bounded cleanup wait; preserve it for the caller. */
+internal fun terminateProcessTree(process: Process) {
+    var interrupted = Thread.interrupted()
+    fun awaitTermination(timeoutMillis: Long): Boolean {
+        val deadline = System.nanoTime() + TimeUnit.MILLISECONDS.toNanos(timeoutMillis)
+        while (process.isAlive) {
+            val remaining = deadline - System.nanoTime()
+            if (remaining <= 0) return false
+            try {
+                return process.waitFor(remaining, TimeUnit.NANOSECONDS)
+            } catch (_: InterruptedException) {
+                interrupted = true
+            }
+        }
+        return true
+    }
+    try {
         val descendants = process.toHandle().descendants().toList().asReversed()
         descendants.forEach { it.destroy() }
         process.destroy()
-        if (!process.waitFor(250, TimeUnit.MILLISECONDS)) {
+        if (!awaitTermination(250)) {
             descendants.forEach { if (it.isAlive) it.destroyForcibly() }
             process.destroyForcibly()
-            require(process.waitFor(2, TimeUnit.SECONDS)) { "sandboxed behavior process did not terminate" }
+            require(awaitTermination(2000)) { "sandboxed behavior process did not terminate" }
         }
+    } finally {
+        if (interrupted) Thread.currentThread().interrupt()
     }
 }
 

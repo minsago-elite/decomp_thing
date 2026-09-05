@@ -22,6 +22,36 @@ import kotlin.test.assertTrue
 
 class BehaviorValidationTest {
     @Test
+    fun `interrupted cleanup confirms child termination and retains cancellation`() {
+        val process = ProcessBuilder("/bin/sleep", "10").start()
+        val failure = java.util.concurrent.atomic.AtomicReference<Throwable?>()
+        val retainedInterrupt = java.util.concurrent.atomic.AtomicBoolean()
+        val worker = Thread {
+            try {
+                Thread.currentThread().interrupt()
+                terminateProcessTree(process)
+                retainedInterrupt.set(Thread.currentThread().isInterrupted)
+            } catch (error: Throwable) {
+                failure.set(error)
+            }
+        }
+        try {
+            worker.start()
+            worker.join(4000)
+            assertFalse(worker.isAlive, "cleanup must finish within its bound")
+            assertEquals(null, failure.get())
+            assertFalse(process.isAlive, "cleanup must confirm child termination")
+            assertTrue(retainedInterrupt.get(), "caller cancellation must be preserved")
+        } finally {
+            process.destroyForcibly()
+            worker.join(4000)
+            process.inputStream.close()
+            process.errorStream.close()
+            process.outputStream.close()
+        }
+    }
+
+    @Test
     fun `ambiguous wrapper exits and deadline expiry cannot replace passing evidence`() {
         val tempDir = createTempDirectory("validation-wrapper-outcomes-")
         val source = """
