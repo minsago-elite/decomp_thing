@@ -36,6 +36,53 @@ internal class GccRetainedCompilerEngineProfile private constructor(
     }
 
     @Synchronized
+    fun bindInvocation(
+        engineId: String,
+        artifacts: List<GccCompilerEngineContainmentArtifactIdentity>,
+        budgets: GccCompilerEngineContainmentBudgets,
+    ): ByteArray {
+        requireCurrent()
+        val engine = suite.engine(engineId)
+        val byRole = artifacts.associateBy { it.role }
+        require(byRole.size == artifacts.size) { "planner profile invocation repeats artifact roles" }
+        val controls = mapOf(
+            GccCompilerEngineContainmentArtifactRole.BENCHMARK_PROFILE to suite.profilePath,
+            GccCompilerEngineContainmentArtifactRole.SOURCE_LOCK to suite.sourceLockPath,
+            GccCompilerEngineContainmentArtifactRole.BUILD_RECORD to engine.buildRecordPath,
+            GccCompilerEngineContainmentArtifactRole.ORACLE_MANIFEST to engine.oracleManifestPath,
+            GccCompilerEngineContainmentArtifactRole.TOOLCHAIN_REPRODUCTION to suite.toolchainReproductionPath,
+        )
+        controls.forEach { (role, path) ->
+            val artifact = byRole.getValue(role)
+            val guard = guards.getValue(path)
+            require(artifact.path == path && artifact.bytes == guard.size && artifact.sha256 == guard.authenticatedSha256) {
+                "GCC operation $role differs from its retained planner profile"
+            }
+        }
+        val binary = byRole.getValue(GccCompilerEngineContainmentArtifactRole.ENGINE_BINARY)
+        require(binary.bytes == engine.strippedArtifact.bytes && binary.sha256 == engine.strippedArtifact.sha256) {
+            "GCC operation engine differs from its retained planner profile"
+        }
+        val archive = byRole.getValue(GccCompilerEngineContainmentArtifactRole.GHIDRA_ARCHIVE)
+        require(archive.bytes == suite.analysis.ghidraArchive.bytes && archive.sha256 == suite.analysis.ghidraArchive.sha256 &&
+            byRole.getValue(GccCompilerEngineContainmentArtifactRole.EXPORTER_SOURCE).sha256 == suite.analysis.exporterSha256
+        ) { "GCC operation analysis tools differ from its retained planner profile" }
+        require(budgets.wallClockMillis <= suite.budgets.exportWallClockMillis &&
+            budgets.maximumResidentBytes <= suite.budgets.exportMaximumResidentBytes
+        ) { "GCC operation exceeds its retained profile resource ceilings" }
+        requireCurrent()
+        return encoded.copyOf()
+    }
+
+    @Synchronized
+    fun requireDisjoint(roots: List<Path>) {
+        requireCurrent()
+        require(guards.keys.none { input -> roots.any { root -> input.startsWith(root) || root.startsWith(input) } }) {
+            "GCC planner profile overlaps an excluded operation root"
+        }
+    }
+
+    @Synchronized
     override fun close() {
         if (closed) return
         closed = true
