@@ -59,6 +59,31 @@ class AcpAuthenticationInventoryTest {
         assertEquals(valid.id.value, AcpAuthenticationInventory.capture(listOf(valid), emptyList()).methods.single().id)
     }
 
+    @Test fun `preview truncation preserves supplementary Unicode boundaries`() {
+        val key = "\ud83d\udd11"
+        for (prefixLength in listOf(126, 127, 128)) {
+            val idAndName = "x".repeat(prefixLength) + key + "tail"
+            val description = "x".repeat(prefixLength + 128) + key + "tail"
+            val method = AcpAuthenticationInventory.capture(listOf(
+                AuthMethod.AgentAuth(AuthMethodId(idAndName), idAndName, description),
+            ), emptyList()).methods.single()
+            for (preview in listOf(method.namePreview, method.descriptionPreview!!)) {
+                assertTrue(Charsets.UTF_8.newEncoder().canEncode(preview))
+                assertTrue(preview.endsWith("… [preview truncated]"))
+                assertEquals(prefixLength == 126, preview.contains(key))
+            }
+        }
+    }
+
+    @Test fun `replacement-marker matches cannot cause unbounded intermediate preview growth`() {
+        val inventory = AcpAuthenticationInventory.capture(listOf(
+            AuthMethod.AgentAuth(AuthMethodId("id"), "r".repeat(512), "r".repeat(2048)),
+        ), listOf("r", "e", "d", "a", "c", "t", "[", "]"))
+        val method = inventory.methods.single()
+        assertEquals("[oversized text omitted]", method.namePreview)
+        assertEquals("[oversized text omitted]", method.descriptionPreview)
+    }
+
     @Test fun `unknown authentication variants stay unsupported`() {
         val method = AuthMethod.UnknownAuthMethod(AuthMethodId("future"), "future method", null,
             "future-type", kotlinx.serialization.json.JsonObject(emptyMap()))
