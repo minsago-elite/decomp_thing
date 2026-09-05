@@ -92,11 +92,19 @@ flag/command/policy contradictions. The shim executes only the authored fixture
 programs and does not qualify bubblewrap containment. Existing real-bubblewrap
 integration cases require that executable on their test host.
 
-The focused behavior/audit/archive/reconstruction/profile selection, including
-the missing-sandbox and capability-probe checks, executes 42 tests with no failures
-or skips. The two existing live `SandboxRunnerTest` cases fail on this host because
-`/usr/bin/bwrap` is unavailable; those failures are retained separately and are not
-counted as successful containment verification.
+The earlier behavior/audit/archive/reconstruction/profile checkpoint passed 42
+focused tests. Bubblewrap was unavailable at that checkpoint; its two live runner
+failures were not counted as successful containment verification.
+
+The current `BehaviorValidationTest` includes a live bubblewrap file-input case.
+An authored original and a generated, rebuilt project read binary and empty files,
+report failed attempts to open the mounted files for writing, and observe an
+undeclared file as absent in the next case. Assertions check expected exit codes
+and exact bytes independently of original/rebuilt equality. The project audit
+then verifies the current source/build/executable attribution of the retained
+record. The focused behavior validation/evidence/file-input selection passes
+22 tests with zero failures or skips on a host with bubblewrap 0.11.2. This verifies
+these local mount behaviors, not production containment attestation.
 
 These records describe local path-stability checks. They do not retain an
 execve-bound executable capability or an immutable runtime-library closure across
