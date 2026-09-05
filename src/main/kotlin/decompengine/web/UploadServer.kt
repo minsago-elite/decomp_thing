@@ -385,6 +385,8 @@ class UploadServer(
         buildJsonObject {
             put("status", "ready")
             put("inventorySha256", inventory.sha256)
+            put("logoutAdvertised", inventory.logoutAdvertised)
+            put("logoutSupported", inventory.logoutSupported)
             put("loginSupported", false)
             put("methods", kotlinx.serialization.json.buildJsonArray {
                 inventory.methods.forEach { method -> add(buildJsonObject {

@@ -757,8 +757,8 @@ surrogate pairs. Redaction checks its 16,384-unit working-text limit after every
 another replacement can expand inserted markers; exceeding it produces an omission marker. A single
 replacement can transiently allocate up to ten times that limit. Unknown variants remain
 explicitly `unknown`, and every method currently reports `loginSupported=false`: this inventory
-is not an authentication action or grant. The printable doctor descriptor includes only the count
-and normalized inventory digest. Default object string representations omit method IDs and previews.
+is not an authentication action or grant. The printable doctor descriptor includes the count,
+normalized inventory digest and logout advertisement/support flags. Default object string representations omit method IDs and previews.
 
 The digest commits to ordered IDs, variant categories, names and descriptions. It excludes extension
 metadata and variant-specific credential/terminal payloads, so it cannot authorize a login request or
@@ -768,7 +768,7 @@ receipts and session/project archives. Login/logout, interactive surfaces and cr
 remain tracked by #265/#70, with fresh advertised-method validation required before any future dispatch.
 
 Use `llm_bin_patch doctor --auth-methods` to inspect advertised method previews explicitly.
-The normal doctor report retains only inventory count/digest. Inspection prints quoted, redacted
+The normal doctor report retains inventory count/digest and logout advertisement/support flags. Inspection prints quoted, redacted
 ID/name/description previews, variant category and the current unsupported-login status; previews
 may be truncated and are not exact selection tokens. This option cannot be combined with
 `--tools-only`; selecting the legacy harness fails without a legacy connectivity probe. No login,
@@ -841,3 +841,10 @@ implementation still reports login unsupported until its lifecycle and authority
 The auth golden includes the SDK-emitted `type: "agent"` discriminator. The SDK accepts its absence
 as the agent-managed variant, but encoding normalizes it to the explicit discriminator; the fixture
 freezes the emitted shape instead of treating omitted input defaults as byte-preserving round trips.
+
+Preflight separately preserves presence of `agentCapabilities.auth.logout` as `logoutAdvertised`.
+It always reports `logoutSupported=false` until the explicit logout lifecycle is implemented and
+qualified. An empty method list does not imply absent logout advertisement. The ready web inspection
+response exposes both flags; the stable doctor descriptor names both explicitly. The existing method
+digest deliberately excludes this capability and must not be used to authorize logout. This capture
+retains no logout extension payload and sends no logout RPC.

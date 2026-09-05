@@ -254,6 +254,7 @@ initialize_result = {
     "agentInfo": {"name": "scripted-fixture", "version": "1.0"},
 }
 if MODE == "doctor-preflight":
+    initialize_result["agentCapabilities"]["auth"] = {"logout": {}}
     initialize_result["authMethods"] = [{"id": "operator-login", "name": "Fixture login", "description": "Bearer fixture-credential"}]
 if MODE.startswith("doctor-auth-"):
     method = {"id": "private-method-id", "name": "Fixture login"}

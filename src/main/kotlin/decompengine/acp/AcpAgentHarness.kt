@@ -1322,7 +1322,10 @@ class AcpAgentHarness(
         }
         authenticationInventory?.let { inventory ->
             try {
-                inventory.set(AcpAuthenticationInventory.capture(agentInfo.authMethods, configuration.environment.values.map { it.value }))
+                inventory.set(AcpAuthenticationInventory.capture(
+                    agentInfo.authMethods, configuration.environment.values.map { it.value },
+                    logoutAdvertised = agentInfo.capabilities.auth.logout != null,
+                ))
             } catch (_: AcpProtocolFailure) {
                 throw AgentExecutionException(AgentFailure(
                     AgentFailureKind.PROTOCOL,

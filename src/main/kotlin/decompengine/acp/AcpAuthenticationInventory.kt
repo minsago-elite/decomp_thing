@@ -22,12 +22,19 @@ class AcpAuthenticationMethod internal constructor(
 class AcpAuthenticationInventory private constructor(
     methods: List<AcpAuthenticationMethod>,
     val sha256: String,
+    val logoutAdvertised: Boolean,
 ) {
+    /** Advertisement does not grant permission or establish an executable logout lifecycle. */
+    val logoutSupported: Boolean = false
     val methods: List<AcpAuthenticationMethod> = Collections.unmodifiableList(methods.toList())
     override fun toString(): String = "AcpAuthenticationInventory(count=${methods.size}, sha256=$sha256)"
 
     companion object {
-        internal fun capture(methods: List<AuthMethod>, sensitiveValues: Collection<String>): AcpAuthenticationInventory {
+        internal fun capture(
+            methods: List<AuthMethod>,
+            sensitiveValues: Collection<String>,
+            logoutAdvertised: Boolean = false,
+        ): AcpAuthenticationInventory {
             if (methods.size > 32) throw AcpProtocolFailure("ACP authentication inventory exceeds its method limit")
             val ids = HashSet<String>()
             val redactor = ProgressRedactor(sensitiveValues)
@@ -58,7 +65,7 @@ class AcpAuthenticationInventory private constructor(
             return AcpAuthenticationInventory(methods.map {
                 AcpAuthenticationMethod(it.id.value, variant(it), preview(it.id.value, 128), preview(it.name, 128),
                     it.description?.let { description -> preview(description, 256) })
-            }, digest)
+            }, digest, logoutAdvertised)
         }
 
         private fun variant(method: AuthMethod): String = when (method) {

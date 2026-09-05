@@ -56,7 +56,7 @@ class WebAuthenticationInspectionTest {
     @Test fun `web inspection is explicit and returns only redacted previews`() {
         val calls = AtomicInteger()
         val inventory = AcpAuthenticationInventory.capture(listOf(AuthMethod.AgentAuth(
-            AuthMethodId("private-value"), "Login private-value", "Bearer private-value")), listOf("private-value"))
+            AuthMethodId("private-value"), "Login private-value", "Bearer private-value")), listOf("private-value"), logoutAdvertised = true)
         val server = UploadServer("127.0.0.1", 0, createTempDirectory("web-auth-"),
             authenticationInspector = { calls.incrementAndGet(); inventory })
         server.start()
@@ -75,6 +75,8 @@ class WebAuthenticationInspectionTest {
             assertFalse(response.body().contains("private-value"))
             assertFalse(response.body().contains("\"id\":"))
             assertTrue(response.body().contains("\"loginSupported\":false"))
+            assertTrue(response.body().contains("\"logoutAdvertised\":true"))
+            assertTrue(response.body().contains("\"logoutSupported\":false"))
             assertTrue(response.body().contains("[redacted]"))
         } finally { server.stop(0) }
     }
@@ -96,6 +98,8 @@ class WebAuthenticationInspectionTest {
             val success = awaitResult(server)
             assertEquals(200, success.statusCode())
             assertTrue(success.body().contains("\"methods\":[]"))
+            assertTrue(success.body().contains("\"logoutAdvertised\":false"))
+            assertTrue(success.body().contains("\"logoutSupported\":false"))
             assertEquals(2, calls.get())
         } finally { server.stop(0) }
     }
