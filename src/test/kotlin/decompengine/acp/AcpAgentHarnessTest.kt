@@ -1484,6 +1484,38 @@ class AcpAgentHarnessTest {
     }
 
     @Test
+    fun `completed agent turn cannot return changes when final snapshot exceeds its limit`() {
+        val fixture = fixture(genericContract = true, wallMillis = 15_000)
+        val injected = java.util.concurrent.atomic.AtomicBoolean(false)
+        val injection = AgentCancellation {
+            val duringSnapshot = Thread.currentThread().stackTrace.any { frame ->
+                frame.className == WorkspaceSnapshotBudget::class.java.name && frame.methodName == "checkpoint"
+            }
+            if (!injected.get() && duringSnapshot && fixture.source.readText() == "updated artifact\n" &&
+                injected.compareAndSet(false, true)) {
+                fixture.source.writeText("x".repeat(8 * 1024 * 1024 + 1))
+            }
+            false
+        }
+        val receipt = harness("missing-usage").executeReceipt(fixture.request.withCancellation(injection))
+        assertTrue(injected.get(), "fixture did not reach the post-cleanup boundary")
+        val failure = assertIs<AgentExecutionOutcome.Failed>(receipt.outcome).failure
+        assertEquals(AgentFailureKind.RESOURCE_EXHAUSTED, failure.kind)
+        assertEquals("final-workspace-snapshot", failure.details["phase"])
+        assertEquals("file-bytes", failure.details["limit"])
+        assertNotNull(failure.session)
+        assertEquals(8L * 1024 * 1024 + 1, java.nio.file.Files.size(fixture.source))
+        val evidence = assertIs<AcpInvocationEvidenceSnapshot>(receipt.providerEvidence)
+        assertEquals(AcpExecutionLifecyclePhase.FINAL_WORKSPACE_SNAPSHOT, evidence.phaseReached)
+        assertEquals(AcpExecutionCleanupDisposition.VERIFIED, evidence.cleanupDisposition)
+        assertNull(evidence.completeExecutionEvidence)
+        val diagnostics = assertNotNull(evidence.diagnostics)
+        assertTrue(diagnostics.remainingProcessIds.isEmpty())
+        assertTrue(diagnostics.sandboxCleanupVerified)
+        assertProcessStopped(diagnostics.pid)
+    }
+
+    @Test
     fun `workspace snapshots stream large files and observe prelaunch cancellation and wall time`() {
         val largeFixture = fixture()
         largeFixture.source.writeText("x".repeat(2 * 1024 * 1024))

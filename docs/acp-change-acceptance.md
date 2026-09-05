@@ -41,6 +41,12 @@ own contained execution boundaries before this final observation is made.
 The final report is attached to the invocation-bound execution receipt. A
 successful prompt stop reason does not remove failures in cleanup, final snapshot
 collection, or the caller's later source/build/behavior validation.
+Focused harness tests cover oversized initial input before process launch and
+host-injected text-file growth at a post-cleanup final-snapshot checkpoint after a
+benign completed turn. The latter must fail final snapshotting with verified
+process/sandbox cleanup and without complete execution evidence or a returned
+partial change list. This is deterministic fault injection, not a claim that an
+agent bypassed the independent filesystem or protocol-frame limits.
 
 ## Captured repair
 
