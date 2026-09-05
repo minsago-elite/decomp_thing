@@ -1033,6 +1033,7 @@ internal object KotlinSystemdCgroupCommandLauncher {
         readOnlyControlDirectories: Map<String, LinuxFileIdentity> = emptyMap(),
         readOnlyStateDirectory: LinuxFileIdentity? = null,
         operationDeadline: ContainedCommandOperationDeadline? = null,
+        readOnlyReportsDirectory: LinuxFileIdentity? = null,
     ): KotlinSystemdCgroupCommandExecution {
         val cleanup = ContainedCommandCleanup()
         val secret = ByteArray(32).also(SECURE_RANDOM::nextBytes)
@@ -1043,7 +1044,7 @@ internal object KotlinSystemdCgroupCommandLauncher {
             require(controlDirectoryName == null || validContainedControlName(controlDirectoryName)) {
                 "contained command control directory must have a canonical execution name"
             }
-            val retainedDirectories = ContainedCommandRetainedDirectories(controlDirectoryName, readOnlyControlDirectories, readOnlyStateDirectory)
+            val retainedDirectories = ContainedCommandRetainedDirectories(controlDirectoryName, readOnlyControlDirectories, readOnlyStateDirectory, readOnlyReportsDirectory)
             borrowed.withPinnedDescriptor(retainedDirectories::verify)
             val writableRoot = borrowed.path
             val controlPath = controlDirectoryName?.let(writableRoot::resolve) ?: writableRoot
@@ -1075,6 +1076,7 @@ internal object KotlinSystemdCgroupCommandLauncher {
             )) + (if (retainedDirectories.controlsAreEmpty) emptyMap() else mapOf(
                 "readOnlyControlDirectories" to retainedDirectories.controlsToJson(),
             )) + (retainedDirectories.stateToJson()?.let { mapOf("readOnlyStateDirectory" to it) } ?: emptyMap()) +
+                (retainedDirectories.reportsToJson()?.let { mapOf("readOnlyReportsDirectory" to it) } ?: emptyMap()) +
                 (operationDeadline?.let { mapOf("operationWallDeadline" to it.policy) } ?: emptyMap()))))
             val runtime = AuthenticatedObservationRuntime.open(configuration)
             cleanup.runtime = runtime
