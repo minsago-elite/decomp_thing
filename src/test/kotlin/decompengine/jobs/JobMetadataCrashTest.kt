@@ -55,11 +55,20 @@ class JobMetadataCrashTest {
                 entries.filter { it.fileName.toString().startsWith(".job-metadata-") }.toList()
             }
             assertEquals(if (point.published) 0 else 1, remnants.size)
+            val retainedBytes = remnants.associateWith { it.readBytes() }
+            val inventory = store.recoveryInventory()
+            assertTrue(inventory.inventoryComplete)
+            assertEquals(0, inventory.uninspectedEntries)
+            assertEquals(0, inventory.retainedUploadStages)
+            assertEquals(remnants.size, inventory.retainedMetadataFiles)
+            assertEquals(retainedBytes.values.sumOf { it.size.toLong() }, inventory.observedBytes)
             assertEquals(listOf(initial.id), store.list().map { it.id })
             store.recoverInterruptedJobs()
             assertEquals(if (point.published) "failed" else "uploaded", store.get(initial.id).status)
             // Recovery must not promote a private candidate or claim it was safely reclaimed.
             remnants.forEach { assertTrue(it.exists()) }
+            assertEquals(inventory, store.recoveryInventory())
+            retainedBytes.forEach { (path, bytes) -> assertContentEquals(bytes, path.readBytes()) }
         } finally {
             if (process.isAlive) process.destroyForcibly().waitFor(5, TimeUnit.SECONDS)
         }
