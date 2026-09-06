@@ -42,7 +42,8 @@ class AcpAuthenticationInventory private constructor(
                     }
                     add(buildJsonObject {
                         put("id", method.id.value); put("variant", variant(method))
-                        put("name", method.name); put("description", method.description?.let(::JsonPrimitive) ?: JsonNull)
+                        put("name", redactor.text(method.name, 512))
+                        put("description", method.description?.let { JsonPrimitive(redactor.text(it, 2048)) } ?: JsonNull)
                     })
                 }
             }

@@ -105,6 +105,19 @@ class AcpAuthenticationInventoryTest {
         assertNotEquals(empty.sha256, AcpAuthenticationInventory.capture(listOf(method), emptyList()).sha256)
     }
 
+    @Test fun `commitments derive from redacted advertisement text instead of raw credentials`() {
+        val first = AcpAuthenticationInventory.capture(
+            listOf(AuthMethod.AgentAuth(AuthMethodId("method-id"), "password-one", "note password-one")),
+            listOf("password-one")).sha256
+        val second = AcpAuthenticationInventory.capture(
+            listOf(AuthMethod.AgentAuth(AuthMethodId("method-id"), "password-two", "note password-two")),
+            listOf("password-two")).sha256
+        assertEquals(first, second)
+        assertFalse(AcpAuthenticationInventory.capture(
+            listOf(AuthMethod.AgentAuth(AuthMethodId("method-id"), "password-three", null)),
+            emptyList()).sha256.let { it == first })
+    }
+
     @Test fun `ambiguous and excessive advertisements fail with fixed diagnostics`() {
         val method = AuthMethod.AgentAuth(AuthMethodId("secret-id"), "name", null)
         for (methods in listOf(listOf(method, method), List(33) { method },
