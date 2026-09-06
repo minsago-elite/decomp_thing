@@ -3,6 +3,7 @@ package decompengine.web
 import com.agentclientprotocol.model.AuthMethod
 import com.agentclientprotocol.model.AuthMethodId
 import decompengine.acp.AcpAuthenticationInventory
+import decompengine.jobs.JobRecoveryInventory
 import java.net.URI
 import java.net.http.HttpClient
 import java.net.http.HttpRequest
@@ -277,6 +278,16 @@ class WebAuthenticationInspectionTest {
             server.stop()
             root.toFile().deleteRecursively()
         }
+    }
+
+    @Test fun `rendered polling rejects status updates from a replacement inspection`() {
+        val dashboard = renderDashboard(emptyList(), JobRecoveryInventory(0, 0, 0, 0L, 0, true))
+        assertTrue(dashboard.contains("observed.inspectionId !== authInspectionId"),
+            "polling must compare the observed identity against the admitted identity")
+        assertTrue(dashboard.contains("This inspection is no longer active; start a new inspection."),
+            "an identity mismatch must end polling instead of adopting the replacement")
+        assertTrue(dashboard.contains("if (!authInspectionId) {"),
+            "the observed identity may only be adopted while no identity is captured")
     }
 
     private fun awaitResult(server: UploadServer): HttpResponse<String> {

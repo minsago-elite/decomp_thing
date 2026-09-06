@@ -126,10 +126,18 @@ fun renderDashboard(jobs: List<Job>, diagnostics: List<WebJobDiagnostic> = empty
               const observed = await update.json();
               if (!observed || !['idle', 'inspecting', 'ready', 'failed', 'cancelled'].includes(observed.status))
                 throw new Error('unavailable');
+              if (validInspectionId(observed.inspectionId) && authInspectionId &&
+                  observed.inspectionId !== authInspectionId) {
+                status.textContent = 'This inspection is no longer active; start a new inspection.';
+                return;
+              }
               if (observed.status === 'inspecting') {
                 if (!validInspectionId(observed.inspectionId)) throw new Error('unavailable');
-                authInspectionId = observed.inspectionId;
-                cancelAuthButton.disabled = false;
+                if (!authInspectionId) {
+                  authInspectionId = observed.inspectionId;
+                  cancelAuthButton.disabled = false;
+                  status.textContent = 'Inspecting advertised methods…';
+                }
               }
               inventory = observed;
               if (inventory.status === 'inspecting' && status.textContent.startsWith(
