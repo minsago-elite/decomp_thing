@@ -1273,9 +1273,14 @@ class AcpAgentHarness(
     private fun rejectSessionPreference(
         kind: String, index: Int?, reason: String, choices: Sequence<String>? = null,
     ): Nothing {
+        val message = "ACP configured session preference was not advertised by the exact session/new response"
         val preview = choices?.let {
-            " Advertised choice previews: " + previewSessionChoices(it,
-                configuration.environment.values.map { value -> value.value }, configuration.sessionPreferences.privateIdentifiers())
+            val values = configuration.environment.values.map { value -> value.value }
+            val suffix = " Advertised choice previews: " + previewSessionChoices(it, values,
+                configuration.sessionPreferences.privateIdentifiers())
+            // The fixed label is appended after the helper's own collision scan; recheck the complete diagnostic.
+            val sensitive = values + configuration.sessionPreferences.privateIdentifiers()
+            if (sensitive.any { value -> value.isNotEmpty() && (message + suffix).contains(value) }) "" else suffix
         }.orEmpty()
         throw AgentExecutionException(
             AgentFailure(

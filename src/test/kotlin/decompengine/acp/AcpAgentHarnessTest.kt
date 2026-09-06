@@ -348,6 +348,12 @@ class AcpAgentHarnessTest {
                 )),
                 "not-present",
             ),
+            RejectedPreference(
+                "preview label collides with the configured identifier",
+                "session-preferences",
+                AcpSessionPreferences(modelId = "Advertised choice previews"),
+                "Advertised choice previews",
+            ),
         )
 
         (cases + cases.drop(1).take(4).map { it.copy(mode = "session-preferences-overlapping-choices") }).forEach { case ->
