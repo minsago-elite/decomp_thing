@@ -184,11 +184,7 @@ class UploadServer(
     private val diagnosticRedactor = ProgressRedactor(sensitiveValues)
     private val authenticationInspectionLock = Any()
     private var authenticationInspectionId: String? = null
-<<<<<<< HEAD
     private val authenticationInspectionCancellation = java.util.concurrent.atomic.AtomicBoolean(false)
-=======
-    private val authenticationInspectionCancellation = AtomicBoolean(false)
->>>>>>> 0caff984 (Bind cancellation identity in the original inspection PR (#279) [skip ci])
     private val authenticationInspectionResult = java.util.concurrent.atomic.AtomicReference(
         "{\"status\":\"idle\",\"loginSupported\":false}")
     private val authenticationInspectionWorker = java.util.concurrent.atomic.AtomicReference<Thread>()
@@ -415,14 +411,9 @@ class UploadServer(
                 try {
                     synchronized(lifecycleLock) {
                         authenticationInspectionCancellation.set(false)
-<<<<<<< HEAD
                         // requestStop signals outside this lock; never clear its signal after checking it.
                         check(!stopping && !stopRequested.get()) { "Server is stopping" }
                         val worker = Thread({
-=======
-                        check(!stopping) { "Server is stopping" }
-                        val inspection = Thread({
->>>>>>> 0caff984 (Bind cancellation identity in the original inspection PR (#279) [skip ci])
                             var result = AUTH_INSPECTION_FAILED
                             try {
                                 withActiveRequest { result = inspectAuthenticationMethods() }
@@ -434,13 +425,8 @@ class UploadServer(
                                 }
                             }
                         }, "decomp-web-auth-inspection").apply { isDaemon = true }
-<<<<<<< HEAD
                         authenticationInspectionWorker.set(worker)
                         worker.start()
-=======
-                        authenticationInspectionThread = inspection
-                        inspection.start()
->>>>>>> 0caff984 (Bind cancellation identity in the original inspection PR (#279) [skip ci])
                     }
                     202 to authenticationInspectionSnapshot(AUTH_INSPECTION_RUNNING)
                 } catch (_: Exception) {
