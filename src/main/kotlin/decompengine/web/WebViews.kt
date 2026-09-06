@@ -165,9 +165,18 @@ fun renderDashboard(jobs: List<Job>, diagnostics: List<WebJobDiagnostic> = empty
               .filter(Boolean).join(' · ');
             list.append(item);
           }
+          if (inventory.logoutAdvertised) {
+            const item = document.createElement('li');
+            item.textContent = inventory.logoutSupported
+              ? 'Logout advertised · logout capability reported by the agent'
+              : 'Logout advertised · logout remains unsupported here';
+            list.append(item);
+          }
           status.textContent = inventory.methods.length
             ? 'Advertised method previews. Login is unsupported; no login attempted.'
-            : 'No authentication methods advertised; no login attempted.';
+            : (inventory.logoutAdvertised
+              ? 'No authentication methods advertised; the agent advertised logout. Login is unsupported; no login attempted.'
+              : 'No authentication methods advertised; no login attempted.');
         } catch (_) {
           status.textContent = 'Authentication inspection is unavailable. Check ACP configuration and cleanup.';
         } finally {

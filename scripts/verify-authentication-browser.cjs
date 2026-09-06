@@ -50,9 +50,12 @@ const { chromium } = require(process.env.DECOMP_PLAYWRIGHT_MODULE || 'playwright
       if (mode === 'waiting' || mode === 'cancelled')
         return route.fulfill({json:{status:mode === 'waiting' ? 'inspecting' : 'cancelled', inspectionId:polledId}});
       return route.fulfill({json: mode === 'failed' ? {status:'failed'} : {
-        status:'ready', methods: mode === 'empty' ? [] : [{
+        status:'ready',
+        methods: mode === 'empty' ? [] : mode === 'logout' ? [] : [{
           idPreview:'method', variant:'agent', namePreview:'<img src=x> login', descriptionPreview:'[redacted]'
-        }]
+        }],
+        logoutAdvertised: mode === 'empty' ? false : mode === 'logout' ? true : undefined,
+        logoutSupported: mode === 'empty' ? false : mode === 'logout' ? false : undefined
       }});
     });
     const click = async expected => {
@@ -76,7 +79,14 @@ const { chromium } = require(process.env.DECOMP_PLAYWRIGHT_MODULE || 'playwright
     assert.equal(await page.locator('#auth-method-list li').count(), 0);
     mode='empty';
     await click('No authentication methods advertised; no login attempted.');
+    assert.equal(await page.locator('#auth-method-list li').count(), 0);
     assert.equal(starts, 3); assert.equal(polls, 3);
+    mode='logout';
+    await click('No authentication methods advertised; the agent advertised logout. Login is unsupported; no login attempted.');
+    assert.equal(await page.locator('#auth-method-list li').count(), 1);
+    assert.equal(await page.locator('#auth-method-list li').textContent(),
+      'Logout advertised · logout remains unsupported here');
+    assert.equal(starts, 4); assert.equal(polls, 4);
     mode = 'waiting';
     await page.locator('#inspect-auth-methods').click();
     await page.waitForFunction(() => !document.querySelector('#cancel-auth-inspection').disabled);
@@ -108,7 +118,7 @@ const { chromium } = require(process.env.DECOMP_PLAYWRIGHT_MODULE || 'playwright
     assert.equal(await page.locator('#auth-inspection-status').textContent(), 'Inspection cancelled; no login attempted.');
     assert.equal(await page.locator('#inspect-auth-methods').isEnabled(), true);
     assert.equal(await page.locator('#cancel-auth-inspection').isEnabled(), false);
-    assert.equal(cancellations, 3); assert.equal(starts, 4); assert.deepEqual(errors, []);
+    assert.equal(cancellations, 3); assert.equal(starts, 5); assert.deepEqual(errors, []);
     admissionStatus = 409; mode = 'waiting';
     await page.locator('#inspect-auth-methods').click();
     await page.waitForFunction(() => !document.querySelector('#cancel-auth-inspection').disabled);
@@ -117,7 +127,7 @@ const { chromium } = require(process.env.DECOMP_PLAYWRIGHT_MODULE || 'playwright
     await page.waitForFunction(() => document.querySelector('#auth-inspection-status').textContent ===
       'Inspection cancelled; no login attempted.');
     await page.waitForTimeout(800);
-    assert.equal(starts, 5); assert.equal(cancellations, 4);
+    assert.equal(starts, 6); assert.equal(cancellations, 4);
     assert.equal(await page.locator('#cancel-auth-inspection').isEnabled(), false);
     admissionStatus = 202; mode = 'waiting'; omitAdmissionIdentity = true; pollingFailure = 'http';
     await page.locator('#inspect-auth-methods').click();
@@ -130,7 +140,7 @@ const { chromium } = require(process.env.DECOMP_PLAYWRIGHT_MODULE || 'playwright
     await page.waitForFunction(() => document.querySelector('#auth-inspection-status').textContent ===
       'Inspection cancelled; no login attempted.');
     await page.waitForTimeout(800);
-    assert.equal(starts, 6); assert.equal(cancellations, 5);
+    assert.equal(starts, 7); assert.equal(cancellations, 5);
     assert.deepEqual(errors, []);
     admissionStatus = 202; mode = 'waiting'; omitAdmissionIdentity = false; replacementId = 'ffffffff-ffff-4fff-8fff-ffffffffffff';
     await page.locator('#inspect-auth-methods').click();
@@ -175,7 +185,7 @@ const { chromium } = require(process.env.DECOMP_PLAYWRIGHT_MODULE || 'playwright
     finally { await browser.close(); }
   }
   fs.writeFileSync(path.join(output,'result.json'), JSON.stringify({passed:true,
-    browser:browserVersion, starts, polls, cancellations, scenarios:['production stylesheet','explicit action','previews','text escaping','failure','retry','empty inventory','cancellation','HTTP cancellation retry','network cancellation retry','late cancellation acknowledgement','HTTP polling recovery','network polling recovery','invalid JSON polling recovery','attach to existing inspection','recover missing admission identity','replacement inspection rejected','restart after replacement rejection','lost admission recovered by polling','lost admission confirmed idle'],
+    browser:browserVersion, starts, polls, cancellations, scenarios:['production stylesheet','explicit action','previews','text escaping','failure','retry','empty inventory','advertised logout','cancellation','HTTP cancellation retry','network cancellation retry','late cancellation acknowledgement','HTTP polling recovery','network polling recovery','invalid JSON polling recovery','attach to existing inspection','recover missing admission identity','replacement inspection rejected','restart after replacement rejection','lost admission recovered by polling','lost admission confirmed idle'],
     renderedCssSha256:require('node:crypto').createHash('sha256').update(css).digest('hex'),
     renderedHtmlSha256:require('node:crypto').createHash('sha256').update(html).digest('hex')},null,2)+'\n');
 })().catch(error=>{console.error(error);process.exitCode=1;});

@@ -81,6 +81,28 @@ class WebAuthenticationInspectionTest {
         } finally { server.stop(0) }
     }
 
+    @Test fun `dashboard surfaces an advertised logout when no methods are advertised`() {
+        val server = UploadServer("127.0.0.1", 0, createTempDirectory("web-auth-logout-"),
+            authenticationInspector = {
+                AcpAuthenticationInventory.capture(emptyList(), emptyList(), logoutAdvertised = true)
+            })
+        server.start()
+        try {
+            val dashboard = request(server, "/", false)
+            assertEquals(200, dashboard.statusCode())
+            assertTrue(dashboard.body().contains("inventory.logoutAdvertised"))
+            assertTrue(dashboard.body().contains("inventory.logoutSupported"))
+            assertTrue(dashboard.body().contains(
+                "No authentication methods advertised; the agent advertised logout. Login is unsupported; no login attempted."))
+            assertTrue(dashboard.body().contains("Logout advertised · logout remains unsupported here"))
+            assertEquals(202, request(server, "/api/operator/auth-methods", true).statusCode())
+            val response = awaitResult(server)
+            assertEquals(200, response.statusCode())
+            assertTrue(response.body().contains("\"logoutAdvertised\":true"))
+            assertTrue(response.body().contains("\"logoutSupported\":false"))
+        } finally { server.stop(0) }
+    }
+
     @Test fun `failed inspection hides raw errors and permits another explicit attempt`() {
         val calls = AtomicInteger()
         val server = UploadServer("127.0.0.1", 0, createTempDirectory("web-auth-failure-"),
