@@ -357,6 +357,14 @@ ELF metadata keeps its existing field names and numeric types, including signed/
 The persistence serializer and stored `job.json` format are unchanged.
 The HTTP regression in `UploadServerTest` checks both responses, an old private diagnostic,
 exact public keys, retained field values and byte-for-byte preservation of stored records.
+Legacy job HTML also withholds persisted `status_message` prose and displays a fixed
+explanation when details exist. The job status itself remains visible. Generic request/storage
+exceptions and unsupported-upload exceptions no longer supply raw text to HTML error pages;
+those paths use fixed public messages. Typed service/access error messages remain available.
+This leaves stored diagnostic bytes and background redaction behavior unchanged. It is a
+privacy change for generic diagnostics, not a certification of report summaries or every
+retained metadata label as public.
+
 Legacy `/api/*` failures always return JSON, including unknown routes. POST `/jobs`
 returns JSON failures when the existing Accept switch selects `application/json`; HTML form
 requests retain HTML errors. The legacy error envelope is `{requestId, error: {code, message}}`,
@@ -429,9 +437,13 @@ fresh per transfer and do not replace durable idempotency keys.
 ### Current D4 JSON polling implementation
 
 The current retained-journal adapter implements `GET jobs/J/runs/R/snapshot`
-and `GET jobs/J/runs/R/events?cursor=...&limit=...` under the v1 prefix.
-This is bounded JSON polling; `transport`/`after` parameters and SSE negotiation
-from the target design above are not implemented. Snapshot `progress` metadata
+and `GET jobs/J/runs/R/events?transport=poll&after=...&limit=...` under the v1 prefix.
+The activity client uses this target polling spelling. The existing `cursor` parameter
+remains an alias for `after`; specifying both, duplicates, unknown fields or a transport
+other than `poll` is rejected. Omitting transport retains JSON polling compatibility.
+`Last-Event-ID` is rejected on polling rather than silently losing its resume position.
+JSON polling remains the activity client transport. An explicit positive `Accept: text/event-stream`
+on the same endpoint now selects SSE when `transport=poll` is absent. Snapshot `progress` metadata
 makes queue/history omissions and retained-record counts explicit. Missing
 journals fail with `PROGRESS_UNAVAILABLE`; replay gaps require a fresh snapshot
 via `PROGRESS_GAP`. See [the implemented boundary and qualification limits](web-progress-adapter.md).
@@ -444,3 +456,47 @@ configured limits, lifecycle, source and server sample time. Borrowed executors
 report unavailable metrics without zero values. Runtime uses the session-time
 snapshot; it neither polls these counts nor infers workflow availability from
 capacity. See [scheduler summary and verification](web-scheduler-summary.md).
+
+## Legacy session migration
+
+Legacy pages, JSON routes and downloads now require the local session described in
+`web-trust.md`. Use the CLI's `/login#bootstrap=…` handoff or exchange its token via
+`POST /api/v1/session` with exact Origin and JSON content type. The response supplies the
+session cookie and in-memory CSRF token. Legacy-only `GET /api/v1/session/csrf` restores the
+same `session` envelope under the cookie on reload. It rejects query parameters, negotiates
+JSON and is no-store. `DELETE /api/v1/session` requires cookie, exact Origin and CSRF.
+
+Legacy upload/explore/reconstruct requests require `X-CSRF-Token` and the session cookie in
+addition to exact Origin. Upload is multipart; explore/reconstruct are JSON POSTs. Browser
+forms supply these through their session adapter. There is no automatic mutation retry.
+This supersedes earlier descriptions of unauthenticated legacy routes; it does not change
+their existing unversioned job/event payloads or add durable workflow capabilities.
+
+## Current retained-journal SSE transport
+
+An explicit `Accept: text/event-stream` selects SSE on `GET jobs/J/runs/R/events`.
+Resume with one of `Last-Event-ID`, `after` or the retained `cursor` alias; mixed positions
+are rejected. The response uses the same observational event documents and signed cursors
+as polling: `id` is the cursor, `event` is `workflow.observation`, and `data` is the JSON
+event. No cookie/CSRF/access credential appears in the URL. Wildcard/default requests remain
+JSON, and explicit `transport=poll` continues to require an acceptable JSON response type.
+
+The server authorizes before admission, each checked journal read and every frame/heartbeat.
+Streams run outside the HTTP/workflow executors with at most 16 reservations globally and
+two per session. There is no per-client event queue; each replay page retains its existing
+200-record/sub-MiB ceiling. Connections have 30-second leases and heartbeat comments every
+15 seconds. A disconnected idle client is detected on a write or at the lease deadline;
+connection termination does not change workflow state. Admission failures use 429 and
+Retry-After; clients can keep using bounded polling.
+
+Before headers, the current adapter preserves polling's 410 `PROGRESS_GAP` response rather
+than the target design's `EVENT_GAP` spelling. After headers, loss of a non-null acknowledged
+cursor produces a `retention.gap` control event with no SSE id, null cursor/sequence and
+requested/oldest/latest positions plus snapshotHref, then closes. A missing journal, lost
+session or other post-header failure closes the transport; it is not a workflow verdict.
+If no cursor has ever existed, the connection closes and the subsequent initial request
+reports the gap rather than inventing an anchor.
+
+The production UI still uses polling; automatic SSE selection/reconnect/fallback in that
+client is not implemented. Full slow-socket qualification, transactional snapshot cutover,
+timed retention and target gap-error detail convergence remain outstanding under #174.

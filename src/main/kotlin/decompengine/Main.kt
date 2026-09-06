@@ -576,11 +576,10 @@ private fun runWeb(args: List<String>) {
     decompengine.web.startWebServerWithShutdownHook(server)
     val urlHost = if (':' in host && !host.startsWith('[')) "[$host]" else host
     println("Serving decomp_engine ${uiMode.name.lowercase()} UI on http://$urlHost:${server.serverPort}$basePath")
-    if (uiMode == WebUiMode.SPA) {
-        val bootstrap = server.issueBrowserBootstrap()
-        // This is an explicit local operator handoff, not a request/access log.
-        println("Open local browser session (expires ${bootstrap.expiresAt}): ${server.browserOrigin}${basePath}#bootstrap=${bootstrap.token}")
-    }
+    val bootstrap = server.issueBrowserBootstrap()
+    val sessionPath = if (uiMode == WebUiMode.SPA) basePath else "/login"
+    // This is an explicit local operator handoff, not a request/access log.
+    println("Open local browser session (expires ${bootstrap.expiresAt}): ${server.browserOrigin}$sessionPath#bootstrap=${bootstrap.token}")
 }
 
 private fun printHelp() {

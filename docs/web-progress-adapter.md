@@ -460,3 +460,106 @@ the application PATH and confirmed cleanup. Chrome used test-only `--no-sandbox`
 No uploaded binary, native analysis or live agent ran. This covers the embedded SPA on the
 recorded Linux/Chrome environment; legacy-browser automation, other browsers, certified public
 messages and complete classification of retained metadata remain outside this evidence.
+
+## Legacy HTML progress service boundary
+
+The legacy job controller now obtains a projected snapshot through the same bounded service
+read and privacy mapper as the legacy JSON route. `renderJob` accepts that snapshot explicitly;
+its progress renderer no longer opens `agent-progress.json`. Callers that do not supply a
+snapshot get an unavailable-progress label, even if a journal happens to exist beside the job.
+Missing, malformed or oversized journals leave the job page usable and clearly state that
+missing data does not establish empty history. A valid zero-event journal has a distinct
+retained-empty message. Polling errors retain displayed rows and replace the status message
+with unavailable progress; a successful subsequent response can replace that state.
+
+HTTP tests check unavailable and valid-empty HTML alongside JSON and byte preservation. A
+renderer regression supplies a snapshot differing from the on-disk journal and verifies only
+the supplied data appears; an omitted snapshot does not trigger an implicit read. This removes
+the progress-specific direct-read gap from the D2 audit. Other legacy exploration/repair HTML
+report reads and the legacy session boundary remain migration work. Browser execution of the
+legacy polling script is not covered by this JVM verification.
+
+## Target polling query compatibility
+
+The retained-journal endpoint now accepts the planned fallback query
+`events?transport=poll&after=...&limit=...`, and the activity client sends that spelling.
+Existing `cursor` requests use the same replay implementation and produce identical pages.
+Transport may be omitted; `after` and `cursor` are mutually exclusive even when equal.
+Duplicate/unknown fields, other transport values and oversized queries fail validation.
+The same 1–200 page limit, bounded source reads, HMAC cursor binding and explicit gap behavior
+remain in force. Polling rejects Last-Event-ID; that header is reserved for future streaming
+and cannot silently reset a polling client to the beginning of history.
+
+HTTP/core tests compare both spellings and exercise ambiguity, invalid transport and gap
+behavior. Frontend tests require `transport=poll` and continuation through `after`. This
+closes the target polling-query compatibility gap; SSE, heartbeat/resource management,
+transactional cutover and timed retention are still outstanding under #174.
+
+At source `3443883`, 179 web/journal JVM tests, 269 frontend tests, lint and distZip pass.
+The [packaged history/activity report](evidence/web-polling-query-browser-20260905.json)
+verifies the target query and equality with the cursor alias alongside 200/5 activity pages,
+pause/resume, recovery, metadata privacy and retained-byte checks. It identifies artifact
+hashes, an inert test-owned fixture, no workflow execution, test-only Chrome --no-sandbox,
+unchanged installation and confirmed cleanup. This does not qualify SSE or live delivery.
+
+## Dedicated stream resource prerequisite
+
+`WebStreamResources` provides the resource owner for the forthcoming SSE adapter. It admits
+at most 16 connections globally and two per authenticated session identity, independently of
+the ordinary HTTP and workflow executors. Rejection leaves the exchange with the router so
+it can return a typed error or keep using polling. The component does not authenticate a
+request itself: the endpoint must call LocalWebAccess before admission and revalidate while
+serving private events. It is not yet attached to an HTTP route or advertised as SSE support.
+
+Only admitted reservations can create virtual-thread work or cleanup tasks. There is no
+waiting-client queue or event buffer. Separate cleanup tasks prevent a blocked writer from
+preventing its connection-close attempt, and a blocked close cannot serialize other clients'
+cleanup. A reservation is released only after both the writer has exited and connection
+closure has succeeded. Interrupting a writer or cancelling its lease alone does not refund
+capacity. Failed cleanup keeps its reservation charged and makes shutdown report incomplete.
+
+Each reservation has a bounded 30-second connection lease; its deadline interrupts work and
+requests cleanup without running connection-close code on the deadline scheduler. Shutdown
+rejects new admission, requests cancellation and waits within one bounded grace period. It
+reports false if writers/cleanup remain, and late completion can be observed by another
+shutdown check without restarting work. The future stream transport must reconnect from its
+last acknowledged cursor; ending a connection is never a workflow cancellation.
+
+Nine resource tests cover global/session limits, simultaneous admissions, cancelled writers
+that ignore interruption, blocked/failed cleanup, deadlines, work failure, exact-once closure
+and bounded shutdown with late completion. The tests use controlled callbacks and latches,
+not a slow browser socket. Actual SSE framing, heartbeats, authenticated transport integration,
+slow socket behavior and server lifecycle integration remain required before #174's stream
+resource criteria are complete.
+
+## SSE transport integration
+
+The v1 events route now negotiates explicit text/event-stream and hands the exchange to
+WebStreamResources. UploadServer owns and shuts down that resource pool. WebEventStream
+uses the same WebProgressPages instance as polling, so session/job/attempt cursor binding
+and replay positions are interchangeable. Snapshot, polling and SSE share readWebProgress's
+fixed journal path and attempt-version guard; this remains a guarded read, not a transaction
+with journal publication.
+
+Frames contain the existing workflow.observation projection. Resume headers are bounded
+and mutually exclusive with query positions; heartbeat comments carry no cursor. Retention
+loss after delivery emits the existing retention.gap schema without an SSE id and closes.
+Authentication is rechecked before source reads and writes. The activity UI remains on
+bounded polling; this endpoint does not enable any unfinished production workflow adapter.
+
+HTTP tests use an actual single-worker HttpServer to prove two open streams do not occupy
+its only HTTP worker, quota rejection leaves ordinary requests responsive, logout closes
+streams, Last-Event-ID replays after the acknowledged record, polling/SSE documents match,
+retention loss emits an unnumbered gap and reconnect receives a pre-header 410. Accelerated
+heartbeat/lease tests verify real connection closure and unchanged fixture bytes. A test on
+UploadServer itself verifies routing and its shared guarded artifact projection. These do
+not establish arbitrary slow-socket behavior, the full client reconnect algorithm, timed
+retention or transactional snapshot/event cutover.
+
+At source `e15ba2e`, 194 web/journal tests and distZip pass. The
+[packaged SSE report](evidence/web-sse-browser-20260906.json) verifies native EventSource
+receipt with the session cookie and an event/id identical to polling, alongside the existing
+history/activity/recovery and retained-byte checks. No workflow executes. The report
+identifies archive/JAR/browser hashes, test-only --no-sandbox, unchanged installation and
+confirmed shutdown/cleanup. It proves native delivery, not full browser automatic reconnect
+or fallback behavior; the UI still chooses polling.

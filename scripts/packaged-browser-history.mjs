@@ -75,11 +75,23 @@ export async function qualifyHistory({ fixture, makeTarget, cdp, evaluate, ready
   const polling = await evaluate(tab, `(async () => {
     const read = async path => { const response = await fetch(path); if (!response.ok) throw new Error('Progress request failed'); return (await response.json()).data; };
     const snapshot = await read('${progressEndpoint}/snapshot');
-    const first = await read('${progressEndpoint}/events?limit=2&cursor=' + snapshot.oldestCursor);
-    const second = await read('${progressEndpoint}/events?cursor=' + first.nextCursor);
-    const idle = await read('${progressEndpoint}/events?cursor=' + snapshot.throughCursor);
-    return { snapshot, first, second, idle };
+    const first = await read('${progressEndpoint}/events?transport=poll&limit=2&after=' + snapshot.oldestCursor);
+    const compatibility = await read('${progressEndpoint}/events?limit=2&cursor=' + snapshot.oldestCursor);
+    const second = await read('${progressEndpoint}/events?transport=poll&after=' + first.nextCursor);
+    const idle = await read('${progressEndpoint}/events?transport=poll&after=' + snapshot.throughCursor);
+    return { snapshot, first, compatibility, second, idle };
   })()`);
+  assert.deepEqual(polling.first, polling.compatibility);
+  const streamed = await evaluate(tab, `new Promise((resolve, reject) => {
+    const source = new EventSource('${progressEndpoint}/events?after=' + ${JSON.stringify(polling.snapshot.oldestCursor)});
+    const timer = setTimeout(() => { source.close(); reject(new Error('SSE fixture deadline')); }, 5000);
+    source.addEventListener('workflow.observation', event => {
+      clearTimeout(timer); source.close(); resolve({ id: event.lastEventId, data: JSON.parse(event.data) });
+    });
+    source.onerror = () => { clearTimeout(timer); source.close(); reject(new Error('SSE fixture unavailable')); };
+  })`);
+  assert.deepEqual(streamed.data, polling.first.items[0]);
+  assert.equal(streamed.id, polling.first.items[0].cursor);
   assert.equal(polling.snapshot.run.runId, 'run_fixture_3');
   assert.equal(polling.snapshot.progress.authority, 'observations');
   assert.equal(polling.snapshot.progress.retainedEventCount, '205');
@@ -223,7 +235,7 @@ export async function qualifyHistory({ fixture, makeTarget, cdp, evaluate, ready
   assert.deepEqual(tab.exceptions, []);
   for (const [name, bytes] of Object.entries(fixture.retained)) assert.deepEqual(await fs.readFile(join(fixture.directory, name)), Buffer.from(bytes));
   assert.deepEqual((await fs.readdir(fixture.directory)).sort(), [...Object.keys(fixture.retained), 'reports'].sort());
-  return { activityUi: { pausedReceiptAgeAdvances: true, receiptAgeIsNotSourceAge: true, exactObservedUsage: true, explicitUsageUnitsAndProvenance: true, durationWithoutRounding: true, missingPricingBasis: true, backgroundSuspendsReads: true, offlineSuspendsReads: true, recoveryReconcilesSnapshot: true, recoveryPreservesRows: true, lastReceivedTime: true, categoryAndTaskFilters: true, filtersPreserveCursor: true, exactAttemptLinks: true, correlationReferences: true, narrowViewport: 320, firstPage: 200, continuationPage: 5, keyboardStart: true, focusPreserved: true, pauseStopsPolling: true, resumeWithoutDuplicates: true, navigationStopsPolling: true, privateTextWithheld: true, politeStatusOnly: true }, progressPolling: true, privateProseAbsentFromResponses: true, privatePathsAbsentFromResponses: true, presentationOmissionsCounted: true, progressBytesUnchanged: true, fixtureAttempts: 55, firstPage: 50, secondPage: 5, exactOrder: true, cursorReload: true,
+  return { activityUi: { pausedReceiptAgeAdvances: true, receiptAgeIsNotSourceAge: true, exactObservedUsage: true, explicitUsageUnitsAndProvenance: true, durationWithoutRounding: true, missingPricingBasis: true, backgroundSuspendsReads: true, offlineSuspendsReads: true, recoveryReconcilesSnapshot: true, recoveryPreservesRows: true, lastReceivedTime: true, categoryAndTaskFilters: true, filtersPreserveCursor: true, exactAttemptLinks: true, correlationReferences: true, narrowViewport: 320, firstPage: 200, continuationPage: 5, keyboardStart: true, focusPreserved: true, pauseStopsPolling: true, resumeWithoutDuplicates: true, navigationStopsPolling: true, privateTextWithheld: true, politeStatusOnly: true }, progressPolling: true, nativeEventSourceMatchesPolling: true, targetPollingQuery: true, cursorAliasPreservesPage: true, privateProseAbsentFromResponses: true, privatePathsAbsentFromResponses: true, presentationOmissionsCounted: true, progressBytesUnchanged: true, fixtureAttempts: 55, firstPage: 50, secondPage: 5, exactOrder: true, cursorReload: true,
     earlierAttemptReload: true, previousInterruptedAttempt: true, exactUnsignedUsage: true,
     unacceptedCandidate: true, explorationSummary: true, nativeReportDownload: true, downloadedBytesMatch: true, reportBytesUnchanged: true, retainedBytesUnchanged: true, mutationRequests: 0, executionStarted: false };
 }

@@ -28,6 +28,27 @@ class WebProgressPagesTest {
         assertFalse(idle.getValue("hasMore").jsonPrimitive.boolean)
     }
 
+    @Test fun `target polling parameters preserve replay and reject ambiguous positions`() {
+        val pages = WebProgressPages(); val bytes = journal(listOf(0, 1, 2))
+        val first = page(pages, bytes, "transport=poll&limit=1")
+        val anchor = cursor(first)
+        val legacy = page(pages, bytes, "cursor=$anchor&limit=1")
+        assertEquals(legacy, page(pages, bytes, "transport=poll&after=$anchor&limit=1"))
+        assertEquals(legacy, page(pages, bytes, "after=$anchor&limit=1"))
+        assertEquals(legacy, page(pages, bytes, "transport=%70oll&cursor=$anchor&limit=1"))
+        for (query in listOf("transport=stream", "transport=", "transport=poll&transport=poll",
+            "after=$anchor&cursor=$anchor", "after=$anchor&after=$anchor", "limit=1&limit=2",
+            "transport=poll&", "transport=" + "x".repeat(4096))) {
+            assertEquals("VALIDATION_FAILED", assertFailsWith<WebAccessDenied> { page(pages, bytes, query) }.code, query.take(100))
+        }
+        for (query in listOf("transport=poll&after=", "transport=poll&after=%26cursor%3Danything")) {
+            assertEquals("INVALID_CURSOR", assertFailsWith<WebAccessDenied> { page(pages, bytes, query) }.code)
+        }
+        assertEquals("PROGRESS_GAP", assertFailsWith<WebAccessDenied> {
+            page(pages, journal(listOf(1, 2)), "transport=poll&after=$anchor")
+        }.code)
+    }
+
     @Test fun `cursors reject cross session job attempt and tampering`() {
         val pages = WebProgressPages(); val bytes = journal(listOf(0, 1))
         val token = cursor(page(pages, bytes, "limit=1"))

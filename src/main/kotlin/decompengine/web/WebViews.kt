@@ -1,9 +1,7 @@
 package decompengine.web
 
 import decompengine.jobs.Job
-import decompengine.jobs.AgentProgressJournal
 import decompengine.jobs.toJson
-import kotlinx.serialization.json.Json
 import kotlinx.serialization.json.JsonArray
 import kotlinx.serialization.json.JsonObject
 import kotlinx.serialization.json.contentOrNull
@@ -14,12 +12,6 @@ import kotlinx.serialization.json.jsonObject
 import kotlinx.serialization.json.jsonPrimitive
 import java.net.URLEncoder
 import java.nio.charset.StandardCharsets
-import java.nio.file.Files
-import java.nio.file.Path
-import kotlin.io.path.exists
-import kotlin.io.path.isRegularFile
-import kotlin.io.path.name
-import kotlin.io.path.readText
 import kotlin.math.roundToInt
 
 fun renderDashboard(jobs: List<Job>, diagnostics: List<WebJobDiagnostic> = emptyList()): String = page(
@@ -71,13 +63,15 @@ fun renderDashboard(jobs: List<Job>, diagnostics: List<WebJobDiagnostic> = empty
 
 fun renderJob(job: Job, reportContext: WebReportContext? = null,
     diagnostics: List<decompengine.jobs.WorkflowStoreDiagnostic> = emptyList(),
-    sourceTree: SourceTreeView? = null, sourceTreeUnavailable: Boolean = false): String {
+    sourceTree: SourceTreeView? = null, sourceTreeUnavailable: Boolean = false,
+    progressSnapshot: JsonObject? = null, explorationReport: JsonObject? = null,
+    repairHistory: JsonObject? = null, reconstructionProgress: JsonObject? = null,
+    artifacts: List<WebArtifactSummary>? = null): String {
     val reports = reportsFor(job, reportContext)
     val active = job.status in setOf("queued", "analyzing")
     val metadata = job.metadata.toJson().entries.joinToString("") { (key, value) ->
         "<div class=\"datum\"><dt>${key.replace('_', ' ').title().escapeHtml()}</dt><dd>${value.toString().trim('"').escapeHtml()}</dd></div>"
     }
-    val artifacts = listArtifacts(reports.reportsDirectory)
     val action = if (reports.runId != null) {
         "<span class=\"status-note\">Legacy workflow actions are unavailable for jobs with durable attempts.</span>"
     } else if (active) {
@@ -92,10 +86,12 @@ fun renderJob(job: Job, reportContext: WebReportContext? = null,
     val script = if (active) """
         const initialStatus = ${jsString(job.status)};
         const poll = async () => {
+          if (!window.legacySession.isActive()) return;
           try {
-            const eventsResponse = await fetch('/api/jobs/${job.id}/events${reports.runId?.let { "?runId=$it" }.orEmpty()}', {cache: 'no-store'});
+            const eventsResponse = await window.legacySession.request('/api/jobs/${job.id}/events${reports.runId?.let { "?runId=$it" }.orEmpty()}', {cache: 'no-store'});
             if (eventsResponse.ok) {
               const snapshot = await eventsResponse.json();
+              if (!window.legacySession.isActive()) return;
               const list = document.querySelector('#agent-event-list');
               list.replaceChildren();
               for (const event of snapshot.events.slice(-30)) {
@@ -114,16 +110,20 @@ fun renderJob(job: Job, reportContext: WebReportContext? = null,
                 list.append(item);
               }
               document.querySelector('#agent-event-gap').textContent = snapshot.truncated
-                ? 'Earlier events were omitted from this bounded view. Inspect the invocation receipts for retained evidence.' : '';
+                ? 'Earlier events were omitted from this bounded view. Inspect the invocation receipts for retained evidence.'
+                : snapshot.events.length === 0 ? 'The retained journal currently contains no events.' : '';
+            } else {
+              document.querySelector('#agent-event-gap').textContent = 'Retained progress is unavailable. Missing data does not establish an empty history.';
             }
-            const response = await fetch('/api/jobs/${job.id}', {cache: 'no-store'});
+            const response = await window.legacySession.request('/api/jobs/${job.id}', {cache: 'no-store'});
             if (!response.ok) return;
             const job = await response.json();
+            if (!window.legacySession.isActive()) return;
             if (job.status !== initialStatus || !['queued', 'analyzing'].includes(job.status)) location.reload();
           } catch (error) {
-            document.querySelector('#agent-event-gap').textContent = 'Progress connection interrupted; retrying.';
+            if (window.legacySession.isActive()) document.querySelector('#agent-event-gap').textContent = 'Progress connection interrupted; retrying.';
           } finally {
-            setTimeout(poll, 1500);
+            if (window.legacySession.isActive()) setTimeout(poll, 1500);
           }
         };
         setTimeout(poll, 900);
@@ -144,7 +144,7 @@ fun renderJob(job: Job, reportContext: WebReportContext? = null,
                 $action
               </div>
             </section>
-            ${job.statusMessage?.let { "<div class=\"status-note ${job.status.escapeHtml()}\"><span></span>${it.escapeHtml()}</div>" }.orEmpty()}
+            ${job.statusMessage?.let { "<div class=\"status-note ${job.status.escapeHtml()}\"><span></span>Stored diagnostic details are withheld because they may contain private data.</div>" }.orEmpty()}
             ${reports.runId?.let { "<p class=\"status-note\">Reports for workflow attempt ${it.escapeHtml()}. Completion does not establish acceptance.</p>" }.orEmpty()}
             ${diagnostics.joinToString("") { "<p class=\"status-note\">${it.code.escapeHtml()}: ${it.message.escapeHtml()}</p>" }}
             <div class="job-grid">
@@ -167,21 +167,20 @@ fun renderJob(job: Job, reportContext: WebReportContext? = null,
                 </ol>
               </section>
             </div>
-            ${renderExploration(job, reports)}
-            ${renderReconstructionProgress(job, reports)}
-            ${renderAgentProgress(reports)}
+            ${runCatching { renderExploration(job, reports, explorationReport) }.getOrElse { renderExploration(job, reports, null) }}
+            ${runCatching { renderReconstructionProgress(reconstructionProgress) }.getOrElse { renderReconstructionProgress(null) }}
+            ${renderAgentProgress(progressSnapshot)}
             ${sourceTree?.let { renderSourceTree(job, it, reports) }.orEmpty()}
             ${if (sourceTreeUnavailable) "<section class=\"panel\"><p>Source-tree evidence is unavailable or has not been generated for this revision.</p></section>" else ""}
-            ${renderRepairHistory(job, reports)}
-            ${renderArtifacts(job, artifacts, reports)}
+            ${runCatching { renderRepairHistory(job, reports, repairHistory) }.getOrElse { renderRepairHistory(job, reports, null) }}
+            ${renderArtifacts(job, artifacts)}
           </main>
         """.trimIndent(),
         script = script,
     )
 }
 
-private fun renderAgentProgress(reports: WebReportContext): String {
-    val snapshot = runCatching { AgentProgressJournal.read(reports.reportsDirectory)?.let(::legacyProgressPresentation) }.getOrNull()
+private fun renderAgentProgress(snapshot: JsonObject?): String {
     val events = snapshot?.get("events")?.jsonArray.orEmpty().takeLast(30)
     val rows = events.joinToString("") { item ->
         val event = item.jsonObject
@@ -200,8 +199,12 @@ private fun renderAgentProgress(reports: WebReportContext): String {
             .filter(String::isNotBlank).joinToString(" · ")
         "<li>${summary.escapeHtml()}</li>"
     }
-    val gap = if (snapshot?.get("truncated")?.toString() == "true")
-        "Earlier events were omitted from this bounded view. Inspect the invocation receipts for retained evidence." else ""
+    val gap = when {
+        snapshot == null -> "Retained progress is unavailable. Missing data does not establish an empty history."
+        snapshot["truncated"]?.toString() == "true" -> "Earlier events were omitted from this bounded view. Inspect the invocation receipts for retained evidence."
+        events.isEmpty() -> "The retained journal currently contains no events."
+        else -> ""
+    }
     return """
         <section class="panel agent-progress" aria-labelledby="agent-progress-title">
           <h2 id="agent-progress-title">Agent progress</h2>
@@ -285,16 +288,13 @@ private fun renderJobList(jobs: List<Job>): String {
     } + "</div>"
 }
 
-private fun renderExploration(job: Job, reports: WebReportContext): String {
-    val reportPath = reports.reportsDirectory.resolve("exploration.json")
-    if (!reportPath.exists()) return """
+private fun renderExploration(job: Job, reports: WebReportContext, root: JsonObject?): String {
+    if (root == null) return """
         <section class="panel evidence-panel pending-evidence">
           <div class="section-heading compact"><span class="step">03</span><div><p class="kicker">Evidence</p><h2>Exploration report</h2></div></div>
-          <p>Run automatic exploration to generate input, coverage, and confidence evidence.</p>
+          <p>The exploration report is unavailable or has not been generated for this attempt.</p>
         </section>
     """.trimIndent()
-    val root = runCatching { Json.parseToJsonElement(reportPath.readText()).jsonObject }.getOrNull()
-        ?: return "<section class=\"panel evidence-panel\"><h2>Exploration report</h2><p>The report could not be parsed.</p></section>"
     val confidence = root["confidence"]?.jsonObject
     val score = confidence?.get("score")?.jsonPrimitive?.doubleOrNull ?: 0.0
     val candidates = root["candidates"]?.jsonArray ?: JsonArray(emptyList())
@@ -329,11 +329,8 @@ private fun renderExploration(job: Job, reports: WebReportContext): String {
     """.trimIndent()
 }
 
-fun renderRepairHistory(job: Job, reportContext: WebReportContext? = null): String {
-    val historyPath = reportsFor(job, reportContext).reportsDirectory.resolve("repair_history.json")
-    if (!historyPath.exists()) return ""
-    val payload = runCatching { Json.parseToJsonElement(historyPath.readText()).jsonObject }.getOrNull()
-        ?: return "<section class=\"panel history-panel\"><h2>Repair history</h2><p>Repair history could not be loaded.</p></section>"
+fun renderRepairHistory(job: Job, reportContext: WebReportContext? = null, payload: JsonObject? = null): String {
+    if (payload == null) return "<section class=\"panel history-panel\"><h2>Repair history</h2><p>Repair history is unavailable or has not been generated for this attempt.</p></section>"
     val iterations = payload["iterations"] as? JsonArray ?: return ""
     if (iterations.isEmpty()) return ""
     val items = iterations.mapNotNull { it as? JsonObject }.joinToString("") { iteration ->
@@ -364,12 +361,12 @@ private fun renderEvidence(label: String, evidence: JsonObject?): String {
     return "<p class=\"evidence-line\"><b>$label:</b><span>${kind.escapeHtml()} — ${summary.escapeHtml()}</span>${if (artifact.isBlank()) "" else "<code>${artifact.escapeHtml()}</code>"}</p>"
 }
 
-private fun renderArtifacts(job: Job, artifacts: List<Path>, reports: WebReportContext): String {
+private fun renderArtifacts(job: Job, artifacts: List<WebArtifactSummary>?): String {
+    if (artifacts == null) return "<section class=\"panel artifacts-panel\"><h2>Artifacts</h2><p>Artifact listing is unavailable.</p></section>"
     if (artifacts.isEmpty()) return ""
-    val root = reports.reportsDirectory
     val links = artifacts.joinToString("") { artifact ->
-        val relative = reports.artifactPrefix + "/" + root.relativize(artifact).toString().replace('\\', '/')
-        "<a class=\"artifact-row\" href=\"${artifactHref(job, relative)}\"><span class=\"artifact-icon\">${artifact.fileName.toString().substringAfterLast('.', "FILE").uppercase().take(4)}</span><span><strong>${artifact.name.escapeHtml()}</strong><small>${relative.escapeHtml()} · ${runCatching { formatBytes(Files.size(artifact).toInt()) }.getOrDefault("unknown")}</small></span><span>↓</span></a>"
+        val relative = artifact.relativePath
+        "<a class=\"artifact-row\" href=\"${artifactHref(job, relative)}\"><span class=\"artifact-icon\">${artifact.displayName.substringAfterLast('.', "FILE").uppercase().take(4).escapeHtml()}</span><span><strong>${artifact.displayName.escapeHtml()}</strong><small>${relative.escapeHtml()} · ${formatBytes(artifact.sizeBytes)}</small></span><span>↓</span></a>"
     }
     return """
       <section class="panel artifacts-panel">
@@ -402,10 +399,8 @@ private fun renderSourceTree(job: Job, source: SourceTreeView, reports: WebRepor
     """.trimIndent()
 }
 
-private fun renderReconstructionProgress(job: Job, reports: WebReportContext): String {
-    val path = reports.reportsDirectory.resolve("reconstruction_progress.json")
-    if (!path.exists()) return ""
-    val progress = runCatching { Json.parseToJsonElement(path.readText()).jsonObject }.getOrNull() ?: return ""
+private fun renderReconstructionProgress(progress: JsonObject?): String {
+    if (progress == null) return "<section class=\"panel reconstruction-progress\"><h2>Source reconstruction</h2><p>Reconstruction progress is unavailable or has not been generated for this attempt.</p></section>"
     val phase = progress.text("phase")
     val completed = progress.number("completed")
     val total = progress.number("total")
@@ -420,29 +415,6 @@ private fun renderReconstructionProgress(job: Job, reports: WebReportContext): S
 
 private fun reportsFor(job: Job, supplied: WebReportContext?): WebReportContext =
     supplied ?: WebReportContext(job.binaryPath.parent.resolve("reports"))
-
-private fun listArtifacts(jobDir: Path): List<Path> {
-    if (!jobDir.exists()) return emptyList()
-    val artifacts = mutableListOf<Path>()
-    var entries = 0
-    Files.walkFileTree(jobDir, object : java.nio.file.SimpleFileVisitor<Path>() {
-        override fun preVisitDirectory(directory: Path, attributes: java.nio.file.attribute.BasicFileAttributes): java.nio.file.FileVisitResult {
-            require(++entries <= 10_000 && jobDir.relativize(directory).nameCount <= 32) {
-                "report listing exceeds its traversal bound"
-            }
-            return if (directory == jobDir.resolve("source-tree") || directory == jobDir.resolve("runs")) {
-                java.nio.file.FileVisitResult.SKIP_SUBTREE
-            } else java.nio.file.FileVisitResult.CONTINUE
-        }
-
-        override fun visitFile(file: Path, attributes: java.nio.file.attribute.BasicFileAttributes): java.nio.file.FileVisitResult {
-            require(++entries <= 10_000) { "report listing exceeds its entry bound" }
-            if (attributes.isRegularFile) artifacts.add(file)
-            return java.nio.file.FileVisitResult.CONTINUE
-        }
-    })
-    return artifacts.sorted()
-}
 
 private fun metric(label: String, value: String, detail: String, score: Double? = null): String {
     val gauge = score?.let { "<span class=\"gauge\"><i style=\"width:${(it.coerceIn(0.0, 1.0) * 100).toInt()}%\"></i></span>" }.orEmpty()
@@ -474,6 +446,7 @@ private fun page(title: String, body: String, script: String = ""): String = """
   <nav class="topbar"><a href="/" class="brand"><span>de</span> decomp_engine</a><span class="build-label">LOCAL WORKBENCH</span></nav>
 $body
   <footer class="shell"><span>decomp_engine</span><span>Evidence over assumptions.</span></footer>
+  <script>$LEGACY_SESSION_SCRIPT</script>
   ${if (script.isBlank()) "" else "<script>$script</script>"}
 </body>
 </html>
@@ -493,7 +466,9 @@ private fun String.escapeHtml(): String =
 
 private fun String.title(): String = split(' ').joinToString(" ") { it.replaceFirstChar(Char::uppercase) }
 private fun formatTimestamp(value: String): String = value.replace('T', ' ').removeSuffix("Z").substringBefore('.') + " UTC"
-private fun formatBytes(bytes: Int): String = when {
+private fun formatBytes(bytes: Int): String = formatBytes(bytes.toLong())
+
+private fun formatBytes(bytes: Long): String = when {
     bytes >= 1024 * 1024 -> "%.1f MiB".format(java.util.Locale.ROOT, bytes / (1024.0 * 1024.0))
     bytes >= 1024 -> "%.1f KiB".format(java.util.Locale.ROOT, bytes / 1024.0)
     else -> "$bytes B"

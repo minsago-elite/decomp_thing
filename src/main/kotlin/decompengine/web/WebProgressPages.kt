@@ -25,10 +25,7 @@ internal class WebProgressPages {
     }
 
     fun page(owner: String, jobId: String, runId: String, bytes: ByteArray, rawQuery: String?): JsonObject {
-        if (rawQuery != null && rawQuery.split('&').any { it.substringBefore('=') !in setOf("limit", "cursor") }) {
-            throw WebAccessDenied(422, "VALIDATION_FAILED", "Progress pages accept only limit and cursor.")
-        }
-        val (query, cursor) = WebJobQuery.parse(rawQuery)
+        val (query, cursor) = WebProgressQuery.parse(rawQuery)
         val journal = decode(bytes)
         val records = journal.getValue("events").jsonArray.map { it.jsonObject }
         var expected = 0L
