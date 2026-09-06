@@ -340,6 +340,13 @@ class UploadServer(
         synchronized(lifecycleLock) {
             if (stopping || startupCancellation.get()) return false
             activeRequests++
+            // stop() publishes startupCancellation outside lifecycleLock, so a handler that read
+            // the flag before the signal must still be refused when the signal preceded this
+            // reservation instead of staying admitted past the stop request.
+            if (startupCancellation.get()) {
+                activeRequests--
+                return false
+            }
         }
         try {
             action()

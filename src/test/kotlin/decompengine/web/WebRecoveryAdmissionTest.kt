@@ -4,6 +4,9 @@ import decompengine.jobs.JobStore
 import decompengine.jobs.JobStoreException
 import decompengine.jobs.elfFixture
 import java.nio.file.Files
+import java.util.concurrent.atomic.AtomicBoolean
+import java.util.concurrent.atomic.AtomicInteger
+import java.util.concurrent.atomic.AtomicReference
 import kotlin.io.path.*
 import kotlin.test.*
 
@@ -82,5 +85,42 @@ class WebRecoveryAdmissionTest {
             assertEquals("failed", store.get(job.id).status)
             assertEquals("private-invalid-record", root.resolve("retained-invalid/job.json").readText())
         } finally { replacement.stop(0) }
+    }
+
+    @Test fun `request admission racing the stop signal is refused once cancellation is observable`() {
+        val root = createTempDirectory("web-admission-fence-")
+        val server = UploadServer("127.0.0.1", 0, root)
+        server.start()
+        try {
+            val stopReturned = AtomicBoolean(false)
+            val refusals = AtomicInteger()
+            val problems = AtomicReference<Throwable>()
+            val racers = List(4) {
+                Thread {
+                    try {
+                        var refused = 0
+                        while (!stopReturned.get()) {
+                            var ran = false
+                            server.withActiveRequest { ran = true }
+                            if (!ran) refused++
+                        }
+                        refusals.addAndGet(refused)
+                    } catch (problem: Throwable) {
+                        problems.set(problem)
+                    }
+                }
+            }
+            racers.forEach { racer -> racer.isDaemon = true; racer.start() }
+            // stop() publishes cancellation outside lifecycleLock; admission decisions that
+            // observe the signal afterwards must be refused rather than admitted past it.
+            val shutdown = runCatching { server.stop() }
+            stopReturned.set(true)
+            racers.forEach { it.join(5000) }
+            racers.forEach { check(!it.isAlive) }
+            assertNull(problems.get())
+            assertTrue(shutdown.isSuccess || shutdown.exceptionOrNull()?.message == "HTTP requests remain active after server stop")
+            assertTrue(refusals.get() > 0)
+            assertFalse(server.withActiveRequest { error("stopped server admitted work") })
+        } finally { runCatching { server.stop() } }
     }
 }
