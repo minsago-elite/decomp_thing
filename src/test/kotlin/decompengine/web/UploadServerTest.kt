@@ -317,6 +317,32 @@ class UploadServerTest {
     }
 
     @Test
+    fun `stop signals the job service before waiting on the lifecycle lock`() {
+        val dataDir = createTempDirectory("web-stop-signal-order-")
+        val server = UploadServer("127.0.0.1", 0, dataDir)
+        server.start()
+        val stopThread = Thread { server.stop() }
+        try {
+            synchronized(server.lifecycleMonitor()) {
+                stopThread.start()
+                assertTrue(awaitBlockedIn("decompengine.web.UploadServer", "stop"),
+                    "stop() should wait on the lifecycle lock while it is held")
+                // The job service must already be signalled while stop() is still blocked:
+                // a queued callback or completing operation must observe shutdown before
+                // the lock frees.
+                assertTrue(server.jobServiceStopping(),
+                    "beginShutdown must be published before waiting on the lifecycle lock")
+            }
+            stopThread.join(10_000)
+            assertTrue(!stopThread.isAlive,
+                "stop() must complete once the lock is released; state=${stopThread.state} " +
+                    "frames=${stopThread.stackTrace.joinToString(" <- ") { "${it.className.substringAfterLast('.')}.${it.methodName}" }}")
+        } finally {
+            dataDir.toFile().deleteRecursively()
+        }
+    }
+
+    @Test
     fun `shutdown timeout retains store ownership until the worker exits and cleanup is retried`() {
         val dataDir = createTempDirectory("web-retained-owner-")
         val started = java.util.concurrent.CountDownLatch(1)
@@ -1027,6 +1053,10 @@ class UploadServerTest {
 
     private fun UploadServer.lifecycleMonitor(): Any =
         UploadServer::class.java.getDeclaredField("lifecycleLock").apply { isAccessible = true }.get(this)
+
+    private fun UploadServer.jobServiceStopping(): Boolean =
+        (UploadServer::class.java.getDeclaredField("jobs").apply { isAccessible = true }.get(this) as WebJobService)
+            .let { service -> WebJobService::class.java.getDeclaredField("stopping").apply { isAccessible = true }.getBoolean(service) }
 
     private fun awaitBlocked(thread: Thread?): Boolean {
         val deadline = System.nanoTime() + java.util.concurrent.TimeUnit.SECONDS.toNanos(10)

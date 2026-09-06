@@ -318,8 +318,11 @@ class UploadServer(
 
     fun stop(delaySeconds: Int = 0) {
         require(delaySeconds >= 0) { "shutdown delay must be nonnegative" }
-        // Signal recovery even while start holds lifecycleLock through filesystem operations.
+        // Signal recovery and the job service even while start or a queued callback holds
+        // lifecycleLock through filesystem operations: no queued operation may begin and no
+        // completion may be published after the stop signal is observable.
         stopRequested.set(true)
+        jobs.beginShutdown()
         val callerWasInterrupted = Thread.currentThread().isInterrupted
         val inspection = synchronized(lifecycleLock) {
             stopping = true
@@ -333,7 +336,6 @@ class UploadServer(
             authenticationInspectionCancellation.set(true)
             authenticationInspectionWorker.get()
         }
-        jobs.beginShutdown()
         server.stop(delaySeconds)
         requestExecutor.shutdownNow()
         requestDeadlines.shutdownNow()
