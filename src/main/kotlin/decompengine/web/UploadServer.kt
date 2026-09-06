@@ -176,7 +176,7 @@ class UploadServer(
     devFrontendOrigin: String? = null,
     sourceProfiles: List<ReconstructionProfile> = listOf(GeneratedCMakeReconstructionProfile.descriptor),
     sensitiveValues: Collection<String> = System.getenv().values,
-    listenBacklog: Int = 64,
+    private val listenBacklog: Int = 64,
 ) {
     init { require(listenBacklog in 1..4096) { "HTTP listen backlog must be between 1 and 4096" } }
     private val diagnosticRedactor = ProgressRedactor(sensitiveValues)

@@ -34,6 +34,21 @@ class WebShutdownTest {
         verifyShutdown(swallowInterruption = false, abruptExit = true)
     }
 
+    @Test
+    fun `failed startup releases the configured listener before the server is started`() {
+        val root = createTempDirectory("web-prestart-listener-")
+        val owner = UploadServer("127.0.0.1", 0, root)
+        owner.start()
+        try {
+            val port = java.net.ServerSocket(0).use { socket -> socket.localPort }
+            val failure = kotlin.test.assertFailsWith<IllegalStateException> { UploadServer("127.0.0.1", port, root) }
+            assertEquals("Job store already has a live web server owner", failure.message)
+            java.net.ServerSocket(port).use { }
+        } finally {
+            owner.stop()
+        }
+    }
+
     private fun verifyShutdown(swallowInterruption: Boolean, keepWaiting: Boolean = false, abruptExit: Boolean = false) {
         val root = createTempDirectory("web-shutdown-")
         val log = root.resolve("child.log")
