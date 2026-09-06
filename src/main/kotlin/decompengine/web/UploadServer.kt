@@ -184,7 +184,7 @@ class UploadServer(
     private val diagnosticRedactor = ProgressRedactor(sensitiveValues)
     private val authenticationInspectionLock = Any()
     private var authenticationInspectionId: String? = null
-    private val authenticationInspectionCancellation = AtomicBoolean(false)
+    private val authenticationInspectionCancellation = java.util.concurrent.atomic.AtomicBoolean(false)
     private val authenticationInspectionResult = java.util.concurrent.atomic.AtomicReference(
         "{\"status\":\"idle\",\"loginSupported\":false}")
     private val authenticationInspectionWorker = java.util.concurrent.atomic.AtomicReference<Thread>()
@@ -297,7 +297,6 @@ class UploadServer(
             if (exception is InterruptedException) Thread.currentThread().interrupt()
         }
         if (inspectionWaitInterrupted) Thread.currentThread().interrupt()
-        }
         if (!releaseOwnershipIfIdle()) throw IllegalStateException("HTTP requests remain active after server stop")
     }
 

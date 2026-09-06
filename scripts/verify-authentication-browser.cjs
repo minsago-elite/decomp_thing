@@ -12,7 +12,7 @@ const { chromium } = require(process.env.DECOMP_PLAYWRIGHT_MODULE || 'playwright
   assert(css.length > 0, 'production stylesheet fixture is empty');
   const browser = await chromium.launch({headless: true});
   const browserVersion = browser.version();
-  let starts = 0, polls = 0, cancellations = 0, cancellationFailure = null, pollingFailure = null, admissionStatus = 202, omitAdmissionIdentity = false, replacementId = null, inspectionId = '00000000-0000-0000-0000-000000000001', context;
+  let starts = 0, polls = 0, cancellations = 0, cancellationFailure = null, pollingFailure = null, admissionStatus = 202, omitAdmissionIdentity = false, replacementId = null, admissionFailure = null, inspectionId = '00000000-0000-0000-0000-000000000001', context;
   try {
     context = await browser.newContext();
     await context.tracing.start({screenshots: true, snapshots: true});
@@ -37,6 +37,7 @@ const { chromium } = require(process.env.DECOMP_PLAYWRIGHT_MODULE || 'playwright
       if (request.method() === 'POST') {
         starts++;
         if (admissionStatus === 202) inspectionId = `00000000-0000-0000-0000-${String(starts).padStart(12, '0')}`;
+        if (admissionFailure === 'network') return route.abort('failed');
         assert.equal(request.headers()['x-decomp-operator-action'], 'inspect-auth');
         return route.fulfill({status:admissionStatus, json:{status:'inspecting', ...(omitAdmissionIdentity ? {} : {inspectionId})}});
       }
@@ -45,6 +46,7 @@ const { chromium } = require(process.env.DECOMP_PLAYWRIGHT_MODULE || 'playwright
       if (pollingFailure === 'network') return route.abort('failed');
       if (pollingFailure === 'json') return route.fulfill({status:200, contentType:'application/json', body:'{' });
       const polledId = replacementId || inspectionId;
+      if (mode === 'idle') return route.fulfill({json:{status:'idle', inspectionId:null}});
       if (mode === 'waiting' || mode === 'cancelled')
         return route.fulfill({json:{status:mode === 'waiting' ? 'inspecting' : 'cancelled', inspectionId:polledId}});
       return route.fulfill({json: mode === 'failed' ? {status:'failed'} : {
@@ -141,13 +143,39 @@ const { chromium } = require(process.env.DECOMP_PLAYWRIGHT_MODULE || 'playwright
     replacementId = null;
     mode = 'empty';
     await click('No authentication methods advertised; no login attempted.');
+    mode = 'waiting'; admissionFailure = 'network';
+    await page.locator('#inspect-auth-methods').click();
+    await page.waitForFunction(() => document.querySelector('#auth-inspection-status').textContent ===
+      'Admission response was lost; checking inspection status…');
+    await page.waitForFunction(() => document.querySelector('#auth-inspection-status').textContent ===
+      'Inspecting advertised methods…');
+    await page.waitForFunction(() => !document.querySelector('#cancel-auth-inspection').disabled);
+    assert.equal(await page.locator('#inspect-auth-methods').isEnabled(), false);
+    admissionFailure = null;
+    await page.locator('#cancel-auth-inspection').click();
+    await page.waitForFunction(() => document.querySelector('#auth-inspection-status').textContent ===
+      'Inspection cancelled; no login attempted.');
+    await page.waitForTimeout(800);
+    assert.equal(starts, 9); assert.equal(cancellations, 6);
+    assert.equal(await page.locator('#inspect-auth-methods').isEnabled(), true);
+    assert.equal(await page.locator('#cancel-auth-inspection').isEnabled(), false);
+    assert.deepEqual(errors, []);
+    mode = 'idle'; admissionFailure = 'network';
+    await page.locator('#inspect-auth-methods').click();
+    await page.waitForFunction(() => document.querySelector('#auth-inspection-status').textContent ===
+      'Authentication inspection is unavailable. Check ACP configuration and cleanup.');
+    assert.equal(await page.locator('#inspect-auth-methods').isEnabled(), true);
+    assert.equal(await page.locator('#cancel-auth-inspection').isEnabled(), false);
+    assert.equal(starts, 10);
+    assert.deepEqual(errors, []);
+    admissionFailure = null;
     await page.screenshot({path:path.join(output,'dashboard.png')});
   } finally {
     try { if (context) await context.tracing.stop({path:path.join(output,'trace.zip')}); }
     finally { await browser.close(); }
   }
   fs.writeFileSync(path.join(output,'result.json'), JSON.stringify({passed:true,
-    browser:browserVersion, starts, polls, cancellations, scenarios:['production stylesheet','explicit action','previews','text escaping','failure','retry','empty inventory','cancellation','HTTP cancellation retry','network cancellation retry','late cancellation acknowledgement','HTTP polling recovery','network polling recovery','invalid JSON polling recovery','attach to existing inspection','recover missing admission identity','replacement inspection rejected','restart after replacement rejection'],
+    browser:browserVersion, starts, polls, cancellations, scenarios:['production stylesheet','explicit action','previews','text escaping','failure','retry','empty inventory','cancellation','HTTP cancellation retry','network cancellation retry','late cancellation acknowledgement','HTTP polling recovery','network polling recovery','invalid JSON polling recovery','attach to existing inspection','recover missing admission identity','replacement inspection rejected','restart after replacement rejection','lost admission recovered by polling','lost admission confirmed idle'],
     renderedCssSha256:require('node:crypto').createHash('sha256').update(css).digest('hex'),
     renderedHtmlSha256:require('node:crypto').createHash('sha256').update(html).digest('hex')},null,2)+'\n');
 })().catch(error=>{console.error(error);process.exitCode=1;});

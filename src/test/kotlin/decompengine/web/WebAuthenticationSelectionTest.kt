@@ -13,12 +13,12 @@ class WebAuthenticationSelectionTest {
             val select: () -> AcpAgentHarness = { selections++; throw currentFailure }
             val inspector = defaultWebAuthenticationInspector(select)
             assertEquals(0, selections, "construction remains lazy")
-            assertSame(failure, assertFails { inspector() })
+            assertSame(failure, assertFails { inspector(decompengine.agent.AgentCancellation.NONE) })
             currentFailure = IllegalArgumentException("changed configuration")
-            repeat(2) { assertSame(failure, assertFails { inspector() }) }
+            repeat(2) { assertSame(failure, assertFails { inspector(decompengine.agent.AgentCancellation.NONE) }) }
             assertEquals(1, selections, "failed selection must not reread changed configuration")
             val restarted = defaultWebAuthenticationInspector(select)
-            assertSame(currentFailure, assertFails { restarted() })
+            assertSame(currentFailure, assertFails { restarted(decompengine.agent.AgentCancellation.NONE) })
             assertEquals(2, selections, "a new inspector may select configuration again")
         }
     }

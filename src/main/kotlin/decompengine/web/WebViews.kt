@@ -107,15 +107,19 @@ fun renderDashboard(jobs: List<Job>, diagnostics: List<WebJobDiagnostic> = empty
         list.replaceChildren();
         status.textContent = 'Inspecting advertised methods…';
         try {
-          const response = await fetch('/api/operator/auth-methods', {
-            method: 'POST', cache: 'no-store', headers: {'X-Decomp-Operator-Action': 'inspect-auth'}
-          });
-          if (response.status !== 202 && response.status !== 409) throw new Error('unavailable');
-          // A 409 attaches to the current inspection. Polling can recover a missing acknowledgement.
           try {
-            const admitted = await response.json();
-            if (validInspectionId(admitted.inspectionId)) authInspectionId = admitted.inspectionId;
-          } catch (_) { }
+            const response = await fetch('/api/operator/auth-methods', {
+              method: 'POST', cache: 'no-store', headers: {'X-Decomp-Operator-Action': 'inspect-auth'}
+            });
+            if (response.status !== 202 && response.status !== 409) throw new Error('unavailable');
+            // A 409 attaches to the current inspection. Polling can recover a missing acknowledgement.
+            try {
+              const admitted = await response.json();
+              if (validInspectionId(admitted.inspectionId)) authInspectionId = admitted.inspectionId;
+            } catch (_) { }
+          } catch (_) {
+            status.textContent = 'Admission response was lost; checking inspection status…';
+          }
           let inventory = {status: 'inspecting'};
           cancelAuthButton.disabled = !validInspectionId(authInspectionId);
           while (inventory.status === 'inspecting') {

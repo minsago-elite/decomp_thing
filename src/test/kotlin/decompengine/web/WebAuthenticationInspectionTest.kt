@@ -193,6 +193,8 @@ class WebAuthenticationInspectionTest {
             val replacement = UploadServer("127.0.0.1", 0, root)
             try { replacement.start() } finally { replacement.stop(0) }
         } finally { release.countDown(); server.stop(0) }
+    }
+
     @Test fun `explicit cancellation reaches the current inspector and publishes only its terminal result`() {
         val entered = java.util.concurrent.CountDownLatch(1)
         val cancellationObserved = java.util.concurrent.CountDownLatch(1)
@@ -281,13 +283,24 @@ class WebAuthenticationInspectionTest {
     }
 
     @Test fun `rendered polling rejects status updates from a replacement inspection`() {
-        val dashboard = renderDashboard(emptyList(), JobRecoveryInventory(0, 0, 0, 0L, 0, true))
+        val dashboard = renderDashboard(emptyList(), emptyList(), JobRecoveryInventory(0, 0, 0, 0L, 0, true))
         assertTrue(dashboard.contains("observed.inspectionId !== authInspectionId"),
             "polling must compare the observed identity against the admitted identity")
         assertTrue(dashboard.contains("This inspection is no longer active; start a new inspection."),
             "an identity mismatch must end polling instead of adopting the replacement")
         assertTrue(dashboard.contains("if (!authInspectionId) {"),
             "the observed identity may only be adopted while no identity is captured")
+    }
+
+    @Test fun `rendered polling continues when the admission acknowledgement is lost`() {
+        val dashboard = renderDashboard(emptyList(), emptyList(), JobRecoveryInventory(0, 0, 0, 0L, 0, true))
+        val recoveryNotice = dashboard.indexOf("Admission response was lost; checking inspection status…")
+        val pollingLoop = dashboard.indexOf("while (inventory.status === 'inspecting')")
+        val terminalNotice = dashboard.indexOf("Authentication inspection is unavailable. Check ACP configuration and cleanup.")
+        assertTrue(recoveryNotice in 0 until pollingLoop,
+            "an ambiguous admission failure must notice recovery polling before any terminal report")
+        assertTrue(pollingLoop in 0 until terminalNotice,
+            "polling must remain able to recover the inspection before reporting it unavailable")
     }
 
     private fun awaitResult(server: UploadServer): HttpResponse<String> {
