@@ -138,7 +138,6 @@ class AcpCurrentConfigInventoryTest {
     @Test
     fun `final preview omits private identifiers synthesized by replacements and formatting`() {
         val cases = listOf(
-            listOf("[redacted]X", "foobar") to sequenceOf("foobarX"),
             listOf("\"model-safe\"") to sequenceOf("model-safe"),
             listOf(" (more choices omitted)") to (1..5).asSequence().map { "choice-$it" },
             listOf("[]") to emptySequence<String>(),
@@ -148,6 +147,10 @@ class AcpCurrentConfigInventoryTest {
             assertEquals("", preview)
             privateIds.forEach { assertFalse(preview.contains(it)) }
         }
+        val synthesized = previewSessionChoices(sequenceOf("foobarX"), emptyList(), listOf("[redacted]X", "foobar"))
+        assertTrue(synthesized.contains("[redacted]"))
+        assertFalse(synthesized.contains("[redacted]X"))
+        assertFalse(synthesized.contains("foobar"))
     }
 
     @Test

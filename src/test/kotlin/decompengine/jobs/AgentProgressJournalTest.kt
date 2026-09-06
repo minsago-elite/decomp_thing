@@ -325,6 +325,14 @@ class AgentProgressJournalTest {
         assertFalse(redactor.text("\u001b[31mhello").contains('\u001b'))
     }
 
+    @Test
+    fun `replacement output cannot synthesize a reordered secret`() {
+        val redactor = ProgressRedactor(listOf("foo", "[redacted]X"))
+        assertEquals("[redacted]", redactor.text("fooX"))
+        val marker = ProgressRedactor(listOf("[redacted]"))
+        assertFalse(marker.text("hello [redacted] world").contains("[redacted]"))
+    }
+
     private fun request(root: java.nio.file.Path) = AgentExecutionRequest(
         "fixture task", listOf(AgentWorkspaceRoot("project", root.toAbsolutePath().normalize())),
         accessPolicy = AgentAccessPolicy(emptyList()),

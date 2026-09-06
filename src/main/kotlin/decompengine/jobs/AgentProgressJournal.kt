@@ -436,19 +436,34 @@ internal class ProgressRedactor(values: Collection<String>, additionalValues: Co
         // Do not take a raw prefix: that can expose a partial configured secret.
         if (value.length > 16_384) return "[oversized text omitted]"
         var safe = value.replace(removableControls, "")
-        secrets.forEach {
-            safe = safe.replace(it, "[redacted]")
+        // Replacing one secret can synthesize another ("fooX" with the secrets "foo" and
+        // "[redacted]X"); repeat replacement passes until the output is stable and omit
+        // any result that still contains a secret.
+        for (pass in 1..REDACTION_PASSES) {
+            val next = redact(safe)
+            if (next == safe) break
+            safe = next
             if (safe.length > 16_384) return "[oversized text omitted]"
         }
+        if (safe.length > maximumCharacters) {
+            var end = maximumCharacters
+            if (end > 0 && safe[end - 1].isHighSurrogate() && safe[end].isLowSurrogate()) end--
+            safe = safe.take(end) + "… [preview truncated]"
+        }
+        if (leaks(safe)) return "[unredactable text omitted]"
+        return safe
+    }
+
+    private fun redact(source: String): String {
+        var safe = source
+        secrets.forEach { safe = safe.replace(it, "[redacted]") }
         safe = safe.replace(Regex("(?i)(bearer\\s+)[^\\s,;]+"), "$1[redacted]")
-        if (safe.length > 16_384) return "[oversized text omitted]"
         safe = safe.replace(Regex("(?i)((?:api[_-]?key|access[_-]?token|password|secret|authorization)\\s*[:=]\\s*)[^\\s,;]+"), "$1[redacted]")
-        if (safe.length > 16_384) return "[oversized text omitted]"
         safe = safe.replace(Regex("(?:sk-|ghp_|github_pat_)[A-Za-z0-9_-]+"), "[redacted]")
-        if (safe.length > 16_384) return "[oversized text omitted]"
-        if (safe.length <= maximumCharacters) return safe
-        var end = maximumCharacters
-        if (end > 0 && safe[end - 1].isHighSurrogate() && safe[end].isLowSurrogate()) end--
-        return safe.take(end) + "… [preview truncated]"
+        return safe
+    }
+
+    private companion object {
+        const val REDACTION_PASSES = 8
     }
 }
