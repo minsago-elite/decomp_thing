@@ -347,9 +347,16 @@ offering an explicit recovery action. Credentials and raw transport diagnostics 
 
 ## Legacy compatibility
 
-Current `GET /api/jobs/{id}` returns `Job.toJson()` with snake_case fields, a raw `binary_path`,
-numeric `size_bytes` and a signed/numeric `entry_point`; failures can be HTML. It is not a v1 DTO.
-Current POST `/jobs` returns that shape only when JSON is requested; execution POSTs redirect.
+`GET /api/jobs/{id}` and JSON-requested POST `/jobs` success responses use an explicit
+public projection: `id`, `filename`, `status`, `created_at`, `updated_at`, `size_bytes` and
+`metadata`. The former persistence-derived `binary_path` and optional `status_message` fields
+are removed for privacy: stored diagnostic text can contain host paths, environment values or
+raw exceptions, including records predating redaction. No placeholder diagnostic is invented.
+ELF metadata keeps its existing field names and numeric types, including signed/numeric
+`entry_point`; this legacy shape is not a v1 DTO. Execution POSTs still redirect and failures
+can still be HTML. The persistence serializer and stored `job.json` format are unchanged.
+The HTTP regression in `UploadServerTest` checks both responses, an old private diagnostic,
+exact public keys, retained field values and byte-for-byte preservation of stored records.
 D2/D13 preserve the non-sensitive legacy success fields through the first D-series release and
 at least one subsequent minor release, while documenting removal of `binary_path`, applying the
 same session/content boundary and making API failures JSON. Do not silently change old numeric

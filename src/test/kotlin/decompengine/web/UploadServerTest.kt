@@ -39,6 +39,44 @@ import kotlin.test.assertTrue
 
 class UploadServerTest {
     @Test
+    fun `legacy upload and job JSON omit private storage fields without changing persistence`() {
+        withServer { server, root ->
+            val uploaded = upload(server, "presentation.elf", elfFixture(), acceptJson = true)
+            assertEquals(201, uploaded.status)
+            val publicJob = Json.parseToJsonElement(uploaded.body.decodeToString()).jsonObject
+            val id = publicJob.getValue("id").toString().trim('"')
+            val record = root.resolve(id).resolve("job.json")
+            val initialBytes = record.readBytes()
+            val persisted = Json.parseToJsonElement(initialBytes.decodeToString()).jsonObject
+            val publicKeys = setOf("id", "filename", "status", "created_at", "updated_at", "size_bytes", "metadata")
+            assertEquals(publicKeys, publicJob.keys)
+            publicKeys.forEach { assertEquals(persisted[it], publicJob[it], it) }
+            assertTrue(persisted.containsKey("binary_path"))
+            val read = request(server, "GET", "/api/jobs/$id")
+            assertEquals(200, read.status)
+            assertEquals(publicJob, Json.parseToJsonElement(read.body.decodeToString()))
+            assertContentEquals(initialBytes, record.readBytes())
+
+            // Old persisted diagnostics may contain secrets predating current redaction.
+            val diagnostic = "PRIVATE_DIAGNOSTIC_SENTINEL root=$root env=PRIVATE_ENV_VALUE"
+            decompengine.jobs.JobStore(root).updateStatus(id, "failed", diagnostic)
+            val failedBytes = record.readBytes()
+            val failed = request(server, "GET", "/api/jobs/$id")
+            assertEquals(200, failed.status)
+            val failedJob = Json.parseToJsonElement(failed.body.decodeToString()).jsonObject
+            assertEquals(publicKeys, failedJob.keys)
+            assertEquals("\"failed\"", failedJob.getValue("status").toString())
+            listOf(uploaded, read, failed).forEach { response ->
+                listOf(root.toString(), "binary_path", "status_message", "PRIVATE_DIAGNOSTIC_SENTINEL", "PRIVATE_ENV_VALUE").forEach {
+                    assertTrue(!response.body.decodeToString().contains(it), it)
+                }
+            }
+            assertTrue(failedBytes.decodeToString().contains("PRIVATE_DIAGNOSTIC_SENTINEL"))
+            assertContentEquals(failedBytes, record.readBytes())
+        }
+    }
+
+    @Test
     fun `missing job workflow admissions return typed safe not found responses`() {
         var executions = 0
         withServer(JobAnalyzer { _, _ -> executions++ }, JobReconstructor { _, _ -> executions++ }) { server, root ->
@@ -74,9 +112,12 @@ class UploadServerTest {
             val persisted = dataDir.resolve(id).resolve("job.json").readBytes().decodeToString()
             val api = request(server, "GET", "/api/jobs/$id").body.decodeToString()
             val page = request(server, "GET", "/jobs/$id").body.decodeToString()
-            listOf(persisted, api, page).forEach { text ->
+            listOf(persisted, page).forEach { text ->
                 listOf(configured, bearer, password).forEach { assertTrue(!text.contains(it)) }
                 assertTrue(text.contains("[redacted]"))
+            }
+            listOf(configured, bearer, password, "status_message", "binary_path").forEach {
+                assertTrue(!api.contains(it))
             }
             assertTrue(!page.contains("<script>bad</script>"))
             assertEquals(303, request(server, "POST", "/jobs/$id/reconstruct", followRedirects = false).status)
