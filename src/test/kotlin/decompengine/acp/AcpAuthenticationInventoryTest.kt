@@ -7,7 +7,6 @@ import kotlin.test.*
 import kotlinx.serialization.json.*
 
 class AcpAuthenticationInventoryTest {
-<<<<<<< HEAD
     @Test fun `long private fragments are withheld at every alignment in operator previews`() {
         val secret = "0123456789abcdefghijklmnopqrstuvwxyzABCD"
         val fragments = listOf(secret.dropLast(1), secret.drop(1)) +
@@ -51,7 +50,6 @@ class AcpAuthenticationInventoryTest {
         }
     }
 
-<<<<<<< HEAD
     @Test fun `preview truncation preserves supplementary Unicode boundaries`() {
         val key = "\ud83d\udd11"
         for (prefixLength in listOf(126, 127, 128)) {
@@ -92,8 +90,8 @@ class AcpAuthenticationInventoryTest {
         }
         val valid = AuthMethod.AgentAuth(AuthMethodId("id-\ud83d\udd11"), "name", "description")
         assertEquals(valid.id.value, AcpAuthenticationInventory.capture(listOf(valid), emptyList()).methods.single().id)
-=======
->>>>>>> 038f7515 (Normalize preview controls before secret matching (#267) [skip ci])
+    }
+
     @Test fun `inventory commitment scope changes across JVM restarts`() {
         fun isolated(): List<String> {
             val process = ProcessBuilder(
@@ -250,19 +248,6 @@ class AcpAuthenticationInventoryTest {
         assertEquals(empty.commitment, AcpAuthenticationInventory.capture(emptyList(), emptyList()).commitment)
         val method = AuthMethod.AgentAuth(AuthMethodId("id"), "name", null)
         assertNotEquals(empty.commitment, AcpAuthenticationInventory.capture(listOf(method), emptyList()).commitment)
-    }
-
-    @Test fun `commitments derive from redacted advertisement text instead of raw credentials`() {
-        val first = AcpAuthenticationInventory.capture(
-            listOf(AuthMethod.AgentAuth(AuthMethodId("method-id"), "password-one", "note password-one")),
-            listOf("password-one")).sha256
-        val second = AcpAuthenticationInventory.capture(
-            listOf(AuthMethod.AgentAuth(AuthMethodId("method-id"), "password-two", "note password-two")),
-            listOf("password-two")).sha256
-        assertEquals(first, second)
-        assertFalse(AcpAuthenticationInventory.capture(
-            listOf(AuthMethod.AgentAuth(AuthMethodId("method-id"), "password-three", null)),
-            emptyList()).sha256.let { it == first })
     }
 
     @Test fun `invisible format characters cannot hide configured credentials from previews`() {

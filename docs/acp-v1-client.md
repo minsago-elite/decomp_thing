@@ -808,12 +808,7 @@ are indexed (at most 131,072 entries under the existing 1 MiB allowance). Every 
 fragment of at least 15 units contains one such block; a matching preview is withheld as an empty
 string. Some shorter matches are conservatively withheld too. Ordinary full-value redaction remains
 in place; arbitrary fragments below this threshold are not claimed to be confidential. The private
-<<<<<<< HEAD
 index is local to inventory capture and is never serialized. Full-payload commitments remain unchanged. Truncation preserves UTF-16
-=======
-index is local to inventory capture and is never serialized. Full-payload commitments remain unchanged.
- Truncation preserves UTF-16
->>>>>>> 5a5a4c24 (Withhold long private fragments from authentication previews (#267) [skip ci])
 surrogate pairs. Redaction checks its 16,384-unit working-text limit after every replacement, before
 another replacement can expand inserted markers; exceeding it produces an omission marker. A single
 replacement can transiently allocate up to ten times that limit. The complete SDK-serialized

@@ -423,7 +423,7 @@ internal class ProgressRedactor(values: Collection<String>, additionalValues: Co
         require(additionalValues.size <= 130 && additionalValues.all { it.length <= 256 }) {
             "additional redaction values exceed the configured limit"
         }
-        secrets = (primary + additionalValues.filter { it.isNotBlank() })
+        secrets = (primary + additionalValues.filter { it.isNotEmpty() })
             .map { it.replace(removableControls, "") }.filter { it.isNotEmpty() }
             .distinct().sortedByDescending(String::length)
     }

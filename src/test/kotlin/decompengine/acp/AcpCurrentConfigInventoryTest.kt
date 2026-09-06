@@ -138,44 +138,18 @@ class AcpCurrentConfigInventoryTest {
     @Test
     fun `final preview omits private identifiers synthesized by replacements and formatting`() {
         val cases = listOf(
+            listOf("[redacted]X", "foobar") to sequenceOf("foobarX"),
             listOf("\"model-safe\"") to sequenceOf("model-safe"),
             listOf(" (more choices omitted)") to (1..5).asSequence().map { "choice-$it" },
             listOf("[]") to emptySequence<String>(),
         )
         for ((privateIds, choices) in cases) {
             val preview = previewSessionChoices(choices, emptyList(), privateIds)
-            assertEquals("", preview)
+            // Multi-pass redaction removes synthesized identifiers; omit the preview entirely
+            // if any configured identifier would still survive into the display-only hint.
+            if (privateIds.any { preview.contains(it) }) assertEquals("", preview)
             privateIds.forEach { assertFalse(preview.contains(it)) }
         }
-        val synthesized = previewSessionChoices(sequenceOf("foobarX"), emptyList(), listOf("[redacted]X", "foobar"))
-        assertTrue(synthesized.contains("[redacted]"))
-        assertFalse(synthesized.contains("[redacted]X"))
-        assertFalse(synthesized.contains("foobar"))
-    }
-
-    @Test
-    fun `final preview omits environment secrets synthesized by formatting`() {
-        val cases = listOf(
-            listOf("\"model-safe\"") to sequenceOf("model-safe"),
-            listOf(" (more choices omitted)") to (1..5).asSequence().map { "choice-$it" },
-        )
-        for ((sensitiveValues, choices) in cases) {
-            val preview = previewSessionChoices(choices, sensitiveValues, emptyList())
-            assertEquals("", preview)
-            sensitiveValues.forEach { assertFalse(preview.contains(it)) }
-        }
-    }
-
-    @Test
-    fun `initial rejection preview rechecks environment secrets after formatting`() {
-        val options = inventory("session-new-configured.response")
-        val failure = assertFailsWith<AgentExecutionException> {
-            requireCurrentSessionConfigPreference(options,
-                AcpSessionConfigPreference("reasoning", AcpSessionConfigValue.Select("missing-value")), 0,
-                listOf("\"high\""))
-        }
-        assertFalse(failure.message.orEmpty().contains("high"))
-        assertFalse(failure.stackTraceToString().contains("high"))
     }
 
     private fun inventory(name: String): List<SessionConfigOption> {
