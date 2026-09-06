@@ -56,7 +56,7 @@ class AcpAuthenticationInventory private constructor(
             val digest = MessageDigest.getInstance("SHA-256").digest(OracleJson.canonicalBytes(commitment))
                 .joinToString("") { "%02x".format(it) }
             return AcpAuthenticationInventory(methods.map {
-                AcpAuthenticationMethod(it.id.value, variant(it), preview(it.name, 128),
+                AcpAuthenticationMethod(it.id.value, variant(it), preview(it.id.value, 128), preview(it.name, 128),
                     it.description?.let { description -> preview(description, 256) })
             }, digest)
         }

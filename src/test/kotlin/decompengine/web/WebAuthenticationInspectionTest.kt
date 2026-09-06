@@ -95,11 +95,8 @@ class WebAuthenticationInspectionTest {
             assertTrue(entered.await(5, java.util.concurrent.TimeUnit.SECONDS))
             assertEquals("HTTP requests remain active after server stop",
                 assertFailsWith<IllegalStateException> { server.stop(0) }.message)
-            val contender = UploadServer("127.0.0.1", 0, root)
-            try {
-                assertEquals("Job store already has a live web server owner",
-                    assertFailsWith<IllegalStateException> { contender.start() }.message)
-            } finally { contender.stop(0) }
+            assertEquals("Job store already has a live web server owner",
+                assertFailsWith<IllegalStateException> { UploadServer("127.0.0.1", 0, root) }.message)
             release.countDown()
             val deadline = System.nanoTime() + java.util.concurrent.TimeUnit.SECONDS.toNanos(5)
             var stopped = false
@@ -107,6 +104,38 @@ class WebAuthenticationInspectionTest {
                 try { server.stop(0); stopped = true } catch (_: IllegalStateException) { Thread.sleep(20) }
             }
             assertTrue(stopped, "inspection did not release server ownership")
+            val replacement = UploadServer("127.0.0.1", 0, root)
+            try { replacement.start() } finally { replacement.stop(0) }
+        } finally { release.countDown(); server.stop(0) }
+    }
+
+    @Test fun `shutdown waits for the running inspection to finish before returning`() {
+        val entered = java.util.concurrent.CountDownLatch(1)
+        val release = java.util.concurrent.CountDownLatch(1)
+        val cleaned = java.util.concurrent.CountDownLatch(1)
+        val root = createTempDirectory("web-auth-await-")
+        val server = UploadServer("127.0.0.1", 0, root, authenticationInspector = {
+            entered.countDown()
+            check(release.await(15, java.util.concurrent.TimeUnit.SECONDS))
+            cleaned.countDown()
+            AcpAuthenticationInventory.capture(emptyList(), emptyList())
+        })
+        server.start()
+        try {
+            assertEquals(202, request(server, "/api/operator/auth-methods", true).statusCode())
+            assertTrue(entered.await(5, java.util.concurrent.TimeUnit.SECONDS))
+            val stopped = java.util.concurrent.CountDownLatch(1)
+            val stopper = Thread({
+                try { server.stop(0) } catch (_: IllegalStateException) { }
+                stopped.countDown()
+            }, "test-shutdown")
+            stopper.start()
+            Thread.sleep(200)
+            assertEquals(1, stopped.count)
+            assertEquals(1, cleaned.count)
+            release.countDown()
+            assertTrue(stopped.await(10, java.util.concurrent.TimeUnit.SECONDS))
+            assertEquals(0, cleaned.count)
             val replacement = UploadServer("127.0.0.1", 0, root)
             try { replacement.start() } finally { replacement.stop(0) }
         } finally { release.countDown(); server.stop(0) }

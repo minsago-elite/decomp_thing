@@ -184,9 +184,25 @@ class UploadServer(
     private val diagnosticRedactor = ProgressRedactor(sensitiveValues)
     private val authenticationInspectionResult = java.util.concurrent.atomic.AtomicReference(
         "{\"status\":\"idle\",\"loginSupported\":false}")
+    private val authenticationInspectionWorker = java.util.concurrent.atomic.AtomicReference<Thread>()
     // Verify trusted application bytes before binding a listening socket.
     private val spaAssets = when (uiMode) {
         WebUiMode.SPA -> {
+            require(java.net.InetAddress.getByName(host).isLoopbackAddress) {
+                "the SPA preview currently requires a loopback host"
+            }
+            // Validate the explicit origin spelling before binding, including
+            // when an ephemeral port is requested. No origin comes from HTTP.
+            LocalWebAccessConfiguration(webOrigin(host, port.takeIf { it != 0 } ?: 1), basePath,
+                setOfNotNull(devFrontendOrigin))
+            EmbeddedWebAssets.load(basePath = basePath)
+        }
+        WebUiMode.LEGACY -> {
+            require(basePath == "/") { "--base-path is supported by --ui spa" }
+            require(devFrontendOrigin == null) { "--dev-frontend-origin requires --ui spa" }
+            null
+        }
+    }
     // Acquire cooperative ownership before binding so a refused contender never occupies a listener.
     private val ownership: WebJobStoreOwnership = WebJobStoreOwnership.acquire(dataDir.toAbsolutePath().normalize())
     private val server = HttpServer.create(InetSocketAddress(host, port), listenBacklog)
@@ -261,6 +277,12 @@ class UploadServer(
         requestDeadlines.shutdownNow()
         access?.close()
         jobs.close()
+        try {
+            // The inspection daemon must finish its bounded agent cleanup before the JVM exits.
+            authenticationInspectionWorker.get()?.join(TimeUnit.SECONDS.toMillis(5))
+        } catch (exception: Exception) {
+            if (exception is InterruptedException) Thread.currentThread().interrupt()
+        }
         if (!releaseOwnershipIfIdle()) throw IllegalStateException("HTTP requests remain active after server stop")
     }
 
@@ -310,7 +332,7 @@ class UploadServer(
             return
         }
         try {
-            Thread({
+            val worker = Thread({
                 var result = AUTH_INSPECTION_FAILED
                 try {
                     withActiveRequest { result = inspectAuthenticationMethods() }
@@ -320,7 +342,9 @@ class UploadServer(
                     // Publish terminal status and release admission in one atomic state change.
                     authenticationInspectionResult.set(result)
                 }
-            }, "decomp-web-auth-inspection").apply { isDaemon = true; start() }
+            }, "decomp-web-auth-inspection").apply { isDaemon = true }
+            authenticationInspectionWorker.set(worker)
+            worker.start()
         } catch (_: Exception) {
             authenticationInspectionResult.set(AUTH_INSPECTION_FAILED)
             exchange.sendJson(503, AUTH_INSPECTION_FAILED)

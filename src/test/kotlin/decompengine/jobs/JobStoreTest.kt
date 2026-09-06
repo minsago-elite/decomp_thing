@@ -18,7 +18,7 @@ class JobStoreTest {
         val root = createTempDirectory("jobs-status-reserve-")
         val store = JobStore(root)
         // This filename fits the initial record but not its largest later status update.
-        assertFailsWith<IllegalArgumentException> {
+        assertFailsWith<InvalidUploadException> {
             store.createFromUpload("a".repeat(256 * 1024 - 1100), elfFixture())
         }
         assertTrue(store.list().isEmpty())
