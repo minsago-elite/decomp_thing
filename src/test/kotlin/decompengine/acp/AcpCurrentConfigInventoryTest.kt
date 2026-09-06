@@ -150,6 +150,31 @@ class AcpCurrentConfigInventoryTest {
         }
     }
 
+    @Test
+    fun `final preview omits environment secrets synthesized by formatting`() {
+        val cases = listOf(
+            listOf("\"model-safe\"") to sequenceOf("model-safe"),
+            listOf(" (more choices omitted)") to (1..5).asSequence().map { "choice-$it" },
+        )
+        for ((sensitiveValues, choices) in cases) {
+            val preview = previewSessionChoices(choices, sensitiveValues, emptyList())
+            assertEquals("", preview)
+            sensitiveValues.forEach { assertFalse(preview.contains(it)) }
+        }
+    }
+
+    @Test
+    fun `initial rejection preview rechecks environment secrets after formatting`() {
+        val options = inventory("session-new-configured.response")
+        val failure = assertFailsWith<AgentExecutionException> {
+            requireCurrentSessionConfigPreference(options,
+                AcpSessionConfigPreference("reasoning", AcpSessionConfigValue.Select("missing-value")), 0,
+                listOf("\"high\""))
+        }
+        assertFalse(failure.message.orEmpty().contains("high"))
+        assertFalse(failure.stackTraceToString().contains("high"))
+    }
+
     private fun inventory(name: String): List<SessionConfigOption> {
         val fixture = javaClass.getResourceAsStream("/acp/v1/wire-contract.json")!!.use { it.readBytes().decodeToString() }
         return Json.parseToJsonElement(fixture).jsonObject.getValue("messages").jsonObject.getValue(name)

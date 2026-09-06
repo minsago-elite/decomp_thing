@@ -428,6 +428,9 @@ internal class ProgressRedactor(values: Collection<String>, additionalValues: Co
             .distinct().sortedByDescending(String::length)
     }
 
+    /** True when any configured secret survives into the given formatted output. */
+    fun leaks(text: String): Boolean = secrets.any { text.contains(it) }
+
     fun text(value: String, maximumCharacters: Int = 512): String {
         require(maximumCharacters >= 0)
         // Do not take a raw prefix: that can expose a partial configured secret.
