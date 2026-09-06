@@ -303,6 +303,17 @@ class UploadServer(
     internal fun requestStop() {
         stopRequested.set(true)
         authenticationInspectionCancellation.set(true)
+        jobs.beginShutdown()
+    }
+
+    /** Latch that resolves once requestStop has published its signal; test evidence helper. */
+    internal fun requestStopSignalled(): java.util.concurrent.CountDownLatch {
+        val latch = java.util.concurrent.CountDownLatch(1)
+        Thread({
+            while (!stopRequested.get()) Thread.sleep(10)
+            latch.countDown()
+        }, "stop-signal-probe").apply { isDaemon = true; start() }
+        return latch
     }
 
     fun stop(delaySeconds: Int = 0) {
