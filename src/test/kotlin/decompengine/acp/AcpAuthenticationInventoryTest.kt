@@ -2,6 +2,7 @@ package decompengine.acp
 
 import com.agentclientprotocol.model.AuthMethod
 import com.agentclientprotocol.model.AuthMethodId
+import java.util.concurrent.TimeUnit
 import kotlin.test.*
 import kotlinx.serialization.json.*
 
@@ -72,6 +73,8 @@ class AcpAuthenticationInventoryTest {
         val method = inventory.methods.single()
         assertEquals("[oversized text omitted]", method.namePreview)
         assertEquals("[oversized text omitted]", method.descriptionPreview)
+    }
+
     @Test fun `unpaired surrogates fail as authentication inventory errors`() {
         for (invalid in listOf("\ud800", "\udc00", "\ud800x")) {
             for (method in listOf(
@@ -87,6 +90,8 @@ class AcpAuthenticationInventoryTest {
         }
         val valid = AuthMethod.AgentAuth(AuthMethodId("id-\ud83d\udd11"), "name", "description")
         assertEquals(valid.id.value, AcpAuthenticationInventory.capture(listOf(valid), emptyList()).methods.single().id)
+    }
+
     @Test fun `numeric payload policy applies at the exact limit to metadata and unknown variants`() {
         // Preserve the token through SDK serialization so this tests the post-SDK admission boundary.
         fun methods(token: String): List<AuthMethod> {
@@ -103,7 +108,7 @@ class AcpAuthenticationInventoryTest {
         }
         for (token in listOf("1".repeat(257), "-" + "1".repeat(256), "1e309", "1e-310")) {
             for (method in methods(token)) {
-                val failure = assertFailsWith<AcpProtocolFailure> {
+                val failure = assertFailsWith<AcpAuthenticationInventoryFailure> {
                     AcpAuthenticationInventory.capture(listOf(method), emptyList())
                 }
                 assertEquals("ACP authentication inventory exceeds its payload limits", failure.message)
@@ -155,7 +160,6 @@ class AcpAuthenticationInventoryTest {
         assertNotEquals(empty.sha256, AcpAuthenticationInventory.capture(listOf(method), emptyList()).sha256)
     }
 
-<<<<<<< HEAD
     @Test fun `commitments derive from redacted advertisement text instead of raw credentials`() {
         val first = AcpAuthenticationInventory.capture(
             listOf(AuthMethod.AgentAuth(AuthMethodId("method-id"), "password-one", "note password-one")),
@@ -180,7 +184,8 @@ class AcpAuthenticationInventoryTest {
         val splitPrivate = AcpAuthenticationInventory.capture(listOf(
             AuthMethod.AgentAuth(AuthMethodId("fixture"), secret, null)), listOf(obfuscated))
         assertEquals("", splitPrivate.methods.single().namePreview)
-=======
+    }
+
     @Test fun `complete inventory limits include metadata unsupported payloads depth and aggregate size`() {
         fun agent(index: Int, payload: JsonElement): AuthMethod = AuthMethod.AgentAuth(
             AuthMethodId("method-$index"), "name", null, payload)
@@ -205,7 +210,19 @@ class AcpAuthenticationInventoryTest {
             buildJsonObject { put("hint", "private-value") })), listOf("private-value"))
         assertEquals(1, accepted.methods.size)
         assertFalse(accepted.toString().contains("private-value"))
->>>>>>> 2b02343e (Bound complete ACP authentication method payloads [skip ci])
+    }
+
+    @Test fun `large flat metadata is rejected at the node cap before canonical sorting`() {
+        val meta = buildJsonObject { repeat(400_000) { index -> put("k$index", index) } }
+        assertTrue(meta.toString().toByteArray().size < 8 * 1024 * 1024)
+        val startedAt = System.nanoTime()
+        val failure = assertFailsWith<AcpAuthenticationInventoryFailure> {
+            AcpAuthenticationInventory.capture(listOf(
+                AuthMethod.AgentAuth(AuthMethodId("agent"), "name", null, meta)), emptyList())
+        }
+        val elapsedMillis = TimeUnit.NANOSECONDS.toMillis(System.nanoTime() - startedAt)
+        assertEquals("ACP authentication inventory exceeds its payload limits", failure.message)
+        assertTrue(elapsedMillis < 2_000, "flat metadata validation unexpectedly blocked for ${elapsedMillis}ms")
     }
 
     @Test fun `ambiguous and excessive advertisements fail with fixed diagnostics`() {
@@ -217,5 +234,4 @@ class AcpAuthenticationInventoryTest {
             assertFalse(error.message!!.contains("secret-id"))
         }
     }
-}
 }

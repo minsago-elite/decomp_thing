@@ -87,7 +87,7 @@ class AcpAuthenticationInventory private constructor(
                     maximumTotalStringBytes = 64 * 1024,
                 ))
             } catch (_: StrictJsonException) {
-                throw AcpProtocolFailure("ACP authentication inventory exceeds its payload limits")
+                throw AcpAuthenticationInventoryFailure("ACP authentication inventory exceeds its payload limits")
             }
         }
 
@@ -99,3 +99,5 @@ class AcpAuthenticationInventory private constructor(
         }
     }
 }
+
+internal class AcpAuthenticationInventoryFailure(message: String) : IllegalArgumentException(message)

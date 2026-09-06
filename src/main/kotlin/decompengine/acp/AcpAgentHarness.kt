@@ -1326,12 +1326,15 @@ class AcpAgentHarness(
                     agentInfo.authMethods, configuration.environment.values.map { it.value },
                     logoutAdvertised = agentInfo.capabilities.auth.logout != null,
                 ))
-            } catch (_: AcpProtocolFailure) {
-                throw AgentExecutionException(AgentFailure(
-                    AgentFailureKind.PROTOCOL,
-                    "ACP agent advertised an invalid authentication inventory",
-                    details = mapOf("reason" to "invalidAuthenticationInventory"),
-                ))
+            } catch (failure: Exception) {
+                when (failure) {
+                    is AcpProtocolFailure, is AcpAuthenticationInventoryFailure -> throw AgentExecutionException(AgentFailure(
+                        AgentFailureKind.PROTOCOL,
+                        "ACP agent advertised an invalid authentication inventory",
+                        details = mapOf("reason" to "invalidAuthenticationInventory"),
+                    ))
+                    else -> throw failure
+                }
             }
         }
         validateCapabilities(agentInfo.capabilities, requiredCapabilities)
