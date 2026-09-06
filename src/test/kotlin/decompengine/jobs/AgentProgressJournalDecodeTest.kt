@@ -21,10 +21,11 @@ class AgentProgressJournalDecodeTest {
     }
 
     @Test fun `decoder retains exact sequence boundaries and explicit omissions`() {
-        val bytes = snapshot("9223372036854775806", """{"sequence":9223372036854775804},{"sequence":9223372036854775805}""")
+        val bytes = snapshot("9223372036854775806", """{"sequence":9223372036854775804},{"sequence":9223372036854775805}""",
+            historyDropped = "9223372036854775804")
         val decoded = AgentProgressJournal.decode(bytes)
         assertTrue(decoded.toString().contains("9223372036854775805"))
-        assertTrue(decoded.toString().contains("\"historyDropped\":3"))
+        assertTrue(decoded.toString().contains("\"historyDropped\":9223372036854775804"))
     }
 
     @Test fun `decoder rejects oversized malformed and ambiguous snapshots`() {
@@ -42,6 +43,6 @@ class AgentProgressJournalDecodeTest {
         invalid.forEachIndexed { index, bytes -> assertFails("invalid snapshot $index") { AgentProgressJournal.decode(bytes) } }
     }
 
-    private fun snapshot(next: String, events: String): ByteArray =
-        """{"schemaVersion":1,"displayOnly":true,"nextSequence":$next,"queueDropped":0,"historyDropped":3,"truncated":true,"events":[$events]}""".toByteArray()
+    private fun snapshot(next: String, events: String, historyDropped: String = "3"): ByteArray =
+        """{"schemaVersion":1,"displayOnly":true,"nextSequence":$next,"queueDropped":0,"historyDropped":$historyDropped,"truncated":true,"events":[$events]}""".toByteArray()
 }

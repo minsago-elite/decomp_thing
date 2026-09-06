@@ -12,6 +12,19 @@ import kotlin.test.assertTrue
 
 class DoctorTest {
     @Test
+    fun `authentication previews escape terminal controls and Unicode formatting`() {
+        val text = "login\u009b31m\u202ePASS\u2066\u2028\u2029\u001b\n\"\\"
+        val quoted = quoteTerminalPreview(text)
+        kotlin.test.assertEquals(text, kotlinx.serialization.json.Json.parseToJsonElement(quoted)
+            .let { it as kotlinx.serialization.json.JsonPrimitive }.content)
+        for (character in listOf('\u009b', '\u202e', '\u2066', '\u2028', '\u2029', '\u001b', '\n')) {
+            assertFalse(character in quoted)
+        }
+        assertTrue(quoted.contains("\\u202ePASS"))
+        kotlin.test.assertEquals("\"ordinary login\"", quoteTerminalPreview("ordinary login"))
+    }
+
+    @Test
     fun `reports all tools output and authenticated connectivity independently`() {
         val temp = createTempDirectory("doctor-ok-")
         val ghidra = temp.resolve("ghidra")
@@ -89,6 +102,9 @@ class DoctorTest {
         val output = createTempDirectory("doctor-tools-contract-")
 
         assertFailsWith<IllegalArgumentException> {
+            DoctorOptions(output, toolsOnly = true, showAuthMethods = true)
+        }
+        assertFailsWith<IllegalArgumentException> {
             DoctorOptions(output, toolsOnly = true, harnessOverride = "acp")
         }
         assertFailsWith<IllegalArgumentException> {
@@ -98,6 +114,17 @@ class DoctorTest {
                 workflowOverride = decompengine.acp.AcpPreflightWorkflow.PATCH,
             )
         }
+    }
+
+    @Test
+    fun `authentication inspection rejects legacy without provider connectivity`() {
+        val output = createTempDirectory("doctor-auth-legacy-")
+        val doctor = Doctor(environment = emptyMap(),
+            commandProbe = CommandProbe { _, _ -> CommandProbeResult(0, "available") },
+            connectivityProbe = ConnectivityProbe { _, _ -> error("auth inspection must not connect to legacy provider") })
+        val report = doctor.inspect(DoctorOptions(output, harnessOverride = "legacy-openai", showAuthMethods = true))
+        assertTrue(report.checks.any { it.name == "ACP authentication methods" && !it.passed })
+        assertFalse(report.checks.any { it.name.startsWith("LLM") })
     }
 
     @Test

@@ -53,6 +53,359 @@ class UploadServerTest {
     }
 
     @Test
+    fun `dashboard shows retained recovery data without exposing private files`() = withServer { server, root ->
+        val stage = Files.createDirectory(root.resolve(".upload-private-secret"))
+        val input = stage.resolve("input.elf")
+        input.writeText("private-content")
+        val page = request(server, "GET", "/")
+        assertEquals(200, page.status)
+        val html = page.body.decodeToString()
+        assertTrue(html.contains("Retained recovery files"))
+        assertTrue(html.contains("Observed 1 upload stages and 0 metadata temporary files; 15 observed bytes."))
+        assertTrue(html.contains("Files may still belong to active work."))
+        assertTrue(html.contains("No files were deleted."))
+        assertTrue(html.contains("href=\"/api/recovery\""))
+        assertTrue(!html.contains("private-secret"))
+        assertTrue(!html.contains("private-content"))
+        assertTrue(!html.contains(root.toString()))
+        assertEquals("private-content", input.readBytes().decodeToString())
+    }
+
+    @Test
+    fun `dashboard shows incomplete recovery inspection even with zero counted candidates`() = withServer { server, root ->
+        val unknown = root.resolve(".upload-unknown")
+        unknown.writeText("unknown-layout")
+        val page = request(server, "GET", "/")
+        assertEquals(200, page.status)
+        val html = page.body.decodeToString()
+        assertTrue(html.contains("At least 0 upload stages and 0 metadata temporary files"))
+        assertTrue(html.contains("Inspection is incomplete."))
+        assertTrue(html.contains("More files or bytes may remain"))
+        assertTrue(!html.contains("The scoped scan finished."))
+        assertEquals("unknown-layout", unknown.readBytes().decodeToString())
+    }
+
+    @Test
+    fun `recovery endpoint returns a read-only summary without private names or contents`() = withServer { server, root ->
+        val stage = Files.createDirectory(root.resolve(".upload-private-secret-name"))
+        val input = stage.resolve("input.elf")
+        input.writeText("private-content")
+        val response = request(server, "GET", "/api/recovery")
+        assertEquals(200, response.status)
+        val text = response.body.decodeToString()
+        val json = Json.parseToJsonElement(text).jsonObject
+        assertEquals("true", json["displayOnly"].toString())
+        assertEquals("true", json["inventoryComplete"].toString())
+        assertEquals("1", json["retainedUploadStages"].toString())
+        assertEquals("\"15\"", json["observedBytes"].toString())
+        assertTrue(!text.contains("private"))
+        assertTrue(!text.contains(root.toString()))
+        assertEquals("private-content", input.readBytes().decodeToString())
+    }
+
+    @Test
+    fun `shutdown discards caller-queued work and late delivery cannot alter a new owner state`() {
+        val dataDir = createTempDirectory("web-caller-queue-")
+        val queued = java.util.concurrent.CopyOnWriteArrayList<Runnable>()
+        val invocations = java.util.concurrent.atomic.AtomicInteger()
+        val executor = Executor { queued.add(it) }
+        val server = UploadServer("127.0.0.1", 0, dataDir,
+            analyzer = JobAnalyzer { _, _ -> invocations.incrementAndGet() }, executor = executor)
+        server.start()
+        try {
+            val uploaded = upload(server, "pending.elf", elfFixture(), acceptJson = true)
+            val id = Json.parseToJsonElement(uploaded.body.decodeToString()).jsonObject["id"].toString().trim('"')
+            assertEquals(303, request(server, "POST", "/jobs/$id/explore", followRedirects = false).status)
+            assertEquals(1, queued.size)
+            server.stop()
+            val store = decompengine.jobs.JobStore(dataDir)
+            assertEquals("failed", store.get(id).status)
+            assertEquals("Server stopped before the operation started", store.get(id).statusMessage)
+            val restarted = UploadServer("127.0.0.1", 0, dataDir)
+            try {
+                restarted.start()
+                val replacement = store.updateStatus(id, "complete", "New owner state")
+                repeat(2) { queued.single().run() }
+                assertEquals(0, invocations.get())
+                assertEquals(replacement, store.get(id))
+                executor.execute { invocations.incrementAndGet() }
+                queued.last().run()
+                assertEquals(1, invocations.get())
+            } finally {
+                restarted.stop()
+            }
+        } finally {
+            server.stop()
+        }
+    }
+
+    @Test
+    fun `late caller-owned worker completion releases ownership without a second stop`() {
+        val dataDir = createTempDirectory("web-caller-release-")
+        val started = java.util.concurrent.CountDownLatch(1)
+        val release = java.util.concurrent.CountDownLatch(1)
+        val finished = java.util.concurrent.CountDownLatch(1)
+        val executor = java.util.concurrent.Executors.newSingleThreadExecutor { runnable ->
+            Thread(runnable, "caller-owned-worker")
+        }
+        val server = UploadServer("127.0.0.1", 0, dataDir, analyzer = JobAnalyzer { _, _ ->
+            started.countDown()
+            while (release.count != 0L) {
+                try { release.await() } catch (_: InterruptedException) { }
+            }
+            finished.countDown()
+        }, executor = executor)
+        server.start()
+        try {
+            val uploaded = upload(server, "late-worker.elf", elfFixture(), acceptJson = true)
+            val id = Json.parseToJsonElement(uploaded.body.decodeToString()).jsonObject["id"].toString().trim('"')
+            assertEquals(303, request(server, "POST", "/jobs/$id/explore", followRedirects = false).status)
+            assertTrue(started.await(5, java.util.concurrent.TimeUnit.SECONDS))
+            val stopped = kotlin.test.assertFailsWith<WebJobServiceException> { server.stop() }
+            assertEquals("SHUTDOWN_INCOMPLETE", stopped.code)
+            val store = decompengine.jobs.JobStore(dataDir)
+            assertEquals("analyzing", store.get(id).status)
+            val refused = kotlin.test.assertFailsWith<IllegalStateException> { UploadServer("127.0.0.1", 0, dataDir) }
+            assertEquals("Job store already has a live web server owner", refused.message)
+
+            release.countDown()
+            assertTrue(finished.await(5, java.util.concurrent.TimeUnit.SECONDS))
+            val deadline = System.nanoTime() + java.util.concurrent.TimeUnit.SECONDS.toNanos(10)
+            var replacement: UploadServer? = null
+            while (replacement == null) {
+                assertTrue(System.nanoTime() < deadline, "store ownership was not released after the worker exited")
+                try {
+                    replacement = UploadServer("127.0.0.1", 0, dataDir).also { it.start() }
+                } catch (_: IllegalStateException) {
+                    Thread.sleep(20)
+                }
+            }
+            try {
+                assertEquals("Server stopped before the operation reported completion", store.get(id).statusMessage)
+            } finally {
+                replacement.stop()
+            }
+        } finally {
+            release.countDown()
+            executor.shutdownNow()
+        }
+    @Test
+    fun `dashboard keeps an unreadable published job visible without leaking its contents`() {
+        val root = createTempDirectory("web-listing-admission-")
+        val server = UploadServer("127.0.0.1", 0, root)
+        server.start()
+        try {
+            val id = uploadedJobId(server)
+            val metadata = root.resolve(id).resolve("job.json")
+            val original = metadata.readBytes()
+            metadata.writeText("private-invalid-record")
+            val page = request(server, "GET", "/")
+            assertEquals(200, page.status)
+            val text = page.body.decodeToString()
+            assertTrue(text.contains("Unavailable job"))
+            assertTrue(!text.contains("private-invalid-record"))
+            assertTrue(!text.contains(root.toString()))
+            assertEquals("private-invalid-record", metadata.readBytes().decodeToString())
+            metadata.writeBytes(original)
+            assertEquals(200, request(server, "GET", "/").status)
+        } finally { server.stop() }
+    }
+
+    }
+
+    @Test
+    fun `early stop signal discards delivered queued work before cleanup takes the lifecycle lock`() {
+        val root = createTempDirectory("web-stop-admission-")
+        val queued = java.util.concurrent.CopyOnWriteArrayList<Runnable>()
+        val calls = java.util.concurrent.atomic.AtomicInteger()
+        val server = UploadServer("127.0.0.1", 0, root,
+            analyzer = JobAnalyzer { _, _ -> calls.incrementAndGet() }, executor = Executor { queued.add(it) })
+        server.start()
+        try {
+            val id = uploadedJobId(server)
+            assertEquals(303, request(server, "POST", "/jobs/$id/explore", followRedirects = false).status)
+            server.requestStop()
+            assertTrue(!server.withActiveRequest { error("stop-requested server admitted a request") })
+            repeat(2) { queued.single().run() }
+            assertEquals(0, calls.get())
+            val job = decompengine.jobs.JobStore(root).get(id)
+            assertEquals("failed", job.status)
+            assertEquals("Server stopped before the operation started", job.statusMessage)
+        } finally { server.stop() }
+    }
+
+    @Test
+    fun `early stop signal prevents successful completion publication before cleanup`() {
+        val root = createTempDirectory("web-stop-completion-")
+        lateinit var server: UploadServer
+        server = UploadServer("127.0.0.1", 0, root,
+            analyzer = JobAnalyzer { _, _ -> server.requestStop() }, executor = Executor { it.run() })
+        server.start()
+        try {
+            val id = uploadedJobId(server)
+            assertEquals(303, request(server, "POST", "/jobs/$id/explore", followRedirects = false).status)
+            val job = decompengine.jobs.JobStore(root).get(id)
+            assertEquals("failed", job.status)
+            assertEquals("Server stopped before the operation reported completion", job.statusMessage)
+        } finally { server.stop() }
+    }
+
+    @Test
+    fun `completion publication racing the stop signal is repaired to failed`() {
+        val root = createTempDirectory("web-completion-fence-")
+        val analyzing = java.util.concurrent.CountDownLatch(1)
+        lateinit var server: UploadServer
+        server = UploadServer("127.0.0.1", 0, root,
+            analyzer = JobAnalyzer { _, _ ->
+                analyzing.countDown()
+                check(server.requestStopSignalled().await(15, java.util.concurrent.TimeUnit.SECONDS))
+            }, executor = Executor { task ->
+                Thread(task, "web-stop-race-worker").apply { isDaemon = true; start() }
+            })
+        server.start()
+        try {
+            val id = uploadedJobId(server)
+            assertEquals(303, request(server, "POST", "/jobs/$id/explore", followRedirects = false).status)
+            assertTrue(analyzing.await(5, java.util.concurrent.TimeUnit.SECONDS))
+            server.requestStop()
+            // The stop signal is published while the worker is mid-operation; the completion
+            // decision observes it and persists failed instead of a completed publication.
+            val deadline = System.nanoTime() + java.util.concurrent.TimeUnit.SECONDS.toNanos(10)
+            var job = decompengine.jobs.JobStore(root).get(id)
+            while (job.status != "failed" && System.nanoTime() < deadline) {
+                Thread.sleep(20)
+                job = decompengine.jobs.JobStore(root).get(id)
+            }
+            assertEquals("failed", job.status)
+            assertEquals("Server stopped before the operation reported completion", job.statusMessage)
+        } finally {
+            server.stop()
+        }
+    }
+
+    @Test
+    fun `claim that precedes the stop signal cannot invoke the operation`() {
+        val root = createTempDirectory("web-claim-fence-")
+        val queued = java.util.concurrent.CopyOnWriteArrayList<Runnable>()
+        val calls = java.util.concurrent.atomic.AtomicInteger()
+        val server = UploadServer("127.0.0.1", 0, root,
+            analyzer = JobAnalyzer { _, _ -> calls.incrementAndGet() }, executor = Executor { queued.add(it) })
+        server.start()
+        try {
+            val id = uploadedJobId(server)
+            assertEquals(303, request(server, "POST", "/jobs/$id/explore", followRedirects = false).status)
+            assertEquals(1, queued.size)
+            server.requestStop()
+            val runner = Thread { queued.single().run() }.apply { isDaemon = true; start() }
+            runner.join(15000)
+            assertEquals(0, calls.get())
+            val job = decompengine.jobs.JobStore(root).get(id)
+            assertEquals("failed", job.status)
+            assertEquals("Server stopped before the operation started", job.statusMessage)
+            server.stop()
+            val restarted = UploadServer("127.0.0.1", 0, root)
+            try {
+                restarted.start()
+            } finally {
+                restarted.stop()
+            }
+        } finally {
+            server.stop()
+        }
+    }
+
+    @Test
+    fun `queued publication racing the stop signal is rejected and repaired`() {
+        val root = createTempDirectory("web-queued-fence-")
+        val queued = java.util.concurrent.CopyOnWriteArrayList<Runnable>()
+        val calls = java.util.concurrent.atomic.AtomicInteger()
+        val server = UploadServer("127.0.0.1", 0, root,
+            analyzer = JobAnalyzer { _, _ -> calls.incrementAndGet() }, executor = Executor { queued.add(it) })
+        server.start()
+        try {
+            val id = uploadedJobId(server)
+            server.requestStop()
+            val status = try { request(server, "POST", "/jobs/$id/explore", followRedirects = false).status }
+                catch (_: java.io.IOException) { 503 }
+            assertEquals(503, status)
+            assertEquals(0, queued.size)
+            assertEquals(0, calls.get())
+            val job = decompengine.jobs.JobStore(root).get(id)
+            // The submission was never admitted; the pending record is preserved for a later owner.
+            assertEquals("uploaded", job.status)
+        } finally {
+            server.stop()
+        }
+    }
+
+    @Test
+    fun `stop signals the job service before waiting on the lifecycle lock`() {
+        val dataDir = createTempDirectory("web-stop-signal-order-")
+        val server = UploadServer("127.0.0.1", 0, dataDir)
+        server.start()
+        val stopThread = Thread { server.stop() }
+        try {
+            synchronized(server.lifecycleMonitor()) {
+                stopThread.start()
+                assertTrue(awaitBlockedIn("decompengine.web.UploadServer", "stop"),
+                    "stop() should wait on the lifecycle lock while it is held")
+                // The job service must already be signalled while stop() is still blocked:
+                // a queued callback or completing operation must observe shutdown before
+                // the lock frees.
+                assertTrue(server.jobServiceStopping(),
+                    "beginShutdown must be published before waiting on the lifecycle lock")
+            }
+            stopThread.join(10_000)
+            assertTrue(!stopThread.isAlive,
+                "stop() must complete once the lock is released; state=${stopThread.state} " +
+                    "frames=${stopThread.stackTrace.joinToString(" <- ") { "${it.className.substringAfterLast('.')}.${it.methodName}" }}")
+        } finally {
+            dataDir.toFile().deleteRecursively()
+        }
+    }
+
+    @Test
+    fun `shutdown timeout retains store ownership until the worker exits and cleanup is retried`() {
+        val dataDir = createTempDirectory("web-retained-owner-")
+        val started = java.util.concurrent.CountDownLatch(1)
+        val release = java.util.concurrent.CountDownLatch(1)
+        val server = UploadServer("127.0.0.1", 0, dataDir, analyzer = JobAnalyzer { _, _ ->
+            started.countDown()
+            while (release.count != 0L) {
+                try { release.await() } catch (_: InterruptedException) { }
+            }
+        })
+        server.start()
+        try {
+            val uploaded = upload(server, "waiting.elf", elfFixture(), acceptJson = true)
+            val id = Json.parseToJsonElement(uploaded.body.decodeToString()).jsonObject["id"].toString().trim('"')
+            assertEquals(303, request(server, "POST", "/jobs/$id/explore", followRedirects = false).status)
+            assertTrue(started.await(5, java.util.concurrent.TimeUnit.SECONDS))
+            val timeout = kotlin.test.assertFailsWith<WebJobServiceException> { server.stop() }
+            assertEquals("SHUTDOWN_INCOMPLETE", timeout.code)
+            val refused = kotlin.test.assertFailsWith<IllegalStateException> { UploadServer("127.0.0.1", 0, dataDir) }
+            assertEquals("Job store already has a live web server owner", refused.message)
+            val store = decompengine.jobs.JobStore(dataDir)
+            assertEquals("analyzing", store.get(id).status)
+
+            release.countDown()
+            server.stop()
+            assertEquals("failed", store.get(id).status)
+            assertEquals("Server stopped before the operation reported completion", store.get(id).statusMessage)
+            val restarted = UploadServer("127.0.0.1", 0, dataDir)
+            try {
+                restarted.start()
+                assertEquals("Server stopped before the operation reported completion", store.get(id).statusMessage)
+            } finally {
+                restarted.stop()
+            }
+        } finally {
+            release.countDown()
+            server.stop()
+        }
+    }
+
+    @Test
     fun `background diagnostics redact secrets before persistence and rendering`() {
         val dataDir = createTempDirectory("web-private-diagnostic-")
         val configured = "configured-provider-credential"
@@ -190,6 +543,28 @@ class UploadServerTest {
     }
 
     @Test
+    fun `progress refresh distinguishes hidden rows lost history and unreadable snapshots`() {
+        withServer { server, dataDir ->
+            val uploaded = upload(server, "progress-view.elf", elfFixture(), acceptJson = true)
+            val jobId = Json.parseToJsonElement(uploaded.body.decodeToString()).jsonObject["id"].toString().trim('"')
+            val reports = dataDir.resolve(jobId).resolve("reports")
+            decompengine.jobs.AgentProgressJournal(reports, "reconstruction", maximumEvents = 40,
+                maximumQueuedEvents = 128).use { journal ->
+                repeat(50) { journal.phase(decompengine.agent.AgentWorkflowPhase.BUILD_VALIDATING, "module-$it") }
+            }
+            val page = request(server, "GET", "/jobs/$jobId").body.decodeToString()
+            assertTrue(page.contains("Some progress events were not retained."))
+            assertTrue(page.contains("Showing the latest 30 of 40 retained events."))
+            val rows = page.substringAfter("<ol id=\"agent-event-list\"").substringBefore("</ol>")
+            assertEquals(30, Regex("<li>").findAll(rows).count())
+            reports.resolve(decompengine.jobs.AgentProgressJournal.FILE_NAME).writeText("private broken journal")
+            val unavailable = request(server, "GET", "/jobs/$jobId").body.decodeToString()
+            assertTrue(unavailable.contains("Progress history is unavailable."))
+            assertTrue(!unavailable.contains("private broken journal"))
+        }
+    }
+
+    @Test
     fun `job event endpoint and refresh render the persisted bounded stream`() {
         withServer { server, dataDir ->
             val uploaded = upload(server, "progress.elf", elfFixture(), acceptJson = true)
@@ -254,6 +629,7 @@ class UploadServerTest {
             assertTrue(response.body.decodeToString().contains("name=\"binary\""))
             assertTrue(response.body.decodeToString().contains("Binary reconstruction workbench"))
             assertTrue(response.body.decodeToString().contains("/assets/app.css"))
+            assertTrue(!response.body.decodeToString().contains("Retained recovery files"))
         }
     }
 
@@ -692,6 +1068,49 @@ class UploadServerTest {
     private fun uploadedJobId(server: UploadServer): String =
         Json.parseToJsonElement(upload(server, "boundary.elf", elfFixture(), acceptJson = true).body.decodeToString())
             .jsonObject.getValue("id").toString().trim('"')
+
+    private fun UploadServer.internalStore(): decompengine.jobs.JobStore =
+        UploadServer::class.java.getDeclaredField("store").apply { isAccessible = true }
+            .get(this) as decompengine.jobs.JobStore
+
+    private fun UploadServer.lifecycleMonitor(): Any =
+        UploadServer::class.java.getDeclaredField("lifecycleLock").apply { isAccessible = true }.get(this)
+
+    private fun UploadServer.jobServiceStopping(): Boolean =
+        (UploadServer::class.java.getDeclaredField("jobs").apply { isAccessible = true }.get(this) as WebJobService)
+            .let { service -> WebJobService::class.java.getDeclaredField("stopping").apply { isAccessible = true }.getBoolean(service) }
+
+    private fun awaitBlocked(thread: Thread?): Boolean {
+        val deadline = System.nanoTime() + java.util.concurrent.TimeUnit.SECONDS.toNanos(10)
+        while (System.nanoTime() < deadline) {
+            if (thread?.state == Thread.State.BLOCKED) return true
+            Thread.sleep(10)
+        }
+        return false
+    }
+
+    private fun awaitJobStoreFrame(methodName: String): Boolean {
+        val deadline = System.nanoTime() + java.util.concurrent.TimeUnit.SECONDS.toNanos(10)
+        while (System.nanoTime() < deadline) {
+            if (Thread.getAllStackTraces().values.any { frames ->
+                    frames.any { it.className == "decompengine.jobs.JobStore" && it.methodName == methodName }
+                }) return true
+            Thread.sleep(10)
+        }
+        return false
+    }
+
+    private fun awaitBlockedIn(className: String, methodName: String): Boolean {
+        val deadline = System.nanoTime() + java.util.concurrent.TimeUnit.SECONDS.toNanos(10)
+        while (System.nanoTime() < deadline) {
+            if (Thread.getAllStackTraces().any { (thread, frames) ->
+                    thread.state == Thread.State.BLOCKED &&
+                        frames.any { it.className == className && it.methodName == methodName }
+                }) return true
+            Thread.sleep(10)
+        }
+        return false
+    }
 
     private fun writeManifest(
         tree: Path,

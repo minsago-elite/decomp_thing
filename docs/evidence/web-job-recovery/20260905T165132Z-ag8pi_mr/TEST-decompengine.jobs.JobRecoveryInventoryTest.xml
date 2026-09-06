@@ -1,0 +1,12 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<testsuite name="decompengine.jobs.JobRecoveryInventoryTest" tests="6" skipped="0" failures="0" errors="0" timestamp="2026-09-05T16:52:49.851Z" hostname="whatsername" time="0.046">
+  <properties/>
+  <testcase name="candidate budget retains uninspected candidates()" classname="decompengine.jobs.JobRecoveryInventoryTest" time="0.002"/>
+  <testcase name="entry budget charges unrelated files too()" classname="decompengine.jobs.JobRecoveryInventoryTest" time="0.0"/>
+  <testcase name="symlinks and unknown nested layouts are retained without traversal()" classname="decompengine.jobs.JobRecoveryInventoryTest" time="0.001"/>
+  <testcase name="byte budget reports an incomplete lower bound without opening content()" classname="decompengine.jobs.JobRecoveryInventoryTest" time="0.001"/>
+  <testcase name="inventory counts retained candidates without reading or changing published data()" classname="decompengine.jobs.JobRecoveryInventoryTest" time="0.041"/>
+  <testcase name="missing store is empty and is not created by inspection()" classname="decompengine.jobs.JobRecoveryInventoryTest" time="0.0"/>
+  <system-out><![CDATA[]]></system-out>
+  <system-err><![CDATA[]]></system-err>
+</testsuite>

@@ -63,7 +63,9 @@ class WebJobService(
     private val active = mutableMapOf<String, OwnedTask>()
     private val uploads = mutableMapOf<Thread, CountDownLatch>()
     private val uploadStorage = WebUploadStorage(store.storageRoot, maximumRetainedStorageBytes)
-    private val uploadPublisher = decompengine.jobs.StagedJobUpload(store.storageRoot)
+
+    /** Internal seam for deterministic publication-failure fixtures; production code never reassigns this. */
+    internal var uploadPublisher = decompengine.jobs.StagedJobUpload(store.storageRoot)
     private val publicationFailures = mutableMapOf<String, WebJobDiagnostic>()
     private var attempts: WorkflowAttemptStore? = null
     private var initialized = false
@@ -81,6 +83,12 @@ class WebJobService(
     }
 
     @Synchronized fun beginShutdown() { stopping = true }
+
+    /** True when the service is closed and no workflows or uploads remain; ownership-handoff evidence. */
+    internal fun isIdle(): Boolean = synchronized(this) { closed && active.isEmpty() && uploads.isEmpty() }
+
+    /** Invoked whenever quiescence is (re)established after close; used to release outer ownership. */
+    internal var onQuiescent: (() -> Unit)? = null
 
     @Synchronized
     fun initializeExistingStorage() {
@@ -385,6 +393,7 @@ class WebJobService(
             val restoreInterrupt = Thread.interrupted()
             try { attempts?.close(); attempts = null }
             finally { if (restoreInterrupt) Thread.currentThread().interrupt() }
+            try { onQuiescent?.invoke() } catch (_: Exception) { }
         }
     }
 

@@ -9,6 +9,82 @@ import kotlin.test.*
 
 class AgentProgressJournalTest {
     @Test
+    fun `omission ranges preserve prefix interior and trailing gaps across legacy restart`() {
+        val root = createTempDirectory("progress-ranges-")
+        val legacy = buildJsonObject {
+            put("schemaVersion", 1); put("displayOnly", true); put("nextSequence", 7)
+            put("queueDropped", 3); put("historyDropped", 2); put("truncated", true)
+            put("events", buildJsonArray {
+                for (sequence in listOf(2, 4)) add(buildJsonObject { put("sequence", sequence) })
+            })
+        }
+        Files.writeString(root.resolve(AgentProgressJournal.FILE_NAME), legacy.toString())
+        AgentProgressJournal(root, "repair").use { }
+        val snapshot = AgentProgressJournal.read(root)!!
+        val ranges = snapshot.getValue("omittedSequenceRanges").jsonArray
+        assertEquals(listOf("0" to "2", "3" to "4", "5" to "7"), ranges.map {
+            it.jsonObject.getValue("startInclusive").jsonPrimitive.content to
+                it.jsonObject.getValue("endExclusive").jsonPrimitive.content
+        })
+        val corrupted = JsonObject(snapshot + ("omittedSequenceRanges" to JsonArray(emptyList())))
+        Files.writeString(root.resolve(AgentProgressJournal.FILE_NAME), corrupted.toString())
+        assertFailsWith<IllegalArgumentException> { AgentProgressJournal.read(root) }
+    }
+
+    @Test
+    fun `persisted history rejects unexplained loss and inconsistent omission counters`() {
+        val root = createTempDirectory("progress-loss-")
+        AgentProgressJournal(root, "repair").use { it.phase(AgentWorkflowPhase.AGENT_RUNNING) }
+        val original = AgentProgressJournal.read(root)!!
+        val corruptions = listOf(
+            mapOf("events" to JsonArray(original.getValue("events").jsonArray.take(1)),
+                "historyDropped" to JsonPrimitive(1), "truncated" to JsonPrimitive(true)),
+            mapOf("events" to JsonArray(original.getValue("events").jsonArray.drop(1))),
+            mapOf("queueDropped" to JsonPrimitive(1)),
+            mapOf("queueDropped" to JsonPrimitive(Long.MAX_VALUE), "historyDropped" to JsonPrimitive(Long.MAX_VALUE)),
+            mapOf("truncated" to JsonPrimitive(true)),
+            mapOf("events" to JsonArray(emptyList()), "queueDropped" to JsonPrimitive(2), "truncated" to JsonPrimitive(false)),
+            mapOf("events" to JsonArray(original.getValue("events").jsonArray.drop(1)),
+                "queueDropped" to JsonPrimitive(1), "truncated" to JsonPrimitive(true)),
+            mapOf("events" to JsonArray(emptyList()), "queueDropped" to JsonPrimitive(2),
+                "truncated" to JsonPrimitive(true)),
+            mapOf("events" to JsonArray(emptyList()), "queueDropped" to JsonPrimitive(1),
+                "historyDropped" to JsonPrimitive(1), "truncated" to JsonPrimitive(true)),
+        )
+        corruptions.forEach { changes ->
+            // Omit the optional range projection so counter checks must reject these legacy records.
+            val malformed = JsonObject(original.filterKeys { it != "omittedSequenceRanges" } + changes).toString()
+            Files.writeString(root.resolve(AgentProgressJournal.FILE_NAME), malformed)
+            assertFailsWith<IllegalArgumentException> { AgentProgressJournal.read(root) }
+            assertFailsWith<IllegalArgumentException> { AgentProgressJournal(root, "repair") }
+            assertEquals(malformed, Files.readString(root.resolve(AgentProgressJournal.FILE_NAME)))
+        }
+        // Failed restart validation releases ownership and never overwrites the rejected history.
+        Files.writeString(root.resolve(AgentProgressJournal.FILE_NAME), original.toString())
+        AgentProgressJournal(root, "repair").use { it.phase(AgentWorkflowPhase.ROLLED_BACK) }
+        assertEquals(4, AgentProgressJournal.read(root)!!.getValue("nextSequence").jsonPrimitive.int)
+    }
+
+    @Test
+    fun `history eviction precedes retained events while queue loss may follow them`() {
+        val root = createTempDirectory("progress-prefix-")
+        AgentProgressJournal(root, "repair").use { it.phase(AgentWorkflowPhase.AGENT_RUNNING) }
+        val original = AgentProgressJournal.read(root)!!
+        val events = original.getValue("events").jsonArray
+        assertEquals(2, events.size)
+        listOf(
+            mapOf("events" to JsonArray(events.takeLast(1)), "historyDropped" to JsonPrimitive(1)),
+            mapOf("events" to JsonArray(events.take(1)), "queueDropped" to JsonPrimitive(1)),
+            mapOf("events" to JsonArray(emptyList()), "historyDropped" to JsonPrimitive(2)),
+        ).forEach { changes ->
+            // These fixtures exercise legacy snapshots; explicit omission ranges have separate validation tests.
+            val valid = JsonObject(original - "omittedSequenceRanges" + changes + ("truncated" to JsonPrimitive(true)))
+            Files.writeString(root.resolve(AgentProgressJournal.FILE_NAME), valid.toString())
+            assertEquals(valid, AgentProgressJournal.read(root))
+        }
+    }
+
+    @Test
     fun `completion preserves available usage including zero cache and exact elapsed duration`() {
         val root = createTempDirectory("progress-usage-")
         val request = request(root)
@@ -187,6 +263,14 @@ class AgentProgressJournalTest {
         assertEquals(2_001, next)
         assertEquals(next, dropped + snapshot.getValue("events").jsonArray.size)
         assertTrue(snapshot.getValue("truncated").jsonPrimitive.boolean)
+        val omitted = snapshot.getValue("omittedSequenceRanges").jsonArray.flatMap {
+            val range = it.jsonObject
+            (range.getValue("startInclusive").jsonPrimitive.content.toLong() until
+                range.getValue("endExclusive").jsonPrimitive.content.toLong()).toList()
+        }
+        val retained = snapshot.getValue("events").jsonArray.map { it.jsonObject.getValue("sequence").jsonPrimitive.long }
+        assertEquals((0L until next).toList(), (omitted + retained).sorted())
+        assertTrue(snapshot.getValue("omittedSequenceRanges").jsonArray.size <= retained.size + 1)
         assertTrue(root.resolve(AgentProgressJournal.FILE_NAME).fileSize() <= 4096)
     }
 
@@ -239,6 +323,14 @@ class AgentProgressJournalTest {
         val redactor = ProgressRedactor(listOf("abc123"))
         assertEquals("api_key=[redacted] Bearer [redacted] [redacted]", redactor.text("api_key=some-value Bearer token-value abc123"))
         assertFalse(redactor.text("\u001b[31mhello").contains('\u001b'))
+    }
+
+    @Test
+    fun `replacement output cannot synthesize a reordered secret`() {
+        val redactor = ProgressRedactor(listOf("foo", "[redacted]X"))
+        assertEquals("[redacted]", redactor.text("fooX"))
+        val marker = ProgressRedactor(listOf("[redacted]"))
+        assertFalse(marker.text("hello [redacted] world").contains("[redacted]"))
     }
 
     private fun request(root: java.nio.file.Path) = AgentExecutionRequest(

@@ -1,0 +1,28 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<testsuite name="decompengine.acp.WorkspaceSnapshotLimitsTest" tests="22" skipped="0" failures="0" errors="0" timestamp="2026-09-05T16:06:17.752Z" hostname="whatsername" time="0.048">
+  <properties/>
+  <testcase name="unchanged bytes cannot hide an unauthorized permission change()" classname="decompengine.acp.WorkspaceSnapshotLimitsTest" time="0.002"/>
+  <testcase name="unsupported extended attributes are rejected without reading or exposing their values()" classname="decompengine.acp.WorkspaceSnapshotLimitsTest" time="0.004"/>
+  <testcase name="aggregate file bytes are bounded independently of each file()" classname="decompengine.acp.WorkspaceSnapshotLimitsTest" time="0.001"/>
+  <testcase name="overlapping rules count and hash each file once while preserving exact diff()" classname="decompengine.acp.WorkspaceSnapshotLimitsTest" time="0.002"/>
+  <testcase name="recursive inventory rejects symlinks instead of silently omitting them()" classname="decompengine.acp.WorkspaceSnapshotLimitsTest" time="0.0"/>
+  <testcase name="empty extended attributes are still unsupported metadata()" classname="decompengine.acp.WorkspaceSnapshotLimitsTest" time="0.0"/>
+  <testcase name="directory entries consume budget without any regular files()" classname="decompengine.acp.WorkspaceSnapshotLimitsTest" time="0.001"/>
+  <testcase name="unique file inventory fails before producing a partial snapshot()" classname="decompengine.acp.WorkspaceSnapshotLimitsTest" time="0.001"/>
+  <testcase name="stream accounting rejects growth beyond declared file or remaining aggregate bytes()" classname="decompengine.acp.WorkspaceSnapshotLimitsTest" time="0.0"/>
+  <testcase name="snapshot hashing preserves valid Linux filenames for exact and recursive rules()" classname="decompengine.acp.WorkspaceSnapshotLimitsTest" time="0.006"/>
+  <testcase name="oversized individual file is refused()" classname="decompengine.acp.WorkspaceSnapshotLimitsTest" time="0.0"/>
+  <testcase name="missing explicitly authorized target remains eligible for later creation()" classname="decompengine.acp.WorkspaceSnapshotLimitsTest" time="0.001"/>
+  <testcase name="snapshot hash paths still reject absolute traversal empty and NUL segments()" classname="decompengine.acp.WorkspaceSnapshotLimitsTest" time="0.001"/>
+  <testcase name="non-default filesystem roots are rejected before native path resolution()" classname="decompengine.acp.WorkspaceSnapshotLimitsTest" time="0.01"/>
+  <testcase name="descriptor hash streams exact bytes under the snapshot budget()" classname="decompengine.acp.WorkspaceSnapshotLimitsTest" time="0.003"/>
+  <testcase name="recursive depth is bounded before retaining an excessive handle chain()" classname="decompengine.acp.WorkspaceSnapshotLimitsTest" time="0.003"/>
+  <testcase name="authorized content write does not authorize a permission change()" classname="decompengine.acp.WorkspaceSnapshotLimitsTest" time="0.002"/>
+  <testcase name="nested descriptor discovery preserves relative change identity()" classname="decompengine.acp.WorkspaceSnapshotLimitsTest" time="0.001"/>
+  <testcase name="atomic same-content replacement preserving metadata remains unchanged()" classname="decompengine.acp.WorkspaceSnapshotLimitsTest" time="0.002"/>
+  <testcase name="special socket entries are rejected without opening their content()" classname="decompengine.acp.WorkspaceSnapshotLimitsTest" time="0.001"/>
+  <testcase name="dangling links are unsupported entries rather than absent authorized paths()" classname="decompengine.acp.WorkspaceSnapshotLimitsTest" time="0.0"/>
+  <testcase name="root handle count is bounded even when authorized targets are absent()" classname="decompengine.acp.WorkspaceSnapshotLimitsTest" time="0.003"/>
+  <system-out><![CDATA[]]></system-out>
+  <system-err><![CDATA[]]></system-err>
+</testsuite>

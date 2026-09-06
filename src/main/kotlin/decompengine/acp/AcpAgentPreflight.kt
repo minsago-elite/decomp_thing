@@ -44,6 +44,7 @@ enum class AcpPreflightWorkflow(
  */
 class AcpAgentPreflightResult internal constructor(
     val workflow: AcpPreflightWorkflow,
+    val authentication: AcpAuthenticationInventory,
     val negotiatedAgent: AcpNegotiatedAgentEvidence,
     requiredAgentCapabilities: Collection<AcpRequiredAgentCapability>,
     val diagnostics: AcpProcessDiagnostics,
@@ -72,7 +73,7 @@ class AcpAgentPreflightResult internal constructor(
         }
     }
 
-    /** Stable, bounded, and safe to print without exposing agent environment values or peer text. */
+    /** Stable within the inventory commitment's JVM scope; excludes environment values and peer text. */
     val stableDescriptor: String = listOf(
         "acp-preflight-v1",
         "workflow-${workflow.cliName}",
@@ -80,6 +81,12 @@ class AcpAgentPreflightResult internal constructor(
         "agent-identity-sha256-$negotiatedIdentitySha256",
         "required-${requiredAgentCapabilities.sortedBy { it.diagnosticName }.joinToString(",") { it.diagnosticName }.ifEmpty { "none" }}",
         "agent-capabilities-${negotiatedAgent.capabilities.stableBits()}",
+        "auth-methods-${authentication.methods.size}",
+        "auth-inventory-commitment-${authentication.commitment}",
+        "auth-inventory-format-${authentication.commitmentFormat}",
+        "auth-inventory-scope-${authentication.commitmentScope}",
+        "auth-logout-advertised-${authentication.logoutAdvertised}",
+        "auth-logout-supported-${authentication.logoutSupported}",
         "client-fs-read-${workflow.filesystemRead}",
         "client-fs-write-${workflow.filesystemWrite}",
         "client-terminal-${workflow.terminal}",
@@ -112,3 +119,8 @@ private fun negotiatedIdentitySha256(agent: AcpNegotiatedAgentEvidence): String 
     }
     return digest.digest().joinToString("") { byte -> "%02x".format(byte) }
 }
+
+/** Returned only for a terminal cancelled result; cleanup failures retain their original failure. */
+class AcpPreflightCancelledException internal constructor(
+    val receipt: decompengine.agent.AgentExecutionReceipt,
+) : IllegalStateException("ACP preflight cancelled")

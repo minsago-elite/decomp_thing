@@ -1,0 +1,28 @@
+{
+  "parentSourceCommit": "dd594c4",
+  "tipSourceCommit": "038f751",
+  "runsBeforeCommit": true,
+  "propagatedTip": "1deaa24",
+  "tipTreeUnchanged": true,
+  "groups": {
+    "parent": {
+      "tests": 22,
+      "failures": 0,
+      "errors": 0,
+      "skipped": 0
+    },
+    "tip": {
+      "tests": 37,
+      "failures": 0,
+      "errors": 0,
+      "skipped": 0
+    }
+  },
+  "files": {
+    "parent/TEST-decompengine.acp.AcpAuthenticationInventoryTest.xml": "08729d79c67ae7b0f89b89943094b6b4e3bc8cc8c1166add59930a3839a1bb3e",
+    "parent/TEST-decompengine.jobs.AgentProgressJournalTest.xml": "ac56119c62fbee76659b91ed6c4208425b475af974878902aac72a2567245bd8",
+    "tip/TEST-decompengine.jobs.AgentProgressJournalTest.xml": "9ee62b4df255146d1141f485138acf695957ca7cf1436c627c406403b8ee8782",
+    "tip/TEST-decompengine.acp.AcpAuthenticationInventoryTest.xml": "4dabe2f8e1af98d9c856a146a729df5877d4fe5abd1b896bf9be11751315c6e9",
+    "tip/TEST-decompengine.acp.AcpCurrentConfigInventoryTest.xml": "ae63b1e287597569a9a2ded76c550b5d65cbae7d33d8f3eeb5413f7bbd0ac1a5"
+  }
+}

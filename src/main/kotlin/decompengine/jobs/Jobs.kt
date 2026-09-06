@@ -7,36 +7,36 @@ import decompengine.acp.LinuxDescriptor
 import decompengine.acp.LinuxFileIdentity
 import decompengine.acp.LinuxFilesystemSyscalls
 import decompengine.oracle.core.OracleJson
+import decompengine.oracle.core.StrictJsonLimits
+import decompengine.oracle.core.StrictJsonException
 import decompengine.repair.StableRegularFile
 import decompengine.repair.readStableRegularFile
 import java.io.IOException
-import kotlinx.serialization.json.Json
-import kotlinx.serialization.json.JsonElement
 import kotlinx.serialization.json.JsonObject
 import kotlinx.serialization.json.JsonPrimitive
 import kotlinx.serialization.json.buildJsonObject
-import kotlinx.serialization.json.int
+import kotlinx.serialization.json.JsonNull
+import kotlinx.serialization.json.longOrNull
 import kotlinx.serialization.json.jsonObject
 import kotlinx.serialization.json.jsonPrimitive
 import kotlinx.serialization.json.put
 import java.nio.file.Path
 import java.nio.file.Files
-import java.nio.ByteBuffer
-import java.nio.channels.FileChannel
-import java.nio.file.LinkOption.NOFOLLOW_LINKS
-import java.nio.file.StandardCopyOption.ATOMIC_MOVE
-import java.nio.file.StandardCopyOption.REPLACE_EXISTING
-import java.nio.file.StandardOpenOption.READ
-import java.nio.file.StandardOpenOption.WRITE
 import java.time.Instant
 import java.util.UUID
 import kotlin.io.path.createDirectories
 import kotlin.io.path.exists
 import kotlin.io.path.name
 import kotlin.io.path.isRegularFile
-import kotlin.io.path.writeBytes
 
 class JobStoreException(message: String) : RuntimeException(message)
+internal class JobListingUnavailableException : IllegalStateException(
+    "Job listing is incomplete. Check retained records and store limits.",
+)
+internal class JobRecoveryCancelledException(val statusUpdatesStarted: Boolean) : IllegalStateException(
+    if (statusUpdatesStarted) "Job recovery cancelled after status publication began; some statuses may have changed"
+    else "Job recovery cancelled before status publication; no recovery statuses were changed",
+)
 class InvalidUploadException(message: String, cause: Throwable? = null) : RuntimeException(message, cause)
 
 data class Job(
@@ -63,7 +63,13 @@ data class Job(
     }
 }
 
-class JobStore(root: Path) {
+class JobStore internal constructor(
+    root: Path,
+    private val uploadPublisher: UploadPublisher,
+    private val metadataPublisher: JobMetadataPublisher = AtomicJobMetadataPublisher,
+    private val storeDirectories: JobStoreDirectories = ForcedJobStoreDirectories,
+) {
+    constructor(root: Path) : this(root, AtomicUploadPublisher)
     private val root = root.toAbsolutePath().normalize()
     internal val storageRoot: Path get() = root
 
@@ -83,46 +89,70 @@ class JobStore(root: Path) {
 
     @Synchronized
     fun createFromUpload(filename: String, content: ByteArray): Job {
+        require(content.size <= MAX_INPUT_BYTES) { "upload exceeds the 32 MiB input limit" }
+        val input = content.copyOf()
         val metadata = try {
-            ElfMetadataReader.read(content)
+            ElfMetadataReader.read(input)
         } catch (exception: InvalidElfException) {
             throw InvalidUploadException(exception.message ?: "uploaded file is not an ELF binary", exception)
         }
 
-        root.createDirectories()
+        storeDirectories.prepare(root)
         val jobId = UUID.randomUUID().toString().replace("-", "")
-        val jobDir = root.resolve(jobId).createDirectories()
+        val jobDir = root.resolve(jobId)
         val binaryPath = jobDir.resolve("input.elf")
-        binaryPath.writeBytes(content)
-        check(binaryPath.toFile().setExecutable(true, true) || Files.isExecutable(binaryPath)) {
-            "could not mark uploaded ELF executable"
-        }
         val job = Job(
             id = jobId,
             filename = Path.of(filename).name.ifBlank { "input.elf" },
             status = "uploaded",
             createdAt = Instant.now().toString(),
-            sizeBytes = content.size,
+            sizeBytes = input.size,
             binaryPath = binaryPath,
             metadata = metadata,
         )
-        persist(job)
-        return job
+        requireStatusUpdateHeadroom(job)
+        val staging = Files.createTempDirectory(root, ".upload-")
+        var publicationAttempted = false
+        try {
+            val stagedInput = staging.resolve("input.elf")
+            uploadPublisher.writeAndForceInput(stagedInput, input)
+            persist(job, staging)
+            publicationAttempted = true
+            uploadPublisher.publish(staging, jobDir)
+            uploadPublisher.confirmDirectory(root)
+            return job
+        } catch (failure: Exception) {
+            try {
+                Files.deleteIfExists(staging.resolve("input.elf"))
+                Files.deleteIfExists(staging.resolve("job.json"))
+                Files.deleteIfExists(staging)
+            } catch (cleanup: Exception) {
+                failure.addSuppressed(cleanup)
+            }
+            if (publicationAttempted) throw UploadPublicationUncertainException(job.id, failure)
+            throw failure
+        }
     }
 
     @Synchronized
     fun get(jobId: String): Job {
         jobDirectory(jobId)
         val payload = try {
-            OracleJson.parse(readStableRegularFile(root, "$jobId/job.json", 256L * 1024).bytes).jsonObject
+            OracleJson.parse(readStableRegularFile(root, "$jobId/job.json", MAX_METADATA_BYTES.toLong()).bytes).jsonObject
         } catch (_: IOException) {
             throw JobStoreException("job metadata is unavailable or its path changed")
         }
         return decodeJobRecord(jobId, payload)
     }
 
+    private fun decodeJob(jobId: String, bytes: ByteArray): Job = decodeJobRecord(jobId, OracleJson.parse(bytes).jsonObject)
+
     internal fun decodeJobRecord(jobId: String, payload: JsonObject): Job {
         val jobDir = jobDirectory(jobId)
+        require(payload.keys.all { it in setOf("id", "filename", "status", "created_at", "updated_at",
+            "status_message", "size_bytes", "binary_path", "metadata") }) { "job metadata has unsupported fields" }
+        require(payload.string("status") in VALID_STATUSES) { "job metadata has an invalid status" }
+        require(payload.int("size_bytes") in 0..MAX_INPUT_BYTES) { "job metadata has an invalid input size" }
         require(payload.string("id") == jobId &&
             Path.of(payload.string("binary_path")) == jobDir.resolve("input.elf")
         ) { "job metadata identity does not match its store location" }
@@ -131,7 +161,7 @@ class JobStore(root: Path) {
             filename = payload.string("filename"),
             status = payload.string("status"),
             createdAt = payload.string("created_at"),
-            updatedAt = payload.optionalString("updated_at") ?: payload.string("created_at"),
+            updatedAt = if ("updated_at" in payload) payload.string("updated_at") else payload.string("created_at"),
             statusMessage = payload.optionalString("status_message"),
             sizeBytes = payload.int("size_bytes"),
             binaryPath = Path.of(payload.string("binary_path")),
@@ -140,15 +170,22 @@ class JobStore(root: Path) {
     }
 
     @Synchronized
-    fun list(): List<Job> {
-        if (!root.exists()) return emptyList()
-        return Files.list(root).use { paths ->
-            paths.iterator().asSequence()
-                .filter { Files.isDirectory(it) && it.resolve("job.json").isRegularFile() }
-                .toList()
-                .mapNotNull { directory -> runCatching { get(directory.fileName.toString()) }.getOrNull() }
-                .sortedByDescending { it.createdAt }
+    fun recoveryInventory(): JobRecoveryInventory = inspectJobRecoveryInventory(root)
+
+    @Synchronized
+    fun list(): List<Job> = list(4096, 64L * 1024 * 1024)
+
+    @Synchronized
+    internal fun list(maximumEntries: Int, maximumMetadataBytes: Long): List<Job> {
+        require(maximumEntries in 1..4096 && maximumMetadataBytes in 1..64L * 1024 * 1024)
+        val jobs = ArrayList<Job>()
+        try {
+            scanJobs(maximumEntries, maximumMetadataBytes,
+                { check(!Thread.currentThread().isInterrupted) }, jobs::add)
+        } catch (_: Exception) {
+            throw JobListingUnavailableException()
         }
+        return jobs.sortedByDescending { it.createdAt }
     }
 
     @Synchronized
@@ -157,7 +194,7 @@ class JobStore(root: Path) {
         val updated = get(jobId).copy(
             status = status,
             updatedAt = Instant.now().toString(),
-            statusMessage = message?.replace(Regex("[\\r\\n]+"), " ")?.take(500),
+            statusMessage = message?.replace(Regex("[\\r\\n]+"), " ")?.take(MAX_STATUS_MESSAGE_CHARACTERS),
         )
         persist(updated)
         return updated
@@ -227,7 +264,7 @@ class JobStore(root: Path) {
     internal fun readInput(jobId: String): StableRegularFile {
         jobDirectory(jobId)
         return try {
-            readStableRegularFile(root, "$jobId/input.elf", 32L * 1024 * 1024)
+            readStableRegularFile(root, "$jobId/input.elf", MAX_INPUT_BYTES.toLong())
         } catch (_: IOException) {
             throw JobStoreException("job input is unavailable or its path changed")
         }
@@ -289,10 +326,81 @@ class JobStore(root: Path) {
     }
 
     @Synchronized
-    fun recoverInterruptedJobs() {
-        list().filter { it.status in setOf("queued", "analyzing") }.forEach { job ->
-            updateStatus(job.id, "failed", "Analysis was interrupted before the server restarted")
+    fun recoverInterruptedJobs() = recoverInterruptedJobs { false }
+
+    internal fun recoverInterruptedJobs(cancellation: () -> Boolean) =
+        recoverInterruptedJobs(4096, 64L * 1024 * 1024, cancellation)
+
+    /** Complete bounded inspection precedes every recovery write; errors never imply rollback. */
+    @Synchronized
+    internal fun recoverInterruptedJobs(
+        maximumEntries: Int, maximumMetadataBytes: Long, cancellation: () -> Boolean = { false },
+    ) {
+        require(maximumEntries in 1..4096 && maximumMetadataBytes in 1..64L * 1024 * 1024)
+        var statusUpdatesStarted = false
+        fun checkCancellation() {
+            if (Thread.currentThread().isInterrupted || cancellation()) {
+                throw JobRecoveryCancelledException(statusUpdatesStarted)
+            }
         }
+        checkCancellation()
+        val pending = ArrayList<Job>()
+        try {
+            scanJobs(maximumEntries, maximumMetadataBytes, { checkCancellation() }) { job ->
+                check(job.status in VALID_STATUSES)
+                if (job.status == "queued" || job.status == "analyzing") {
+                    val recovered = job.copy(
+                        status = "failed",
+                        updatedAt = Instant.now().toString(),
+                        statusMessage = "Analysis was interrupted before the server restarted",
+                    )
+                    // Legacy records may parse within the read limit but exceed the rewrite limit.
+                    // Freeze the entire replacement, including its timestamp, before validating it.
+                    encodeMetadata(recovered)
+                    pending.add(recovered)
+                }
+            }
+        } catch (cancelled: JobRecoveryCancelledException) {
+            throw cancelled
+        } catch (_: Exception) {
+            throw JobStoreException("Job recovery inspection is incomplete; no recovery statuses were changed")
+        }
+        checkCancellation()
+        pending.forEach { job ->
+            checkCancellation()
+            statusUpdatesStarted = true
+            // Reuse the bounded inspection: updateStatus would read this metadata a second time.
+            persist(job)
+        }
+        // A cancellation racing the final write begins after its admission check; report the
+        // publication through the cancelled-after-status-updates failure instead of success.
+        checkCancellation()
+    }
+
+    /** Shared read-only admission for complete listing and recovery inspection. */
+    private fun scanJobs(
+        maximumEntries: Int, maximumMetadataBytes: Long,
+        checkProgress: () -> Unit, accept: (Job) -> Unit,
+    ) {
+        checkProgress()
+        if (Files.notExists(root)) return
+        var scanned = 0
+        var remaining = maximumMetadataBytes
+        val jobName = Regex("[a-f0-9]{32}")
+        Files.newDirectoryStream(root).use { entries ->
+            for (entry in entries) {
+                checkProgress()
+                check(++scanned <= maximumEntries)
+                val id = entry.fileName.toString()
+                if (!id.matches(jobName)) continue
+                check(remaining > 0)
+                val bytes = readStableRegularFile(root, "$id/job.json",
+                    minOf(MAX_METADATA_BYTES.toLong(), remaining)).bytes
+                remaining -= bytes.size
+                accept(decodeJob(id, bytes))
+            }
+        }
+        checkProgress()
     }
 
     private fun jobDirectory(jobId: String): Path {
@@ -302,26 +410,56 @@ class JobStore(root: Path) {
         return root.resolve(jobId)
     }
 
-    private fun persist(job: Job) {
-        val jobDir = jobDirectory(job.id).createDirectories()
-        val bytes = (Json { prettyPrint = true }.encodeToString(JsonElement.serializer(), job.toJson()) + "\n")
-            .toByteArray(Charsets.UTF_8)
+    // Admissions must also fit every later record shape updateStatus can publish.
+    private fun requireStatusUpdateHeadroom(job: Job) {
+        val reserved = job.copy(
+            status = "analyzing",
+            updatedAt = MAXIMUM_UPDATE_TIMESTAMP,
+            statusMessage = STATUS_MESSAGE_RESERVE,
+        )
+        try {
+            OracleJson.canonicalBytes(reserved.toJson(), METADATA_LIMITS)
+        } catch (_: StrictJsonException) {
+            throw InvalidUploadException("job metadata exceeds the 256 KiB limit once later status updates are reserved")
+        }
+    }
+
+    private fun persist(job: Job, jobDir: Path = jobDirectory(job.id).createDirectories()) {
+        val bytes = encodeMetadata(job)
         val temporary = Files.createTempFile(jobDir, ".job-metadata-", ".tmp")
         try {
-            FileChannel.open(temporary, WRITE, NOFOLLOW_LINKS).use { channel ->
-                val buffer = ByteBuffer.wrap(bytes)
-                while (buffer.hasRemaining()) channel.write(buffer)
-                channel.force(true)
-            }
-            Files.move(temporary, jobDir.resolve("job.json"), ATOMIC_MOVE, REPLACE_EXISTING)
-            FileChannel.open(jobDir, READ).use { it.force(true) }
+            metadataPublisher.writeAndForce(temporary, bytes)
+            metadataPublisher.replace(temporary, jobDir.resolve("job.json"))
+            metadataPublisher.confirmDirectory(jobDir)
         } finally {
             Files.deleteIfExists(temporary)
         }
     }
 
+    private fun encodeMetadata(job: Job): ByteArray {
+        // Bound the encoder's string-byte accounting allocation before it sees caller-provided text.
+        require(job.filename.length <= MAX_METADATA_BYTES) { "job metadata exceeds the 256 KiB limit" }
+        return try {
+            OracleJson.canonicalBytes(job.toJson(), METADATA_LIMITS)
+        } catch (_: StrictJsonException) {
+            throw IllegalArgumentException("job metadata exceeds the 256 KiB limit or contains invalid JSON text")
+        }
+    }
+
     private companion object {
+        const val MAX_STATUS_MESSAGE_CHARACTERS = 500
+        const val MAX_INPUT_BYTES = 32 * 1024 * 1024
+        const val MAX_METADATA_BYTES = 256 * 1024
+        val METADATA_LIMITS = StrictJsonLimits(
+            maximumCanonicalBytes = MAX_METADATA_BYTES,
+            maximumStringBytes = MAX_METADATA_BYTES,
+            maximumTotalStringBytes = MAX_METADATA_BYTES,
+            maximumDepth = 8,
+            maximumNodes = 128,
+        )
         val VALID_STATUSES = setOf("uploaded", "queued", "analyzing", "complete", "failed")
+        val STATUS_MESSAGE_RESERVE = "\u0001".repeat(500)
+        const val MAXIMUM_UPDATE_TIMESTAMP = "9999-12-31T23:59:59.999999999Z"
     }
 }
 
@@ -339,22 +477,43 @@ fun ElfMetadata.toJson(): JsonObject = buildJsonObject {
     put("section_name_table_index", sectionNameTableIndex.toInt())
 }
 
-private fun JsonObject.toElfMetadata(): ElfMetadata = ElfMetadata(
-    format = string("format"),
-    endianness = string("endianness"),
-    elfVersion = long("elf_version").toUInt(),
-    osAbi = string("os_abi"),
-    objectType = string("object_type"),
-    machine = string("machine"),
-    entryPoint = long("entry_point").toULong(),
-    elfHeaderSize = int("elf_header_size").toUShort(),
-    programHeaderCount = int("program_header_count").toUShort(),
-    sectionHeaderCount = int("section_header_count").toUShort(),
-    sectionNameTableIndex = int("section_name_table_index").toUShort(),
-)
+private fun JsonObject.toElfMetadata(): ElfMetadata {
+    require(keys == setOf("format", "endianness", "elf_version", "os_abi", "object_type", "machine",
+        "entry_point", "elf_header_size", "program_header_count", "section_header_count", "section_name_table_index")) {
+        "job ELF metadata has missing or unsupported fields"
+    }
+    fun unsignedShort(name: String): UShort = long(name).also {
+        require(it in 0..65535) { "job ELF metadata integer is out of range" }
+    }.toUShort()
+    return ElfMetadata(
+        format = string("format"),
+        endianness = string("endianness"),
+        elfVersion = long("elf_version").also {
+            require(it in 0..UInt.MAX_VALUE.toLong()) { "job ELF metadata version is out of range" }
+        }.toUInt(),
+        osAbi = string("os_abi"),
+        objectType = string("object_type"),
+        machine = string("machine"),
+        // Existing metadata encodes this ULong using its signed Long bit representation.
+        entryPoint = long("entry_point").toULong(),
+        elfHeaderSize = unsignedShort("elf_header_size"),
+        programHeaderCount = unsignedShort("program_header_count"),
+        sectionHeaderCount = unsignedShort("section_header_count"),
+        sectionNameTableIndex = unsignedShort("section_name_table_index"),
+    )
+}
 
-private fun JsonObject.string(name: String): String = getValue(name).jsonPrimitive.content
-private fun JsonObject.optionalString(name: String): String? = get(name)?.jsonPrimitive?.content
-private fun JsonObject.int(name: String): Int = getValue(name).jsonPrimitive.int
-private fun JsonObject.long(name: String): Long = getValue(name).jsonPrimitive.content.toLong()
+private fun JsonObject.string(name: String): String = getValue(name).jsonPrimitive.let {
+    require(it.isString) { "job metadata requires a JSON string" }
+    it.content
+}
+private fun JsonObject.optionalString(name: String): String? =
+    if (get(name) == null || get(name) == JsonNull) null else string(name)
+private fun JsonObject.int(name: String): Int = long(name).also {
+    require(it in Int.MIN_VALUE.toLong()..Int.MAX_VALUE.toLong()) { "job metadata integer is out of range" }
+}.toInt()
+private fun JsonObject.long(name: String): Long = getValue(name).jsonPrimitive.let {
+    require(!it.isString) { "job metadata requires a JSON integer" }
+    requireNotNull(it.longOrNull) { "job metadata requires a JSON integer" }
+}
 private fun JsonObject.jsonObject(name: String): JsonObject = getValue(name).jsonObject

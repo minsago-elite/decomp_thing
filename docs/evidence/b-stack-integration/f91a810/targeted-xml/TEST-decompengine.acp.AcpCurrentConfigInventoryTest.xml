@@ -1,0 +1,12 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<testsuite name="decompengine.acp.AcpCurrentConfigInventoryTest" tests="6" skipped="0" failures="0" errors="0" timestamp="2026-09-05T16:06:06.454Z" hostname="whatsername" time="0.036">
+  <properties/>
+  <testcase name="flat and grouped current inventories must retain a unique configured value()" classname="decompengine.acp.AcpCurrentConfigInventoryTest" time="0.011"/>
+  <testcase name="choice previews redact configured secrets and bound long inventories()" classname="decompengine.acp.AcpCurrentConfigInventoryTest" time="0.003"/>
+  <testcase name="shared choice preview bounds enumeration and escapes redacted peer text()" classname="decompengine.acp.AcpCurrentConfigInventoryTest" time="0.003"/>
+  <testcase name="current type mismatch is rejected without exposing preference values()" classname="decompengine.acp.AcpCurrentConfigInventoryTest" time="0.002"/>
+  <testcase name="current choices redact configured identifiers embedded in advertised values()" classname="decompengine.acp.AcpCurrentConfigInventoryTest" time="0.003"/>
+  <testcase name="full environment budget and complete preferences share redaction without exhausting limits()" classname="decompengine.acp.AcpCurrentConfigInventoryTest" time="0.014"/>
+  <system-out><![CDATA[]]></system-out>
+  <system-err><![CDATA[]]></system-err>
+</testsuite>
