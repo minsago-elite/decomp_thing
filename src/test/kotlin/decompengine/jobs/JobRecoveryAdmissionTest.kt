@@ -76,6 +76,38 @@ class JobRecoveryAdmissionTest {
         assertTrue(jobs.all { store.get(it.id).status == "failed" })
     }
 
+    @Test fun `cancellation during the final publication is reported without clearing interruption`() {
+        for (interrupt in listOf(false, true)) {
+            val root = createTempDirectory("recovery-final-cancellation-")
+            var armed = false
+            var cancelled = false
+            val publisher = object : JobMetadataPublisher by AtomicJobMetadataPublisher {
+                override fun confirmDirectory(directory: java.nio.file.Path) {
+                    AtomicJobMetadataPublisher.confirmDirectory(directory)
+                    if (armed) {
+                        if (interrupt) Thread.currentThread().interrupt() else cancelled = true
+                    }
+                }
+            }
+            val store = JobStore(root, AtomicUploadPublisher, publisher)
+            val job = store.createFromUpload("fixture.elf", elfFixture())
+            store.updateStatus(job.id, "queued")
+            armed = true
+            try {
+                val failure = assertFailsWith<JobRecoveryCancelledException> {
+                    store.recoverInterruptedJobs { cancelled }
+                }
+                assertTrue(failure.statusUpdatesStarted)
+                assertEquals(interrupt, Thread.currentThread().isInterrupted)
+            } finally {
+                if (interrupt) Thread.interrupted()
+                armed = false
+            }
+            try { assertEquals("failed", store.get(job.id).status) }
+            finally { root.toFile().deleteRecursively() }
+        }
+    }
+
     private fun assertIncomplete(action: () -> Unit) {
         val failure = assertFailsWith<JobStoreException>(block = action)
         assertEquals("Job recovery inspection is incomplete; no recovery statuses were changed", failure.message)

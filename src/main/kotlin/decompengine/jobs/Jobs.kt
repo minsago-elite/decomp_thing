@@ -368,6 +368,9 @@ class JobStore internal constructor(
                 statusMessage = "Analysis was interrupted before the server restarted",
             ))
         }
+        // A cancellation racing the final write begins after its admission check; report the
+        // publication through the cancelled-after-status-updates failure instead of success.
+        checkCancellation()
     }
 
     private fun jobDirectory(jobId: String): Path {
