@@ -276,6 +276,50 @@ class UploadServerTest {
     }
 
     @Test
+    fun `claim that precedes the stop signal cannot invoke the operation`() {
+        val root = createTempDirectory("web-claim-fence-")
+        val queued = java.util.concurrent.CopyOnWriteArrayList<Runnable>()
+        val calls = java.util.concurrent.atomic.AtomicInteger()
+        val lockHeld = java.util.concurrent.CountDownLatch(1)
+        val releaseLock = java.util.concurrent.CountDownLatch(1)
+        val server = UploadServer("127.0.0.1", 0, root,
+            analyzer = JobAnalyzer { _, _ -> calls.incrementAndGet() }, executor = Executor { queued.add(it) })
+        server.start()
+        try {
+            val id = uploadedJobId(server)
+            assertEquals(303, request(server, "POST", "/jobs/$id/explore", followRedirects = false).status)
+            assertEquals(1, queued.size)
+            val holder = Thread {
+                synchronized(server.lifecycleMonitor()) {
+                    lockHeld.countDown()
+                    check(releaseLock.await(15, java.util.concurrent.TimeUnit.SECONDS))
+                }
+            }.apply { isDaemon = true; start() }
+            assertTrue(lockHeld.await(5, java.util.concurrent.TimeUnit.SECONDS))
+            val runner = Thread { queued.single().run() }.apply { isDaemon = true; start() }
+            assertTrue(awaitBlocked(runner))
+            server.requestStop()
+            releaseLock.countDown()
+            runner.join(15000)
+            holder.join(15000)
+            assertEquals(0, calls.get())
+            val job = decompengine.jobs.JobStore(root).get(id)
+            assertEquals("failed", job.status)
+            assertEquals("Server stopped before the operation started", job.statusMessage)
+            server.stop()
+            val restarted = UploadServer("127.0.0.1", 0, root)
+            try {
+                restarted.start()
+            } finally {
+                restarted.stop()
+            }
+        } finally {
+            releaseLock.countDown()
+            server.stop()
+        }
+    }
+
+    @Test
     fun `shutdown timeout retains store ownership until the worker exits and cleanup is retried`() {
         val dataDir = createTempDirectory("web-retained-owner-")
         val started = java.util.concurrent.CountDownLatch(1)
@@ -983,6 +1027,9 @@ class UploadServerTest {
     private fun UploadServer.internalStore(): decompengine.jobs.JobStore =
         UploadServer::class.java.getDeclaredField("store").apply { isAccessible = true }
             .get(this) as decompengine.jobs.JobStore
+
+    private fun UploadServer.lifecycleMonitor(): Any =
+        UploadServer::class.java.getDeclaredField("lifecycleLock").apply { isAccessible = true }.get(this)
 
     private fun awaitBlocked(thread: Thread?): Boolean {
         val deadline = System.nanoTime() + java.util.concurrent.TimeUnit.SECONDS.toNanos(10)
