@@ -110,7 +110,7 @@ class AcpAuthenticationInventoryTest {
         for (methods in listOf(listOf(method, method), List(33) { method },
             listOf(AuthMethod.AgentAuth(AuthMethodId("x".repeat(257)), "name", null)),
             listOf(AuthMethod.AgentAuth(AuthMethodId("id"), "x".repeat(513), null)))) {
-            val error = assertFailsWith<IllegalArgumentException> { AcpAuthenticationInventory.capture(methods, emptyList()) }
+            val error = assertFailsWith<AcpProtocolFailure> { AcpAuthenticationInventory.capture(methods, emptyList()) }
             assertFalse(error.message!!.contains("secret-id"))
         }
     }

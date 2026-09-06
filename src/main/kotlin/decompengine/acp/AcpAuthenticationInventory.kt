@@ -27,18 +27,18 @@ class AcpAuthenticationInventory private constructor(
 
     companion object {
         internal fun capture(methods: List<AuthMethod>, sensitiveValues: Collection<String>): AcpAuthenticationInventory {
-            require(methods.size <= 32) { "ACP authentication inventory exceeds its method limit" }
+            if (methods.size > 32) throw AcpProtocolFailure("ACP authentication inventory exceeds its method limit")
             val ids = HashSet<String>()
             val redactor = ProgressRedactor(sensitiveValues)
             val fragments = AuthenticationPreviewFragments(sensitiveValues)
             fun preview(text: String, limit: Int) = fragments.conceal(redactor.text(text, limit))
             val commitment = buildJsonArray {
                 methods.forEach { method ->
-                    require(method.id.value.isNotBlank() && method.id.value.toByteArray().size <= 256 && ids.add(method.id.value)) {
-                        "ACP authentication inventory contains an invalid or duplicate method ID"
+                    if (method.id.value.isBlank() || method.id.value.toByteArray().size > 256 || !ids.add(method.id.value)) {
+                        throw AcpProtocolFailure("ACP authentication inventory contains an invalid or duplicate method ID")
                     }
-                    require(method.name.toByteArray().size <= 512 && (method.description?.toByteArray()?.size ?: 0) <= 2048) {
-                        "ACP authentication inventory exceeds its text limit"
+                    if (method.name.toByteArray().size > 512 || (method.description?.toByteArray()?.size ?: 0) > 2048) {
+                        throw AcpProtocolFailure("ACP authentication inventory exceeds its text limit")
                     }
                     add(buildJsonObject {
                         put("id", method.id.value); put("variant", variant(method))
