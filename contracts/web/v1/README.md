@@ -38,3 +38,7 @@ strings and `authority` is fixed to `observations`. Reported phases and source
 commitments do not confer workflow acceptance. Unsupported payload fields need
 explicit omission accounting, separate from event-retention gaps. See
 [`docs/web-progress-adapter.md`](../../../docs/web-progress-adapter.md).
+
+The `event-observation-public-metadata` and `event-observation-plan-metadata` fixtures
+capture the current producer's omission of uncertified prose and paths. Older prose-bearing
+fixtures remain schema compatibility examples, not a public-visibility certification.

@@ -36,7 +36,7 @@ internal fun webProgressObservation(jobId: String, attemptId: String, cursor: St
     val counts = setOf("inputTokens", "outputTokens", "cachedInputTokens", "toolCalls", "contextUsedTokens", "contextWindowTokens", "chunkCharacters", "entryCount")
     val booleans = setOf("completed", "validationPending", "sourceSequenceGap", "textOmitted", "messageTrackingExhausted", "entriesTruncated")
     var omitted = 0
-    val fields = buildJsonObject {
+    val validatedFields = buildJsonObject {
         for ((key, value) in record) when (key) {
             in metadata -> Unit
             in strings -> put(key, text(value, 533))
@@ -66,6 +66,13 @@ internal fun webProgressObservation(jobId: String, attemptId: String, cursor: St
             }
             else -> omitted++
         }
+    }
+    // Known fields are still validated, but journal prose has no certified public visibility.
+    val withheld = setOf("text", "entries", "path")
+    omitted += validatedFields.keys.count { it in withheld }
+    val fields = buildJsonObject {
+        validatedFields.filterKeys { it !in withheld }.forEach { (key, value) -> put(key, value) }
+        if ("text" in validatedFields) put("textOmitted", true)
     }
     return buildJsonObject {
         put("apiVersion", 1); put("kind", "event"); put("type", "workflow.observation")
