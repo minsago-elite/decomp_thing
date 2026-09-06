@@ -1,34 +1,20 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-if (($# > 1)) || [[ $# == 1 && "${1:-}" != --bundled-ghidra && "${1:-}" != --bundled-ghidra-resume && "${1:-}" != --bundled-ghidra-resume-control ]]; then
-  echo "usage: scripts/ci-release-oracle-ext4-scratch.sh [--bundled-ghidra|--bundled-ghidra-resume|--bundled-ghidra-resume-control]" >&2
+if (($# > 1)); then
+  echo "usage: $0 [--bundled-ghidra|--bundled-ghidra-resume|--bundled-ghidra-resume-control|--gcc-engine-{cc1,lto1}-{fresh,resume}]" >&2
   exit 64
 fi
+source "$(cd "$(dirname "$0")" && pwd -P)/oracle-ext4-scratch-profile.sh"
+oracle_ext4_scratch_profile "${1:-}"
 
 : "${RUNNER_TEMP:?RUNNER_TEMP must name the GitHub Actions temporary directory}"
-mount_path="${DECOMP_TEST_ORACLE_EXT4_SCRATCH:-}"
-image="${DECOMP_TEST_ORACLE_EXT4_IMAGE:-}"
-expected_parent=/var/lib/decomp-oracle-ci
-expected_image="$RUNNER_TEMP/decomp-oracle-ext4-scratch.img"
-if [[ "${1:-}" == --bundled-ghidra ]]; then
-  mount_path="${DECOMP_TEST_BUNDLED_GHIDRA_EXT4_SCRATCH:-}"
-  image="${DECOMP_TEST_BUNDLED_GHIDRA_EXT4_IMAGE:-}"
-  expected_parent=/var/lib/decomp-bundled-ghidra-ci
-  expected_image="$RUNNER_TEMP/decomp-bundled-ghidra-ext4-scratch.img"
-fi
-
-if [[ "${1:-}" == --bundled-ghidra-resume ]]; then
-  mount_path="${DECOMP_TEST_BUNDLED_GHIDRA_RESUME_EXT4_SCRATCH:-}"
-  image="${DECOMP_TEST_BUNDLED_GHIDRA_RESUME_EXT4_IMAGE:-}"
-  expected_parent=/var/lib/decomp-bundled-ghidra-resume-ci
-  expected_image="$RUNNER_TEMP/decomp-bundled-ghidra-resume-ext4-scratch.img"
-elif [[ "${1:-}" == --bundled-ghidra-resume-control ]]; then
-  mount_path="${DECOMP_TEST_BUNDLED_GHIDRA_RESUME_CONTROL_EXT4_SCRATCH:-}"
-  image="${DECOMP_TEST_BUNDLED_GHIDRA_RESUME_CONTROL_EXT4_IMAGE:-}"
-  expected_parent=/var/lib/decomp-bundled-ghidra-resume-control-ci
-  expected_image="$RUNNER_TEMP/decomp-bundled-ghidra-resume-control-ext4-scratch.img"
-fi
+mount_variable="${environment_prefix}_SCRATCH"
+image_variable="${environment_prefix}_IMAGE"
+mount_path="${!mount_variable:-}"
+image="${!image_variable:-}"
+expected_parent="$mount_parent"
+expected_image="$RUNNER_TEMP/$image_basename"
 
 if [[ -n "$mount_path" ]]; then
   if [[ "$mount_path" != "$expected_parent/scratch" || -L "$expected_parent" || -L "$mount_path" ]]; then

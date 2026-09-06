@@ -32,6 +32,7 @@ data class ArchivalAudit(
     val moduleCompilationEvidenceProblems: Map<String, String> = emptyMap(),
     val requiredCorpusSha256: List<String> = emptyList(),
     val observedPortableCorpusSha256: List<String> = emptyList(),
+    val recoveryAssessment: JsonObject? = null,
 ) {
     val provenanceComplete: Boolean get() = missingModelProvenance.isEmpty() && missingSourceProvenance.isEmpty()
     val universalEquivalenceClaim: Boolean = false
@@ -39,6 +40,7 @@ data class ArchivalAudit(
     fun toJson(): String = """
         {
           "entityCount": $entityCount,
+          "recoveryAssessment": ${recoveryAssessment ?: "null"},
           "provenanceComplete": $provenanceComplete,
           "missingModelProvenance": [${missingModelProvenance.sorted().joinToString(",") { JsonPrimitive(it).toString() }}],
           "missingSourceProvenance": [${missingSourceProvenance.sorted().joinToString(",") { JsonPrimitive(it).toString() }}],
@@ -58,7 +60,7 @@ data class ArchivalAudit(
           "behaviorEvidenceProblems": {${behaviorEvidenceProblems.toSortedMap().entries.joinToString(",") { (path, problem) -> "${JsonPrimitive(path)}:${JsonPrimitive(problem)}" }}},
           "unresolvedBehaviorReportIds": [${unresolvedBehaviorReportIds.sorted().joinToString(",") { JsonPrimitive(it).toString() }}],
           "universalEquivalenceClaim": false,
-          "limitation": "Confidence is bounded by recovered structure and observed behavior; untested behavior remains unresolved."
+          "limitation": "Extraction, compilation and local behavior observations do not establish calibrated recovery accuracy; untested behavior remains unresolved."
         }
     """.trimIndent() + "\n"
 }
@@ -263,7 +265,10 @@ object ArchivalProjectAuditor {
                 }
                 val identifier = record.string("id")
                 require(reportIds.add(identifier)) { "behavior report ID is duplicated" }
-                val portable = record.getValue("schemaVersion").jsonPrimitive.intOrNull == 3
+                require(record.getValue("schemaVersion").jsonPrimitive.intOrNull == 4) {
+                    "behavior record lacks independent local completion evidence"
+                }
+                val portable = record.getValue("schemaVersion").jsonPrimitive.intOrNull in setOf(3, 4)
                 val corpus = record.string("corpusSha256")
                 if (requiredCorpora.isNotEmpty()) {
                     require(portable && corpus in requiredCorpora) { "behavior report does not match a required portable corpus" }
@@ -285,9 +290,9 @@ object ArchivalProjectAuditor {
             entityCount = entities.size,
             missingModelProvenance = missingModel,
             missingSourceProvenance = missingSource,
-            unresolvedEntityIds = (model.functions.filter { it.status != RecoveryStatus.RECOVERED }.map { it.id } +
-                model.globals.filter { it.status != RecoveryStatus.RECOVERED }.map { it.id } +
-                model.types.filter { it.status != RecoveryStatus.RECOVERED }.map { it.id } +
+            unresolvedEntityIds = (model.functions.filter { model.isRecoveryUnresolved(it.status) }.map { it.id } +
+                model.globals.filter { model.isRecoveryUnresolved(it.status) }.map { it.id } +
+                model.types.filter { model.isRecoveryUnresolved(it.status) }.map { it.id } +
                 manifest.unresolvedEntityIds + manifest.unresolvedImplementationIds +
                 implementations.filter { it.acceptedImplementation != true }.flatMap { it.entityIds } +
                 missingModel + missingSource + compilationUnresolved).distinct().sorted(),
@@ -306,6 +311,7 @@ object ArchivalProjectAuditor {
             moduleCompilationEvidenceProblems = compilationProblems,
             requiredCorpusSha256 = requiredCorpora.sorted(),
             observedPortableCorpusSha256 = observedCorpora.toList(),
+            recoveryAssessment = model.unassessedRecoveryAssessment(sha256(modelText.toByteArray(Charsets.UTF_8))),
         )
         require(readStableRegularFile(projectDir, "source_tree_manifest.json", maximumFileBytes).sha256 == manifestSnapshot.sha256) {
             "audit manifest changed during verification"

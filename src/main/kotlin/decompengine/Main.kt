@@ -122,6 +122,7 @@ private fun runReconstruct(args: List<String>) {
         println("source tree: ${result.projectDir}")
         println("archive: ${result.bundle.archivePath}")
         println("archive sha256: ${result.bundle.archiveSha256}")
+        println("recovery accuracy: unassessed; see the source tree's confidence and unresolved reports")
     }
 }
 

@@ -19,6 +19,63 @@ import kotlinx.serialization.json.jsonPrimitive
 
 class ArchivalAuditProvenanceTest {
     @Test
+    fun `historical recovered labels retain complete unassessed population bound to actual model bytes`() {
+        val project = fixture(accepted = true)
+        val modelPath = project.resolve("reports/program_model.json")
+        val audit = ArchivalProjectAuditor.audit(project)
+        val assessment = requireNotNull(audit.recoveryAssessment)
+        assertEquals("unassessed", assessment.getValue("state").jsonPrimitive.content)
+        assertEquals("1", assessment.getValue("modelSchemaVersion").jsonPrimitive.content)
+        assertEquals(sha256(Files.readAllBytes(modelPath)), assessment.getValue("modelSha256").jsonPrimitive.content)
+        assertEquals(listOf("fn_10", "fn_100"), assessment.getValue("unassessedEntityIds").jsonArray.map { it.jsonPrimitive.content })
+        assertTrue(assessment.getValue("assessedEntityIds").jsonArray.isEmpty())
+        val confidence = Json.parseToJsonElement(project.resolve("reports/confidence.json").readText()).jsonObject
+        assertEquals(assessment, confidence.getValue("recoveryAssessment"))
+        // Historical diagnostic populations remain readable; they cannot stand in
+        // for the separate scored-assessment population.
+        assertTrue(audit.unresolvedEntityIds.isEmpty())
+        assertTrue(audit.moduleCompilationEvidenceProblems.isEmpty())
+        val human = project.resolve("UNRESOLVED.md").readText()
+        assertTrue("Recovery assessment: unassessed for 2 entities" in human)
+        assertTrue("historical extraction-status list has no unresolved entries" in human)
+    }
+
+    @Test
+    fun `schema two compiled entities remain unassessed in every reconstruction report`() {
+        val project = Files.createTempDirectory("unassessed-model-reports-")
+        val model = RecoveredProgramModel(
+            schemaVersion = 2,
+            inputSha256 = "a".repeat(64),
+            functions = listOf(RecoveredFunction("fn_10", "compute", 0x1000UL,
+                "int compute(void)", "int compute(void) { return 3; }")),
+            globals = listOf(RecoveredGlobal("global_10", "counter", 0x2000UL, "int", "3")),
+            types = listOf(RecoveredType("type_10", "typedef int result_t;")),
+        )
+        val expected = listOf("fn_10", "global_10", "type_10")
+        val manifest = SourceTreeGenerator.generate(model, project, reconstructor = EvidenceModuleReconstructor(true))
+        assertTrue(manifest.unresolvedImplementationIds.isEmpty())
+        assertEquals(expected, manifest.unresolvedEntityIds.sorted())
+        val confidence = Json.parseToJsonElement(project.resolve("reports/confidence.json").readText()).jsonObject
+        assertEquals("1.0000", confidence.getValue("projectScore").jsonPrimitive.content)
+        assertEquals(expected, confidence.getValue("unresolvedRecoveryEntityIds").jsonArray.map { it.jsonPrimitive.content })
+        val human = project.resolve("UNRESOLVED.md").readText()
+        for (id in expected) assertTrue("`$id` | unassessed (extraction: recovered)" in human)
+        val audit = ArchivalProjectAuditor.audit(project)
+        assertTrue(audit.provenanceComplete)
+        assertTrue(audit.moduleCompilationEvidenceProblems.isEmpty())
+        assertEquals(expected, audit.unresolvedEntityIds)
+        assertEquals(null, audit.behaviorMatched)
+        assertEquals(confidence.getValue("recoveryAssessment").jsonObject, requireNotNull(audit.recoveryAssessment))
+        assertEquals(expected, requireNotNull(audit.recoveryAssessment).getValue("unassessedEntityIds").jsonArray.map { it.jsonPrimitive.content })
+        assertEquals(0, MakeProjectBuilder.build(project).returnCode)
+        val archive = project.parent.resolve(project.fileName.toString() + ".zip")
+        ArchivalPackager.create(project, archive)
+        val extracted = project.parent.resolve(project.fileName.toString() + "-extracted")
+        ArchivalBundleVerifier.extractAndVerify(archive, extracted)
+        assertEquals(expected, ArchivalProjectAuditor.audit(extracted).unresolvedEntityIds)
+    }
+
+    @Test
     fun `accepted flags cannot hide missing or mismatched compiler evidence`() {
         for (change in listOf("missing", "foreign-source", "failed", "foreign-command", "old-schema", "future-schema",
             "foreign-entity", "missing-entity", "duplicate-entity", "unresolved-entity", "unresolved-issue")) {

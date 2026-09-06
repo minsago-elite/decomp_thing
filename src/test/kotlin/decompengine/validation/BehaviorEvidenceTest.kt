@@ -31,7 +31,136 @@ import kotlinx.serialization.json.jsonPrimitive
 
 class BehaviorEvidenceTest {
     @Test
-    fun `matching reserved exits remain unresolved even with consistent commitments`() {
+    fun `cancelled and forcibly stopped comparisons retain prior evidence and remove channels`() {
+        val fixture = fixture()
+        val report = fixture.evaluate()
+        val prior = report.reportPath.readBytes()
+        val shim = fixture.original.parent.resolve("authored-runner-shim")
+        val ready = fixture.original.parent.resolve("capture-ready")
+        val originalShim = shim.readText()
+        val header = originalShim.lines().first { "child-pid" in it }
+        // A test-owned execution owner announces readiness before waiting. No
+        // application output or namespace assertion qualifies this negative run.
+        shim.writeText("#!/bin/sh\n" + header + "\n" +
+            "printf '%s\\n' \"${'$'}${'$'}\" > \"$ready\"\n" +
+            "exec /bin/sleep 5\n")
+        for (interrupt in listOf(true, false)) {
+            Files.deleteIfExists(ready)
+            val failure = java.util.concurrent.atomic.AtomicReference<Throwable?>()
+            val retainedInterrupt = java.util.concurrent.atomic.AtomicBoolean()
+            val worker = Thread {
+                try {
+                    fixture.evaluate()
+                } catch (error: Throwable) {
+                    failure.set(error)
+                    retainedInterrupt.set(Thread.currentThread().isInterrupted)
+                }
+            }
+            var owner: ProcessHandle? = null
+            try {
+                worker.start()
+                val deadline = System.nanoTime() + java.util.concurrent.TimeUnit.SECONDS.toNanos(3)
+                var pid: Long? = null
+                while (pid == null && worker.isAlive && System.nanoTime() < deadline) {
+                    pid = if (Files.exists(ready)) ready.readText().trim().toLongOrNull() else null
+                    if (pid == null) Thread.sleep(5)
+                }
+                owner = ProcessHandle.of(requireNotNull(pid) { "authored owner did not become ready: ${failure.get()}" }).orElseThrow()
+                assertTrue(owner.isAlive)
+                val channel = Files.readSymbolicLink(Path.of("/proc/$pid/fd/3"))
+                assertTrue(Files.exists(channel))
+                if (interrupt) worker.interrupt() else assertTrue(owner.destroyForcibly())
+                worker.join(4000)
+                assertFalse(worker.isAlive, "comparison cancellation must finish within its bound")
+                if (interrupt) {
+                    assertTrue(failure.get() is InterruptedException, "unexpected failure: ${failure.get()}")
+                    assertTrue(retainedInterrupt.get())
+                } else {
+                    assertTrue(failure.get() is BehaviorExecutionOutcomeException, "unexpected failure: ${failure.get()}")
+                }
+                assertFalse(owner.isAlive)
+                assertFalse(Files.exists(channel))
+                assertFalse(Files.exists(channel.parent))
+                assertTrue(prior.contentEquals(report.reportPath.readBytes()))
+            } finally {
+                owner?.let { if (it.isAlive) it.destroyForcibly() }
+                if (worker.isAlive) worker.interrupt()
+                worker.join(4000)
+            }
+        }
+    }
+
+    @Test
+    fun `completion command and terminal fields remain closed after rehashing`() {
+        val fixture = fixture()
+        val record = BehaviorEvidence.decode(fixture.evaluate().reportPath.readBytes())
+        val sample = record.getValue("cases").jsonArray.first().jsonObject
+            .getValue("original").jsonObject.getValue("completionEvidence").jsonObject
+        val command = sample.getValue("launchCommand").jsonArray
+        val variants = listOf(
+            JsonObject(sample - "statusHex"),
+            JsonObject(sample + ("extra" to JsonPrimitive(true))),
+            JsonObject(sample + ("statusHex" to JsonPrimitive(""))),
+            JsonObject(sample + ("channelPath" to JsonPrimitive("relative/status"))),
+            JsonObject(sample + ("channelPath" to JsonPrimitive("/different/status"))),
+            JsonObject(sample + ("launchCommand" to JsonArray(command.dropLast(1)))),
+            JsonObject(sample + ("launchCommand" to JsonArray(command.mapIndexed { index, value ->
+                if (index == 2) JsonPrimitive("exit 0") else value
+            }))),
+        )
+        for (completion in variants) {
+            val cases = JsonArray(record.getValue("cases").jsonArray.map { element ->
+                val case = element.jsonObject
+                JsonObject(case + ("original" to JsonObject(case.getValue("original").jsonObject +
+                    ("completionEvidence" to completion))))
+            })
+            val changed = JsonObject(record + mapOf("cases" to cases,
+                "observationsSha256" to JsonPrimitive(OracleArtifacts.sha256(OracleJson.canonicalBytes(cases)))))
+            val digest = OracleArtifacts.sha256(OracleJson.canonicalBytes(JsonObject(changed - "reportSha256")))
+            val bytes = OracleJson.canonicalBytes(JsonObject(changed + ("reportSha256" to JsonPrimitive(digest))))
+            assertFails { BehaviorEvidence.decode(bytes) }
+        }
+    }
+
+    @Test
+    fun `historical completion uncertainty remains visible without rewriting evidence`() {
+        val fixture = fixture()
+        val report = fixture.evaluate()
+        val current = BehaviorEvidence.decode(report.reportPath.readBytes())
+        for (version in 1..3) {
+            val bytes = OracleJson.canonicalBytes(historicalCompletionRecord(current, version))
+            assertEquals(version, BehaviorEvidence.decode(bytes).integer("schemaVersion"))
+            Files.write(report.reportPath, bytes)
+            val audit = ArchivalProjectAuditor.audit(fixture.project)
+            assertEquals(null, audit.behaviorMatched)
+            assertTrue("reports/probe.behavior.json" in audit.unresolvedBehaviorReportIds)
+            assertTrue(bytes.contentEquals(report.reportPath.readBytes()))
+        }
+    }
+
+    @Test
+    fun `missing terminal completion preserves prior passing evidence`() {
+        val fixture = fixture()
+        val report = fixture.evaluate()
+        val bytes = report.reportPath.readBytes()
+        val record = BehaviorEvidence.decode(bytes)
+        for (case in record.getValue("cases").jsonArray) {
+            for (side in listOf("original", "rebuilt")) {
+                val channel = Path.of(case.jsonObject.getValue(side).jsonObject
+                    .getValue("completionEvidence").jsonObject.string("channelPath"))
+                assertFalse(Files.exists(channel))
+                assertFalse(Files.exists(channel.parent))
+            }
+        }
+        val shim = fixture.original.parent.resolve("authored-runner-shim")
+        val lines = shim.readText().lines()
+        shim.writeText(lines.filterNot { "exit-code" in it }.joinToString("\n"))
+        assertFailsWith<BehaviorExecutionOutcomeException> { fixture.evaluate() }
+        assertTrue(bytes.contentEquals(report.reportPath.readBytes()))
+    }
+
+    @Test
+    fun `exit statuses contradicting completion remain unresolved even with consistent commitments`() {
         val fixture = fixture()
         val report = fixture.evaluate()
         val record = BehaviorEvidence.decode(report.reportPath.readBytes())
@@ -46,7 +175,7 @@ class BehaviorEvidenceTest {
                 "observationsSha256" to JsonPrimitive(OracleArtifacts.sha256(OracleJson.canonicalBytes(cases)))))
             val digest = OracleArtifacts.sha256(OracleJson.canonicalBytes(JsonObject(changed - "reportSha256")))
             val bytes = OracleJson.canonicalBytes(JsonObject(changed + ("reportSha256" to JsonPrimitive(digest))))
-            assertFailsWith<BehaviorExecutionOutcomeException> { BehaviorEvidence.decode(bytes) }
+            assertFails { BehaviorEvidence.decode(bytes) }
             Files.write(report.reportPath, bytes)
             val audit = ArchivalProjectAuditor.audit(fixture.project)
             assertEquals(null, audit.behaviorMatched)
@@ -64,7 +193,7 @@ class BehaviorEvidenceTest {
             bwrapPath = fixture.original.parent.resolve("authored-runner-shim"), networkIsolation = false)
         val report = BehaviorComparator(sandbox).evaluate("timeout_recipe", fixture.original, fixture.rebuilt,
             listOf(ProcessInput("empty")), fixture.project.resolve("reports"), BehaviorProjectContext(fixture.project))
-        val record = BehaviorEvidence.decode(report.reportPath.readBytes())
+        val record = historicalCompletionRecord(BehaviorEvidence.decode(report.reportPath.readBytes()), 3)
         fun changedDuration(duration: String): ByteArray {
             val cases = JsonArray(record.getValue("cases").jsonArray.map { element ->
                 val case = element.jsonObject
@@ -132,8 +261,7 @@ class BehaviorEvidenceTest {
         Files.delete(fixture.project.resolve("reports/subset.behavior.json"))
         // With no declared files, v2 and v3 corpus digests happen to agree, but only v3
         // establishes the portable-corpus contract required by this audit policy.
-        val legacy = JsonObject(record + mapOf("schemaVersion" to JsonPrimitive(2),
-            "provider" to JsonPrimitive("local-revision-bound-behavior-v2")))
+        val legacy = historicalCompletionRecord(record, 2)
         val rehashed = JsonObject(legacy + ("reportSha256" to JsonPrimitive(
             OracleArtifacts.sha256(OracleJson.canonicalBytes(JsonObject(legacy - "reportSha256"))),
         )))
@@ -212,14 +340,7 @@ class BehaviorEvidenceTest {
         secondPath.writeText("changed input")
         val changed = evaluate(secondPath, "changed")
         assertFalse(first.getValue("corpusSha256") == changed.getValue("corpusSha256"))
-        val legacyCorpus = JsonArray(first.getValue("cases").jsonArray.map { element ->
-            JsonObject(element.jsonObject.filterKeys { it in setOf("id", "args", "stdinHex", "fileInputs") })
-        })
-        val legacy = JsonObject(first + mapOf(
-            "schemaVersion" to JsonPrimitive(2),
-            "provider" to JsonPrimitive("local-revision-bound-behavior-v2"),
-            "corpusSha256" to JsonPrimitive(OracleArtifacts.sha256(OracleJson.canonicalBytes(legacyCorpus))),
-        ))
+        val legacy = historicalCompletionRecord(first, 2)
         val legacyRecord = JsonObject(legacy + ("reportSha256" to JsonPrimitive(
             OracleArtifacts.sha256(OracleJson.canonicalBytes(JsonObject(legacy - "reportSha256"))),
         )))
@@ -229,7 +350,7 @@ class BehaviorEvidenceTest {
     @Test
     fun `historical schema one records remain readable without file declarations`() {
         val fixture = fixture()
-        val current = BehaviorEvidence.decode(fixture.evaluate().reportPath.readBytes())
+        val current = historicalCompletionRecord(BehaviorEvidence.decode(fixture.evaluate().reportPath.readBytes()), 1)
         val cases = JsonArray(current.getValue("cases").jsonArray.map { JsonObject(it.jsonObject - "fileInputs") })
         val corpus = JsonArray(cases.map { JsonObject(it.jsonObject.filterKeys { key -> key in setOf("id", "args", "stdinHex") }) })
         val legacy = JsonObject(current + mapOf(
@@ -255,7 +376,7 @@ class BehaviorEvidenceTest {
             fileInputs = mapOf("file" to mapOf("nested/input.bin" to input)),
         )
         val record = BehaviorEvidence.decode(report.reportPath.readBytes())
-        assertEquals(3, record.integer("schemaVersion"))
+        assertEquals(4, record.integer("schemaVersion"))
         val case = record.getValue("cases").jsonArray.single().jsonObject
         val retained = case.getValue("fileInputs").jsonArray.single().jsonObject
         assertEquals("00017fff", retained.string("contentHex"))
@@ -492,6 +613,33 @@ class BehaviorEvidenceTest {
         )
     }
 
+    private fun historicalCompletionRecord(record: JsonObject, version: Int): JsonObject {
+        val cases = JsonArray(record.getValue("cases").jsonArray.map { element ->
+            val case = element.jsonObject
+            val stripped = JsonObject(case + listOf("original", "rebuilt").associateWith { side ->
+                JsonObject(case.getValue(side).jsonObject - "completionEvidence")
+            })
+            if (version == 1) JsonObject(stripped - "fileInputs") else stripped
+        })
+        val corpus = JsonArray(cases.map { element ->
+            val inputs = element.jsonObject.filterKeys { it in setOf("id", "args", "stdinHex", "fileInputs") }
+            if (version < 3 || "fileInputs" !in inputs) JsonObject(inputs)
+            else JsonObject(inputs + ("fileInputs" to JsonArray(inputs.getValue("fileInputs").jsonArray.map {
+                JsonObject(it.jsonObject - "sourcePath")
+            })))
+        })
+        val changed = JsonObject(record + mapOf(
+            "schemaVersion" to JsonPrimitive(version),
+            "provider" to JsonPrimitive("local-revision-bound-behavior-v$version"),
+            "cases" to cases,
+            "executionPolicy" to JsonObject(record.getValue("executionPolicy").jsonObject - setOf("completionLauncher", "maximumCompletionBytes")),
+            "corpusSha256" to JsonPrimitive(OracleArtifacts.sha256(OracleJson.canonicalBytes(corpus))),
+            "observationsSha256" to JsonPrimitive(OracleArtifacts.sha256(OracleJson.canonicalBytes(cases))),
+        ))
+        return JsonObject(changed + ("reportSha256" to JsonPrimitive(
+            OracleArtifacts.sha256(OracleJson.canonicalBytes(JsonObject(changed - "reportSha256"))))))
+    }
+
     private fun fixture(): Fixture {
         val root = Files.createTempDirectory("behavior-evidence-")
         val original = root.resolve("original")
@@ -513,13 +661,18 @@ class BehaviorEvidenceTest {
         val runner = root.resolve("authored-runner-shim").also { path ->
             path.writeText("""
                 #!/bin/sh
+                printf '{ "child-pid": %s, "mnt-namespace": 1, "pid-namespace": 2 }\n' "${'$'}${'$'}" >&3
                 program=
                 while [ "${'$'}#" -gt 0 ]; do
                     case "${'$'}1" in
                         --ro-bind)
                             if [ "${'$'}3" = /program/executable ]; then program=${'$'}2; fi
                             shift 3 ;;
-                        /program/executable) shift; exec "${'$'}program" "${'$'}@" ;;
+                        /program/executable)
+                            (exec 3>&-; shift; exec "${'$'}program" "${'$'}@")
+                            outcome=${'$'}?
+                            printf '{ "exit-code": %s }\n' "${'$'}outcome" >&3
+                            exit "${'$'}outcome" ;;
                         *) shift ;;
                     esac
                 done
