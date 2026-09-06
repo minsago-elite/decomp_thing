@@ -90,7 +90,8 @@ class GccCompilerEngineProfileTest {
         assertEquals("12.1.3", suite.analysis.ghidraVersion)
         assertEquals(569_445_154L, suite.analysis.ghidraArchive.bytes)
         assertEquals("93a5d11a9ad510622acaaf908c556a7b9b764d338e78a7567f3689bf5081fd54", suite.analysis.ghidraArchive.sha256)
-        assertEquals("f3e85829cd73f9a1f7046924984410b9e4149154b99f962769fb980de1db585a", suite.analysis.exporterSha256)
+        assertEquals("dc0debe2808c2744792f736d150d25aaefd6a46fd90910af7175a454686c6ab9", suite.analysis.exporterSha256)
+        assertEquals(10, suite.analysis.exporterVersion)
         assertEquals("planning", suite.analysis.exporterMode)
         assertEquals(listOf("cc1", "lto1"), suite.engines.map(GccCompilerEngine::id))
 

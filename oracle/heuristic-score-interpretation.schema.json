@@ -1,0 +1,15 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "Uncalibrated heuristic score interpretation v1",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schemaVersion", "kind", "calibrationStatus", "calibratedProbability", "calibrationArtifactSha256", "empiricalSampleCount"],
+  "properties": {
+    "schemaVersion": {"const": 1},
+    "kind": {"enum": ["structural-recovery", "exploration-breadth"]},
+    "calibrationStatus": {"const": "uncalibrated"},
+    "calibratedProbability": {"type": "null"},
+    "calibrationArtifactSha256": {"type": "null"},
+    "empiricalSampleCount": {"type": "null"}
+  }
+}

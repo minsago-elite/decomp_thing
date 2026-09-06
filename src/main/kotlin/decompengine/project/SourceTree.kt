@@ -1,5 +1,6 @@
 package decompengine.project
 
+import decompengine.assessment.HeuristicScoreInterpretation
 import decompengine.acp.LinuxDescriptor
 import decompengine.acp.LinuxFilesystemSyscalls
 import decompengine.agent.AgentAccessPolicy
@@ -652,6 +653,7 @@ object SourceTreeGenerator {
             }.filter { it != module.id }.distinct().sorted()
         }
         val headerHashes = headers.mapValues { sha256(it.value.toByteArray()) }
+        val interfaceFingerprints = moduleInterfaceFingerprints(dependenciesByModule, headerHashes)
         val privateHeaders = plan.modules.associate { module -> module.id to renderPrivateHeader(module, model, plan) }
         headers.forEach { (id, content) ->
             val path = profile.layout.declaration("module-interface").materialize(mapOf("module" to id))
@@ -685,7 +687,7 @@ object SourceTreeGenerator {
         val unresolvedImplementations = sortedSetOf<String>()
         val moduleRevisionEvidence = mutableMapOf<String, String>()
 
-        generationOrder(plan, dependenciesByModule).forEachIndexed { index, module ->
+        moduleDependencyOrder(dependenciesByModule).map(moduleById::getValue).forEachIndexed { index, module ->
             val dependencies = dependenciesByModule.getValue(module.id)
             val dependencyHeaders = dependencies.associate { dependency -> moduleById.getValue(dependency).headerPath to headers.getValue(dependency) }
             val localFingerprint = moduleFingerprint(
@@ -698,8 +700,8 @@ object SourceTreeGenerator {
                 observedBehavior,
                 profile.sha256,
             )
-            val fingerprint = sha256(("transitive-interfaces-v1\n" + localFingerprint + "\n" +
-                transitiveInterfaceFingerprint(module.id, dependenciesByModule, headerHashes)).toByteArray())
+            val fingerprint = sha256(("transitive-interfaces-v2\n" + localFingerprint + "\n" +
+                interfaceFingerprints.getValue(module.id)).toByteArray())
             val sourcePath = projectDir.resolve(module.sourcePath)
             val checkpointPath = projectDir.resolve(profile.layout.declaration("module-evidence").materialize(mapOf("module" to module.id)))
             val executionEvidenceDeclaration = runCatching {
@@ -726,8 +728,14 @@ object SourceTreeGenerator {
                 throw ModuleReconstructionEvidencePersistenceException(failure)
             }
             val recordedCheckpoint = readCheckpoint(checkpointPath)
+            fun ModuleCheckpoint.hasCurrentModuleAcceptance(): Boolean =
+                schemaVersion == 5 && accepted && issues.isEmpty() &&
+                    entityIds.size == entityIds.toSet().size &&
+                    entityIds.toSet() == (module.functionIds + module.globalIds).toSet() &&
+                    compilation?.passed == true &&
+                    compilation.command == GeneratedCModuleValidation.command(profile, module.sourcePath)
             val verifiedPreviousAcceptance = recordedCheckpoint?.takeIf {
-                it.accepted && sourcePath.exists() && sha256(sourcePath.readBytes()) == it.sourceSha256 &&
+                it.hasCurrentModuleAcceptance() && sourcePath.exists() && sha256(sourcePath.readBytes()) == it.sourceSha256 &&
                     it.hasCurrentExecutionEvidence(projectDir, configuredExecutionEvidencePath, false)
             }
             val request = ModuleReconstructionRequest(
@@ -755,7 +763,7 @@ object SourceTreeGenerator {
                         configuredEvidencePath = configuredExecutionEvidencePath,
                         evidenceRequired = reconstructor.requiresExecutionEvidenceForCheckpointReuse(),
                     ) &&
-                    (checkpoint.accepted || !checkpoint.retryable)
+                    (if (checkpoint.accepted) checkpoint.hasCurrentModuleAcceptance() else !checkpoint.retryable)
             }
             val checkpoint = cached ?: run {
                 val previousAccepted = verifiedPreviousAcceptance
@@ -977,9 +985,9 @@ object SourceTreeGenerator {
             profileSha256 = profile.sha256,
             inputSha256 = model.inputSha256,
             files = generated,
-            unresolvedEntityIds = model.functions.filter { it.status != RecoveryStatus.RECOVERED }.map { it.id } +
-                model.globals.filter { it.status != RecoveryStatus.RECOVERED }.map { it.id } +
-                model.types.filter { it.status != RecoveryStatus.RECOVERED }.map { it.id },
+            unresolvedEntityIds = model.functions.filter { model.isRecoveryUnresolved(it.status) }.map { it.id } +
+                model.globals.filter { model.isRecoveryUnresolved(it.status) }.map { it.id } +
+                model.types.filter { model.isRecoveryUnresolved(it.status) }.map { it.id },
             unresolvedImplementationIds = unresolvedImplementations.toList(),
         )
         projectDir.resolve("source_tree_manifest.json").writeText(manifest.toJson())
@@ -1022,21 +1030,6 @@ object SourceTreeGenerator {
             .filterNot { it.id in externallyCalled || safeCName(it.name) in setOf("main", "decomp_engine_main") }
             .forEach { function -> append(normalizedPrototype(function)).append("; /* private ${function.id} @ 0x${function.address.toString(16)} */\n") }
         append("\n#endif\n")
-    }
-
-    private fun transitiveInterfaceFingerprint(
-        moduleId: String,
-        dependencies: Map<String, List<String>>,
-        headerHashes: Map<String, String>,
-    ): String {
-        val visited = mutableSetOf(moduleId)
-        val pending = ArrayDeque(dependencies.getValue(moduleId))
-        while (pending.isNotEmpty()) {
-            val next = pending.removeLast()
-            if (visited.add(next)) pending.addAll(dependencies.getValue(next))
-        }
-        visited.remove(moduleId)
-        return sha256(visited.sorted().joinToString("\n") { "${it.jsonEscape()}:${headerHashes.getValue(it)}" }.toByteArray())
     }
 
     private fun renderMakefile(sources: List<String>, profile: ReconstructionProfile): String {
@@ -1249,7 +1242,13 @@ object SourceTreeGenerator {
                     )
                 },
                 entityIds = root.getValue("entityStatuses").jsonArray.map {
-                    it.jsonObject.getValue("id").jsonPrimitive.content
+                    val status = it.jsonObject
+                    require(status.keys == setOf("id", "status")) { "unsupported module entity status fields" }
+                    val expected = if (root.getValue("accepted").jsonPrimitive.boolean) "accepted" else "unresolved"
+                    require(status.getValue("status").jsonPrimitive.isString &&
+                        status.getValue("status").jsonPrimitive.content == expected) { "contradictory module entity acceptance" }
+                    require(status.getValue("id").jsonPrimitive.isString) { "module entity ID must be a string" }
+                    status.getValue("id").jsonPrimitive.content
                 },
                 executionEvidencePath = if (schemaVersion >= 3) optionalString("executionEvidencePath") else null,
                 executionEvidenceSha256 = if (schemaVersion >= 3) optionalString("executionEvidenceSha256") else null,
@@ -1437,14 +1436,8 @@ object SourceTreeGenerator {
             }
         }
         val codeOnly = codeWithoutCommentsOrLiterals(source)
-        val undefinedType = Regex("\\b(?:undefined(?:1|2|4|8)?|byte|longlong)\\b")
-        if (reconstructed.generator != "evidence-only" && undefinedType.containsMatchIn(codeOnly)) {
-            issues += ModuleReconstructionIssue(
-                "undefined-decompiler-type",
-                "candidate source retains an undefined decompiler type",
-                entityIds,
-            )
-        }
+        // The compiler gate resolves type names; spelling-only checks reject valid
+        // identifiers and explicitly defined typedefs.
         module.functionIds.forEach { id ->
             val function = model.functions.single { it.id == id }
             if (!source.contains(id)) {
@@ -1709,24 +1702,10 @@ object SourceTreeGenerator {
         return sha256(
             (
                 functions + "\n" + globals + "\n" + types + "\n" + sharedHeader + moduleHeader + privateHeader +
-                    dependencies + "\n" + observedBehavior.orEmpty() + "\n" + profileSha256
+                    dependencies + "\n" + observedBehavior.orEmpty() + "\n" + profileSha256 +
+                    "\n" + GeneratedCModuleValidation.POLICY_ID
                 ).toByteArray(),
         )
-    }
-
-    private fun generationOrder(plan: ModulePlan, dependencies: Map<String, List<String>>): List<PlannedModule> {
-        val ordered = mutableListOf<String>()
-        val visiting = mutableSetOf<String>()
-        val visited = mutableSetOf<String>()
-        fun visit(id: String) {
-            if (id in visited || !visiting.add(id)) return
-            dependencies[id].orEmpty().sorted().forEach(::visit)
-            visiting.remove(id)
-            visited += id
-            ordered += id
-        }
-        plan.modules.map { it.id }.sorted().forEach(::visit)
-        return ordered.map { id -> plan.modules.single { it.id == id } }
     }
 
     private fun renderConfidence(
@@ -1751,9 +1730,9 @@ object SourceTreeGenerator {
         }
         val allStatuses = model.functions.map { it.status } + model.globals.map { it.status } + model.types.map { it.status }
         val projectScore = if (allStatuses.isEmpty()) 0.0 else allStatuses.map(::score).average()
-        val unresolvedRecovery = model.functions.filter { it.status != RecoveryStatus.RECOVERED }.map { it.id } +
-            model.globals.filter { it.status != RecoveryStatus.RECOVERED }.map { it.id } +
-            model.types.filter { it.status != RecoveryStatus.RECOVERED }.map { it.id }
+        val unresolvedRecovery = model.functions.filter { model.isRecoveryUnresolved(it.status) }.map { it.id } +
+            model.globals.filter { model.isRecoveryUnresolved(it.status) }.map { it.id } +
+            model.types.filter { model.isRecoveryUnresolved(it.status) }.map { it.id }
         fun idsJson(ids: Collection<String>) = ids.distinct().sorted().joinToString(prefix = "[", postfix = "]", separator = ",") {
             "\"${it.jsonEscape()}\""
         }
@@ -1763,6 +1742,8 @@ object SourceTreeGenerator {
             append("{\n  \"schemaVersion\": 2,")
             append("\n  \"basis\": \"recovery evidence only; behavioral equivalence is not implied\",")
             append("\n  \"scoreMeaning\": \"structural recovery heuristic; not implementation acceptance or measured behavioral confidence\",")
+            append("\n  \"scoreInterpretation\": ").append(HeuristicScoreInterpretation.STRUCTURAL_RECOVERY.toJson()).append(',')
+            append("\n  \"recoveryAssessment\": ").append(model.unassessedRecoveryAssessment()).append(',')
             append("\n  \"projectScore\": ").append("%.4f".format(java.util.Locale.ROOT, projectScore)).append(',')
             append("\n  \"modules\": [")
             append(moduleScores.sortedBy { it.first }.joinToString(",") { (id, value) ->
@@ -1805,18 +1786,25 @@ object SourceTreeGenerator {
         unresolvedImplementationIds: Set<String>,
     ): String {
         val rows = buildList {
-            model.functions.filter { it.status != RecoveryStatus.RECOVERED }.forEach { add("function" to Triple(it.id, it.status, "0x${it.address.toString(16)}")) }
-            model.globals.filter { it.status != RecoveryStatus.RECOVERED }.forEach { add("global" to Triple(it.id, it.status, "0x${it.address.toString(16)}")) }
-            model.types.filter { it.status != RecoveryStatus.RECOVERED }.forEach { add("type" to Triple(it.id, it.status, it.sourceAddress?.let { address -> "0x${address.toString(16)}" } ?: "no address")) }
+            model.functions.filter { model.isRecoveryUnresolved(it.status) }.forEach { add("function" to Triple(it.id, it.status, "0x${it.address.toString(16)}")) }
+            model.globals.filter { model.isRecoveryUnresolved(it.status) }.forEach { add("global" to Triple(it.id, it.status, "0x${it.address.toString(16)}")) }
+            model.types.filter { model.isRecoveryUnresolved(it.status) }.forEach { add("type" to Triple(it.id, it.status, it.sourceAddress?.let { address -> "0x${address.toString(16)}" } ?: "no address")) }
         }
         return buildString {
             append("# Unresolved reconstruction evidence\n\n")
             append("This list is evidence-bounded. The generated project does not claim universal behavioral equivalence.\n\n")
-            if (rows.isEmpty()) append("No structurally unresolved entities were identified. Untested behavior remains unresolved.\n")
+            val entityCount = model.functions.size + model.globals.size + model.types.size
+            append("Recovery assessment: unassessed for $entityCount entities ")
+            append("(${model.functions.size} functions, ${model.globals.size} globals, ${model.types.size} types). ")
+            append("Extraction labels and implementation acceptance do not establish recovery accuracy. ")
+            append("The confidence report retains the complete model-bound unassessed population.\n\n")
+            if (rows.isEmpty()) append("The historical extraction-status list has no unresolved entries. Recovery accuracy and untested behavior remain unassessed.\n")
             else {
                 append("| Kind | Stable ID | Status | Provenance |\n|---|---|---|---|\n")
                 rows.sortedBy { it.second.first }.forEach { (kind, details) ->
-                    append("| $kind | `${details.first}` | ${details.second.name.lowercase()} | ${details.third} |\n")
+                    val status = details.second.name.lowercase()
+                    val assessment = if (model.schemaVersion == 2) "unassessed (extraction: $status)" else status
+                    append("| $kind | `${details.first}` | $assessment | ${details.third} |\n")
                 }
             }
             append("\n## Implementation generation\n\n")

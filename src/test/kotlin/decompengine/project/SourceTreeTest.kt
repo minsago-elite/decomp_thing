@@ -29,11 +29,56 @@ import kotlin.test.assertNull
 import kotlin.test.assertTrue
 import kotlinx.serialization.json.Json
 import kotlinx.serialization.json.JsonNull
+import kotlinx.serialization.json.JsonObject
+import kotlinx.serialization.json.JsonArray
+import kotlinx.serialization.json.JsonPrimitive
 import kotlinx.serialization.json.jsonObject
 import kotlinx.serialization.json.jsonArray
 import kotlinx.serialization.json.jsonPrimitive
 
 class SourceTreeTest {
+    @Test
+    fun `explicit byte typedef is resolved by the compiler`() {
+        val project = createTempDirectory("source-defined-byte-type-")
+        val reconstructor = ModuleReconstructor {
+            val source = "/* fn_0000000000401000 */\ntypedef unsigned char byte;\nint parse_input(void) { byte value = 17; return value; }\n"
+            ReconstructedModule(source, "scripted", sha256(source.toByteArray()))
+        }
+        val manifest = SourceTreeGenerator.generate(oneModuleModel(), project, reconstructor = reconstructor)
+        assertTrue(manifest.unresolvedImplementationIds.isEmpty())
+    }
+
+    @Test
+    fun `decompiler-like words used as identifiers are accepted by the compiler gate`() {
+        for (name in listOf("byte", "longlong", "undefined", "undefined1", "undefined2", "undefined4", "undefined8")) {
+            val project = createTempDirectory("source-valid-identifier-")
+            val reconstructor = ModuleReconstructor {
+                val source = "/* fn_0000000000401000 */\nint parse_input(void) { int $name = 17; return $name; }\n"
+                ReconstructedModule(source, "scripted", sha256(source.toByteArray()))
+            }
+            val manifest = SourceTreeGenerator.generate(oneModuleModel(), project, reconstructor = reconstructor)
+            assertTrue(manifest.unresolvedImplementationIds.isEmpty(), name)
+            val checkpoint = Json.parseToJsonElement(project.resolve("reports/modules/parse.json").readText()).jsonObject
+            assertEquals("passed", checkpoint.getValue("compilation").jsonObject.getValue("outcome").jsonPrimitive.content)
+        }
+    }
+
+    @Test
+    fun `undeclared decompiler types still fail compilation and remain unresolved`() {
+        for (type in listOf("byte", "longlong", "undefined", "undefined1", "undefined2", "undefined4", "undefined8")) {
+            val project = createTempDirectory("source-undeclared-type-")
+            val reconstructor = ModuleReconstructor {
+                val source = "/* fn_0000000000401000 */\nint parse_input(void) { $type value = 17; return value; }\n"
+                ReconstructedModule(source, "scripted", sha256(source.toByteArray()))
+            }
+            val manifest = SourceTreeGenerator.generate(oneModuleModel(), project, reconstructor = reconstructor)
+            assertEquals(oneModuleModel().functions.map { it.id }, manifest.unresolvedImplementationIds, type)
+            val checkpoint = Json.parseToJsonElement(project.resolve("reports/modules/parse.json").readText()).jsonObject
+            assertEquals("false", checkpoint.getValue("accepted").jsonPrimitive.content)
+            assertEquals("failed", checkpoint.getValue("compilation").jsonObject.getValue("outcome").jsonPrimitive.content)
+        }
+    }
+
     @Test
     fun `global owners precede consumers and invalidate downstream interface caches`() {
         val model = RecoveredProgramModel(inputSha256 = "input", functions = listOf(
@@ -73,7 +118,7 @@ class SourceTreeTest {
             RecoveredFunction("root", "root", 3u, "int root(void)", calls = setOf("middle")),
             RecoveredFunction("unrelated", "unrelated", 4u, "int unrelated(void)"),
         )
-        val model = RecoveredProgramModel(inputSha256 = "input", functions = functions)
+        val model = RecoveredProgramModel(inputSha256 = sha256("authored dependency resume fixture".toByteArray()), functions = functions)
         val overrides = functions.associate { it.id to it.id }
         val project = createTempDirectory("source-transitive-resume-")
         val calls = mutableListOf<String>()
@@ -86,12 +131,24 @@ class SourceTreeTest {
                     throw ModuleReconstructionInterruptedException("root", AgentStopReason.CANCELLED, "test checkpoint interruption")
                 }
                 val function = request.model.functions.single { it.id == request.module.functionIds.single() }
-                val source = "#include \"modules/${request.module.id}.h\"\n/* ${function.id} */\n${function.prototype} { return 1; }\n"
+                val source = buildString {
+                    append("#include \"modules/${request.module.id}.h\"\n")
+                    request.dependencyHeaders.keys.sorted().forEach { header ->
+                        append("#include \"${header.removePrefix("include/")}\"\n")
+                    }
+                    val result = function.calls.sorted().joinToString(" + ") { callee ->
+                        request.model.functions.single { it.id == callee }.name + "()"
+                    }.ifEmpty { "1" }
+                    append("/* ${function.id} */\n${function.prototype} { return $result; }\n")
+                }
                 return ReconstructedModule(source, "scripted", sha256(source.toByteArray()))
             }
         }
         SourceTreeGenerator.generate(model, project, reconstructor = reconstructor, overrides = overrides)
         assertEquals(setOf("leaf", "middle", "root", "unrelated"), calls.toSet())
+        assertEquals(0, MakeProjectBuilder.build(project).returnCode)
+        val initialAudit = ArchivalProjectAuditor.audit(project)
+        assertTrue(initialAudit.moduleCompilationEvidenceProblems.isEmpty())
         val unrelatedCheckpoint = project.resolve("reports/modules/unrelated.json").readText()
         val changed = model.copy(functions = functions.map { if (it.id == "leaf") it.copy(prototype = "long leaf(void)") else it })
         calls.clear()
@@ -117,6 +174,35 @@ class SourceTreeTest {
             }
         }
         assertEquals(0, MakeProjectBuilder.build(project).returnCode)
+        val plan = Json.parseToJsonElement(project.resolve("reports/module_plan.json").readText()).jsonObject
+        val expectedRevisions = plan.getValue("modules").jsonArray.associate { element ->
+            val module = element.jsonObject
+            module.getValue("id").jsonPrimitive.content to
+                sha256(project.resolve(module.getValue("sourcePath").jsonPrimitive.content).readBytes())
+        }
+        assertNotEquals(initialAudit.moduleRevisionSha256.getValue("leaf"), expectedRevisions.getValue("leaf"))
+        for (id in listOf("middle", "root", "unrelated")) {
+            assertEquals(initialAudit.moduleRevisionSha256.getValue(id), expectedRevisions.getValue(id))
+        }
+        fun verifyAudit(directory: Path) {
+            val audit = ArchivalProjectAuditor.audit(directory)
+            assertTrue(audit.provenanceComplete)
+            assertTrue(audit.moduleCompilationEvidenceProblems.isEmpty())
+            assertEquals(expectedRevisions, audit.moduleRevisionSha256)
+            assertTrue(audit.unresolvedEntityIds.isEmpty())
+            assertNull(audit.behaviorMatched)
+            assertTrue("no-behavior-evidence" in audit.behaviorEvidenceProblems)
+            val document = Json.parseToJsonElement(audit.toJson()).jsonObject
+            assertEquals("not-observed", document.getValue("moduleExecutionCoverage").jsonPrimitive.content)
+            assertTrue(document.getValue("moduleBehaviorEvidence").jsonArray.isEmpty())
+        }
+        verifyAudit(project)
+        val archive = project.parent.resolve(project.fileName.toString() + ".zip")
+        ArchivalPackager.create(project, archive)
+        val extracted = project.parent.resolve(project.fileName.toString() + "-extracted")
+        ArchivalBundleVerifier.extractAndVerify(archive, extracted)
+        assertEquals(0, MakeProjectBuilder.build(extracted).returnCode)
+        verifyAudit(extracted)
     }
 
     @Test
@@ -207,6 +293,11 @@ class SourceTreeTest {
         val report = Json.parseToJsonElement(project.resolve("reports/confidence.json").readText()).jsonObject
         assertEquals("2", report.getValue("schemaVersion").jsonPrimitive.content)
         assertEquals("1.0000", report.getValue("projectScore").jsonPrimitive.content)
+        val interpretation = report.getValue("scoreInterpretation").jsonObject
+        assertEquals("structural-recovery", interpretation.getValue("kind").jsonPrimitive.content)
+        assertEquals("uncalibrated", interpretation.getValue("calibrationStatus").jsonPrimitive.content)
+        assertEquals(JsonNull, interpretation.getValue("calibratedProbability"))
+        assertEquals(JsonNull, interpretation.getValue("empiricalSampleCount"))
         assertTrue(report.getValue("unresolvedRecoveryEntityIds").jsonArray.isEmpty())
         val implementationIds = report.getValue("unresolvedImplementationIds").jsonArray.map { it.jsonPrimitive.content }
         assertEquals(manifest.unresolvedImplementationIds, implementationIds)
@@ -576,6 +667,44 @@ class SourceTreeTest {
     }
 
     @Test
+    fun `contradictory accepted checkpoints are neither reused nor offered as rollback baselines`() {
+        for (change in listOf("command", "owners", "duplicate", "status", "issues", "schema")) {
+            val project = createTempDirectory("source-checkpoint-acceptance-")
+            val input = oneModuleModel()
+            SourceTreeGenerator.generate(input, project, reconstructor = validReconstructor())
+            val path = project.resolve("reports/modules/parse.json")
+            val checkpoint = Json.parseToJsonElement(path.readText()).jsonObject
+            val statuses = checkpoint.getValue("entityStatuses").jsonArray
+            val changed = when (change) {
+                "command" -> JsonObject(checkpoint + ("compilation" to JsonObject(
+                    checkpoint.getValue("compilation").jsonObject + ("command" to JsonArray(listOf(JsonPrimitive("other-compiler")))))))
+                "owners" -> JsonObject(checkpoint + ("entityStatuses" to JsonArray(emptyList())))
+                "duplicate" -> JsonObject(checkpoint + ("entityStatuses" to JsonArray(statuses + statuses.first())))
+                "status" -> JsonObject(checkpoint + ("entityStatuses" to JsonArray(statuses.map {
+                    JsonObject(it.jsonObject + ("status" to JsonPrimitive("unresolved")))
+                })))
+                "issues" -> JsonObject(checkpoint + ("issues" to JsonArray(listOf(JsonObject(mapOf(
+                    "code" to JsonPrimitive("pending"), "message" to JsonPrimitive("pending"),
+                    "entityIds" to JsonArray(emptyList()),
+                ))))))
+                else -> JsonObject(checkpoint + ("schemaVersion" to JsonPrimitive(4)))
+            }
+            path.writeText(changed.toString())
+            var calls = 0
+            val delegate = validReconstructor()
+            val reconstructor = ModuleReconstructor { request ->
+                calls++
+                assertNull(request.acceptedSourceSha256, change)
+                delegate.reconstruct(request)
+            }
+            SourceTreeGenerator.generate(input, project, reconstructor = reconstructor)
+            assertEquals(1, calls, change)
+            SourceTreeGenerator.generate(input, project, reconstructor = reconstructor)
+            assertEquals(1, calls, "repaired checkpoint must resume: $change")
+        }
+    }
+
+    @Test
     fun `historical checkpoints without compiler evidence are regenerated`() {
         val project = createTempDirectory("source-tree-old-checkpoint-")
         val input = oneModuleModel()
@@ -798,7 +927,7 @@ class SourceTreeTest {
     }
 
     @Test
-    fun `partial agent modules and undefined decompiler types are never accepted`() {
+    fun `partial agent modules remain unresolved before compiler validation`() {
         val project = createTempDirectory("source-tree-partial-agent-")
         val functions = listOf(
             model().functions[0].copy(name = "parse_first", calls = emptySet()),
@@ -817,7 +946,6 @@ class SourceTreeTest {
 
         assertEquals(functions.map { it.id }.sorted(), manifest.unresolvedImplementationIds.sorted())
         val checkpoint = project.resolve("reports/modules/parse.json").readText()
-        assertTrue(checkpoint.contains("undefined-decompiler-type"))
         assertTrue(checkpoint.contains("missing-function-definition"))
         assertTrue(checkpoint.contains("fn_0000000000401020"))
     }

@@ -75,6 +75,30 @@ Supply canonical paths in these environment variables:
 - `DECOMP_GCC_CLI_EVIDENCE_ROOT`: an existing private evidence directory disjoint
   from all inputs and scratch mounts, with capacity for four captured model/plan pairs.
 
+On a trusted GitHub Actions provisioner with noninteractive sudo, the existing
+scratch setup script has four explicit real-engine selections:
+
+```sh
+bash scripts/ci-prepare-oracle-ext4-scratch.sh --gcc-engine-cc1-fresh
+bash scripts/ci-prepare-oracle-ext4-scratch.sh --gcc-engine-cc1-resume
+bash scripts/ci-prepare-oracle-ext4-scratch.sh --gcc-engine-lto1-fresh
+bash scripts/ci-prepare-oracle-ext4-scratch.sh --gcc-engine-lto1-resume
+```
+
+Each selection creates a distinct 12 GiB ext4 image with 65,536 inodes and publishes
+its matching `DECOMP_GCC_CLI_*_SCRATCH` and `*_IMAGE` variables through `GITHUB_ENV`
+for subsequent steps. This leaves metadata headroom above the default 8 GiB and
+32,768 available-inode minima. The trusted host must have adequate backing storage
+for all four images and retained evidence; sparse image creation does not reserve
+physical storage. The Kotlin lease still checks actual mount identity, flags and
+capacity before use. Provisioning does not grant production execution authority.
+
+After evidence retention and confirmed worker absence, trusted teardown uses
+`ci-release-oracle-ext4-scratch.sh` with each corresponding selection. It checks
+the exact profile paths and loop-device detachment. These helpers do not replace
+Kotlin lifecycle validation or establish crash recovery. Their privileged engine
+mount paths still require provisioned-host qualification.
+
 Provision the reviewed root-owned JVM/system libraries, native helpers and bundled
 Ghidra runtime required by the existing contained tests. The qualification invokes
 the real `MainKt.main` CLI entry point in the Gradle test JVM, using its independently

@@ -122,6 +122,7 @@ private fun runReconstruct(args: List<String>) {
         println("source tree: ${result.projectDir}")
         println("archive: ${result.bundle.archivePath}")
         println("archive sha256: ${result.bundle.archiveSha256}")
+        println("recovery accuracy: unassessed; see the source tree's confidence and unresolved reports")
     }
 }
 
@@ -202,7 +203,7 @@ private fun runExplore(args: List<String>) {
     val report = AutomaticExplorer().explore(binary, seeds, reports)
     println(
         "exploration generated ${report.candidates.size} input(s), discovered " +
-            "${report.coverage.newSignatures.size} new output signature(s), confidence=${"%.4f".format(Locale.ROOT, report.confidence.score)}",
+            "${report.coverage.newSignatures.size} new output signature(s), uncalibrated exploration heuristic=${"%.4f".format(Locale.ROOT, report.confidence.score)}",
     )
     println("report: ${report.reportPath}")
 }

@@ -30,6 +30,9 @@ data class ArchivalAudit(
     val behaviorEvidenceProblems: Map<String, String> = emptyMap(),
     val projectBehaviorReportIds: List<String> = emptyList(),
     val moduleCompilationEvidenceProblems: Map<String, String> = emptyMap(),
+    val requiredCorpusSha256: List<String> = emptyList(),
+    val observedPortableCorpusSha256: List<String> = emptyList(),
+    val recoveryAssessment: JsonObject? = null,
 ) {
     val provenanceComplete: Boolean get() = missingModelProvenance.isEmpty() && missingSourceProvenance.isEmpty()
     val universalEquivalenceClaim: Boolean = false
@@ -37,11 +40,14 @@ data class ArchivalAudit(
     fun toJson(): String = """
         {
           "entityCount": $entityCount,
+          "recoveryAssessment": ${recoveryAssessment ?: "null"},
           "provenanceComplete": $provenanceComplete,
           "missingModelProvenance": [${missingModelProvenance.sorted().joinToString(",") { JsonPrimitive(it).toString() }}],
           "missingSourceProvenance": [${missingSourceProvenance.sorted().joinToString(",") { JsonPrimitive(it).toString() }}],
           "unresolvedEntityIds": [${unresolvedEntityIds.sorted().joinToString(",") { JsonPrimitive(it).toString() }}],
           "behaviorReportCount": $behaviorReportCount,
+          "requiredCorpusSha256": [${requiredCorpusSha256.joinToString(",") { JsonPrimitive(it).toString() }}],
+          "observedPortableCorpusSha256": [${observedPortableCorpusSha256.joinToString(",") { JsonPrimitive(it).toString() }}],
           "behaviorMatched": ${behaviorMatched ?: "null"},
           "sandboxReported": $sandboxReported,
           "networkIsolationObserved": [${networkIsolation.sorted().joinToString(",")}],
@@ -54,16 +60,25 @@ data class ArchivalAudit(
           "behaviorEvidenceProblems": {${behaviorEvidenceProblems.toSortedMap().entries.joinToString(",") { (path, problem) -> "${JsonPrimitive(path)}:${JsonPrimitive(problem)}" }}},
           "unresolvedBehaviorReportIds": [${unresolvedBehaviorReportIds.sorted().joinToString(",") { JsonPrimitive(it).toString() }}],
           "universalEquivalenceClaim": false,
-          "limitation": "Confidence is bounded by recovered structure and observed behavior; untested behavior remains unresolved."
+          "limitation": "Extraction, compilation and local behavior observations do not establish calibrated recovery accuracy; untested behavior remains unresolved."
         }
     """.trimIndent() + "\n"
+}
+
+internal fun snapshotRequiredBehaviorCorpora(required: Set<String>): Set<String> {
+    require(required.size <= 1024) { "audit required corpus count exceeds its bound" }
+    val snapshot = required.toSet()
+    require(snapshot.all { it.matches(Regex("[0-9a-f]{64}")) }) { "audit required corpus identities must be lowercase SHA-256" }
+    return snapshot
 }
 
 object ArchivalProjectAuditor {
     fun audit(
         projectDir: Path,
         profile: ReconstructionProfile = GeneratedCMakeReconstructionProfile.descriptor,
+        requiredCorpusSha256: Set<String> = emptySet(),
     ): ArchivalAudit {
+        val requiredCorpora = snapshotRequiredBehaviorCorpora(requiredCorpusSha256)
         val maximumFileBytes = minOf(profile.budgets.archiveMaximumFileBytes, Int.MAX_VALUE.toLong() - 1L)
         val manifestSnapshot = readStableRegularFile(projectDir, "source_tree_manifest.json", maximumFileBytes)
         val manifest = SourceTreeManifestReader.parse(manifestSnapshot.bytes.decodeToString(throwOnInvalidSequence = true), profile)
@@ -151,7 +166,23 @@ object ArchivalProjectAuditor {
                     val checkpointText = snapshot.bytes.decodeToString(throwOnInvalidSequence = true)
                     UniqueJsonObjectKeyValidator(checkpointText).validate()
                     val checkpoint = Json.parseToJsonElement(checkpointText).jsonObject
+                    require(checkpoint.getValue("schemaVersion") == JsonPrimitive(5)) {
+                        "module checkpoint lacks the supported compiler acceptance schema"
+                    }
                     require(checkpoint.boolean("accepted")) { "module checkpoint does not record acceptance" }
+                    require(checkpoint.getValue("issues").jsonArray.isEmpty()) {
+                        "accepted module checkpoint retains unresolved reconstruction issues"
+                    }
+                    val acceptedEntities = checkpoint.getValue("entityStatuses").jsonArray.map { element ->
+                        val status = element.jsonObject
+                        require(status.keys == setOf("id", "status") && status.string("status") == "accepted") {
+                            "module checkpoint entity status does not record acceptance"
+                        }
+                        status.string("id")
+                    }
+                    require(acceptedEntities.size == acceptedEntities.toSet().size && acceptedEntities.toSet() == owned.toSet()) {
+                        "module checkpoint entity ownership differs from the module plan"
+                    }
                     require(checkpoint.string("sourceSha256") == hashes.getValue(source)) { "module checkpoint does not bind the current source" }
                     val compilation = checkpoint.getValue("compilation").jsonObject
                     require(compilation.string("sourceSha256") == hashes.getValue(source)) { "compiler evidence does not bind the current source" }
@@ -211,6 +242,7 @@ object ArchivalProjectAuditor {
         val verifiedBehavior = linkedMapOf<String, Boolean>()
         val behaviorHashes = linkedMapOf<String, String>()
         val reportIds = hashSetOf<String>()
+        val observedCorpora = sortedSetOf<String>()
         var currentProjectRecord: JsonObject? = null
         var behaviorBytes = 0L
         for (path in behaviorPaths) {
@@ -233,22 +265,34 @@ object ArchivalProjectAuditor {
                 }
                 val identifier = record.string("id")
                 require(reportIds.add(identifier)) { "behavior report ID is duplicated" }
+                require(record.getValue("schemaVersion").jsonPrimitive.intOrNull == 4) {
+                    "behavior record lacks independent local completion evidence"
+                }
+                val portable = record.getValue("schemaVersion").jsonPrimitive.intOrNull in setOf(3, 4)
+                val corpus = record.string("corpusSha256")
+                if (requiredCorpora.isNotEmpty()) {
+                    require(portable && corpus in requiredCorpora) { "behavior report does not match a required portable corpus" }
+                }
                 verifiedBehavior[relative] = record.boolean("matches")
                 behaviorHashes[relative] = snapshot.sha256
+                if (portable) observedCorpora += corpus
             } catch (failure: Exception) {
                 if (failure is InterruptedException) throw failure
                 problems[relative] = failure.message.orEmpty().take(512).ifEmpty { failure.javaClass.simpleName }
             }
         }
         if (behaviorPaths.isEmpty()) problems["no-behavior-evidence"] = "No revision-bound behavior record is available"
+        for (missing in (requiredCorpora - observedCorpora).sorted()) {
+            problems["missing-corpus:$missing"] = "No current revision-bound report covers the required corpus"
+        }
         val unresolvedBehavior = problems.keys + verifiedBehavior.filterValues { !it }.keys
         val audit = ArchivalAudit(
             entityCount = entities.size,
             missingModelProvenance = missingModel,
             missingSourceProvenance = missingSource,
-            unresolvedEntityIds = (model.functions.filter { it.status != RecoveryStatus.RECOVERED }.map { it.id } +
-                model.globals.filter { it.status != RecoveryStatus.RECOVERED }.map { it.id } +
-                model.types.filter { it.status != RecoveryStatus.RECOVERED }.map { it.id } +
+            unresolvedEntityIds = (model.functions.filter { model.isRecoveryUnresolved(it.status) }.map { it.id } +
+                model.globals.filter { model.isRecoveryUnresolved(it.status) }.map { it.id } +
+                model.types.filter { model.isRecoveryUnresolved(it.status) }.map { it.id } +
                 manifest.unresolvedEntityIds + manifest.unresolvedImplementationIds +
                 implementations.filter { it.acceptedImplementation != true }.flatMap { it.entityIds } +
                 missingModel + missingSource + compilationUnresolved).distinct().sorted(),
@@ -265,6 +309,9 @@ object ArchivalProjectAuditor {
             behaviorEvidenceProblems = problems,
             projectBehaviorReportIds = verifiedBehavior.keys.sorted(),
             moduleCompilationEvidenceProblems = compilationProblems,
+            requiredCorpusSha256 = requiredCorpora.sorted(),
+            observedPortableCorpusSha256 = observedCorpora.toList(),
+            recoveryAssessment = model.unassessedRecoveryAssessment(sha256(modelText.toByteArray(Charsets.UTF_8))),
         )
         require(readStableRegularFile(projectDir, "source_tree_manifest.json", maximumFileBytes).sha256 == manifestSnapshot.sha256) {
             "audit manifest changed during verification"
