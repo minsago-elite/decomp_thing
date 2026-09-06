@@ -22,10 +22,12 @@ class WebRecoveryAdmissionTest {
                 write("GET / HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n".toByteArray())
                 flush()
             }
-            val start = java.util.concurrent.FutureTask { assertFailsWith<JobStoreException> { server.start() } }
+            // Startup fails closed because stop precedes start; cleanup must not deadlock on
+            // the queued handler that was never admitted.
+            server.stop(0)
+            val start = java.util.concurrent.FutureTask { assertFailsWith<IllegalStateException> { server.start() } }
             Thread(start, "failed-start-fixture").apply { isDaemon = true; start() }
-            val failure = start.get(5, java.util.concurrent.TimeUnit.SECONDS)
-            assertEquals("Job recovery inspection is incomplete; no recovery statuses were changed", failure.message)
+            start.get(5, java.util.concurrent.TimeUnit.SECONDS)
         }
         server.stop(0)
         Files.move(broken, root.resolve("retained-invalid"))
@@ -58,7 +60,8 @@ class WebRecoveryAdmissionTest {
         val replacement = UploadServer("127.0.0.1", port, root)
         try {
             replacement.start()
-            assertEquals("failed", store.get(job.id).status)
+            // Recovery projects interruption for reads without rewriting the pending record.
+            assertEquals("queued", store.get(job.id).status)
         } finally { replacement.stop() }
     }
 
@@ -84,6 +87,36 @@ class WebRecoveryAdmissionTest {
             replacement.start()
             assertEquals("failed", store.get(job.id).status)
             assertEquals("private-invalid-record", root.resolve("retained-invalid/job.json").readText())
+        } finally { replacement.stop(0) }
+    }
+
+    @Test fun `startup thread interruption prevents the listener from starting and preserves records`() {
+        val root = createTempDirectory("web-start-interruption-")
+        val store = JobStore(root)
+        val job = store.createFromUpload("fixture.elf", elfFixture())
+        store.updateStatus(job.id, "queued")
+        val server = UploadServer("127.0.0.1", 0, root)
+        val port = server.serverPort
+        var failure: Throwable? = null
+        var exitedInterrupted = false
+        val starter = Thread {
+            Thread.currentThread().interrupt()
+            try { server.start() } catch (problem: Throwable) { failure = problem }
+            exitedInterrupted = Thread.currentThread().isInterrupted
+        }
+        starter.isDaemon = true
+        starter.start()
+        starter.join(15000)
+        assertTrue(!starter.isAlive)
+        val cancelled = assertIs<IllegalStateException>(failure)
+        assertEquals("Job recovery cancelled before status publication; no recovery statuses were changed", cancelled.message)
+        assertTrue(exitedInterrupted)
+        assertEquals("queued", store.get(job.id).status)
+        assertFalse(server.withActiveRequest { error("interrupted startup must not admit requests") })
+        val replacement = UploadServer("127.0.0.1", port, root)
+        try {
+            replacement.start()
+            assertEquals("failed", store.get(job.id).status)
         } finally { replacement.stop(0) }
     }
 
@@ -123,4 +156,5 @@ class WebRecoveryAdmissionTest {
             assertFalse(server.withActiveRequest { error("stopped server admitted work") })
         } finally { runCatching { server.stop() } }
     }
+}
 }

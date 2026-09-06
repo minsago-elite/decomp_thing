@@ -278,6 +278,9 @@ class UploadServer(
                 check(!started && !stopping) { "Web server cannot be started again" }
                 cleanupRequired = true
                 try {
+                    // Recovery never rewrites historical metadata here; startup must not report
+                    // success when a cancellation signal or a late interrupt preceded the listener.
+                    check(!startupCancellation.get() && !Thread.currentThread().isInterrupted) { "Web server startup cancelled" }
                     server.start()
                     started = true
                 } catch (failure: Exception) {
@@ -302,7 +305,6 @@ class UploadServer(
         startupCancellation.set(true)
         val callerWasInterrupted = Thread.currentThread().isInterrupted
         val inspection = synchronized(lifecycleLock) {
->>>>>>> fe706797 (Propagate shutdown cancellation into web startup recovery [skip ci])
             stopping = true
             // JDK HttpServer.stop does not release a bound listener before start. Start its
             // dispatcher only after closing request admission, then close it below. This also
