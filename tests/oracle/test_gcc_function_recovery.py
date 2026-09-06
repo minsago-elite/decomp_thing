@@ -194,6 +194,33 @@ def score_fixture(
 
 
 class GccFunctionRecoveryTest(unittest.TestCase):
+    def test_schema_two_retains_boundary_inputs_without_granting_assessment(self) -> None:
+        oracle = load_function_oracle(ORACLE)
+
+        def migrate(model: dict[str, Any]) -> None:
+            model["schemaVersion"] = 2
+            for kind in ("functions", "globals", "types"):
+                for entity in model[kind]:
+                    entity["extractionStatus"] = entity.pop("status")
+                    entity["recoveryAssessment"] = "unassessed"
+
+        recovered = {}
+        for twin, path, base in (("rich", RICH_MODEL, RICH_MODEL_IMAGE_BASE),
+                                 ("stripped", STRIPPED_MODEL, STRIPPED_MODEL_IMAGE_BASE)):
+            legacy = load_program_model(path, twin=twin, artifact=oracle.artifacts[twin], model_image_base=base)
+            with self.staged_json(path, migrate) as current_path:
+                current = load_program_model(current_path, twin=twin, artifact=oracle.artifacts[twin], model_image_base=base)
+                self.assertEqual(legacy.functions, current.functions)
+                recovered[twin] = current
+                document = json.loads(current_path.read_text())
+                document["functions"][0]["recoveryAssessment"] = "abi-equivalent"
+                current_path.write_text(json.dumps(document))
+                with self.assertRaisesRegex(ScoringError, "cannot supply a scored recovery assessment"):
+                    load_program_model(current_path, twin=twin, artifact=oracle.artifacts[twin], model_image_base=base)
+        report = score_function_recovery(oracle, recovered)
+        self.assertFalse(report["oracle"]["verification"]["productionVerified"])
+        self.assertEqual(score_fixture(), report)
+
     @contextmanager
     def staged_text(self, name: str, payload: str) -> Iterator[Path]:
         with tempfile.TemporaryDirectory(prefix="function-score-raw-") as temporary:
