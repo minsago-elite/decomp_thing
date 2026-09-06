@@ -9,13 +9,14 @@ const { chromium } = require(process.env.DECOMP_PLAYWRIGHT_MODULE || 'playwright
   fs.mkdirSync(path.dirname(output), {recursive: true}); fs.mkdirSync(output);
   const html = fs.readFileSync(htmlPath, 'utf8');
   const browser = await chromium.launch({headless: true});
-  let context;
+  const browserVersion = browser.version();
+  let starts = 0, polls = 0, context;
   try {
     context = await browser.newContext();
     await context.tracing.start({screenshots: true, snapshots: true});
     const page = await context.newPage();
     const errors = []; page.on('pageerror', e => errors.push(e.message));
-    let starts = 0, polls = 0, mode = 'ready';
+    let mode = 'ready';
     await page.route('**/*', route => {
       const request = route.request(), url = new URL(request.url());
       if (url.pathname === '/') return route.fulfill({contentType:'text/html', body:html});
@@ -51,11 +52,11 @@ const { chromium } = require(process.env.DECOMP_PLAYWRIGHT_MODULE || 'playwright
     await click('No authentication methods advertised; no login attempted.');
     assert.equal(starts, 3); assert.equal(polls, 3); assert.deepEqual(errors, []);
     await page.screenshot({path:path.join(output,'dashboard.png')});
-    fs.writeFileSync(path.join(output,'result.json'), JSON.stringify({passed:true,
-      browser:browser.version(), starts, polls, scenarios:['explicit action','previews','text escaping','failure','retry','empty inventory'],
-      renderedHtmlSha256:require('node:crypto').createHash('sha256').update(html).digest('hex')},null,2)+'\n');
   } finally {
     try { if (context) await context.tracing.stop({path:path.join(output,'trace.zip')}); }
     finally { await browser.close(); }
   }
+  fs.writeFileSync(path.join(output,'result.json'), JSON.stringify({passed:true,
+    browser:browserVersion, starts, polls, scenarios:['explicit action','previews','text escaping','failure','retry','empty inventory'],
+    renderedHtmlSha256:require('node:crypto').createHash('sha256').update(html).digest('hex')},null,2)+'\n');
 })().catch(error=>{console.error(error);process.exitCode=1;});
