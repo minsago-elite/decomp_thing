@@ -97,44 +97,50 @@ internal class AcpExecutionScheduler(
                 if (requestExpired()) throw schedulingFailure("requestDeadline", AgentFailureKind.TIMEOUT)
                 val elapsed = (System.nanoTime() - queueStartedAt).coerceAtLeast(0)
                 if (elapsed >= queueTimeoutNanos) throw schedulingFailure("queueDeadline", AgentFailureKind.TIMEOUT)
+                // The observations above are current. Admission may only commit while they
+                // stay current: waiting for the lock invalidates them, so that pass gives up
+                // its admission decisions and the state is re-observed before the next one.
+                var current = true
                 try {
-                    if (!lock.tryLock(minOf(POLL_NANOS, queueTimeoutNanos - elapsed), TimeUnit.NANOSECONDS)) continue
+                    if (!lock.tryLock()) {
+                        if (!lock.tryLock(minOf(POLL_NANOS, queueTimeoutNanos - elapsed), TimeUnit.NANOSECONDS)) continue
+                        current = false
+                    }
+                    try {
+                        val remaining = queueTimeoutNanos - (System.nanoTime() - queueStartedAt).coerceAtLeast(0)
+                        if (remaining <= 0) throw schedulingFailure("queueDeadline", AgentFailureKind.TIMEOUT)
+                        if (quarantinedByGroup.containsKey(workspaceGroup) || quarantinedCount() == limits.maximumActive) {
+                            throw schedulingFailure("cleanupUnverified", AgentFailureKind.UNAVAILABLE, retryable = false)
+                        }
+                        if (!queued) {
+                            // Queue bounds charge waiting work only. A blocked workspace cannot
+                            // prevent immediate admission to spare capacity for an eligible group.
+                            if (active < limits.maximumActive && eligible(workspaceGroup) && queue.none { eligible(it.group) }) {
+                                if (current) return admit(workspaceGroup)
+                                continue
+                            }
+                            if (queue.size >= limits.maximumQueued ||
+                                queue.count { it.group == workspaceGroup } >= limits.maximumQueuedPerWorkspace
+                            ) {
+                                throw schedulingFailure("queueCapacity", AgentFailureKind.RESOURCE_EXHAUSTED)
+                            }
+                            queue.add(waiter)
+                            queued = true
+                        }
+                        if (active < limits.maximumActive && queue.firstOrNull { eligible(it.group) } === waiter) {
+                            if (current) {
+                                queue.remove(waiter)
+                                return admit(workspaceGroup)
+                            }
+                            continue
+                        }
+                        changed.awaitNanos(minOf(POLL_NANOS, remaining))
+                    } finally {
+                        lock.unlock()
+                    }
                 } catch (_: InterruptedException) {
                     Thread.currentThread().interrupt()
                     return null
-                }
-                try {
-                    val remaining = queueTimeoutNanos - (System.nanoTime() - queueStartedAt).coerceAtLeast(0)
-                    if (remaining <= 0) throw schedulingFailure("queueDeadline", AgentFailureKind.TIMEOUT)
-                    if (quarantinedByGroup.containsKey(workspaceGroup) || quarantinedCount() == limits.maximumActive) {
-                        throw schedulingFailure("cleanupUnverified", AgentFailureKind.UNAVAILABLE, retryable = false)
-                    }
-                    if (!queued) {
-                        // Queue bounds charge waiting work only. A blocked workspace cannot
-                        // prevent immediate admission to spare capacity for an eligible group.
-                        if (active < limits.maximumActive && eligible(workspaceGroup) && queue.none { eligible(it.group) }) {
-                            return admit(workspaceGroup)
-                        }
-                        if (queue.size >= limits.maximumQueued ||
-                            queue.count { it.group == workspaceGroup } >= limits.maximumQueuedPerWorkspace
-                        ) {
-                            throw schedulingFailure("queueCapacity", AgentFailureKind.RESOURCE_EXHAUSTED)
-                        }
-                        queue.add(waiter)
-                        queued = true
-                    }
-                    if (active < limits.maximumActive && queue.firstOrNull { eligible(it.group) } === waiter) {
-                        queue.remove(waiter)
-                        return admit(workspaceGroup)
-                    }
-                    try {
-                        changed.awaitNanos(minOf(POLL_NANOS, remaining))
-                    } catch (_: InterruptedException) {
-                        Thread.currentThread().interrupt()
-                        return null
-                    }
-                } finally {
-                    lock.unlock()
                 }
             }
         } finally {

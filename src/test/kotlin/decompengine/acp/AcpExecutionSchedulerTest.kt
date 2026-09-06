@@ -144,6 +144,119 @@ class AcpExecutionSchedulerTest {
     }
 
     @Test
+    fun `queue position is reserved before the first observer blocks`() = withWorkers { workers ->
+        val scheduler = scheduler(active = 1, queued = 1, queuedPerWorkspace = 1)
+        val first = scheduler.admit("workspace-a")
+        val entered = CountDownLatch(1)
+        val release = CountDownLatch(1)
+        val calls = AtomicInteger()
+        val cancelled = AtomicBoolean()
+        fun observer(): Boolean {
+            if (calls.incrementAndGet() == 1) {
+                entered.countDown()
+                check(release.await(5, TimeUnit.SECONDS))
+            }
+            return cancelled.get()
+        }
+        val waiting = workers.submit(Callable {
+            scheduler.acquire("workspace-b", AgentCancellation { observer() }) { false }
+        })
+        try {
+            assertTrue(entered.await(2, TimeUnit.SECONDS))
+            // The reservation precedes the blocked observer, so the caller is queued and
+            // charged against the queue bounds while its observer is still blocked.
+            assertEquals(1, scheduler.snapshot().queued)
+            assertSchedulingFailure(AgentFailureKind.RESOURCE_EXHAUSTED, "queueCapacity") {
+                scheduler.acquire("workspace-c", AgentCancellation.NONE) { false }
+            }
+            release.countDown()
+            cancelled.set(true)
+            assertNull(waiting.get(2, TimeUnit.SECONDS))
+            first.finish()
+            assertEmpty(scheduler)
+        } finally {
+            release.countDown()
+            first.finish()
+        }
+    }
+
+    @Test
+    fun `slow observer keeps its reserved place ahead of later callers`() = withWorkers { workers ->
+        val scheduler = scheduler(active = 1)
+        val first = scheduler.admit("workspace-a")
+        val entered = CountDownLatch(1)
+        val release = CountDownLatch(1)
+        val calls = AtomicInteger()
+        fun observer(): Boolean {
+            if (calls.incrementAndGet() == 1) {
+                entered.countDown()
+                check(release.await(5, TimeUnit.SECONDS))
+            }
+            return false
+        }
+        val slow = workers.submit(Callable {
+            scheduler.acquire("workspace-b", AgentCancellation { observer() }) { false }
+        })
+        try {
+            assertTrue(entered.await(2, TimeUnit.SECONDS))
+            assertEquals(1, scheduler.snapshot().queued)
+            val successor = workers.submit(Callable { scheduler.admit("workspace-c") })
+            awaitQueued(scheduler, 2)
+            release.countDown()
+            first.finish()
+            // Capacity goes to the reserved head even though its observer was slow; the
+            // later caller stays queued behind it.
+            val slowPermit = assertNotNull(slow.get(2, TimeUnit.SECONDS))
+            assertFalse(successor.isDone)
+            slowPermit.finish()
+            successor.get(2, TimeUnit.SECONDS).finish()
+            assertEmpty(scheduler)
+        } finally {
+            release.countDown()
+            first.finish()
+        }
+    }
+
+    @Test
+    fun `concurrent cancellation churn reclaims every permit within both caps`() = withWorkers { workers ->
+        val scheduler = AcpExecutionScheduler(AcpSchedulingLimits(
+            maximumActive = 4,
+            maximumActivePerWorkspace = 2,
+            maximumQueued = 64,
+            maximumQueuedPerWorkspace = 16,
+        ))
+        val active = AtomicInteger()
+        val groupActive = List(3) { AtomicInteger() }
+        val started = CountDownLatch(1)
+        val tasks = (0 until 48).map { index ->
+            workers.submit(Callable {
+                assertTrue(started.await(2, TimeUnit.SECONDS))
+                val group = index % groupActive.size
+                val cancelAfter = if (index % 7 == 0) 2 else Int.MAX_VALUE
+                var observations = 0
+                val permit = scheduler.acquire("workspace-$group", AgentCancellation {
+                    observations += 1
+                    observations >= cancelAfter
+                }) { false } ?: return@Callable
+                try {
+                    assertTrue(active.incrementAndGet() <= 4)
+                    assertTrue(groupActive[group].incrementAndGet() <= 2)
+                    Thread.sleep(2)
+                } finally {
+                    groupActive[group].decrementAndGet()
+                    active.decrementAndGet()
+                    permit.finish()
+                }
+            })
+        }
+        started.countDown()
+        tasks.forEach { it.get(3, TimeUnit.SECONDS) }
+        assertEquals(0, active.get())
+        assertTrue(groupActive.all { it.get() == 0 })
+        assertEmpty(scheduler)
+    }
+
+    @Test
     fun `observer time consumes queue deadline even with spare capacity`() {
         val scheduler = scheduler(active = 1, queueWait = Duration.ofMillis(25))
         assertSchedulingFailure(AgentFailureKind.TIMEOUT, "queueDeadline") {
