@@ -118,6 +118,19 @@ class AcpAuthenticationInventoryTest {
             emptyList()).sha256.let { it == first })
     }
 
+    @Test fun `invisible format characters cannot hide configured credentials from previews`() {
+        val secret = "credential-fixture"
+        val obfuscated = secret.chunked(7).joinToString("\u200b")
+        assertTrue(!obfuscated.contains(secret))
+        val splitValue = AcpAuthenticationInventory.capture(listOf(
+            AuthMethod.AgentAuth(AuthMethodId("fixture"), obfuscated, "Prefix $obfuscated")), listOf(secret))
+        assertEquals("", splitValue.methods.single().namePreview)
+        assertEquals("", splitValue.methods.single().descriptionPreview)
+        val splitPrivate = AcpAuthenticationInventory.capture(listOf(
+            AuthMethod.AgentAuth(AuthMethodId("fixture"), secret, null)), listOf(obfuscated))
+        assertEquals("", splitPrivate.methods.single().namePreview)
+    }
+
     @Test fun `ambiguous and excessive advertisements fail with fixed diagnostics`() {
         val method = AuthMethod.AgentAuth(AuthMethodId("secret-id"), "name", null)
         for (methods in listOf(listOf(method, method), List(33) { method },
