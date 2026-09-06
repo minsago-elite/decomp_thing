@@ -191,6 +191,10 @@ class UploadServer(
             EmbeddedWebAssets.load(basePath = basePath)
         }
         WebUiMode.LEGACY -> {
+            require(java.net.InetAddress.getByName(host).isLoopbackAddress) {
+                "legacy browser access requires a loopback host until a remote access profile is qualified"
+            }
+            LocalWebAccessConfiguration(webOrigin(host, port.takeIf { it != 0 } ?: 1), basePath)
             require(basePath == "/") { "--base-path is supported by --ui spa" }
             require(devFrontendOrigin == null) { "--dev-frontend-origin requires --ui spa" }
             null
@@ -201,11 +205,11 @@ class UploadServer(
     private val jobs = WebJobService(store, analyzer, reconstructor, executor, shutdownTimeoutMs = 5000, failureDiagnostic = { diagnostic(it, "Background operation failed") })
     private val sourceEvidence = WebSourceEvidence(store, sourceProfiles, jobs::readArtifact)
     private val archiveEvidence = WebArchiveEvidence(store, sourceEvidence, jobs::readArtifact)
-    private val access = spaAssets?.let {
-        LocalWebAccess(LocalWebAccessConfiguration(webOrigin(host, server.address.port), basePath,
-            setOfNotNull(devFrontendOrigin)))
-    }
-    private val api = access?.let { WebApiController(it, checkNotNull(spaAssets), jobs) }
+    private val access = LocalWebAccess(LocalWebAccessConfiguration(webOrigin(host, server.address.port), basePath,
+        setOfNotNull(devFrontendOrigin)))
+    private val legacySessions = WebSessionController(access)
+    internal val streamResources = WebStreamResources()
+    private val api = spaAssets?.let { WebApiController(access, it, jobs, streamResources) }
     private val requestExecutor = ThreadPoolExecutor(
         16, 16, 0, TimeUnit.MILLISECONDS, ArrayBlockingQueue(64),
         { task -> Thread(task, "decomp-web-http").apply { isDaemon = true } },
@@ -218,7 +222,9 @@ class UploadServer(
     val browserOrigin: String = devFrontendOrigin ?: webOrigin(host, serverPort)
 
     /** The CLI calls this explicitly; no HTTP route can issue a local link. */
-    fun issueBrowserBootstrap(): WebBootstrapToken = checkNotNull(access) { "Browser sessions require --ui spa" }.issueBootstrap()
+    fun issueBrowserBootstrap(): WebBootstrapToken {
+        return access.issueBootstrap()
+    }
 
     init {
         try {
@@ -227,7 +233,8 @@ class UploadServer(
             server.stop(0)
             requestExecutor.shutdownNow()
             requestDeadlines.shutdownNow()
-            access?.close()
+            streamResources.shutdown()
+            access.close()
             jobs.close()
             throw failure
         }
@@ -245,10 +252,12 @@ class UploadServer(
     fun stop(delaySeconds: Int = 0) {
         require(delaySeconds >= 0) { "shutdown delay must be nonnegative" }
         jobs.beginShutdown()
+        val streamsClosed = streamResources.shutdown()
         server.stop(delaySeconds)
+        if (!streamsClosed && !streamResources.shutdown()) System.err.println("Event stream shutdown did not complete cleanly.")
         requestExecutor.shutdownNow()
         requestDeadlines.shutdownNow()
-        access?.close()
+        access.close()
         jobs.close()
     }
 
@@ -265,6 +274,38 @@ class UploadServer(
         }
         val segments = exchange.requestURI.path.split('/').filter(String::isNotBlank)
         try {
+            access.authorize(exchange, WebEndpointPolicy.transport(setOf("GET", "HEAD", "POST", "PUT", "PATCH", "DELETE", "OPTIONS")))
+            if (exchange.requestURI.rawPath == "/api/v1/session") {
+                legacySessions.handle(exchange)
+                return
+            }
+            if (exchange.requestURI.rawPath == "/api/v1/session/csrf") {
+                val credentials = access.csrfForSession(exchange)
+                requireNoWebApiQuery(exchange)
+                requireJsonAccept(exchange)
+                sendWebApiResponse(exchange, 200, "session", buildJsonObject {
+                    put("csrfToken", credentials.csrfToken)
+                    put("expiresAt", credentials.session.expiresAt.toString())
+                })
+                return
+            }
+            val legacyJsonRead = segments.size in 3..4 && segments.take(2) == listOf("api", "jobs") &&
+                (segments.size == 3 || segments[3] == "events")
+            val publicPage = exchange.requestURI.rawPath in setOf("/login", "/assets/app.css")
+            val mutation = exchange.requestMethod in setOf("POST", "PUT", "PATCH", "DELETE")
+            val policy = when {
+                publicPage -> WebEndpointPolicy.publicRead()
+                legacyJsonRead -> WebEndpointPolicy.privateRead()
+                mutation && segments == listOf("jobs") && exchange.requestMethod == "POST" -> WebEndpointPolicy.multipartUpload()
+                mutation -> WebEndpointPolicy.jsonMutation(exchange.requestMethod)
+                else -> WebEndpointPolicy.privateRead(allowHead = true)
+            }
+            access.authorize(exchange, policy)
+            if (exchange.requestURI.rawPath == "/login") {
+                exchange.sendHtml(200, renderLegacyLogin())
+                return
+            }
+            if (legacyJsonRead) requireJsonAccept(exchange)
             when {
                 exchange.requestMethod == "GET" && segments.isEmpty() ->
                     renderJobDashboard(exchange)
@@ -289,15 +330,26 @@ class UploadServer(
                         require(it.matches(Regex("runId=[A-Za-z0-9][A-Za-z0-9_-]{0,127}"))) { "Only an exact workflow attempt selection is supported" }
                         it.removePrefix("runId=")
                     }
-                    val bytes = jobs.readProgressJournal(job.id, runId)
-                    val snapshot = try { legacyProgressPresentation(AgentProgressJournal.decode(bytes)) } catch (_: Exception) {
-                        throw WebJobServiceException("PROGRESS_UNAVAILABLE", "The retained progress journal is unavailable.")
-                    }
-                    exchange.sendJson(200, snapshot.toString())
+                    exchange.sendJson(200, readLegacyProgress(job.id, runId).toString())
                 }
                 else -> legacyError(exchange, 404, "NOT_FOUND", "The requested route does not exist.") {
                     renderErrorPage(404, "Page not found", "The requested route does not exist.")
                 }
+            }
+        } catch (exception: WebAccessDenied) {
+            if (exchange.requestURI.rawPath.startsWith("/api/v1/")) {
+                access.sendDenied(exchange, exception)
+                return
+            }
+            access.deniedHeaders(exchange, exception)
+            if (exception.status == 401 && !exchange.requestURI.path.startsWith("/api/") &&
+                exchange.requestMethod in setOf("GET", "HEAD")) {
+                exchange.sendHtml(401, renderLegacyLogin())
+                return
+            }
+
+            legacyError(exchange, exception.status, exception.code, exception.message ?: "The request was invalid.") {
+                renderErrorPage(exception.status, "Invalid request", exception.message ?: "The request was invalid.")
             }
         } catch (exception: WebJobServiceException) {
             val status = if (exception.code in setOf("JOB_NOT_FOUND", "RUN_NOT_FOUND")) 404 else 503
@@ -311,15 +363,15 @@ class UploadServer(
             }
         } catch (exception: JobStoreException) {
             legacyError(exchange, 404, "JOB_NOT_FOUND", "The requested job is unavailable.") {
-                renderErrorPage(404, "Job not found", diagnostic(exception, "The job does not exist."))
+                renderErrorPage(404, "Job not found", "The requested job is unavailable.")
             }
         } catch (exception: IllegalArgumentException) {
             legacyError(exchange, 400, "INVALID_REQUEST", "The request was invalid.") {
-                renderErrorPage(400, "Invalid request", diagnostic(exception, "The request was invalid."))
+                renderErrorPage(400, "Invalid request", "The request was invalid or the requested source or artifact is unavailable.")
             }
         } catch (exception: Exception) {
             legacyError(exchange, 500, "INTERNAL_ERROR", "The operation failed.") {
-                renderErrorPage(500, "Unexpected error", diagnostic(exception, "The operation failed."))
+                renderErrorPage(500, "Unexpected error", "The operation failed. Private diagnostic details are withheld.")
             }
         }
     }
@@ -375,7 +427,7 @@ class UploadServer(
             }
         } catch (exception: InvalidUploadException) {
             legacyError(exchange, 400, "INVALID_UPLOAD", "Upload a supported Linux ELF binary.") {
-                renderErrorPage(400, "Unsupported binary", diagnostic(exception, "Upload a Linux ELF binary."))
+                renderErrorPage(400, "Unsupported binary", "Upload a supported Linux ELF binary.")
             }
         }
     }
@@ -409,12 +461,36 @@ class UploadServer(
         diagnosticRedactor.text(failure.message ?: fallback, maximumCharacters = 480)
 
     /** A queued operation can be claimed once, either by a worker or by shutdown. */
+    private fun readLegacyProgress(jobId: String, runId: String?): kotlinx.serialization.json.JsonObject {
+        val bytes = jobs.readProgressJournal(jobId, runId)
+        return try { legacyProgressPresentation(AgentProgressJournal.decode(bytes)) } catch (_: Exception) {
+            throw WebJobServiceException("PROGRESS_UNAVAILABLE", "The retained progress journal is unavailable.")
+        }
+    }
+
     private fun handleJob(exchange: HttpExchange, jobId: String) {
         val view = jobs.presentation(jobId)
         val source = runCatching { archiveEvidence.read(jobId, reportPrefix = view.reports.artifactPrefix).source }
             .recoverCatching { sourceEvidence.read(jobId, view.reports.artifactPrefix).view() }
-        exchange.sendHtml(200, renderJob(view.job, view.reports, view.diagnostics, source.getOrNull(), source.isFailure))
+        val progress = runCatching { readLegacyProgress(jobId, view.reports.runId) }.getOrNull()
+        exchange.sendHtml(200, renderJob(view.job, view.reports, view.diagnostics, source.getOrNull(), source.isFailure,
+            progressSnapshot = progress,
+            explorationReport = readLegacyJsonReport(jobId, view.reports, LegacyJsonReport.EXPLORATION),
+            repairHistory = readLegacyJsonReport(jobId, view.reports, LegacyJsonReport.REPAIR_HISTORY),
+            reconstructionProgress = readLegacyJsonReport(jobId, view.reports, LegacyJsonReport.RECONSTRUCTION_PROGRESS),
+            artifacts = runCatching { jobs.listArtifactSummaries(jobId, view.reports.runId) }.getOrNull()))
     }
+
+    private enum class LegacyJsonReport(val filename: String) {
+        EXPLORATION("exploration.json"), REPAIR_HISTORY("repair_history.json"),
+        RECONSTRUCTION_PROGRESS("reconstruction_progress.json"),
+    }
+
+    private fun readLegacyJsonReport(jobId: String, context: WebReportContext, report: LegacyJsonReport): kotlinx.serialization.json.JsonObject? =
+        runCatching {
+            decompengine.oracle.core.OracleJson.parse(jobs.readArtifact(jobId,
+                "${context.artifactPrefix}/${report.filename}", 1_048_576).bytes) as kotlinx.serialization.json.JsonObject
+        }.getOrNull()
 
     private fun handleSource(exchange: HttpExchange, jobId: String, relativePath: String) {
         require(relativePath.isNotBlank()) { "source path must not be blank" }
@@ -545,8 +621,13 @@ private fun HttpExchange.sendBytes(
         "default-src 'self'; style-src 'self' 'unsafe-inline'; script-src 'self' 'unsafe-inline'; img-src 'self' data:; base-uri 'none'; frame-ancestors 'none'",
     )
     responseHeaders.add("Cache-Control", if (cache) "public, max-age=3600" else "no-store")
-    sendResponseHeaders(status, body.size.toLong())
-    responseBody.use { it.write(body) }
+    if (requestMethod == "HEAD") {
+        sendResponseHeaders(status, -1)
+        close()
+    } else {
+        sendResponseHeaders(status, body.size.toLong())
+        responseBody.use { it.write(body) }
+    }
 }
 
 private fun contentType(path: Path): String = when (path.fileName.toString().substringAfterLast('.', "")) {

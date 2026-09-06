@@ -286,9 +286,7 @@ class LocalWebAccess(
         exchange.responseHeaders.set("Referrer-Policy", "no-referrer")
         exchange.responseHeaders.set("X-Content-Type-Options", "nosniff")
         exchange.responseHeaders.set("X-Request-ID", requestId)
-        if (failure.allowedMethods.isNotEmpty()) exchange.responseHeaders.set("Allow", failure.allowedMethods.sorted().joinToString(", "))
-        if (failure.clearCookie) exchange.responseHeaders.add("Set-Cookie", expiredSessionCookie())
-        if (failure.status == 429) exchange.responseHeaders.set("Retry-After", "30")
+        deniedHeaders(exchange, failure)
         try {
             if (exchange.requestMethod == "HEAD") exchange.sendResponseHeaders(failure.status, -1)
             else {
@@ -296,6 +294,12 @@ class LocalWebAccess(
                 exchange.responseBody.use { it.write(body) }
             }
         } finally { exchange.close() }
+    }
+
+    internal fun deniedHeaders(exchange: HttpExchange, failure: WebAccessDenied) {
+        if (failure.allowedMethods.isNotEmpty()) exchange.responseHeaders.set("Allow", failure.allowedMethods.sorted().joinToString(", "))
+        if (failure.clearCookie) exchange.responseHeaders.add("Set-Cookie", expiredSessionCookie())
+        if (failure.status == 429) exchange.responseHeaders.set("Retry-After", "30")
     }
 
     private fun validateBoundary(exchange: HttpExchange, policy: WebEndpointPolicy) {

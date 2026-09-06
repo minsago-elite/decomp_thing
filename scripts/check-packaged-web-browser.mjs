@@ -9,6 +9,7 @@ import { parseArgs } from 'node:util';
 import { qualifyUpload, qualifyUploadFailures, qualifyMeasuredUpload } from './packaged-browser-upload.mjs';
 import { seedScale, qualifyScale } from './packaged-browser-scale.mjs';
 import { seedHistory, qualifyHistory } from './packaged-browser-history.mjs';
+import { seedLegacy, qualifyLegacy } from './packaged-browser-legacy.mjs';
 import { qualifyUpgrade } from './packaged-browser-upgrade.mjs';
 
 // Test driver only: the application is launched with a separate Node-free PATH.
@@ -26,8 +27,9 @@ const { values } = parseArgs({ options: {
   help: { type: 'boolean', default: false },
 } });
 if (values.help) {
-  console.log('Usage: node scripts/check-packaged-web-browser.mjs --archive /absolute/distribution.zip --chrome /absolute/chrome --java-home /absolute/jdk [--mode public|session|upload|history|scale|proxy|upgrade] [--previous-archive /absolute/previous.zip] [--work-parent /absolute/scratch] [--keep-workdir] [--python /absolute/python3] [--no-sandbox]');
+  console.log('Usage: node scripts/check-packaged-web-browser.mjs --archive /absolute/distribution.zip --chrome /absolute/chrome --java-home /absolute/jdk [--mode public|session|upload|history|scale|proxy|upgrade|legacy] [--previous-archive /absolute/previous.zip] [--work-parent /absolute/scratch] [--keep-workdir] [--python /absolute/python3] [--no-sandbox]');
   console.log('public: packaged home/Runtime/recovery; session: public plus local session journey; upload: session plus inert upload and lost-response retry; history: session plus preseeded inert multi-page attempts; scale: session plus 10,000 persisted jobs and keyboard pagination; proxy: real Vite HMR and session journey against packaged JVM; upgrade: previous JVM to current JVM on one origin with an old tab.');
+  console.log('legacy: inert legacy HTML/polling with explicit test-owned state edits; no workflow execution.');
   console.log('upgrade requires --previous-archive and distinct manifest builds with the old Runtime chunk absent from --archive. Its previous extraction is always removed before the current extraction, even with --keep-workdir.');
   console.log('Reports/screenshots stay in build/. Owned extraction/profile/socket directories are removed after confirmed shutdown unless --keep-workdir is set. Proxy requires npm ci --ignore-scripts under the pinned Node beforehand.');
   process.exit(0);
@@ -39,7 +41,7 @@ for (const option of ['archive', 'chrome', 'java-home', 'python']) {
   assert.ok(values[option] && isAbsolute(values[option]), `--${option} must name an absolute existing path; see --help`);
   await fs.access(values[option]);
 }
-assert.ok(['public', 'session', 'upload', 'history', 'scale', 'proxy', 'upgrade'].includes(values.mode), '--mode must be public, session, upload, history, scale, proxy or upgrade');
+assert.ok(['public', 'session', 'upload', 'history', 'scale', 'proxy', 'upgrade', 'legacy'].includes(values.mode), '--mode must be public, session, upload, history, scale, proxy, upgrade or legacy');
 if (values.mode === 'upgrade') {
   assert.ok(values['previous-archive'] && isAbsolute(values['previous-archive']), 'upgrade requires --previous-archive as an absolute existing ZIP path');
   await fs.access(values['previous-archive']);
@@ -260,15 +262,15 @@ function installationIdentity(installation) {
 function recordInstallation(installation) {
   Object.assign(report, installationIdentity(installation), {
     workDirectory: installation.work, unrelatedWorkingDirectory: installation.working,
-    basePath: '/nested/', nodeOnApplicationPath: false, npmOnApplicationPath: false, readOnlyInstallation: true,
+    basePath: values.mode === 'legacy' ? '/' : '/nested/', nodeOnApplicationPath: false, npmOnApplicationPath: false, readOnlyInstallation: true,
   });
 }
 
 async function launchApplication(installation, port = '0', frontendOrigin) {
   applicationOutput = '';
   applicationError = '';
-  application = startOwned(join(installation.app, 'bin/llm_bin_patch'), ['web', '--ui', 'spa', '--host', '127.0.0.1', '--port', port,
-    '--base-path', '/nested/', '--data-dir', installation.data, ...(frontendOrigin ? ['--dev-frontend-origin', frontendOrigin] : [])], {
+  application = startOwned(join(installation.app, 'bin/llm_bin_patch'), ['web', '--ui', values.mode === 'legacy' ? 'legacy' : 'spa', '--host', '127.0.0.1', '--port', port,
+    '--base-path', values.mode === 'legacy' ? '/' : '/nested/', '--data-dir', installation.data, ...(frontendOrigin ? ['--dev-frontend-origin', frontendOrigin] : [])], {
     cwd: installation.working, env: installation.environment, stdio: ['ignore', 'pipe', 'pipe'],
   });
   application.stdout.on('data', (chunk) => { applicationOutput = (applicationOutput + chunk).slice(-1048576); });
@@ -277,7 +279,7 @@ async function launchApplication(installation, port = '0', frontendOrigin) {
     if (application.exitCode !== null || application.signalCode !== null) throw new Error(`Packaged application exited: ${applicationError}`);
     return applicationOutput.match(/http:\/\/127\.0\.0\.1:\d+/)?.[0];
   }, 'packaged application listener');
-  console.log(`Packaged application ready: ${origin}/nested/`);
+  console.log(`Packaged application ready: ${origin}${values.mode === 'legacy' ? '/' : '/nested/'}`);
   return origin;
 }
 
@@ -294,6 +296,7 @@ try {
   let installation = await prepareArchive(values.mode === 'upgrade' ? values['previous-archive'] : archive);
   recordInstallation(installation);
   const { manifest, data } = installation;
+  const legacyFixture = values.mode === 'legacy' ? await seedLegacy(data) : null;
   const historyFixture = values.mode === 'history' ? await seedHistory(data) : null;
   const scaleFixture = values.mode === 'scale' ? await seedScale(data) : null;
   const populated = !!(historyFixture || scaleFixture);
@@ -330,6 +333,12 @@ try {
   cdp = new Protocol(socket);
   report.browser = await cdp.call('Browser.getVersion');
   report.browserSandboxDisabled = values['no-sandbox'];
+  if (legacyFixture) {
+    const tab = await makeTarget();
+    const bootstrapUrl = await waitFor(() => applicationOutput.split(/\s+/).find(part => part.startsWith(origin + '/login#bootstrap=')), 'legacy local bootstrap handoff');
+    report.legacy = await qualifyLegacy({ fixture: legacyFixture, origin, bootstrapUrl, tab, cdp, evaluate, ready, makeTarget });
+    report.requests.legacy = tab.requests;
+  }
   if (values.mode === 'upgrade') {
     const previous = installation;
     report.upgrade = { previous: installationIdentity(previous), phase: 'previous-home', requestInterception: false };

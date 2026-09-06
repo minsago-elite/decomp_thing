@@ -26,7 +26,8 @@ it('starts on request, preserves exact omissions and pause position, and dedupli
   fireEvent.click(screen.getByRole('button', { name: 'Pause activity' }));
   fireEvent.click(screen.getByRole('button', { name: 'Resume activity' }));
   await waitFor(() => expect(transport.get).toHaveBeenCalledTimes(3));
-  expect(transport.get.mock.calls[2]![1]).toContain('cursor=cursor_example_2');
+  expect(transport.get.mock.calls[2]![1]).toContain('after=cursor_example_2');
+  expect(transport.get.mock.calls[2]![1]).toContain('transport=poll');
   expect(screen.getAllByRole('listitem')).toHaveLength(1);
 });
 
@@ -88,7 +89,7 @@ it.each([200, 201])('preserves the display boundary and checks the next page sta
     expect(await screen.findByRole('alert')).toBeTruthy();
     expect(screen.queryAllByRole('listitem')).toHaveLength(0);
   }
-  expect(transport.get.mock.calls[2]![1]).toContain('cursor=cursor_199');
+  expect(transport.get.mock.calls[2]![1]).toContain('after=cursor_199');
   if (nextSequence === 200) expect(document.activeElement).toBe(button);
 });
 
@@ -138,7 +139,7 @@ it('filters categories and task references locally without discarding rows or mo
   transport.get.mockResolvedValueOnce({ data: { items: [], nextCursor: 'cursor_4', hasMore: false } });
   fireEvent.click(screen.getByRole('button', { name: 'Resume activity' }));
   await waitFor(() => expect(transport.get).toHaveBeenCalledTimes(3));
-  expect(transport.get.mock.calls[2]![1]).toContain('cursor=cursor_4');
+  expect(transport.get.mock.calls[2]![1]).toContain('after=cursor_4');
 });
 
 it('links the exact attempt and exposes available correlation without inventing evidence links', async () => {

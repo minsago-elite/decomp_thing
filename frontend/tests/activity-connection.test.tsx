@@ -43,7 +43,7 @@ it('suspends hidden/offline reads and reconciles a fresh snapshot without replac
   transport.get.mockResolvedValueOnce(snapshot).mockResolvedValueOnce(idle);
   await act(async () => { online = true; window.dispatchEvent(new Event('online')); await Promise.resolve(); });
   expect(transport.get.mock.calls[2]![0]).toBe('snapshot');
-  expect(transport.get.mock.calls[3]![1]).toContain(`cursor=${events.data.nextCursor}`);
+  expect(transport.get.mock.calls[3]![1]).toContain(`after=${events.data.nextCursor}`);
   expect(task).toHaveProperty('value', 'missing_task'); expect(document.activeElement).toBe(task);
   fireEvent.click(screen.getByRole('button', { name: 'Clear activity filters' }));
   expect(screen.getAllByRole('listitem')).toHaveLength(1);
@@ -59,7 +59,7 @@ it('retries a transient read with jittered backoff and snapshot reconciliation',
   await advance(999); expect(transport.get).toHaveBeenCalledTimes(3);
   await advance(1); expect(transport.get).toHaveBeenCalledTimes(5);
   expect(transport.get.mock.calls[3]![0]).toBe('snapshot');
-  expect(transport.get.mock.calls[4]![1]).toContain(`cursor=${events.data.nextCursor}`);
+  expect(transport.get.mock.calls[4]![1]).toContain(`after=${events.data.nextCursor}`);
   expect(screen.getByRole('status').textContent).toContain('Following retained activity');
   expect(screen.getAllByRole('listitem')).toHaveLength(1);
 });
