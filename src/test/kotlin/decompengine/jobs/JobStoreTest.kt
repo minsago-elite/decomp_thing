@@ -94,7 +94,7 @@ class JobStoreTest {
         val accepted = store.createFromUpload(acceptedName, elfFixture())
         assertEquals(acceptedName, JobStore(root).get(accepted.id).filename)
         for (oversizedName in listOf("界".repeat(90_000), "\"".repeat(140_000), "a".repeat(300_000))) {
-            val failure = assertFailsWith<IllegalArgumentException> {
+            val failure = assertFailsWith<InvalidUploadException> {
                 store.createFromUpload(oversizedName, elfFixture())
             }
             assertTrue(failure.message.orEmpty().startsWith("job metadata exceeds the 256 KiB limit"))
@@ -105,6 +105,27 @@ class JobStoreTest {
         }
         assertEquals("analyzing", store.updateStatus(accepted.id, "analyzing", "still readable").status)
         assertEquals("still readable", JobStore(root).get(accepted.id).statusMessage)
+    }
+
+    @Test
+    fun `uploads reserve metadata space for later status updates`() {
+        val root = createTempDirectory("jobs-status-headroom-")
+        val store = JobStore(root)
+        val limit = 256 * 1024
+        val probe = store.createFromUpload("a".repeat(1_000), elfFixture())
+        val fixedBytes = root.resolve(probe.id).resolve("job.json").toFile().length().toInt() - 1_000
+
+        val rejected = "a".repeat(limit - fixedBytes - 1_500)
+        val failure = assertFailsWith<InvalidUploadException> {
+            store.createFromUpload(rejected, elfFixture())
+        }
+        assertEquals("job metadata exceeds the 256 KiB limit once later status updates are reserved", failure.message)
+        assertEquals(listOf(probe.id), JobStore(root).list().map { it.id })
+
+        val accepted = store.createFromUpload("a".repeat(limit - fixedBytes - 5_000), elfFixture())
+        val message = "\u0001".repeat(500)
+        assertEquals("queued", store.updateStatus(accepted.id, "queued", message).status)
+        assertEquals(message, JobStore(root).get(accepted.id).statusMessage)
     }
 
     @Test

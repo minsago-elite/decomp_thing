@@ -102,6 +102,7 @@ class JobStore internal constructor(
             binaryPath = binaryPath,
             metadata = metadata,
         )
+        requireStatusUpdateHeadroom(job)
         val staging = Files.createTempDirectory(root, ".upload-")
         var publicationAttempted = false
         try {
@@ -320,6 +321,20 @@ class JobStore internal constructor(
         return root.resolve(jobId)
     }
 
+    // Admissions must also fit every later record shape updateStatus can publish.
+    private fun requireStatusUpdateHeadroom(job: Job) {
+        val reserved = job.copy(
+            status = "analyzing",
+            updatedAt = MAXIMUM_UPDATE_TIMESTAMP,
+            statusMessage = STATUS_MESSAGE_RESERVE,
+        )
+        try {
+            OracleJson.canonicalBytes(reserved.toJson(), METADATA_LIMITS)
+        } catch (_: StrictJsonException) {
+            throw InvalidUploadException("job metadata exceeds the 256 KiB limit once later status updates are reserved")
+        }
+    }
+
     private fun persist(job: Job, jobDir: Path = jobDirectory(job.id).createDirectories()) {
         // Bound the encoder's string-byte accounting allocation before it sees caller-provided text.
         require(job.filename.length <= MAX_METADATA_BYTES) { "job metadata exceeds the 256 KiB limit" }
@@ -349,6 +364,8 @@ class JobStore internal constructor(
             maximumNodes = 128,
         )
         val VALID_STATUSES = setOf("uploaded", "queued", "analyzing", "complete", "failed")
+        val STATUS_MESSAGE_RESERVE = "\u0001".repeat(500)
+        const val MAXIMUM_UPDATE_TIMESTAMP = "9999-12-31T23:59:59.999999999Z"
     }
 }
 
