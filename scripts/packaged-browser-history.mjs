@@ -48,7 +48,7 @@ export async function seedHistory(root) {
     events: Array.from({ length: 205 }, (_, sequence) => ({ sequence, runId: 'writer_fixture_progress', workflow: 'reconstruct', time: at,
       taskId: sequence % 2 ? 'task_odd' : 'task_even', sessionIdSha256: 'a'.repeat(64), kind: sequence === 1 ? 'message' : sequence === 202 ? 'context_usage' : sequence === 203 ? 'agent_finished' : 'workflow_phase',
       ...(sequence === 202 ? { contextUsedTokens: '9007199254740993', contextWindowTokens: '18446744073709551615' } : {}),
-      ...(sequence === 203 ? { stopReason: 'limit_exhausted', wallClock: 'PT1H2M3.000000001S' } : {}), ...(sequence === 1 ? { role: 'thought' } : { phase: 'planning' }), text: `Synthetic private content ${sequence}`, inputTokens: '18446744073709551615' })) });
+      ...(sequence === 203 ? { stopReason: 'limit_exhausted', wallClock: 'PT1H2M3.000000001S' } : {}), ...(sequence === 1 ? { role: 'thought', entries: [{ idSha256: 'b'.repeat(64), status: 'pending', text: 'Synthetic private plan' }] } : { phase: 'planning' }), path: '/Synthetic-private-root/input', text: `Synthetic private content ${sequence}`, inputTokens: '18446744073709551615' })) });
   await fs.writeFile(progressPath, progress, { flag: 'wx', mode: 0o600 });
   return { jobId, directory, retained, count: attempts.length, reportPath, exploration, progressPath, progress };
 }
@@ -89,6 +89,15 @@ export async function qualifyHistory({ fixture, makeTarget, cdp, evaluate, ready
   assert.equal(polling.first.items[0].payload.fields.inputTokens, '18446744073709551615');
   assert.equal(polling.first.items[0].runId, 'run_fixture_3');
   assert.equal(polling.first.items[0].payload.writerId, 'writer_fixture_progress');
+  for (const event of [...polling.first.items, ...polling.second.items]) {
+    assert.equal(event.payload.fields.text, undefined);
+    assert.equal(event.payload.fields.entries, undefined);
+    assert.equal(event.payload.fields.path, undefined);
+    assert.equal(event.payload.fields.textOmitted, true);
+    assert.equal(event.payload.omittedFieldCount, event.sequence === '1' ? '3' : '2');
+  }
+  assert.ok(!JSON.stringify(polling).includes('Synthetic private'));
+  assert.ok(!JSON.stringify(polling).includes('Synthetic-private-root'));
   assert.deepEqual(polling.idle.items, []);
   assert.equal(await fs.readFile(fixture.progressPath, 'utf8'), fixture.progress);
   // Exercise the rendered UI, not only direct endpoint reads. All data is an inert fixture.
@@ -214,7 +223,7 @@ export async function qualifyHistory({ fixture, makeTarget, cdp, evaluate, ready
   assert.deepEqual(tab.exceptions, []);
   for (const [name, bytes] of Object.entries(fixture.retained)) assert.deepEqual(await fs.readFile(join(fixture.directory, name)), Buffer.from(bytes));
   assert.deepEqual((await fs.readdir(fixture.directory)).sort(), [...Object.keys(fixture.retained), 'reports'].sort());
-  return { activityUi: { pausedReceiptAgeAdvances: true, receiptAgeIsNotSourceAge: true, exactObservedUsage: true, explicitUsageUnitsAndProvenance: true, durationWithoutRounding: true, missingPricingBasis: true, backgroundSuspendsReads: true, offlineSuspendsReads: true, recoveryReconcilesSnapshot: true, recoveryPreservesRows: true, lastReceivedTime: true, categoryAndTaskFilters: true, filtersPreserveCursor: true, exactAttemptLinks: true, correlationReferences: true, narrowViewport: 320, firstPage: 200, continuationPage: 5, keyboardStart: true, focusPreserved: true, pauseStopsPolling: true, resumeWithoutDuplicates: true, navigationStopsPolling: true, privateTextWithheld: true, politeStatusOnly: true }, progressPolling: true, progressBytesUnchanged: true, fixtureAttempts: 55, firstPage: 50, secondPage: 5, exactOrder: true, cursorReload: true,
+  return { activityUi: { pausedReceiptAgeAdvances: true, receiptAgeIsNotSourceAge: true, exactObservedUsage: true, explicitUsageUnitsAndProvenance: true, durationWithoutRounding: true, missingPricingBasis: true, backgroundSuspendsReads: true, offlineSuspendsReads: true, recoveryReconcilesSnapshot: true, recoveryPreservesRows: true, lastReceivedTime: true, categoryAndTaskFilters: true, filtersPreserveCursor: true, exactAttemptLinks: true, correlationReferences: true, narrowViewport: 320, firstPage: 200, continuationPage: 5, keyboardStart: true, focusPreserved: true, pauseStopsPolling: true, resumeWithoutDuplicates: true, navigationStopsPolling: true, privateTextWithheld: true, politeStatusOnly: true }, progressPolling: true, privateProseAbsentFromResponses: true, privatePathsAbsentFromResponses: true, presentationOmissionsCounted: true, progressBytesUnchanged: true, fixtureAttempts: 55, firstPage: 50, secondPage: 5, exactOrder: true, cursorReload: true,
     earlierAttemptReload: true, previousInterruptedAttempt: true, exactUnsignedUsage: true,
     unacceptedCandidate: true, explorationSummary: true, nativeReportDownload: true, downloadedBytesMatch: true, reportBytesUnchanged: true, retainedBytesUnchanged: true, mutationRequests: 0, executionStarted: false };
 }
